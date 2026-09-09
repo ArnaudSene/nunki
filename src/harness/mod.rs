@@ -8,7 +8,9 @@
 //! else. What is NOT here — role prompts, the mission protocol, gates, the
 //! flow, the clone, the container — is handed in as arguments.
 
+pub mod claude_code;
 pub mod fake;
+pub mod spawn;
 
 use std::path::PathBuf;
 
@@ -63,10 +65,13 @@ pub struct SessionId(pub String);
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunHandle {
     pub session: SessionId,
-    /// Container the run lives in, as named by the container engine.
+    /// Container the run lives in, as named by the container engine; empty
+    /// for a local run.
     pub container: String,
-    /// Process id of the harness inside the container, when known.
+    /// Process id of the harness, when known.
     pub pid: Option<u32>,
+    /// Where the harness's structured output is written, as `hq` sees it.
+    pub log: PathBuf,
 }
 
 /// Why a run ended. The distinction is what SPEC 4.3 and 4.5 are built on:

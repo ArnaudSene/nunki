@@ -64,6 +64,11 @@ impl Harness for FakeHarness {
             session: request.session.clone(),
             container: format!("fake-{}", request.session.0),
             pid: Some(1),
+            log: request
+                .workspace
+                .mission_dir
+                .join("runs")
+                .join(format!("{}.jsonl", request.session.0)),
         })
     }
 

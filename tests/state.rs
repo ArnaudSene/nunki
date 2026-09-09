@@ -52,6 +52,7 @@ fn a_mission_state_round_trips_through_disk() {
                 session: SessionId("sess-1".into()),
                 container: "hq-m1-coder".into(),
                 pid: Some(4242),
+                log: std::path::PathBuf::from("/tmp/runs/sess-1.jsonl"),
             }),
         )
         .unwrap();
