@@ -399,8 +399,14 @@ campagne exige de garder une capacité que la règle « rendue après le
 démarrage » avait rendue. **Tranché par Arnaud le 2026-09-09** :
 
 1. **Le garde est un conteneur à part.** Chaque conteneur d'agent est
-   accompagné d'un **sidecar pare-feu**, minuscule, qui partage son espace
-   réseau. Lui seul détient `NET_ADMIN` et `NET_RAW`. L'agent tourne **sans
+   accompagné d'un **sidecar pare-feu**, minuscule, qui **possède l'espace
+   réseau** que l'agent rejoint (le sens est vérifié par exécution, voir
+   4.2). Lui seul détient des capacités — `NET_ADMIN` et `NET_RAW` pour
+   poser les règles, `SETUID` et `SETGID` parce que son résolveur descend
+   sur son propre uid, et que c'est cet uid qui distingue ses requêtes de
+   celles de l'agent (mesuré : sans elles, « failed to change group-id to
+   dip: Operation not permitted ») ; c'est lui, et non l'agent, qui
+   s'attache aux réseaux des services du projet. L'agent tourne **sans
    aucune capacité** (`cap_drop: [ALL]`, `no-new-privileges`), directement
    sous l'uid de l'hôte (`user:` dans le Compose généré, ce que le sidecar
    rend possible : plus d'entrypoint root à abandonner), sans `sudo`, sans
@@ -411,7 +417,11 @@ démarrage » avait rendue. **Tranché par Arnaud le 2026-09-09** :
    pas, rien ne se lance. Jamais un agent sans règles.
 3. **Le sidecar est le seul résolveur DNS** du conteneur, et il est
    **filtrant** : il ne répond que pour les domaines de la liste blanche et
-   rend NXDOMAIN pour tout le reste, sans jamais relayer. Le tunnel DNS est
+   rend NXDOMAIN pour tout le reste, sans jamais relayer. Il ne suffit pas
+   de l'écrire dans `/etc/resolv.conf` — le moteur y met le sien, et
+   l'agent pourrait interroger un autre serveur : le sidecar **détourne
+   tout le port 53** de l'espace réseau partagé vers lui-même, et refuse le
+   reste. C'est ce détournement que la sonde de `hq check` mesure. Le tunnel DNS est
    fermé par construction, dans tous les profils.
 4. **Les adresses autorisées suivent les réponses DNS.** Le sidecar, qui
    répond lui-même aux questions d'adresse, ajoute au fil de l'eau les
@@ -432,7 +442,13 @@ démarrage » avait rendue. **Tranché par Arnaud le 2026-09-09** :
 7. `hq check` **sonde de l'intérieur** : depuis un conteneur du profil
    mission, et depuis un conteneur du profil système d'une mission donnée
    (`--mission <id>`), joindre un domaine interdit, résoudre un nom hors
-   liste et joindre une adresse privée non déclarée doivent échouer.
+   liste et joindre une adresse privée non déclarée doivent échouer. Ces
+   sondes existent déjà comme test vivant du dépôt — `cargo test --test
+   firewall -- --ignored` lève la paire depuis un Compose généré et essaie
+   de sortir par sept chemins. Une sonde ne vaut que si elle réussirait sans
+   le pare-feu : les deux premières écrites échouaient de toute façon (un
+   certificat, une adresse inexistante) et ont été remplacées par une
+   connexion TCP nue et un voisin levé exprès sur le réseau du slot.
 
 Ce que le sidecar coûte : un conteneur de plus par agent, que `hq` lève et
 arrête avec lui, invisible pour l'humain ; et une différence de moteur, parce
@@ -622,7 +638,7 @@ exigent. L'adaptateur de moteur porte, et lui seul :
 
 | ce qui diffère | Docker Compose | podman-compose |
 |---|---|---|
-| partage d'espace réseau pour le sidecar | `network_mode: "service:<agent>"` | seulement `container:<nom>`, nom généré à connaître avant |
+| partage d'espace réseau pour le sidecar | l'agent rejoint le pare-feu : `network_mode: "service:<pare-feu>"` **sur le service d'agent** (voir le sens, plus bas) | seulement `container:<nom>`, nom généré à connaître avant |
 | mappage des utilisateurs en mode sans root | sans objet | `userns_mode: keep-id`, propre à Podman |
 | joindre l'hôte sur déclaration | `host.docker.internal` via `host-gateway` | `host.containers.internal` natif, `host-gateway` mal supporté |
 | inclusion des services du projet | `include:` fonctionne | `include:` plante — donc **`hq` fusionne lui-même le YAML** des services du projet dans le Compose généré, sur les deux moteurs |
@@ -630,6 +646,33 @@ exigent. L'adaptateur de moteur porte, et lui seul :
 | profils Compose | fiables | bugués — donc **un fichier par profil** avec un nom de projet stable, jamais `profiles:` |
 | adresse du résolveur | dépend du **mode réseau**, pas de la plateforme | idem, autres adresses (aardvark, pasta, slirp) |
 | commande et socket | `docker compose`, socket détectée | `podman-compose`, socket détectée |
+
+**Le sens du partage d'espace réseau, vérifié par exécution le 2026-09-09.**
+La v2 écrivait `network_mode: "service:<agent>"` sur le sidecar — le
+pare-feu rejoignait l'agent. Mesuré sur Docker Compose v5.1.2 : dans ce
+sens, **l'agent démarre le premier** et le sidecar second (il en dépend),
+donc l'agent a un réseau avant que la moindre règle soit posée, ce qui
+contredit 4.1 bis §2. Le sens juste est l'inverse : **le pare-feu possède
+l'espace réseau, l'agent le rejoint** (`network_mode: "service:<pare-feu>"`
+sur le service d'agent) et l'attend par `depends_on: { <pare-feu>: {
+condition: service_healthy } }`. Mesuré dans ce sens : le sidecar pose ses
+règles, passe healthy, et l'agent démarre ensuite — avec `cap_drop: [ALL]`,
+`no-new-privileges` et l'uid de l'hôte, que le partage d'espace réseau
+n'affecte pas. **Conséquence pour le générateur** : Compose refuse
+`network_mode` et `networks` sur le même service (« mutually exclusive
+`network_mode` and `networks`: invalid compose project », mesuré) — donc
+c'est **le pare-feu** qui s'attache au réseau des services du projet et qui
+porte les ports, jamais l'agent.
+
+**Le changement de profil ne touche pas aux services, vérifié par exécution
+le 2026-09-09.** Sous un nom de projet stable, lever un second fichier qui
+**redéclare les services du projet à l'identique** laisse leurs conteneurs
+intacts — même identifiant, même heure de démarrage (mesuré). Un fichier qui
+les **omet** ne les arrête pas non plus, mais Compose les signale comme
+« orphelins » à chaque commande. Donc la règle du générateur : **chaque
+fichier de profil redéclare les services du projet à l'identique**, et `hq`
+ne passe jamais `--remove-orphans`. Arrêter le conteneur d'agent du profil
+précédent reste un geste explicite de l'adaptateur de moteur.
 
 Une bonne part de ces différences sont des bugs ouverts de `podman-compose`,
 pas des choix de conception. D'où : **la première version ne vise que
@@ -660,12 +703,12 @@ et qui se vérifie en CI sur les deux :
 | point | macOS | Linux / WSL | règle pour `hq` |
 |---|---|---|---|
 | binaire | arm64 et x86_64 | x86_64 et arm64 | Rust, compilé nativement sur chaque cible en CI (la compilation croisée macOS → Linux demande un éditeur de liens, on ne compte pas dessus) ; aucune dépendance native ; à l'exécution, la commande Compose du moteur et un client HTTP pour l'API de la forge |
-| moteur de conteneurs | Docker Desktop (VM Linux) ; Podman Desktop existe aussi, cible seconde | Docker Desktop avec WSL2, ou Docker Engine dans WSL ; Podman, cible seconde | l'API est la même ; `hq` détecte la socket, ne suppose pas son chemin ; en mode rootless, l'uid vu par l'hôte passe par les subuid, et l'adaptateur de moteur le sait |
+| moteur de conteneurs | Docker Desktop **ou OrbStack** (VM Linux ; OrbStack est ce qu'Arnaud utilise, API Docker compatible) ; Podman Desktop existe aussi, cible seconde | Docker Desktop avec WSL2, ou Docker Engine dans WSL ; Podman, cible seconde | l'API est la même ; `hq` détecte la socket, ne suppose pas son chemin ; en mode rootless, l'uid vu par l'hôte passe par les subuid, et l'adaptateur de moteur le sait |
 | propriétaire des fichiers | mappé par VirtioFS ; cas connus de fichiers vus `root:root` | l'uid de l'hôte doit être celui de l'utilisateur du conteneur, sinon un fichier `600` est illisible et **git refuse l'arbre** (`safe.directory`) | `hq` passe uid et gid de l'hôte au build et au run ; l'image pré-crée les points de montage des **volumes nommés** avec cet uid, sinon ils naissent à root et la toolchain ne peut pas y écrire ; `hq check` vérifie que git accepte l'arbre depuis le conteneur |
 | chemins montables | Docker Desktop ne partage que `/Users`, `/Volumes`, `/private`, `/tmp` par défaut | tout le système de fichiers WSL ; **`/mnt/c` très lent et sans permissions** | dépôt et slots vivent sous un chemin partagé sur macOS et dans le système de fichiers Linux sous WSL ; `hq check` refuse `/mnt/` et un chemin non partagé |
 | casse des noms | APFS insensible par défaut | ext4 sensible, dans le conteneur aussi | `hq check` signale deux chemins ne différant que par la casse |
 | services de l'hôte depuis un conteneur | `host.docker.internal` | idem avec Docker Desktop ; à déclarer soi-même avec Docker Engine seul | l'adaptateur de moteur le sait, pas le fichier de profil du projet ; et l'hôte n'est joignable que si la mission le déclare (4.1 bis) |
-| résolveur DNS du conteneur | 192.168.65.x sur Desktop | 127.0.0.11 sur un réseau utilisateur sous Engine | seule adresse ouverte sur le port 53, fournie par l'adaptateur de moteur |
+| résolveur DNS du conteneur | dépend du moteur, pas de la plateforme : 127.0.0.11 sur un réseau utilisateur, autre chose sur le réseau par défaut (mesuré le 2026-09-09 sous **OrbStack**, le moteur d'Arnaud : `0.250.250.200`) | 127.0.0.11 sur un réseau utilisateur sous Engine | ne pas supposer l'adresse. Dans un profil d'agent la question ne se pose plus : le sidecar **détourne le port 53** de l'espace réseau partagé vers son propre résolveur (4.1 bis §3), quelle que soit l'adresse écrite dans `/etc/resolv.conf` par le moteur |
 | fins de ligne | LF | LF, mais un éditeur Windows peut écrire CRLF | `hq init` pose un `.gitattributes` (`* text=auto eol=lf`) s'il n'en existe pas ; `hq check` vérifie ce qu'il lit |
 | mémoire | celle de Docker Desktop | WSL2 prend la moitié de la RAM par défaut (`.wslconfig`) | `hq check` affiche la mémoire vue par le moteur et avertit sous un seuil |
 | clone local | même système de fichiers | dans WSL | `--no-hardlinks` (3.2) ; le slot est créé à côté du dépôt, jamais sur un autre volume |
