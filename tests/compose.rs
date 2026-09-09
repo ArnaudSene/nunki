@@ -1,0 +1,440 @@
+//! Compose generation (SPEC 4.2) and the container doctrine of 4.1 bis.
+//!
+//! Golden files under `tests/fixtures/compose/`: generation happens at every
+//! launch, so the bytes must not move unless a decision moves. Refresh them
+//! with `HQ_BLESS=1 cargo test --test compose` and read the diff.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use hq::compose::{
+    AGENT_SERVICE, AGENT_WRITABLE, ComposeError, FIREWALL_SERVICE, NamedVolume, Plan, UserIds,
+    generate, project_name,
+};
+use hq::harness::Role;
+use hq::mission::Service;
+use hq::perimeter::{Sources, compute};
+
+fn strings(items: &[&str]) -> Vec<String> {
+    items.iter().map(|s| s.to_string()).collect()
+}
+
+fn services() -> Vec<Service> {
+    vec![Service {
+        name: "db".to_string(),
+        reach: strings(&["db", "10.4.0.7"]),
+    }]
+}
+
+fn plan(role: Role) -> Plan {
+    let mission_services = match role {
+        Role::Coder => Vec::new(),
+        Role::Integrator | Role::Security => services(),
+    };
+    let perimeter = compute(
+        role,
+        &Sources {
+            stack: &strings(&["index.crates.io", "static.crates.io"]),
+            harness: &strings(&["api.anthropic.com", "statsig.anthropic.com"]),
+            services: &mission_services,
+            forge: &strings(&["github.com"]),
+        },
+    )
+    .unwrap();
+
+    let credentials = match role {
+        Role::Coder => Vec::new(),
+        _ => vec![(
+            PathBuf::from("/Users/h/.hq/demo/credentials/db.env"),
+            PathBuf::from("/run/hq/credentials/db.env"),
+        )],
+    };
+
+    let mut volumes = vec![NamedVolume {
+        name: "hq-demo-1-harness".to_string(),
+        at: PathBuf::from("/home/agent/.harness"),
+    }];
+    if role == Role::Security {
+        // What a read-only tree still needs to write, from `writable.txt`.
+        volumes.push(NamedVolume {
+            name: "hq-demo-1-target".to_string(),
+            at: PathBuf::from("/work/tree/target"),
+        });
+    }
+
+    let mut environment = BTreeMap::new();
+    environment.insert("HQ_ROLE".to_string(), format!("{role:?}").to_lowercase());
+
+    Plan {
+        slot: "demo-1".to_string(),
+        role,
+        image: "hq/rust:1".to_string(),
+        firewall_image: "hq/firewall:1".to_string(),
+        user: UserIds { uid: 501, gid: 20 },
+        tree: PathBuf::from("/Users/h/code/demo-slot-1"),
+        tree_at: PathBuf::from("/work/tree"),
+        mission_dir: PathBuf::from("/Users/h/.hq/demo/missions/m1"),
+        mission_dir_at: PathBuf::from("/work/mission"),
+        credentials,
+        volumes,
+        environment,
+        command: strings(&["sleep", "infinity"]),
+        perimeter,
+        project_services: None,
+        project_networks: Vec::new(),
+    }
+}
+
+fn golden(name: &str, produced: &str) {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/compose")
+        .join(name);
+    if std::env::var_os("HQ_BLESS").is_some() {
+        std::fs::write(&path, produced).unwrap();
+        return;
+    }
+    let expected = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("{}: {e} — bless with HQ_BLESS=1", path.display()));
+    assert_eq!(produced, expected, "{} moved", path.display());
+}
+
+#[test]
+fn the_mission_profile_is_stable() {
+    golden("mission.yml", &generate(&plan(Role::Coder)).unwrap());
+}
+
+#[test]
+fn the_system_profile_of_the_integrator_is_stable() {
+    golden(
+        "system-integrator.yml",
+        &generate(&plan(Role::Integrator)).unwrap(),
+    );
+}
+
+#[test]
+fn the_system_profile_of_the_security_agent_is_stable() {
+    golden(
+        "system-security.yml",
+        &generate(&plan(Role::Security)).unwrap(),
+    );
+}
+
+#[test]
+fn generating_twice_yields_the_same_bytes() {
+    let plan = plan(Role::Integrator);
+    assert_eq!(generate(&plan).unwrap(), generate(&plan).unwrap());
+}
+
+#[test]
+fn the_agent_joins_the_firewall_and_waits_for_it() {
+    // Measured against Docker Compose v5.1.2: in the other direction the
+    // agent starts first and has a network before any rule is laid.
+    let yaml = generate(&plan(Role::Coder)).unwrap();
+    let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+    let agent = &doc["services"][AGENT_SERVICE];
+    let firewall = &doc["services"][FIREWALL_SERVICE];
+
+    assert_eq!(
+        agent["network_mode"].as_str(),
+        Some("service:firewall"),
+        "the agent must join the firewall's namespace"
+    );
+    assert!(
+        firewall["network_mode"].is_null(),
+        "the firewall owns the namespace, it joins nothing"
+    );
+    assert_eq!(
+        agent["depends_on"]["firewall"]["condition"].as_str(),
+        Some("service_healthy"),
+        "a sidecar that fails is an agent that does not start"
+    );
+    assert!(
+        !firewall["healthcheck"].is_null(),
+        "without a healthcheck, service_healthy can never be met"
+    );
+}
+
+#[test]
+fn the_agent_has_no_power_and_the_firewall_has_it_all() {
+    let yaml = generate(&plan(Role::Coder)).unwrap();
+    let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+    let agent = &doc["services"][AGENT_SERVICE];
+    let firewall = &doc["services"][FIREWALL_SERVICE];
+
+    assert_eq!(agent["cap_drop"][0].as_str(), Some("ALL"));
+    assert!(agent["cap_add"].is_null(), "the agent gains no capability");
+    assert_eq!(
+        agent["security_opt"][0].as_str(),
+        Some("no-new-privileges:true")
+    );
+    assert_eq!(agent["user"].as_str(), Some("501:20"));
+
+    assert_eq!(firewall["cap_drop"][0].as_str(), Some("ALL"));
+    let caps: Vec<_> = firewall["cap_add"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(caps, vec!["NET_ADMIN", "NET_RAW", "SETUID", "SETGID"]);
+}
+
+#[test]
+fn the_agent_declares_no_network_because_compose_refuses_both() {
+    // "mutually exclusive `network_mode` and `networks`: invalid compose
+    // project" — measured. The firewall is what attaches to the services.
+    let yaml = generate(&plan(Role::Integrator)).unwrap();
+    let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+    assert!(doc["services"][AGENT_SERVICE]["networks"].is_null());
+    assert!(doc["services"][AGENT_SERVICE]["ports"].is_null());
+}
+
+#[test]
+fn the_allowlist_reaches_the_sidecar_and_only_the_sidecar() {
+    let coder = generate(&plan(Role::Coder)).unwrap();
+    let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&coder).unwrap();
+    let env = &doc["services"][FIREWALL_SERVICE]["environment"];
+    assert_eq!(
+        env["HQ_ALLOW_DOMAINS"].as_str(),
+        Some("api.anthropic.com,index.crates.io,static.crates.io,statsig.anthropic.com")
+    );
+    assert_eq!(env["HQ_ALLOW_ADDRESSES"].as_str(), Some(""));
+    assert!(
+        doc["services"][AGENT_SERVICE]["environment"]["HQ_ALLOW_DOMAINS"].is_null(),
+        "the agent is not told its own allowlist by the generator"
+    );
+
+    let integrator = generate(&plan(Role::Integrator)).unwrap();
+    let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&integrator).unwrap();
+    let env = &doc["services"][FIREWALL_SERVICE]["environment"];
+    assert!(env["HQ_ALLOW_DOMAINS"].as_str().unwrap().contains(",db,"));
+    assert_eq!(env["HQ_ALLOW_ADDRESSES"].as_str(), Some("10.4.0.7"));
+}
+
+#[test]
+fn the_security_agent_reads_the_tree_and_the_others_write_it() {
+    for (role, mode) in [
+        (Role::Coder, "rw"),
+        (Role::Integrator, "rw"),
+        (Role::Security, "ro"),
+    ] {
+        let yaml = generate(&plan(role)).unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let mounts: Vec<_> = doc["services"][AGENT_SERVICE]["volumes"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        let tree = mounts
+            .iter()
+            .find(|m| m.contains("demo-slot-1:/work/tree:"))
+            .unwrap_or_else(|| panic!("{role:?} has no tree mount in {mounts:?}"));
+        assert!(tree.ends_with(&format!(":{mode}")), "{role:?}: {tree}");
+    }
+}
+
+#[test]
+fn the_mission_folder_is_read_only_but_for_three_files() {
+    let yaml = generate(&plan(Role::Coder)).unwrap();
+    let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+    let mounts: Vec<_> = doc["services"][AGENT_SERVICE]["volumes"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+
+    assert!(
+        mounts.contains(&"/Users/h/.hq/demo/missions/m1:/work/mission:ro".to_string()),
+        "{mounts:?}"
+    );
+    for file in AGENT_WRITABLE {
+        let expected = format!("/Users/h/.hq/demo/missions/m1/{file}:/work/mission/{file}:rw");
+        assert!(
+            mounts.contains(&expected),
+            "missing {expected} in {mounts:?}"
+        );
+    }
+    // MISSION.md is inside the read-only mount and nowhere else: the header
+    // the run is framed by cannot be rewritten by the run (SPEC 4.1).
+    assert!(
+        !mounts.iter().any(|m| m.contains("MISSION.md")),
+        "{mounts:?}"
+    );
+}
+
+#[test]
+fn credentials_are_read_only_and_never_on_the_mission_profile() {
+    let yaml = generate(&plan(Role::Integrator)).unwrap();
+    assert!(yaml.contains("/run/hq/credentials/db.env:ro"), "{yaml}");
+
+    let mut coder = plan(Role::Coder);
+    coder.credentials = vec![(
+        PathBuf::from("/Users/h/.hq/demo/credentials/db.env"),
+        PathBuf::from("/run/hq/credentials/db.env"),
+    )];
+    assert!(matches!(
+        generate(&coder).unwrap_err(),
+        ComposeError::CredentialsOnMissionProfile(1)
+    ));
+}
+
+#[test]
+fn the_projects_services_travel_verbatim_and_keep_their_unknown_keys() {
+    let mut plan = plan(Role::Integrator);
+    plan.project_services = Some(
+        serde_yaml_ng::from_str(
+            "db:\n  image: postgres:16\n  x-note: kept\n  healthcheck:\n    test: [\"CMD\", \"pg_isready\"]\n",
+        )
+        .unwrap(),
+    );
+    let yaml = generate(&plan).unwrap();
+    let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+    assert_eq!(doc["services"]["db"]["image"].as_str(), Some("postgres:16"));
+    assert_eq!(doc["services"]["db"]["x-note"].as_str(), Some("kept"));
+    assert_eq!(
+        doc["services"]["db"]["healthcheck"]["test"][1].as_str(),
+        Some("pg_isready")
+    );
+}
+
+#[test]
+fn a_project_service_may_not_take_a_name_hq_reserves() {
+    for reserved in [FIREWALL_SERVICE, AGENT_SERVICE] {
+        let mut plan = plan(Role::Integrator);
+        plan.project_services =
+            Some(serde_yaml_ng::from_str(&format!("{reserved}:\n  image: nginx\n")).unwrap());
+        assert!(
+            matches!(generate(&plan).unwrap_err(), ComposeError::ReservedService(name) if name == reserved),
+            "{reserved} should be refused"
+        );
+    }
+}
+
+#[test]
+fn the_project_name_is_stable_across_profiles_and_legal_for_compose() {
+    // Same slot, three profiles, one project name: this is what keeps the
+    // project's services up between profiles (measured).
+    let names: Vec<_> = [Role::Coder, Role::Integrator, Role::Security]
+        .iter()
+        .map(|role| {
+            let yaml = generate(&plan(*role)).unwrap();
+            let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+            doc["name"].as_str().unwrap().to_string()
+        })
+        .collect();
+    assert_eq!(names, vec!["hq-demo-1"; 3]);
+
+    // Compose refuses anything else: "must consist only of lowercase
+    // alphanumeric characters, hyphens, and underscores as well as start
+    // with a letter or number" — measured.
+    assert_eq!(
+        project_name("Feat/Mission Resume").unwrap(),
+        "hq-feat-mission-resume"
+    );
+    assert_eq!(project_name("_1").unwrap(), "hq-1");
+    assert!(matches!(
+        project_name("///"),
+        Err(ComposeError::SlotName(_))
+    ));
+}
+
+#[test]
+fn a_relative_host_path_is_refused_before_the_engine_sees_it() {
+    let mut plan = plan(Role::Coder);
+    plan.tree = PathBuf::from("relative/tree");
+    assert!(matches!(
+        generate(&plan).unwrap_err(),
+        ComposeError::RelativePath { .. }
+    ));
+}
+
+#[test]
+fn an_empty_allowlist_is_refused() {
+    let mut plan = plan(Role::Coder);
+    plan.perimeter = Default::default();
+    assert!(matches!(
+        generate(&plan).unwrap_err(),
+        ComposeError::EmptyPerimeter
+    ));
+}
+
+/// Everything above proves what `hq` writes; this one proves the engine
+/// accepts it. Skipped, not failed, on a machine without a container engine
+/// (SPEC 4.2 bis, CI on two platforms).
+#[test]
+fn a_real_compose_accepts_every_generated_profile() {
+    let Some(engine) = engine() else {
+        eprintln!("skipped: no `docker compose` on this machine");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    for role in [Role::Coder, Role::Integrator, Role::Security] {
+        let mut plan = plan(role);
+        if role != Role::Coder {
+            plan.project_services = Some(
+                serde_yaml_ng::from_str("db:\n  image: postgres:16\n  x-note: kept\n").unwrap(),
+            );
+        }
+        let file = dir.path().join(format!("{role:?}.yml"));
+        std::fs::write(&file, generate(&plan).unwrap()).unwrap();
+
+        let out = engine.config(&file);
+        assert!(
+            out.status.success(),
+            "{role:?} rejected by the engine:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let normalised = String::from_utf8_lossy(&out.stdout);
+        // `no` must survive as a string, not become the boolean it is in
+        // YAML 1.1.
+        assert!(normalised.contains(r#"restart: "no""#), "{normalised}");
+    }
+}
+
+/// And the shape the generator refuses to write is one the engine refuses
+/// too — the reason the agent carries no `networks:`.
+#[test]
+fn a_real_compose_refuses_an_agent_that_declares_both() {
+    let Some(engine) = engine() else {
+        eprintln!("skipped: no `docker compose` on this machine");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("both.yml");
+    std::fs::write(
+        &file,
+        "services:\n  firewall:\n    image: alpine\n  agent:\n    image: alpine\n    network_mode: \"service:firewall\"\n    networks: [db]\nnetworks:\n  db:\n",
+    )
+    .unwrap();
+    let out = engine.config(&file);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("mutually exclusive"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+struct Engine;
+
+impl Engine {
+    fn config(&self, file: &Path) -> std::process::Output {
+        std::process::Command::new("docker")
+            .args(["compose", "-f"])
+            .arg(file)
+            .arg("config")
+            .output()
+            .expect("docker is on the path")
+    }
+}
+
+fn engine() -> Option<Engine> {
+    let ok = std::process::Command::new("docker")
+        .args(["compose", "version"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    ok.then_some(Engine)
+}
