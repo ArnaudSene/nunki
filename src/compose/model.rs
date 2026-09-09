@@ -21,6 +21,9 @@ pub struct Document {
     pub services: Mapping,
     #[serde(skip_serializing_if = "Mapping::is_empty")]
     pub volumes: Mapping,
+    /// The project's own `networks:` block, verbatim.
+    #[serde(skip_serializing_if = "Mapping::is_empty")]
+    pub networks: Mapping,
 }
 
 /// A service `hq` writes itself.
@@ -39,6 +42,10 @@ pub struct Service {
     pub cap_add: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub security_opt: Vec<String>,
+    /// Only ever set on the firewall: Compose refuses `networks` and
+    /// `network_mode` on one service, and the agent has the latter.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub networks: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub depends_on: Option<Mapping>,
     #[serde(skip_serializing_if = "Option::is_none")]

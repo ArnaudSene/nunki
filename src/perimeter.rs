@@ -160,3 +160,81 @@ fn forge_hit(domain: &str, forge: &[String]) -> Option<String> {
         }
     })
 }
+
+/// One attempt to get out, as SPEC 4.1 bis rule 7 requires `hq check` to make
+/// from inside a container. They live here and not in a test so that
+/// `hq check` is a caller of this list rather than a copy of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Probe {
+    /// What is being attempted, for the report.
+    pub what: String,
+    /// Whether a correctly fenced container should succeed at it. Two of
+    /// these are true: a perimeter that refuses everything is not a
+    /// perimeter, it is a broken container.
+    pub expected: bool,
+    /// A shell script, run inside the agent container; its exit status is
+    /// the answer.
+    pub script: String,
+}
+
+/// The battery. `allowed` is a domain the role's allowlist names; `forbidden`
+/// are addresses and ports nothing declared — a neighbour on the slot's own
+/// network belongs here, and it is the only hermetic one: the rest need the
+/// machine to have a way out at all, or they go green for the wrong reason.
+pub fn probes(allowed: &str, forbidden: &[(String, u16)]) -> Vec<Probe> {
+    let resolves =
+        |name: &str| format!("nslookup {name} 2>&1 | tail -5 | grep -q 'Address: [0-9]'");
+    let mut probes = vec![
+        Probe {
+            what: format!("{allowed}, an allowed name, resolves"),
+            expected: true,
+            script: resolves(allowed),
+        },
+        Probe {
+            what: format!("{allowed}, an allowed host, is reachable"),
+            expected: true,
+            script: format!("wget -q -T5 -O /dev/null http://{allowed}/"),
+        },
+        Probe {
+            what: "an off-list name resolves".to_string(),
+            expected: false,
+            script: resolves("github.com"),
+        },
+        Probe {
+            what: "an off-list name resolves through another server".to_string(),
+            expected: false,
+            script: resolves("github.com 1.1.1.1"),
+        },
+        Probe {
+            what: "an off-list name resolves over TCP".to_string(),
+            expected: false,
+            script: format!(
+                "nslookup -vc {}",
+                "github.com 8.8.8.8 2>&1 | tail -5 | grep -q 'Address: [0-9]'"
+            ),
+        },
+        Probe {
+            what: "a DNS tunnel carries data out".to_string(),
+            expected: false,
+            script: resolves("exfil.attacker.example"),
+        },
+        Probe {
+            what: "the agent can undo the rules".to_string(),
+            expected: false,
+            script: "nft flush ruleset".to_string(),
+        },
+        Probe {
+            what: "the agent can even read the rules".to_string(),
+            expected: false,
+            script: "nft list ruleset | grep -q hqfw".to_string(),
+        },
+    ];
+    for (address, port) in forbidden {
+        probes.push(Probe {
+            what: format!("{address}:{port}, declared by nothing, is reachable"),
+            expected: false,
+            script: format!("nc -z -w3 {address} {port}"),
+        });
+    }
+    probes
+}

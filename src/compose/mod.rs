@@ -85,8 +85,12 @@ pub struct Plan {
     /// unusable on one of the two engines, and re-typing it would lose keys
     /// (SPEC 4.2, engine table).
     pub project_services: Option<Value>,
-    /// Networks the firewall attaches to for those services.
-    pub project_networks: Vec<String>,
+    /// The project's own `networks:` block, merged verbatim. The firewall
+    /// attaches to every network it declares — it is the one that can, the
+    /// agent having `network_mode` instead (measured). A project that
+    /// declares none needs none: its services and the firewall both land on
+    /// the generated default network, and reach each other there (measured).
+    pub project_networks: Option<Value>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -99,6 +103,8 @@ pub enum ComposeError {
     ReservedService(String),
     #[error("the project's services must be a YAML mapping, found {0}")]
     ProjectServicesShape(&'static str),
+    #[error("the project's networks must be a YAML mapping, found {0}")]
+    ProjectNetworksShape(&'static str),
     #[error("{what} must be an absolute path, found {path:?}")]
     RelativePath { what: &'static str, path: PathBuf },
     #[error(
@@ -156,14 +162,28 @@ fn build(plan: &Plan) -> Result<Document, ComposeError> {
         absolute("a credential file", host)?;
     }
 
+    let networks = match &plan.project_networks {
+        None | Some(Value::Null) => Mapping::new(),
+        Some(Value::Mapping(map)) => map.clone(),
+        Some(Value::Sequence(_)) => return Err(ComposeError::ProjectNetworksShape("a sequence")),
+        Some(_) => return Err(ComposeError::ProjectNetworksShape("a scalar")),
+    };
+    let attached: Vec<String> = networks
+        .keys()
+        .map(|k| k.as_str().unwrap_or_default().to_string())
+        .collect();
+
     let mut services = Mapping::new();
-    services.insert(Value::from(FIREWALL_SERVICE), firewall(plan).to_value());
+    services.insert(
+        Value::from(FIREWALL_SERVICE),
+        firewall(plan, &attached).to_value(),
+    );
     services.insert(Value::from(AGENT_SERVICE), agent(plan).to_value());
 
     if let Some(project) = &plan.project_services {
         let declared = match project {
             Value::Mapping(map) => map,
-            Value::Null => return document(plan, services),
+            Value::Null => return document(plan, services, networks),
             Value::Sequence(_) => return Err(ComposeError::ProjectServicesShape("a sequence")),
             _ => return Err(ComposeError::ProjectServicesShape("a scalar")),
         };
@@ -177,10 +197,10 @@ fn build(plan: &Plan) -> Result<Document, ComposeError> {
         }
     }
 
-    document(plan, services)
+    document(plan, services, networks)
 }
 
-fn document(plan: &Plan, services: Mapping) -> Result<Document, ComposeError> {
+fn document(plan: &Plan, services: Mapping, networks: Mapping) -> Result<Document, ComposeError> {
     let mut volumes = Mapping::new();
     for volume in &plan.volumes {
         volumes.insert(Value::from(volume.name.clone()), Value::Null);
@@ -189,12 +209,13 @@ fn document(plan: &Plan, services: Mapping) -> Result<Document, ComposeError> {
         name: project_name(&plan.slot)?,
         services,
         volumes,
+        networks,
     })
 }
 
 /// The sidecar: the only container with power, and the one that owns the
 /// network namespace (SPEC 4.1 bis, rules 1 and 3).
-fn firewall(plan: &Plan) -> Service {
+fn firewall(plan: &Plan, attached: &[String]) -> Service {
     let mut environment = BTreeMap::new();
     environment.insert(
         "HQ_ALLOW_DOMAINS".to_string(),
@@ -230,6 +251,7 @@ fn firewall(plan: &Plan) -> Service {
             "SETGID".to_string(),
         ],
         security_opt: vec!["no-new-privileges:true".to_string()],
+        networks: attached.to_vec(),
         healthcheck: Some(Healthcheck {
             test: vec!["CMD".to_string(), "/usr/local/bin/fw-ready".to_string()],
             interval: "1s".to_string(),

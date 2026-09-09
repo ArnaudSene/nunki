@@ -81,7 +81,7 @@ fn plan(role: Role) -> Plan {
         command: strings(&["sleep", "infinity"]),
         perimeter,
         project_services: None,
-        project_networks: Vec::new(),
+        project_networks: None,
     }
 }
 
@@ -437,4 +437,38 @@ fn engine() -> Option<Engine> {
         .map(|o| o.status.success())
         .unwrap_or(false);
     ok.then_some(Engine)
+}
+
+#[test]
+fn the_projects_networks_travel_verbatim_and_the_firewall_is_what_joins_them() {
+    let mut plan = plan(Role::Integrator);
+    plan.project_services =
+        Some(serde_yaml_ng::from_str("db:\n  image: postgres:16\n  networks: [back]\n").unwrap());
+    plan.project_networks =
+        Some(serde_yaml_ng::from_str("back:\n  driver: bridge\n  x-note: kept\n").unwrap());
+
+    let yaml = generate(&plan).unwrap();
+    let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+
+    assert_eq!(doc["networks"]["back"]["driver"].as_str(), Some("bridge"));
+    assert_eq!(doc["networks"]["back"]["x-note"].as_str(), Some("kept"));
+    assert_eq!(
+        doc["services"][FIREWALL_SERVICE]["networks"][0].as_str(),
+        Some("back"),
+        "the firewall is the one that can attach"
+    );
+    assert!(
+        doc["services"][AGENT_SERVICE]["networks"].is_null(),
+        "the agent still cannot: it has network_mode"
+    );
+}
+
+#[test]
+fn a_project_declaring_no_network_gets_no_networks_block() {
+    // Measured: services and firewall both land on the generated default
+    // network and reach each other there, so hq invents nothing.
+    let yaml = generate(&plan(Role::Integrator)).unwrap();
+    assert!(!yaml.contains("\nnetworks:"), "{yaml}");
+    let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+    assert!(doc["services"][FIREWALL_SERVICE]["networks"].is_null());
 }

