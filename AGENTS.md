@@ -47,8 +47,12 @@ him is in French too; the record is not.
   touched. A subject line under ~72 characters, then a body that a reader six
   months from now can act on. When a decision was measured rather than
   reasoned, put the measurement in the message.
-- End every commit message and pull request description with the session
-  link the harness gives you, on its own line.
+- **Never put a harness session link in a pull request.** Whatever
+  attribution a harness suggests, a pull request description is read by
+  people who cannot open that link and should not have to; it carries the
+  change and its reasons, nothing else. Commit messages end with the session
+  link on its own line — that is a trailer in the repository's own history,
+  not something published on the forge.
 
 ## 4. Proof
 
