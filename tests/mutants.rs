@@ -1,0 +1,323 @@
+//! The mutation campaign and gate 7 (SPEC 4.4).
+//!
+//! The campaign is deliberately not run against `cargo-mutants` here: what
+//! has to be right is the fingerprint, the three outcomes and the staleness
+//! rule, and a stub campaign that prints the tool's line shape exercises all
+//! of them. Which tool the stack declares is the stack's business.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use hq::mutants::{self, Campaign, Survivor, Triage};
+
+fn git(at: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(at)
+        .args(["-c", "user.name=Mutants Test", "-c", "user.email=m@test"])
+        .args(args)
+        .output()
+        .expect("git is on the path");
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+fn write(at: &Path, path: &str, body: &str) {
+    let full = at.join(path);
+    if let Some(dir) = full.parent() {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    std::fs::write(full, body).unwrap();
+}
+
+fn repo(dir: &Path) -> PathBuf {
+    let tree = dir.join("tree");
+    std::fs::create_dir_all(&tree).unwrap();
+    git(&tree, &["init", "-q", "-b", "dev"]);
+    write(&tree, "src/lib.rs", "pub fn one() -> u8 { 1 }\n");
+    git(&tree, &["add", "-A"]);
+    git(&tree, &["commit", "-q", "-m", "base"]);
+    git(&tree, &["checkout", "-q", "-b", "mission/x"]);
+    tree
+}
+
+/// The fingerprint is over **content**, not over `HEAD`. A commit that
+/// rewrites history without changing a byte of the touched files must not
+/// cost an hour of campaign — SPEC section 7 counts that hour.
+#[test]
+fn the_fingerprint_follows_the_content_and_not_the_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let tree = repo(dir.path());
+    write(&tree, "src/lib.rs", "pub fn one() -> u8 { 2 }\n");
+    git(&tree, &["add", "-A"]);
+    git(&tree, &["commit", "-q", "-m", "L1"]);
+    let touched = vec!["src/lib.rs".to_string()];
+    let before = mutants::fingerprint(&tree, &touched).unwrap();
+
+    // A new commit, the same bytes in the touched file.
+    write(&tree, "README.md", "unrelated\n");
+    git(&tree, &["add", "-A"]);
+    git(&tree, &["commit", "-q", "-m", "something else"]);
+    assert_ne!(git(&tree, &["rev-parse", "HEAD"]), "");
+    assert_eq!(
+        mutants::fingerprint(&tree, &touched).unwrap(),
+        before,
+        "HEAD moved and the touched file did not: the campaign must not replay"
+    );
+
+    // The bytes change: so does the fingerprint.
+    write(&tree, "src/lib.rs", "pub fn one() -> u8 { 3 }\n");
+    git(&tree, &["add", "-A"]);
+    git(&tree, &["commit", "-q", "-m", "L2"]);
+    assert_ne!(mutants::fingerprint(&tree, &touched).unwrap(), before);
+}
+
+#[test]
+fn the_order_the_paths_arrive_in_does_not_change_the_fingerprint() {
+    let dir = tempfile::tempdir().unwrap();
+    let tree = repo(dir.path());
+    write(&tree, "src/a.rs", "pub fn a() {}\n");
+    write(&tree, "src/b.rs", "pub fn b() {}\n");
+    git(&tree, &["add", "-A"]);
+    git(&tree, &["commit", "-q", "-m", "two files"]);
+    let one = mutants::fingerprint(&tree, &["src/a.rs".into(), "src/b.rs".into()]).unwrap();
+    let other = mutants::fingerprint(&tree, &["src/b.rs".into(), "src/a.rs".into()]).unwrap();
+    assert_eq!(one, other);
+    // And a path repeated is a path, not two.
+    let twice = mutants::fingerprint(
+        &tree,
+        &["src/a.rs".into(), "src/b.rs".into(), "src/a.rs".into()],
+    )
+    .unwrap();
+    assert_eq!(one, twice);
+}
+
+/// A campaign's stdout carries the tool's own chatter as well as its
+/// survivors. One malformed line is not a lost campaign.
+#[test]
+fn the_survivors_are_read_out_of_whatever_else_the_tool_printed() {
+    let text = "Found 12 mutants to test\n\
+        {\"id\":\"a\",\"file\":\"src/lib.rs\",\"line\":3,\"description\":\"replace one with 0\"}\n\
+        ok  src/lib.rs:9 caught\n\
+        {\"id\":\"b\",\"file\":\"src/gate.rs\",\"line\":7}\n\
+        \n";
+    let survivors = mutants::parse(text);
+    assert_eq!(survivors.len(), 2);
+    assert_eq!(survivors[0].file, "src/lib.rs");
+    assert_eq!(survivors[1].line, 7);
+    // Nobody has answered for either of them yet.
+    assert!(survivors.iter().all(|s| s.outcome.is_none()));
+}
+
+#[test]
+fn a_campaign_round_trips_through_the_mission_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(mutants::read(dir.path()).unwrap(), None);
+    let campaign = Campaign {
+        fingerprint: "abc1234".into(),
+        head: "def5678".into(),
+        date: "2026-09-10T12:00:00Z".into(),
+        survivors: vec![Survivor {
+            id: "src/lib.rs:3".into(),
+            file: "src/lib.rs".into(),
+            line: 3,
+            description: "replace one with 0".into(),
+            outcome: Some(Triage::Equivalent {
+                why: "the branch is unreachable from any caller".into(),
+            }),
+        }],
+    };
+    mutants::write(dir.path(), &campaign).unwrap();
+    assert_eq!(mutants::read(dir.path()).unwrap(), Some(campaign));
+}
+
+#[test]
+fn only_two_of_the_three_outcomes_rest_on_a_test() {
+    assert_eq!(
+        Triage::Killed {
+            test: "a_reverted_commit_is_still_caught".into()
+        }
+        .test(),
+        Some("a_reverted_commit_is_still_caught")
+    );
+    assert_eq!(
+        Triage::Bug {
+            test: "the_known_hole".into()
+        }
+        .test(),
+        Some("the_known_hole")
+    );
+    // The one no gate can check, and SPEC gives its counter-check to the HQ.
+    assert_eq!(Triage::Equivalent { why: "x".into() }.test(), None);
+}
+
+/// A campaign, launched detached in a real container and watched to its end,
+/// then read back — which is the whole shape SPEC 4.4 gives gate 7.
+///
+/// The campaign here is a stub that prints the tool's line shape. What has to
+/// be right is the launching, the watching, the file it produces and the
+/// staleness rule; which tool a stack declares is the stack's business, and
+/// `cargo-mutants` is not in this image.
+///
+/// ```text
+/// cargo test --test mutants -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "lifts real containers; run by hand"]
+fn live_a_campaign_is_launched_watched_and_read_back() {
+    use hq::mutants::Progress;
+
+    let dir = tempfile::tempdir().unwrap();
+    let tree = repo(dir.path());
+    write(
+        &tree,
+        ".hq/stacks/rust/mutation.sh",
+        "#!/bin/sh\n\
+         # A stand-in campaign: the shape hq reads, without the tool.\n\
+         echo \"campaign $1 on $# path(s)\" >&2\n\
+         sleep 2\n\
+         echo '{\"id\":\"src/lib.rs:1\",\"file\":\"src/lib.rs\",\"line\":1,\
+         \"description\":\"replace one with 0\"}'\n\
+         echo 'not a survivor, just chatter'\n\
+         echo '{\"id\":\"src/lib.rs:1b\",\"file\":\"src/lib.rs\",\"line\":1,\
+         \"description\":\"replace one with 255\"}'\n",
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            tree.join(".hq/stacks/rust/mutation.sh"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+    }
+    // Changed on the branch, so it is a touched file and the campaign has
+    // something to run on.
+    write(&tree, "src/lib.rs", "pub fn one() -> u8 { 2 }\n");
+    git(&tree, &["add", "-A"]);
+    git(&tree, &["commit", "-q", "-m", "L1"]);
+
+    let project = hq::project::Project::at(
+        dir.path().join("repo"),
+        hq::project::Config {
+            harness: "claude-code".into(),
+            forge: vec![],
+            stacks: vec!["rust".into()],
+            protected_branches: vec!["main".into(), "dev".into()],
+            protected_paths: Default::default(),
+            account: None,
+            bounds: Default::default(),
+            credentials: None,
+            run: None,
+        },
+        dir.path().join("hq"),
+    );
+    let slot = hq::slot::Slot {
+        name: "mutlive".into(),
+        tree: tree.clone(),
+    };
+    let volume = hq::exec::proof_volume(&slot.name);
+    let file = hq::run::profile_path(&project, &slot.name);
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(
+        &file,
+        format!(
+            "services:\n\
+             \x20 agent:\n\
+             \x20   image: alpine:3.20\n\
+             \x20   volumes:\n\
+             \x20     - {tree}:{tree_at}\n\
+             \x20     - {volume}:{proof}\n\
+             \x20   tmpfs:\n\
+             \x20     - /run/hq\n\
+             \x20   command: [\"sh\", \"-c\", \"apk add --no-cache git > /dev/null && \
+             sleep 600\"]\n\
+             \x20   healthcheck:\n\
+             \x20     test: [\"CMD-SHELL\", \"command -v git > /dev/null\"]\n\
+             \x20     interval: 1s\n\
+             \x20     timeout: 2s\n\
+             \x20     retries: 60\n\
+             \x20     start_period: 1s\n\
+             volumes:\n\
+             \x20 {volume}:\n",
+            tree = tree.display(),
+            tree_at = hq::run::TREE_AT,
+            proof = hq::exec::PROOF_AT,
+        ),
+    )
+    .unwrap();
+
+    let engine: std::sync::Arc<dyn hq::engine::Engine> =
+        std::sync::Arc::new(hq::engine::docker::Docker::real());
+    let compose_project = hq::compose::project_name(&slot.name).unwrap();
+    let _ = engine.down(&file, &compose_project, true);
+    engine.up(&file, &compose_project).unwrap();
+
+    let mission = dir.path().join("mission");
+    std::fs::create_dir_all(&mission).unwrap();
+    let touched = hq::gate::touched_paths(&tree, "dev").unwrap();
+    assert!(touched.contains(&"src/lib.rs".to_string()), "{touched:?}");
+
+    let go = || {
+        mutants::campaign(
+            &project,
+            &slot,
+            engine.clone(),
+            &mission,
+            "rust",
+            &touched,
+            45,
+        )
+        .unwrap()
+    };
+
+    match go() {
+        Progress::Started { fingerprint } => println!("started {fingerprint}"),
+        other => panic!("expected a launch, got {other:?}"),
+    }
+    // While it runs, the record is beside the campaign — never in the mission
+    // state, which holds the agent's run and only that.
+    assert!(mutants::read_running(&mission).unwrap().is_some());
+
+    let mut finished = None;
+    for _ in 0..60 {
+        match go() {
+            Progress::Running { lines, .. } => {
+                println!("running, {lines} line(s)");
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+            other => {
+                finished = Some(other);
+                break;
+            }
+        }
+    }
+    match finished.expect("the campaign ended") {
+        Progress::Finished { survivors } => assert_eq!(survivors, 2),
+        other => panic!("expected a finished campaign, got {other:?}"),
+    }
+    assert!(
+        mutants::read_running(&mission).unwrap().is_none(),
+        "the record is cleared when the campaign is on file"
+    );
+
+    let campaign = mutants::read(&mission).unwrap().expect("it is on file");
+    assert_eq!(campaign.survivors.len(), 2, "the chatter is not a survivor");
+    assert_eq!(
+        campaign.fingerprint,
+        mutants::fingerprint(&tree, &touched).unwrap()
+    );
+    assert!(campaign.survivors.iter().all(|s| s.outcome.is_none()));
+
+    // Asked again on the same content, it does not spend another campaign.
+    match go() {
+        Progress::Fresh { survivors } => assert_eq!(survivors, 2),
+        other => panic!("it replays only when the touched files change: {other:?}"),
+    }
+
+    engine.down(&file, &compose_project, true).unwrap();
+}

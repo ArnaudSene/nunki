@@ -84,6 +84,11 @@ pub struct Bounds {
     pub stall_checks: u32,
     /// Hours on one lot, with progress, after which the human is told.
     pub long_lot_hours: u32,
+    /// Minutes a mutation campaign is given before `hq` stops it (SPEC 4.4,
+    /// gate 7: "elle est longue, donc elle se lance et se guette comme un
+    /// run, avec un délai paramétré").
+    #[serde(default = "default_mutation_minutes")]
+    pub mutation_minutes: u32,
 }
 
 impl Default for Bounds {
@@ -95,8 +100,15 @@ impl Default for Bounds {
             check_minutes: 15,
             stall_checks: 3,
             long_lot_hours: 8,
+            mutation_minutes: default_mutation_minutes(),
         }
     }
+}
+
+/// Long enough for a real campaign on a lot's worth of files, short enough
+/// that a hung one does not hold a slot for a working day.
+fn default_mutation_minutes() -> u32 {
+    45
 }
 
 /// The structured header of `MISSION.md`, frozen into the state at

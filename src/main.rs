@@ -170,6 +170,15 @@ enum MissionCommand {
     /// End the run in progress properly: the agent finishes its turn and
     /// writes its resume block.
     Stop { id: String },
+    /// Start the mutation campaign, or say where the one in flight is
+    /// (SPEC 4.4, gate 7). Long: it is launched detached and watched, and
+    /// the call that finds it finished writes `MUTANTS.json`.
+    Mutants {
+        id: String,
+        /// Which slot runs it. Defaults to the one the mission started in.
+        #[arg(long)]
+        slot: Option<String>,
+    },
     /// Play the verification gates 1 to 4 on what the slot holds (SPEC 4.4).
     /// Deterministic, and nothing is asked of the agent.
     Gates {
@@ -660,6 +669,95 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             }
         }
 
+        MissionCommand::Mutants { id, slot } => {
+            let header = match hq::mission::dir::read_header(&project.hq_root, &id) {
+                Ok(h) => h,
+                Err(e) => {
+                    eprintln!("hq: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let Some(in_slot) = slot.or_else(|| {
+                hq::state::Store::open(&project.hq_root)
+                    .and_then(|s| s.load(&id))
+                    .ok()
+                    .map(|s| s.slot)
+            }) else {
+                eprintln!("hq: mission {id} has not started — name a slot with --slot");
+                return ExitCode::FAILURE;
+            };
+            let slot = match hq::slot::find(project, &in_slot) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("hq: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let base = match hq::gate::touched_paths(&slot.tree, &header.base) {
+                Ok(paths) => paths,
+                Err(e) => {
+                    eprintln!("hq: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let stack = project
+                .config
+                .stacks
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "rust".to_string());
+            let engine: std::sync::Arc<dyn hq::engine::Engine> =
+                std::sync::Arc::new(hq::engine::docker::Docker::real());
+            let paths = hq::mission::dir::Paths::of(&project.hq_root, &id);
+            match hq::mutants::campaign(
+                project,
+                &slot,
+                engine,
+                &paths.dir,
+                &stack,
+                &base,
+                header.bounds.mutation_minutes,
+            ) {
+                Ok(progress) => {
+                    use hq::mutants::Progress;
+                    match progress {
+                        Progress::Fresh { survivors } => println!(
+                            "a campaign on this exact content is already on file — \
+                             {survivors} survivor(s); it replays only when the touched \
+                             files change"
+                        ),
+                        Progress::Started { fingerprint } => println!(
+                            "campaign {} started; `hq mission mutants {id}` follows it",
+                            &fingerprint[..7.min(fingerprint.len())]
+                        ),
+                        Progress::Running { started_at, lines } => {
+                            println!("running since {started_at} — {lines} line(s) so far")
+                        }
+                        Progress::Finished { survivors } => println!(
+                            "finished — {survivors} survivor(s) in {}; each needs one of \
+                             the three outcomes before gate 7 is green",
+                            hq::mutants::FILE
+                        ),
+                        Progress::Overrun { minutes } => {
+                            eprintln!(
+                                "hq: the campaign passed its {minutes}-minute deadline and was stopped"
+                            );
+                            return ExitCode::FAILURE;
+                        }
+                        Progress::Lost(why) => {
+                            eprintln!("hq: the campaign cannot be reached: {why}");
+                            return ExitCode::FAILURE;
+                        }
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("hq: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+
         MissionCommand::Gates {
             id,
             role,
@@ -705,6 +803,7 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                 journal: &paths.journal,
                 pr: &paths.pr,
                 verdict: &paths.verdict,
+                mission_dir: &paths.dir,
                 header: &header,
                 protected_branches: &project.config.protected_branches,
                 protected_paths: &project.config.protected_paths,
@@ -756,6 +855,10 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                     outcome.gate.number(),
                     outcome.gate.title()
                 );
+                // What a green gate still owes the reader.
+                if let Some(note) = &outcome.note {
+                    println!("          note  {note}");
+                }
             }
             match report.failure() {
                 Some(_) => ExitCode::FAILURE,

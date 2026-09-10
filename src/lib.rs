@@ -18,6 +18,7 @@ pub mod human;
 pub mod image;
 pub mod init;
 pub mod mission;
+pub mod mutants;
 pub mod perimeter;
 pub mod probe;
 pub mod project;

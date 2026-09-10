@@ -77,7 +77,7 @@ pub fn run(
     let at = match on {
         On::Proof => {
             let head = git::head(&slot.tree)?;
-            refresh(&engine, &file, &compose_project, &head)?;
+            refresh_at(&engine, &file, &compose_project, &head)?;
             PROOF_AT.to_string()
         }
         On::Tree => crate::run::TREE_AT.to_string(),
@@ -96,6 +96,11 @@ pub fn run(
     Ok(engine.exec(&file, &compose_project, AGENT_SERVICE, &wrapped)?)
 }
 
+/// Bring the slot's copy of `HEAD` up to date, creating it the first time.
+/// Public because a caller that launches something **detached** in the copy —
+/// a mutation campaign (SPEC 4.4, gate 7) — has to refresh it first and then
+/// spawn, rather than go through [`run`], which waits.
+///
 /// Bring the copy to `head`, creating it the first time.
 ///
 /// `git fetch <path> HEAD` rather than a named branch: what has to be
@@ -107,7 +112,17 @@ pub fn run(
 /// is where the build cache lives. With `-x` the cache would go and gate 7
 /// would recompile from cold every campaign, which SPEC 4.4 explicitly
 /// refuses.
-fn refresh(
+pub fn refresh(project: &Project, slot: &Slot, engine: Arc<dyn Engine>) -> Result<(), ExecError> {
+    let file = crate::run::profile_path(project, &slot.name);
+    if !file.is_file() {
+        return Err(ExecError::NoProfile(slot.name.clone()));
+    }
+    let compose_project = crate::compose::project_name(&slot.name)?;
+    let head = git::head(&slot.tree)?;
+    refresh_at(&engine, &file, &compose_project, &head)
+}
+
+fn refresh_at(
     engine: &Arc<dyn Engine>,
     file: &std::path::Path,
     compose_project: &str,
