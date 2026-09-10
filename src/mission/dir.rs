@@ -1,0 +1,158 @@
+//! The mission folder, at the HQ (SPEC 4.1).
+//!
+//! It lives under `~/.hq/<project>/missions/<id>/`, outside the git tree,
+//! and is mounted into the container. That is what lets the HQ and the agent
+//! talk through files without a channel, while the tree stays clean and the
+//! folder survives `hq slot rm`.
+//!
+//! Five files, and the split between them is a restriction, not a
+//! convention. `MISSION.md` and `FOLLOWUP_HQ.md` belong to the human and the
+//! HQ, and are mounted read-only: an agent that could rewrite its own header
+//! could grant itself a domain and a credentials file for the next run.
+//! `JOURNAL.md`, `PR.md` and `VERDICT.json` are the agent's three.
+
+use std::path::{Path, PathBuf};
+
+use crate::mission::Header;
+
+/// The files of one mission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Paths {
+    pub dir: PathBuf,
+    pub mission: PathBuf,
+    pub followup: PathBuf,
+    pub journal: PathBuf,
+    pub pr: PathBuf,
+    pub verdict: PathBuf,
+}
+
+impl Paths {
+    pub fn of(hq_root: &Path, id: &str) -> Self {
+        let dir = hq_root.join("missions").join(id);
+        Self {
+            mission: dir.join("MISSION.md"),
+            followup: dir.join("FOLLOWUP_HQ.md"),
+            journal: dir.join("JOURNAL.md"),
+            pr: dir.join("PR.md"),
+            verdict: dir.join("VERDICT.json"),
+            dir,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum MissionDirError {
+    #[error("mission {0:?} already exists at {1}")]
+    Exists(String, PathBuf),
+    #[error("no mission {0:?} at {1}")]
+    Unknown(String, PathBuf),
+    #[error("a mission id may hold letters, digits, - and _ only, and {0:?} does not")]
+    BadId(String),
+    #[error("{0} has no header: a mission starts with a `---` block")]
+    NoHeader(PathBuf),
+    #[error("the header of {path} is not valid: {source}")]
+    BadHeader {
+        path: PathBuf,
+        source: serde_yaml_ng::Error,
+    },
+    #[error("{0}: {1}")]
+    Io(PathBuf, std::io::Error),
+}
+
+/// Write a new mission folder. Refuses to touch one that exists: a mission is
+/// reframed by a verb, never by writing over it (SPEC 4.1).
+pub fn create(
+    hq_root: &Path,
+    id: &str,
+    header: &Header,
+    prose: &str,
+) -> Result<Paths, MissionDirError> {
+    check_id(id)?;
+    let paths = Paths::of(hq_root, id);
+    if paths.dir.exists() {
+        return Err(MissionDirError::Exists(id.to_string(), paths.dir));
+    }
+    std::fs::create_dir_all(&paths.dir).map_err(|e| MissionDirError::Io(paths.dir.clone(), e))?;
+
+    write(&paths.mission, &render(header, prose))?;
+    write(&paths.followup, FOLLOWUP)?;
+    write(&paths.journal, &journal(id))?;
+    write(&paths.pr, "")?;
+    // Not `{}`: an empty verdict is the absence of one, and `hq` refuses a
+    // verdict whose `head` is not the branch's (SPEC 4.1).
+    write(&paths.verdict, "")?;
+    Ok(paths)
+}
+
+/// The header of a mission, read back from its folder. `hq` reads this once,
+/// when the human validates the framing, and freezes it in its state; during
+/// the mission it never reads it again.
+pub fn read_header(hq_root: &Path, id: &str) -> Result<Header, MissionDirError> {
+    let paths = Paths::of(hq_root, id);
+    if !paths.mission.is_file() {
+        return Err(MissionDirError::Unknown(id.to_string(), paths.dir));
+    }
+    let text = std::fs::read_to_string(&paths.mission)
+        .map_err(|e| MissionDirError::Io(paths.mission.clone(), e))?;
+    let yaml =
+        front_matter(&text).ok_or_else(|| MissionDirError::NoHeader(paths.mission.clone()))?;
+    serde_yaml_ng::from_str(yaml).map_err(|source| MissionDirError::BadHeader {
+        path: paths.mission.clone(),
+        source,
+    })
+}
+
+/// The missions a project's HQ holds, in name order.
+pub fn list(hq_root: &Path) -> Vec<String> {
+    let mut ids: Vec<String> = std::fs::read_dir(hq_root.join("missions"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().join("MISSION.md").is_file())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    ids.sort();
+    ids
+}
+
+/// The YAML between the first two `---` lines.
+fn front_matter(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix("---\n")?;
+    let end = rest.find("\n---")?;
+    Some(&rest[..end])
+}
+
+fn render(header: &Header, prose: &str) -> String {
+    let yaml = serde_yaml_ng::to_string(header).expect("a header serialises");
+    format!("---\n{yaml}---\n\n# Mission\n\n{}\n", prose.trim_end())
+}
+
+fn write(path: &Path, body: &str) -> Result<(), MissionDirError> {
+    std::fs::write(path, body).map_err(|e| MissionDirError::Io(path.to_path_buf(), e))
+}
+
+fn journal(id: &str) -> String {
+    format!(
+        "# Journal — {id}\n\n\
+         ## ÉTAT DE REPRISE\n\n\
+         Nothing has run yet.\n\n\
+         > Rewrite the block above at every checkpoint and before stopping. A\n\
+         > run that ends without it has not honoured the run contract.\n"
+    )
+}
+
+const FOLLOWUP: &str = "# Follow-up\n\n\
+    For the human and the HQ. The agent reads this and never writes it.\n";
+
+fn check_id(id: &str) -> Result<(), MissionDirError> {
+    let ok = !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        && id.chars().next().is_some_and(|c| c.is_ascii_alphanumeric());
+    if ok {
+        Ok(())
+    } else {
+        Err(MissionDirError::BadId(id.to_string()))
+    }
+}

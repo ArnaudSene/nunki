@@ -5,6 +5,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
+use hq::mission::{Bounds, Header, Integration, Lot, Security, Service, dir as mission_dir};
 use hq::project::Project;
 use hq::{check, image, init, probe, slot};
 
@@ -41,6 +42,10 @@ enum Command {
     #[command(subcommand)]
     Slot(SlotCommand),
 
+    /// Missions: what an agent is asked to do, and where it reports.
+    #[command(subcommand)]
+    Mission(MissionCommand),
+
     /// Say whether the project holds what the specification describes.
     ///
     /// Red when a restriction is not held; and it always says what it could
@@ -74,6 +79,42 @@ enum SlotCommand {
         #[arg(long)]
         force: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum MissionCommand {
+    /// Write a new mission folder at the HQ.
+    New {
+        /// Identifier: letters, digits, - and _.
+        id: String,
+        /// The branch the agents work on.
+        #[arg(long)]
+        branch: String,
+        /// What that branch starts from.
+        #[arg(long, default_value = "dev")]
+        base: String,
+        /// A unit of work, as `id:title`. Repeat it; order is the order.
+        #[arg(long = "lot", value_name = "ID:TITLE", required = true)]
+        lots: Vec<String>,
+        /// A service the integrator may reach, as `name=host[,host…]`.
+        /// Declaring one makes this an integration mission.
+        #[arg(long = "service", value_name = "NAME=REACH")]
+        services: Vec<String>,
+        /// Why there is no integration mission. Required when no service is
+        /// declared: a shape is stated, never inferred from silence.
+        #[arg(long, default_value = "no external service is involved")]
+        no_integration: String,
+        /// Call the security agent, rather than the mechanical gates alone.
+        #[arg(long)]
+        security_agent: bool,
+        /// The prose an agent reads under the header.
+        #[arg(long, default_value = "Describe the mission here.")]
+        about: String,
+    },
+    /// List the missions this project's HQ holds.
+    List,
+    /// What a mission is, and where it stands.
+    Status { id: String },
 }
 
 fn main() -> ExitCode {
@@ -180,6 +221,14 @@ fn main() -> ExitCode {
             }
         }
 
+        Command::Mission(command) => {
+            let project = match open(&start) {
+                Some(p) => p,
+                None => return ExitCode::FAILURE,
+            };
+            mission(&project, command)
+        }
+
         Command::Check {
             slot: which,
             mission,
@@ -271,4 +320,166 @@ fn probes(project: &Project, which: Option<&str>) -> Vec<check::Check> {
             },
         }],
     }
+}
+
+fn mission(project: &Project, command: MissionCommand) -> ExitCode {
+    match command {
+        MissionCommand::New {
+            id,
+            branch,
+            base,
+            lots,
+            services,
+            no_integration,
+            security_agent,
+            about,
+        } => {
+            let lots = match lots
+                .iter()
+                .map(|l| parse_lot(l))
+                .collect::<Result<Vec<_>, _>>()
+            {
+                Ok(l) => l,
+                Err(e) => {
+                    eprintln!("hq: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let integration = if services.is_empty() {
+                // The shape is declared, never inferred from silence: a
+                // mission that needs services and does not say so would run
+                // its integrator with an empty perimeter (SPEC 2).
+                Integration::None {
+                    reason: no_integration,
+                }
+            } else {
+                match services
+                    .iter()
+                    .map(|s| parse_service(s))
+                    .collect::<Result<Vec<_>, _>>()
+                {
+                    Ok(services) => Integration::Services { services },
+                    Err(e) => {
+                        eprintln!("hq: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            };
+            let header = Header {
+                branch,
+                base,
+                lots,
+                integration,
+                security: if security_agent {
+                    Security::Agent
+                } else {
+                    Security::Gates
+                },
+                bounds: project.config.bounds.clone(),
+            };
+            match mission_dir::create(&project.hq_root, &id, &header, &about) {
+                Ok(paths) => {
+                    println!("mission {id} at {}", paths.dir.display());
+                    println!(
+                        "  {} — yours and the HQ's, read-only for the agent",
+                        paths.mission.display()
+                    );
+                    println!("  {} — the agent's", paths.journal.display());
+                    println!();
+                    println!("Edit MISSION.md, then `hq mission status {id}`.");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("hq: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+
+        MissionCommand::List => {
+            let ids = mission_dir::list(&project.hq_root);
+            if ids.is_empty() {
+                println!("no mission yet: `hq mission new <id> --branch <branch> --lot L1:…`");
+            }
+            for id in ids {
+                match mission_dir::read_header(&project.hq_root, &id) {
+                    Ok(h) => println!("{id:<20} {:<24} {} lot(s)", h.branch, h.lots.len()),
+                    Err(e) => println!("{id:<20} unreadable: {e}"),
+                }
+            }
+            ExitCode::SUCCESS
+        }
+
+        MissionCommand::Status { id } => {
+            let header = match mission_dir::read_header(&project.hq_root, &id) {
+                Ok(h) => h,
+                Err(e) => {
+                    eprintln!("hq: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            println!("mission   {id}");
+            println!("branch    {} (from {})", header.branch, header.base);
+            println!("shape     {:?}", header.shape());
+            for lot in &header.lots {
+                println!("lot       {} — {}", lot.id, lot.title);
+            }
+            match &header.integration {
+                Integration::None { reason } => println!("services  none — {reason}"),
+                Integration::Services { services } => {
+                    for s in services {
+                        println!("service   {} → {}", s.name, s.reach.join(", "));
+                    }
+                }
+            }
+            println!(
+                "bounds    {} volet(s), {} attempt(s) per lot",
+                header.bounds.max_volets, header.bounds.attempts_per_lot
+            );
+
+            // The state is the other half of the answer, and its absence is
+            // an answer too: a mission exists before it has ever run.
+            match hq::state::Store::open(&project.hq_root).and_then(|s| s.load(&id)) {
+                Ok(state) => println!("stage     {:?} in slot {}", state.flow.stage(), state.slot),
+                Err(_) => println!("stage     not started"),
+            }
+            ExitCode::SUCCESS
+        }
+    }
+}
+
+fn parse_lot(spec: &str) -> Result<Lot, String> {
+    let (id, title) = spec
+        .split_once(':')
+        .ok_or_else(|| format!("a lot is written `id:title`, and {spec:?} is not"))?;
+    if id.trim().is_empty() || title.trim().is_empty() {
+        return Err(format!(
+            "a lot needs an id and a title, and {spec:?} lacks one"
+        ));
+    }
+    Ok(Lot {
+        id: id.trim().to_string(),
+        title: title.trim().to_string(),
+    })
+}
+
+fn parse_service(spec: &str) -> Result<Service, String> {
+    let (name, reach) = spec
+        .split_once('=')
+        .ok_or_else(|| format!("a service is written `name=host[,host…]`, and {spec:?} is not"))?;
+    let reach: Vec<String> = reach
+        .split(',')
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+        .map(str::to_string)
+        .collect();
+    if name.trim().is_empty() || reach.is_empty() {
+        return Err(format!(
+            "a service needs a name and something to reach, and {spec:?} lacks one"
+        ));
+    }
+    Ok(Service {
+        name: name.trim().to_string(),
+        reach,
+    })
 }
