@@ -1120,6 +1120,32 @@ lot. Les portes 5 à 7 sont jouées à la vérification finale, quand le codeur 
    tué par un test nommé, reconnu comme bug et figé dans un test, ou démontré
    équivalent en une phrase.
 
+   **Le script de campagne, mesuré contre le vrai outil le 2026-09-10.**
+   Il n'avait jamais tourné : tous les tests de la porte 7 utilisaient un
+   bouchon qui imprimait une ligne JSON, et le script livré était faux de
+   quatre façons que seule l'exécution pouvait montrer (cargo-mutants 27.1.0) :
+
+   - **`--output DIR` écrit dans `DIR/mutants.out/`**, pas dans `DIR`. Le
+     script lisait `DIR/missed.txt`, ne trouvait rien et sortait en erreur :
+     **toutes** les campagnes auraient échoué ;
+   - **`--output` ne crée pas le répertoire parent**. Une copie propre de
+     `HEAD` jamais compilée n'a pas de `target/` — et c'est exactement là que
+     la porte 7 tourne ;
+   - **plusieurs mutants partagent une position.** `> ==`, `> <` et `> >=`
+     sont tous à `src/lib.rs:2:7`, donc ni `fichier:ligne` ni
+     `fichier:ligne:colonne` ne les distingue. **L'identifiant est la ligne
+     entière**, qui est le nom que l'outil donne lui-même à un mutant — sans
+     quoi le codeur reçoit des survivants qu'il ne peut pas répondre un par
+     un dans un fichier dont c'est toute la raison d'être ;
+   - **`cargo-mutants` n'était installé nulle part.** Le fragment de stack
+     l'installe maintenant dans son image, après `USER agent` : posé en root,
+     il atterrit là où le seul utilisateur qui le lance ne peut pas le lire.
+
+   Un test live joue le script **tel que `hq init` le dépose** sur un crate
+   d'exemple dont une fonction n'a aucun test, et lit ses survivants avec le
+   parseur de la porte 7. C'est ce qu'AGENTS.md § 4 appelle prouver en
+   exécutant, et ça a coûté quatre défauts.
+
    **Qui écrit quoi, tranché par Arnaud le 2026-09-10, et le partage suit la
    vérifiabilité.** Les deux premières issues sont du code — écrire un test —
    et seul le codeur commite : il les écrit, dans `MUTANTS.triage.json`, et

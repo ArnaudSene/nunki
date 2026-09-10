@@ -655,24 +655,59 @@ fn project_compose(project: &Project, slot: &Slot) -> Result<ProjectBlocks, RunE
     Ok((pick("services"), pick("networks"), pick("volumes")))
 }
 
-/// A v4-shaped identifier, from the clock and the process — enough to be
-/// unique per run, and `hq` imposes it rather than reading one back.
-fn session_id() -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let pid = std::process::id() as u128;
-    let mix = now ^ (pid << 64);
-    let hex = format!("{mix:032x}");
+/// A v4-shaped identifier. `hq` imposes it rather than reading one back
+/// (SPEC 4.3), so it only has to be unique — but it has to be unique across
+/// its **whole** length, because the identity check greps a container's
+/// `/proc/<pid>/cmdline` for it and a prefix everybody shares tells nothing
+/// apart.
+///
+/// From `/dev/urandom` when there is one. The clock-and-pid mix that came
+/// before left the top 48 bits at zero — every identifier began
+/// `00000000-0000-`, as the run logs of this project's own HQ show — because
+/// nanoseconds since 1970 need 61 bits and a pid shifted by 64 reaches 80,
+/// and nothing filled the rest.
+pub fn session_id() -> String {
+    let bytes = random_bytes().unwrap_or_else(|| {
+        // No `/dev/urandom`: the clock and the process, spread over the
+        // whole width rather than heaped at one end.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let pid = std::process::id() as u128;
+        let mix =
+            now ^ (now.rotate_left(67)) ^ (pid.wrapping_mul(0x9e37_79b9_7f4a_7c15) << 32) ^ pid;
+        mix.to_be_bytes()
+    });
+
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    // Version 4 and the RFC 4122 variant, so the string is one a harness
+    // will accept wherever it validates the shape.
     format!(
-        "{}-{}-4{}-8{}-{}",
+        "{}-{}-4{}-{}{}-{}",
         &hex[0..8],
         &hex[8..12],
         &hex[13..16],
+        // The variant nibble: one of 8, 9, a, b.
+        match &hex[16..17] {
+            "0" | "4" | "8" | "c" => "8",
+            "1" | "5" | "9" | "d" => "9",
+            "2" | "6" | "a" | "e" => "a",
+            _ => "b",
+        },
         &hex[17..20],
         &hex[20..32]
     )
+}
+
+fn random_bytes() -> Option<[u8; 16]> {
+    use std::io::Read;
+    let mut bytes = [0u8; 16];
+    std::fs::File::open("/dev/urandom")
+        .ok()?
+        .read_exact(&mut bytes)
+        .ok()?;
+    Some(bytes)
 }
 
 #[cfg(unix)]

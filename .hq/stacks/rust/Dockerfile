@@ -35,3 +35,10 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
       --default-toolchain ${RUST_VERSION} --component clippy,rustfmt
 
 RUN mkdir -p /home/agent/.cargo/registry /home/agent/.harness
+
+# The mutation campaign gate 7 plays (SPEC 4.4). Installed here, in the
+# project's own image, because the campaign is what this stack declares and
+# not something hq brings: `mutation.sh` beside this file is what calls it.
+# It costs minutes at build time and none at campaign time, which is the
+# right way round — `hq slot rebuild` is rare and a campaign is not.
+RUN cargo install cargo-mutants --locked
