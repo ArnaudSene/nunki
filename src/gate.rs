@@ -41,6 +41,8 @@ pub enum Gate {
     Deliverable,
     /// 6 — the battery, green, on the clean copy of `HEAD`.
     Battery,
+    /// 7 — every mutant that survived has an outcome.
+    Mutation,
 }
 
 impl Gate {
@@ -54,6 +56,7 @@ impl Gate {
             Gate::Perimeter => 4,
             Gate::Deliverable => 5,
             Gate::Battery => 6,
+            Gate::Mutation => 7,
         }
     }
 
@@ -65,6 +68,7 @@ impl Gate {
             Gate::Perimeter => "perimeter",
             Gate::Deliverable => "the deliverable is there",
             Gate::Battery => "the battery is green",
+            Gate::Mutation => "every survivor has an outcome",
         }
     }
 }
@@ -92,6 +96,20 @@ pub enum Decision {
 pub struct Outcome {
     pub gate: Gate,
     pub decision: Decision,
+    /// Something a green gate still owes the reader. Gate 7 uses it to say
+    /// how many survivors passed on an outcome no gate can check — left
+    /// unsaid, that outcome becomes the escape hatch that empties the gate.
+    pub note: Option<String>,
+}
+
+impl Outcome {
+    fn of(gate: Gate, decision: Decision) -> Self {
+        Self {
+            gate,
+            decision,
+            note: None,
+        }
+    }
 }
 
 /// What the gates of one run decided, all four of them.
@@ -134,6 +152,8 @@ pub enum GateError {
     Git(#[from] git::GitError),
     #[error("{0} could not be read: {1}")]
     Unreadable(std::path::PathBuf, std::io::Error),
+    #[error("the mutation campaign could not be read: {0}")]
+    Mutants(String),
     #[error("{pattern:?} is not a usable path pattern: {source}")]
     BadPattern {
         pattern: String,
@@ -155,6 +175,9 @@ pub struct Subject<'a> {
     /// The mission's `VERDICT.json`, on the host — where the security
     /// agent's report lives, because it commits nothing.
     pub verdict: &'a Path,
+    /// The mission folder itself, where the mutation campaign's file lives
+    /// (SPEC 4.4, gate 7: "un fichier du dossier de mission que le HQ lit").
+    pub mission_dir: &'a Path,
     pub header: &'a Header,
     pub protected_branches: &'a [String],
     pub protected_paths: &'a ProtectedPaths,
@@ -188,32 +211,15 @@ pub fn at_verification(
 fn play(subject: &Subject, verification: Option<&Verification>) -> Result<Report, GateError> {
     let head = git::head(subject.tree)?;
     let mut outcomes = vec![
-        Outcome {
-            gate: Gate::CleanTree,
-            decision: clean_tree(subject)?,
-        },
-        Outcome {
-            gate: Gate::BranchAhead,
-            decision: branch_ahead(subject)?,
-        },
-        Outcome {
-            gate: Gate::ResumeNamesHead,
-            decision: resume_names_head(subject, &head)?,
-        },
-        Outcome {
-            gate: Gate::Perimeter,
-            decision: perimeter(subject)?,
-        },
+        Outcome::of(Gate::CleanTree, clean_tree(subject)?),
+        Outcome::of(Gate::BranchAhead, branch_ahead(subject)?),
+        Outcome::of(Gate::ResumeNamesHead, resume_names_head(subject, &head)?),
+        Outcome::of(Gate::Perimeter, perimeter(subject)?),
     ];
     if let Some(verification) = verification {
-        outcomes.push(Outcome {
-            gate: Gate::Deliverable,
-            decision: deliverable(subject)?,
-        });
-        outcomes.push(Outcome {
-            gate: Gate::Battery,
-            decision: battery(subject, verification)?,
-        });
+        outcomes.push(Outcome::of(Gate::Deliverable, deliverable(subject)?));
+        outcomes.push(Outcome::of(Gate::Battery, battery(subject, verification)?));
+        outcomes.push(mutation(subject)?);
     }
     Ok(Report {
         role: subject.role,
@@ -358,37 +364,68 @@ fn perimeter(subject: &Subject) -> Result<Decision, GateError> {
     let tree = subject.tree;
     let base = base_ref(tree, &subject.header.base)?;
 
+    let Touched { seen, commits } = touched(tree, &base)?;
+
+    match subject.role {
+        Role::Integrator => integrator_perimeter(subject, &seen, &commits),
+        _ => coder_perimeter(subject, tree, &base, &seen),
+    }
+}
+
+/// Every path this branch touched, and where it was seen — the diff against
+/// the base, and every commit on it.
+///
+/// Two passes rather than one, because SPEC 4.4 says so and because a
+/// forbidden commit that is then reverted leaves a clean tree and an innocent
+/// diff. Gate 7 reads the same set: what a mutation campaign runs on is what
+/// this branch touched, and computing it twice in two ways is how the two
+/// gates would come to disagree.
+struct Touched {
+    /// Each path, with where it was seen — the diff, or a named commit.
+    seen: Vec<(String, String)>,
+    /// The commits on the branch, in `rev-list` order.
+    commits: Vec<String>,
+}
+
+fn touched(tree: &Path, base: &str) -> Result<Touched, GateError> {
     let diff = git::run(tree, &["diff", "--name-only", &format!("{base}...HEAD")])?;
     let commits: Vec<String> = git::run(tree, &["rev-list", &format!("{base}..HEAD")])?
         .lines()
         .map(str::to_string)
         .collect();
-
-    // Where each path was seen, so the refusal can name it. A merge commit
-    // shows nothing under `diff-tree` without `-m`, and that is deliberate:
-    // its content is its parents', already judged.
+    // A merge commit shows nothing under `diff-tree` without `-m`, and that
+    // is deliberate: its content is its parents', already judged.
     let mut seen: Vec<(String, String)> = diff
         .lines()
         .filter(|p| !p.is_empty())
         .map(|p| (p.to_string(), "the diff against the base".to_string()))
         .collect();
     for commit in &commits {
-        let touched = git::run(
+        let in_commit = git::run(
             tree,
             &["diff-tree", "--no-commit-id", "--name-only", "-r", commit],
         )?;
-        for path in touched.lines().filter(|p| !p.is_empty()) {
+        for path in in_commit.lines().filter(|p| !p.is_empty()) {
             seen.push((
                 path.to_string(),
                 format!("commit {}", &commit[..7.min(commit.len())]),
             ));
         }
     }
+    Ok(Touched { seen, commits })
+}
 
-    match subject.role {
-        Role::Integrator => integrator_perimeter(subject, &seen, &commits),
-        _ => coder_perimeter(subject, tree, &base, &seen),
-    }
+/// The paths a mutation campaign runs on: what this branch touched, once
+/// each, in a stable order.
+pub fn touched_paths(tree: &Path, base: &str) -> Result<Vec<String>, GateError> {
+    let mut paths: Vec<String> = touched(tree, base)?
+        .seen
+        .into_iter()
+        .map(|(path, _)| path)
+        .collect();
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
 }
 
 /// The coder's gate 4 is a **denylist**: the project's protected paths.
@@ -648,5 +685,128 @@ fn read(path: &Path) -> Result<String, GateError> {
         // is what it is.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
         Err(e) => Err(GateError::Unreadable(path.to_path_buf(), e)),
+    }
+}
+
+/// Gate 7: every mutant that survived has received an outcome (SPEC 4.4).
+///
+/// Deterministic, and it reads a file: the campaign itself is long, runs in
+/// the slot's container and is watched like a run (see [`crate::mutants`]).
+/// **No threshold** — the gate is green when every survivor has one of three
+/// outcomes, never when a score clears a bar.
+///
+/// Three states it must keep apart:
+///
+/// - no campaign, or one that ran on other content: **unplayed**. Nobody has
+///   asked the question yet, and answering "green" would be a lie about work
+///   that was never done.
+/// - survivors nobody has triaged: **red**, and the message names them. SPEC
+///   makes the return of survivors to the coder "un run de plus sur le lot,
+///   pas un volet", which is what a failed gate produces.
+/// - every survivor answered: green, and the note says how many rode on
+///   `equivalent`, the one outcome no gate can check.
+fn mutation(subject: &Subject) -> Result<Outcome, GateError> {
+    let gate = Gate::Mutation;
+    if subject.role != Role::Coder {
+        // SPEC 4.4's per-role table: "non (des tests système et de la
+        // configuration ne se mutent pas)".
+        return Ok(Outcome::of(
+            gate,
+            Decision::NotApplicable(
+                "system tests and configuration are not mutated (SPEC 4.4)".into(),
+            ),
+        ));
+    }
+    let base = base_ref(subject.tree, &subject.header.base)?;
+    let paths = touched_paths(subject.tree, &base)?;
+    let want = crate::mutants::fingerprint(subject.tree, &paths)
+        .map_err(|e| GateError::Mutants(e.to_string()))?;
+
+    let campaign =
+        crate::mutants::read(subject.mission_dir).map_err(|e| GateError::Mutants(e.to_string()))?;
+    let Some(campaign) = campaign else {
+        return Ok(Outcome::of(
+            gate,
+            Decision::Unplayed(
+                "no mutation campaign has run on this mission — `hq mission mutants` \
+                 starts one"
+                    .into(),
+            ),
+        ));
+    };
+    if campaign.fingerprint != want {
+        return Ok(Outcome::of(
+            gate,
+            Decision::Unplayed(format!(
+                "the campaign in {} ran on other content ({} against {}), so it says \
+                 nothing about the code as it stands — `hq mission mutants` runs it again",
+                crate::mutants::FILE,
+                &campaign.fingerprint[..7.min(campaign.fingerprint.len())],
+                &want[..7.min(want.len())]
+            )),
+        ));
+    }
+
+    let untriaged: Vec<String> = campaign
+        .survivors
+        .iter()
+        .filter(|s| s.outcome.is_none())
+        .map(|s| format!("{}:{} {}", s.file, s.line, s.id))
+        .collect();
+    if !untriaged.is_empty() {
+        return Ok(Outcome::of(
+            gate,
+            Decision::Failed(format!(
+                "{} survivor(s) have no outcome, and there is no threshold to hide \
+                 behind — each needs a named test, a sentence saying it is equivalent, \
+                 or a bug frozen in a test: {}",
+                untriaged.len(),
+                head_of(&untriaged, 10)
+            )),
+        ));
+    }
+
+    // A named test has to exist. "A test covers this" is not an outcome; a
+    // test called `x` is, and whether `x` is there is a fact.
+    for survivor in &campaign.survivors {
+        let Some(outcome) = &survivor.outcome else {
+            continue;
+        };
+        if let Some(test) = outcome.test()
+            && git::run(subject.tree, &["grep", "--quiet", "-F", "--", test]).is_err()
+        {
+            return Ok(Outcome::of(
+                gate,
+                Decision::Failed(format!(
+                    "{}:{} names the test {test:?}, and nothing in the tree is called \
+                     that",
+                    survivor.file, survivor.line
+                )),
+            ));
+        }
+    }
+
+    let equivalent = campaign
+        .survivors
+        .iter()
+        .filter(|s| matches!(s.outcome, Some(crate::mutants::Triage::Equivalent { .. })))
+        .count();
+    let mut outcome = Outcome::of(gate, Decision::Passed);
+    if equivalent > 0 {
+        outcome.note = Some(format!(
+            "{equivalent} of {} rode on `equivalent`, which no gate can check — SPEC 4.4 \
+             gives that counter-check to the HQ",
+            campaign.survivors.len()
+        ));
+    }
+    Ok(outcome)
+}
+
+fn head_of(items: &[String], n: usize) -> String {
+    let shown = items.iter().take(n).cloned().collect::<Vec<_>>().join("; ");
+    if items.len() > n {
+        format!("{shown}; …")
+    } else {
+        shown
     }
 }

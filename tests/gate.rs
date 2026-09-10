@@ -143,6 +143,7 @@ impl Fixture {
             journal: &self.journal,
             pr: &self.pr,
             verdict: &self.verdict,
+            mission_dir: self._dir.path(),
             header: &self.header,
             protected_branches: &self.branches,
             protected_paths: &self.protected,
@@ -503,6 +504,7 @@ impl Fixture {
                 journal: &self.journal,
                 pr: &self.pr,
                 verdict: &self.verdict,
+                mission_dir: self._dir.path(),
                 header: &self.header,
                 protected_branches: &self.branches,
                 protected_paths: &self.protected,
@@ -757,6 +759,7 @@ fn live_the_battery_is_the_committed_one_and_an_absent_one_is_red() {
                 journal: &journal,
                 pr: &pr,
                 verdict: &verdict,
+                mission_dir: dir.path(),
                 header: &header,
                 protected_branches: &branches,
                 protected_paths: &protected,
@@ -817,4 +820,183 @@ fn live_the_battery_is_the_committed_one_and_an_absent_one_is_red() {
     }
 
     engine.down(&file, &compose_project, true).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Gate 7, the mutation campaign (SPEC 4.4).
+// ---------------------------------------------------------------------------
+
+use hq::mutants::{Campaign, Survivor, Triage};
+
+impl Fixture {
+    /// The campaign file this mission holds, written on the current content.
+    fn campaign(&self, survivors: Vec<Survivor>) {
+        let base = if git(&self.tree, &["rev-parse", "--verify", "--quiet", "dev"]).is_empty() {
+            "origin/dev".to_string()
+        } else {
+            "dev".to_string()
+        };
+        let touched = hq::gate::touched_paths(&self.tree, &base).unwrap();
+        let fingerprint = hq::mutants::fingerprint(&self.tree, &touched).unwrap();
+        hq::mutants::write(
+            self._dir.path(),
+            &Campaign {
+                fingerprint,
+                head: git(&self.tree, &["rev-parse", "HEAD"]),
+                date: "2026-09-10T12:00:00Z".into(),
+                survivors,
+            },
+        )
+        .unwrap();
+    }
+
+    fn gate_seven(&self, role: Role) -> hq::gate::Outcome {
+        self.verification(role)
+            .outcomes
+            .into_iter()
+            .find(|o| o.gate == Gate::Mutation)
+            .expect("gate 7 is reported")
+    }
+}
+
+fn survivor(line: u32, outcome: Option<Triage>) -> Survivor {
+    Survivor {
+        id: format!("src/new.rs:{line}"),
+        file: "src/new.rs".into(),
+        line,
+        description: "replace two with 0".into(),
+        outcome,
+    }
+}
+
+/// No campaign is not a green gate, and it is not a red one either: nobody
+/// has asked the question yet.
+#[test]
+fn a_mission_with_no_campaign_has_not_passed_gate_seven() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.journal_names_head();
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Unplayed(why) => assert!(why.contains("hq mission mutants"), "{why}"),
+        other => panic!("no campaign has run: {other:?}"),
+    }
+}
+
+/// A campaign that ran on other content says nothing about the code as it
+/// stands — and saying nothing is not saying yes.
+#[test]
+fn a_campaign_overtaken_by_a_commit_is_not_an_answer_about_this_one() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.campaign(vec![]);
+    f.journal_names_head();
+    assert_eq!(f.gate_seven(Role::Coder).decision, Decision::Passed);
+
+    // The code moves; the campaign does not.
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 3 }\n", "L2");
+    f.journal_names_head();
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Unplayed(why) => assert!(why.contains("other content"), "{why}"),
+        other => panic!("the campaign is stale: {other:?}"),
+    }
+}
+
+/// There is no threshold to hide behind: one survivor without an outcome is
+/// a red gate, whatever the other ninety-nine did.
+#[test]
+fn one_survivor_without_an_outcome_is_a_red_gate() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.campaign(vec![
+        survivor(
+            1,
+            Some(Triage::Killed {
+                test: "a_run_that_honoured_its_contract_passes_all_four".into(),
+            }),
+        ),
+        survivor(2, None),
+    ]);
+    f.journal_names_head();
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => {
+            assert!(why.contains("src/new.rs:2"), "{why}");
+            assert!(why.contains("no threshold"), "{why}");
+        }
+        other => panic!("an untriaged survivor is unanswered: {other:?}"),
+    }
+}
+
+/// "A test covers this" is not an outcome. A test called `x` is, and whether
+/// `x` exists is a fact.
+#[test]
+fn a_named_test_has_to_exist() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    commit(
+        &f.tree,
+        "tests/thing.rs",
+        "#[test]\nfn the_thing_holds() {}\n",
+        "a test",
+    );
+    f.campaign(vec![survivor(
+        1,
+        Some(Triage::Killed {
+            test: "a_test_nobody_wrote".into(),
+        }),
+    )]);
+    f.journal_names_head();
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => assert!(why.contains("a_test_nobody_wrote"), "{why}"),
+        other => panic!("a test that does not exist kills nothing: {other:?}"),
+    }
+
+    f.campaign(vec![survivor(
+        1,
+        Some(Triage::Killed {
+            test: "the_thing_holds".into(),
+        }),
+    )]);
+    assert_eq!(f.gate_seven(Role::Coder).decision, Decision::Passed);
+}
+
+/// The outcome no gate can check must not be silent, or it becomes the escape
+/// hatch that empties the gate.
+#[test]
+fn the_equivalences_are_counted_out_loud() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.campaign(vec![
+        survivor(
+            1,
+            Some(Triage::Equivalent {
+                why: "no caller can reach that branch".into(),
+            }),
+        ),
+        survivor(
+            2,
+            Some(Triage::Equivalent {
+                why: "the constant is never read".into(),
+            }),
+        ),
+    ]);
+    f.journal_names_head();
+    let outcome = f.gate_seven(Role::Coder);
+    assert_eq!(outcome.decision, Decision::Passed);
+    let note = outcome
+        .note
+        .expect("a green gate that owes the reader a number");
+    assert!(note.contains("2 of 2"), "{note}");
+    assert!(note.contains("HQ"), "{note}");
+}
+
+#[test]
+fn system_tests_and_configuration_are_not_mutated() {
+    let f = Fixture::new();
+    f.journal_names_head();
+    for role in [Role::Integrator, Role::Security] {
+        match f.gate_seven(role).decision {
+            Decision::NotApplicable(why) => assert!(why.contains("not mutated"), "{why}"),
+            other => panic!("gate 7 is the coder's: {other:?}"),
+        }
+    }
 }
