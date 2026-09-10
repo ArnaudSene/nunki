@@ -48,6 +48,13 @@ pub struct MissionState {
     /// The run launched for the current stage, if one is (or was) running.
     /// Kept so a restarted `hq` can ask the engine whether it is still alive.
     pub run: Option<RunHandle>,
+    /// The application `hq` started for the current stage, if the mission
+    /// has one (SPEC 4.2, "les services et le lancement de l'application").
+    /// Its own field and not the run's: "the agent is up" and "the
+    /// deliverable is up" are two facts, and one handle would report them as
+    /// one.
+    #[serde(default)]
+    pub app: Option<RunHandle>,
     /// RFC 3339 time of the last write; informational.
     pub updated_at: String,
 }

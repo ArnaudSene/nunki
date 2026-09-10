@@ -15,11 +15,13 @@ use crate::compose::{AGENT_SERVICE, FIREWALL_SERVICE, NamedVolume, Plan, UserIds
 use crate::engine::spawn::ContainerSpawner;
 use crate::engine::{Engine, EngineError};
 use crate::git;
-use crate::harness::{Exposure, Harness, Role, RunRequest, SessionId, Workspace, claude_code};
+use crate::harness::{
+    Exposure, Harness, Role, RunHandle, RunRequest, SessionId, Workspace, claude_code,
+};
 use crate::image;
 use crate::mission::dir::{self as mission_dir, Paths};
 use crate::mission::flow::Flow;
-use crate::perimeter::{Sources, compute};
+use crate::perimeter::{Profile, Sources, compute};
 use crate::project::Project;
 use crate::role;
 use crate::slot::Slot;
@@ -66,6 +68,15 @@ pub enum RunError {
     Io(PathBuf, std::io::Error),
     #[error("the run could not be launched: {0}")]
     Launch(String),
+    #[error(
+        "hq.yaml names {0} as the project's services file, and the slot's tree has no \
+         such file on this commit"
+    )]
+    NoServicesFile(PathBuf),
+    #[error("{0} is not a Compose file hq can read: {1}")]
+    BadServicesFile(PathBuf, String),
+    #[error(transparent)]
+    Application(#[from] crate::launch::LaunchError),
 }
 
 /// Which account a mission spends, and the token to pass. The mission's
@@ -114,20 +125,104 @@ pub fn start(
     let header = mission_dir::read_header(&project.hq_root, id)?;
     let paths = Paths::of(&project.hq_root, id);
 
-    // Which subscription this mission spends, decided here and frozen with
-    // the header it was read from.
-    let (account_name, _account, token) = account_for(project, header.account.as_deref())?;
-
-    // Only now the machine: what the project declares is cheap to check and
-    // belongs to the mission, while a missing image belongs to this machine.
-    // Saying "build your images" to someone whose account is wrong helps
-    // nobody.
-    let stack = project
-        .config
-        .stacks
+    let lot = header
+        .lots
         .first()
-        .cloned()
-        .unwrap_or_else(|| "rust".to_string());
+        .map(|l| l.id.clone())
+        .unwrap_or_else(|| "L1".to_string());
+
+    let launched = launch(&Launching {
+        project,
+        slot,
+        engine,
+        engine_bin,
+        paths: &paths,
+        header: &header,
+        role: Role::Coder,
+        lot,
+        attempt: 1,
+    })?;
+
+    let mut state = MissionState {
+        id: id.to_string(),
+        slot: slot.name.clone(),
+        flow: Flow::new(header).map_err(crate::state::StateError::Flow)?,
+        run: Some(launched.run),
+        app: launched.app,
+        updated_at: String::new(),
+    };
+    store.save(&state)?;
+    state.updated_at = crate::state::now_rfc3339();
+    Ok(state)
+}
+
+/// Everything one launch needs that its caller already holds. Gathered as a
+/// struct because `launch` takes no lock and asks the store nothing: the
+/// caller has both, and a second `SlotLock::acquire` under `hq verify` would
+/// be `hq` refusing itself (SPEC 4.2, "`hq exec` lancé par `verify`
+/// s'exécute **sous** son verrou").
+pub struct Launching<'a> {
+    pub project: &'a Project,
+    pub slot: &'a Slot,
+    pub engine: Arc<dyn Engine>,
+    pub engine_bin: &'a str,
+    pub paths: &'a Paths,
+    /// The **frozen** header, never the file.
+    pub header: &'a crate::mission::Header,
+    pub role: Role,
+    /// What this run is for, as the harness records it.
+    pub lot: String,
+    pub attempt: u32,
+}
+
+/// What a launch left behind, for the caller to persist.
+pub struct Launched {
+    pub run: RunHandle,
+    /// The application `hq` started for this role, when the mission has one
+    /// to start. Kept apart from the run: "the agent is up" and "the
+    /// deliverable is up" are two facts, and a single handle would report
+    /// them as one.
+    pub app: Option<RunHandle>,
+    /// How the application was declared, so the caller can say it. `None`
+    /// for the coder, who has nothing to start.
+    pub launch: Option<crate::launch::Launch>,
+}
+
+/// Lift the role's profile and launch its run, on a slot whose lock the
+/// caller already holds.
+///
+/// The order is the one SPEC 4.2 fixes and it is not interchangeable:
+///
+/// 1. resolve the launch script — **before** anything is taken down, so a
+///    mission that cannot start its application says so while the previous
+///    role's container is still up;
+/// 2. switch the profile: stop and remove the agent and its sidecar, and
+///    **only** those. The project's services were lifted once for the slot
+///    and keep the state the previous role left in them — migrations played,
+///    fixtures laid (rule 1);
+/// 3. start the application, in the new profile, **before** the agent (rule
+///    2);
+/// 4. launch the agent.
+pub fn launch(l: &Launching) -> Result<Launched, RunError> {
+    let Launching {
+        project,
+        slot,
+        engine,
+        engine_bin,
+        paths,
+        header,
+        role,
+        ..
+    } = l;
+    let role = *role;
+
+    // Which subscription this mission spends. Checked before the machine:
+    // what the project declares is cheap to check and belongs to the
+    // mission, while a missing image belongs to this machine. Saying "build
+    // your images" to someone whose account is wrong helps nobody.
+    let (_account_name, _account, token) = account_for(project, header.account.as_deref())?;
+
+    let stack = stack_of(project);
     let images = image::names(project, &stack);
     for image in [&images.agent, &images.firewall] {
         if !image::present(engine_bin, image) {
@@ -135,34 +230,56 @@ pub fn start(
         }
     }
 
+    // The slot on the mission's branch, before anything is written into it.
+    // Idempotent: a role that follows another finds the branch already
+    // checked out and this does nothing.
     branch(slot, &header.branch, &header.base)?;
 
+    // Step 1. The coder starts nothing: there is nothing to test or attack
+    // yet, and SPEC 4.2's table says so for the "code seul" shape.
+    let declared = match role {
+        Role::Coder => None,
+        Role::Integrator | Role::Security => {
+            Some(crate::launch::resolve(project, slot, &stack, header)?)
+        }
+    };
+
     let prompt = paths.dir.join(role::PROMPT_FILE);
-    std::fs::write(&prompt, role::prompt(Role::Coder))
-        .map_err(|e| RunError::Io(prompt.clone(), e))?;
+    std::fs::write(&prompt, role::prompt(role)).map_err(|e| RunError::Io(prompt.clone(), e))?;
 
-    let lot = header
-        .lots
-        .first()
-        .map(|l| l.id.clone())
-        .unwrap_or_else(|| "L1".to_string());
-
-    let plan = plan(project, slot, &stack, &images, &paths, &token, &header)?;
-    let _ = &account_name;
+    let plan = plan(project, slot, &stack, &images, paths, &token, header, role)?;
     let file = profile_path(project, &slot.name);
     if let Some(dir) = file.parent() {
         std::fs::create_dir_all(dir).map_err(|e| RunError::Io(dir.to_path_buf(), e))?;
     }
+    let compose_project = crate::compose::project_name(&slot.name)?;
+
+    // Step 2. The switch, read from the file that is up — the one that names
+    // the services to remove. `stop` and never `down`: `down` would take the
+    // project's services with it.
+    if file.is_file() {
+        engine.stop(&file, &compose_project, &SERVICES)?;
+    }
+
     std::fs::write(&file, crate::compose::generate(&plan, engine.dialect())?)
         .map_err(|e| RunError::Io(file.clone(), e))?;
     // The generated profile carries the subscription token in the agent's
     // environment, so the file is the human's alone. It lives at the HQ and
     // never in the repository, and it is not readable by anyone else.
     restrict(&file)?;
-
-    let compose_project = crate::compose::project_name(&slot.name)?;
     engine.up(&file, &compose_project)?;
 
+    // Step 3. The application, in the profile of the role that will test or
+    // attack it, before that role is launched.
+    let runs = paths.dir.join("runs");
+    let app = match &declared {
+        Some(declared) => {
+            crate::launch::start(project, slot, engine.clone(), role, &runs, declared)?
+        }
+        None => None,
+    };
+
+    // Step 4. The agent.
     let session = SessionId(session_id());
     let spawner = ContainerSpawner::new(
         engine.clone(),
@@ -172,43 +289,48 @@ pub fn start(
     )
     .identified_by(&session.0);
     let harness = claude_code::ClaudeCode::new(Default::default(), Box::new(spawner));
-    std::fs::create_dir_all(paths.dir.join("runs"))
-        .map_err(|e| RunError::Io(paths.dir.join("runs"), e))?;
+    std::fs::create_dir_all(&runs).map_err(|e| RunError::Io(runs.clone(), e))?;
     let request = RunRequest {
-        role: Role::Coder,
+        role,
         workspace: Workspace {
             tree: PathBuf::from(TREE_AT),
             mission_dir: PathBuf::from(MISSION_AT),
         },
-        lot,
-        attempt: 1,
+        lot: l.lot.clone(),
+        attempt: l.attempt,
         session,
         resume: false,
         // On the host: the container has nowhere to write a log, and the
         // mission folder is read-only but for the agent's own files
         // (SPEC 4.1).
-        runs_dir: paths.dir.join("runs"),
+        runs_dir: runs,
     };
-    let handle = harness
+    let run = harness
         .launch(
             &request,
             // What the role may do through the harness. The container is
             // what restrains it; this only keeps the ordinary work possible.
-            &harness.guards(Role::Coder),
+            &harness.guards(role),
             &Exposure::SystemPromptFile(PathBuf::from(MISSION_AT).join(role::PROMPT_FILE)),
         )
         .map_err(|e| RunError::Launch(e.to_string()))?;
 
-    let mut state = MissionState {
-        id: id.to_string(),
-        slot: slot.name.clone(),
-        flow: Flow::new(header).map_err(crate::state::StateError::Flow)?,
-        run: Some(handle),
-        updated_at: String::new(),
-    };
-    store.save(&state)?;
-    state.updated_at = crate::state::now_rfc3339();
-    Ok(state)
+    Ok(Launched {
+        run,
+        app,
+        launch: declared,
+    })
+}
+
+/// The stack a project's profiles are built from. One place, because three
+/// modules had begun to each spell the same fallback.
+pub fn stack_of(project: &Project) -> String {
+    project
+        .config
+        .stacks
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "rust".to_string())
 }
 
 /// Where a slot's current profile is written. One file per slot, regenerated
@@ -248,7 +370,9 @@ pub fn plan(
     paths: &Paths,
     token: &str,
     header: &crate::mission::Header,
+    role: Role,
 ) -> Result<Plan, RunError> {
+    let profile = Profile::of(role);
     let harness_domains = {
         claude_code::ClaudeCode::new(
             Default::default(),
@@ -257,12 +381,20 @@ pub fn plan(
         .provision()
         .domains
     };
+    // A mission profile carries no service, whatever the header declares:
+    // the coder has nothing to reach, and `compute` refuses one anyway. The
+    // system profile adds exactly the services the frozen header declared,
+    // address by address (SPEC 4.1 bis, rule 6).
+    let declared: &[crate::mission::Service] = match (profile, &header.integration) {
+        (Profile::System, crate::mission::Integration::Services { services, .. }) => services,
+        _ => &[],
+    };
     let perimeter = compute(
-        Role::Coder,
+        role,
         &Sources {
             stack: &project.stack_domains(stack).unwrap_or_default(),
             harness: &harness_domains,
-            services: &[],
+            services: declared,
             forge: &project.config.forge,
         },
     )?;
@@ -277,12 +409,30 @@ pub fn plan(
         Box::new(crate::harness::spawn::LocalSpawner),
     );
     environment.insert(harness.token_env().to_string(), token.to_string());
-    environment.insert("HQ_ROLE".to_string(), "coder".to_string());
+    environment.insert("HQ_ROLE".to_string(), role::slug(role).to_string());
     environment.insert("HQ_BRANCH".to_string(), header.branch.clone());
+
+    // The test credentials, on the system profile and nowhere else (SPEC
+    // 3.1). `compose::build` refuses them on a mission profile, so this is
+    // two guards on one rule and that is deliberate: one of them is a type
+    // error away from being deleted, the other is not.
+    let credentials = match profile {
+        Profile::Mission => Vec::new(),
+        Profile::System => credentials(project)?,
+    };
+
+    // The project's own services, merged verbatim into the system profile.
+    // Not into the mission one: the coder reaches no service, so lifting a
+    // database beside it would be lifting what its allowlist forbids it to
+    // talk to.
+    let (project_services, project_networks, project_volumes) = match profile {
+        Profile::Mission => (None, None, None),
+        Profile::System => project_compose(project, slot)?,
+    };
 
     Ok(Plan {
         slot: slot.name.clone(),
-        role: Role::Coder,
+        role,
         image: images.agent.clone(),
         firewall_image: images.firewall.clone(),
         user: UserIds { uid, gid },
@@ -290,7 +440,7 @@ pub fn plan(
         tree_at: PathBuf::from(TREE_AT),
         mission_dir: paths.dir.clone(),
         mission_dir_at: PathBuf::from(MISSION_AT),
-        credentials: Vec::new(),
+        credentials,
         volumes: vec![
             // The clean copy of HEAD that `hq exec` replays proofs on, and
             // its build cache with it: warmed once per slot and kept
@@ -311,9 +461,76 @@ pub fn plan(
         // The container stays up between runs; the harness is exec'd into it.
         command: vec!["sleep".to_string(), "infinity".to_string()],
         perimeter,
-        project_services: None,
-        project_networks: None,
+        project_services,
+        project_networks,
+        project_volumes,
     })
+}
+
+/// Where the test credentials are mounted, read-only, on a system profile.
+/// Under the agent's own tmpfs: it is the one writable place in a container
+/// whose tree and mission folder are both restrained, and a file bound
+/// underneath it stays read-only while the tmpfs above stays the agent's
+/// (measured, 2026-09-10).
+pub const CREDENTIALS_AT: &str = "/run/hq/credentials";
+
+/// The credential files a system profile mounts: every file the project's
+/// declared directory holds, sorted, so the generated profile is stable.
+///
+/// A directory that does not exist is not an error here. `hq check` is where
+/// a missing credential is a finding; refusing to launch would turn "the
+/// human has not put the files there yet" into "the mission cannot run",
+/// which is a different sentence.
+fn credentials(project: &Project) -> Result<Vec<(PathBuf, PathBuf)>, RunError> {
+    let Some(dir) = &project.config.credentials else {
+        return Ok(Vec::new());
+    };
+    if !dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let entries = std::fs::read_dir(dir).map_err(|e| RunError::Io(dir.clone(), e))?;
+    let mut files = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| RunError::Io(dir.clone(), e))?;
+        if !entry.path().is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        files.push((entry.path(), PathBuf::from(CREDENTIALS_AT).join(&name)));
+    }
+    files.sort();
+    Ok(files)
+}
+
+/// The project's own `services:` and `networks:` blocks, read from the slot's
+/// tree.
+///
+/// From the tree and not from the repository: the file is the project's, it
+/// travels with the commit, and the integrator may amend it in its wiring —
+/// the same rule as the launch script (SPEC 4.2). What `hq.yaml` decides is
+/// **which** file; what the slot decides is what is in it.
+type ProjectBlocks = (
+    Option<serde_yaml_ng::Value>,
+    Option<serde_yaml_ng::Value>,
+    Option<serde_yaml_ng::Value>,
+);
+
+fn project_compose(project: &Project, slot: &Slot) -> Result<ProjectBlocks, RunError> {
+    let Some(relative) = &project.config.services_file else {
+        return Ok((None, None, None));
+    };
+    let file = slot.tree.join(relative);
+    if !file.is_file() {
+        return Err(RunError::NoServicesFile(file));
+    }
+    let text = std::fs::read_to_string(&file).map_err(|e| RunError::Io(file.clone(), e))?;
+    let document: serde_yaml_ng::Value = serde_yaml_ng::from_str(&text)
+        .map_err(|e| RunError::BadServicesFile(file.clone(), e.to_string()))?;
+    let pick = |key: &str| match &document {
+        serde_yaml_ng::Value::Mapping(map) => map.get(serde_yaml_ng::Value::from(key)).cloned(),
+        _ => None,
+    };
+    Ok((pick("services"), pick("networks"), pick("volumes")))
 }
 
 /// A v4-shaped identifier, from the clock and the process — enough to be

@@ -432,6 +432,7 @@ fn write_profile(dir: &Path, slot: &str, role: hq::harness::Role, name: &str) ->
         // switch a no-op for it (SPEC 4.2, measured).
         project_services: Some(serde_yaml_ng::from_str("db:\n  image: nginx:alpine\n").unwrap()),
         project_networks: None,
+        project_volumes: None,
     };
 
     let path = dir.join(name);

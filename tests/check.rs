@@ -17,6 +17,7 @@ fn config() -> Config {
         bounds: Default::default(),
         credentials: None,
         run: None,
+        services_file: None,
     }
 }
 

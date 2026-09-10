@@ -51,6 +51,7 @@ fn project(root: &Path) -> Project {
             bounds: Default::default(),
             credentials: None,
             run: None,
+            services_file: None,
         },
         root.join("hq"),
     )

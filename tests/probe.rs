@@ -19,6 +19,7 @@ fn project(dir: &Path) -> Project {
             bounds: Default::default(),
             credentials: None,
             run: None,
+            services_file: None,
         },
         dir.join("hq"),
     )

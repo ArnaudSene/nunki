@@ -168,6 +168,7 @@ fn plan(
         perimeter,
         project_services: None,
         project_networks: None,
+        project_volumes: None,
     })
 }
 

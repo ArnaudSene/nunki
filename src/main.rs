@@ -44,8 +44,13 @@ enum Command {
     Slot(SlotCommand),
 
     /// Missions: what an agent is asked to do, and where it reports.
+    ///
+    /// Boxed because `mission new` carries every field of a mission header
+    /// and would otherwise decide the size of every other subcommand: this
+    /// value is parsed once per process, and its size is not worth spending
+    /// on the seven variants beside it.
     #[command(subcommand)]
-    Mission(MissionCommand),
+    Mission(Box<MissionCommand>),
 
     /// Accounts: which subscription a mission spends.
     #[command(subcommand)]
@@ -151,6 +156,11 @@ enum MissionCommand {
         /// Call the security agent, rather than the mechanical gates alone.
         #[arg(long)]
         security_agent: bool,
+        /// How `hq` starts the application for the integrator and the
+        /// security agent, as a path inside the tree. Refines `hq.yaml` and
+        /// the stack's `run.sh`; `none` when there is nothing to start.
+        #[arg(long, value_name = "SCRIPT")]
+        run: Option<String>,
         /// Which account this mission spends. Defaults to the project's, then
         /// to the one named in ~/.hq/accounts.yaml.
         #[arg(long, value_name = "NAME")]
@@ -424,7 +434,7 @@ fn main() -> ExitCode {
                 Some(p) => p,
                 None => return ExitCode::FAILURE,
             };
-            mission(&project, command)
+            mission(&project, *command)
         }
 
         Command::Verify { mission } => {
@@ -434,7 +444,8 @@ fn main() -> ExitCode {
             };
             let engine: std::sync::Arc<dyn hq::engine::Engine> =
                 std::sync::Arc::new(hq::engine::docker::Docker::real());
-            match hq::verify::verify(&project, &mission, engine) {
+            let engine_bin = std::env::var("HQ_ENGINE").unwrap_or_else(|_| "docker".into());
+            match hq::verify::verify(&project, &mission, engine, &engine_bin) {
                 Ok(steps) => {
                     let mut owed = false;
                     for step in &steps {
@@ -447,6 +458,18 @@ fn main() -> ExitCode {
                             hq::verify::Step::NeedsRun { role, why } => {
                                 owed = true;
                                 println!("owed      a {role:?} run — {why}");
+                            }
+                            hq::verify::Step::Launched { role, application } => {
+                                owed = true;
+                                println!("launched  a {role:?} run — {application}");
+                                println!(
+                                    "          it runs detached; `hq verify {mission}` \
+                                     again reads it back"
+                                );
+                            }
+                            hq::verify::Step::Unreachable { role, why } => {
+                                owed = true;
+                                println!("unknown   the {role:?} run could not be asked — {why}");
                             }
                             hq::verify::Step::Verified => println!(
                                 "VERIFIED  every declared stage is green; read it, then \
@@ -618,6 +641,7 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             wiring,
             no_integration,
             security_agent,
+            run,
             account,
             arbiter,
             about,
@@ -664,6 +688,7 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                     Security::Gates
                 },
                 account,
+                run,
                 // Said rather than assumed: whoever frames a mission is who
                 // it comes back to, until somebody says otherwise.
                 arbiter: arbiter

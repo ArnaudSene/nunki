@@ -104,6 +104,7 @@ fn a_mission_says_who_arbitrates_and_the_follow_up_is_addressed_to_them() {
         },
         security: hq::mission::Security::Gates,
         arbiter: Some("Igor".to_string()),
+        run: None,
         account: None,
         bounds: Default::default(),
     };
@@ -137,6 +138,7 @@ fn a_mission_with_nobody_named_still_addresses_somebody() {
         },
         security: hq::mission::Security::Gates,
         arbiter: None,
+        run: None,
         account: None,
         bounds: Default::default(),
     };

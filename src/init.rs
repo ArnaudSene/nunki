@@ -210,6 +210,17 @@ forge: []
 
 {list}
 
+# How hq starts the application for the integrator and the security agent
+# (SPEC 4.2). Absent, the stack's own `run.sh` is used; `none` for a library,
+# whose security agent works on the code and the build artefact. A mission
+# header may refine it.
+# run: none
+
+# The project's own Compose file, whose services and networks hq merges into
+# every system profile. They are lifted once per slot and never stopped
+# between two profiles, so what the integrator laid down survives.
+# services_file: compose.yaml
+
 protected_branches:
   - main
   - dev
@@ -364,6 +375,38 @@ while IFS= read -r mutant; do
 done < "$out/missed.txt"
 "#;
 
+/// How a Rust application is started (SPEC 4.2, rule 2). Shipped by the
+/// stack because starting an application is a property of the stack, not of
+/// the mission; replaceable by `hq.yaml`, refinable by a mission header, and
+/// amendable by the integrator as part of its wiring.
+const RUN_RUST: &str = r#"#!/bin/sh
+# How an application of this stack is started (SPEC 4.2, "les services et le
+# lancement de l'application").
+#
+# `hq` runs this, detached, from the root of the tree, inside the container
+# of the role that will test or attack the application — before that role is
+# launched. No agent starts the application; this script is how the project
+# says what starting it means.
+#
+# It is called as `run.sh <id>`. Three things it must do, and the first two
+# are how `hq` knows the application is up at all:
+#
+#  - keep the id on its command line. `hq` recognises this process by it, and
+#    that is why the command below is **not** `exec`ed: replacing the process
+#    replaces its command line, and the application would be reported as
+#    stopped one second after it started (measured, 2026-09-10).
+#  - stay in the foreground. A script that forks and exits reports an
+#    application that is not running.
+#  - listen on the address the mission's services can reach, not only on
+#    127.0.0.1, when something outside the container has to reach it.
+#
+# Replace the command below with whatever starting this project means. A
+# project with nothing to start says `run: none` in hq.yaml instead.
+set -eu
+
+cargo run --release
+"#;
+
 /// The files of a stack fragment: `(name, body, executable)`.
 fn fragment(stack: &str) -> Vec<(&'static str, String, bool)> {
     match stack {
@@ -392,6 +435,7 @@ fn fragment(stack: &str) -> Vec<(&'static str, String, bool)> {
                 true,
             ),
             ("mutation.sh", MUTATION_RUST.to_string(), true),
+            ("run.sh", RUN_RUST.to_string(), true),
             ("Dockerfile", DOCKERFILE_RUST.to_string(), false),
             (
                 "writable.txt",

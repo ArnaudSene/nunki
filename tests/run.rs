@@ -21,6 +21,7 @@ fn project(dir: &Path) -> Project {
             bounds: Default::default(),
             credentials: None,
             run: None,
+            services_file: None,
         },
         dir.join("hq"),
     )
@@ -223,6 +224,7 @@ fn a_mission_that_cannot_authenticate_does_not_start() {
         },
         security: hq::mission::Security::Gates,
         arbiter: None,
+        run: None,
         account: None,
         bounds: Default::default(),
     };
@@ -271,9 +273,11 @@ fn a_run_profile_carries_the_clean_copy_of_head() {
             },
             security: hq::mission::Security::Gates,
             arbiter: None,
+            run: None,
             account: None,
             bounds: Default::default(),
         },
+        hq::harness::Role::Coder,
     )
     .unwrap();
     let engine = hq::engine::fake::FakeEngine::default();
@@ -428,6 +432,7 @@ fn live_a_mission_starts_and_its_run_is_read_back() {
         },
         security: hq::mission::Security::Gates,
         arbiter: None,
+        run: None,
         account: None,
         bounds: Default::default(),
     };
@@ -673,4 +678,247 @@ fn live_liveness_tells_this_run_from_a_stranger_and_from_a_lost_container() {
     }
 
     let _ = engine_bin;
+}
+
+// --- the profile of a role (SPEC 4.1, mounts per profile; 4.2, services) ---
+
+fn header_with(integration: hq::mission::Integration) -> hq::mission::Header {
+    hq::mission::Header {
+        branch: "feat/alpha".to_string(),
+        base: "dev".to_string(),
+        lots: vec![hq::mission::Lot {
+            id: "L1".to_string(),
+            title: "one".to_string(),
+        }],
+        integration,
+        security: hq::mission::Security::Agent,
+        arbiter: None,
+        run: None,
+        account: None,
+        bounds: Default::default(),
+    }
+}
+
+fn with_services() -> hq::mission::Integration {
+    hq::mission::Integration::Services {
+        services: vec![hq::mission::Service {
+            name: "db".to_string(),
+            reach: vec!["db".to_string(), "10.4.0.7".to_string()],
+        }],
+        wiring: vec!["compose.yaml".to_string()],
+    }
+}
+
+/// Build a profile for one role and give back the plan and the YAML.
+fn profile_for(
+    project: &Project,
+    slot: &hq::slot::Slot,
+    header: &hq::mission::Header,
+    role: Role,
+) -> (hq::compose::Plan, serde_yaml_ng::Value) {
+    let images = hq::image::Images {
+        agent: "img/agent".into(),
+        firewall: "img/fw".into(),
+        prober: "img/probe".into(),
+    };
+    let paths = hq::mission::dir::Paths::of(&project.hq_root, "m1");
+    let plan = run::plan(
+        project,
+        slot,
+        "rust",
+        &images,
+        &paths,
+        "stand-in-token",
+        header,
+        role,
+    )
+    .unwrap();
+    let engine = hq::engine::fake::FakeEngine::default();
+    let written = hq::compose::generate(&plan, hq::engine::Engine::dialect(&engine)).unwrap();
+    (plan, serde_yaml_ng::from_str(&written).unwrap())
+}
+
+fn slot_at(dir: &Path) -> hq::slot::Slot {
+    let tree = dir.join("slot");
+    std::fs::create_dir_all(&tree).unwrap();
+    hq::slot::Slot {
+        name: "one".to_string(),
+        tree,
+    }
+}
+
+/// The mission's declared services reach the system profile's allowlist and
+/// never the coder's — SPEC 4.1 bis, rule 6: the coder's list is what his
+/// stack and his harness need, and nothing else.
+#[test]
+fn only_a_system_profile_carries_the_missions_services() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    let slot = slot_at(dir.path());
+    let header = header_with(with_services());
+
+    let (coder, _) = profile_for(&project, &slot, &header, Role::Coder);
+    assert!(
+        !coder.perimeter.addresses.contains("10.4.0.7"),
+        "the coder reaches no service: {:?}",
+        coder.perimeter
+    );
+
+    let (integrator, _) = profile_for(&project, &slot, &header, Role::Integrator);
+    assert!(
+        integrator.perimeter.addresses.contains("10.4.0.7"),
+        "{:?}",
+        integrator.perimeter
+    );
+    assert!(
+        integrator.perimeter.domains.contains("db"),
+        "{:?}",
+        integrator.perimeter
+    );
+}
+
+/// The test credentials are mounted read-only on a system profile and on no
+/// other (SPEC 3.1). Two guards say this — `compose::build` refuses them on a
+/// mission profile as well — and that is deliberate.
+#[test]
+fn only_a_system_profile_mounts_the_test_credentials() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = project(dir.path()).config;
+    let credentials = dir.path().join("credentials");
+    std::fs::create_dir_all(&credentials).unwrap();
+    std::fs::write(credentials.join("db.env"), "PGPASSWORD=x\n").unwrap();
+    std::fs::write(credentials.join("api.env"), "TOKEN=y\n").unwrap();
+    config.credentials = Some(credentials.clone());
+    let project = Project::at(dir.path().join("repo"), config, dir.path().join("hq"));
+    let slot = slot_at(dir.path());
+    let header = header_with(with_services());
+
+    let (coder, _) = profile_for(&project, &slot, &header, Role::Coder);
+    assert!(coder.credentials.is_empty(), "{:?}", coder.credentials);
+
+    let (integrator, doc) = profile_for(&project, &slot, &header, Role::Integrator);
+    // Sorted, because the profile is regenerated at every launch and a diff
+    // must mean a real change.
+    assert_eq!(
+        integrator
+            .credentials
+            .iter()
+            .map(|(_, at)| at.display().to_string())
+            .collect::<Vec<_>>(),
+        vec![
+            format!("{}/api.env", run::CREDENTIALS_AT),
+            format!("{}/db.env", run::CREDENTIALS_AT),
+        ]
+    );
+    let mounts: Vec<String> = doc["services"][hq::compose::AGENT_SERVICE]["volumes"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(
+        mounts
+            .iter()
+            .any(|m| m.ends_with(&format!("{}/db.env:ro", run::CREDENTIALS_AT))),
+        "read-only, and nothing else: {mounts:?}"
+    );
+}
+
+/// The project's own services are merged verbatim into the system profile —
+/// `include:` is unusable on one of the two engines (SPEC 4.2, engine table)
+/// — and into no mission profile: the coder's allowlist forbids it to talk
+/// to them.
+#[test]
+fn the_projects_services_are_merged_into_the_system_profile_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = project(dir.path()).config;
+    config.services_file = Some(std::path::PathBuf::from("compose.yaml"));
+    let project = Project::at(dir.path().join("repo"), config, dir.path().join("hq"));
+    let slot = slot_at(dir.path());
+    std::fs::write(
+        slot.tree.join("compose.yaml"),
+        "services:\n  db:\n    image: postgres:16\n    volumes:\n      - dbdata:/var/lib/postgresql/data\nnetworks:\n  back: {}\nvolumes:\n  dbdata: null\n",
+    )
+    .unwrap();
+    let header = header_with(with_services());
+
+    let (_, coder) = profile_for(&project, &slot, &header, Role::Coder);
+    assert!(coder["services"]["db"].is_null(), "{coder:?}");
+
+    let (_, doc) = profile_for(&project, &slot, &header, Role::Integrator);
+    assert_eq!(doc["services"]["db"]["image"].as_str(), Some("postgres:16"));
+    // Verbatim: a key hq does not know about survives, because re-typing the
+    // block would lose it.
+    assert_eq!(
+        doc["services"]["db"]["volumes"][0].as_str(),
+        Some("dbdata:/var/lib/postgresql/data")
+    );
+    // And the firewall attaches to the network the project declared — it is
+    // the one that can, the agent having `network_mode` instead.
+    assert_eq!(
+        doc["services"][hq::compose::FIREWALL_SERVICE]["networks"][0].as_str(),
+        Some("back")
+    );
+    // The volumes block travels with them: a service naming a volume the
+    // document does not declare makes the whole project invalid (measured).
+    assert!(
+        doc["volumes"]
+            .as_mapping()
+            .unwrap()
+            .contains_key(serde_yaml_ng::Value::from("dbdata")),
+        "{doc:?}"
+    );
+}
+
+/// A services file that `hq.yaml` names and the commit does not carry is
+/// said by name, before a profile is lifted without the services the
+/// integrator was called to wire.
+#[test]
+fn a_services_file_that_is_not_on_the_commit_is_named() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = project(dir.path()).config;
+    config.services_file = Some(std::path::PathBuf::from("compose.yaml"));
+    let project = Project::at(dir.path().join("repo"), config, dir.path().join("hq"));
+    let slot = slot_at(dir.path());
+    let images = hq::image::Images {
+        agent: "img/agent".into(),
+        firewall: "img/fw".into(),
+        prober: "img/probe".into(),
+    };
+    let paths = hq::mission::dir::Paths::of(&project.hq_root, "m1");
+    let err = run::plan(
+        &project,
+        &slot,
+        "rust",
+        &images,
+        &paths,
+        "t",
+        &header_with(with_services()),
+        Role::Integrator,
+    )
+    .unwrap_err();
+    assert!(matches!(err, run::RunError::NoServicesFile(_)), "{err}");
+    assert!(err.to_string().contains("compose.yaml"), "{err}");
+}
+
+/// The container is told which role it is running, and the spelling comes
+/// from one place.
+#[test]
+fn the_profile_names_its_role() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    let slot = slot_at(dir.path());
+    let header = header_with(with_services());
+    for (role, said) in [
+        (Role::Coder, "coder"),
+        (Role::Integrator, "integrator"),
+        (Role::Security, "security"),
+    ] {
+        let (plan, _) = profile_for(&project, &slot, &header, role);
+        assert_eq!(
+            plan.environment.get("HQ_ROLE").map(String::as_str),
+            Some(said)
+        );
+        assert_eq!(plan.role, role);
+    }
 }

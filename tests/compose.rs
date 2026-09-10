@@ -82,6 +82,7 @@ fn plan(role: Role) -> Plan {
         perimeter,
         project_services: None,
         project_networks: None,
+        project_volumes: None,
     }
 }
 
@@ -500,4 +501,65 @@ fn dialect() -> hq::engine::Dialect {
         host_alias: "host.docker.internal".to_string(),
         userns: None,
     }
+}
+
+/// A project's own `volumes:` block is merged beside hq's. Measured on
+/// Compose v5.1.2 on 2026-09-10: without it, a service naming a volume the
+/// document does not declare makes the whole project invalid — `service "db"
+/// refers to undefined volume dbdata` — and that block is exactly where a
+/// project keeps the state a profile switch must not take with it.
+#[test]
+fn the_projects_volumes_are_declared_beside_hqs() {
+    let mut plan = plan(Role::Integrator);
+    plan.project_services = Some(
+        serde_yaml_ng::from_str("db:\n  image: postgres:16\n  volumes:\n    - dbdata:/data\n")
+            .unwrap(),
+    );
+    plan.project_volumes = Some(serde_yaml_ng::from_str("dbdata: null\n").unwrap());
+
+    let yaml = generate(&plan, &dialect()).unwrap();
+    let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+    let volumes = doc["volumes"].as_mapping().expect("volumes are declared");
+    assert!(
+        volumes.contains_key(serde_yaml_ng::Value::from("dbdata")),
+        "{yaml}"
+    );
+    // And hq's own are still there: the two sets are merged, not replaced.
+    assert!(
+        volumes.contains_key(serde_yaml_ng::Value::from("hq-demo-1-harness")),
+        "{yaml}"
+    );
+}
+
+/// A project that names one of the slot's own volumes would be handed the
+/// build cache or the harness's sessions. Refused by name rather than
+/// silently overwritten, exactly as a reserved service name is.
+#[test]
+fn a_project_volume_may_not_take_a_slots_own_name() {
+    let mut mounted = plan(Role::Integrator);
+    mounted.project_volumes = Some(serde_yaml_ng::from_str("hq-demo-1-harness: null\n").unwrap());
+    assert!(matches!(
+        generate(&mounted, &dialect()),
+        Err(ComposeError::ReservedVolume(_))
+    ));
+
+    let mut other = plan(Role::Integrator);
+    other.project_volumes = Some(serde_yaml_ng::from_str("hq-demo-1-proof: null\n").unwrap());
+    assert!(
+        matches!(
+            generate(&other, &dialect()),
+            Err(ComposeError::ReservedVolume(_))
+        ),
+        "the `hq-<slot>-` prefix is reserved whether or not this profile mounts it"
+    );
+}
+
+#[test]
+fn a_volumes_block_that_is_not_a_mapping_is_refused() {
+    let mut plan = plan(Role::Integrator);
+    plan.project_volumes = Some(serde_yaml_ng::from_str("- dbdata\n").unwrap());
+    assert!(matches!(
+        generate(&plan, &dialect()),
+        Err(ComposeError::ProjectVolumesShape("a sequence"))
+    ));
 }

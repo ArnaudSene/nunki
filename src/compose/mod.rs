@@ -100,6 +100,15 @@ pub struct Plan {
     /// declares none needs none: its services and the firewall both land on
     /// the generated default network, and reach each other there (measured).
     pub project_networks: Option<Value>,
+    /// The project's own `volumes:` block, merged verbatim beside hq's.
+    ///
+    /// Not optional in practice: a service that names a volume the document
+    /// does not declare makes the whole project invalid — `service "db"
+    /// refers to undefined volume dbdata: invalid compose project`, measured
+    /// on Compose v5.1.2, 2026-09-10. And it is exactly where a project keeps
+    /// what must survive a profile switch, so dropping the block would drop
+    /// the state SPEC 4.2's first rule exists to keep.
+    pub project_volumes: Option<Value>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -114,6 +123,10 @@ pub enum ComposeError {
     ProjectServicesShape(&'static str),
     #[error("the project's networks must be a YAML mapping, found {0}")]
     ProjectNetworksShape(&'static str),
+    #[error("the project's volumes must be a YAML mapping, found {0}")]
+    ProjectVolumesShape(&'static str),
+    #[error("the project declares a volume named {0:?}, which hq reserves for the slot")]
+    ReservedVolume(String),
     #[error("{what} must be an absolute path, found {path:?}")]
     RelativePath { what: &'static str, path: PathBuf },
     #[error(
@@ -215,6 +228,23 @@ fn document(plan: &Plan, services: Mapping, networks: Mapping) -> Result<Documen
     let mut volumes = Mapping::new();
     for volume in &plan.volumes {
         volumes.insert(Value::from(volume.name.clone()), Value::Null);
+    }
+    match &plan.project_volumes {
+        None | Some(Value::Null) => {}
+        Some(Value::Mapping(declared)) => {
+            for (key, value) in declared {
+                let name = key.as_str().unwrap_or_default();
+                // hq's own volumes are named `hq-<slot>-…`; a project taking
+                // one of those names would have the slot's build cache or
+                // the harness's sessions handed to a service.
+                if volumes.contains_key(key) || name.starts_with(&format!("hq-{}-", plan.slot)) {
+                    return Err(ComposeError::ReservedVolume(name.to_string()));
+                }
+                volumes.insert(key.clone(), value.clone());
+            }
+        }
+        Some(Value::Sequence(_)) => return Err(ComposeError::ProjectVolumesShape("a sequence")),
+        Some(_) => return Err(ComposeError::ProjectVolumesShape("a scalar")),
     }
     Ok(Document {
         name: project_name(&plan.slot)?,

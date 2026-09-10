@@ -7,10 +7,12 @@
 //! persisted at every transition, and running it again picks up where it
 //! stopped.
 //!
-//! What it does not do: launch an agent. Lifting the system profile and
-//! starting the application belong to their own piece, so when the flow
-//! reaches a stage that needs a run, `verify` says which role is owed one
-//! and stops. Saying it is better than pretending the mission is stuck.
+//! What it launches, and what it does not. It lifts the integrator's system
+//! profile, starts the application in it and launches the integration run,
+//! then returns: a run takes hours and `verify` never waits on one. The next
+//! `verify` reads that run back — its verdict, or why there is none — and
+//! moves. The security agent's run is not launched yet, and `verify` says
+//! which role is owed one rather than pretending the mission is stuck.
 //!
 //! The slot's lock is taken **once**, here, at the top: everything under it
 //! — gate 6, gate 7, every `hq exec` — runs inside it and never asks again
@@ -20,7 +22,7 @@ use std::sync::Arc;
 
 use crate::engine::Engine;
 use crate::gate;
-use crate::harness::{Role, RunState};
+use crate::harness::{Outcome, Role, RunHandle, RunState};
 use crate::mission::dir::Paths;
 use crate::mission::flow::{Event, Handover, Stage, Work};
 use crate::project::Project;
@@ -39,6 +41,17 @@ pub enum Step {
     Moved { to: Stage },
     /// A role is owed a run, and `hq` cannot launch it yet.
     NeedsRun { role: Role, why: String },
+    /// A run was launched for this role, and `verify` returned: a run takes
+    /// hours, and nothing here waits on one.
+    Launched {
+        role: Role,
+        /// How the application was started for it, or why it was not.
+        application: String,
+    },
+    /// A run was recorded and the engine could not be asked about it.
+    /// Nothing is decided on a silence (SPEC 4.2, "la reprise re-dérive
+    /// avant de décider").
+    Unreachable { role: Role, why: String },
     /// Every declared stage is green; the human validates and `hq push`
     /// pushes.
     Verified,
@@ -66,6 +79,10 @@ pub enum VerifyError {
     Lock(#[from] crate::state::LockError),
     #[error(transparent)]
     Slot(#[from] crate::slot::SlotError),
+    #[error(transparent)]
+    Run(#[from] crate::run::RunError),
+    #[error(transparent)]
+    Git(#[from] crate::git::GitError),
 }
 
 /// Play the phase as far as it goes, and say what happened.
@@ -73,6 +90,7 @@ pub fn verify(
     project: &Project,
     id: &str,
     engine: Arc<dyn Engine>,
+    engine_bin: &str,
 ) -> Result<Vec<Step>, VerifyError> {
     let store = Store::open(&project.hq_root)?;
     let mut state = store
@@ -85,16 +103,11 @@ pub fn verify(
     // Gates read a tree. A tree an agent is still writing is not a tree to
     // judge — this is the interlock `hq exec --tree` deliberately does not
     // have, and this is where it belongs.
-    refuse_while_running(project, id, &state)?;
+    refuse_while_running(project, engine.clone(), id, &state)?;
 
     let slot = crate::slot::find(project, &state.slot)?;
     let paths = Paths::of(&project.hq_root, id);
-    let stack = project
-        .config
-        .stacks
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "rust".to_string());
+    let stack = crate::run::stack_of(project);
 
     let mut steps = Vec::new();
     loop {
@@ -177,21 +190,68 @@ pub fn verify(
                 });
             }
 
-            Stage::Integration { .. } => {
-                steps.push(Step::NeedsRun {
+            // The integration mission. Two branches, and which one applies
+            // is decided by whether a run was already launched for this
+            // stage — never by a timer, and never by launching a second one
+            // to see.
+            Stage::Integration { attempt } => {
+                if let Some(handle) = state.run.clone() {
+                    match read_back(project, engine.clone(), &state, &handle) {
+                        Ended::Unreachable(why) => {
+                            steps.push(Step::Unreachable {
+                                role: Role::Integrator,
+                                why,
+                            });
+                            return Ok(steps);
+                        }
+                        Ended::With(outcome) => {
+                            let event = concluded(
+                                Role::Integrator,
+                                outcome,
+                                paths.verdict.as_path(),
+                                &crate::git::head(&slot.tree)?,
+                            );
+                            // Forgotten before the transition is written: an
+                            // attempt that stays recorded is a run the next
+                            // `verify` would read back a second time.
+                            state.run = None;
+                            state.app = None;
+                            store.apply(&mut state, event)?;
+                            steps.push(Step::Moved {
+                                to: state.flow.stage().clone(),
+                            });
+                            continue;
+                        }
+                    }
+                }
+
+                let launched = crate::run::launch(&crate::run::Launching {
+                    project,
+                    slot: &slot,
+                    engine: engine.clone(),
+                    engine_bin,
+                    paths: &paths,
+                    header: &header,
                     role: Role::Integrator,
-                    why: "the integration mission has not run: `hq` lifts the system \
-                          profile and starts the application for it, and that verb does \
-                          not exist yet"
-                        .into(),
+                    lot: "integration".to_string(),
+                    attempt,
+                })?;
+                let application = describe(&launched);
+                state.run = Some(launched.run);
+                state.app = launched.app;
+                store.save(&state)?;
+                steps.push(Step::Launched {
+                    role: Role::Integrator,
+                    application,
                 });
                 return Ok(steps);
             }
             Stage::SecurityAgent { .. } => {
                 steps.push(Step::NeedsRun {
                     role: Role::Security,
-                    why: "the security mission has not run: it needs the livrable \
-                          started in its own profile, and that verb does not exist yet"
+                    why: "the security mission has not run: its profile mounts the tree \
+                          read-only and the directories an execution still writes are \
+                          named volumes over it, which is its own piece"
                         .into(),
                 });
                 return Ok(steps);
@@ -233,11 +293,126 @@ fn what_is_owed(work: &Work, header: &crate::mission::Header) -> String {
     }
 }
 
+/// What a recorded run came to, as the engine answers it.
+enum Ended {
+    With(Outcome),
+    /// The question could not be put. A run `hq` cannot reach is not a run
+    /// that failed, and turning one into the other would consume an attempt
+    /// on a machine that was asleep.
+    Unreachable(String),
+}
+
+fn read_back(
+    project: &Project,
+    engine: Arc<dyn Engine>,
+    state: &MissionState,
+    handle: &RunHandle,
+) -> Ended {
+    let harness = crate::harness::claude_code::ClaudeCode::new(
+        Default::default(),
+        Box::new(harness_spawner(
+            project,
+            engine,
+            &state.slot,
+            &handle.session.0,
+        )),
+    );
+    match crate::harness::Harness::state(&harness, handle) {
+        Ok(RunState::Finished(outcome)) => Ended::With(outcome),
+        // `refuse_while_running` already returned for a running run, so this
+        // is a run that started running between the two questions.
+        Ok(RunState::Running(_)) => Ended::Unreachable(
+            "the run started again between two questions; ask once more".to_string(),
+        ),
+        Err(e) => Ended::Unreachable(e.to_string()),
+    }
+}
+
+/// The event a finished role run yields.
+///
+/// A run that finished on its own has to have left a verdict: SPEC 4.4 makes
+/// the verdict the role's conclusion and pins it to a `HEAD`. Finished
+/// without one, or with one that names another commit or another role, is a
+/// run that did not honour the contract — a mission failure, which costs an
+/// attempt. A harness failure costs none, and that distinction is the whole
+/// of SPEC 4.3 on this point.
+fn concluded(role: Role, outcome: Outcome, verdict: &std::path::Path, head: &str) -> Event {
+    let Outcome::Finished(_) = &outcome else {
+        return Event::RunEnded {
+            outcome,
+            lot_done: false,
+        };
+    };
+    match read_verdict(verdict, role, head) {
+        Ok(file) => Event::Verdict {
+            verdict: file.verdict,
+            report: file.report,
+        },
+        Err(why) => Event::RunEnded {
+            outcome: Outcome::MissionFailure(why),
+            lot_done: false,
+        },
+    }
+}
+
+fn read_verdict(
+    path: &std::path::Path,
+    role: Role,
+    head: &str,
+) -> Result<crate::mission::VerdictFile, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("{} could not be read: {e}", path.display()))?;
+    if text.trim().is_empty() {
+        return Err(format!(
+            "the run finished and {} is empty: a role concludes with its verdict",
+            path.display()
+        ));
+    }
+    let file: crate::mission::VerdictFile = serde_json::from_str(&text)
+        .map_err(|e| format!("{} is not a verdict `hq` can read: {e}", path.display()))?;
+    if file.role != role {
+        return Err(format!(
+            "{} carries {:?}'s verdict, and this run was {role:?}'s",
+            path.display(),
+            file.role
+        ));
+    }
+    // "Un verdict vaut pour un HEAD" (SPEC 4.4): a verdict on another commit
+    // is a verdict on other work, and accepting it would carry a green over
+    // a change nobody judged.
+    if file.head != head {
+        return Err(format!(
+            "{} concludes on {}, and the slot is on {head} — a verdict is worth one \
+             commit and no other",
+            path.display(),
+            file.head
+        ));
+    }
+    Ok(file)
+}
+
+/// What to tell the human about the application `hq` started.
+fn describe(launched: &crate::run::Launched) -> String {
+    match (&launched.launch, &launched.app) {
+        (Some(crate::launch::Launch::Script { path, declared }), Some(_)) => {
+            format!(
+                "the application was started from {path} ({})",
+                declared.where_from()
+            )
+        }
+        (Some(crate::launch::Launch::Nothing { declared }), _) => {
+            format!("nothing was started: {} says `none`", declared.where_from())
+        }
+        _ => "nothing was started".to_string(),
+    }
+}
+
 /// Refuse while the agent is still writing. A gate that reads a tree
 /// mid-run reads a tree that is not finished, and its verdict would be about
 /// a moment nobody chose.
 fn refuse_while_running(
     project: &Project,
+    engine: Arc<dyn Engine>,
     id: &str,
     state: &MissionState,
 ) -> Result<(), VerifyError> {
@@ -246,7 +421,12 @@ fn refuse_while_running(
     };
     let harness = crate::harness::claude_code::ClaudeCode::new(
         Default::default(),
-        Box::new(harness_spawner(project, &state.slot, &handle.session.0)),
+        Box::new(harness_spawner(
+            project,
+            engine,
+            &state.slot,
+            &handle.session.0,
+        )),
     );
     // A run `hq` cannot reach is not a run in progress: it says so elsewhere
     // (`hq mission status`), and refusing to verify because the engine is
@@ -260,12 +440,16 @@ fn refuse_while_running(
     Ok(())
 }
 
+/// The spawner that can ask about a run: the engine `verify` was given, not
+/// one of its own. A second engine here would answer about another machine's
+/// containers on any caller that passed a fake or a Podman adapter — and
+/// nothing in the type would have said so.
 fn harness_spawner(
     project: &Project,
+    engine: Arc<dyn Engine>,
     slot: &str,
     session: &str,
 ) -> crate::engine::spawn::ContainerSpawner {
-    let engine: Arc<dyn Engine> = Arc::new(crate::engine::docker::Docker::real());
     let file = crate::run::profile_path(project, slot);
     let compose_project =
         crate::compose::project_name(slot).unwrap_or_else(|_| format!("hq-{slot}"));

@@ -86,3 +86,14 @@ what you did not look at."
 /// The file the prompt is written to, inside the mission folder — read-only
 /// for the agent, like everything there but its own four files.
 pub const PROMPT_FILE: &str = "ROLE.md";
+
+/// The role's name as `hq` writes it down: in `HQ_ROLE`, in a log's name, in
+/// a message to a human. One spelling, in one place, because three modules
+/// were about to each pick their own.
+pub fn slug(role: Role) -> &'static str {
+    match role {
+        Role::Coder => "coder",
+        Role::Integrator => "integrator",
+        Role::Security => "security",
+    }
+}
