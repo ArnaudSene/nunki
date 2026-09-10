@@ -19,8 +19,13 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-/// GitHub's API. Overridable with `HQ_FORGE_API`, which is how the tests
-/// point the real client at a server they control.
+/// GitHub's API — the only host the human's credential is ever sent to.
+///
+/// Deliberately not overridable from the environment: a variable that could
+/// redirect this address would send the token to whatever host it named, and
+/// nothing in SPEC lets a credential travel to a host nobody declared. Tests
+/// reach a server of their own through [`crate::push::push_to`]'s parameter,
+/// which the binary never calls with anything but this.
 pub const API: &str = "https://api.github.com";
 
 /// The credential's file, under the project's HQ.
@@ -118,11 +123,6 @@ pub fn token(hq_root: &std::path::Path) -> Option<String> {
         .ok()
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty())
-}
-
-/// The API to talk to: `HQ_FORGE_API` if set, GitHub's otherwise.
-pub fn api() -> String {
-    std::env::var("HQ_FORGE_API").unwrap_or_else(|_| API.to_string())
 }
 
 #[derive(Deserialize)]

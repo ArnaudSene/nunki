@@ -171,11 +171,12 @@ pub enum PullRequestState {
 /// Push a verified mission's branch, on an explicit human argument, and open
 /// its pull request on the forge's real API.
 pub fn push(project: &Project, id: &str, authorised: bool) -> Result<Pushed, PushError> {
-    push_to(project, id, authorised, &crate::forge::api())
+    push_to(project, id, authorised, crate::forge::API)
 }
 
 /// [`push`], against a given forge API — how the tests point the real client
-/// at a server they control without touching the process environment.
+/// at a server they control. The binary calls [`push`] only, so the address
+/// the human's token goes to is never read from anything a process inherits.
 pub fn push_to(
     project: &Project,
     id: &str,
