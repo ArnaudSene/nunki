@@ -56,6 +56,13 @@ impl Dialect {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Liveness {
     Running,
+    /// Frozen by `hq mission pause`: the process is there and makes no
+    /// progress. Its own answer, because reporting it as running would tell a
+    /// stall check that an agent stopped thinking, and reporting it as gone
+    /// would tell the human their run died (measured: a paused container
+    /// answers `Running=true Paused=true`, and `exec` into one is refused
+    /// outright).
+    Paused,
     /// It exists and is not running; the code is what the engine reports.
     Exited(i64),
     /// The engine knows nothing about it — a rebuilt machine, a pruned
@@ -108,6 +115,23 @@ pub trait Engine: Send + Sync {
     /// that never starts (SPEC 4.1 bis, rule 2), and this is where that is
     /// enforced.
     fn up(&self, file: &Path, project: &str) -> Result<(), EngineError>;
+
+    /// Freeze named services where they are, and unfreeze them exactly there.
+    ///
+    /// The container, not a hook the agent could ignore (SPEC 4.3, "les trois
+    /// gestes de l'humain sur un agent"). Nothing is lost: the processes are
+    /// suspended by the engine. A model call in flight may time out during a
+    /// long freeze, and the harness replays it.
+    fn pause(&self, file: &Path, project: &str, services: &[&str]) -> Result<(), EngineError>;
+
+    fn unpause(&self, file: &Path, project: &str, services: &[&str]) -> Result<(), EngineError>;
+
+    /// The emergency brake: the containers are killed, nothing is waited for.
+    ///
+    /// Unlike [`stop`](Engine::stop), which asks and gives time, and unlike
+    /// [`down`](Engine::down), which takes the project with it. What is
+    /// killed here is the agent's pair; the project's services keep running.
+    fn kill(&self, file: &Path, project: &str, services: &[&str]) -> Result<(), EngineError>;
 
     /// Stop and remove named services, leaving everything else in the project
     /// running. This is how a profile switch happens: the previous agent and

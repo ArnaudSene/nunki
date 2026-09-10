@@ -386,6 +386,14 @@ pub fn campaign(
             .map_err(|e| MutantsError::Launch(e.to_string()))?;
         let text = std::fs::read_to_string(&running.log).unwrap_or_default();
         return match presence {
+            // A frozen campaign is still in flight, and its deadline must
+            // not run against a clock the human stopped on purpose. Reported
+            // as running, with the freeze named, rather than counted as an
+            // overrun.
+            Presence::Paused => Ok(Progress::Running {
+                started_at: running.started_at.clone(),
+                lines: text.lines().count(),
+            }),
             Presence::Running => {
                 if minutes_since(&running.started_at) > running.deadline_minutes {
                     // Stopped rather than left: SPEC 4.4 gives the campaign a

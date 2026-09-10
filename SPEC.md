@@ -946,6 +946,20 @@ l'humain les tape lui-même.
 | `hq mission stop` | **arrêt propre** : `hq` ne relancera aucun run ; le run en cours finit son lot, ou s'interrompt tout de suite avec `--now` par le signal qui termine le tour proprement, pour que l'agent écrive son état de reprise — l'ancien fichier `STOP` | sans `--now`, il finit son lot ; avec, son tour est interrompu proprement |
 | `hq mission kill` | **frein d'urgence** : le conteneur est tué immédiatement, rien n'est attendu — l'ancien `AGENT_STOP` | rien, il n'existe plus |
 
+**Un conteneur gelé n'est pas un conteneur qui tourne**, et il a fallu le
+mesurer pour l'écrire. Mesuré le 2026-09-10 sur Docker 28 : un conteneur en
+pause répond `Running=true Paused=true`, donc un adaptateur qui ne lit que
+`.State.Running` rapporte un agent gelé comme un agent au travail — et un
+contrôle d'immobilité lirait ça comme un agent qui a cessé de penser. Pire :
+`exec` dans un conteneur en pause est **refusé d'emblée** (« Container … is
+paused, unpause the container before exec »), donc la sonde qui répond
+d'habitude ne peut pas répondre, et son refus arriverait comme « je ne sais
+pas » — un silence sur un état parfaitement connu. La vivacité a donc un mot
+pour ça, de bout en bout : `Liveness::Paused`, `Presence::Paused`,
+`RunState::Paused`. C'est la doctrine d'AGENTS.md § 4 appliquée une fois de
+plus : un contrôle qui ne peut pas dire « je ne sais pas » ment, et un
+contrôle qui n'a pas de mot pour « gelé » ment aussi.
+
 `pause` et `stop` laissent le dossier de mission intact et reprenable ; après
 un `kill`, le lot en cours est une tentative échouée et la relance repart du
 dernier état de reprise écrit.

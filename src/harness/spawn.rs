@@ -66,6 +66,11 @@ pub enum Presence {
     /// The container was there and the process was not. This run has ended,
     /// whatever it left behind.
     Ended,
+    /// A human froze it with `hq mission pause`, and it is exactly where they
+    /// left it. Its own answer, and not `Running`: a run that makes no
+    /// progress because somebody said so is not a run that stopped thinking,
+    /// and a stall check must not read the two the same way (SPEC 4.3).
+    Paused,
     /// The engine answered, and the container is gone or stopped: the run
     /// went with it. Not the agent's doing (SPEC 4.2), and the reason says
     /// which container.

@@ -360,6 +360,7 @@ fn live_a_real_headless_run_finishes_with_a_result() {
                 std::thread::sleep(std::time::Duration::from_millis(500));
             }
             RunState::Running(p) => panic!("still running after 120 s: {p:?}"),
+            RunState::Paused(p) => panic!("nothing froze this run: {p:?}"),
         }
     }
 }
@@ -570,4 +571,64 @@ fn a_container_that_went_away_says_so_and_does_not_blame_the_agent() {
         }
         other => panic!("expected a harness failure naming the container, got {other:?}"),
     }
+}
+
+/// A spawner with one answer, for the states a real process cannot be put in
+/// from a test.
+struct Answering(Presence);
+impl Spawner for Answering {
+    fn spawn(&self, _cmd: &CommandSpec, _log: &std::path::Path) -> std::io::Result<Spawned> {
+        unimplemented!("this spawner only answers about a run")
+    }
+    fn alive(&self, _spawned: &Spawned) -> std::io::Result<Presence> {
+        Ok(self.0.clone())
+    }
+    fn signal(
+        &self,
+        _spawned: &Spawned,
+        _signal: hq::harness::spawn::Signal,
+    ) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A run a human froze is neither running nor finished, and saying either is
+/// a lie they would act on: "running" tells them to wait for progress that
+/// cannot come, "finished" tells them their run died. The adapter carries the
+/// distinction through instead of flattening it.
+#[test]
+fn a_paused_run_is_neither_running_nor_finished() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("run.jsonl");
+    fs::write(
+        &log,
+        r#"{"type":"system","subtype":"init","session_id":"s"}"#,
+    )
+    .unwrap();
+    let handle = RunHandle {
+        session: SessionId("s".into()),
+        container: "cafe1234".into(),
+        pid: Some(41),
+        log: log.clone(),
+    };
+
+    let frozen = ClaudeCode::new(Default::default(), Box::new(Answering(Presence::Paused)));
+    assert!(
+        matches!(frozen.state(&handle).unwrap(), RunState::Paused(p) if p.events == 1),
+        "{:?}",
+        frozen.state(&handle)
+    );
+
+    // And the same run, unfrozen, reads as running: it is the freeze that is
+    // being reported, not the log.
+    let live = ClaudeCode::new(Default::default(), Box::new(Answering(Presence::Running)));
+    assert!(matches!(live.state(&handle).unwrap(), RunState::Running(_)));
+
+    // A result outranks the freeze: the run said how it ended, and no reading
+    // of the container contradicts that.
+    fs::write(&log, fixture()).unwrap();
+    assert!(matches!(
+        frozen.state(&handle).unwrap(),
+        RunState::Finished(Outcome::Finished(_))
+    ));
 }

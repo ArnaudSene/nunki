@@ -11,6 +11,9 @@ use super::{Dialect, Engine, EngineError, ExecOutput, Liveness, Netns};
 pub enum Call {
     Up(String),
     Stop(String, Vec<String>),
+    Pause(String, Vec<String>),
+    Unpause(String, Vec<String>),
+    Kill(String, Vec<String>),
     Down(String, bool),
     Exec(String, String, Vec<String>),
     ContainerOf(String, String),
@@ -103,6 +106,30 @@ impl Engine for FakeEngine {
             }),
             None => Ok(()),
         }
+    }
+
+    fn pause(&self, _file: &Path, project: &str, services: &[&str]) -> Result<(), EngineError> {
+        self.record(Call::Pause(
+            project.to_string(),
+            services.iter().map(|s| s.to_string()).collect(),
+        ));
+        Ok(())
+    }
+
+    fn unpause(&self, _file: &Path, project: &str, services: &[&str]) -> Result<(), EngineError> {
+        self.record(Call::Unpause(
+            project.to_string(),
+            services.iter().map(|s| s.to_string()).collect(),
+        ));
+        Ok(())
+    }
+
+    fn kill(&self, _file: &Path, project: &str, services: &[&str]) -> Result<(), EngineError> {
+        self.record(Call::Kill(
+            project.to_string(),
+            services.iter().map(|s| s.to_string()).collect(),
+        ));
+        Ok(())
     }
 
     fn stop(&self, _file: &Path, project: &str, services: &[&str]) -> Result<(), EngineError> {

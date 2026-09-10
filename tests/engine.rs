@@ -122,6 +122,35 @@ fn a_profile_switch_stops_two_services_and_never_takes_the_project_down() {
     );
 }
 
+/// The three gestures of SPEC 4.3 ask the engine for exactly what each one
+/// means, and nothing near it. `kill` in particular is not `stop` with no
+/// patience: `stop` asks and waits, and the emergency brake does neither.
+#[test]
+fn the_three_gestures_ask_for_exactly_what_each_one_means() {
+    let (docker, cli) = recorded(vec![]);
+    docker
+        .pause(&file(), "hq-demo", &["agent", "firewall"])
+        .unwrap();
+    docker
+        .unpause(&file(), "hq-demo", &["agent", "firewall"])
+        .unwrap();
+    docker
+        .kill(&file(), "hq-demo", &["agent", "firewall"])
+        .unwrap();
+    let lines = cli.lines();
+    assert!(lines[0].ends_with("pause agent firewall"), "{lines:?}");
+    assert!(lines[1].ends_with("unpause agent firewall"), "{lines:?}");
+    assert!(lines[2].ends_with("kill agent firewall"), "{lines:?}");
+    assert!(
+        !lines[2].contains("stop") && !lines[2].contains("--timeout"),
+        "the emergency brake asks nothing and waits for nothing: {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|l| l.contains(" down")),
+        "no gesture takes the project's services with it: {lines:?}"
+    );
+}
+
 #[test]
 fn down_is_explicit_about_volumes_and_never_removes_orphans() {
     let (docker, cli) = recorded(vec![]);
@@ -170,10 +199,18 @@ fn a_failing_command_names_the_verb_and_carries_the_engines_words() {
 
 #[test]
 fn liveness_reads_the_engine_and_treats_an_unknown_container_as_an_answer() {
-    let (docker, _) = recorded(vec![saying(0, "true 0\n", "")]);
+    // Three fields, and the middle one is the one a first reading misses:
+    // measured on Docker 28, a **paused** container answers `true true 0`,
+    // so reading only `.State.Running` reports a frozen agent as a working
+    // one — and a stall check would then read it as an agent that stopped
+    // thinking.
+    let (docker, _) = recorded(vec![saying(0, "true false 0\n", "")]);
     assert_eq!(docker.liveness("c1").unwrap(), Liveness::Running);
 
-    let (docker, _) = recorded(vec![saying(0, "false 137\n", "")]);
+    let (docker, _) = recorded(vec![saying(0, "true true 0\n", "")]);
+    assert_eq!(docker.liveness("c1").unwrap(), Liveness::Paused);
+
+    let (docker, _) = recorded(vec![saying(0, "false false 137\n", "")]);
     assert_eq!(docker.liveness("c1").unwrap(), Liveness::Exited(137));
 
     // A machine that slept, an engine restarted without its containers, a
@@ -584,4 +621,131 @@ fn a_signal_is_named_the_way_kill_expects_it() {
     // one word.
     assert_eq!(Signal::Interrupt.name(), "INT");
     assert_eq!(Signal::Terminate.name(), "TERM");
+}
+
+/// The three gestures on a real container, and the one reading that made this
+/// piece necessary (SPEC 4.3, and AGENTS.md §4).
+///
+/// A paused container answers `Running=true` — measured on Docker 28 — so an
+/// adapter reading only that field reports a frozen agent as a working one,
+/// and a stall check would then read it as an agent that stopped thinking.
+/// `exec` into a paused container is refused outright rather than hanging, so
+/// the in-container probe cannot answer either: liveness has to be asked
+/// first, and it has to have a word for this.
+#[test]
+#[ignore = "lifts real containers; run by hand"]
+fn live_a_frozen_container_is_not_a_running_one() {
+    let docker = Docker::real();
+    let slot = "gesturelive";
+    let project = hq::compose::project_name(slot).unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let context = dir.path().join("firewall");
+    std::fs::create_dir_all(&context).unwrap();
+    hq::firewall::materialise(&context).unwrap();
+    assert!(
+        std::process::Command::new("docker")
+            .args(["build", "-q", "-t", "hq/firewall:test"])
+            .arg(&context)
+            .status()
+            .expect("docker is on the path")
+            .success()
+    );
+
+    let file = write_profile(dir.path(), slot, hq::harness::Role::Coder, "mission.yml");
+    let _ = docker.down(&file, &project, true);
+    docker.up(&file, &project).unwrap();
+
+    let agent = docker
+        .container_of(&file, &project, hq::compose::AGENT_SERVICE)
+        .unwrap()
+        .expect("the agent has a container");
+    assert_eq!(docker.liveness(&agent).unwrap(), Liveness::Running);
+
+    docker.pause(&file, &project, &hq::run::SERVICES).unwrap();
+    assert_eq!(
+        docker.liveness(&agent).unwrap(),
+        Liveness::Paused,
+        "a frozen container must not read as a running one"
+    );
+    // And the probe that would otherwise answer cannot: the engine refuses
+    // outright. Not an engine failure — a command that did not run is data,
+    // and the adapter reports it as such — so what is asserted is the exit
+    // status and the daemon's own words.
+    let refused = docker
+        .exec(
+            &file,
+            &project,
+            hq::compose::AGENT_SERVICE,
+            &["true".to_string()],
+        )
+        .unwrap();
+    assert!(!refused.ok(), "{refused:?}");
+    assert!(
+        refused.stderr.contains("paused"),
+        "exec into a paused container is refused, so liveness must answer \
+         first: {refused:?}"
+    );
+
+    docker.unpause(&file, &project, &hq::run::SERVICES).unwrap();
+    assert_eq!(docker.liveness(&agent).unwrap(), Liveness::Running);
+    // Unfrozen exactly there: the same container, not a new one.
+    assert_eq!(
+        docker
+            .container_of(&file, &project, hq::compose::AGENT_SERVICE)
+            .unwrap()
+            .as_deref(),
+        Some(agent.as_str())
+    );
+
+    // The emergency brake: killed, not asked. `docker kill` leaves 137.
+    docker.kill(&file, &project, &hq::run::SERVICES).unwrap();
+    assert!(
+        matches!(docker.liveness(&agent).unwrap(), Liveness::Exited(_)),
+        "the container is gone and nothing was waited for"
+    );
+    // And the project's own service is untouched by all three.
+    let db = docker
+        .container_of(&file, &project, "db")
+        .unwrap()
+        .expect("the project's service has a container");
+    assert_eq!(docker.liveness(&db).unwrap(), Liveness::Running);
+
+    docker.down(&file, &project, true).unwrap();
+}
+
+/// The spawner asks liveness before it probes, and a frozen container ends
+/// the question there.
+///
+/// Two reasons, and both are measured. `exec` into a paused container is
+/// refused by the engine, so the probe cannot answer at all — and its refusal
+/// would arrive as `Unknown`, a silence about a run whose state is perfectly
+/// known. And `Running` would be worse: a stall check reading it would count
+/// a run a human froze on purpose as an agent that stopped thinking.
+#[test]
+fn a_frozen_container_answers_paused_and_is_never_probed() {
+    use hq::harness::spawn::{Presence, Spawned, Spawner};
+
+    let fake =
+        std::sync::Arc::new(FakeEngine::default().with_liveness("cafe1234", Liveness::Paused));
+    let spawner = hq::engine::spawn::ContainerSpawner::new(
+        fake.clone(),
+        file(),
+        "hq-demo",
+        hq::compose::AGENT_SERVICE,
+    )
+    .identified_by("s1");
+
+    let presence = spawner
+        .alive(&Spawned {
+            pid: Some(41),
+            container: "cafe1234".into(),
+        })
+        .unwrap();
+    assert_eq!(presence, Presence::Paused);
+    assert!(
+        !fake.calls().iter().any(|c| matches!(c, Call::Exec(..))),
+        "the probe was attempted on a container that refuses it: {:?}",
+        fake.calls()
+    );
 }

@@ -201,6 +201,44 @@ enum MissionCommand {
     /// End the run in progress properly: the agent finishes its turn and
     /// writes its resume block.
     Stop { id: String },
+    /// Freeze the agent's container where it is.
+    ///
+    /// Nothing is lost: the processes are suspended by the engine. A model
+    /// call in flight may time out during a long freeze, and the harness
+    /// replays it.
+    Pause {
+        /// The mission.
+        id: String,
+    },
+
+    /// Unfreeze a paused container, exactly where it was.
+    Resume {
+        /// The mission.
+        id: String,
+    },
+
+    /// The emergency brake: kill the agent's container, waiting for nothing.
+    ///
+    /// After it, the lot in progress is a failed attempt and the relaunch
+    /// starts from the last resume block the agent wrote. Use `stop` if you
+    /// want the agent to finish its turn.
+    Kill {
+        /// The mission.
+        id: String,
+    },
+
+    /// Leave an instruction for the **next** run.
+    ///
+    /// There is no channel during a run. This lands in `FOLLOWUP_HQ.md`,
+    /// which every role reads before anything else; if it is urgent,
+    /// `hq mission stop` ends the current run first.
+    Say {
+        /// The mission.
+        id: String,
+        /// What to tell the next run.
+        what: Vec<String>,
+    },
+
     /// Bring a mission's commits from its slot into the repository.
     ///
     /// The only way commits leave a slot, and it goes one way. `hq push`
@@ -715,6 +753,29 @@ fn probes(project: &Project, which: Option<&str>) -> Vec<check::Check> {
     }
 }
 
+/// `pause` and `resume` are one gesture in two directions, and printing them
+/// from one place keeps the two messages saying the same thing.
+fn freeze(project: &Project, id: &str, which: hq::gesture::Freeze) -> ExitCode {
+    let engine: std::sync::Arc<dyn hq::engine::Engine> =
+        std::sync::Arc::new(hq::engine::docker::Docker::real());
+    match hq::gesture::freeze(project, id, engine, which) {
+        Ok(_) => {
+            match which {
+                hq::gesture::Freeze::On => println!(
+                    "paused    the agent and its sidecar are frozen; \
+                     `hq mission resume {id}` unfreezes them exactly there"
+                ),
+                hq::gesture::Freeze::Off => println!("resumed   exactly where it was"),
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("hq: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn mission(project: &Project, command: MissionCommand) -> ExitCode {
     match command {
         MissionCommand::New {
@@ -844,6 +905,43 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                 }
             }
         }
+
+        MissionCommand::Pause { id } => freeze(project, &id, hq::gesture::Freeze::On),
+        MissionCommand::Resume { id } => freeze(project, &id, hq::gesture::Freeze::Off),
+
+        MissionCommand::Kill { id } => {
+            let engine: std::sync::Arc<dyn hq::engine::Engine> =
+                std::sync::Arc::new(hq::engine::docker::Docker::real());
+            match hq::gesture::kill(project, &id, engine) {
+                Ok(_) => {
+                    println!("killed    nothing was waited for");
+                    println!(
+                        "          the lot in progress is a failed attempt; the relaunch \
+                         starts from the last resume block"
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("hq: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+
+        MissionCommand::Say { id, what } => match hq::gesture::say(project, &id, &what.join(" ")) {
+            Ok(()) => {
+                println!("said      written to FOLLOWUP_HQ.md, for the next run");
+                println!(
+                    "          there is no channel during a run; `hq mission stop {id}` \
+                     ends this one first"
+                );
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("hq: {e}");
+                ExitCode::FAILURE
+            }
+        },
 
         MissionCommand::Fetch { id } => match hq::push::fetch(project, &id) {
             Ok(fetched) => {
@@ -1187,6 +1285,11 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                         {
                             Ok(hq::harness::RunState::Running(p)) => println!(
                                 "run       running — {} event(s), {} tool call(s)",
+                                p.events, p.tool_calls
+                            ),
+                            Ok(hq::harness::RunState::Paused(p)) => println!(
+                                "run       paused — {} event(s), {} tool call(s); \
+                                 `hq mission resume {id}` unfreezes it",
                                 p.events, p.tool_calls
                             ),
                             Ok(hq::harness::RunState::Finished(outcome)) => {

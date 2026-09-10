@@ -95,6 +95,21 @@ pub fn lifted_all(file: &Path, who: &str, why: &str, head: &str) -> Result<(), F
     )
 }
 
+/// An instruction left for the next run.
+///
+/// `say` and not a channel: there is no channel during a run (SPEC 4.3). What
+/// is written here is read by the run after this one, by every role, because
+/// every role is told to read this file before anything else.
+pub fn said(file: &Path, who: &str, what: &str) -> Result<(), FollowupError> {
+    append(
+        file,
+        &format!(
+            "## {date} — {who} left an instruction for the next run\n\n{what}\n",
+            date = today(),
+        ),
+    )
+}
+
 /// The first twelve characters of a commit, which is how every other message
 /// in `hq` names one.
 fn short(head: &str) -> &str {

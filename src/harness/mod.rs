@@ -111,6 +111,9 @@ pub struct Usage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunState {
     Running(Progress),
+    /// Frozen by a human, exactly where they froze it. Neither running nor
+    /// finished, and saying either would be a lie the human would act on.
+    Paused(Progress),
     Finished(Outcome),
 }
 

@@ -512,7 +512,9 @@ fn live_a_mission_starts_and_its_run_is_read_back() {
                 outcome = Some(o);
                 break;
             }
-            RunState::Running(_) => std::thread::sleep(std::time::Duration::from_millis(200)),
+            RunState::Running(_) | RunState::Paused(_) => {
+                std::thread::sleep(std::time::Duration::from_millis(200))
+            }
         }
     }
     match outcome.expect("the run ended") {

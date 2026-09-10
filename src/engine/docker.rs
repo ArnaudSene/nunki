@@ -141,6 +141,30 @@ impl Engine for Docker {
         Ok(())
     }
 
+    fn pause(&self, file: &Path, project: &str, services: &[&str]) -> Result<(), EngineError> {
+        let mut args = vec!["pause"];
+        args.extend_from_slice(services);
+        self.run("pause", &self.compose_command(file, project, &args))?;
+        Ok(())
+    }
+
+    fn unpause(&self, file: &Path, project: &str, services: &[&str]) -> Result<(), EngineError> {
+        let mut args = vec!["unpause"];
+        args.extend_from_slice(services);
+        self.run("unpause", &self.compose_command(file, project, &args))?;
+        Ok(())
+    }
+
+    fn kill(&self, file: &Path, project: &str, services: &[&str]) -> Result<(), EngineError> {
+        // `kill` and not `stop --timeout 0`: nothing is asked and nothing is
+        // waited for, which is the whole difference between the emergency
+        // brake and a clean stop (SPEC 4.3).
+        let mut args = vec!["kill"];
+        args.extend_from_slice(services);
+        self.run("kill", &self.compose_command(file, project, &args))?;
+        Ok(())
+    }
+
     fn stop(&self, file: &Path, project: &str, services: &[&str]) -> Result<(), EngineError> {
         let timeout = self.config.stop_timeout.to_string();
         let mut stop = vec!["stop", "--timeout", &timeout];
@@ -226,7 +250,7 @@ impl Engine for Docker {
         let spec = self.engine_command(&[
             "inspect",
             "-f",
-            "{{.State.Running}} {{.State.ExitCode}}",
+            "{{.State.Running}} {{.State.Paused}} {{.State.ExitCode}}",
             container,
         ]);
         let out = self.cli.run(&spec)?;
@@ -238,9 +262,12 @@ impl Engine for Docker {
         }
         let text = String::from_utf8_lossy(&out.stdout);
         let mut fields = text.split_whitespace();
-        match (fields.next(), fields.next()) {
-            (Some("true"), _) => Ok(Liveness::Running),
-            (Some("false"), Some(code)) => code
+        // Measured on Docker 28: a paused container answers `true true 0`, so
+        // reading only the first field reports it as running.
+        match (fields.next(), fields.next(), fields.next()) {
+            (Some("true"), Some("true"), _) => Ok(Liveness::Paused),
+            (Some("true"), _, _) => Ok(Liveness::Running),
+            (Some("false"), _, Some(code)) => code
                 .parse()
                 .map(Liveness::Exited)
                 .map_err(|_| EngineError::Unreadable(text.trim().to_string())),
