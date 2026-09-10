@@ -25,9 +25,10 @@ pub enum Role {
     Security,
 }
 
-/// Where a run works: the slot's tree and the mission folder, as the
-/// container sees them. The harness only needs paths; how they are mounted
-/// is the engine's business (SPEC 4.1, mounts per profile).
+/// Where a run works: the slot's tree and the mission folder, **as the
+/// container sees them** — every path here is a container path, and nothing
+/// on the host may be derived from one. The harness only needs paths; how
+/// they are mounted is the engine's business (SPEC 4.1, mounts per profile).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Workspace {
     /// The slot's working tree inside the container.
@@ -53,6 +54,11 @@ pub struct RunRequest {
     pub session: SessionId,
     /// Whether `session` already exists on the harness side.
     pub resume: bool,
+    /// Where the harness's structured output is written, **as `hq` sees it**
+    /// — a host path, unlike everything in [`Workspace`]. It cannot be in the
+    /// mission folder: that is mounted read-only but for three files (SPEC
+    /// 4.1), and a run in a container could not write there at all.
+    pub runs_dir: PathBuf,
 }
 
 /// A harness session identifier, chosen by `hq`.

@@ -52,6 +52,8 @@ pub struct Service {
     pub healthcheck: Option<Healthcheck>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub volumes: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tmpfs: Vec<String>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub environment: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]

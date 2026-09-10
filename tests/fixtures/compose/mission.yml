@@ -43,6 +43,8 @@ services:
     - /Users/h/.hq/demo/missions/m1/PR.md:/work/mission/PR.md:rw
     - /Users/h/.hq/demo/missions/m1/VERDICT.json:/work/mission/VERDICT.json:rw
     - hq-demo-1-harness:/home/agent/.harness
+    tmpfs:
+    - /run/hq:uid=501,gid=20,mode=0700
     environment:
       HQ_ROLE: coder
     init: true

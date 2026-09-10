@@ -45,6 +45,8 @@ services:
     - /Users/h/.hq/demo/credentials/db.env:/run/hq/credentials/db.env:ro
     - hq-demo-1-harness:/home/agent/.harness
     - hq-demo-1-target:/work/tree/target
+    tmpfs:
+    - /run/hq:uid=501,gid=20,mode=0700
     environment:
       HQ_ROLE: security
     init: true

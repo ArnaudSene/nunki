@@ -106,7 +106,7 @@ fn live_the_firewall_holds() {
     };
 
     let file = dir.path().join("mission.yml");
-    std::fs::write(&file, generate(&plan).unwrap()).unwrap();
+    std::fs::write(&file, generate(&plan, &dialect()).unwrap()).unwrap();
 
     let project = project_name(SLOT).unwrap();
     down(&file, &project);
@@ -264,7 +264,7 @@ fn live_a_declared_service_is_reachable_and_nothing_else_is() {
     };
 
     let file = dir.path().join("system.yml");
-    std::fs::write(&file, generate(&plan).unwrap()).unwrap();
+    std::fs::write(&file, generate(&plan, &dialect()).unwrap()).unwrap();
     let project = project_name("fwlivesys").unwrap();
     down(&file, &project);
     let up = compose(&file, &project, &["up", "-d", "--wait"]);
@@ -350,5 +350,15 @@ fn the_build_context_travels_in_the_binary() {
                 "{script} must come out executable, got {mode:o}"
             );
         }
+    }
+}
+
+/// The engine's dialect, which the generator needs and must not spell
+/// itself. Docker's, since Docker is the first version's only target.
+fn dialect() -> hq::engine::Dialect {
+    hq::engine::Dialect {
+        netns: hq::engine::Netns::Service,
+        host_alias: "host.docker.internal".to_string(),
+        userns: None,
     }
 }

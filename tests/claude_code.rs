@@ -15,14 +15,17 @@ use hq::harness::{
 fn request(resume: bool) -> RunRequest {
     RunRequest {
         role: Role::Coder,
+        // Container paths, all of them.
         workspace: Workspace {
             tree: PathBuf::from("/work/tree"),
-            mission_dir: PathBuf::from("/work/missions/m1"),
+            mission_dir: PathBuf::from("/work/mission"),
         },
         lot: "L2".into(),
         attempt: 1,
         session: SessionId("11111111-2222-4333-8444-555555555555".into()),
         resume,
+        // A host path, and deliberately not under the mission folder.
+        runs_dir: PathBuf::from("/hq/demo/missions/m1/runs"),
     }
 }
 
@@ -68,7 +71,9 @@ fn the_command_line_is_headless_refuses_prompts_and_never_bare() {
     assert!(!cmd.env.contains_key("CLAUDE_CONFIG_DIR"));
     // The lot and the mission folder reach the agent in its first message.
     let last = cmd.args.last().unwrap();
-    assert!(last.contains("lot `L2`") && last.contains("/work/missions/m1"));
+    // The agent is told the container's path, not the host's: what it
+    // reads is what it is handed.
+    assert!(last.contains("lot `L2`") && last.contains("/work/mission"));
 }
 
 #[test]
@@ -242,10 +247,22 @@ impl Spawner for Recording {
             container: "c1".into(),
         })
     }
+
+    fn alive(&self, _spawned: &Spawned) -> std::io::Result<bool> {
+        Ok(false)
+    }
+
+    fn signal(
+        &self,
+        _spawned: &Spawned,
+        _signal: hq::harness::spawn::Signal,
+    ) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 #[test]
-fn launch_writes_the_log_under_the_mission_folder_and_keeps_the_handle_persistable() {
+fn launch_writes_the_log_where_hq_can_read_it_not_where_the_agent_runs() {
     let rec = std::sync::Arc::new(Recording(Default::default()));
     let hq = ClaudeCode::new(Config::default(), Box::new(RecordingRef(rec.clone())));
     let handle = hq
@@ -255,10 +272,14 @@ fn launch_writes_the_log_under_the_mission_folder_and_keeps_the_handle_persistab
             &Exposure::SystemPromptFile("/r.md".into()),
         )
         .unwrap();
+    // The host's runs directory, never the container's mission folder: that
+    // one is mounted read-only but for three files, and its path means
+    // nothing on this side of the mount.
     assert_eq!(
         handle.log,
-        PathBuf::from("/work/missions/m1/runs/11111111-2222-4333-8444-555555555555.jsonl")
+        PathBuf::from("/hq/demo/missions/m1/runs/11111111-2222-4333-8444-555555555555.jsonl")
     );
+    assert!(!handle.log.starts_with("/work"), "{:?}", handle.log);
     assert_eq!(handle.container, "c1");
     let calls = rec.0.lock().unwrap();
     assert_eq!(calls.len(), 1);
@@ -271,6 +292,14 @@ struct RecordingRef(std::sync::Arc<Recording>);
 impl Spawner for RecordingRef {
     fn spawn(&self, cmd: &CommandSpec, log: &std::path::Path) -> std::io::Result<Spawned> {
         self.0.spawn(cmd, log)
+    }
+
+    fn alive(&self, spawned: &Spawned) -> std::io::Result<bool> {
+        self.0.alive(spawned)
+    }
+
+    fn signal(&self, spawned: &Spawned, signal: hq::harness::spawn::Signal) -> std::io::Result<()> {
+        self.0.signal(spawned, signal)
     }
 }
 
@@ -301,6 +330,9 @@ fn live_a_real_headless_run_finishes_with_a_result() {
             mission_dir: dir.path().join("m"),
         },
         session: SessionId(uuid_v4()),
+        // A run on the host: the container view and the host view coincide
+        // here, and both have to be said rather than derived from each other.
+        runs_dir: dir.path().join("runs"),
         ..request(false)
     };
     let exposure = Exposure::UserMessage("Reply with exactly the word OK and nothing else.".into());
