@@ -88,6 +88,14 @@ is worth**. Applied to our own work:
 
 - A test needing a container engine must **skip cleanly** without one, not
   fail: CI runs on macOS where there is none.
+- Tests that drive a container engine honour `HQ_COMPOSE`, so the same
+  battery can be replayed under another version. The development machine and
+  CI are three major versions apart on purpose — that gap is the only
+  cross-version coverage this project has:
+
+  ```sh
+  HQ_COMPOSE=/path/to/docker-compose-2.38.2 cargo test --test firewall -- --ignored
+  ```
 - Never weaken a test to make it pass. If a test is wrong, fix the test in
   its own commit and say why it was wrong.
 

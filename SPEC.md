@@ -750,6 +750,25 @@ et qui se vérifie en CI sur les deux :
 | tmux | inutile sur l'hôte | inutile sur l'hôte | ne sert que **dans l'image**, comme dernier recours de `state()` pour un harnais sans sortie structurée ; c'est le Dockerfile qui l'installe |
 | CI | un runner macOS avec un moteur de conteneurs installé par la CI elle-même | un runner Linux | les tests d'intégration de `hq` tournent sur les deux ; ceux qui ont besoin d'un moteur sont marqués et sautent proprement sans lui |
 
+**Deux versions de Compose, et c'est tant mieux.** Constaté par Arnaud le
+2026-09-09 en lisant les journaux de la CI : sa machine porte **Compose
+v5.1.2** (moteur 29.4.0), le coureur Ubuntu de GitHub en porte **v2.38.2** —
+trois versions majeures d'écart. Plutôt que d'aligner les deux, on garde
+l'écart et on s'en sert : c'est la seule couverture inter-versions qu'on
+aura, et elle correspond à la réalité des machines qu'`hq` rencontrera.
+
+Ce qui a été **refait à l'identique sur la v2.38.2**, le même jour : les trois
+profils générés sont acceptés ; le pare-feu pose ses règles, passe *healthy*,
+et l'agent démarre ensuite ; `network_mode` et `networks` restent mutuellement
+exclusifs, au mot près ; un changement de profil sous un nom de projet stable
+laisse le conteneur du service intact. Et la **batterie vivante entière** —
+les deux profils, les onze sondes — passe sous les deux versions.
+
+Ce que ça impose : **v2.38 est le plancher** tant que rien n'exige plus
+récent, et les tests qui touchent un moteur acceptent `HQ_COMPOSE` pour être
+rejoués sous une autre commande que `docker compose`. Un jour où une des deux
+versions divergera, c'est un test qui le dira, pas un utilisateur.
+
 ### 4.3 Les adaptateurs — un par harnais
 
 Tranché par Arnaud le 2026-09-09, après avoir posé comment il travaille

@@ -421,18 +421,31 @@ struct Engine;
 
 impl Engine {
     fn config(&self, file: &Path) -> std::process::Output {
-        std::process::Command::new("docker")
-            .args(["compose", "-f"])
+        let (program, leading) = compose_command();
+        std::process::Command::new(program)
+            .args(leading)
+            .args(["-f"])
             .arg(file)
             .arg("config")
             .output()
-            .expect("docker is on the path")
+            .expect("the compose command is on the path")
     }
 }
 
+/// `docker compose` by default; `HQ_COMPOSE` overrides it, so the same
+/// checks can be run against another version of the engine.
+fn compose_command() -> (String, Vec<String>) {
+    let raw = std::env::var("HQ_COMPOSE").unwrap_or_else(|_| "docker compose".to_string());
+    let mut words = raw.split_whitespace().map(str::to_string);
+    let program = words.next().expect("HQ_COMPOSE must name a program");
+    (program, words.collect())
+}
+
 fn engine() -> Option<Engine> {
-    let ok = std::process::Command::new("docker")
-        .args(["compose", "version"])
+    let (program, leading) = compose_command();
+    let ok = std::process::Command::new(program)
+        .args(leading)
+        .arg("version")
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false);

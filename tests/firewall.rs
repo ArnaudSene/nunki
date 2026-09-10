@@ -23,11 +23,23 @@ const ALLOWED: &str = "example.com";
 
 /// The address a container of this project got, so a probe can try to reach
 /// it by number.
-fn address_of(project: &str, service: &str) -> String {
-    let id = Command::new("docker")
-        .args(["compose", "-p", project, "ps", "-q", service])
+fn compose_version() -> String {
+    let (program, leading) = compose_command();
+    let out = Command::new(program)
+        .args(leading)
+        .arg("version")
         .output()
-        .expect("docker is on the path");
+        .expect("the compose command is on the path");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+fn address_of(project: &str, service: &str) -> String {
+    let (program, leading) = compose_command();
+    let id = Command::new(program)
+        .args(leading)
+        .args(["-p", project, "ps", "-q", service])
+        .output()
+        .expect("the compose command is on the path");
     let id = String::from_utf8_lossy(&id.stdout).trim().to_string();
     assert!(!id.is_empty(), "{service} has no container");
     let out = Command::new("docker")
@@ -165,6 +177,7 @@ fn build_image() -> tempfile::TempDir {
         .arg(context.path())
         .output()
         .expect("docker is on the path");
+    println!("built {FIREWALL_IMAGE} for {}", compose_version());
     assert!(
         out.status.success(),
         "building the sidecar failed:\n{}",
@@ -174,12 +187,25 @@ fn build_image() -> tempfile::TempDir {
 }
 
 fn compose(file: &Path, project: &str, args: &[&str]) -> std::process::Output {
-    Command::new("docker")
-        .args(["compose", "-p", project, "-f"])
+    let (program, leading) = compose_command();
+    Command::new(program)
+        .args(leading)
+        .args(["-p", project, "-f"])
         .arg(file)
         .args(args)
         .output()
-        .expect("docker is on the path")
+        .expect("the compose command is on the path")
+}
+
+/// `docker compose` by default; `HQ_COMPOSE` overrides it with a whole
+/// command line. That is how the same battery gets run against another
+/// version of the engine — the development machine and CI are three major
+/// versions apart, and SPEC 4.2 bis promises portability, not one machine.
+fn compose_command() -> (String, Vec<String>) {
+    let raw = std::env::var("HQ_COMPOSE").unwrap_or_else(|_| "docker compose".to_string());
+    let mut words = raw.split_whitespace().map(str::to_string);
+    let program = words.next().expect("HQ_COMPOSE must name a program");
+    (program, words.collect())
 }
 
 fn down(file: &Path, project: &str) {
