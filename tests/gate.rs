@@ -99,6 +99,8 @@ struct Fixture {
     _dir: tempfile::TempDir,
     tree: PathBuf,
     journal: PathBuf,
+    pr: PathBuf,
+    verdict: PathBuf,
     header: Header,
     protected: ProtectedPaths,
     branches: Vec<String>,
@@ -109,7 +111,11 @@ impl Fixture {
         let dir = tempfile::tempdir().unwrap();
         let tree = repo(dir.path());
         let journal = journal(dir.path(), "0000000");
+        let pr = dir.path().join("PR.md");
+        let verdict = dir.path().join("VERDICT.json");
         Self {
+            pr,
+            verdict,
             _dir: dir,
             tree,
             journal,
@@ -131,10 +137,12 @@ impl Fixture {
     }
 
     fn gates(&self, role: Role) -> gate::Report {
-        gate::run(&Subject {
+        gate::after_run(&Subject {
             role,
             tree: &self.tree,
             journal: &self.journal,
+            pr: &self.pr,
+            verdict: &self.verdict,
             header: &self.header,
             protected_branches: &self.branches,
             protected_paths: &self.protected,
@@ -457,4 +465,356 @@ fn the_report_names_the_first_red_gate_in_specification_order() {
     f.journal_names_head();
     let failure = f.gates(Role::Coder).failure().expect("it is red");
     assert!(failure.starts_with("gate 1 "), "{failure}");
+}
+
+// ---------------------------------------------------------------------------
+// Gates 5 and 6, the final verification's own (SPEC 4.4).
+// ---------------------------------------------------------------------------
+
+impl Fixture {
+    /// The gates of the final verification, against a slot whose profile is
+    /// not up. Gate 6 cannot be played then, and says so — which is exactly
+    /// what these tests need in order to judge gate 5 on its own.
+    fn verification(&self, role: Role) -> gate::Report {
+        let hq = self._dir.path().join("hq");
+        let project = hq::project::Project::at(
+            self._dir.path().join("repo"),
+            hq::project::Config {
+                harness: "claude-code".into(),
+                forge: vec![],
+                stacks: vec!["rust".into()],
+                protected_branches: self.branches.clone(),
+                protected_paths: Default::default(),
+                account: None,
+                bounds: Default::default(),
+                credentials: None,
+                run: None,
+            },
+            hq,
+        );
+        let slot = hq::slot::Slot {
+            name: "nowhere".into(),
+            tree: self.tree.clone(),
+        };
+        gate::at_verification(
+            &Subject {
+                role,
+                tree: &self.tree,
+                journal: &self.journal,
+                pr: &self.pr,
+                verdict: &self.verdict,
+                header: &self.header,
+                protected_branches: &self.branches,
+                protected_paths: &self.protected,
+            },
+            &gate::Verification {
+                project: &project,
+                slot: &slot,
+                engine: std::sync::Arc::new(hq::engine::fake::FakeEngine::default()),
+                stack: "rust",
+            },
+        )
+        .unwrap()
+    }
+
+    fn at_verification(&self, role: Role, gate: Gate) -> Decision {
+        self.verification(role)
+            .outcomes
+            .into_iter()
+            .find(|o| o.gate == gate)
+            .expect("every gate is reported")
+            .decision
+    }
+}
+
+#[test]
+fn the_deliverable_is_the_pull_request_and_an_empty_one_is_not_one() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.journal_names_head();
+
+    // Never written at all, and written empty, are the same thing.
+    match f.at_verification(Role::Coder, Gate::Deliverable) {
+        Decision::Failed(why) => assert!(why.contains("PR.md"), "{why}"),
+        other => panic!("a mission with no pull request has no deliverable: {other:?}"),
+    }
+    std::fs::write(&f.pr, "   \n\n").unwrap();
+    assert!(matches!(
+        f.at_verification(Role::Coder, Gate::Deliverable),
+        Decision::Failed(_)
+    ));
+
+    std::fs::write(&f.pr, "# What this changes\n\nA thing.\n").unwrap();
+    assert_eq!(
+        f.at_verification(Role::Coder, Gate::Deliverable),
+        Decision::Passed
+    );
+}
+
+/// The integrator completes the coder's pull request, and "completed" is
+/// decided by a heading — a gate that needs a reader is not a gate.
+#[test]
+fn the_integrator_owes_its_own_section_of_the_pull_request() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.journal_names_head();
+    std::fs::write(&f.pr, "# What this changes\n\nA thing.\n").unwrap();
+    match f.at_verification(Role::Integrator, Gate::Deliverable) {
+        Decision::Failed(why) => assert!(why.contains("Integration"), "{why}"),
+        other => panic!("the coder's pull request alone is not the integrator's: {other:?}"),
+    }
+    std::fs::write(
+        &f.pr,
+        "# What this changes\n\nA thing.\n\n## Integration\n\nWired to the database.\n",
+    )
+    .unwrap();
+    assert_eq!(
+        f.at_verification(Role::Integrator, Gate::Deliverable),
+        Decision::Passed
+    );
+}
+
+/// The security agent commits nothing, so its deliverable is its report —
+/// and a verdict without one is a verdict about nothing.
+#[test]
+fn the_security_agents_deliverable_is_its_report_not_a_pull_request() {
+    let f = Fixture::new();
+    f.journal_names_head();
+    std::fs::write(&f.pr, "# a pull request it did not write\n").unwrap();
+    match f.at_verification(Role::Security, Gate::Deliverable) {
+        Decision::Failed(why) => assert!(why.contains("VERDICT.json"), "{why}"),
+        other => panic!("a pull request is not the security agent's deliverable: {other:?}"),
+    }
+
+    std::fs::write(
+        &f.verdict,
+        r#"{"role":"Security","verdict":"CLEAR","head":"abc","date":"2026-09-10","report":""}"#,
+    )
+    .unwrap();
+    match f.at_verification(Role::Security, Gate::Deliverable) {
+        Decision::Failed(why) => assert!(why.contains("report"), "{why}"),
+        other => panic!("a verdict without a report is not a report: {other:?}"),
+    }
+
+    std::fs::write(
+        &f.verdict,
+        r#"{"role":"Security","verdict":"CLEAR","head":"abc","date":"2026-09-10",
+            "report":"Nothing reachable was exploitable; the admin panel was not looked at."}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        f.at_verification(Role::Security, Gate::Deliverable),
+        Decision::Passed
+    );
+}
+
+/// A battery nobody could run is not a battery that passed, and it is not a
+/// battery that failed either. The distinction is the whole point: red blames
+/// the agent, and a profile that is not up is not the agent's doing.
+#[test]
+fn a_battery_that_could_not_be_run_is_neither_green_nor_red() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.journal_names_head();
+    std::fs::write(&f.pr, "# What this changes\n").unwrap();
+
+    match f.at_verification(Role::Coder, Gate::Battery) {
+        Decision::Unplayed(why) => assert!(why.contains("hq mission start"), "{why}"),
+        other => panic!("no profile is up, so nothing ran: {other:?}"),
+    }
+    // And a report with a gate nobody played is not a green report.
+    let report = f.verification(Role::Coder);
+    assert!(!report.passed());
+    assert!(
+        report.failure().unwrap().contains("could not be played"),
+        "{:?}",
+        report.failure()
+    );
+}
+
+#[test]
+fn the_security_agent_owes_findings_and_not_a_green_battery() {
+    let f = Fixture::new();
+    f.journal_names_head();
+    match f.at_verification(Role::Security, Gate::Battery) {
+        Decision::NotApplicable(why) => assert!(why.contains("findings"), "{why}"),
+        other => panic!("gate 6 does not apply to the security agent: {other:?}"),
+    }
+}
+
+/// Gate 6 against a real container, which is the only place it means
+/// anything: the battery runs on the clean copy of `HEAD`, and what is being
+/// judged is the committed script, not the one in the tree.
+///
+/// ```text
+/// cargo test --test gate -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "lifts real containers; run by hand"]
+fn live_the_battery_is_the_committed_one_and_an_absent_one_is_red() {
+    let dir = tempfile::tempdir().unwrap();
+    let tree = dir.path().join("tree");
+    std::fs::create_dir_all(&tree).unwrap();
+    git(&tree, &["init", "-q", "-b", "work"]);
+    write(&tree, "src/lib.rs", "pub fn one() -> u8 { 1 }\n");
+    git(&tree, &["add", "-A"]);
+    git(&tree, &["commit", "-q", "-m", "base"]);
+    git(&tree, &["branch", "-q", "dev"]);
+    git(&tree, &["checkout", "-q", "-b", "mission/x"]);
+
+    let project = hq::project::Project::at(
+        dir.path().join("repo"),
+        hq::project::Config {
+            harness: "claude-code".into(),
+            forge: vec![],
+            stacks: vec!["rust".into()],
+            protected_branches: vec!["main".into(), "dev".into()],
+            protected_paths: Default::default(),
+            account: None,
+            bounds: Default::default(),
+            credentials: None,
+            run: None,
+        },
+        dir.path().join("hq"),
+    );
+    let slot = hq::slot::Slot {
+        name: "gatelive".into(),
+        tree: tree.clone(),
+    };
+    // The same shape as `tests/exec.rs`: alpine plus git, because the copy of
+    // HEAD is made with git inside the container. What is being proved here
+    // is which script runs, not what a stack image carries.
+    let volume = hq::exec::proof_volume(&slot.name);
+    let file = hq::run::profile_path(&project, &slot.name);
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(
+        &file,
+        format!(
+            "services:\n\
+             \x20 agent:\n\
+             \x20   image: alpine:3.20\n\
+             \x20   volumes:\n\
+             \x20     - {tree}:{tree_at}\n\
+             \x20     - {volume}:{proof}\n\
+             \x20   command: [\"sh\", \"-c\", \"apk add --no-cache git > /dev/null && \
+             sleep 600\"]\n\
+             \x20   healthcheck:\n\
+             \x20     test: [\"CMD-SHELL\", \"command -v git > /dev/null\"]\n\
+             \x20     interval: 1s\n\
+             \x20     timeout: 2s\n\
+             \x20     retries: 60\n\
+             \x20     start_period: 1s\n\
+             volumes:\n\
+             \x20 {volume}:\n",
+            tree = tree.display(),
+            tree_at = hq::run::TREE_AT,
+            proof = hq::exec::PROOF_AT,
+        ),
+    )
+    .unwrap();
+
+    let engine: std::sync::Arc<dyn hq::engine::Engine> =
+        std::sync::Arc::new(hq::engine::docker::Docker::real());
+    let compose_project = hq::compose::project_name(&slot.name).unwrap();
+    let _ = engine.down(&file, &compose_project, true);
+    engine.up(&file, &compose_project).unwrap();
+
+    let journal = dir.path().join("JOURNAL.md");
+    let pr = dir.path().join("PR.md");
+    std::fs::write(&pr, "# What this changes\n").unwrap();
+    let verdict = dir.path().join("VERDICT.json");
+    let header = header();
+    let branches = vec!["main".to_string(), "dev".to_string()];
+    let protected = ProtectedPaths::default();
+
+    let battery = |body: &str, executable: bool| {
+        let at = tree.join(".hq/stacks/rust/prepush.sh");
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::fs::write(&at, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = if executable { 0o755 } else { 0o644 };
+            std::fs::set_permissions(&at, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+        git(&tree, &["add", "-A"]);
+        git(&tree, &["commit", "-q", "-m", "the battery"]);
+        std::fs::write(
+            &journal,
+            format!(
+                "# Journal\n\n## ÉTAT DE REPRISE\n\nHEAD is `{}`.\n",
+                git(&tree, &["rev-parse", "HEAD"])
+            ),
+        )
+        .unwrap();
+    };
+
+    let played = |role: Role| {
+        gate::at_verification(
+            &Subject {
+                role,
+                tree: &tree,
+                journal: &journal,
+                pr: &pr,
+                verdict: &verdict,
+                header: &header,
+                protected_branches: &branches,
+                protected_paths: &protected,
+            },
+            &gate::Verification {
+                project: &project,
+                slot: &slot,
+                engine: engine.clone(),
+                stack: "rust",
+            },
+        )
+        .unwrap()
+        .outcomes
+        .into_iter()
+        .find(|o| o.gate == Gate::Battery)
+        .unwrap()
+        .decision
+    };
+
+    // No battery on this commit at all.
+    std::fs::write(&journal, "# Journal\n\n## ÉTAT DE REPRISE\n\n").unwrap();
+    write(&tree, "note.md", "a lot\n");
+    git(&tree, &["add", "-A"]);
+    git(&tree, &["commit", "-q", "-m", "a lot"]);
+    match played(Role::Coder) {
+        Decision::Failed(why) => assert!(why.contains("no battery"), "{why}"),
+        other => panic!("a proof nobody can run is not one that passed: {other:?}"),
+    }
+
+    // Present and executable and green.
+    battery("#!/bin/sh\nset -eu\ntest -f src/lib.rs\n", true);
+    assert_eq!(played(Role::Coder), Decision::Passed);
+
+    // Present, executable and red — and the reason carries what it said.
+    battery("#!/bin/sh\necho 'two tests failed' >&2\nexit 1\n", true);
+    match played(Role::Coder) {
+        Decision::Failed(why) => {
+            assert!(why.contains("came back 1"), "{why}");
+            assert!(why.contains("two tests failed"), "{why}");
+        }
+        other => panic!("a red battery is red: {other:?}"),
+    }
+
+    // Present and not executable: red, and said differently, because it
+    // sends a human somewhere else (SPEC 4.4).
+    battery("#!/bin/sh\nexit 0\n", false);
+    match played(Role::Coder) {
+        Decision::Failed(why) => assert!(why.contains("not executable"), "{why}"),
+        other => panic!("nothing ran, so nothing passed: {other:?}"),
+    }
+
+    // The integrator's battery is not the coder's, and this stack declares
+    // none — red by the same rule.
+    battery("#!/bin/sh\nexit 0\n", true);
+    match played(Role::Integrator) {
+        Decision::Failed(why) => assert!(why.contains("system.sh"), "{why}"),
+        other => panic!("the integrator's gate 6 is its system tests: {other:?}"),
+    }
+
+    engine.down(&file, &compose_project, true).unwrap();
 }

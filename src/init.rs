@@ -215,8 +215,14 @@ protected_branches:
   - dev
 
 protected_paths:
-  # Refused outright.
-  refuse: []
+  # Refused outright. `.hq/**` is here from the start and should stay: it
+  # holds the battery gate 6 replays, the allowlist the firewall is built
+  # from and the Dockerfile the agent runs in — the three things that judge
+  # and fence an agent are not that agent's to rewrite. The integrator may
+  # still amend its launch script there: its own gate 4 is the wiring list
+  # its mission declares, not this one. Add your own paths below.
+  refuse:
+    - .hq/**
   # Refused only where the file already exists on the base.
   refuse_if_exists: []
 "

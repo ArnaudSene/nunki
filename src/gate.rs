@@ -1,10 +1,12 @@
-//! The verification gates (SPEC 4.4), gates 1 to 4.
+//! The verification gates (SPEC 4.4).
 //!
-//! These four are played **at the end of every run**, not only at the final
+//! Gates **1 to 4** are played at the end of every run, not only at the final
 //! verification — decided on 2026-09-09, because a perimeter gate that only
 //! falls at the end loses a six-hour mission over a forbidden write in the
-//! first lot. Gates 5 to 7 (deliverable, battery, mutation) belong to the
-//! final verification and need `hq exec`; they are not here.
+//! first lot. Gates **5 and 6** — the deliverable and the battery — are
+//! played at the final verification, and need a way into the slot's
+//! container. Gate 7, the mutation campaign, is long enough to be watched
+//! like a run and is not here yet.
 //!
 //! Everything in this module is deterministic and reads git. Nothing is
 //! asked of an agent: a gate an agent could answer is not a gate.
@@ -35,6 +37,10 @@ pub enum Gate {
     ResumeNamesHead,
     /// 4 — the perimeter, on the diff **and commit by commit**.
     Perimeter,
+    /// 5 — the deliverable this role owes.
+    Deliverable,
+    /// 6 — the battery, green, on the clean copy of `HEAD`.
+    Battery,
 }
 
 impl Gate {
@@ -46,6 +52,8 @@ impl Gate {
             Gate::BranchAhead => 2,
             Gate::ResumeNamesHead => 3,
             Gate::Perimeter => 4,
+            Gate::Deliverable => 5,
+            Gate::Battery => 6,
         }
     }
 
@@ -55,6 +63,8 @@ impl Gate {
             Gate::BranchAhead => "branch not protected and ahead of its base",
             Gate::ResumeNamesHead => "the resume block names HEAD",
             Gate::Perimeter => "perimeter",
+            Gate::Deliverable => "the deliverable is there",
+            Gate::Battery => "the battery is green",
         }
     }
 }
@@ -70,6 +80,12 @@ pub enum Decision {
     /// Reported as itself: a skipped gate described as green is how a report
     /// stops being worth reading.
     NotApplicable(String),
+    /// The gate applies and could not be played at all — no profile up, no
+    /// engine. Neither green nor red: a check that cannot say "I do not
+    /// know" will lie, and the lie here would blame an agent for a machine
+    /// (AGENTS.md § 4, learned the hard way on liveness). A mission is not
+    /// verified over a gate nobody managed to run.
+    Unplayed(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,17 +103,23 @@ pub struct Report {
 }
 
 impl Report {
-    /// The first red gate, in specification order. The flow needs one
-    /// sentence (`GatesFailed { reason }`); a human needs the whole report,
-    /// which is why both exist.
+    /// The first gate that stops this report being green, in specification
+    /// order — red, or never played at all. The flow needs one sentence
+    /// (`GatesFailed { reason }`); a human needs the whole report, which is
+    /// why both exist.
     pub fn failure(&self) -> Option<String> {
-        self.outcomes.iter().find_map(|o| match &o.decision {
-            Decision::Failed(why) => Some(format!(
-                "gate {} ({}): {why}",
-                o.gate.number(),
-                o.gate.title()
-            )),
-            _ => None,
+        self.outcomes.iter().find_map(|o| {
+            let (number, title) = (o.gate.number(), o.gate.title());
+            match &o.decision {
+                Decision::Failed(why) => Some(format!("gate {number} ({title}): {why}")),
+                // Not the same sentence, and not the same kind of fact: one
+                // is about the work, the other about the machine. But
+                // neither is a green report.
+                Decision::Unplayed(why) => Some(format!(
+                    "gate {number} ({title}) could not be played: {why}"
+                )),
+                _ => None,
+            }
         })
     }
 
@@ -127,15 +149,45 @@ pub struct Subject<'a> {
     pub tree: &'a Path,
     /// The mission's journal, on the host.
     pub journal: &'a Path,
+    /// The mission's `PR.md`, on the host — the coder's and the integrator's
+    /// deliverable (SPEC 4.4, gate 5).
+    pub pr: &'a Path,
+    /// The mission's `VERDICT.json`, on the host — where the security
+    /// agent's report lives, because it commits nothing.
+    pub verdict: &'a Path,
     pub header: &'a Header,
     pub protected_branches: &'a [String],
     pub protected_paths: &'a ProtectedPaths,
 }
 
+/// What gates 5 and 6 need beyond the tree: a way into the slot's container,
+/// because a battery is replayed there and nowhere else (SPEC 4.4).
+pub struct Verification<'a> {
+    pub project: &'a crate::project::Project,
+    pub slot: &'a crate::slot::Slot,
+    pub engine: std::sync::Arc<dyn crate::engine::Engine>,
+    /// Which stack fragment declares the battery.
+    pub stack: &'a str,
+}
+
 /// Play gates 1 to 4 for one run.
-pub fn run(subject: &Subject) -> Result<Report, GateError> {
+pub fn after_run(subject: &Subject) -> Result<Report, GateError> {
+    play(subject, None)
+}
+
+/// Play every gate that exists today: 1 to 4, then the deliverable and the
+/// battery. Gate 7 is not here yet, and this says so rather than implying a
+/// complete verification.
+pub fn at_verification(
+    subject: &Subject,
+    verification: &Verification,
+) -> Result<Report, GateError> {
+    play(subject, Some(verification))
+}
+
+fn play(subject: &Subject, verification: Option<&Verification>) -> Result<Report, GateError> {
     let head = git::head(subject.tree)?;
-    let outcomes = vec![
+    let mut outcomes = vec![
         Outcome {
             gate: Gate::CleanTree,
             decision: clean_tree(subject)?,
@@ -153,6 +205,16 @@ pub fn run(subject: &Subject) -> Result<Report, GateError> {
             decision: perimeter(subject)?,
         },
     ];
+    if let Some(verification) = verification {
+        outcomes.push(Outcome {
+            gate: Gate::Deliverable,
+            decision: deliverable(subject)?,
+        });
+        outcomes.push(Outcome {
+            gate: Gate::Battery,
+            decision: battery(subject, verification)?,
+        });
+    }
     Ok(Report {
         role: subject.role,
         head,
@@ -434,4 +496,157 @@ fn compile(patterns: &[String]) -> Result<GlobSet, GateError> {
         pattern: patterns.join(", "),
         source,
     })
+}
+
+/// Gate 5: the deliverable this role owes (SPEC 4.4, the per-role table).
+///
+/// The coder and the integrator owe `PR.md` — the integrator's completed with
+/// its own section, and "completed" is decided mechanically, by a heading,
+/// because a gate that needs a reader is not a gate. The security agent
+/// commits nothing, so what it owes is its report, inside `VERDICT.json`.
+fn deliverable(subject: &Subject) -> Result<Decision, GateError> {
+    if subject.role == Role::Security {
+        let text = read(subject.verdict)?;
+        if text.trim().is_empty() {
+            return Ok(Decision::Failed(format!(
+                "{} is empty: the security agent's deliverable is its report, and it \
+                 writes it there",
+                subject.verdict.display()
+            )));
+        }
+        let file: crate::mission::VerdictFile = match serde_json::from_str(&text) {
+            Ok(f) => f,
+            Err(e) => {
+                return Ok(Decision::Failed(format!(
+                    "{} is not a verdict `hq` can read: {e}",
+                    subject.verdict.display()
+                )));
+            }
+        };
+        if file.report.trim().is_empty() {
+            return Ok(Decision::Failed(format!(
+                "{} carries a verdict but no report, and the report is the deliverable",
+                subject.verdict.display()
+            )));
+        }
+        return Ok(Decision::Passed);
+    }
+
+    let text = read(subject.pr)?;
+    if text.trim().is_empty() {
+        return Ok(Decision::Failed(format!(
+            "{} is empty: a mission's deliverable is the pull request it describes",
+            subject.pr.display()
+        )));
+    }
+    if subject.role == Role::Integrator && !has_heading(&text, "integration") {
+        return Ok(Decision::Failed(format!(
+            "{} has no `Integration` heading: the integrator completes the coder's \
+             pull request with its own section, and that heading is how `hq` sees it",
+            subject.pr.display()
+        )));
+    }
+    Ok(Decision::Passed)
+}
+
+/// A markdown heading whose text begins with `word`, case-insensitively.
+fn has_heading(text: &str, word: &str) -> bool {
+    text.lines().any(|line| {
+        let line = line.trim();
+        let hashes = line.chars().take_while(|c| *c == '#').count();
+        hashes > 0 && line[hashes..].trim().to_lowercase().starts_with(word)
+    })
+}
+
+/// Where a stack fragment declares what must be silent before anything leaves
+/// a slot, and where an integration mission declares its system tests. Paths
+/// **inside the tree**, because they are committed and therefore judged as
+/// part of what is delivered.
+pub const BATTERY: &str = "prepush.sh";
+pub const SYSTEM_BATTERY: &str = "system.sh";
+
+/// Gate 6: the battery, green, on the clean copy of `HEAD`.
+///
+/// Two things SPEC 4.4 is explicit about. A battery that is **absent or not
+/// executable** makes the gate fail; it does not make it skip — a proof
+/// nobody can run is not a proof that passed. And it runs on the copy of
+/// `HEAD` (`hq exec`), never in the tree the agent has been living in.
+///
+/// The integrator's battery is not the coder's: SPEC 4.4 says its gate 6 is
+/// **its system tests, in the system profile**. It is declared separately,
+/// and a stack that declares none fails this gate by the same rule.
+fn battery(subject: &Subject, verification: &Verification) -> Result<Decision, GateError> {
+    if subject.role == Role::Security {
+        return Ok(Decision::NotApplicable(
+            "the security agent attacks what is built; it owes findings, not a green \
+             battery"
+                .into(),
+        ));
+    }
+    let script = match subject.role {
+        Role::Integrator => SYSTEM_BATTERY,
+        _ => BATTERY,
+    };
+    let at = format!(
+        "{}/stacks/{}/{script}",
+        crate::project::FRAGMENTS_DIR,
+        verification.stack
+    );
+    // Absent, not executable, or its own status — told apart, because
+    // "the gate is red" and "there was nothing to run" send a human to
+    // different places.
+    let probe = format!(
+        "if [ ! -f {at} ]; then exit 66; fi\n\
+         if [ ! -x {at} ]; then exit 67; fi\n\
+         exec ./{at}\n"
+    );
+    let out = crate::exec::run(
+        verification.project,
+        verification.slot,
+        verification.engine.clone(),
+        &["sh".to_string(), "-c".to_string(), probe],
+        crate::exec::On::Proof,
+    );
+    let out = match out {
+        Ok(out) => out,
+        // Not red: red would be a verdict on the agent, and this is a
+        // verdict on the machine.
+        Err(e) => return Ok(Decision::Unplayed(e.to_string())),
+    };
+    match out.status {
+        0 => Ok(Decision::Passed),
+        66 => Ok(Decision::Failed(format!(
+            "there is no battery at {at} on this commit — a proof nobody can run is \
+             not a proof that passed (SPEC 4.4)"
+        ))),
+        67 => Ok(Decision::Failed(format!(
+            "{at} is not executable on this commit, so nothing ran"
+        ))),
+        status => Ok(Decision::Failed(format!(
+            "the battery came back {status}:\n{}",
+            tail(&out.stderr, &out.stdout)
+        ))),
+    }
+}
+
+/// The last lines a human needs, from whichever stream said something.
+fn tail(stderr: &str, stdout: &str) -> String {
+    let text = if stderr.trim().is_empty() {
+        stdout
+    } else {
+        stderr
+    };
+    let lines: Vec<&str> = text.lines().collect();
+    let from = lines.len().saturating_sub(20);
+    lines[from..].join("\n")
+}
+
+fn read(path: &Path) -> Result<String, GateError> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(text),
+        // A file the agent never wrote reads as an empty deliverable, which
+        // is what it is.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(GateError::Unreadable(path.to_path_buf(), e)),
+    }
 }
