@@ -31,8 +31,22 @@ pub struct Service {
 pub enum Integration {
     /// No integration mission; the reason is written at framing.
     None { reason: String },
-    /// An integration mission on the system profile, reaching these services.
-    Services { services: Vec<Service> },
+    /// An integration mission on the system profile, reaching these
+    /// services, and allowed to commit exactly `wiring`.
+    Services {
+        services: Vec<Service>,
+        /// The paths the integrator's commits may touch — configuration,
+        /// system tests, fixtures, migrations. SPEC 4.4 defines "wiring"
+        /// mechanically as this list and nothing else: **every commit
+        /// outside it is out of perimeter**. It is the integrator's gate 4,
+        /// and it is an allowlist, the inverse of the coder's.
+        ///
+        /// Empty means the integrator may commit nothing, which is what the
+        /// rule says when nothing is declared. The gate says so by name
+        /// rather than failing obscurely.
+        #[serde(default)]
+        wiring: Vec<String>,
+    },
 }
 
 /// The `security` field of the mission header.

@@ -10,6 +10,7 @@ pub mod check;
 pub mod compose;
 pub mod engine;
 pub mod firewall;
+pub mod gate;
 pub mod git;
 pub mod harness;
 pub mod human;

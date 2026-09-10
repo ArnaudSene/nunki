@@ -34,6 +34,7 @@ fn none() -> Integration {
 
 fn services() -> Integration {
     Integration::Services {
+        wiring: Vec::new(),
         services: vec![Service {
             name: "postgres".into(),
             reach: vec!["db:5432".into()],
