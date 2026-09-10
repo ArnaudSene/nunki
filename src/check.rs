@@ -94,6 +94,7 @@ pub fn run(project: &Project) -> Report {
     line_endings(project, &mut report);
     hq_exists(project, &mut report);
     known_harness(project, &mut report);
+    rules_are_reachable(project, &mut report);
     credentials_outside_the_tree(project, &mut report);
     coder_perimeter(project, &mut report);
     report
@@ -228,6 +229,40 @@ fn known_harness(project: &Project, report: &mut Report) {
             ))
         },
     );
+}
+
+/// The rules of the place have to be read by the harness that is driving.
+/// Claude Code reads `CLAUDE.md` and not `AGENTS.md`, so one must import the
+/// other — SPEC 4.1 makes this check red until it does, because otherwise a
+/// mission starts without the rules.
+fn rules_are_reachable(project: &Project, report: &mut Report) {
+    let agents = project.root.join("AGENTS.md");
+    let claude = project.root.join("CLAUDE.md");
+    let verdict = if !agents.is_file() {
+        Verdict::Red(format!(
+            "no {} — the rules of the place have to be written somewhere",
+            agents.display()
+        ))
+    } else if !claude.exists() {
+        Verdict::Red(format!(
+            "no {}: Claude Code reads that file and not AGENTS.md, so the              rules would never be read",
+            claude.display()
+        ))
+    } else if claude.is_symlink() {
+        Verdict::Green(format!("{} is a link to AGENTS.md", claude.display()))
+    } else {
+        match std::fs::read_to_string(&claude) {
+            Ok(text) if text.contains("AGENTS.md") => {
+                Verdict::Green(format!("{} imports AGENTS.md", claude.display()))
+            }
+            Ok(_) => Verdict::Red(format!(
+                "{} does not import AGENTS.md — add `@AGENTS.md` to it",
+                claude.display()
+            )),
+            Err(e) => Verdict::NotChecked(format!("{} could not be read: {e}", claude.display())),
+        }
+    };
+    report.add("the rules of the place reach the harness", verdict);
 }
 
 fn credentials_outside_the_tree(project: &Project, report: &mut Report) {

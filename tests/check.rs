@@ -26,6 +26,9 @@ fn sound(dir: &Path) -> Project {
     std::fs::create_dir_all(root.join(".git")).unwrap();
     std::fs::create_dir_all(&hq_root).unwrap();
     std::fs::write(root.join(".gitattributes"), "* text=auto eol=lf\n").unwrap();
+    // The rules of the place, and the file the harness actually reads.
+    std::fs::write(root.join("AGENTS.md"), "# rules\n").unwrap();
+    std::fs::write(root.join("CLAUDE.md"), "@AGENTS.md\n").unwrap();
     Project::at(root, config(), hq_root)
 }
 
@@ -335,4 +338,24 @@ fn the_hq_is_the_projects_own_directory_under_the_home() {
     let project = Project::open(&root).unwrap();
     let home = PathBuf::from(std::env::var("HOME").unwrap());
     assert_eq!(project.hq_root, home.join(".hq").join("some-project"));
+}
+
+#[test]
+fn rules_the_harness_cannot_read_are_red() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = sound(dir.path());
+
+    // Claude Code reads CLAUDE.md and not AGENTS.md: without the import, a
+    // mission starts without the rules of the place (SPEC 4.1).
+    std::fs::write(project.root.join("CLAUDE.md"), "# my own\n").unwrap();
+    assert!(is_red(&verdict(&run(&project), "rules of the place")));
+
+    std::fs::remove_file(project.root.join("CLAUDE.md")).unwrap();
+    assert!(is_red(&verdict(&run(&project), "rules of the place")));
+
+    std::fs::write(project.root.join("CLAUDE.md"), "@AGENTS.md\n").unwrap();
+    assert!(!is_red(&verdict(&run(&project), "rules of the place")));
+
+    std::fs::remove_file(project.root.join("AGENTS.md")).unwrap();
+    assert!(is_red(&verdict(&run(&project), "rules of the place")));
 }
