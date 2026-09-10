@@ -2,7 +2,7 @@
 //! by running it and trying to get out (SPEC 4.1 bis, rule 7).
 //!
 //! `#[ignore]`d — it builds an image and lifts two containers. Run it by
-//! hand, and after any change to `.hq/firewall/`:
+//! hand, and after any change to `assets/firewall/`:
 //!
 //! ```text
 //! cargo test --test firewall -- --ignored --nocapture
@@ -47,7 +47,7 @@ fn address_of(project: &str, service: &str) -> String {
 #[test]
 #[ignore = "builds an image and lifts containers; run by hand"]
 fn live_the_firewall_holds() {
-    build_image();
+    let _context = build_image();
 
     let dir = tempfile::tempdir().unwrap();
     let tree = dir.path().join("tree");
@@ -155,11 +155,14 @@ fn verb(reached: bool) -> &'static str {
     if reached { "reached" } else { "refused" }
 }
 
-fn build_image() {
-    let context = Path::new(env!("CARGO_MANIFEST_DIR")).join(".hq/firewall");
+/// Built from what the binary carries, not from the repository's layout —
+/// which is how a slot will get it too (`hq::firewall`).
+fn build_image() -> tempfile::TempDir {
+    let context = tempfile::tempdir().unwrap();
+    hq::firewall::materialise(context.path()).unwrap();
     let out = Command::new("docker")
         .args(["build", "-q", "-t", FIREWALL_IMAGE])
-        .arg(&context)
+        .arg(context.path())
         .output()
         .expect("docker is on the path");
     assert!(
@@ -167,6 +170,7 @@ fn build_image() {
         "building the sidecar failed:\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
+    context
 }
 
 fn compose(file: &Path, project: &str, args: &[&str]) -> std::process::Output {
@@ -188,7 +192,7 @@ fn down(file: &Path, project: &str) {
 #[test]
 #[ignore = "builds an image and lifts containers; run by hand"]
 fn live_a_declared_service_is_reachable_and_nothing_else_is() {
-    build_image();
+    let _context = build_image();
 
     let dir = tempfile::tempdir().unwrap();
     let tree = dir.path().join("tree");
@@ -283,4 +287,42 @@ fn live_a_declared_service_is_reachable_and_nothing_else_is() {
     }
     down(&file, &project);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The binary carries its own sidecar: nothing at run time reads the
+/// repository's layout, and nothing is written into an orchestrated project
+/// to get the image built (SPEC 3.3).
+#[test]
+fn the_build_context_travels_in_the_binary() {
+    let dir = tempfile::tempdir().unwrap();
+    hq::firewall::materialise(dir.path()).unwrap();
+
+    let dockerfile = std::fs::read_to_string(dir.path().join("Dockerfile")).unwrap();
+    assert!(dockerfile.contains("dnsmasq"), "{dockerfile}");
+    assert!(
+        dockerfile.contains("nftables"),
+        "the rules need it: {dockerfile}"
+    );
+
+    let entrypoint = std::fs::read_to_string(dir.path().join("entrypoint.sh")).unwrap();
+    assert!(
+        entrypoint.contains("local=/#/"),
+        "without it the resolver relays what it does not know"
+    );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for script in ["entrypoint.sh", "fw-ready"] {
+            let mode = std::fs::metadata(dir.path().join(script))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(
+                mode & 0o111,
+                0o111,
+                "{script} must come out executable, got {mode:o}"
+            );
+        }
+    }
 }

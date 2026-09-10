@@ -450,6 +450,16 @@ démarrage » avait rendue. **Tranché par Arnaud le 2026-09-09** :
    certificat, une adresse inexistante) et ont été remplacées par une
    connexion TCP nue et un voisin levé exprès sur le réseau du slot.
 
+**Où vit l'image du sidecar.** Précisé le 2026-09-09, après que la question
+« pourquoi `.hq/` ? » a montré une erreur de rangement. `.hq/` est **ce que
+`hq init` dépose dans un dépôt qu'il orchestre** — fragments de stack,
+Dockerfiles du projet — et jamais l'endroit où `hq` range ses propres
+affaires. Le contexte de build du pare-feu appartient à `hq` : il est
+**embarqué dans le binaire** et écrit dans un contexte temporaire au moment de
+construire l'image. Deux raisons au-delà du rangement : `hq` écrit le moins
+possible dans un dépôt qu'il orchestre (3.3), et le fichier qui décrit la cage
+de l'agent n'a rien à faire dans un arbre que l'agent peut écrire.
+
 Ce que le sidecar coûte : un conteneur de plus par agent, que `hq` lève et
 arrête avec lui, invisible pour l'humain ; et une différence de moteur, parce
 que « partage l'espace réseau de ce service » s'écrit `network_mode:
@@ -682,7 +692,8 @@ documentée par ce tableau pour qui l'implémentera, avec la note honnête que
 tant que `podman-compose` porte ces bugs, son adaptateur devra contourner ou
 générer un Compose plus simple. Rien d'autre du moteur ne remonte dans `hq`.
 
-**Les fragments de stack.** Un dossier par stack sous `.hq/stacks/<nom>/` :
+**Les fragments de stack.** Un dossier par stack sous `.hq/stacks/<nom>/`
+— rappel : `.hq/` appartient au projet orchestré, jamais à `hq` (4.1 bis) :
 un Dockerfile (étapes d'image), `allow.txt` (domaines des dépendances),
 `prepush.sh` (section de batterie), `mutate.sh` (commande de mutation),
 `run.sh` (comment on démarre une application de cette stack, par défaut),
