@@ -143,6 +143,27 @@ impl Engine for FakeEngine {
         Ok(self.containers.lock().unwrap().get(service).cloned())
     }
 
+    fn detached_command(
+        &self,
+        _file: &Path,
+        project: &str,
+        service: &str,
+        options: &[String],
+        argv: &[String],
+    ) -> crate::harness::spawn::CommandSpec {
+        crate::harness::spawn::CommandSpec {
+            program: "fake-engine".to_string(),
+            args: [project.to_string()]
+                .into_iter()
+                .chain(options.iter().cloned())
+                .chain([service.to_string()])
+                .chain(argv.iter().cloned())
+                .collect(),
+            cwd: PathBuf::from("."),
+            env: BTreeMap::new(),
+        }
+    }
+
     fn liveness(&self, container: &str) -> Result<Liveness, EngineError> {
         self.record(Call::Liveness(container.to_string()));
         Ok(self

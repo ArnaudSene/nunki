@@ -204,6 +204,24 @@ impl Engine for Docker {
             .map(str::to_string))
     }
 
+    fn detached_command(
+        &self,
+        file: &Path,
+        project: &str,
+        service: &str,
+        options: &[String],
+        argv: &[String],
+    ) -> CommandSpec {
+        // Order is not cosmetic: `exec [options] SERVICE COMMAND`. An option
+        // after the service name becomes part of the command.
+        let mut args = vec!["exec".to_string(), "-T".to_string()];
+        args.extend(options.iter().cloned());
+        args.push(service.to_string());
+        args.extend(argv.iter().cloned());
+        let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+        self.compose_command(file, project, &borrowed)
+    }
+
     fn liveness(&self, container: &str) -> Result<Liveness, EngineError> {
         let spec = self.engine_command(&[
             "inspect",

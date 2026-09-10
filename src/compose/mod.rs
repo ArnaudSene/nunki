@@ -28,6 +28,7 @@ use std::path::{Path, PathBuf};
 use serde_yaml_ng::{Mapping, Value};
 
 use crate::engine::Dialect;
+use crate::engine::spawn::RUN_DIR;
 use crate::harness::Role;
 use crate::perimeter::{Perimeter, Profile};
 
@@ -311,6 +312,15 @@ fn agent(plan: &Plan, dialect: &Dialect) -> Result<Service, ComposeError> {
         security_opt: vec!["no-new-privileges:true".to_string()],
         depends_on: Some(depends_on_healthy(FIREWALL_SERVICE)),
         volumes,
+        // The one place the agent may write that is neither the tree nor the
+        // mission folder: its own runtime files, starting with the process id
+        // a run publishes so `hq` can stop it from inside (see
+        // `engine::spawn`). A tmpfs, so it dies with the container; owned by
+        // the agent, so nothing else in the pair can touch it.
+        tmpfs: vec![format!(
+            "{RUN_DIR}:uid={},gid={},mode=0700",
+            plan.user.uid, plan.user.gid
+        )],
         environment: plan.environment.clone(),
         init: Some(true),
         restart: Some("no".to_string()),

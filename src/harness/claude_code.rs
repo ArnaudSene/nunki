@@ -17,12 +17,11 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
-use super::spawn::{CommandSpec, Spawner};
+use super::spawn::{CommandSpec, Signal, Spawned, Spawner};
 use super::{
     Exposure, GuardSetup, Harness, HarnessError, Outcome, Progress, Provisioning, Role, RunHandle,
     RunRequest, RunState, Usage,
 };
-use crate::state::lock::process_alive;
 
 /// What is fixed per project or per mission, not per run.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,11 +112,12 @@ impl ClaudeCode {
         }
     }
 
+    /// On the host, never in the container: `mission_dir` is a container
+    /// path, and the folder it names is mounted read-only but for three
+    /// files.
     fn log_path(request: &RunRequest) -> PathBuf {
         request
-            .workspace
-            .mission_dir
-            .join("runs")
+            .runs_dir
             .join(format!("{}.jsonl", request.session.0))
     }
 }
@@ -183,7 +183,16 @@ impl Harness for ClaudeCode {
         if let Some(outcome) = parsed.outcome {
             return Ok(RunState::Finished(outcome));
         }
-        let alive = handle.pid.is_some_and(process_alive);
+        // Asked of the spawner, because where the process lives decides
+        // how the question is put: a pid on this machine, or a pid inside a
+        // container that only the engine can reach.
+        let alive = self
+            .spawner
+            .alive(&Spawned {
+                pid: handle.pid,
+                container: handle.container.clone(),
+            })
+            .map_err(HarnessError::Io)?;
         if alive {
             Ok(RunState::Running(parsed.progress))
         } else {
@@ -194,17 +203,19 @@ impl Harness for ClaudeCode {
     }
 
     fn stop(&self, handle: &RunHandle) -> Result<(), HarnessError> {
-        let Some(pid) = handle.pid else {
+        if handle.pid.is_none() {
             return Err(HarnessError::UnknownRun(handle.session.clone()));
-        };
-        // SIGINT ends the turn properly; SIGTERM would leave it unfinished.
-        // SAFETY: sending a signal to a pid we recorded ourselves.
-        let rc = unsafe { libc::kill(pid as libc::pid_t, libc::SIGINT) };
-        if rc == 0 {
-            Ok(())
-        } else {
-            Err(HarnessError::Io(io::Error::last_os_error()))
         }
+        // SIGINT ends the turn properly; SIGTERM would leave it unfinished.
+        self.spawner
+            .signal(
+                &Spawned {
+                    pid: handle.pid,
+                    container: handle.container.clone(),
+                },
+                Signal::Interrupt,
+            )
+            .map_err(HarnessError::Io)
     }
 
     fn expose(&self, _role: Role, prompt_file: PathBuf) -> Exposure {

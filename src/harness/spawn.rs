@@ -27,6 +27,25 @@ impl CommandSpec {
     }
 }
 
+/// Which signal to send. Only two, and the difference matters: SIGINT ends
+/// an agent's turn properly, SIGTERM leaves it unfinished (SPEC 4.3,
+/// `pause`/`stop`/`kill`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Signal {
+    Interrupt,
+    Terminate,
+}
+
+impl Signal {
+    /// The name `kill` takes, for a spawner that has to go through a shell.
+    pub fn name(self) -> &'static str {
+        match self {
+            Signal::Interrupt => "INT",
+            Signal::Terminate => "TERM",
+        }
+    }
+}
+
 /// What a spawner reports back: enough to persist and to re-derive liveness.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Spawned {
@@ -39,6 +58,16 @@ pub trait Spawner: Send + Sync {
     /// Start `cmd` detached, with its stdout appended to `log` and its stderr
     /// to `<log>.err`. Returns as soon as the process is started.
     fn spawn(&self, cmd: &CommandSpec, log: &Path) -> io::Result<Spawned>;
+
+    /// Is the process still there? Asked by the harness adapter to tell a run
+    /// that is working from one that died without saying so.
+    fn alive(&self, spawned: &Spawned) -> io::Result<bool>;
+
+    /// Send it a signal. Where the process lives decides how: a pid on this
+    /// machine is signalled directly, a pid inside a container is signalled
+    /// from inside that container — signalling the client that started it
+    /// would kill the client and leave the agent running.
+    fn signal(&self, spawned: &Spawned, signal: Signal) -> io::Result<()>;
 }
 
 /// Runs the command on this machine, in its own process group so a signal
@@ -74,5 +103,29 @@ impl Spawner for LocalSpawner {
             pid: Some(child.id()),
             container: String::new(),
         })
+    }
+
+    fn alive(&self, spawned: &Spawned) -> io::Result<bool> {
+        Ok(spawned.pid.is_some_and(crate::state::lock::process_alive))
+    }
+
+    fn signal(&self, spawned: &Spawned, signal: Signal) -> io::Result<()> {
+        let Some(pid) = spawned.pid else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "the run has no process id",
+            ));
+        };
+        let number = match signal {
+            Signal::Interrupt => libc::SIGINT,
+            Signal::Terminate => libc::SIGTERM,
+        };
+        // SAFETY: sending a signal to a pid we recorded ourselves.
+        let rc = unsafe { libc::kill(pid as libc::pid_t, number) };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
     }
 }

@@ -10,6 +10,7 @@
 pub mod cli;
 pub mod docker;
 pub mod fake;
+pub mod spawn;
 
 use std::path::Path;
 
@@ -138,4 +139,21 @@ pub trait Engine: Send + Sync {
 
     /// Ask the engine about a container by name or id.
     fn liveness(&self, container: &str) -> Result<Liveness, EngineError>;
+
+    /// The command line that would run `argv` in a service's container, as
+    /// data. [`exec`](Engine::exec) runs it and waits; a caller that needs
+    /// the process to outlive the call — a run — takes this and detaches it
+    /// itself (see [`spawn::ContainerSpawner`]). Building it stays here:
+    /// command construction is the adapter's, whoever executes it.
+    /// `options` are the engine's own exec options — a working directory,
+    /// environment — and they must precede the service name, or the engine
+    /// reads them as part of the command.
+    fn detached_command(
+        &self,
+        file: &Path,
+        project: &str,
+        service: &str,
+        options: &[String],
+        argv: &[String],
+    ) -> crate::harness::spawn::CommandSpec;
 }
