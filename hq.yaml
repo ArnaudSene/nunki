@@ -22,6 +22,10 @@ protected_paths:
   # The gate, the sidecar and the rules of the place are not an agent's to
   # rewrite while it is being gated by them.
   refuse:
+    # The battery gate 6 replays, the allowlist the firewall is built from
+    # and the image the agent runs in. Weakening any of the three would let a
+    # run pass a gate it should not.
+    - .hq/**
     - .github/workflows/**
     - assets/firewall/**
     - AGENTS.md

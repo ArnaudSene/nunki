@@ -177,6 +177,11 @@ enum MissionCommand {
         /// Whose gates. Each role has the gates that match what it produces.
         #[arg(long, default_value = "coder")]
         role: RoleArg,
+        /// Play the final verification's gates too — the deliverable and the
+        /// battery. The battery runs in the slot's container, on the clean
+        /// copy of `HEAD`, so a profile has to be up.
+        #[arg(long)]
+        verification: bool,
         /// Which slot to judge. Defaults to the one the mission started in;
         /// naming one lets a human play the gates before a run exists.
         #[arg(long)]
@@ -655,7 +660,12 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             }
         }
 
-        MissionCommand::Gates { id, role, slot } => {
+        MissionCommand::Gates {
+            id,
+            role,
+            verification,
+            slot,
+        } => {
             let role: hq::harness::Role = role.into();
             // The frozen header, not the file: the perimeter a run is judged
             // against is the one it was launched with (SPEC 4.1).
@@ -689,14 +699,38 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                 }
             };
             let paths = hq::mission::dir::Paths::of(&project.hq_root, &id);
-            let report = match hq::gate::run(&hq::gate::Subject {
+            let subject = hq::gate::Subject {
                 role,
                 tree: &slot.tree,
                 journal: &paths.journal,
+                pr: &paths.pr,
+                verdict: &paths.verdict,
                 header: &header,
                 protected_branches: &project.config.protected_branches,
                 protected_paths: &project.config.protected_paths,
-            }) {
+            };
+            let played = if verification {
+                let engine: std::sync::Arc<dyn hq::engine::Engine> =
+                    std::sync::Arc::new(hq::engine::docker::Docker::real());
+                let stack = project
+                    .config
+                    .stacks
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "rust".to_string());
+                hq::gate::at_verification(
+                    &subject,
+                    &hq::gate::Verification {
+                        project,
+                        slot: &slot,
+                        engine,
+                        stack: &stack,
+                    },
+                )
+            } else {
+                hq::gate::after_run(&subject)
+            };
+            let report = match played {
                 Ok(r) => r,
                 Err(e) => {
                     eprintln!("hq: {e}");
@@ -714,6 +748,8 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                     // reported as green is how a report stops being worth
                     // reading (SPEC 4.4, the per-role table).
                     hq::gate::Decision::NotApplicable(why) => ("n/a ", format!(" — {why}")),
+                    // Neither green nor red: nobody managed to play it.
+                    hq::gate::Decision::Unplayed(why) => ("????", format!(" — {why}")),
                 };
                 println!(
                     "gate {}    {mark}  {}{detail}",

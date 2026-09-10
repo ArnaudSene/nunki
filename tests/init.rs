@@ -268,3 +268,25 @@ fn a_claude_md_that_is_a_link_to_agents_md_is_recognised() {
     assert!(!why.contains("red"), "nothing is wrong here: {why}");
     assert!(root.join("CLAUDE.md").is_symlink(), "the link survived");
 }
+
+/// The three things that judge and fence an agent — the battery gate 6
+/// replays, the allowlist the firewall is built from, and the image it runs
+/// in — all live under `.hq/`, and none of them is that agent's to rewrite.
+/// A project that starts with an empty refusal list starts with a gate an
+/// agent can weaken in one commit.
+#[test]
+fn a_new_project_protects_the_fragments_that_gate_and_fence_its_agents() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    init(&repo, &dir.path().join("hq"), &["rust".to_string()]).unwrap();
+
+    let text = std::fs::read_to_string(repo.join("hq.yaml")).unwrap();
+    let config: hq::project::Config = serde_yaml_ng::from_str(&text).unwrap();
+    assert!(
+        config.protected_paths.refuse.iter().any(|p| p == ".hq/**"),
+        "{text}"
+    );
+    // And the battery it protects is really there.
+    assert!(repo.join(".hq/stacks/rust/prepush.sh").is_file());
+}
