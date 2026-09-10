@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use hq::engine::Engine;
 use hq::engine::fake::{Call, FakeEngine};
-use hq::gesture::{self, Freeze, GestureError};
+use hq::gesture::{self, GestureError};
 use hq::harness::{RunHandle, SessionId};
 use hq::mission::flow::Flow;
 use hq::mission::{Bounds, Header, Integration, Lot, Security};
@@ -77,6 +77,7 @@ impl World {
                 app: None,
                 verdicts: Vec::new(),
                 accepted: Vec::new(),
+                stopped: None,
                 updated_at: String::new(),
             })
             .unwrap();
@@ -102,17 +103,10 @@ fn engine() -> (Arc<dyn Engine>, Arc<FakeEngine>) {
 fn pausing_freezes_the_agent_and_its_sidecar_and_nothing_else() {
     let world = World::new(true);
     let (engine, fake) = engine();
-    gesture::freeze(&world.project, "m1", engine.clone(), Freeze::On).unwrap();
-    gesture::freeze(&world.project, "m1", engine, Freeze::Off).unwrap();
+    gesture::pause(&world.project, "m1", engine).unwrap();
 
     let services: Vec<String> = hq::run::SERVICES.iter().map(|s| s.to_string()).collect();
-    assert_eq!(
-        fake.calls(),
-        vec![
-            Call::Pause("hq-one".into(), services.clone()),
-            Call::Unpause("hq-one".into(), services),
-        ]
-    );
+    assert_eq!(fake.calls(), vec![Call::Pause("hq-one".into(), services)]);
 }
 
 /// The emergency brake is `kill` and not a stop with no patience: nothing is
@@ -134,7 +128,7 @@ fn killing_is_a_kill_and_leaves_the_projects_services_alone() {
 fn a_gesture_with_no_run_in_progress_is_named() {
     let world = World::new(false);
     let (engine, fake) = engine();
-    let err = gesture::freeze(&world.project, "m1", engine.clone(), Freeze::On).unwrap_err();
+    let err = gesture::pause(&world.project, "m1", engine.clone()).unwrap_err();
     assert!(matches!(err, GestureError::NoRun(_)), "{err}");
     let err = gesture::kill(&world.project, "m1", engine).unwrap_err();
     assert!(matches!(err, GestureError::NoRun(_)), "{err}");
@@ -190,4 +184,175 @@ fn an_empty_instruction_is_not_one() {
     let world = World::new(true);
     let err = gesture::say(&world.project, "m1", "  \n\t ").unwrap_err();
     assert!(matches!(err, GestureError::NothingSaid), "{err}");
+}
+
+/// SPEC 4.5 reads as two clauses, and the first is unconditional: `stop`
+/// means "hq launches no further run", and `--now` only chooses what happens
+/// to the run already going. So a bare `stop` writes the hold and signals
+/// nothing — the old `STOP` file was a marker, not a gesture.
+#[test]
+fn stopping_holds_the_mission_and_signals_nothing() {
+    let world = World::new(true);
+    let harness = hq::harness::fake::FakeHarness::new();
+    let held = gesture::stop(&world.project, "m1", &harness, false).unwrap();
+
+    assert!(!held.interrupted, "a bare stop interrupts nothing");
+    assert!(harness.stopped().is_empty(), "{:?}", harness.stopped());
+    let state = Store::open(&world.project.hq_root)
+        .unwrap()
+        .load("m1")
+        .unwrap();
+    assert!(state.held(), "the hold is what stop is for");
+    assert!(state.run.is_some(), "the run in progress finishes its lot");
+}
+
+/// The other clause: `--now` ends the turn as well, and the record keeps the
+/// two apart — what `hq` will not do next, and what was done to the run that
+/// was going.
+#[test]
+fn stopping_now_also_ends_the_turn() {
+    let world = World::new(true);
+    let harness = hq::harness::fake::FakeHarness::new();
+    let held = gesture::stop(&world.project, "m1", &harness, true).unwrap();
+
+    assert!(held.interrupted);
+    assert_eq!(harness.stopped(), vec![SessionId("s1".into())]);
+    assert!(
+        Store::open(&world.project.hq_root)
+            .unwrap()
+            .load("m1")
+            .unwrap()
+            .held()
+    );
+}
+
+/// A hold is a decision about the future, so it needs no run: the coder's
+/// run ended, `verify` has not launched the integrator, and the human wants
+/// the mission held. That is the case a signal cannot express.
+#[test]
+fn a_mission_between_two_runs_can_still_be_held() {
+    let world = World::new(false);
+    let harness = hq::harness::fake::FakeHarness::new();
+    gesture::stop(&world.project, "m1", &harness, false).unwrap();
+    assert!(
+        Store::open(&world.project.hq_root)
+            .unwrap()
+            .load("m1")
+            .unwrap()
+            .held()
+    );
+}
+
+/// `--now` is only ever the second clause. Typed a second after the run
+/// ended, it still holds the mission — refusing the hold because there was
+/// nothing to interrupt would make the unconditional clause conditional on
+/// the optional one. The record says the interruption did not happen.
+#[test]
+fn stopping_now_after_the_run_ended_still_holds_the_mission() {
+    let world = World::new(false);
+    let harness = hq::harness::fake::FakeHarness::new();
+    let held = gesture::stop(&world.project, "m1", &harness, true).unwrap();
+
+    assert!(!held.interrupted, "nothing was there to interrupt");
+    assert!(harness.stopped().is_empty());
+    assert!(
+        Store::open(&world.project.hq_root)
+            .unwrap()
+            .load("m1")
+            .unwrap()
+            .held(),
+        "the hold is not conditional on there being a run"
+    );
+}
+
+/// `resume` lifts the hold and unfreezes in one gesture: to the human who
+/// types it, the mission was held and is held no longer.
+#[test]
+fn resuming_lifts_the_hold_and_unfreezes() {
+    let world = World::new(true);
+    let harness = hq::harness::fake::FakeHarness::new();
+    gesture::stop(&world.project, "m1", &harness, false).unwrap();
+
+    let fake = Arc::new(
+        hq::engine::fake::FakeEngine::default()
+            .with_liveness("cafe1234", hq::engine::Liveness::Paused),
+    );
+    let engine: Arc<dyn Engine> = fake.clone();
+    let lifted = gesture::resume(&world.project, "m1", engine).unwrap();
+    assert!(lifted.is_some(), "it says what it lifted");
+
+    let services: Vec<String> = hq::run::SERVICES.iter().map(|s| s.to_string()).collect();
+    assert_eq!(
+        fake.calls(),
+        vec![
+            Call::Liveness("cafe1234".into()),
+            Call::Unpause("hq-one".into(), services)
+        ]
+    );
+    assert!(
+        !Store::open(&world.project.hq_root)
+            .unwrap()
+            .load("m1")
+            .unwrap()
+            .held()
+    );
+}
+
+/// A mission held between two runs has no container to unfreeze, and that is
+/// exactly a mission worth resuming: `resume` lifts the hold and asks the
+/// engine nothing.
+#[test]
+fn resuming_a_mission_with_no_run_lifts_the_hold_all_the_same() {
+    let world = World::new(false);
+    let harness = hq::harness::fake::FakeHarness::new();
+    gesture::stop(&world.project, "m1", &harness, false).unwrap();
+
+    let (engine, fake) = engine();
+    assert!(
+        gesture::resume(&world.project, "m1", engine)
+            .unwrap()
+            .is_some()
+    );
+    assert!(fake.calls().is_empty(), "{:?}", fake.calls());
+}
+
+/// It reports what it did, not what it meant to do: resuming a mission
+/// nobody held lifts nothing, and says so.
+#[test]
+fn resuming_a_mission_nobody_held_lifts_nothing() {
+    let world = World::new(true);
+    let (engine, _) = engine();
+    assert!(
+        gesture::resume(&world.project, "m1", engine)
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// The common path, and the one a fake engine that always says yes hides:
+/// after a bare `stop` the run **keeps going**, so at `resume` its container
+/// is running and not frozen — and `unpause` on a running container is
+/// refused by the engine (measured on Docker 28: "is not paused", exit 1).
+/// `resume` reads the liveness and unfreezes only what is frozen.
+#[test]
+fn resuming_a_run_that_was_never_frozen_asks_for_no_unpause() {
+    let world = World::new(true);
+    let harness = hq::harness::fake::FakeHarness::new();
+    gesture::stop(&world.project, "m1", &harness, false).unwrap();
+
+    let fake = Arc::new(
+        hq::engine::fake::FakeEngine::default()
+            .with_liveness("cafe1234", hq::engine::Liveness::Running),
+    );
+    let engine: Arc<dyn Engine> = fake.clone();
+    assert!(
+        gesture::resume(&world.project, "m1", engine)
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        fake.calls(),
+        vec![Call::Liveness("cafe1234".into())],
+        "it asked, and it did not unpause"
+    );
 }

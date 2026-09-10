@@ -222,9 +222,15 @@ enum MissionCommand {
         #[arg(long)]
         slot: String,
     },
-    /// End the run in progress properly: the agent finishes its turn and
-    /// writes its resume block.
-    Stop { id: String },
+    /// Hold the mission: hq launches no further run for it. The run in
+    /// progress finishes its lot. `hq mission resume` lifts the hold.
+    Stop {
+        id: String,
+        /// End the run in progress too: the agent finishes its turn cleanly
+        /// and writes its resume block, instead of finishing its lot.
+        #[arg(long)]
+        now: bool,
+    },
     /// Put a mission's framing back in front of you, and re-freeze it.
     ///
     /// `hq` never re-reads `MISSION.md` during a mission — it froze the
@@ -281,7 +287,9 @@ enum MissionCommand {
         id: String,
     },
 
-    /// Unfreeze a paused container, exactly where it was.
+    /// Lift a hold left by `stop`, and unfreeze a paused container
+    /// exactly where it was — the mission was held, and it is held no
+    /// longer.
     Resume {
         /// The mission.
         id: String,
@@ -723,6 +731,14 @@ fn main() -> ExitCode {
                                 owed = true;
                                 println!("owed      a {role:?} run — {why}");
                             }
+                            hq::verify::Step::Held { role, who, date } => {
+                                owed = true;
+                                println!(
+                                    "held      a {role:?} run is owed and hq launches none \
+                                     — {who} held this mission on {date}"
+                                );
+                                println!("          `hq mission resume {mission}` lifts the hold");
+                            }
                             hq::verify::Step::Launched { role, application } => {
                                 owed = true;
                                 println!("launched  a {role:?} run — {application}");
@@ -960,18 +976,15 @@ fn watch(project: &Project, id: &str, every: u64) -> ExitCode {
 
 /// `pause` and `resume` are one gesture in two directions, and printing them
 /// from one place keeps the two messages saying the same thing.
-fn freeze(project: &Project, id: &str, which: hq::gesture::Freeze) -> ExitCode {
+fn pause(project: &Project, id: &str) -> ExitCode {
     let engine: std::sync::Arc<dyn hq::engine::Engine> =
         std::sync::Arc::new(hq::engine::docker::Docker::real());
-    match hq::gesture::freeze(project, id, engine, which) {
+    match hq::gesture::pause(project, id, engine) {
         Ok(_) => {
-            match which {
-                hq::gesture::Freeze::On => println!(
-                    "paused    the agent and its sidecar are frozen; \
-                     `hq mission resume {id}` unfreezes them exactly there"
-                ),
-                hq::gesture::Freeze::Off => println!("resumed   exactly where it was"),
-            }
+            println!(
+                "frozen    the agent and its firewall are suspended where they were\n\
+                 \x20         `hq mission resume {id}` unfreezes exactly there"
+            );
             ExitCode::SUCCESS
         }
         Err(e) => {
@@ -1165,8 +1178,28 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
 
         MissionCommand::Watch { id, every } => watch(project, &id, every),
 
-        MissionCommand::Pause { id } => freeze(project, &id, hq::gesture::Freeze::On),
-        MissionCommand::Resume { id } => freeze(project, &id, hq::gesture::Freeze::Off),
+        MissionCommand::Pause { id } => pause(project, &id),
+        MissionCommand::Resume { id } => {
+            let engine: std::sync::Arc<dyn hq::engine::Engine> =
+                std::sync::Arc::new(hq::engine::docker::Docker::real());
+            match hq::gesture::resume(project, &id, engine) {
+                Ok(lifted) => {
+                    match lifted {
+                        Some(held) => println!(
+                            "lifted    the hold {} put on {} is lifted",
+                            held.who, held.date
+                        ),
+                        None => println!("lifted    nothing was holding mission {id}"),
+                    }
+                    println!("          the container is unfrozen if it was frozen");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("hq: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
 
         MissionCommand::Kill { id } => {
             let engine: std::sync::Arc<dyn hq::engine::Engine> =
@@ -1191,8 +1224,8 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             Ok(()) => {
                 println!("said      written to FOLLOWUP_HQ.md, for the next run");
                 println!(
-                    "          there is no channel during a run; `hq mission stop {id}` \
-                     ends this one first"
+                    "          there is no channel during a run; `hq mission stop {id} \
+                     --now` ends this one first"
                 );
                 ExitCode::SUCCESS
             }
@@ -1464,30 +1497,39 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             }
         }
 
-        MissionCommand::Stop { id } => {
-            let store = match hq::state::Store::open(&project.hq_root) {
+        MissionCommand::Stop { id, now } => {
+            // Read once for the slot and the session: the harness has to be
+            // built against the container the run is in, and `--now`
+            // identifies the process by its session id.
+            let state = match hq::gesture::started(project, &id) {
                 Ok(s) => s,
                 Err(e) => {
                     eprintln!("hq: {e}");
                     return ExitCode::FAILURE;
                 }
             };
-            let state = match store.load(&id) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("hq: {e}");
-                    return ExitCode::FAILURE;
-                }
-            };
-            let Some(handle) = &state.run else {
-                eprintln!("hq: mission {id} has no run in progress");
-                return ExitCode::FAILURE;
-            };
-            match harness_for(project, &state.slot, Some(&handle.session.0)).stop(handle) {
-                Ok(()) => {
-                    // SIGINT, not SIGTERM: the agent ends its turn and writes
-                    // its resume block (SPEC 4.3).
-                    println!("asked the run to end its turn; `hq mission status {id}` follows it");
+            let session = state.run.as_ref().map(|r| r.session.0.clone());
+            let harness = harness_for(project, &state.slot, session.as_deref());
+            match hq::gesture::stop(project, &id, &harness, now) {
+                Ok(held) => {
+                    println!("held      hq will launch no further run for mission {id}");
+                    match (now, held.interrupted) {
+                        // SIGINT, not SIGTERM: the agent ends its turn and
+                        // writes its resume block (SPEC 4.3).
+                        (_, true) => {
+                            println!("          the run in progress was asked to end its turn")
+                        }
+                        // Asked for, and there was nothing to interrupt. The
+                        // hold stands all the same; saying so beats a silent
+                        // success that reads like an interruption.
+                        (true, false) => {
+                            println!("          no run was going, so nothing was interrupted")
+                        }
+                        (false, false) => {
+                            println!("          the run in progress, if any, finishes its lot")
+                        }
+                    }
+                    println!("          `hq mission resume {id}` lifts the hold");
                     ExitCode::SUCCESS
                 }
                 Err(e) => {

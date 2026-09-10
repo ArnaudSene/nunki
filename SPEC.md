@@ -1000,6 +1000,24 @@ contrôle qui n'a pas de mot pour « gelé » ment aussi.
 un `kill`, le lot en cours est une tentative échouée et la relance repart du
 dernier état de reprise écrit.
 
+**`stop` dit deux choses, et la première est inconditionnelle.** Toujours,
+la mission est **retenue** : `hq` ne lance plus aucun run pour elle. C'est une
+écriture dans l'état, pas un signal — l'ancien fichier `STOP` était un
+marqueur et pas un geste, et une mission peut être retenue **entre deux
+runs**, quand il n'y a précisément aucun processus à interrompre. `--now`
+choisit seulement le sort du run déjà lancé : sans lui il finit son lot, avec
+lui son tour est interrompu proprement. La retenue n'est **pas une étape** du
+flux : une mission retenue n'est ni abandonnée (`end` dit ça) ni finie, et le
+flux est exactement où il était quand on la lève.
+
+**C'est `resume` qui la lève** — le même verbe que celui qui dégèle un
+conteneur, parce que pour la main qui le tape c'est une seule chose : la
+mission était retenue, elle ne l'est plus. Ce verbe n'a pas besoin d'un run,
+justement parce qu'une mission retenue entre deux runs n'en a pas.
+**Ce couplage est dérivé, pas cité** : SPEC nomme `resume` comme l'antonyme
+de `pause` et dit d'une mission arrêtée qu'elle est « reprenable », sans dire
+par quel verbe. À confirmer ou à renommer, comme `end`.
+
 `say` change de sens avec le run : il n'y a pas de canal pendant un run. Une
 consigne est déposée dans `FOLLOWUP_HQ.md` et lue au run suivant ; si elle
 presse, `stop --now` termine le run en cours proprement et la relance la

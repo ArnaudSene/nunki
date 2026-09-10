@@ -42,6 +42,7 @@ fn state(id: &str) -> MissionState {
         app: None,
         verdicts: Vec::new(),
         accepted: Vec::new(),
+        stopped: None,
         updated_at: String::new(),
     }
 }

@@ -85,6 +85,7 @@ impl World {
                 app: None,
                 verdicts: Vec::new(),
                 accepted: Vec::new(),
+                stopped: None,
                 updated_at: when.into(),
             })
             .unwrap();

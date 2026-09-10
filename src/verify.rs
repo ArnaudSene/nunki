@@ -57,6 +57,14 @@ pub enum Step {
     Verified,
     /// The flow stopped and the human decides (SPEC 4.5).
     AwaitingHuman(Handover),
+    /// The mission is held (`hq mission stop`), so no run was launched.
+    /// The gates still ran and the flow still moved: holding a mission stops
+    /// `hq` from starting work, not from reading what is already there.
+    Held {
+        role: Role,
+        who: String,
+        date: String,
+    },
     /// The security agent came back with findings: `hq mission iterate` sends
     /// them back to the coder, `hq mission accept` lifts them.
     Findings {
@@ -74,7 +82,7 @@ pub enum VerifyError {
     NotStarted(String),
     #[error(
         "a run is still going in slot {slot}: verifying now would judge a tree the \
-         agent is still writing — `hq mission stop {mission}` ends its turn first"
+         agent is still writing — `hq mission stop {mission} --now` ends its turn first"
     )]
     RunInProgress { mission: String, slot: String },
     #[error(transparent)]
@@ -172,10 +180,13 @@ pub fn verify(
                 if !matches!(state.flow.stage(), Stage::Coding { .. }) {
                     continue;
                 }
-                steps.push(Step::NeedsRun {
-                    role: Role::Coder,
-                    why: owed,
-                });
+                match held(&state, Role::Coder) {
+                    Some(step) => steps.push(step),
+                    None => steps.push(Step::NeedsRun {
+                        role: Role::Coder,
+                        why: owed,
+                    }),
+                }
                 return Ok(steps);
             }
 
@@ -247,6 +258,10 @@ pub fn verify(
                     }
                 }
 
+                if let Some(step) = held(&state, Role::Integrator) {
+                    steps.push(step);
+                    return Ok(steps);
+                }
                 let launched = crate::run::launch(&crate::run::Launching {
                     project,
                     slot: &slot,
@@ -299,6 +314,10 @@ pub fn verify(
                     }
                 }
 
+                if let Some(step) = held(&state, Role::Security) {
+                    steps.push(step);
+                    return Ok(steps);
+                }
                 let launched = crate::run::launch(&crate::run::Launching {
                     project,
                     slot: &slot,
@@ -352,6 +371,17 @@ pub fn verify(
             }
         }
     }
+}
+
+/// The step a held mission answers with instead of a launch, or `None` if it
+/// is not held. One place decides it, because "hq launches no further run"
+/// must mean the same thing at every launch site (SPEC 4.5).
+fn held(state: &MissionState, role: Role) -> Option<Step> {
+    state.stopped.as_ref().map(|s| Step::Held {
+        role,
+        who: s.who.clone(),
+        date: s.date.clone(),
+    })
 }
 
 /// Which role the current stage belongs to, for the gates that role owes.
