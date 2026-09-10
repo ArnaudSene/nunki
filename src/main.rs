@@ -691,14 +691,21 @@ fn main() -> ExitCode {
                     println!("pushed    {} → {}", pushed.branch, pushed.remote);
                     println!("head      {}", &pushed.head[..12.min(pushed.head.len())]);
                     match pushed.pull_request {
-                        Some(url) => {
-                            println!("pull request, to open yourself:");
-                            println!("  {url}");
+                        hq::push::PullRequestState::Opened(hq::forge::Opened::Created(url)) => {
+                            println!("opened    {url}");
                         }
-                        None => println!(
-                            "the pull request is yours to open: hq does not talk to the \
-                             forge yet"
-                        ),
+                        hq::push::PullRequestState::Opened(hq::forge::Opened::AlreadyOpen(url)) => {
+                            println!("updated   {url}");
+                            println!("          it was already open; this push is on it now");
+                        }
+                        // The push succeeded; only the pull request is left
+                        // to the human, and the exit code says the push.
+                        hq::push::PullRequestState::ByHand { compare, why } => {
+                            println!("pull request not opened by hq: {why}");
+                            if let Some(url) = compare {
+                                println!("          open it yourself at {url}");
+                            }
+                        }
                     }
                     ExitCode::SUCCESS
                 }
