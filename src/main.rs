@@ -141,6 +141,18 @@ enum SlotCommand {
         #[arg(long)]
         force: bool,
     },
+    /// Put a slot back to a clean state: discard the work in progress and
+    /// the slot's caches, keep the clone.
+    ///
+    /// The reason to reach for it is a named volume gone bad — a build cache
+    /// or a harness state directory that outlives every rebuild of the image
+    /// and that nothing else can reach.
+    Reset {
+        name: String,
+        /// Reset it anyway, discarding commits the repository does not have.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -213,6 +225,27 @@ enum MissionCommand {
     /// End the run in progress properly: the agent finishes its turn and
     /// writes its resume block.
     Stop { id: String },
+    /// Put a mission's framing back in front of you, and re-freeze it.
+    ///
+    /// `hq` never re-reads `MISSION.md` during a mission — it froze the
+    /// header when you validated the framing — so editing the file changes
+    /// nothing until this verb says so.
+    Reframe {
+        /// The mission.
+        id: String,
+        /// Apply it. Without this, it says what would change and does
+        /// nothing.
+        #[arg(long)]
+        yes: bool,
+    },
+
+    /// Close a finished mission: its folder and its state move under
+    /// `archive/`. Nothing is deleted, and the slot is left alone.
+    Archive {
+        /// The mission.
+        id: String,
+    },
+
     /// Follow the run in progress until it ends.
     ///
     /// Two states, and a third a human causes: it runs, it is paused, it is
@@ -436,6 +469,26 @@ fn main() -> ExitCode {
                             println!("agent     {}", images.agent);
                             println!("firewall  {}", images.firewall);
                             println!("prober    {}", images.prober);
+                            ExitCode::SUCCESS
+                        }
+                        Err(e) => {
+                            eprintln!("hq: {e}");
+                            ExitCode::FAILURE
+                        }
+                    }
+                }
+                SlotCommand::Reset { name, force } => {
+                    let engine_bin = std::env::var("HQ_ENGINE").unwrap_or_else(|_| "docker".into());
+                    match slot::reset(&project, &name, &engine_bin, force) {
+                        Ok(reset) => {
+                            println!("reset     {}", reset.slot.tree.display());
+                            if reset.discarded {
+                                println!("          uncommitted work was discarded");
+                            }
+                            match reset.volumes.len() {
+                                0 => println!("          no named volume to remove"),
+                                _ => println!("          removed {}", reset.volumes.join(", ")),
+                            }
                             ExitCode::SUCCESS
                         }
                         Err(e) => {
@@ -1045,6 +1098,44 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                 }
             }
         }
+
+        MissionCommand::Reframe { id, yes } => match hq::lifecycle::reframe(project, &id, yes) {
+            Ok(reframed) => {
+                if reframed.changes.is_empty() {
+                    println!("framing   unchanged — the frozen header already says this");
+                    return ExitCode::SUCCESS;
+                }
+                for change in &reframed.changes {
+                    println!("{:<9} {} → {}", change.what, change.from, change.to);
+                }
+                if reframed.applied {
+                    println!();
+                    println!("frozen    the new framing is what hq reads from here on");
+                } else {
+                    println!();
+                    println!(
+                        "nothing has changed yet — `hq mission reframe {id} --yes` freezes it"
+                    );
+                }
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("hq: {e}");
+                ExitCode::FAILURE
+            }
+        },
+
+        MissionCommand::Archive { id } => match hq::lifecycle::archive(project, &id) {
+            Ok(archived) => {
+                println!("archived  {} → {}", archived.id, archived.at.display());
+                println!("          nothing was deleted, and the slot is untouched");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("hq: {e}");
+                ExitCode::FAILURE
+            }
+        },
 
         MissionCommand::Watch { id, every } => watch(project, &id, every),
 

@@ -388,7 +388,14 @@ les obtenir au run 2. Donc :
    chaque liste blanche.
 3. Changer la forme d'une mission en cours est un geste du HQ, par un verbe
    (`hq mission reframe`), qui remet le cadrage devant l'humain et refige
-   l'en-tête ; jamais une édition du fichier.
+   l'en-tête ; jamais une édition du fichier. Précisé le 2026-09-10 à
+   l'implémentation : le verbe **dit d'abord ce qui changerait et ne change
+   rien**, champ par champ — ce qui compte est quelle **décision** bouge, et
+   un diff du texte sérialisé rapporterait une liste réordonnée comme un
+   changement et un lot renuméroté comme deux. Il refuse pendant un run (le
+   périmètre changerait sous un agent qui est dedans) et il refuse un
+   cadrage qui supprime le lot en cours : l'état pointerait sur un travail
+   que personne n'a décrit, et il n'y a pas de supposition honnête à faire.
 
 ### 4.1 bis — Le pare-feu
 
@@ -502,7 +509,21 @@ une mission, une pull request, un push.
 mission du codeur, alors que le verbe couvre toute la phase de vérification —
 portes, intégration, sécurité, itérations — jusqu'à la validation humaine.
 Son résultat est `VERIFIED`, ou l'échec nommé. « Clôturer » redevient un mot
-pour ce qui vient après le push : `hq mission archive`.
+pour ce qui vient après le push : `hq mission archive`. Il **déplace**, il
+n'efface jamais — les journaux, le texte de la pull request et les verdicts
+sont le compte rendu de ce qui a été fait — et il laisse le slot tranquille :
+`hq slot reset` et `hq slot rm` sont les verbes d'un slot. Il refuse une
+mission encore en travail : l'archiver la cacherait au lieu de la clore. Les
+deux endroits où une mission se termine sont `Verified` et « rendue à
+l'humain », et la seconde compte : sinon le HQ garde des missions que
+personne ne peut clore.
+
+`hq slot reset` remet un slot au propre **sans le détruire** : le clone
+reste — `hq slot rm` est le verbe qui supprime — et ce qui part, c'est le
+travail en cours et les **volumes nommés** du slot. C'est la vraie raison
+d'y toucher : un cache de compilation ou un répertoire d'état de harnais
+devenu mauvais survit à toutes les reconstructions d'image, et rien d'autre
+ne l'atteint. Il refuse sur les mêmes bases que `rm`.
 
 **Pourquoi un seul verbe.** Cette phase est une seule machine à états —
 codeur, puis intégrateur, puis sécurité, avec des retours en arrière — et si
