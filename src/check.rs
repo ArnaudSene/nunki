@@ -96,6 +96,7 @@ pub fn run(project: &Project) -> Report {
     known_harness(project, &mut report);
     rules_are_reachable(project, &mut report);
     harness_can_authenticate(project, &mut report);
+    somebody_to_hand_back_to(project, &mut report);
     credentials_outside_the_tree(project, &mut report);
     coder_perimeter(project, &mut report);
     report
@@ -348,6 +349,35 @@ fn harness_can_authenticate(project: &Project, report: &mut Report) {
             report.add(what, Verdict::Green(format!("{name} ({})", path.display())));
         }
     }
+}
+
+/// A mission ends by giving something back to a person (SPEC 4.5). "Waiting
+/// on the human" is enough while there is one; it stops being enough the
+/// moment a second person works on the project, and an arbitration for
+/// Arnaud is not an arbitration for Igor.
+fn somebody_to_hand_back_to(project: &Project, report: &mut Report) {
+    use crate::human::{ME_FILE, Source, me};
+
+    let who = me(&project.hq_home(), Some(&project.root));
+    let what = "hq knows who to hand a mission back to";
+    let verdict = match (&who.name, &who.source) {
+        (Some(name), Source::Declared(path)) => {
+            Verdict::Green(format!("{name}, from {}", path.display()))
+        }
+        (Some(name), Source::Git) => Verdict::Green(format!("{name}, from git")),
+        // A machine account name is a guess, not a statement — usable, and
+        // said to be a guess.
+        (Some(name), _) => Verdict::NotChecked(format!(
+            "{name} is the machine's account name, not something you said; \
+             write {} to be addressed properly",
+            project.hq_home().join(ME_FILE).display()
+        )),
+        (None, _) => Verdict::NotChecked(format!(
+            "nothing says who you are; write {}",
+            project.hq_home().join(ME_FILE).display()
+        )),
+    };
+    report.add(what, verdict);
 }
 
 fn credentials_outside_the_tree(project: &Project, report: &mut Report) {

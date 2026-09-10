@@ -932,6 +932,25 @@ engage pour l'adaptateur, et qu'il doit tenir explicitement :
   un jour — plusieurs slots qui saturent la fenêtre, un projet d'équipe —
   c'est une décision à reprendre, pas une case à cocher.
 
+**`hq` sait à qui il rend la main.** Demandé par Arnaud le 2026-09-10 : une
+mission finit par rendre quelque chose à quelqu'un — un arbitrage, un verdict
+à accepter, un push à autoriser — et « en attente de l'humain » cesse de
+suffire dès qu'ils sont deux. Un arbitrage pour Arnaud n'est pas un arbitrage
+pour Igor.
+
+- L'identité vient de l'endroit le moins surprenant qui en ait une :
+  `~/.hq/me.yaml`, puis `git config user.name` dans le projet, puis le
+  nom de compte de la machine. **D'où vient le nom est conservé** : un nom
+  déclaré est une affirmation, un nom pris à `$USER` est une supposition, et
+  `hq check` le dit ainsi.
+- **Rien n'est inventé.** Sans aucune source, `hq` dit qu'il ne sait pas
+  plutôt que d'écrire « l'humain » comme s'il s'agissait d'un nom.
+- L'en-tête de mission porte **`arbiter`** : qui tranche quand elle revient
+  avec une question. Il vaut par défaut celui qui a cadré la mission, se
+  force avec `hq mission new --for <nom>`, et se **fige avec le reste de
+  l'en-tête**. `FOLLOWUP_HQ.md` est adressé à cette personne par son nom.
+- `hq whoami` dit qui `hq` croit avoir en face, et d'où il le tient.
+
 **Plusieurs comptes, et la mission choisit.** Demandé par Arnaud le
 2026-09-10 : il détient deux abonnements Anthropic et un compte OpenAI, et
 veut pouvoir dire quelle mission dépense lequel. Donc :

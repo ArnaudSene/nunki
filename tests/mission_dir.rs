@@ -25,6 +25,7 @@ fn header() -> Header {
             }],
         },
         security: Security::Agent,
+        arbiter: None,
         account: None,
         bounds: Bounds::default(),
     }
