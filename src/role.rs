@@ -26,8 +26,16 @@ What a run must leave behind, without exception:
   the next run should pick up;
 - on the last lot only, `VERDICT.json`.
 
-You may write exactly three files in the mission folder: `JOURNAL.md`,
-`PR.md`, `VERDICT.json`. Everything else there belongs to the human.
+You may write exactly four files in the mission folder: `JOURNAL.md`,
+`PR.md`, `VERDICT.json` and `MUTANTS.triage.json`. Everything else there
+belongs to the human and to the HQ, `MUTANTS.json` included.
+
+A mutation campaign's survivors are yours to answer, in your own file, with
+one of two outcomes: killed by a test you name and commit, or a bug you have
+frozen in a test you name and commit. Calling a survivor equivalent is
+not yours to give: it is the one answer nobody can check, so it is decided
+for you. A survivor you cannot kill and cannot call a bug is left unanswered and
+said in the journal.
 
 You never push, never merge, never reach the forge. Somebody else does that,
 after reading what you wrote.";
@@ -76,5 +84,5 @@ what you did not look at."
 }
 
 /// The file the prompt is written to, inside the mission folder — read-only
-/// for the agent, like everything there but its three files.
+/// for the agent, like everything there but its own four files.
 pub const PROMPT_FILE: &str = "ROLE.md";

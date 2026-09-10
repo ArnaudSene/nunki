@@ -113,8 +113,8 @@ impl ClaudeCode {
     }
 
     /// On the host, never in the container: `mission_dir` is a container
-    /// path, and the folder it names is mounted read-only but for three
-    /// files.
+    /// path, and the folder it names is mounted read-only but for the
+    /// agent's own files.
     fn log_path(request: &RunRequest) -> PathBuf {
         request
             .runs_dir
@@ -165,7 +165,7 @@ impl Harness for ClaudeCode {
             "Glob".to_string(),
             "Grep".to_string(),
             "Bash".to_string(),
-            // The agent's three files live in the mission folder, so even a
+            // The agent's own files live in the mission folder, so even a
             // read-only tree needs Write.
             "Write".to_string(),
             "Edit".to_string(),

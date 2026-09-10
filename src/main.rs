@@ -178,6 +178,17 @@ enum MissionCommand {
         /// Which slot runs it. Defaults to the one the mission started in.
         #[arg(long)]
         slot: Option<String>,
+        /// Rule that a survivor is equivalent rather than starting or
+        /// following a campaign. This outcome is not the coder's to give —
+        /// nothing can check it — so it is written here, by hand, on
+        /// purpose (SPEC 4.4).
+        #[arg(long = "equivalent", value_name = "SURVIVOR")]
+        equivalent: Option<String>,
+        /// Why it is equivalent, in one sentence. Required with
+        /// `--equivalent`: a ruling nobody can check must at least say what
+        /// it rests on.
+        #[arg(long = "because", value_name = "SENTENCE", requires = "equivalent")]
+        because: Option<String>,
     },
     /// Play the verification gates 1 to 4 on what the slot holds (SPEC 4.4).
     /// Deterministic, and nothing is asked of the agent.
@@ -669,7 +680,32 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             }
         }
 
-        MissionCommand::Mutants { id, slot } => {
+        MissionCommand::Mutants {
+            id,
+            slot,
+            equivalent,
+            because,
+        } => {
+            if let Some(survivor) = equivalent {
+                let Some(why) = because else {
+                    eprintln!(
+                        "hq: --equivalent needs --because: a ruling nobody can check must \
+                         say what it rests on"
+                    );
+                    return ExitCode::FAILURE;
+                };
+                let paths = hq::mission::dir::Paths::of(&project.hq_root, &id);
+                return match hq::mutants::rule_equivalent(&paths.dir, &survivor, &why) {
+                    Ok(()) => {
+                        println!("{survivor} ruled equivalent — {why}");
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("hq: {e}");
+                        ExitCode::FAILURE
+                    }
+                };
+            }
             let header = match hq::mission::dir::read_header(&project.hq_root, &id) {
                 Ok(h) => h,
                 Err(e) => {

@@ -15,7 +15,8 @@ use std::path::{Path, PathBuf};
 
 use crate::mission::Header;
 
-/// The files of one mission.
+/// The files of one mission. `MUTANTS.json` is `hq`'s and is written only
+/// when a campaign ends, so it is not created here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Paths {
     pub dir: PathBuf,
@@ -24,6 +25,11 @@ pub struct Paths {
     pub journal: PathBuf,
     pub pr: PathBuf,
     pub verdict: PathBuf,
+    /// The coder's answers to a mutation campaign's survivors (SPEC 4.4,
+    /// gate 7). Separate from `MUTANTS.json`, which is the HQ's.
+    pub triage: PathBuf,
+    /// The campaign itself, written by `hq` and read-only for the agent.
+    pub mutants: PathBuf,
 }
 
 impl Paths {
@@ -35,6 +41,8 @@ impl Paths {
             journal: dir.join("JOURNAL.md"),
             pr: dir.join("PR.md"),
             verdict: dir.join("VERDICT.json"),
+            triage: dir.join(crate::mutants::TRIAGE_FILE),
+            mutants: dir.join(crate::mutants::FILE),
             dir,
         }
     }
@@ -81,6 +89,10 @@ pub fn create(
     // Not `{}`: an empty verdict is the absence of one, and `hq` refuses a
     // verdict whose `head` is not the branch's (SPEC 4.1).
     write(&paths.verdict, "")?;
+    // Created empty, and that is not cosmetic: a bind mount whose source
+    // does not exist makes the engine create a **directory** there, and the
+    // agent would find a directory where its file should be.
+    write(&paths.triage, "")?;
     Ok(paths)
 }
 

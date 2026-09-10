@@ -319,9 +319,16 @@ fn the_role_prompts_say_what_the_role_may_not_do() {
         assert!(prompt.contains("refusing is safe"), "{prompt}");
         assert!(prompt.contains("ÉTAT DE REPRISE"), "{prompt}");
         assert!(prompt.contains("never push"), "{prompt}");
-        // Exactly three files, named.
+        // Its own files, named, and the one that is not its to write said
+        // in the same breath (SPEC 4.1, 4.4).
         assert!(prompt.contains("JOURNAL.md"), "{prompt}");
         assert!(prompt.contains("VERDICT.json"), "{prompt}");
+        assert!(prompt.contains("MUTANTS.triage.json"), "{prompt}");
+        assert!(
+            prompt.contains("not yours to give"),
+            "the outcome nobody can check must be refused where the agent reads \
+             its rules, not only where hq checks them: {prompt}"
+        );
     }
 
     // And each says the thing that is its own.
@@ -337,14 +344,21 @@ fn the_role_prompts_say_what_the_role_may_not_do() {
 #[test]
 fn the_prompt_travels_as_a_file_and_never_into_the_slot() {
     // It is written into the mission folder, which is mounted read-only but
-    // for the agent's three files — so the agent reads it and nothing in the
+    // for the agent's own files — so the agent reads it and nothing in the
     // repository is touched (SPEC 3.3).
     assert_eq!(role::PROMPT_FILE, "ROLE.md");
-    let three = hq::compose::AGENT_WRITABLE;
+    let writable = hq::compose::AGENT_WRITABLE;
     assert!(
-        !three.contains(&role::PROMPT_FILE),
+        !writable.contains(&role::PROMPT_FILE),
         "the role prompt is not the agent's to rewrite"
     );
+    // Nor is the campaign the gate reads: the coder answers in its own file
+    // (SPEC 4.1, 4.4).
+    assert!(
+        !writable.contains(&hq::mutants::FILE),
+        "the HQ's campaign file is not the agent's to rewrite"
+    );
+    assert!(writable.contains(&hq::mutants::TRIAGE_FILE));
 }
 
 #[test]

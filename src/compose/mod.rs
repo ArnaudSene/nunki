@@ -38,8 +38,15 @@ use model::{Document, Healthcheck, Service, depends_on_healthy};
 pub const FIREWALL_SERVICE: &str = "firewall";
 /// The agent's service name in every generated file.
 pub const AGENT_SERVICE: &str = "agent";
-/// The only three files an agent may write in the mission folder (SPEC 4.1).
-pub const AGENT_WRITABLE: [&str; 3] = ["JOURNAL.md", "PR.md", "VERDICT.json"];
+/// The only files an agent may write in the mission folder (SPEC 4.1).
+///
+/// `MUTANTS.triage.json` is the fourth, added with gate 7 on 2026-09-10: the
+/// coder answers a campaign's survivors there, and it is a **different file**
+/// from `MUTANTS.json` on purpose. What decides who wrote a line is this
+/// list, not the line — so the outcome no machine can check lives in the
+/// HQ's file, which is mounted read-only here.
+pub const AGENT_WRITABLE: [&str; 4] =
+    ["JOURNAL.md", "PR.md", "VERDICT.json", "MUTANTS.triage.json"];
 
 /// The uid and gid of the human, passed through so that files the agent
 /// creates belong to them on the host (SPEC 4.2 bis).
@@ -285,7 +292,8 @@ fn agent(plan: &Plan, dialect: &Dialect) -> Result<Service, ComposeError> {
     volumes.push(mount(&plan.tree, &plan.tree_at, tree_mode));
 
     // The mission folder is the agent's only channel with the HQ, and it is
-    // read-only but for three files (SPEC 4.1). A directory mounted rw would
+    // read-only but for the agent's own files (SPEC 4.1). A directory
+    // mounted rw would
     // hand back `MISSION.md` — the header the whole run is framed by.
     volumes.push(mount(&plan.mission_dir, &plan.mission_dir_at, "ro"));
     for file in AGENT_WRITABLE {

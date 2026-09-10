@@ -142,7 +142,19 @@ pub fn harness_layer(base: &str, provisioning: &crate::harness::Provisioning) ->
         // As the agent, not as root: the harness keeps its state under the
         // agent's home, and installing it as root would leave it unreadable
         // by the only user that runs it.
-        out.push_str(&format!("RUN {step}\n"));
+        //
+        // And only if it is not already there. A stack image is allowed to
+        // ship its own harness — pinned, or built for a base the installer
+        // does not support — and reinstalling over it wastes minutes at
+        // best. Measured: the layer failed to build on an image that already
+        // carried `claude`, because the installer wants `curl` and that
+        // image had none.
+        match &provisioning.binary {
+            binary if !binary.is_empty() => out.push_str(&format!(
+                "RUN command -v {binary} > /dev/null || ({step})\n"
+            )),
+            _ => out.push_str(&format!("RUN {step}\n")),
+        }
     }
     if !provisioning.binary.is_empty() {
         // Loudly, at build time. The first version of this layer produced an

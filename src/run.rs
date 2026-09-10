@@ -185,7 +185,8 @@ pub fn start(
         session,
         resume: false,
         // On the host: the container has nowhere to write a log, and the
-        // mission folder is read-only but for three files (SPEC 4.1).
+        // mission folder is read-only but for the agent's own files
+        // (SPEC 4.1).
         runs_dir: paths.dir.join("runs"),
     };
     let handle = harness

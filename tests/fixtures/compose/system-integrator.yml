@@ -42,6 +42,7 @@ services:
     - /Users/h/.hq/demo/missions/m1/JOURNAL.md:/work/mission/JOURNAL.md:rw
     - /Users/h/.hq/demo/missions/m1/PR.md:/work/mission/PR.md:rw
     - /Users/h/.hq/demo/missions/m1/VERDICT.json:/work/mission/VERDICT.json:rw
+    - /Users/h/.hq/demo/missions/m1/MUTANTS.triage.json:/work/mission/MUTANTS.triage.json:rw
     - /Users/h/.hq/demo/credentials/db.env:/run/hq/credentials/db.env:ro
     - hq-demo-1-harness:/home/agent/.harness
     tmpfs:

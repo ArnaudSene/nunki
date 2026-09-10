@@ -10,7 +10,8 @@
 //! The stream is the other way round: the client's stdout is the harness's
 //! structured output, and it is captured on the host, where `hq` reads it.
 //! The mission folder cannot serve for that — it is mounted read-only but
-//! for three files (SPEC 4.1) — which is why a run's log lives in the HQ's
+//! for the agent's own files (SPEC 4.1) — which is why a run's log lives in
+//! the HQ's
 //! own directory and never in the container.
 
 use std::io;

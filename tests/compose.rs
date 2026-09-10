@@ -241,7 +241,7 @@ fn the_security_agent_reads_the_tree_and_the_others_write_it() {
 }
 
 #[test]
-fn the_mission_folder_is_read_only_but_for_three_files() {
+fn the_mission_folder_is_read_only_but_for_the_agents_own_files() {
     let yaml = generate(&plan(Role::Coder), &dialect()).unwrap();
     let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
     let mounts: Vec<_> = doc["services"][AGENT_SERVICE]["volumes"]

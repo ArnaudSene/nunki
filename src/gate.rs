@@ -747,10 +747,33 @@ fn mutation(subject: &Subject) -> Result<Outcome, GateError> {
         ));
     }
 
+    // Two sources, and which one a line came from is decided by the mount,
+    // not by the line: the coder can only write its own file, and the
+    // outcome no machine can check is not in it (SPEC 4.1, 4.4).
+    let coders = crate::mutants::read_triage(subject.mission_dir)
+        .map_err(|e| GateError::Mutants(e.to_string()))?;
+    for (id, outcome) in &coders {
+        if !outcome.is_the_coders_to_give() {
+            return Ok(Outcome::of(
+                gate,
+                Decision::Failed(format!(
+                    "{} answers {id} with `{}`, and that outcome is not the coder's to \
+                     give: nothing can check it, so it is the HQ's — write it in {}",
+                    crate::mutants::TRIAGE_FILE,
+                    outcome.kind(),
+                    crate::mutants::FILE
+                )),
+            ));
+        }
+    }
+    let answer = |s: &crate::mutants::Survivor| -> Option<crate::mutants::Triage> {
+        coders.get(&s.id).cloned().or_else(|| s.outcome.clone())
+    };
+
     let untriaged: Vec<String> = campaign
         .survivors
         .iter()
-        .filter(|s| s.outcome.is_none())
+        .filter(|s| answer(s).is_none())
         .map(|s| format!("{}:{} {}", s.file, s.line, s.id))
         .collect();
     if !untriaged.is_empty() {
@@ -769,7 +792,7 @@ fn mutation(subject: &Subject) -> Result<Outcome, GateError> {
     // A named test has to exist. "A test covers this" is not an outcome; a
     // test called `x` is, and whether `x` is there is a fact.
     for survivor in &campaign.survivors {
-        let Some(outcome) = &survivor.outcome else {
+        let Some(outcome) = answer(survivor) else {
             continue;
         };
         if let Some(test) = outcome.test()
@@ -789,13 +812,14 @@ fn mutation(subject: &Subject) -> Result<Outcome, GateError> {
     let equivalent = campaign
         .survivors
         .iter()
-        .filter(|s| matches!(s.outcome, Some(crate::mutants::Triage::Equivalent { .. })))
+        .filter(|s| matches!(answer(s), Some(crate::mutants::Triage::Equivalent { .. })))
         .count();
     let mut outcome = Outcome::of(gate, Decision::Passed);
     if equivalent > 0 {
         outcome.note = Some(format!(
-            "{equivalent} of {} rode on `equivalent`, which no gate can check — SPEC 4.4 \
-             gives that counter-check to the HQ",
+            "{equivalent} of {} rode on `equivalent`, which no machine can check — they \
+             come from the HQ's own hand, and they are counted here so nobody has to \
+             go looking",
             campaign.survivors.len()
         ));
     }
