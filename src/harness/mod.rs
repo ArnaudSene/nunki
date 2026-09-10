@@ -1,0 +1,194 @@
+//! The harness boundary (SPEC 4.3).
+//!
+//! A harness is the coding agent's runtime — Claude Code, Codex, OpenCode.
+//! `hq` never talks to one directly: it holds a `Box<dyn Harness>` and asks
+//! it to launch a run, read its state, stop it. Everything that is specific
+//! to a harness (command line, session resumption, structured output,
+//! headless login, optional guards) lives behind this trait and nowhere
+//! else. What is NOT here — role prompts, the mission protocol, gates, the
+//! flow, the clone, the container — is handed in as arguments.
+
+pub mod claude_code;
+pub mod fake;
+pub mod spawn;
+
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+
+/// The three agent roles of SPEC 2. The HQ and the human are not roles a
+/// harness runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Role {
+    Coder,
+    Integrator,
+    Security,
+}
+
+/// Where a run works: the slot's tree and the mission folder, as the
+/// container sees them. The harness only needs paths; how they are mounted
+/// is the engine's business (SPEC 4.1, mounts per profile).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Workspace {
+    /// The slot's working tree inside the container.
+    pub tree: PathBuf,
+    /// The mission folder inside the container (`JOURNAL.md`, `PR.md`,
+    /// `VERDICT.json` writable; `MISSION.md`, `FOLLOWUP_HQ.md` read-only).
+    pub mission_dir: PathBuf,
+}
+
+/// What a run is asked to do: one lot, or a retry of one (SPEC 4.3, "un run
+/// par lot").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunRequest {
+    pub role: Role,
+    pub workspace: Workspace,
+    /// Identifier of the lot this run works on, from the mission header.
+    pub lot: String,
+    /// Which attempt this is for that lot, starting at 1.
+    pub attempt: u32,
+    /// Resume this harness session instead of starting a fresh one. The
+    /// identifier is chosen by `hq` at the first launch and imposed on the
+    /// harness, never read back from it.
+    pub session: SessionId,
+    /// Whether `session` already exists on the harness side.
+    pub resume: bool,
+}
+
+/// A harness session identifier, chosen by `hq`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SessionId(pub String);
+
+/// Handle on a launched run. Persistable: the engine writes it to its state
+/// so a restarted `hq` can re-derive whether the run is alive (SPEC 4.2,
+/// "la reprise re-dérive avant de décider").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunHandle {
+    pub session: SessionId,
+    /// Container the run lives in, as named by the container engine; empty
+    /// for a local run.
+    pub container: String,
+    /// Process id of the harness, when known.
+    pub pid: Option<u32>,
+    /// Where the harness's structured output is written, as `hq` sees it.
+    pub log: PathBuf,
+}
+
+/// Why a run ended. The distinction is what SPEC 4.3 and 4.5 are built on:
+/// a harness failure is replayed and consumes neither an attempt nor a
+/// volet; a mission failure does.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Outcome {
+    /// The run ended on its own, having done what it could; whether the lot
+    /// is actually done is read from the journal and the verdict, not from
+    /// here.
+    Finished(Usage),
+    /// Quota, expired token, network, harness crash. Not the mission's fault.
+    HarnessFailure(String),
+    /// The run was stopped by `hq` (stall observed, human `stop`/`kill`) or
+    /// left without honouring the run contract. The mission's fault.
+    MissionFailure(String),
+}
+
+/// What a run consumed, as the harness reports it. Counted against the
+/// per-mission cap of SPEC 7, in tokens — never in money (SPEC 4.3,
+/// subscription only).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Usage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+/// Current state of a launched run (SPEC 4.3: two states, plus the stall
+/// checks that the engine derives from [`Progress`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunState {
+    Running(Progress),
+    Finished(Outcome),
+}
+
+/// Signals a liveness check reads without asking the agent (SPEC 4.3, the
+/// 15-minute check). All counters are monotonic since launch.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Progress {
+    /// Structured events the harness emitted so far.
+    pub events: u64,
+    /// Tool calls made so far.
+    pub tool_calls: u64,
+    /// Length of the longest run of identical consecutive tool calls seen.
+    pub longest_repeat: u32,
+}
+
+/// What a harness needs on the container side (SPEC 4.3, `provision()`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Provisioning {
+    /// Packages or install steps for the stack Dockerfile.
+    pub install: Vec<String>,
+    /// Directory the harness keeps its config and sessions in; mounted as a
+    /// named volume per slot so session resumption survives a rebuild.
+    pub config_dir: Option<PathBuf>,
+    /// Domains the harness itself must reach (the model API). Added to the
+    /// role's allowlist by the engine (SPEC 4.1 bis, rule 6).
+    pub domains: Vec<String>,
+}
+
+/// Harness-side guards that double the container/git restrictions (SPEC
+/// 3.2). Passed at invocation, never written into the slot (SPEC 3.3).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GuardSetup {
+    /// Extra command-line arguments to pass at launch.
+    pub args: Vec<String>,
+}
+
+/// How a role's prompt is handed to the harness (SPEC 4.3, `expose(role)`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Exposure {
+    /// Appended to the system prompt from a file.
+    SystemPromptFile(PathBuf),
+    /// Given as the first user message.
+    UserMessage(String),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum HarnessError {
+    #[error("launch failed: {0}")]
+    Launch(String),
+    #[error("unknown run: {0:?}")]
+    UnknownRun(SessionId),
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+/// The contract every harness adapter implements. See the module docs.
+pub trait Harness: Send + Sync {
+    /// Stable name, used in `hq.yaml` and in the state.
+    fn name(&self) -> &'static str;
+
+    /// What the container must carry for this harness to run.
+    fn provision(&self) -> Provisioning;
+
+    /// Start a headless run for `request`. Returns a persistable handle.
+    fn launch(
+        &self,
+        request: &RunRequest,
+        guards: &GuardSetup,
+        exposure: &Exposure,
+    ) -> Result<RunHandle, HarnessError>;
+
+    /// Read the run's state from what the container exposes: structured
+    /// output and exit code first, a terminal pane only as a last resort.
+    fn state(&self, handle: &RunHandle) -> Result<RunState, HarnessError>;
+
+    /// End the current turn properly (for Claude Code, `SIGINT`, not
+    /// `SIGTERM`), so the agent can write its resume block.
+    fn stop(&self, handle: &RunHandle) -> Result<(), HarnessError>;
+
+    /// Optional: guards this harness can add on top of the container and
+    /// git ones. The default is none, and that is a complete answer.
+    fn guards(&self, _role: Role) -> GuardSetup {
+        GuardSetup::default()
+    }
+
+    /// How this harness prefers to receive a role prompt.
+    fn expose(&self, role: Role, prompt_file: PathBuf) -> Exposure;
+}

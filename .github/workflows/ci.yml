@@ -1,0 +1,100 @@
+# The gate the repository's own doctrine asks for: nothing merges on the word
+# of whoever ran the commands locally.
+#
+# Two platforms, because SPEC 4.2 bis commits to macOS and to Linux under WSL
+# and there is no cross-compilation to lean on. Only GitHub's own actions are
+# used: the toolchain ships with the runners, and an action nobody reads is a
+# dependency nobody reviews.
+#
+# Major tags, not commit digests, and the reason is that these two are
+# GitHub's own. A digest would freeze the patch level, so a fix inside v7
+# would wait for someone to notice and edit; a major tag takes it the next
+# morning. The risk a digest buys off — an owner repointing a tag at other
+# code — sits inside a trust boundary we are already all the way inside:
+# these runners, this toolchain and the job's token are GitHub's too.
+#
+# That reasoning does not extend to anyone else's action. **A third-party
+# action is pinned to a commit digest**, with the version in a comment, or it
+# does not go in. Check the majors now and then:
+#
+#   gh api repos/actions/checkout/releases/latest --jq .tag_name
+#   gh api repos/actions/cache/releases/latest    --jq .tag_name
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [dev, main]
+
+env:
+  CARGO_TERM_COLOR: always
+  # No blanket `RUSTFLAGS: -D warnings`: it applies to dependencies too, so a
+  # warning upstream would turn this repository red for something it cannot
+  # fix. Clippy denies warnings where it matters — our own code.
+
+jobs:
+  check:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Show what the runner brought
+        run: |
+          rustc --version
+          cargo --version
+          cargo fmt --version
+          cargo clippy --version
+          docker compose version || echo "no container engine here — engine tests will skip"
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ matrix.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ matrix.os }}-cargo-
+
+      - name: Formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy, warnings included
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Tests
+        # The `#[ignore]`d ones stay out: one needs a human's subscription,
+        # the others lift real containers. They are run by hand, and the
+        # journal says when.
+        run: cargo test --all-features
+
+  supply-chain:
+    name: supply chain
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+          key: audit-tools-${{ hashFiles('**/Cargo.lock', 'deny.toml') }}
+          restore-keys: audit-tools-
+
+      - name: Install the two auditors if the cache did not carry them
+        run: |
+          command -v cargo-audit >/dev/null || cargo install cargo-audit --locked
+          command -v cargo-deny  >/dev/null || cargo install cargo-deny  --locked
+
+      - name: Known vulnerabilities
+        run: cargo audit --deny warnings
+
+      - name: Licences, bans and sources
+        run: cargo deny check

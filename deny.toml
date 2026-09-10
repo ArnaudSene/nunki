@@ -1,0 +1,47 @@
+# Supply-chain gate for `hq` (SPEC 3.4, "ce qui ne doit pas entrer dans le
+# commun"). `cargo audit` answers "is anything here known to be vulnerable";
+# this file answers the two questions it does not: what licences we accept,
+# and what we refuse to carry at all.
+
+[advisories]
+# Anything RustSec knows about is an error. Ignoring one must be a written
+# decision, listed here with the reason.
+yanked = "deny"
+ignore = []
+
+[licenses]
+# Permissive only, and only what the tree actually needs — plus ISC and the
+# BSD pair, which are the same kind of licence and turn up constantly in
+# transitive dependencies. A copyleft licence appearing here is a decision to
+# take, not a line to add quietly.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "ISC",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.9
+# Listing a permissive licence the tree does not happen to use today is not a
+# finding; it is how the list stays stable when a dependency changes.
+unused-allowed-license = "allow"
+
+[bans]
+# Two copies of one crate is how a supply-chain surprise usually arrives, and
+# how build times quietly double. A warning, not an error: the fix is often
+# upstream's to make.
+multiple-versions = "warn"
+wildcards = "deny"
+deny = []
+
+[sources]
+# Nothing from anywhere but crates.io: a git dependency is a dependency
+# nobody reviews.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = []

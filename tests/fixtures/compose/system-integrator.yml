@@ -1,0 +1,55 @@
+name: hq-demo-1
+services:
+  firewall:
+    image: hq/firewall:1
+    cap_drop:
+    - ALL
+    cap_add:
+    - NET_ADMIN
+    - NET_RAW
+    - SETUID
+    - SETGID
+    security_opt:
+    - no-new-privileges:true
+    healthcheck:
+      test:
+      - CMD
+      - /usr/local/bin/fw-ready
+      interval: 1s
+      timeout: 2s
+      retries: 30
+      start_period: 1s
+    environment:
+      HQ_ALLOW_ADDRESSES: 10.4.0.7
+      HQ_ALLOW_DOMAINS: api.anthropic.com,db,index.crates.io,static.crates.io,statsig.anthropic.com
+    init: true
+    restart: no
+  agent:
+    image: hq/rust:1
+    user: 501:20
+    working_dir: /work/tree
+    network_mode: service:firewall
+    cap_drop:
+    - ALL
+    security_opt:
+    - no-new-privileges:true
+    depends_on:
+      firewall:
+        condition: service_healthy
+    volumes:
+    - /Users/h/code/demo-slot-1:/work/tree:rw
+    - /Users/h/.hq/demo/missions/m1:/work/mission:ro
+    - /Users/h/.hq/demo/missions/m1/JOURNAL.md:/work/mission/JOURNAL.md:rw
+    - /Users/h/.hq/demo/missions/m1/PR.md:/work/mission/PR.md:rw
+    - /Users/h/.hq/demo/missions/m1/VERDICT.json:/work/mission/VERDICT.json:rw
+    - /Users/h/.hq/demo/credentials/db.env:/run/hq/credentials/db.env:ro
+    - hq-demo-1-harness:/home/agent/.harness
+    environment:
+      HQ_ROLE: integrator
+    init: true
+    restart: no
+    command:
+    - sleep
+    - infinity
+volumes:
+  hq-demo-1-harness: null
