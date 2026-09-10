@@ -300,10 +300,19 @@ fn the_verb_exits_non_zero_when_a_restriction_is_not_held() {
 
 /// nunki orchestrates nunki: the first project the tool checks is the
 /// one whose rules it enforces.
+///
+/// With a home of its own. The first version of this test read the
+/// developer's, where the HQ happens to exist — so it was green here and red
+/// on both CI runners, having asserted something about the machine rather
+/// than about the repository.
 #[test]
 fn the_verb_is_green_on_this_very_repository() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join(".hq").join("nunki")).unwrap();
+
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_hq"))
+        .env("HOME", home.path())
         .args(["-C"])
         .arg(root)
         .arg("check")
@@ -314,4 +323,16 @@ fn the_verb_is_green_on_this_very_repository() {
     assert!(text.contains("the coder's allowlist for rust"), "{text}");
     // The container probes are named as not run, never silently skipped.
     assert!(text.contains("could not be checked"), "{text}");
+}
+
+#[test]
+fn the_hq_is_the_projects_own_directory_under_the_home() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("some-project");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("hq.yaml"), "harness: claude-code\n").unwrap();
+
+    let project = Project::open(&root).unwrap();
+    let home = PathBuf::from(std::env::var("HOME").unwrap());
+    assert_eq!(project.hq_root, home.join(".hq").join("some-project"));
 }
