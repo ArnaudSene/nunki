@@ -692,6 +692,30 @@ documentée par ce tableau pour qui l'implémentera, avec la note honnête que
 tant que `podman-compose` porte ces bugs, son adaptateur devra contourner ou
 générer un Compose plus simple. Rien d'autre du moteur ne remonte dans `hq`.
 
+**La base des images, et pourquoi elle n'est pas la même partout.** Tranché
+par Arnaud le 2026-09-09, après qu'il a scanné l'image du sidecar.
+
+- **Les images de stack — les conteneurs d'agent — sont sur une base
+  glibc** (Debian slim). musl coûte trop cher là où le travail a lieu : les
+  wheels `manylinux` de Python sont glibc et retombent sinon sur une
+  compilation depuis les sources, les binaires natifs préconstruits de Node
+  visent glibc, Rust change de cible, et la pile de thread par défaut de musl
+  (128 Kio contre 8 Mio) fait tomber des logiciels qui ne s'y attendent pas.
+- **Le sidecar pare-feu est sur Alpine**, avec son dnsmasq compilé (4.1 bis).
+  Mesuré le 2026-09-09 : `debian:bookworm-slim` porte 4 vulnérabilités
+  critiques et 52 hautes **dont aucune n'est corrigeable** — Debian les marque
+  « ne sera pas corrigé » — et le sidecar fini arrivait à 8 critiques, 55
+  hautes et 154 Mo ; sur Alpine, le même sidecar est à 0 et 0, pour 27 Mo.
+
+L'asymétrie est assumée parce que le calcul de risque n'est pas le même : le
+conteneur d'agent n'a **aucune capacité** et vit derrière le pare-feu, tandis
+que le sidecar détient `NET_ADMIN` et **son socket d'écoute est joignable
+depuis l'espace réseau que l'agent partage**. C'est le pire endroit du système
+pour accumuler des CVE, et le seul où l'on paie une étape de build pour les
+éviter. Ce que ça coûte : deux profils de vulnérabilités à suivre au lieu
+d'un, et rien ne les surveille encore dans le temps — un scan d'image en CI
+reste à trancher.
+
 **Les fragments de stack.** Un dossier par stack sous `.hq/stacks/<nom>/`
 — rappel : `.hq/` appartient au projet orchestré, jamais à `hq` (4.1 bis) :
 un Dockerfile (étapes d'image), `allow.txt` (domaines des dépendances),
