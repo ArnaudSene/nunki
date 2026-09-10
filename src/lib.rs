@@ -26,3 +26,4 @@ pub mod role;
 pub mod run;
 pub mod slot;
 pub mod state;
+pub mod verify;

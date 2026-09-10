@@ -148,6 +148,15 @@ impl Flow {
             (Stage::Coding { work, attempt }, Event::Stalled { .. }) => {
                 self.retry_coder(work, attempt)
             }
+            // Gates 1 to 4 are played at the end of **every** run, not only
+            // at the final verification (SPEC 4.4, decided 2026-09-09): a
+            // perimeter gate that only falls at the end loses a six-hour
+            // mission over a forbidden write in the first lot. A red one
+            // here is one more run on the same lot — the work is not done,
+            // and it is bounded like any other attempt.
+            (Stage::Coding { work, attempt }, Event::GatesFailed { .. }) => {
+                self.retry_coder(work, attempt)
+            }
 
             // --- gates -------------------------------------------------
             (Stage::Gates, Event::GatesPassed) => self.after_gates(),
