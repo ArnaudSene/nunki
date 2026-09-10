@@ -1,0 +1,123 @@
+//! Building the two images a profile needs (SPEC 4.1, 4.2).
+//!
+//! One belongs to the project — the stack's `Dockerfile`, which `hq init`
+//! wrote and the project may edit. The other belongs to `hq` and travels in
+//! the binary: the firewall sidecar (see [`crate::firewall`]).
+//!
+//! Both are built with the human's uid and gid. That is not a nicety: a file
+//! written under another id is unreadable on the host, and git refuses a tree
+//! it does not own (SPEC 4.2 bis).
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use crate::project::Project;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Images {
+    pub agent: String,
+    pub firewall: String,
+    /// The container `hq check` probes from — never the agent's, which has no
+    /// reason to carry `nslookup` (see `assets/prober/Dockerfile`).
+    pub prober: String,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ImageError {
+    #[error("no Dockerfile for stack {stack:?} at {at} — `hq init --stack {stack}` writes one")]
+    NoDockerfile { stack: String, at: PathBuf },
+    #[error("building {image} failed:\n{stderr}")]
+    Build { image: String, stderr: String },
+    #[error("{0}: {1}")]
+    Io(PathBuf, std::io::Error),
+    #[error("the container engine is not on this machine: {0}")]
+    NoEngine(String),
+}
+
+/// The uid and gid the images and containers run under: the human's own.
+pub fn host_ids() -> (u32, u32) {
+    // SAFETY: both are always-succeeding libc calls with no arguments.
+    unsafe { (libc::getuid(), libc::getgid()) }
+}
+
+/// What the images are called for a given slot. Named per project and stack,
+/// not per slot: two slots of the same project share an image, and rebuilding
+/// one rebuilds for both — which is what makes `hq slot rebuild` cheap.
+pub fn names(project: &Project, stack: &str) -> Images {
+    Images {
+        agent: format!("hq/{}-{stack}:latest", project.name().to_lowercase()),
+        firewall: format!("hq/firewall:{}", env!("CARGO_PKG_VERSION")),
+        prober: format!("hq/prober:{}", env!("CARGO_PKG_VERSION")),
+    }
+}
+
+/// Build both images. `engine` is the binary that builds — `docker` unless
+/// `HQ_ENGINE` says otherwise.
+pub fn build(project: &Project, stack: &str, engine: &str) -> Result<Images, ImageError> {
+    let images = names(project, stack);
+    let (uid, gid) = host_ids();
+
+    // The sidecar first: the agent's image is worthless without something to
+    // fence it in.
+    let context = tempfile::tempdir().map_err(|e| ImageError::Io(PathBuf::from("."), e))?;
+    crate::firewall::materialise(context.path())
+        .map_err(|e| ImageError::Io(context.path().to_path_buf(), e))?;
+    docker_build(engine, context.path(), &images.firewall, &[])?;
+
+    let prober = tempfile::tempdir().map_err(|e| ImageError::Io(PathBuf::from("."), e))?;
+    crate::firewall::materialise_prober(prober.path())
+        .map_err(|e| ImageError::Io(prober.path().to_path_buf(), e))?;
+    docker_build(engine, prober.path(), &images.prober, &[])?;
+
+    let fragment = project.fragment(stack);
+    let dockerfile = fragment.join("Dockerfile");
+    if !dockerfile.is_file() {
+        return Err(ImageError::NoDockerfile {
+            stack: stack.to_string(),
+            at: dockerfile,
+        });
+    }
+    docker_build(
+        engine,
+        &fragment,
+        &images.agent,
+        &[format!("UID={uid}"), format!("GID={gid}")],
+    )?;
+
+    Ok(images)
+}
+
+/// Whether an image is already on this machine, so a caller can say what is
+/// missing instead of building for minutes.
+pub fn present(engine: &str, image: &str) -> bool {
+    Command::new(engine)
+        .args(["image", "inspect", image])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn docker_build(
+    engine: &str,
+    context: &Path,
+    tag: &str,
+    build_args: &[String],
+) -> Result<(), ImageError> {
+    let mut command = Command::new(engine);
+    command.args(["build", "-q", "-t", tag]);
+    for arg in build_args {
+        command.args(["--build-arg", arg]);
+    }
+    command.arg(context);
+    let out = command
+        .output()
+        .map_err(|e| ImageError::NoEngine(e.to_string()))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(ImageError::Build {
+            image: tag.to_string(),
+            stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        })
+    }
+}

@@ -132,6 +132,17 @@ fn claude_md(root: &Path, actions: &mut Vec<Action>) -> Result<(), InitError> {
         actions.push(Action::Created(path));
         return Ok(());
     }
+    // A symlink to AGENTS.md is the other documented shape, and reading
+    // through it would ask whether AGENTS.md mentions its own name — which is
+    // not the question. `hq check` already knew this; `init` did not, and
+    // said so on this very repository.
+    if path.is_symlink() {
+        actions.push(Action::LeftAlone(
+            path,
+            "it is a link to AGENTS.md".to_string(),
+        ));
+        return Ok(());
+    }
     let text = std::fs::read_to_string(&path).unwrap_or_default();
     let why = if text.contains("AGENTS.md") {
         "it already imports AGENTS.md".to_string()
@@ -235,6 +246,57 @@ actually hold in this project.
   checkpoint and before stopping.
 ";
 
+/// The agent image for a Rust project.
+///
+/// Debian and not Alpine: musl costs too much where the work happens —
+/// manylinux-style prebuilt artefacts, a different target triple, and a
+/// default thread stack of 128 KiB against glibc's 8 MiB (SPEC 4.2, decided
+/// 2026-09-09). The firewall sidecar is the one image on Alpine, for reasons
+/// that apply to it alone.
+///
+/// Two things it must do that are easy to forget: run as the **host's** uid,
+/// or a file it writes is unreadable on the host and git refuses the tree;
+/// and **pre-create the mount points**, or a named volume is born owned by
+/// root and the toolchain cannot write in it (SPEC 4.2 bis).
+const DOCKERFILE_RUST: &str = r#"# The coder's image for a Rust project, built by `hq slot rebuild`.
+ARG BASE=debian:bookworm-slim
+FROM ${BASE}
+
+# Passed by hq at build time: the human's own ids, so that what the agent
+# writes belongs to the human on the host.
+ARG UID=1000
+ARG GID=1000
+ARG RUST_VERSION=stable
+
+RUN apt-get -qq update \
+ && apt-get -qq install --no-install-recommends -y \
+      ca-certificates curl git build-essential pkg-config tmux \
+ && rm -rf /var/lib/apt/lists/*
+
+# The group may already exist under that id (on macOS, gid 20 is `dialout`
+# here); either way the agent ends up in it.
+RUN groupadd -g ${GID} agent || true \
+ && useradd -m -u ${UID} -g ${GID} -s /bin/bash agent
+
+# Mount points, created by root because they sit at the filesystem root, then
+# handed to the agent: a named volume mounted over a root-owned directory is
+# born root-owned, and the toolchain cannot write in it (SPEC 4.2 bis). The
+# agent cannot create them itself — it is not root, which is the point.
+RUN mkdir -p /work/tree /work/mission /run/hq \
+ && chown -R ${UID}:${GID} /work /run/hq
+
+USER agent
+ENV RUSTUP_HOME=/home/agent/.rustup \
+    CARGO_HOME=/home/agent/.cargo \
+    PATH=/home/agent/.cargo/bin:${PATH}
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+  | sh -s -- -y --no-modify-path --profile minimal \
+      --default-toolchain ${RUST_VERSION} --component clippy,rustfmt
+
+RUN mkdir -p /home/agent/.cargo/registry /home/agent/.harness
+"#;
+
 /// The files of a stack fragment: `(name, body, executable)`.
 fn fragment(stack: &str) -> Vec<(&'static str, String, bool)> {
     match stack {
@@ -262,6 +324,7 @@ fn fragment(stack: &str) -> Vec<(&'static str, String, bool)> {
                     .to_string(),
                 true,
             ),
+            ("Dockerfile", DOCKERFILE_RUST.to_string(), false),
             (
                 "writable.txt",
                 "# Directories an execution must be able to write when the tree is\n\

@@ -1,0 +1,3 @@
+# Directories an execution must be able to write when the tree is
+# mounted read-only (SPEC 4.2). One relative path per line.
+target

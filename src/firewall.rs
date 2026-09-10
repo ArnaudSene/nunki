@@ -42,12 +42,28 @@ pub const BUILD_CONTEXT: [Asset; 3] = [
     },
 ];
 
+/// The prober's build context: one file, and its reason is in it.
+pub const PROBER_CONTEXT: [Asset; 1] = [Asset {
+    name: "Dockerfile",
+    contents: include_str!("../assets/prober/Dockerfile"),
+    executable: false,
+}];
+
+/// Write the prober's build context into `dir`.
+pub fn materialise_prober(dir: &Path) -> io::Result<()> {
+    write(dir, &PROBER_CONTEXT)
+}
+
 /// Write the build context into `dir`, which must exist. The two scripts come
 /// out executable: a Dockerfile that `COPY`s them can chmod, but an
 /// entrypoint that arrives without its bit is a sidecar that fails to start,
 /// and a sidecar that fails to start is an agent that never runs.
 pub fn materialise(dir: &Path) -> io::Result<()> {
-    for asset in &BUILD_CONTEXT {
+    write(dir, &BUILD_CONTEXT)
+}
+
+fn write(dir: &Path, assets: &[Asset]) -> io::Result<()> {
+    for asset in assets {
         let path = dir.join(asset.name);
         std::fs::write(&path, asset.contents)?;
         if asset.executable {
