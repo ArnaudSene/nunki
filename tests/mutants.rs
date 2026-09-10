@@ -385,3 +385,102 @@ fn a_triage_file_the_coder_wrote_and_hq_cannot_read_is_said_not_ignored() {
     std::fs::write(dir.path().join("MUTANTS.triage.json"), "{not json").unwrap();
     assert!(mutants::read_triage(dir.path()).is_err());
 }
+
+/// The mutation script `hq init` ships, run against the real cargo-mutants
+/// (SPEC 4.4, gate 7).
+///
+/// It had never been run. Every test of gate 7 used a stub that echoed a JSON
+/// line, and the shipped script was wrong in two ways that only running it
+/// could show — measured against cargo-mutants 27.1.0 on 2026-09-10:
+///
+/// 1. `--output DIR` writes into `DIR/mutants.out/`, not into `DIR`. The
+///    script read `DIR/missed.txt`, found nothing, and exited 1: every
+///    campaign would have failed with "the campaign left no …".
+/// 2. Several mutants share one **position** — `> ==`, `> <` and `> >=` are
+///    all at `src/lib.rs:2:7` — so neither `file:line` nor `file:line:col`
+///    tells them apart, and the coder would have been handed survivors it
+///    cannot answer one by one in a file whose whole purpose is that. The
+///    identifier is the whole line, which is the tool's own name for a
+///    mutant.
+/// 3. `--output` creates its own directory and not the path above it, so a
+///    clean copy of `HEAD` that has never been built — which is exactly what
+///    gate 7 runs in — failed with "create output parent directory".
+#[test]
+#[ignore = "runs a real mutation campaign; needs cargo-mutants; run by hand"]
+fn live_the_shipped_mutation_script_reads_a_real_campaign() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("crate");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"tiny\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    // `keep` has no test at all, so its mutants survive; `double` has one, so
+    // some of its are caught. A campaign where everything survives would not
+    // prove the script reads `missed.txt` rather than every mutant.
+    std::fs::write(
+        root.join("src/lib.rs"),
+        "pub fn keep(n: u8) -> bool {\n    n > 3\n}\n\n\
+         pub fn double(n: u8) -> u8 {\n    n * 2\n}\n\n\
+         #[cfg(test)]\nmod tests {\n    #[test]\n    fn double_works() {\n        \
+         assert_eq!(super::double(2), 4);\n    }\n}\n",
+    )
+    .unwrap();
+
+    // The script exactly as `hq init` deposits it, not a copy of it.
+    hq::init::init(&root, &dir.path().join("hq"), &["rust".to_string()]).unwrap();
+    let script = root.join(".hq/stacks/rust").join(hq::mutants::SCRIPT);
+    assert!(script.is_file());
+
+    let out = std::process::Command::new(&script)
+        .arg("campaign-1")
+        .arg("src/lib.rs")
+        .current_dir(&root)
+        .output()
+        .expect("the script runs; cargo-mutants must be installed");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // What `hq` reads is what the script printed, through the very parser
+    // gate 7 uses.
+    let survivors = hq::mutants::parse(&stdout);
+    assert!(
+        survivors.len() >= 4,
+        "a crate with an untested function has survivors: {stdout}"
+    );
+    assert!(
+        survivors.iter().all(|s| s.file == "src/lib.rs"),
+        "{survivors:?}"
+    );
+    assert!(
+        survivors.iter().any(|s| s.description.contains("replace")),
+        "{survivors:?}"
+    );
+
+    // The identifiers are distinct, which is the second defect: three mutants
+    // of one line differ only by their column.
+    let mut ids: Vec<&str> = survivors.iter().map(|s| s.id.as_str()).collect();
+    let total = ids.len();
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), total, "two survivors share an id: {survivors:?}");
+    let same_line = survivors.iter().filter(|s| s.line == 2).collect::<Vec<_>>();
+    assert!(
+        same_line.len() >= 2,
+        "line 2 carries several mutants: {survivors:?}"
+    );
+
+    // And what `double` proves: the script reads the missed list, not every
+    // mutant the campaign tried.
+    assert!(
+        !survivors
+            .iter()
+            .any(|s| s.description.contains("replace * with /")),
+        "that one is caught by the test, and a caught mutant is not a survivor: {survivors:?}"
+    );
+}

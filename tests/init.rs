@@ -355,3 +355,32 @@ fn the_prose_init_writes_reads_as_prose() {
     }
     assert!(seen >= 4, "only {seen} prose files were read back");
 }
+
+/// The stack fragment ships the campaign gate 7 plays, and the image that can
+/// run it. Measured on 2026-09-10: `mutation.sh` calls `cargo mutants`, and
+/// nothing installed it — so every campaign would have died on a command that
+/// is not there, in a log written by a detached process nobody was reading.
+#[test]
+fn the_rust_image_carries_what_the_mutation_campaign_calls() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    hq::init::init(&root, &dir.path().join("hq"), &["rust".to_string()]).unwrap();
+
+    let script = std::fs::read_to_string(root.join(".hq/stacks/rust/mutation.sh")).unwrap();
+    assert!(script.contains("cargo mutants"), "{script}");
+    let dockerfile = std::fs::read_to_string(root.join(".hq/stacks/rust/Dockerfile")).unwrap();
+    assert!(
+        dockerfile.contains("cargo install cargo-mutants"),
+        "the campaign calls a command the image does not carry:\n{dockerfile}"
+    );
+    // As the agent, after `USER agent`: installed as root it would land where
+    // the only user that runs it cannot read (SPEC 4.2 bis).
+    let user = dockerfile
+        .rfind("USER ")
+        .expect("the image drops to a user");
+    let install = dockerfile
+        .find("cargo install cargo-mutants")
+        .expect("checked above");
+    assert!(user < install, "{dockerfile}");
+}

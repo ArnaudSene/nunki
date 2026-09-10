@@ -1064,3 +1064,49 @@ fn the_declared_directories_are_made_in_the_tree_before_the_profile_is_lifted() 
     .unwrap();
     assert!(dirty.trim().is_empty(), "gate 1 would go red on: {dirty}");
 }
+
+/// A session identifier has to be unique across its **whole** length.
+///
+/// The identity check greps a container's `/proc/<pid>/cmdline` for it (see
+/// `engine::spawn`), and a prefix everybody shares tells nothing apart. The
+/// mix that came before left the top 48 bits at zero — every identifier began
+/// `00000000-0000-`, as this project's own run logs show — because
+/// nanoseconds since 1970 need 61 bits, a pid shifted by 64 reaches 80, and
+/// nothing filled the rest.
+#[test]
+fn a_session_identifier_is_unique_over_its_whole_length() {
+    let ids: Vec<String> = (0..64).map(|_| run::session_id()).collect();
+
+    for id in &ids {
+        assert_eq!(id.len(), 36, "{id}");
+        let parts: Vec<&str> = id.split('-').collect();
+        assert_eq!(
+            parts.iter().map(|p| p.len()).collect::<Vec<_>>(),
+            vec![8, 4, 4, 4, 12],
+            "{id}"
+        );
+        assert!(
+            id.chars().all(|c| c.is_ascii_hexdigit() || c == '-'),
+            "{id}"
+        );
+        // v4, and the RFC 4122 variant, so a harness that validates the shape
+        // accepts it.
+        assert!(parts[2].starts_with('4'), "{id}");
+        assert!(
+            matches!(parts[3].chars().next(), Some('8' | '9' | 'a' | 'b')),
+            "{id}"
+        );
+    }
+
+    // No shared prefix: the head of the identifier must carry entropy, not a
+    // constant. Sixteen distinct first-halves out of sixty-four is far below
+    // what randomness gives and far above what a constant gives.
+    let heads: std::collections::BTreeSet<&str> = ids.iter().map(|id| &id[..18]).collect();
+    assert!(
+        heads.len() > 16,
+        "the first half of every identifier is nearly the same: {:?}",
+        heads.iter().take(4).collect::<Vec<_>>()
+    );
+    let whole: std::collections::BTreeSet<&String> = ids.iter().collect();
+    assert_eq!(whole.len(), ids.len(), "two runs share an identifier");
+}
