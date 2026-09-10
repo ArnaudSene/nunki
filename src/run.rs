@@ -35,8 +35,19 @@ pub const MISSION_AT: &str = "/work/mission";
 pub enum RunError {
     #[error("mission {0} has already started; `hq mission status {0}` says where it is")]
     AlreadyStarted(String),
-    #[error("the harness has no token: put the output of `claude setup-token` in {0}")]
-    NoToken(PathBuf),
+    #[error(transparent)]
+    Account(#[from] crate::account::AccountError),
+    #[error(
+        "account {account:?} authenticates {has}, but this project runs {wants} — \
+         name an account for {wants}, or change the project's harness"
+    )]
+    WrongHarness {
+        account: String,
+        has: String,
+        wants: String,
+    },
+    #[error("no home directory: accounts live under ~/.hq")]
+    NoHome,
     #[error("the images are missing — `hq slot rebuild` builds them ({0})")]
     NoImages(String),
     #[error(transparent)]
@@ -59,24 +70,27 @@ pub enum RunError {
     Launch(String),
 }
 
-/// The token the agents authenticate with: the subscription's long-lived one
-/// (SPEC 4.3, "l'abonnement, et rien d'autre"). Never an API key, and never
-/// written into a slot — it reaches the container as an environment variable
-/// at launch and nowhere else.
-pub fn token_file(project: &Project) -> PathBuf {
-    project.hq_root.join("token")
-}
-
-pub fn token(project: &Project) -> Option<String> {
-    if let Ok(t) = std::env::var("CLAUDE_CODE_OAUTH_TOKEN") {
-        if !t.trim().is_empty() {
-            return Some(t.trim().to_string());
-        }
+/// Which account a mission spends, and the token to pass. The mission's
+/// header wins over the project's declaration, which wins over the index's
+/// default — and the token reaches the container as an environment variable
+/// at launch, never written into a slot (SPEC 3.3, 4.3).
+pub fn account_for(
+    project: &Project,
+    from_mission: Option<&str>,
+) -> Result<(String, crate::account::Account, String), RunError> {
+    let hq_home = project.hq_home();
+    let accounts = crate::account::Accounts::load(&hq_home)?;
+    let (name, account) =
+        accounts.choose(&hq_home, from_mission, project.config.account.as_deref())?;
+    if account.harness != project.config.harness {
+        return Err(RunError::WrongHarness {
+            account: name,
+            has: account.harness,
+            wants: project.config.harness.clone(),
+        });
     }
-    std::fs::read_to_string(token_file(project))
-        .ok()
-        .map(|t| t.trim().to_string())
-        .filter(|t| !t.is_empty())
+    let token = account.token(&hq_home, &name)?;
+    Ok((name, account, token))
 }
 
 /// Start the mission's first run: the coder, on its first lot.
@@ -96,7 +110,6 @@ pub fn start(
     // two agents in one tree (SPEC 4.2).
     let _lock = SlotLock::acquire(&project.hq_root.join("locks"), &slot.name, "mission start")?;
 
-    let token = token(project).ok_or_else(|| RunError::NoToken(token_file(project)))?;
     let stack = project
         .config
         .stacks
@@ -116,6 +129,10 @@ pub fn start(
     let header = mission_dir::read_header(&project.hq_root, id)?;
     let paths = Paths::of(&project.hq_root, id);
 
+    // Which subscription this mission spends, decided here and frozen with
+    // the header it was read from.
+    let (account_name, _account, token) = account_for(project, header.account.as_deref())?;
+
     branch(slot, &header.branch, &header.base)?;
 
     let prompt = paths.dir.join(role::PROMPT_FILE);
@@ -129,6 +146,7 @@ pub fn start(
         .unwrap_or_else(|| "L1".to_string());
 
     let plan = plan(project, slot, &stack, &images, &paths, &token, &header)?;
+    let _ = &account_name;
     let file = profile_path(project, &slot.name);
     if let Some(dir) = file.parent() {
         std::fs::create_dir_all(dir).map_err(|e| RunError::Io(dir.to_path_buf(), e))?;
@@ -243,8 +261,13 @@ fn plan(
 
     let mut environment = BTreeMap::new();
     // The one secret that enters a container, and it enters at launch, never
-    // through a file in the slot (SPEC 3.3, 4.3).
-    environment.insert("CLAUDE_CODE_OAUTH_TOKEN".to_string(), token.to_string());
+    // through a file in the slot (SPEC 3.3, 4.3). Which variable carries it
+    // is the harness's business, not this module's.
+    let harness = claude_code::ClaudeCode::new(
+        Default::default(),
+        Box::new(crate::harness::spawn::LocalSpawner),
+    );
+    environment.insert(harness.token_env().to_string(), token.to_string());
     environment.insert("HQ_ROLE".to_string(), "coder".to_string());
     environment.insert("HQ_BRANCH".to_string(), header.branch.clone());
 

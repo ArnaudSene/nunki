@@ -31,6 +31,9 @@ pub struct Config {
     pub protected_branches: Vec<String>,
     #[serde(default)]
     pub protected_paths: ProtectedPaths,
+    /// The account this project's missions spend unless one says otherwise.
+    #[serde(default)]
+    pub account: Option<String>,
     #[serde(default)]
     pub bounds: Bounds,
     /// Where the test credentials live, mounted read-only on a system
@@ -111,6 +114,17 @@ impl Project {
             config,
             hq_root,
         }
+    }
+
+    /// `~/.hq/` — the directory every project's HQ sits under, and where
+    /// accounts live. Derived from the HQ rather than from `HOME`, so a test
+    /// or a second machine can point the whole thing elsewhere by saying so
+    /// once.
+    pub fn hq_home(&self) -> PathBuf {
+        self.hq_root
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.hq_root.clone())
     }
 
     pub fn name(&self) -> String {

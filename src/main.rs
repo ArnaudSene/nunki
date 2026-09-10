@@ -47,6 +47,10 @@ enum Command {
     #[command(subcommand)]
     Mission(MissionCommand),
 
+    /// Accounts: which subscription a mission spends.
+    #[command(subcommand)]
+    Account(AccountCommand),
+
     /// Say whether the project holds what the specification describes.
     ///
     /// Red when a restriction is not held; and it always says what it could
@@ -83,6 +87,12 @@ enum SlotCommand {
 }
 
 #[derive(Subcommand)]
+enum AccountCommand {
+    /// List the accounts declared in ~/.hq/accounts.yaml.
+    List,
+}
+
+#[derive(Subcommand)]
 enum MissionCommand {
     /// Write a new mission folder at the HQ.
     New {
@@ -108,6 +118,10 @@ enum MissionCommand {
         /// Call the security agent, rather than the mechanical gates alone.
         #[arg(long)]
         security_agent: bool,
+        /// Which account this mission spends. Defaults to the project's, then
+        /// to the one named in ~/.hq/accounts.yaml.
+        #[arg(long, value_name = "NAME")]
+        account: Option<String>,
         /// The prose an agent reads under the header.
         #[arg(long, default_value = "Describe the mission here.")]
         about: String,
@@ -232,6 +246,60 @@ fn main() -> ExitCode {
             }
         }
 
+        Command::Account(AccountCommand::List) => {
+            let project = match open(&start) {
+                Some(p) => p,
+                None => return ExitCode::FAILURE,
+            };
+            let hq_home = project.hq_home();
+            let accounts = match hq::account::Accounts::load(&hq_home) {
+                Ok(a) => a,
+                Err(e) => {
+                    eprintln!("hq: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            if accounts.accounts.is_empty() {
+                println!(
+                    "no account declared. Write {}:\n",
+                    hq_home.join(hq::account::INDEX_FILE).display()
+                );
+                println!("default: perso");
+                println!("accounts:");
+                println!("  perso:");
+                println!("    harness: claude-code");
+                println!("    token_file: accounts/perso");
+                println!("    note: my own subscription");
+                println!();
+                println!(
+                    "then put the token in {}/accounts/perso, mode 600.",
+                    hq_home.display()
+                );
+                return ExitCode::SUCCESS;
+            }
+            for (name, account) in &accounts.accounts {
+                let path = account.token_path(&hq_home);
+                let state = match account.token(&hq_home, name) {
+                    Ok(_) => "ready",
+                    Err(_) => "no token",
+                };
+                let chosen = if accounts.default.as_deref() == Some(name.as_str()) {
+                    " (default)"
+                } else {
+                    ""
+                };
+                println!(
+                    "{name:<12} {:<14} {state:<9} {}{chosen}",
+                    account.harness,
+                    path.display()
+                );
+                if let Some(note) = &account.note {
+                    println!("{:<12} {note}", "");
+                }
+            }
+            ExitCode::SUCCESS
+        }
+
         Command::Mission(command) => {
             let project = match open(&start) {
                 Some(p) => p,
@@ -343,6 +411,7 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             services,
             no_integration,
             security_agent,
+            account,
             about,
         } => {
             let lots = match lots
@@ -386,6 +455,7 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                 } else {
                     Security::Gates
                 },
+                account,
                 bounds: project.config.bounds.clone(),
             };
             match mission_dir::create(&project.hq_root, &id, &header, &about) {

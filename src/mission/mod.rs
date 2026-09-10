@@ -95,6 +95,11 @@ pub struct Header {
     pub lots: Vec<Lot>,
     pub integration: Integration,
     pub security: Security,
+    /// Which account this mission spends. Frozen with the rest of the
+    /// header: a mission cannot change the subscription it runs on halfway
+    /// through, any more than it can change its perimeter (SPEC 4.3).
+    #[serde(default)]
+    pub account: Option<String>,
     #[serde(default)]
     pub bounds: Bounds,
 }

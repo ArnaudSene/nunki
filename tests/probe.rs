@@ -15,6 +15,7 @@ fn project(dir: &Path) -> Project {
             stacks: vec!["rust".to_string()],
             protected_branches: vec!["main".to_string()],
             protected_paths: ProtectedPaths::default(),
+            account: None,
             bounds: Default::default(),
             credentials: None,
             run: None,

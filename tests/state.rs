@@ -26,6 +26,7 @@ fn header() -> Header {
             reason: "pure domain".into(),
         },
         security: Security::Gates,
+        account: None,
         bounds: Bounds::default(),
     }
 }

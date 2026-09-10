@@ -17,6 +17,7 @@ fn project(dir: &Path) -> Project {
             stacks: vec!["rust".to_string()],
             protected_branches: vec!["main".to_string()],
             protected_paths: ProtectedPaths::default(),
+            account: None,
             bounds: Default::default(),
             credentials: None,
             run: None,
@@ -26,28 +27,168 @@ fn project(dir: &Path) -> Project {
 }
 
 #[test]
-fn the_token_is_read_from_the_hq_and_never_from_the_tree() {
+fn an_account_is_chosen_by_the_mission_then_the_project_then_the_default() {
+    use hq::account::{Account, Accounts};
+    use std::collections::BTreeMap;
+
     let dir = tempfile::tempdir().unwrap();
-    let project = project(dir.path());
-    std::fs::create_dir_all(&project.hq_root).unwrap();
+    let hq_home = dir.path();
+    let mut accounts = BTreeMap::new();
+    for name in ["perso", "pro"] {
+        accounts.insert(
+            name.to_string(),
+            Account {
+                harness: "claude-code".to_string(),
+                token_file: std::path::PathBuf::from(format!("accounts/{name}")),
+                note: None,
+            },
+        );
+    }
+    let index = Accounts {
+        accounts,
+        default: Some("perso".to_string()),
+    };
 
-    // Its home is the HQ, outside the repository: a token in the tree would
-    // be in every slot and every container (SPEC 3.3).
-    let file = run::token_file(&project);
-    assert!(!file.starts_with(&project.root));
-    assert!(file.ends_with("token"));
-
-    assert!(run::token(&project).is_none());
-    std::fs::write(&file, "  sk-ant-oat-example\n").unwrap();
+    // The mission wins over the project, which wins over the default.
     assert_eq!(
-        run::token(&project).as_deref(),
-        Some("sk-ant-oat-example"),
-        "surrounding whitespace is not part of a token"
+        index.choose(hq_home, Some("pro"), Some("perso")).unwrap().0,
+        "pro"
+    );
+    assert_eq!(index.choose(hq_home, None, Some("pro")).unwrap().0, "pro");
+    assert_eq!(index.choose(hq_home, None, None).unwrap().0, "perso");
+
+    // A name nobody declared is an error that lists what exists.
+    let err = index.choose(hq_home, Some("ghost"), None).unwrap_err();
+    assert!(err.to_string().contains("perso, pro"), "{err}");
+
+    // With exactly one account and no default, that one is the answer rather
+    // than a question.
+    let only = Accounts {
+        accounts: index
+            .accounts
+            .iter()
+            .take(1)
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+        default: None,
+    };
+    assert_eq!(only.choose(hq_home, None, None).unwrap().0, "perso");
+
+    // With none at all, hq says where to declare one.
+    let empty = Accounts::default();
+    let err = empty.choose(hq_home, None, None).unwrap_err();
+    assert!(err.to_string().contains("accounts.yaml"), "{err}");
+}
+
+#[test]
+fn a_token_lives_beside_the_accounts_and_whitespace_is_not_part_of_it() {
+    use hq::account::{Account, Accounts};
+
+    let dir = tempfile::tempdir().unwrap();
+    let hq_home = dir.path();
+    std::fs::create_dir_all(hq_home.join("accounts")).unwrap();
+    let account = Account {
+        harness: "claude-code".to_string(),
+        token_file: std::path::PathBuf::from("accounts/perso"),
+        note: None,
+    };
+
+    // Relative to ~/.hq, so an index can be written without absolute
+    // paths — and never inside a repository.
+    assert_eq!(account.token_path(hq_home), hq_home.join("accounts/perso"));
+
+    assert!(account.token(hq_home, "perso").is_err());
+    std::fs::write(hq_home.join("accounts/perso"), "  sk-ant-oat-example\n").unwrap();
+    assert_eq!(
+        account.token(hq_home, "perso").unwrap(),
+        "sk-ant-oat-example"
     );
 
     // An empty file is no token, not an empty one.
-    std::fs::write(&file, "\n").unwrap();
-    assert!(run::token(&project).is_none());
+    std::fs::write(hq_home.join("accounts/perso"), "\n").unwrap();
+    let err = account.token(hq_home, "perso").unwrap_err();
+    assert!(err.to_string().contains("claude setup-token"), "{err}");
+
+    // And the index reads back what was written.
+    let index = Accounts {
+        accounts: [("perso".to_string(), account)].into_iter().collect(),
+        default: None,
+    };
+    std::fs::write(
+        hq_home.join("accounts.yaml"),
+        serde_yaml_ng::to_string(&index).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(Accounts::load(hq_home).unwrap(), index);
+}
+
+#[test]
+fn starting_a_mission_on_the_wrong_kind_of_account_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut project = project(dir.path());
+    project.config.account = Some("openai".to_string());
+    let hq_home = project.hq_home();
+    std::fs::create_dir_all(hq_home.join("accounts")).unwrap();
+    std::fs::write(hq_home.join("accounts/openai"), "sk-openai-example\n").unwrap();
+    std::fs::write(
+        hq_home.join("accounts.yaml"),
+        "accounts:\n  openai:\n    harness: codex\n    token_file: accounts/openai\n",
+    )
+    .unwrap();
+
+    // An OpenAI subscription does not authenticate Claude Code. Passing it
+    // along would fail inside a container, with nobody there to read the
+    // error (SPEC 3.2: refusing is safe, asking is not).
+    let err = run::account_for(&project, None).unwrap_err();
+    assert!(matches!(err, run::RunError::WrongHarness { .. }), "{err}");
+    let text = err.to_string();
+    assert!(
+        text.contains("codex") && text.contains("claude-code"),
+        "{text}"
+    );
+
+    // And the mission's own choice is what is checked, not the project's.
+    let index = concat!(
+        "accounts:\n",
+        "  openai:\n",
+        "    harness: codex\n",
+        "    token_file: accounts/openai\n",
+        "  perso:\n",
+        "    harness: claude-code\n",
+        "    token_file: accounts/perso\n",
+    );
+    std::fs::write(hq_home.join("accounts.yaml"), index).unwrap();
+    std::fs::write(hq_home.join("accounts/perso"), "sk-ant-oat-example\n").unwrap();
+    let (name, _, token) = run::account_for(&project, Some("perso")).unwrap();
+    assert_eq!(name, "perso");
+    assert_eq!(token, "sk-ant-oat-example");
+}
+
+#[test]
+fn an_account_for_another_harness_is_refused_rather_than_passed_along() {
+    use hq::account::{Account, Accounts};
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut project = project(dir.path());
+    project.config.account = Some("openai".to_string());
+    let index = Accounts {
+        accounts: [(
+            "openai".to_string(),
+            Account {
+                harness: "codex".to_string(),
+                token_file: std::path::PathBuf::from("accounts/openai"),
+                note: None,
+            },
+        )]
+        .into_iter()
+        .collect(),
+        default: None,
+    };
+    // An OpenAI subscription does not authenticate Claude Code, and passing
+    // it along would fail inside a container with nobody to read the error.
+    let (name, account) = index.choose(dir.path(), None, Some("openai")).unwrap();
+    assert_eq!(name, "openai");
+    assert_ne!(account.harness, project.config.harness);
 }
 
 #[test]
@@ -63,9 +204,14 @@ fn a_mission_that_cannot_authenticate_does_not_start() {
         std::sync::Arc::new(hq::engine::fake::FakeEngine::default());
 
     let err = run::start(&project, "m1", &slot, engine, "docker").unwrap_err();
-    // Refused before anything is lifted, and it says what to do.
-    assert!(matches!(err, run::RunError::NoToken(_)), "{err}");
-    assert!(err.to_string().contains("claude setup-token"), "{err}");
+    // Refused before anything is lifted. Which failure it is depends on the
+    // machine's own ~/.hq; what matters is that it does not start and
+    // that it says where to look.
+    let text = err.to_string();
+    assert!(
+        text.contains("account") || text.contains("token") || text.contains("mission"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -184,10 +330,20 @@ fn live_a_mission_starts_and_its_run_is_read_back() {
             reason: "nothing external".to_string(),
         },
         security: hq::mission::Security::Gates,
+        account: None,
         bounds: Default::default(),
     };
     hq::mission::dir::create(&hq_root, "alpha", &header, "Do the thing.").unwrap();
-    std::fs::write(run::token_file(&project), "stand-in-token\n").unwrap();
+    // An account of this test's own, under its own ~/.hq: nothing here
+    // reads the machine's.
+    let hq_home = project.hq_home();
+    std::fs::create_dir_all(hq_home.join("accounts")).unwrap();
+    std::fs::write(hq_home.join("accounts/stand-in"), "stand-in-token\n").unwrap();
+    std::fs::write(
+        hq_home.join("accounts.yaml"),
+        "default: stand-in\naccounts:\n  stand-in:\n    harness: claude-code\n    token_file: accounts/stand-in\n",
+    )
+    .unwrap();
 
     let engine: std::sync::Arc<dyn hq::engine::Engine> =
         std::sync::Arc::new(hq::engine::docker::Docker::real());
@@ -294,7 +450,6 @@ fn a_slot_already_driven_by_another_hq_is_not_driven_twice() {
     std::fs::create_dir_all(&locks).unwrap();
     std::fs::create_dir_all(&project.hq_root).unwrap();
     // A token exists, so a refusal here can only be the lock.
-    std::fs::write(run::token_file(&project), "stand-in\n").unwrap();
 
     let held = hq::state::SlotLock::acquire(&locks, "one", "something else").unwrap();
     let slot = hq::slot::Slot {

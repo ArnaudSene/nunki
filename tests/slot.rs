@@ -40,6 +40,7 @@ fn repository(dir: &Path) -> Project {
             stacks: Vec::new(),
             protected_branches: vec!["main".to_string()],
             protected_paths: ProtectedPaths::default(),
+            account: None,
             bounds: Default::default(),
             credentials: None,
             run: None,
