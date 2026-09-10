@@ -46,6 +46,35 @@ impl Signal {
     }
 }
 
+/// What a liveness check found.
+///
+/// Four answers, not a `bool`, because **"I could not ask" is not "it is not
+/// there"** and neither of them is "the container went away under it". A
+/// boolean forces all three into one, and the lie is always in the same
+/// direction: an engine that did not answer, a profile taken down, a machine
+/// that slept — every one of them reads as a run that died, and `hq` files a
+/// harness failure against an agent it never looked at.
+///
+/// SPEC 4.2 already separates the last two: a restarted `hq` asks the engine
+/// whether the container exists and runs, and a container that is gone makes
+/// the run *interrupted by the harness* — no attempt consumed, the session
+/// resumed. That is a verdict, and it needs the engine to have answered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Presence {
+    /// The process is there, and it is this run.
+    Running,
+    /// The container was there and the process was not. This run has ended,
+    /// whatever it left behind.
+    Ended,
+    /// The engine answered, and the container is gone or stopped: the run
+    /// went with it. Not the agent's doing (SPEC 4.2), and the reason says
+    /// which container.
+    Vanished(String),
+    /// The question could not be put at all, and the answer says why.
+    /// Nothing here is a statement about the run.
+    Unknown(String),
+}
+
 /// What a spawner reports back: enough to persist and to re-derive liveness.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Spawned {
@@ -60,8 +89,9 @@ pub trait Spawner: Send + Sync {
     fn spawn(&self, cmd: &CommandSpec, log: &Path) -> io::Result<Spawned>;
 
     /// Is the process still there? Asked by the harness adapter to tell a run
-    /// that is working from one that died without saying so.
-    fn alive(&self, spawned: &Spawned) -> io::Result<bool>;
+    /// that is working from one that died without saying so — and, since
+    /// [`Presence`] has three answers, from one it cannot see at all.
+    fn alive(&self, spawned: &Spawned) -> io::Result<Presence>;
 
     /// Send it a signal. Where the process lives decides how: a pid on this
     /// machine is signalled directly, a pid inside a container is signalled
@@ -105,8 +135,17 @@ impl Spawner for LocalSpawner {
         })
     }
 
-    fn alive(&self, spawned: &Spawned) -> io::Result<bool> {
-        Ok(spawned.pid.is_some_and(crate::state::lock::process_alive))
+    fn alive(&self, spawned: &Spawned) -> io::Result<Presence> {
+        let Some(pid) = spawned.pid else {
+            return Ok(Presence::Unknown(
+                "the run recorded no process id, so nothing can be asked about it".into(),
+            ));
+        };
+        Ok(if crate::state::lock::process_alive(pid) {
+            Presence::Running
+        } else {
+            Presence::Ended
+        })
     }
 
     fn signal(&self, spawned: &Spawned, signal: Signal) -> io::Result<()> {

@@ -486,21 +486,28 @@ fn a_slot_already_driven_by_another_hq_is_not_driven_twice() {
     drop(held);
 }
 
-/// Liveness must be about **this** run, not about whatever holds its number.
+/// Liveness must be about **this** run — not about whatever holds its
+/// number, and not about the container it needed to ask through.
 ///
 /// Process ids inside a container are low and recycled within seconds, so a
 /// finished run reads as running the moment an unrelated `exec` takes its
 /// pid — measured on a real container, where the very shell asking the
-/// question had become pid 7.
+/// question had become pid 7. And the check has to be able to fail to
+/// answer: a container taken down under a run is not a run that died, and
+/// answering "not alive" for it is how `hq` came to blame an agent for its
+/// engine.
+///
+/// Three assertions, in the three directions: a live run reads as running,
+/// an impostor pid does not, and a container that went away is neither.
 ///
 /// ```text
 /// cargo test --test run -- --ignored --nocapture
 /// ```
 #[test]
 #[ignore = "lifts real containers; run by hand"]
-fn live_a_recycled_pid_is_not_the_run_that_had_it() {
+fn live_liveness_tells_this_run_from_a_stranger_and_from_a_lost_container() {
     use hq::engine::spawn::ContainerSpawner;
-    use hq::harness::spawn::{CommandSpec, Spawned, Spawner};
+    use hq::harness::spawn::{CommandSpec, Presence, Spawned, Spawner};
 
     let dir = tempfile::tempdir().unwrap();
     let engine_bin = std::env::var("HQ_ENGINE").unwrap_or_else(|_| "docker".to_string());
@@ -553,7 +560,12 @@ fn live_a_recycled_pid_is_not_the_run_that_had_it() {
         .unwrap();
     let pid = spawned.pid.expect("a pid was published");
     println!("in-container pid {pid}");
-    assert!(spawner.alive(&spawned).unwrap(), "it is running");
+    assert_eq!(
+        spawner.alive(&spawned).unwrap(),
+        Presence::Running,
+        "it is running, and a liveness check that cannot say so about a live \
+         run is worth nothing"
+    );
 
     // A pid that is not this run — pid 1 is always there, and is never the
     // harness. `kill -0` alone would call it alive.
@@ -561,11 +573,26 @@ fn live_a_recycled_pid_is_not_the_run_that_had_it() {
         pid: Some(1),
         container: spawned.container.clone(),
     };
-    assert!(
-        !spawner.alive(&impostor).unwrap(),
+    assert_eq!(
+        spawner.alive(&impostor).unwrap(),
+        Presence::Ended,
         "pid 1 is alive and is not the run; liveness must be about identity"
     );
 
+    // The container goes away under the run. That is not the process ending
+    // — SPEC 4.2 makes it an interruption the agent does not pay for — and
+    // the answer must say so in its own words, naming the container.
     engine.down(&profile, project, true).unwrap();
+    match spawner.alive(&spawned).unwrap() {
+        Presence::Vanished(why) => {
+            println!("vanished, and it says why: {why}");
+            assert!(
+                why.contains(&spawned.container[..12]),
+                "it must name the container: {why}"
+            );
+        }
+        other => panic!("a container that went away is not the run ending: {other:?}"),
+    }
+
     let _ = engine_bin;
 }
