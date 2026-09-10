@@ -485,3 +485,87 @@ fn a_slot_already_driven_by_another_hq_is_not_driven_twice() {
     assert!(matches!(err, run::RunError::Lock(_)), "{err}");
     drop(held);
 }
+
+/// Liveness must be about **this** run, not about whatever holds its number.
+///
+/// Process ids inside a container are low and recycled within seconds, so a
+/// finished run reads as running the moment an unrelated `exec` takes its
+/// pid — measured on a real container, where the very shell asking the
+/// question had become pid 7.
+///
+/// ```text
+/// cargo test --test run -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "lifts real containers; run by hand"]
+fn live_a_recycled_pid_is_not_the_run_that_had_it() {
+    use hq::engine::spawn::ContainerSpawner;
+    use hq::harness::spawn::{CommandSpec, Spawned, Spawner};
+
+    let dir = tempfile::tempdir().unwrap();
+    let engine_bin = std::env::var("HQ_ENGINE").unwrap_or_else(|_| "docker".to_string());
+    let profile = dir.path().join("probe.yml");
+    let project = "hq-pidprobe";
+    std::fs::write(
+        &profile,
+        concat!(
+            "services:\n",
+            "  agent:\n",
+            "    image: alpine:3.20\n",
+            // The agent's own writable directory, where a run publishes its
+            // pid. Without it the wrapper has nowhere to write and the
+            // launch times out — which is what a real profile mounts.
+            "    tmpfs:\n      - /run/hq\n",
+            "    command: [\"sleep\", \"600\"]\n",
+        ),
+    )
+    .unwrap();
+
+    let engine: std::sync::Arc<dyn hq::engine::Engine> =
+        std::sync::Arc::new(hq::engine::docker::Docker::real());
+    let _ = engine.down(&profile, project, true);
+    engine.up(&profile, project).unwrap();
+
+    let session = "11111111-2222-4333-8444-555555555555";
+    let spawner = ContainerSpawner::new(engine.clone(), profile.clone(), project, "agent")
+        .identified_by(session);
+
+    let log = dir.path().join("runs").join(format!("{session}.jsonl"));
+    let spawned = spawner
+        .spawn(
+            &CommandSpec {
+                program: "sh".to_string(),
+                // A loop, not `sleep`: a shell whose script ends in one
+                // simple command execs it and its own command line
+                // disappears. The real harness is exec'd directly by the
+                // wrapper, so its `--session-id` is right there in
+                // /proc/<pid>/cmdline; this stands in for that.
+                args: vec![
+                    "-c".to_string(),
+                    "while :; do sleep 1; done".to_string(),
+                    session.to_string(),
+                ],
+                cwd: std::path::PathBuf::from("/"),
+                env: Default::default(),
+            },
+            &log,
+        )
+        .unwrap();
+    let pid = spawned.pid.expect("a pid was published");
+    println!("in-container pid {pid}");
+    assert!(spawner.alive(&spawned).unwrap(), "it is running");
+
+    // A pid that is not this run — pid 1 is always there, and is never the
+    // harness. `kill -0` alone would call it alive.
+    let impostor = Spawned {
+        pid: Some(1),
+        container: spawned.container.clone(),
+    };
+    assert!(
+        !spawner.alive(&impostor).unwrap(),
+        "pid 1 is alive and is not the run; liveness must be about identity"
+    );
+
+    engine.down(&profile, project, true).unwrap();
+    let _ = engine_bin;
+}
