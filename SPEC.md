@@ -970,7 +970,15 @@ presse, `stop --now` termine le run en cours proprement et la relance la
 porte.
 
 Ce que ça coûte : plus d'écran à regarder par curiosité (`hq logs` le rend en
-lisant la sortie), et une connexion sans interface par harnais, avec un geste
+lisant la sortie ; **c'est l'adaptateur de harnais qui rend son propre flux**
+— `hq` ne parse aucun format de run, la forme du flux appartient au harnais —
+et deux règles de rendu tranchées le 2026-09-10 en le lançant pour de vrai
+sur un run de cinq minutes : une ligne que `hq` **ne sait pas lire** est
+gardée et marquée, parce qu'un log rendu en jetant l'inattendu cache
+précisément le run qui a mal tourné ; et une ligne qu'il **sait lire et
+choisit de ne pas montrer** — les 127 événements de progression de ce run —
+est comptée et dite une fois, parce que « je n'ai pas su lire » et « j'ai lu
+et ça ne vaut pas une ligne » sont deux faits différents), et une connexion sans interface par harnais, avec un geste
 humain une fois par an pour Claude Code, à ranger là où `provision()` monte
 le volume du harnais — un jeton révoqué arrête tous les slots d'un coup.
 

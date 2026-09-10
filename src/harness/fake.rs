@@ -76,6 +76,16 @@ impl Harness for FakeHarness {
         })
     }
 
+    fn readable(&self, text: &str) -> Vec<crate::harness::Line> {
+        text.lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| crate::harness::Line {
+                kind: crate::harness::LineKind::Said,
+                text: l.trim().to_string(),
+            })
+            .collect()
+    }
+
     fn state(&self, handle: &RunHandle) -> Result<RunState, HarnessError> {
         let mut scripts = self.scripts.lock().unwrap();
         let states = scripts
