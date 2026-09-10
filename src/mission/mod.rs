@@ -132,6 +132,11 @@ pub struct Header {
     /// through, any more than it can change its perimeter (SPEC 4.3).
     #[serde(default)]
     pub account: Option<String>,
+    /// How the application is started for this mission, refining `hq.yaml`
+    /// and the stack's default (SPEC 4.2, "les services et le lancement de
+    /// l'application"). `none` when there is nothing to start.
+    #[serde(default)]
+    pub run: Option<String>,
     #[serde(default)]
     pub bounds: Bounds,
 }

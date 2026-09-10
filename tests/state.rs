@@ -27,6 +27,7 @@ fn header() -> Header {
         },
         security: Security::Gates,
         arbiter: None,
+        run: None,
         account: None,
         bounds: Bounds::default(),
     }
@@ -38,6 +39,7 @@ fn state(id: &str) -> MissionState {
         slot: "s1".into(),
         flow: Flow::new(header()).unwrap(),
         run: None,
+        app: None,
         updated_at: String::new(),
     }
 }

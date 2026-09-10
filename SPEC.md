@@ -338,7 +338,7 @@ YAML, du JSON, du git. Rien d'autre.
 | le contrat de run | un run par lot (4.3) : ce qu'un run doit avoir produit avant de sortir — le lot commité et prouvé ou l'échec dit, arbre commitable, bloc `ÉTAT DE REPRISE` en tête du journal (écrit aussi toutes les 45 minutes en cours de run), et pour le dernier lot le verdict | l'agent, par `MISSION.md` ; `hq`, à la sortie et aux checkpoints |
 | les chemins protégés | une liste déclarative par projet, **deux modes** : refuser, refuser seulement si le fichier existe déjà sur la base. Le mode « demander » a disparu : rien ne peut demander en autonome | la porte de périmètre, et l'adaptateur harnais s'il double |
 | la batterie | un script par projet, cousu depuis un fragment par stack | la porte « batterie », la CI |
-| la configuration du projet | `hq.yaml` à la racine du dépôt : harnais, stacks, branches protégées, chemins protégés, liste blanche par stack, borne de volets, seuil de mutants, délais, dossier des identifiants de test. `MISSION.md` prime sur lui pour ce qu'il redéclare | `hq` |
+| la configuration du projet | `hq.yaml` à la racine du dépôt : harnais, stacks, branches protégées, chemins protégés, liste blanche par stack, borne de volets, seuil de mutants, délais, dossier des identifiants de test, script de lancement (`run:`) et fichier de services du projet (`services_file:`). `MISSION.md` prime sur lui pour ce qu'il redéclare | `hq` |
 | le conteneur | un **Dockerfile** par stack (les anciennes « features » deviennent des étapes, l'image pré-crée les points de montage avec l'uid de l'hôte) et un fichier **Compose par profil, généré par `hq`** à chaque lancement — voir 4.2. **Tous les conteneurs d'agent sont autonomes** : derrière un pare-feu en liste blanche, sans supervision humaine dedans, arrêtables par `hq`. Deux variantes d'un même profil autonome — **mission** (codeur : aucun service externe) et **système** (intégrateur et sécurité : pare-feu élargi aux services déclarés, identifiants de test montés, services à côté). Un profil **interactif** n'existe que pour un seul usage possible : héberger le **HQ** lui-même si l'humain choisit de le faire tourner en conteneur plutôt que sur sa machine ; un `devcontainer.json` de quelques lignes est la **vue IDE** de ce profil, et rien de plus. Aucun agent ne tourne jamais en interactif | le moteur de conteneurs, par sa commande Compose |
 | le HQ du projet | `~/.hq/<projet>/` : journal, tableau de bord, file de remontées, discussions, **et l'état de `hq`** (4.2) | le superviseur, `hq` |
 
@@ -580,6 +580,26 @@ Trois règles, et une seule mécanique quelle que soit la forme de la mission :
    | intégration puis sécurité | `hq` la démarre pour l'intégrateur, puis la redémarre pour la sécurité, avec le script tel que l'intégrateur l'a commité, sur les mêmes services jamais arrêtés |
    | sécurité seule, sans services | `hq` la démarre pour la sécurité avec le script de la stack ou du projet ; `run: none` pour une bibliothèque |
    | code seul | rien à démarrer, personne n'est appelé |
+
+   **Ce que le script de lancement ne doit pas faire, mesuré le 2026-09-10.**
+   `hq` lance ce script détaché dans le conteneur de l'agent et reconnaît le
+   processus **à l'identifiant posé sur sa ligne de commande** — la même
+   mécanique que pour un run de harnais ou une campagne de mutation. Un
+   script qui finit par `exec` remplace son propre processus, donc sa ligne
+   de commande, donc l'identifiant : la vérification de vivacité répond
+   « terminée » sur une application qui tourne. Le fragment de stack le dit
+   en commentaire et n'`exec` pas, et le test live joue les deux formes côte
+   à côte pour que la différence soit mesurée et non affirmée.
+
+   **Le bloc `volumes:` du projet est fusionné avec ceux du slot**, mesuré le
+   2026-09-10 sur Compose v5.1.2 : un service qui nomme un volume que le
+   document ne déclare pas rend le projet entier invalide (`service "db"
+   refers to undefined volume dbdata: invalid compose project`). Et c'est
+   précisément là qu'un projet range ce qui doit survivre à une bascule de
+   profil, donc l'oublier reviendrait à jeter l'état que la règle 1 existe
+   pour garder. Un projet ne peut pas nommer un volume en `hq-<slot>-` :
+   ceux-là sont au slot, et le lui donner serait lui tendre le cache de
+   compilation ou les sessions du harnais.
 
    La sécurité attaque ainsi exactement ce que l'intégrateur a validé quand
    il est passé, et sinon ce que le projet déclare comme façon normale de

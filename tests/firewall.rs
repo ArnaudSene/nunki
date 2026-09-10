@@ -103,6 +103,7 @@ fn live_the_firewall_holds() {
             serde_yaml_ng::from_str("neighbour:\n  image: nginx:alpine\n").unwrap(),
         ),
         project_networks: None,
+        project_volumes: None,
     };
 
     let file = dir.path().join("mission.yml");
@@ -261,6 +262,7 @@ fn live_a_declared_service_is_reachable_and_nothing_else_is() {
         perimeter,
         project_services: Some(serde_yaml_ng::from_str("db:\n  image: nginx:alpine\n").unwrap()),
         project_networks: None,
+        project_volumes: None,
     };
 
     let file = dir.path().join("system.yml");

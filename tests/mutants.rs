@@ -213,6 +213,7 @@ fn live_a_campaign_is_launched_watched_and_read_back() {
             bounds: Default::default(),
             credentials: None,
             run: None,
+            services_file: None,
         },
         dir.path().join("hq"),
     );

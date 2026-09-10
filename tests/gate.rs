@@ -67,6 +67,7 @@ fn header() -> Header {
         },
         security: Security::Gates,
         arbiter: None,
+        run: None,
         account: None,
         bounds: Bounds::default(),
     }
@@ -490,6 +491,7 @@ impl Fixture {
                 bounds: Default::default(),
                 credentials: None,
                 run: None,
+                services_file: None,
             },
             hq,
         );
@@ -676,6 +678,7 @@ fn live_the_battery_is_the_committed_one_and_an_absent_one_is_red() {
             bounds: Default::default(),
             credentials: None,
             run: None,
+            services_file: None,
         },
         dir.path().join("hq"),
     );

@@ -44,6 +44,14 @@ pub struct Config {
     /// `none` for a library (SPEC 4.2).
     #[serde(default)]
     pub run: Option<String>,
+    /// The project's own Compose file, whose `services:` and `networks:` are
+    /// merged verbatim into every system profile (SPEC 4.2, engine table:
+    /// `include:` is unusable on one of the two engines, so `hq` merges the
+    /// YAML itself). A path inside the tree, because the file is the
+    /// project's and travels with the commit; absent means the mission's
+    /// system profile lifts no service of its own.
+    #[serde(default)]
+    pub services_file: Option<PathBuf>,
 }
 
 fn default_protected_branches() -> Vec<String> {

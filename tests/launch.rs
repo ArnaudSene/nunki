@@ -1,0 +1,577 @@
+//! The launch script (SPEC 4.2, "les services et le lancement de
+//! l'application", rule 2): who declares it, where it is read from, and what
+//! `hq` says when it is not there.
+
+use std::path::{Path, PathBuf};
+
+use hq::launch::{self, Declared, Launch, LaunchError};
+use hq::mission::{Header, Integration, Lot, Security};
+use hq::project::{Config, Project, ProtectedPaths};
+use hq::slot::Slot;
+
+fn config() -> Config {
+    Config {
+        harness: "claude-code".to_string(),
+        forge: vec!["github.com".to_string()],
+        stacks: vec!["rust".to_string()],
+        protected_branches: vec!["main".to_string()],
+        protected_paths: ProtectedPaths::default(),
+        account: None,
+        bounds: Default::default(),
+        credentials: None,
+        run: None,
+        services_file: None,
+    }
+}
+
+fn header() -> Header {
+    Header {
+        branch: "feat/x".to_string(),
+        base: "dev".to_string(),
+        lots: vec![Lot {
+            id: "L1".to_string(),
+            title: "one".to_string(),
+        }],
+        integration: Integration::Services {
+            services: Vec::new(),
+            wiring: Vec::new(),
+        },
+        security: Security::Gates,
+        arbiter: None,
+        run: None,
+        account: None,
+        bounds: Default::default(),
+    }
+}
+
+/// A slot with one commit, so `git rev-parse HEAD` has an answer: the
+/// message of a missing script names the commit it looked at.
+fn slot(dir: &Path) -> Slot {
+    let tree = dir.join("slot");
+    std::fs::create_dir_all(&tree).unwrap();
+    for args in [
+        vec!["init", "-q", "-b", "feat/x"],
+        vec!["config", "user.email", "t@example.com"],
+        vec!["config", "user.name", "T"],
+    ] {
+        assert!(
+            std::process::Command::new("git")
+                .args(&args)
+                .current_dir(&tree)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    std::fs::write(tree.join("README.md"), "x\n").unwrap();
+    for args in [vec!["add", "-A"], vec!["commit", "-qm", "one"]] {
+        assert!(
+            std::process::Command::new("git")
+                .args(&args)
+                .current_dir(&tree)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    Slot {
+        name: "one".to_string(),
+        tree,
+    }
+}
+
+fn write_script(tree: &Path, at: &str) {
+    let path = tree.join(at);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "#!/bin/sh\nexec sleep infinity\n").unwrap();
+    executable(&path);
+}
+
+#[cfg(unix)]
+fn executable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[cfg(not(unix))]
+fn executable(_path: &Path) {}
+
+#[test]
+fn the_stacks_script_is_the_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let slot = slot(dir.path());
+    write_script(&slot.tree, ".hq/stacks/rust/run.sh");
+    let project = Project::at(dir.path().join("repo"), config(), dir.path().join("hq"));
+
+    assert_eq!(
+        launch::resolve(&project, &slot, "rust", &header()).unwrap(),
+        Launch::Script {
+            path: ".hq/stacks/rust/run.sh".to_string(),
+            declared: Declared::Stack,
+        }
+    );
+}
+
+#[test]
+fn hq_yaml_replaces_the_stacks_script() {
+    let dir = tempfile::tempdir().unwrap();
+    let slot = slot(dir.path());
+    // Both exist, so what is chosen says which declaration won and not which
+    // file happened to be there.
+    write_script(&slot.tree, ".hq/stacks/rust/run.sh");
+    write_script(&slot.tree, "bin/serve");
+    let mut config = config();
+    config.run = Some("bin/serve".to_string());
+    let project = Project::at(dir.path().join("repo"), config, dir.path().join("hq"));
+
+    assert_eq!(
+        launch::resolve(&project, &slot, "rust", &header()).unwrap(),
+        Launch::Script {
+            path: "bin/serve".to_string(),
+            declared: Declared::Config,
+        }
+    );
+}
+
+#[test]
+fn the_mission_header_beats_hq_yaml() {
+    let dir = tempfile::tempdir().unwrap();
+    let slot = slot(dir.path());
+    write_script(&slot.tree, ".hq/stacks/rust/run.sh");
+    write_script(&slot.tree, "bin/serve");
+    write_script(&slot.tree, "bin/serve-this-mission");
+    let mut config = config();
+    config.run = Some("bin/serve".to_string());
+    let project = Project::at(dir.path().join("repo"), config, dir.path().join("hq"));
+    let mut header = header();
+    header.run = Some("bin/serve-this-mission".to_string());
+
+    assert_eq!(
+        launch::resolve(&project, &slot, "rust", &header).unwrap(),
+        Launch::Script {
+            path: "bin/serve-this-mission".to_string(),
+            declared: Declared::Header,
+        }
+    );
+}
+
+/// `none` is how a project with no executable — a library — says there is
+/// nothing to start, and the security agent then works on the code and the
+/// build artefact (SPEC 4.2).
+#[test]
+fn none_means_there_is_nothing_to_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let slot = slot(dir.path());
+    write_script(&slot.tree, ".hq/stacks/rust/run.sh");
+
+    let mut library = config();
+    library.run = Some("none".to_string());
+    let project = Project::at(dir.path().join("repo"), library, dir.path().join("hq"));
+    assert_eq!(
+        launch::resolve(&project, &slot, "rust", &header()).unwrap(),
+        Launch::Nothing {
+            declared: Declared::Config
+        }
+    );
+
+    // And a mission may say it for itself, over a project that declares one.
+    let mut other = config();
+    other.run = Some("bin/serve".to_string());
+    let project = Project::at(dir.path().join("repo"), other, dir.path().join("hq"));
+    let mut header = header();
+    header.run = Some("none".to_string());
+    assert_eq!(
+        launch::resolve(&project, &slot, "rust", &header).unwrap(),
+        Launch::Nothing {
+            declared: Declared::Header
+        }
+    );
+}
+
+/// The rule this piece exists for: the integrator amends the launch script
+/// and commits it, and it is **that** version `hq` uses afterwards. So the
+/// file is read from the slot's tree, and a copy in the repository the slot
+/// was cloned from is not an answer.
+#[test]
+fn the_script_is_read_from_the_slots_tree_and_not_from_the_repository() {
+    let dir = tempfile::tempdir().unwrap();
+    let slot = slot(dir.path());
+    let repo = dir.path().join("repo");
+    write_script(&repo, ".hq/stacks/rust/run.sh");
+    let project = Project::at(repo, config(), dir.path().join("hq"));
+
+    let err = launch::resolve(&project, &slot, "rust", &header()).unwrap_err();
+    assert!(
+        matches!(err, LaunchError::Missing { .. }),
+        "the repository's copy is not the slot's: {err}"
+    );
+
+    // Put it in the slot — the integrator committing it — and it resolves.
+    write_script(&slot.tree, ".hq/stacks/rust/run.sh");
+    assert!(matches!(
+        launch::resolve(&project, &slot, "rust", &header()).unwrap(),
+        Launch::Script { .. }
+    ));
+}
+
+#[test]
+fn a_missing_script_names_the_declaration_and_the_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let slot = slot(dir.path());
+    let mut config = config();
+    config.run = Some("bin/serve".to_string());
+    let project = Project::at(dir.path().join("repo"), config, dir.path().join("hq"));
+
+    let err = launch::resolve(&project, &slot, "rust", &header()).unwrap_err();
+    let said = err.to_string();
+    assert!(said.contains("hq.yaml"), "{said}");
+    assert!(said.contains("bin/serve"), "{said}");
+    let head = String::from_utf8(
+        std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&slot.tree)
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    assert!(said.contains(head.trim()), "{said} does not name {head}");
+}
+
+/// `hq` runs the script; it does not guess an interpreter for it. A file
+/// without the bit is a launch that would fail inside a container, in a log
+/// nobody is reading.
+#[test]
+fn a_script_that_is_not_executable_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let slot = slot(dir.path());
+    let path = slot.tree.join(".hq/stacks/rust/run.sh");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "#!/bin/sh\nexec sleep infinity\n").unwrap();
+    let project = Project::at(dir.path().join("repo"), config(), dir.path().join("hq"));
+
+    let err = launch::resolve(&project, &slot, "rust", &header()).unwrap_err();
+    assert!(matches!(err, LaunchError::NotExecutable { .. }), "{err}");
+}
+
+/// `hq init` must ship one, or every fresh project's first integration
+/// mission fails on a file nobody was told to write.
+#[test]
+fn the_rust_fragment_ships_a_launch_script() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    hq::init::init(&root, &dir.path().join("hq"), &["rust".to_string()]).unwrap();
+
+    let script = root.join(".hq/stacks/rust").join(launch::SCRIPT);
+    assert!(script.is_file(), "{} is missing", script.display());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&script).unwrap().permissions().mode();
+        assert!(mode & 0o111 != 0, "{script:?} is not executable: {mode:o}");
+    }
+    // And it must not `exec`: the wrapper that spawns it puts the run's
+    // identifier on the command line, `hq` recognises the process by it, and
+    // a script that replaces itself replaces that command line — reporting an
+    // application that has stopped (see the live test below).
+    let body = std::fs::read_to_string(&script).unwrap();
+    let command = body
+        .lines()
+        .rfind(|l| !l.trim_start().starts_with('#') && !l.trim().is_empty())
+        .unwrap_or_default();
+    assert!(!command.trim_start().starts_with("exec "), "{body}");
+}
+
+/// The path the stack's default resolves to is the one `hq init` writes, and
+/// the two are derived from the same constant rather than spelled twice.
+#[test]
+fn the_default_path_is_the_one_init_writes() {
+    assert_eq!(
+        PathBuf::from(hq::project::FRAGMENTS_DIR)
+            .join("stacks")
+            .join("rust")
+            .join(launch::SCRIPT),
+        PathBuf::from(".hq/stacks/rust/run.sh")
+    );
+}
+
+// --- with a real engine ----------------------------------------------------
+
+/// The two rules of SPEC 4.2 that only a container can prove:
+///
+/// 1. the project's services are lifted once per slot and **never stopped
+///    between two profiles** — what the integrator laid down in them
+///    survives the switch;
+/// 2. `hq` starts the application in the profile of the role that will test
+///    it, before that role, and can tell afterwards that it is running.
+///
+/// It also measures the thing that makes rule 2 work at all: the run is
+/// recognised by the identifier on its command line, so a launch script that
+/// `exec`s replaces that command line and reports an application that has
+/// stopped. Both shapes are run here, and they must not answer the same.
+#[test]
+#[ignore = "lifts real containers; run by hand"]
+fn live_the_services_survive_a_switch_and_the_application_starts_in_the_profile() {
+    use hq::compose::{NamedVolume, Plan, UserIds, generate};
+    use hq::engine::docker::Docker;
+    use hq::engine::{Engine, Liveness};
+    use hq::harness::Role;
+    use hq::harness::spawn::{Presence, Spawned, Spawner};
+    use hq::perimeter::{Sources, compute};
+    use std::sync::Arc;
+
+    let docker = Docker::real();
+    let slot_name = "launchlive";
+    let compose_project = hq::compose::project_name(slot_name).unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let context = dir.path().join("firewall");
+    std::fs::create_dir_all(&context).unwrap();
+    hq::firewall::materialise(&context).unwrap();
+    assert!(
+        std::process::Command::new("docker")
+            .args(["build", "-q", "-t", "hq/firewall:test"])
+            .arg(&context)
+            .status()
+            .expect("docker is on the path")
+            .success()
+    );
+
+    let mut slot = slot(dir.path());
+    slot.name = slot_name.to_string();
+    // Two launch scripts, identical but for the one line under measurement.
+    std::fs::write(
+        slot.tree.join("run.sh"),
+        "#!/bin/sh\nset -eu\necho \"$1\" > /work/tree/app.marker\nsleep 600\n",
+    )
+    .unwrap();
+    executable(&slot.tree.join("run.sh"));
+    std::fs::write(
+        slot.tree.join("run-exec.sh"),
+        "#!/bin/sh\nset -eu\nexec sleep 600\n",
+    )
+    .unwrap();
+    executable(&slot.tree.join("run-exec.sh"));
+
+    let mission_dir = dir.path().join("mission");
+    std::fs::create_dir_all(&mission_dir).unwrap();
+    for f in hq::compose::AGENT_WRITABLE {
+        std::fs::write(mission_dir.join(f), "").unwrap();
+    }
+
+    let hq_root = dir.path().join("hq");
+    let mut declared = config();
+    declared.run = Some("run.sh".to_string());
+    let project = Project::at(dir.path().join("repo"), declared, hq_root.clone());
+    let file = hq::run::profile_path(&project, slot_name);
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+
+    let profile = |role: Role| {
+        let services = match role {
+            Role::Coder => Vec::new(),
+            _ => vec![hq::mission::Service {
+                name: "db".to_string(),
+                reach: vec!["db".to_string()],
+            }],
+        };
+        let perimeter = compute(
+            role,
+            &Sources {
+                stack: &["example.com".to_string()],
+                harness: &[],
+                services: &services,
+                forge: &[],
+            },
+        )
+        .unwrap();
+        let (uid, gid) = hq::image::host_ids();
+        Plan {
+            slot: slot_name.to_string(),
+            role,
+            image: "alpine:3.20".to_string(),
+            firewall_image: "hq/firewall:test".to_string(),
+            user: UserIds { uid, gid },
+            tree: slot.tree.clone(),
+            tree_at: PathBuf::from("/work/tree"),
+            mission_dir: mission_dir.clone(),
+            mission_dir_at: PathBuf::from("/work/mission"),
+            credentials: Vec::new(),
+            volumes: Vec::<NamedVolume>::new(),
+            environment: Default::default(),
+            command: vec!["sleep".to_string(), "600".to_string()],
+            perimeter,
+            // Re-declared identically in both profiles — that identity is
+            // what makes the switch a no-op for them. The named volume is
+            // the point: it is the state the integrator leaves behind.
+            project_services: Some(
+                serde_yaml_ng::from_str(
+                    "db:\n  image: alpine:3.20\n  command: [\"sleep\", \"600\"]\n  \
+                     volumes:\n    - dbdata:/state\n",
+                )
+                .unwrap(),
+            ),
+            project_networks: None,
+            // Without this the whole project is invalid — `service "db"
+            // refers to undefined volume dbdata` (measured, and the reason
+            // the block is merged at all).
+            project_volumes: Some(serde_yaml_ng::from_str("dbdata: null\n").unwrap()),
+        }
+    };
+    let write = |role: Role| {
+        std::fs::write(&file, generate(&profile(role), docker.dialect()).unwrap()).unwrap();
+    };
+
+    let _ = docker.down(&file, &compose_project, true);
+    write(Role::Coder);
+    let _ = docker.down(&file, &compose_project, true);
+
+    // The coder's profile, with the project's service beside it.
+    docker.up(&file, &compose_project).unwrap();
+    let db_before = docker
+        .container_of(&file, &compose_project, "db")
+        .unwrap()
+        .expect("the project's service has a container");
+    docker
+        .exec(
+            &file,
+            &compose_project,
+            "db",
+            &[
+                "sh".to_string(),
+                "-c".to_string(),
+                "echo 'migrations played' > /state/left-behind".to_string(),
+            ],
+        )
+        .unwrap();
+
+    // The switch: the agent and its sidecar go, and only those.
+    docker
+        .stop(&file, &compose_project, &hq::run::SERVICES)
+        .unwrap();
+    write(Role::Integrator);
+    docker.up(&file, &compose_project).unwrap();
+
+    // Rule 1, measured: same container, same data.
+    let db_after = docker
+        .container_of(&file, &compose_project, "db")
+        .unwrap()
+        .expect("the project's service still has a container");
+    assert_eq!(
+        db_before, db_after,
+        "the project's service was replaced by the switch"
+    );
+    assert_eq!(docker.liveness(&db_after).unwrap(), Liveness::Running);
+    let left = docker
+        .exec(
+            &file,
+            &compose_project,
+            "db",
+            &["cat".to_string(), "/state/left-behind".to_string()],
+        )
+        .unwrap();
+    assert!(
+        left.stdout.contains("migrations played"),
+        "what the previous role laid down did not survive: {left:?}"
+    );
+
+    // Rule 2: the application starts in this profile, and `hq` can tell.
+    let engine: Arc<dyn Engine> = Arc::new(Docker::real());
+    let runs = dir.path().join("runs");
+    let launch = launch::resolve(&project, &slot, "rust", &header()).unwrap();
+    assert_eq!(
+        launch,
+        Launch::Script {
+            path: "run.sh".to_string(),
+            declared: Declared::Config
+        }
+    );
+    let handle = launch::start(
+        &project,
+        &slot,
+        engine.clone(),
+        hq::harness::Role::Integrator,
+        &runs,
+        &launch,
+    )
+    .unwrap()
+    .expect("a script means a started application");
+
+    let spawner = hq::engine::spawn::ContainerSpawner::new(
+        engine.clone(),
+        file.clone(),
+        &compose_project,
+        hq::compose::AGENT_SERVICE,
+    )
+    .identified_by(&handle.session.0);
+    let spawned = Spawned {
+        pid: handle.pid,
+        container: handle.container.clone(),
+    };
+    assert!(
+        matches!(spawner.alive(&spawned).unwrap(), Presence::Running),
+        "the application is up and hq can say so"
+    );
+    // It really ran the project's script, in the tree, as the agent.
+    let marker = slot.tree.join("app.marker");
+    let mut waited = 0;
+    while !marker.is_file() && waited < 50 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        waited += 1;
+    }
+    assert_eq!(
+        std::fs::read_to_string(&marker).unwrap().trim(),
+        handle.session.0,
+        "the script was called with the run's identifier"
+    );
+
+    // The measurement behind the fragment's comment: a script that `exec`s
+    // loses the identifier from its command line, and the very same check
+    // then answers "ended" on a process that is alive.
+    let mut execs = config();
+    execs.run = Some("run-exec.sh".to_string());
+    let execing = Project::at(dir.path().join("repo"), execs, hq_root);
+    let other = launch::resolve(&execing, &slot, "rust", &header()).unwrap();
+    let exec_handle = launch::start(
+        &execing,
+        &slot,
+        engine.clone(),
+        hq::harness::Role::Integrator,
+        &runs,
+        &other,
+    )
+    .unwrap()
+    .unwrap();
+    let exec_spawner = hq::engine::spawn::ContainerSpawner::new(
+        engine,
+        file.clone(),
+        &compose_project,
+        hq::compose::AGENT_SERVICE,
+    )
+    .identified_by(&exec_handle.session.0);
+    let exec_spawned = Spawned {
+        pid: exec_handle.pid,
+        container: exec_handle.container.clone(),
+    };
+    // The process is there — `kill -0` on it succeeds — and the check still
+    // says ended, because the command line no longer carries the identifier.
+    let still_there = docker
+        .exec(
+            &file,
+            &compose_project,
+            hq::compose::AGENT_SERVICE,
+            &[
+                "sh".to_string(),
+                "-c".to_string(),
+                format!("kill -0 {} && echo alive", exec_handle.pid.unwrap()),
+            ],
+        )
+        .unwrap();
+    assert!(still_there.stdout.contains("alive"), "{still_there:?}");
+    assert!(
+        matches!(exec_spawner.alive(&exec_spawned).unwrap(), Presence::Ended),
+        "this is why the stack's run.sh does not exec"
+    );
+
+    docker.down(&file, &compose_project, true).unwrap();
+}

@@ -37,7 +37,7 @@ fn write(at: &Path, path: &str, body: &str) {
     std::fs::write(full, body).unwrap();
 }
 
-fn header(lots: usize) -> Header {
+fn header_of(lots: usize, integration: Integration) -> Header {
     Header {
         branch: "mission/x".into(),
         base: "dev".into(),
@@ -47,11 +47,10 @@ fn header(lots: usize) -> Header {
                 title: format!("lot {n}"),
             })
             .collect(),
-        integration: Integration::None {
-            reason: "no external service is involved".into(),
-        },
+        integration,
         security: Security::Gates,
         arbiter: None,
+        run: None,
         account: None,
         bounds: Bounds {
             attempts_per_lot: 3,
@@ -68,6 +67,15 @@ struct World {
 
 impl World {
     fn new(lots: usize) -> Self {
+        Self::shaped(
+            lots,
+            Integration::None {
+                reason: "no external service is involved".into(),
+            },
+        )
+    }
+
+    fn shaped(lots: usize, integration: Integration) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let hq_root = dir.path().join("hq");
         std::fs::create_dir_all(hq_root.join("locks")).unwrap();
@@ -101,6 +109,7 @@ impl World {
                 bounds: Default::default(),
                 credentials: None,
                 run: None,
+                services_file: None,
             },
             hq_root,
         );
@@ -109,14 +118,21 @@ impl World {
             project,
             tree,
         };
-        hq::mission::dir::create(&world.project.hq_root, "m1", &header(lots), "do it").unwrap();
+        hq::mission::dir::create(
+            &world.project.hq_root,
+            "m1",
+            &header_of(lots, integration.clone()),
+            "do it",
+        )
+        .unwrap();
         let store = Store::open(&world.project.hq_root).unwrap();
         store
             .save(&MissionState {
                 id: "m1".into(),
                 slot: "one".into(),
-                flow: Flow::new(header(lots)).unwrap(),
+                flow: Flow::new(header_of(lots, integration)).unwrap(),
                 run: None,
+                app: None,
                 updated_at: String::new(),
             })
             .unwrap();
@@ -168,7 +184,7 @@ impl World {
 
     fn verify(&self) -> Result<Vec<Step>, VerifyError> {
         let engine: Arc<dyn hq::engine::Engine> = Arc::new(hq::engine::fake::FakeEngine::default());
-        verify::verify(&self.project, "m1", engine)
+        verify::verify(&self.project, "m1", engine, "docker")
     }
 }
 
@@ -277,7 +293,7 @@ fn running_it_again_picks_up_where_it_stopped() {
 fn a_mission_that_never_started_is_named_rather_than_invented() {
     let world = World::new(1);
     let engine: Arc<dyn hq::engine::Engine> = Arc::new(hq::engine::fake::FakeEngine::default());
-    let err = verify::verify(&world.project, "nope", engine).unwrap_err();
+    let err = verify::verify(&world.project, "nope", engine, "docker").unwrap_err();
     assert!(matches!(err, VerifyError::NotStarted(_)), "{err}");
     assert!(err.to_string().contains("hq mission start"), "{err}");
 }
@@ -430,7 +446,7 @@ fn live_a_mission_is_driven_from_its_first_lot_to_verified() {
     let compose_project = hq::compose::project_name(&slot.name).unwrap();
     let _ = engine.down(&file, &compose_project, true);
     engine.up(&file, &compose_project).unwrap();
-    let go = || verify::verify(&world.project, "m1", engine.clone()).unwrap();
+    let go = || verify::verify(&world.project, "m1", engine.clone(), "docker").unwrap();
 
     // 1. The coder still owes its lot a run; gates 1 to 4 are green.
     let steps = go();
@@ -542,7 +558,7 @@ fn live_a_mission_is_driven_from_its_first_lot_to_verified() {
             log,
         });
         store.save(&state).unwrap();
-        match verify::verify(&world.project, "m1", engine.clone()) {
+        match verify::verify(&world.project, "m1", engine.clone(), "docker") {
             Err(VerifyError::RunInProgress { slot, .. }) => assert_eq!(slot, "one"),
             other => panic!("a live run must stop verification: {other:?}"),
         }
@@ -567,4 +583,223 @@ fn live_a_mission_is_driven_from_its_first_lot_to_verified() {
     assert!(matches!(world.state().flow.stage(), Stage::Verified));
 
     engine.down(&file, &compose_project, true).unwrap();
+}
+
+// --- the integration run, read back (SPEC 4.2, 4.4, 4.5) -------------------
+
+fn integration() -> Integration {
+    Integration::Services {
+        services: vec![hq::mission::Service {
+            name: "db".into(),
+            reach: vec!["db".into()],
+        }],
+        wiring: vec!["compose.yaml".into()],
+    }
+}
+
+impl World {
+    /// Drive the flow to the stage where the integrator is due, the way a
+    /// finished coder and a green verification do.
+    fn at_integration(&self) {
+        let store = Store::open(&self.project.hq_root).unwrap();
+        let mut state = store.load("m1").unwrap();
+        store
+            .apply(
+                &mut state,
+                hq::mission::flow::Event::RunEnded {
+                    outcome: hq::harness::Outcome::Finished(Default::default()),
+                    lot_done: true,
+                },
+            )
+            .unwrap();
+        store
+            .apply(&mut state, hq::mission::flow::Event::GatesPassed)
+            .unwrap();
+        assert!(matches!(state.flow.stage(), Stage::Integration { .. }));
+    }
+
+    /// Record a run for the current stage, with a harness log that says how
+    /// it ended. `pid` absent is a run nothing can be asked about.
+    fn run_recorded(&self, pid: Option<u32>, log_body: &str) {
+        let runs = self.mission().join("runs");
+        std::fs::create_dir_all(&runs).unwrap();
+        let log = runs.join("integration.log");
+        std::fs::write(&log, log_body).unwrap();
+        let store = Store::open(&self.project.hq_root).unwrap();
+        let mut state = store.load("m1").unwrap();
+        state.run = Some(hq::harness::RunHandle {
+            session: hq::harness::SessionId("s-integration".into()),
+            container: "cafe1234".into(),
+            pid,
+            log,
+        });
+        store.save(&state).unwrap();
+    }
+
+    fn verdict(&self, role: &str, verdict: &str, head: &str, report: &str) {
+        std::fs::write(
+            self.mission().join("VERDICT.json"),
+            format!(
+                "{{\"role\":\"{role}\",\"verdict\":\"{verdict}\",\"head\":\"{head}\",\
+                 \"date\":\"2026-09-10T00:00:00Z\",\"report\":\"{report}\"}}"
+            ),
+        )
+        .unwrap();
+    }
+
+    fn head(&self) -> String {
+        git(&self.tree, &["rev-parse", "HEAD"])
+    }
+}
+
+/// A harness log whose run concluded normally.
+const FINISHED: &str =
+    "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"usage\":{}}\n";
+
+/// The chain SPEC 4.5 describes: the integrator concludes `INTEGRATED`, and
+/// the mission moves on rather than waiting for a human to relay the verdict.
+#[test]
+fn an_integration_run_that_concluded_moves_the_mission_on() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.run_recorded(Some(41), FINISHED);
+    world.verdict("Integrator", "INTEGRATED", &world.head(), "wired");
+
+    let steps = world.verify().unwrap();
+    assert!(
+        matches!(steps.last(), Some(Step::Verified)),
+        "the shape declares no security agent, so INTEGRATED ends it: {steps:?}"
+    );
+    // The run is forgotten with the transition: left recorded, the next
+    // `verify` would read the same run back a second time.
+    assert!(world.state().run.is_none(), "{:?}", world.state().run);
+}
+
+/// "Un verdict vaut pour un `HEAD`" (SPEC 4.4). A verdict concluding on
+/// another commit is a verdict on other work, and accepting it would carry a
+/// green over a change nobody judged.
+#[test]
+fn a_verdict_on_another_commit_is_not_a_verdict_on_this_one() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.run_recorded(Some(41), FINISHED);
+    world.verdict(
+        "Integrator",
+        "INTEGRATED",
+        "0000000000000000000000000000000000000000",
+        "wired",
+    );
+
+    // The relaunch that follows needs images and an account this world has
+    // neither of; what is asserted is the transition, which is written
+    // before anything is lifted.
+    let _ = world.verify();
+    assert!(
+        matches!(
+            world.state().flow.stage(),
+            Stage::Integration { attempt: 2 }
+        ),
+        "it costs an attempt and the role runs again: {:?}",
+        world.state().flow.stage()
+    );
+}
+
+#[test]
+fn a_run_that_left_no_verdict_did_not_conclude() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.run_recorded(Some(41), FINISHED);
+    // No VERDICT.json at all: `hq mission dir` creates an empty one.
+
+    let _ = world.verify();
+    assert!(
+        matches!(
+            world.state().flow.stage(),
+            Stage::Integration { attempt: 2 }
+        ),
+        "{:?}",
+        world.state().flow.stage()
+    );
+}
+
+#[test]
+fn a_verdict_signed_by_another_role_is_not_this_roles() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.run_recorded(Some(41), FINISHED);
+    world.verdict("Coder", "INTEGRATED", &world.head(), "wired");
+
+    let _ = world.verify();
+    assert!(
+        matches!(
+            world.state().flow.stage(),
+            Stage::Integration { attempt: 2 }
+        ),
+        "{:?}",
+        world.state().flow.stage()
+    );
+}
+
+/// A run `hq` cannot ask about decides nothing: a machine that slept must not
+/// cost the mission an attempt (SPEC 4.2, "la reprise re-dérive avant de
+/// décider"; AGENTS.md §4, "a check that cannot say 'I do not know' will
+/// lie").
+#[test]
+fn a_run_that_cannot_be_asked_about_decides_nothing() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    // No pid, and a log that says nothing: there is no answer to be had.
+    world.run_recorded(None, "");
+    world.verdict("Integrator", "INTEGRATED", &world.head(), "wired");
+
+    let steps = world.verify().unwrap();
+    assert!(
+        matches!(steps.last(), Some(Step::Unreachable { role, .. }) if *role == Role::Integrator),
+        "{steps:?}"
+    );
+    assert!(
+        matches!(
+            world.state().flow.stage(),
+            Stage::Integration { attempt: 1 }
+        ),
+        "no attempt was spent: {:?}",
+        world.state().flow.stage()
+    );
+    assert!(world.state().run.is_some(), "and the run is still recorded");
+}
+
+/// A `BROKEN` integrator sends the mission back to the coder as a volet,
+/// bounded — it does not stop the mission and does not repair it itself
+/// (SPEC 4.5).
+#[test]
+fn a_broken_integration_goes_back_to_the_coder_as_a_volet() {
+    let world = World::shaped(1, integration());
+    world.journal_names_head();
+    world.at_integration();
+    world.run_recorded(Some(41), FINISHED);
+    world.verdict(
+        "Integrator",
+        "BROKEN",
+        &world.head(),
+        "the adapter cannot be wired as it stands",
+    );
+
+    let steps = world.verify().unwrap();
+    assert!(
+        matches!(
+            world.state().flow.stage(),
+            Stage::Coding {
+                work: Work::Volet { .. },
+                ..
+            }
+        ),
+        "{:?}",
+        world.state().flow.stage()
+    );
+    assert!(
+        steps
+            .iter()
+            .any(|s| matches!(s, Step::NeedsRun { role, .. } if *role == Role::Coder)),
+        "{steps:?}"
+    );
 }
