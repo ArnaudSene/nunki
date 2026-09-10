@@ -171,6 +171,11 @@ pub enum HarnessError {
     Launch(String),
     #[error("unknown run: {0:?}")]
     UnknownRun(SessionId),
+    /// The run could not be reached, and that is not a verdict on it. A
+    /// container taken down, an engine that did not answer: `hq` says it
+    /// does not know rather than call the agent dead (SPEC 4.2).
+    #[error("the run cannot be reached: {0}")]
+    Unreachable(String),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }

@@ -642,7 +642,11 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                             Ok(hq::harness::RunState::Finished(outcome)) => {
                                 println!("run       finished — {outcome:?}")
                             }
-                            Err(e) => println!("run       unreadable: {e}"),
+                            // Not "finished", not "running": `hq` says it
+                            // does not know, and why. Calling an unreachable
+                            // run a dead one is how a container taken down
+                            // becomes a harness failure in the record.
+                            Err(e) => println!("run       unknown — {e}"),
                         }
                     }
                 }

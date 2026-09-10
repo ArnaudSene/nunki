@@ -71,8 +71,16 @@ is worth**. Applied to our own work:
   firewall probes once "passed" because the address was unreachable anyway.
   Before trusting a negative result, verify the same attempt succeeds in an
   unguarded container.
+- **A check that cannot say "I do not know" will lie.** A liveness answer
+  squeezed into a `bool` reports an engine that did not answer, a container
+  taken down and a machine that slept as one thing: a dead agent. Whenever a
+  question can fail for a reason that is not about its subject, that reason
+  gets its own answer — measured here, and it had already put a false defect
+  in a pull request.
 - **Report faithfully.** If something is untested, say which part. If a test
-  was skipped, say so. Never describe intended behaviour as verified.
+  was skipped, say so. Never describe intended behaviour as verified. A
+  finding that turns out to be wrong is corrected where it was published, not
+  quietly dropped.
 
 ## 5. Tests
 

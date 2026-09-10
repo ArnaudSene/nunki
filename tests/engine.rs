@@ -470,7 +470,7 @@ fn a_detached_command_puts_its_options_before_the_service_name() {
 #[ignore = "lifts real containers; run by hand"]
 fn live_a_run_lives_in_the_container_and_is_signalled_from_inside_it() {
     use hq::engine::spawn::ContainerSpawner;
-    use hq::harness::spawn::{Signal, Spawner};
+    use hq::harness::spawn::{Presence, Signal, Spawner};
     use std::sync::Arc;
 
     let dir = tempfile::tempdir().unwrap();
@@ -520,7 +520,11 @@ fn live_a_run_lives_in_the_container_and_is_signalled_from_inside_it() {
         &spawned.container[..12]
     );
     assert!(!spawned.container.is_empty());
-    assert!(spawner.alive(&spawned).unwrap(), "the run should be alive");
+    assert_eq!(
+        spawner.alive(&spawned).unwrap(),
+        Presence::Running,
+        "the run should be alive"
+    );
 
     // The stream is captured on the host, where hq reads it — the container
     // has nowhere to write it (SPEC 4.1, mounts per profile).
@@ -557,7 +561,7 @@ fn live_a_run_lives_in_the_container_and_is_signalled_from_inside_it() {
     spawner.signal(&spawned, Signal::Interrupt).unwrap();
     let mut stopped = false;
     for _ in 0..50 {
-        if !spawner.alive(&spawned).unwrap() {
+        if spawner.alive(&spawned).unwrap() != Presence::Running {
             stopped = true;
             break;
         }

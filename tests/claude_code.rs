@@ -6,7 +6,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use hq::harness::claude_code::{ClaudeCode, Config, FORBIDDEN_ARGS, parse_stream};
-use hq::harness::spawn::{CommandSpec, LocalSpawner, Spawned, Spawner};
+use hq::harness::spawn::{CommandSpec, LocalSpawner, Presence, Spawned, Spawner};
 use hq::harness::{
     Exposure, GuardSetup, Harness, Outcome, Progress, Role, RunHandle, RunRequest, RunState,
     SessionId, Workspace,
@@ -248,8 +248,8 @@ impl Spawner for Recording {
         })
     }
 
-    fn alive(&self, _spawned: &Spawned) -> std::io::Result<bool> {
-        Ok(false)
+    fn alive(&self, _spawned: &Spawned) -> std::io::Result<Presence> {
+        Ok(Presence::Ended)
     }
 
     fn signal(
@@ -294,7 +294,7 @@ impl Spawner for RecordingRef {
         self.0.spawn(cmd, log)
     }
 
-    fn alive(&self, spawned: &Spawned) -> std::io::Result<bool> {
+    fn alive(&self, spawned: &Spawned) -> std::io::Result<Presence> {
         self.0.alive(spawned)
     }
 
@@ -427,4 +427,146 @@ fn a_role_is_allowed_the_tools_its_work_needs_and_the_prompt_survives() {
         "the prompt must still be the last argument: {:?}",
         cmd.args
     );
+}
+
+/// A spawner that answers `answer`, and — the point of it — writes `writes`
+/// into the log at the moment it is asked. That is the race, made
+/// deterministic: the harness emits its `result` and exits between `hq`'s
+/// two reads.
+struct EndsWhileAsked {
+    answer: Presence,
+    writes: Option<(PathBuf, String)>,
+}
+
+impl Spawner for EndsWhileAsked {
+    fn spawn(&self, _cmd: &CommandSpec, _log: &std::path::Path) -> std::io::Result<Spawned> {
+        unreachable!("this spawner is only ever asked about liveness")
+    }
+
+    fn alive(&self, _spawned: &Spawned) -> std::io::Result<Presence> {
+        if let Some((log, text)) = &self.writes {
+            fs::write(log, text)?;
+        }
+        Ok(self.answer.clone())
+    }
+
+    fn signal(
+        &self,
+        _spawned: &Spawned,
+        _signal: hq::harness::spawn::Signal,
+    ) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn handle_for(log: PathBuf) -> RunHandle {
+    RunHandle {
+        session: SessionId("s".into()),
+        container: "c1".into(),
+        pid: Some(4242),
+        log,
+    }
+}
+
+/// The ordering, and it is the whole test: liveness is asked **before** the
+/// log is read.
+///
+/// A run that emits its `result` and exits in between is a run that said how
+/// it ended. Read the log first and the process second, and `hq` sees an
+/// empty log and a dead process, and files a harness failure against an
+/// agent that had just succeeded. A process that has ended writes nothing
+/// more, so the log read after the answer is complete — which is why this
+/// order and not the other.
+#[test]
+fn a_run_that_ends_between_the_two_reads_is_not_a_harness_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("s.jsonl");
+    fs::write(
+        &log,
+        r#"{"type":"system","subtype":"init","session_id":"s"}"#,
+    )
+    .unwrap();
+
+    let hq = ClaudeCode::new(
+        Config::default(),
+        Box::new(EndsWhileAsked {
+            answer: Presence::Ended,
+            writes: Some((log.clone(), fixture())),
+        }),
+    );
+    match hq.state(&handle_for(log)).unwrap() {
+        RunState::Finished(Outcome::Finished(_)) => {}
+        other => panic!("the run said how it ended and hq must read it, got {other:?}"),
+    }
+}
+
+/// A run `hq` cannot reach is not a run that died.
+///
+/// Everything that goes wrong between here and the process — the container
+/// taken down, the engine not running, the profile recycled — used to come
+/// back as "not alive", and "not alive" plus a log without a `result` is a
+/// harness failure recorded against the agent. `hq` does not know, and the
+/// only honest answer is to say so.
+#[test]
+fn a_run_that_cannot_be_reached_is_not_a_run_that_died() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("s.jsonl");
+    fs::write(
+        &log,
+        r#"{"type":"system","subtype":"init","session_id":"s"}"#,
+    )
+    .unwrap();
+
+    let hq = ClaudeCode::new(
+        Config::default(),
+        Box::new(EndsWhileAsked {
+            answer: Presence::Unknown("the engine did not answer: no such daemon".into()),
+            writes: None,
+        }),
+    );
+    let err = hq.state(&handle_for(log.clone())).unwrap_err();
+    let said = err.to_string();
+    assert!(
+        matches!(err, hq::harness::HarnessError::Unreachable(_)),
+        "{said}"
+    );
+    // And it carries the reason, so the human knows where to look.
+    assert!(said.contains("no such daemon"), "{said}");
+    assert!(
+        !said.contains("without a result event"),
+        "an unreachable run must not be described as a harness that died: {said}"
+    );
+}
+
+/// A container that went away is a harness failure — SPEC 4.2 says the run
+/// is interrupted without costing an attempt — but it is **not** the same
+/// harness failure as a process that quit on its own, and the record has to
+/// tell them apart. One is about the container, the other about the agent.
+#[test]
+fn a_container_that_went_away_says_so_and_does_not_blame_the_agent() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("s.jsonl");
+    fs::write(
+        &log,
+        r#"{"type":"system","subtype":"init","session_id":"s"}"#,
+    )
+    .unwrap();
+
+    let hq = ClaudeCode::new(
+        Config::default(),
+        Box::new(EndsWhileAsked {
+            answer: Presence::Vanished("the engine no longer knows container abc123def456".into()),
+            writes: None,
+        }),
+    );
+    match hq.state(&handle_for(log)).unwrap() {
+        RunState::Finished(Outcome::HarnessFailure(why)) => {
+            assert!(why.contains("abc123def456"), "{why}");
+            assert!(
+                !why.contains("without a result event"),
+                "that sentence is about the agent, and this was about the container: {why}"
+            );
+        }
+        other => panic!("expected a harness failure naming the container, got {other:?}"),
+    }
 }

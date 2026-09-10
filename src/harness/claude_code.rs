@@ -17,7 +17,7 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
-use super::spawn::{CommandSpec, Signal, Spawned, Spawner};
+use super::spawn::{CommandSpec, Presence, Signal, Spawned, Spawner};
 use super::{
     Exposure, GuardSetup, Harness, HarnessError, Outcome, Progress, Provisioning, Role, RunHandle,
     RunRequest, RunState, Usage,
@@ -228,32 +228,53 @@ impl Harness for ClaudeCode {
         })
     }
 
+    /// Liveness **first**, then the log — the order is the decision here.
+    ///
+    /// A process that has ended writes nothing more, so a log read after
+    /// that answer is complete. Read the other way round, a run that emits
+    /// its `result` and exits between the two reads is reported as one that
+    /// died saying nothing: the log was read a moment too early and the
+    /// process a moment too late. The window is small; the verdict it
+    /// produces is permanent, and it blames the agent.
+    ///
+    /// The four answers are then kept apart. [`Presence::Ended`] — the
+    /// container was there, the process was not — is the only one that makes
+    /// "ended without a result event". [`Presence::Vanished`] is a harness
+    /// failure too, because SPEC 4.2 says a container that went away
+    /// interrupts a run without costing it an attempt, but it is reported in
+    /// its own words: what happened was to the container, and a human
+    /// reading the record must be able to tell the two apart.
+    /// [`Presence::Unknown`] is neither, and becomes an error: `hq` does not
+    /// know, and saying so is the only honest thing left.
     fn state(&self, handle: &RunHandle) -> Result<RunState, HarnessError> {
-        let text = match fs::read_to_string(&handle.log) {
-            Ok(t) => t,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
-            Err(e) => return Err(HarnessError::Io(e)),
-        };
-        let parsed = parse_stream(&text);
-        if let Some(outcome) = parsed.outcome {
-            return Ok(RunState::Finished(outcome));
-        }
         // Asked of the spawner, because where the process lives decides
         // how the question is put: a pid on this machine, or a pid inside a
         // container that only the engine can reach.
-        let alive = self
+        let presence = self
             .spawner
             .alive(&Spawned {
                 pid: handle.pid,
                 container: handle.container.clone(),
             })
             .map_err(HarnessError::Io)?;
-        if alive {
-            Ok(RunState::Running(parsed.progress))
-        } else {
-            Ok(RunState::Finished(Outcome::HarnessFailure(
+        let text = match fs::read_to_string(&handle.log) {
+            Ok(t) => t,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(HarnessError::Io(e)),
+        };
+        let parsed = parse_stream(&text);
+        // A result outranks everything: the run said how it ended, and no
+        // reading of the process can contradict it.
+        if let Some(outcome) = parsed.outcome {
+            return Ok(RunState::Finished(outcome));
+        }
+        match presence {
+            Presence::Running => Ok(RunState::Running(parsed.progress)),
+            Presence::Ended => Ok(RunState::Finished(Outcome::HarnessFailure(
                 "the harness process ended without a result event".into(),
-            )))
+            ))),
+            Presence::Vanished(why) => Ok(RunState::Finished(Outcome::HarnessFailure(why))),
+            Presence::Unknown(why) => Err(HarnessError::Unreachable(why)),
         }
     }
 
