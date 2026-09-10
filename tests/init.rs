@@ -251,3 +251,20 @@ fn init_then_check_is_green_on_a_repository_that_had_nothing() {
     // And it still says what it could not establish.
     assert!(text.contains("could not be checked"), "{text}");
 }
+
+#[test]
+fn a_claude_md_that_is_a_link_to_agents_md_is_recognised() {
+    // The other documented shape (SPEC 4.1). Reading through the link would
+    // ask whether AGENTS.md mentions its own name, which is not the question
+    // — and `init` got this wrong on nunki itself before this test.
+    let (_d, root, hq) = fresh();
+    std::fs::write(root.join("AGENTS.md"), "# rules with no self-reference\n").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("AGENTS.md", root.join("CLAUDE.md")).unwrap();
+
+    let actions = init(&root, &hq, &[]).unwrap();
+    let why = kept(&actions, "CLAUDE.md").expect("CLAUDE.md should be reported");
+    assert!(why.contains("link to AGENTS.md"), "{why}");
+    assert!(!why.contains("red"), "nothing is wrong here: {why}");
+    assert!(root.join("CLAUDE.md").is_symlink(), "the link survived");
+}

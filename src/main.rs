@@ -6,7 +6,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 
 use hq::project::Project;
-use hq::{check, init, slot};
+use hq::{check, image, init, probe, slot};
 
 #[derive(Parser)]
 #[command(
@@ -46,8 +46,10 @@ enum Command {
     /// Red when a restriction is not held; and it always says what it could
     /// not check, because a check that quietly skips reads as a pass.
     Check {
-        /// Probe the system profile of this mission as well as the mission
-        /// profile.
+        /// Probe the mission profile from inside this slot's containers.
+        #[arg(long, value_name = "NAME")]
+        slot: Option<String>,
+        /// Probe the system profile of this mission as well.
         #[arg(long, value_name = "ID")]
         mission: Option<String>,
     },
@@ -59,6 +61,12 @@ enum SlotCommand {
     Add { name: String },
     /// List this project's slots.
     List,
+    /// Build this project's images: the stack's, and the firewall sidecar's.
+    Rebuild {
+        /// Which stack's image. Defaults to the only one declared.
+        #[arg(long, value_name = "NAME")]
+        stack: Option<String>,
+    },
     /// Remove a slot, refusing while it holds work the repository lacks.
     Rm {
         name: String,
@@ -136,6 +144,29 @@ fn main() -> ExitCode {
                     }
                     ExitCode::SUCCESS
                 }
+                SlotCommand::Rebuild { stack } => {
+                    let stack = match stack.or_else(|| project.config.stacks.first().cloned()) {
+                        Some(s) => s,
+                        None => {
+                            eprintln!("hq: no stack declared in hq.yaml; pass --stack");
+                            return ExitCode::FAILURE;
+                        }
+                    };
+                    let engine = std::env::var("HQ_ENGINE").unwrap_or_else(|_| "docker".into());
+                    println!("building the images for {stack}, this takes a while…");
+                    match image::build(&project, &stack, &engine) {
+                        Ok(images) => {
+                            println!("agent     {}", images.agent);
+                            println!("firewall  {}", images.firewall);
+                            println!("prober    {}", images.prober);
+                            ExitCode::SUCCESS
+                        }
+                        Err(e) => {
+                            eprintln!("hq: {e}");
+                            ExitCode::FAILURE
+                        }
+                    }
+                }
                 SlotCommand::Rm { name, force } => match slot::rm(&project, &name, force) {
                     Ok(s) => {
                         println!("removed {}", s.tree.display());
@@ -149,26 +180,26 @@ fn main() -> ExitCode {
             }
         }
 
-        Command::Check { mission } => {
+        Command::Check {
+            slot: which,
+            mission,
+        } => {
             let project = match open(&start) {
                 Some(p) => p,
                 None => return ExitCode::FAILURE,
             };
             let mut report = check::run(&project);
-            // Said, not skipped: the container probes of SPEC 4.1 bis rule 7
-            // need a slot and an engine, and neither exists yet.
-            report.checks.push(check::Check {
-                what: match &mission {
-                    Some(id) => format!("the perimeter holds from inside the profiles of {id}"),
-                    None => "the perimeter holds from inside the mission profile".to_string(),
-                },
-                verdict: check::Verdict::NotChecked(
-                    "hq cannot lift a slot yet, so the probes of SPEC 4.1 bis rule 7 \
-                     were not run; `cargo test --test firewall -- --ignored` runs them \
-                     by hand"
-                        .to_string(),
-                ),
-            });
+            report.checks.extend(probes(&project, which.as_deref()));
+            if let Some(id) = &mission {
+                // Said, not skipped: a system profile is a mission's, and
+                // missions do not exist yet.
+                report.checks.push(check::Check {
+                    what: format!("the perimeter holds from inside the system profile of {id}"),
+                    verdict: check::Verdict::NotChecked(
+                        "hq has no missions yet, so there is no system profile to lift".to_string(),
+                    ),
+                });
+            }
             print!("{}", report.render());
             if report.is_red() {
                 ExitCode::FAILURE
@@ -195,4 +226,49 @@ fn hq_root_for(root: &std::path::Path) -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
     let name = root.file_name()?.to_string_lossy().into_owned();
     Some(PathBuf::from(home).join(".hq").join(name))
+}
+
+/// The container probes of SPEC 4.1 bis rule 7, when a slot was named. Never
+/// silently skipped: without a slot, that is said as plainly as a result.
+fn probes(project: &Project, which: Option<&str>) -> Vec<check::Check> {
+    let Some(name) = which else {
+        return vec![check::Check {
+            what: "the perimeter holds from inside the mission profile".to_string(),
+            verdict: check::Verdict::NotChecked(
+                "no slot named: `hq check --slot <name>` lifts one and probes it".to_string(),
+            ),
+        }];
+    };
+    let slot = match slot::find(project, name) {
+        Ok(s) => s,
+        Err(e) => {
+            return vec![check::Check {
+                what: "the perimeter holds from inside the mission profile".to_string(),
+                verdict: check::Verdict::Red(e.to_string()),
+            }];
+        }
+    };
+    let Some(stack) = project.config.stacks.first().cloned() else {
+        return vec![check::Check {
+            what: "the perimeter holds from inside the mission profile".to_string(),
+            verdict: check::Verdict::NotChecked(
+                "no stack declared in hq.yaml, so no image to lift".to_string(),
+            ),
+        }];
+    };
+    let engine_bin = std::env::var("HQ_ENGINE").unwrap_or_else(|_| "docker".into());
+    let engine: std::sync::Arc<dyn hq::engine::Engine> =
+        std::sync::Arc::new(hq::engine::docker::Docker::real());
+
+    match probe::mission_profile(project, &slot, &stack, engine, &engine_bin) {
+        Ok(checks) => checks,
+        Err(e) => vec![check::Check {
+            what: "the perimeter holds from inside the mission profile".to_string(),
+            verdict: match e {
+                // Missing images are something to do, not something broken.
+                probe::ProbeError::NoImages(..) => check::Verdict::NotChecked(e.to_string()),
+                _ => check::Verdict::Red(e.to_string()),
+            },
+        }],
+    }
 }

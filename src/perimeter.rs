@@ -191,9 +191,14 @@ pub fn probes(allowed: &str, forbidden: &[(String, u16)]) -> Vec<Probe> {
             script: resolves(allowed),
         },
         Probe {
+            // A bare TCP connect, not an HTTP request: what the perimeter
+            // decides is whether the address may be reached, and an allowed
+            // domain has no obligation to answer on port 80. Measured —
+            // against `api.anthropic.com` the HTTP form failed on the
+            // protocol and `hq check` reported a violation that was not one.
             what: format!("{allowed}, an allowed host, is reachable"),
             expected: true,
-            script: format!("wget -q -T5 -O /dev/null http://{allowed}/"),
+            script: format!("nc -z -w5 {allowed} 443"),
         },
         Probe {
             what: "an off-list name resolves".to_string(),
