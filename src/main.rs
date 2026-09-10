@@ -43,6 +43,20 @@ enum Command {
     #[command(subcommand)]
     Slot(SlotCommand),
 
+    /// Push a verified mission's branch, and hand the pull request over.
+    ///
+    /// The one verb that touches the forge in write, and the one thing in
+    /// `hq` that is not autonomous: it needs `--yes`, on the command line,
+    /// from somebody who has read the pull request.
+    Push {
+        /// The mission.
+        mission: String,
+        /// Your explicit authorisation. There is no dialogue, and no flag to
+        /// push past a red verdict.
+        #[arg(long)]
+        yes: bool,
+    },
+
     /// Missions: what an agent is asked to do, and where it reports.
     ///
     /// Boxed because `mission new` carries every field of a mission header
@@ -187,6 +201,15 @@ enum MissionCommand {
     /// End the run in progress properly: the agent finishes its turn and
     /// writes its resume block.
     Stop { id: String },
+    /// Bring a mission's commits from its slot into the repository.
+    ///
+    /// The only way commits leave a slot, and it goes one way. `hq push`
+    /// does it for you; this is for looking at them yourself first.
+    Fetch {
+        /// The mission.
+        id: String,
+    },
+
     /// Lift a security finding, or what a `FINDINGS` verdict still carries.
     ///
     /// Never touches `VERDICT.json`: the verdict says what the agent found,
@@ -458,6 +481,34 @@ fn main() -> ExitCode {
                 None => return ExitCode::FAILURE,
             };
             mission(&project, *command)
+        }
+
+        Command::Push { mission, yes } => {
+            let project = match open(&start) {
+                Some(p) => p,
+                None => return ExitCode::FAILURE,
+            };
+            match hq::push::push(&project, &mission, yes) {
+                Ok(pushed) => {
+                    println!("pushed    {} → {}", pushed.branch, pushed.remote);
+                    println!("head      {}", &pushed.head[..12.min(pushed.head.len())]);
+                    match pushed.pull_request {
+                        Some(url) => {
+                            println!("pull request, to open yourself:");
+                            println!("  {url}");
+                        }
+                        None => println!(
+                            "the pull request is yours to open: hq does not talk to the \
+                             forge yet"
+                        ),
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("hq: {e}");
+                    ExitCode::FAILURE
+                }
+            }
         }
 
         Command::Verify { mission } => {
@@ -793,6 +844,28 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                 }
             }
         }
+
+        MissionCommand::Fetch { id } => match hq::push::fetch(project, &id) {
+            Ok(fetched) => {
+                let head = &fetched.head[..12.min(fetched.head.len())];
+                match fetched.was {
+                    Some(was) if was == fetched.head => {
+                        println!("fetched   {} already at {head}", fetched.branch)
+                    }
+                    Some(was) => println!(
+                        "fetched   {} {} → {head}",
+                        fetched.branch,
+                        &was[..12.min(was.len())]
+                    ),
+                    None => println!("fetched   {} at {head}, new here", fetched.branch),
+                }
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("hq: {e}");
+                ExitCode::FAILURE
+            }
+        },
 
         MissionCommand::Accept { id, finding, why } => {
             let lift = match finding {

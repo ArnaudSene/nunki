@@ -182,6 +182,7 @@ pub fn verify(
             // The final verification: every gate, including the deliverable,
             // the battery and the mutation campaign.
             Stage::Gates => {
+                let head = crate::git::head(&slot.tree)?;
                 let report = gate::at_verification(&subject, &verification)?;
                 let failure = report.failure();
                 steps.push(Step::Gates {
@@ -190,7 +191,15 @@ pub fn verify(
                 });
                 let event = match failure {
                     Some(reason) => Event::GatesFailed { reason },
-                    None => Event::GatesPassed,
+                    None => {
+                        // The coder's verdict is implicit — its gates were
+                        // green (SPEC 4.4) — so this is where it is recorded,
+                        // with the commit it was green on. `hq push` needs
+                        // that commit: everything after it must be the
+                        // integrator's wiring and nothing else.
+                        state.conclude(Role::Coder, None, &head);
+                        Event::GatesPassed
+                    }
                 };
                 store.apply(&mut state, event)?;
                 steps.push(Step::Moved {
@@ -221,6 +230,9 @@ pub fn verify(
                                 &head,
                             );
                             carry(&paths.followup, Role::Integrator, &event, &head)?;
+                            if let Event::Verdict { verdict, .. } = &event {
+                                state.conclude(Role::Integrator, Some(*verdict), &head);
+                            }
                             // Forgotten before the transition is written: an
                             // attempt that stays recorded is a run the next
                             // `verify` would read back a second time.
@@ -273,6 +285,9 @@ pub fn verify(
                             let event =
                                 concluded(Role::Security, outcome, paths.verdict.as_path(), &head);
                             carry(&paths.followup, Role::Security, &event, &head)?;
+                            if let Event::Verdict { verdict, .. } = &event {
+                                state.conclude(Role::Security, Some(*verdict), &head);
+                            }
                             state.run = None;
                             state.app = None;
                             store.apply(&mut state, event)?;

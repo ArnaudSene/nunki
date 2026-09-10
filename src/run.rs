@@ -156,6 +156,7 @@ pub fn start(
         flow: Flow::new(header).map_err(crate::state::StateError::Flow)?,
         run: Some(launched.run),
         app: launched.app,
+        verdicts: Vec::new(),
         accepted: Vec::new(),
         updated_at: String::new(),
     };

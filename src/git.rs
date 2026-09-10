@@ -88,3 +88,8 @@ pub fn commits_not_in(at: &Path, elsewhere: &Path) -> Result<Vec<String>, GitErr
     let _ = branch;
     Ok(missing)
 }
+
+/// Where a named branch is in `at`, whatever `HEAD` is on.
+pub fn head_of(at: &Path, branch: &str) -> Result<String, GitError> {
+    run(at, &["rev-parse", &format!("{branch}^{{commit}}")])
+}

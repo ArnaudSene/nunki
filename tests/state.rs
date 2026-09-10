@@ -40,6 +40,7 @@ fn state(id: &str) -> MissionState {
         flow: Flow::new(header()).unwrap(),
         run: None,
         app: None,
+        verdicts: Vec::new(),
         accepted: Vec::new(),
         updated_at: String::new(),
     }
