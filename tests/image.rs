@@ -115,3 +115,39 @@ fn a_stack_that_declares_no_writable_directory_gets_none() {
     let layer = image::harness_layer("hq/demo:base", &provisioning(), &[]);
     assert!(!layer.contains("/work/tree/"), "{layer}");
 }
+
+/// A stack image that ends as root is one this layer cannot serve: the
+/// harness keeps its state under the home of whoever installs it, so
+/// installed as root it lands in root's home and the only user that runs it
+/// cannot read it. Measured on a fixture that had no `agent` user at all —
+/// the failure surfaced two steps later as "claude is not on PATH after the
+/// install", which sends the reader to the installer instead of to the
+/// missing `USER`.
+#[test]
+fn the_layer_refuses_a_stack_image_that_ends_as_root_and_says_why() {
+    let layer = image::harness_layer("hq/demo:base", &provisioning(), &[]);
+    let check = layer
+        .find("id -u")
+        .unwrap_or_else(|| panic!("nothing checks the user: {layer}"));
+    let install = layer
+        .find("install.sh")
+        .unwrap_or_else(|| panic!("{layer}"));
+    assert!(
+        check < install,
+        "the cause is named before the symptom can happen: {layer}"
+    );
+    assert!(layer.contains("SPEC 4.2 bis"), "{layer}");
+    assert!(
+        layer.contains("USER"),
+        "it names what is missing, not what broke: {layer}"
+    );
+}
+
+/// A harness that installs nothing has no home to land in, so there is
+/// nothing for the user to be wrong about — and a check that cannot fail is
+/// a check worth removing.
+#[test]
+fn a_harness_that_installs_nothing_is_not_asked_about_the_user() {
+    let layer = image::harness_layer("hq/demo:base", &Provisioning::default(), &[]);
+    assert!(!layer.contains("id -u"), "{layer}");
+}
