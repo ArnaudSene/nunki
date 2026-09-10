@@ -5,7 +5,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
-use hq::mission::{Bounds, Header, Integration, Lot, Security, Service, dir as mission_dir};
+use hq::mission::{Header, Integration, Lot, Security, Service, dir as mission_dir};
 use hq::project::Project;
 use hq::{check, image, init, probe, slot};
 
