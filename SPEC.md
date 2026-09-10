@@ -530,8 +530,8 @@ où un humain la lit, dans `FOLLOWUP_HQ.md`, pas seulement dans l'état. Le
 verbe vaut **partout où une mission peut encore être travaillée** — un verbe
 qui marcherait dans cinq étapes sur sept est un verbe sur lequel l'humain ne
 peut pas compter au moment où il veut sortir — et refuse sur une mission déjà
-terminée. **Cette définition est dérivée, pas citée : Arnaud la confirme ou la
-renomme.**
+terminée. Dérivée d'abord, faute de texte : **confirmée par Arnaud le
+2026-09-10**, nom et définition.
 
 `hq slot reset` remet un slot au propre **sans le détruire** : le clone
 reste — `hq slot rm` est le verbe qui supprime — et ce qui part, c'est le
@@ -1014,9 +1014,9 @@ flux est exactement où il était quand on la lève.
 conteneur, parce que pour la main qui le tape c'est une seule chose : la
 mission était retenue, elle ne l'est plus. Ce verbe n'a pas besoin d'un run,
 justement parce qu'une mission retenue entre deux runs n'en a pas.
-**Ce couplage est dérivé, pas cité** : SPEC nomme `resume` comme l'antonyme
-de `pause` et dit d'une mission arrêtée qu'elle est « reprenable », sans dire
-par quel verbe. À confirmer ou à renommer, comme `end`.
+Ce couplage a d'abord été dérivé — SPEC nommait `resume` comme l'antonyme de
+`pause` et disait d'une mission arrêtée qu'elle est « reprenable », sans dire
+par quel verbe — puis **confirmé par Arnaud le 2026-09-10**.
 
 `say` change de sens avec le run : il n'y a pas de canal pendant un run. Une
 consigne est déposée dans `FOLLOWUP_HQ.md` et lue au run suivant ; si elle

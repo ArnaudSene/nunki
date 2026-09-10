@@ -118,8 +118,8 @@ pub fn stop(
 /// One verb for both because they are one thing to the human who types it:
 /// the mission was held, and it is held no longer. SPEC 4.5 names `resume`
 /// as `pause`'s antonym and calls a stopped mission "reprenable" without
-/// saying by which verb — **this pairing is derived, not quoted**, and it is
-/// in the owner's queue.
+/// saying by which verb; the pairing was derived from that, then confirmed
+/// by Arnaud on 2026-09-10.
 ///
 /// It does not require a run: a mission held between two runs has none, and
 /// that is precisely a mission worth resuming.
