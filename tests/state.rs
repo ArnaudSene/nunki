@@ -222,3 +222,78 @@ fn dropping_a_guard_never_deletes_a_lock_retaken_by_another_process() {
         Some(theirs["pid"].as_u64().unwrap() as u32)
     );
 }
+
+/// A hold changes what `hq` will do next, so a read verb that does not
+/// mention it reports a held mission as one nobody touched. This drives the
+/// real binary, because the omission was in what the CLI prints and nothing
+/// below it could have caught it.
+#[test]
+fn status_says_a_mission_is_held_and_who_held_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("hq.yaml"), "harness: claude-code\n").unwrap();
+    let hq_root = dir.path().join("home/.hq/repo");
+
+    let status = || {
+        let out = Command::new(env!("CARGO_BIN_EXE_hq"))
+            .args(["-C"])
+            .arg(&root)
+            .args(["mission", "status", "m1"])
+            .env("HOME", dir.path().join("home"))
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+
+    hq::mission::dir::create(&hq_root, "m1", &header(), "do it").unwrap();
+    let store = Store::open(&hq_root).unwrap();
+    let mut state = state("m1");
+    store.save(&state).unwrap();
+    assert!(
+        !status().contains("held"),
+        "the probe is worth nothing unless an unheld mission says nothing: {}",
+        status()
+    );
+
+    state.hold("Arnaud", false);
+    store.save(&state).unwrap();
+    let text = status();
+    assert!(text.contains("held"), "{text}");
+    assert!(text.contains("Arnaud"), "it names who held it: {text}");
+    assert!(text.contains("resume m1"), "and how to lift it: {text}");
+}
+
+/// `watch` on a held mission with no run said "none in progress" and left —
+/// which reads as "it is between two runs" when it means "nothing is
+/// coming". The hold is reported before the run, and it is the one that
+/// decides whether anything follows.
+#[test]
+fn watch_says_the_hold_before_it_says_there_is_no_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("hq.yaml"), "harness: claude-code\n").unwrap();
+    let hq_root = dir.path().join("home/.hq/repo");
+
+    hq::mission::dir::create(&hq_root, "m1", &header(), "do it").unwrap();
+    let store = Store::open(&hq_root).unwrap();
+    let mut state = state("m1");
+    state.hold("Arnaud", false);
+    store.save(&state).unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_hq"))
+        .args(["-C"])
+        .arg(&root)
+        .args(["mission", "watch", "m1"])
+        .env("HOME", dir.path().join("home"))
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    let held = text.find("held").unwrap_or_else(|| panic!("{text}"));
+    let none = text
+        .find("none in progress")
+        .unwrap_or_else(|| panic!("{text}"));
+    assert!(held < none, "the hold comes first: {text}");
+    assert!(text.contains("Arnaud"), "{text}");
+}
