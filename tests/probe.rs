@@ -92,7 +92,25 @@ fn live_a_fresh_project_ends_with_a_perimeter_that_holds() {
         // If the battery ran in the agent's container instead of the
         // prober's, every positive probe would fail here — which is exactly
         // what happened on nunki before the prober existed.
-        "FROM debian:bookworm-slim\nRUN mkdir -p /work/tree /work/mission /run/hq\n",
+        //
+        // It carries the agent user all the same, and ends as that user:
+        // SPEC 4.2 bis makes that a requirement of every stack image, and
+        // hq's harness layer is built on top of whatever user the stack
+        // image leaves — a stack image that ends as root installs the
+        // harness into root's home, where the only user that runs it cannot
+        // read it. A fixture that skipped it was testing a shape no stack
+        // image is allowed to have.
+        "FROM debian:bookworm-slim\n\
+         ARG UID=1000\n\
+         ARG GID=1000\n\
+         RUN apt-get -qq update \\\n\
+          && apt-get -qq install --no-install-recommends -y ca-certificates curl \\\n\
+          && rm -rf /var/lib/apt/lists/*\n\
+         RUN groupadd -g ${GID} agent || true \\\n\
+          && useradd -m -u ${UID} -g ${GID} -s /bin/bash agent\n\
+         RUN mkdir -p /work/tree /work/mission /run/hq \\\n\
+          && chown -R ${UID}:${GID} /work /run/hq\n\
+         USER agent\n",
     )
     .unwrap();
     // A first commit, so the clone has something to carry.

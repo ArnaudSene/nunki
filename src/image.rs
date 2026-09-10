@@ -154,6 +154,21 @@ pub fn harness_layer(
             provisioning.path.join(":")
         ));
     }
+    // Before anything is installed: a stack image that ends as root is a
+    // stack image the rest of this layer cannot serve. The harness keeps its
+    // state under the home of whoever installs it, so installed as root it
+    // lands in root's home and the only user that runs it cannot read it —
+    // and the failure surfaced two steps later as "claude is not on PATH
+    // after the install", which sends the reader to the installer instead of
+    // to the missing `USER`. A check that names the wrong cause is a check
+    // that lies (SPEC 4.2 bis).
+    if !provisioning.install.is_empty() {
+        out.push_str(
+            "RUN [ \"$(id -u)\" != 0 ] || (echo \"hq: this stack's image ends as root; \
+             its Dockerfile must end with USER set to the agent, so that what the agent \
+             writes belongs to the human on the host (SPEC 4.2 bis)\" >&2; exit 1)\n",
+        );
+    }
     for step in &provisioning.install {
         // As the agent, not as root: the harness keeps its state under the
         // agent's home, and installing it as root would leave it unreadable
