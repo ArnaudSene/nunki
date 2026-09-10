@@ -9,6 +9,7 @@ pub mod account;
 pub mod check;
 pub mod compose;
 pub mod engine;
+pub mod exec;
 pub mod firewall;
 pub mod gate;
 pub mod git;
