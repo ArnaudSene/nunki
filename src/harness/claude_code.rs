@@ -143,6 +143,11 @@ impl Harness for ClaudeCode {
         "claude-code"
     }
 
+    fn token_env(&self) -> &'static str {
+        // The subscription's long-lived token, never an API key (SPEC 4.3).
+        "CLAUDE_CODE_OAUTH_TOKEN"
+    }
+
     fn provision(&self) -> Provisioning {
         Provisioning {
             install: vec!["npm install -g @anthropic-ai/claude-code".into()],

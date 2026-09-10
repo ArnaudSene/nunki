@@ -167,6 +167,12 @@ pub enum HarnessError {
 
 /// The contract every harness adapter implements. See the module docs.
 pub trait Harness: Send + Sync {
+    /// The environment variable this harness reads its long-lived token
+    /// from. Harness-specific knowledge, so it lives here and nowhere else:
+    /// an Anthropic subscription and an OpenAI one are not passed the same
+    /// way (SPEC 4.3).
+    fn token_env(&self) -> &'static str;
+
     /// Stable name, used in `hq.yaml` and in the state.
     fn name(&self) -> &'static str;
 

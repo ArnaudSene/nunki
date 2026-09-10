@@ -49,6 +49,10 @@ impl Harness for FakeHarness {
         "fake"
     }
 
+    fn token_env(&self) -> &'static str {
+        "HQ_FAKE_TOKEN"
+    }
+
     fn provision(&self) -> Provisioning {
         Provisioning::default()
     }

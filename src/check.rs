@@ -266,32 +266,88 @@ fn rules_are_reachable(project: &Project, report: &mut Report) {
     report.add("the rules of the place reach the harness", verdict);
 }
 
-/// An agent authenticates with the subscription's long-lived token, never an
-/// API key (SPEC 4.3). It reaches the container as an environment variable at
-/// launch and is never written into a slot — so what `check` verifies is that
-/// `hq` has one to pass, and that it is not sitting in the tree.
+/// Which account this project's missions spend, and whether it can actually
+/// pay (SPEC 4.3). A human may hold several subscriptions — two Anthropic
+/// ones, an OpenAI one — so the question is not "is there a token" but "is
+/// the named account usable by this project".
 fn harness_can_authenticate(project: &Project, report: &mut Report) {
-    let file = crate::run::token_file(project);
-    let verdict = if std::env::var("CLAUDE_CODE_OAUTH_TOKEN").is_ok_and(|t| !t.trim().is_empty()) {
-        Verdict::Green("a token is in this shell's environment".to_string())
-    } else if file.is_file() {
-        if file.starts_with(&project.root) {
-            Verdict::Red(format!(
-                "{} is inside the repository — a token in the tree is a token in \
-                 every slot and every container",
-                file.display()
-            ))
-        } else {
-            Verdict::Green(file.display().to_string())
+    use crate::account::{Accounts, setup_command};
+
+    let what = "the account this project spends can authenticate";
+    let hq_home = project.hq_home();
+    let accounts = match Accounts::load(&hq_home) {
+        Ok(a) => a,
+        Err(e) => {
+            report.add(what, Verdict::Red(e.to_string()));
+            return;
         }
-    } else {
-        Verdict::NotChecked(format!(
-            "no token: `claude setup-token` once, then write it to {} — \
-             `hq mission start` refuses without it",
-            file.display()
-        ))
     };
-    report.add("the harness can authenticate in a container", verdict);
+    let (name, account) = match accounts.choose(&hq_home, None, project.config.account.as_deref()) {
+        Ok(pair) => pair,
+        // Nothing named and nothing to guess from: something to do, not
+        // something broken.
+        Err(e) => {
+            report.add(what, Verdict::NotChecked(e.to_string()));
+            return;
+        }
+    };
+
+    if account.harness != project.config.harness {
+        report.add(
+            what,
+            Verdict::Red(format!(
+                "account {name:?} authenticates {}, but this project runs {}",
+                account.harness, project.config.harness
+            )),
+        );
+        return;
+    }
+
+    let path = account.token_path(&hq_home);
+    if path.starts_with(&project.root) {
+        // A token in the tree is a token in every slot and every container.
+        report.add(
+            what,
+            Verdict::Red(format!(
+                "{} is inside the repository, so every slot and every container \
+                 would carry it",
+                path.display()
+            )),
+        );
+        return;
+    }
+    match account.token(&hq_home, &name) {
+        Err(_) => report.add(
+            what,
+            Verdict::NotChecked(format!(
+                "account {name:?} has no token at {} — put the output of `{}` there",
+                path.display(),
+                setup_command(&account.harness)
+            )),
+        ),
+        Ok(_) => {
+            // A secret others can read is a secret.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(&path)
+                    .map(|m| m.permissions().mode())
+                    .unwrap_or(0);
+                if mode & 0o077 != 0 {
+                    report.add(
+                        what,
+                        Verdict::Red(format!(
+                            "{} is readable by others ({:o}) — `chmod 600` it",
+                            path.display(),
+                            mode & 0o777
+                        )),
+                    );
+                    return;
+                }
+            }
+            report.add(what, Verdict::Green(format!("{name} ({})", path.display())));
+        }
+    }
 }
 
 fn credentials_outside_the_tree(project: &Project, report: &mut Report) {

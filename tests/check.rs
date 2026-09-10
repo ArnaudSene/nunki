@@ -13,6 +13,7 @@ fn config() -> Config {
         stacks: Vec::new(),
         protected_branches: vec!["main".to_string()],
         protected_paths: ProtectedPaths::default(),
+        account: None,
         bounds: Default::default(),
         credentials: None,
         run: None,
@@ -360,28 +361,75 @@ fn rules_the_harness_cannot_read_are_red() {
 }
 
 #[test]
-fn a_missing_harness_token_is_something_to_do_not_a_violation() {
+fn the_account_a_project_spends_is_checked_not_assumed() {
+    use hq::account::{Account, Accounts};
+
     let dir = tempfile::tempdir().unwrap();
     let project = sound(dir.path());
-    let v = verdict(&run(&project), "authenticate in a container");
-    match &v {
+    let hq_home = project.hq_home();
+
+    // Nothing declared: something to do, not something broken.
+    let v = verdict(&run(&project), "can authenticate");
+    assert!(matches!(v, Verdict::NotChecked(_)), "{v:?}");
+
+    let write_index = |index: &Accounts| {
+        std::fs::write(
+            hq_home.join("accounts.yaml"),
+            serde_yaml_ng::to_string(index).unwrap(),
+        )
+        .unwrap()
+    };
+    let account = |harness: &str, file: &str| Account {
+        harness: harness.to_string(),
+        token_file: std::path::PathBuf::from(file),
+        note: None,
+    };
+
+    // Declared, but no token yet: still something to do, with the command.
+    write_index(&Accounts {
+        accounts: [(
+            "perso".to_string(),
+            account("claude-code", "accounts/perso"),
+        )]
+        .into_iter()
+        .collect(),
+        default: None,
+    });
+    match verdict(&run(&project), "can authenticate") {
         Verdict::NotChecked(why) => assert!(why.contains("claude setup-token"), "{why}"),
         other => panic!("{other:?}"),
     }
 
-    // A token in the tree is a token in every slot and every container.
-    let mut in_tree = project.clone();
-    in_tree.hq_root = project.root.clone();
-    std::fs::write(project.root.join("token"), "sk-ant-oat-example\n").unwrap();
-    assert!(is_red(&verdict(
-        &run(&in_tree),
-        "authenticate in a container"
-    )));
+    // A token that authenticates another harness is refused rather than
+    // passed along to fail inside a container.
+    write_index(&Accounts {
+        accounts: [("openai".to_string(), account("codex", "accounts/openai"))]
+            .into_iter()
+            .collect(),
+        default: None,
+    });
+    assert!(is_red(&verdict(&run(&project), "can authenticate")));
 
-    // At the HQ, outside the repository, it is simply fine.
-    std::fs::write(project.hq_root.join("token"), "sk-ant-oat-example\n").unwrap();
-    assert!(!is_red(&verdict(
-        &run(&project),
-        "authenticate in a container"
-    )));
+    // The real thing, with the right harness and a private file.
+    write_index(&Accounts {
+        accounts: [(
+            "perso".to_string(),
+            account("claude-code", "accounts/perso"),
+        )]
+        .into_iter()
+        .collect(),
+        default: None,
+    });
+    std::fs::create_dir_all(hq_home.join("accounts")).unwrap();
+    let token = hq_home.join("accounts/perso");
+    std::fs::write(&token, "sk-ant-oat-example\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // Readable by others is not good enough for a secret.
+        std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(is_red(&verdict(&run(&project), "can authenticate")));
+        std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    assert!(!is_red(&verdict(&run(&project), "can authenticate")));
 }

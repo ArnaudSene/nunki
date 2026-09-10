@@ -5,6 +5,7 @@
 //! it holds the state of missions, slots and verdicts, and talks to a coding
 //! harness only through the [`harness::Harness`] trait (SPEC 4.3).
 
+pub mod account;
 pub mod check;
 pub mod compose;
 pub mod engine;

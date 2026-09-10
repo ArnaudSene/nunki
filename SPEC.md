@@ -932,6 +932,33 @@ engage pour l'adaptateur, et qu'il doit tenir explicitement :
   un jour — plusieurs slots qui saturent la fenêtre, un projet d'équipe —
   c'est une décision à reprendre, pas une case à cocher.
 
+**Plusieurs comptes, et la mission choisit.** Demandé par Arnaud le
+2026-09-10 : il détient deux abonnements Anthropic et un compte OpenAI, et
+veut pouvoir dire quelle mission dépense lequel. Donc :
+
+- les comptes vivent dans `~/.hq/accounts.yaml`, **à côté des QG et hors
+  de tout dépôt** — un compte appartient à l'humain, pas à un projet, et deux
+  projets partagent les mêmes abonnements. Les jetons sont dans des fichiers
+  à part, un par compte, pour que l'index se lise sans lire les secrets ;
+- chaque compte déclare **quel harnais il authentifie**. Un abonnement OpenAI
+  n'authentifie pas Claude Code, et le passer quand même échouerait dans un
+  conteneur avec personne pour lire l'erreur : `hq` refuse avant de lever
+  quoi que ce soit ;
+- le choix se fait par ordre de précision — l'en-tête de la mission, puis
+  `hq.yaml`, puis le `default:` de l'index ; et **quand il n'existe qu'un
+  compte, c'est la réponse et non une question** ;
+- le compte est **figé avec le reste de l'en-tête** : une mission ne change
+  pas d'abonnement en cours de route, pas plus qu'elle ne change de
+  périmètre ;
+- **quel nom de variable porte le jeton est la connaissance du harnais**, pas
+  celle du moteur : l'adaptateur le déclare (`token_env`), et `hq` ne connaît
+  que le nom du compte.
+
+`hq check` vérifie que le compte nommé existe, qu'il authentifie bien le
+harnais du projet, que son fichier est hors du dépôt et qu'il n'est pas
+lisible par d'autres. `hq account list` dit ce qui est déclaré et ce qui est
+prêt.
+
 Un adaptateur est jetable. Le jour où le harnais change d'affichage ou de
 mécanisme, on réécrit l'adaptateur, pas la méthode. Le premier adaptateur est
 Claude Code, parce que c'est celui qui existe ; le second est ce qui prouvera
