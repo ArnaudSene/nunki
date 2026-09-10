@@ -206,12 +206,21 @@ pub fn probes(allowed: &str, forbidden: &[(String, u16)]) -> Vec<Probe> {
             script: resolves("github.com 1.1.1.1"),
         },
         Probe {
-            what: "an off-list name resolves over TCP".to_string(),
+            // Not `nslookup -vc`: busybox has no such option, so that probe
+            // failed on its argument and would have gone green with no
+            // firewall at all. A bare TCP connect is what a tunnel would
+            // need, and busybox can do it.
+            what: "a resolver elsewhere answers over TCP".to_string(),
             expected: false,
-            script: format!(
-                "nslookup -vc {}",
-                "github.com 8.8.8.8 2>&1 | tail -5 | grep -q 'Address: [0-9]'"
-            ),
+            script: "nc -z -w3 8.8.8.8 53".to_string(),
+        },
+        Probe {
+            // The other half of the same fact: our own resolver must accept
+            // TCP, or a truncated UDP answer has nowhere to fall back to and
+            // large responses break.
+            what: "the local resolver accepts TCP".to_string(),
+            expected: true,
+            script: "nc -z -w3 127.0.0.1 53".to_string(),
         },
         Probe {
             what: "a DNS tunnel carries data out".to_string(),
