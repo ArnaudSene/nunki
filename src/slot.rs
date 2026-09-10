@@ -113,6 +113,95 @@ pub fn find(project: &Project, name: &str) -> Result<Slot, SlotError> {
 
 /// Remove a slot — and refuse while it holds work the repository does not
 /// have (SPEC 3.3, rule 2). `force` is the human saying it anyway.
+/// Put a slot back to a clean state without destroying it.
+///
+/// What it removes, and what it deliberately does not. The **clone stays**:
+/// `hq slot rm` is the verb that deletes one, and a reset that quietly did
+/// the same would be a name lying about a destructive act. What goes is the
+/// work in progress — uncommitted changes, untracked files — and the slot's
+/// **named volumes**, which is the real reason to reset: a build cache or a
+/// harness state directory that has gone bad outlives every rebuild of the
+/// image, and nothing else can reach it.
+///
+/// It refuses on the same grounds as `rm`, and for the same reason: commits
+/// the repository does not have are work nobody else holds, and a verb that
+/// discarded them because its name sounds mild would be the worst kind of
+/// verb (SPEC 3.3).
+pub fn reset(
+    project: &Project,
+    name: &str,
+    engine_bin: &str,
+    force: bool,
+) -> Result<Reset, SlotError> {
+    let slot = find(project, name)?;
+    if !force {
+        let missing = git::commits_not_in(&slot.tree, &project.root)?;
+        if !missing.is_empty() {
+            return Err(SlotError::Unfetched {
+                name: name.to_string(),
+                branch: git::current_branch(&slot.tree)?,
+                count: missing.len(),
+                repository: project.root.display().to_string(),
+            });
+        }
+    }
+
+    let discarded = !git::is_clean(&slot.tree)?;
+    git::run(&slot.tree, &["reset", "--hard", "--quiet", "HEAD"])?;
+    // `-x` here, unlike the refresh of the proof copy: that one keeps the
+    // build cache on purpose, and this one exists to throw it away.
+    git::run(&slot.tree, &["clean", "-qxdff"])?;
+
+    let mut volumes = Vec::new();
+    for volume in volumes_of(project, &slot) {
+        let out = std::process::Command::new(engine_bin)
+            .args(["volume", "rm", "-f", &volume])
+            .output();
+        // A volume that was never created is not an error: a slot reset
+        // before its first run has none, and saying so as a failure would
+        // make the ordinary case look broken.
+        if out.map(|o| o.status.success()).unwrap_or(false) {
+            volumes.push(volume);
+        }
+    }
+    Ok(Reset {
+        slot,
+        discarded,
+        volumes,
+    })
+}
+
+/// What a reset threw away, for the caller to print.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reset {
+    pub slot: Slot,
+    /// Whether the tree had uncommitted work.
+    pub discarded: bool,
+    /// The named volumes that were actually removed.
+    pub volumes: Vec<String>,
+}
+
+/// Every named volume a slot owns, whichever profile put it there.
+///
+/// Listed here rather than derived from a profile file: a profile is
+/// regenerated at every launch and may not exist at all, and a reset must be
+/// able to clean a slot whose last profile is gone.
+pub fn volumes_of(project: &Project, slot: &Slot) -> Vec<String> {
+    let mut names = vec![
+        crate::exec::proof_volume(&slot.name),
+        format!("hq-{}-harness", slot.name),
+        format!("hq-{}-cargo", slot.name),
+    ];
+    for stack in &project.config.stacks {
+        for path in project.stack_writable(stack) {
+            names.push(crate::run::writable_volume(&slot.name, &path));
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
 pub fn rm(project: &Project, name: &str, force: bool) -> Result<Slot, SlotError> {
     let slot = find(project, name)?;
     if !force {

@@ -83,6 +83,11 @@ pub enum FlowError {
     InvalidTransition { stage: Stage, event: Event },
     #[error("a mission needs at least one lot")]
     NoLots,
+    #[error(
+        "the mission is working on lot {lot}, and the new framing declares only {lots} \
+         lot(s) — finish the lot, or stop the mission before reframing it"
+    )]
+    LotGone { lot: String, lots: usize },
 }
 
 /// The state machine. Serializable, so the engine persists it at every
@@ -121,6 +126,35 @@ impl Flow {
 
     pub fn header(&self) -> &Header {
         &self.header
+    }
+
+    /// Re-freeze the framing (SPEC 4.1, rule 3).
+    ///
+    /// Changing the shape of a running mission is a gesture of the HQ,
+    /// through a verb, never an edit of the file: `hq` never re-reads the
+    /// header during a mission, so a file edited behind its back changes
+    /// nothing and looks as though it did.
+    ///
+    /// Refused when the flow is standing on a lot the new framing does not
+    /// have. Re-numbering under a running mission would leave the state
+    /// pointing at work nobody described, and there is no honest guess to
+    /// make about which lot was meant.
+    pub fn reframe(&mut self, header: Header) -> Result<(), FlowError> {
+        if header.lots.is_empty() {
+            return Err(FlowError::NoLots);
+        }
+        if let Stage::Coding {
+            work: Work::Lot(i), ..
+        } = &self.stage
+            && *i >= header.lots.len()
+        {
+            return Err(FlowError::LotGone {
+                lot: self.header.lots[*i].id.clone(),
+                lots: header.lots.len(),
+            });
+        }
+        self.header = header;
+        Ok(())
     }
 
     /// Returns to the coder used so far.
