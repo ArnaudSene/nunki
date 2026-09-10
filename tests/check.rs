@@ -51,12 +51,11 @@ fn a_sound_project_is_green_and_says_so() {
     let dir = tempfile::tempdir().unwrap();
     let report = run(&sound(dir.path()));
     assert!(!report.is_red(), "{}", report.render());
-    assert_eq!(
-        report.unchecked(),
-        1,
-        "the stackless perimeter is unchecked"
-    );
-    assert!(report.render().contains("1 could not be checked"));
+    // Two, and both are things this machine cannot answer for rather than
+    // things that are wrong: no stack is declared, and no harness token is
+    // in reach.
+    assert_eq!(report.unchecked(), 2, "{}", report.render());
+    assert!(report.render().contains("2 could not be checked"));
 }
 
 #[test]
@@ -358,4 +357,31 @@ fn rules_the_harness_cannot_read_are_red() {
 
     std::fs::remove_file(project.root.join("AGENTS.md")).unwrap();
     assert!(is_red(&verdict(&run(&project), "rules of the place")));
+}
+
+#[test]
+fn a_missing_harness_token_is_something_to_do_not_a_violation() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = sound(dir.path());
+    let v = verdict(&run(&project), "authenticate in a container");
+    match &v {
+        Verdict::NotChecked(why) => assert!(why.contains("claude setup-token"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+
+    // A token in the tree is a token in every slot and every container.
+    let mut in_tree = project.clone();
+    in_tree.hq_root = project.root.clone();
+    std::fs::write(project.root.join("token"), "sk-ant-oat-example\n").unwrap();
+    assert!(is_red(&verdict(
+        &run(&in_tree),
+        "authenticate in a container"
+    )));
+
+    // At the HQ, outside the repository, it is simply fine.
+    std::fs::write(project.hq_root.join("token"), "sk-ant-oat-example\n").unwrap();
+    assert!(!is_red(&verdict(
+        &run(&project),
+        "authenticate in a container"
+    )));
 }

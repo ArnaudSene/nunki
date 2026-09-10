@@ -5,6 +5,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
+use hq::harness::Harness;
 use hq::mission::{Header, Integration, Lot, Security, Service, dir as mission_dir};
 use hq::project::Project;
 use hq::{check, image, init, probe, slot};
@@ -115,6 +116,16 @@ enum MissionCommand {
     List,
     /// What a mission is, and where it stands.
     Status { id: String },
+    /// Start the mission: freeze its framing and launch the coder's first run.
+    Start {
+        id: String,
+        /// The slot it happens in.
+        #[arg(long)]
+        slot: String,
+    },
+    /// End the run in progress properly: the agent finishes its turn and
+    /// writes its resume block.
+    Stop { id: String },
 }
 
 fn main() -> ExitCode {
@@ -410,6 +421,71 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             ExitCode::SUCCESS
         }
 
+        MissionCommand::Start {
+            id,
+            slot: slot_name,
+        } => {
+            let slot = match slot::find(project, &slot_name) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("hq: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let engine_bin = std::env::var("HQ_ENGINE").unwrap_or_else(|_| "docker".into());
+            let engine: std::sync::Arc<dyn hq::engine::Engine> =
+                std::sync::Arc::new(hq::engine::docker::Docker::real());
+            match hq::run::start(project, &id, &slot, engine, &engine_bin) {
+                Ok(state) => {
+                    println!("mission {id} started in slot {}", state.slot);
+                    if let Some(run) = &state.run {
+                        println!("session {}", run.session.0);
+                        println!("log     {}", run.log.display());
+                    }
+                    println!();
+                    println!("`hq mission status {id}` says where it is.");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("hq: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+
+        MissionCommand::Stop { id } => {
+            let store = match hq::state::Store::open(&project.hq_root) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("hq: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let state = match store.load(&id) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("hq: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let Some(handle) = &state.run else {
+                eprintln!("hq: mission {id} has no run in progress");
+                return ExitCode::FAILURE;
+            };
+            match harness_for(project, &state.slot).stop(handle) {
+                Ok(()) => {
+                    // SIGINT, not SIGTERM: the agent ends its turn and writes
+                    // its resume block (SPEC 4.3).
+                    println!("asked the run to end its turn; `hq mission status {id}` follows it");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("hq: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+
         MissionCommand::Status { id } => {
             let header = match mission_dir::read_header(&project.hq_root, &id) {
                 Ok(h) => h,
@@ -440,7 +516,25 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             // The state is the other half of the answer, and its absence is
             // an answer too: a mission exists before it has ever run.
             match hq::state::Store::open(&project.hq_root).and_then(|s| s.load(&id)) {
-                Ok(state) => println!("stage     {:?} in slot {}", state.flow.stage(), state.slot),
+                Ok(state) => {
+                    println!("stage     {:?} in slot {}", state.flow.stage(), state.slot);
+                    if let Some(handle) = &state.run {
+                        println!("session   {}", handle.session.0);
+                        // Read from the run itself, not from what was
+                        // recorded: a machine that slept leaves the state
+                        // saying "running" (SPEC 4.2).
+                        match harness_for(project, &state.slot).state(handle) {
+                            Ok(hq::harness::RunState::Running(p)) => println!(
+                                "run       running — {} event(s), {} tool call(s)",
+                                p.events, p.tool_calls
+                            ),
+                            Ok(hq::harness::RunState::Finished(outcome)) => {
+                                println!("run       finished — {outcome:?}")
+                            }
+                            Err(e) => println!("run       unreadable: {e}"),
+                        }
+                    }
+                }
                 Err(_) => println!("stage     not started"),
             }
             ExitCode::SUCCESS
@@ -482,4 +576,20 @@ fn parse_service(spec: &str) -> Result<Service, String> {
         name: name.trim().to_string(),
         reach,
     })
+}
+
+/// The harness as it must be addressed for a run that lives in a slot's
+/// container: through the engine, because the pid `hq` holds is inside it.
+fn harness_for(project: &Project, slot: &str) -> hq::harness::claude_code::ClaudeCode {
+    let engine: std::sync::Arc<dyn hq::engine::Engine> =
+        std::sync::Arc::new(hq::engine::docker::Docker::real());
+    let file = hq::run::profile_path(project, slot);
+    let compose_project = hq::compose::project_name(slot).unwrap_or_else(|_| format!("hq-{slot}"));
+    let spawner = hq::engine::spawn::ContainerSpawner::new(
+        engine,
+        file,
+        &compose_project,
+        hq::compose::AGENT_SERVICE,
+    );
+    hq::harness::claude_code::ClaudeCode::new(Default::default(), Box::new(spawner))
 }
