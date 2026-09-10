@@ -1,0 +1,5 @@
+# What a Rust build needs to reach, and nothing else (SPEC 4.1 bis, rule 6).
+# One name per line; `#` comments. No forge: hq check is red if one appears.
+static.crates.io
+index.crates.io
+crates.io
