@@ -486,7 +486,7 @@ par un adaptateur (4.3), et le moteur de conteneurs que par un autre.
 | `hq mission new/start/reframe/status/say/watch/pause/resume/stop/kill/end/accept/iterate/fetch/archive` | le cycle d'une mission, du cadrage au rapatriement des commits ; `say` dépose une consigne pour le **run suivant**, `watch` rend deux états (tourne, fini), `stop` termine le run proprement (4.3) |
 | `hq exec <slot> <cmd>` | joue une commande dans le conteneur du slot — c'est ainsi que le HQ **rejoue une preuve** sans avoir la stack sur l'hôte. Par défaut sur la **copie git propre de `HEAD`** que la porte 7 utilise, pas sur l'arbre que l'agent a habité : un `Makefile`, un `pytest.ini` ou un alias `cargo` posé par l'agent y tromperait la preuve. Jamais pendant un run sur l'arbre de travail |
 | `hq verify <mission>` | les portes de vérification sur la mission du codeur, puis enchaîne la mission d'intégration, puis la mission de sécurité, chacune avec ses portes ; à la première rouge, applique les règles d'itération (4.5) ; à la fin, rend la main à l'humain pour la validation du push. **Reprenable** : son état est persisté à chaque transition, et le relancer reprend au même point |
-| `hq push <mission>` | après validation humaine explicite (un argument, pas un dialogue), pousse la branche depuis le dépôt principal et ouvre la pull request. C'est le seul verbe qui touche la forge en écriture, et il refuse sans `INTEGRATED` et `CLEAR` sur le dernier commit et le verdict du codeur sur son ancêtre (4.4). Il parle à l'API de la forge avec un credential de l'humain, rangé au HQ et jamais monté dans un conteneur ; sans credential, il pousse et dit que la pull request est à ouvrir à la main |
+| `hq push <mission>` | après validation humaine explicite (un argument, pas un dialogue), pousse la branche depuis le dépôt principal et ouvre la pull request. C'est le seul verbe qui touche la forge en écriture, et il refuse sans `INTEGRATED` et `CLEAR` sur le dernier commit et le verdict du codeur sur son ancêtre (4.4). Il parle à l'API de la forge avec un credential de l'humain, rangé au HQ et jamais monté dans un conteneur ; sans credential, il pousse et dit que la pull request est à ouvrir à la main — **c'est le chemin pris aujourd'hui pour tous les projets** : `hq` pousse et rend l'adresse exacte à ouvrir, l'appel à l'API de la forge restant à faire (il engage une dépendance HTTP, qui est une décision) |
 | `hq check [--mission <id>]` | dit si un dépôt, ses slots et leurs conteneurs sont dans l'état que ce fichier décrit ; rouge si une restriction n'est pas tenue ; sonde le profil mission sans argument, et le profil système d'une mission donnée avec `--mission` ; **dit ce qu'il n'a pas pu vérifier** (la forge sans credential, LF quand un `.gitattributes` existant ne le force pas) |
 | `hq logs <mission>` | rend la sortie structurée des runs, lisible |
 
@@ -1122,7 +1122,22 @@ commit, et le verdict du codeur sur un ancêtre dont la différence ne contient
 que des commits de câblage. Un commit après le sien qui touche au code métier
 invalide son verdict, et le codeur repart en volet. Sans intégrateur
 (`integration: none`), le verdict du codeur est sur le dernier commit et la
-règle de l'ancêtre ne sert pas.
+règle de l'ancêtre ne sert pas — précisé le 2026-09-10 à l'implémentation :
+la liste de câblage est alors **vide, pas absente**, donc n'importe quel
+commit après celui du codeur invalide son verdict, ce qui est exactement ce
+que « personne n'avait le droit de commiter après lui » veut dire.
+
+**Où vivent les verdicts.** Précisé le 2026-09-10. `VERDICT.json` n'en porte
+qu'un à la fois et chaque rôle l'écrase : le fichier ne peut donc plus
+répondre « l'intégrateur est-il passé, et sur quoi ? » une fois que la
+sécurité a écrit. C'est **l'état de `hq`** qui porte les verdicts et leurs
+`HEAD` (4.2 le disait déjà), et c'est là que `hq push` les lit. Un rôle qui
+conclut à nouveau **remplace** sa réponse précédente : un `INTEGRATED`
+d'avant une correction n'est pas un second avis, c'en est un périmé, et
+garder les deux laisserait `hq push` trouver le vert qu'il cherche parmi des
+réponses portant sur d'autres commits. Le verdict du codeur, lui, est
+implicite — ses portes étaient vertes — et ce qui est enregistré est le
+commit sur lequel elles l'étaient.
 
 Puis, dans l'ordre et selon la forme déclarée : la mission d'**intégration**
 (le livrable est connecté à ses infrastructures et les tests système passent,

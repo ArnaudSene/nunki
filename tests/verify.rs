@@ -133,6 +133,7 @@ impl World {
                 flow: Flow::new(header_of(lots, integration)).unwrap(),
                 run: None,
                 app: None,
+                verdicts: Vec::new(),
                 accepted: Vec::new(),
                 updated_at: String::new(),
             })
@@ -822,6 +823,7 @@ fn with_security_agent(lots: usize) -> World {
             flow: Flow::new(header).unwrap(),
             run: None,
             app: None,
+            verdicts: Vec::new(),
             accepted: Vec::new(),
             updated_at: String::new(),
         })

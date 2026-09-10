@@ -55,6 +55,13 @@ pub struct MissionState {
     /// one.
     #[serde(default)]
     pub app: Option<RunHandle>,
+    /// What each role concluded, and on which commit (SPEC 4.2, "verdicts et
+    /// leurs `HEAD`"). `VERDICT.json` holds one verdict at a time and every
+    /// role overwrites it, so the file cannot answer "did the integrator pass,
+    /// and on what?" once the security agent has written. This can, and it is
+    /// what `hq push` reads.
+    #[serde(default)]
+    pub verdicts: Vec<Concluded>,
     /// Security findings a human has lifted (SPEC 4.5). `VERDICT.json` stays
     /// `FINDINGS` — the verdict says what the agent found, this says what the
     /// human decided, and `hq push` reads the decision here. Each acceptance
@@ -64,6 +71,19 @@ pub struct MissionState {
     pub accepted: Vec<Accepted>,
     /// RFC 3339 time of the last write; informational.
     pub updated_at: String,
+}
+
+/// What one role concluded, and where.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Concluded {
+    pub role: crate::harness::Role,
+    /// `None` for the coder, whose verdict SPEC 4.4 makes implicit: its
+    /// gates were green. Saying `None` rather than inventing a fourth
+    /// `Verdict` keeps the file's vocabulary the one the agents write.
+    pub verdict: Option<crate::mission::Verdict>,
+    /// The commit the role concluded on.
+    pub head: String,
+    pub date: String,
 }
 
 /// One risk a human took, on the record.
@@ -83,6 +103,32 @@ pub struct Accepted {
 }
 
 impl MissionState {
+    /// Record what a role concluded, replacing whatever it concluded before.
+    ///
+    /// Replacing, because a volet replays the whole chain: an `INTEGRATED`
+    /// from before a correction is not a second opinion, it is a stale one,
+    /// and keeping both would let `hq push` find the green it wants among
+    /// answers about other commits.
+    pub fn conclude(
+        &mut self,
+        role: crate::harness::Role,
+        verdict: Option<crate::mission::Verdict>,
+        head: &str,
+    ) {
+        self.verdicts.retain(|c| c.role != role);
+        self.verdicts.push(Concluded {
+            role,
+            verdict,
+            head: head.to_string(),
+            date: now_rfc3339(),
+        });
+    }
+
+    /// What `role` concluded, if it has.
+    pub fn concluded(&self, role: crate::harness::Role) -> Option<&Concluded> {
+        self.verdicts.iter().find(|c| c.role == role)
+    }
+
     /// The acceptances that still stand: those given on `head`. A new commit
     /// makes the others stale, exactly as it makes a verdict stale.
     pub fn accepted_on(&self, head: &str) -> Vec<&Accepted> {

@@ -507,7 +507,11 @@ fn integrator_perimeter(
 /// dependency is a decision here rather than a reflex (AGENTS.md § 7), and
 /// this one is from the ripgrep tree, permissively licensed and read by half
 /// the ecosystem.
-fn compile(patterns: &[String]) -> Result<GlobSet, GateError> {
+///
+/// Public because `hq push` judges the integrator's commits by the very
+/// allowlist gate 4 judged them by, and two compilations of one list are two
+/// lists waiting to disagree.
+pub fn compile(patterns: &[String]) -> Result<GlobSet, GateError> {
     let mut builder = GlobSetBuilder::new();
     let mut added: BTreeSet<&str> = BTreeSet::new();
     for pattern in patterns {

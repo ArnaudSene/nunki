@@ -25,6 +25,7 @@ pub mod mutants;
 pub mod perimeter;
 pub mod probe;
 pub mod project;
+pub mod push;
 pub mod role;
 pub mod run;
 pub mod slot;
