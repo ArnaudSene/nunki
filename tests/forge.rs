@@ -102,6 +102,11 @@ fn a_pull_request_is_opened_with_the_humans_token_and_the_missions_words() {
         header(sent, "user-agent").is_some_and(|v| v.starts_with("hq/")),
         "GitHub refuses a request with no User-Agent: {sent}"
     );
+    assert_eq!(
+        header(sent, "content-type"),
+        Some("application/json"),
+        "the body is serialised by hq, so the header is hq's to send: {sent}"
+    );
     let body: serde_json::Value = serde_json::from_str(sent.split("\r\n\r\n").nth(1).unwrap())
         .unwrap_or_else(|e| panic!("{e}: {sent}"));
     assert_eq!(body["title"], "feat: the thing");

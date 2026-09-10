@@ -147,8 +147,13 @@ pub fn open(api: &str, token: &str, repo: &Repo, pr: &PullRequest) -> Result<Ope
         "head": pr.head,
         "base": pr.base,
     });
+    // Serialised here rather than through `ureq`'s `json` feature: that
+    // feature is what puts `cookie_store`, `cookie` and `time` in the
+    // lockfile, and `time` carried RUSTSEC-2026-0009 at the only version our
+    // minimum Rust allows. Nothing here needs cookies.
     let mut response = authorised(agent.post(&url), token)
-        .send_json(&body)
+        .header("Content-Type", "application/json")
+        .send(body.to_string())
         .map_err(|e| ForgeError::Unreachable(e.to_string()))?;
     let status = response.status().as_u16();
     let text = response
