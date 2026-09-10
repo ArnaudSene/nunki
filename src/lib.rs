@@ -6,6 +6,7 @@
 //! harness only through the [`harness::Harness`] trait (SPEC 4.3).
 
 pub mod compose;
+pub mod engine;
 pub mod firewall;
 pub mod harness;
 pub mod mission;

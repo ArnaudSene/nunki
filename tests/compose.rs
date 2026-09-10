@@ -100,14 +100,17 @@ fn golden(name: &str, produced: &str) {
 
 #[test]
 fn the_mission_profile_is_stable() {
-    golden("mission.yml", &generate(&plan(Role::Coder)).unwrap());
+    golden(
+        "mission.yml",
+        &generate(&plan(Role::Coder), &dialect()).unwrap(),
+    );
 }
 
 #[test]
 fn the_system_profile_of_the_integrator_is_stable() {
     golden(
         "system-integrator.yml",
-        &generate(&plan(Role::Integrator)).unwrap(),
+        &generate(&plan(Role::Integrator), &dialect()).unwrap(),
     );
 }
 
@@ -115,21 +118,24 @@ fn the_system_profile_of_the_integrator_is_stable() {
 fn the_system_profile_of_the_security_agent_is_stable() {
     golden(
         "system-security.yml",
-        &generate(&plan(Role::Security)).unwrap(),
+        &generate(&plan(Role::Security), &dialect()).unwrap(),
     );
 }
 
 #[test]
 fn generating_twice_yields_the_same_bytes() {
     let plan = plan(Role::Integrator);
-    assert_eq!(generate(&plan).unwrap(), generate(&plan).unwrap());
+    assert_eq!(
+        generate(&plan, &dialect()).unwrap(),
+        generate(&plan, &dialect()).unwrap()
+    );
 }
 
 #[test]
 fn the_agent_joins_the_firewall_and_waits_for_it() {
     // Measured against Docker Compose v5.1.2: in the other direction the
     // agent starts first and has a network before any rule is laid.
-    let yaml = generate(&plan(Role::Coder)).unwrap();
+    let yaml = generate(&plan(Role::Coder), &dialect()).unwrap();
     let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
     let agent = &doc["services"][AGENT_SERVICE];
     let firewall = &doc["services"][FIREWALL_SERVICE];
@@ -156,7 +162,7 @@ fn the_agent_joins_the_firewall_and_waits_for_it() {
 
 #[test]
 fn the_agent_has_no_power_and_the_firewall_has_it_all() {
-    let yaml = generate(&plan(Role::Coder)).unwrap();
+    let yaml = generate(&plan(Role::Coder), &dialect()).unwrap();
     let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
     let agent = &doc["services"][AGENT_SERVICE];
     let firewall = &doc["services"][FIREWALL_SERVICE];
@@ -183,7 +189,7 @@ fn the_agent_has_no_power_and_the_firewall_has_it_all() {
 fn the_agent_declares_no_network_because_compose_refuses_both() {
     // "mutually exclusive `network_mode` and `networks`: invalid compose
     // project" — measured. The firewall is what attaches to the services.
-    let yaml = generate(&plan(Role::Integrator)).unwrap();
+    let yaml = generate(&plan(Role::Integrator), &dialect()).unwrap();
     let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
     assert!(doc["services"][AGENT_SERVICE]["networks"].is_null());
     assert!(doc["services"][AGENT_SERVICE]["ports"].is_null());
@@ -191,7 +197,7 @@ fn the_agent_declares_no_network_because_compose_refuses_both() {
 
 #[test]
 fn the_allowlist_reaches_the_sidecar_and_only_the_sidecar() {
-    let coder = generate(&plan(Role::Coder)).unwrap();
+    let coder = generate(&plan(Role::Coder), &dialect()).unwrap();
     let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&coder).unwrap();
     let env = &doc["services"][FIREWALL_SERVICE]["environment"];
     assert_eq!(
@@ -204,7 +210,7 @@ fn the_allowlist_reaches_the_sidecar_and_only_the_sidecar() {
         "the agent is not told its own allowlist by the generator"
     );
 
-    let integrator = generate(&plan(Role::Integrator)).unwrap();
+    let integrator = generate(&plan(Role::Integrator), &dialect()).unwrap();
     let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&integrator).unwrap();
     let env = &doc["services"][FIREWALL_SERVICE]["environment"];
     assert!(env["HQ_ALLOW_DOMAINS"].as_str().unwrap().contains(",db,"));
@@ -218,7 +224,7 @@ fn the_security_agent_reads_the_tree_and_the_others_write_it() {
         (Role::Integrator, "rw"),
         (Role::Security, "ro"),
     ] {
-        let yaml = generate(&plan(role)).unwrap();
+        let yaml = generate(&plan(role), &dialect()).unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
         let mounts: Vec<_> = doc["services"][AGENT_SERVICE]["volumes"]
             .as_sequence()
@@ -236,7 +242,7 @@ fn the_security_agent_reads_the_tree_and_the_others_write_it() {
 
 #[test]
 fn the_mission_folder_is_read_only_but_for_three_files() {
-    let yaml = generate(&plan(Role::Coder)).unwrap();
+    let yaml = generate(&plan(Role::Coder), &dialect()).unwrap();
     let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
     let mounts: Vec<_> = doc["services"][AGENT_SERVICE]["volumes"]
         .as_sequence()
@@ -266,7 +272,7 @@ fn the_mission_folder_is_read_only_but_for_three_files() {
 
 #[test]
 fn credentials_are_read_only_and_never_on_the_mission_profile() {
-    let yaml = generate(&plan(Role::Integrator)).unwrap();
+    let yaml = generate(&plan(Role::Integrator), &dialect()).unwrap();
     assert!(yaml.contains("/run/hq/credentials/db.env:ro"), "{yaml}");
 
     let mut coder = plan(Role::Coder);
@@ -275,7 +281,7 @@ fn credentials_are_read_only_and_never_on_the_mission_profile() {
         PathBuf::from("/run/hq/credentials/db.env"),
     )];
     assert!(matches!(
-        generate(&coder).unwrap_err(),
+        generate(&coder, &dialect()).unwrap_err(),
         ComposeError::CredentialsOnMissionProfile(1)
     ));
 }
@@ -289,7 +295,7 @@ fn the_projects_services_travel_verbatim_and_keep_their_unknown_keys() {
         )
         .unwrap(),
     );
-    let yaml = generate(&plan).unwrap();
+    let yaml = generate(&plan, &dialect()).unwrap();
     let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
     assert_eq!(doc["services"]["db"]["image"].as_str(), Some("postgres:16"));
     assert_eq!(doc["services"]["db"]["x-note"].as_str(), Some("kept"));
@@ -306,7 +312,7 @@ fn a_project_service_may_not_take_a_name_hq_reserves() {
         plan.project_services =
             Some(serde_yaml_ng::from_str(&format!("{reserved}:\n  image: nginx\n")).unwrap());
         assert!(
-            matches!(generate(&plan).unwrap_err(), ComposeError::ReservedService(name) if name == reserved),
+            matches!(generate(&plan, &dialect()).unwrap_err(), ComposeError::ReservedService(name) if name == reserved),
             "{reserved} should be refused"
         );
     }
@@ -319,7 +325,7 @@ fn the_project_name_is_stable_across_profiles_and_legal_for_compose() {
     let names: Vec<_> = [Role::Coder, Role::Integrator, Role::Security]
         .iter()
         .map(|role| {
-            let yaml = generate(&plan(*role)).unwrap();
+            let yaml = generate(&plan(*role), &dialect()).unwrap();
             let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
             doc["name"].as_str().unwrap().to_string()
         })
@@ -345,7 +351,7 @@ fn a_relative_host_path_is_refused_before_the_engine_sees_it() {
     let mut plan = plan(Role::Coder);
     plan.tree = PathBuf::from("relative/tree");
     assert!(matches!(
-        generate(&plan).unwrap_err(),
+        generate(&plan, &dialect()).unwrap_err(),
         ComposeError::RelativePath { .. }
     ));
 }
@@ -355,7 +361,7 @@ fn an_empty_allowlist_is_refused() {
     let mut plan = plan(Role::Coder);
     plan.perimeter = Default::default();
     assert!(matches!(
-        generate(&plan).unwrap_err(),
+        generate(&plan, &dialect()).unwrap_err(),
         ComposeError::EmptyPerimeter
     ));
 }
@@ -378,7 +384,7 @@ fn a_real_compose_accepts_every_generated_profile() {
             );
         }
         let file = dir.path().join(format!("{role:?}.yml"));
-        std::fs::write(&file, generate(&plan).unwrap()).unwrap();
+        std::fs::write(&file, generate(&plan, &dialect()).unwrap()).unwrap();
 
         let out = engine.config(&file);
         assert!(
@@ -460,7 +466,7 @@ fn the_projects_networks_travel_verbatim_and_the_firewall_is_what_joins_them() {
     plan.project_networks =
         Some(serde_yaml_ng::from_str("back:\n  driver: bridge\n  x-note: kept\n").unwrap());
 
-    let yaml = generate(&plan).unwrap();
+    let yaml = generate(&plan, &dialect()).unwrap();
     let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
 
     assert_eq!(doc["networks"]["back"]["driver"].as_str(), Some("bridge"));
@@ -480,8 +486,18 @@ fn the_projects_networks_travel_verbatim_and_the_firewall_is_what_joins_them() {
 fn a_project_declaring_no_network_gets_no_networks_block() {
     // Measured: services and firewall both land on the generated default
     // network and reach each other there, so hq invents nothing.
-    let yaml = generate(&plan(Role::Integrator)).unwrap();
+    let yaml = generate(&plan(Role::Integrator), &dialect()).unwrap();
     assert!(!yaml.contains("\nnetworks:"), "{yaml}");
     let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
     assert!(doc["services"][FIREWALL_SERVICE]["networks"].is_null());
+}
+
+/// The engine's dialect, which the generator needs and must not spell
+/// itself. Docker's, since Docker is the first version's only target.
+fn dialect() -> hq::engine::Dialect {
+    hq::engine::Dialect {
+        netns: hq::engine::Netns::Service,
+        host_alias: "host.docker.internal".to_string(),
+        userns: None,
+    }
 }

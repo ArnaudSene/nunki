@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 
 use serde_yaml_ng::{Mapping, Value};
 
+use crate::engine::Dialect;
 use crate::harness::Role;
 use crate::perimeter::{Perimeter, Profile};
 
@@ -115,9 +116,11 @@ pub enum ComposeError {
     EmptyPerimeter,
 }
 
-/// Generate the Compose file for one profile.
-pub fn generate(plan: &Plan) -> Result<String, ComposeError> {
-    let document = build(plan)?;
+/// Generate the Compose file for one profile. The dialect comes from the
+/// engine adapter: how a namespace is shared is the one thing on the 4.2
+/// engine table this file needs, and it must not be spelled here.
+pub fn generate(plan: &Plan, dialect: &Dialect) -> Result<String, ComposeError> {
+    let document = build(plan, dialect)?;
     Ok(serde_yaml_ng::to_string(&document).expect("the document serialises"))
 }
 
@@ -145,7 +148,7 @@ pub fn project_name(slot: &str) -> Result<String, ComposeError> {
     Ok(format!("hq-{name}"))
 }
 
-fn build(plan: &Plan) -> Result<Document, ComposeError> {
+fn build(plan: &Plan, dialect: &Dialect) -> Result<Document, ComposeError> {
     let profile = Profile::of(plan.role);
 
     if profile == Profile::Mission && !plan.credentials.is_empty() {
@@ -178,7 +181,7 @@ fn build(plan: &Plan) -> Result<Document, ComposeError> {
         Value::from(FIREWALL_SERVICE),
         firewall(plan, &attached).to_value(),
     );
-    services.insert(Value::from(AGENT_SERVICE), agent(plan).to_value());
+    services.insert(Value::from(AGENT_SERVICE), agent(plan, dialect)?.to_value());
 
     if let Some(project) = &plan.project_services {
         let declared = match project {
@@ -268,7 +271,7 @@ fn firewall(plan: &Plan, attached: &[String]) -> Service {
 
 /// The agent: no capability, the human's uid, and no way to declare a
 /// network of its own — it lives in the firewall's namespace.
-fn agent(plan: &Plan) -> Service {
+fn agent(plan: &Plan, dialect: &Dialect) -> Result<Service, ComposeError> {
     let mut volumes = Vec::new();
 
     let tree_mode = match plan.role {
@@ -299,11 +302,11 @@ fn agent(plan: &Plan) -> Service {
         volumes.push(format!("{}:{}", volume.name, display(&volume.at)));
     }
 
-    Service {
+    Ok(Service {
         image: plan.image.clone(),
         user: Some(format!("{}:{}", plan.user.uid, plan.user.gid)),
         working_dir: Some(display(&plan.tree_at)),
-        network_mode: Some(format!("service:{FIREWALL_SERVICE}")),
+        network_mode: Some(dialect.netns_ref(&project_name(&plan.slot)?, FIREWALL_SERVICE)),
         cap_drop: vec!["ALL".to_string()],
         security_opt: vec!["no-new-privileges:true".to_string()],
         depends_on: Some(depends_on_healthy(FIREWALL_SERVICE)),
@@ -313,7 +316,7 @@ fn agent(plan: &Plan) -> Service {
         restart: Some("no".to_string()),
         command: plan.command.clone(),
         ..Service::default()
-    }
+    })
 }
 
 fn mount(host: &Path, at: &Path, mode: &str) -> String {
