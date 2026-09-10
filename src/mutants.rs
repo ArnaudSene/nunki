@@ -18,14 +18,27 @@
 //! byte the same, and re-running the campaign then spends an hour SPEC § 7 is
 //! counting.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use crate::git;
 
-/// The campaign's result, in the mission folder, read by the HQ and by gate 7.
+/// The campaign's result, in the mission folder. **The HQ's file**, mounted
+/// read-only in the container: it carries the survivors, and the one outcome
+/// no machine can check — `equivalent`.
 pub const FILE: &str = "MUTANTS.json";
+
+/// The coder's answers, beside it. **The agent's file**, and the only one of
+/// the two it can write.
+///
+/// Two files rather than one field, because what decides who wrote a line is
+/// the **mount**, not the content: `hq` cannot read a file and tell whose
+/// hand a line came from (SPEC 4.1, decided 2026-09-10). The agent may write
+/// the two outcomes that rest on a committed test, and physically cannot
+/// write the third.
+pub const TRIAGE_FILE: &str = "MUTANTS.triage.json";
 
 /// The campaign in flight, beside it. Its own record on purpose: the mission
 /// state holds one run handle and that one belongs to the agent — a campaign
@@ -60,16 +73,32 @@ pub enum Triage {
     /// Killed by a test that is named. The name has to exist in the tree —
     /// "a test covers this" is not an outcome, a test called `x` is.
     Killed { test: String },
-    /// Shown equivalent, in one sentence. This is the one outcome no gate can
-    /// check: SPEC gives the counter-check to the HQ, so gate 7 accepts it
-    /// and **says how many rode on it**. Left silent it would be the escape
-    /// hatch that empties the gate.
+    /// Shown equivalent, in one sentence. The one outcome no machine can
+    /// check — which is why it is not the agent's to give: it lives in the
+    /// HQ's file, and one found in the agent's makes the gate red. Letting
+    /// the graded fill in the only box nobody can check is a gate that
+    /// empties itself (SPEC 4.4, decided 2026-09-10).
     Equivalent { why: String },
     /// Recognised as a bug and frozen in a named test.
     Bug { test: String },
 }
 
 impl Triage {
+    /// Whether the coder may write this outcome itself. The two that rest on
+    /// a committed test, yes; the judgement, no.
+    pub fn is_the_coders_to_give(&self) -> bool {
+        self.test().is_some()
+    }
+
+    /// The name this outcome goes by in a refusal.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Triage::Killed { .. } => "killed",
+            Triage::Equivalent { .. } => "equivalent",
+            Triage::Bug { .. } => "bug",
+        }
+    }
+
     /// The test this outcome rests on, when it rests on one.
     pub fn test(&self) -> Option<&str> {
         match self {
@@ -201,6 +230,28 @@ pub fn read(dir: &Path) -> Result<Option<Campaign>, MutantsError> {
         .map_err(|e| MutantsError::Unreadable(file, e.to_string()))
 }
 
+/// The coder's answers, by survivor id. Absent until it writes one, and an
+/// unreadable one is an error rather than an empty triage: a file the coder
+/// wrote and `hq` cannot parse must be said, not silently ignored.
+pub fn read_triage(dir: &Path) -> Result<BTreeMap<String, Triage>, MutantsError> {
+    let file = dir.join(TRIAGE_FILE);
+    let text = match std::fs::read_to_string(&file) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(e) => return Err(MutantsError::Io(file, e)),
+    };
+    if text.trim().is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    serde_json::from_str(&text).map_err(|e| MutantsError::Unreadable(file, e.to_string()))
+}
+
+pub fn write_triage(dir: &Path, triage: &BTreeMap<String, Triage>) -> Result<(), MutantsError> {
+    let file = dir.join(TRIAGE_FILE);
+    let body = serde_json::to_string_pretty(triage).expect("a triage serialises");
+    std::fs::write(&file, format!("{body}\n")).map_err(|e| MutantsError::Io(file, e))
+}
+
 pub fn read_running(dir: &Path) -> Result<Option<Running>, MutantsError> {
     let (_, file) = paths(dir);
     let text = match std::fs::read_to_string(&file) {
@@ -242,6 +293,35 @@ pub fn parse(text: &str) -> Vec<Survivor> {
     text.lines()
         .filter_map(|line| serde_json::from_str::<Survivor>(line.trim()).ok())
         .collect()
+}
+
+/// Record the HQ's own ruling on a survivor: this mutant changes nothing
+/// observable, and here is why in one sentence.
+///
+/// A verb rather than an invitation to hand-edit JSON, because this is the
+/// one outcome no machine can check and the person giving it should have to
+/// say so on purpose. It writes into [`FILE`], which the agent cannot.
+pub fn rule_equivalent(dir: &Path, id: &str, why: &str) -> Result<(), MutantsError> {
+    let mut campaign = read(dir)?.ok_or_else(|| {
+        MutantsError::Unreadable(
+            dir.join(FILE),
+            "there is no campaign to rule on — `hq mission mutants` runs one".to_string(),
+        )
+    })?;
+    let found = campaign
+        .survivors
+        .iter_mut()
+        .find(|s| s.id == id)
+        .ok_or_else(|| {
+            MutantsError::Unreadable(
+                dir.join(FILE),
+                format!("no survivor is called {id:?} in this campaign"),
+            )
+        })?;
+    found.outcome = Some(Triage::Equivalent {
+        why: why.to_string(),
+    });
+    write(dir, &campaign)
 }
 
 /// Where a campaign is at, as a caller reports it.

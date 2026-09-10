@@ -332,7 +332,7 @@ YAML, du JSON, du git. Rien d'autre.
 |---|---|---|
 | les règles du lieu | `AGENTS.md` à la racine (et par zone) ; `CLAUDE.md` n'est qu'un import (`@AGENTS.md`) ou un lien vers lui, les deux documentés par Claude Code. Un `CLAUDE.md` existant n'est pas écrasé (3.3) : `hq init` dépose l'import à côté, le résumé le dit, et **`hq check` est rouge** tant que ce `CLAUDE.md` n'importe pas `AGENTS.md` — sinon les règles ne seraient jamais lues par ce harnais et `mission start` partirait sans elles. L'adaptateur peut, en attendant, passer `AGENTS.md` par `--append-system-prompt-file` | tous les harnais qui le supportent, Claude Code via import ou lien |
 | les compétences | `SKILL.md`, standard ouvert (agentskills.io) adopté par OpenCode, Codex, Gemini CLI, Cursor, Copilot et d'autres — vérifié le 2026-09-09 ; il peut porter des choses essentielles | les harnais |
-| la mission | un dossier **au HQ, hors de l'arbre git** (voir les montages) : `MISSION.md` et `FOLLOWUP_HQ.md` (à l'humain et au HQ, lecture seule pour l'agent), `JOURNAL.md`, `PR.md`, `VERDICT.json` (à l'agent) — la même forme pour les trois rôles | l'agent qui la porte, le HQ |
+| la mission | un dossier **au HQ, hors de l'arbre git** (voir les montages) : `MISSION.md`, `FOLLOWUP_HQ.md` et `MUTANTS.json` (à l'humain et au HQ, lecture seule pour l'agent), `JOURNAL.md`, `PR.md`, `VERDICT.json`, `MUTANTS.triage.json` (à l'agent) — la même forme pour les trois rôles | l'agent qui la porte, le HQ |
 | le bloc structuré de `MISSION.md` | un en-tête YAML que `hq` lit, valide et **fige dans son état à la validation humaine** : forme (`integration`, `security`), rôle, branche, base, **la liste des lots** (un identifiant et un titre chacun — c'est elle qui donne « un run par lot » et qui fait refuser un `VERDICT.json` écrit avant que le dernier lot ait son entrée « fini » dans le journal), borne de volets, tentatives par lot, délais, script de lancement, et pour une mission d'intégration les **services** (réseau nommé, adresses, domaines) et les **fichiers d'identifiants** montés. La prose du gabarit vient après, pour l'agent. L'agent ne peut pas l'écrire, et `hq` ne le relit pas en cours de mission | `hq`, puis l'agent |
 | le verdict | `VERDICT.json` dans le dossier de mission : `{ role, verdict, head, date, report }`, écrit par l'agent à la fin de son dernier run ; `hq` le refuse si `head` n'est pas le `HEAD` réel de la branche | `hq` |
 | le contrat de run | un run par lot (4.3) : ce qu'un run doit avoir produit avant de sortir — le lot commité et prouvé ou l'échec dit, arbre commitable, bloc `ÉTAT DE REPRISE` en tête du journal (écrit aussi toutes les 45 minutes en cours de run), et pour le dernier lot le verdict | l'agent, par `MISSION.md` ; `hq`, à la sortie et aux checkpoints |
@@ -349,7 +349,7 @@ lecture seule, et la porte « arbre propre » ne doit pas le voir.
 
 | profil | l'arbre du slot | le dossier de mission | identifiants | services |
 |---|---|---|---|---|
-| mission (codeur) | lecture-écriture | **hors de l'arbre**, au HQ : `~/.hq/<projet>/missions/<id>/`, monté dans le conteneur — **trois fichiers en écriture** (`JOURNAL.md`, `PR.md`, `VERDICT.json`), le reste en lecture seule | aucun | aucun |
+| mission (codeur) | lecture-écriture | **hors de l'arbre**, au HQ : `~/.hq/<projet>/missions/<id>/`, monté dans le conteneur — **quatre fichiers en écriture** (`JOURNAL.md`, `PR.md`, `VERDICT.json`, `MUTANTS.triage.json`), le reste en lecture seule | aucun | aucun |
 | système (intégrateur) | lecture-écriture | idem | les fichiers nommés par la mission, en lecture seule, depuis le dossier réservé | ceux de la mission, à côté |
 | système (sécurité) | **lecture seule**, plus les répertoires d'écriture déclarés par la stack en volumes | idem | idem | idem, jamais arrêtés depuis le profil précédent |
 | interactif (HQ) | lecture-écriture | tout `~/.hq/<projet>/` | ce que l'humain décide | ce que l'humain décide |
@@ -372,9 +372,16 @@ chaque run. Un agent, ou un prompt injecté par une dépendance qu'il lit,
 pouvait s'écrire un domaine et un fichier d'identifiants de plus au run 1 et
 les obtenir au run 2. Donc :
 
-1. L'agent n'écrit que dans **`JOURNAL.md`, `PR.md` et `VERDICT.json`**.
-   `MISSION.md` et `FOLLOWUP_HQ.md` lui sont montés en **lecture seule** : ils
-   sont à l'humain et au HQ.
+1. L'agent n'écrit que dans **`JOURNAL.md`, `PR.md`, `VERDICT.json` et
+   `MUTANTS.triage.json`**. `MISSION.md`, `FOLLOWUP_HQ.md` et `MUTANTS.json`
+   lui sont montés en **lecture seule** : ils sont à l'humain et au HQ.
+
+   Le quatrième fichier a été ajouté le 2026-09-10, avec la porte 7 (4.4) :
+   le codeur doit pouvoir répondre aux survivants d'une campagne, et deux de
+   ses trois réponses sont du code. Il est séparé de `MUTANTS.json` — qui
+   porte la campagne et les équivalences — parce que **ce qui décide qui a
+   écrit quoi est le montage, pas le contenu** : `hq` ne peut pas lire un
+   fichier et savoir de quelle main vient une ligne.
 2. `hq` **ne relit jamais l'en-tête** du dossier pendant la mission. Il le
    **fige dans son état** (`~/.hq/<projet>/state/`) au moment où l'humain
    valide le cadrage, et c'est cette copie figée qui génère chaque Compose et
@@ -1009,10 +1016,23 @@ lot. Les portes 5 à 7 sont jouées à la vérification finale, quand le codeur 
 6. batterie verte — absente ou non exécutable, la porte **échoue**, elle ne
    saute pas ;
 7. **mutation** : campagne jouée sur les fichiers touchés. **Pas de seuil** :
-   la porte est verte quand **chaque survivant a reçu une des trois issues**
-   écrites par le codeur — tué par un test nommé, démontré équivalent en une
-   phrase que le HQ contre-vérifie, ou reconnu comme bug et figé dans un test
-   rouge. Un seuil et un triage tiraient en sens contraire, et Google, dont la
+   la porte est verte quand **chaque survivant a reçu une des trois issues** —
+   tué par un test nommé, reconnu comme bug et figé dans un test, ou démontré
+   équivalent en une phrase.
+
+   **Qui écrit quoi, tranché par Arnaud le 2026-09-10, et le partage suit la
+   vérifiabilité.** Les deux premières issues sont du code — écrire un test —
+   et seul le codeur commite : il les écrit, dans `MUTANTS.triage.json`, et
+   `hq` les contrôle (le test nommé existe). La troisième n'est pas du code,
+   c'est un jugement, et **aucune machine ne peut le vérifier** : elle n'est
+   acceptée que de la main de l'humain ou du HQ, dans `MUTANTS.json`. Un
+   `equivalent` venu du fichier de l'agent rend la porte rouge et est nommé.
+
+   La raison est celle qui a fait passer `.hq/**` en chemin protégé le même
+   jour : laisser le noté remplir la seule case que personne ne peut
+   contrôler, c'est une porte qui se vide toute seule — il suffit de cocher
+   « équivalent » partout avec une phrase crédible. Compter les équivalences
+   les signale à un lecteur ; les refuser côté agent les empêche. Un seuil et un triage tiraient en sens contraire, et Google, dont la
    pratique inspire cette porte, ne fait ni score ni seuil. Le retour des
    survivants au codeur est un run de plus sur le lot, pas un volet. Quatre
    particularités, écrites parce qu'elles ne sont pas évidentes : elle tourne

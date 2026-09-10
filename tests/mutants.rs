@@ -321,3 +321,66 @@ fn live_a_campaign_is_launched_watched_and_read_back() {
 
     engine.down(&file, &compose_project, true).unwrap();
 }
+
+/// The HQ's ruling is a verb, not an invitation to hand-edit JSON: the one
+/// outcome nobody can check should be given on purpose.
+#[test]
+fn an_equivalence_is_ruled_by_a_verb_and_lands_in_the_hqs_own_file() {
+    let dir = tempfile::tempdir().unwrap();
+    // Nothing to rule on yet, and it says so rather than inventing a campaign.
+    let err = mutants::rule_equivalent(dir.path(), "src/lib.rs:3", "unreachable").unwrap_err();
+    assert!(err.to_string().contains("no campaign"), "{err}");
+
+    mutants::write(
+        dir.path(),
+        &Campaign {
+            fingerprint: "abc1234".into(),
+            head: "def5678".into(),
+            date: "2026-09-10T12:00:00Z".into(),
+            survivors: vec![Survivor {
+                id: "src/lib.rs:3".into(),
+                file: "src/lib.rs".into(),
+                line: 3,
+                description: "replace one with 0".into(),
+                outcome: None,
+            }],
+        },
+    )
+    .unwrap();
+
+    let err = mutants::rule_equivalent(dir.path(), "src/lib.rs:9", "unreachable").unwrap_err();
+    assert!(err.to_string().contains("no survivor is called"), "{err}");
+
+    mutants::rule_equivalent(dir.path(), "src/lib.rs:3", "no caller reaches it").unwrap();
+    let campaign = mutants::read(dir.path()).unwrap().unwrap();
+    assert_eq!(
+        campaign.survivors[0].outcome,
+        Some(Triage::Equivalent {
+            why: "no caller reaches it".into()
+        })
+    );
+    // And it landed in the HQ's file, not in the agent's.
+    assert!(mutants::read_triage(dir.path()).unwrap().is_empty());
+}
+
+#[test]
+fn only_the_two_outcomes_that_rest_on_a_test_are_the_coders_to_give() {
+    assert!(Triage::Killed { test: "x".into() }.is_the_coders_to_give());
+    assert!(Triage::Bug { test: "x".into() }.is_the_coders_to_give());
+    // The judgement nobody can check.
+    assert!(!Triage::Equivalent { why: "x".into() }.is_the_coders_to_give());
+    assert_eq!(Triage::Equivalent { why: "x".into() }.kind(), "equivalent");
+}
+
+#[test]
+fn a_triage_file_the_coder_wrote_and_hq_cannot_read_is_said_not_ignored() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(mutants::read_triage(dir.path()).unwrap().is_empty());
+    // Created empty by `hq mission new`, and empty is not an error.
+    std::fs::write(dir.path().join("MUTANTS.triage.json"), "").unwrap();
+    assert!(mutants::read_triage(dir.path()).unwrap().is_empty());
+    // Written and unreadable is another matter: silently treating it as no
+    // triage would lose every answer the coder wrote.
+    std::fs::write(dir.path().join("MUTANTS.triage.json"), "{not json").unwrap();
+    assert!(mutants::read_triage(dir.path()).is_err());
+}

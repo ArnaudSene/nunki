@@ -273,7 +273,8 @@ fn launch_writes_the_log_where_hq_can_read_it_not_where_the_agent_runs() {
         )
         .unwrap();
     // The host's runs directory, never the container's mission folder: that
-    // one is mounted read-only but for three files, and its path means
+    // one is mounted read-only but for the agent's own files, and its path
+    // means
     // nothing on this side of the mount.
     assert_eq!(
         handle.log,

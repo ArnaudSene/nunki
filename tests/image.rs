@@ -52,6 +52,25 @@ fn the_layer_fails_the_build_when_the_harness_is_not_on_path() {
     assert!(!layer.contains("$HOME"), "{layer}");
 }
 
+/// A stack image may ship its own harness — pinned, or built for a base the
+/// installer does not support. Reinstalling over it wastes minutes when it
+/// works, and fails the build when it does not: measured on an image that
+/// carried `claude` and no `curl`.
+#[test]
+fn the_install_is_skipped_when_the_image_already_carries_the_harness() {
+    let layer = image::harness_layer("hq/demo:base", &provisioning());
+    assert!(
+        layer.contains("RUN command -v claude > /dev/null || (curl"),
+        "{layer}"
+    );
+    // And the verification afterwards is not conditional: whichever way the
+    // binary got there, the build fails if it is not on PATH.
+    assert!(
+        layer.contains("RUN command -v claude > /dev/null || (echo"),
+        "{layer}"
+    );
+}
+
 #[test]
 fn a_harness_that_needs_nothing_still_gets_the_mount_points() {
     let layer = image::harness_layer("hq/demo:base", &Provisioning::default());

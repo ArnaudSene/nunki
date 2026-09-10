@@ -827,6 +827,7 @@ fn live_the_battery_is_the_committed_one_and_an_absent_one_is_red() {
 // ---------------------------------------------------------------------------
 
 use hq::mutants::{Campaign, Survivor, Triage};
+use std::collections::BTreeMap;
 
 impl Fixture {
     /// The campaign file this mission holds, written on the current content.
@@ -856,6 +857,17 @@ impl Fixture {
             .into_iter()
             .find(|o| o.gate == Gate::Mutation)
             .expect("gate 7 is reported")
+    }
+}
+
+impl Fixture {
+    /// What the coder wrote, in its own file.
+    fn coder_answers(&self, answers: &[(&str, Triage)]) {
+        let map: BTreeMap<String, Triage> = answers
+            .iter()
+            .map(|(id, t)| ((*id).to_string(), t.clone()))
+            .collect();
+        hq::mutants::write_triage(self._dir.path(), &map).unwrap();
     }
 }
 
@@ -957,6 +969,89 @@ fn a_named_test_has_to_exist() {
         }),
     )]);
     assert_eq!(f.gate_seven(Role::Coder).decision, Decision::Passed);
+}
+
+/// The split the owner decided on 2026-09-10: the coder answers with the two
+/// outcomes that rest on a committed test, and the one nobody can check is
+/// not its to give. What decides who wrote a line is the mount, so an
+/// `equivalent` in the coder's file is not a mistake to tolerate — it is
+/// somebody granting themselves the gate.
+#[test]
+fn the_coder_may_not_call_a_survivor_equivalent() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.campaign(vec![survivor(1, None)]);
+    f.coder_answers(&[(
+        "src/new.rs:1",
+        Triage::Equivalent {
+            why: "nothing reads it, honest".into(),
+        },
+    )]);
+    f.journal_names_head();
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => {
+            assert!(why.contains("not the coder's to give"), "{why}");
+            assert!(
+                why.contains("MUTANTS.json"),
+                "it must say where it goes: {why}"
+            );
+        }
+        other => panic!("the graded may not fill in the box nobody can check: {other:?}"),
+    }
+
+    // The same ruling from the HQ's own file is accepted.
+    f.coder_answers(&[]);
+    f.campaign(vec![survivor(
+        1,
+        Some(Triage::Equivalent {
+            why: "no caller can reach that branch".into(),
+        }),
+    )]);
+    assert_eq!(f.gate_seven(Role::Coder).decision, Decision::Passed);
+}
+
+/// The coder's own file answers, and it is enough on its own.
+#[test]
+fn the_coder_answers_with_the_two_outcomes_that_rest_on_a_test() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    commit(
+        &f.tree,
+        "tests/thing.rs",
+        "#[test]\nfn the_thing_holds() {}\n#[test]\nfn the_known_hole() {}\n",
+        "tests",
+    );
+    f.campaign(vec![survivor(1, None), survivor(2, None)]);
+    f.coder_answers(&[
+        (
+            "src/new.rs:1",
+            Triage::Killed {
+                test: "the_thing_holds".into(),
+            },
+        ),
+        (
+            "src/new.rs:2",
+            Triage::Bug {
+                test: "the_known_hole".into(),
+            },
+        ),
+    ]);
+    f.journal_names_head();
+    let outcome = f.gate_seven(Role::Coder);
+    assert_eq!(outcome.decision, Decision::Passed);
+    assert!(outcome.note.is_none(), "nothing rode on a judgement");
+
+    // And a test it names still has to exist.
+    f.coder_answers(&[(
+        "src/new.rs:1",
+        Triage::Killed {
+            test: "a_test_nobody_wrote".into(),
+        },
+    )]);
+    assert!(matches!(
+        f.gate_seven(Role::Coder).decision,
+        Decision::Failed(_)
+    ));
 }
 
 /// The outcome no gate can check must not be silent, or it becomes the escape

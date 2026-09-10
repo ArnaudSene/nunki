@@ -56,7 +56,8 @@ pub struct RunRequest {
     pub resume: bool,
     /// Where the harness's structured output is written, **as `hq` sees it**
     /// — a host path, unlike everything in [`Workspace`]. It cannot be in the
-    /// mission folder: that is mounted read-only but for three files (SPEC
+    /// mission folder: that is mounted read-only but for the agent's own
+    /// files (SPEC
     /// 4.1), and a run in a container could not write there at all.
     pub runs_dir: PathBuf,
 }
