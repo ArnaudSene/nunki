@@ -5,15 +5,47 @@
 # resolver that answers for allowed names only, and a ruleset whose allowed
 # addresses are fed by that resolver's own answers.
 #
-# Debian rather than Alpine for one measured reason: rule 4 needs dnsmasq's
-# `nftset`, and Alpine's dnsmasq is built without it ("recompile with
-# HAVE_NFTSET defined"). Debian's 2.90 has it.
-FROM debian:bookworm-slim
+# Alpine, and dnsmasq built rather than installed. Measured on 2026-09-09:
+# `debian:bookworm-slim` carries 4 critical and 52 high vulnerabilities, none
+# of them fixable — Debian marks them won't-fix — and the finished sidecar
+# came to 8 critical, 55 high, 154 MB. On Alpine the same sidecar is 0 and 0,
+# at 27 MB. That matters here more than elsewhere: the agent shares this
+# container's network namespace, so this resolver's listening socket is
+# reachable by the very process the sidecar exists to fence in.
+#
+# Alpine's packaged dnsmasq is built without `nftset` ("recompile with
+# HAVE_NFTSET defined"), and `nftset` is what rule 4 needs — the resolver
+# feeding the ruleset the addresses it just handed out. So we build it, which
+# costs one stage and buys the whole security posture.
 
-RUN apt-get -qq update \
- && apt-get -qq install --no-install-recommends -y dnsmasq nftables bind9-dnsutils \
- && rm -rf /var/lib/apt/lists/*
+FROM alpine:3.22 AS build
 
+RUN apk add --no-cache build-base linux-headers nftables-dev
+
+ARG DNSMASQ_VERSION=2.91
+# Trust on first use: this is the digest of what upstream served on
+# 2026-09-09, pinned so that a later change is a build failure rather than a
+# silent substitution. Verifying Simon Kelley's signature would be stronger,
+# and is not done here.
+ARG DNSMASQ_SHA256=f622682848b33677adb2b6ad08264618a2ae0a01da486a93fd8cd91186b3d153
+
+RUN wget -qO dnsmasq.tar.xz "https://thekelleys.org.uk/dnsmasq/dnsmasq-${DNSMASQ_VERSION}.tar.xz" \
+ && echo "${DNSMASQ_SHA256}  dnsmasq.tar.xz" | sha256sum -c - \
+ && tar xf dnsmasq.tar.xz \
+ && cd "dnsmasq-${DNSMASQ_VERSION}" \
+ && make COPTS="-DHAVE_NFTSET" -j"$(nproc)" \
+ && install -m 0755 src/dnsmasq /dnsmasq
+
+FROM alpine:3.22
+
+# `upgrade` before `add`: the base image lags its own repository, and the two
+# openssl advisories it ships have fixes waiting.
+RUN apk upgrade --no-cache \
+ && apk add --no-cache nftables bind-tools \
+ && addgroup -S dnsmasq \
+ && adduser -S -G dnsmasq -H -s /sbin/nologin dnsmasq
+
+COPY --from=build /dnsmasq /usr/sbin/dnsmasq
 COPY entrypoint.sh /usr/local/bin/entrypoint
 COPY fw-ready /usr/local/bin/fw-ready
 RUN chmod 0755 /usr/local/bin/entrypoint /usr/local/bin/fw-ready

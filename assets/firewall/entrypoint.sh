@@ -37,6 +37,9 @@ conf=/run/hq/dnsmasq.conf
     echo "port=$DNS_PORT"
     echo "pid-file="
     echo "user=dnsmasq"
+    # dnsmasq's built-in default group is `dip`, which exists on Debian and
+    # nowhere else; naming it explicitly is what stops the drop from failing.
+    echo "group=dnsmasq"
     # Everything not matched below is NXDOMAIN, answered here, never relayed:
     # this is what closes the DNS tunnel (rule 3).
     echo "local=/#/"

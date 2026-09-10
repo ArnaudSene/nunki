@@ -81,7 +81,7 @@ is worth**. Applied to our own work:
   subscription, the others lift real containers. Run them by hand after
   touching what they cover, and say in the commit message that you did:
 
-  ```
+  ```sh
   cargo test --test claude_code -- --ignored     # a real headless run
   cargo test --test firewall   -- --ignored      # a real fenced pair
   ```
@@ -97,7 +97,7 @@ is worth**. Applied to our own work:
   library.
 - Before every commit, all four, and they must be silent:
 
-  ```
+  ```sh
   cargo fmt --all
   cargo clippy --all-targets --all-features -- -D warnings
   cargo test --all-features
