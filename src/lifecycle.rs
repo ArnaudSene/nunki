@@ -38,8 +38,15 @@ pub enum LifecycleError {
     NotFinished { mission: String, stage: Stage },
     #[error("{0} already exists: this mission has been archived once")]
     AlreadyArchived(PathBuf),
+    #[error(
+        "say why: a mission called off without a reason is a puzzle for whoever finds it \
+         six months from now"
+    )]
+    NoReason,
     #[error("{0}: {1}")]
     Io(PathBuf, std::io::Error),
+    #[error(transparent)]
+    Followup(#[from] crate::followup::FollowupError),
     #[error(transparent)]
     Mission(#[from] crate::mission::dir::MissionDirError),
     #[error(transparent)]
@@ -148,6 +155,46 @@ fn lots(header: &Header) -> String {
         .map(|l| format!("{} {}", l.id, l.title))
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+/// Call a mission off before it is verified (SPEC 4.2, verb table).
+///
+/// The one verb in SPEC's list that the list never explains, and this
+/// definition is **derived rather than quoted**: `stop` ends a run, `archive`
+/// closes a finished mission, and between them sat a mission a human has
+/// given up on — still `Coding`, never to be verified, and impossible to
+/// close. `end` is what closes it, and after it `archive` will.
+///
+/// It refuses on a mission that is already over, because "call it off" is not
+/// a thing to say twice, and it takes a reason for the same purpose every
+/// other reason in `hq` is taken for: six months from now, "abandoned" alone
+/// says nothing.
+pub fn end(project: &Project, id: &str, why: &str) -> Result<MissionState, LifecycleError> {
+    if why.trim().is_empty() {
+        return Err(LifecycleError::NoReason);
+    }
+    let store = Store::open(&project.hq_root)?;
+    let mut state = store
+        .load(id)
+        .map_err(|_| LifecycleError::NotStarted(id.to_string()))?;
+    if state.run.is_some() {
+        return Err(LifecycleError::RunInProgress {
+            mission: id.to_string(),
+            slot: state.slot.clone(),
+        });
+    }
+    // Written where a human reads it, and before the transition: a mission
+    // called off leaves a record of why, or it leaves a puzzle.
+    let paths = Paths::of(&project.hq_root, id);
+    let who = crate::human::me(&project.hq_home(), Some(&project.root)).addressed();
+    crate::followup::ended(&paths.followup, &who, why.trim())?;
+    store.apply(
+        &mut state,
+        crate::mission::flow::Event::Ended {
+            reason: why.trim().to_string(),
+        },
+    )?;
+    Ok(state)
 }
 
 /// Where an archived mission goes.

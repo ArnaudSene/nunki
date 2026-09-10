@@ -490,7 +490,7 @@ par un adaptateur (4.3), et le moteur de conteneurs que par un autre.
 |---|---|
 | `hq init <dépôt>` | rend un dépôt **existant** orchestrable. Pose, en respectant 3.3 : `hq.yaml`, `AGENTS.md` (ou l'import dans `CLAUDE.md`), la liste des chemins protégés, la batterie cousue, les Dockerfiles et fragments de stack sous `.hq/`, un `.gitattributes` absent. Crée ce qui n'existe pas, dépose à côté ce qui existe, ne touche à rien d'autre, ne tient aucun manifeste, ne désinstalle rien. Rejouable. |
 | `hq slot add/reset/rebuild/rm` | un slot = un clone local sans liens durs, un jeu de volumes nommés, et **trois profils de conteneur successifs** (voir « slots et branches » ci-dessous). Les missions s'y succèdent. |
-| `hq mission new/start/reframe/status/say/watch/pause/resume/stop/kill/end/accept/iterate/fetch/archive` | le cycle d'une mission, du cadrage au rapatriement des commits ; `say` dépose une consigne pour le **run suivant**, `watch` rend deux états (tourne, fini), `stop` termine le run proprement (4.3) |
+| `hq mission new/start/reframe/status/say/watch/pause/resume/stop/kill/end/accept/iterate/fetch/archive` | le cycle d'une mission, du cadrage au rapatriement des commits ; `say` dépose une consigne pour le **run suivant**, `watch` rend deux états (tourne, fini) plus un troisième que l'humain provoque (gelé), `stop` termine le run proprement (4.3), **`end` déclare la mission abandonnée** |
 | `hq exec <slot> <cmd>` | joue une commande dans le conteneur du slot — c'est ainsi que le HQ **rejoue une preuve** sans avoir la stack sur l'hôte. Par défaut sur la **copie git propre de `HEAD`** que la porte 7 utilise, pas sur l'arbre que l'agent a habité : un `Makefile`, un `pytest.ini` ou un alias `cargo` posé par l'agent y tromperait la preuve. Jamais pendant un run sur l'arbre de travail |
 | `hq verify <mission>` | les portes de vérification sur la mission du codeur, puis enchaîne la mission d'intégration, puis la mission de sécurité, chacune avec ses portes ; à la première rouge, applique les règles d'itération (4.5) ; à la fin, rend la main à l'humain pour la validation du push. **Reprenable** : son état est persisté à chaque transition, et le relancer reprend au même point |
 | `hq push <mission>` | après validation humaine explicite (un argument, pas un dialogue), pousse la branche depuis le dépôt principal et ouvre la pull request. C'est le seul verbe qui touche la forge en écriture, et il refuse sans `INTEGRATED` et `CLEAR` sur le dernier commit et le verdict du codeur sur son ancêtre (4.4). Il parle à l'API de la forge avec un credential de l'humain, rangé au HQ et jamais monté dans un conteneur ; sans credential, il pousse et dit que la pull request est à ouvrir à la main — **c'est le chemin pris aujourd'hui pour tous les projets** : `hq` pousse et rend l'adresse exacte à ouvrir, l'appel à l'API de la forge restant à faire (il engage une dépendance HTTP, qui est une décision) |
@@ -517,6 +517,21 @@ mission encore en travail : l'archiver la cacherait au lieu de la clore. Les
 deux endroits où une mission se termine sont `Verified` et « rendue à
 l'humain », et la seconde compte : sinon le HQ garde des missions que
 personne ne peut clore.
+
+**`end`, et une définition dérivée.** Ce verbe figurait dans la liste
+ci-dessus sans être décrit nulle part, et l'implémentation du 2026-09-10 a
+buté sur le trou qu'il laisse : `stop` termine un **run**, `archive` clôt une
+mission **finie**, et entre les deux se tenait une mission qu'un humain
+abandonne — encore en `Coding`, jamais vérifiée, impossible à clore.
+`hq mission end <mission> --because <pourquoi>` la clôt, et `archive` la range
+ensuite. La raison n'est pas facultative : une mission abandonnée sans raison
+est une énigme pour qui la retrouve six mois plus tard, et elle est écrite là
+où un humain la lit, dans `FOLLOWUP_HQ.md`, pas seulement dans l'état. Le
+verbe vaut **partout où une mission peut encore être travaillée** — un verbe
+qui marcherait dans cinq étapes sur sept est un verbe sur lequel l'humain ne
+peut pas compter au moment où il veut sortir — et refuse sur une mission déjà
+terminée. **Cette définition est dérivée, pas citée : Arnaud la confirme ou la
+renomme.**
 
 `hq slot reset` remet un slot au propre **sans le détruire** : le clone
 reste — `hq slot rm` est le verbe qui supprime — et ce qui part, c'est le

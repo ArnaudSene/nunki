@@ -33,6 +33,8 @@ pub enum Handover {
     RoleAttemptsExhausted { role: Role, attempts: u32 },
     /// `max_volets` returns to the coder were used; the verdicts are listed.
     VoletsExhausted { causes: Vec<String> },
+    /// The human called it off before it was verified, and said why.
+    Abandoned { reason: String },
 }
 
 /// Where the mission is.
@@ -75,6 +77,11 @@ pub enum Event {
     Iterate,
     /// From `Findings`: the human lifted every finding (`hq mission accept`).
     HumanAccepted,
+    /// The human called the mission off (`hq mission end`), with a reason.
+    /// Valid wherever a mission can still be worked on: what it says is
+    /// "stop asking me about this", and there is no stage where that is not
+    /// a thing a human may say.
+    Ended { reason: String },
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -88,6 +95,8 @@ pub enum FlowError {
          lot(s) — finish the lot, or stop the mission before reframing it"
     )]
     LotGone { lot: String, lots: usize },
+    #[error("the mission is already over; `hq mission archive` closes it")]
+    AlreadyOver,
 }
 
 /// The state machine. Serializable, so the engine persists it at every
@@ -249,6 +258,16 @@ impl Flow {
                 self.volet(format!("security FINDINGS: {report}"))
             }
             (Stage::Findings { .. }, Event::HumanAccepted) => Stage::Verified,
+
+            // Wherever it is, and last in the match so that no stage can
+            // claim it first: a mission a human has called off is over, and
+            // a verb that worked in five stages out of seven would be a verb
+            // the human cannot rely on when they want out.
+            (Stage::Verified, Event::Ended { .. })
+            | (Stage::AwaitingHuman(_), Event::Ended { .. }) => {
+                return Err(FlowError::AlreadyOver);
+            }
+            (_, Event::Ended { reason }) => Stage::AwaitingHuman(Handover::Abandoned { reason }),
 
             (stage, event) => return Err(FlowError::InvalidTransition { stage, event }),
         };

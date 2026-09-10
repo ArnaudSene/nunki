@@ -345,3 +345,107 @@ fn every_decision_in_the_framing_is_compared() {
     assert!(lots.from.contains("lot 2"), "{lots:?}");
     assert!(lots.to.contains("something else entirely"), "{lots:?}");
 }
+
+/// `end` is the one verb in SPEC's list that the list never explains, and the
+/// definition here is derived rather than quoted: `stop` ends a run,
+/// `archive` closes a finished mission, and between them sat a mission a
+/// human has given up on — still `Coding`, never to be verified, impossible
+/// to close. `end` closes it, and after it `archive` will.
+#[test]
+fn ending_a_mission_makes_it_closable() {
+    let world = World::new(2);
+    assert!(matches!(world.state().flow.stage(), Stage::Coding { .. }));
+    // Before: it cannot be archived, because it is still being worked on.
+    assert!(matches!(
+        lifecycle::archive(&world.project, "m1").unwrap_err(),
+        LifecycleError::NotFinished { .. }
+    ));
+
+    let state = lifecycle::end(&world.project, "m1", "the approach was wrong").unwrap();
+    assert!(
+        matches!(
+            state.flow.stage(),
+            Stage::AwaitingHuman(hq::mission::flow::Handover::Abandoned { reason })
+                if reason == "the approach was wrong"
+        ),
+        "{:?}",
+        state.flow.stage()
+    );
+
+    // The reason is where a human reads it, not only in the state.
+    let followup =
+        std::fs::read_to_string(world.project.hq_root.join("missions/m1/FOLLOWUP_HQ.md")).unwrap();
+    assert!(followup.contains("the approach was wrong"), "{followup}");
+
+    lifecycle::archive(&world.project, "m1").unwrap();
+}
+
+/// A mission called off without a reason is a puzzle for whoever finds it six
+/// months from now.
+#[test]
+fn ending_a_mission_without_a_reason_is_refused() {
+    let world = World::new(1);
+    let err = lifecycle::end(&world.project, "m1", " \n\t").unwrap_err();
+    assert!(matches!(err, LifecycleError::NoReason), "{err}");
+    assert!(matches!(world.state().flow.stage(), Stage::Coding { .. }));
+}
+
+/// "Call it off" is not a thing to say twice, and a mission that is verified
+/// is not one to call off at all — it is one to push.
+#[test]
+fn a_mission_that_is_already_over_is_not_ended_again() {
+    let world = World::new(1);
+    world.at(&[
+        Event::RunEnded {
+            outcome: hq::harness::Outcome::Finished(Default::default()),
+            lot_done: true,
+        },
+        Event::GatesPassed,
+    ]);
+    assert!(matches!(world.state().flow.stage(), Stage::Verified));
+
+    let err = lifecycle::end(&world.project, "m1", "changed my mind").unwrap_err();
+    assert!(
+        matches!(
+            err,
+            LifecycleError::State(hq::state::StateError::Flow(
+                hq::mission::flow::FlowError::AlreadyOver
+            ))
+        ),
+        "{err}"
+    );
+    assert!(err.to_string().contains("hq mission archive"), "{err}");
+    assert!(matches!(world.state().flow.stage(), Stage::Verified));
+}
+
+/// It works from anywhere a mission can still be worked on. A verb that
+/// worked in five stages out of seven is one the human cannot rely on when
+/// they want out.
+#[test]
+fn ending_works_wherever_a_mission_can_still_be_worked_on() {
+    for reach in [
+        vec![],
+        vec![Event::RunEnded {
+            outcome: hq::harness::Outcome::Finished(Default::default()),
+            lot_done: true,
+        }],
+    ] {
+        let world = World::new(2);
+        world.at(&reach);
+        lifecycle::end(&world.project, "m1", "not worth finishing").unwrap();
+        assert!(matches!(
+            world.state().flow.stage(),
+            Stage::AwaitingHuman(hq::mission::flow::Handover::Abandoned { .. })
+        ));
+    }
+}
+
+/// And not under a running agent: the agent is still writing, and a mission
+/// declared over while its run is going is a tree nobody chose the moment of.
+#[test]
+fn ending_under_a_running_agent_is_refused() {
+    let world = World::new(1);
+    world.running();
+    let err = lifecycle::end(&world.project, "m1", "enough").unwrap_err();
+    assert!(matches!(err, LifecycleError::RunInProgress { .. }), "{err}");
+}
