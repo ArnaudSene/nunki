@@ -20,6 +20,7 @@ fn header(integration: Integration, security: Security, bounds: Bounds) -> Heade
         lots: lots(2),
         integration,
         security,
+        arbiter: None,
         account: None,
         bounds,
     }

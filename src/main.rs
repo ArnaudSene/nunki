@@ -51,6 +51,9 @@ enum Command {
     #[command(subcommand)]
     Account(AccountCommand),
 
+    /// Say who hq thinks you are, and where it got that from.
+    Whoami,
+
     /// Say whether the project holds what the specification describes.
     ///
     /// Red when a restriction is not held; and it always says what it could
@@ -122,6 +125,10 @@ enum MissionCommand {
         /// to the one named in ~/.hq/accounts.yaml.
         #[arg(long, value_name = "NAME")]
         account: Option<String>,
+        /// Who arbitrates when this mission comes back with a question.
+        /// Defaults to whoever runs `hq` — `hq whoami` says who that is.
+        #[arg(long = "for", value_name = "NAME")]
+        arbiter: Option<String>,
         /// The prose an agent reads under the header.
         #[arg(long, default_value = "Describe the mission here.")]
         about: String,
@@ -244,6 +251,33 @@ fn main() -> ExitCode {
                     }
                 },
             }
+        }
+
+        Command::Whoami => {
+            let project = open(&start);
+            let hq_home = project
+                .as_ref()
+                .map(|p| p.hq_home())
+                .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".hq")))
+                .unwrap_or_else(|| PathBuf::from("."));
+            let me = hq::human::me(&hq_home, project.as_ref().map(|p| p.root.as_path()));
+            match &me.name {
+                Some(name) => {
+                    println!("{name}");
+                    if let Some(email) = &me.email {
+                        println!("{email}");
+                    }
+                    println!("from {}", me.source.describe());
+                }
+                None => {
+                    println!("hq does not know who you are.");
+                    println!();
+                    println!("Write {}:", hq_home.join(hq::human::ME_FILE).display());
+                    println!("name: Arnaud");
+                    println!("email: you@example.com");
+                }
+            }
+            ExitCode::SUCCESS
         }
 
         Command::Account(AccountCommand::List) => {
@@ -412,6 +446,7 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             no_integration,
             security_agent,
             account,
+            arbiter,
             about,
         } => {
             let lots = match lots
@@ -456,6 +491,10 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                     Security::Gates
                 },
                 account,
+                // Said rather than assumed: whoever frames a mission is who
+                // it comes back to, until somebody says otherwise.
+                arbiter: arbiter
+                    .or_else(|| hq::human::me(&project.hq_home(), Some(&project.root)).name),
                 bounds: project.config.bounds.clone(),
             };
             match mission_dir::create(&project.hq_root, &id, &header, &about) {

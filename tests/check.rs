@@ -30,6 +30,10 @@ fn sound(dir: &Path) -> Project {
     // The rules of the place, and the file the harness actually reads.
     std::fs::write(root.join("AGENTS.md"), "# rules\n").unwrap();
     std::fs::write(root.join("CLAUDE.md"), "@AGENTS.md\n").unwrap();
+    // And a human who said who they are — otherwise the fixture would read
+    // this machine's global git configuration, and be green here and amber
+    // on a runner that has none.
+    std::fs::write(dir.join("me.yaml"), "name: Arnaud\n").unwrap();
     Project::at(root, config(), hq_root)
 }
 
@@ -52,10 +56,23 @@ fn a_sound_project_is_green_and_says_so() {
     let dir = tempfile::tempdir().unwrap();
     let report = run(&sound(dir.path()));
     assert!(!report.is_red(), "{}", report.render());
-    // Two, and both are things this machine cannot answer for rather than
-    // things that are wrong: no stack is declared, and no harness token is
-    // in reach.
-    assert_eq!(report.unchecked(), 2, "{}", report.render());
+    // Named rather than counted: a count says "two" and a name says which,
+    // and only the second survives a check being added.
+    let unchecked: Vec<&str> = report
+        .checks
+        .iter()
+        .filter(|c| matches!(c.verdict, Verdict::NotChecked(_)))
+        .map(|c| c.what.as_str())
+        .collect();
+    assert_eq!(
+        unchecked,
+        vec![
+            "the account this project spends can authenticate",
+            "the coder's allowlist names no forge domain",
+        ],
+        "{}",
+        report.render()
+    );
     assert!(report.render().contains("2 could not be checked"));
 }
 

@@ -75,7 +75,7 @@ pub fn create(
     std::fs::create_dir_all(&paths.dir).map_err(|e| MissionDirError::Io(paths.dir.clone(), e))?;
 
     write(&paths.mission, &render(header, prose))?;
-    write(&paths.followup, FOLLOWUP)?;
+    write(&paths.followup, &followup(header))?;
     write(&paths.journal, &journal(id))?;
     write(&paths.pr, "")?;
     // Not `{}`: an empty verdict is the absence of one, and `hq` refuses a
@@ -141,8 +141,18 @@ fn journal(id: &str) -> String {
     )
 }
 
-const FOLLOWUP: &str = "# Follow-up\n\n\
-    For the human and the HQ. The agent reads this and never writes it.\n";
+/// Addressed to somebody by name when the mission says who: an arbitration
+/// is for a person, and "waiting on the human" stops being enough as soon as
+/// there are two.
+fn followup(header: &Header) -> String {
+    let who = header
+        .arbiter
+        .clone()
+        .unwrap_or_else(|| "the human".to_string());
+    format!(
+        "# Follow-up — for {who}\n\n         For {who} and the HQ. The agent reads this and never writes it.\n\n         Anything this mission cannot decide on its own is written here,          addressed to {who}.\n"
+    )
+}
 
 fn check_id(id: &str) -> Result<(), MissionDirError> {
     let ok = !id.is_empty()

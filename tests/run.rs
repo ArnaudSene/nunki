@@ -222,6 +222,7 @@ fn a_mission_that_cannot_authenticate_does_not_start() {
             reason: "none".to_string(),
         },
         security: hq::mission::Security::Gates,
+        arbiter: None,
         account: None,
         bounds: Default::default(),
     };
@@ -349,6 +350,7 @@ fn live_a_mission_starts_and_its_run_is_read_back() {
             reason: "nothing external".to_string(),
         },
         security: hq::mission::Security::Gates,
+        arbiter: None,
         account: None,
         bounds: Default::default(),
     };

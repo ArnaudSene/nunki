@@ -12,6 +12,7 @@ pub mod engine;
 pub mod firewall;
 pub mod git;
 pub mod harness;
+pub mod human;
 pub mod image;
 pub mod init;
 pub mod mission;

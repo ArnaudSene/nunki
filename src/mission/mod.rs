@@ -95,6 +95,12 @@ pub struct Header {
     pub lots: Vec<Lot>,
     pub integration: Integration,
     pub security: Security,
+    /// Who decides when this mission comes back with a question — an
+    /// arbitration, a verdict to accept, a push to authorise. Defaults to
+    /// whoever framed it, and is said rather than assumed the moment a
+    /// second person works on the project (SPEC 4.5).
+    #[serde(default)]
+    pub arbiter: Option<String>,
     /// Which account this mission spends. Frozen with the rest of the
     /// header: a mission cannot change the subscription it runs on halfway
     /// through, any more than it can change its perimeter (SPEC 4.3).
