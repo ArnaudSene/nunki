@@ -1,0 +1,32 @@
+# nunki, as a project hq can orchestrate (SPEC 4.1).
+#
+# Written by hand for now: `hq init` does not exist yet. This file is here so
+# the tool is exercised on itself — the first project it orchestrates should
+# be the one whose rules it enforces.
+
+harness: claude-code
+
+# No agent may reach the forge: a slot's origin is unreachable, and an
+# allowlist naming the forge would undo that (SPEC 3.1, 4.1 bis rule 6).
+forge:
+  - github.com
+
+stacks:
+  - rust
+
+protected_branches:
+  - main
+  - dev
+
+protected_paths:
+  # The gate, the sidecar and the rules of the place are not an agent's to
+  # rewrite while it is being gated by them.
+  refuse:
+    - .github/workflows/**
+    - assets/firewall/**
+    - AGENTS.md
+    - CLAUDE.md
+    - deny.toml
+  refuse_if_exists:
+    - Cargo.lock
+    - SPEC.md
