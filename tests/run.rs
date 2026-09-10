@@ -204,14 +204,33 @@ fn a_mission_that_cannot_authenticate_does_not_start() {
         std::sync::Arc::new(hq::engine::fake::FakeEngine::default());
 
     let err = run::start(&project, "m1", &slot, engine, "docker").unwrap_err();
-    // Refused before anything is lifted. Which failure it is depends on the
-    // machine's own ~/.hq; what matters is that it does not start and
-    // that it says where to look.
-    let text = err.to_string();
-    assert!(
-        text.contains("account") || text.contains("token") || text.contains("mission"),
-        "{text}"
-    );
+    // The mission does not exist, so that is what it says — and it says it
+    // before looking at this machine's images, because a missing image is
+    // this machine's business and a missing mission is the mission's.
+    assert!(matches!(err, run::RunError::Mission(_)), "{err}");
+
+    // With the mission there but no account declared, the account is what is
+    // named — still without a word about images.
+    let header = hq::mission::Header {
+        branch: "feat/x".to_string(),
+        base: "dev".to_string(),
+        lots: vec![hq::mission::Lot {
+            id: "L1".to_string(),
+            title: "one".to_string(),
+        }],
+        integration: hq::mission::Integration::None {
+            reason: "none".to_string(),
+        },
+        security: hq::mission::Security::Gates,
+        account: None,
+        bounds: Default::default(),
+    };
+    hq::mission::dir::create(&project.hq_root, "m1", &header, "").unwrap();
+    let engine: std::sync::Arc<dyn hq::engine::Engine> =
+        std::sync::Arc::new(hq::engine::fake::FakeEngine::default());
+    let err = run::start(&project, "m1", &slot, engine, "docker").unwrap_err();
+    assert!(matches!(err, run::RunError::Account(_)), "{err}");
+    assert!(!err.to_string().contains("rebuild"), "{err}");
 }
 
 #[test]

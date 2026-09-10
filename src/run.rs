@@ -110,6 +110,20 @@ pub fn start(
     // two agents in one tree (SPEC 4.2).
     let _lock = SlotLock::acquire(&project.hq_root.join("locks"), &slot.name, "mission start")?;
 
+    // The header is read once, here, and frozen: from now on `hq` uses its
+    // own copy, so nothing an agent writes can change the perimeter, the
+    // bounds or the lots (SPEC 4.1).
+    let header = mission_dir::read_header(&project.hq_root, id)?;
+    let paths = Paths::of(&project.hq_root, id);
+
+    // Which subscription this mission spends, decided here and frozen with
+    // the header it was read from.
+    let (account_name, _account, token) = account_for(project, header.account.as_deref())?;
+
+    // Only now the machine: what the project declares is cheap to check and
+    // belongs to the mission, while a missing image belongs to this machine.
+    // Saying "build your images" to someone whose account is wrong helps
+    // nobody.
     let stack = project
         .config
         .stacks
@@ -122,16 +136,6 @@ pub fn start(
             return Err(RunError::NoImages(image.clone()));
         }
     }
-
-    // The header is read once, here, and frozen: from now on `hq` uses its
-    // own copy, so nothing an agent writes can change the perimeter, the
-    // bounds or the lots (SPEC 4.1).
-    let header = mission_dir::read_header(&project.hq_root, id)?;
-    let paths = Paths::of(&project.hq_root, id);
-
-    // Which subscription this mission spends, decided here and frozen with
-    // the header it was read from.
-    let (account_name, _account, token) = account_for(project, header.account.as_deref())?;
 
     branch(slot, &header.branch, &header.base)?;
 
