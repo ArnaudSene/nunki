@@ -54,6 +54,22 @@ enum Command {
     /// Say who hq thinks you are, and where it got that from.
     Whoami,
 
+    /// Run a command in a slot's container — how the HQ replays a proof
+    /// without having the stack on this machine (SPEC 4.2).
+    Exec {
+        /// The slot whose container runs it.
+        slot: String,
+        /// Run on the working tree instead of the clean copy of `HEAD`.
+        ///
+        /// Dangerous, and not the default for a reason: a proof replayed in
+        /// the tree an agent has been living in proves what that tree does,
+        /// not what the commit does. Never while a run is in progress.
+        #[arg(long)]
+        tree: bool,
+        /// The command, after `--`.
+        #[arg(trailing_var_arg = true, required = true)]
+        argv: Vec<String>,
+    },
     /// Say whether the project holds what the specification describes.
     ///
     /// Red when a restriction is not held; and it always says what it could
@@ -377,6 +393,45 @@ fn main() -> ExitCode {
                 None => return ExitCode::FAILURE,
             };
             mission(&project, command)
+        }
+
+        Command::Exec { slot, tree, argv } => {
+            let project = match open(&start) {
+                Some(p) => p,
+                None => return ExitCode::FAILURE,
+            };
+            let slot = match hq::slot::find(&project, &slot) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("hq: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let engine: std::sync::Arc<dyn hq::engine::Engine> =
+                std::sync::Arc::new(hq::engine::docker::Docker::real());
+            let on = if tree {
+                hq::exec::On::Tree
+            } else {
+                hq::exec::On::Proof
+            };
+            match hq::exec::run(&project, &slot, engine, &argv, on) {
+                Ok(out) => {
+                    // The command's own output, on the streams it wrote to,
+                    // and its own status: `hq exec` is a way through, not a
+                    // reporter.
+                    print!("{}", out.stdout);
+                    eprint!("{}", out.stderr);
+                    if out.ok() {
+                        ExitCode::SUCCESS
+                    } else {
+                        ExitCode::from(u8::try_from(out.status).unwrap_or(1))
+                    }
+                }
+                Err(e) => {
+                    eprintln!("hq: {e}");
+                    ExitCode::FAILURE
+                }
+            }
         }
 
         Command::Check {

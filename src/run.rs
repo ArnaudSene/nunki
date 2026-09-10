@@ -235,8 +235,11 @@ fn branch(slot: &Slot, branch: &str, base: &str) -> Result<(), git::GitError> {
     Ok(())
 }
 
+/// The profile a run lifts, as data. Public because it **is** the run's
+/// perimeter, its mounts and its secret: a test that cannot read it can only
+/// check that the file was written, not what it says.
 #[allow(clippy::too_many_arguments)]
-fn plan(
+pub fn plan(
     project: &Project,
     slot: &Slot,
     stack: &str,
@@ -288,6 +291,10 @@ fn plan(
         mission_dir_at: PathBuf::from(MISSION_AT),
         credentials: Vec::new(),
         volumes: vec![
+            // The clean copy of HEAD that `hq exec` replays proofs on, and
+            // its build cache with it: warmed once per slot and kept
+            // (SPEC 4.2, 4.4 gate 7).
+            crate::exec::volume(&slot.name),
             // The harness keeps its sessions here, so resuming survives a
             // rebuilt container (SPEC 4.3).
             NamedVolume {

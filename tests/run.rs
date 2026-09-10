@@ -234,6 +234,69 @@ fn a_mission_that_cannot_authenticate_does_not_start() {
     assert!(!err.to_string().contains("rebuild"), "{err}");
 }
 
+/// A run's profile carries the clean copy of `HEAD` that `hq exec` replays
+/// proofs on, and its build cache with it — warmed once per slot and kept
+/// (SPEC 4.2, and gate 7 of 4.4). Without it there is nowhere to put the
+/// copy, and every proof would run in the tree the agent has been living in.
+#[test]
+fn a_run_profile_carries_the_clean_copy_of_head() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    let slot = hq::slot::Slot {
+        name: "one".to_string(),
+        tree: dir.path().join("slot"),
+    };
+    let images = hq::image::Images {
+        agent: "img/agent".into(),
+        firewall: "img/fw".into(),
+        prober: "img/probe".into(),
+    };
+    let paths = hq::mission::dir::Paths::of(&project.hq_root, "m1");
+    let plan = run::plan(
+        &project,
+        &slot,
+        "rust",
+        &images,
+        &paths,
+        "stand-in-token",
+        &hq::mission::Header {
+            branch: "feat/alpha".to_string(),
+            base: "dev".to_string(),
+            lots: vec![hq::mission::Lot {
+                id: "L1".to_string(),
+                title: "one".to_string(),
+            }],
+            integration: hq::mission::Integration::None {
+                reason: "none".to_string(),
+            },
+            security: hq::mission::Security::Gates,
+            arbiter: None,
+            account: None,
+            bounds: Default::default(),
+        },
+    )
+    .unwrap();
+    let engine = hq::engine::fake::FakeEngine::default();
+    let written = hq::compose::generate(&plan, hq::engine::Engine::dialect(&engine)).unwrap();
+    let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&written).unwrap();
+
+    let mounts: Vec<String> = doc["services"][hq::compose::AGENT_SERVICE]["volumes"]
+        .as_sequence()
+        .expect("the agent has mounts")
+        .iter()
+        .map(|v| v.as_str().unwrap_or_default().to_string())
+        .collect();
+    let expected = format!("{}:{}", hq::exec::proof_volume("one"), hq::exec::PROOF_AT);
+    assert!(mounts.contains(&expected), "{mounts:?}");
+    let declared = doc["volumes"]
+        .as_mapping()
+        .expect("the document declares its named volumes");
+    assert!(
+        declared.contains_key(serde_yaml_ng::Value::from(hq::exec::proof_volume("one"))),
+        "a named volume is declared as well as mounted: {written}"
+    );
+}
+
 #[test]
 fn each_profile_is_written_where_a_restarted_hq_finds_it() {
     let dir = tempfile::tempdir().unwrap();
@@ -391,6 +454,7 @@ fn live_a_mission_starts_and_its_run_is_read_back() {
         Some("stand-in-token"),
         "the run would have nothing to authenticate with"
     );
+
     assert!(
         !std::fs::read_to_string(slot.tree.join(".git/config"))
             .unwrap_or_default()
