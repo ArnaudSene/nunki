@@ -28,6 +28,9 @@ pub const RUN_DIR: &str = "/run/hq";
 
 pub struct ContainerSpawner {
     engine: Arc<dyn Engine>,
+    /// What the harness's command line must still contain for the recorded
+    /// pid to be the run and not a recycled number.
+    identity: Option<String>,
     /// The profile file currently up, as the engine reads it.
     file: PathBuf,
     project: String,
@@ -46,7 +49,15 @@ impl ContainerSpawner {
             service: service.to_string(),
             patience: Duration::from_secs(10),
             host: LocalSpawner,
+            identity: None,
         }
+    }
+
+    /// Say what the run's command line carries — its session id — so that
+    /// liveness can tell the run from whatever else has taken its pid.
+    pub fn identified_by(mut self, session: &str) -> Self {
+        self.identity = Some(session.to_string());
+        self
     }
 
     /// The pid file a run publishes, named after its log — which is named
@@ -139,12 +150,27 @@ impl Spawner for ContainerSpawner {
         }
     }
 
+    /// Alive **and still the same process**.
+    ///
+    /// `kill -0` alone is not enough here: process ids inside a container are
+    /// low and recycled within seconds, so an unrelated `exec` becomes pid 7
+    /// and a dead run reads as running. Measured — a finished run reported
+    /// itself alive because the very shell asking the question had taken its
+    /// number. So the identity is checked too: the harness's command line
+    /// carries the session id `hq` imposed on it, and nothing else in the
+    /// container does — the wrapper `exec`s the harness, so what the kernel
+    /// reports for that pid is the harness's own command line.
     fn alive(&self, spawned: &Spawned) -> io::Result<bool> {
         let Some(pid) = spawned.pid else {
             return Ok(false);
         };
-        let pid = pid.to_string();
-        Ok(self.in_container(&["kill", "-0", &pid])?.ok())
+        let Some(session) = &self.identity else {
+            let pid = pid.to_string();
+            return Ok(self.in_container(&["kill", "-0", &pid])?.ok());
+        };
+        let script =
+            format!("tr '\\0' ' ' < /proc/{pid}/cmdline 2>/dev/null | grep -q -- {session}");
+        Ok(self.in_container(&["sh", "-c", &script])?.ok())
     }
 
     fn signal(&self, spawned: &Spawned, signal: Signal) -> io::Result<()> {

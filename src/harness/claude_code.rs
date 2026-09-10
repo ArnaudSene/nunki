@@ -122,6 +122,11 @@ impl ClaudeCode {
     }
 }
 
+/// Where the agent's home is, by hq's convention: the stack image creates
+/// the `agent` user with `useradd -m`, and the harness keeps its install and
+/// its sessions under it (SPEC 4.1).
+pub const AGENT_HOME: &str = "/home/agent";
+
 /// The user message that starts a run: which lot, which attempt, where the
 /// mission files are. The role prompt itself travels as a system prompt.
 fn lot_prompt(request: &RunRequest, exposure: &Exposure) -> String {
@@ -143,6 +148,41 @@ impl Harness for ClaudeCode {
         "claude-code"
     }
 
+    /// What a role is allowed to do **through the harness**.
+    ///
+    /// Found by running one: with `--permission-mode dontAsk` and nothing
+    /// allowed, the first real agent run had `Bash` and `Write` refused, sat
+    /// thinking, and ended without a result. Refusing is safe (SPEC 3.2) —
+    /// refusing *everything* is a container that cannot work.
+    ///
+    /// This list is comfort, not enforcement: what actually restrains an
+    /// agent is the container, the firewall and git (SPEC 3.2). Its job is
+    /// to make the ordinary work possible while anything unusual is refused
+    /// rather than asked, because there is nobody to ask.
+    fn guards(&self, role: Role) -> GuardSetup {
+        let mut tools = vec![
+            "Read".to_string(),
+            "Glob".to_string(),
+            "Grep".to_string(),
+            "Bash".to_string(),
+            // The agent's three files live in the mission folder, so even a
+            // read-only tree needs Write.
+            "Write".to_string(),
+            "Edit".to_string(),
+            "TodoWrite".to_string(),
+        ];
+        if role == Role::Coder {
+            tools.push("NotebookEdit".to_string());
+        }
+        GuardSetup {
+            // `--allowedTools=…` as one token, not two. The flag is variadic
+            // (`<tools...>`), so the separated form swallows the prompt that
+            // follows it: measured, the run died with "Input must be provided
+            // either through stdin or as a prompt argument".
+            args: vec![format!("--allowedTools={}", tools.join(","))],
+        }
+    }
+
     fn token_env(&self) -> &'static str {
         // The subscription's long-lived token, never an API key (SPEC 4.3).
         "CLAUDE_CODE_OAUTH_TOKEN"
@@ -150,7 +190,17 @@ impl Harness for ClaudeCode {
 
     fn provision(&self) -> Provisioning {
         Provisioning {
-            install: vec!["npm install -g @anthropic-ai/claude-code".into()],
+            // The native installer, measured on debian:bookworm-slim on
+            // 2026-09-10: it needs no Node and puts a versioned install
+            // under ~/.local/share/claude with a symlink in ~/.local/bin.
+            install: vec!["curl -fsSL https://claude.ai/install.sh | bash".into()],
+            binary: "claude".into(),
+            // Absolute: a Dockerfile's ENV does not expand $HOME, and the
+            // first version of this shipped an image with `PATH=/.local/bin`
+            // and no reachable harness. `/home/agent` is hq's convention for
+            // the agent's home, and the layer fails the build if the binary
+            // is not on PATH afterwards.
+            path: vec![format!("{AGENT_HOME}/.local/bin")],
             config_dir: self.config.config_dir.clone(),
             // The model API, and the feature-flag endpoint the CLI calls at
             // start; both were in the inherited allowlist.

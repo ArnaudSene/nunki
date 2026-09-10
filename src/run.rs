@@ -15,9 +15,7 @@ use crate::compose::{AGENT_SERVICE, FIREWALL_SERVICE, NamedVolume, Plan, UserIds
 use crate::engine::spawn::ContainerSpawner;
 use crate::engine::{Engine, EngineError};
 use crate::git;
-use crate::harness::{
-    Exposure, GuardSetup, Harness, Role, RunRequest, SessionId, Workspace, claude_code,
-};
+use crate::harness::{Exposure, Harness, Role, RunRequest, SessionId, Workspace, claude_code};
 use crate::image;
 use crate::mission::dir::{self as mission_dir, Paths};
 use crate::mission::flow::Flow;
@@ -165,14 +163,15 @@ pub fn start(
     let compose_project = crate::compose::project_name(&slot.name)?;
     engine.up(&file, &compose_project)?;
 
+    let session = SessionId(session_id());
     let spawner = ContainerSpawner::new(
         engine.clone(),
         file.clone(),
         &compose_project,
         AGENT_SERVICE,
-    );
+    )
+    .identified_by(&session.0);
     let harness = claude_code::ClaudeCode::new(Default::default(), Box::new(spawner));
-    let session = SessionId(session_id());
     std::fs::create_dir_all(paths.dir.join("runs"))
         .map_err(|e| RunError::Io(paths.dir.join("runs"), e))?;
     let request = RunRequest {
@@ -192,7 +191,9 @@ pub fn start(
     let handle = harness
         .launch(
             &request,
-            &GuardSetup::default(),
+            // What the role may do through the harness. The container is
+            // what restrains it; this only keeps the ordinary work possible.
+            &harness.guards(Role::Coder),
             &Exposure::SystemPromptFile(PathBuf::from(MISSION_AT).join(role::PROMPT_FILE)),
         )
         .map_err(|e| RunError::Launch(e.to_string()))?;

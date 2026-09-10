@@ -128,8 +128,18 @@ pub struct Progress {
 /// What a harness needs on the container side (SPEC 4.3, `provision()`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Provisioning {
-    /// Packages or install steps for the stack Dockerfile.
+    /// Shell commands that put the harness in the image, run **as the agent**
+    /// in a layer `hq` generates on top of the stack's image. They belong to
+    /// the adapter and not to the project: a stack fragment describes a
+    /// stack, and changing harness must not mean editing every project's
+    /// Dockerfile.
     pub install: Vec<String>,
+    /// What must be on the agent's `PATH` afterwards. `hq check` looks for
+    /// it rather than assuming the install worked.
+    pub binary: String,
+    /// Directories to prepend to `PATH` for the agent, when the install puts
+    /// the binary somewhere a login shell would not look.
+    pub path: Vec<String>,
     /// Directory the harness keeps its config and sessions in; mounted as a
     /// named volume per slot so session resumption survives a rebuild.
     pub config_dir: Option<PathBuf>,

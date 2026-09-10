@@ -389,3 +389,42 @@ fn uuid_v4() -> String {
         b[15]
     )
 }
+
+#[test]
+fn a_role_is_allowed_the_tools_its_work_needs_and_the_prompt_survives() {
+    let hq = adapter();
+    let guards = hq.guards(Role::Coder);
+    let cmd = hq.command(
+        &request(false),
+        &guards,
+        &Exposure::UserMessage("do the thing".into()),
+    );
+
+    // Refusing everything is not a guard, it is a container that cannot
+    // work: with nothing allowed, the first real run had Bash and Write
+    // refused and ended without a result.
+    let allowed = guards.args.join(" ");
+    for tool in ["Read", "Write", "Bash", "Edit", "Grep"] {
+        assert!(allowed.contains(tool), "{allowed}");
+    }
+
+    // One token, not two. `--allowedTools` is variadic, so the separated
+    // form swallows the prompt that follows it — measured, and the run died
+    // on "Input must be provided either through stdin or as a prompt
+    // argument".
+    assert_eq!(guards.args.len(), 1, "{:?}", guards.args);
+    assert!(
+        guards.args[0].starts_with("--allowedTools="),
+        "{:?}",
+        guards.args
+    );
+    assert_eq!(
+        cmd.args
+            .last()
+            .map(String::as_str)
+            .map(|a| a.contains("do the thing")),
+        Some(true),
+        "the prompt must still be the last argument: {:?}",
+        cmd.args
+    );
+}
