@@ -95,6 +95,17 @@ pub fn lifted_all(file: &Path, who: &str, why: &str, head: &str) -> Result<(), F
     )
 }
 
+/// A mission called off, and why.
+pub fn ended(file: &Path, who: &str, why: &str) -> Result<(), FollowupError> {
+    append(
+        file,
+        &format!(
+            "## {date} — {who} called this mission off\n\n             **Because:** {why}\n\n             Nothing here is deleted. `hq mission archive` moves this folder under\n             `archive/`, and what it holds is the record of what was done.\n",
+            date = today(),
+        ),
+    )
+}
+
 /// An instruction left for the next run.
 ///
 /// `say` and not a channel: there is no channel during a run (SPEC 4.3). What

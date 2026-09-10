@@ -239,6 +239,18 @@ enum MissionCommand {
         yes: bool,
     },
 
+    /// Call a mission off before it is verified.
+    ///
+    /// `stop` ends a run, `archive` closes a finished mission; this is for a
+    /// mission you have given up on, so that it can be closed.
+    End {
+        /// The mission.
+        id: String,
+        /// Why you are calling it off.
+        #[arg(long = "because", value_name = "WHY")]
+        why: String,
+    },
+
     /// Close a finished mission: its folder and its state move under
     /// `archive/`. Nothing is deleted, and the slot is left alone.
     Archive {
@@ -1117,6 +1129,20 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                         "nothing has changed yet — `hq mission reframe {id} --yes` freezes it"
                     );
                 }
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("hq: {e}");
+                ExitCode::FAILURE
+            }
+        },
+
+        MissionCommand::End { id, why } => match hq::lifecycle::end(project, &id, &why) {
+            Ok(state) => {
+                println!("ended     {:?}", state.flow.stage());
+                println!(
+                    "          written to FOLLOWUP_HQ.md; `hq mission archive {id}` closes it"
+                );
                 ExitCode::SUCCESS
             }
             Err(e) => {
