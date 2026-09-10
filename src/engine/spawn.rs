@@ -194,6 +194,13 @@ impl Spawner for ContainerSpawner {
         }
         match self.engine.liveness(&spawned.container) {
             Ok(Liveness::Running) => {}
+            // Asked before the probe, because the probe cannot run: the
+            // engine refuses to exec into a frozen container outright
+            // ("Container … is paused, unpause the container before exec",
+            // measured 2026-09-10), and that refusal would arrive here as
+            // `Unknown` — a silence about a run whose state is perfectly
+            // known.
+            Ok(Liveness::Paused) => return Ok(Presence::Paused),
             Ok(Liveness::Exited(code)) => {
                 return Ok(Presence::Vanished(format!(
                     "container {} exited ({code}) and took the run with it",

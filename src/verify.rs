@@ -399,6 +399,12 @@ fn read_back(
     );
     match crate::harness::Harness::state(&harness, handle) {
         Ok(RunState::Finished(outcome)) => Ended::With(outcome),
+        // A frozen run is a run in progress that a human stopped on purpose.
+        // Nothing is concluded from it, and the message says whose doing it
+        // is rather than leaving `verify` looking stuck.
+        Ok(RunState::Paused(_)) => Ended::Unreachable(
+            "the run is paused — `hq mission resume` unfreezes it exactly where it is".to_string(),
+        ),
         // `refuse_while_running` already returned for a running run, so this
         // is a run that started running between the two questions.
         Ok(RunState::Running(_)) => Ended::Unreachable(

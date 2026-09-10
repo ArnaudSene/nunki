@@ -270,6 +270,7 @@ impl Harness for ClaudeCode {
         }
         match presence {
             Presence::Running => Ok(RunState::Running(parsed.progress)),
+            Presence::Paused => Ok(RunState::Paused(parsed.progress)),
             Presence::Ended => Ok(RunState::Finished(Outcome::HarnessFailure(
                 "the harness process ended without a result event".into(),
             ))),
