@@ -135,6 +135,7 @@ impl World {
                 app: None,
                 verdicts: Vec::new(),
                 accepted: Vec::new(),
+                stopped: None,
                 updated_at: String::new(),
             })
             .unwrap();
@@ -182,6 +183,14 @@ impl World {
                 },
             )
             .unwrap();
+    }
+
+    /// What `hq mission stop` writes: the mission is held.
+    fn hold(&self) {
+        let store = Store::open(&self.project.hq_root).unwrap();
+        let mut state = store.load("m1").unwrap();
+        state.hold("Arnaud", false);
+        store.save(&state).unwrap();
     }
 
     fn verify(&self) -> Result<Vec<Step>, VerifyError> {
@@ -825,6 +834,7 @@ fn with_security_agent(lots: usize) -> World {
             app: None,
             verdicts: Vec::new(),
             accepted: Vec::new(),
+            stopped: None,
             updated_at: String::new(),
         })
         .unwrap();
@@ -1111,4 +1121,88 @@ fn neither_verb_applies_before_there_is_a_verdict_to_lift() {
         );
         assert!(err.to_string().contains("Coding"), "{err}");
     }
+}
+
+/// The whole point of `hq mission stop` (SPEC 4.5): "`hq` ne relancera aucun
+/// run". This world has neither images nor an account, so an unheld `verify`
+/// at this stage **fails trying to launch** — which is what makes the held
+/// case worth asserting: it returns, having launched nothing.
+#[test]
+fn a_held_mission_launches_no_integration_run() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    assert!(
+        world.verify().is_err(),
+        "the probe is worth nothing unless the unheld path really launches"
+    );
+
+    world.hold();
+    let steps = world.verify().unwrap();
+    assert!(
+        matches!(steps.last(), Some(Step::Held { role, .. }) if *role == hq::harness::Role::Integrator),
+        "{steps:?}"
+    );
+}
+
+/// Holding a mission stops `hq` from starting work, not from reading what is
+/// already there: the gates still run, and the coder is still told a run is
+/// owed — by a step that names who held it, not by `NeedsRun`.
+#[test]
+fn a_held_mission_still_plays_its_gates_and_says_who_held_it() {
+    let world = World::shaped(1, integration());
+    world.hold();
+    let steps = world.verify().unwrap();
+
+    assert!(
+        steps.iter().any(|s| matches!(s, Step::Gates { .. })),
+        "{steps:?}"
+    );
+    assert!(
+        !steps.iter().any(|s| matches!(s, Step::NeedsRun { .. })),
+        "a held mission is not merely owed a run: {steps:?}"
+    );
+    match steps.last() {
+        Some(Step::Held { role, who, .. }) => {
+            assert_eq!(*role, hq::harness::Role::Coder);
+            assert!(!who.is_empty(), "it names who held it");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// The hold is lifted by `resume`, and the flow is exactly where it was: a
+/// hold is not a stage, so nothing about the mission's progress moved while
+/// it was held.
+#[test]
+fn lifting_the_hold_leaves_the_flow_where_it_was() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    let before = world.state().flow.stage().clone();
+    world.hold();
+    world.verify().unwrap();
+
+    let engine: Arc<dyn hq::engine::Engine> = Arc::new(hq::engine::fake::FakeEngine::default());
+    hq::gesture::resume(&world.project, "m1", engine).unwrap();
+    assert_eq!(&before, world.state().flow.stage());
+    assert!(!world.state().held());
+}
+
+/// The hold has to mean the same thing at every launch site, and the
+/// security one is a second site: a mutation that removed only its guard
+/// survived the whole battery until this test existed.
+#[test]
+fn a_held_mission_launches_no_security_run() {
+    let world = with_security_agent(1);
+    world.at_security();
+    assert!(
+        world.verify().is_err(),
+        "the probe is worth nothing unless the unheld path really launches"
+    );
+
+    world.hold();
+    let steps = world.verify().unwrap();
+    assert!(
+        matches!(steps.last(), Some(Step::Held { role, .. }) if *role == hq::harness::Role::Security),
+        "{steps:?}"
+    );
 }

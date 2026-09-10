@@ -69,6 +69,13 @@ pub struct MissionState {
     /// worth one commit and no other.
     #[serde(default)]
     pub accepted: Vec<Accepted>,
+    /// Set by `hq mission stop`: `hq` launches no further run for this
+    /// mission (SPEC 4.5). Deliberately **not** a stage — a stopped mission
+    /// is neither abandoned (`end` says that) nor finished; SPEC calls it
+    /// "intact et reprenable", and a stage would conflate a human's hold
+    /// with where the work has got to.
+    #[serde(default)]
+    pub stopped: Option<Stopped>,
     /// RFC 3339 time of the last write; informational.
     pub updated_at: String,
 }
@@ -100,6 +107,19 @@ pub struct Accepted {
     /// The commit it was given on.
     pub head: String,
     pub date: String,
+}
+
+/// A hold a human put on a mission: no further run is launched until
+/// `hq mission resume` lifts it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Stopped {
+    /// Who held it, as `hq whoami` knows them.
+    pub who: String,
+    pub date: String,
+    /// Whether the run in progress was also interrupted (`--now`). Kept
+    /// because the two are different facts: one says what `hq` will not do
+    /// next, the other says what was done to the run that was going.
+    pub interrupted: bool,
 }
 
 impl MissionState {
@@ -138,6 +158,26 @@ impl MissionState {
     /// Whether the human lifted the verdict as a whole on `head`.
     pub fn verdict_lifted_on(&self, head: &str) -> bool {
         self.accepted_on(head).iter().any(|a| a.finding.is_none())
+    }
+
+    /// Hold the mission: `hq` launches no further run for it.
+    pub fn hold(&mut self, who: &str, interrupted: bool) {
+        self.stopped = Some(Stopped {
+            who: who.to_string(),
+            date: now_rfc3339(),
+            interrupted,
+        });
+    }
+
+    /// Lift the hold. Returns what was lifted, so a caller can say whether
+    /// there was anything to lift rather than claiming it lifted one.
+    pub fn release(&mut self) -> Option<Stopped> {
+        self.stopped.take()
+    }
+
+    /// Whether `hq` may launch a run for this mission.
+    pub fn held(&self) -> bool {
+        self.stopped.is_some()
     }
 }
 

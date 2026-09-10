@@ -158,6 +158,7 @@ pub fn start(
         app: launched.app,
         verdicts: Vec::new(),
         accepted: Vec::new(),
+        stopped: None,
         updated_at: String::new(),
     };
     store.save(&state)?;

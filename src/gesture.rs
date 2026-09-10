@@ -15,8 +15,13 @@
 //! | `kill` | the emergency brake: the container is killed, nothing is
 //!   waited for | nothing, it no longer exists |
 //!
-//! `stop` is the fourth and lives with the harness, because ending a turn
-//! cleanly is a signal to the process and not a gesture on the container.
+//! `stop` is the fourth, and it is two things at once (SPEC 4.5). Always, it
+//! **holds the mission**: `hq` launches no further run for it, which is a
+//! write to the state file and not a signal — the old `STOP` file, which was
+//! a marker and not a gesture. With `--now` it also ends the turn in
+//! progress, and that half is the harness's, because interrupting a turn
+//! cleanly is a signal to a process. Without it, the run in progress finishes
+//! its lot and nothing follows it. `resume` lifts the hold.
 //!
 //! `say` is here for the opposite reason: **there is no channel during a
 //! run**. An instruction is left in `FOLLOWUP_HQ.md` and read by the next
@@ -39,6 +44,8 @@ pub enum GestureError {
     NothingSaid,
     #[error(transparent)]
     Engine(#[from] crate::engine::EngineError),
+    #[error(transparent)]
+    Harness(#[from] crate::harness::HarnessError),
     #[error(transparent)]
     State(#[from] crate::state::StateError),
     #[error(transparent)]
@@ -71,6 +78,79 @@ pub fn freeze(
         Freeze::Off => engine.unpause(&file, &compose_project, &crate::run::SERVICES)?,
     }
     Ok(state)
+}
+
+/// Hold the mission, and with `now` end the turn in progress too.
+///
+/// The hold is the whole point and it is written to the state file: `hq`
+/// launches no further run until `resume` lifts it. It is recorded even when
+/// no run is going — a human holding a mission between two runs is exactly
+/// the case a signal cannot express, and the case SPEC's old `STOP` file
+/// existed for.
+///
+/// `now` is the other half: SIGINT, not SIGTERM, so the agent ends its turn
+/// and writes its resume block (SPEC 4.3). It is only ever the second
+/// clause — a `--now` typed a second after the run ended still holds the
+/// mission, and the record says the interruption did not happen rather than
+/// refusing the hold along with it.
+pub fn stop(
+    project: &Project,
+    id: &str,
+    harness: &dyn crate::harness::Harness,
+    now: bool,
+) -> Result<crate::state::Stopped, GestureError> {
+    let store = Store::open(&project.hq_root)?;
+    let mut state = started(project, id)?;
+
+    let interrupted = match (now, state.run.clone()) {
+        (true, Some(handle)) => {
+            harness.stop(&handle)?;
+            true
+        }
+        _ => false,
+    };
+
+    let who = crate::human::me(&project.hq_home(), Some(&project.root)).addressed();
+    state.hold(&who, interrupted);
+    store.save(&state)?;
+    // `expect`: `hold` has just set it.
+    Ok(state.stopped.expect("hold sets the hold"))
+}
+
+/// Lift the hold, and unfreeze the container if one is frozen.
+///
+/// One verb for both because they are one thing to the human who types it:
+/// the mission was held, and it is held no longer. SPEC 4.5 names `resume`
+/// as `pause`'s antonym and calls a stopped mission "reprenable" without
+/// saying by which verb — **this pairing is derived, not quoted**, and it is
+/// in the owner's queue.
+///
+/// It does not require a run: a mission held between two runs has none, and
+/// that is precisely a mission worth resuming.
+pub fn resume(
+    project: &Project,
+    id: &str,
+    engine: Arc<dyn Engine>,
+) -> Result<Option<crate::state::Stopped>, GestureError> {
+    let store = Store::open(&project.hq_root)?;
+    let mut state = started(project, id)?;
+    let lifted = state.release();
+    store.save(&state)?;
+
+    // Only a frozen container is unfrozen. Measured on Docker 28 the day
+    // this was written: `unpause` on a container that is merely running is
+    // refused ("is not paused", exit 1) — and after a bare `stop` the run
+    // keeps going, so that is the *common* path here, not the odd one. The
+    // engine already has the word for the distinction (`Liveness::Paused`),
+    // which is what it was given one for.
+    if let Some(handle) = &state.run
+        && engine.liveness(&handle.container)? == crate::engine::Liveness::Paused
+    {
+        let file = crate::run::profile_path(project, &state.slot);
+        let compose_project = crate::compose::project_name(&state.slot)?;
+        engine.unpause(&file, &compose_project, &crate::run::SERVICES)?;
+    }
+    Ok(lifted)
 }
 
 /// The emergency brake.
@@ -107,6 +187,16 @@ pub fn say(project: &Project, id: &str, what: &str) -> Result<(), GestureError> 
     let who = crate::human::me(&project.hq_home(), Some(&project.root)).addressed();
     crate::followup::said(&paths.followup, &who, what.trim())?;
     Ok(())
+}
+
+/// A mission that has started, or the one sentence that says it has not.
+/// Public because a caller often needs the state before it can build the
+/// harness the gesture acts through, and two places saying "has not started"
+/// in two ways is two answers to one question.
+pub fn started(project: &Project, id: &str) -> Result<MissionState, GestureError> {
+    Store::open(&project.hq_root)?
+        .load(id)
+        .map_err(|_| GestureError::NotStarted(id.to_string()))
 }
 
 /// The mission's run, its profile, and its Compose project — or the reason
