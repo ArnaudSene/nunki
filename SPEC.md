@@ -610,6 +610,28 @@ Trois règles, et une seule mécanique quelle que soit la forme de la mission :
    écrire** (`target/`, `.next/`, caches), montés comme volumes propres au
    profil. Ce qui n'est pas déclaré reste fermé.
 
+   **Deux conditions, mesurées le 2026-09-10, et il faut les deux.** Un
+   volume nommé monté sur un sous-chemin d'un bind en lecture seule :
+
+   - **prend sa propriété de l'image** — si l'image ne porte pas ce
+     répertoire, le volume naît à `root` et un conteneur sans capacité ne
+     peut rien y faire ; s'il le porte et qu'il est `chown`é à l'agent, le
+     volume arrive à l'agent. C'est donc la couche `hq` de l'image qui crée
+     ces répertoires, à partir de `writable.txt` ;
+   - **exige que le point de montage existe aussi dans la source du bind**,
+     sinon le conteneur ne démarre pas du tout (`create mountpoint for
+     /work/tree/target: read-only file system`). `hq` crée donc le
+     répertoire vide dans l'arbre du slot avant de lever le profil — c'est
+     un répertoire que le projet ignore, invisible à `git status`, donc la
+     porte 1 reste verte.
+
+   La profondeur ne change rien : `packages/web/node_modules` se comporte
+   comme `target`. Et comme une image périmée porte le même tag, `hq` ne peut
+   pas voir la différence avant de lever : il **demande au conteneur levé**
+   si ces répertoires sont réellement inscriptibles, et nomme
+   `hq slot rebuild` sinon. Sans cette question, la seule mesure qui compte
+   ici ne serait garantie par rien à l'exécution.
+
 **La forme déclarative des conteneurs : Compose, généré par `hq`.** Tranché
 par Arnaud le 2026-09-09. La revue a établi que Compose est un plugin de la
 CLI, pas une notion de l'API : « un Compose levé par l'API » n'existe pas.

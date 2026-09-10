@@ -438,7 +438,7 @@ fn fragment(stack: &str) -> Vec<(&'static str, String, bool)> {
             ("run.sh", RUN_RUST.to_string(), true),
             ("Dockerfile", DOCKERFILE_RUST.to_string(), false),
             (
-                "writable.txt",
+                crate::project::WRITABLE_FILE,
                 "# Directories an execution must be able to write when the tree is\n\
                  # mounted read-only (SPEC 4.2). One relative path per line.\n\
                  target\n"
