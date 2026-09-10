@@ -5,6 +5,14 @@
 # and there is no cross-compilation to lean on. Only GitHub's own actions are
 # used: the toolchain ships with the runners, and an action nobody reads is a
 # dependency nobody reviews.
+#
+# Those two are pinned to a commit, with the version in the comment. A tag is
+# a moving pointer its owner can repoint; a commit is what was reviewed. The
+# cost is that upgrading is a deliberate edit — which is the point. Check for
+# newer ones with:
+#
+#   gh api repos/actions/checkout/releases/latest --jq .tag_name
+#   gh api repos/actions/cache/releases/latest    --jq .tag_name
 name: CI
 
 on:
@@ -27,7 +35,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Show what the runner brought
         run: |
@@ -37,7 +45,7 @@ jobs:
           cargo clippy --version
           docker compose version || echo "no container engine here — engine tests will skip"
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index
@@ -63,9 +71,9 @@ jobs:
     name: supply chain
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/bin
