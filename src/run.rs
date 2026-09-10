@@ -77,6 +77,13 @@ pub enum RunError {
     BadServicesFile(PathBuf, String),
     #[error(transparent)]
     Application(#[from] crate::launch::LaunchError),
+    #[error(
+        "the security profile is up but {0:?} is not writable in it — the stack declares \
+         it in writable.txt, and a named volume takes its ownership from the image, so \
+         an image built before that line yields a root-owned directory. \
+         `hq slot rebuild` builds it again{1}"
+    )]
+    NotWritable(String, String),
 }
 
 /// Which account a mission spends, and the token to pass. The mission's
@@ -267,7 +274,30 @@ pub fn launch(l: &Launching) -> Result<Launched, RunError> {
     // environment, so the file is the human's alone. It lives at the HQ and
     // never in the repository, and it is not readable by anyone else.
     restrict(&file)?;
+
+    // A volume can only be mounted at a path the read-only bind already
+    // carries: runc creates the mount point in the assembled root filesystem,
+    // and under a `:ro` bind it cannot ("create mountpoint for
+    // /work/tree/target: read-only file system", measured 2026-09-10). So the
+    // directory is made in the slot's tree first. It is empty and, being
+    // whatever the project ignores, invisible to `git status` — gate 1 stays
+    // green.
+    let writable = match role {
+        Role::Security => project.stack_writable(&stack),
+        _ => Vec::new(),
+    };
+    seed_writable(slot, &writable)?;
+
     engine.up(&file, &compose_project)?;
+    // And the ownership of that volume comes from the **image**, not from the
+    // tree: an image built before the stack declared this directory yields a
+    // root-owned volume, silently, and the first build inside the container
+    // fails on a permission nobody is watching. `image::present` cannot see
+    // that — the tag is the same — so the only honest check is to ask the
+    // container that is now up.
+    if !writable.is_empty() {
+        writable_or_rebuild(engine.clone(), &file, &compose_project, &writable)?;
+    }
 
     // Step 3. The application, in the profile of the role that will test or
     // attack it, before that role is launched.
@@ -320,6 +350,56 @@ pub fn launch(l: &Launching) -> Result<Launched, RunError> {
         app,
         launch: declared,
     })
+}
+
+/// Make the declared directories exist in the slot's tree, so the profile can
+/// mount a volume over each of them.
+///
+/// Public because it is a write into a slot, and a write into a slot is
+/// something a test should be able to hold to account. What it writes is an
+/// empty directory that the project already ignores — git tracks files, not
+/// directories, so gate 1 stays green — and it writes nothing else.
+pub fn seed_writable(slot: &Slot, writable: &[String]) -> Result<(), RunError> {
+    for path in writable {
+        let at = slot.tree.join(path);
+        std::fs::create_dir_all(&at).map_err(|e| RunError::Io(at, e))?;
+    }
+    Ok(())
+}
+
+/// Ask the container that is up whether it can really write where the stack
+/// says it must. Named here rather than discovered later: this is the one
+/// failure of the security profile that produces no error of its own.
+///
+/// Public because it is the enforcement of a measurement, and a test that
+/// cannot lift a stale image beside a good one cannot prove it enforces
+/// anything.
+pub fn writable_or_rebuild(
+    engine: Arc<dyn Engine>,
+    file: &std::path::Path,
+    compose_project: &str,
+    writable: &[String],
+) -> Result<(), RunError> {
+    let mut argv = vec![
+        "sh".to_string(),
+        "-c".to_string(),
+        "for d in \"$@\"; do test -w \"$d\" || { echo \"$d\"; exit 1; }; done".to_string(),
+        "sh".to_string(),
+    ];
+    argv.extend(writable.iter().map(|p| format!("{TREE_AT}/{p}")));
+    let out = engine.exec(file, compose_project, AGENT_SERVICE, &argv)?;
+    if out.ok() {
+        return Ok(());
+    }
+    Err(RunError::NotWritable(
+        out.stdout.trim().to_string(),
+        [out.stderr.trim()]
+            .iter()
+            .filter(|s| !s.is_empty())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" "),
+    ))
 }
 
 /// The stack a project's profiles are built from. One place, because three
@@ -441,22 +521,7 @@ pub fn plan(
         mission_dir: paths.dir.clone(),
         mission_dir_at: PathBuf::from(MISSION_AT),
         credentials,
-        volumes: vec![
-            // The clean copy of HEAD that `hq exec` replays proofs on, and
-            // its build cache with it: warmed once per slot and kept
-            // (SPEC 4.2, 4.4 gate 7).
-            crate::exec::volume(&slot.name),
-            // The harness keeps its sessions here, so resuming survives a
-            // rebuilt container (SPEC 4.3).
-            NamedVolume {
-                name: format!("hq-{}-harness", slot.name),
-                at: PathBuf::from("/home/agent/.claude"),
-            },
-            NamedVolume {
-                name: format!("hq-{}-cargo", slot.name),
-                at: PathBuf::from("/home/agent/.cargo/registry"),
-            },
-        ],
+        volumes: volumes(project, slot, stack, role),
         environment,
         // The container stays up between runs; the harness is exec'd into it.
         command: vec!["sleep".to_string(), "infinity".to_string()],
@@ -465,6 +530,61 @@ pub fn plan(
         project_networks,
         project_volumes,
     })
+}
+
+/// The named volumes a role's profile carries.
+///
+/// The first three are every profile's: the clean copy of `HEAD` with its
+/// build cache, the harness's sessions, the package cache. The rest exist
+/// only for the security agent, whose tree is mounted read-only — the stack
+/// declares what an execution must still be able to write and it is mounted
+/// as a volume of its own (SPEC 4.2, rule 3). What is not declared stays
+/// closed.
+fn volumes(project: &Project, slot: &Slot, stack: &str, role: Role) -> Vec<NamedVolume> {
+    let mut volumes = vec![
+        // The clean copy of HEAD that `hq exec` replays proofs on, and its
+        // build cache with it: warmed once per slot and kept (SPEC 4.2,
+        // 4.4 gate 7).
+        crate::exec::volume(&slot.name),
+        // The harness keeps its sessions here, so resuming survives a
+        // rebuilt container (SPEC 4.3).
+        NamedVolume {
+            name: format!("hq-{}-harness", slot.name),
+            at: PathBuf::from("/home/agent/.claude"),
+        },
+        NamedVolume {
+            name: format!("hq-{}-cargo", slot.name),
+            at: PathBuf::from("/home/agent/.cargo/registry"),
+        },
+    ];
+    if role != Role::Security {
+        return volumes;
+    }
+    for path in project.stack_writable(stack) {
+        volumes.push(NamedVolume {
+            name: writable_volume(&slot.name, &path),
+            at: PathBuf::from(TREE_AT).join(&path),
+        });
+    }
+    volumes
+}
+
+/// The volume behind one writable directory. Named per profile, not per
+/// slot: SPEC 4.2 says "montés comme volumes propres au profil", and a
+/// `target/` shared with the coder's would hand the security agent a build
+/// tree it is meant to attack from the outside.
+pub fn writable_volume(slot: &str, path: &str) -> String {
+    let sanitised: String = path
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    format!("hq-{slot}-security-{sanitised}")
 }
 
 /// Where the test credentials are mounted, read-only, on a system profile.

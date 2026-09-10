@@ -922,3 +922,143 @@ fn the_profile_names_its_role() {
         assert_eq!(plan.role, role);
     }
 }
+
+/// The security agent's tree is read-only, and what an execution must still
+/// write is declared by the stack and mounted as a volume of its own (SPEC
+/// 4.2, rule 3). The other two roles write the tree, so they carry none.
+#[test]
+fn only_the_security_profile_carries_the_stacks_writable_volumes() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    std::fs::create_dir_all(project.fragment("rust")).unwrap();
+    std::fs::write(
+        project.fragment("rust").join(hq::project::WRITABLE_FILE),
+        "# what a build writes\ntarget\n\npackages/web/node_modules\n",
+    )
+    .unwrap();
+    let slot = slot_at(dir.path());
+    let header = header_with(with_services());
+
+    for role in [Role::Coder, Role::Integrator] {
+        let (plan, _) = profile_for(&project, &slot, &header, role);
+        assert!(
+            !plan.volumes.iter().any(|v| v.at.ends_with("target")),
+            "{role:?} writes the tree itself: {:?}",
+            plan.volumes
+        );
+    }
+
+    let (plan, doc) = profile_for(&project, &slot, &header, Role::Security);
+    let at: Vec<String> = plan
+        .volumes
+        .iter()
+        .map(|v| v.at.display().to_string())
+        .collect();
+    assert!(at.contains(&"/work/tree/target".to_string()), "{at:?}");
+    assert!(
+        at.contains(&"/work/tree/packages/web/node_modules".to_string()),
+        "{at:?}"
+    );
+    // Named per profile, not per slot: a `target/` shared with the coder's
+    // would hand the security agent the build tree it is meant to attack
+    // from outside.
+    assert_eq!(
+        run::writable_volume("one", "target"),
+        "hq-one-security-target"
+    );
+    assert_eq!(
+        run::writable_volume("one", "packages/web/node_modules"),
+        "hq-one-security-packages-web-node_modules"
+    );
+    // Declared as well as mounted, or Compose refuses the whole project.
+    let declared = doc["volumes"].as_mapping().unwrap();
+    assert!(
+        declared.contains_key(serde_yaml_ng::Value::from(
+            "hq-one-security-target".to_string()
+        )),
+        "{declared:?}"
+    );
+    // And the tree stays read-only around them.
+    let mounts: Vec<String> = doc["services"][hq::compose::AGENT_SERVICE]["volumes"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(
+        mounts.iter().any(|m| m.ends_with("/work/tree:ro")),
+        "{mounts:?}"
+    );
+}
+
+/// `writable.txt` is a list a human edits, and what it may not do is escape
+/// the tree it describes.
+#[test]
+fn a_writable_declaration_may_not_climb_out_of_the_tree() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    std::fs::create_dir_all(project.fragment("rust")).unwrap();
+    std::fs::write(
+        project.fragment("rust").join(hq::project::WRITABLE_FILE),
+        "# a comment\n\n  target  \n/.next/\n..\n../../etc\nsrc/../..\n.\n",
+    )
+    .unwrap();
+    assert_eq!(
+        project.stack_writable("rust"),
+        vec!["target".to_string(), ".next".to_string()]
+    );
+}
+
+/// A volume can only be mounted at a path the read-only bind already carries:
+/// runc creates the mount point in the assembled root filesystem, and under a
+/// `:ro` bind it cannot — `create mountpoint for /work/tree/target: read-only
+/// file system`, measured 2026-09-10. So `hq` makes the directory in the
+/// slot's tree first, and nothing else: an empty directory the project
+/// ignores, invisible to `git status`, so gate 1 stays green.
+#[test]
+fn the_declared_directories_are_made_in_the_tree_before_the_profile_is_lifted() {
+    let dir = tempfile::tempdir().unwrap();
+    let slot = slot_at(dir.path());
+    let git = |args: &[&str]| {
+        assert!(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&slot.tree)
+                .args(["-c", "user.name=T", "-c", "user.email=t@example.com"])
+                .args(args)
+                .status()
+                .unwrap()
+                .success(),
+            "git {args:?}"
+        );
+    };
+    git(&["init", "-q", "-b", "x"]);
+    std::fs::write(slot.tree.join(".gitignore"), "target\n").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "base"]);
+
+    let declared = vec![
+        "target".to_string(),
+        "packages/web/node_modules".to_string(),
+    ];
+    run::seed_writable(&slot, &declared).unwrap();
+    assert!(slot.tree.join("target").is_dir());
+    assert!(slot.tree.join("packages/web/node_modules").is_dir());
+
+    // Twice changes nothing — a role that follows another finds them there.
+    run::seed_writable(&slot, &declared).unwrap();
+
+    // And the tree gate does not see them. `packages/` is not ignored and is
+    // still invisible: git tracks files, not directories.
+    let dirty = String::from_utf8(
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&slot.tree)
+            .args(["status", "--porcelain"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    assert!(dirty.trim().is_empty(), "gate 1 would go red on: {dirty}");
+}

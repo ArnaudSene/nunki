@@ -74,6 +74,9 @@ pub struct ProtectedPaths {
 pub const CONFIG_FILE: &str = "hq.yaml";
 /// Where a project's stack fragments live, inside the project.
 pub const FRAGMENTS_DIR: &str = ".hq";
+/// Where a stack fragment declares the directories an execution must be able
+/// to write when the tree is read-only.
+pub const WRITABLE_FILE: &str = "writable.txt";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProjectError {
@@ -158,6 +161,22 @@ impl Project {
                 .map(str::to_string)
                 .collect(),
         )
+    }
+
+    /// The directories a stack declares as writable when the tree is mounted
+    /// read-only (SPEC 4.2, services and launch, rule 3). Relative paths
+    /// inside the tree; what is not declared stays closed.
+    pub fn stack_writable(&self, stack: &str) -> Vec<String> {
+        let file = self.fragment(stack).join(WRITABLE_FILE);
+        let Ok(text) = std::fs::read_to_string(file) else {
+            return Vec::new();
+        };
+        text.lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(|l| l.trim_matches('/').to_string())
+            .filter(|l| !l.is_empty() && l != "." && !l.split('/').any(|s| s == ".."))
+            .collect()
     }
 
     fn find_root(start: &Path) -> Option<PathBuf> {

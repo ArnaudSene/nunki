@@ -803,3 +803,103 @@ fn a_broken_integration_goes_back_to_the_coder_as_a_volet() {
         "{steps:?}"
     );
 }
+
+// --- the security mission, read back (SPEC 4.4, 4.5) -----------------------
+
+fn with_security_agent(lots: usize) -> World {
+    let world = World::shaped(lots, integration());
+    // `verify` reads the **frozen** header out of the state and never the
+    // file (SPEC 4.1), so declaring the security agent means rebuilding the
+    // flow, not rewriting `MISSION.md`.
+    let mut header = header_of(lots, integration());
+    header.security = Security::Agent;
+    let store = Store::open(&world.project.hq_root).unwrap();
+    store
+        .save(&MissionState {
+            id: "m1".into(),
+            slot: "one".into(),
+            flow: Flow::new(header).unwrap(),
+            run: None,
+            app: None,
+            updated_at: String::new(),
+        })
+        .unwrap();
+    world
+}
+
+impl World {
+    /// Drive the flow to the stage where the security agent is due.
+    fn at_security(&self) {
+        let store = Store::open(&self.project.hq_root).unwrap();
+        let mut state = store.load("m1").unwrap();
+        for event in [
+            hq::mission::flow::Event::RunEnded {
+                outcome: hq::harness::Outcome::Finished(Default::default()),
+                lot_done: true,
+            },
+            hq::mission::flow::Event::GatesPassed,
+            hq::mission::flow::Event::Verdict {
+                verdict: hq::mission::Verdict::Integrated,
+                report: "wired".into(),
+            },
+        ] {
+            store.apply(&mut state, event).unwrap();
+        }
+        assert!(
+            matches!(state.flow.stage(), Stage::SecurityAgent { .. }),
+            "{:?}",
+            state.flow.stage()
+        );
+    }
+}
+
+/// `CLEAR` on this `HEAD` is the last thing the mission was waiting for.
+#[test]
+fn a_clear_security_run_ends_the_mission() {
+    let world = with_security_agent(1);
+    world.at_security();
+    world.run_recorded(Some(41), FINISHED);
+    world.verdict("Security", "CLEAR", &world.head(), "nothing found");
+
+    let steps = world.verify().unwrap();
+    assert!(matches!(steps.last(), Some(Step::Verified)), "{steps:?}");
+    assert!(world.state().run.is_none());
+}
+
+/// `FINDINGS` parks the mission where a human decides: the HQ iterates, or
+/// the findings are lifted. Both events exist in the flow and no verb applies
+/// either yet — so this asserts where it stops, not that it moves on.
+#[test]
+fn findings_park_the_mission_and_carry_the_report() {
+    let world = with_security_agent(1);
+    world.at_security();
+    world.run_recorded(Some(41), FINISHED);
+    world.verdict("Security", "FINDINGS", &world.head(), "an open redirect");
+
+    let steps = world.verify().unwrap();
+    assert!(
+        matches!(steps.last(), Some(Step::Findings { report }) if report.contains("open redirect")),
+        "{steps:?}"
+    );
+    assert!(matches!(world.state().flow.stage(), Stage::Findings { .. }));
+}
+
+/// The security agent's verdict is signed by the security agent. An
+/// integrator's `INTEGRATED` left in the same file is not a security answer.
+#[test]
+fn an_integrators_verdict_does_not_clear_the_security_run() {
+    let world = with_security_agent(1);
+    world.at_security();
+    world.run_recorded(Some(41), FINISHED);
+    world.verdict("Integrator", "INTEGRATED", &world.head(), "wired");
+
+    let _ = world.verify();
+    assert!(
+        matches!(
+            world.state().flow.stage(),
+            Stage::SecurityAgent { attempt: 2 }
+        ),
+        "{:?}",
+        world.state().flow.stage()
+    );
+}

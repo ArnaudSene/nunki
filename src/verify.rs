@@ -7,12 +7,12 @@
 //! persisted at every transition, and running it again picks up where it
 //! stopped.
 //!
-//! What it launches, and what it does not. It lifts the integrator's system
-//! profile, starts the application in it and launches the integration run,
-//! then returns: a run takes hours and `verify` never waits on one. The next
-//! `verify` reads that run back — its verdict, or why there is none — and
-//! moves. The security agent's run is not launched yet, and `verify` says
-//! which role is owed one rather than pretending the mission is stuck.
+//! What it launches, and what it does not. It lifts a role's profile, starts
+//! the application in it and launches that role's run, then returns: a run
+//! takes hours and `verify` never waits on one. The next `verify` reads that
+//! run back — its verdict, or why there is none — and moves. What it still
+//! does not do is lift a `FINDINGS` verdict: the flow has both the events for
+//! it, and no verb applies either yet.
 //!
 //! The slot's lock is taken **once**, here, at the top: everything under it
 //! — gate 6, gate 7, every `hq exec` — runs inside it and never asks again
@@ -246,16 +246,61 @@ pub fn verify(
                 });
                 return Ok(steps);
             }
-            Stage::SecurityAgent { .. } => {
-                steps.push(Step::NeedsRun {
+            // The security mission, on the same two branches as the
+            // integration one — the profile differs, the reading does not.
+            Stage::SecurityAgent { attempt } => {
+                if let Some(handle) = state.run.clone() {
+                    match read_back(project, engine.clone(), &state, &handle) {
+                        Ended::Unreachable(why) => {
+                            steps.push(Step::Unreachable {
+                                role: Role::Security,
+                                why,
+                            });
+                            return Ok(steps);
+                        }
+                        Ended::With(outcome) => {
+                            let event = concluded(
+                                Role::Security,
+                                outcome,
+                                paths.verdict.as_path(),
+                                &crate::git::head(&slot.tree)?,
+                            );
+                            state.run = None;
+                            state.app = None;
+                            store.apply(&mut state, event)?;
+                            steps.push(Step::Moved {
+                                to: state.flow.stage().clone(),
+                            });
+                            continue;
+                        }
+                    }
+                }
+
+                let launched = crate::run::launch(&crate::run::Launching {
+                    project,
+                    slot: &slot,
+                    engine: engine.clone(),
+                    engine_bin,
+                    paths: &paths,
+                    header: &header,
                     role: Role::Security,
-                    why: "the security mission has not run: its profile mounts the tree \
-                          read-only and the directories an execution still writes are \
-                          named volumes over it, which is its own piece"
-                        .into(),
+                    lot: "security".to_string(),
+                    attempt,
+                })?;
+                let application = describe(&launched);
+                state.run = Some(launched.run);
+                state.app = launched.app;
+                store.save(&state)?;
+                steps.push(Step::Launched {
+                    role: Role::Security,
+                    application,
                 });
                 return Ok(steps);
             }
+            // Terminal for now, and said as such: `Event::Iterate` and
+            // `Event::HumanAccepted` exist in the flow and no verb applies
+            // either, so a `FINDINGS` verdict parks the mission until
+            // `hq mission accept` and the iteration decision are written.
             Stage::Findings { report } => {
                 steps.push(Step::Findings { report });
                 return Ok(steps);

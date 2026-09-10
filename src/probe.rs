@@ -124,6 +124,17 @@ fn say(reached: bool) -> &'static str {
     if reached { "reached" } else { "refused" }
 }
 
+/// The profile a probe run lifts, and **not** the one `hq mission start`
+/// lifts.
+///
+/// It is deliberately a mission profile without a mission: no token — a
+/// check must run without spending a subscription — no frozen header, no
+/// slot volumes, and a Compose project name of its own. What it must not
+/// drift on is the **allowlist**, and it does not: the perimeter comes from
+/// `perimeter::compute` with the same sources `run::plan` gives it, which is
+/// the thing under test here. The mounts differ and are not probed; the day
+/// `hq check --mission` probes a system profile (SPEC 4.2, verb table), it
+/// will need the mounts too, and this is where that shows.
 fn plan(
     project: &Project,
     slot: &Slot,

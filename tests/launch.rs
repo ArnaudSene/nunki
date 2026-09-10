@@ -575,3 +575,178 @@ fn live_the_services_survive_a_switch_and_the_application_starts_in_the_profile(
 
     docker.down(&file, &compose_project, true).unwrap();
 }
+
+/// The security profile, with a real engine (SPEC 4.2, rule 3): the tree is
+/// read-only, the directories the stack declared are open, and everything
+/// else is closed. Three things only a container can answer:
+///
+/// 1. a named volume mounted over a subpath of a `:ro` bind takes its
+///    **ownership from the image**, so an image built before the stack
+///    declared that directory yields a root-owned one — silently;
+/// 2. the mount point must also exist in the **bind source**, or the
+///    container does not start at all;
+/// 3. `hq` can tell the two apart at launch and name `hq slot rebuild`.
+#[test]
+#[ignore = "builds images and lifts containers; run by hand"]
+fn live_the_security_profile_writes_only_what_the_stack_declared() {
+    use hq::compose::{NamedVolume, Plan, UserIds, generate};
+    use hq::engine::Engine;
+    use hq::engine::docker::Docker;
+    use hq::harness::Role;
+    use hq::perimeter::{Sources, compute};
+    use std::sync::Arc;
+
+    let docker = Docker::real();
+    let slot_name = "seclive";
+    let compose_project = hq::compose::project_name(slot_name).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+
+    let context = dir.path().join("firewall");
+    std::fs::create_dir_all(&context).unwrap();
+    hq::firewall::materialise(&context).unwrap();
+    let build = |tag: &str, at: &Path| {
+        assert!(
+            std::process::Command::new("docker")
+                .args(["build", "-q", "-t", tag])
+                .arg(at)
+                .status()
+                .expect("docker is on the path")
+                .success(),
+            "building {tag}"
+        );
+    };
+    build("hq/firewall:test", &context);
+
+    // Two agent images, identical but for the one line under measurement:
+    // the mount point `hq slot rebuild` puts there from `writable.txt`.
+    let (uid, gid) = hq::image::host_ids();
+    for (tag, mkdir) in [
+        ("hq/sec-good:test", "RUN mkdir -p /work/tree/target\n"),
+        ("hq/sec-stale:test", ""),
+    ] {
+        let at = dir.path().join(tag.replace([':', '/'], "-"));
+        std::fs::create_dir_all(&at).unwrap();
+        std::fs::write(
+            at.join("Dockerfile"),
+            format!(
+                "FROM alpine:3.20\n\
+                 RUN addgroup -g {gid} agent 2>/dev/null || true\n\
+                 RUN adduser -D -u {uid} -G $(getent group {gid} | cut -d: -f1) agent \
+                 2>/dev/null || true\n\
+                 RUN mkdir -p /work/tree /work/mission /run/hq && chown -R {uid}:{gid} /work\n\
+                 USER {uid}:{gid}\n{mkdir}"
+            ),
+        )
+        .unwrap();
+        build(tag, &at);
+    }
+
+    let mut slot = slot(dir.path());
+    slot.name = slot_name.to_string();
+    std::fs::write(slot.tree.join("secret.rs"), "fn main() {}\n").unwrap();
+    // What `hq` does before lifting the profile: the mount point has to exist
+    // in the bind source, or runc cannot create it under a read-only bind.
+    std::fs::create_dir_all(slot.tree.join("target")).unwrap();
+
+    let mission_dir = dir.path().join("mission");
+    std::fs::create_dir_all(&mission_dir).unwrap();
+    for f in hq::compose::AGENT_WRITABLE {
+        std::fs::write(mission_dir.join(f), "").unwrap();
+    }
+    let project = Project::at(dir.path().join("repo"), config(), dir.path().join("hq"));
+    let file = hq::run::profile_path(&project, slot_name);
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+
+    let write_profile = |image: &str| {
+        let perimeter = compute(
+            Role::Security,
+            &Sources {
+                stack: &["example.com".to_string()],
+                harness: &[],
+                services: &[],
+                forge: &[],
+            },
+        )
+        .unwrap();
+        let plan = Plan {
+            slot: slot_name.to_string(),
+            role: Role::Security,
+            image: image.to_string(),
+            firewall_image: "hq/firewall:test".to_string(),
+            user: UserIds { uid, gid },
+            tree: slot.tree.clone(),
+            tree_at: PathBuf::from("/work/tree"),
+            mission_dir: mission_dir.clone(),
+            mission_dir_at: PathBuf::from("/work/mission"),
+            credentials: Vec::new(),
+            volumes: vec![NamedVolume {
+                name: hq::run::writable_volume(slot_name, "target"),
+                at: PathBuf::from("/work/tree/target"),
+            }],
+            environment: Default::default(),
+            command: vec!["sleep".to_string(), "600".to_string()],
+            perimeter,
+            project_services: None,
+            project_networks: None,
+            project_volumes: None,
+        };
+        std::fs::write(&file, generate(&plan, docker.dialect()).unwrap()).unwrap();
+    };
+
+    let engine: Arc<dyn Engine> = Arc::new(Docker::real());
+    let writable = vec!["target".to_string()];
+    let clean = || {
+        let _ = docker.down(&file, &compose_project, true);
+        let _ = std::process::Command::new("docker")
+            .args([
+                "volume",
+                "rm",
+                "-f",
+                &hq::run::writable_volume(slot_name, "target"),
+            ])
+            .status();
+    };
+
+    // The image the stack declared its directory to: the volume is the
+    // agent's, and `hq` says so.
+    write_profile("hq/sec-good:test");
+    clean();
+    docker.up(&file, &compose_project).unwrap();
+    hq::run::writable_or_rebuild(engine.clone(), &file, &compose_project, &writable)
+        .expect("the declared directory is writable");
+
+    let said = docker
+        .exec(
+            &file,
+            &compose_project,
+            hq::compose::AGENT_SERVICE,
+            &[
+                "sh".to_string(),
+                "-c".to_string(),
+                "echo built > /work/tree/target/artefact && cat /work/tree/target/artefact; \
+                 (echo x > /work/tree/leak 2>/dev/null && echo TREE-WRITABLE) || \
+                 echo TREE-READ-ONLY; cat /work/tree/secret.rs"
+                    .to_string(),
+            ],
+        )
+        .unwrap();
+    // Open where the stack said, closed everywhere else, and the tree still
+    // readable beside it — that is what "read-only for the security agent"
+    // has to mean for the role to work at all.
+    assert!(said.stdout.contains("built"), "{said:?}");
+    assert!(said.stdout.contains("TREE-READ-ONLY"), "{said:?}");
+    assert!(said.stdout.contains("fn main()"), "{said:?}");
+
+    // The same profile on an image built before that line: the volume is
+    // root's, nothing says so, and this is the check that does.
+    write_profile("hq/sec-stale:test");
+    clean();
+    docker.up(&file, &compose_project).unwrap();
+    let err = hq::run::writable_or_rebuild(engine, &file, &compose_project, &writable)
+        .expect_err("a stale image yields a root-owned volume");
+    let message = err.to_string();
+    assert!(message.contains("target"), "{message}");
+    assert!(message.contains("hq slot rebuild"), "{message}");
+
+    clean();
+}
