@@ -232,3 +232,28 @@ fn the_verbs_write_and_read_the_same_mission() {
     );
     assert!(!home.join(".hq/repo/missions/beta").exists());
 }
+
+/// `FOLLOWUP_HQ.md` is the file an agent is told to read before anything
+/// else. It was being written with runs of leading spaces — a lost line
+/// continuation — which Markdown renders as a code block: the two sentences
+/// that say what the file is for arrived as monospaced source. Prose, and
+/// nothing that indents into a code block.
+#[test]
+fn the_follow_up_file_is_prose_and_not_a_code_block() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = hq::mission::dir::create(dir.path(), "m1", &header(), "do it").unwrap();
+    let text = std::fs::read_to_string(&paths.followup).unwrap();
+
+    for line in text.lines() {
+        assert!(
+            !line.starts_with("    "),
+            "this line renders as a code block: {line:?}\n{text}"
+        );
+        assert!(
+            !line.contains("  "),
+            "a run of spaces inside a line: {line:?}\n{text}"
+        );
+    }
+    // And it still says who it is for, and that the agent does not write it.
+    assert!(text.contains("never writes it"), "{text}");
+}

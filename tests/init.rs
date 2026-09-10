@@ -290,3 +290,68 @@ fn a_new_project_protects_the_fragments_that_gate_and_fence_its_agents() {
     // And the battery it protects is really there.
     assert!(repo.join(".hq/stacks/rust/prepush.sh").is_file());
 }
+
+/// The prose `hq init` deposits must read as prose.
+///
+/// The cause, measured on 2026-09-10: `cargo fmt` joins a `\`-continued
+/// string literal onto one line and keeps the continuation's indentation as
+/// **real spaces**. A template written to read nicely in the source arrives
+/// on disk with nine-space indents, and Markdown renders those as a code
+/// block. `FOLLOWUP_HQ.md` — the file an agent is told to read first — was
+/// shipped that way for a fortnight.
+///
+/// Markdown and YAML only, on purpose: the Dockerfile and the shell scripts
+/// indent continuation lines because that is how those languages read, and
+/// they are raw strings in the source, which `cargo fmt` does not touch. It
+/// is the prose that is at risk, and it is the prose this guards.
+#[test]
+fn the_prose_init_writes_reads_as_prose() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    hq::init::init(&root, &dir.path().join("hq"), &["rust".to_string()]).unwrap();
+
+    let mut seen = 0;
+    let mut stack: Vec<std::path::PathBuf> = vec![root.clone()];
+    while let Some(at) = stack.pop() {
+        for entry in std::fs::read_dir(&at).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let prose = path
+                .extension()
+                .is_some_and(|e| e == "md" || e == "yaml" || e == "yml" || e == "txt");
+            if !prose {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            seen += 1;
+            for (n, line) in text.lines().enumerate() {
+                // A `\` continuation carries the source's own indentation,
+                // which in this crate is eight spaces or more.
+                assert!(
+                    !line.contains("     "),
+                    "{}:{}: a run of spaces inside a line — a `\\`-continued \
+                     literal joined by cargo fmt?\n{line:?}",
+                    path.display(),
+                    n + 1
+                );
+                // And Markdown's own reading of four: a code block, whatever
+                // the sentence in it says. Markdown only — YAML nests four
+                // spaces deep because that is what YAML is.
+                let markdown = path.extension().is_some_and(|e| e == "md");
+                assert!(
+                    !(markdown && line.starts_with("    ") && !line.trim().is_empty()),
+                    "{}:{}: this renders as a code block\n{line:?}",
+                    path.display(),
+                    n + 1
+                );
+            }
+        }
+    }
+    assert!(seen >= 4, "only {seen} prose files were read back");
+}

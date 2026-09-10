@@ -187,6 +187,29 @@ enum MissionCommand {
     /// End the run in progress properly: the agent finishes its turn and
     /// writes its resume block.
     Stop { id: String },
+    /// Lift a security finding, or what a `FINDINGS` verdict still carries.
+    ///
+    /// Never touches `VERDICT.json`: the verdict says what the agent found,
+    /// `hq`'s state says what you decided, and `hq push` reads it there.
+    Accept {
+        /// The mission.
+        id: String,
+        /// One finding, as the report names it. Without it, what the report
+        /// still carries is lifted and the mission concludes.
+        #[arg(long, value_name = "NAME")]
+        finding: Option<String>,
+        /// Why the risk is acceptable. Required: a risk accepted without a
+        /// reason is not accepted, it is forgotten.
+        #[arg(long = "because", value_name = "WHY")]
+        why: String,
+    },
+
+    /// Send a `FINDINGS` verdict back to the coder, as a volet.
+    Iterate {
+        /// The mission.
+        id: String,
+    },
+
     /// Start the mutation campaign, or say where the one in flight is
     /// (SPEC 4.4, gate 7). Long: it is launched detached and watched, and
     /// the call that finds it finished writes `MUTANTS.json`.
@@ -479,9 +502,20 @@ fn main() -> ExitCode {
                                 owed = true;
                                 println!("stopped   {handover:?}");
                             }
-                            hq::verify::Step::Findings { report } => {
+                            hq::verify::Step::Findings { report, lifted } => {
                                 owed = true;
                                 println!("findings  {report}");
+                                for one in lifted {
+                                    println!("lifted    {one}");
+                                }
+                                println!(
+                                    "          `hq mission iterate {mission}` sends it back \
+                                     to the coder;"
+                                );
+                                println!(
+                                    "          `hq mission accept {mission} --because <why>` \
+                                     lifts what remains."
+                                );
                             }
                         }
                     }
@@ -759,6 +793,40 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                 }
             }
         }
+
+        MissionCommand::Accept { id, finding, why } => {
+            let lift = match finding {
+                Some(name) => hq::findings::Lift::Finding(name),
+                None => hq::findings::Lift::Verdict,
+            };
+            match hq::findings::accept(project, &id, lift, &why) {
+                Ok(state) => {
+                    println!("accepted  written to FOLLOWUP_HQ.md and to hq's state");
+                    println!("stage     {:?}", state.flow.stage());
+                    println!(
+                        "          VERDICT.json still says FINDINGS — that is the agent's \
+                         answer, and it is not yours to edit"
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("hq: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+
+        MissionCommand::Iterate { id } => match hq::findings::iterate(project, &id) {
+            Ok(state) => {
+                println!("stage     {:?}", state.flow.stage());
+                println!("          `hq verify {id}` plays it from there");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("hq: {e}");
+                ExitCode::FAILURE
+            }
+        },
 
         MissionCommand::Mutants {
             id,
