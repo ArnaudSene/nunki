@@ -55,8 +55,44 @@ pub struct MissionState {
     /// one.
     #[serde(default)]
     pub app: Option<RunHandle>,
+    /// Security findings a human has lifted (SPEC 4.5). `VERDICT.json` stays
+    /// `FINDINGS` — the verdict says what the agent found, this says what the
+    /// human decided, and `hq push` reads the decision here. Each acceptance
+    /// carries the commit it was given on, because a verdict and its lift are
+    /// worth one commit and no other.
+    #[serde(default)]
+    pub accepted: Vec<Accepted>,
     /// RFC 3339 time of the last write; informational.
     pub updated_at: String,
+}
+
+/// One risk a human took, on the record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Accepted {
+    /// What was lifted. `None` means the verdict as a whole — the human read
+    /// the report and lifted what remained of it.
+    pub finding: Option<String>,
+    /// Why. Never empty: a risk accepted without a reason is not accepted,
+    /// it is forgotten.
+    pub why: String,
+    /// Who took it, as `hq whoami` knows them.
+    pub who: String,
+    /// The commit it was given on.
+    pub head: String,
+    pub date: String,
+}
+
+impl MissionState {
+    /// The acceptances that still stand: those given on `head`. A new commit
+    /// makes the others stale, exactly as it makes a verdict stale.
+    pub fn accepted_on(&self, head: &str) -> Vec<&Accepted> {
+        self.accepted.iter().filter(|a| a.head == head).collect()
+    }
+
+    /// Whether the human lifted the verdict as a whole on `head`.
+    pub fn verdict_lifted_on(&self, head: &str) -> bool {
+        self.accepted_on(head).iter().any(|a| a.finding.is_none())
+    }
 }
 
 /// The state directory of one project's HQ.

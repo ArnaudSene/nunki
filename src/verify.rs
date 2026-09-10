@@ -57,9 +57,15 @@ pub enum Step {
     Verified,
     /// The flow stopped and the human decides (SPEC 4.5).
     AwaitingHuman(Handover),
-    /// The security agent came back with findings: the HQ iterates or the
-    /// human lifts them.
-    Findings { report: String },
+    /// The security agent came back with findings: `hq mission iterate` sends
+    /// them back to the coder, `hq mission accept` lifts them.
+    Findings {
+        report: String,
+        /// What a human has already lifted **on this commit**. An acceptance
+        /// given on another one is not shown, because it does not hold: a
+        /// verdict, and its lift, are worth one commit and no other.
+        lifted: Vec<String>,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -83,6 +89,8 @@ pub enum VerifyError {
     Run(#[from] crate::run::RunError),
     #[error(transparent)]
     Git(#[from] crate::git::GitError),
+    #[error(transparent)]
+    Followup(#[from] crate::followup::FollowupError),
 }
 
 /// Play the phase as far as it goes, and say what happened.
@@ -205,12 +213,14 @@ pub fn verify(
                             return Ok(steps);
                         }
                         Ended::With(outcome) => {
+                            let head = crate::git::head(&slot.tree)?;
                             let event = concluded(
                                 Role::Integrator,
                                 outcome,
                                 paths.verdict.as_path(),
-                                &crate::git::head(&slot.tree)?,
+                                &head,
                             );
+                            carry(&paths.followup, Role::Integrator, &event, &head)?;
                             // Forgotten before the transition is written: an
                             // attempt that stays recorded is a run the next
                             // `verify` would read back a second time.
@@ -259,12 +269,10 @@ pub fn verify(
                             return Ok(steps);
                         }
                         Ended::With(outcome) => {
-                            let event = concluded(
-                                Role::Security,
-                                outcome,
-                                paths.verdict.as_path(),
-                                &crate::git::head(&slot.tree)?,
-                            );
+                            let head = crate::git::head(&slot.tree)?;
+                            let event =
+                                concluded(Role::Security, outcome, paths.verdict.as_path(), &head);
+                            carry(&paths.followup, Role::Security, &event, &head)?;
                             state.run = None;
                             state.app = None;
                             store.apply(&mut state, event)?;
@@ -297,12 +305,24 @@ pub fn verify(
                 });
                 return Ok(steps);
             }
-            // Terminal for now, and said as such: `Event::Iterate` and
-            // `Event::HumanAccepted` exist in the flow and no verb applies
-            // either, so a `FINDINGS` verdict parks the mission until
-            // `hq mission accept` and the iteration decision are written.
+            // A security verdict closes three ways, and two of them are a
+            // human's gesture (SPEC 4.5). `verify` makes neither for them:
+            // iterating by itself would spend a volet the human might have
+            // wanted to spend on an acceptance, and lifting a risk is never
+            // a machine's to do.
             Stage::Findings { report } => {
-                steps.push(Step::Findings { report });
+                let head = crate::git::head(&slot.tree)?;
+                steps.push(Step::Findings {
+                    report,
+                    lifted: state
+                        .accepted_on(&head)
+                        .iter()
+                        .map(|a| match &a.finding {
+                            Some(finding) => format!("{finding} — {}", a.why),
+                            None => format!("the verdict, as a whole — {}", a.why),
+                        })
+                        .collect(),
+                });
                 return Ok(steps);
             }
             Stage::AwaitingHuman(handover) => {
@@ -434,6 +454,22 @@ fn read_verdict(
         ));
     }
     Ok(file)
+}
+
+/// Carry a red verdict to the coder before the flow moves on it.
+///
+/// Only a red one: an `INTEGRATED` or a `CLEAR` is not something the coder
+/// has to act on, and a follow-up file that fills with green is one nobody
+/// reads (SPEC 4.5, "le constat vit dans le journal du rôle qui l'a fait").
+fn carry(file: &std::path::Path, from: Role, event: &Event, head: &str) -> Result<(), VerifyError> {
+    let Event::Verdict { verdict, report } = event else {
+        return Ok(());
+    };
+    if verdict.is_green() {
+        return Ok(());
+    }
+    crate::followup::carry(file, from, *verdict, report, head)?;
+    Ok(())
 }
 
 /// What to tell the human about the application `hq` started.

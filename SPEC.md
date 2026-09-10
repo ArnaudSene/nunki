@@ -483,7 +483,7 @@ par un adaptateur (4.3), et le moteur de conteneurs que par un autre.
 |---|---|
 | `hq init <dépôt>` | rend un dépôt **existant** orchestrable. Pose, en respectant 3.3 : `hq.yaml`, `AGENTS.md` (ou l'import dans `CLAUDE.md`), la liste des chemins protégés, la batterie cousue, les Dockerfiles et fragments de stack sous `.hq/`, un `.gitattributes` absent. Crée ce qui n'existe pas, dépose à côté ce qui existe, ne touche à rien d'autre, ne tient aucun manifeste, ne désinstalle rien. Rejouable. |
 | `hq slot add/reset/rebuild/rm` | un slot = un clone local sans liens durs, un jeu de volumes nommés, et **trois profils de conteneur successifs** (voir « slots et branches » ci-dessous). Les missions s'y succèdent. |
-| `hq mission new/start/reframe/status/say/watch/pause/resume/stop/kill/end/fetch/archive` | le cycle d'une mission, du cadrage au rapatriement des commits ; `say` dépose une consigne pour le **run suivant**, `watch` rend deux états (tourne, fini), `stop` termine le run proprement (4.3) |
+| `hq mission new/start/reframe/status/say/watch/pause/resume/stop/kill/end/accept/iterate/fetch/archive` | le cycle d'une mission, du cadrage au rapatriement des commits ; `say` dépose une consigne pour le **run suivant**, `watch` rend deux états (tourne, fini), `stop` termine le run proprement (4.3) |
 | `hq exec <slot> <cmd>` | joue une commande dans le conteneur du slot — c'est ainsi que le HQ **rejoue une preuve** sans avoir la stack sur l'hôte. Par défaut sur la **copie git propre de `HEAD`** que la porte 7 utilise, pas sur l'arbre que l'agent a habité : un `Makefile`, un `pytest.ini` ou un alias `cargo` posé par l'agent y tromperait la preuve. Jamais pendant un run sur l'arbre de travail |
 | `hq verify <mission>` | les portes de vérification sur la mission du codeur, puis enchaîne la mission d'intégration, puis la mission de sécurité, chacune avec ses portes ; à la première rouge, applique les règles d'itération (4.5) ; à la fin, rend la main à l'humain pour la validation du push. **Reprenable** : son état est persisté à chaque transition, et le relancer reprend au même point |
 | `hq push <mission>` | après validation humaine explicite (un argument, pas un dialogue), pousse la branche depuis le dépôt principal et ouvre la pull request. C'est le seul verbe qui touche la forge en écriture, et il refuse sans `INTEGRATED` et `CLEAR` sur le dernier commit et le verdict du codeur sur son ancêtre (4.4). Il parle à l'API de la forge avec un credential de l'humain, rangé au HQ et jamais monté dans un conteneur ; sans credential, il pousse et dit que la pull request est à ouvrir à la main |
@@ -1181,11 +1181,29 @@ Ce que la boucle veut dire, et ce qu'elle ne veut pas dire.
 - **Rien ne se pousse en rouge.** Il n'existe pas de drapeau pour passer
   outre. Un constat de sécurité ne se ferme que corrigé, ou démontré faux
   positif en une phrase que le HQ contre-vérifie, ou **accepté comme risque
-  par l'humain**. L'acceptation passe par un verbe, `hq mission accept
-  <mission> <constat>`, qui l'écrit dans l'état de `hq` et, daté, dans le
-  `FOLLOWUP_HQ.md` ; `VERDICT.json` reste `FINDINGS` — c'est l'état qui sait
-  que l'humain a levé le constat, et `hq push` le lit là. Aucun agent
-  n'accepte un risque.
+  par l'humain**. L'acceptation passe par un verbe,
+  `hq mission accept <mission> --because <pourquoi>`, qui l'écrit dans l'état
+  de `hq` et, daté, dans le `FOLLOWUP_HQ.md` ; `VERDICT.json` reste
+  `FINDINGS` — c'est l'état qui sait que l'humain a levé le constat, et
+  `hq push` le lit là. Aucun agent n'accepte un risque.
+
+  **Deux formes, et deux verbes.** Précisé le 2026-09-10 à l'implémentation,
+  parce que la boucle donnait le geste au HQ sans nommer par quoi il passe :
+
+  - `hq mission accept <mission> --finding <nom> --because <pourquoi>`
+    **inventorie** un constat levé et ne conclut rien : itérer sur la liste
+    n'est pas la clore, et une session qui prendrait la première acceptation
+    pour la dernière pousserait sur un rapport que personne n'a fini de lire.
+    Sans `--finding`, c'est ce que le rapport porte encore qui est levé, et
+    la mission conclut.
+  - `hq mission iterate <mission>` renvoie au codeur en volet. C'est un
+    **geste**, pas un défaut : un `verify` qui renverrait de lui-même
+    dépenserait un volet que l'humain voulait peut-être dépenser en
+    acceptation.
+  - `--because` n'est jamais facultatif : un risque accepté sans raison n'est
+    pas accepté, il est oublié.
+  - **Une acceptation vaut pour un `HEAD`**, comme le verdict qu'elle lève.
+    Un nouveau commit la périme au lieu de la reporter en silence.
 - **La boucle est bornée, et la borne est un paramètre.** Tranché par Arnaud
   le 2026-09-08 : **trois volets** par défaut. Au troisième retour au codeur
   sur une même mission, le HQ ne relance pas : il s'arrête et remonte à

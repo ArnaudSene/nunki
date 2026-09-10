@@ -161,9 +161,20 @@ fn followup(header: &Header) -> String {
         .arbiter
         .clone()
         .unwrap_or_else(|| "the human".to_string());
-    format!(
-        "# Follow-up — for {who}\n\n         For {who} and the HQ. The agent reads this and never writes it.\n\n         Anything this mission cannot decide on its own is written here,          addressed to {who}.\n"
-    )
+    // A raw string, and not a `\`-continued one: `cargo fmt` joins a
+    // continued literal onto one line and keeps its indentation as real
+    // spaces, which is how this file came to be written with nine-space
+    // indents — Markdown renders those as a code block. Measured on this very
+    // function, 2026-09-10.
+    const TEMPLATE: &str = r#"# Follow-up — for {who}
+
+For {who} and the HQ. The agent reads this file and never writes it.
+
+Anything this mission cannot decide on its own is written here, dated and
+addressed to {who}. `hq` appends to it too: a verdict another role concluded
+on, and a finding {who} has lifted (SPEC 4.5).
+"#;
+    TEMPLATE.replace("{who}", &who)
 }
 
 fn check_id(id: &str) -> Result<(), MissionDirError> {

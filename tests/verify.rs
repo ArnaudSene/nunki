@@ -133,6 +133,7 @@ impl World {
                 flow: Flow::new(header_of(lots, integration)).unwrap(),
                 run: None,
                 app: None,
+                accepted: Vec::new(),
                 updated_at: String::new(),
             })
             .unwrap();
@@ -821,6 +822,7 @@ fn with_security_agent(lots: usize) -> World {
             flow: Flow::new(header).unwrap(),
             run: None,
             app: None,
+            accepted: Vec::new(),
             updated_at: String::new(),
         })
         .unwrap();
@@ -878,7 +880,7 @@ fn findings_park_the_mission_and_carry_the_report() {
 
     let steps = world.verify().unwrap();
     assert!(
-        matches!(steps.last(), Some(Step::Findings { report }) if report.contains("open redirect")),
+        matches!(steps.last(), Some(Step::Findings { report, .. }) if report.contains("open redirect")),
         "{steps:?}"
     );
     assert!(matches!(world.state().flow.stage(), Stage::Findings { .. }));
@@ -902,4 +904,209 @@ fn an_integrators_verdict_does_not_clear_the_security_run() {
         "{:?}",
         world.state().flow.stage()
     );
+}
+
+// --- lifting a security verdict (SPEC 4.5) ---------------------------------
+
+impl World {
+    /// Drive a mission to `FINDINGS`, and say who is running `hq`, so the
+    /// acceptance records a name rather than whatever `$USER` happens to be.
+    fn at_findings(&self) {
+        std::fs::write(
+            self.project.hq_home().join("me.yaml"),
+            "name: Arnaud\nemail: a@example.com\n",
+        )
+        .unwrap();
+        self.at_security();
+        self.run_recorded(Some(41), FINISHED);
+        self.verdict(
+            "Security",
+            "FINDINGS",
+            &self.head(),
+            "an open redirect in /auth/callback",
+        );
+        let steps = self.verify().unwrap();
+        assert!(
+            matches!(steps.last(), Some(Step::Findings { .. })),
+            "{steps:?}"
+        );
+    }
+
+    fn followup(&self) -> String {
+        std::fs::read_to_string(self.mission().join("FOLLOWUP_HQ.md")).unwrap()
+    }
+}
+
+/// The constat lives in the journal of the role that made it, and the HQ
+/// carries it to the coder — dated, in `FOLLOWUP_HQ.md`. An agent never
+/// speaks to another agent.
+#[test]
+fn a_red_verdict_is_carried_to_the_coder_and_a_green_one_is_not() {
+    let world = with_security_agent(1);
+    world.at_findings();
+    let carried = world.followup();
+    assert!(carried.contains("security"), "{carried}");
+    assert!(carried.contains("open redirect"), "{carried}");
+
+    // A green verdict is not something the coder has to act on, and a
+    // follow-up file that fills with green is one nobody reads.
+    let other = World::shaped(1, integration());
+    other.at_integration();
+    other.run_recorded(Some(41), FINISHED);
+    other.verdict("Integrator", "INTEGRATED", &other.head(), "wired");
+    other.verify().unwrap();
+    assert!(
+        !other.followup().contains("concluded Integrated"),
+        "{}",
+        other.followup()
+    );
+}
+
+/// Lifting the verdict as a whole is what concludes the mission — and it
+/// never touches `VERDICT.json`: the verdict says what the agent found, the
+/// state says what the human decided.
+#[test]
+fn lifting_the_verdict_concludes_the_mission_and_leaves_the_verdict_red() {
+    let world = with_security_agent(1);
+    world.at_findings();
+
+    let state = hq::findings::accept(
+        &world.project,
+        "m1",
+        hq::findings::Lift::Verdict,
+        "the callback is behind the VPN and the host allowlist is closed",
+    )
+    .unwrap();
+    assert!(
+        matches!(state.flow.stage(), Stage::Verified),
+        "{:?}",
+        state.flow.stage()
+    );
+    assert!(state.verdict_lifted_on(&world.head()));
+
+    let verdict = std::fs::read_to_string(world.mission().join("VERDICT.json")).unwrap();
+    assert!(verdict.contains("FINDINGS"), "{verdict}");
+    let carried = world.followup();
+    assert!(carried.contains("Arnaud"), "{carried}");
+    assert!(carried.contains("behind the VPN"), "{carried}");
+}
+
+/// Naming one finding records it and does **not** conclude: itemising is not
+/// concluding, and a session that treated the first acceptance as the last
+/// would push on a report nobody finished reading.
+#[test]
+fn accepting_one_finding_records_it_without_concluding() {
+    let world = with_security_agent(1);
+    world.at_findings();
+
+    let state = hq::findings::accept(
+        &world.project,
+        "m1",
+        hq::findings::Lift::Finding("open redirect in /auth/callback".into()),
+        "unreachable from outside the VPN",
+    )
+    .unwrap();
+    assert!(matches!(state.flow.stage(), Stage::Findings { .. }));
+    assert!(!state.verdict_lifted_on(&world.head()));
+    assert_eq!(state.accepted_on(&world.head()).len(), 1);
+
+    // And `verify` shows it back, so the human sees what they have lifted.
+    let steps = world.verify().unwrap();
+    assert!(
+        matches!(steps.last(), Some(Step::Findings { lifted, .. })
+            if lifted.iter().any(|l| l.contains("unreachable from outside"))),
+        "{steps:?}"
+    );
+}
+
+/// A verdict, and its lift, are worth one commit and no other. A new commit
+/// makes an acceptance stale rather than silently carrying it forward.
+#[test]
+fn an_acceptance_given_on_another_commit_does_not_hold() {
+    let world = with_security_agent(1);
+    world.at_findings();
+    hq::findings::accept(
+        &world.project,
+        "m1",
+        hq::findings::Lift::Verdict,
+        "accepted on the commit that was judged",
+    )
+    .unwrap();
+    let judged = world.head();
+    assert!(world.state().verdict_lifted_on(&judged));
+
+    world.commit(
+        "src/new.rs",
+        "pub fn two() -> u8 { 2 }\n",
+        "one more change",
+    );
+    assert!(
+        !world.state().verdict_lifted_on(&world.head()),
+        "the lift was given on {judged}, and the slot has moved"
+    );
+}
+
+/// A risk accepted without a reason is not accepted, it is forgotten.
+#[test]
+fn a_lift_without_a_reason_is_refused() {
+    let world = with_security_agent(1);
+    world.at_findings();
+    let err = hq::findings::accept(
+        &world.project,
+        "m1",
+        hq::findings::Lift::Verdict,
+        "   \n\t ",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, hq::findings::FindingsError::NoReason),
+        "{err}"
+    );
+    assert!(matches!(world.state().flow.stage(), Stage::Findings { .. }));
+}
+
+/// Iterating is a gesture, not a default: a `verify` that sent the mission
+/// back by itself would spend a volet the human might have wanted to spend on
+/// an acceptance instead.
+#[test]
+fn iterating_sends_the_mission_back_to_the_coder_as_a_volet() {
+    let world = with_security_agent(1);
+    world.at_findings();
+
+    // Running `verify` again changes nothing: it stops at the same place.
+    let again = world.verify().unwrap();
+    assert!(
+        matches!(again.last(), Some(Step::Findings { .. })),
+        "{again:?}"
+    );
+
+    let state = hq::findings::iterate(&world.project, "m1").unwrap();
+    assert!(
+        matches!(
+            state.flow.stage(),
+            Stage::Coding {
+                work: Work::Volet { .. },
+                ..
+            }
+        ),
+        "{:?}",
+        state.flow.stage()
+    );
+}
+
+/// Neither verb applies anywhere but on a security verdict, and says where
+/// the mission actually is rather than failing obscurely.
+#[test]
+fn neither_verb_applies_before_there_is_a_verdict_to_lift() {
+    let world = with_security_agent(1);
+    for err in [
+        hq::findings::accept(&world.project, "m1", hq::findings::Lift::Verdict, "why").unwrap_err(),
+        hq::findings::iterate(&world.project, "m1").unwrap_err(),
+    ] {
+        assert!(
+            matches!(err, hq::findings::FindingsError::NotOnFindings { .. }),
+            "{err}"
+        );
+        assert!(err.to_string().contains("Coding"), "{err}");
+    }
 }
