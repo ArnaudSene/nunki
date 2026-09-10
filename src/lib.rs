@@ -21,6 +21,7 @@ pub mod human;
 pub mod image;
 pub mod init;
 pub mod launch;
+pub mod logs;
 pub mod mission;
 pub mod mutants;
 pub mod perimeter;

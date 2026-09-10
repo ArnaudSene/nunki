@@ -96,6 +96,18 @@ enum Command {
         #[arg(trailing_var_arg = true, required = true)]
         argv: Vec<String>,
     },
+    /// Render the runs of a mission, readably.
+    ///
+    /// What replaces watching a screen: an agent nobody can look at is
+    /// acceptable because its output is readable afterwards.
+    Logs {
+        /// The mission. Defaults to the one this HQ touched last.
+        mission: Option<String>,
+        /// Only the last run.
+        #[arg(long)]
+        last: bool,
+    },
+
     /// Say whether the project holds what the specification describes.
     ///
     /// Red when a restriction is not held; and it always says what it could
@@ -201,6 +213,19 @@ enum MissionCommand {
     /// End the run in progress properly: the agent finishes its turn and
     /// writes its resume block.
     Stop { id: String },
+    /// Follow the run in progress until it ends.
+    ///
+    /// Two states, and a third a human causes: it runs, it is paused, it is
+    /// finished. Nothing is asked of the agent — this reads the container and
+    /// the run's own stream, like everything else `hq` knows about a run.
+    Watch {
+        /// The mission.
+        id: String,
+        /// Seconds between readings.
+        #[arg(long, default_value_t = 10)]
+        every: u64,
+    },
+
     /// Freeze the agent's container where it is.
     ///
     /// Nothing is lost: the processes are suspended by the engine. A model
@@ -521,6 +546,68 @@ fn main() -> ExitCode {
             mission(&project, *command)
         }
 
+        Command::Logs { mission, last } => {
+            let project = match open(&start) {
+                Some(p) => p,
+                None => return ExitCode::FAILURE,
+            };
+            let mission = match mission {
+                Some(id) => id,
+                None => match hq::logs::most_recent(&project) {
+                    Ok(Some(id)) => {
+                        // Said out loud: choosing for the reader without
+                        // telling them which is a guess dressed as a
+                        // convenience.
+                        println!("mission   {id} — the one this HQ touched last");
+                        id
+                    }
+                    Ok(None) => {
+                        eprintln!("hq: no mission has run yet; name one");
+                        return ExitCode::FAILURE;
+                    }
+                    Err(e) => {
+                        eprintln!("hq: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                },
+            };
+            let harness = harness_for(&project, "", None);
+            match hq::logs::of(&project, &mission, &harness) {
+                Ok(runs) => {
+                    let runs = if last {
+                        runs.into_iter().next_back().into_iter().collect()
+                    } else {
+                        runs
+                    };
+                    for run in runs {
+                        println!();
+                        println!("── run {} ({})", run.session, run.log.display());
+                        for line in run.lines {
+                            let mark = match line.kind {
+                                hq::harness::LineKind::Start => "start",
+                                hq::harness::LineKind::Said => "said ",
+                                hq::harness::LineKind::Did => "did  ",
+                                hq::harness::LineKind::Ended => "ended",
+                                hq::harness::LineKind::Unread => "?    ",
+                                hq::harness::LineKind::Noted => "…    ",
+                            };
+                            for (n, text) in line.text.lines().enumerate() {
+                                match n {
+                                    0 => println!("{mark} {text}"),
+                                    _ => println!("      {text}"),
+                                }
+                            }
+                        }
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("hq: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+
         Command::Push { mission, yes } => {
             let project = match open(&start) {
                 Some(p) => p,
@@ -753,6 +840,59 @@ fn probes(project: &Project, which: Option<&str>) -> Vec<check::Check> {
     }
 }
 
+/// Follow a run until it ends, printing only what changed.
+///
+/// Only what changed, because a line every ten seconds saying the same thing
+/// is a log nobody reads to the end — and the two facts worth seeing, the
+/// transitions, would be lost in it.
+fn watch(project: &Project, id: &str, every: u64) -> ExitCode {
+    let store = match hq::state::Store::open(&project.hq_root) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("hq: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut said = String::new();
+    loop {
+        let state = match store.load(id) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("hq: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let Some(handle) = &state.run else {
+            println!("run       none in progress");
+            return ExitCode::SUCCESS;
+        };
+        let now = match harness_for(project, &state.slot, Some(&handle.session.0)).state(handle) {
+            Ok(hq::harness::RunState::Running(p)) => format!(
+                "running — {} event(s), {} tool call(s)",
+                p.events, p.tool_calls
+            ),
+            Ok(hq::harness::RunState::Paused(p)) => format!(
+                "paused — {} event(s), {} tool call(s); `hq mission resume {id}` unfreezes it",
+                p.events, p.tool_calls
+            ),
+            Ok(hq::harness::RunState::Finished(outcome)) => {
+                println!("run       finished — {outcome:?}");
+                println!("          `hq logs {id} --last` renders it");
+                return ExitCode::SUCCESS;
+            }
+            // Not a reason to stop watching: a machine that slept comes
+            // back, and a `watch` that gave up on the first silence would
+            // give up exactly when the human left it running.
+            Err(e) => format!("unknown — {e}"),
+        };
+        if now != said {
+            println!("run       {now}");
+            said = now;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(every.max(1)));
+    }
+}
+
 /// `pause` and `resume` are one gesture in two directions, and printing them
 /// from one place keeps the two messages saying the same thing.
 fn freeze(project: &Project, id: &str, which: hq::gesture::Freeze) -> ExitCode {
@@ -905,6 +1045,8 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                 }
             }
         }
+
+        MissionCommand::Watch { id, every } => watch(project, &id, every),
 
         MissionCommand::Pause { id } => freeze(project, &id, hq::gesture::Freeze::On),
         MissionCommand::Resume { id } => freeze(project, &id, hq::gesture::Freeze::Off),

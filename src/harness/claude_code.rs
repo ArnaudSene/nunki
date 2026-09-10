@@ -279,6 +279,95 @@ impl Harness for ClaudeCode {
         }
     }
 
+    fn readable(&self, text: &str) -> Vec<crate::harness::Line> {
+        use crate::harness::{Line, LineKind};
+        let mut lines = Vec::new();
+        let mut noted = 0usize;
+        for raw in text.lines() {
+            let raw = raw.trim();
+            if raw.is_empty() {
+                continue;
+            }
+            let Ok(event) = serde_json::from_str::<Value>(raw) else {
+                // Kept, not dropped: a line hq cannot parse is usually the
+                // one worth reading — a stack trace, a message from the
+                // wrapper, a truncated write.
+                lines.push(Line {
+                    kind: LineKind::Unread,
+                    text: raw.to_string(),
+                });
+                continue;
+            };
+            match event.get("type").and_then(Value::as_str) {
+                // `init` says what the run was given. Every other `system`
+                // subtype is progress telemetry — thinking tokens, task
+                // notifications — and printing one line each buries the run
+                // in its own heartbeat. Measured on a real five-minute run:
+                // 33 of its 51 rendered lines were that, and each claimed
+                // "model ?" because only `init` carries the model.
+                Some("system") => match event.get("subtype").and_then(Value::as_str) {
+                    Some("init") => lines.push(Line {
+                        kind: LineKind::Start,
+                        text: format!(
+                            "init — model {}",
+                            event.get("model").and_then(Value::as_str).unwrap_or("?")
+                        ),
+                    }),
+                    _ => noted += 1,
+                },
+                Some("assistant") => {
+                    for block in event
+                        .pointer("/message/content")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default()
+                    {
+                        match block.get("type").and_then(Value::as_str) {
+                            Some("text") => {
+                                let said = block.get("text").and_then(Value::as_str).unwrap_or("");
+                                if !said.trim().is_empty() {
+                                    lines.push(Line {
+                                        kind: LineKind::Said,
+                                        text: said.trim().to_string(),
+                                    });
+                                }
+                            }
+                            Some("tool_use") => lines.push(Line {
+                                kind: LineKind::Did,
+                                text: format!(
+                                    "{} {}",
+                                    block.get("name").and_then(Value::as_str).unwrap_or("?"),
+                                    summarise(block.get("input"))
+                                ),
+                            }),
+                            _ => {}
+                        }
+                    }
+                }
+                Some("result") => lines.push(Line {
+                    kind: LineKind::Ended,
+                    text: format!("{:?}", classify_result(&event)),
+                }),
+                // A `user` event is a tool result coming back; it is the
+                // other half of a `Did`, and adding it doubles the log
+                // without adding a fact.
+                _ => {}
+            }
+        }
+        // Said once, at the end, so the reader knows what they are not being
+        // shown rather than having to wonder.
+        if noted > 0 {
+            lines.push(Line {
+                kind: LineKind::Noted,
+                text: format!(
+                    "{noted} further system event(s) not shown — progress, thinking, \
+                     task notifications"
+                ),
+            });
+        }
+        lines
+    }
+
     fn stop(&self, handle: &RunHandle) -> Result<(), HarnessError> {
         if handle.pid.is_none() {
             return Err(HarnessError::UnknownRun(handle.session.clone()));
@@ -358,6 +447,27 @@ pub fn parse_stream(text: &str) -> Parsed {
         }
     }
     parsed
+}
+
+/// A tool call's input, in one short line: the field a reader recognises the
+/// call by, and nothing else. A whole `input` object printed verbatim turns a
+/// readable log back into the JSON it was rendered from.
+fn summarise(input: Option<&Value>) -> String {
+    let Some(Value::Object(map)) = input else {
+        return String::new();
+    };
+    for key in ["file_path", "path", "command", "pattern", "prompt", "url"] {
+        if let Some(Value::String(value)) = map.get(key) {
+            let value = value.trim();
+            let short: String = value.chars().take(120).collect();
+            return if short.chars().count() < value.chars().count() {
+                format!("{short}…")
+            } else {
+                short
+            };
+        }
+    }
+    format!("({} field(s))", map.len())
 }
 
 /// A `result` event into an [`Outcome`]. An error whose text names the

@@ -62,6 +62,37 @@ pub struct RunRequest {
     pub runs_dir: PathBuf,
 }
 
+/// One line of a run, as a human reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Line {
+    /// What kind of thing happened, in one word, for a reader skimming.
+    pub kind: LineKind,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineKind {
+    /// The run starting, and what it was told.
+    Start,
+    /// The agent's own words.
+    Said,
+    /// A tool the agent used.
+    Did,
+    /// How the run ended.
+    Ended,
+    /// Something `hq` could not read. Kept, and marked, because a log
+    /// rendered by dropping what the reader did not expect hides the run
+    /// that went wrong.
+    Unread,
+    /// Something `hq` read and chose not to print, counted and said once.
+    ///
+    /// The distinction from [`Unread`](LineKind::Unread) is the whole point:
+    /// "I could not read this" and "I read this and it is not worth a line"
+    /// are different facts, and a renderer that says neither is a renderer
+    /// the reader cannot calibrate.
+    Noted,
+}
+
 /// A harness session identifier, chosen by `hq`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionId(pub String);
@@ -216,6 +247,15 @@ pub trait Harness: Send + Sync {
 
     /// Optional: guards this harness can add on top of the container and
     /// git ones. The default is none, and that is a complete answer.
+    /// Turn a run's own structured stream into lines a human reads.
+    ///
+    /// The shape of that stream is the harness's and nobody else's — which
+    /// is why `hq logs` asks for it here rather than parsing JSON of its own
+    /// (SPEC 4.3). A line the adapter does not recognise is **kept**, not
+    /// dropped: a log rendered by throwing away what the reader did not
+    /// expect is a log that hides exactly the run that went wrong.
+    fn readable(&self, text: &str) -> Vec<Line>;
+
     fn guards(&self, _role: Role) -> GuardSetup {
         GuardSetup::default()
     }
