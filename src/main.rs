@@ -976,18 +976,15 @@ fn watch(project: &Project, id: &str, every: u64) -> ExitCode {
 
 /// `pause` and `resume` are one gesture in two directions, and printing them
 /// from one place keeps the two messages saying the same thing.
-fn freeze(project: &Project, id: &str, which: hq::gesture::Freeze) -> ExitCode {
+fn pause(project: &Project, id: &str) -> ExitCode {
     let engine: std::sync::Arc<dyn hq::engine::Engine> =
         std::sync::Arc::new(hq::engine::docker::Docker::real());
-    match hq::gesture::freeze(project, id, engine, which) {
+    match hq::gesture::pause(project, id, engine) {
         Ok(_) => {
-            match which {
-                hq::gesture::Freeze::On => println!(
-                    "paused    the agent and its sidecar are frozen; \
-                     `hq mission resume {id}` unfreezes them exactly there"
-                ),
-                hq::gesture::Freeze::Off => println!("resumed   exactly where it was"),
-            }
+            println!(
+                "frozen    the agent and its firewall are suspended where they were\n\
+                 \x20         `hq mission resume {id}` unfreezes exactly there"
+            );
             ExitCode::SUCCESS
         }
         Err(e) => {
@@ -1181,7 +1178,7 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
 
         MissionCommand::Watch { id, every } => watch(project, &id, every),
 
-        MissionCommand::Pause { id } => freeze(project, &id, hq::gesture::Freeze::On),
+        MissionCommand::Pause { id } => pause(project, &id),
         MissionCommand::Resume { id } => {
             let engine: std::sync::Arc<dyn hq::engine::Engine> =
                 std::sync::Arc::new(hq::engine::docker::Docker::real());

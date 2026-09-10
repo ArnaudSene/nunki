@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use hq::engine::Engine;
 use hq::engine::fake::{Call, FakeEngine};
-use hq::gesture::{self, Freeze, GestureError};
+use hq::gesture::{self, GestureError};
 use hq::harness::{RunHandle, SessionId};
 use hq::mission::flow::Flow;
 use hq::mission::{Bounds, Header, Integration, Lot, Security};
@@ -103,17 +103,10 @@ fn engine() -> (Arc<dyn Engine>, Arc<FakeEngine>) {
 fn pausing_freezes_the_agent_and_its_sidecar_and_nothing_else() {
     let world = World::new(true);
     let (engine, fake) = engine();
-    gesture::freeze(&world.project, "m1", engine.clone(), Freeze::On).unwrap();
-    gesture::freeze(&world.project, "m1", engine, Freeze::Off).unwrap();
+    gesture::pause(&world.project, "m1", engine).unwrap();
 
     let services: Vec<String> = hq::run::SERVICES.iter().map(|s| s.to_string()).collect();
-    assert_eq!(
-        fake.calls(),
-        vec![
-            Call::Pause("hq-one".into(), services.clone()),
-            Call::Unpause("hq-one".into(), services),
-        ]
-    );
+    assert_eq!(fake.calls(), vec![Call::Pause("hq-one".into(), services)]);
 }
 
 /// The emergency brake is `kill` and not a stop with no patience: nothing is
@@ -135,7 +128,7 @@ fn killing_is_a_kill_and_leaves_the_projects_services_alone() {
 fn a_gesture_with_no_run_in_progress_is_named() {
     let world = World::new(false);
     let (engine, fake) = engine();
-    let err = gesture::freeze(&world.project, "m1", engine.clone(), Freeze::On).unwrap_err();
+    let err = gesture::pause(&world.project, "m1", engine.clone()).unwrap_err();
     assert!(matches!(err, GestureError::NoRun(_)), "{err}");
     let err = gesture::kill(&world.project, "m1", engine).unwrap_err();
     assert!(matches!(err, GestureError::NoRun(_)), "{err}");

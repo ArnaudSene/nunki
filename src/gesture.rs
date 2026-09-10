@@ -10,8 +10,10 @@
 //! | verb | what it does | what the agent sees |
 //! |---|---|---|
 //! | `pause` / `resume` | freezes the container where it is; `resume`
-//!   unfreezes it exactly there | nothing. A model call in flight may time
-//!   out during a long freeze, and the harness replays it |
+//!   unfreezes it exactly there — and `resume` unfreezes only what is
+//!   actually frozen, because the engine refuses to unpause a container that
+//!   is merely running | nothing. A model call in flight may time out during
+//!   a long freeze, and the harness replays it |
 //! | `kill` | the emergency brake: the container is killed, nothing is
 //!   waited for | nothing, it no longer exists |
 //!
@@ -54,29 +56,23 @@ pub enum GestureError {
     Followup(#[from] crate::followup::FollowupError),
 }
 
-/// Which way the freeze goes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Freeze {
-    On,
-    Off,
-}
-
-/// Freeze the agent's container, or unfreeze it exactly where it was.
+/// Freeze the agent's container where it is.
 ///
 /// The firewall goes with it. A frozen agent behind a live sidecar is a pair
 /// where one half can still answer and the other cannot — and the sidecar
 /// exists to fence the agent, so nothing is gained by leaving it running.
-pub fn freeze(
+///
+/// There is no `unfreeze` beside it: `resume` unfreezes, because unfreezing
+/// and lifting a hold are one gesture to the human, and because only one
+/// place should decide that a container is frozen before asking the engine
+/// to unfreeze it.
+pub fn pause(
     project: &Project,
     id: &str,
     engine: Arc<dyn Engine>,
-    which: Freeze,
 ) -> Result<MissionState, GestureError> {
     let (state, file, compose_project) = target(project, id)?;
-    match which {
-        Freeze::On => engine.pause(&file, &compose_project, &crate::run::SERVICES)?,
-        Freeze::Off => engine.unpause(&file, &compose_project, &crate::run::SERVICES)?,
-    }
+    engine.pause(&file, &compose_project, &crate::run::SERVICES)?;
     Ok(state)
 }
 
