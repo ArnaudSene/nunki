@@ -135,7 +135,11 @@ is worth**. Applied to our own work:
   library; prefer a few lines of our own over a crate we would not read.
 - In CI, **only GitHub's own actions** (`checkout`, `cache`). The toolchain
   ships with the runners. An action nobody reads is a dependency nobody
-  reviews.
+  reviews. Those are referenced by **major tag**, so a patch-level fix
+  arrives on its own; the digest a tag could hide protects against a threat
+  already inside GitHub's trust boundary, which is the runner's anyway. If a
+  third-party action ever earns its place, it is **pinned to a commit
+  digest** with the version in a comment — different owner, different rule.
 
 ## 8. What `hq` may never do
 

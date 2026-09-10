@@ -6,10 +6,16 @@
 # used: the toolchain ships with the runners, and an action nobody reads is a
 # dependency nobody reviews.
 #
-# Those two are pinned to a commit, with the version in the comment. A tag is
-# a moving pointer its owner can repoint; a commit is what was reviewed. The
-# cost is that upgrading is a deliberate edit — which is the point. Check for
-# newer ones with:
+# Major tags, not commit digests, and the reason is that these two are
+# GitHub's own. A digest would freeze the patch level, so a fix inside v7
+# would wait for someone to notice and edit; a major tag takes it the next
+# morning. The risk a digest buys off — an owner repointing a tag at other
+# code — sits inside a trust boundary we are already all the way inside:
+# these runners, this toolchain and the job's token are GitHub's too.
+#
+# That reasoning does not extend to anyone else's action. **A third-party
+# action is pinned to a commit digest**, with the version in a comment, or it
+# does not go in. Check the majors now and then:
 #
 #   gh api repos/actions/checkout/releases/latest --jq .tag_name
 #   gh api repos/actions/cache/releases/latest    --jq .tag_name
@@ -35,7 +41,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7
 
       - name: Show what the runner brought
         run: |
@@ -45,7 +51,7 @@ jobs:
           cargo clippy --version
           docker compose version || echo "no container engine here — engine tests will skip"
 
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -71,9 +77,9 @@ jobs:
     name: supply chain
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7
 
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/bin
