@@ -512,3 +512,203 @@ fn a_role_that_concludes_twice_leaves_one_answer_and_it_is_the_last() {
     push::push(&world.project, "m1", true).unwrap();
     assert_eq!(world.on_forge("mission/x").as_deref(), Some(head.as_str()));
 }
+
+// --- the pull request, opened on the forge (SPEC 4.2) -----------------------
+
+/// A server that answers each connection with the next canned response and
+/// hands back what it was sent — the real HTTP client, pointed at it.
+fn serve(responses: Vec<(u16, &'static str)>) -> (String, std::thread::JoinHandle<Vec<String>>) {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let handle = std::thread::spawn(move || {
+        let mut seen = Vec::new();
+        for (status, body) in responses {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let (mut request, mut length) = (String::new(), 0usize);
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = v.trim().parse().unwrap();
+                }
+                request.push_str(&line);
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+            }
+            let mut payload = vec![0; length];
+            reader.read_exact(&mut payload).unwrap();
+            request.push_str(&String::from_utf8_lossy(&payload));
+            seen.push(request);
+            let mut stream = stream;
+            write!(
+                stream,
+                "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        }
+        seen
+    });
+    (base, handle)
+}
+
+impl World {
+    /// The shape of a real project: `origin` reads as a GitHub repository, and
+    /// pushes go to the bare repository standing in for it — so `hq` works
+    /// out the forge from the remote exactly as it would, and the push is
+    /// still a real push.
+    fn on_github(&self) {
+        git(
+            &self.project.root,
+            &["remote", "set-url", "origin", "https://github.com/o/r.git"],
+        );
+        git(
+            &self.project.root,
+            &[
+                "remote",
+                "set-url",
+                "--push",
+                "origin",
+                &self.forge.display().to_string(),
+            ],
+        );
+    }
+
+    fn with_token(&self) {
+        std::fs::write(
+            self.project.hq_root.join(hq::forge::TOKEN_FILE),
+            "tok-human\n",
+        )
+        .unwrap();
+    }
+
+    fn pr_says(&self, text: &str) {
+        std::fs::write(self.project.hq_root.join("missions/m1/PR.md"), text).unwrap();
+    }
+
+    fn ready(&self) -> String {
+        let coder = self.commit("src.rs", "pub fn one() -> u8 { 2 }\n", "the lot");
+        let head = self.commit("compose.yaml", "services: {}\n", "wire it");
+        self.verified(&[
+            (Role::Coder, None, coder),
+            (Role::Integrator, Some(Verdict::Integrated), head.clone()),
+            (Role::Security, Some(Verdict::Clear), head.clone()),
+        ]);
+        head
+    }
+}
+
+/// The whole verb: pushed, then the pull request opened with the human's
+/// token and titled with what the mission wrote in `PR.md`.
+#[test]
+fn a_verified_mission_is_pushed_and_its_pull_request_opened() {
+    let world = World::new(with_wiring(), Security::Agent);
+    world.on_github();
+    world.with_token();
+    world.pr_says("# feat: one returns two\n\nBecause it had to.\n");
+    let head = world.ready();
+
+    let (api, server) = serve(vec![(
+        201,
+        r#"{"html_url":"https://github.com/o/r/pull/9"}"#,
+    )]);
+    let pushed = push::push_to(&world.project, "m1", true, &api).unwrap();
+
+    assert_eq!(world.on_forge("mission/x").as_deref(), Some(head.as_str()));
+    assert_eq!(
+        pushed.pull_request,
+        push::PullRequestState::Opened(hq::forge::Opened::Created(
+            "https://github.com/o/r/pull/9".into()
+        ))
+    );
+    let sent = &server.join().unwrap()[0];
+    assert!(sent.starts_with("POST /repos/o/r/pulls "), "{sent}");
+    assert!(sent.contains("Bearer tok-human"), "{sent}");
+    // Read as JSON, not as a string: how the client lays the body out is
+    // its business, what it says is the test's.
+    let body: serde_json::Value = serde_json::from_str(sent.split("\r\n\r\n").nth(1).unwrap())
+        .unwrap_or_else(|e| panic!("{e}: {sent}"));
+    assert_eq!(body["title"], "feat: one returns two", "{sent}");
+    assert_eq!(body["body"], "Because it had to.", "{sent}");
+    assert_eq!(body["head"], "mission/x");
+    assert_eq!(body["base"], "dev");
+}
+
+/// No credential at the HQ: the push still happens — it is what `--yes`
+/// authorised — and the human is handed the exact address, and told where
+/// the credential would go.
+#[test]
+fn without_a_credential_the_push_happens_and_the_address_is_handed_over() {
+    let world = World::new(with_wiring(), Security::Agent);
+    world.on_github();
+    world.pr_says("# feat: one returns two\n");
+    let head = world.ready();
+
+    let pushed = push::push_to(&world.project, "m1", true, "http://127.0.0.1:9").unwrap();
+    assert_eq!(world.on_forge("mission/x").as_deref(), Some(head.as_str()));
+    match pushed.pull_request {
+        push::PullRequestState::ByHand { compare, why } => {
+            assert_eq!(
+                compare.as_deref(),
+                Some("https://github.com/o/r/compare/dev...mission/x?expand=1")
+            );
+            assert!(why.contains(hq::forge::TOKEN_FILE), "{why}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// The forge refusing the pull request does not undo the push, and must not
+/// read as if it had: a push reported red is retried, and the second push is
+/// a no-op that hides the first.
+#[test]
+fn a_forge_that_refuses_the_pull_request_leaves_the_push_standing() {
+    let world = World::new(with_wiring(), Security::Agent);
+    world.on_github();
+    world.with_token();
+    world.pr_says("# feat: one returns two\n");
+    let head = world.ready();
+
+    let (api, server) = serve(vec![(
+        403,
+        r#"{"message":"Resource not accessible by personal access token"}"#,
+    )]);
+    let pushed = push::push_to(&world.project, "m1", true, &api).unwrap();
+    server.join().unwrap();
+
+    assert_eq!(world.on_forge("mission/x").as_deref(), Some(head.as_str()));
+    match pushed.pull_request {
+        push::PullRequestState::ByHand { compare, why } => {
+            assert!(compare.is_some());
+            assert!(why.contains("403"), "{why}");
+            assert!(
+                why.contains("Resource not accessible"),
+                "the forge's own reason: {why}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A remote that is not on GitHub is said to be elsewhere. The forge is
+/// never asked — the server here would fail the test if it were.
+#[test]
+fn a_remote_elsewhere_is_named_and_no_forge_is_asked() {
+    let world = World::new(with_wiring(), Security::Agent);
+    world.with_token();
+    world.pr_says("# feat: one returns two\n");
+    world.ready();
+
+    let pushed = push::push_to(&world.project, "m1", true, "http://127.0.0.1:9").unwrap();
+    match pushed.pull_request {
+        push::PullRequestState::ByHand { compare, why } => {
+            assert_eq!(compare, None, "no GitHub address to work out");
+            assert!(why.contains("not on GitHub"), "{why}");
+        }
+        other => panic!("{other:?}"),
+    }
+}

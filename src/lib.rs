@@ -13,6 +13,7 @@ pub mod exec;
 pub mod findings;
 pub mod firewall;
 pub mod followup;
+pub mod forge;
 pub mod gate;
 pub mod gesture;
 pub mod git;

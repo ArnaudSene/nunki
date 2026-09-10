@@ -147,13 +147,41 @@ pub struct Pushed {
     pub branch: String,
     pub head: String,
     pub remote: String,
-    /// The pull request is opened by hand for now, and this is the address to
-    /// open it at when `hq` could work one out.
-    pub pull_request: Option<String>,
+    pub pull_request: PullRequestState,
 }
 
-/// Push a verified mission's branch, on an explicit human argument.
+/// Where the pull request stands once the branch is on the forge.
+///
+/// Not a `Result`: by the time it is decided the push has **already
+/// happened**, and it cannot be undone. A forge that refused the pull request
+/// is reported next to a push that succeeded, never in place of it — a
+/// `hq push` that exited red after pushing would be retried, and the second
+/// `git push` is a no-op that hides the first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PullRequestState {
+    Opened(crate::forge::Opened),
+    /// Left for the human to open, and why — with the exact address when
+    /// `hq` can work one out.
+    ByHand {
+        compare: Option<String>,
+        why: String,
+    },
+}
+
+/// Push a verified mission's branch, on an explicit human argument, and open
+/// its pull request on the forge's real API.
 pub fn push(project: &Project, id: &str, authorised: bool) -> Result<Pushed, PushError> {
+    push_to(project, id, authorised, &crate::forge::api())
+}
+
+/// [`push`], against a given forge API — how the tests point the real client
+/// at a server they control without touching the process environment.
+pub fn push_to(
+    project: &Project,
+    id: &str,
+    authorised: bool,
+    api: &str,
+) -> Result<Pushed, PushError> {
     if !authorised {
         return Err(PushError::NotAuthorised(id.to_string()));
     }
@@ -181,12 +209,63 @@ pub fn push(project: &Project, id: &str, authorised: bool) -> Result<Pushed, Pus
 
     state.updated_at = crate::state::now_rfc3339();
     store.save(&state)?;
+
+    // After the push, and under the same `--yes`: SPEC names one verb that
+    // pushes the branch and opens the pull request, on one argument.
+    let pr = crate::mission::dir::Paths::of(&project.hq_root, id).pr;
+    let pull_request = open_pull_request(project, &remote, &header, &fetched.branch, &pr, api);
     Ok(Pushed {
         branch: fetched.branch.clone(),
         head,
-        remote: remote.clone(),
-        pull_request: pull_request_url(&remote, &header.base, &fetched.branch),
+        remote,
+        pull_request,
     })
+}
+
+/// Open the pull request if everything it needs is there, and say which
+/// piece is missing otherwise. Every branch but the last is a reason the
+/// forge was never asked; the last is the forge's own answer.
+fn open_pull_request(
+    project: &Project,
+    remote: &str,
+    header: &crate::mission::Header,
+    branch: &str,
+    pr_file: &std::path::Path,
+    api: &str,
+) -> PullRequestState {
+    let compare = pull_request_url(remote, &header.base, branch);
+    let by_hand = |why: String| PullRequestState::ByHand {
+        compare: compare.clone(),
+        why,
+    };
+
+    let Some(repo) = crate::forge::Repo::of_remote(remote) else {
+        return by_hand(format!(
+            "the remote is not on GitHub ({remote}), and GitHub is the only forge hq opens \
+             pull requests on"
+        ));
+    };
+    let Some(token) = crate::forge::token(&project.hq_root) else {
+        return by_hand(format!(
+            "no forge credential at {} — a GitHub token that can open pull requests on \
+             {}/{}, and hq opens it itself",
+            project.hq_root.join(crate::forge::TOKEN_FILE).display(),
+            repo.owner,
+            repo.name
+        ));
+    };
+    let text = std::fs::read_to_string(pr_file).unwrap_or_default();
+    let Some(request) = crate::forge::PullRequest::from_markdown(&text, branch, &header.base)
+    else {
+        return by_hand(format!(
+            "{} says nothing a pull request could be titled with",
+            pr_file.display()
+        ));
+    };
+    match crate::forge::open(api, &token, &repo, &request) {
+        Ok(opened) => PullRequestState::Opened(opened),
+        Err(e) => by_hand(e.to_string()),
+    }
 }
 
 /// Every precondition of SPEC 4.4, in the order a human would ask them.
@@ -323,11 +402,9 @@ fn remote_url(project: &Project) -> Result<String, PushError> {
 /// The address a human opens the pull request at, worked out from the
 /// remote's own URL.
 ///
-/// `hq` does not talk to the forge yet: SPEC 4.2 says that without a
-/// credential it pushes and says the pull request is to be opened by hand,
-/// and that is the path taken here, deliberately and for every project. A
-/// URL nobody has to assemble is the difference between "opened by hand" and
-/// "left to figure out".
+/// Used whenever `hq` does not open it itself — no credential, a remote that
+/// is not on GitHub, a forge that refused. A URL nobody has to assemble is
+/// the difference between "opened by hand" and "left to figure out".
 pub fn pull_request_url(remote: &str, base: &str, branch: &str) -> Option<String> {
     let path = remote
         .trim_end_matches(".git")
