@@ -943,6 +943,18 @@ fn watch(project: &Project, id: &str, every: u64) -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
+        // SPEC 4.5 gives `watch` two states plus a third the human
+        // provokes. A hold is a second one they provoke, and it is the one
+        // that decides whether anything follows — reported before the run,
+        // because "no run in progress" on a held mission reads as "it is
+        // between two runs" when it means "nothing is coming".
+        if let Some(hold) = &state.stopped {
+            println!(
+                "held      by {} on {} — hq will launch no further run",
+                hold.who, hold.date
+            );
+            println!("          `hq mission resume {id}` lifts it");
+        }
         let Some(handle) = &state.run else {
             println!("run       none in progress");
             return ExitCode::SUCCESS;
@@ -1576,6 +1588,16 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             match hq::state::Store::open(&project.hq_root).and_then(|s| s.load(&id)) {
                 Ok(state) => {
                     println!("stage     {:?} in slot {}", state.flow.stage(), state.slot);
+                    // A hold changes what `hq` will do next, and nothing
+                    // else in this report says so: a mission held between
+                    // two runs reads exactly like one nobody touched.
+                    if let Some(hold) = &state.stopped {
+                        println!(
+                            "held      by {} on {} — hq will launch no further run",
+                            hold.who, hold.date
+                        );
+                        println!("          `hq mission resume {id}` lifts it");
+                    }
                     if let Some(handle) = &state.run {
                         println!("session   {}", handle.session.0);
                         // Read from the run itself, not from what was
