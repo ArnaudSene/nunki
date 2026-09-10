@@ -17,5 +17,7 @@ pub mod mission;
 pub mod perimeter;
 pub mod probe;
 pub mod project;
+pub mod role;
+pub mod run;
 pub mod slot;
 pub mod state;

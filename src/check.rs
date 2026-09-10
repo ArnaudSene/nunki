@@ -95,6 +95,7 @@ pub fn run(project: &Project) -> Report {
     hq_exists(project, &mut report);
     known_harness(project, &mut report);
     rules_are_reachable(project, &mut report);
+    harness_can_authenticate(project, &mut report);
     credentials_outside_the_tree(project, &mut report);
     coder_perimeter(project, &mut report);
     report
@@ -263,6 +264,34 @@ fn rules_are_reachable(project: &Project, report: &mut Report) {
         }
     };
     report.add("the rules of the place reach the harness", verdict);
+}
+
+/// An agent authenticates with the subscription's long-lived token, never an
+/// API key (SPEC 4.3). It reaches the container as an environment variable at
+/// launch and is never written into a slot — so what `check` verifies is that
+/// `hq` has one to pass, and that it is not sitting in the tree.
+fn harness_can_authenticate(project: &Project, report: &mut Report) {
+    let file = crate::run::token_file(project);
+    let verdict = if std::env::var("CLAUDE_CODE_OAUTH_TOKEN").is_ok_and(|t| !t.trim().is_empty()) {
+        Verdict::Green("a token is in this shell's environment".to_string())
+    } else if file.is_file() {
+        if file.starts_with(&project.root) {
+            Verdict::Red(format!(
+                "{} is inside the repository — a token in the tree is a token in \
+                 every slot and every container",
+                file.display()
+            ))
+        } else {
+            Verdict::Green(file.display().to_string())
+        }
+    } else {
+        Verdict::NotChecked(format!(
+            "no token: `claude setup-token` once, then write it to {} — \
+             `hq mission start` refuses without it",
+            file.display()
+        ))
+    };
+    report.add("the harness can authenticate in a container", verdict);
 }
 
 fn credentials_outside_the_tree(project: &Project, report: &mut Report) {
