@@ -54,6 +54,13 @@ enum Command {
     /// Say who hq thinks you are, and where it got that from.
     Whoami,
 
+    /// Play the verification phase of a mission: the gates, then the
+    /// integration and security missions, each with theirs (SPEC 4.2).
+    /// Resumable — running it again picks up where it stopped.
+    Verify {
+        /// The mission to verify.
+        mission: String,
+    },
     /// Run a command in a slot's container — how the HQ replays a proof
     /// without having the stack on this machine (SPEC 4.2).
     Exec {
@@ -418,6 +425,54 @@ fn main() -> ExitCode {
                 None => return ExitCode::FAILURE,
             };
             mission(&project, command)
+        }
+
+        Command::Verify { mission } => {
+            let project = match open(&start) {
+                Some(p) => p,
+                None => return ExitCode::FAILURE,
+            };
+            let engine: std::sync::Arc<dyn hq::engine::Engine> =
+                std::sync::Arc::new(hq::engine::docker::Docker::real());
+            match hq::verify::verify(&project, &mission, engine) {
+                Ok(steps) => {
+                    let mut owed = false;
+                    for step in &steps {
+                        match step {
+                            hq::verify::Step::Gates { role, report } => {
+                                println!("gates     {role:?}, on {}", &report.head[..12]);
+                                print_gates(report);
+                            }
+                            hq::verify::Step::Moved { to } => println!("stage     {to:?}"),
+                            hq::verify::Step::NeedsRun { role, why } => {
+                                owed = true;
+                                println!("owed      a {role:?} run — {why}");
+                            }
+                            hq::verify::Step::Verified => println!(
+                                "VERIFIED  every declared stage is green; read it, then \
+                                 `hq push {mission}`"
+                            ),
+                            hq::verify::Step::AwaitingHuman(handover) => {
+                                owed = true;
+                                println!("stopped   {handover:?}");
+                            }
+                            hq::verify::Step::Findings { report } => {
+                                owed = true;
+                                println!("findings  {report}");
+                            }
+                        }
+                    }
+                    if owed {
+                        ExitCode::FAILURE
+                    } else {
+                        ExitCode::SUCCESS
+                    }
+                }
+                Err(e) => {
+                    eprintln!("hq: {e}");
+                    ExitCode::FAILURE
+                }
+            }
         }
 
         Command::Exec { slot, tree, argv } => {
@@ -801,21 +856,25 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             slot,
         } => {
             let role: hq::harness::Role = role.into();
-            // The frozen header, not the file: the perimeter a run is judged
-            // against is the one it was launched with (SPEC 4.1).
-            let header = match hq::mission::dir::read_header(&project.hq_root, &id) {
-                Ok(h) => h,
-                Err(e) => {
-                    eprintln!("hq: {e}");
-                    return ExitCode::FAILURE;
-                }
+            let started = hq::state::Store::open(&project.hq_root)
+                .and_then(|s| s.load(&id))
+                .ok();
+            // The frozen header once a mission has started, and the file only
+            // before that: `hq` never re-reads the header during a mission
+            // (SPEC 4.1). A perimeter a run is judged against must be the one
+            // it was launched with, or an agent could widen it between two
+            // gates.
+            let header = match &started {
+                Some(state) => state.flow.header().clone(),
+                None => match hq::mission::dir::read_header(&project.hq_root, &id) {
+                    Ok(h) => h,
+                    Err(e) => {
+                        eprintln!("hq: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                },
             };
-            let in_slot = match slot.or_else(|| {
-                hq::state::Store::open(&project.hq_root)
-                    .and_then(|s| s.load(&id))
-                    .ok()
-                    .map(|s| s.slot)
-            }) {
+            let in_slot = match slot.or_else(|| started.as_ref().map(|s| s.slot.clone())) {
                 Some(s) => s,
                 None => {
                     eprintln!(
@@ -875,27 +934,7 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             println!("mission   {id}");
             println!("role      {:?}", report.role);
             println!("head      {}", report.head);
-            for outcome in &report.outcomes {
-                let (mark, detail) = match &outcome.decision {
-                    hq::gate::Decision::Passed => ("pass", String::new()),
-                    hq::gate::Decision::Failed(why) => ("FAIL", format!(" — {why}")),
-                    // Said, never folded into a pass: a skipped gate
-                    // reported as green is how a report stops being worth
-                    // reading (SPEC 4.4, the per-role table).
-                    hq::gate::Decision::NotApplicable(why) => ("n/a ", format!(" — {why}")),
-                    // Neither green nor red: nobody managed to play it.
-                    hq::gate::Decision::Unplayed(why) => ("????", format!(" — {why}")),
-                };
-                println!(
-                    "gate {}    {mark}  {}{detail}",
-                    outcome.gate.number(),
-                    outcome.gate.title()
-                );
-                // What a green gate still owes the reader.
-                if let Some(note) = &outcome.note {
-                    println!("          note  {note}");
-                }
-            }
+            print_gates(&report);
             match report.failure() {
                 Some(_) => ExitCode::FAILURE,
                 None => ExitCode::SUCCESS,
@@ -1036,6 +1075,32 @@ fn parse_service(spec: &str) -> Result<Service, String> {
         name: name.trim().to_string(),
         reach,
     })
+}
+
+/// One line per gate, the same wherever gates are reported — `hq mission
+/// gates` and `hq verify` must not describe the same report differently.
+fn print_gates(report: &hq::gate::Report) {
+    for outcome in &report.outcomes {
+        let (mark, detail) = match &outcome.decision {
+            hq::gate::Decision::Passed => ("pass", String::new()),
+            hq::gate::Decision::Failed(why) => ("FAIL", format!(" — {why}")),
+            // Said, never folded into a pass: a skipped gate reported as
+            // green is how a report stops being worth reading (SPEC 4.4,
+            // the per-role table).
+            hq::gate::Decision::NotApplicable(why) => ("n/a ", format!(" — {why}")),
+            // Neither green nor red: nobody managed to play it.
+            hq::gate::Decision::Unplayed(why) => ("????", format!(" — {why}")),
+        };
+        println!(
+            "gate {}    {mark}  {}{detail}",
+            outcome.gate.number(),
+            outcome.gate.title()
+        );
+        // What a green gate still owes the reader.
+        if let Some(note) = &outcome.note {
+            println!("          note  {note}");
+        }
+    }
 }
 
 /// The harness as it must be addressed for a run that lives in a slot's
