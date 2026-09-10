@@ -401,14 +401,29 @@ fn live_a_mission_starts_and_its_run_is_read_back() {
 
     hq::init::init(&root, &hq_root, &["rust".to_string()]).unwrap();
     // A stand-in for the harness: it prints a result event and exits.
+    //
+    // It ends on `USER agent`, as every stack image must (SPEC 4.2 bis): the
+    // agent runs under the human's own id, and hq's harness layer is built
+    // on top of whatever user the stack image leaves. A fixture that ended
+    // as root ran this whole live test as root, and proved a shape no stack
+    // image is allowed to have — caught by the check added the same day.
+    let (uid, gid) = hq::image::host_ids();
     std::fs::write(
         root.join(".hq/stacks/rust/Dockerfile"),
-        "FROM alpine:3.22\n\
-         RUN mkdir -p /work/tree /work/mission /run/hq\n\
-         RUN printf '#!/bin/sh\\necho \\x27{\"type\":\"system\",\"subtype\":\"init\"}\\x27\\n\
-         echo \\x27{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\
-         \"usage\":{\"input_tokens\":11,\"output_tokens\":7}}\\x27\\n' > /usr/local/bin/claude \\\n\
-         && chmod 0755 /usr/local/bin/claude\n",
+        format!(
+            "FROM alpine:3.22\n\
+             RUN addgroup -g {gid} agent 2>/dev/null || true\n\
+             RUN adduser -D -u {uid} -G $(getent group {gid} | cut -d: -f1) agent \
+             2>/dev/null || true\n\
+             RUN mkdir -p /work/tree /work/mission /run/hq \\\n\
+              && chown -R {uid}:{gid} /work /run/hq\n\
+             RUN printf '#!/bin/sh\\necho \\x27{{\"type\":\"system\",\"subtype\":\"init\"}}\\x27\\n\
+             echo \\x27{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\
+             \"usage\":{{\"input_tokens\":11,\"output_tokens\":7}}}}\\x27\\n' \
+             > /usr/local/bin/claude \\\n\
+              && chmod 0755 /usr/local/bin/claude\n\
+             USER {uid}:{gid}\n"
+        ),
     )
     .unwrap();
     git(&root, &["add", "."]);
