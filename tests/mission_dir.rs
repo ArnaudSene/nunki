@@ -19,6 +19,7 @@ fn header() -> Header {
             },
         ],
         integration: Integration::Services {
+            wiring: Vec::new(),
             services: vec![Service {
                 name: "db".to_string(),
                 reach: vec!["db".to_string(), "10.4.0.7".to_string()],

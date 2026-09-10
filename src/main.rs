@@ -114,6 +114,13 @@ enum MissionCommand {
         /// Declaring one makes this an integration mission.
         #[arg(long = "service", value_name = "NAME=REACH")]
         services: Vec<String>,
+        /// A path the integrator's commits may touch — configuration,
+        /// system tests, fixtures, migrations. Repeatable, globs allowed.
+        /// This list **is** "wiring" as SPEC 4.4 defines it: every commit
+        /// outside it is out of perimeter, so an integration mission that
+        /// declares none lets its integrator commit nothing.
+        #[arg(long = "wiring", value_name = "PATH")]
+        wiring: Vec<String>,
         /// Why there is no integration mission. Required when no service is
         /// declared: a shape is stated, never inferred from silence.
         #[arg(long, default_value = "no external service is involved")]
@@ -147,6 +154,36 @@ enum MissionCommand {
     /// End the run in progress properly: the agent finishes its turn and
     /// writes its resume block.
     Stop { id: String },
+    /// Play the verification gates 1 to 4 on what the slot holds (SPEC 4.4).
+    /// Deterministic, and nothing is asked of the agent.
+    Gates {
+        id: String,
+        /// Whose gates. Each role has the gates that match what it produces.
+        #[arg(long, default_value = "coder")]
+        role: RoleArg,
+        /// Which slot to judge. Defaults to the one the mission started in;
+        /// naming one lets a human play the gates before a run exists.
+        #[arg(long)]
+        slot: Option<String>,
+    },
+}
+
+/// The three roles, as a command-line word.
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum RoleArg {
+    Coder,
+    Integrator,
+    Security,
+}
+
+impl From<RoleArg> for hq::harness::Role {
+    fn from(role: RoleArg) -> Self {
+        match role {
+            RoleArg::Coder => hq::harness::Role::Coder,
+            RoleArg::Integrator => hq::harness::Role::Integrator,
+            RoleArg::Security => hq::harness::Role::Security,
+        }
+    }
 }
 
 fn main() -> ExitCode {
@@ -443,6 +480,7 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             base,
             lots,
             services,
+            wiring,
             no_integration,
             security_agent,
             account,
@@ -473,7 +511,7 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                     .map(|s| parse_service(s))
                     .collect::<Result<Vec<_>, _>>()
                 {
-                    Ok(services) => Integration::Services { services },
+                    Ok(services) => Integration::Services { services, wiring },
                     Err(e) => {
                         eprintln!("hq: {e}");
                         return ExitCode::FAILURE;
@@ -562,6 +600,78 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             }
         }
 
+        MissionCommand::Gates { id, role, slot } => {
+            let role: hq::harness::Role = role.into();
+            // The frozen header, not the file: the perimeter a run is judged
+            // against is the one it was launched with (SPEC 4.1).
+            let header = match hq::mission::dir::read_header(&project.hq_root, &id) {
+                Ok(h) => h,
+                Err(e) => {
+                    eprintln!("hq: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let in_slot = match slot.or_else(|| {
+                hq::state::Store::open(&project.hq_root)
+                    .and_then(|s| s.load(&id))
+                    .ok()
+                    .map(|s| s.slot)
+            }) {
+                Some(s) => s,
+                None => {
+                    eprintln!(
+                        "hq: mission {id} has not started, so there is no slot to judge — \
+                         name one with --slot"
+                    );
+                    return ExitCode::FAILURE;
+                }
+            };
+            let slot = match hq::slot::find(project, &in_slot) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("hq: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let paths = hq::mission::dir::Paths::of(&project.hq_root, &id);
+            let report = match hq::gate::run(&hq::gate::Subject {
+                role,
+                tree: &slot.tree,
+                journal: &paths.journal,
+                header: &header,
+                protected_branches: &project.config.protected_branches,
+                protected_paths: &project.config.protected_paths,
+            }) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("hq: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            println!("mission   {id}");
+            println!("role      {:?}", report.role);
+            println!("head      {}", report.head);
+            for outcome in &report.outcomes {
+                let (mark, detail) = match &outcome.decision {
+                    hq::gate::Decision::Passed => ("pass", String::new()),
+                    hq::gate::Decision::Failed(why) => ("FAIL", format!(" — {why}")),
+                    // Said, never folded into a pass: a skipped gate
+                    // reported as green is how a report stops being worth
+                    // reading (SPEC 4.4, the per-role table).
+                    hq::gate::Decision::NotApplicable(why) => ("n/a ", format!(" — {why}")),
+                };
+                println!(
+                    "gate {}    {mark}  {}{detail}",
+                    outcome.gate.number(),
+                    outcome.gate.title()
+                );
+            }
+            match report.failure() {
+                Some(_) => ExitCode::FAILURE,
+                None => ExitCode::SUCCESS,
+            }
+        }
+
         MissionCommand::Stop { id } => {
             let store = match hq::state::Store::open(&project.hq_root) {
                 Ok(s) => s,
@@ -611,9 +721,14 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             }
             match &header.integration {
                 Integration::None { reason } => println!("services  none — {reason}"),
-                Integration::Services { services } => {
+                Integration::Services { services, wiring } => {
                     for s in services {
                         println!("service   {} → {}", s.name, s.reach.join(", "));
+                    }
+                    if wiring.is_empty() {
+                        println!("wiring    none declared — the integrator may commit nothing");
+                    } else {
+                        println!("wiring    {}", wiring.join(", "));
                     }
                 }
             }
