@@ -1,6 +1,7 @@
 //! Missions: the structured header (SPEC 4.1), verdicts (SPEC 4.4) and the
 //! flow (SPEC 4.5).
 
+pub mod dir;
 pub mod flow;
 
 use serde::{Deserialize, Serialize};
