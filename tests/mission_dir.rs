@@ -23,6 +23,7 @@ fn header() -> Header {
             services: vec![Service {
                 name: "db".to_string(),
                 reach: vec!["db".to_string(), "10.4.0.7".to_string()],
+                shared: false,
             }],
         },
         security: Security::Agent,

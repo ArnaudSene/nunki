@@ -793,6 +793,17 @@ fn main() -> ExitCode {
                                      `hq verify {mission}` after that relaunches it"
                                 );
                             }
+                            hq::verify::Step::Busy { role, provider, by } => {
+                                owed = true;
+                                println!(
+                                    "busy      a {role:?} run is owed; provider {provider} is \
+                                     held by {by}"
+                                );
+                                println!(
+                                    "          hq launches none until it is free; the \
+                                     mission's monitor looks again every minute"
+                                );
+                            }
                             hq::verify::Step::Launched { role, application } => {
                                 owed = true;
                                 println!("launched  a {role:?} run — {application}");
@@ -1768,9 +1779,12 @@ fn parse_service(spec: &str) -> Result<Service, String> {
             "a service needs a name and something to reach, and {spec:?} lacks one"
         ));
     }
+    // A real provider is said in the header, `shared: true`, before it is
+    // validated: the flag is the human's to set, never a default.
     Ok(Service {
         name: name.trim().to_string(),
         reach,
+        shared: false,
     })
 }
 

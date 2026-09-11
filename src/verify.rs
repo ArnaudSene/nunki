@@ -88,6 +88,14 @@ pub enum Step {
         failures: u32,
         last: String,
     },
+    /// A real provider this role shares is held by another mission's
+    /// integration run (SPEC 7): nothing is launched until it is free — a
+    /// wait, not a hold, and the mission's monitor looks again.
+    Busy {
+        role: Role,
+        provider: String,
+        by: String,
+    },
     /// The security agent came back with findings: `hq mission iterate` sends
     /// them back to the coder, `hq mission accept` lifts them.
     Findings {
@@ -127,6 +135,8 @@ pub enum VerifyError {
     Usage(String),
     #[error(transparent)]
     Gesture(#[from] crate::gesture::GestureError),
+    #[error(transparent)]
+    Provider(#[from] crate::provider::ProviderError),
     #[error(
         "mission {mission}'s run was told to end its turn: account {account}'s \
          {window} is at {percent}% — hq launches nothing before {until}, then goes on; \
@@ -474,6 +484,21 @@ pub fn verify_as(
                     steps.push(step);
                     return Ok(steps);
                 }
+                // A real provider another mission's integration run holds is
+                // waited for, not shared (SPEC 7). The guards are held until
+                // the run is recorded; from then on, that record is the lock.
+                let _providers =
+                    match crate::provider::claim(&store, &project.hq_root, id, &header, verb)? {
+                        crate::provider::Claim::Free(guards) => guards,
+                        crate::provider::Claim::Busy { provider, by } => {
+                            steps.push(Step::Busy {
+                                role: Role::Integrator,
+                                provider,
+                                by,
+                            });
+                            return Ok(steps);
+                        }
+                    };
                 let launched = crate::run::launch(&crate::run::Launching {
                     project,
                     slot: &slot,

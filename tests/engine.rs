@@ -437,6 +437,7 @@ fn write_profile(dir: &Path, slot: &str, role: hq::harness::Role, name: &str) ->
         _ => vec![hq::mission::Service {
             name: "db".to_string(),
             reach: vec!["db".to_string()],
+            shared: false,
         }],
     };
     let perimeter = compute(

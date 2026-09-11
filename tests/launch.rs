@@ -374,6 +374,7 @@ fn live_the_services_survive_a_switch_and_the_application_starts_in_the_profile(
             _ => vec![hq::mission::Service {
                 name: "db".to_string(),
                 reach: vec!["db".to_string()],
+                shared: false,
             }],
         };
         let perimeter = compute(

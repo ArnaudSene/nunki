@@ -726,6 +726,7 @@ fn with_services() -> hq::mission::Integration {
         services: vec![hq::mission::Service {
             name: "db".to_string(),
             reach: vec!["db".to_string(), "10.4.0.7".to_string()],
+            shared: false,
         }],
         wiring: vec!["compose.yaml".to_string()],
     }

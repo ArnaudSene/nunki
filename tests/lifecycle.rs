@@ -132,6 +132,7 @@ fn reframing_says_what_would_change_and_freezes_nothing_until_told() {
         services: vec![Service {
             name: "db".into(),
             reach: vec!["db".into()],
+            shared: false,
         }],
         wiring: vec!["compose.yaml".into()],
     };

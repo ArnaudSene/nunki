@@ -53,6 +53,7 @@ fn with_wiring() -> Integration {
         services: vec![Service {
             name: "db".into(),
             reach: vec!["db".into()],
+            shared: false,
         }],
         wiring: vec!["compose.yaml".into(), "tests/system/**".into()],
     }
