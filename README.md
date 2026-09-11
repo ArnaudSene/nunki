@@ -14,6 +14,118 @@ interchangeable executor behind an adapter).
 French). [`AGENTS.md`](AGENTS.md) holds the rules for anyone working in this
 repository.
 
+## Install
+
+What you need:
+
+- **Rust 1.85 or later**, to build `hq` — `rustup` gives you one.
+- **git**.
+- **A container engine** with Compose: Docker, or OrbStack. Every agent runs
+  in a container behind a firewall sidecar; nothing runs on your machine.
+- **A Claude subscription**, and the Claude Code CLI **once on your machine**,
+  to mint a long-lived token. The agents' own CLI lives in their image, not
+  here.
+
+Build and install the binary:
+
+```sh
+git clone https://github.com/ArnaudSene/nunki
+cd nunki
+cargo install --path .       # puts `hq` in ~/.cargo/bin
+hq --version
+```
+
+Declare the subscription `hq` spends. The token is written under `~/.hq`,
+never in a repository, and reaches a container as an environment variable at
+launch:
+
+```sh
+mkdir -p ~/.hq/accounts
+claude setup-token > ~/.hq/accounts/main.token   # a browser gesture, once
+chmod 600 ~/.hq/accounts/main.token
+cat > ~/.hq/accounts.yaml <<'YAML'
+default: main
+accounts:
+  main:
+    harness: claude-code
+    token_file: accounts/main.token
+YAML
+hq account list
+```
+
+## Set a repository up
+
+From inside the repository you want orchestrated:
+
+```sh
+hq init --stack rust         # rust is the stack shipped today
+```
+
+It creates what is absent and never overwrites a file you edit — it says what
+it left alone. In the repository: `hq.yaml` (the project's configuration),
+`AGENTS.md` (the rules every agent reads), `CLAUDE.md` importing it, a
+`.gitattributes` entry, and `.hq/stacks/<stack>/` with the Dockerfile, the
+battery, the mutation campaign and the launch script. Outside it, your HQ at
+`~/.hq/<project>/`: journal, state, missions.
+
+Read `hq.yaml` before going further. Its `protected_branches`,
+`protected_paths` and `forge_protection` are what the perimeter gate enforces.
+Then commit what `hq init` wrote, build the images and clone a slot:
+
+```sh
+hq slot rebuild --stack rust # the agent's image and the firewall sidecar
+hq slot add one              # a clone at ../<project>-slots/one
+hq check                     # what is held, and what could not be checked
+```
+
+## A first mission
+
+```sh
+hq mission new m1 \
+  --branch mission/first \
+  --lot "L1:parse the header" \
+  --lot "L2:reject a malformed one" \
+  --about "What the mission is for, in your words."
+```
+
+That writes `~/.hq/<project>/missions/m1/MISSION.md`: a YAML header `hq`
+reads, and prose the agent reads. Edit the prose, then start it:
+
+```sh
+hq mission start m1 --slot one
+```
+
+The coder's first run is launched, detached, and a monitor is started for the
+mission. From then on `hq` drives: it reads each run back, plays the gates,
+launches the next lot, waits out a harness that fails, and stops a run that
+would pass your subscription's threshold.
+
+While it works:
+
+```sh
+hq mission status m1     # the stage, the run, what it has spent
+hq logs m1 --last        # the run, readably
+hq mission watch m1      # follow the run in progress
+hq verify m1             # read back and launch what is owed, by hand
+```
+
+If you need to intervene: `hq mission stop m1` holds the mission (`--now` ends
+the turn in progress too), `hq mission resume m1` lifts the hold,
+`hq mission say m1 "..."` leaves an instruction for the next run, and
+`hq mission kill m1` is the emergency brake.
+
+When the mission reads `VERIFIED`, the push is yours and yours alone:
+
+```sh
+hq mission fetch m1      # bring its commits into the repository to read them
+hq push m1 --yes         # push the branch, and open the pull request
+hq mission archive m1    # close it: the folder and state move under archive/
+```
+
+`hq push` opens the pull request when a GitHub token that may do so sits at
+`~/.hq/<project>/forge-token`. Without one it pushes the branch and hands
+you the URL.
+
 ## Vocabulary
 
 The mission is the parent of everything else. It moves through **stages**;
@@ -119,3 +231,49 @@ and launches whatever is owed; the monitor calls it for you. `hq mission
 status`, `logs` and `watch` show where it is; `pause`, `stop`, `resume`,
 `kill` and `say` act on a run. `hq push` carries a verified branch to the
 forge, on `--yes`.
+
+Two more are worth knowing. `hq exec` runs a command in a slot's container,
+which is how you replay a proof without having the stack on your machine.
+`hq mission gates` plays gates 1 to 4 on what a slot holds, asking the agent
+nothing.
+
+`hq --help`, and `hq <verb> --help`, say the rest — every verb carries its
+own reasons.
+
+## Uninstall
+
+`hq` keeps no manifest and installs no hook, so removing it is removing what
+you can see. Nothing below is done for you.
+
+Per project, from the repository:
+
+```sh
+hq mission archive <id>          # or `hq mission end <id> --because "..."`
+hq slot rm one                   # add --force to discard work it still holds
+rm -rf .hq hq.yaml AGENTS.md CLAUDE.md
+rm -rf ~/.hq/<project>       # journal, dashboard, state, missions
+```
+
+`hq slot rm` refuses while a slot holds commits the repository lacks:
+`hq mission fetch` brings them over first. `AGENTS.md` may be yours by now —
+read it before deleting it — and `hq init`'s `.gitattributes` entry is the
+last trace in the tree.
+
+Then the images and the volumes, which are named after the project and the
+slots:
+
+```sh
+docker image ls  --filter reference='hq/*'   # <project>-<stack>, firewall, prober
+docker volume ls --filter name=hq-           # a slot's caches and harness state
+```
+
+Remove what those two list. A slot's containers belong to a Compose project
+named `hq-<slot>`; `hq slot rm` takes them down with the slot, and
+`hq slot reset` clears the volumes while keeping the clone.
+
+Finally, the binary and the accounts, once no project uses them:
+
+```sh
+cargo uninstall hq
+rm -rf ~/.hq/accounts ~/.hq/accounts.yaml ~/.hq/usage
+```
