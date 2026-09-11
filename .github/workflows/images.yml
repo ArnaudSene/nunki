@@ -1,0 +1,113 @@
+# The images hq builds, scanned for known vulnerabilities (decided by the
+# owner on 2026-09-11). The scan of 2026-09-09 was a measure; this is the
+# watch that follows it over time.
+#
+# When: every Monday, because a CVE is published against an image nobody has
+# touched; and on a pull request that changes what the images are made of.
+# Not on every pull request: building a Rust toolchain image to review a
+# README buys nothing.
+#
+# What turns it red: a critical or high vulnerability that has a fix. The rest
+# is listed in the log and blocks nothing — a CVE with no fix is one nobody
+# can act on, and the agent's container has no capabilities and lives behind
+# the firewall (SPEC 3.2).
+#
+# Trivy is a third party's, so it comes as the release binary pinned by
+# version **and** by checksum, not as an action: an action is code that runs
+# with the job's token, and a checksum is something a reviewer can compare.
+# To move to a new release:
+#
+#   gh api repos/aquasecurity/trivy/releases/latest --jq .tag_name
+#   curl -fsSL https://github.com/aquasecurity/trivy/releases/download/v<version>/trivy_<version>_checksums.txt \
+#     | grep Linux-64bit.tar.gz
+name: Images
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "assets/**"
+      - "src/firewall.rs"
+      - "src/image.rs"
+      - "src/init.rs"
+      - ".github/workflows/images.yml"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  HQ_NO_MONITOR: "1"
+  TRIVY_VERSION: "0.74.0"
+  TRIVY_SHA256: "2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a"
+
+jobs:
+  scan:
+    name: image scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: images-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: images-cargo-
+
+      - name: Build hq
+        run: cargo build --locked
+
+      - name: Install Trivy, pinned by version and checksum
+        run: |
+          url="https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          curl -fsSLo "$RUNNER_TEMP/trivy.tgz" "$url"
+          echo "${TRIVY_SHA256}  $RUNNER_TEMP/trivy.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/trivy.tgz" -C "$RUNNER_TEMP" trivy
+          sudo install -m 0755 "$RUNNER_TEMP/trivy" /usr/local/bin/trivy
+          trivy --version
+
+      # Built the way a project gets them: `hq init`, then `hq slot rebuild`.
+      # The stack's Dockerfile is the one `hq init` writes, and the firewall
+      # and prober travel in the binary — so this scans what a user runs.
+      - name: Build the images, as a project would
+        run: |
+          # Without pipefail a pipeline's status is its last command's, so
+          # `tee` would hide a failed build, and a scan of no image is green.
+          set -o pipefail
+          hq="$GITHUB_WORKSPACE/target/debug/hq"
+          mkdir -p "$RUNNER_TEMP/demo"
+          cd "$RUNNER_TEMP/demo"
+          git init -q -b main
+          git -c user.name=ci -c user.email=ci@example.com commit -q --allow-empty -m first
+          "$hq" init --stack rust
+          git add -A
+          git -c user.name=ci -c user.email=ci@example.com commit -q -m "hq init"
+          "$hq" slot rebuild --stack rust | tee "$RUNNER_TEMP/images.txt"
+
+      - name: Scan
+        run: |
+          # Three images or the scan is not the scan: an empty list would
+          # loop zero times and pass.
+          mapfile -t images < <(awk '/^(agent|firewall|prober) /{print $2}' "$RUNNER_TEMP/images.txt")
+          if [ "${#images[@]}" -ne 3 ]; then
+            echo "::error::hq slot rebuild named ${#images[@]} image(s), and three are scanned"
+            exit 1
+          fi
+          fail=0
+          for image in "${images[@]}"; do
+            echo "::group::$image — critical and high, fixed or not, listed"
+            trivy image --no-progress --severity CRITICAL,HIGH "$image"
+            echo "::endgroup::"
+            if ! trivy image --no-progress --quiet --severity CRITICAL,HIGH \
+                --ignore-unfixed --exit-code 1 "$image"; then
+              echo "::error::$image carries a critical or high vulnerability that has a fix"
+              fail=1
+            fi
+          done
+          exit "$fail"

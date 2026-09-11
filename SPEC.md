@@ -811,8 +811,14 @@ que le sidecar détient `NET_ADMIN` et **son socket d'écoute est joignable
 depuis l'espace réseau que l'agent partage**. C'est le pire endroit du système
 pour accumuler des CVE, et le seul où l'on paie une étape de build pour les
 éviter. Ce que ça coûte : deux profils de vulnérabilités à suivre au lieu
-d'un, et rien ne les surveille encore dans le temps — un scan d'image en CI
-reste à trancher.
+d'un. **Ils sont surveillés dans le temps** (tranché par Arnaud le
+2026-09-11) : chaque lundi, et sur une pull request qui touche ce dont les
+images sont faites, la CI construit les trois images comme un projet les
+obtient (`hq init`, puis `hq slot rebuild`) et les passe à Trivy, épinglé
+par version et par somme de contrôle plutôt qu'en action tierce. Elle est
+rouge pour une vulnérabilité critique ou haute **qui a un correctif** ; les
+autres sont listées sans bloquer, puisque personne ne peut agir sur une
+CVE sans correctif.
 
 **Les fragments de stack.** Un dossier par stack sous `.hq/stacks/<nom>/`
 — rappel : `.hq/` appartient au projet orchestré, jamais à `hq` (4.1 bis) :
