@@ -328,7 +328,20 @@ RUN mkdir -p /home/agent/.cargo/registry /home/agent/.harness
 # Measured on 2026-09-10, cargo-mutants 27.1.0 on this image: 20 s and 115 MB
 # at build time, none at campaign time — which is the right way round, since
 # `hq slot rebuild` is rare and a campaign is not.
-RUN cargo install cargo-mutants --locked
+#
+# What stays of the build is the binary and the lockfile it was built from,
+# kept where an image scanner finds it. The registry is emptied: it held the
+# sources of every dependency — 117 MB, each with its own development
+# lockfile, which describes nothing installed here and which Trivy read as a
+# vulnerable `regex` (measured 2026-09-11). The kept lockfile is named
+# `Cargo.lock`, in a folder of its own: a scanner recognises it by that name
+# and no other. The registry directory stays, empty, as the mount point of the
+# slot's cargo cache.
+RUN cargo install cargo-mutants --locked \
+ && mkdir -p /home/agent/.cargo/installed/cargo-mutants \
+ && cp /home/agent/.cargo/registry/src/*/cargo-mutants-*/Cargo.lock \
+       /home/agent/.cargo/installed/cargo-mutants/Cargo.lock \
+ && rm -rf /home/agent/.cargo/registry/*
 "#;
 
 /// The mutation campaign a Rust project runs (SPEC 4.4, gate 7): declared by
