@@ -9,9 +9,9 @@
 //! revoked token.
 //!
 //! `hq verify` does not sleep — it launches and returns. The wait is a "not
-//! before" kept in the mission's state and honoured at the launch site by the
-//! next `verify`, so it survives a machine asleep, and in practice the
-//! shortest step lasts as long as whatever calls `verify` again.
+//! before" kept in the mission's state and honoured at the launch site, so it
+//! survives a machine asleep; the mission's monitor ([`crate::monitor`]) is
+//! what calls `verify` again once it is over.
 //!
 //! Pure: every function takes the time it is asked about.
 

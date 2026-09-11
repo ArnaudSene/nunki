@@ -264,6 +264,14 @@ enum MissionCommand {
         id: String,
     },
 
+    /// Watch a mission's runs and drive it on between them. Started by `hq`,
+    /// detached, and never typed (SPEC 4.3).
+    #[command(hide = true)]
+    Monitor {
+        /// The mission.
+        id: String,
+    },
+
     /// Follow the run in progress until it ends.
     ///
     /// Two states, and a third a human causes: it runs, it is paused, it is
@@ -724,7 +732,7 @@ fn main() -> ExitCode {
             let engine: std::sync::Arc<dyn hq::engine::Engine> =
                 std::sync::Arc::new(hq::engine::docker::Docker::real());
             let engine_bin = std::env::var("HQ_ENGINE").unwrap_or_else(|_| "docker".into());
-            match hq::verify::verify(&project, &mission, engine, &engine_bin) {
+            let code = match hq::verify::verify(&project, &mission, engine, &engine_bin) {
                 Ok(steps) => {
                     let mut owed = false;
                     for step in &steps {
@@ -836,7 +844,9 @@ fn main() -> ExitCode {
                     eprintln!("hq: {e}");
                     ExitCode::FAILURE
                 }
-            }
+            };
+            start_monitor(&project, &mission);
+            code
         }
 
         Command::Exec { slot, tree, argv } => {
@@ -1016,8 +1026,8 @@ fn watch(project: &Project, id: &str, every: u64) -> ExitCode {
         let harness = harness_for(project, &state.slot, Some(&handle.session.0));
         // Measured at every tick while a run goes, so the account's file is
         // as fresh as the run's own stream — and acted on: past the account's
-        // threshold the run is told to end its turn. Only while `watch` runs;
-        // the guard that holds at night is `verify`'s, before every launch.
+        // threshold the run is told to end its turn. The mission's monitor
+        // does the same with no terminal; this is the one a human watches.
         let at = hq::state::now_secs();
         if let Err(e) = hq::consumption::note(
             project,
@@ -1027,7 +1037,7 @@ fn watch(project: &Project, id: &str, every: u64) -> ExitCode {
         ) {
             eprintln!("hq: {e}");
         }
-        match hq::gesture::spare(project, id, &harness, at) {
+        match hq::gesture::spare(project, id, &harness, at, "mission watch") {
             Ok(Some(spared)) if !told => {
                 println!(
                     "spared    account {}'s {} is at {}% — the run was told to end its turn",
@@ -1213,6 +1223,7 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                     }
                     println!();
                     println!("`hq mission status {id}` says where it is.");
+                    start_monitor(project, &id);
                     ExitCode::SUCCESS
                 }
                 Err(e) => {
@@ -1274,6 +1285,18 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             }
         },
 
+        MissionCommand::Monitor { id } => {
+            let engine_bin = std::env::var("HQ_ENGINE").unwrap_or_else(|_| "docker".into());
+            let engine: std::sync::Arc<dyn hq::engine::Engine> =
+                std::sync::Arc::new(hq::engine::docker::Docker::real());
+            let why = hq::monitor::run(project, &id, engine, &engine_bin);
+            println!(
+                "{}  monitor stops: {why}",
+                hq::state::rfc3339(hq::state::now_secs())
+            );
+            ExitCode::SUCCESS
+        }
+
         MissionCommand::Watch { id, every } => watch(project, &id, every),
 
         MissionCommand::Pause { id } => pause(project, &id),
@@ -1293,6 +1316,7 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                         None => println!("lifted    nothing was holding mission {id}"),
                     }
                     println!("          the container is unfrozen if it was frozen");
+                    start_monitor(project, &id);
                     ExitCode::SUCCESS
                 }
                 Err(e) => {
@@ -1682,6 +1706,7 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                     // two runs reads exactly like one nobody touched.
                     print_hold(&state, &id);
                     print_usage(project, &state);
+                    print_monitor(project, &id);
                     if let Some(handle) = &state.run {
                         println!("session   {}", handle.session.0);
                         // Read from the run itself, not from what was
@@ -1863,6 +1888,55 @@ fn print_usage(project: &Project, state: &hq::state::MissionState) {
             "          past its threshold: hq launches no run before {}",
             hq::state::rfc3339(over.until)
         );
+    }
+}
+
+/// Start the mission's monitor when it has something to watch or wait for
+/// (SPEC 4.3). The verbs that launch, read back or resume call this, so a
+/// mission never runs unwatched for want of a terminal. `HQ_NO_MONITOR` in
+/// the environment turns it off, for a human who drives by hand.
+fn start_monitor(project: &Project, id: &str) {
+    if std::env::var_os("HQ_NO_MONITOR").is_some() {
+        return;
+    }
+    let Ok(state) = hq::state::Store::open(&project.hq_root).and_then(|s| s.load(id)) else {
+        return;
+    };
+    if !hq::monitor::wanted(project, &state, hq::state::now_secs()) {
+        return;
+    }
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(e) => {
+            eprintln!("hq: the mission's monitor could not start: {e}");
+            return;
+        }
+    };
+    match hq::monitor::ensure(project, id, &exe) {
+        Ok(hq::monitor::Ensured::Started(pid)) => {
+            println!(
+                "monitor   started (pid {pid}): it watches the run, ends its turn past the \
+                 account's window, and relaunches after a wait"
+            );
+            println!(
+                "          its log: {}",
+                hq::monitor::logfile(&project.hq_root, id).display()
+            );
+        }
+        Ok(hq::monitor::Ensured::Running(pid)) => {
+            println!("monitor   already watching (pid {pid})")
+        }
+        Err(e) => eprintln!("hq: the mission's monitor could not start: {e}"),
+    }
+}
+
+fn print_monitor(project: &Project, id: &str) {
+    match hq::monitor::running(&project.hq_root, id) {
+        Some(pid) => println!(
+            "monitor   watching (pid {pid}) — log: {}",
+            hq::monitor::logfile(&project.hq_root, id).display()
+        ),
+        None => println!("monitor   none watching"),
     }
 }
 
