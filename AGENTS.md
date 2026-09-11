@@ -115,14 +115,20 @@ is worth**. Applied to our own work:
 
 - Edition 2024, minimum 1.85, licence Apache-2.0. One binary `hq`, one
   library.
-- Before every commit, all four, and they must be silent:
+- Before every commit, all five, and they must be silent — each read from
+  its own exit code, never through a pipe:
 
   ```sh
   cargo fmt --all
   cargo clippy --all-targets --all-features -- -D warnings
   cargo test --all-features
-  cargo deny check        # licences, bans, sources
+  cargo deny check              # licences, bans, sources
+  cargo audit --deny warnings   # known vulnerabilities (RustSec)
   ```
+
+  `cargo audit` is not redundant with `cargo deny`: CI plays both, and on
+  2026-09-10 it was `cargo audit` alone that caught RUSTSEC-2026-0009 in a
+  dependency `cargo deny` had let through locally.
 
 - Module layout follows the spec, not the other way round: `harness/`
   (SPEC 4.3), `mission/` (4.1, 4.5), `state/` (4.2), `compose/` (4.2),
