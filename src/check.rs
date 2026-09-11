@@ -484,6 +484,13 @@ fn walk(root: &Path, visit: &mut impl FnMut(&Path)) {
 /// It asks with the human's credential at the HQ, and without one it says it
 /// did not ask. Anything the forge declines to answer is "not checked",
 /// never green and never red: a check that cannot say "I do not know" lies.
+///
+/// It runs on every `hq check` where a credential is present — unlike the
+/// container probes, which wait for `--slot`. The asymmetry is deliberate:
+/// SPEC 4.1 bis asks for it "quand un credential de forge est présent sur
+/// l'hôte", and it costs one read per protected branch, where a probe costs
+/// a profile lifted and taken down. Without a credential it makes no network
+/// call at all.
 pub fn forge_protection(project: &Project, api: &str, report: &mut Report) {
     use crate::forge::{Protection, Repo, TOKEN_FILE, protection, token};
 

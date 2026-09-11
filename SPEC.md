@@ -463,6 +463,19 @@ démarrage » avait rendue. **Tranché par Arnaud le 2026-09-09** :
    le pare-feu : les deux premières écrites échouaient de toute façon (un
    certificat, une adresse inexistante) et ont été remplacées par une
    connexion TCP nue et un voisin levé exprès sur le réseau du slot.
+   **Depuis le profil système** (`hq check --mission`, 2026-09-10), la sonde
+   lève le plan même de `hq verify` pour l'intégrateur, depuis l'en-tête
+   figé, mais sous un slot `<slot>-check` : tout ce que `hq` nomme d'après le
+   slot — projet Compose, réseau, volumes nommés — est alors celui du
+   contrôle, et la base de données du projet est levée **à côté** de celle du
+   slot, jamais sur ses volumes (seul un volume à `name:` explicite dans le
+   fichier de services du projet y échapperait). Elle ajoute deux sondes que
+   seul ce profil a : chaque service déclaré par la mission se résout, et
+   chaque service que le projet lève **sans que la mission le déclare** ne se
+   résout pas — il est sur le même réseau, et le résolveur de Compose le
+   donnerait sans le pare-feu (mesuré). Joindre un service **sur son port**
+   n'est pas sondé : `hq` ne sait pas sur quel port il écoute, et le dit
+   « non vérifié » plutôt que d'inventer un vert.
 
 **Où vit l'image du sidecar.** Précisé le 2026-09-09, après que la question
 « pourquoi `.hq/` ? » a montré une erreur de rangement. `.hq/` est **ce que

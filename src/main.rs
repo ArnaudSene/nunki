@@ -847,17 +847,22 @@ fn main() -> ExitCode {
             check::forge_protection(&project, hq::forge::API, &mut report);
             report.checks.extend(probes(&project, which.as_deref()));
             if let Some(id) = &mission {
-                // Said, not skipped. The reason used to be "hq has no
-                // missions yet", which stopped being true many pieces ago;
-                // what is actually missing is the probe itself.
-                report.checks.push(check::Check {
-                    what: format!("the perimeter holds from inside the system profile of {id}"),
-                    verdict: check::Verdict::NotChecked(
-                        "hq has no probe for a system profile yet — only the mission \
-                         profile is probed"
-                            .to_string(),
-                    ),
-                });
+                let engine_bin = std::env::var("HQ_ENGINE").unwrap_or_else(|_| "docker".into());
+                let engine: std::sync::Arc<dyn hq::engine::Engine> =
+                    std::sync::Arc::new(hq::engine::docker::Docker::real());
+                match probe::system_profile(&project, id, engine, &engine_bin) {
+                    Ok(checks) => report.checks.extend(checks),
+                    Err(e) => report.checks.push(check::Check {
+                        what: format!("the perimeter holds from inside the system profile of {id}"),
+                        verdict: match e {
+                            // Something to do, not something broken.
+                            probe::ProbeError::NoImages(..) | probe::ProbeError::NotStarted(_) => {
+                                check::Verdict::NotChecked(e.to_string())
+                            }
+                            _ => check::Verdict::Red(e.to_string()),
+                        },
+                    }),
+                }
             }
             print!("{}", report.render());
             if report.is_red() {

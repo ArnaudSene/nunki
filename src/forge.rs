@@ -289,6 +289,10 @@ pub fn can_read(api: &str, token: &str, repo: &Repo) -> Result<(), ForgeError> {
 fn agent() -> ureq::Agent {
     ureq::Agent::config_builder()
         .http_status_as_error(false)
+        // A forge that does not answer should say so quickly: `hq check`
+        // asks once per protected branch, and a silent minute reads as a
+        // hung verb.
+        .timeout_connect(Some(Duration::from_secs(10)))
         .timeout_global(Some(Duration::from_secs(30)))
         .build()
         .into()
