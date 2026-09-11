@@ -84,8 +84,27 @@ pub struct MissionState {
     /// What the mission has spent, against its caps (SPEC 7).
     #[serde(default)]
     pub spent: Spent,
+    /// Set when `hq` told the run in progress to end its turn because the
+    /// account's window passed its threshold (SPEC 4.3). The read-back that
+    /// follows costs no attempt, whatever the run left: the state decides and
+    /// not the log, because what a harness writes after an interrupted turn
+    /// has not been measured.
+    #[serde(default)]
+    pub spared: Option<Spared>,
     /// RFC 3339 time of the last write; informational.
     pub updated_at: String,
+}
+
+/// A run `hq` ended because the account's window passed its threshold.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Spared {
+    pub account: String,
+    /// Which window, as a human reads it.
+    pub window: String,
+    pub per_mille: u32,
+    /// When that window resets, in epoch seconds.
+    pub until: u64,
+    pub date: String,
 }
 
 /// Runs, and tokens as the harness reported them (SPEC 7).

@@ -994,6 +994,7 @@ fn watch(project: &Project, id: &str, every: u64) -> ExitCode {
         }
     };
     let mut said = String::new();
+    let mut told = false;
     loop {
         let state = match store.load(id) {
             Ok(s) => s,
@@ -1014,16 +1015,35 @@ fn watch(project: &Project, id: &str, every: u64) -> ExitCode {
         };
         let harness = harness_for(project, &state.slot, Some(&handle.session.0));
         // Measured at every tick while a run goes, so the account's file is
-        // as fresh as the run's own stream. Kept, not acted on: `watch` runs
-        // only while someone started it, and the guard that must hold at
-        // night is `verify`'s, before every launch.
+        // as fresh as the run's own stream — and acted on: past the account's
+        // threshold the run is told to end its turn. Only while `watch` runs;
+        // the guard that holds at night is `verify`'s, before every launch.
+        let at = hq::state::now_secs();
         if let Err(e) = hq::consumption::note(
             project,
             state.flow.header().account.as_deref(),
             harness.windows(handle),
-            hq::state::now_secs(),
+            at,
         ) {
             eprintln!("hq: {e}");
+        }
+        match hq::gesture::spare(project, id, &harness, at) {
+            Ok(Some(spared)) if !told => {
+                println!(
+                    "spared    account {}'s {} is at {}% — the run was told to end its turn",
+                    spared.account,
+                    spared.window,
+                    hq::consumption::percent(spared.per_mille)
+                );
+                println!(
+                    "          hq launches nothing before {}, then goes on; the read-back \
+                     spends no attempt",
+                    hq::state::rfc3339(spared.until)
+                );
+                told = true;
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!("hq: {e}"),
         }
         let now = match harness.state(handle) {
             Ok(hq::harness::RunState::Running(p)) => format!(
@@ -1754,6 +1774,19 @@ fn print_hold(state: &hq::state::MissionState, id: &str) {
             down.failures,
             hq::state::rfc3339(down.not_before),
             down.last
+        );
+    }
+    if let Some(spared) = &state.spared {
+        println!(
+            "spared    hq ended the run's turn on {}: account {}'s {} was at {}%",
+            spared.date,
+            spared.account,
+            spared.window,
+            hq::consumption::percent(spared.per_mille)
+        );
+        println!(
+            "          nothing is launched before {}; the read-back spends no attempt",
+            hq::state::rfc3339(spared.until)
         );
     }
     // What the mission has spent, in the four kinds kept apart: the caps have

@@ -89,6 +89,7 @@ impl World {
                 stopped: None,
                 harness_down: None,
                 spent: Default::default(),
+                spared: None,
                 updated_at: when.into(),
             })
             .unwrap();

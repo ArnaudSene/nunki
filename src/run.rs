@@ -166,6 +166,7 @@ pub fn start(
             runs: 1,
             usage: Default::default(),
         },
+        spared: None,
         updated_at: String::new(),
     };
     store.save(&state)?;
