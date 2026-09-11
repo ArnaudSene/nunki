@@ -19,8 +19,8 @@ use serde_json::Value;
 
 use super::spawn::{CommandSpec, Presence, Signal, Spawned, Spawner};
 use super::{
-    Exposure, GuardSetup, Harness, HarnessError, Outcome, Progress, Provisioning, Role, RunHandle,
-    RunRequest, RunState, Usage,
+    Exposure, Fault, GuardSetup, Harness, HarnessError, Outcome, Progress, Provisioning, Role,
+    RunHandle, RunRequest, RunState, Usage,
 };
 
 /// What is fixed per project or per mission, not per run.
@@ -272,9 +272,11 @@ impl Harness for ClaudeCode {
             Presence::Running => Ok(RunState::Running(parsed.progress)),
             Presence::Paused => Ok(RunState::Paused(parsed.progress)),
             Presence::Ended => Ok(RunState::Finished(Outcome::HarnessFailure(
-                "the harness process ended without a result event".into(),
+                Fault::transient("the harness process ended without a result event"),
             ))),
-            Presence::Vanished(why) => Ok(RunState::Finished(Outcome::HarnessFailure(why))),
+            Presence::Vanished(why) => Ok(RunState::Finished(Outcome::HarnessFailure(
+                Fault::transient(why),
+            ))),
             Presence::Unknown(why) => Err(HarnessError::Unreachable(why)),
         }
     }
@@ -498,7 +500,25 @@ fn classify_result(event: &Value) -> Outcome {
         None => event.to_string().to_lowercase(),
     };
     let status = event.get("api_error_status").and_then(Value::as_u64);
-    let harness_cause = matches!(status, Some(401 | 403 | 408 | 429 | 500..=599))
+    // Authentication is told apart here, where the status is still in hand:
+    // no wait mends a revoked token, so it goes to the human at once. 403 is
+    // not counted in: it also answers a quota or a permission, which a wait
+    // may mend.
+    let authentication = status == Some(401)
+        || [
+            "authentication",
+            "unauthorized",
+            "not logged in",
+            "/login",
+            "invalid api key",
+            "token has expired",
+            "token expired",
+            "revoked",
+        ]
+        .iter()
+        .any(|needle| text.contains(needle));
+    let harness_cause = authentication
+        || matches!(status, Some(401 | 403 | 408 | 429 | 500..=599))
         || [
             "rate limit",
             "rate_limit",
@@ -521,8 +541,10 @@ fn classify_result(event: &Value) -> Outcome {
         Some(r) => r.to_string(),
         None => event.to_string().chars().take(400).collect(),
     };
-    if harness_cause {
-        Outcome::HarnessFailure(message)
+    if authentication {
+        Outcome::HarnessFailure(Fault::authentication(message))
+    } else if harness_cause {
+        Outcome::HarnessFailure(Fault::transient(message))
     } else {
         Outcome::MissionFailure(message)
     }

@@ -122,10 +122,43 @@ pub enum Outcome {
     /// here.
     Finished(Usage),
     /// Quota, expired token, network, harness crash. Not the mission's fault.
-    HarnessFailure(String),
+    HarnessFailure(Fault),
     /// The run was stopped by `hq` (stall observed, human `stop`/`kill`) or
     /// left without honouring the run contract. The mission's fault.
     MissionFailure(String),
+}
+
+/// Why the harness failed, and whether waiting can mend it (SPEC 4.3).
+///
+/// Decided where the harness's own answer is read — its status code, its
+/// words — because that is the only place the difference exists: a 401
+/// whose text says something else would read downstream as a quota, and the
+/// human would learn about a revoked token six hours later.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Fault {
+    pub why: String,
+    /// The harness could not authenticate: a token expired or revoked, a
+    /// session logged out. No wait mends that, so it goes to the human at
+    /// once rather than being waited out.
+    pub authentication: bool,
+}
+
+impl Fault {
+    /// A failure that may pass by itself: quota, network, a crash.
+    pub fn transient(why: impl Into<String>) -> Self {
+        Self {
+            why: why.into(),
+            authentication: false,
+        }
+    }
+
+    /// A failure only a human can mend.
+    pub fn authentication(why: impl Into<String>) -> Self {
+        Self {
+            why: why.into(),
+            authentication: true,
+        }
+    }
 }
 
 /// What a run consumed, as the harness reports it. Counted against the

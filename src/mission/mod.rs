@@ -89,6 +89,12 @@ pub struct Bounds {
     /// run, avec un délai paramétré").
     #[serde(default = "default_mutation_minutes")]
     pub mutation_minutes: u32,
+    /// Hours `hq` waits out a harness that keeps failing — quota, network,
+    /// crash — before it holds the mission and hands it to the human (SPEC
+    /// 4.3). Counted from the first failure in a row; zero sends the first
+    /// one to the human.
+    #[serde(default = "default_harness_wait_hours")]
+    pub harness_wait_hours: u32,
 }
 
 impl Default for Bounds {
@@ -101,8 +107,16 @@ impl Default for Bounds {
             stall_checks: 3,
             long_lot_hours: 8,
             mutation_minutes: default_mutation_minutes(),
+            harness_wait_hours: default_harness_wait_hours(),
         }
     }
+}
+
+/// Long enough to outlast a subscription window that has run dry overnight,
+/// so `hq` picks the mission up by itself when it reopens (decided by Arnaud
+/// on 2026-09-11, against three hours that would wake him instead).
+fn default_harness_wait_hours() -> u32 {
+    6
 }
 
 /// Long enough for a real campaign on a lot's worth of files, short enough

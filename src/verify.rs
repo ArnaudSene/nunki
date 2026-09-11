@@ -20,9 +20,11 @@
 
 use std::sync::Arc;
 
+use crate::backoff;
 use crate::engine::Engine;
 use crate::gate;
-use crate::harness::{Outcome, Role, RunHandle, RunState};
+use crate::harness::{Fault, Outcome, Role, RunHandle, RunState};
+use crate::mission::Bounds;
 use crate::mission::dir::Paths;
 use crate::mission::flow::{Event, Handover, Stage, Work};
 use crate::project::Project;
@@ -64,6 +66,16 @@ pub enum Step {
         role: Role,
         who: String,
         date: String,
+        /// Why, when `hq` held it itself.
+        reason: Option<String>,
+    },
+    /// The harness keeps failing, and `hq` waits it out before launching
+    /// again (SPEC 4.3): nothing is launched before `until`.
+    Waiting {
+        role: Role,
+        until: String,
+        failures: u32,
+        last: String,
     },
     /// The security agent came back with findings: `hq mission iterate` sends
     /// them back to the coder, `hq mission accept` lifts them.
@@ -124,6 +136,7 @@ pub fn verify(
     let slot = crate::slot::find(project, &state.slot)?;
     let paths = Paths::of(&project.hq_root, id);
     let stack = crate::run::stack_of(project);
+    let now = crate::state::now_secs();
 
     let mut steps = Vec::new();
     loop {
@@ -234,6 +247,12 @@ pub fn verify(
                         }
                         Ended::With(outcome) => {
                             let head = crate::git::head(&slot.tree)?;
+                            note_harness(
+                                &mut state,
+                                fault_of(&outcome).as_ref(),
+                                &header.bounds,
+                                now,
+                            );
                             let event = concluded(
                                 Role::Integrator,
                                 outcome,
@@ -258,7 +277,9 @@ pub fn verify(
                     }
                 }
 
-                if let Some(step) = held(&state, Role::Integrator) {
+                if let Some(step) = held(&state, Role::Integrator)
+                    .or_else(|| waiting(&state, Role::Integrator, now))
+                {
                     steps.push(step);
                     return Ok(steps);
                 }
@@ -297,6 +318,12 @@ pub fn verify(
                         }
                         Ended::With(outcome) => {
                             let head = crate::git::head(&slot.tree)?;
+                            note_harness(
+                                &mut state,
+                                fault_of(&outcome).as_ref(),
+                                &header.bounds,
+                                now,
+                            );
                             let event =
                                 concluded(Role::Security, outcome, paths.verdict.as_path(), &head);
                             carry(&paths.followup, Role::Security, &event, &head)?;
@@ -314,7 +341,9 @@ pub fn verify(
                     }
                 }
 
-                if let Some(step) = held(&state, Role::Security) {
+                if let Some(step) =
+                    held(&state, Role::Security).or_else(|| waiting(&state, Role::Security, now))
+                {
                     steps.push(step);
                     return Ok(steps);
                 }
@@ -381,7 +410,52 @@ fn held(state: &MissionState, role: Role) -> Option<Step> {
         role,
         who: s.who.clone(),
         date: s.date.clone(),
+        reason: s.reason.clone(),
     })
+}
+
+/// The step a launch site answers with while the harness is being waited
+/// out, or `None` if a run may be launched now.
+fn waiting(state: &MissionState, role: Role, now: u64) -> Option<Step> {
+    let down = state.harness_down.as_ref()?;
+    if backoff::due(Some(down), now) {
+        return None;
+    }
+    Some(Step::Waiting {
+        role,
+        until: crate::state::rfc3339(down.not_before),
+        failures: down.failures,
+        last: down.last.clone(),
+    })
+}
+
+/// Keep count of the harness's failures in a row (SPEC 4.3): a failure
+/// pushes the next launch back, or holds the mission once waiting no longer
+/// serves; any other ending means the harness carried the run, and the count
+/// starts over. The caller saves this with the transition, in one write, so
+/// a crash between the two can neither drop a failure nor count one twice.
+fn note_harness(state: &mut MissionState, fault: Option<&Fault>, bounds: &Bounds, now: u64) {
+    let Some(fault) = fault else {
+        state.harness_down = None;
+        return;
+    };
+    let (record, next) = backoff::after(
+        state.harness_down.as_ref(),
+        fault,
+        now,
+        bounds.harness_wait_hours,
+    );
+    state.harness_down = Some(record);
+    if let backoff::Next::Human { why } = next {
+        state.hold_for("hq", why);
+    }
+}
+
+fn fault_of(outcome: &Outcome) -> Option<Fault> {
+    match outcome {
+        Outcome::HarnessFailure(fault) => Some(fault.clone()),
+        _ => None,
+    }
 }
 
 /// Which role the current stage belongs to, for the gates that role owes.
