@@ -497,6 +497,15 @@ fn live_a_system_profile_reaches_what_the_mission_declares_and_nothing_else() {
         "cache, a project service the mission does not declare, resolves"
     ));
 
+    // The profile it lifted mounted a scratch mission folder, never the real
+    // one — whose journal the agent's files would otherwise make writable.
+    let real = hq::mission::dir::Paths::of(&project.hq_root, "m1").dir;
+    let lifted = std::fs::read_to_string(project.hq_root.join("checks/sys-system.yml")).unwrap();
+    assert!(
+        !lifted.contains(&real.display().to_string()),
+        "the check mounted the mission's own folder:\n{lifted}"
+    );
+
     let left = std::process::Command::new(&engine_bin)
         .args([
             "ps",
@@ -577,4 +586,27 @@ fn the_verb_probes_the_system_profile_of_the_mission_it_is_given() {
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains("system profile of m1"), "{text}");
     assert!(text.contains("declares no service"), "{text}");
+}
+
+/// The mission folder a system-profile check mounts is a scratch one under
+/// `checks/`, with the agent's files present — never the mission's own.
+#[test]
+fn a_system_profile_check_mounts_a_scratch_mission_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot, _) = with_services(dir.path());
+    let paths = hq::probe::scratch_paths(&project, &slot, "m1").unwrap();
+    let real = hq::mission::dir::Paths::of(&project.hq_root, "m1");
+
+    assert_ne!(paths.dir, real.dir);
+    assert!(
+        paths.dir.starts_with(project.hq_root.join("checks")),
+        "{}",
+        paths.dir.display()
+    );
+    for file in hq::compose::AGENT_WRITABLE {
+        assert!(
+            paths.dir.join(file).is_file(),
+            "{file} is there to be mounted"
+        );
+    }
 }

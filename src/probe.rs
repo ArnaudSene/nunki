@@ -191,7 +191,7 @@ pub fn system_profile(
         }
     }
 
-    let paths = crate::mission::dir::Paths::of(&project.hq_root, id);
+    let paths = scratch_paths(project, &slot, id)?;
     let plan = system_plan(project, &slot, &stack, &images, &paths, &header)?;
     let checks_dir = project.hq_root.join("checks");
     std::fs::create_dir_all(&checks_dir).map_err(|e| ProbeError::Io(checks_dir.clone(), e))?;
@@ -228,6 +228,34 @@ pub fn system_profile(
 
     engine.down(&file, &compose_project, true)?;
     Ok(checks)
+}
+
+/// The mission folder a system-profile check mounts: a scratch one under
+/// the HQ's `checks/`, never the mission's own.
+///
+/// The profile mounts the mission folder with the agent's files writable
+/// (`JOURNAL.md`, `PR.md`, …). The check's container only sleeps today, but
+/// a check that bound a real mission's journal read-write would be one exec
+/// away from writing into it — so it gets the same shape of folder, empty,
+/// as the mission-profile probe does.
+pub fn scratch_paths(
+    project: &Project,
+    slot: &Slot,
+    id: &str,
+) -> Result<crate::mission::dir::Paths, ProbeError> {
+    let root = project
+        .hq_root
+        .join("checks")
+        .join(format!("{}-system", slot.name));
+    let paths = crate::mission::dir::Paths::of(&root, id);
+    std::fs::create_dir_all(&paths.dir).map_err(|e| ProbeError::Io(paths.dir.clone(), e))?;
+    for file in AGENT_WRITABLE {
+        let path = paths.dir.join(file);
+        if !path.exists() {
+            std::fs::write(&path, "").map_err(|e| ProbeError::Io(path, e))?;
+        }
+    }
+    Ok(paths)
 }
 
 /// The system profile a check lifts: [`crate::run::plan`]'s, for the
