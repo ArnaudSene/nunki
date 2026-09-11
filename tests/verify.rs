@@ -1772,3 +1772,45 @@ fn a_security_run_hq_spared_costs_no_attempt_too() {
         &Stage::SecurityAgent { attempt: 1 }
     );
 }
+
+/// `verify` finding a run still going is the moment to judge the window
+/// while it runs: past the threshold the run is told to end its turn, and
+/// the caller hears why instead of "a run is still going". Below it, the
+/// run goes on and `verify` refuses as before.
+///
+/// The fake engine answers the liveness probe with the marker the probe
+/// prints for a live process (`hq-run-running`, in `engine::spawn`).
+#[test]
+fn a_run_still_going_past_the_threshold_is_told_to_end_its_turn() {
+    use hq::engine::{ExecOutput, Liveness, fake::FakeEngine};
+    let still_going = || -> Arc<dyn hq::engine::Engine> {
+        Arc::new(
+            FakeEngine::default()
+                .with_liveness("cafe1234", Liveness::Running)
+                .with_exec(ExecOutput {
+                    status: 0,
+                    stdout: "hq-run-running\n".into(),
+                    stderr: String::new(),
+                }),
+        )
+    };
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.with_account();
+    world.run_recorded(Some(41), "");
+    let now = hq::state::now_secs();
+
+    world.five_hours_at(100, now + 3_600);
+    match verify::verify(&world.project, "m1", still_going(), "docker") {
+        Err(VerifyError::RunInProgress { .. }) => {}
+        other => panic!("below the threshold the run goes on: {other:?}"),
+    }
+    assert!(world.state().spared.is_none());
+
+    world.five_hours_at(950, now + 3_600);
+    match verify::verify(&world.project, "m1", still_going(), "docker") {
+        Err(VerifyError::Spared { account, .. }) => assert_eq!(account, "main"),
+        other => panic!("past the threshold the turn is ended: {other:?}"),
+    }
+    assert!(world.state().spared.is_some());
+}
