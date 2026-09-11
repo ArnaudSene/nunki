@@ -147,13 +147,26 @@ pub fn verify(
     engine: Arc<dyn Engine>,
     engine_bin: &str,
 ) -> Result<Vec<Step>, VerifyError> {
+    verify_as(project, id, engine, engine_bin, "verify")
+}
+
+/// [`verify`], taking the slot's lock under `verb`: the mission's monitor
+/// takes it as itself, so a human who types `verify` meanwhile is told what
+/// holds it rather than a `verify` they never started.
+pub fn verify_as(
+    project: &Project,
+    id: &str,
+    engine: Arc<dyn Engine>,
+    engine_bin: &str,
+    verb: &str,
+) -> Result<Vec<Step>, VerifyError> {
     let store = Store::open(&project.hq_root)?;
     let mut state = store
         .load(id)
         .map_err(|_| VerifyError::NotStarted(id.to_string()))?;
 
     // Once, at the top. Everything underneath runs under it (SPEC 4.2).
-    let _lock = SlotLock::acquire(&project.hq_root.join("locks"), &state.slot, "verify")?;
+    let _lock = SlotLock::acquire(&project.hq_root.join("locks"), &state.slot, verb)?;
 
     // Gates read a tree. A tree an agent is still writing is not a tree to
     // judge — this is the interlock `hq exec --tree` deliberately does not
@@ -838,7 +851,7 @@ fn spare_event(spared: Option<&crate::state::Spared>, event: Event) -> Event {
 /// one of its own. A second engine here would answer about another machine's
 /// containers on any caller that passed a fake or a Podman adapter — and
 /// nothing in the type would have said so.
-fn harness_spawner(
+pub fn harness_spawner(
     project: &Project,
     engine: Arc<dyn Engine>,
     slot: &str,

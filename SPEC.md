@@ -982,9 +982,9 @@ Trois choses en découlent :
   l'humain **tout de suite** : aucune attente ne répare un jeton, et c'est
   l'adaptateur qui la reconnaît, là où le code d'état est encore lisible.
   `hq verify` ne dort pas — il lance et rend la main : l'attente est un « pas
-  avant » écrit dans l'état de la mission et respecté au site de lancement
-  par le `verify` suivant, si bien que le premier palier dure en pratique
-  jusqu'au prochain appel. Un run que le harnais a porté jusqu'au bout remet
+  avant » écrit dans l'état de la mission et respecté au site de lancement ;
+  c'est le moniteur de la mission (plus bas) qui rappelle `verify` à
+  l'échéance. Un run que le harnais a porté jusqu'au bout remet
   le compte à zéro, `resume` aussi. Aujourd'hui seuls les runs que `hq` relit
   — intégrateur et sécurité — y passent : la fin d'un run du codeur n'est
   pas encore relue par `hq`.
@@ -1002,23 +1002,41 @@ Trois choses en découlent :
   `~/.hq/usage/<compte>.json` que le superviseur relit, et `hq mission
   status` l'affiche, ou dit « non mesuré » — jamais zéro — quand le harnais
   ne la rend pas. Mesurée chaque fois que `hq` lit un run (`verify` à la
-  relecture, `watch` pendant qu'il tourne) et jugée **avant chaque
+  relecture, le moniteur et `watch` pendant qu'il tourne) et jugée **avant chaque
   lancement** : au-delà de **90 % des cinq heures** ou de **80 % de la
   semaine** (`five_hour_stop_percent`, `weekly_stop_percent`, dans les
   bornes), `hq` ne lance rien avant la remise à zéro de la fenêtre, puis
   reprend seul — une attente, pas une retenue. Entre deux lectures la
   dernière mesure vaut, et ce qu'une autre session consomme sur le même
   compte n'apparaît qu'à la lecture suivante. Un run **en cours** au-delà du
-  seuil reçoit la fin de tour propre (SIGINT, comme `stop --now`) de `hq
-  verify` quand il le trouve encore actif, ou de `hq mission watch` à chaque
-  tour de boucle ; la mission est marquée, pas retenue, et la relecture de ce
+  seuil reçoit la fin de tour propre (SIGINT, comme `stop --now`) du moniteur de
+  la mission chaque minute, de `hq verify` quand il le trouve encore actif,
+  ou de `hq mission watch` ; la mission est marquée, pas retenue, et la relecture de ce
   run ne coûte **aucune tentative** et ne compte pas comme une panne du
   harnais — c'est la marque qui en décide, pas le journal, car ce qu'un
   harnais écrit après un tour interrompu n'a pas été mesuré ; un verdict
-  écrit avant la fin du tour tient. Sans démon, cet arrêt n'a lieu que
-  pendant qu'un de ces deux verbes est invoqué ; la garde qui tient la nuit
-  est celle d'avant chaque lancement. Le codeur, dont `hq` ne relit ni ne
+  écrit avant la fin du tour tient. Le codeur, dont `hq` ne relit ni ne
   relance encore les runs, peut être arrêté ainsi mais pas encore relancé.
+- **Chaque mission a son moniteur.** Tranché par Arnaud le 2026-09-11. `hq`
+  n'a pas de service système, et un verbe rend la main ; ce qui surveille un
+  run la nuit et relance après une attente est donc un processus à part, un
+  par mission : `hq mission monitor <id>`, verbe interne jamais tapé, lancé
+  par `hq mission start`, `hq verify` et `hq mission resume` dès qu'il y a un
+  run à surveiller ou une attente qui finira seule, détaché du terminal
+  (`nohup`, son propre groupe de processus) pour lui survivre, et relancé par
+  le prochain de ces verbes s'il est mort (un redémarrage). Chaque minute
+  pendant un run, il mesure les deux fenêtres et arrête le run au seuil ;
+  sans run, il appelle `verify` — qui relit, attend ou relance — puis dort
+  jusqu'à la prochaine échéance connue (attente du harnais, remise à zéro
+  d'une fenêtre). Il prend le verrou du slot au nom de `hq mission monitor`,
+  si bien qu'un `hq verify` tapé pendant ce temps dit qui le tient ; un
+  verrou pris est un humain qui conduit, et le moniteur attend son tour. Il
+  s'arrête dès que la mission attend un humain ou n'a plus rien que `hq`
+  sache lancer — vérifiée, remise à l'humain, retenue, constats de sécurité
+  à trancher, ou un run du codeur dû, que `hq` ne lance pas encore. `hq
+  mission status` dit s'il veille ; `HQ_NO_MONITOR` dans l'environnement le
+  coupe, pour qui conduit à la main. Son pid et son journal sont sous
+  `monitors/` dans le HQ, et seul le binaire `hq` peut en lancer un.
 - **« Bloqué sur une permission » n'existe plus.** Sans interface, ce qui
   aurait demandé est refusé — la règle « refuser est sûr » tenue par
   construction, aux drapeaux près du tableau ci-dessus.

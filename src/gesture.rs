@@ -68,10 +68,8 @@ pub enum GestureError {
 /// block — but no hold: nothing for a human to lift. The next launch waits
 /// for the window to reset, then `hq` goes on by itself.
 ///
-/// Called by `hq verify` when it finds a run still going and by `hq mission
-/// watch` at every tick. Neither runs by itself: without a daemon, a run
-/// under way is stopped only while one of them is invoked, and the guard that
-/// holds at night is the one before every launch.
+/// Called every minute by the mission's monitor ([`crate::monitor`]), by
+/// `hq verify` when it finds a run still going, and by `hq mission watch`.
 pub fn spare(
     project: &Project,
     id: &str,

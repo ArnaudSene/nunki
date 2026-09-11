@@ -27,6 +27,7 @@ pub mod launch;
 pub mod lifecycle;
 pub mod logs;
 pub mod mission;
+pub mod monitor;
 pub mod mutants;
 pub mod perimeter;
 pub mod probe;
