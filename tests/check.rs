@@ -349,11 +349,11 @@ fn the_verb_is_green_on_this_very_repository() {
     // The container probes are named as not run, never silently skipped.
     assert!(text.contains("could not be checked"), "{text}");
     // And the forge is part of the verb, not only of the library. This
-    // repository is private on GitHub's free plan and declares that its
-    // owner holds the rule, so every protected branch is named as held by
-    // hand — never read off the forge, never red.
+    // repository lets the forge hold the rule, and a home of its own has no
+    // credential to ask it with: every protected branch is named as not
+    // checked, and why — never read off the forge from a test, never red.
     assert!(text.contains("main is protected on the forge"), "{text}");
-    assert!(text.contains("held by hand"), "{text}");
+    assert!(text.contains("no forge credential"), "{text}");
 }
 
 #[test]
