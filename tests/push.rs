@@ -11,6 +11,9 @@ use hq::project::{Config, Project, ProtectedPaths};
 use hq::push::{self, PushError};
 use hq::state::{MissionState, Store};
 
+mod common;
+use common::serve;
+
 fn git(at: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
         .arg("-C")
@@ -514,47 +517,6 @@ fn a_role_that_concludes_twice_leaves_one_answer_and_it_is_the_last() {
 }
 
 // --- the pull request, opened on the forge (SPEC 4.2) -----------------------
-
-/// A server that answers each connection with the next canned response and
-/// hands back what it was sent — the real HTTP client, pointed at it.
-fn serve(responses: Vec<(u16, &'static str)>) -> (String, std::thread::JoinHandle<Vec<String>>) {
-    use std::io::{BufRead, BufReader, Read, Write};
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
-    let handle = std::thread::spawn(move || {
-        let mut seen = Vec::new();
-        for (status, body) in responses {
-            let (stream, _) = listener.accept().unwrap();
-            let mut reader = BufReader::new(stream.try_clone().unwrap());
-            let (mut request, mut length) = (String::new(), 0usize);
-            loop {
-                let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
-                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-                    length = v.trim().parse().unwrap();
-                }
-                request.push_str(&line);
-                if line == "\r\n" || line.is_empty() {
-                    break;
-                }
-            }
-            let mut payload = vec![0; length];
-            reader.read_exact(&mut payload).unwrap();
-            request.push_str(&String::from_utf8_lossy(&payload));
-            seen.push(request);
-            let mut stream = stream;
-            write!(
-                stream,
-                "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\n\
-                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            )
-            .unwrap();
-        }
-        seen
-    });
-    (base, handle)
-}
 
 impl World {
     /// The shape of a real project: `origin` reads as a GitHub repository, and

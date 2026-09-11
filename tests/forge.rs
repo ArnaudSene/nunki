@@ -6,54 +6,12 @@
 //! from GitHub, not a 401, and reads like a repository that does not exist —
 //! so the request is read byte by byte, as a server receives it.
 
-use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
-use std::thread::JoinHandle;
+
+mod common;
+use common::serve;
 
 use hq::forge::{self, ForgeError, Opened, PullRequest, Repo};
-
-/// A server that answers each connection with the next canned response, and
-/// hands back what it was sent. `Connection: close` on every answer, so each
-/// request is its own connection and the order is the order asked.
-fn serve(responses: Vec<(u16, &'static str)>) -> (String, JoinHandle<Vec<String>>) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
-    let handle = std::thread::spawn(move || {
-        let mut seen = Vec::new();
-        for (status, body) in responses {
-            let (stream, _) = listener.accept().unwrap();
-            let mut reader = BufReader::new(stream.try_clone().unwrap());
-            let mut request = String::new();
-            let mut length = 0usize;
-            loop {
-                let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
-                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-                    length = v.trim().parse().unwrap();
-                }
-                request.push_str(&line);
-                if line == "\r\n" || line.is_empty() {
-                    break;
-                }
-            }
-            let mut payload = vec![0; length];
-            reader.read_exact(&mut payload).unwrap();
-            request.push_str(&String::from_utf8_lossy(&payload));
-            seen.push(request);
-
-            let mut stream = stream;
-            write!(
-                stream,
-                "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\n\
-                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            )
-            .unwrap();
-        }
-        seen
-    });
-    (base, handle)
-}
 
 fn repo() -> Repo {
     Repo {
@@ -262,5 +220,28 @@ fn live_the_real_forge_is_reached_over_tls_and_a_bad_token_is_refused() {
     assert!(
         matches!(err, ForgeError::Refused { status: 401, .. }),
         "the same call with a bad token is refused, so the green above is the token's: {err:?}"
+    );
+}
+
+/// The branch question, against the real forge: this repository's own `dev`
+/// answers with a protection state, and a branch that does not exist is read
+/// as absent — the one 404 that is an answer. Read-only.
+#[test]
+#[ignore = "talks to GitHub; needs HQ_LIVE_FORGE_TOKEN"]
+fn live_the_real_forge_says_whether_a_branch_is_protected() {
+    let Ok(token) = std::env::var("HQ_LIVE_FORGE_TOKEN") else {
+        eprintln!("skipped: HQ_LIVE_FORGE_TOKEN is not set");
+        return;
+    };
+    let repo = Repo::of_remote("https://github.com/ArnaudSene/nunki").unwrap();
+    let dev = forge::protection(forge::API, token.trim(), &repo, "dev").expect("dev is readable");
+    eprintln!("dev on the forge: {dev:?}");
+    assert!(matches!(
+        dev,
+        forge::Protection::Protected | forge::Protection::Unprotected
+    ));
+    assert_eq!(
+        forge::protection(forge::API, token.trim(), &repo, "no-such-branch-hq-check").unwrap(),
+        forge::Protection::NoSuchBranch
     );
 }

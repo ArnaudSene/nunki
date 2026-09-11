@@ -3,8 +3,9 @@
 //! Two rules shape it. It is **red** when a restriction is not held, not
 //! when something is merely absent. And it **says what it could not check**:
 //! a check that quietly skips is worse than no check, because it reads as a
-//! pass. Everything here is a pure function of the project on disk; probing
-//! containers is the caller's, and its absence is reported as such.
+//! pass. Everything in [`run`] is a pure function of the project on disk;
+//! probing containers is the caller's, and so is asking the forge
+//! ([`forge_protection`]), the one check here that talks to the network.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -471,5 +472,77 @@ fn walk(root: &Path, visit: &mut impl FnMut(&Path)) {
         if path.is_dir() {
             walk(&path, visit);
         }
+    }
+}
+
+/// Whether each protected branch is protected **on the forge** (SPEC 4.1
+/// bis, "branche protégée"): locally nothing stops an agent committing to
+/// `main` in its clone — gate 2 sees it, and the forge is what refuses the
+/// push. When the forge would not refuse, gate 2 is the only guard left, and
+/// that is a restriction not held.
+///
+/// It asks with the human's credential at the HQ, and without one it says it
+/// did not ask. Anything the forge declines to answer is "not checked",
+/// never green and never red: a check that cannot say "I do not know" lies.
+pub fn forge_protection(project: &Project, api: &str, report: &mut Report) {
+    use crate::forge::{Protection, Repo, TOKEN_FILE, protection, token};
+
+    let not_checked = |report: &mut Report, why: String| {
+        for branch in &project.config.protected_branches {
+            report.add(
+                format!("{branch} is protected on the forge"),
+                Verdict::NotChecked(why.clone()),
+            );
+        }
+    };
+
+    let Ok(remote) = crate::git::run(&project.root, &["remote", "get-url", crate::push::REMOTE])
+    else {
+        return not_checked(
+            report,
+            format!(
+                "the repository has no `{}` remote, so there is no forge to ask",
+                crate::push::REMOTE
+            ),
+        );
+    };
+    let Some(repo) = Repo::of_remote(&remote) else {
+        return not_checked(
+            report,
+            format!(
+                "the remote is not on GitHub ({}), and GitHub is the only forge hq can ask",
+                remote.trim()
+            ),
+        );
+    };
+    let Some(token) = token(&project.hq_root) else {
+        return not_checked(
+            report,
+            format!(
+                "no forge credential at {} — without one hq cannot ask the forge, and says so",
+                project.hq_root.join(TOKEN_FILE).display()
+            ),
+        );
+    };
+
+    for branch in &project.config.protected_branches {
+        let verdict = match protection(api, &token, &repo, branch) {
+            Ok(Protection::Protected) => Verdict::Green(format!(
+                "GitHub reports {branch} protected on {}/{}",
+                repo.owner, repo.name
+            )),
+            Ok(Protection::Unprotected) => Verdict::Red(format!(
+                "GitHub reports {branch} unprotected on {}/{}: the forge would accept a push \
+                 to it, and gate 2 is the only guard left (SPEC 4.1 bis). Protect it on \
+                 GitHub — on a private repository that needs a paid plan",
+                repo.owner, repo.name
+            )),
+            Ok(Protection::NoSuchBranch) => Verdict::NotChecked(format!(
+                "{branch} does not exist on {}/{}, so there is nothing to protect yet",
+                repo.owner, repo.name
+            )),
+            Err(e) => Verdict::NotChecked(format!("the forge did not say: {e}")),
+        };
+        report.add(format!("{branch} is protected on the forge"), verdict);
     }
 }

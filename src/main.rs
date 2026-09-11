@@ -844,14 +844,18 @@ fn main() -> ExitCode {
                 None => return ExitCode::FAILURE,
             };
             let mut report = check::run(&project);
+            check::forge_protection(&project, hq::forge::API, &mut report);
             report.checks.extend(probes(&project, which.as_deref()));
             if let Some(id) = &mission {
-                // Said, not skipped: a system profile is a mission's, and
-                // missions do not exist yet.
+                // Said, not skipped. The reason used to be "hq has no
+                // missions yet", which stopped being true many pieces ago;
+                // what is actually missing is the probe itself.
                 report.checks.push(check::Check {
                     what: format!("the perimeter holds from inside the system profile of {id}"),
                     verdict: check::Verdict::NotChecked(
-                        "hq has no missions yet, so there is no system profile to lift".to_string(),
+                        "hq has no probe for a system profile yet — only the mission \
+                         profile is probed"
+                            .to_string(),
                     ),
                 });
             }

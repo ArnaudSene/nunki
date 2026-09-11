@@ -214,6 +214,60 @@ fn existing(
         })
 }
 
+/// What the forge says about one branch (SPEC 4.1 bis, "branche protégée").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Protection {
+    Protected,
+    Unprotected,
+    /// The forge has no such branch, so there is nothing to protect yet.
+    NoSuchBranch,
+}
+
+/// Whether `branch` is protected on the forge.
+///
+/// Read from the branch itself (`protected`), not from the protection
+/// endpoint: measured on 2026-09-10, a private repository on GitHub's free
+/// plan refuses the latter with 403 ("Upgrade to GitHub Pro") while still
+/// answering the former — and the question asked here is the one a push
+/// would meet, not how the rules are written.
+pub fn protection(
+    api: &str,
+    token: &str,
+    repo: &Repo,
+    branch: &str,
+) -> Result<Protection, ForgeError> {
+    #[derive(Deserialize)]
+    struct Branch {
+        protected: bool,
+    }
+    let url = format!("{api}/repos/{}/{}/branches/{branch}", repo.owner, repo.name);
+    let mut response = authorised(agent().get(&url), token)
+        .call()
+        .map_err(|e| ForgeError::Unreachable(e.to_string()))?;
+    let status = response.status().as_u16();
+    let text = response
+        .body_mut()
+        .read_to_string()
+        .map_err(|e| ForgeError::Unreadable(e.to_string()))?;
+    match status {
+        200 => {
+            let branch: Branch =
+                serde_json::from_str(&text).map_err(|e| ForgeError::Unreadable(e.to_string()))?;
+            Ok(if branch.protected {
+                Protection::Protected
+            } else {
+                Protection::Unprotected
+            })
+        }
+        // Measured: a missing branch answers 404 "Branch not found", and a
+        // repository the token cannot see answers 404 too, with "Not Found".
+        // Only the first is an answer about the branch; the second is the
+        // forge declining to say, and is reported as a refusal.
+        404 if text.contains("Branch not found") => Ok(Protection::NoSuchBranch),
+        _ => Err(refused(status, &text)),
+    }
+}
+
 /// Whether the token can read the repository — the one read-only call, which
 /// proves the address, the certificate chain and the credential together.
 pub fn can_read(api: &str, token: &str, repo: &Repo) -> Result<(), ForgeError> {
