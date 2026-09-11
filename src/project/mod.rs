@@ -52,10 +52,29 @@ pub struct Config {
     /// system profile lifts no service of its own.
     #[serde(default)]
     pub services_file: Option<PathBuf>,
+    /// Who refuses a push to a protected branch besides gate 2: the forge,
+    /// or the human (SPEC 4.1 bis, "branche protégée").
+    #[serde(default)]
+    pub forge_protection: ForgeProtection,
 }
 
 fn default_protected_branches() -> Vec<String> {
     vec!["main".to_string(), "master".to_string(), "dev".to_string()]
+}
+
+/// A private repository on GitHub's free plan can neither protect a branch
+/// nor say it does, and a red `hq check` cannot fix that: a red that cannot
+/// be fixed teaches to ignore red. `by_hand` is the written decision that the
+/// human holds the rule instead.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForgeProtection {
+    /// The forge refuses the push, and `hq check` asks it whether it would.
+    #[default]
+    Forge,
+    /// The human holds the rule; `hq check` does not ask the forge, and says
+    /// so for every protected branch.
+    ByHand,
 }
 
 /// The two modes of SPEC 4.1. There is no "ask": nothing can ask in an

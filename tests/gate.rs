@@ -492,6 +492,7 @@ impl Fixture {
                 credentials: None,
                 run: None,
                 services_file: None,
+                forge_protection: Default::default(),
             },
             hq,
         );
@@ -679,6 +680,7 @@ fn live_the_battery_is_the_committed_one_and_an_absent_one_is_red() {
             credentials: None,
             run: None,
             services_file: None,
+            forge_protection: Default::default(),
         },
         dir.path().join("hq"),
     );

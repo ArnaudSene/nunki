@@ -58,6 +58,7 @@ impl World {
                 credentials: None,
                 run: None,
                 services_file: None,
+                forge_protection: Default::default(),
             },
             hq_root.clone(),
         );

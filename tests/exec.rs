@@ -52,6 +52,7 @@ fn project(root: &Path) -> Project {
             credentials: None,
             run: None,
             services_file: None,
+            forge_protection: Default::default(),
         },
         root.join("hq"),
     )

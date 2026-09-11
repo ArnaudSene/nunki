@@ -225,6 +225,13 @@ protected_branches:
   - main
   - dev
 
+# Who refuses a push to a protected branch besides hq's own gate: `forge`
+# (the default) — `hq check` asks the forge, and an unprotected branch is red.
+# `by_hand` when the forge cannot, as on a private repository on GitHub's
+# free plan, and you hold the rule yourself: `hq check` does not ask, and
+# says so.
+# forge_protection: by_hand
+
 protected_paths:
   # Refused outright. `.hq/**` is here from the start and should stay: it
   # holds the battery gate 6 replays, the allowlist the firewall is built
