@@ -53,6 +53,8 @@ pub enum GestureError {
     #[error(transparent)]
     Compose(#[from] crate::compose::ComposeError),
     #[error(transparent)]
+    Lock(#[from] crate::state::LockError),
+    #[error(transparent)]
     Followup(#[from] crate::followup::FollowupError),
     /// The subscription's measure could not be kept or read.
     #[error("the subscription's usage: {0}")]
@@ -68,9 +70,31 @@ pub enum GestureError {
 /// block — but no hold: nothing for a human to lift. The next launch waits
 /// for the window to reset, then `hq` goes on by itself.
 ///
-/// Called every minute by the mission's monitor ([`crate::monitor`]), by
-/// `hq verify` when it finds a run still going, and by `hq mission watch`.
+/// Called every minute by the mission's monitor ([`crate::monitor`]) and by
+/// `hq mission watch`, each under its own name for the slot's lock: the mark
+/// is a transition of hq's own, and a mark written behind a `verify` that
+/// holds the lock would be lost when that `verify` saves — the run would then
+/// cost the attempt the mark exists to spare. So a slot someone else drives
+/// is left to them this time: their `verify` judges the run itself.
 pub fn spare(
+    project: &Project,
+    id: &str,
+    harness: &dyn crate::harness::Harness,
+    now: u64,
+    verb: &str,
+) -> Result<Option<crate::state::Spared>, GestureError> {
+    let state = started(project, id)?;
+    let _lock =
+        match crate::state::SlotLock::acquire(&project.hq_root.join("locks"), &state.slot, verb) {
+            Ok(lock) => lock,
+            Err(crate::state::LockError::Held { .. }) => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+    spare_under_lock(project, id, harness, now)
+}
+
+/// [`spare`], for a caller that already holds the slot's lock: `hq verify`.
+pub(crate) fn spare_under_lock(
     project: &Project,
     id: &str,
     harness: &dyn crate::harness::Harness,

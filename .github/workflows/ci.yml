@@ -31,6 +31,9 @@ env:
   # No blanket `RUSTFLAGS: -D warnings`: it applies to dependencies too, so a
   # warning upstream would turn this repository red for something it cannot
   # fix. Clippy denies warnings where it matters — our own code.
+  # A test driving the real `hq` binary through `mission start`, `verify` or
+  # `resume` would otherwise leave a detached mission monitor behind it.
+  HQ_NO_MONITOR: "1"
 
 jobs:
   check:

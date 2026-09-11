@@ -1037,7 +1037,7 @@ fn watch(project: &Project, id: &str, every: u64) -> ExitCode {
         ) {
             eprintln!("hq: {e}");
         }
-        match hq::gesture::spare(project, id, &harness, at) {
+        match hq::gesture::spare(project, id, &harness, at, "mission watch") {
             Ok(Some(spared)) if !told => {
                 println!(
                     "spared    account {}'s {} is at {}% — the run was told to end its turn",

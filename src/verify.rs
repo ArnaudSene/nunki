@@ -811,7 +811,7 @@ fn refuse_while_running(
     // (`hq mission status`), and refusing to verify because the engine is
     // down would be the same lie in another place.
     if let Ok(RunState::Running(_)) = crate::harness::Harness::state(&harness, handle) {
-        if let Some(spared) = crate::gesture::spare(project, id, &harness, now)? {
+        if let Some(spared) = crate::gesture::spare_under_lock(project, id, &harness, now)? {
             return Err(VerifyError::Spared {
                 mission: id.to_string(),
                 account: spared.account,

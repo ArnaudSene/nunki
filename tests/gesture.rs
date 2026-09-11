@@ -417,9 +417,15 @@ fn a_run_past_the_threshold_is_told_to_end_its_turn_once() {
     world.measured(950);
     let harness = running();
 
-    let spared = gesture::spare(&world.project, "m1", &harness, hq::state::now_secs())
-        .unwrap()
-        .expect("past 90 % of five hours");
+    let spared = gesture::spare(
+        &world.project,
+        "m1",
+        &harness,
+        hq::state::now_secs(),
+        "mission monitor",
+    )
+    .unwrap()
+    .expect("past 90 % of five hours");
     assert_eq!((spared.account.as_str(), spared.per_mille), ("main", 950));
     assert_eq!(harness.stopped(), vec![SessionId("s1".into())]);
     let state = world.state();
@@ -427,7 +433,14 @@ fn a_run_past_the_threshold_is_told_to_end_its_turn_once() {
     assert!(!state.held(), "a wait, not a hold");
 
     // A second SIGINT would interrupt the resume block the first asked for.
-    gesture::spare(&world.project, "m1", &harness, hq::state::now_secs()).unwrap();
+    gesture::spare(
+        &world.project,
+        "m1",
+        &harness,
+        hq::state::now_secs(),
+        "mission monitor",
+    )
+    .unwrap();
     assert_eq!(harness.stopped().len(), 1);
 }
 
@@ -437,9 +450,15 @@ fn below_the_threshold_the_run_goes_on() {
     world.measured(100);
     let harness = running();
     assert!(
-        gesture::spare(&world.project, "m1", &harness, hq::state::now_secs())
-            .unwrap()
-            .is_none()
+        gesture::spare(
+            &world.project,
+            "m1",
+            &harness,
+            hq::state::now_secs(),
+            "mission monitor"
+        )
+        .unwrap()
+        .is_none()
     );
     assert!(harness.stopped().is_empty());
     assert!(world.state().spared.is_none());
@@ -454,9 +473,15 @@ fn a_run_that_is_not_running_is_not_signalled() {
         hq::harness::Outcome::Finished(Default::default()),
     ));
     assert!(
-        gesture::spare(&world.project, "m1", &harness, hq::state::now_secs())
-            .unwrap()
-            .is_none()
+        gesture::spare(
+            &world.project,
+            "m1",
+            &harness,
+            hq::state::now_secs(),
+            "mission monitor"
+        )
+        .unwrap()
+        .is_none()
     );
     assert!(harness.stopped().is_empty());
 }
@@ -468,9 +493,44 @@ fn nothing_measured_stops_nothing() {
     let world = World::new(true);
     let harness = running();
     assert!(
-        gesture::spare(&world.project, "m1", &harness, hq::state::now_secs())
-            .unwrap()
-            .is_none()
+        gesture::spare(
+            &world.project,
+            "m1",
+            &harness,
+            hq::state::now_secs(),
+            "mission monitor"
+        )
+        .unwrap()
+        .is_none()
     );
     assert!(harness.stopped().is_empty());
+}
+
+/// A slot someone else drives — a human's `verify` — is theirs this time: a
+/// mark written behind their back would be lost when they save, and the run
+/// would then cost an attempt. Their own `verify` spares the run itself.
+#[test]
+fn a_slot_driven_by_another_verb_is_left_to_it() {
+    let world = World::new(true);
+    world.measured(950);
+    let harness = running();
+    let spare = || {
+        gesture::spare(
+            &world.project,
+            "m1",
+            &harness,
+            hq::state::now_secs(),
+            "mission monitor",
+        )
+        .unwrap()
+    };
+
+    let lock = hq::state::SlotLock::acquire(&world.project.hq_root.join("locks"), "one", "verify")
+        .unwrap();
+    assert!(spare().is_none());
+    assert!(harness.stopped().is_empty());
+    assert!(world.state().spared.is_none());
+
+    drop(lock);
+    assert!(spare().is_some(), "free again, the run is spared");
 }

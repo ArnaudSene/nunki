@@ -290,7 +290,7 @@ fn watch(project: &Project, id: &str, engine: Arc<dyn Engine>, engine_bin: &str)
                     ) {
                         say(&format!("the measure could not be kept: {e}"));
                     }
-                    match crate::gesture::spare(project, id, &harness, now) {
+                    match crate::gesture::spare(project, id, &harness, now, LOCK_VERB) {
                         Ok(Some(spared)) => say(&format!(
                             "account {}'s {} at {}% — the run was told to end its turn",
                             spared.account,
