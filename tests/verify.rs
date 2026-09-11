@@ -2087,3 +2087,33 @@ fn red_final_gates_tell_the_coder_why() {
         world.followup()
     );
 }
+
+/// The last lot done is not a stopping point: the same `verify` goes on to
+/// the final gates, which this world has red — so the mission is already on
+/// its first volet when it returns.
+#[test]
+fn the_last_lot_done_goes_on_to_the_final_gates_at_once() {
+    let world = World::new(1);
+    world.commit("src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    let steps = world.coder_ran("Lot: L1 — done");
+
+    assert!(
+        steps
+            .iter()
+            .any(|s| matches!(s, Step::Moved { to: Stage::Gates })),
+        "{steps:?}"
+    );
+    assert_ne!(world.state().flow.stage(), &Stage::Gates, "{steps:?}");
+}
+
+/// A volet is called `volet-<n>`: the name the coder is given, the one its
+/// `Lot:` line must repeat, and the one a handover to the human names.
+#[test]
+fn a_volet_is_named_by_its_number() {
+    let world = World::new(1);
+    let work = Work::Volet {
+        n: 2,
+        cause: "gate: red".into(),
+    };
+    assert_eq!(world.state().flow.label(&work), "volet-2");
+}

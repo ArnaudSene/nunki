@@ -237,12 +237,14 @@ pub fn verify_as(
                             &outcome,
                             now,
                         )?;
-                        // A turn `hq` ended, or a harness that failed: the
-                        // same attempt is replayed, and nothing is judged on
-                        // a tree the run did not finish — a resume block one
-                        // commit behind would turn a replay into a spent
-                        // attempt.
-                        if spared.is_some() || matches!(outcome, Outcome::HarnessFailure(_)) {
+                        // A turn `hq` ended is replayed, whatever the run
+                        // left, and nothing is judged on a tree it did not
+                        // finish — a resume block one commit behind would
+                        // turn a replay into a spent attempt. Only a run
+                        // that finished on its own is judged; a harness
+                        // failure falls to the last branch, which the flow
+                        // replays as well.
+                        if spared.is_some() {
                             Some(spare_event(
                                 spared.as_ref(),
                                 Event::RunEnded {
