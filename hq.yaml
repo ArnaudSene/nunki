@@ -18,10 +18,12 @@ protected_branches:
   - main
   - dev
 
-# A private repository on GitHub's free plan: the forge can neither protect
-# a branch nor say whether one is (403, measured 2026-09-10). The owner holds
-# the rule instead, decided on 2026-09-10 (SPEC 4.1 bis).
-forge_protection: by_hand
+# Public since 2026-09-11, so GitHub's free plan protects both branches: a
+# pull request is required, and so are the CI's checks. The forge holds the
+# rule and `hq check` asks it (SPEC 4.1 bis). It was `by_hand` while the
+# repository was private, when the forge could neither protect a branch nor
+# say whether one was (403, measured 2026-09-10).
+forge_protection: forge
 
 protected_paths:
   # The gate, the sidecar and the rules of the place are not an agent's to
