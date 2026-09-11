@@ -21,6 +21,7 @@ fn config() -> Config {
         credentials: None,
         run: None,
         services_file: None,
+        forge_protection: Default::default(),
     }
 }
 

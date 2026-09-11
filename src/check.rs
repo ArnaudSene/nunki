@@ -479,7 +479,10 @@ fn walk(root: &Path, visit: &mut impl FnMut(&Path)) {
 /// bis, "branche protégée"): locally nothing stops an agent committing to
 /// `main` in its clone — gate 2 sees it, and the forge is what refuses the
 /// push. When the forge would not refuse, gate 2 is the only guard left, and
-/// that is a restriction not held.
+/// that is a restriction not held — unless `hq.yaml` declares
+/// `forge_protection: by_hand`, the written decision that the human holds the
+/// rule. Then the forge is not asked, and every branch is named as held by
+/// hand: never green, since hq cannot see a human keep a rule, and never red.
 ///
 /// It asks with the human's credential at the HQ, and without one it says it
 /// did not ask. Anything the forge declines to answer is "not checked",
@@ -493,6 +496,7 @@ fn walk(root: &Path, visit: &mut impl FnMut(&Path)) {
 /// call at all.
 pub fn forge_protection(project: &Project, api: &str, report: &mut Report) {
     use crate::forge::{Protection, Repo, TOKEN_FILE, protection, token};
+    use crate::project::{CONFIG_FILE, ForgeProtection};
 
     let not_checked = |report: &mut Report, why: String| {
         for branch in &project.config.protected_branches {
@@ -502,6 +506,17 @@ pub fn forge_protection(project: &Project, api: &str, report: &mut Report) {
             );
         }
     };
+
+    if project.config.forge_protection == ForgeProtection::ByHand {
+        return not_checked(
+            report,
+            format!(
+                "held by hand, as {CONFIG_FILE} declares (`forge_protection: by_hand`): the forge \
+                 is not asked and would accept a push to it, so gate 2 and the human are the \
+                 guards (SPEC 4.1 bis)"
+            ),
+        );
+    }
 
     let Ok(remote) = crate::git::run(&project.root, &["remote", "get-url", crate::push::REMOTE])
     else {
@@ -541,7 +556,8 @@ pub fn forge_protection(project: &Project, api: &str, report: &mut Report) {
             Ok(Protection::Unprotected) => Verdict::Red(format!(
                 "GitHub reports {branch} unprotected on {}/{}: the forge would accept a push \
                  to it, and gate 2 is the only guard left (SPEC 4.1 bis). Protect it on \
-                 GitHub — on a private repository that needs a paid plan",
+                 GitHub — on a private repository that needs a paid plan — or, if you hold \
+                 the rule yourself, declare `forge_protection: by_hand` in {CONFIG_FILE}",
                 repo.owner, repo.name
             )),
             Ok(Protection::NoSuchBranch) => Verdict::NotChecked(format!(

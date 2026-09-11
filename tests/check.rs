@@ -21,6 +21,7 @@ fn config() -> Config {
         credentials: None,
         run: None,
         services_file: None,
+        forge_protection: Default::default(),
     }
 }
 
@@ -347,10 +348,12 @@ fn the_verb_is_green_on_this_very_repository() {
     assert!(text.contains("the coder's allowlist for rust"), "{text}");
     // The container probes are named as not run, never silently skipped.
     assert!(text.contains("could not be checked"), "{text}");
-    // And the forge is part of the verb, not only of the library: with no
-    // credential in this home, every protected branch is named as unasked.
+    // And the forge is part of the verb, not only of the library. This
+    // repository is private on GitHub's free plan and declares that its
+    // owner holds the rule, so every protected branch is named as held by
+    // hand — never read off the forge, never red.
     assert!(text.contains("main is protected on the forge"), "{text}");
-    assert!(text.contains("no forge credential"), "{text}");
+    assert!(text.contains("held by hand"), "{text}");
 }
 
 #[test]
@@ -596,6 +599,44 @@ fn a_404_is_an_absent_branch_only_when_the_forge_says_so() {
         other => panic!("{other:?}"),
     }
     assert!(!report.is_red());
+}
+
+/// `by_hand` asks nothing, even with a credential on a GitHub remote: every
+/// branch is named as held by hand, and the check is not red. The api here
+/// is unreachable, so a forge actually asked would answer "the forge did not
+/// say" instead.
+#[test]
+fn by_hand_asks_no_forge_and_names_every_branch_as_held_by_hand() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut project = on_github(dir.path(), "https://github.com/o/r.git");
+    project.config.forge_protection = hq::project::ForgeProtection::ByHand;
+    with_token(&project);
+
+    let mut report = Report::default();
+    hq::check::forge_protection(&project, "http://127.0.0.1:9", &mut report);
+    let verdicts = forge_verdicts(&report);
+
+    assert_eq!(verdicts.len(), 2, "{verdicts:?}");
+    for (_, verdict) in &verdicts {
+        match verdict {
+            Verdict::NotChecked(why) => assert!(why.contains("by_hand"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+    }
+    assert!(!report.is_red());
+}
+
+/// The field reads from `hq.yaml` as written there, and is `forge` when
+/// absent — the default asks the forge.
+#[test]
+fn forge_protection_reads_from_the_file_and_defaults_to_the_forge() {
+    use hq::project::ForgeProtection;
+    let base = "harness: claude-code\n";
+    let absent: Config = serde_yaml_ng::from_str(base).unwrap();
+    assert_eq!(absent.forge_protection, ForgeProtection::Forge);
+    let by_hand: Config =
+        serde_yaml_ng::from_str(&format!("{base}forge_protection: by_hand\n")).unwrap();
+    assert_eq!(by_hand.forge_protection, ForgeProtection::ByHand);
 }
 
 /// A remote off GitHub is named as such, and no forge is asked.
