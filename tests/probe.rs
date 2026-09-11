@@ -236,6 +236,7 @@ fn with_services(dir: &Path) -> (Project, hq::slot::Slot, hq::mission::Header) {
             services: vec![hq::mission::Service {
                 name: "db".into(),
                 reach: vec!["db".into()],
+                shared: false,
             }],
             wiring: vec![],
         },
@@ -544,6 +545,7 @@ fn the_battery_never_takes_a_declared_service_as_its_allowed_host() {
         services: vec![hq::mission::Service {
             name: "aaa-store".into(),
             reach: vec!["aaa-store".into()],
+            shared: false,
         }],
         wiring: vec![],
     };

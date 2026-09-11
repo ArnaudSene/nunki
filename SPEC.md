@@ -333,7 +333,7 @@ YAML, du JSON, du git. Rien d'autre.
 | les règles du lieu | `AGENTS.md` à la racine (et par zone) ; `CLAUDE.md` n'est qu'un import (`@AGENTS.md`) ou un lien vers lui, les deux documentés par Claude Code. Un `CLAUDE.md` existant n'est pas écrasé (3.3) : `hq init` dépose l'import à côté, le résumé le dit, et **`hq check` est rouge** tant que ce `CLAUDE.md` n'importe pas `AGENTS.md` — sinon les règles ne seraient jamais lues par ce harnais et `mission start` partirait sans elles. L'adaptateur peut, en attendant, passer `AGENTS.md` par `--append-system-prompt-file` | tous les harnais qui le supportent, Claude Code via import ou lien |
 | les compétences | `SKILL.md`, standard ouvert (agentskills.io) adopté par OpenCode, Codex, Gemini CLI, Cursor, Copilot et d'autres — vérifié le 2026-09-09 ; il peut porter des choses essentielles | les harnais |
 | la mission | un dossier **au HQ, hors de l'arbre git** (voir les montages) : `MISSION.md`, `FOLLOWUP_HQ.md` et `MUTANTS.json` (à l'humain et au HQ, lecture seule pour l'agent), `JOURNAL.md`, `PR.md`, `VERDICT.json`, `MUTANTS.triage.json` (à l'agent) — la même forme pour les trois rôles | l'agent qui la porte, le HQ |
-| le bloc structuré de `MISSION.md` | un en-tête YAML que `hq` lit, valide et **fige dans son état à la validation humaine** : forme (`integration`, `security`), rôle, branche, base, **la liste des lots** (un identifiant et un titre chacun — c'est elle qui donne « un run par lot » et qui fait refuser un `VERDICT.json` écrit avant que le dernier lot ait son entrée « fini » dans le journal), borne de volets, tentatives par lot, délais, script de lancement, et pour une mission d'intégration les **services** (réseau nommé, adresses, domaines) et les **fichiers d'identifiants** montés. La prose du gabarit vient après, pour l'agent. L'agent ne peut pas l'écrire, et `hq` ne le relit pas en cours de mission | `hq`, puis l'agent |
+| le bloc structuré de `MISSION.md` | un en-tête YAML que `hq` lit, valide et **fige dans son état à la validation humaine** : forme (`integration`, `security`), rôle, branche, base, **la liste des lots** (un identifiant et un titre chacun — c'est elle qui donne « un run par lot » et qui fait refuser un `VERDICT.json` écrit avant que le dernier lot ait son entrée « fini » dans le journal), borne de volets, tentatives par lot, délais, script de lancement, et pour une mission d'intégration les **services** (réseau nommé, adresses, domaines, et `shared: true` pour un fournisseur réel, que les autres missions attendent — 7) et les **fichiers d'identifiants** montés. La prose du gabarit vient après, pour l'agent. L'agent ne peut pas l'écrire, et `hq` ne le relit pas en cours de mission | `hq`, puis l'agent |
 | le verdict | `VERDICT.json` dans le dossier de mission : `{ role, verdict, head, date, report }`, écrit par l'agent à la fin de son dernier run ; `hq` le refuse si `head` n'est pas le `HEAD` réel de la branche | `hq` |
 | le contrat de run | un run par lot (4.3) : ce qu'un run doit avoir produit avant de sortir — le lot commité et prouvé ou l'échec dit, arbre commitable, bloc `ÉTAT DE REPRISE` en tête du journal (écrit aussi toutes les 45 minutes en cours de run), et pour le dernier lot le verdict. Pour le codeur, ce bloc se termine par la ligne `Lot: <lot> — done`, ou `Lot: <lot> — failed: <raison>` : la seule que `hq` lise pour savoir le lot fini (tranché par Arnaud le 2026-09-11) | l'agent, par `MISSION.md` ; `hq`, à la sortie et aux checkpoints |
 | les chemins protégés | une liste déclarative par projet, **deux modes** : refuser, refuser seulement si le fichier existe déjà sur la base. Le mode « demander » a disparu : rien ne peut demander en autonome | la porte de périmètre, et l'adaptateur harnais s'il double |
@@ -1493,7 +1493,18 @@ La revue a reproché au brouillon de vendre sans chiffrer. Voici l'addition.
   marchent dessus. Une mission d'intégration qui déclare un fournisseur réel
   **verrouille ce fournisseur** pour les autres missions du projet le temps
   de ses runs — un verrou de plus dans l'état de `hq` (4.2), à côté du verrou
-  de slot.
+  de slot. Un fournisseur réel est un service que l'en-tête déclare
+  `shared: true`, posé par l'humain au cadrage : rien n'est deviné des
+  domaines (tranché par Arnaud le 2026-09-11). Le verrou se déduit de
+  l'état : un fournisseur est pris tant qu'une autre mission se tient à son
+  étape d'intégration avec un run enregistré et le déclare. Relu, le run est
+  oublié et le verrou tombe avec lui, si bien qu'aucune mission finie,
+  recadrée ou tombée ne laisse de verrou derrière elle. Un verrou court, un
+  fichier par fournisseur, n'encadre que la vérification et le lancement,
+  pour que deux moniteurs ne trouvent pas ensemble un fournisseur libre. Un
+  intégrateur dont un fournisseur est pris n'est pas lancé : `hq verify` le
+  dit (`busy`), sans tentative consommée, et le moniteur de la mission
+  regarde à nouveau chaque minute.
 - **La connexion sans interface** : un geste humain avec navigateur par
   harnais et par an pour Claude Code, un jeton partagé par tous les slots,
   dont la révocation arrête tout d'un coup.

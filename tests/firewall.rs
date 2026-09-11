@@ -233,6 +233,7 @@ fn live_a_declared_service_is_reachable_and_nothing_else_is() {
     let declared = vec![hq::mission::Service {
         name: "db".to_string(),
         reach: vec!["db".to_string()],
+        shared: false,
     }];
     let perimeter = compute(
         Role::Integrator,

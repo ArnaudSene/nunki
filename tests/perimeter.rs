@@ -15,6 +15,7 @@ fn the_coder_gets_his_stack_and_his_harness_and_nothing_else() {
     let services = vec![Service {
         name: "db".to_string(),
         reach: strings(&["db.internal"]),
+        shared: false,
     }];
     let coder = compute(
         Role::Coder,
@@ -53,6 +54,7 @@ fn a_mission_profile_carrying_services_is_refused() {
     let services = vec![Service {
         name: "db".to_string(),
         reach: strings(&["db.internal"]),
+        shared: false,
     }];
     let err = compute(
         Role::Coder,
@@ -123,6 +125,7 @@ fn an_address_is_an_address_and_a_name_is_a_name() {
     let services = vec![Service {
         name: "db".to_string(),
         reach: strings(&["10.4.0.7", "10.4.0.0/24", "::1", "db.internal"]),
+        shared: false,
     }];
     let p = compute(
         Role::Integrator,

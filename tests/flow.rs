@@ -39,6 +39,7 @@ fn services() -> Integration {
         services: vec![Service {
             name: "postgres".into(),
             reach: vec!["db:5432".into()],
+            shared: false,
         }],
     }
 }

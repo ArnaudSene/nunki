@@ -297,3 +297,59 @@ fn only_the_hq_binary_starts_a_monitor() {
     ));
     assert!(running(&project.hq_root, "m1").is_none());
 }
+
+/// A mission at its integration stage with a shared provider.
+fn integrating(id: &str, with_run: bool) -> MissionState {
+    use hq::mission::flow::Event;
+    let mut framing = header();
+    framing.integration = Integration::Services {
+        services: vec![hq::mission::Service {
+            name: "stripe".into(),
+            reach: vec!["api.stripe.com".into()],
+            shared: true,
+        }],
+        wiring: Vec::new(),
+    };
+    let mut state = state(with_run);
+    state.id = id.into();
+    state.slot = format!("slot-{id}");
+    state.flow = Flow::new(framing).unwrap();
+    state
+        .flow
+        .advance(Event::RunEnded {
+            outcome: hq::harness::Outcome::Finished(Default::default()),
+            lot_done: true,
+        })
+        .unwrap();
+    state.flow.advance(Event::GatesPassed).unwrap();
+    state
+}
+
+/// Waiting on a provider another mission holds is a wait that ends by
+/// itself: the monitor is wanted for it, and no longer once it is free.
+#[test]
+fn a_monitor_is_wanted_while_another_mission_holds_a_provider() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    let store = hq::state::Store::open(&project.hq_root).unwrap();
+    let mine = integrating("m1", false);
+
+    store.save(&integrating("m2", true)).unwrap();
+    assert!(wanted(&project, &mine, 1_000), "the provider is held");
+
+    store.save(&integrating("m2", false)).unwrap();
+    assert!(!wanted(&project, &mine, 1_000), "free: verify launches");
+}
+
+/// A provider another mission holds is a wait: the monitor goes on.
+#[test]
+fn a_busy_provider_is_waited_for_not_handed_over() {
+    assert_eq!(
+        after_verify(&Ok(vec![Step::Busy {
+            role: hq::harness::Role::Integrator,
+            provider: "stripe".into(),
+            by: "mission m2".into(),
+        }])),
+        Next::Continue
+    );
+}

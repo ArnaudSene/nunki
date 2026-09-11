@@ -86,7 +86,8 @@ pub fn running(hq_root: &Path, id: &str) -> Option<u32> {
 }
 
 /// Whether the mission has anything a monitor would watch or wait for: a run
-/// recorded, or a wait that ends by itself. A mission that needs a human
+/// recorded, or a wait that ends by itself — the harness, the account's
+/// window, or a provider another mission holds. A mission that needs a human
 /// does not: a monitor started there would stop at once.
 pub fn wanted(project: &Project, state: &MissionState, now: u64) -> bool {
     if state.held() {
@@ -105,7 +106,16 @@ pub fn wanted(project: &Project, state: &MissionState, now: u64) -> bool {
         .harness_down
         .as_ref()
         .is_some_and(|down| down.not_before > now);
-    harness_wait || window_reset(project, state, now).is_some()
+    harness_wait || window_reset(project, state, now).is_some() || waits_on_provider(project, state)
+}
+
+/// A provider this mission shares is held by another mission's integration
+/// run (SPEC 7): a wait that ends by itself, when that run is read back.
+fn waits_on_provider(project: &Project, state: &MissionState) -> bool {
+    matches!(state.flow.stage(), Stage::Integration { .. })
+        && crate::state::Store::open(&project.hq_root)
+            .and_then(|store| crate::provider::blocked(&store, &state.id, state.flow.header()))
+            .is_ok_and(|blocked| blocked.is_some())
 }
 
 /// When the account's window resets, if it is past its threshold now.
@@ -209,6 +219,7 @@ pub fn after_verify(result: &Result<Vec<Step>, VerifyError>) -> Next {
                 Step::Launched { .. }
                 | Step::Saving { .. }
                 | Step::Waiting { .. }
+                | Step::Busy { .. }
                 | Step::Unreachable { .. }
                 | Step::Gates { .. }
                 | Step::Moved { .. },

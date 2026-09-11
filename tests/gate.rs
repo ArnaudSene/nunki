@@ -374,6 +374,7 @@ fn the_integrator_may_commit_its_wiring_and_nothing_else() {
         services: vec![Service {
             name: "db".into(),
             reach: vec!["db".into()],
+            shared: false,
         }],
         wiring: vec!["tests/system/**".into(), "config/*.yml".into()],
     };
@@ -414,6 +415,7 @@ fn an_integration_mission_with_no_wiring_declared_lets_the_integrator_commit_not
         services: vec![Service {
             name: "db".into(),
             reach: vec!["db".into()],
+            shared: false,
         }],
         wiring: Vec::new(),
     };

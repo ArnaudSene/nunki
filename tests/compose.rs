@@ -23,6 +23,7 @@ fn services() -> Vec<Service> {
     vec![Service {
         name: "db".to_string(),
         reach: strings(&["db", "10.4.0.7"]),
+        shared: false,
     }]
 }
 

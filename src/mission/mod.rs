@@ -24,6 +24,12 @@ pub struct Service {
     pub name: String,
     /// Domains or addresses the system profile may reach for this service.
     pub reach: Vec<String>,
+    /// A real provider — a third-party API's test tier — that two missions
+    /// must not exercise at once: an integration run that uses it locks it
+    /// for the project's other missions (SPEC 7, decided 2026-09-11). The
+    /// human says so at framing; nothing is guessed from the domains.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shared: bool,
 }
 
 /// The `integration` field of the mission header (SPEC 2, mission shapes).

@@ -617,6 +617,7 @@ fn integration() -> Integration {
         services: vec![hq::mission::Service {
             name: "db".into(),
             reach: vec!["db".into()],
+            shared: false,
         }],
         wiring: vec!["compose.yaml".into()],
     }
@@ -2116,4 +2117,73 @@ fn a_volet_is_named_by_its_number() {
         cause: "gate: red".into(),
     };
     assert_eq!(world.state().flow.label(&work), "volet-2");
+}
+
+// --- a real provider, locked for the other missions (SPEC 7) -----------------
+
+fn shared_integration() -> Integration {
+    Integration::Services {
+        services: vec![hq::mission::Service {
+            name: "stripe".into(),
+            reach: vec!["api.stripe.com".into()],
+            shared: true,
+        }],
+        wiring: vec!["compose.yaml".into()],
+    }
+}
+
+impl World {
+    /// Another mission of the project on the same framing, at its
+    /// integration stage, with its run recorded or read back.
+    fn another_mission_integrating(&self, with_run: bool) {
+        let store = Store::open(&self.project.hq_root).unwrap();
+        let mut other = self.state();
+        other.id = "m2".into();
+        other.slot = "two".into();
+        other.run = with_run.then(|| hq::harness::RunHandle {
+            session: hq::harness::SessionId("s-m2".into()),
+            container: "beef5678".into(),
+            pid: Some(42),
+            log: PathBuf::from("/dev/null"),
+        });
+        store.save(&other).unwrap();
+    }
+}
+
+/// A provider another mission's integration run holds is waited for: no
+/// run, no attempt spent. Once that run is read back, the launch goes.
+#[test]
+fn a_provider_another_mission_holds_is_waited_for() {
+    let world = World::shaped(1, shared_integration());
+    world.at_integration();
+    world.another_mission_integrating(true);
+
+    let steps = world.verify().unwrap();
+    match steps.last() {
+        Some(Step::Busy { role, provider, by }) => {
+            assert_eq!(*role, Role::Integrator);
+            assert_eq!(provider, "stripe");
+            assert_eq!(by, "mission m2");
+        }
+        other => panic!("{other:?}"),
+    }
+    let state = world.state();
+    assert!(state.run.is_none());
+    assert_eq!(state.flow.stage(), &Stage::Integration { attempt: 1 });
+
+    world.another_mission_integrating(false);
+    assert!(
+        world.verify().is_err(),
+        "free again, the launch is attempted"
+    );
+}
+
+/// A service not declared shared is not a real provider: two missions may
+/// use it at once.
+#[test]
+fn a_service_not_declared_shared_is_not_locked() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.another_mission_integrating(true);
+    assert!(world.verify().is_err(), "the launch is attempted");
 }
