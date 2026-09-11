@@ -81,8 +81,33 @@ pub struct MissionState {
     /// only when it would pass the ceiling does `hq` hold the mission.
     #[serde(default)]
     pub harness_down: Option<crate::backoff::HarnessDown>,
+    /// What the mission has spent, against its caps (SPEC 7).
+    #[serde(default)]
+    pub spent: Spent,
     /// RFC 3339 time of the last write; informational.
     pub updated_at: String,
+}
+
+/// Runs, and tokens as the harness reported them (SPEC 7).
+///
+/// A run is counted when `hq` reads it back — today the integrator's and the
+/// security agent's — plus the coder's first run, launched by `hq mission
+/// start` and not read back yet. Whoever adds that reading must drop the
+/// start's count, or the first run is counted twice.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Spent {
+    pub runs: u32,
+    pub usage: crate::harness::Usage,
+}
+
+impl Spent {
+    /// One more run, and what it spent — nothing, if the harness did not say.
+    pub fn record(&mut self, usage: Option<&crate::harness::Usage>) {
+        self.runs = self.runs.saturating_add(1);
+        if let Some(usage) = usage {
+            self.usage.add(usage);
+        }
+    }
 }
 
 /// What one role concluded, and where.

@@ -164,10 +164,41 @@ impl Fault {
 /// What a run consumed, as the harness reports it. Counted against the
 /// per-mission cap of SPEC 7, in tokens — never in money (SPEC 4.3,
 /// subscription only).
+///
+/// Four kinds, as Claude Code reports them (measured on v2.1.266), because
+/// the two it is tempting to keep are the smallest: the cache reads are
+/// usually most of a run's volume.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// Tokens written to the prompt cache.
+    #[serde(default)]
+    pub cache_creation_input_tokens: u64,
+    /// Tokens read back from it.
+    #[serde(default)]
+    pub cache_read_input_tokens: u64,
+}
+
+impl Usage {
+    /// All four kinds, summed: what `max_tokens` is compared with.
+    pub fn total(&self) -> u64 {
+        self.input_tokens
+            .saturating_add(self.output_tokens)
+            .saturating_add(self.cache_creation_input_tokens)
+            .saturating_add(self.cache_read_input_tokens)
+    }
+
+    pub fn add(&mut self, other: &Usage) {
+        self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
+        self.cache_creation_input_tokens = self
+            .cache_creation_input_tokens
+            .saturating_add(other.cache_creation_input_tokens);
+        self.cache_read_input_tokens = self
+            .cache_read_input_tokens
+            .saturating_add(other.cache_read_input_tokens);
+    }
 }
 
 /// Current state of a launched run (SPEC 4.3: two states, plus the stall
@@ -277,6 +308,14 @@ pub trait Harness: Send + Sync {
     /// End the current turn properly (for Claude Code, `SIGINT`, not
     /// `SIGTERM`), so the agent can write its resume block.
     fn stop(&self, handle: &RunHandle) -> Result<(), HarnessError>;
+
+    /// What a finished run spent, if the harness says — whatever the run
+    /// concluded: a run that fell for a quota spent tokens too, and a cap
+    /// that only counted the runs that succeeded would undercount the ones
+    /// that cost the most (SPEC 7). The default is that it does not say.
+    fn usage(&self, _handle: &RunHandle) -> Option<Usage> {
+        None
+    }
 
     /// Optional: guards this harness can add on top of the container and
     /// git ones. The default is none, and that is a complete answer.

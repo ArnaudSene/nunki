@@ -1411,8 +1411,22 @@ La revue a reproché au brouillon de vendre sans chiffrer. Voici l'addition.
   mission en tokens et en runs** et un comportement en quota atteint
   (attendre, puis remonter à l'humain), parce que sans plafond une boucle
   bornée à trois volets peut encore consommer une nuit de fenêtre. Claude
-  Code rend la consommation dans sa sortie structurée ; l'`Outcome` du trait
-  la porte.
+  Code rend la consommation dans sa sortie structurée, en quatre sortes
+  (entrée, sortie, cache écrit, cache lu — mesuré sur v2.1.266), et le trait
+  la rend pour tout run fini, quelle qu'en soit l'issue : un run tombé pour
+  quota a consommé aussi. Tranché par Arnaud le 2026-09-11 : `max_runs` et
+  `max_tokens` sont **facultatifs et sans valeur par défaut** — les runs sont
+  déjà bornés par les tentatives et les volets (pire cas légitime d'une
+  mission de deux lots : 48), et un chiffre de tokens attend des missions
+  réelles mesurées ; d'ici là `hq mission status` affiche ce que chaque
+  mission a dépensé, sorte par sorte. `max_tokens` compte les quatre sortes
+  additionnées. Le plafond se vérifie **entre deux runs**, au site de
+  lancement : un run en cours n'est jamais tué pour lui, si bien qu'une
+  mission peut le dépasser d'un run au plus ; atteint, `hq` pose sa retenue
+  avec la raison, et on le relève dans l'en-tête, par `hq mission reframe`,
+  puis `hq mission resume`. Un run se compte quand `hq` le relit —
+  aujourd'hui l'intégrateur et la sécurité — plus le premier run du codeur,
+  lancé par `hq mission start`.
 - **Les tests système sur une vraie API tierce** : lents, instables, à effets
   de bord, et deux missions parallèles partagent le même palier de test et se
   marchent dessus. Une mission d'intégration qui déclare un fournisseur réel
