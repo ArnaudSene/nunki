@@ -69,6 +69,16 @@ pub enum Step {
         /// Why, when `hq` held it itself.
         reason: Option<String>,
     },
+    /// The subscription's window is past its threshold, and `hq` launches
+    /// nothing before it resets (SPEC 4.3).
+    Saving {
+        role: Role,
+        account: String,
+        window: String,
+        per_mille: u32,
+        stop_at_percent: u32,
+        until: String,
+    },
     /// The harness keeps failing, and `hq` waits it out before launching
     /// again (SPEC 4.3): nothing is launched before `until`.
     Waiting {
@@ -111,6 +121,9 @@ pub enum VerifyError {
     Git(#[from] crate::git::GitError),
     #[error(transparent)]
     Followup(#[from] crate::followup::FollowupError),
+    /// The subscription's measure could not be kept or read.
+    #[error("the subscription's usage: {0}")]
+    Usage(String),
 }
 
 /// Play the phase as far as it goes, and say what happened.
@@ -245,9 +258,16 @@ pub fn verify(
                             });
                             return Ok(steps);
                         }
-                        Ended::With(outcome, usage) => {
+                        Ended::With(outcome, usage, windows) => {
                             let head = crate::git::head(&slot.tree)?;
                             state.spent.record(usage.as_ref());
+                            crate::consumption::note(
+                                project,
+                                header.account.as_deref(),
+                                windows,
+                                now,
+                            )
+                            .map_err(VerifyError::Usage)?;
                             note_harness(
                                 &mut state,
                                 fault_of(&outcome).as_ref(),
@@ -281,6 +301,10 @@ pub fn verify(
                 if let Some(step) = held(&state, Role::Integrator)
                     .or_else(|| waiting(&state, Role::Integrator, now))
                 {
+                    steps.push(step);
+                    return Ok(steps);
+                }
+                if let Some(step) = saving(project, Role::Integrator, &header, now)? {
                     steps.push(step);
                     return Ok(steps);
                 }
@@ -323,9 +347,16 @@ pub fn verify(
                             });
                             return Ok(steps);
                         }
-                        Ended::With(outcome, usage) => {
+                        Ended::With(outcome, usage, windows) => {
                             let head = crate::git::head(&slot.tree)?;
                             state.spent.record(usage.as_ref());
+                            crate::consumption::note(
+                                project,
+                                header.account.as_deref(),
+                                windows,
+                                now,
+                            )
+                            .map_err(VerifyError::Usage)?;
                             note_harness(
                                 &mut state,
                                 fault_of(&outcome).as_ref(),
@@ -352,6 +383,10 @@ pub fn verify(
                 if let Some(step) =
                     held(&state, Role::Security).or_else(|| waiting(&state, Role::Security, now))
                 {
+                    steps.push(step);
+                    return Ok(steps);
+                }
+                if let Some(step) = saving(project, Role::Security, &header, now)? {
                     steps.push(step);
                     return Ok(steps);
                 }
@@ -464,6 +499,37 @@ fn note_harness(state: &mut MissionState, fault: Option<&Fault>, bounds: &Bounds
     }
 }
 
+/// The step a launch site answers with while the subscription's windows are
+/// past their threshold (SPEC 4.3): nothing is launched until the window
+/// resets, and then `hq` goes on by itself — a wait, not a hold. A mission
+/// whose account cannot be named is not judged here: the launch that follows
+/// says what is wrong with it.
+fn saving(
+    project: &Project,
+    role: Role,
+    header: &crate::mission::Header,
+    now: u64,
+) -> Result<Option<Step>, VerifyError> {
+    let Ok(account) = crate::consumption::account_of(project, header.account.as_deref()) else {
+        return Ok(None);
+    };
+    let Some(measure) =
+        crate::consumption::read(&project.hq_home(), &account).map_err(VerifyError::Usage)?
+    else {
+        return Ok(None);
+    };
+    Ok(
+        crate::consumption::over(&measure, &header.bounds, now).map(|over| Step::Saving {
+            role,
+            account,
+            window: over.kind.name().to_string(),
+            per_mille: over.per_mille,
+            stop_at_percent: over.stop_at_percent,
+            until: crate::state::rfc3339(over.until),
+        }),
+    )
+}
+
 /// Hold the mission if it has spent its cap (SPEC 7), and answer with the
 /// hold. Checked between two runs, at the launch site: a run in progress is
 /// never killed for the cap, so a mission may pass it by one run at most.
@@ -535,8 +601,9 @@ fn what_is_owed(work: &Work, header: &crate::mission::Header) -> String {
 
 /// What a recorded run came to, as the engine answers it.
 enum Ended {
-    /// How it ended, and what it spent if the harness said.
-    With(Outcome, Option<Usage>),
+    /// How it ended, what it spent, and how far the subscription's windows
+    /// were used — each as far as the harness said.
+    With(Outcome, Option<Usage>, Option<crate::consumption::Windows>),
     /// The question could not be put. A run `hq` cannot reach is not a run
     /// that failed, and turning one into the other would consume an attempt
     /// on a machine that was asleep.
@@ -559,9 +626,11 @@ fn read_back(
         )),
     );
     match crate::harness::Harness::state(&harness, handle) {
-        Ok(RunState::Finished(outcome)) => {
-            Ended::With(outcome, crate::harness::Harness::usage(&harness, handle))
-        }
+        Ok(RunState::Finished(outcome)) => Ended::With(
+            outcome,
+            crate::harness::Harness::usage(&harness, handle),
+            crate::harness::Harness::windows(&harness, handle),
+        ),
         // A frozen run is a run in progress that a human stopped on purpose.
         // Nothing is concluded from it, and the message says whose doing it
         // is rather than leaving `verify` looking stuck.

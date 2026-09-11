@@ -9,6 +9,7 @@ pub mod account;
 pub mod backoff;
 pub mod check;
 pub mod compose;
+pub mod consumption;
 pub mod engine;
 pub mod exec;
 pub mod findings;

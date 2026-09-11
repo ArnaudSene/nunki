@@ -105,11 +105,33 @@ pub struct Bounds {
     /// (decided 2026-09-11).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u64>,
+    /// Percent of the subscription's five-hour window past which `hq`
+    /// launches no run until the window resets (SPEC 4.3).
+    #[serde(default = "default_five_hour_stop_percent")]
+    pub five_hour_stop_percent: u32,
+    /// Percent of the subscription's weekly window past which `hq` launches
+    /// no run until the window resets (SPEC 4.3).
+    #[serde(default = "default_weekly_stop_percent")]
+    pub weekly_stop_percent: u32,
+}
+
+/// The rest of the five hours is left to a supervisor that shares the
+/// account, so a human can still step in (decided by Arnaud, 2026-09-11).
+fn default_five_hour_stop_percent() -> u32 {
+    90
+}
+
+/// A fifth of the week stays outside the agents, whatever they do (decided
+/// by Arnaud, 2026-09-11).
+fn default_weekly_stop_percent() -> u32 {
+    80
 }
 
 impl Default for Bounds {
     fn default() -> Self {
         Self {
+            five_hour_stop_percent: default_five_hour_stop_percent(),
+            weekly_stop_percent: default_weekly_stop_percent(),
             max_volets: 3,
             attempts_per_lot: 3,
             checkpoint_minutes: 45,

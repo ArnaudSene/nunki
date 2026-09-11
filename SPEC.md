@@ -988,6 +988,30 @@ Trois choses en découlent :
   le compte à zéro, `resume` aussi. Aujourd'hui seuls les runs que `hq` relit
   — intégrateur et sécurité — y passent : la fin d'un run du codeur n'est
   pas encore relue par `hq`.
+- **La consommation de l'abonnement se mesure par ses deux fenêtres.**
+  Tranché par Arnaud le 2026-09-11. Un abonnement est borné à la fois sur
+  cinq heures et sur la semaine, et le harnais qui le sait le dit : Claude
+  Code écrit dans le flux de chaque run un `rate_limit_event` qui porte
+  l'utilisation des deux fenêtres et l'heure de leur remise à zéro (mesuré
+  sur v2.1.266, émis quand l'utilisation bouge). Le lire est le travail de
+  l'**adaptateur du harnais du rôle**, pas de l'agent — l'agent ne voit pas
+  ces chiffres, et les écrire lui coûterait des tokens — ni du superviseur :
+  le flux d'un run est celui du jeton qui l'a lancé, si bien qu'un codeur sur
+  Codex et un superviseur sur Claude, ou deux jetons, font deux mesures
+  justes. `hq` garde la dernière mesure **par compte**, dans
+  `~/.hq/usage/<compte>.json` que le superviseur relit, et `hq mission
+  status` l'affiche, ou dit « non mesuré » — jamais zéro — quand le harnais
+  ne la rend pas. Mesurée chaque fois que `hq` lit un run (`verify` à la
+  relecture, `watch` pendant qu'il tourne) et jugée **avant chaque
+  lancement** : au-delà de **90 % des cinq heures** ou de **80 % de la
+  semaine** (`five_hour_stop_percent`, `weekly_stop_percent`, dans les
+  bornes), `hq` ne lance rien avant la remise à zéro de la fenêtre, puis
+  reprend seul — une attente, pas une retenue. Entre deux lectures la
+  dernière mesure vaut, et ce qu'une autre session consomme sur le même
+  compte n'apparaît qu'à la lecture suivante. L'arrêt propre d'un run **en
+  cours** au seuil, et sa relecture qui ne coûte pas de tentative, sont la
+  pièce suivante ; aujourd'hui le seuil empêche le lancement suivant, et le
+  codeur, dont `hq` ne relance pas encore les runs, n'en a pas.
 - **« Bloqué sur une permission » n'existe plus.** Sans interface, ce qui
   aurait demandé est refusé — la règle « refuser est sûr » tenue par
   construction, aux drapeaux près du tableau ci-dessus.

@@ -317,6 +317,15 @@ pub trait Harness: Send + Sync {
         None
     }
 
+    /// How far the subscription's two windows are used — five hours and a
+    /// week — as this run's own stream last said (SPEC 4.3). The run's, so
+    /// the account's: a coder on one token and a supervisor on another are
+    /// two measures. The default is that the harness does not say, and then
+    /// `hq` says "not measured", never zero.
+    fn windows(&self, _handle: &RunHandle) -> Option<crate::consumption::Windows> {
+        None
+    }
+
     /// Optional: guards this harness can add on top of the container and
     /// git ones. The default is none, and that is a complete answer.
     /// Turn a run's own structured stream into lines a human reads.
