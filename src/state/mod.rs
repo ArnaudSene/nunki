@@ -76,6 +76,11 @@ pub struct MissionState {
     /// with where the work has got to.
     #[serde(default)]
     pub stopped: Option<Stopped>,
+    /// Harness failures in a row, and the time before which no run is
+    /// launched (SPEC 4.3). A wait and not a hold: it expires by itself, and
+    /// only when it would pass the ceiling does `hq` hold the mission.
+    #[serde(default)]
+    pub harness_down: Option<crate::backoff::HarnessDown>,
     /// RFC 3339 time of the last write; informational.
     pub updated_at: String,
 }
@@ -120,6 +125,10 @@ pub struct Stopped {
     /// because the two are different facts: one says what `hq` will not do
     /// next, the other says what was done to the run that was going.
     pub interrupted: bool,
+    /// Why, when `hq` held it itself — a harness it stopped waiting for. A
+    /// hold whose reason is lost reads as a mission someone forgot.
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 impl MissionState {
@@ -166,12 +175,29 @@ impl MissionState {
             who: who.to_string(),
             date: now_rfc3339(),
             interrupted,
+            reason: None,
+        });
+    }
+
+    /// Hold the mission, saying why: `hq`'s own hold, when waiting no longer
+    /// serves.
+    pub fn hold_for(&mut self, who: &str, reason: String) {
+        self.stopped = Some(Stopped {
+            who: who.to_string(),
+            date: now_rfc3339(),
+            interrupted: false,
+            reason: Some(reason),
         });
     }
 
     /// Lift the hold. Returns what was lifted, so a caller can say whether
     /// there was anything to lift rather than claiming it lifted one.
+    ///
+    /// The harness's failures are forgotten with it: a human who lifts a hold
+    /// has mended the cause, or means to watch, and a count carried over
+    /// would send the very next failure back to them at the ceiling.
     pub fn release(&mut self) -> Option<Stopped> {
+        self.harness_down = None;
         self.stopped.take()
     }
 
@@ -283,13 +309,21 @@ impl Store {
     }
 }
 
-/// Seconds since the epoch, formatted as RFC 3339 in UTC, without pulling
-/// a date crate for one informational field.
-pub(crate) fn now_rfc3339() -> String {
-    let secs = std::time::SystemTime::now()
+/// Now, in seconds since the epoch.
+pub fn now_secs() -> u64 {
+    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
-        .unwrap_or(0);
+        .unwrap_or(0)
+}
+
+pub(crate) fn now_rfc3339() -> String {
+    rfc3339(now_secs())
+}
+
+/// Seconds since the epoch, formatted as RFC 3339 in UTC, without pulling
+/// a date crate for a few informational fields.
+pub fn rfc3339(secs: u64) -> String {
     // Civil-from-days, Howard Hinnant's algorithm.
     let days = (secs / 86_400) as i64;
     let rem = secs % 86_400;

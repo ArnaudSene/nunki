@@ -738,13 +738,37 @@ fn main() -> ExitCode {
                                 owed = true;
                                 println!("owed      a {role:?} run — {why}");
                             }
-                            hq::verify::Step::Held { role, who, date } => {
+                            hq::verify::Step::Held {
+                                role,
+                                who,
+                                date,
+                                reason,
+                            } => {
                                 owed = true;
                                 println!(
                                     "held      a {role:?} run is owed and hq launches none \
                                      — {who} held this mission on {date}"
                                 );
+                                if let Some(why) = reason {
+                                    println!("          {why}");
+                                }
                                 println!("          `hq mission resume {mission}` lifts the hold");
+                            }
+                            hq::verify::Step::Waiting {
+                                role,
+                                until,
+                                failures,
+                                last,
+                            } => {
+                                owed = true;
+                                println!(
+                                    "waiting   a {role:?} run is owed; the harness failed \
+                                     {failures} time(s) in a row — last: {last}"
+                                );
+                                println!(
+                                    "          hq launches none before {until}; \
+                                     `hq verify {mission}` after that relaunches it"
+                                );
                             }
                             hq::verify::Step::Launched { role, application } => {
                                 owed = true;
@@ -964,13 +988,7 @@ fn watch(project: &Project, id: &str, every: u64) -> ExitCode {
         // that decides whether anything follows — reported before the run,
         // because "no run in progress" on a held mission reads as "it is
         // between two runs" when it means "nothing is coming".
-        if let Some(hold) = &state.stopped {
-            println!(
-                "held      by {} on {} — hq will launch no further run",
-                hold.who, hold.date
-            );
-            println!("          `hq mission resume {id}` lifts it");
-        }
+        print_hold(&state, id);
         let Some(handle) = &state.run else {
             println!("run       none in progress");
             return ExitCode::SUCCESS;
@@ -1213,10 +1231,13 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             match hq::gesture::resume(project, &id, engine) {
                 Ok(lifted) => {
                     match lifted {
-                        Some(held) => println!(
-                            "lifted    the hold {} put on {} is lifted",
-                            held.who, held.date
-                        ),
+                        Some(held) => {
+                            println!(
+                                "lifted    the hold {} put on {} is lifted",
+                                held.who, held.date
+                            );
+                            println!("          and the harness's failures are forgotten");
+                        }
                         None => println!("lifted    nothing was holding mission {id}"),
                     }
                     println!("          the container is unfrozen if it was frozen");
@@ -1607,13 +1628,7 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                     // A hold changes what `hq` will do next, and nothing
                     // else in this report says so: a mission held between
                     // two runs reads exactly like one nobody touched.
-                    if let Some(hold) = &state.stopped {
-                        println!(
-                            "held      by {} on {} — hq will launch no further run",
-                            hold.who, hold.date
-                        );
-                        println!("          `hq mission resume {id}` lifts it");
-                    }
+                    print_hold(&state, &id);
                     if let Some(handle) = &state.run {
                         println!("session   {}", handle.session.0);
                         // Read from the run itself, not from what was
@@ -1687,6 +1702,29 @@ fn parse_service(spec: &str) -> Result<Service, String> {
 
 /// One line per gate, the same wherever gates are reported — `hq mission
 /// gates` and `hq verify` must not describe the same report differently.
+/// A hold, and a harness being waited out, change what `hq` does next, and
+/// nothing else in a report says so: a mission held between two runs reads
+/// exactly like one nobody touched.
+fn print_hold(state: &hq::state::MissionState, id: &str) {
+    if let Some(hold) = &state.stopped {
+        println!(
+            "held      by {} on {} — hq will launch no further run",
+            hold.who, hold.date
+        );
+        if let Some(why) = &hold.reason {
+            println!("          {why}");
+        }
+        println!("          `hq mission resume {id}` lifts it");
+    } else if let Some(down) = &state.harness_down {
+        println!(
+            "harness   failed {} time(s) in a row — no run before {} — last: {}",
+            down.failures,
+            hq::state::rfc3339(down.not_before),
+            down.last
+        );
+    }
+}
+
 fn print_gates(report: &hq::gate::Report) {
     for outcome in &report.outcomes {
         let (mark, detail) = match &outcome.decision {

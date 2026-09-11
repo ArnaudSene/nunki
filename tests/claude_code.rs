@@ -166,18 +166,16 @@ fn an_error_result_is_classified_by_its_cause() {
     let auth = r#"{"type":"result","subtype":"error","is_error":true,"result":"boom","api_error_status":401}"#;
     let login = r#"{"type":"result","subtype":"error","is_error":true,"result":"Not logged in · Please run /login"}"#;
     let mission = r#"{"type":"result","subtype":"error_max_turns","is_error":true,"result":"Reached max turns"}"#;
-    assert!(matches!(
-        parse_stream(rate).outcome,
-        Some(Outcome::HarnessFailure(_))
-    ));
-    assert!(matches!(
-        parse_stream(auth).outcome,
-        Some(Outcome::HarnessFailure(_))
-    ));
-    assert!(matches!(
-        parse_stream(login).outcome,
-        Some(Outcome::HarnessFailure(_))
-    ));
+    // A quota may pass by itself; a 401 or a logged-out session will not,
+    // and the difference is read here, where the status is still in hand —
+    // the 401 below says only "boom".
+    let authentication = |log: &str| match parse_stream(log).outcome {
+        Some(Outcome::HarnessFailure(fault)) => fault.authentication,
+        other => panic!("{other:?}"),
+    };
+    assert!(!authentication(rate));
+    assert!(authentication(auth));
+    assert!(authentication(login));
     assert!(matches!(
         parse_stream(mission).outcome,
         Some(Outcome::MissionFailure(_))
@@ -562,7 +560,7 @@ fn a_container_that_went_away_says_so_and_does_not_blame_the_agent() {
         }),
     );
     match hq.state(&handle_for(log)).unwrap() {
-        RunState::Finished(Outcome::HarnessFailure(why)) => {
+        RunState::Finished(Outcome::HarnessFailure(hq::harness::Fault { why, .. })) => {
             assert!(why.contains("abc123def456"), "{why}");
             assert!(
                 !why.contains("without a result event"),

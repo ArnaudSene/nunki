@@ -972,12 +972,28 @@ Trois choses en découlent :
   plantage du harnais : le run est rejoué sans consommer de tentative, avec
   une attente croissante entre deux essais et un plafond d'attente au-delà
   duquel `hq` s'arrête et remonte à l'humain, plutôt que d'attendre une nuit
-  sur un jeton révoqué.
+  sur un jeton révoqué. Tranché par Arnaud le 2026-09-11 : 2, 4, 8, 16, 32
+  minutes, puis une heure à chaque fois ; **six heures** comptées depuis la
+  première panne d'affilée (`harness_wait_hours`, dans les bornes), assez
+  pour qu'une fenêtre d'abonnement vidée la nuit se rouvre et que `hq`
+  reprenne seul. Au-delà, `hq` pose sur la mission la même retenue que
+  `hq mission stop`, à son nom et avec la raison, et `hq mission resume` la
+  lève. Une panne d'authentification (401, session déconnectée) va à
+  l'humain **tout de suite** : aucune attente ne répare un jeton, et c'est
+  l'adaptateur qui la reconnaît, là où le code d'état est encore lisible.
+  `hq verify` ne dort pas — il lance et rend la main : l'attente est un « pas
+  avant » écrit dans l'état de la mission et respecté au site de lancement
+  par le `verify` suivant, si bien que le premier palier dure en pratique
+  jusqu'au prochain appel. Un run que le harnais a porté jusqu'au bout remet
+  le compte à zéro, `resume` aussi. Aujourd'hui seuls les runs que `hq` relit
+  — intégrateur et sécurité — y passent : la fin d'un run du codeur n'est
+  pas encore relue par `hq`.
 - **« Bloqué sur une permission » n'existe plus.** Sans interface, ce qui
   aurait demandé est refusé — la règle « refuser est sûr » tenue par
   construction, aux drapeaux près du tableau ci-dessus.
 
-Fenêtre de checkpoint, cadence de contrôle, tentatives par lot, seuil
+Fenêtre de checkpoint, cadence de contrôle, tentatives par lot, plafond
+d'attente du harnais, seuil
 d'immobilité, garde-fou de durée : cinq paramètres de `hq.yaml`, l'en-tête de
 mission prime. Les valeurs par défaut (45, 15, 3, 3 contrôles, 8 h) sont
 héritées de sessions interactives ; en mode sans interface un lot bien

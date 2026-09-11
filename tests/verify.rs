@@ -137,6 +137,7 @@ impl World {
                 verdicts: Vec::new(),
                 accepted: Vec::new(),
                 stopped: None,
+                harness_down: None,
                 updated_at: String::new(),
             })
             .unwrap();
@@ -836,6 +837,7 @@ fn with_security_agent(lots: usize) -> World {
             verdicts: Vec::new(),
             accepted: Vec::new(),
             stopped: None,
+            harness_down: None,
             updated_at: String::new(),
         })
         .unwrap();
@@ -1206,4 +1208,162 @@ fn a_held_mission_launches_no_security_run() {
         matches!(steps.last(), Some(Step::Held { role, .. }) if *role == hq::harness::Role::Security),
         "{steps:?}"
     );
+}
+
+// --- waiting out the harness (SPEC 4.3) -------------------------------------
+
+/// A run that fell for a quota, as Claude Code writes it.
+const QUOTA: &str = "{\"type\":\"result\",\"subtype\":\"error\",\"is_error\":true,\
+                     \"result\":\"API Error: 429 rate limit reached\",\"usage\":{}}\n";
+/// A run whose harness could not authenticate; the text says nothing, the
+/// status says it all.
+const UNAUTHORIZED: &str = "{\"type\":\"result\",\"subtype\":\"error\",\"is_error\":true,\
+                            \"result\":\"boom\",\"api_error_status\":401}\n";
+
+impl World {
+    fn harness_down(&self, record: Option<hq::backoff::HarnessDown>) {
+        let store = Store::open(&self.project.hq_root).unwrap();
+        let mut state = store.load("m1").unwrap();
+        state.harness_down = record;
+        store.save(&state).unwrap();
+    }
+}
+
+/// A quota is replayed, not at once: the run is forgotten, no attempt is
+/// spent, and the launch site answers with the wait. Asked again at once,
+/// it still waits — and this world cannot launch (no images, no account),
+/// so a guard that let the launch through would fail the call instead.
+#[test]
+fn a_harness_failure_is_waited_out_rather_than_relaunched() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.run_recorded(Some(41), QUOTA);
+
+    let steps = world.verify().unwrap();
+    match steps.last() {
+        Some(Step::Waiting {
+            role,
+            failures,
+            last,
+            ..
+        }) => {
+            assert_eq!(*role, Role::Integrator);
+            assert_eq!(*failures, 1);
+            assert!(last.contains("rate limit"), "{last}");
+        }
+        other => panic!("{other:?}"),
+    }
+    let state = world.state();
+    assert!(state.run.is_none(), "{:?}", state.run);
+    assert_eq!(state.flow.stage(), &Stage::Integration { attempt: 1 });
+    let down = state.harness_down.expect("the failure is counted");
+    assert!(down.not_before > hq::state::now_secs(), "{down:?}");
+
+    let steps = world.verify().unwrap();
+    assert!(
+        matches!(steps.last(), Some(Step::Waiting { failures: 1, .. })),
+        "{steps:?}"
+    );
+}
+
+/// The wait has to hold at every launch site, as the hold does: the
+/// security one is the second.
+#[test]
+fn a_harness_failure_of_the_security_run_is_waited_out_too() {
+    let world = with_security_agent(1);
+    world.at_security();
+    world.run_recorded(Some(41), QUOTA);
+
+    let steps = world.verify().unwrap();
+    assert!(
+        matches!(steps.last(), Some(Step::Waiting { role, .. }) if *role == Role::Security),
+        "{steps:?}"
+    );
+    let steps = world.verify().unwrap();
+    assert!(
+        matches!(steps.last(), Some(Step::Waiting { failures: 1, .. })),
+        "{steps:?}"
+    );
+}
+
+/// No wait mends a revoked token: the first 401 holds the mission, and the
+/// hold says why and that `hq` put it there.
+#[test]
+fn an_authentication_failure_holds_the_mission_at_once() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.run_recorded(Some(41), UNAUTHORIZED);
+
+    let steps = world.verify().unwrap();
+    match steps.last() {
+        Some(Step::Held { who, reason, .. }) => {
+            assert_eq!(who, "hq");
+            let reason = reason.as_deref().unwrap_or_default();
+            assert!(reason.contains("could not authenticate"), "{reason}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(world.state().held());
+}
+
+/// Past the ceiling, `hq` stops waiting and holds the mission: a harness that
+/// has been failing for six hours is not one more wait away from working.
+#[test]
+fn a_harness_down_past_the_ceiling_holds_the_mission() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    let now = hq::state::now_secs();
+    world.harness_down(Some(hq::backoff::HarnessDown {
+        failures: 6,
+        since: now - 6 * 3600 + 60,
+        not_before: now - 1,
+        last: "429".into(),
+    }));
+    world.run_recorded(Some(41), QUOTA);
+
+    let steps = world.verify().unwrap();
+    match steps.last() {
+        Some(Step::Held { reason, .. }) => {
+            let reason = reason.as_deref().unwrap_or_default();
+            assert!(reason.contains("6-hour ceiling"), "{reason}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A run the harness carried through, whatever it concluded, means the
+/// harness works again: the count starts over.
+#[test]
+fn a_run_the_harness_carried_forgets_its_failures() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.harness_down(Some(hq::backoff::HarnessDown {
+        failures: 3,
+        since: 0,
+        not_before: 0,
+        last: "429".into(),
+    }));
+    world.run_recorded(Some(41), FINISHED);
+    world.verdict("Integrator", "INTEGRATED", &world.head(), "wired");
+
+    let steps = world.verify().unwrap();
+    assert!(matches!(steps.last(), Some(Step::Verified)), "{steps:?}");
+    assert!(world.state().harness_down.is_none());
+}
+
+/// Lifting `hq`'s hold forgets the failures with it: a count carried over
+/// would send the very next quota straight back to the human.
+#[test]
+fn resuming_forgets_the_harness_failures() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.run_recorded(Some(41), UNAUTHORIZED);
+    world.verify().unwrap();
+    assert!(world.state().harness_down.is_some());
+
+    let engine: Arc<dyn hq::engine::Engine> = Arc::new(hq::engine::fake::FakeEngine::default());
+    hq::gesture::resume(&world.project, "m1", engine).unwrap();
+    let state = world.state();
+    assert!(!state.held());
+    assert!(state.harness_down.is_none(), "{:?}", state.harness_down);
 }

@@ -136,6 +136,7 @@ impl World {
                 verdicts: Vec::new(),
                 accepted: Vec::new(),
                 stopped: None,
+                harness_down: None,
                 updated_at: String::new(),
             })
             .unwrap();

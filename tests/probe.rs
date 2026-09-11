@@ -344,6 +344,7 @@ fn started(project: &Project, header: &hq::mission::Header) {
             verdicts: Vec::new(),
             accepted: Vec::new(),
             stopped: None,
+            harness_down: None,
             updated_at: String::new(),
         })
         .unwrap();
@@ -466,6 +467,7 @@ fn live_a_system_profile_reaches_what_the_mission_declares_and_nothing_else() {
             verdicts: Vec::new(),
             accepted: Vec::new(),
             stopped: None,
+            harness_down: None,
             updated_at: String::new(),
         })
         .unwrap();

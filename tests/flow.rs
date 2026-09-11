@@ -191,7 +191,7 @@ fn a_harness_failure_replays_the_same_attempt() {
     let mut flow = Flow::new(header(none(), Security::Gates, Bounds::default())).unwrap();
     for _ in 0..10 {
         flow.advance(Event::RunEnded {
-            outcome: Outcome::HarnessFailure("rate limit".into()),
+            outcome: Outcome::HarnessFailure(hq::harness::Fault::transient("rate limit")),
             lot_done: false,
         })
         .unwrap();
