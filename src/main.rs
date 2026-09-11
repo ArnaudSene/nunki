@@ -754,6 +754,25 @@ fn main() -> ExitCode {
                                 }
                                 println!("          `hq mission resume {mission}` lifts the hold");
                             }
+                            hq::verify::Step::Saving {
+                                role,
+                                account,
+                                window,
+                                per_mille,
+                                stop_at_percent,
+                                until,
+                            } => {
+                                owed = true;
+                                println!(
+                                    "saving    a {role:?} run is owed; account {account}'s \
+                                     {window} is at {}% and hq stops at {stop_at_percent}%",
+                                    hq::consumption::percent(*per_mille)
+                                );
+                                println!(
+                                    "          hq launches none before {until}, when it \
+                                     resets; `hq verify {mission}` after that goes on"
+                                );
+                            }
                             hq::verify::Step::Waiting {
                                 role,
                                 until,
@@ -993,7 +1012,20 @@ fn watch(project: &Project, id: &str, every: u64) -> ExitCode {
             println!("run       none in progress");
             return ExitCode::SUCCESS;
         };
-        let now = match harness_for(project, &state.slot, Some(&handle.session.0)).state(handle) {
+        let harness = harness_for(project, &state.slot, Some(&handle.session.0));
+        // Measured at every tick while a run goes, so the account's file is
+        // as fresh as the run's own stream. Kept, not acted on: `watch` runs
+        // only while someone started it, and the guard that must hold at
+        // night is `verify`'s, before every launch.
+        if let Err(e) = hq::consumption::note(
+            project,
+            state.flow.header().account.as_deref(),
+            harness.windows(handle),
+            hq::state::now_secs(),
+        ) {
+            eprintln!("hq: {e}");
+        }
+        let now = match harness.state(handle) {
             Ok(hq::harness::RunState::Running(p)) => format!(
                 "running — {} event(s), {} tool call(s)",
                 p.events, p.tool_calls
@@ -1629,6 +1661,7 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                     // else in this report says so: a mission held between
                     // two runs reads exactly like one nobody touched.
                     print_hold(&state, &id);
+                    print_usage(project, &state);
                     if let Some(handle) = &state.run {
                         println!("session   {}", handle.session.0);
                         // Read from the run itself, not from what was
@@ -1743,6 +1776,59 @@ fn print_hold(state: &hq::state::MissionState, id: &str) {
             "          caps: {} run(s), {} tokens",
             cap(bounds.max_runs.map(|n| n.to_string())),
             cap(bounds.max_tokens.map(|n| n.to_string()))
+        );
+    }
+}
+
+/// How far the account the mission spends has used its two windows, as last
+/// measured — or that it has not been, in those words: a supervisor reading
+/// "0" where nothing was measured would read that nothing was spent.
+fn print_usage(project: &Project, state: &hq::state::MissionState) {
+    use hq::consumption::{Window, percent};
+    let header = state.flow.header();
+    let bounds = &header.bounds;
+    let account = match hq::consumption::account_of(project, header.account.as_deref()) {
+        Ok(account) => account,
+        Err(e) => {
+            println!("usage     not measured — {e}");
+            return;
+        }
+    };
+    let measure = match hq::consumption::read(&project.hq_home(), &account) {
+        Ok(Some(measure)) => measure,
+        Ok(None) => {
+            println!(
+                "usage     account {account}: not measured yet — hq measures it when it reads a run"
+            );
+            return;
+        }
+        Err(e) => {
+            println!("usage     account {account}: unreadable — {e}");
+            return;
+        }
+    };
+    let window = |w: Option<Window>, stop: u32| match w {
+        Some(w) => format!(
+            "{}% (stops at {stop}%, resets {})",
+            percent(w.per_mille),
+            hq::state::rfc3339(w.resets_at)
+        ),
+        None => "not reported".to_string(),
+    };
+    println!(
+        "usage     account {account}: five hours {} — week {}",
+        window(measure.windows.five_hour, bounds.five_hour_stop_percent),
+        window(measure.windows.weekly, bounds.weekly_stop_percent)
+    );
+    println!(
+        "          measured {} from {}",
+        hq::state::rfc3339(measure.measured_at),
+        measure.harness
+    );
+    if let Some(over) = hq::consumption::over(&measure, bounds, hq::state::now_secs()) {
+        println!(
+            "          past its threshold: hq launches no run before {}",
+            hq::state::rfc3339(over.until)
         );
     }
 }

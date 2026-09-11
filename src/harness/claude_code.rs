@@ -286,6 +286,11 @@ impl Harness for ClaudeCode {
         parse_stream(&text).usage
     }
 
+    fn windows(&self, handle: &RunHandle) -> Option<crate::consumption::Windows> {
+        let text = fs::read_to_string(&handle.log).ok()?;
+        parse_stream(&text).windows
+    }
+
     fn readable(&self, text: &str) -> Vec<crate::harness::Line> {
         use crate::harness::{Line, LineKind};
         let mut lines = Vec::new();
@@ -405,6 +410,8 @@ pub struct Parsed {
     /// What the run spent, read from its `result` event whatever it
     /// concluded.
     pub usage: Option<Usage>,
+    /// The subscription's windows, as the last `rate_limit_event` said.
+    pub windows: Option<crate::consumption::Windows>,
 }
 
 /// Parse the stream-json lines Claude Code writes. Tolerant of a truncated
@@ -454,6 +461,14 @@ pub fn parse_stream(text: &str) -> Parsed {
                 parsed.usage = Some(usage_of(&event));
                 parsed.outcome = Some(classify_result(&event));
             }
+            // Emitted when a window's utilization moves, not at every turn
+            // (measured: four in a run of fifty-two messages). The last one
+            // is the freshest.
+            Some("rate_limit_event") => {
+                if let Some(windows) = windows_of(&event) {
+                    parsed.windows = Some(windows);
+                }
+            }
             _ => {}
         }
     }
@@ -479,6 +494,24 @@ fn summarise(input: Option<&Value>) -> String {
         }
     }
     format!("({} field(s))", map.len())
+}
+
+/// The subscription's windows in a `rate_limit_event`, as v2.1.266 writes
+/// them: `rate_limit_info.unifiedWindows.{five_hour,seven_day}`, each with a
+/// `utilization` between 0 and 1 and a `resetsAt` in epoch seconds.
+fn windows_of(event: &Value) -> Option<crate::consumption::Windows> {
+    let unified = event.pointer("/rate_limit_info/unifiedWindows")?;
+    let window = |key: &str| {
+        let w = unified.get(key)?;
+        Some(crate::consumption::Window {
+            per_mille: crate::consumption::per_mille(w.get("utilization")?.as_f64()?),
+            resets_at: w.get("resetsAt")?.as_u64()?,
+        })
+    };
+    Some(crate::consumption::Windows {
+        five_hour: window("five_hour"),
+        weekly: window("seven_day"),
+    })
 }
 
 /// The `usage` of a `result` event, in the four kinds Claude Code reports

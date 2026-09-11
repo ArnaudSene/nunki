@@ -650,3 +650,43 @@ fn a_paused_run_is_neither_running_nor_finished() {
         RunState::Finished(Outcome::Finished(_))
     ));
 }
+
+/// The subscription's two windows, as v2.1.266 writes them into the run's
+/// own stream (`rate_limit_event`), in thousandths.
+#[test]
+fn the_subscription_windows_are_read_from_the_stream() {
+    let windows = parse_stream(&fixture())
+        .windows
+        .expect("v2.1.266 reports them");
+    assert_eq!(
+        windows.five_hour,
+        Some(hq::consumption::Window {
+            per_mille: 530,
+            resets_at: 1_789_003_800
+        })
+    );
+    assert_eq!(
+        windows.weekly,
+        Some(hq::consumption::Window {
+            per_mille: 410,
+            resets_at: 1_789_351_200
+        })
+    );
+}
+
+/// Emitted when a window moves, several times a run: the last is kept.
+#[test]
+fn the_last_rate_limit_event_is_the_one_kept() {
+    let event = |u: f64| {
+        format!(
+            r#"{{"type":"rate_limit_event","rate_limit_info":{{"unifiedWindows":{{"five_hour":{{"utilization":{u},"resetsAt":10}}}}}}}}"#
+        )
+    };
+    let log = format!("{}\n{}\n", event(0.37), event(0.40));
+    let windows = parse_stream(&log).windows.unwrap();
+    assert_eq!(windows.five_hour.map(|w| w.per_mille), Some(400));
+    assert_eq!(
+        windows.weekly, None,
+        "a window not reported is absent, not zero"
+    );
+}

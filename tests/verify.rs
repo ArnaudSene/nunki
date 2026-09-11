@@ -1554,3 +1554,139 @@ fn a_security_run_read_back_is_counted_too() {
     let spent = world.state().spent;
     assert_eq!((spent.runs, spent.usage.total()), (1, 100));
 }
+
+// --- the subscription's windows (SPEC 4.3) ----------------------------------
+
+/// A finished run whose stream said how far the windows were used.
+const MEASURED: &str = "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"unifiedWindows\":\
+                        {\"five_hour\":{\"utilization\":0.37,\"resetsAt\":1789003800},\
+                        \"seven_day\":{\"utilization\":0.41,\"resetsAt\":1789351200}}}}\n\
+                        {\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"usage\":{}}\n";
+
+impl World {
+    /// One account, so the mission spends it without naming it. Its token
+    /// is absent: a launch attempted here fails, which is what makes a
+    /// launch that was *not* attempted worth asserting.
+    fn with_account(&self) {
+        std::fs::write(
+            self.project.hq_home().join("accounts.yaml"),
+            "accounts:\n  main:\n    harness: claude-code\n    token_file: accounts/main.token\n",
+        )
+        .unwrap();
+    }
+
+    fn five_hours_at(&self, per_mille: u32, resets_at: u64) {
+        hq::consumption::record(
+            &self.project.hq_home(),
+            "main",
+            &hq::consumption::Measure {
+                windows: hq::consumption::Windows {
+                    five_hour: Some(hq::consumption::Window {
+                        per_mille,
+                        resets_at,
+                    }),
+                    weekly: None,
+                },
+                measured_at: hq::state::now_secs(),
+                harness: "claude-code".into(),
+            },
+        )
+        .unwrap();
+    }
+}
+
+/// Past 90 % of five hours, the launch waits for the reset — a wait, not a
+/// hold: nothing for a human to lift. Below it, the launch is attempted.
+#[test]
+fn a_window_past_its_threshold_launches_nothing_until_it_resets() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.with_account();
+    let now = hq::state::now_secs();
+    world.five_hours_at(100, now + 3_600);
+    assert!(
+        world.verify().is_err(),
+        "below the threshold, a launch is attempted"
+    );
+
+    world.five_hours_at(950, now + 3_600);
+    let steps = world.verify().unwrap();
+    match steps.last() {
+        Some(Step::Saving {
+            role,
+            account,
+            per_mille,
+            stop_at_percent,
+            ..
+        }) => {
+            assert_eq!(*role, Role::Integrator);
+            assert_eq!(account, "main");
+            assert_eq!((*per_mille, *stop_at_percent), (950, 90));
+        }
+        other => panic!("{other:?}"),
+    }
+    let state = world.state();
+    assert!(state.run.is_none() && !state.held(), "{state:?}");
+}
+
+/// Once the window has reset, the same measure forbids nothing: `hq` goes on
+/// by itself.
+#[test]
+fn a_window_that_has_reset_lets_the_launch_through() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.with_account();
+    world.five_hours_at(990, hq::state::now_secs() - 1);
+    assert!(world.verify().is_err(), "the launch is attempted");
+}
+
+/// The wait holds at every launch site.
+#[test]
+fn the_window_holds_at_the_security_launch_site_too() {
+    let world = with_security_agent(1);
+    world.at_security();
+    world.with_account();
+    world.five_hours_at(950, hq::state::now_secs() + 3_600);
+    let steps = world.verify().unwrap();
+    assert!(
+        matches!(steps.last(), Some(Step::Saving { role, .. }) if *role == Role::Security),
+        "{steps:?}"
+    );
+}
+
+/// A run read back leaves its measure in the account's file, where the
+/// supervisor reads it.
+#[test]
+fn a_run_read_back_leaves_its_measure_for_the_account() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.with_account();
+    world.run_recorded(Some(41), MEASURED);
+    world.verdict("Integrator", "INTEGRATED", &world.head(), "wired");
+
+    world.verify().unwrap();
+    let kept = hq::consumption::read(&world.project.hq_home(), "main")
+        .unwrap()
+        .expect("measured");
+    assert_eq!(kept.windows.five_hour.map(|w| w.per_mille), Some(370));
+    assert_eq!(kept.windows.weekly.map(|w| w.per_mille), Some(410));
+    assert_eq!(kept.harness, "claude-code");
+}
+
+/// Recorded at every place `hq` reads a run back: the security run is the
+/// second, and a mutation that dropped only its record survived until this
+/// test existed.
+#[test]
+fn a_security_run_read_back_leaves_its_measure_too() {
+    let world = with_security_agent(1);
+    world.at_security();
+    world.with_account();
+    world.run_recorded(Some(41), MEASURED);
+    world.verdict("Security", "CLEAR", &world.head(), "nothing found");
+
+    world.verify().unwrap();
+    let kept = hq::consumption::read(&world.project.hq_home(), "main")
+        .unwrap()
+        .expect("measured");
+    assert_eq!(kept.windows.five_hour.map(|w| w.per_mille), Some(370));
+}
