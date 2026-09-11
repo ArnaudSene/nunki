@@ -6,6 +6,9 @@ use std::path::{Path, PathBuf};
 use hq::check::{Report, Verdict, collisions, run};
 use hq::project::{Config, Project, ProjectError, ProtectedPaths};
 
+mod common;
+use common::serve;
+
 fn config() -> Config {
     Config {
         harness: "claude-code".to_string(),
@@ -344,6 +347,10 @@ fn the_verb_is_green_on_this_very_repository() {
     assert!(text.contains("the coder's allowlist for rust"), "{text}");
     // The container probes are named as not run, never silently skipped.
     assert!(text.contains("could not be checked"), "{text}");
+    // And the forge is part of the verb, not only of the library: with no
+    // credential in this home, every protected branch is named as unasked.
+    assert!(text.contains("main is protected on the forge"), "{text}");
+    assert!(text.contains("no forge credential"), "{text}");
 }
 
 #[test]
@@ -450,4 +457,160 @@ fn the_account_a_project_spends_is_checked_not_assumed() {
         std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
     assert!(!is_red(&verdict(&run(&project), "can authenticate")));
+}
+
+// --- the forge's own protection (SPEC 4.1 bis) ------------------------------
+
+/// A real repository whose `origin` reads as GitHub, protecting two branches.
+fn on_github(dir: &Path, remote: &str) -> Project {
+    let root = dir.join("repo");
+    let hq_root = dir.join("hq");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&hq_root).unwrap();
+    for args in [vec!["init", "-q"], vec!["remote", "add", "origin", remote]] {
+        assert!(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(&args)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    Project::at(
+        root,
+        Config {
+            protected_branches: vec!["main".to_string(), "dev".to_string()],
+            ..config()
+        },
+        hq_root,
+    )
+}
+
+fn with_token(project: &Project) {
+    std::fs::write(project.hq_root.join(hq::forge::TOKEN_FILE), "tok-human\n").unwrap();
+}
+
+fn forge_verdicts(report: &Report) -> Vec<(String, Verdict)> {
+    report
+        .checks
+        .iter()
+        .filter(|c| c.what.ends_with("is protected on the forge"))
+        .map(|c| (c.what.clone(), c.verdict.clone()))
+        .collect()
+}
+
+/// A protected branch is green, an unprotected one is red — the forge would
+/// take the push, and gate 2 is left alone — and each question goes to the
+/// branch itself, with the human's token.
+#[test]
+fn the_forge_is_asked_branch_by_branch_and_an_unprotected_one_is_red() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = on_github(dir.path(), "https://github.com/o/r.git");
+    with_token(&project);
+    let (api, server) = serve(vec![
+        (200, r#"{"name":"main","protected":true}"#),
+        (200, r#"{"name":"dev","protected":false}"#),
+    ]);
+
+    let mut report = Report::default();
+    hq::check::forge_protection(&project, &api, &mut report);
+    let verdicts = forge_verdicts(&report);
+
+    assert!(matches!(&verdicts[0].1, Verdict::Green(_)), "{verdicts:?}");
+    match &verdicts[1].1 {
+        Verdict::Red(why) => assert!(why.contains("gate 2"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    assert!(report.is_red());
+
+    let seen = server.join().unwrap();
+    assert!(
+        seen[0].starts_with("GET /repos/o/r/branches/main "),
+        "{}",
+        seen[0]
+    );
+    assert!(
+        seen[1].starts_with("GET /repos/o/r/branches/dev "),
+        "{}",
+        seen[1]
+    );
+    assert!(
+        seen.iter().all(|r| r
+            .to_ascii_lowercase()
+            .contains("authorization: bearer tok-human")),
+        "{seen:?}"
+    );
+}
+
+/// Without the human's credential the forge is not asked — and the check
+/// says so for every branch rather than passing over them in silence.
+#[test]
+fn without_a_credential_every_branch_is_named_as_not_checked() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = on_github(dir.path(), "https://github.com/o/r.git");
+
+    let mut report = Report::default();
+    hq::check::forge_protection(&project, "http://127.0.0.1:9", &mut report);
+    let verdicts = forge_verdicts(&report);
+
+    assert_eq!(verdicts.len(), 2, "{verdicts:?}");
+    for (_, verdict) in &verdicts {
+        match verdict {
+            Verdict::NotChecked(why) => assert!(why.contains(hq::forge::TOKEN_FILE), "{why}"),
+            other => panic!("{other:?}"),
+        }
+    }
+    assert!(!report.is_red());
+}
+
+/// Measured on GitHub: a missing branch answers 404 "Branch not found", and a
+/// repository the token cannot see answers 404 "Not Found". The first is
+/// about the branch; the second is the forge declining to say — and reading
+/// it as either green or red would be inventing an answer.
+#[test]
+fn a_404_is_an_absent_branch_only_when_the_forge_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = on_github(dir.path(), "https://github.com/o/r.git");
+    with_token(&project);
+    let (api, server) = serve(vec![
+        (404, r#"{"message":"Branch not found","status":"404"}"#),
+        (404, r#"{"message":"Not Found","status":"404"}"#),
+    ]);
+
+    let mut report = Report::default();
+    hq::check::forge_protection(&project, &api, &mut report);
+    server.join().unwrap();
+    let verdicts = forge_verdicts(&report);
+
+    match &verdicts[0].1 {
+        Verdict::NotChecked(why) => assert!(why.contains("does not exist"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    match &verdicts[1].1 {
+        Verdict::NotChecked(why) => {
+            assert!(why.contains("404") && why.contains("Not Found"), "{why}");
+            assert!(!why.contains("does not exist"), "{why}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(!report.is_red());
+}
+
+/// A remote off GitHub is named as such, and no forge is asked.
+#[test]
+fn a_remote_off_github_is_not_asked_and_says_why() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = on_github(dir.path(), "git@gitlab.com:team/thing.git");
+    with_token(&project);
+
+    let mut report = Report::default();
+    hq::check::forge_protection(&project, "http://127.0.0.1:9", &mut report);
+    for (_, verdict) in forge_verdicts(&report) {
+        match verdict {
+            Verdict::NotChecked(why) => assert!(why.contains("not on GitHub"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+    }
 }
