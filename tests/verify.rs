@@ -1538,3 +1538,19 @@ fn caps_are_absent_unless_set() {
         "{yaml}"
     );
 }
+
+/// Counted at every place `hq` reads a run back: the security run is the
+/// second, and a mutation that dropped only its count survived until this
+/// test existed.
+#[test]
+fn a_security_run_read_back_is_counted_too() {
+    let world = with_security_agent(1);
+    world.at_security();
+    world.run_recorded(Some(41), SPENDING);
+    world.verdict("Security", "CLEAR", &world.head(), "nothing found");
+
+    let steps = world.verify().unwrap();
+    assert!(matches!(steps.last(), Some(Step::Verified)), "{steps:?}");
+    let spent = world.state().spent;
+    assert_eq!((spent.runs, spent.usage.total()), (1, 100));
+}
