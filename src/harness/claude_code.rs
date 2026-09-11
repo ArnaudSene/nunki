@@ -115,10 +115,23 @@ impl ClaudeCode {
     /// On the host, never in the container: `mission_dir` is a container
     /// path, and the folder it names is mounted read-only but for the
     /// agent's own files.
+    ///
+    /// Named after the session, and never twice the same file: a resumed
+    /// session keeps its id, and the log is appended to — a second run
+    /// written after the first, dying without its own `result`, would be
+    /// read back with the first one's ending. So the first free name of
+    /// `<session>.jsonl`, `<session>-2.jsonl`, `<session>-3.jsonl`…
     fn log_path(request: &RunRequest) -> PathBuf {
-        request
-            .runs_dir
-            .join(format!("{}.jsonl", request.session.0))
+        let named = |n: u32| {
+            request.runs_dir.join(match n {
+                1 => format!("{}.jsonl", request.session.0),
+                n => format!("{}-{n}.jsonl", request.session.0),
+            })
+        };
+        (1..)
+            .map(named)
+            .find(|path| !path.exists())
+            .expect("an unbounded range has a free name")
     }
 }
 
@@ -130,13 +143,21 @@ pub const AGENT_HOME: &str = "/home/agent";
 /// The user message that starts a run: which lot, which attempt, where the
 /// mission files are. The role prompt itself travels as a system prompt.
 fn lot_prompt(request: &RunRequest, exposure: &Exposure) -> String {
-    let base = format!(
+    let mut base = format!(
         "Mission folder: {}. Work on lot `{}` (attempt {}). Read MISSION.md and JOURNAL.md first; \
          write your ÉTAT DE REPRISE block in JOURNAL.md at every checkpoint and before you stop.",
         request.workspace.mission_dir.display(),
         request.lot,
         request.attempt
     );
+    // The coder's run is judged on this line; the other roles conclude
+    // with their verdict.
+    if request.role == Role::Coder {
+        base.push_str(&format!(
+            " End that block with `Lot: {} — done`, or `Lot: {} — failed: <why>`.",
+            request.lot, request.lot
+        ));
+    }
     match exposure {
         Exposure::UserMessage(m) => format!("{m}\n\n{base}"),
         Exposure::SystemPromptFile(_) => base,

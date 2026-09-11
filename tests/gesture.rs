@@ -82,6 +82,7 @@ impl World {
                 harness_down: None,
                 spent: Default::default(),
                 spared: None,
+                coder_session: None,
                 updated_at: String::new(),
             })
             .unwrap();

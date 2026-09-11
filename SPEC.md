@@ -335,7 +335,7 @@ YAML, du JSON, du git. Rien d'autre.
 | la mission | un dossier **au HQ, hors de l'arbre git** (voir les montages) : `MISSION.md`, `FOLLOWUP_HQ.md` et `MUTANTS.json` (à l'humain et au HQ, lecture seule pour l'agent), `JOURNAL.md`, `PR.md`, `VERDICT.json`, `MUTANTS.triage.json` (à l'agent) — la même forme pour les trois rôles | l'agent qui la porte, le HQ |
 | le bloc structuré de `MISSION.md` | un en-tête YAML que `hq` lit, valide et **fige dans son état à la validation humaine** : forme (`integration`, `security`), rôle, branche, base, **la liste des lots** (un identifiant et un titre chacun — c'est elle qui donne « un run par lot » et qui fait refuser un `VERDICT.json` écrit avant que le dernier lot ait son entrée « fini » dans le journal), borne de volets, tentatives par lot, délais, script de lancement, et pour une mission d'intégration les **services** (réseau nommé, adresses, domaines) et les **fichiers d'identifiants** montés. La prose du gabarit vient après, pour l'agent. L'agent ne peut pas l'écrire, et `hq` ne le relit pas en cours de mission | `hq`, puis l'agent |
 | le verdict | `VERDICT.json` dans le dossier de mission : `{ role, verdict, head, date, report }`, écrit par l'agent à la fin de son dernier run ; `hq` le refuse si `head` n'est pas le `HEAD` réel de la branche | `hq` |
-| le contrat de run | un run par lot (4.3) : ce qu'un run doit avoir produit avant de sortir — le lot commité et prouvé ou l'échec dit, arbre commitable, bloc `ÉTAT DE REPRISE` en tête du journal (écrit aussi toutes les 45 minutes en cours de run), et pour le dernier lot le verdict | l'agent, par `MISSION.md` ; `hq`, à la sortie et aux checkpoints |
+| le contrat de run | un run par lot (4.3) : ce qu'un run doit avoir produit avant de sortir — le lot commité et prouvé ou l'échec dit, arbre commitable, bloc `ÉTAT DE REPRISE` en tête du journal (écrit aussi toutes les 45 minutes en cours de run), et pour le dernier lot le verdict. Pour le codeur, ce bloc se termine par la ligne `Lot: <lot> — done`, ou `Lot: <lot> — failed: <raison>` : la seule que `hq` lise pour savoir le lot fini (tranché par Arnaud le 2026-09-11) | l'agent, par `MISSION.md` ; `hq`, à la sortie et aux checkpoints |
 | les chemins protégés | une liste déclarative par projet, **deux modes** : refuser, refuser seulement si le fichier existe déjà sur la base. Le mode « demander » a disparu : rien ne peut demander en autonome | la porte de périmètre, et l'adaptateur harnais s'il double |
 | la batterie | un script par projet, cousu depuis un fragment par stack | la porte « batterie », la CI |
 | la configuration du projet | `hq.yaml` à la racine du dépôt : harnais, stacks, branches protégées, chemins protégés, liste blanche par stack, borne de volets, seuil de mutants, délais, dossier des identifiants de test, script de lancement (`run:`), fichier de services du projet (`services_file:`) et qui tient les branches protégées côté forge (`forge_protection:`, `forge` par défaut ou `by_hand`). `MISSION.md` prime sur lui pour ce qu'il redéclare | `hq` |
@@ -930,14 +930,25 @@ Trois choses en découlent :
   seuls — et un **run** est l'invocation du harnais pour **un** lot : `hq` le
   lance avec la consigne « fais le lot N », attend sa fin, lit `JOURNAL.md` et
   `VERDICT.json`, applique les règles (lots restants, volets, tentatives), et
-  relance le lot suivant en reprenant la session. Un run **n'a pas de durée
+  relance le lot suivant en reprenant la session — la même d'un lot au
+  suivant, et à travers une panne du harnais ou un tour épargné ; une
+  session neuve pour une nouvelle tentative après un échec, car un contexte
+  qui a échoué n'est pas celui qu'on veut garder (tranché par Arnaud le
+  2026-09-11). Un run **n'a pas de durée
   maximale** : il se termine quand le lot est fini et prouvé, ou quand le HQ
   constate qu'il est bloqué. **Jamais un arrêt parce qu'une durée est
   atteinte.** Le contrat de sortie d'un run, vérifié par `hq` : le lot est
   commité et sa preuve passe, ou le run dit qu'il a échoué ; l'arbre est
   commitable ; le journal porte un bloc `ÉTAT DE REPRISE` qui nomme `HEAD`, le
-  lot, la prochaine action ; et pour le dernier lot, `VERDICT.json` existe. Un
-  run qui sort sans ce contrat est une tentative échouée du lot.
+  lot, la prochaine action ; pour le codeur, il se termine par
+  `Lot: <lot> — done` ou `Lot: <lot> — failed: <raison>` ; et pour le dernier
+  lot, `VERDICT.json` existe. Un run qui sort sans ce contrat est une
+  tentative échouée du lot. `hq verify` relit le run du codeur dans cet
+  ordre : un tour épargné ou une panne du harnais rejoue la même tentative
+  sans juger l'arbre ; sinon les portes 1 à 4, puis la ligne `Lot:` du bloc,
+  et d'elle seule — une ligne absente, en échec ou qui nomme un autre lot est
+  une tentative échouée, dont la raison est portée dans `FOLLOWUP_HQ.md` pour
+  la tentative suivante. Le run suivant est lancé aussitôt.
 - **Deux niveaux de contrôle pendant un run**, tranchés par Arnaud le
   2026-09-09, et ce qui les distingue :
   - **toutes les 15 minutes, la vie et le progrès**, par les signaux seuls,
@@ -1015,8 +1026,9 @@ Trois choses en découlent :
   run ne coûte **aucune tentative** et ne compte pas comme une panne du
   harnais — c'est la marque qui en décide, pas le journal, car ce qu'un
   harnais écrit après un tour interrompu n'a pas été mesuré ; un verdict
-  écrit avant la fin du tour tient. Le codeur, dont `hq` ne relit ni ne
-  relance encore les runs, peut être arrêté ainsi mais pas encore relancé.
+  écrit avant la fin du tour tient. Le codeur y est soumis comme les autres
+  rôles : son tour épargné est relu sans juger l'arbre, puis relancé dans la
+  même session.
 - **Chaque mission a son moniteur.** Tranché par Arnaud le 2026-09-11. `hq`
   n'a pas de service système, et un verbe rend la main ; ce qui surveille un
   run la nuit et relance après une attente est donc un processus à part, un
@@ -1032,8 +1044,8 @@ Trois choses en découlent :
   si bien qu'un `hq verify` tapé pendant ce temps dit qui le tient ; un
   verrou pris est un humain qui conduit, et le moniteur attend son tour. Il
   s'arrête dès que la mission attend un humain ou n'a plus rien que `hq`
-  sache lancer — vérifiée, remise à l'humain, retenue, constats de sécurité
-  à trancher, ou un run du codeur dû, que `hq` ne lance pas encore. `hq
+  sache lancer — vérifiée, remise à l'humain, retenue, ou constats de sécurité
+  à trancher. `hq
   mission status` dit s'il veille ; `HQ_NO_MONITOR` dans l'environnement le
   coupe, pour qui conduit à la main. Son pid et son journal sont sous
   `monitors/` dans le HQ, et seul le binaire `hq` peut en lancer un.
@@ -1473,9 +1485,9 @@ La revue a reproché au brouillon de vendre sans chiffrer. Voici l'addition.
   lancement : un run en cours n'est jamais tué pour lui, si bien qu'une
   mission peut le dépasser d'un run au plus ; atteint, `hq` pose sa retenue
   avec la raison, et on le relève dans l'en-tête, par `hq mission reframe`,
-  puis `hq mission resume`. Un run se compte quand `hq` le relit —
-  aujourd'hui l'intégrateur et la sécurité — plus le premier run du codeur,
-  lancé par `hq mission start`.
+  puis `hq mission resume`. Un run se compte quand `hq verify` le
+  relit, quel que soit le rôle — le premier run du codeur compris, lancé par
+  `hq mission start`.
 - **Les tests système sur une vraie API tierce** : lents, instables, à effets
   de bord, et deux missions parallèles partagent le même palier de test et se
   marchent dessus. Une mission d'intégration qui déclare un fournisseur réel

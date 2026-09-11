@@ -268,6 +268,8 @@ actually hold in this project.
 - A commitable tree.
 - A `ÉTAT DE REPRISE` block at the top of `JOURNAL.md`, rewritten at every
   checkpoint and before stopping.
+- For the coder, that block ends with `Lot: <lot> — done`, or
+  `Lot: <lot> — failed: <why>`: the line `hq` reads to know the lot is done.
 ";
 
 /// The agent image for a Rust project.

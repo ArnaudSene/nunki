@@ -742,10 +742,6 @@ fn main() -> ExitCode {
                                 print_gates(report);
                             }
                             hq::verify::Step::Moved { to } => println!("stage     {to:?}"),
-                            hq::verify::Step::NeedsRun { role, why } => {
-                                owed = true;
-                                println!("owed      a {role:?} run — {why}");
-                            }
                             hq::verify::Step::Held {
                                 role,
                                 who,

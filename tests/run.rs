@@ -509,6 +509,10 @@ fn live_a_mission_starts_and_its_run_is_read_back() {
 
     let handle = state.run.clone().expect("a run was launched");
     assert!(!handle.container.is_empty(), "it runs in a container");
+    // Counted when `hq verify` reads it back, like every other run; and its
+    // session is the one the next lot resumes.
+    assert_eq!(state.spent.runs, 0);
+    assert_eq!(state.coder_session.as_ref(), Some(&handle.session));
     // The log is on the host, where hq reads it — the container has nowhere
     // to write it.
     assert!(handle.log.starts_with(&hq_root), "{:?}", handle.log);
@@ -1125,4 +1129,16 @@ fn a_session_identifier_is_unique_over_its_whole_length() {
     );
     let whole: std::collections::BTreeSet<&String> = ids.iter().collect();
     assert_eq!(whole.len(), ids.len(), "two runs share an identifier");
+}
+
+/// A session given is resumed; none given is a fresh one, never the same
+/// twice.
+#[test]
+fn a_given_session_is_resumed_and_none_starts_a_fresh_one() {
+    let given = hq::harness::SessionId("s-coder".into());
+    assert_eq!(run::session_for(Some(&given)), (given.clone(), true));
+    let (fresh, resume) = run::session_for(None);
+    assert!(!resume);
+    assert_ne!(fresh, given);
+    assert_ne!(run::session_for(None).0, fresh, "a fresh one each time");
 }

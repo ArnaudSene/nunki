@@ -148,7 +148,9 @@ pub fn start(
         role: Role::Coder,
         lot,
         attempt: 1,
+        session: None,
     })?;
+    let session = launched.run.session.clone();
 
     let mut state = MissionState {
         id: id.to_string(),
@@ -160,13 +162,10 @@ pub fn start(
         accepted: Vec::new(),
         stopped: None,
         harness_down: None,
-        // The run just launched is the mission's first. Its tokens are not
-        // known until something reads it back, which nothing does yet.
-        spent: crate::state::Spent {
-            runs: 1,
-            usage: Default::default(),
-        },
+        // Counted when `hq verify` reads it back, like every other run.
+        spent: Default::default(),
         spared: None,
+        coder_session: Some(session),
         updated_at: String::new(),
     };
     store.save(&state)?;
@@ -191,6 +190,8 @@ pub struct Launching<'a> {
     /// What this run is for, as the harness records it.
     pub lot: String,
     pub attempt: u32,
+    /// The harness session to resume, or `None` for a fresh one.
+    pub session: Option<SessionId>,
 }
 
 /// What a launch left behind, for the caller to persist.
@@ -321,7 +322,7 @@ pub fn launch(l: &Launching) -> Result<Launched, RunError> {
     };
 
     // Step 4. The agent.
-    let session = SessionId(session_id());
+    let (session, resume) = session_for(l.session.as_ref());
     let spawner = ContainerSpawner::new(
         engine.clone(),
         file.clone(),
@@ -340,7 +341,7 @@ pub fn launch(l: &Launching) -> Result<Launched, RunError> {
         lot: l.lot.clone(),
         attempt: l.attempt,
         session,
-        resume: false,
+        resume,
         // On the host: the container has nowhere to write a log, and the
         // mission folder is read-only but for the agent's own files
         // (SPEC 4.1).
@@ -361,6 +362,17 @@ pub fn launch(l: &Launching) -> Result<Launched, RunError> {
         app,
         launch: declared,
     })
+}
+
+/// The session a run is launched in, and whether the harness resumes it: the
+/// one given, resumed, or a fresh one (SPEC 4.3). Which one the caller gives
+/// is its rule to keep — `hq verify` carries the coder's from one lot to the
+/// next and drops it after a failed attempt.
+pub fn session_for(given: Option<&SessionId>) -> (SessionId, bool) {
+    match given {
+        Some(session) => (session.clone(), true),
+        None => (SessionId(session_id()), false),
+    }
 }
 
 /// Make the declared directories exist in the slot's tree, so the profile can

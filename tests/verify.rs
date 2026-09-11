@@ -140,6 +140,7 @@ impl World {
                 harness_down: None,
                 spent: Default::default(),
                 spared: None,
+                coder_session: None,
                 updated_at: String::new(),
             })
             .unwrap();
@@ -222,6 +223,9 @@ fn a_forbidden_commit_costs_a_run_now_and_not_the_mission_later() {
     let world = World::new(2);
     world.commit("AGENTS.md", "rewritten by the agent\n", "loosen the rules");
     world.journal_names_head();
+    // Held, so this world — no account, no images — launches nothing and
+    // `verify` answers with its steps.
+    world.hold();
 
     let steps = world.verify().unwrap();
     let report = gates_of(&steps);
@@ -269,15 +273,16 @@ fn running_it_again_picks_up_where_it_stopped() {
     let world = World::new(2);
     world.commit("src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
     world.journal_names_head();
+    world.hold();
 
-    // Green gates, first lot still owed a run.
+    // Green gates, first lot still owed a run — and held, so none launched.
     let first = world.verify().unwrap();
     assert!(
         gates_of(&first).passed(),
         "{:?}",
         gates_of(&first).failure()
     );
-    assert!(matches!(first.last(), Some(Step::NeedsRun { .. })));
+    assert!(matches!(first.last(), Some(Step::Held { .. })));
     let after_first = world.state();
 
     // The run happens; the flow moves to the second lot.
@@ -354,6 +359,9 @@ fn a_slot_already_held_is_not_verified_under_the_other_hq() {
     .unwrap();
     assert!(matches!(world.verify(), Err(VerifyError::Lock(_))));
     drop(held);
+    // Held, so the coder's run is refused by name rather than launched in a
+    // world with no account.
+    world.hold();
     assert!(world.verify().is_ok());
 }
 
@@ -463,14 +471,16 @@ fn live_a_mission_is_driven_from_its_first_lot_to_verified() {
     engine.up(&file, &compose_project).unwrap();
     let go = || verify::verify(&world.project, "m1", engine.clone(), "docker").unwrap();
 
-    // 1. The coder still owes its lot a run; gates 1 to 4 are green.
+    // 1. The coder still owes its lot a run; gates 1 to 4 are green. Held,
+    //    because this world has no account to launch it with.
+    world.hold();
     let steps = go();
     assert!(
         gates_of(&steps).passed(),
         "{:?}",
         gates_of(&steps).failure()
     );
-    assert!(matches!(steps.last(), Some(Step::NeedsRun { role, .. }) if *role == Role::Coder));
+    assert!(matches!(steps.last(), Some(Step::Held { role, .. }) if *role == Role::Coder));
 
     // 2. The run happens, the flow reaches the final gates.
     world.coder_finished_the_lot();
@@ -798,6 +808,9 @@ fn a_broken_integration_goes_back_to_the_coder_as_a_volet() {
         &world.head(),
         "the adapter cannot be wired as it stands",
     );
+    // Held: the read-back still happens, and the coder's launch is refused
+    // by name rather than failing in a world with no account.
+    world.hold();
 
     let steps = world.verify().unwrap();
     assert!(
@@ -812,10 +825,8 @@ fn a_broken_integration_goes_back_to_the_coder_as_a_volet() {
         world.state().flow.stage()
     );
     assert!(
-        steps
-            .iter()
-            .any(|s| matches!(s, Step::NeedsRun { role, .. } if *role == Role::Coder)),
-        "{steps:?}"
+        matches!(steps.last(), Some(Step::Held { role, .. }) if *role == Role::Coder),
+        "the coder is owed the volet: {steps:?}"
     );
 }
 
@@ -842,6 +853,7 @@ fn with_security_agent(lots: usize) -> World {
             harness_down: None,
             spent: Default::default(),
             spared: None,
+            coder_session: None,
             updated_at: String::new(),
         })
         .unwrap();
@@ -1152,8 +1164,8 @@ fn a_held_mission_launches_no_integration_run() {
 }
 
 /// Holding a mission stops `hq` from starting work, not from reading what is
-/// already there: the gates still run, and the coder is still told a run is
-/// owed — by a step that names who held it, not by `NeedsRun`.
+/// already there: the gates still run, and the coder's run is refused by a
+/// step that names who held it.
 #[test]
 fn a_held_mission_still_plays_its_gates_and_says_who_held_it() {
     let world = World::shaped(1, integration());
@@ -1163,10 +1175,6 @@ fn a_held_mission_still_plays_its_gates_and_says_who_held_it() {
     assert!(
         steps.iter().any(|s| matches!(s, Step::Gates { .. })),
         "{steps:?}"
-    );
-    assert!(
-        !steps.iter().any(|s| matches!(s, Step::NeedsRun { .. })),
-        "a held mission is not merely owed a run: {steps:?}"
     );
     match steps.last() {
         Some(Step::Held { role, who, .. }) => {
@@ -1813,4 +1821,299 @@ fn a_run_still_going_past_the_threshold_is_told_to_end_its_turn() {
         other => panic!("past the threshold the turn is ended: {other:?}"),
     }
     assert!(world.state().spared.is_some());
+}
+
+// --- the coder's runs, read back and relaunched (SPEC 4.3) -------------------
+
+impl World {
+    /// The journal's resume block, naming HEAD, with the run's `Lot:` line.
+    fn journal_says(&self, line: &str) {
+        std::fs::write(
+            self.mission().join("JOURNAL.md"),
+            format!(
+                "# Journal\n\n## ÉTAT DE REPRISE\n\nHEAD is `{}`.\n{line}\n",
+                self.head()
+            ),
+        )
+        .unwrap();
+    }
+
+    /// A coder session, as `hq mission start` records one.
+    fn coder_session(&self, id: &str) {
+        let store = Store::open(&self.project.hq_root).unwrap();
+        let mut state = store.load("m1").unwrap();
+        state.coder_session = Some(hq::harness::SessionId(id.into()));
+        store.save(&state).unwrap();
+    }
+
+    /// A coder run that finished, having left `line` in its resume block.
+    /// Held, so the relaunch is refused by name instead of failing in a
+    /// world with no account.
+    fn coder_ran(&self, line: &str) -> Vec<Step> {
+        self.journal_says(line);
+        self.coder_session("s-coder");
+        self.run_recorded(Some(41), FINISHED);
+        self.hold();
+        self.verify().unwrap()
+    }
+}
+
+fn coding(state: &MissionState) -> (Work, u32) {
+    match state.flow.stage() {
+        Stage::Coding { work, attempt } => (work.clone(), *attempt),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// The run says its lot is done, the gates agree: the next lot, first
+/// attempt, in the same session — and the run is counted and forgotten.
+#[test]
+fn a_coder_run_that_says_its_lot_is_done_moves_to_the_next_lot() {
+    let world = World::new(2);
+    world.commit("src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    let steps = world.coder_ran("Lot: L1 — done");
+
+    assert!(
+        gates_of(&steps).passed(),
+        "{:?}",
+        gates_of(&steps).failure()
+    );
+    let state = world.state();
+    assert_eq!(coding(&state), (Work::Lot(1), 1));
+    assert!(state.run.is_none(), "{:?}", state.run);
+    assert_eq!(state.spent.runs, 1, "counted when read back");
+    assert_eq!(
+        state.coder_session,
+        Some(hq::harness::SessionId("s-coder".into())),
+        "the next lot resumes the session"
+    );
+    assert!(
+        matches!(steps.last(), Some(Step::Held { role, .. }) if *role == Role::Coder),
+        "{steps:?}"
+    );
+}
+
+/// A lot the run says it failed is one more attempt, in a fresh session, and
+/// the next attempt reads why in the file every run reads first.
+#[test]
+fn a_run_that_says_its_lot_failed_costs_an_attempt_and_its_session() {
+    let world = World::new(2);
+    world.commit("src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    world.coder_ran("Lot: L1 — failed: the parser rejects empty input");
+
+    let state = world.state();
+    assert_eq!(coding(&state), (Work::Lot(0), 2));
+    assert!(state.coder_session.is_none(), "{:?}", state.coder_session);
+    let followup = world.followup();
+    assert!(followup.contains("L1, attempt 1"), "{followup}");
+    assert!(
+        followup.contains("the parser rejects empty input"),
+        "{followup}"
+    );
+}
+
+/// No `Lot:` line is no word that the lot is done: a failed attempt.
+#[test]
+fn a_run_that_does_not_say_its_lot_is_done_has_not_finished_it() {
+    let world = World::new(2);
+    world.commit("src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    world.coder_ran("Nothing said about the lot.");
+
+    let state = world.state();
+    assert_eq!(coding(&state), (Work::Lot(0), 2));
+    assert!(state.coder_session.is_none());
+    assert!(
+        world.followup().contains("no `Lot: L1 — done` line"),
+        "{}",
+        world.followup()
+    );
+}
+
+/// A `done` for another lot is not this lot's.
+#[test]
+fn a_done_line_for_another_lot_is_not_this_lots() {
+    let world = World::new(2);
+    world.commit("src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    world.coder_ran("Lot: L2 — done");
+
+    assert_eq!(coding(&world.state()), (Work::Lot(0), 2));
+    assert!(
+        world.followup().contains("reports lot L2"),
+        "{}",
+        world.followup()
+    );
+}
+
+/// Red gates after a run cost that run's attempt, once: the launch that
+/// follows is not preceded by a second judgement of the same tree.
+#[test]
+fn red_gates_after_a_coder_run_spend_one_attempt_not_two() {
+    let world = World::new(2);
+    world.commit("AGENTS.md", "rewritten by the agent\n", "loosen the rules");
+    let steps = world.coder_ran("Lot: L1 — done");
+
+    assert_eq!(coding(&world.state()), (Work::Lot(0), 2));
+    assert_eq!(
+        steps
+            .iter()
+            .filter(|s| matches!(s, Step::Gates { .. }))
+            .count(),
+        1,
+        "{steps:?}"
+    );
+    assert!(world.state().coder_session.is_none());
+    assert!(
+        world.followup().contains("the gates were red"),
+        "{}",
+        world.followup()
+    );
+}
+
+/// A turn `hq` ended is replayed in the same session, and its tree is not
+/// judged: a resume block one commit behind would turn the replay into a
+/// spent attempt.
+#[test]
+fn a_coder_turn_hq_spared_is_replayed_without_judging_the_tree() {
+    let world = World::new(2);
+    world.journal_names_head();
+    world.commit("src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1, half done");
+    world.coder_session("s-coder");
+    world.run_recorded(Some(41), FINISHED);
+    world.spared();
+    world.hold();
+
+    let steps = world.verify().unwrap();
+    let state = world.state();
+    assert_eq!(coding(&state), (Work::Lot(0), 1));
+    assert!(state.spared.is_none(), "the mark is spent");
+    assert_eq!(
+        state.coder_session,
+        Some(hq::harness::SessionId("s-coder".into()))
+    );
+    assert!(
+        !steps.iter().any(|s| matches!(s, Step::Gates { .. })),
+        "{steps:?}"
+    );
+}
+
+/// A harness that failed the coder's run is waited out, like any other role's,
+/// and the session is kept for the replay.
+#[test]
+fn a_coder_harness_failure_is_waited_out_and_keeps_its_session() {
+    let world = World::new(2);
+    world.journal_names_head();
+    world.coder_session("s-coder");
+    world.run_recorded(Some(41), QUOTA);
+
+    let steps = world.verify().unwrap();
+    assert!(
+        matches!(steps.last(), Some(Step::Waiting { role, .. }) if *role == Role::Coder),
+        "{steps:?}"
+    );
+    let state = world.state();
+    assert_eq!(coding(&state), (Work::Lot(0), 1));
+    assert!(state.harness_down.is_some());
+    assert_eq!(
+        state.coder_session,
+        Some(hq::harness::SessionId("s-coder".into()))
+    );
+}
+
+/// The coder's launch site answers to the account's window like the others.
+#[test]
+fn the_window_holds_at_the_coder_launch_site_too() {
+    let world = World::new(2);
+    world.journal_names_head();
+    world.with_account();
+    world.five_hours_at(950, hq::state::now_secs() + 3_600);
+
+    let steps = world.verify().unwrap();
+    assert!(
+        matches!(steps.last(), Some(Step::Saving { role, .. }) if *role == Role::Coder),
+        "{steps:?}"
+    );
+}
+
+/// And to the mission's caps: below, the launch is attempted (and fails in
+/// this world); at the cap, the mission is held.
+#[test]
+fn the_cap_holds_at_the_coder_launch_site_too() {
+    let world = World::new(2);
+    world.journal_names_head();
+    world.capped(Some(1), None);
+    assert!(
+        world.verify().is_err(),
+        "below the cap, a launch is attempted"
+    );
+
+    world.spent(1, 0);
+    let steps = world.verify().unwrap();
+    match steps.last() {
+        Some(Step::Held {
+            role, who, reason, ..
+        }) => {
+            assert_eq!((*role, who.as_str()), (Role::Coder, "hq"));
+            assert!(reason.as_deref().unwrap_or_default().contains("max_runs"));
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Red final gates open a volet, and the coder is told why in the file every
+/// run reads first — the one place a volet's reason reaches the agent.
+#[test]
+fn red_final_gates_tell_the_coder_why() {
+    let world = World::new(1);
+    world.commit("src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    world.journal_names_head();
+    world.coder_finished_the_lot();
+    world.hold();
+
+    let steps = world.verify();
+    let stage = world.state().flow.stage().clone();
+    assert!(
+        matches!(
+            stage,
+            Stage::Coding {
+                work: Work::Volet { .. },
+                ..
+            }
+        ),
+        "{stage:?} after {steps:?}"
+    );
+    assert!(
+        world.followup().contains("the final gates were red"),
+        "{}",
+        world.followup()
+    );
+}
+
+/// The last lot done is not a stopping point: the same `verify` goes on to
+/// the final gates, which this world has red — so the mission is already on
+/// its first volet when it returns.
+#[test]
+fn the_last_lot_done_goes_on_to_the_final_gates_at_once() {
+    let world = World::new(1);
+    world.commit("src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    let steps = world.coder_ran("Lot: L1 — done");
+
+    assert!(
+        steps
+            .iter()
+            .any(|s| matches!(s, Step::Moved { to: Stage::Gates })),
+        "{steps:?}"
+    );
+    assert_ne!(world.state().flow.stage(), &Stage::Gates, "{steps:?}");
+}
+
+/// A volet is called `volet-<n>`: the name the coder is given, the one its
+/// `Lot:` line must repeat, and the one a handover to the human names.
+#[test]
+fn a_volet_is_named_by_its_number() {
+    let world = World::new(1);
+    let work = Work::Volet {
+        n: 2,
+        cause: "gate: red".into(),
+    };
+    assert_eq!(world.state().flow.label(&work), "volet-2");
 }
