@@ -205,9 +205,6 @@ pub fn after_verify(result: &Result<Vec<Step>, VerifyError>) -> Next {
             Some(Step::Findings { .. }) => Next::Exit(
                 "the security agent's findings are the human's to iterate or lift".to_string(),
             ),
-            Some(Step::NeedsRun { role, why }) => Next::Exit(format!(
-                "a {role:?} run is owed and hq does not launch it yet: {why}"
-            )),
             Some(
                 Step::Launched { .. }
                 | Step::Saving { .. }

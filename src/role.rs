@@ -52,7 +52,12 @@ journal that you did.
 
 You do not wire external infrastructure and you do not write system tests —
 another role does, and doing it here would leave the mission with two
-half-done wirings."
+half-done wirings.
+
+Before you stop, end the `ÉTAT DE REPRISE` block with one line saying how
+the lot ended: `Lot: <lot> — done` once it is committed and proved, or
+`Lot: <lot> — failed: <why>` if it is not, `<lot>` being the identifier you
+were given. That line, and nothing else, tells the HQ the lot is done."
         }
 
         Role::Integrator => {

@@ -91,6 +91,12 @@ pub struct MissionState {
     /// has not been measured.
     #[serde(default)]
     pub spared: Option<Spared>,
+    /// The coder's harness session, resumed by its next run (SPEC 4.3,
+    /// decided by Arnaud on 2026-09-11): kept from one lot to the next and
+    /// across a harness failure or a spared turn, dropped when an attempt
+    /// fails — a context that failed is not the one to carry on with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coder_session: Option<crate::harness::SessionId>,
     /// RFC 3339 time of the last write; informational.
     pub updated_at: String,
 }
@@ -109,10 +115,9 @@ pub struct Spared {
 
 /// Runs, and tokens as the harness reported them (SPEC 7).
 ///
-/// A run is counted when `hq` reads it back — today the integrator's and the
-/// security agent's — plus the coder's first run, launched by `hq mission
-/// start` and not read back yet. Whoever adds that reading must drop the
-/// start's count, or the first run is counted twice.
+/// A run is counted when `hq verify` reads it back, whatever the role — the
+/// coder's first run too, launched by `hq mission start` and read back like
+/// the others.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Spent {
     pub runs: u32,

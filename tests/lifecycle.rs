@@ -73,6 +73,7 @@ impl World {
                 harness_down: None,
                 spent: Default::default(),
                 spared: None,
+                coder_session: None,
                 updated_at: "2026-09-10T00:00:00Z".into(),
             })
             .unwrap();
@@ -305,6 +306,7 @@ fn archiving_twice_says_so() {
             harness_down: None,
             spent: Default::default(),
             spared: None,
+            coder_session: None,
             updated_at: String::new(),
         })
         .unwrap();

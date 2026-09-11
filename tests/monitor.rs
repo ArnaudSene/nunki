@@ -69,6 +69,7 @@ fn state(with_run: bool) -> MissionState {
         harness_down: None,
         spent: Default::default(),
         spared: None,
+        coder_session: None,
         updated_at: String::new(),
     }
 }
@@ -138,11 +139,6 @@ fn after_a_verify_the_monitor_goes_on_or_stops_for_a_human() {
     assert!(stops(go(Step::Findings {
         report: "one".into(),
         lifted: vec![],
-    })));
-    // The coder: owed a run that hq does not launch yet.
-    assert!(stops(go(Step::NeedsRun {
-        role: hq::harness::Role::Coder,
-        why: "lot L1".into(),
     })));
 
     // A human driving the slot is not a failure: the monitor waits its turn.

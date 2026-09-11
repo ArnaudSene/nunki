@@ -3,6 +3,7 @@
 
 pub mod dir;
 pub mod flow;
+pub mod journal;
 
 use serde::{Deserialize, Serialize};
 

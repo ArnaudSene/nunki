@@ -166,6 +166,16 @@ impl Flow {
         Ok(())
     }
 
+    /// What a piece of coder work is called — in the run's prompt, in the
+    /// journal's `Lot:` line, in the attempts' count. One spelling, because
+    /// the line the agent writes is compared with the one it was given.
+    pub fn label(&self, work: &Work) -> String {
+        match work {
+            Work::Lot(i) => self.header.lots[*i].id.clone(),
+            Work::Volet { n, .. } => format!("volet-{n}"),
+        }
+    }
+
     /// Returns to the coder used so far.
     pub fn volets(&self) -> u32 {
         self.volets
@@ -309,10 +319,7 @@ impl Flow {
     /// One more attempt on the same coder work, or the human once the bound
     /// is reached.
     fn retry_coder(&mut self, work: Work, attempt: u32) -> Stage {
-        let label = match &work {
-            Work::Lot(i) => self.header.lots[*i].id.clone(),
-            Work::Volet { n, .. } => format!("volet-{n}"),
-        };
+        let label = self.label(&work);
         *self.attempts.entry(label.clone()).or_insert(0) = attempt;
         if attempt >= self.header.bounds.attempts_per_lot {
             Stage::AwaitingHuman(Handover::LotAttemptsExhausted {

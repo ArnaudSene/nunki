@@ -7,12 +7,14 @@
 //! persisted at every transition, and running it again picks up where it
 //! stopped.
 //!
-//! What it launches, and what it does not. It lifts a role's profile, starts
-//! the application in it and launches that role's run, then returns: a run
-//! takes hours and `verify` never waits on one. The next `verify` reads that
-//! run back — its verdict, or why there is none — and moves. What it still
-//! does not do is lift a `FINDINGS` verdict: the flow has both the events for
-//! it, and no verb applies either yet.
+//! What it launches, and what it does not. It launches every role's run —
+//! the coder's next lot, the integrator's and the security agent's missions,
+//! lifting the role's profile and starting the application where the role
+//! needs one — then returns: a run takes hours and `verify` never waits on
+//! one. The next `verify` reads that run back — the coder's `Lot:` line, a
+//! role's verdict, or why there is none — and moves. What it does not do is
+//! lift a `FINDINGS` verdict: that is a human's (`hq mission iterate`,
+//! `hq mission accept`).
 //!
 //! The slot's lock is taken **once**, here, at the top: everything under it
 //! — gate 6, gate 7, every `hq exec` — runs inside it and never asks again
@@ -41,13 +43,12 @@ pub enum Step {
     },
     /// The flow moved.
     Moved { to: Stage },
-    /// A role is owed a run, and `hq` cannot launch it yet.
-    NeedsRun { role: Role, why: String },
     /// A run was launched for this role, and `verify` returned: a run takes
     /// hours, and nothing here waits on one.
     Launched {
         role: Role,
-        /// How the application was started for it, or why it was not.
+        /// What the coder's run is for; for the integrator and the security
+        /// agent, how the application was started for it, or why it was not.
         application: String,
     },
     /// A run was recorded and the engine could not be asked about it.
@@ -208,44 +209,158 @@ pub fn verify_as(
         };
 
         match state.flow.stage().clone() {
-            // A lot is still owed a run. Gates 1 to 4 are played anyway,
-            // because a forbidden commit found at the end of the first lot
-            // costs one run and found at the end costs the mission.
-            Stage::Coding { work, .. } => {
-                let report = gate::after_run(&subject)?;
-                let failure = report.failure();
-                steps.push(Step::Gates {
-                    role: subject.role,
-                    report: Box::new(report),
-                });
-                let owed = match failure {
-                    Some(reason) => {
-                        store.apply(
+            // The coder, one run per lot (SPEC 4.3). A run recorded for the
+            // stage is read back first; then, while the work is still the
+            // coder's, the next run is launched — the same attempt replayed,
+            // the next attempt, or the next lot — and `verify` returns.
+            Stage::Coding { work, attempt } => {
+                let label = state.flow.label(&work);
+                let event = match state.run.clone() {
+                    Some(handle) => {
+                        let (outcome, usage, windows) =
+                            match read_back(project, engine.clone(), &state, &handle) {
+                                Ended::Unreachable(why) => {
+                                    steps.push(Step::Unreachable {
+                                        role: Role::Coder,
+                                        why,
+                                    });
+                                    return Ok(steps);
+                                }
+                                Ended::With(outcome, usage, windows) => (outcome, usage, windows),
+                            };
+                        let spared = tally(
+                            project,
                             &mut state,
-                            Event::GatesFailed {
-                                reason: reason.clone(),
-                            },
+                            &header,
+                            usage.as_ref(),
+                            windows,
+                            &outcome,
+                            now,
                         )?;
-                        steps.push(Step::Moved {
-                            to: state.flow.stage().clone(),
-                        });
-                        format!("the gates were red, and fixing them is a run: {reason}")
+                        // A turn `hq` ended, or a harness that failed: the
+                        // same attempt is replayed, and nothing is judged on
+                        // a tree the run did not finish — a resume block one
+                        // commit behind would turn a replay into a spent
+                        // attempt.
+                        if spared.is_some() || matches!(outcome, Outcome::HarnessFailure(_)) {
+                            Some(spare_event(
+                                spared.as_ref(),
+                                Event::RunEnded {
+                                    outcome,
+                                    lot_done: false,
+                                },
+                            ))
+                        } else if let Outcome::Finished(_) = &outcome {
+                            // Gates 1 to 4 at the end of every run (SPEC
+                            // 4.4): a forbidden commit found after the first
+                            // lot costs one run, found at the end it costs
+                            // the mission. Then the run's own word on its
+                            // lot, and only the resume block's.
+                            let report = gate::after_run(&subject)?;
+                            let failure = report.failure();
+                            steps.push(Step::Gates {
+                                role: Role::Coder,
+                                report: Box::new(report),
+                            });
+                            Some(match failure {
+                                Some(reason) => Event::GatesFailed { reason },
+                                None => {
+                                    let journal =
+                                        std::fs::read_to_string(&paths.journal).unwrap_or_default();
+                                    match crate::mission::journal::judge(&journal, &label) {
+                                        Ok(()) => Event::RunEnded {
+                                            outcome,
+                                            lot_done: true,
+                                        },
+                                        Err(why) => Event::RunEnded {
+                                            outcome: Outcome::MissionFailure(why),
+                                            lot_done: false,
+                                        },
+                                    }
+                                }
+                            })
+                        } else {
+                            Some(Event::RunEnded {
+                                outcome,
+                                lot_done: false,
+                            })
+                        }
                     }
-                    None => what_is_owed(&work, &header),
+                    // No run recorded: a tree someone left, judged before a
+                    // run is launched on it. A red gate here is one more run
+                    // on the same lot, like any other.
+                    None => {
+                        let report = gate::after_run(&subject)?;
+                        let failure = report.failure();
+                        steps.push(Step::Gates {
+                            role: Role::Coder,
+                            report: Box::new(report),
+                        });
+                        failure.map(|reason| Event::GatesFailed { reason })
+                    }
                 };
-                // Either way the coder is owed a run, and `verify` launches
-                // none: looping here would spend every attempt the lot has
-                // against a tree nobody has touched in between.
-                if !matches!(state.flow.stage(), Stage::Coding { .. }) {
+
+                if let Some(event) = event {
+                    // The next attempt is told why this one failed, in the
+                    // file every run reads first, and starts a fresh
+                    // session: a context that failed is not the one to
+                    // carry on with.
+                    if let Some(why) = attempt_failed(&event) {
+                        crate::followup::said(
+                            &paths.followup,
+                            "hq",
+                            &format!("{label}, attempt {attempt}: {why}"),
+                        )?;
+                        state.coder_session = None;
+                    }
+                    // Forgotten with the transition, as at every read-back.
+                    state.run = None;
+                    state.app = None;
+                    store.apply(&mut state, event)?;
+                    steps.push(Step::Moved {
+                        to: state.flow.stage().clone(),
+                    });
+                }
+                // Launched from here and never by looping back: a second
+                // pass would judge the same tree again and spend a second
+                // attempt on a run that never happened.
+                let Stage::Coding { work, attempt } = state.flow.stage().clone() else {
                     continue;
+                };
+                if let Some(step) =
+                    held(&state, Role::Coder).or_else(|| waiting(&state, Role::Coder, now))
+                {
+                    steps.push(step);
+                    return Ok(steps);
                 }
-                match held(&state, Role::Coder) {
-                    Some(step) => steps.push(step),
-                    None => steps.push(Step::NeedsRun {
-                        role: Role::Coder,
-                        why: owed,
-                    }),
+                if let Some(step) = saving(project, Role::Coder, &header, now)? {
+                    steps.push(step);
+                    return Ok(steps);
                 }
+                if let Some(step) = capped(&store, &mut state, Role::Coder, &header.bounds, id)? {
+                    steps.push(step);
+                    return Ok(steps);
+                }
+                let launched = crate::run::launch(&crate::run::Launching {
+                    project,
+                    slot: &slot,
+                    engine: engine.clone(),
+                    engine_bin,
+                    paths: &paths,
+                    header: &header,
+                    role: Role::Coder,
+                    lot: state.flow.label(&work),
+                    attempt,
+                    session: state.coder_session.clone(),
+                })?;
+                state.coder_session = Some(launched.run.session.clone());
+                state.run = Some(launched.run);
+                state.app = launched.app;
+                store.save(&state)?;
+                steps.push(Step::Launched {
+                    role: Role::Coder,
+                    application: format!("{}, attempt {attempt}", what_for(&work, &header)),
+                });
                 return Ok(steps);
             }
 
@@ -260,7 +375,19 @@ pub fn verify_as(
                     report: Box::new(report),
                 });
                 let event = match failure {
-                    Some(reason) => Event::GatesFailed { reason },
+                    Some(reason) => {
+                        // The volet this opens is told why, like every
+                        // attempt the coder is sent back to.
+                        crate::followup::said(
+                            &paths.followup,
+                            "hq",
+                            &format!(
+                                "the final gates were red on {}: {reason}",
+                                &head[..head.len().min(12)]
+                            ),
+                        )?;
+                        Event::GatesFailed { reason }
+                    }
                     None => {
                         // The coder's verdict is implicit — its gates were
                         // green (SPEC 4.4) — so this is where it is recorded,
@@ -293,21 +420,15 @@ pub fn verify_as(
                         }
                         Ended::With(outcome, usage, windows) => {
                             let head = crate::git::head(&slot.tree)?;
-                            let spared = state.spared.take();
-                            state.spent.record(usage.as_ref());
-                            crate::consumption::note(
+                            let spared = tally(
                                 project,
-                                header.account.as_deref(),
+                                &mut state,
+                                &header,
+                                usage.as_ref(),
                                 windows,
+                                &outcome,
                                 now,
-                            )
-                            .map_err(VerifyError::Usage)?;
-                            let fault = if spared.is_some() {
-                                None
-                            } else {
-                                fault_of(&outcome)
-                            };
-                            note_harness(&mut state, fault.as_ref(), &header.bounds, now);
+                            )?;
                             let event = spare_event(
                                 spared.as_ref(),
                                 concluded(
@@ -361,6 +482,7 @@ pub fn verify_as(
                     role: Role::Integrator,
                     lot: "integration".to_string(),
                     attempt,
+                    session: None,
                 })?;
                 let application = describe(&launched);
                 state.run = Some(launched.run);
@@ -386,21 +508,15 @@ pub fn verify_as(
                         }
                         Ended::With(outcome, usage, windows) => {
                             let head = crate::git::head(&slot.tree)?;
-                            let spared = state.spared.take();
-                            state.spent.record(usage.as_ref());
-                            crate::consumption::note(
+                            let spared = tally(
                                 project,
-                                header.account.as_deref(),
+                                &mut state,
+                                &header,
+                                usage.as_ref(),
                                 windows,
+                                &outcome,
                                 now,
-                            )
-                            .map_err(VerifyError::Usage)?;
-                            let fault = if spared.is_some() {
-                                None
-                            } else {
-                                fault_of(&outcome)
-                            };
-                            note_harness(&mut state, fault.as_ref(), &header.bounds, now);
+                            )?;
                             let event = spare_event(
                                 spared.as_ref(),
                                 concluded(Role::Security, outcome, paths.verdict.as_path(), &head),
@@ -445,6 +561,7 @@ pub fn verify_as(
                     role: Role::Security,
                     lot: "security".to_string(),
                     attempt,
+                    session: None,
                 })?;
                 let application = describe(&launched);
                 state.run = Some(launched.run);
@@ -629,14 +746,54 @@ fn role_of(stage: &Stage) -> Role {
     }
 }
 
-fn what_is_owed(work: &Work, header: &crate::mission::Header) -> String {
+fn what_for(work: &Work, header: &crate::mission::Header) -> String {
     match work {
         Work::Lot(i) => match header.lots.get(*i) {
-            Some(lot) => format!("lot {} — {} is owed a run", lot.id, lot.title),
-            None => "a lot is owed a run".to_string(),
+            Some(lot) => format!("lot {} — {}", lot.id, lot.title),
+            None => "a lot".to_string(),
         },
-        Work::Volet { n, cause } => format!("volet {n} is owed a run: {cause}"),
+        Work::Volet { n, cause } => format!("volet {n} — {cause}"),
     }
+}
+
+/// Why a coder attempt failed, when the event says it did: the words the
+/// next attempt is given, and the sign that its session is not carried on.
+/// A harness failure is not one — the same attempt is replayed.
+fn attempt_failed(event: &Event) -> Option<String> {
+    match event {
+        Event::RunEnded {
+            outcome: Outcome::MissionFailure(why),
+            ..
+        } => Some(why.clone()),
+        Event::GatesFailed { reason } => Some(format!("the gates were red: {reason}")),
+        _ => None,
+    }
+}
+
+/// What every read-back records, whatever the role: the run and what it
+/// spent, the account's windows as it last saw them, and the harness's
+/// failures in a row. Returns the spared mark, spent by this read-back — a
+/// turn `hq` ended is no fault of the harness's, and is not counted as one.
+fn tally(
+    project: &Project,
+    state: &mut MissionState,
+    header: &crate::mission::Header,
+    usage: Option<&Usage>,
+    windows: Option<crate::consumption::Windows>,
+    outcome: &Outcome,
+    now: u64,
+) -> Result<Option<crate::state::Spared>, VerifyError> {
+    let spared = state.spared.take();
+    state.spent.record(usage);
+    crate::consumption::note(project, header.account.as_deref(), windows, now)
+        .map_err(VerifyError::Usage)?;
+    let fault = if spared.is_some() {
+        None
+    } else {
+        fault_of(outcome)
+    };
+    note_harness(state, fault.as_ref(), &header.bounds, now);
+    Ok(spared)
 }
 
 /// What a recorded run came to, as the engine answers it.

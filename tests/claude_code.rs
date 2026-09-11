@@ -690,3 +690,57 @@ fn the_last_rate_limit_event_is_the_one_kept() {
         "a window not reported is absent, not zero"
     );
 }
+
+/// A resumed session keeps its id, and a log is appended to: the second run
+/// gets a file of its own, and the first one's is left as it was.
+#[test]
+fn a_resumed_session_writes_its_run_to_a_log_of_its_own() {
+    let dir = tempfile::tempdir().unwrap();
+    let rec = std::sync::Arc::new(Recording(Default::default()));
+    let hq = ClaudeCode::new(Config::default(), Box::new(RecordingRef(rec.clone())));
+    let mut req = request(true);
+    req.runs_dir = dir.path().to_path_buf();
+    let first = dir
+        .path()
+        .join("11111111-2222-4333-8444-555555555555.jsonl");
+    fs::write(&first, "the first run\n").unwrap();
+    let launch = || {
+        hq.launch(
+            &req,
+            &GuardSetup::default(),
+            &Exposure::SystemPromptFile("/r.md".into()),
+        )
+        .unwrap()
+    };
+
+    let second = launch();
+    assert_eq!(
+        second.log,
+        dir.path()
+            .join("11111111-2222-4333-8444-555555555555-2.jsonl")
+    );
+    fs::write(&second.log, "the second run\n").unwrap();
+    assert_eq!(
+        launch().log,
+        dir.path()
+            .join("11111111-2222-4333-8444-555555555555-3.jsonl")
+    );
+    assert_eq!(fs::read_to_string(&first).unwrap(), "the first run\n");
+}
+
+/// The coder's first message names the line that ends its lot; the other
+/// roles conclude with a verdict and are not told it.
+#[test]
+fn the_coder_is_told_the_line_that_ends_its_lot() {
+    let exposure = Exposure::SystemPromptFile("/r.md".into());
+    let cmd = adapter().command(&request(false), &GuardSetup::default(), &exposure);
+    let last = cmd.args.last().unwrap();
+    assert!(
+        last.contains("`Lot: L2 — done`") && last.contains("`Lot: L2 — failed: <why>`"),
+        "{last}"
+    );
+    let mut integrator = request(false);
+    integrator.role = Role::Integrator;
+    let cmd = adapter().command(&integrator, &GuardSetup::default(), &exposure);
+    assert!(!cmd.args.last().unwrap().contains("Lot:"));
+}
