@@ -281,6 +281,11 @@ impl Harness for ClaudeCode {
         }
     }
 
+    fn usage(&self, handle: &RunHandle) -> Option<Usage> {
+        let text = fs::read_to_string(&handle.log).ok()?;
+        parse_stream(&text).usage
+    }
+
     fn readable(&self, text: &str) -> Vec<crate::harness::Line> {
         use crate::harness::{Line, LineKind};
         let mut lines = Vec::new();
@@ -397,6 +402,9 @@ pub struct Parsed {
     pub progress: Progress,
     pub outcome: Option<Outcome>,
     pub session_id: Option<String>,
+    /// What the run spent, read from its `result` event whatever it
+    /// concluded.
+    pub usage: Option<Usage>,
 }
 
 /// Parse the stream-json lines Claude Code writes. Tolerant of a truncated
@@ -443,6 +451,7 @@ pub fn parse_stream(text: &str) -> Parsed {
                 }
             }
             Some("result") => {
+                parsed.usage = Some(usage_of(&event));
                 parsed.outcome = Some(classify_result(&event));
             }
             _ => {}
@@ -472,6 +481,24 @@ fn summarise(input: Option<&Value>) -> String {
     format!("({} field(s))", map.len())
 }
 
+/// The `usage` of a `result` event, in the four kinds Claude Code reports
+/// (measured on v2.1.266). A kind that is missing reads as zero.
+fn usage_of(event: &Value) -> Usage {
+    let kind = |key: &str| {
+        event
+            .get("usage")
+            .and_then(|u| u.get(key))
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+    };
+    Usage {
+        input_tokens: kind("input_tokens"),
+        output_tokens: kind("output_tokens"),
+        cache_creation_input_tokens: kind("cache_creation_input_tokens"),
+        cache_read_input_tokens: kind("cache_read_input_tokens"),
+    }
+}
+
 /// A `result` event into an [`Outcome`]. An error whose text names the
 /// harness's own conditions — quota, authentication, network — is a harness
 /// failure, replayed without counting; any other error is the mission's.
@@ -480,18 +507,8 @@ fn classify_result(event: &Value) -> Outcome {
         .get("is_error")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let usage = Usage {
-        input_tokens: event
-            .pointer("/usage/input_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0),
-        output_tokens: event
-            .pointer("/usage/output_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0),
-    };
     if !is_error {
-        return Outcome::Finished(usage);
+        return Outcome::Finished(usage_of(event));
     }
     // The text to classify: `result` when it is a string, else the whole
     // event — an error may sit in an `errors` array or a nested field.

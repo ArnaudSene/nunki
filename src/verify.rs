@@ -23,12 +23,12 @@ use std::sync::Arc;
 use crate::backoff;
 use crate::engine::Engine;
 use crate::gate;
-use crate::harness::{Fault, Outcome, Role, RunHandle, RunState};
+use crate::harness::{Fault, Outcome, Role, RunHandle, RunState, Usage};
 use crate::mission::Bounds;
 use crate::mission::dir::Paths;
 use crate::mission::flow::{Event, Handover, Stage, Work};
 use crate::project::Project;
-use crate::state::{MissionState, Store, lock::SlotLock};
+use crate::state::{MissionState, Spent, Store, lock::SlotLock};
 
 /// One thing `verify` did, in the order it did it. The caller prints them;
 /// the state file is what actually carries the mission forward.
@@ -245,8 +245,9 @@ pub fn verify(
                             });
                             return Ok(steps);
                         }
-                        Ended::With(outcome) => {
+                        Ended::With(outcome, usage) => {
                             let head = crate::git::head(&slot.tree)?;
+                            state.spent.record(usage.as_ref());
                             note_harness(
                                 &mut state,
                                 fault_of(&outcome).as_ref(),
@@ -279,6 +280,12 @@ pub fn verify(
 
                 if let Some(step) = held(&state, Role::Integrator)
                     .or_else(|| waiting(&state, Role::Integrator, now))
+                {
+                    steps.push(step);
+                    return Ok(steps);
+                }
+                if let Some(step) =
+                    capped(&store, &mut state, Role::Integrator, &header.bounds, id)?
                 {
                     steps.push(step);
                     return Ok(steps);
@@ -316,8 +323,9 @@ pub fn verify(
                             });
                             return Ok(steps);
                         }
-                        Ended::With(outcome) => {
+                        Ended::With(outcome, usage) => {
                             let head = crate::git::head(&slot.tree)?;
+                            state.spent.record(usage.as_ref());
                             note_harness(
                                 &mut state,
                                 fault_of(&outcome).as_ref(),
@@ -343,6 +351,11 @@ pub fn verify(
 
                 if let Some(step) =
                     held(&state, Role::Security).or_else(|| waiting(&state, Role::Security, now))
+                {
+                    steps.push(step);
+                    return Ok(steps);
+                }
+                if let Some(step) = capped(&store, &mut state, Role::Security, &header.bounds, id)?
                 {
                     steps.push(step);
                     return Ok(steps);
@@ -451,6 +464,49 @@ fn note_harness(state: &mut MissionState, fault: Option<&Fault>, bounds: &Bounds
     }
 }
 
+/// Hold the mission if it has spent its cap (SPEC 7), and answer with the
+/// hold. Checked between two runs, at the launch site: a run in progress is
+/// never killed for the cap, so a mission may pass it by one run at most.
+fn capped(
+    store: &Store,
+    state: &mut MissionState,
+    role: Role,
+    bounds: &Bounds,
+    id: &str,
+) -> Result<Option<Step>, VerifyError> {
+    let Some(why) = over_cap(&state.spent, bounds, id) else {
+        return Ok(None);
+    };
+    state.hold_for("hq", why);
+    store.save(state)?;
+    Ok(held(state, role))
+}
+
+fn over_cap(spent: &Spent, bounds: &Bounds, id: &str) -> Option<String> {
+    let raise = format!(
+        "raise it in the mission's header, then `hq mission reframe {id} --yes` and \
+         `hq mission resume {id}`"
+    );
+    if let Some(max) = bounds.max_runs
+        && spent.runs >= max
+    {
+        return Some(format!(
+            "the mission has spent {} run(s), and its cap is {max} (`max_runs`) — {raise}",
+            spent.runs
+        ));
+    }
+    if let Some(max) = bounds.max_tokens
+        && spent.usage.total() >= max
+    {
+        return Some(format!(
+            "the mission has spent {} tokens, and its cap is {max} (`max_tokens`, the four \
+             kinds summed) — {raise}",
+            spent.usage.total()
+        ));
+    }
+    None
+}
+
 fn fault_of(outcome: &Outcome) -> Option<Fault> {
     match outcome {
         Outcome::HarnessFailure(fault) => Some(fault.clone()),
@@ -479,7 +535,8 @@ fn what_is_owed(work: &Work, header: &crate::mission::Header) -> String {
 
 /// What a recorded run came to, as the engine answers it.
 enum Ended {
-    With(Outcome),
+    /// How it ended, and what it spent if the harness said.
+    With(Outcome, Option<Usage>),
     /// The question could not be put. A run `hq` cannot reach is not a run
     /// that failed, and turning one into the other would consume an attempt
     /// on a machine that was asleep.
@@ -502,7 +559,9 @@ fn read_back(
         )),
     );
     match crate::harness::Harness::state(&harness, handle) {
-        Ok(RunState::Finished(outcome)) => Ended::With(outcome),
+        Ok(RunState::Finished(outcome)) => {
+            Ended::With(outcome, crate::harness::Harness::usage(&harness, handle))
+        }
         // A frozen run is a run in progress that a human stopped on purpose.
         // Nothing is concluded from it, and the message says whose doing it
         // is rather than leaving `verify` looking stuck.

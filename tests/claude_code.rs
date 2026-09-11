@@ -124,12 +124,32 @@ fn a_captured_successful_run_parses_as_finished_with_its_usage() {
     );
     assert_eq!(parsed.progress.events, 5);
     assert_eq!(parsed.progress.tool_calls, 0);
+    // The four kinds, as v2.1.266 reports them: the cache read is nearly all
+    // of it, and a count of input and output alone would have said six.
+    let spent = hq::harness::Usage {
+        input_tokens: 2,
+        output_tokens: 4,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 16_964,
+    };
     match parsed.outcome {
-        Some(Outcome::Finished(usage)) => {
-            assert_eq!((usage.input_tokens, usage.output_tokens), (2, 4))
-        }
+        Some(Outcome::Finished(usage)) => assert_eq!(usage, spent),
         other => panic!("expected Finished, got {other:?}"),
     }
+    assert_eq!(parsed.usage.as_ref().map(|u| u.total()), Some(16_970));
+}
+
+/// A run that fell for a quota spent tokens too, and a cap that counted only
+/// the runs that succeeded would undercount the ones that cost the most.
+#[test]
+fn a_run_that_failed_still_says_what_it_spent() {
+    let quota = r#"{"type":"result","subtype":"error","is_error":true,"result":"API Error: 429 rate limit reached","usage":{"input_tokens":3,"output_tokens":1,"cache_read_input_tokens":500}}"#;
+    let parsed = parse_stream(quota);
+    assert!(
+        matches!(parsed.outcome, Some(Outcome::HarnessFailure(_))),
+        "{parsed:?}"
+    );
+    assert_eq!(parsed.usage.map(|u| u.total()), Some(504));
 }
 
 fn tool_use(name: &str, input: &str) -> String {

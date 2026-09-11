@@ -160,6 +160,12 @@ pub fn start(
         accepted: Vec::new(),
         stopped: None,
         harness_down: None,
+        // The run just launched is the mission's first. Its tokens are not
+        // known until something reads it back, which nothing does yet.
+        spent: crate::state::Spent {
+            runs: 1,
+            usage: Default::default(),
+        },
         updated_at: String::new(),
     };
     store.save(&state)?;

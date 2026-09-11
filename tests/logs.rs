@@ -88,6 +88,7 @@ impl World {
                 accepted: Vec::new(),
                 stopped: None,
                 harness_down: None,
+                spent: Default::default(),
                 updated_at: when.into(),
             })
             .unwrap();

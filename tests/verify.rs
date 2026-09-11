@@ -138,6 +138,7 @@ impl World {
                 accepted: Vec::new(),
                 stopped: None,
                 harness_down: None,
+                spent: Default::default(),
                 updated_at: String::new(),
             })
             .unwrap();
@@ -838,6 +839,7 @@ fn with_security_agent(lots: usize) -> World {
             accepted: Vec::new(),
             stopped: None,
             harness_down: None,
+            spent: Default::default(),
             updated_at: String::new(),
         })
         .unwrap();
@@ -1366,4 +1368,189 @@ fn resuming_forgets_the_harness_failures() {
     let state = world.state();
     assert!(!state.held());
     assert!(state.harness_down.is_none(), "{:?}", state.harness_down);
+}
+
+// --- what a mission spends, and its caps (SPEC 7) ---------------------------
+
+/// A finished run as Claude Code writes it, with what it spent in each kind.
+const SPENDING: &str = "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\
+                        \"usage\":{\"input_tokens\":10,\"output_tokens\":40,\
+                        \"cache_creation_input_tokens\":20,\"cache_read_input_tokens\":30}}\n";
+/// A run that fell for a quota, having spent something first.
+const QUOTA_SPENT: &str = "{\"type\":\"result\",\"subtype\":\"error\",\"is_error\":true,\
+                           \"result\":\"API Error: 429 rate limit reached\",\
+                           \"usage\":{\"input_tokens\":5,\"output_tokens\":1}}\n";
+
+impl World {
+    /// Re-freeze the header with these caps, the way `hq mission reframe`
+    /// would.
+    fn capped(&self, max_runs: Option<u32>, max_tokens: Option<u64>) {
+        let store = Store::open(&self.project.hq_root).unwrap();
+        let mut state = store.load("m1").unwrap();
+        let mut header = state.flow.header().clone();
+        header.bounds.max_runs = max_runs;
+        header.bounds.max_tokens = max_tokens;
+        state.flow.reframe(header).unwrap();
+        store.save(&state).unwrap();
+    }
+
+    fn spent(&self, runs: u32, input_tokens: u64) {
+        let store = Store::open(&self.project.hq_root).unwrap();
+        let mut state = store.load("m1").unwrap();
+        state.spent = hq::state::Spent {
+            runs,
+            usage: hq::harness::Usage {
+                input_tokens,
+                ..Default::default()
+            },
+        };
+        store.save(&state).unwrap();
+    }
+}
+
+#[test]
+fn a_run_read_back_is_counted_with_the_four_kinds_it_spent() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.run_recorded(Some(41), SPENDING);
+    world.verdict("Integrator", "INTEGRATED", &world.head(), "wired");
+
+    let steps = world.verify().unwrap();
+    assert!(matches!(steps.last(), Some(Step::Verified)), "{steps:?}");
+    let spent = world.state().spent;
+    assert_eq!(spent.runs, 1);
+    assert_eq!(
+        spent.usage,
+        hq::harness::Usage {
+            input_tokens: 10,
+            output_tokens: 40,
+            cache_creation_input_tokens: 20,
+            cache_read_input_tokens: 30,
+        }
+    );
+}
+
+#[test]
+fn a_run_that_fell_for_a_quota_is_counted_too() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.run_recorded(Some(41), QUOTA_SPENT);
+
+    world.verify().unwrap();
+    let spent = world.state().spent;
+    assert_eq!(spent.runs, 1);
+    assert_eq!(spent.usage.total(), 6);
+}
+
+/// At its cap, the mission is held instead of launched, and the hold says
+/// which cap and how to raise it. One run short of it, the launch is really
+/// attempted — this world cannot launch, so that is an error — which is what
+/// makes the held case worth asserting.
+#[test]
+fn a_mission_at_its_run_cap_is_held_rather_than_launched() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.capped(Some(2), None);
+    world.spent(1, 0);
+    assert!(
+        world.verify().is_err(),
+        "below the cap, a launch is attempted"
+    );
+
+    world.spent(2, 0);
+    let steps = world.verify().unwrap();
+    match steps.last() {
+        Some(Step::Held { who, reason, .. }) => {
+            assert_eq!(who, "hq");
+            let reason = reason.as_deref().unwrap_or_default();
+            assert!(reason.contains("max_runs"), "{reason}");
+            assert!(reason.contains("hq mission reframe m1"), "{reason}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(world.state().held());
+}
+
+#[test]
+fn a_mission_at_its_token_cap_is_held_rather_than_launched() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.capped(None, Some(100));
+    world.spent(0, 99);
+    assert!(
+        world.verify().is_err(),
+        "below the cap, a launch is attempted"
+    );
+
+    world.spent(0, 100);
+    let steps = world.verify().unwrap();
+    match steps.last() {
+        Some(Step::Held { reason, .. }) => {
+            let reason = reason.as_deref().unwrap_or_default();
+            assert!(reason.contains("max_tokens"), "{reason}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// The cap holds at every launch site, as the hold and the wait do.
+#[test]
+fn the_cap_holds_at_the_security_launch_site_too() {
+    let world = with_security_agent(1);
+    world.at_security();
+    world.capped(Some(1), None);
+    world.spent(1, 0);
+
+    let steps = world.verify().unwrap();
+    assert!(
+        matches!(steps.last(), Some(Step::Held { role, .. }) if *role == Role::Security),
+        "{steps:?}"
+    );
+}
+
+/// Raised in the header and resumed, the mission launches again: the cap is
+/// a question put to the human, not an end.
+#[test]
+fn raising_the_cap_and_resuming_lets_the_mission_launch_again() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.capped(Some(1), None);
+    world.spent(1, 0);
+    world.verify().unwrap();
+    assert!(world.state().held());
+
+    world.capped(Some(5), None);
+    let engine: Arc<dyn hq::engine::Engine> = Arc::new(hq::engine::fake::FakeEngine::default());
+    hq::gesture::resume(&world.project, "m1", engine).unwrap();
+    assert!(world.verify().is_err(), "the launch is attempted again");
+    assert!(!world.state().held());
+}
+
+/// No cap by default, and none written into a header that did not set one:
+/// `mission new` copies the bounds into every header it writes.
+#[test]
+fn caps_are_absent_unless_set() {
+    let bounds = Bounds::default();
+    assert_eq!((bounds.max_runs, bounds.max_tokens), (None, None));
+    let yaml = serde_yaml_ng::to_string(&bounds).unwrap();
+    assert!(
+        !yaml.contains("max_runs") && !yaml.contains("max_tokens"),
+        "{yaml}"
+    );
+}
+
+/// Counted at every place `hq` reads a run back: the security run is the
+/// second, and a mutation that dropped only its count survived until this
+/// test existed.
+#[test]
+fn a_security_run_read_back_is_counted_too() {
+    let world = with_security_agent(1);
+    world.at_security();
+    world.run_recorded(Some(41), SPENDING);
+    world.verdict("Security", "CLEAR", &world.head(), "nothing found");
+
+    let steps = world.verify().unwrap();
+    assert!(matches!(steps.last(), Some(Step::Verified)), "{steps:?}");
+    let spent = world.state().spent;
+    assert_eq!((spent.runs, spent.usage.total()), (1, 100));
 }

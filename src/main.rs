@@ -1723,6 +1723,28 @@ fn print_hold(state: &hq::state::MissionState, id: &str) {
             down.last
         );
     }
+    // What the mission has spent, in the four kinds kept apart: the caps have
+    // no default until real missions are measured, and this is the measure.
+    let spent = &state.spent;
+    let u = &spent.usage;
+    println!(
+        "spent     {} run(s), {} tokens — in {}, out {}, cache written {}, cache read {}",
+        spent.runs,
+        u.total(),
+        u.input_tokens,
+        u.output_tokens,
+        u.cache_creation_input_tokens,
+        u.cache_read_input_tokens
+    );
+    let bounds = &state.flow.header().bounds;
+    if bounds.max_runs.is_some() || bounds.max_tokens.is_some() {
+        let cap = |c: Option<String>| c.unwrap_or_else(|| "none".into());
+        println!(
+            "          caps: {} run(s), {} tokens",
+            cap(bounds.max_runs.map(|n| n.to_string())),
+            cap(bounds.max_tokens.map(|n| n.to_string()))
+        );
+    }
 }
 
 fn print_gates(report: &hq::gate::Report) {

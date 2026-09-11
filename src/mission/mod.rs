@@ -95,6 +95,16 @@ pub struct Bounds {
     /// one to the human.
     #[serde(default = "default_harness_wait_hours")]
     pub harness_wait_hours: u32,
+    /// Runs a mission may spend before `hq` holds it (SPEC 7). No default:
+    /// runs are already bounded by the attempts and the volets, and a fixed
+    /// number would cut legitimate missions short (decided 2026-09-11).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_runs: Option<u32>,
+    /// Tokens a mission may spend before `hq` holds it, the four kinds
+    /// summed (SPEC 7). No default until real missions have been measured
+    /// (decided 2026-09-11).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u64>,
 }
 
 impl Default for Bounds {
@@ -108,6 +118,8 @@ impl Default for Bounds {
             long_lot_hours: 8,
             mutation_minutes: default_mutation_minutes(),
             harness_wait_hours: default_harness_wait_hours(),
+            max_runs: None,
+            max_tokens: None,
         }
     }
 }
