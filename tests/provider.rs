@@ -201,3 +201,23 @@ fn only_shared_providers_are_claimed_whatever_their_name() {
         other => panic!("{other:?}"),
     }
 }
+
+/// Said only when it is so: a header without a real provider serialises as
+/// it always did, reads back unchanged, and one with a real provider says
+/// `shared: true`.
+#[test]
+fn a_header_says_shared_only_when_it_is() {
+    let plain = serde_yaml_ng::to_string(&header(&[("db", false)])).unwrap();
+    assert!(!plain.contains("shared"), "{plain}");
+    assert_eq!(
+        serde_yaml_ng::from_str::<Header>(&plain).unwrap(),
+        header(&[("db", false)])
+    );
+
+    let real = serde_yaml_ng::to_string(&header(&[("stripe", true)])).unwrap();
+    assert!(real.contains("shared: true"), "{real}");
+    assert_eq!(
+        serde_yaml_ng::from_str::<Header>(&real).unwrap(),
+        header(&[("stripe", true)])
+    );
+}
