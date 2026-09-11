@@ -139,6 +139,7 @@ impl World {
                 stopped: None,
                 harness_down: None,
                 spent: Default::default(),
+                spared: None,
                 updated_at: String::new(),
             })
             .unwrap();
@@ -840,6 +841,7 @@ fn with_security_agent(lots: usize) -> World {
             stopped: None,
             harness_down: None,
             spent: Default::default(),
+            spared: None,
             updated_at: String::new(),
         })
         .unwrap();
@@ -1689,4 +1691,126 @@ fn a_security_run_read_back_leaves_its_measure_too() {
         .unwrap()
         .expect("measured");
     assert_eq!(kept.windows.five_hour.map(|w| w.per_mille), Some(370));
+}
+
+// --- a run hq stopped for the window (SPEC 4.3) -----------------------------
+
+impl World {
+    /// What `hq` writes when it tells the run to end its turn.
+    fn spared(&self) {
+        let store = Store::open(&self.project.hq_root).unwrap();
+        let mut state = store.load("m1").unwrap();
+        state.spared = Some(hq::state::Spared {
+            account: "main".into(),
+            window: "five-hour window".into(),
+            per_mille: 950,
+            until: hq::state::now_secs() + 3_600,
+            date: "2026-09-11T00:00:00Z".into(),
+        });
+        store.save(&state).unwrap();
+    }
+}
+
+/// Unmarked, a run that finished without a verdict is a failed attempt
+/// (`a_run_that_left_no_verdict_did_not_conclude`). Marked, it is a turn `hq`
+/// ended: the same attempt is replayed, and the mark is spent.
+#[test]
+fn a_run_hq_spared_costs_no_attempt() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.run_recorded(Some(41), FINISHED);
+    world.spared();
+
+    // This world cannot launch the replay; what matters is written before.
+    let _ = world.verify();
+    let state = world.state();
+    assert_eq!(state.flow.stage(), &Stage::Integration { attempt: 1 });
+    assert!(state.spared.is_none(), "the mark is spent by its read-back");
+    assert_eq!(state.spent.runs, 1, "it spent, and it is counted");
+}
+
+/// An hq-initiated stop is not a harness failure: two of them in a row must
+/// not walk the harness wait towards its ceiling.
+#[test]
+fn a_run_hq_spared_is_not_a_harness_failure() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.run_recorded(Some(41), QUOTA);
+    world.spared();
+
+    let _ = world.verify();
+    let state = world.state();
+    assert!(state.harness_down.is_none(), "{:?}", state.harness_down);
+    assert_eq!(state.flow.stage(), &Stage::Integration { attempt: 1 });
+}
+
+/// A verdict written before the turn ended is a conclusion; the window has
+/// nothing to say about it.
+#[test]
+fn a_verdict_written_before_the_turn_ended_still_stands() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.run_recorded(Some(41), FINISHED);
+    world.verdict("Integrator", "INTEGRATED", &world.head(), "wired");
+    world.spared();
+
+    let steps = world.verify().unwrap();
+    assert!(matches!(steps.last(), Some(Step::Verified)), "{steps:?}");
+}
+
+/// The mark is read at every read-back site: the security one is the second.
+#[test]
+fn a_security_run_hq_spared_costs_no_attempt_too() {
+    let world = with_security_agent(1);
+    world.at_security();
+    world.run_recorded(Some(41), FINISHED);
+    world.spared();
+
+    let _ = world.verify();
+    assert_eq!(
+        world.state().flow.stage(),
+        &Stage::SecurityAgent { attempt: 1 }
+    );
+}
+
+/// `verify` finding a run still going is the moment to judge the window
+/// while it runs: past the threshold the run is told to end its turn, and
+/// the caller hears why instead of "a run is still going". Below it, the
+/// run goes on and `verify` refuses as before.
+///
+/// The fake engine answers the liveness probe with the marker the probe
+/// prints for a live process (`hq-run-running`, in `engine::spawn`).
+#[test]
+fn a_run_still_going_past_the_threshold_is_told_to_end_its_turn() {
+    use hq::engine::{ExecOutput, Liveness, fake::FakeEngine};
+    let still_going = || -> Arc<dyn hq::engine::Engine> {
+        Arc::new(
+            FakeEngine::default()
+                .with_liveness("cafe1234", Liveness::Running)
+                .with_exec(ExecOutput {
+                    status: 0,
+                    stdout: "hq-run-running\n".into(),
+                    stderr: String::new(),
+                }),
+        )
+    };
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.with_account();
+    world.run_recorded(Some(41), "");
+    let now = hq::state::now_secs();
+
+    world.five_hours_at(100, now + 3_600);
+    match verify::verify(&world.project, "m1", still_going(), "docker") {
+        Err(VerifyError::RunInProgress { .. }) => {}
+        other => panic!("below the threshold the run goes on: {other:?}"),
+    }
+    assert!(world.state().spared.is_none());
+
+    world.five_hours_at(950, now + 3_600);
+    match verify::verify(&world.project, "m1", still_going(), "docker") {
+        Err(VerifyError::Spared { account, .. }) => assert_eq!(account, "main"),
+        other => panic!("past the threshold the turn is ended: {other:?}"),
+    }
+    assert!(world.state().spared.is_some());
 }

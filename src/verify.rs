@@ -124,6 +124,20 @@ pub enum VerifyError {
     /// The subscription's measure could not be kept or read.
     #[error("the subscription's usage: {0}")]
     Usage(String),
+    #[error(transparent)]
+    Gesture(#[from] crate::gesture::GestureError),
+    #[error(
+        "mission {mission}'s run was told to end its turn: account {account}'s \
+         {window} is at {percent}% — hq launches nothing before {until}, then goes on; \
+         `hq verify {mission}` once the turn has ended reads it back without spending an attempt"
+    )]
+    Spared {
+        mission: String,
+        account: String,
+        window: String,
+        percent: String,
+        until: String,
+    },
 }
 
 /// Play the phase as far as it goes, and say what happened.
@@ -144,7 +158,13 @@ pub fn verify(
     // Gates read a tree. A tree an agent is still writing is not a tree to
     // judge — this is the interlock `hq exec --tree` deliberately does not
     // have, and this is where it belongs.
-    refuse_while_running(project, engine.clone(), id, &state)?;
+    refuse_while_running(
+        project,
+        engine.clone(),
+        id,
+        &state,
+        crate::state::now_secs(),
+    )?;
 
     let slot = crate::slot::find(project, &state.slot)?;
     let paths = Paths::of(&project.hq_root, id);
@@ -260,6 +280,7 @@ pub fn verify(
                         }
                         Ended::With(outcome, usage, windows) => {
                             let head = crate::git::head(&slot.tree)?;
+                            let spared = state.spared.take();
                             state.spent.record(usage.as_ref());
                             crate::consumption::note(
                                 project,
@@ -268,17 +289,20 @@ pub fn verify(
                                 now,
                             )
                             .map_err(VerifyError::Usage)?;
-                            note_harness(
-                                &mut state,
-                                fault_of(&outcome).as_ref(),
-                                &header.bounds,
-                                now,
-                            );
-                            let event = concluded(
-                                Role::Integrator,
-                                outcome,
-                                paths.verdict.as_path(),
-                                &head,
+                            let fault = if spared.is_some() {
+                                None
+                            } else {
+                                fault_of(&outcome)
+                            };
+                            note_harness(&mut state, fault.as_ref(), &header.bounds, now);
+                            let event = spare_event(
+                                spared.as_ref(),
+                                concluded(
+                                    Role::Integrator,
+                                    outcome,
+                                    paths.verdict.as_path(),
+                                    &head,
+                                ),
                             );
                             carry(&paths.followup, Role::Integrator, &event, &head)?;
                             if let Event::Verdict { verdict, .. } = &event {
@@ -349,6 +373,7 @@ pub fn verify(
                         }
                         Ended::With(outcome, usage, windows) => {
                             let head = crate::git::head(&slot.tree)?;
+                            let spared = state.spared.take();
                             state.spent.record(usage.as_ref());
                             crate::consumption::note(
                                 project,
@@ -357,14 +382,16 @@ pub fn verify(
                                 now,
                             )
                             .map_err(VerifyError::Usage)?;
-                            note_harness(
-                                &mut state,
-                                fault_of(&outcome).as_ref(),
-                                &header.bounds,
-                                now,
+                            let fault = if spared.is_some() {
+                                None
+                            } else {
+                                fault_of(&outcome)
+                            };
+                            note_harness(&mut state, fault.as_ref(), &header.bounds, now);
+                            let event = spare_event(
+                                spared.as_ref(),
+                                concluded(Role::Security, outcome, paths.verdict.as_path(), &head),
                             );
-                            let event =
-                                concluded(Role::Security, outcome, paths.verdict.as_path(), &head);
                             carry(&paths.followup, Role::Security, &event, &head)?;
                             if let Event::Verdict { verdict, .. } = &event {
                                 state.conclude(Role::Security, Some(*verdict), &head);
@@ -744,11 +771,16 @@ fn describe(launched: &crate::run::Launched) -> String {
 /// Refuse while the agent is still writing. A gate that reads a tree
 /// mid-run reads a tree that is not finished, and its verdict would be about
 /// a moment nobody chose.
+///
+/// And the moment to judge the account's windows while a run is under way:
+/// `verify` is what gets invoked, again and again, and a run past the
+/// threshold is told to end its turn here rather than waited on (SPEC 4.3).
 fn refuse_while_running(
     project: &Project,
     engine: Arc<dyn Engine>,
     id: &str,
     state: &MissionState,
+    now: u64,
 ) -> Result<(), VerifyError> {
     let Some(handle) = &state.run else {
         return Ok(());
@@ -766,12 +798,40 @@ fn refuse_while_running(
     // (`hq mission status`), and refusing to verify because the engine is
     // down would be the same lie in another place.
     if let Ok(RunState::Running(_)) = crate::harness::Harness::state(&harness, handle) {
+        if let Some(spared) = crate::gesture::spare(project, id, &harness, now)? {
+            return Err(VerifyError::Spared {
+                mission: id.to_string(),
+                account: spared.account,
+                window: spared.window,
+                percent: crate::consumption::percent(spared.per_mille),
+                until: crate::state::rfc3339(spared.until),
+            });
+        }
         return Err(VerifyError::RunInProgress {
             mission: id.to_string(),
             slot: state.slot.clone(),
         });
     }
     Ok(())
+}
+
+/// A run `hq` stopped for the account's window costs no attempt, whatever it
+/// left: the flow reads it as a harness cause, which replays the same
+/// attempt. A verdict it managed to write before its turn ended still
+/// stands — it is a conclusion, and the window has nothing to say about it.
+fn spare_event(spared: Option<&crate::state::Spared>, event: Event) -> Event {
+    match (spared, event) {
+        (Some(spared), Event::RunEnded { .. }) => Event::RunEnded {
+            outcome: Outcome::HarnessFailure(Fault::transient(format!(
+                "hq ended the turn: account {}'s {} was at {}%",
+                spared.account,
+                spared.window,
+                crate::consumption::percent(spared.per_mille)
+            ))),
+            lot_done: false,
+        },
+        (_, event) => event,
+    }
 }
 
 /// The spawner that can ask about a run: the engine `verify` was given, not

@@ -1008,10 +1008,17 @@ Trois choses en découlent :
   bornes), `hq` ne lance rien avant la remise à zéro de la fenêtre, puis
   reprend seul — une attente, pas une retenue. Entre deux lectures la
   dernière mesure vaut, et ce qu'une autre session consomme sur le même
-  compte n'apparaît qu'à la lecture suivante. L'arrêt propre d'un run **en
-  cours** au seuil, et sa relecture qui ne coûte pas de tentative, sont la
-  pièce suivante ; aujourd'hui le seuil empêche le lancement suivant, et le
-  codeur, dont `hq` ne relance pas encore les runs, n'en a pas.
+  compte n'apparaît qu'à la lecture suivante. Un run **en cours** au-delà du
+  seuil reçoit la fin de tour propre (SIGINT, comme `stop --now`) de `hq
+  verify` quand il le trouve encore actif, ou de `hq mission watch` à chaque
+  tour de boucle ; la mission est marquée, pas retenue, et la relecture de ce
+  run ne coûte **aucune tentative** et ne compte pas comme une panne du
+  harnais — c'est la marque qui en décide, pas le journal, car ce qu'un
+  harnais écrit après un tour interrompu n'a pas été mesuré ; un verdict
+  écrit avant la fin du tour tient. Sans démon, cet arrêt n'a lieu que
+  pendant qu'un de ces deux verbes est invoqué ; la garde qui tient la nuit
+  est celle d'avant chaque lancement. Le codeur, dont `hq` ne relit ni ne
+  relance encore les runs, peut être arrêté ainsi mais pas encore relancé.
 - **« Bloqué sur une permission » n'existe plus.** Sans interface, ce qui
   aurait demandé est refusé — la règle « refuser est sûr » tenue par
   construction, aux drapeaux près du tableau ci-dessus.

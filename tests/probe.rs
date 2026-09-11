@@ -346,6 +346,7 @@ fn started(project: &Project, header: &hq::mission::Header) {
             stopped: None,
             harness_down: None,
             spent: Default::default(),
+            spared: None,
             updated_at: String::new(),
         })
         .unwrap();
@@ -470,6 +471,7 @@ fn live_a_system_profile_reaches_what_the_mission_declares_and_nothing_else() {
             stopped: None,
             harness_down: None,
             spent: Default::default(),
+            spared: None,
             updated_at: String::new(),
         })
         .unwrap();

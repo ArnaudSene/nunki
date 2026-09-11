@@ -54,6 +54,75 @@ pub enum GestureError {
     Compose(#[from] crate::compose::ComposeError),
     #[error(transparent)]
     Followup(#[from] crate::followup::FollowupError),
+    /// The subscription's measure could not be kept or read.
+    #[error("the subscription's usage: {0}")]
+    Usage(String),
+}
+
+/// End the turn in progress when the account's window is past its
+/// threshold (SPEC 4.3), and mark the mission so the read-back costs no
+/// attempt. Returns the mark, or `None` when nothing was done: no run, a run
+/// that is not running, nothing measured, a window below its threshold.
+///
+/// SIGINT, as `stop --now`, so the agent ends its turn and writes its resume
+/// block — but no hold: nothing for a human to lift. The next launch waits
+/// for the window to reset, then `hq` goes on by itself.
+///
+/// Called by `hq verify` when it finds a run still going and by `hq mission
+/// watch` at every tick. Neither runs by itself: without a daemon, a run
+/// under way is stopped only while one of them is invoked, and the guard that
+/// holds at night is the one before every launch.
+pub fn spare(
+    project: &Project,
+    id: &str,
+    harness: &dyn crate::harness::Harness,
+    now: u64,
+) -> Result<Option<crate::state::Spared>, GestureError> {
+    let store = Store::open(&project.hq_root)?;
+    let mut state = started(project, id)?;
+    let Some(handle) = state.run.clone() else {
+        return Ok(None);
+    };
+    // Told once: a second SIGINT would interrupt the resume block the first
+    // one asked for.
+    if state.spared.is_some() {
+        return Ok(state.spared);
+    }
+    if !matches!(
+        harness.state(&handle),
+        Ok(crate::harness::RunState::Running(_))
+    ) {
+        return Ok(None);
+    }
+    let header = state.flow.header().clone();
+    crate::consumption::note(
+        project,
+        header.account.as_deref(),
+        harness.windows(&handle),
+        now,
+    )
+    .map_err(GestureError::Usage)?;
+    let Ok(account) = crate::consumption::account_of(project, header.account.as_deref()) else {
+        return Ok(None);
+    };
+    let Some(measure) =
+        crate::consumption::read(&project.hq_home(), &account).map_err(GestureError::Usage)?
+    else {
+        return Ok(None);
+    };
+    let Some(over) = crate::consumption::over(&measure, &header.bounds, now) else {
+        return Ok(None);
+    };
+    harness.stop(&handle)?;
+    state.spared = Some(crate::state::Spared {
+        account,
+        window: over.kind.name().to_string(),
+        per_mille: over.per_mille,
+        until: over.until,
+        date: crate::state::rfc3339(now),
+    });
+    store.save(&state)?;
+    Ok(state.spared)
 }
 
 /// Freeze the agent's container where it is.

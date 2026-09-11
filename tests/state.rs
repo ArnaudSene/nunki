@@ -45,6 +45,7 @@ fn state(id: &str) -> MissionState {
         stopped: None,
         harness_down: None,
         spent: Default::default(),
+        spared: None,
         updated_at: String::new(),
     }
 }
