@@ -77,6 +77,9 @@ jobs:
       # and prober travel in the binary — so this scans what a user runs.
       - name: Build the images, as a project would
         run: |
+          # Without pipefail a pipeline's status is its last command's, so
+          # `tee` would hide a failed build, and a scan of no image is green.
+          set -o pipefail
           hq="$GITHUB_WORKSPACE/target/debug/hq"
           mkdir -p "$RUNNER_TEMP/demo"
           cd "$RUNNER_TEMP/demo"
@@ -89,8 +92,15 @@ jobs:
 
       - name: Scan
         run: |
+          # Three images or the scan is not the scan: an empty list would
+          # loop zero times and pass.
+          mapfile -t images < <(awk '/^(agent|firewall|prober) /{print $2}' "$RUNNER_TEMP/images.txt")
+          if [ "${#images[@]}" -ne 3 ]; then
+            echo "::error::hq slot rebuild named ${#images[@]} image(s), and three are scanned"
+            exit 1
+          fi
           fail=0
-          while read -r image; do
+          for image in "${images[@]}"; do
             echo "::group::$image — critical and high, fixed or not, listed"
             trivy image --no-progress --severity CRITICAL,HIGH "$image"
             echo "::endgroup::"
@@ -99,5 +109,5 @@ jobs:
               echo "::error::$image carries a critical or high vulnerability that has a fix"
               fail=1
             fi
-          done < <(awk '/^(agent|firewall|prober) /{print $2}' "$RUNNER_TEMP/images.txt")
+          done
           exit "$fail"
