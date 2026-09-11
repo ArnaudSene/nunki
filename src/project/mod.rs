@@ -34,6 +34,14 @@ pub struct Config {
     /// The account this project's missions spend unless one says otherwise.
     #[serde(default)]
     pub account: Option<String>,
+    /// Which model the agents run on, when the harness takes one. Absent,
+    /// the harness keeps its own default. A mission header beats it, and no
+    /// name is checked against a list: what a model name means belongs to
+    /// the harness, not to `hq`, and a list here would rot with every
+    /// release. An unknown name fails in the container, where the harness
+    /// says what it accepts.
+    #[serde(default)]
+    pub model: Option<String>,
     #[serde(default)]
     pub bounds: Bounds,
     /// Where the test credentials live, mounted read-only on a system

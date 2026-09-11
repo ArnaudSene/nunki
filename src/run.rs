@@ -109,6 +109,20 @@ pub fn account_for(
     Ok((name, account, token))
 }
 
+/// Which model this run asks the harness for. The mission's header wins over
+/// the project's declaration, and `None` leaves the harness its own default.
+///
+/// Nothing here checks the name. `hq` knows harnesses, not models (SPEC
+/// 4.3): a list of accepted names would rot with every release, and the
+/// harness itself refuses what it does not know — in the container, where
+/// its message is the one worth reading.
+pub fn model_for(project: &Project, header: &crate::mission::Header) -> Option<String> {
+    header
+        .model
+        .clone()
+        .or_else(|| project.config.model.clone())
+}
+
 /// Start the mission's first run: the coder, on its first lot.
 pub fn start(
     project: &Project,
@@ -330,7 +344,13 @@ pub fn launch(l: &Launching) -> Result<Launched, RunError> {
         AGENT_SERVICE,
     )
     .identified_by(&session.0);
-    let harness = claude_code::ClaudeCode::new(Default::default(), Box::new(spawner));
+    let harness = claude_code::ClaudeCode::new(
+        claude_code::Config {
+            model: model_for(project, header),
+            ..Default::default()
+        },
+        Box::new(spawner),
+    );
     std::fs::create_dir_all(&runs).map_err(|e| RunError::Io(runs.clone(), e))?;
     let request = RunRequest {
         role,

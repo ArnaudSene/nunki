@@ -216,6 +216,12 @@ forge: []
 # header may refine it.
 # run: none
 
+# Which model the agents run on, when the harness takes one. Absent, the
+# harness keeps its own default — `hq logs` names the one a run used. A
+# mission header may refine it. hq checks no name: what a name means is the
+# harness's business, and the harness refuses what it does not know.
+# model: claude-sonnet-5
+
 # The project's own Compose file, whose services and networks hq merges into
 # every system profile. They are lifted once per slot and never stopped
 # between two profiles, so what the integrator laid down survives.
