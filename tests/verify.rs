@@ -1672,3 +1672,21 @@ fn a_run_read_back_leaves_its_measure_for_the_account() {
     assert_eq!(kept.windows.weekly.map(|w| w.per_mille), Some(410));
     assert_eq!(kept.harness, "claude-code");
 }
+
+/// Recorded at every place `hq` reads a run back: the security run is the
+/// second, and a mutation that dropped only its record survived until this
+/// test existed.
+#[test]
+fn a_security_run_read_back_leaves_its_measure_too() {
+    let world = with_security_agent(1);
+    world.at_security();
+    world.with_account();
+    world.run_recorded(Some(41), MEASURED);
+    world.verdict("Security", "CLEAR", &world.head(), "nothing found");
+
+    world.verify().unwrap();
+    let kept = hq::consumption::read(&world.project.hq_home(), "main")
+        .unwrap()
+        .expect("measured");
+    assert_eq!(kept.windows.five_hour.map(|w| w.per_mille), Some(370));
+}
