@@ -26,6 +26,7 @@ fn header() -> Header {
         arbiter: None,
         run: None,
         account: None,
+        model: None,
         bounds: Bounds::default(),
     }
 }
@@ -41,6 +42,7 @@ fn project(dir: &Path) -> Project {
             protected_branches: vec!["main".into()],
             protected_paths: ProtectedPaths::default(),
             account: None,
+            model: None,
             bounds: Default::default(),
             credentials: None,
             run: None,

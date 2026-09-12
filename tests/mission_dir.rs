@@ -30,6 +30,7 @@ fn header() -> Header {
         arbiter: None,
         run: None,
         account: None,
+        model: None,
         bounds: Bounds::default(),
     }
 }

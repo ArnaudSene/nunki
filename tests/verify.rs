@@ -52,6 +52,7 @@ fn header_of(lots: usize, integration: Integration) -> Header {
         arbiter: None,
         run: None,
         account: None,
+        model: None,
         bounds: Bounds {
             attempts_per_lot: 3,
             ..Default::default()
@@ -106,6 +107,7 @@ impl World {
                     refuse_if_exists: vec![],
                 },
                 account: None,
+                model: None,
                 bounds: Default::default(),
                 credentials: None,
                 run: None,

@@ -1167,6 +1167,10 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                     Security::Gates
                 },
                 account,
+                // No flag of its own: the project declares the model in
+                // `hq.yaml`, and a mission that wants another one says so in
+                // this header, by hand, before `hq mission start` freezes it.
+                model: None,
                 run,
                 // Said rather than assumed: whoever frames a mission is who
                 // it comes back to, until somebody says otherwise.

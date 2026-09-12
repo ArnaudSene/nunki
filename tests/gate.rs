@@ -69,6 +69,7 @@ fn header() -> Header {
         arbiter: None,
         run: None,
         account: None,
+        model: None,
         bounds: Bounds::default(),
     }
 }
@@ -490,6 +491,7 @@ impl Fixture {
                 protected_branches: self.branches.clone(),
                 protected_paths: Default::default(),
                 account: None,
+                model: None,
                 bounds: Default::default(),
                 credentials: None,
                 run: None,
@@ -678,6 +680,7 @@ fn live_the_battery_is_the_committed_one_and_an_absent_one_is_red() {
             protected_branches: vec!["main".into(), "dev".into()],
             protected_paths: Default::default(),
             account: None,
+            model: None,
             bounds: Default::default(),
             credentials: None,
             run: None,

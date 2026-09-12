@@ -210,6 +210,7 @@ fn live_a_campaign_is_launched_watched_and_read_back() {
             protected_branches: vec!["main".into(), "dev".into()],
             protected_paths: Default::default(),
             account: None,
+            model: None,
             bounds: Default::default(),
             credentials: None,
             run: None,

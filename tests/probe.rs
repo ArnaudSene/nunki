@@ -16,6 +16,7 @@ fn project(dir: &Path) -> Project {
             protected_branches: vec!["main".to_string()],
             protected_paths: ProtectedPaths::default(),
             account: None,
+            model: None,
             bounds: Default::default(),
             credentials: None,
             run: None,
@@ -244,6 +245,7 @@ fn with_services(dir: &Path) -> (Project, hq::slot::Slot, hq::mission::Header) {
         arbiter: None,
         run: None,
         account: None,
+        model: None,
         bounds: Default::default(),
     };
     let slot = hq::slot::Slot {

@@ -18,6 +18,7 @@ fn project(dir: &Path) -> Project {
             protected_branches: vec!["main".to_string()],
             protected_paths: ProtectedPaths::default(),
             account: None,
+            model: None,
             bounds: Default::default(),
             credentials: None,
             run: None,
@@ -26,6 +27,41 @@ fn project(dir: &Path) -> Project {
         },
         dir.join("hq"),
     )
+}
+
+/// The same layering as the account, and for the same reason: what the
+/// project declares holds until a mission says otherwise, and the choice is
+/// frozen with the header rather than read again mid-mission.
+///
+/// No name is checked here. `hq` knows harnesses, not models: the harness
+/// refuses what it does not know, in the container.
+#[test]
+fn a_model_is_chosen_by_the_mission_then_the_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let coding = hq::mission::Integration::None {
+        reason: "no external service is involved".to_string(),
+    };
+
+    // Neither declares one: the harness keeps its own default, and hq adds
+    // no `--model` at all.
+    let project = project(dir.path());
+    assert_eq!(run::model_for(&project, &header_with(coding.clone())), None);
+
+    // The project declares one, and no mission refines it.
+    let mut declared = project;
+    declared.config.model = Some("claude-sonnet-5".to_string());
+    assert_eq!(
+        run::model_for(&declared, &header_with(coding.clone())),
+        Some("claude-sonnet-5".to_string())
+    );
+
+    // The mission declares another: its header wins over hq.yaml.
+    let mut header = header_with(coding);
+    header.model = Some("claude-opus-5".to_string());
+    assert_eq!(
+        run::model_for(&declared, &header),
+        Some("claude-opus-5".to_string())
+    );
 }
 
 #[test]
@@ -227,6 +263,7 @@ fn a_mission_that_cannot_authenticate_does_not_start() {
         arbiter: None,
         run: None,
         account: None,
+        model: None,
         bounds: Default::default(),
     };
     hq::mission::dir::create(&project.hq_root, "m1", &header, "").unwrap();
@@ -276,6 +313,7 @@ fn a_run_profile_carries_the_clean_copy_of_head() {
             arbiter: None,
             run: None,
             account: None,
+            model: None,
             bounds: Default::default(),
         },
         hq::harness::Role::Coder,
@@ -450,6 +488,7 @@ fn live_a_mission_starts_and_its_run_is_read_back() {
         arbiter: None,
         run: None,
         account: None,
+        model: None,
         bounds: Default::default(),
     };
     hq::mission::dir::create(&hq_root, "alpha", &header, "Do the thing.").unwrap();
@@ -717,6 +756,7 @@ fn header_with(integration: hq::mission::Integration) -> hq::mission::Header {
         arbiter: None,
         run: None,
         account: None,
+        model: None,
         bounds: Default::default(),
     }
 }

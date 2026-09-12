@@ -136,6 +136,11 @@ pub fn differences(frozen: &Header, fresh: &Header) -> Vec<Change> {
         fresh.account.clone().unwrap_or_else(|| "—".into()),
     );
     note(
+        "model",
+        frozen.model.clone().unwrap_or_else(|| "—".into()),
+        fresh.model.clone().unwrap_or_else(|| "—".into()),
+    );
+    note(
         "run",
         frozen.run.clone().unwrap_or_else(|| "—".into()),
         fresh.run.clone().unwrap_or_else(|| "—".into()),
