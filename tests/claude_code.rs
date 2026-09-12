@@ -52,7 +52,7 @@ fn the_command_line_is_headless_refuses_prompts_and_never_bare() {
     for must in [
         "-p",
         "--output-format stream-json",
-        "--permission-mode dontAsk",
+        "--permission-mode auto",
         "--permission-prompts none",
         "--session-id 11111111-2222-4333-8444-555555555555",
         "--append-system-prompt-file /roles/coder.md",
@@ -93,6 +93,9 @@ fn guards_and_config_are_passed_at_invocation() {
     let config = Config {
         model: Some("claude-opus-5".into()),
         max_turns: Some(40),
+        // Not the default: what is asserted below is that the project's
+        // choice reaches the command line, not that the default does.
+        permission_mode: "dontAsk".into(),
         config_dir: Some("/home/agent/.claude".into()),
         ..Config::default()
     };
@@ -112,6 +115,9 @@ fn guards_and_config_are_passed_at_invocation() {
     );
     assert!(line.contains("--model claude-opus-5"));
     assert!(line.contains("--max-turns 40"));
+    assert!(line.contains("--permission-mode dontAsk"));
+    // Refused whatever the mode: it is what makes a prompt impossible.
+    assert!(line.contains("--permission-prompts none"));
     assert!(line.contains("--settings {\"hooks\":{}}"));
 }
 

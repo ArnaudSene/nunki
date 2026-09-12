@@ -222,6 +222,15 @@ forge: []
 # harness's business, and the harness refuses what it does not know.
 # model: claude-sonnet-5
 
+# What the harness does with a permission it would otherwise ask about.
+# Nobody is there to ask in an autonomous container, so the only question is
+# which way the silence falls. `auto` lets the harness's own safety checks
+# decide and nudges the agent to keep working rather than stop for a
+# clarification; `dontAsk` allows only what is pre-approved and denies
+# everything else. Whatever the mode, hq refuses the prompt itself, so a run
+# never waits for a human who is not there.
+permission_mode: auto
+
 # The project's own Compose file, whose services and networks hq merges into
 # every system profile. They are lifted once per slot and never stopped
 # between two profiles, so what the integrator laid down survives.

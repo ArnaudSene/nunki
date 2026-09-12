@@ -347,6 +347,7 @@ pub fn launch(l: &Launching) -> Result<Launched, RunError> {
     let harness = claude_code::ClaudeCode::new(
         claude_code::Config {
             model: model_for(project, header),
+            permission_mode: project.config.permission_mode.clone(),
             ..Default::default()
         },
         Box::new(spawner),
