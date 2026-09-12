@@ -32,6 +32,7 @@ fn header(services: &[(&str, bool)]) -> Header {
         arbiter: None,
         run: None,
         account: None,
+        model: None,
         bounds: Bounds::default(),
     }
 }

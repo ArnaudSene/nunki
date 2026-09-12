@@ -106,6 +106,7 @@ fn a_mission_says_who_arbitrates_and_the_follow_up_is_addressed_to_them() {
         arbiter: Some("Igor".to_string()),
         run: None,
         account: None,
+        model: None,
         bounds: Default::default(),
     };
     let paths = hq::mission::dir::create(dir.path(), "m1", &header, "").unwrap();
@@ -140,6 +141,7 @@ fn a_mission_with_nobody_named_still_addresses_somebody() {
         arbiter: None,
         run: None,
         account: None,
+        model: None,
         bounds: Default::default(),
     };
     let paths = hq::mission::dir::create(dir.path(), "m1", &header, "").unwrap();

@@ -41,6 +41,7 @@ fn repository(dir: &Path) -> Project {
             protected_branches: vec!["main".to_string()],
             protected_paths: ProtectedPaths::default(),
             account: None,
+            model: None,
             bounds: Default::default(),
             credentials: None,
             run: None,

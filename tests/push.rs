@@ -44,6 +44,7 @@ fn header(integration: Integration, security: Security) -> Header {
         arbiter: None,
         run: None,
         account: None,
+        model: None,
         bounds: Bounds::default(),
     }
 }
@@ -116,6 +117,7 @@ impl World {
                 protected_branches: vec!["main".into(), "dev".into()],
                 protected_paths: ProtectedPaths::default(),
                 account: None,
+                model: None,
                 bounds: Default::default(),
                 credentials: None,
                 run: None,

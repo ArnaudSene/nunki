@@ -23,6 +23,7 @@ fn header(integration: Integration, security: Security, bounds: Bounds) -> Heade
         arbiter: None,
         run: None,
         account: None,
+        model: None,
         bounds,
     }
 }

@@ -48,6 +48,7 @@ fn project(root: &Path) -> Project {
             protected_branches: vec!["main".into(), "dev".into()],
             protected_paths: Default::default(),
             account: None,
+            model: None,
             bounds: Default::default(),
             credentials: None,
             run: None,
