@@ -23,6 +23,7 @@ fn project(dir: &Path) -> Project {
             credentials: None,
             run: None,
             services_file: None,
+            permission_mode: "auto".to_string(),
             forge_protection: Default::default(),
         },
         dir.join("hq"),

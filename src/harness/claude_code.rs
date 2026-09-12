@@ -1,7 +1,8 @@
 //! The Claude Code adapter (SPEC 4.3), against the CLI as installed:
 //! `claude -p` with `--output-format stream-json`, sessions imposed by `hq`
-//! with `--session-id` and resumed with `--resume`, permissions refused
-//! rather than asked (`--permission-mode dontAsk --permission-prompts none`),
+//! with `--session-id` and resumed with `--resume`, a permission mode the
+//! project declares and a prompt nobody ever waits for
+//! (`--permission-mode <mode> --permission-prompts none`),
 //! and **never `--bare`**: it skips `CLAUDE.md` and ignores the
 //! subscription token, and the subscription is the only login (SPEC 4.3,
 //! "L'abonnement, et rien d'autre").
@@ -32,6 +33,10 @@ pub struct Config {
     pub model: Option<String>,
     /// Upper bound on agentic turns per run, or none.
     pub max_turns: Option<u32>,
+    /// What the CLI does with a permission it would otherwise ask about
+    /// (`--permission-mode`). Declared per project; `hq` passes it through
+    /// without checking the name, and the CLI refuses one it does not know.
+    pub permission_mode: String,
     /// Where the harness keeps config and sessions (`CLAUDE_CONFIG_DIR`).
     /// In a container: a named volume per slot, set by the engine. `None`
     /// leaves the CLI to its own default — the human's login on this machine,
@@ -45,6 +50,7 @@ impl Default for Config {
             program: "claude".into(),
             model: None,
             max_turns: None,
+            permission_mode: "auto".into(),
             config_dir: None,
         }
     }
@@ -74,7 +80,12 @@ impl ClaudeCode {
             "stream-json".into(),
             "--verbose".into(),
             "--permission-mode".into(),
-            "dontAsk".into(),
+            self.config.permission_mode.clone(),
+            // Unconditional, whatever the mode: it is what makes a prompt
+            // impossible rather than merely unlikely. `auto` still forces a
+            // prompt for an explicit ask rule and for `AskUserQuestion`, and
+            // `none` denies those instead of waiting for a human who is not
+            // there. The mode decides everything else.
             "--permission-prompts".into(),
             "none".into(),
         ];
@@ -171,10 +182,13 @@ impl Harness for ClaudeCode {
 
     /// What a role is allowed to do **through the harness**.
     ///
-    /// Found by running one: with `--permission-mode dontAsk` and nothing
-    /// allowed, the first real agent run had `Bash` and `Write` refused, sat
-    /// thinking, and ended without a result. Refusing is safe (SPEC 3.2) —
-    /// refusing *everything* is a container that cannot work.
+    /// Found by running one, on 2026-09-10, when `dontAsk` was the only mode
+    /// `hq` passed: with nothing allowed, the first real agent run had `Bash`
+    /// and `Write` refused, sat thinking, and ended without a result.
+    /// Refusing is safe (SPEC 3.2) — refusing *everything* is a container
+    /// that cannot work. The list still matters under `auto`, which is now
+    /// the default: it pre-approves the ordinary work instead of leaving it
+    /// to a classifier that can decline it.
     ///
     /// This list is comfort, not enforcement: what actually restrains an
     /// agent is the container, the firewall and git (SPEC 3.2). Its job is

@@ -70,6 +70,10 @@ battery, the mutation campaign and the launch script. Outside it, your HQ at
 
 Read `hq.yaml` before going further. Its `protected_branches`,
 `protected_paths` and `forge_protection` are what the perimeter gate enforces.
+Two more decide how the agents run: `model` (which model they use, absent
+means the harness's own default) and `permission_mode` (`auto` by default —
+what the harness does with a permission it would otherwise ask a human
+about, since nobody is there to ask).
 Then commit what `hq init` wrote, build the images and clone a slot:
 
 ```sh
@@ -85,6 +89,7 @@ hq mission new m1 \
   --branch mission/first \
   --lot "L1:parse the header" \
   --lot "L2:reject a malformed one" \
+  --model claude-sonnet-5 \
   --about "What the mission is for, in your words."
 ```
 

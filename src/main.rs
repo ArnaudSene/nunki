@@ -203,6 +203,15 @@ enum MissionCommand {
         /// to the one named in ~/.hq/accounts.yaml.
         #[arg(long, value_name = "NAME")]
         account: Option<String>,
+        /// Which model this mission's agents run on. Defaults to the
+        /// project's `model:` in hq.yaml, then to the harness's own default.
+        ///
+        /// An alias for the latest of a family (`sonnet`, `opus`) or a full
+        /// name (`claude-sonnet-5`). No name is checked here: hq knows
+        /// harnesses, not models, and the harness refuses what it does not
+        /// know.
+        #[arg(long, value_name = "MODEL")]
+        model: Option<String>,
         /// Who arbitrates when this mission comes back with a question.
         /// Defaults to whoever runs `hq` — `hq whoami` says who that is.
         #[arg(long = "for", value_name = "NAME")]
@@ -1122,6 +1131,7 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             security_agent,
             run,
             account,
+            model,
             arbiter,
             about,
         } => {
@@ -1167,10 +1177,7 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                     Security::Gates
                 },
                 account,
-                // No flag of its own: the project declares the model in
-                // `hq.yaml`, and a mission that wants another one says so in
-                // this header, by hand, before `hq mission start` freezes it.
-                model: None,
+                model,
                 run,
                 // Said rather than assumed: whoever frames a mission is who
                 // it comes back to, until somebody says otherwise.

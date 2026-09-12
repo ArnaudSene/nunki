@@ -215,6 +215,7 @@ fn live_a_campaign_is_launched_watched_and_read_back() {
             credentials: None,
             run: None,
             services_file: None,
+            permission_mode: "auto".to_string(),
             forge_protection: Default::default(),
         },
         dir.path().join("hq"),

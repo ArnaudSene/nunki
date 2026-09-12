@@ -42,6 +42,20 @@ pub struct Config {
     /// says what it accepts.
     #[serde(default)]
     pub model: Option<String>,
+    /// How the harness answers a permission it would otherwise ask a human
+    /// about. There is nobody to ask in an autonomous container, so the
+    /// question is only which way the silence falls (SPEC 4.3).
+    ///
+    /// `auto` — the default — lets the harness's own safety checks decide
+    /// and nudges the agent to keep working rather than stop for a
+    /// clarification. `dontAsk` allows only what is pre-approved and denies
+    /// everything else, which is safer and stricter: an agent refused a tool
+    /// it needed is a run that ends having done nothing.
+    ///
+    /// Not checked against a list, for the same reason as `model`: these
+    /// names belong to the harness's vocabulary, not to `hq`.
+    #[serde(default = "default_permission_mode")]
+    pub permission_mode: String,
     #[serde(default)]
     pub bounds: Bounds,
     /// Where the test credentials live, mounted read-only on a system
@@ -68,6 +82,13 @@ pub struct Config {
 
 fn default_protected_branches() -> Vec<String> {
     vec!["main".to_string(), "master".to_string(), "dev".to_string()]
+}
+
+/// Chosen by Arnaud on 2026-09-12: an agent that keeps working is worth more
+/// than one refused a tool it needed, now that the container, the firewall
+/// and git are what actually restrain it (SPEC 3.2).
+fn default_permission_mode() -> String {
+    "auto".to_string()
 }
 
 /// A private repository on GitHub's free plan can neither protect a branch
