@@ -293,6 +293,13 @@ Corollaire, hérité et vérifié : **en autonome, refuser est sûr et demander 
 dangereux.** Un refus est lu par l'agent comme une erreur d'outil et il
 enchaîne ; une question attend quelqu'un qui n'est pas là.
 
+Ce corollaire porte sur la **question**, pas sur le refus systématique. Ce
+qui rend une question impossible est `--permission-prompts none`, passé quel
+que soit le mode ; ce que le mode choisit, c'est qui décide à la place de
+l'humain. Le projet le déclare (`permission_mode:` dans `hq.yaml`, `auto` par
+défaut depuis le 2026-09-12 — voir le tableau des harnais en 4.3), parce que
+tout refuser est aussi une manière de finir un run sans rien avoir produit.
+
 ### 3.3 Ce que `hq` ne fait jamais dans un dépôt
 
 1. Il n'écrit pas dans les fichiers de réglages d'un harnais (`settings.json`

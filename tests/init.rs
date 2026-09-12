@@ -291,6 +291,28 @@ fn a_new_project_protects_the_fragments_that_gate_and_fence_its_agents() {
     assert!(repo.join(".hq/stacks/rust/prepush.sh").is_file());
 }
 
+/// What `hq init` writes and what `hq` reads back must agree.
+///
+/// `permission_mode` ships **uncommented**, unlike `model`: it is the one
+/// line in the template whose value every run of a new project depends on
+/// from the first minute. A template that said `auto` while the field parsed
+/// as something else would be invisible until an agent behaved oddly in a
+/// container nobody is watching.
+#[test]
+fn the_hq_yaml_it_writes_parses_back_with_the_permission_mode_it_declares() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    init(&repo, &dir.path().join("hq"), &["rust".to_string()]).unwrap();
+
+    let text = std::fs::read_to_string(repo.join("hq.yaml")).unwrap();
+    let config: hq::project::Config = serde_yaml_ng::from_str(&text).unwrap();
+    assert_eq!(config.permission_mode, "auto", "{text}");
+    // The model ships commented out, so a new project keeps the harness's
+    // own default until somebody declares one.
+    assert_eq!(config.model, None, "{text}");
+}
+
 /// The prose `hq init` deposits must read as prose.
 ///
 /// The cause, measured on 2026-09-10: `cargo fmt` joins a `\`-continued
