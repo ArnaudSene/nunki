@@ -309,7 +309,18 @@ ARG UID=1000
 ARG GID=1000
 ARG RUST_VERSION=stable
 
+# `upgrade`, and not only `update`. The packages inherited from the base tag
+# keep the versions that tag was cut with, so a security fix Debian published
+# since would never reach a freshly built image — pulling the tag again does
+# not help while the tag itself has not been rebuilt.
+#
+# Measured on 2026-09-13, on a scan that went red: `libpcre2-8-0` 10.42-1,
+# carrying CVE-2026-86145 and CVE-2026-89161 — both HIGH, both with a fix
+# published. It arrives with the base image and is installed by no line here,
+# so nothing but this one moves it. `apt-get upgrade` takes it to
+# 10.42-1+deb12u1, measured in the base image itself.
 RUN apt-get -qq update \
+ && apt-get -qq -y upgrade \
  && apt-get -qq install --no-install-recommends -y \
       ca-certificates curl git build-essential pkg-config tmux \
  && rm -rf /var/lib/apt/lists/*

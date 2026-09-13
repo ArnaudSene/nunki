@@ -54,6 +54,43 @@ fn a_fresh_repository_gets_everything_it_needs() {
     );
 }
 
+/// The image a project builds carries the security updates published since
+/// its base tag was cut.
+///
+/// Measured on 2026-09-13, on a scan that went red: `libpcre2-8-0` 10.42-1,
+/// carrying CVE-2026-86145 and CVE-2026-89161 — both HIGH, both with a fix
+/// already published. That package arrives with `debian:bookworm-slim` and
+/// is installed by no line of this Dockerfile, so nothing but an `upgrade`
+/// moves it; pulling the base tag again does nothing while the tag itself
+/// has not been rebuilt.
+#[test]
+fn the_image_it_writes_applies_the_security_updates_of_its_base() {
+    let (_d, root, hq) = fresh();
+    init(&root, &hq, &["rust".to_string()]).unwrap();
+    let dockerfile = std::fs::read_to_string(root.join(".hq/stacks/rust/Dockerfile")).unwrap();
+
+    assert!(
+        dockerfile.contains("apt-get -qq -y upgrade"),
+        "a freshly built image would keep the vulnerable packages its base \
+         tag was cut with: {dockerfile}"
+    );
+
+    // The order carries as much as the presence: an upgrade run against a
+    // stale package list upgrades nothing while looking right, and one run
+    // after the install leaves the just-installed packages behind.
+    let update = dockerfile
+        .find("apt-get -qq update")
+        .expect("the image updates its package list");
+    let upgrade = dockerfile.find("apt-get -qq -y upgrade").unwrap();
+    let install = dockerfile
+        .find("apt-get -qq install")
+        .expect("the image installs the toolchain");
+    assert!(
+        update < upgrade && upgrade < install,
+        "update, then upgrade, then install — in that order: {dockerfile}"
+    );
+}
+
 #[test]
 fn the_battery_is_executable_or_nothing_can_run_it() {
     let (_d, root, hq) = fresh();
