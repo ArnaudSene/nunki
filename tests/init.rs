@@ -443,3 +443,49 @@ fn the_rust_image_carries_what_the_mutation_campaign_calls() {
         .expect("checked above");
     assert!(user < install, "{dockerfile}");
 }
+
+/// The campaign does not hand the coder a survivor nobody could answer.
+///
+/// cargo-mutants replaces a whole function body with `Default::default()`
+/// whenever the return type allows it, and `fn main() -> ExitCode` always
+/// allows it. No unit test calls `main`, so that mutant cannot be killed by
+/// any test the coder is able to write, and gate 7 asks for every survivor to
+/// be killed or frozen as a bug. Measured on 2026-09-13: a coder spent a run
+/// extracting `main`'s body into a testable function, and the mutant
+/// reappeared on the thin wrapper that was left.
+///
+/// Measured the same day, on a crate with a binary and a library: 19 mutants
+/// without the exclusion, 18 with it — it removes `src/main.rs`'s whole body
+/// and keeps `src/lib.rs`'s `replace run -> ExitCode`, the same shape in the
+/// function `main` delegates to, which a test can and must kill.
+#[test]
+fn the_campaign_does_not_mutate_a_binarys_entry_point() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    hq::init::init(&root, &dir.path().join("hq"), &["rust".to_string()]).unwrap();
+
+    let script = std::fs::read_to_string(root.join(".hq/stacks/rust/mutation.sh")).unwrap();
+    let line = script
+        .lines()
+        .find(|l| l.trim_start().starts_with("cargo mutants"))
+        .expect("the campaign calls cargo mutants");
+    assert!(
+        line.contains(r#"--exclude-re "replace main -> ""#),
+        "the campaign it writes still mutates an entry point no test can \
+         reach: {line}"
+    );
+
+    // On the mutation, and never on the file. A `main.rs` carrying real code
+    // — this project's own is 79K — still owes every mutant in it, so an
+    // exclusion aimed at the file would buy the gate's silence by dropping
+    // coverage that is genuinely the coder's to answer.
+    assert!(
+        !line.contains("--exclude src/main.rs") && !line.contains("--exclude-glob"),
+        "the file is excluded, not the mutation: {line}"
+    );
+    assert!(
+        !script.contains("exclude_globs"),
+        "a mutants.toml excluding the file would do the same damage:\n{script}"
+    );
+}
