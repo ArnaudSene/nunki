@@ -750,6 +750,14 @@ fn main() -> ExitCode {
                                 println!("gates     {role:?}, on {}", &report.head[..12]);
                                 print_gates(report);
                             }
+                            hq::verify::Step::GateUnplayable { role, why } => {
+                                owed = true;
+                                println!(
+                                    "unplayed  a {role:?} gate could not be played, and no run \
+                                     would change that"
+                                );
+                                println!("          {why}");
+                            }
                             hq::verify::Step::Moved { to } => println!("stage     {to:?}"),
                             hq::verify::Step::Held {
                                 role,

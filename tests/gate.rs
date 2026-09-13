@@ -640,6 +640,17 @@ fn a_battery_that_could_not_be_run_is_neither_green_nor_red() {
         "{:?}",
         report.failure()
     );
+    // And told apart, which is what the caller deciding the next move needs.
+    // `failure()` folds the two on purpose — "is this green" has one answer —
+    // but "what do I do about it" has two: a red gate is the agent's to fix,
+    // and a gate nobody could play is not, so sending an agent back at it
+    // spends a run to be told the same thing again.
+    assert!(report.failed().is_none(), "{:?}", report.failed());
+    assert!(
+        report.unplayed().unwrap().contains("could not be played"),
+        "{:?}",
+        report.unplayed()
+    );
 }
 
 #[test]

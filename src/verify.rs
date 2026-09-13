@@ -41,6 +41,19 @@ pub enum Step {
         role: Role,
         report: Box<gate::Report>,
     },
+    /// A gate could not be played at all, and no agent can change that: the
+    /// campaign nobody has started, the profile that is not up. The flow
+    /// does not move — there is nothing to send an agent back for, and
+    /// nothing green to move on from — and `why` carries the gate's own
+    /// sentence, which names the verb that unblocks it. A later `hq verify`
+    /// plays the gate again.
+    ///
+    /// It is a step and not a `Handover` because `AwaitingHuman` is where a
+    /// mission ends: `advance` answers every event from it with
+    /// `AlreadyOver`, so a mission sent there for a gate 7 nobody had run
+    /// yet — that is, every mission on its first pass — could never be
+    /// picked up again.
+    GateUnplayable { role: Role, why: String },
     /// The flow moved.
     Moved { to: Stage },
     /// A run was launched for this role, and `verify` returned: a run takes
@@ -269,17 +282,32 @@ pub fn verify_as(
                             // the mission. Then the run's own word on its
                             // lot, and only the resume block's.
                             let report = gate::after_run(&subject)?;
-                            let failure = report.failure();
+                            let failed = report.failed();
+                            let unplayed = report.unplayed();
                             steps.push(Step::Gates {
                                 role: Role::Coder,
                                 report: Box::new(report),
                             });
-                            Some(match failure {
-                                Some(reason) => Event::GatesFailed { reason },
-                                None => {
+                            match (failed, unplayed) {
+                                (Some(reason), _) => Some(Event::GatesFailed { reason }),
+                                // Nothing red, but a gate nobody could play:
+                                // the run is not at fault and another one
+                                // would meet the same wall. Nothing is
+                                // decided, so nothing is forgotten either —
+                                // the run stays recorded, and the next
+                                // `hq verify` reads it back and plays the
+                                // gate again.
+                                (None, Some(why)) => {
+                                    steps.push(Step::GateUnplayable {
+                                        role: Role::Coder,
+                                        why,
+                                    });
+                                    return Ok(steps);
+                                }
+                                (None, None) => {
                                     let journal =
                                         std::fs::read_to_string(&paths.journal).unwrap_or_default();
-                                    match crate::mission::journal::judge(&journal, &label) {
+                                    Some(match crate::mission::journal::judge(&journal, &label) {
                                         Ok(()) => Event::RunEnded {
                                             outcome,
                                             lot_done: true,
@@ -288,9 +316,9 @@ pub fn verify_as(
                                             outcome: Outcome::MissionFailure(why),
                                             lot_done: false,
                                         },
-                                    }
+                                    })
                                 }
-                            })
+                            }
                         } else {
                             Some(Event::RunEnded {
                                 outcome,
@@ -303,12 +331,28 @@ pub fn verify_as(
                     // on the same lot, like any other.
                     None => {
                         let report = gate::after_run(&subject)?;
-                        let failure = report.failure();
+                        let failed = report.failed();
+                        let unplayed = report.unplayed();
                         steps.push(Step::Gates {
                             role: Role::Coder,
                             report: Box::new(report),
                         });
-                        failure.map(|reason| Event::GatesFailed { reason })
+                        // A red gate first: it is the agent's to fix, and it
+                        // outranks a gate nobody could play. Only when
+                        // nothing is red does an unplayable one stop the
+                        // mission, because then there is nothing to send an
+                        // agent back for.
+                        match (failed, unplayed) {
+                            (Some(reason), _) => Some(Event::GatesFailed { reason }),
+                            (None, Some(why)) => {
+                                steps.push(Step::GateUnplayable {
+                                    role: Role::Coder,
+                                    why,
+                                });
+                                return Ok(steps);
+                            }
+                            (None, None) => None,
+                        }
                     }
                 };
 
@@ -381,13 +425,16 @@ pub fn verify_as(
             Stage::Gates => {
                 let head = crate::git::head(&slot.tree)?;
                 let report = gate::at_verification(&subject, &verification)?;
-                let failure = report.failure();
+                let failed = report.failed();
+                let unplayed = report.unplayed();
                 steps.push(Step::Gates {
                     role: subject.role,
                     report: Box::new(report),
                 });
-                let event = match failure {
-                    Some(reason) => {
+                // Every arm left here moves the flow: the one that does
+                // not has returned above.
+                let event = match (failed, unplayed) {
+                    (Some(reason), _) => {
                         // The volet this opens is told why, like every
                         // attempt the coder is sent back to.
                         crate::followup::said(
@@ -400,7 +447,19 @@ pub fn verify_as(
                         )?;
                         Event::GatesFailed { reason }
                     }
-                    None => {
+                    // Nothing red, and a gate nobody could play. It is not
+                    // written to the followup, unlike a red one: that file is
+                    // what the next run reads first, and there is no next run
+                    // here — the flow stays at the gates and the sentence
+                    // goes to the human, who has the verb.
+                    (None, Some(why)) => {
+                        steps.push(Step::GateUnplayable {
+                            role: subject.role,
+                            why,
+                        });
+                        return Ok(steps);
+                    }
+                    (None, None) => {
                         // The coder's verdict is implicit — its gates were
                         // green (SPEC 4.4) — so this is where it is recorded,
                         // with the commit it was green on. `hq push` needs
