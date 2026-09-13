@@ -260,7 +260,21 @@ impl Spawner for ContainerSpawner {
         if out.ok() {
             Ok(())
         } else {
-            Err(io::Error::other(out.stderr))
+            // The status always, and what the shell said only if it said
+            // anything. A `kill` that fails often writes nothing at all, and
+            // an error carrying only that stderr is an error whose whole
+            // message is empty: measured on 2026-09-13, `hq mission stop
+            // --now` answered `hq: io:` and nothing else, while the run went
+            // on. The status is then the only thing anyone knows, so it is
+            // the one thing that must never be dropped — the same reading
+            // `alive` already makes just above.
+            let said = out.stderr.trim();
+            let what = format!("kill {flag} {pid} in the container failed ({})", out.status);
+            Err(io::Error::other(if said.is_empty() {
+                what
+            } else {
+                format!("{what}: {said}")
+            }))
         }
     }
 }
