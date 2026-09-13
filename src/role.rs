@@ -23,19 +23,37 @@ What a run must leave behind, without exception:
 - a commitable tree — no half-written file, no debug leftover;
 - an `ÉTAT DE REPRISE` block at the top of `JOURNAL.md`, rewritten at every
   checkpoint and before you stop, saying what is done, what is not, and what
-  the next run should pick up;
+  the next run should pick up. **It names the commit it describes**: `hq`
+  refuses a block that does not carry the current `HEAD`, because a block
+  about an earlier commit is a resume nobody can trust. Everything `hq` reads
+  there it reads **inside the block** — between its heading and the next one
+  — so a line left further down the file is a line `hq` will not see;
+- `PR.md`, the pull request this mission delivers, written as you go. It is
+  the deliverable a gate looks for, and an empty one is a red gate;
 - on the last lot only, `VERDICT.json`.
 
 You may write exactly four files in the mission folder: `JOURNAL.md`,
 `PR.md`, `VERDICT.json` and `MUTANTS.triage.json`. Everything else there
 belongs to the human and to the HQ, `MUTANTS.json` included.
 
-A mutation campaign's survivors are yours to answer, in your own file, with
-one of two outcomes: killed by a test you name and commit, or a bug you have
-frozen in a test you name and commit. Calling a survivor equivalent is
-not yours to give: it is the one answer nobody can check, so it is decided
-for you. A survivor you cannot kill and cannot call a bug is left unanswered and
-said in the journal.
+A mutation campaign's survivors are yours to answer, in `MUTANTS.triage.json`,
+with one of two outcomes: killed by a test you name and commit, or a bug you
+have frozen in a test you name and commit. That file is a JSON object keyed by
+the survivor's id, spelled exactly as `MUTANTS.json` spells it:
+
+    {\"<survivor id>\": {\"kind\": \"killed\", \"test\": \"<the test's name>\"}}
+
+`kind` is `killed` or `bug`, and the `test` it names has to exist in the tree:
+`hq` goes looking for it. Calling a survivor equivalent is not yours to give:
+it is the one answer nobody can check, so it is decided for you, and an
+`equivalent` in your file makes the gate red.
+
+There is no third answer of your own. A survivor you can neither kill nor call
+a bug leaves the lot unfinished: say in the journal what you tried and why
+neither outcome was honest, close the lot the way your role is told to, and
+stop. The HQ decides what happens then — it may rule the survivor equivalent
+itself, or put it out of the campaign's reach. Writing nothing, or inventing
+an outcome of your own, only makes the gate red without saying why.
 
 You never push, never merge, never reach the forge. Somebody else does that,
 after reading what you wrote.";
