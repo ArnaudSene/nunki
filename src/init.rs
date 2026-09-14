@@ -420,8 +420,24 @@ mkdir -p "$out"
 # A campaign that finds survivors exits non-zero — 2, measured on
 # cargo-mutants 27.1.0 — and that is a result, not a failure: `hq` reads the
 # survivors rather than the status.
+#
+# `--exclude-re "replace main -> "` drops one survivor nobody could ever
+# answer. cargo-mutants replaces a whole function body with
+# `Default::default()` whenever the return type allows it, and
+# `fn main() -> ExitCode` always allows it — but no unit test calls `main`,
+# so that mutant cannot be killed by any test the coder is able to write.
+# Left in, it costs a lot for nothing: measured on 2026-09-13, a coder spent
+# a run extracting `main`'s body into a testable function, and the mutant
+# simply reappeared on the thin wrapper that was left.
+#
+# Measured the same day, on a crate with a binary and a library: 19 mutants
+# without it, 18 with it. It removes `src/main.rs`'s whole body and keeps
+# `src/lib.rs`'s `replace run -> ExitCode` — the same shape, in the function
+# `main` delegates to, and that one a test can and must kill. The exclusion
+# is on the mutation, never on the file: a `main.rs` carrying real code still
+# owes every mutant in it.
 # shellcheck disable=SC2086
-cargo mutants --in-place --no-shuffle --output "$out" $files >&2 || true
+cargo mutants --in-place --no-shuffle --exclude-re "replace main -> " --output "$out" $files >&2 || true
 
 # `--output DIR` writes into `DIR/mutants.out/`, not into `DIR` (measured on
 # 27.1.0). Reading the wrong path was the whole campaign silently failing.
