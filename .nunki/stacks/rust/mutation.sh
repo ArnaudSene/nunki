@@ -1,13 +1,13 @@
 #!/bin/sh
 # The mutation campaign for a Rust project (SPEC 4.4, gate 7).
 #
-# `hq` calls this as `mutation.sh <campaign-id> <path>...`, from the clean
+# `nunki` calls this as `mutation.sh <campaign-id> <path>...`, from the clean
 # copy of HEAD inside the slot's container. The id comes first so the campaign
 # is identifiable from its own command line; this script does not need it.
 #
 # It prints **one JSON object per line** on stdout, one per surviving mutant:
 #   {"id":"…","file":"…","line":12,"description":"…"}
-# `hq` ignores anything that is not one, so progress may go to stdout freely —
+# `nunki` ignores anything that is not one, so progress may go to stdout freely —
 # though this script keeps the tool's own chatter on stderr.
 #
 # `--in-place` is not a detail: cargo-mutants only reuses a build cache in
@@ -38,7 +38,7 @@ out="target/mutants-$campaign"
 mkdir -p "$out"
 
 # A campaign that finds survivors exits non-zero — 2, measured on
-# cargo-mutants 27.1.0 — and that is a result, not a failure: `hq` reads the
+# cargo-mutants 27.1.0 — and that is a result, not a failure: `nunki` reads the
 # survivors rather than the status.
 # shellcheck disable=SC2086
 cargo mutants --in-place --no-shuffle --output "$out" $files >&2 || true
@@ -47,7 +47,7 @@ cargo mutants --in-place --no-shuffle --output "$out" $files >&2 || true
 # 27.1.0). Reading the wrong path was the whole campaign silently failing.
 missed="$out/mutants.out/missed.txt"
 if [ ! -f "$missed" ]; then
-  echo "hq: the campaign left no $missed" >&2
+  echo "nunki: the campaign left no $missed" >&2
   exit 1
 fi
 
@@ -59,7 +59,7 @@ fi
 # `> >=` are all at `src/lib.rs:2:7` — so `file:line` and even
 # `file:line:col` hand the coder survivors it cannot tell apart, in a file
 # whose whole purpose is answering them one by one. The tool's own name for a
-# mutant is that line, so that is the name hq uses.
+# mutant is that line, so that is the name nunki uses.
 while IFS= read -r mutant; do
   [ -n "$mutant" ] || continue
   file=${mutant%%:*}

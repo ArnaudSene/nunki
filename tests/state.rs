@@ -3,10 +3,10 @@
 use std::fs;
 use std::process::{Command, Stdio};
 
-use hq::harness::{Outcome, RunHandle, SessionId, Usage};
-use hq::mission::flow::{Event, Flow, Stage, Work};
-use hq::mission::{Bounds, Header, Integration, Lot, Security};
-use hq::state::{LockError, MissionState, SlotLock, StateError, Store};
+use nunki::harness::{Outcome, RunHandle, SessionId, Usage};
+use nunki::mission::flow::{Event, Flow, Stage, Work};
+use nunki::mission::{Bounds, Header, Integration, Lot, Security};
+use nunki::state::{LockError, MissionState, SlotLock, StateError, Store};
 
 fn header() -> Header {
     Header {
@@ -62,7 +62,7 @@ fn a_mission_state_round_trips_through_disk() {
             &mut st,
             Some(RunHandle {
                 session: SessionId("sess-1".into()),
-                container: "hq-m1-coder".into(),
+                container: "nunki-m1-coder".into(),
                 pid: Some(4242),
                 log: std::path::PathBuf::from("/tmp/runs/sess-1.jsonl"),
             }),
@@ -228,7 +228,7 @@ fn dropping_a_guard_never_deletes_a_lock_retaken_by_another_process() {
     );
 }
 
-/// A hold changes what `hq` will do next, so a read verb that does not
+/// A hold changes what `nunki` will do next, so a read verb that does not
 /// mention it reports a held mission as one nobody touched. This drives the
 /// real binary, because the omission was in what the CLI prints and nothing
 /// below it could have caught it.
@@ -237,11 +237,11 @@ fn status_says_a_mission_is_held_and_who_held_it() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("repo");
     fs::create_dir_all(&root).unwrap();
-    fs::write(root.join("hq.yaml"), "harness: claude-code\n").unwrap();
-    let hq_root = dir.path().join("home/.hq/repo");
+    fs::write(root.join("nunki.yaml"), "harness: claude-code\n").unwrap();
+    let hq_root = dir.path().join("home/.nunki/repo");
 
     let status = || {
-        let out = Command::new(env!("CARGO_BIN_EXE_hq"))
+        let out = Command::new(env!("CARGO_BIN_EXE_nunki"))
             .args(["-C"])
             .arg(&root)
             .args(["mission", "status", "m1"])
@@ -251,7 +251,7 @@ fn status_says_a_mission_is_held_and_who_held_it() {
         String::from_utf8_lossy(&out.stdout).into_owned()
     };
 
-    hq::mission::dir::create(&hq_root, "m1", &header(), "do it").unwrap();
+    nunki::mission::dir::create(&hq_root, "m1", &header(), "do it").unwrap();
     let store = Store::open(&hq_root).unwrap();
     let mut state = state("m1");
     store.save(&state).unwrap();
@@ -278,16 +278,16 @@ fn watch_says_the_hold_before_it_says_there_is_no_run() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("repo");
     fs::create_dir_all(&root).unwrap();
-    fs::write(root.join("hq.yaml"), "harness: claude-code\n").unwrap();
-    let hq_root = dir.path().join("home/.hq/repo");
+    fs::write(root.join("nunki.yaml"), "harness: claude-code\n").unwrap();
+    let hq_root = dir.path().join("home/.nunki/repo");
 
-    hq::mission::dir::create(&hq_root, "m1", &header(), "do it").unwrap();
+    nunki::mission::dir::create(&hq_root, "m1", &header(), "do it").unwrap();
     let store = Store::open(&hq_root).unwrap();
     let mut state = state("m1");
     state.hold("Arnaud", false);
     store.save(&state).unwrap();
 
-    let out = Command::new(env!("CARGO_BIN_EXE_hq"))
+    let out = Command::new(env!("CARGO_BIN_EXE_nunki"))
         .args(["-C"])
         .arg(&root)
         .args(["mission", "watch", "m1"])

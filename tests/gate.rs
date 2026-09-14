@@ -7,10 +7,10 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use hq::gate::{self, Decision, Gate, Subject};
-use hq::harness::Role;
-use hq::mission::{Bounds, Header, Integration, Lot, Security, Service};
-use hq::project::ProtectedPaths;
+use nunki::gate::{self, Decision, Gate, Subject};
+use nunki::harness::Role;
+use nunki::mission::{Bounds, Header, Integration, Lot, Security, Service};
+use nunki::project::ProtectedPaths;
 
 /// Run git in `at`, with an identity so commits work on a bare machine.
 fn git(at: &Path, args: &[&str]) -> String {
@@ -481,10 +481,10 @@ impl Fixture {
     /// not up. Gate 6 cannot be played then, and says so — which is exactly
     /// what these tests need in order to judge gate 5 on its own.
     fn verification(&self, role: Role) -> gate::Report {
-        let hq = self._dir.path().join("hq");
-        let project = hq::project::Project::at(
+        let nunki = self._dir.path().join("nunki");
+        let project = nunki::project::Project::at(
             self._dir.path().join("repo"),
-            hq::project::Config {
+            nunki::project::Config {
                 harness: "claude-code".into(),
                 forge: vec![],
                 stacks: vec!["rust".into()],
@@ -499,9 +499,9 @@ impl Fixture {
                 permission_mode: "auto".to_string(),
                 forge_protection: Default::default(),
             },
-            hq,
+            nunki,
         );
-        let slot = hq::slot::Slot {
+        let slot = nunki::slot::Slot {
             name: "nowhere".into(),
             tree: self.tree.clone(),
         };
@@ -520,7 +520,7 @@ impl Fixture {
             &gate::Verification {
                 project: &project,
                 slot: &slot,
-                engine: std::sync::Arc::new(hq::engine::fake::FakeEngine::default()),
+                engine: std::sync::Arc::new(nunki::engine::fake::FakeEngine::default()),
                 stack: "rust",
             },
         )
@@ -629,7 +629,7 @@ fn a_battery_that_could_not_be_run_is_neither_green_nor_red() {
     std::fs::write(&f.pr, "# What this changes\n").unwrap();
 
     match f.at_verification(Role::Coder, Gate::Battery) {
-        Decision::Unplayed(why) => assert!(why.contains("hq mission start"), "{why}"),
+        Decision::Unplayed(why) => assert!(why.contains("nunki mission start"), "{why}"),
         other => panic!("no profile is up, so nothing ran: {other:?}"),
     }
     // And a report with a gate nobody played is not a green report.
@@ -683,9 +683,9 @@ fn live_the_battery_is_the_committed_one_and_an_absent_one_is_red() {
     git(&tree, &["branch", "-q", "dev"]);
     git(&tree, &["checkout", "-q", "-b", "mission/x"]);
 
-    let project = hq::project::Project::at(
+    let project = nunki::project::Project::at(
         dir.path().join("repo"),
-        hq::project::Config {
+        nunki::project::Config {
             harness: "claude-code".into(),
             forge: vec![],
             stacks: vec!["rust".into()],
@@ -700,17 +700,17 @@ fn live_the_battery_is_the_committed_one_and_an_absent_one_is_red() {
             permission_mode: "auto".to_string(),
             forge_protection: Default::default(),
         },
-        dir.path().join("hq"),
+        dir.path().join("nunki"),
     );
-    let slot = hq::slot::Slot {
+    let slot = nunki::slot::Slot {
         name: "gatelive".into(),
         tree: tree.clone(),
     };
     // The same shape as `tests/exec.rs`: alpine plus git, because the copy of
     // HEAD is made with git inside the container. What is being proved here
     // is which script runs, not what a stack image carries.
-    let volume = hq::exec::proof_volume(&slot.name);
-    let file = hq::run::profile_path(&project, &slot.name);
+    let volume = nunki::exec::proof_volume(&slot.name);
+    let file = nunki::run::profile_path(&project, &slot.name);
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
     std::fs::write(
         &file,
@@ -732,15 +732,15 @@ fn live_the_battery_is_the_committed_one_and_an_absent_one_is_red() {
              volumes:\n\
              \x20 {volume}:\n",
             tree = tree.display(),
-            tree_at = hq::run::TREE_AT,
-            proof = hq::exec::PROOF_AT,
+            tree_at = nunki::run::TREE_AT,
+            proof = nunki::exec::PROOF_AT,
         ),
     )
     .unwrap();
 
-    let engine: std::sync::Arc<dyn hq::engine::Engine> =
-        std::sync::Arc::new(hq::engine::docker::Docker::real());
-    let compose_project = hq::compose::project_name(&slot.name).unwrap();
+    let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+        std::sync::Arc::new(nunki::engine::docker::Docker::real());
+    let compose_project = nunki::compose::project_name(&slot.name).unwrap();
     let _ = engine.down(&file, &compose_project, true);
     engine.up(&file, &compose_project).unwrap();
 
@@ -753,7 +753,7 @@ fn live_the_battery_is_the_committed_one_and_an_absent_one_is_red() {
     let protected = ProtectedPaths::default();
 
     let battery = |body: &str, executable: bool| {
-        let at = tree.join(".hq/stacks/rust/prepush.sh");
+        let at = tree.join(".nunki/stacks/rust/prepush.sh");
         std::fs::create_dir_all(at.parent().unwrap()).unwrap();
         std::fs::write(&at, body).unwrap();
         #[cfg(unix)]
@@ -849,7 +849,7 @@ fn live_the_battery_is_the_committed_one_and_an_absent_one_is_red() {
 // Gate 7, the mutation campaign (SPEC 4.4).
 // ---------------------------------------------------------------------------
 
-use hq::mutants::{Campaign, Survivor, Triage};
+use nunki::mutants::{Campaign, Survivor, Triage};
 use std::collections::BTreeMap;
 
 impl Fixture {
@@ -860,9 +860,9 @@ impl Fixture {
         } else {
             "dev".to_string()
         };
-        let touched = hq::gate::touched_paths(&self.tree, &base).unwrap();
-        let fingerprint = hq::mutants::fingerprint(&self.tree, &touched).unwrap();
-        hq::mutants::write(
+        let touched = nunki::gate::touched_paths(&self.tree, &base).unwrap();
+        let fingerprint = nunki::mutants::fingerprint(&self.tree, &touched).unwrap();
+        nunki::mutants::write(
             self._dir.path(),
             &Campaign {
                 fingerprint,
@@ -874,7 +874,7 @@ impl Fixture {
         .unwrap();
     }
 
-    fn gate_seven(&self, role: Role) -> hq::gate::Outcome {
+    fn gate_seven(&self, role: Role) -> nunki::gate::Outcome {
         self.verification(role)
             .outcomes
             .into_iter()
@@ -890,7 +890,7 @@ impl Fixture {
             .iter()
             .map(|(id, t)| ((*id).to_string(), t.clone()))
             .collect();
-        hq::mutants::write_triage(self._dir.path(), &map).unwrap();
+        nunki::mutants::write_triage(self._dir.path(), &map).unwrap();
     }
 }
 
@@ -912,7 +912,7 @@ fn a_mission_with_no_campaign_has_not_passed_gate_seven() {
     commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
     f.journal_names_head();
     match f.gate_seven(Role::Coder).decision {
-        Decision::Unplayed(why) => assert!(why.contains("hq mission mutants"), "{why}"),
+        Decision::Unplayed(why) => assert!(why.contains("nunki mission mutants"), "{why}"),
         other => panic!("no campaign has run: {other:?}"),
     }
 }

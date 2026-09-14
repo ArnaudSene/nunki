@@ -3,9 +3,9 @@
 
 use std::path::Path;
 
-use hq::followup;
-use hq::harness::Role;
-use hq::mission::Verdict;
+use nunki::followup;
+use nunki::harness::Role;
+use nunki::mission::Verdict;
 
 fn file(dir: &Path) -> std::path::PathBuf {
     dir.join("FOLLOWUP_HQ.md")

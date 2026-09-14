@@ -1,9 +1,9 @@
 //! The firewall sidecar's build context, carried by the binary (SPEC 4.1
 //! bis).
 //!
-//! It does **not** live in `.hq/` of an orchestrated project, and it never
-//! will: `.hq/` is what `hq init` deposits in someone else's repository, and
-//! this is `hq`'s own asset. Two reasons beyond tidiness. `hq` writes as
+//! It does **not** live in `.nunki/` of an orchestrated project, and it never
+//! will: `.nunki/` is what `nunki init` deposits in someone else's repository, and
+//! this is `nunki`'s own asset. Two reasons beyond tidiness. `nunki` writes as
 //! little as it can into a repository it orchestrates (SPEC 3.3); and the
 //! file describing the agent's cage has no business sitting in a tree the
 //! agent can write.

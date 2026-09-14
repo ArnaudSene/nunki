@@ -23,11 +23,11 @@ What a run must leave behind, without exception:
 - a commitable tree — no half-written file, no debug leftover;
 - an `ÉTAT DE REPRISE` block at the top of `JOURNAL.md`, rewritten at every
   checkpoint and before you stop, saying what is done, what is not, and what
-  the next run should pick up. **It names the commit it describes**: `hq`
+  the next run should pick up. **It names the commit it describes**: `nunki`
   refuses a block that does not carry the current `HEAD`, because a block
-  about an earlier commit is a resume nobody can trust. Everything `hq` reads
+  about an earlier commit is a resume nobody can trust. Everything `nunki` reads
   there it reads **inside the block** — between its heading and the next one
-  — so a line left further down the file is a line `hq` will not see;
+  — so a line left further down the file is a line `nunki` will not see;
 - `PR.md`, the pull request this mission delivers, written as you go. It is
   the deliverable a gate looks for, and an empty one is a red gate;
 - on the last lot only, `VERDICT.json`.
@@ -44,7 +44,7 @@ the survivor's id, spelled exactly as `MUTANTS.json` spells it:
     {\"<survivor id>\": {\"kind\": \"killed\", \"test\": \"<the test's name>\"}}
 
 `kind` is `killed` or `bug`, and the `test` it names has to exist in the tree:
-`hq` goes looking for it. Calling a survivor equivalent is not yours to give:
+`nunki` goes looking for it. Calling a survivor equivalent is not yours to give:
 it is the one answer nobody can check, so it is decided for you, and an
 `equivalent` in your file makes the gate red.
 
@@ -110,7 +110,7 @@ what you did not look at."
 /// for the agent, like everything there but its own four files.
 pub const PROMPT_FILE: &str = "ROLE.md";
 
-/// The role's name as `hq` writes it down: in `HQ_ROLE`, in a log's name, in
+/// The role's name as `nunki` writes it down: in `HQ_ROLE`, in a log's name, in
 /// a message to a human. One spelling, in one place, because three modules
 /// were about to each pick their own.
 pub fn slug(role: Role) -> &'static str {

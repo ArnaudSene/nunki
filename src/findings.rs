@@ -11,7 +11,7 @@
 //! - **lifted as a risk**, by a human, with a reason. That is [`accept`].
 //!
 //! Neither ever touches `VERDICT.json`. The verdict says what the agent
-//! found; `hq`'s state says what the human decided; and `hq push` reads the
+//! found; `nunki`'s state says what the human decided; and `nunki push` reads the
 //! decision there. Letting a lift edit the verdict would turn a red answer
 //! into a green one, which is the one thing this whole section exists to
 //! prevent.
@@ -46,7 +46,7 @@ pub enum FindingsError {
          with `--because`"
     )]
     NoReason,
-    #[error("hq does not know who you are: `hq whoami` says where it looks")]
+    #[error("nunki does not know who you are: `nunki whoami` says where it looks")]
     NoHuman,
     #[error(transparent)]
     State(#[from] crate::state::StateError),
@@ -70,7 +70,7 @@ pub fn accept(
     if why.trim().is_empty() {
         return Err(FindingsError::NoReason);
     }
-    let who = crate::human::me(&project.hq_home(), Some(&project.root))
+    let who = crate::human::me(&project.nunki_home(), Some(&project.root))
         .name
         .ok_or(FindingsError::NoHuman)?;
 

@@ -43,7 +43,7 @@ pub enum SlotError {
     Unknown(String, PathBuf),
     #[error(
         "slot {name:?} carries {count} commit(s) on {branch} that {repository} does not have; \
-         `hq mission fetch` first, or say so explicitly"
+         `nunki mission fetch` first, or say so explicitly"
     )]
     Unfetched {
         name: String,
@@ -116,7 +116,7 @@ pub fn find(project: &Project, name: &str) -> Result<Slot, SlotError> {
 /// Put a slot back to a clean state without destroying it.
 ///
 /// What it removes, and what it deliberately does not. The **clone stays**:
-/// `hq slot rm` is the verb that deletes one, and a reset that quietly did
+/// `nunki slot rm` is the verb that deletes one, and a reset that quietly did
 /// the same would be a name lying about a destructive act. What goes is the
 /// work in progress — uncommitted changes, untracked files — and the slot's
 /// **named volumes**, which is the real reason to reset: a build cache or a
@@ -189,8 +189,8 @@ pub struct Reset {
 pub fn volumes_of(project: &Project, slot: &Slot) -> Vec<String> {
     let mut names = vec![
         crate::exec::proof_volume(&slot.name),
-        format!("hq-{}-harness", slot.name),
-        format!("hq-{}-cargo", slot.name),
+        format!("nunki-{}-harness", slot.name),
+        format!("nunki-{}-cargo", slot.name),
     ];
     for stack in &project.config.stacks {
         for path in project.stack_writable(stack) {

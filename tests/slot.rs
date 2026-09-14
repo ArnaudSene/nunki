@@ -3,8 +3,8 @@
 
 use std::path::{Path, PathBuf};
 
-use hq::project::{Config, Project, ProtectedPaths};
-use hq::slot::{SlotError, add, find, list, rm, slots_dir};
+use nunki::project::{Config, Project, ProtectedPaths};
+use nunki::slot::{SlotError, add, find, list, rm, slots_dir};
 
 fn git(at: &Path, args: &[&str]) -> String {
     let out = std::process::Command::new("git")
@@ -49,7 +49,7 @@ fn repository(dir: &Path) -> Project {
             permission_mode: "auto".to_string(),
             forge_protection: Default::default(),
         },
-        dir.join("hq"),
+        dir.join("nunki"),
     )
 }
 
@@ -175,7 +175,7 @@ fn removing_a_slot_that_holds_commits_is_refused_and_names_the_branch() {
         }
         other => panic!("expected a refusal, got {other}"),
     }
-    assert!(err.to_string().contains("hq mission fetch"), "{err}");
+    assert!(err.to_string().contains("nunki mission fetch"), "{err}");
     assert!(slot.tree.exists(), "nothing was removed");
 
     // Said explicitly, it goes.
@@ -207,10 +207,10 @@ fn a_slot_that_carries_nothing_new_is_removed_without_argument() {
     assert!(list(&project).is_empty());
 }
 
-/// `hq slot reset` puts a slot back to a clean state without destroying it.
+/// `nunki slot reset` puts a slot back to a clean state without destroying it.
 ///
 /// What it removes, and what it deliberately does not: the **clone stays** —
-/// `hq slot rm` is the verb that deletes one, and a reset that quietly did
+/// `nunki slot rm` is the verb that deletes one, and a reset that quietly did
 /// the same would be a name lying about a destructive act. What goes is the
 /// work in progress, and the slot's named volumes, which is the real reason
 /// to reach for it.
@@ -221,15 +221,15 @@ fn resetting_discards_the_work_in_progress_and_keeps_the_clone() {
     let slot = add(&project, "one").unwrap();
     std::fs::write(slot.tree.join("half-written.rs"), "fn oops(").unwrap();
     std::fs::write(slot.tree.join("README.md"), "changed\n").unwrap();
-    assert!(!hq::git::is_clean(&slot.tree).unwrap());
+    assert!(!nunki::git::is_clean(&slot.tree).unwrap());
 
     // `false` as the engine binary: there is no engine here, and a volume
     // that cannot be removed is not an error — a slot reset before its first
     // run has none.
-    let reset = hq::slot::reset(&project, "one", "false", false).unwrap();
+    let reset = nunki::slot::reset(&project, "one", "false", false).unwrap();
     assert!(reset.discarded);
     assert!(reset.volumes.is_empty());
-    assert!(hq::git::is_clean(&slot.tree).unwrap());
+    assert!(nunki::git::is_clean(&slot.tree).unwrap());
     assert!(!slot.tree.join("half-written.rs").exists());
     assert!(slot.tree.join(".git").is_dir(), "the clone stays");
     let _ = dir;
@@ -259,21 +259,21 @@ fn resetting_refuses_while_the_slot_holds_work_the_repository_lacks() {
         ],
     );
 
-    let err = hq::slot::reset(&project, "one", "false", false).unwrap_err();
+    let err = nunki::slot::reset(&project, "one", "false", false).unwrap_err();
     assert!(
-        matches!(err, hq::slot::SlotError::Unfetched { .. }),
+        matches!(err, nunki::slot::SlotError::Unfetched { .. }),
         "{err}"
     );
     // The commit is still there: refused means refused.
     assert_eq!(
-        hq::git::commits_not_in(&slot.tree, &project.root)
+        nunki::git::commits_not_in(&slot.tree, &project.root)
             .unwrap()
             .len(),
         1
     );
 
     // And said explicitly, it goes.
-    hq::slot::reset(&project, "one", "false", true).unwrap();
+    nunki::slot::reset(&project, "one", "false", true).unwrap();
     let _ = dir;
 }
 
@@ -287,20 +287,26 @@ fn a_slots_volumes_are_known_without_a_profile_file() {
     project.config.stacks = vec!["rust".to_string()];
     std::fs::create_dir_all(project.fragment("rust")).unwrap();
     std::fs::write(
-        project.fragment("rust").join(hq::project::WRITABLE_FILE),
+        project.fragment("rust").join(nunki::project::WRITABLE_FILE),
         "target\n",
     )
     .unwrap();
-    let slot = hq::slot::Slot {
+    let slot = nunki::slot::Slot {
         name: "one".to_string(),
         tree: dir.path().join("nowhere"),
     };
 
-    let names = hq::slot::volumes_of(&project, &slot);
-    assert!(names.contains(&hq::exec::proof_volume("one")), "{names:?}");
-    assert!(names.contains(&"hq-one-harness".to_string()), "{names:?}");
+    let names = nunki::slot::volumes_of(&project, &slot);
     assert!(
-        names.contains(&hq::run::writable_volume("one", "target")),
+        names.contains(&nunki::exec::proof_volume("one")),
+        "{names:?}"
+    );
+    assert!(
+        names.contains(&"nunki-one-harness".to_string()),
+        "{names:?}"
+    );
+    assert!(
+        names.contains(&nunki::run::writable_volume("one", "target")),
         "{names:?}"
     );
 }

@@ -1,4 +1,4 @@
-# The images hq builds, scanned for known vulnerabilities (decided by the
+# The images nunki builds, scanned for known vulnerabilities (decided by the
 # owner on 2026-09-11). The scan of 2026-09-09 was a measure; this is the
 # watch that follows it over time.
 #
@@ -60,7 +60,7 @@ jobs:
           key: images-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: images-cargo-
 
-      - name: Build hq
+      - name: Build nunki
         run: cargo build --locked
 
       - name: Install Trivy, pinned by version and checksum
@@ -72,23 +72,23 @@ jobs:
           sudo install -m 0755 "$RUNNER_TEMP/trivy" /usr/local/bin/trivy
           trivy --version
 
-      # Built the way a project gets them: `hq init`, then `hq slot rebuild`.
-      # The stack's Dockerfile is the one `hq init` writes, and the firewall
+      # Built the way a project gets them: `nunki init`, then `nunki slot rebuild`.
+      # The stack's Dockerfile is the one `nunki init` writes, and the firewall
       # and prober travel in the binary — so this scans what a user runs.
       - name: Build the images, as a project would
         run: |
           # Without pipefail a pipeline's status is its last command's, so
           # `tee` would hide a failed build, and a scan of no image is green.
           set -o pipefail
-          hq="$GITHUB_WORKSPACE/target/debug/hq"
+          nunki="$GITHUB_WORKSPACE/target/debug/nunki"
           mkdir -p "$RUNNER_TEMP/demo"
           cd "$RUNNER_TEMP/demo"
           git init -q -b main
           git -c user.name=ci -c user.email=ci@example.com commit -q --allow-empty -m first
-          "$hq" init --stack rust
+          "$nunki" init --stack rust
           git add -A
-          git -c user.name=ci -c user.email=ci@example.com commit -q -m "hq init"
-          "$hq" slot rebuild --stack rust | tee "$RUNNER_TEMP/images.txt"
+          git -c user.name=ci -c user.email=ci@example.com commit -q -m "nunki init"
+          "$nunki" slot rebuild --stack rust | tee "$RUNNER_TEMP/images.txt"
 
       - name: Scan
         run: |
@@ -96,7 +96,7 @@ jobs:
           # loop zero times and pass.
           mapfile -t images < <(awk '/^(agent|firewall|prober) /{print $2}' "$RUNNER_TEMP/images.txt")
           if [ "${#images[@]}" -ne 3 ]; then
-            echo "::error::hq slot rebuild named ${#images[@]} image(s), and three are scanned"
+            echo "::error::nunki slot rebuild named ${#images[@]} image(s), and three are scanned"
             exit 1
           fi
           fail=0

@@ -1,6 +1,6 @@
 //! Just enough git, run as a subprocess.
 //!
-//! `hq` never links a git library: what it needs is what the command line
+//! `nunki` never links a git library: what it needs is what the command line
 //! does — clone, branch, log — and shelling out keeps the behaviour identical
 //! to what a human sees in the same repository.
 
@@ -69,7 +69,7 @@ pub fn is_clean(at: &Path) -> Result<bool, GitError> {
 }
 
 /// The commits reachable from `HEAD` in `at` that `elsewhere` does not have.
-/// This is what makes `hq slot rm` refuse rather than lose work (SPEC 3.3).
+/// This is what makes `nunki slot rm` refuse rather than lose work (SPEC 3.3).
 pub fn commits_not_in(at: &Path, elsewhere: &Path) -> Result<Vec<String>, GitError> {
     // Ask the other repository what it knows, then ask this one what it has
     // that the other does not. No fetch, no network, no writing anywhere.

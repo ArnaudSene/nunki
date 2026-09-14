@@ -1,25 +1,25 @@
-//! `hq` — a mission orchestrator for AI coding agents (SPEC 4.2).
+//! `nunki` — a mission orchestrator for AI coding agents (SPEC 4.2).
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
-use hq::harness::Harness;
-use hq::mission::{Header, Integration, Lot, Security, Service, dir as mission_dir};
-use hq::project::Project;
-use hq::{check, image, init, probe, slot};
+use nunki::harness::Harness;
+use nunki::mission::{Header, Integration, Lot, Security, Service, dir as mission_dir};
+use nunki::project::Project;
+use nunki::{check, image, init, probe, slot};
 
 #[derive(Parser)]
 #[command(
-    name = "hq",
+    name = "nunki",
     version,
     about = "Orchestrate missions run by AI coding agents",
     long_about = None
 )]
 struct Cli {
     /// Where to look for the project. Defaults to the current directory, and
-    /// `hq` walks up from there the way git does.
+    /// `nunki` walks up from there the way git does.
     #[arg(long, short = 'C', global = true, value_name = "DIR")]
     directory: Option<PathBuf>,
 
@@ -34,7 +34,7 @@ enum Command {
     /// Creates what is absent, never overwrites a file a human edits — it
     /// deposits its version beside it — and keeps no manifest. Replayable.
     Init {
-        /// Stack fragments to write under `.hq/stacks/`.
+        /// Stack fragments to write under `.nunki/stacks/`.
         #[arg(long = "stack", value_name = "NAME")]
         stacks: Vec<String>,
     },
@@ -46,7 +46,7 @@ enum Command {
     /// Push a verified mission's branch, and hand the pull request over.
     ///
     /// The one verb that touches the forge in write, and the one thing in
-    /// `hq` that is not autonomous: it needs `--yes`, on the command line,
+    /// `nunki` that is not autonomous: it needs `--yes`, on the command line,
     /// from somebody who has read the pull request.
     Push {
         /// The mission.
@@ -70,7 +70,7 @@ enum Command {
     #[command(subcommand)]
     Account(AccountCommand),
 
-    /// Say who hq thinks you are, and where it got that from.
+    /// Say who nunki thinks you are, and where it got that from.
     Whoami,
 
     /// Play the verification phase of a mission: the gates, then the
@@ -157,7 +157,7 @@ enum SlotCommand {
 
 #[derive(Subcommand)]
 enum AccountCommand {
-    /// List the accounts declared in ~/.hq/accounts.yaml.
+    /// List the accounts declared in ~/.nunki/accounts.yaml.
     List,
 }
 
@@ -194,26 +194,26 @@ enum MissionCommand {
         /// Call the security agent, rather than the mechanical gates alone.
         #[arg(long)]
         security_agent: bool,
-        /// How `hq` starts the application for the integrator and the
-        /// security agent, as a path inside the tree. Refines `hq.yaml` and
+        /// How `nunki` starts the application for the integrator and the
+        /// security agent, as a path inside the tree. Refines `nunki.yaml` and
         /// the stack's `run.sh`; `none` when there is nothing to start.
         #[arg(long, value_name = "SCRIPT")]
         run: Option<String>,
         /// Which account this mission spends. Defaults to the project's, then
-        /// to the one named in ~/.hq/accounts.yaml.
+        /// to the one named in ~/.nunki/accounts.yaml.
         #[arg(long, value_name = "NAME")]
         account: Option<String>,
         /// Which model this mission's agents run on. Defaults to the
-        /// project's `model:` in hq.yaml, then to the harness's own default.
+        /// project's `model:` in nunki.yaml, then to the harness's own default.
         ///
         /// An alias for the latest of a family (`sonnet`, `opus`) or a full
-        /// name (`claude-sonnet-5`). No name is checked here: hq knows
+        /// name (`claude-sonnet-5`). No name is checked here: nunki knows
         /// harnesses, not models, and the harness refuses what it does not
         /// know.
         #[arg(long, value_name = "MODEL")]
         model: Option<String>,
         /// Who arbitrates when this mission comes back with a question.
-        /// Defaults to whoever runs `hq` — `hq whoami` says who that is.
+        /// Defaults to whoever runs `nunki` — `nunki whoami` says who that is.
         #[arg(long = "for", value_name = "NAME")]
         arbiter: Option<String>,
         /// The prose an agent reads under the header.
@@ -231,8 +231,8 @@ enum MissionCommand {
         #[arg(long)]
         slot: String,
     },
-    /// Hold the mission: hq launches no further run for it. The run in
-    /// progress finishes its lot. `hq mission resume` lifts the hold.
+    /// Hold the mission: nunki launches no further run for it. The run in
+    /// progress finishes its lot. `nunki mission resume` lifts the hold.
     Stop {
         id: String,
         /// End the run in progress too: the agent finishes its turn cleanly
@@ -242,7 +242,7 @@ enum MissionCommand {
     },
     /// Put a mission's framing back in front of you, and re-freeze it.
     ///
-    /// `hq` never re-reads `MISSION.md` during a mission — it froze the
+    /// `nunki` never re-reads `MISSION.md` during a mission — it froze the
     /// header when you validated the framing — so editing the file changes
     /// nothing until this verb says so.
     Reframe {
@@ -273,7 +273,7 @@ enum MissionCommand {
         id: String,
     },
 
-    /// Watch a mission's runs and drive it on between them. Started by `hq`,
+    /// Watch a mission's runs and drive it on between them. Started by `nunki`,
     /// detached, and never typed (SPEC 4.3).
     #[command(hide = true)]
     Monitor {
@@ -285,7 +285,7 @@ enum MissionCommand {
     ///
     /// Two states, and a third a human causes: it runs, it is paused, it is
     /// finished. Nothing is asked of the agent — this reads the container and
-    /// the run's own stream, like everything else `hq` knows about a run.
+    /// the run's own stream, like everything else `nunki` knows about a run.
     Watch {
         /// The mission.
         id: String,
@@ -326,7 +326,7 @@ enum MissionCommand {
     ///
     /// There is no channel during a run. This lands in `FOLLOWUP_HQ.md`,
     /// which every role reads before anything else; if it is urgent,
-    /// `hq mission stop` ends the current run first.
+    /// `nunki mission stop` ends the current run first.
     Say {
         /// The mission.
         id: String,
@@ -336,7 +336,7 @@ enum MissionCommand {
 
     /// Bring a mission's commits from its slot into the repository.
     ///
-    /// The only way commits leave a slot, and it goes one way. `hq push`
+    /// The only way commits leave a slot, and it goes one way. `nunki push`
     /// does it for you; this is for looking at them yourself first.
     Fetch {
         /// The mission.
@@ -346,7 +346,7 @@ enum MissionCommand {
     /// Lift a security finding, or what a `FINDINGS` verdict still carries.
     ///
     /// Never touches `VERDICT.json`: the verdict says what the agent found,
-    /// `hq`'s state says what you decided, and `hq push` reads it there.
+    /// `nunki`'s state says what you decided, and `nunki push` reads it there.
     Accept {
         /// The mission.
         id: String,
@@ -413,12 +413,12 @@ enum RoleArg {
     Security,
 }
 
-impl From<RoleArg> for hq::harness::Role {
+impl From<RoleArg> for nunki::harness::Role {
     fn from(role: RoleArg) -> Self {
         match role {
-            RoleArg::Coder => hq::harness::Role::Coder,
-            RoleArg::Integrator => hq::harness::Role::Integrator,
-            RoleArg::Security => hq::harness::Role::Security,
+            RoleArg::Coder => nunki::harness::Role::Coder,
+            RoleArg::Integrator => nunki::harness::Role::Integrator,
+            RoleArg::Security => nunki::harness::Role::Security,
         }
     }
 }
@@ -437,14 +437,14 @@ fn main() -> ExitCode {
             let root = match std::fs::canonicalize(&start) {
                 Ok(r) => r,
                 Err(e) => {
-                    eprintln!("hq: {}: {e}", start.display());
+                    eprintln!("nunki: {}: {e}", start.display());
                     return ExitCode::FAILURE;
                 }
             };
             let hq_root = match hq_root_for(&root) {
                 Some(h) => h,
                 None => {
-                    eprintln!("hq: no home directory: the HQ lives under ~/.hq");
+                    eprintln!("nunki: no home directory: the HQ lives under ~/.nunki");
                     return ExitCode::FAILURE;
                 }
             };
@@ -459,7 +459,7 @@ fn main() -> ExitCode {
                     ExitCode::SUCCESS
                 }
                 Err(e) => {
-                    eprintln!("hq: {e}");
+                    eprintln!("nunki: {e}");
                     ExitCode::FAILURE
                 }
             }
@@ -477,14 +477,14 @@ fn main() -> ExitCode {
                         ExitCode::SUCCESS
                     }
                     Err(e) => {
-                        eprintln!("hq: {e}");
+                        eprintln!("nunki: {e}");
                         ExitCode::FAILURE
                     }
                 },
                 SlotCommand::List => {
                     let slots = slot::list(&project);
                     if slots.is_empty() {
-                        println!("no slot yet: `hq slot add <name>`");
+                        println!("no slot yet: `nunki slot add <name>`");
                     }
                     for s in slots {
                         println!("{:<20} {}", s.name, s.tree.display());
@@ -495,7 +495,7 @@ fn main() -> ExitCode {
                     let stack = match stack.or_else(|| project.config.stacks.first().cloned()) {
                         Some(s) => s,
                         None => {
-                            eprintln!("hq: no stack declared in hq.yaml; pass --stack");
+                            eprintln!("nunki: no stack declared in nunki.yaml; pass --stack");
                             return ExitCode::FAILURE;
                         }
                     };
@@ -509,7 +509,7 @@ fn main() -> ExitCode {
                             ExitCode::SUCCESS
                         }
                         Err(e) => {
-                            eprintln!("hq: {e}");
+                            eprintln!("nunki: {e}");
                             ExitCode::FAILURE
                         }
                     }
@@ -529,7 +529,7 @@ fn main() -> ExitCode {
                             ExitCode::SUCCESS
                         }
                         Err(e) => {
-                            eprintln!("hq: {e}");
+                            eprintln!("nunki: {e}");
                             ExitCode::FAILURE
                         }
                     }
@@ -540,7 +540,7 @@ fn main() -> ExitCode {
                         ExitCode::SUCCESS
                     }
                     Err(e) => {
-                        eprintln!("hq: {e}");
+                        eprintln!("nunki: {e}");
                         ExitCode::FAILURE
                     }
                 },
@@ -549,12 +549,12 @@ fn main() -> ExitCode {
 
         Command::Whoami => {
             let project = open(&start);
-            let hq_home = project
+            let nunki_home = project
                 .as_ref()
-                .map(|p| p.hq_home())
-                .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".hq")))
+                .map(|p| p.nunki_home())
+                .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".nunki")))
                 .unwrap_or_else(|| PathBuf::from("."));
-            let me = hq::human::me(&hq_home, project.as_ref().map(|p| p.root.as_path()));
+            let me = nunki::human::me(&nunki_home, project.as_ref().map(|p| p.root.as_path()));
             match &me.name {
                 Some(name) => {
                     println!("{name}");
@@ -564,9 +564,12 @@ fn main() -> ExitCode {
                     println!("from {}", me.source.describe());
                 }
                 None => {
-                    println!("hq does not know who you are.");
+                    println!("nunki does not know who you are.");
                     println!();
-                    println!("Write {}:", hq_home.join(hq::human::ME_FILE).display());
+                    println!(
+                        "Write {}:",
+                        nunki_home.join(nunki::human::ME_FILE).display()
+                    );
                     println!("name: Arnaud");
                     println!("email: you@example.com");
                 }
@@ -579,18 +582,18 @@ fn main() -> ExitCode {
                 Some(p) => p,
                 None => return ExitCode::FAILURE,
             };
-            let hq_home = project.hq_home();
-            let accounts = match hq::account::Accounts::load(&hq_home) {
+            let nunki_home = project.nunki_home();
+            let accounts = match nunki::account::Accounts::load(&nunki_home) {
                 Ok(a) => a,
                 Err(e) => {
-                    eprintln!("hq: {e}");
+                    eprintln!("nunki: {e}");
                     return ExitCode::FAILURE;
                 }
             };
             if accounts.accounts.is_empty() {
                 println!(
                     "no account declared. Write {}:\n",
-                    hq_home.join(hq::account::INDEX_FILE).display()
+                    nunki_home.join(nunki::account::INDEX_FILE).display()
                 );
                 println!("default: perso");
                 println!("accounts:");
@@ -601,13 +604,13 @@ fn main() -> ExitCode {
                 println!();
                 println!(
                     "then put the token in {}/accounts/perso, mode 600.",
-                    hq_home.display()
+                    nunki_home.display()
                 );
                 return ExitCode::SUCCESS;
             }
             for (name, account) in &accounts.accounts {
-                let path = account.token_path(&hq_home);
-                let state = match account.token(&hq_home, name) {
+                let path = account.token_path(&nunki_home);
+                let state = match account.token(&nunki_home, name) {
                     Ok(_) => "ready",
                     Err(_) => "no token",
                 };
@@ -643,7 +646,7 @@ fn main() -> ExitCode {
             };
             let mission = match mission {
                 Some(id) => id,
-                None => match hq::logs::most_recent(&project) {
+                None => match nunki::logs::most_recent(&project) {
                     Ok(Some(id)) => {
                         // Said out loud: choosing for the reader without
                         // telling them which is a guess dressed as a
@@ -652,17 +655,17 @@ fn main() -> ExitCode {
                         id
                     }
                     Ok(None) => {
-                        eprintln!("hq: no mission has run yet; name one");
+                        eprintln!("nunki: no mission has run yet; name one");
                         return ExitCode::FAILURE;
                     }
                     Err(e) => {
-                        eprintln!("hq: {e}");
+                        eprintln!("nunki: {e}");
                         return ExitCode::FAILURE;
                     }
                 },
             };
             let harness = harness_for(&project, "", None);
-            match hq::logs::of(&project, &mission, &harness) {
+            match nunki::logs::of(&project, &mission, &harness) {
                 Ok(runs) => {
                     let runs = if last {
                         runs.into_iter().next_back().into_iter().collect()
@@ -674,12 +677,12 @@ fn main() -> ExitCode {
                         println!("── run {} ({})", run.session, run.log.display());
                         for line in run.lines {
                             let mark = match line.kind {
-                                hq::harness::LineKind::Start => "start",
-                                hq::harness::LineKind::Said => "said ",
-                                hq::harness::LineKind::Did => "did  ",
-                                hq::harness::LineKind::Ended => "ended",
-                                hq::harness::LineKind::Unread => "?    ",
-                                hq::harness::LineKind::Noted => "…    ",
+                                nunki::harness::LineKind::Start => "start",
+                                nunki::harness::LineKind::Said => "said ",
+                                nunki::harness::LineKind::Did => "did  ",
+                                nunki::harness::LineKind::Ended => "ended",
+                                nunki::harness::LineKind::Unread => "?    ",
+                                nunki::harness::LineKind::Noted => "…    ",
                             };
                             for (n, text) in line.text.lines().enumerate() {
                                 match n {
@@ -692,7 +695,7 @@ fn main() -> ExitCode {
                     ExitCode::SUCCESS
                 }
                 Err(e) => {
-                    eprintln!("hq: {e}");
+                    eprintln!("nunki: {e}");
                     ExitCode::FAILURE
                 }
             }
@@ -703,22 +706,26 @@ fn main() -> ExitCode {
                 Some(p) => p,
                 None => return ExitCode::FAILURE,
             };
-            match hq::push::push(&project, &mission, yes) {
+            match nunki::push::push(&project, &mission, yes) {
                 Ok(pushed) => {
                     println!("pushed    {} → {}", pushed.branch, pushed.remote);
                     println!("head      {}", &pushed.head[..12.min(pushed.head.len())]);
                     match pushed.pull_request {
-                        hq::push::PullRequestState::Opened(hq::forge::Opened::Created(url)) => {
+                        nunki::push::PullRequestState::Opened(nunki::forge::Opened::Created(
+                            url,
+                        )) => {
                             println!("opened    {url}");
                         }
-                        hq::push::PullRequestState::Opened(hq::forge::Opened::AlreadyOpen(url)) => {
+                        nunki::push::PullRequestState::Opened(
+                            nunki::forge::Opened::AlreadyOpen(url),
+                        ) => {
                             println!("updated   {url}");
                             println!("          it was already open; this push is on it now");
                         }
                         // The push succeeded; only the pull request is left
                         // to the human, and the exit code says the push.
-                        hq::push::PullRequestState::ByHand { compare, why } => {
-                            println!("pull request not opened by hq: {why}");
+                        nunki::push::PullRequestState::ByHand { compare, why } => {
+                            println!("pull request not opened by nunki: {why}");
                             if let Some(url) = compare {
                                 println!("          open it yourself at {url}");
                             }
@@ -727,7 +734,7 @@ fn main() -> ExitCode {
                     ExitCode::SUCCESS
                 }
                 Err(e) => {
-                    eprintln!("hq: {e}");
+                    eprintln!("nunki: {e}");
                     ExitCode::FAILURE
                 }
             }
@@ -738,19 +745,19 @@ fn main() -> ExitCode {
                 Some(p) => p,
                 None => return ExitCode::FAILURE,
             };
-            let engine: std::sync::Arc<dyn hq::engine::Engine> =
-                std::sync::Arc::new(hq::engine::docker::Docker::real());
+            let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+                std::sync::Arc::new(nunki::engine::docker::Docker::real());
             let engine_bin = std::env::var("HQ_ENGINE").unwrap_or_else(|_| "docker".into());
-            let code = match hq::verify::verify(&project, &mission, engine, &engine_bin) {
+            let code = match nunki::verify::verify(&project, &mission, engine, &engine_bin) {
                 Ok(steps) => {
                     let mut owed = false;
                     for step in &steps {
                         match step {
-                            hq::verify::Step::Gates { role, report } => {
+                            nunki::verify::Step::Gates { role, report } => {
                                 println!("gates     {role:?}, on {}", &report.head[..12]);
                                 print_gates(report);
                             }
-                            hq::verify::Step::GateUnplayable { role, why } => {
+                            nunki::verify::Step::GateUnplayable { role, why } => {
                                 owed = true;
                                 println!(
                                     "unplayed  a {role:?} gate could not be played, and no run \
@@ -758,8 +765,8 @@ fn main() -> ExitCode {
                                 );
                                 println!("          {why}");
                             }
-                            hq::verify::Step::Moved { to } => println!("stage     {to:?}"),
-                            hq::verify::Step::Held {
+                            nunki::verify::Step::Moved { to } => println!("stage     {to:?}"),
+                            nunki::verify::Step::Held {
                                 role,
                                 who,
                                 date,
@@ -767,15 +774,17 @@ fn main() -> ExitCode {
                             } => {
                                 owed = true;
                                 println!(
-                                    "held      a {role:?} run is owed and hq launches none \
+                                    "held      a {role:?} run is owed and nunki launches none \
                                      — {who} held this mission on {date}"
                                 );
                                 if let Some(why) = reason {
                                     println!("          {why}");
                                 }
-                                println!("          `hq mission resume {mission}` lifts the hold");
+                                println!(
+                                    "          `nunki mission resume {mission}` lifts the hold"
+                                );
                             }
-                            hq::verify::Step::Saving {
+                            nunki::verify::Step::Saving {
                                 role,
                                 account,
                                 window,
@@ -786,15 +795,15 @@ fn main() -> ExitCode {
                                 owed = true;
                                 println!(
                                     "saving    a {role:?} run is owed; account {account}'s \
-                                     {window} is at {}% and hq stops at {stop_at_percent}%",
-                                    hq::consumption::percent(*per_mille)
+                                     {window} is at {}% and nunki stops at {stop_at_percent}%",
+                                    nunki::consumption::percent(*per_mille)
                                 );
                                 println!(
-                                    "          hq launches none before {until}, when it \
-                                     resets; `hq verify {mission}` after that goes on"
+                                    "          nunki launches none before {until}, when it \
+                                     resets; `nunki verify {mission}` after that goes on"
                                 );
                             }
-                            hq::verify::Step::Waiting {
+                            nunki::verify::Step::Waiting {
                                 role,
                                 until,
                                 failures,
@@ -806,53 +815,53 @@ fn main() -> ExitCode {
                                      {failures} time(s) in a row — last: {last}"
                                 );
                                 println!(
-                                    "          hq launches none before {until}; \
-                                     `hq verify {mission}` after that relaunches it"
+                                    "          nunki launches none before {until}; \
+                                     `nunki verify {mission}` after that relaunches it"
                                 );
                             }
-                            hq::verify::Step::Busy { role, provider, by } => {
+                            nunki::verify::Step::Busy { role, provider, by } => {
                                 owed = true;
                                 println!(
                                     "busy      a {role:?} run is owed; provider {provider} is \
                                      held by {by}"
                                 );
                                 println!(
-                                    "          hq launches none until it is free; the \
+                                    "          nunki launches none until it is free; the \
                                      mission's monitor looks again every minute"
                                 );
                             }
-                            hq::verify::Step::Launched { role, application } => {
+                            nunki::verify::Step::Launched { role, application } => {
                                 owed = true;
                                 println!("launched  a {role:?} run — {application}");
                                 println!(
-                                    "          it runs detached; `hq verify {mission}` \
+                                    "          it runs detached; `nunki verify {mission}` \
                                      again reads it back"
                                 );
                             }
-                            hq::verify::Step::Unreachable { role, why } => {
+                            nunki::verify::Step::Unreachable { role, why } => {
                                 owed = true;
                                 println!("unknown   the {role:?} run could not be asked — {why}");
                             }
-                            hq::verify::Step::Verified => println!(
+                            nunki::verify::Step::Verified => println!(
                                 "VERIFIED  every declared stage is green; read it, then \
-                                 `hq push {mission}`"
+                                 `nunki push {mission}`"
                             ),
-                            hq::verify::Step::AwaitingHuman(handover) => {
+                            nunki::verify::Step::AwaitingHuman(handover) => {
                                 owed = true;
                                 println!("stopped   {handover:?}");
                             }
-                            hq::verify::Step::Findings { report, lifted } => {
+                            nunki::verify::Step::Findings { report, lifted } => {
                                 owed = true;
                                 println!("findings  {report}");
                                 for one in lifted {
                                     println!("lifted    {one}");
                                 }
                                 println!(
-                                    "          `hq mission iterate {mission}` sends it back \
+                                    "          `nunki mission iterate {mission}` sends it back \
                                      to the coder;"
                                 );
                                 println!(
-                                    "          `hq mission accept {mission} --because <why>` \
+                                    "          `nunki mission accept {mission} --because <why>` \
                                      lifts what remains."
                                 );
                             }
@@ -865,7 +874,7 @@ fn main() -> ExitCode {
                     }
                 }
                 Err(e) => {
-                    eprintln!("hq: {e}");
+                    eprintln!("nunki: {e}");
                     ExitCode::FAILURE
                 }
             };
@@ -878,24 +887,24 @@ fn main() -> ExitCode {
                 Some(p) => p,
                 None => return ExitCode::FAILURE,
             };
-            let slot = match hq::slot::find(&project, &slot) {
+            let slot = match nunki::slot::find(&project, &slot) {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!("hq: {e}");
+                    eprintln!("nunki: {e}");
                     return ExitCode::FAILURE;
                 }
             };
-            let engine: std::sync::Arc<dyn hq::engine::Engine> =
-                std::sync::Arc::new(hq::engine::docker::Docker::real());
+            let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+                std::sync::Arc::new(nunki::engine::docker::Docker::real());
             let on = if tree {
-                hq::exec::On::Tree
+                nunki::exec::On::Tree
             } else {
-                hq::exec::On::Proof
+                nunki::exec::On::Proof
             };
-            match hq::exec::run(&project, &slot, engine, &argv, on) {
+            match nunki::exec::run(&project, &slot, engine, &argv, on) {
                 Ok(out) => {
                     // The command's own output, on the streams it wrote to,
-                    // and its own status: `hq exec` is a way through, not a
+                    // and its own status: `nunki exec` is a way through, not a
                     // reporter.
                     print!("{}", out.stdout);
                     eprint!("{}", out.stderr);
@@ -906,7 +915,7 @@ fn main() -> ExitCode {
                     }
                 }
                 Err(e) => {
-                    eprintln!("hq: {e}");
+                    eprintln!("nunki: {e}");
                     ExitCode::FAILURE
                 }
             }
@@ -921,12 +930,12 @@ fn main() -> ExitCode {
                 None => return ExitCode::FAILURE,
             };
             let mut report = check::run(&project);
-            check::forge_protection(&project, hq::forge::API, &mut report);
+            check::forge_protection(&project, nunki::forge::API, &mut report);
             report.checks.extend(probes(&project, which.as_deref()));
             if let Some(id) = &mission {
                 let engine_bin = std::env::var("HQ_ENGINE").unwrap_or_else(|_| "docker".into());
-                let engine: std::sync::Arc<dyn hq::engine::Engine> =
-                    std::sync::Arc::new(hq::engine::docker::Docker::real());
+                let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+                    std::sync::Arc::new(nunki::engine::docker::Docker::real());
                 match probe::system_profile(&project, id, engine, &engine_bin) {
                     Ok(checks) => report.checks.extend(checks),
                     Err(e) => report.checks.push(check::Check {
@@ -957,7 +966,7 @@ fn open(start: &std::path::Path) -> Option<Project> {
     match Project::open(start) {
         Ok(p) => Some(p),
         Err(e) => {
-            eprintln!("hq: {e}");
+            eprintln!("nunki: {e}");
             None
         }
     }
@@ -966,7 +975,7 @@ fn open(start: &std::path::Path) -> Option<Project> {
 fn hq_root_for(root: &std::path::Path) -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
     let name = root.file_name()?.to_string_lossy().into_owned();
-    Some(PathBuf::from(home).join(".hq").join(name))
+    Some(PathBuf::from(home).join(".nunki").join(name))
 }
 
 /// The container probes of SPEC 4.1 bis rule 7, when a slot was named. Never
@@ -976,7 +985,7 @@ fn probes(project: &Project, which: Option<&str>) -> Vec<check::Check> {
         return vec![check::Check {
             what: "the perimeter holds from inside the mission profile".to_string(),
             verdict: check::Verdict::NotChecked(
-                "no slot named: `hq check --slot <name>` lifts one and probes it".to_string(),
+                "no slot named: `nunki check --slot <name>` lifts one and probes it".to_string(),
             ),
         }];
     };
@@ -993,13 +1002,13 @@ fn probes(project: &Project, which: Option<&str>) -> Vec<check::Check> {
         return vec![check::Check {
             what: "the perimeter holds from inside the mission profile".to_string(),
             verdict: check::Verdict::NotChecked(
-                "no stack declared in hq.yaml, so no image to lift".to_string(),
+                "no stack declared in nunki.yaml, so no image to lift".to_string(),
             ),
         }];
     };
     let engine_bin = std::env::var("HQ_ENGINE").unwrap_or_else(|_| "docker".into());
-    let engine: std::sync::Arc<dyn hq::engine::Engine> =
-        std::sync::Arc::new(hq::engine::docker::Docker::real());
+    let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+        std::sync::Arc::new(nunki::engine::docker::Docker::real());
 
     match probe::mission_profile(project, &slot, &stack, engine, &engine_bin) {
         Ok(checks) => checks,
@@ -1020,10 +1029,10 @@ fn probes(project: &Project, which: Option<&str>) -> Vec<check::Check> {
 /// is a log nobody reads to the end — and the two facts worth seeing, the
 /// transitions, would be lost in it.
 fn watch(project: &Project, id: &str, every: u64) -> ExitCode {
-    let store = match hq::state::Store::open(&project.hq_root) {
+    let store = match nunki::state::Store::open(&project.hq_root) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("hq: {e}");
+            eprintln!("nunki: {e}");
             return ExitCode::FAILURE;
         }
     };
@@ -1033,7 +1042,7 @@ fn watch(project: &Project, id: &str, every: u64) -> ExitCode {
         let state = match store.load(id) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("hq: {e}");
+                eprintln!("nunki: {e}");
                 return ExitCode::FAILURE;
             }
         };
@@ -1052,45 +1061,45 @@ fn watch(project: &Project, id: &str, every: u64) -> ExitCode {
         // as fresh as the run's own stream — and acted on: past the account's
         // threshold the run is told to end its turn. The mission's monitor
         // does the same with no terminal; this is the one a human watches.
-        let at = hq::state::now_secs();
-        if let Err(e) = hq::consumption::note(
+        let at = nunki::state::now_secs();
+        if let Err(e) = nunki::consumption::note(
             project,
             state.flow.header().account.as_deref(),
             harness.windows(handle),
             at,
         ) {
-            eprintln!("hq: {e}");
+            eprintln!("nunki: {e}");
         }
-        match hq::gesture::spare(project, id, &harness, at, "mission watch") {
+        match nunki::gesture::spare(project, id, &harness, at, "mission watch") {
             Ok(Some(spared)) if !told => {
                 println!(
                     "spared    account {}'s {} is at {}% — the run was told to end its turn",
                     spared.account,
                     spared.window,
-                    hq::consumption::percent(spared.per_mille)
+                    nunki::consumption::percent(spared.per_mille)
                 );
                 println!(
-                    "          hq launches nothing before {}, then goes on; the read-back \
+                    "          nunki launches nothing before {}, then goes on; the read-back \
                      spends no attempt",
-                    hq::state::rfc3339(spared.until)
+                    nunki::state::rfc3339(spared.until)
                 );
                 told = true;
             }
             Ok(_) => {}
-            Err(e) => eprintln!("hq: {e}"),
+            Err(e) => eprintln!("nunki: {e}"),
         }
         let now = match harness.state(handle) {
-            Ok(hq::harness::RunState::Running(p)) => format!(
+            Ok(nunki::harness::RunState::Running(p)) => format!(
                 "running — {} event(s), {} tool call(s)",
                 p.events, p.tool_calls
             ),
-            Ok(hq::harness::RunState::Paused(p)) => format!(
-                "paused — {} event(s), {} tool call(s); `hq mission resume {id}` unfreezes it",
+            Ok(nunki::harness::RunState::Paused(p)) => format!(
+                "paused — {} event(s), {} tool call(s); `nunki mission resume {id}` unfreezes it",
                 p.events, p.tool_calls
             ),
-            Ok(hq::harness::RunState::Finished(outcome)) => {
+            Ok(nunki::harness::RunState::Finished(outcome)) => {
                 println!("run       finished — {outcome:?}");
-                println!("          `hq logs {id} --last` renders it");
+                println!("          `nunki logs {id} --last` renders it");
                 return ExitCode::SUCCESS;
             }
             // Not a reason to stop watching: a machine that slept comes
@@ -1109,18 +1118,18 @@ fn watch(project: &Project, id: &str, every: u64) -> ExitCode {
 /// `pause` and `resume` are one gesture in two directions, and printing them
 /// from one place keeps the two messages saying the same thing.
 fn pause(project: &Project, id: &str) -> ExitCode {
-    let engine: std::sync::Arc<dyn hq::engine::Engine> =
-        std::sync::Arc::new(hq::engine::docker::Docker::real());
-    match hq::gesture::pause(project, id, engine) {
+    let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+        std::sync::Arc::new(nunki::engine::docker::Docker::real());
+    match nunki::gesture::pause(project, id, engine) {
         Ok(_) => {
             println!(
                 "frozen    the agent and its firewall are suspended where they were\n\
-                 \x20         `hq mission resume {id}` unfreezes exactly there"
+                 \x20         `nunki mission resume {id}` unfreezes exactly there"
             );
             ExitCode::SUCCESS
         }
         Err(e) => {
-            eprintln!("hq: {e}");
+            eprintln!("nunki: {e}");
             ExitCode::FAILURE
         }
     }
@@ -1150,7 +1159,7 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             {
                 Ok(l) => l,
                 Err(e) => {
-                    eprintln!("hq: {e}");
+                    eprintln!("nunki: {e}");
                     return ExitCode::FAILURE;
                 }
             };
@@ -1169,7 +1178,7 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                 {
                     Ok(services) => Integration::Services { services, wiring },
                     Err(e) => {
-                        eprintln!("hq: {e}");
+                        eprintln!("nunki: {e}");
                         return ExitCode::FAILURE;
                     }
                 }
@@ -1190,7 +1199,7 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                 // Said rather than assumed: whoever frames a mission is who
                 // it comes back to, until somebody says otherwise.
                 arbiter: arbiter
-                    .or_else(|| hq::human::me(&project.hq_home(), Some(&project.root)).name),
+                    .or_else(|| nunki::human::me(&project.nunki_home(), Some(&project.root)).name),
                 bounds: project.config.bounds.clone(),
             };
             match mission_dir::create(&project.hq_root, &id, &header, &about) {
@@ -1202,11 +1211,11 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                     );
                     println!("  {} — the agent's", paths.journal.display());
                     println!();
-                    println!("Edit MISSION.md, then `hq mission status {id}`.");
+                    println!("Edit MISSION.md, then `nunki mission status {id}`.");
                     ExitCode::SUCCESS
                 }
                 Err(e) => {
-                    eprintln!("hq: {e}");
+                    eprintln!("nunki: {e}");
                     ExitCode::FAILURE
                 }
             }
@@ -1215,7 +1224,7 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
         MissionCommand::List => {
             let ids = mission_dir::list(&project.hq_root);
             if ids.is_empty() {
-                println!("no mission yet: `hq mission new <id> --branch <branch> --lot L1:…`");
+                println!("no mission yet: `nunki mission new <id> --branch <branch> --lot L1:…`");
             }
             for id in ids {
                 match mission_dir::read_header(&project.hq_root, &id) {
@@ -1233,14 +1242,14 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             let slot = match slot::find(project, &slot_name) {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!("hq: {e}");
+                    eprintln!("nunki: {e}");
                     return ExitCode::FAILURE;
                 }
             };
             let engine_bin = std::env::var("HQ_ENGINE").unwrap_or_else(|_| "docker".into());
-            let engine: std::sync::Arc<dyn hq::engine::Engine> =
-                std::sync::Arc::new(hq::engine::docker::Docker::real());
-            match hq::run::start(project, &id, &slot, engine, &engine_bin) {
+            let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+                std::sync::Arc::new(nunki::engine::docker::Docker::real());
+            match nunki::run::start(project, &id, &slot, engine, &engine_bin) {
                 Ok(state) => {
                     println!("mission {id} started in slot {}", state.slot);
                     if let Some(run) = &state.run {
@@ -1248,18 +1257,18 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                         println!("log     {}", run.log.display());
                     }
                     println!();
-                    println!("`hq mission status {id}` says where it is.");
+                    println!("`nunki mission status {id}` says where it is.");
                     start_monitor(project, &id);
                     ExitCode::SUCCESS
                 }
                 Err(e) => {
-                    eprintln!("hq: {e}");
+                    eprintln!("nunki: {e}");
                     ExitCode::FAILURE
                 }
             }
         }
 
-        MissionCommand::Reframe { id, yes } => match hq::lifecycle::reframe(project, &id, yes) {
+        MissionCommand::Reframe { id, yes } => match nunki::lifecycle::reframe(project, &id, yes) {
             Ok(reframed) => {
                 if reframed.changes.is_empty() {
                     println!("framing   unchanged — the frozen header already says this");
@@ -1270,55 +1279,55 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                 }
                 if reframed.applied {
                     println!();
-                    println!("frozen    the new framing is what hq reads from here on");
+                    println!("frozen    the new framing is what nunki reads from here on");
                 } else {
                     println!();
                     println!(
-                        "nothing has changed yet — `hq mission reframe {id} --yes` freezes it"
+                        "nothing has changed yet — `nunki mission reframe {id} --yes` freezes it"
                     );
                 }
                 ExitCode::SUCCESS
             }
             Err(e) => {
-                eprintln!("hq: {e}");
+                eprintln!("nunki: {e}");
                 ExitCode::FAILURE
             }
         },
 
-        MissionCommand::End { id, why } => match hq::lifecycle::end(project, &id, &why) {
+        MissionCommand::End { id, why } => match nunki::lifecycle::end(project, &id, &why) {
             Ok(state) => {
                 println!("ended     {:?}", state.flow.stage());
                 println!(
-                    "          written to FOLLOWUP_HQ.md; `hq mission archive {id}` closes it"
+                    "          written to FOLLOWUP_HQ.md; `nunki mission archive {id}` closes it"
                 );
                 ExitCode::SUCCESS
             }
             Err(e) => {
-                eprintln!("hq: {e}");
+                eprintln!("nunki: {e}");
                 ExitCode::FAILURE
             }
         },
 
-        MissionCommand::Archive { id } => match hq::lifecycle::archive(project, &id) {
+        MissionCommand::Archive { id } => match nunki::lifecycle::archive(project, &id) {
             Ok(archived) => {
                 println!("archived  {} → {}", archived.id, archived.at.display());
                 println!("          nothing was deleted, and the slot is untouched");
                 ExitCode::SUCCESS
             }
             Err(e) => {
-                eprintln!("hq: {e}");
+                eprintln!("nunki: {e}");
                 ExitCode::FAILURE
             }
         },
 
         MissionCommand::Monitor { id } => {
             let engine_bin = std::env::var("HQ_ENGINE").unwrap_or_else(|_| "docker".into());
-            let engine: std::sync::Arc<dyn hq::engine::Engine> =
-                std::sync::Arc::new(hq::engine::docker::Docker::real());
-            let why = hq::monitor::run(project, &id, engine, &engine_bin);
+            let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+                std::sync::Arc::new(nunki::engine::docker::Docker::real());
+            let why = nunki::monitor::run(project, &id, engine, &engine_bin);
             println!(
                 "{}  monitor stops: {why}",
-                hq::state::rfc3339(hq::state::now_secs())
+                nunki::state::rfc3339(nunki::state::now_secs())
             );
             ExitCode::SUCCESS
         }
@@ -1327,9 +1336,9 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
 
         MissionCommand::Pause { id } => pause(project, &id),
         MissionCommand::Resume { id } => {
-            let engine: std::sync::Arc<dyn hq::engine::Engine> =
-                std::sync::Arc::new(hq::engine::docker::Docker::real());
-            match hq::gesture::resume(project, &id, engine) {
+            let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+                std::sync::Arc::new(nunki::engine::docker::Docker::real());
+            match nunki::gesture::resume(project, &id, engine) {
                 Ok(lifted) => {
                     match lifted {
                         Some(held) => {
@@ -1346,16 +1355,16 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                     ExitCode::SUCCESS
                 }
                 Err(e) => {
-                    eprintln!("hq: {e}");
+                    eprintln!("nunki: {e}");
                     ExitCode::FAILURE
                 }
             }
         }
 
         MissionCommand::Kill { id } => {
-            let engine: std::sync::Arc<dyn hq::engine::Engine> =
-                std::sync::Arc::new(hq::engine::docker::Docker::real());
-            match hq::gesture::kill(project, &id, engine) {
+            let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+                std::sync::Arc::new(nunki::engine::docker::Docker::real());
+            match nunki::gesture::kill(project, &id, engine) {
                 Ok(_) => {
                     println!("killed    nothing was waited for");
                     println!(
@@ -1365,28 +1374,30 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                     ExitCode::SUCCESS
                 }
                 Err(e) => {
-                    eprintln!("hq: {e}");
+                    eprintln!("nunki: {e}");
                     ExitCode::FAILURE
                 }
             }
         }
 
-        MissionCommand::Say { id, what } => match hq::gesture::say(project, &id, &what.join(" ")) {
-            Ok(()) => {
-                println!("said      written to FOLLOWUP_HQ.md, for the next run");
-                println!(
-                    "          there is no channel during a run; `hq mission stop {id} \
+        MissionCommand::Say { id, what } => {
+            match nunki::gesture::say(project, &id, &what.join(" ")) {
+                Ok(()) => {
+                    println!("said      written to FOLLOWUP_HQ.md, for the next run");
+                    println!(
+                        "          there is no channel during a run; `nunki mission stop {id} \
                      --now` ends this one first"
-                );
-                ExitCode::SUCCESS
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    ExitCode::FAILURE
+                }
             }
-            Err(e) => {
-                eprintln!("hq: {e}");
-                ExitCode::FAILURE
-            }
-        },
+        }
 
-        MissionCommand::Fetch { id } => match hq::push::fetch(project, &id) {
+        MissionCommand::Fetch { id } => match nunki::push::fetch(project, &id) {
             Ok(fetched) => {
                 let head = &fetched.head[..12.min(fetched.head.len())];
                 match fetched.was {
@@ -1403,19 +1414,19 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                 ExitCode::SUCCESS
             }
             Err(e) => {
-                eprintln!("hq: {e}");
+                eprintln!("nunki: {e}");
                 ExitCode::FAILURE
             }
         },
 
         MissionCommand::Accept { id, finding, why } => {
             let lift = match finding {
-                Some(name) => hq::findings::Lift::Finding(name),
-                None => hq::findings::Lift::Verdict,
+                Some(name) => nunki::findings::Lift::Finding(name),
+                None => nunki::findings::Lift::Verdict,
             };
-            match hq::findings::accept(project, &id, lift, &why) {
+            match nunki::findings::accept(project, &id, lift, &why) {
                 Ok(state) => {
-                    println!("accepted  written to FOLLOWUP_HQ.md and to hq's state");
+                    println!("accepted  written to FOLLOWUP_HQ.md and to nunki's state");
                     println!("stage     {:?}", state.flow.stage());
                     println!(
                         "          VERDICT.json still says FINDINGS — that is the agent's \
@@ -1424,20 +1435,20 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                     ExitCode::SUCCESS
                 }
                 Err(e) => {
-                    eprintln!("hq: {e}");
+                    eprintln!("nunki: {e}");
                     ExitCode::FAILURE
                 }
             }
         }
 
-        MissionCommand::Iterate { id } => match hq::findings::iterate(project, &id) {
+        MissionCommand::Iterate { id } => match nunki::findings::iterate(project, &id) {
             Ok(state) => {
                 println!("stage     {:?}", state.flow.stage());
-                println!("          `hq verify {id}` plays it from there");
+                println!("          `nunki verify {id}` plays it from there");
                 ExitCode::SUCCESS
             }
             Err(e) => {
-                eprintln!("hq: {e}");
+                eprintln!("nunki: {e}");
                 ExitCode::FAILURE
             }
         },
@@ -1451,50 +1462,50 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             if let Some(survivor) = equivalent {
                 let Some(why) = because else {
                     eprintln!(
-                        "hq: --equivalent needs --because: a ruling nobody can check must \
+                        "nunki: --equivalent needs --because: a ruling nobody can check must \
                          say what it rests on"
                     );
                     return ExitCode::FAILURE;
                 };
-                let paths = hq::mission::dir::Paths::of(&project.hq_root, &id);
-                return match hq::mutants::rule_equivalent(&paths.dir, &survivor, &why) {
+                let paths = nunki::mission::dir::Paths::of(&project.hq_root, &id);
+                return match nunki::mutants::rule_equivalent(&paths.dir, &survivor, &why) {
                     Ok(()) => {
                         println!("{survivor} ruled equivalent — {why}");
                         ExitCode::SUCCESS
                     }
                     Err(e) => {
-                        eprintln!("hq: {e}");
+                        eprintln!("nunki: {e}");
                         ExitCode::FAILURE
                     }
                 };
             }
-            let header = match hq::mission::dir::read_header(&project.hq_root, &id) {
+            let header = match nunki::mission::dir::read_header(&project.hq_root, &id) {
                 Ok(h) => h,
                 Err(e) => {
-                    eprintln!("hq: {e}");
+                    eprintln!("nunki: {e}");
                     return ExitCode::FAILURE;
                 }
             };
             let Some(in_slot) = slot.or_else(|| {
-                hq::state::Store::open(&project.hq_root)
+                nunki::state::Store::open(&project.hq_root)
                     .and_then(|s| s.load(&id))
                     .ok()
                     .map(|s| s.slot)
             }) else {
-                eprintln!("hq: mission {id} has not started — name a slot with --slot");
+                eprintln!("nunki: mission {id} has not started — name a slot with --slot");
                 return ExitCode::FAILURE;
             };
-            let slot = match hq::slot::find(project, &in_slot) {
+            let slot = match nunki::slot::find(project, &in_slot) {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!("hq: {e}");
+                    eprintln!("nunki: {e}");
                     return ExitCode::FAILURE;
                 }
             };
-            let base = match hq::gate::touched_paths(&slot.tree, &header.base) {
+            let base = match nunki::gate::touched_paths(&slot.tree, &header.base) {
                 Ok(paths) => paths,
                 Err(e) => {
-                    eprintln!("hq: {e}");
+                    eprintln!("nunki: {e}");
                     return ExitCode::FAILURE;
                 }
             };
@@ -1504,10 +1515,10 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                 .first()
                 .cloned()
                 .unwrap_or_else(|| "rust".to_string());
-            let engine: std::sync::Arc<dyn hq::engine::Engine> =
-                std::sync::Arc::new(hq::engine::docker::Docker::real());
-            let paths = hq::mission::dir::Paths::of(&project.hq_root, &id);
-            match hq::mutants::campaign(
+            let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+                std::sync::Arc::new(nunki::engine::docker::Docker::real());
+            let paths = nunki::mission::dir::Paths::of(&project.hq_root, &id);
+            match nunki::mutants::campaign(
                 project,
                 &slot,
                 engine,
@@ -1517,7 +1528,7 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                 header.bounds.mutation_minutes,
             ) {
                 Ok(progress) => {
-                    use hq::mutants::Progress;
+                    use nunki::mutants::Progress;
                     match progress {
                         Progress::Fresh { survivors } => println!(
                             "a campaign on this exact content is already on file — \
@@ -1525,7 +1536,7 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                              files change"
                         ),
                         Progress::Started { fingerprint } => println!(
-                            "campaign {} started; `hq mission mutants {id}` follows it",
+                            "campaign {} started; `nunki mission mutants {id}` follows it",
                             &fingerprint[..7.min(fingerprint.len())]
                         ),
                         Progress::Running { started_at, lines } => {
@@ -1534,23 +1545,23 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                         Progress::Finished { survivors } => println!(
                             "finished — {survivors} survivor(s) in {}; each needs one of \
                              the three outcomes before gate 7 is green",
-                            hq::mutants::FILE
+                            nunki::mutants::FILE
                         ),
                         Progress::Overrun { minutes } => {
                             eprintln!(
-                                "hq: the campaign passed its {minutes}-minute deadline and was stopped"
+                                "nunki: the campaign passed its {minutes}-minute deadline and was stopped"
                             );
                             return ExitCode::FAILURE;
                         }
                         Progress::Lost(why) => {
-                            eprintln!("hq: the campaign cannot be reached: {why}");
+                            eprintln!("nunki: the campaign cannot be reached: {why}");
                             return ExitCode::FAILURE;
                         }
                     }
                     ExitCode::SUCCESS
                 }
                 Err(e) => {
-                    eprintln!("hq: {e}");
+                    eprintln!("nunki: {e}");
                     ExitCode::FAILURE
                 }
             }
@@ -1562,21 +1573,21 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             verification,
             slot,
         } => {
-            let role: hq::harness::Role = role.into();
-            let started = hq::state::Store::open(&project.hq_root)
+            let role: nunki::harness::Role = role.into();
+            let started = nunki::state::Store::open(&project.hq_root)
                 .and_then(|s| s.load(&id))
                 .ok();
             // The frozen header once a mission has started, and the file only
-            // before that: `hq` never re-reads the header during a mission
+            // before that: `nunki` never re-reads the header during a mission
             // (SPEC 4.1). A perimeter a run is judged against must be the one
             // it was launched with, or an agent could widen it between two
             // gates.
             let header = match &started {
                 Some(state) => state.flow.header().clone(),
-                None => match hq::mission::dir::read_header(&project.hq_root, &id) {
+                None => match nunki::mission::dir::read_header(&project.hq_root, &id) {
                     Ok(h) => h,
                     Err(e) => {
-                        eprintln!("hq: {e}");
+                        eprintln!("nunki: {e}");
                         return ExitCode::FAILURE;
                     }
                 },
@@ -1585,21 +1596,21 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                 Some(s) => s,
                 None => {
                     eprintln!(
-                        "hq: mission {id} has not started, so there is no slot to judge — \
+                        "nunki: mission {id} has not started, so there is no slot to judge — \
                          name one with --slot"
                     );
                     return ExitCode::FAILURE;
                 }
             };
-            let slot = match hq::slot::find(project, &in_slot) {
+            let slot = match nunki::slot::find(project, &in_slot) {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!("hq: {e}");
+                    eprintln!("nunki: {e}");
                     return ExitCode::FAILURE;
                 }
             };
-            let paths = hq::mission::dir::Paths::of(&project.hq_root, &id);
-            let subject = hq::gate::Subject {
+            let paths = nunki::mission::dir::Paths::of(&project.hq_root, &id);
+            let subject = nunki::gate::Subject {
                 role,
                 tree: &slot.tree,
                 journal: &paths.journal,
@@ -1611,17 +1622,17 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                 protected_paths: &project.config.protected_paths,
             };
             let played = if verification {
-                let engine: std::sync::Arc<dyn hq::engine::Engine> =
-                    std::sync::Arc::new(hq::engine::docker::Docker::real());
+                let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+                    std::sync::Arc::new(nunki::engine::docker::Docker::real());
                 let stack = project
                     .config
                     .stacks
                     .first()
                     .cloned()
                     .unwrap_or_else(|| "rust".to_string());
-                hq::gate::at_verification(
+                nunki::gate::at_verification(
                     &subject,
-                    &hq::gate::Verification {
+                    &nunki::gate::Verification {
                         project,
                         slot: &slot,
                         engine,
@@ -1629,12 +1640,12 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                     },
                 )
             } else {
-                hq::gate::after_run(&subject)
+                nunki::gate::after_run(&subject)
             };
             let report = match played {
                 Ok(r) => r,
                 Err(e) => {
-                    eprintln!("hq: {e}");
+                    eprintln!("nunki: {e}");
                     return ExitCode::FAILURE;
                 }
             };
@@ -1652,18 +1663,18 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             // Read once for the slot and the session: the harness has to be
             // built against the container the run is in, and `--now`
             // identifies the process by its session id.
-            let state = match hq::gesture::started(project, &id) {
+            let state = match nunki::gesture::started(project, &id) {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!("hq: {e}");
+                    eprintln!("nunki: {e}");
                     return ExitCode::FAILURE;
                 }
             };
             let session = state.run.as_ref().map(|r| r.session.0.clone());
             let harness = harness_for(project, &state.slot, session.as_deref());
-            match hq::gesture::stop(project, &id, &harness, now) {
+            match nunki::gesture::stop(project, &id, &harness, now) {
                 Ok(held) => {
-                    println!("held      hq will launch no further run for mission {id}");
+                    println!("held      nunki will launch no further run for mission {id}");
                     match (now, held.interrupted) {
                         // SIGINT, not SIGTERM: the agent ends its turn and
                         // writes its resume block (SPEC 4.3).
@@ -1680,11 +1691,11 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                             println!("          the run in progress, if any, finishes its lot")
                         }
                     }
-                    println!("          `hq mission resume {id}` lifts the hold");
+                    println!("          `nunki mission resume {id}` lifts the hold");
                     ExitCode::SUCCESS
                 }
                 Err(e) => {
-                    eprintln!("hq: {e}");
+                    eprintln!("nunki: {e}");
                     ExitCode::FAILURE
                 }
             }
@@ -1694,7 +1705,7 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             let header = match mission_dir::read_header(&project.hq_root, &id) {
                 Ok(h) => h,
                 Err(e) => {
-                    eprintln!("hq: {e}");
+                    eprintln!("nunki: {e}");
                     return ExitCode::FAILURE;
                 }
             };
@@ -1724,10 +1735,10 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
 
             // The state is the other half of the answer, and its absence is
             // an answer too: a mission exists before it has ever run.
-            match hq::state::Store::open(&project.hq_root).and_then(|s| s.load(&id)) {
+            match nunki::state::Store::open(&project.hq_root).and_then(|s| s.load(&id)) {
                 Ok(state) => {
                     println!("stage     {:?} in slot {}", state.flow.stage(), state.slot);
-                    // A hold changes what `hq` will do next, and nothing
+                    // A hold changes what `nunki` will do next, and nothing
                     // else in this report says so: a mission held between
                     // two runs reads exactly like one nobody touched.
                     print_hold(&state, &id);
@@ -1741,19 +1752,19 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                         match harness_for(project, &state.slot, Some(&handle.session.0))
                             .state(handle)
                         {
-                            Ok(hq::harness::RunState::Running(p)) => println!(
+                            Ok(nunki::harness::RunState::Running(p)) => println!(
                                 "run       running — {} event(s), {} tool call(s)",
                                 p.events, p.tool_calls
                             ),
-                            Ok(hq::harness::RunState::Paused(p)) => println!(
+                            Ok(nunki::harness::RunState::Paused(p)) => println!(
                                 "run       paused — {} event(s), {} tool call(s); \
-                                 `hq mission resume {id}` unfreezes it",
+                                 `nunki mission resume {id}` unfreezes it",
                                 p.events, p.tool_calls
                             ),
-                            Ok(hq::harness::RunState::Finished(outcome)) => {
+                            Ok(nunki::harness::RunState::Finished(outcome)) => {
                                 println!("run       finished — {outcome:?}")
                             }
-                            // Not "finished", not "running": `hq` says it
+                            // Not "finished", not "running": `nunki` says it
                             // does not know, and why. Calling an unreachable
                             // run a dead one is how a container taken down
                             // becomes a harness failure in the record.
@@ -1807,40 +1818,40 @@ fn parse_service(spec: &str) -> Result<Service, String> {
     })
 }
 
-/// One line per gate, the same wherever gates are reported — `hq mission
-/// gates` and `hq verify` must not describe the same report differently.
-/// A hold, and a harness being waited out, change what `hq` does next, and
+/// One line per gate, the same wherever gates are reported — `nunki mission
+/// gates` and `nunki verify` must not describe the same report differently.
+/// A hold, and a harness being waited out, change what `nunki` does next, and
 /// nothing else in a report says so: a mission held between two runs reads
 /// exactly like one nobody touched.
-fn print_hold(state: &hq::state::MissionState, id: &str) {
+fn print_hold(state: &nunki::state::MissionState, id: &str) {
     if let Some(hold) = &state.stopped {
         println!(
-            "held      by {} on {} — hq will launch no further run",
+            "held      by {} on {} — nunki will launch no further run",
             hold.who, hold.date
         );
         if let Some(why) = &hold.reason {
             println!("          {why}");
         }
-        println!("          `hq mission resume {id}` lifts it");
+        println!("          `nunki mission resume {id}` lifts it");
     } else if let Some(down) = &state.harness_down {
         println!(
             "harness   failed {} time(s) in a row — no run before {} — last: {}",
             down.failures,
-            hq::state::rfc3339(down.not_before),
+            nunki::state::rfc3339(down.not_before),
             down.last
         );
     }
     if let Some(spared) = &state.spared {
         println!(
-            "spared    hq ended the run's turn on {}: account {}'s {} was at {}%",
+            "spared    nunki ended the run's turn on {}: account {}'s {} was at {}%",
             spared.date,
             spared.account,
             spared.window,
-            hq::consumption::percent(spared.per_mille)
+            nunki::consumption::percent(spared.per_mille)
         );
         println!(
             "          nothing is launched before {}; the read-back spends no attempt",
-            hq::state::rfc3339(spared.until)
+            nunki::state::rfc3339(spared.until)
         );
     }
     // What the mission has spent, in the four kinds kept apart: the caps have
@@ -1870,22 +1881,22 @@ fn print_hold(state: &hq::state::MissionState, id: &str) {
 /// How far the account the mission spends has used its two windows, as last
 /// measured — or that it has not been, in those words: a supervisor reading
 /// "0" where nothing was measured would read that nothing was spent.
-fn print_usage(project: &Project, state: &hq::state::MissionState) {
-    use hq::consumption::{Window, percent};
+fn print_usage(project: &Project, state: &nunki::state::MissionState) {
+    use nunki::consumption::{Window, percent};
     let header = state.flow.header();
     let bounds = &header.bounds;
-    let account = match hq::consumption::account_of(project, header.account.as_deref()) {
+    let account = match nunki::consumption::account_of(project, header.account.as_deref()) {
         Ok(account) => account,
         Err(e) => {
             println!("usage     not measured — {e}");
             return;
         }
     };
-    let measure = match hq::consumption::read(&project.hq_home(), &account) {
+    let measure = match nunki::consumption::read(&project.nunki_home(), &account) {
         Ok(Some(measure)) => measure,
         Ok(None) => {
             println!(
-                "usage     account {account}: not measured yet — hq measures it when it reads a run"
+                "usage     account {account}: not measured yet — nunki measures it when it reads a run"
             );
             return;
         }
@@ -1898,7 +1909,7 @@ fn print_usage(project: &Project, state: &hq::state::MissionState) {
         Some(w) => format!(
             "{}% (stops at {stop}%, resets {})",
             percent(w.per_mille),
-            hq::state::rfc3339(w.resets_at)
+            nunki::state::rfc3339(w.resets_at)
         ),
         None => "not reported".to_string(),
     };
@@ -1909,13 +1920,13 @@ fn print_usage(project: &Project, state: &hq::state::MissionState) {
     );
     println!(
         "          measured {} from {}",
-        hq::state::rfc3339(measure.measured_at),
+        nunki::state::rfc3339(measure.measured_at),
         measure.harness
     );
-    if let Some(over) = hq::consumption::over(&measure, bounds, hq::state::now_secs()) {
+    if let Some(over) = nunki::consumption::over(&measure, bounds, nunki::state::now_secs()) {
         println!(
-            "          past its threshold: hq launches no run before {}",
-            hq::state::rfc3339(over.until)
+            "          past its threshold: nunki launches no run before {}",
+            nunki::state::rfc3339(over.until)
         );
     }
 }
@@ -1928,58 +1939,58 @@ fn start_monitor(project: &Project, id: &str) {
     if std::env::var_os("HQ_NO_MONITOR").is_some() {
         return;
     }
-    let Ok(state) = hq::state::Store::open(&project.hq_root).and_then(|s| s.load(id)) else {
+    let Ok(state) = nunki::state::Store::open(&project.hq_root).and_then(|s| s.load(id)) else {
         return;
     };
-    if !hq::monitor::wanted(project, &state, hq::state::now_secs()) {
+    if !nunki::monitor::wanted(project, &state, nunki::state::now_secs()) {
         return;
     }
     let exe = match std::env::current_exe() {
         Ok(exe) => exe,
         Err(e) => {
-            eprintln!("hq: the mission's monitor could not start: {e}");
+            eprintln!("nunki: the mission's monitor could not start: {e}");
             return;
         }
     };
-    match hq::monitor::ensure(project, id, &exe) {
-        Ok(hq::monitor::Ensured::Started(pid)) => {
+    match nunki::monitor::ensure(project, id, &exe) {
+        Ok(nunki::monitor::Ensured::Started(pid)) => {
             println!(
                 "monitor   started (pid {pid}): it watches the run, ends its turn past the \
                  account's window, and relaunches after a wait"
             );
             println!(
                 "          its log: {}",
-                hq::monitor::logfile(&project.hq_root, id).display()
+                nunki::monitor::logfile(&project.hq_root, id).display()
             );
         }
-        Ok(hq::monitor::Ensured::Running(pid)) => {
+        Ok(nunki::monitor::Ensured::Running(pid)) => {
             println!("monitor   already watching (pid {pid})")
         }
-        Err(e) => eprintln!("hq: the mission's monitor could not start: {e}"),
+        Err(e) => eprintln!("nunki: the mission's monitor could not start: {e}"),
     }
 }
 
 fn print_monitor(project: &Project, id: &str) {
-    match hq::monitor::running(&project.hq_root, id) {
+    match nunki::monitor::running(&project.hq_root, id) {
         Some(pid) => println!(
             "monitor   watching (pid {pid}) — log: {}",
-            hq::monitor::logfile(&project.hq_root, id).display()
+            nunki::monitor::logfile(&project.hq_root, id).display()
         ),
         None => println!("monitor   none watching"),
     }
 }
 
-fn print_gates(report: &hq::gate::Report) {
+fn print_gates(report: &nunki::gate::Report) {
     for outcome in &report.outcomes {
         let (mark, detail) = match &outcome.decision {
-            hq::gate::Decision::Passed => ("pass", String::new()),
-            hq::gate::Decision::Failed(why) => ("FAIL", format!(" — {why}")),
+            nunki::gate::Decision::Passed => ("pass", String::new()),
+            nunki::gate::Decision::Failed(why) => ("FAIL", format!(" — {why}")),
             // Said, never folded into a pass: a skipped gate reported as
             // green is how a report stops being worth reading (SPEC 4.4,
             // the per-role table).
-            hq::gate::Decision::NotApplicable(why) => ("n/a ", format!(" — {why}")),
+            nunki::gate::Decision::NotApplicable(why) => ("n/a ", format!(" — {why}")),
             // Neither green nor red: nobody managed to play it.
-            hq::gate::Decision::Unplayed(why) => ("????", format!(" — {why}")),
+            nunki::gate::Decision::Unplayed(why) => ("????", format!(" — {why}")),
         };
         println!(
             "gate {}    {mark}  {}{detail}",
@@ -1994,24 +2005,25 @@ fn print_gates(report: &hq::gate::Report) {
 }
 
 /// The harness as it must be addressed for a run that lives in a slot's
-/// container: through the engine, because the pid `hq` holds is inside it.
+/// container: through the engine, because the pid `nunki` holds is inside it.
 fn harness_for(
     project: &Project,
     slot: &str,
     session: Option<&str>,
-) -> hq::harness::claude_code::ClaudeCode {
-    let engine: std::sync::Arc<dyn hq::engine::Engine> =
-        std::sync::Arc::new(hq::engine::docker::Docker::real());
-    let file = hq::run::profile_path(project, slot);
-    let compose_project = hq::compose::project_name(slot).unwrap_or_else(|_| format!("hq-{slot}"));
-    let mut spawner = hq::engine::spawn::ContainerSpawner::new(
+) -> nunki::harness::claude_code::ClaudeCode {
+    let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+        std::sync::Arc::new(nunki::engine::docker::Docker::real());
+    let file = nunki::run::profile_path(project, slot);
+    let compose_project =
+        nunki::compose::project_name(slot).unwrap_or_else(|_| format!("nunki-{slot}"));
+    let mut spawner = nunki::engine::spawn::ContainerSpawner::new(
         engine,
         file,
         &compose_project,
-        hq::compose::AGENT_SERVICE,
+        nunki::compose::AGENT_SERVICE,
     );
     if let Some(session) = session {
         spawner = spawner.identified_by(session);
     }
-    hq::harness::claude_code::ClaudeCode::new(Default::default(), Box::new(spawner))
+    nunki::harness::claude_code::ClaudeCode::new(Default::default(), Box::new(spawner))
 }

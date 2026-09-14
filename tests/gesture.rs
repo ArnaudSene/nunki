@@ -4,14 +4,14 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use hq::engine::Engine;
-use hq::engine::fake::{Call, FakeEngine};
-use hq::gesture::{self, GestureError};
-use hq::harness::{RunHandle, SessionId};
-use hq::mission::flow::Flow;
-use hq::mission::{Bounds, Header, Integration, Lot, Security};
-use hq::project::{Config, Project, ProtectedPaths};
-use hq::state::{MissionState, Store};
+use nunki::engine::Engine;
+use nunki::engine::fake::{Call, FakeEngine};
+use nunki::gesture::{self, GestureError};
+use nunki::harness::{RunHandle, SessionId};
+use nunki::mission::flow::Flow;
+use nunki::mission::{Bounds, Header, Integration, Lot, Security};
+use nunki::project::{Config, Project, ProtectedPaths};
+use nunki::state::{MissionState, Store};
 
 fn header() -> Header {
     Header {
@@ -41,7 +41,7 @@ struct World {
 impl World {
     fn new(with_run: bool) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let hq_root = dir.path().join("hq");
+        let hq_root = dir.path().join("nunki");
         for d in ["locks", "missions", "state/missions", "profiles"] {
             std::fs::create_dir_all(hq_root.join(d)).unwrap();
         }
@@ -65,7 +65,7 @@ impl World {
             },
             hq_root.clone(),
         );
-        hq::mission::dir::create(&hq_root, "m1", &header(), "do it").unwrap();
+        nunki::mission::dir::create(&hq_root, "m1", &header(), "do it").unwrap();
         Store::open(&hq_root)
             .unwrap()
             .save(&MissionState {
@@ -98,7 +98,7 @@ impl World {
 }
 
 /// A fake engine, kept typed so the test can read what was asked of it, and
-/// handed to `hq` as the trait object it takes.
+/// handed to `nunki` as the trait object it takes.
 fn engine() -> (Arc<dyn Engine>, Arc<FakeEngine>) {
     let fake = Arc::new(FakeEngine::default());
     (fake.clone(), fake)
@@ -113,8 +113,11 @@ fn pausing_freezes_the_agent_and_its_sidecar_and_nothing_else() {
     let (engine, fake) = engine();
     gesture::pause(&world.project, "m1", engine).unwrap();
 
-    let services: Vec<String> = hq::run::SERVICES.iter().map(|s| s.to_string()).collect();
-    assert_eq!(fake.calls(), vec![Call::Pause("hq-one".into(), services)]);
+    let services: Vec<String> = nunki::run::SERVICES.iter().map(|s| s.to_string()).collect();
+    assert_eq!(
+        fake.calls(),
+        vec![Call::Pause("nunki-one".into(), services)]
+    );
 }
 
 /// The emergency brake is `kill` and not a stop with no patience: nothing is
@@ -126,8 +129,8 @@ fn killing_is_a_kill_and_leaves_the_projects_services_alone() {
     let (engine, fake) = engine();
     gesture::kill(&world.project, "m1", engine).unwrap();
 
-    let services: Vec<String> = hq::run::SERVICES.iter().map(|s| s.to_string()).collect();
-    assert_eq!(fake.calls(), vec![Call::Kill("hq-one".into(), services)]);
+    let services: Vec<String> = nunki::run::SERVICES.iter().map(|s| s.to_string()).collect();
+    assert_eq!(fake.calls(), vec![Call::Kill("nunki-one".into(), services)]);
 }
 
 /// A gesture on a mission with no run says so rather than acting on whatever
@@ -172,7 +175,7 @@ fn saying_leaves_an_instruction_for_the_next_run() {
 #[test]
 fn saying_works_before_a_mission_has_started() {
     let world = World::new(false);
-    hq::mission::dir::create(&world.project.hq_root, "m2", &header(), "not started").unwrap();
+    nunki::mission::dir::create(&world.project.hq_root, "m2", &header(), "not started").unwrap();
     assert!(
         Store::open(&world.project.hq_root)
             .unwrap()
@@ -195,13 +198,13 @@ fn an_empty_instruction_is_not_one() {
 }
 
 /// SPEC 4.5 reads as two clauses, and the first is unconditional: `stop`
-/// means "hq launches no further run", and `--now` only chooses what happens
+/// means "nunki launches no further run", and `--now` only chooses what happens
 /// to the run already going. So a bare `stop` writes the hold and signals
 /// nothing — the old `STOP` file was a marker, not a gesture.
 #[test]
 fn stopping_holds_the_mission_and_signals_nothing() {
     let world = World::new(true);
-    let harness = hq::harness::fake::FakeHarness::new();
+    let harness = nunki::harness::fake::FakeHarness::new();
     let held = gesture::stop(&world.project, "m1", &harness, false).unwrap();
 
     assert!(!held.interrupted, "a bare stop interrupts nothing");
@@ -215,12 +218,12 @@ fn stopping_holds_the_mission_and_signals_nothing() {
 }
 
 /// The other clause: `--now` ends the turn as well, and the record keeps the
-/// two apart — what `hq` will not do next, and what was done to the run that
+/// two apart — what `nunki` will not do next, and what was done to the run that
 /// was going.
 #[test]
 fn stopping_now_also_ends_the_turn() {
     let world = World::new(true);
-    let harness = hq::harness::fake::FakeHarness::new();
+    let harness = nunki::harness::fake::FakeHarness::new();
     let held = gesture::stop(&world.project, "m1", &harness, true).unwrap();
 
     assert!(held.interrupted);
@@ -240,7 +243,7 @@ fn stopping_now_also_ends_the_turn() {
 #[test]
 fn a_mission_between_two_runs_can_still_be_held() {
     let world = World::new(false);
-    let harness = hq::harness::fake::FakeHarness::new();
+    let harness = nunki::harness::fake::FakeHarness::new();
     gesture::stop(&world.project, "m1", &harness, false).unwrap();
     assert!(
         Store::open(&world.project.hq_root)
@@ -258,7 +261,7 @@ fn a_mission_between_two_runs_can_still_be_held() {
 #[test]
 fn stopping_now_after_the_run_ended_still_holds_the_mission() {
     let world = World::new(false);
-    let harness = hq::harness::fake::FakeHarness::new();
+    let harness = nunki::harness::fake::FakeHarness::new();
     let held = gesture::stop(&world.project, "m1", &harness, true).unwrap();
 
     assert!(!held.interrupted, "nothing was there to interrupt");
@@ -278,23 +281,23 @@ fn stopping_now_after_the_run_ended_still_holds_the_mission() {
 #[test]
 fn resuming_lifts_the_hold_and_unfreezes() {
     let world = World::new(true);
-    let harness = hq::harness::fake::FakeHarness::new();
+    let harness = nunki::harness::fake::FakeHarness::new();
     gesture::stop(&world.project, "m1", &harness, false).unwrap();
 
     let fake = Arc::new(
-        hq::engine::fake::FakeEngine::default()
-            .with_liveness("cafe1234", hq::engine::Liveness::Paused),
+        nunki::engine::fake::FakeEngine::default()
+            .with_liveness("cafe1234", nunki::engine::Liveness::Paused),
     );
     let engine: Arc<dyn Engine> = fake.clone();
     let lifted = gesture::resume(&world.project, "m1", engine).unwrap();
     assert!(lifted.is_some(), "it says what it lifted");
 
-    let services: Vec<String> = hq::run::SERVICES.iter().map(|s| s.to_string()).collect();
+    let services: Vec<String> = nunki::run::SERVICES.iter().map(|s| s.to_string()).collect();
     assert_eq!(
         fake.calls(),
         vec![
             Call::Liveness("cafe1234".into()),
-            Call::Unpause("hq-one".into(), services)
+            Call::Unpause("nunki-one".into(), services)
         ]
     );
     assert!(
@@ -312,7 +315,7 @@ fn resuming_lifts_the_hold_and_unfreezes() {
 #[test]
 fn resuming_a_mission_with_no_run_lifts_the_hold_all_the_same() {
     let world = World::new(false);
-    let harness = hq::harness::fake::FakeHarness::new();
+    let harness = nunki::harness::fake::FakeHarness::new();
     gesture::stop(&world.project, "m1", &harness, false).unwrap();
 
     let (engine, fake) = engine();
@@ -345,12 +348,12 @@ fn resuming_a_mission_nobody_held_lifts_nothing() {
 #[test]
 fn resuming_a_run_that_was_never_frozen_asks_for_no_unpause() {
     let world = World::new(true);
-    let harness = hq::harness::fake::FakeHarness::new();
+    let harness = nunki::harness::fake::FakeHarness::new();
     gesture::stop(&world.project, "m1", &harness, false).unwrap();
 
     let fake = Arc::new(
-        hq::engine::fake::FakeEngine::default()
-            .with_liveness("cafe1234", hq::engine::Liveness::Running),
+        nunki::engine::fake::FakeEngine::default()
+            .with_liveness("cafe1234", nunki::engine::Liveness::Running),
     );
     let engine: Arc<dyn Engine> = fake.clone();
     assert!(
@@ -370,19 +373,19 @@ fn resuming_a_run_that_was_never_frozen_asks_for_no_unpause() {
 impl World {
     /// One account, whose five-hour window was last measured at `per_mille`.
     fn measured(&self, per_mille: u32) {
-        let hq_home = self.project.hq_home();
+        let nunki_home = self.project.nunki_home();
         std::fs::write(
-            hq_home.join("accounts.yaml"),
+            nunki_home.join("accounts.yaml"),
             "accounts:\n  main:\n    harness: claude-code\n    token_file: accounts/main.token\n",
         )
         .unwrap();
-        let now = hq::state::now_secs();
-        hq::consumption::record(
-            &hq_home,
+        let now = nunki::state::now_secs();
+        nunki::consumption::record(
+            &nunki_home,
             "main",
-            &hq::consumption::Measure {
-                windows: hq::consumption::Windows {
-                    five_hour: Some(hq::consumption::Window {
+            &nunki::consumption::Measure {
+                windows: nunki::consumption::Windows {
+                    five_hour: Some(nunki::consumption::Window {
                         per_mille,
                         resets_at: now + 3_600,
                     }),
@@ -403,14 +406,14 @@ impl World {
     }
 }
 
-fn harness_saying(state: hq::harness::RunState) -> hq::harness::fake::FakeHarness {
-    let harness = hq::harness::fake::FakeHarness::new();
+fn harness_saying(state: nunki::harness::RunState) -> nunki::harness::fake::FakeHarness {
+    let harness = nunki::harness::fake::FakeHarness::new();
     harness.script(SessionId("s1".into()), vec![state]);
     harness
 }
 
-fn running() -> hq::harness::fake::FakeHarness {
-    harness_saying(hq::harness::RunState::Running(Default::default()))
+fn running() -> nunki::harness::fake::FakeHarness {
+    harness_saying(nunki::harness::RunState::Running(Default::default()))
 }
 
 /// Past the threshold, the run is told to end its turn — once — and the
@@ -425,7 +428,7 @@ fn a_run_past_the_threshold_is_told_to_end_its_turn_once() {
         &world.project,
         "m1",
         &harness,
-        hq::state::now_secs(),
+        nunki::state::now_secs(),
         "mission monitor",
     )
     .unwrap()
@@ -441,7 +444,7 @@ fn a_run_past_the_threshold_is_told_to_end_its_turn_once() {
         &world.project,
         "m1",
         &harness,
-        hq::state::now_secs(),
+        nunki::state::now_secs(),
         "mission monitor",
     )
     .unwrap();
@@ -458,7 +461,7 @@ fn below_the_threshold_the_run_goes_on() {
             &world.project,
             "m1",
             &harness,
-            hq::state::now_secs(),
+            nunki::state::now_secs(),
             "mission monitor"
         )
         .unwrap()
@@ -473,15 +476,15 @@ fn below_the_threshold_the_run_goes_on() {
 fn a_run_that_is_not_running_is_not_signalled() {
     let world = World::new(true);
     world.measured(950);
-    let harness = harness_saying(hq::harness::RunState::Finished(
-        hq::harness::Outcome::Finished(Default::default()),
+    let harness = harness_saying(nunki::harness::RunState::Finished(
+        nunki::harness::Outcome::Finished(Default::default()),
     ));
     assert!(
         gesture::spare(
             &world.project,
             "m1",
             &harness,
-            hq::state::now_secs(),
+            nunki::state::now_secs(),
             "mission monitor"
         )
         .unwrap()
@@ -501,7 +504,7 @@ fn nothing_measured_stops_nothing() {
             &world.project,
             "m1",
             &harness,
-            hq::state::now_secs(),
+            nunki::state::now_secs(),
             "mission monitor"
         )
         .unwrap()
@@ -523,14 +526,15 @@ fn a_slot_driven_by_another_verb_is_left_to_it() {
             &world.project,
             "m1",
             &harness,
-            hq::state::now_secs(),
+            nunki::state::now_secs(),
             "mission monitor",
         )
         .unwrap()
     };
 
-    let lock = hq::state::SlotLock::acquire(&world.project.hq_root.join("locks"), "one", "verify")
-        .unwrap();
+    let lock =
+        nunki::state::SlotLock::acquire(&world.project.hq_root.join("locks"), "one", "verify")
+            .unwrap();
     assert!(spare().is_none());
     assert!(harness.stopped().is_empty());
     assert!(world.state().spared.is_none());

@@ -1,11 +1,11 @@
-//! The persisted state of `hq` (SPEC 4.2, "L'état de `hq` est persisté, et
+//! The persisted state of `nunki` (SPEC 4.2, "L'état de `nunki` est persisté, et
 //! verrouillé").
 //!
-//! `hq verify` lasts hours and must survive the death of the HQ session, a
+//! `nunki verify` lasts hours and must survive the death of the HQ session, a
 //! sleeping machine, a closed terminal. So every transition is written to
-//! disk under `<hq-root>/state/`, one file per mission, atomically; and a
-//! lock per slot keeps two `hq` from driving the same slot at once. A
-//! restarted `hq` reads the state back and, before deciding anything,
+//! disk under `<nunki-root>/state/`, one file per mission, atomically; and a
+//! lock per slot keeps two `nunki` from driving the same slot at once. A
+//! restarted `nunki` reads the state back and, before deciding anything,
 //! re-derives whether the run it recorded is still alive — that part is the
 //! engine's, not this module's: here we only keep and hand back the facts.
 
@@ -37,7 +37,7 @@ pub enum StateError {
     Flow(#[from] FlowError),
 }
 
-/// Everything `hq` knows about a mission that is not in its files: the flow
+/// Everything `nunki` knows about a mission that is not in its files: the flow
 /// (which carries the frozen header), the slot, and the run in progress if
 /// any, as a persistable handle.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,9 +46,9 @@ pub struct MissionState {
     pub slot: String,
     pub flow: Flow,
     /// The run launched for the current stage, if one is (or was) running.
-    /// Kept so a restarted `hq` can ask the engine whether it is still alive.
+    /// Kept so a restarted `nunki` can ask the engine whether it is still alive.
     pub run: Option<RunHandle>,
-    /// The application `hq` started for the current stage, if the mission
+    /// The application `nunki` started for the current stage, if the mission
     /// has one (SPEC 4.2, "les services et le lancement de l'application").
     /// Its own field and not the run's: "the agent is up" and "the
     /// deliverable is up" are two facts, and one handle would report them as
@@ -59,17 +59,17 @@ pub struct MissionState {
     /// leurs `HEAD`"). `VERDICT.json` holds one verdict at a time and every
     /// role overwrites it, so the file cannot answer "did the integrator pass,
     /// and on what?" once the security agent has written. This can, and it is
-    /// what `hq push` reads.
+    /// what `nunki push` reads.
     #[serde(default)]
     pub verdicts: Vec<Concluded>,
     /// Security findings a human has lifted (SPEC 4.5). `VERDICT.json` stays
     /// `FINDINGS` — the verdict says what the agent found, this says what the
-    /// human decided, and `hq push` reads the decision here. Each acceptance
+    /// human decided, and `nunki push` reads the decision here. Each acceptance
     /// carries the commit it was given on, because a verdict and its lift are
     /// worth one commit and no other.
     #[serde(default)]
     pub accepted: Vec<Accepted>,
-    /// Set by `hq mission stop`: `hq` launches no further run for this
+    /// Set by `nunki mission stop`: `nunki` launches no further run for this
     /// mission (SPEC 4.5). Deliberately **not** a stage — a stopped mission
     /// is neither abandoned (`end` says that) nor finished; SPEC calls it
     /// "intact et reprenable", and a stage would conflate a human's hold
@@ -78,13 +78,13 @@ pub struct MissionState {
     pub stopped: Option<Stopped>,
     /// Harness failures in a row, and the time before which no run is
     /// launched (SPEC 4.3). A wait and not a hold: it expires by itself, and
-    /// only when it would pass the ceiling does `hq` hold the mission.
+    /// only when it would pass the ceiling does `nunki` hold the mission.
     #[serde(default)]
     pub harness_down: Option<crate::backoff::HarnessDown>,
     /// What the mission has spent, against its caps (SPEC 7).
     #[serde(default)]
     pub spent: Spent,
-    /// Set when `hq` told the run in progress to end its turn because the
+    /// Set when `nunki` told the run in progress to end its turn because the
     /// account's window passed its threshold (SPEC 4.3). The read-back that
     /// follows costs no attempt, whatever the run left: the state decides and
     /// not the log, because what a harness writes after an interrupted turn
@@ -101,7 +101,7 @@ pub struct MissionState {
     pub updated_at: String,
 }
 
-/// A run `hq` ended because the account's window passed its threshold.
+/// A run `nunki` ended because the account's window passed its threshold.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Spared {
     pub account: String,
@@ -115,8 +115,8 @@ pub struct Spared {
 
 /// Runs, and tokens as the harness reported them (SPEC 7).
 ///
-/// A run is counted when `hq verify` reads it back, whatever the role — the
-/// coder's first run too, launched by `hq mission start` and read back like
+/// A run is counted when `nunki verify` reads it back, whatever the role — the
+/// coder's first run too, launched by `nunki mission start` and read back like
 /// the others.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Spent {
@@ -156,7 +156,7 @@ pub struct Accepted {
     /// Why. Never empty: a risk accepted without a reason is not accepted,
     /// it is forgotten.
     pub why: String,
-    /// Who took it, as `hq whoami` knows them.
+    /// Who took it, as `nunki whoami` knows them.
     pub who: String,
     /// The commit it was given on.
     pub head: String,
@@ -164,17 +164,17 @@ pub struct Accepted {
 }
 
 /// A hold a human put on a mission: no further run is launched until
-/// `hq mission resume` lifts it.
+/// `nunki mission resume` lifts it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Stopped {
-    /// Who held it, as `hq whoami` knows them.
+    /// Who held it, as `nunki whoami` knows them.
     pub who: String,
     pub date: String,
     /// Whether the run in progress was also interrupted (`--now`). Kept
-    /// because the two are different facts: one says what `hq` will not do
+    /// because the two are different facts: one says what `nunki` will not do
     /// next, the other says what was done to the run that was going.
     pub interrupted: bool,
-    /// Why, when `hq` held it itself — a harness it stopped waiting for. A
+    /// Why, when `nunki` held it itself — a harness it stopped waiting for. A
     /// hold whose reason is lost reads as a mission someone forgot.
     #[serde(default)]
     pub reason: Option<String>,
@@ -185,7 +185,7 @@ impl MissionState {
     ///
     /// Replacing, because a volet replays the whole chain: an `INTEGRATED`
     /// from before a correction is not a second opinion, it is a stale one,
-    /// and keeping both would let `hq push` find the green it wants among
+    /// and keeping both would let `nunki push` find the green it wants among
     /// answers about other commits.
     pub fn conclude(
         &mut self,
@@ -218,7 +218,7 @@ impl MissionState {
         self.accepted_on(head).iter().any(|a| a.finding.is_none())
     }
 
-    /// Hold the mission: `hq` launches no further run for it.
+    /// Hold the mission: `nunki` launches no further run for it.
     pub fn hold(&mut self, who: &str, interrupted: bool) {
         self.stopped = Some(Stopped {
             who: who.to_string(),
@@ -228,7 +228,7 @@ impl MissionState {
         });
     }
 
-    /// Hold the mission, saying why: `hq`'s own hold, when waiting no longer
+    /// Hold the mission, saying why: `nunki`'s own hold, when waiting no longer
     /// serves.
     pub fn hold_for(&mut self, who: &str, reason: String) {
         self.stopped = Some(Stopped {
@@ -250,7 +250,7 @@ impl MissionState {
         self.stopped.take()
     }
 
-    /// Whether `hq` may launch a run for this mission.
+    /// Whether `nunki` may launch a run for this mission.
     pub fn held(&self) -> bool {
         self.stopped.is_some()
     }
@@ -264,7 +264,7 @@ pub struct Store {
 
 impl Store {
     /// Open (creating if needed) the state directory under an HQ root —
-    /// `~/.hq/<project>/` in production, a temp dir in tests.
+    /// `~/.nunki/<project>/` in production, a temp dir in tests.
     pub fn open(hq_root: &Path) -> Result<Self, StateError> {
         let root = hq_root.join("state");
         for dir in [root.join("missions"), root.join("locks")] {

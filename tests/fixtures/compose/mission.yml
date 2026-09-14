@@ -1,7 +1,7 @@
-name: hq-demo-1
+name: nunki-demo-1
 services:
   firewall:
-    image: hq/firewall:1
+    image: nunki/firewall:1
     cap_drop:
     - ALL
     cap_add:
@@ -25,7 +25,7 @@ services:
     init: true
     restart: no
   agent:
-    image: hq/rust:1
+    image: nunki/rust:1
     user: 501:20
     working_dir: /work/tree
     network_mode: service:firewall
@@ -38,14 +38,14 @@ services:
         condition: service_healthy
     volumes:
     - /Users/h/code/demo-slot-1:/work/tree:rw
-    - /Users/h/.hq/demo/missions/m1:/work/mission:ro
-    - /Users/h/.hq/demo/missions/m1/JOURNAL.md:/work/mission/JOURNAL.md:rw
-    - /Users/h/.hq/demo/missions/m1/PR.md:/work/mission/PR.md:rw
-    - /Users/h/.hq/demo/missions/m1/VERDICT.json:/work/mission/VERDICT.json:rw
-    - /Users/h/.hq/demo/missions/m1/MUTANTS.triage.json:/work/mission/MUTANTS.triage.json:rw
-    - hq-demo-1-harness:/home/agent/.harness
+    - /Users/h/.nunki/demo/missions/m1:/work/mission:ro
+    - /Users/h/.nunki/demo/missions/m1/JOURNAL.md:/work/mission/JOURNAL.md:rw
+    - /Users/h/.nunki/demo/missions/m1/PR.md:/work/mission/PR.md:rw
+    - /Users/h/.nunki/demo/missions/m1/VERDICT.json:/work/mission/VERDICT.json:rw
+    - /Users/h/.nunki/demo/missions/m1/MUTANTS.triage.json:/work/mission/MUTANTS.triage.json:rw
+    - nunki-demo-1-harness:/home/agent/.harness
     tmpfs:
-    - /run/hq:uid=501,gid=20,mode=0700
+    - /run/nunki:uid=501,gid=20,mode=0700
     environment:
       HQ_ROLE: coder
     init: true
@@ -54,4 +54,4 @@ services:
     - sleep
     - infinity
 volumes:
-  hq-demo-1-harness: null
+  nunki-demo-1-harness: null

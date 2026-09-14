@@ -1,4 +1,4 @@
-//! `hq check` — does this project hold what SPEC describes? (SPEC 4.2.)
+//! `nunki check` — does this project hold what SPEC describes? (SPEC 4.2.)
 //!
 //! Two rules shape it. It is **red** when a restriction is not held, not
 //! when something is merely absent. And it **says what it could not check**:
@@ -276,23 +276,24 @@ fn harness_can_authenticate(project: &Project, report: &mut Report) {
     use crate::account::{Accounts, setup_command};
 
     let what = "the account this project spends can authenticate";
-    let hq_home = project.hq_home();
-    let accounts = match Accounts::load(&hq_home) {
+    let nunki_home = project.nunki_home();
+    let accounts = match Accounts::load(&nunki_home) {
         Ok(a) => a,
         Err(e) => {
             report.add(what, Verdict::Red(e.to_string()));
             return;
         }
     };
-    let (name, account) = match accounts.choose(&hq_home, None, project.config.account.as_deref()) {
-        Ok(pair) => pair,
-        // Nothing named and nothing to guess from: something to do, not
-        // something broken.
-        Err(e) => {
-            report.add(what, Verdict::NotChecked(e.to_string()));
-            return;
-        }
-    };
+    let (name, account) =
+        match accounts.choose(&nunki_home, None, project.config.account.as_deref()) {
+            Ok(pair) => pair,
+            // Nothing named and nothing to guess from: something to do, not
+            // something broken.
+            Err(e) => {
+                report.add(what, Verdict::NotChecked(e.to_string()));
+                return;
+            }
+        };
 
     if account.harness != project.config.harness {
         report.add(
@@ -305,7 +306,7 @@ fn harness_can_authenticate(project: &Project, report: &mut Report) {
         return;
     }
 
-    let path = account.token_path(&hq_home);
+    let path = account.token_path(&nunki_home);
     if path.starts_with(&project.root) {
         // A token in the tree is a token in every slot and every container.
         report.add(
@@ -318,7 +319,7 @@ fn harness_can_authenticate(project: &Project, report: &mut Report) {
         );
         return;
     }
-    match account.token(&hq_home, &name) {
+    match account.token(&nunki_home, &name) {
         Err(_) => report.add(
             what,
             Verdict::NotChecked(format!(
@@ -359,8 +360,8 @@ fn harness_can_authenticate(project: &Project, report: &mut Report) {
 fn somebody_to_hand_back_to(project: &Project, report: &mut Report) {
     use crate::human::{ME_FILE, Source, me};
 
-    let who = me(&project.hq_home(), Some(&project.root));
-    let what = "hq knows who to hand a mission back to";
+    let who = me(&project.nunki_home(), Some(&project.root));
+    let what = "nunki knows who to hand a mission back to";
     let verdict = match (&who.name, &who.source) {
         (Some(name), Source::Declared(path)) => {
             Verdict::Green(format!("{name}, from {}", path.display()))
@@ -371,11 +372,11 @@ fn somebody_to_hand_back_to(project: &Project, report: &mut Report) {
         (Some(name), _) => Verdict::NotChecked(format!(
             "{name} is the machine's account name, not something you said; \
              write {} to be addressed properly",
-            project.hq_home().join(ME_FILE).display()
+            project.nunki_home().join(ME_FILE).display()
         )),
         (None, _) => Verdict::NotChecked(format!(
             "nothing says who you are; write {}",
-            project.hq_home().join(ME_FILE).display()
+            project.nunki_home().join(ME_FILE).display()
         )),
     };
     report.add(what, verdict);
@@ -419,7 +420,7 @@ fn coder_perimeter(project: &Project, report: &mut Report) {
     if project.config.stacks.is_empty() {
         report.add(
             "the coder's allowlist names no forge domain",
-            Verdict::NotChecked("no stack declared in hq.yaml".to_string()),
+            Verdict::NotChecked("no stack declared in nunki.yaml".to_string()),
         );
         return;
     }
@@ -479,16 +480,16 @@ fn walk(root: &Path, visit: &mut impl FnMut(&Path)) {
 /// bis, "branche protégée"): locally nothing stops an agent committing to
 /// `main` in its clone — gate 2 sees it, and the forge is what refuses the
 /// push. When the forge would not refuse, gate 2 is the only guard left, and
-/// that is a restriction not held — unless `hq.yaml` declares
+/// that is a restriction not held — unless `nunki.yaml` declares
 /// `forge_protection: by_hand`, the written decision that the human holds the
 /// rule. Then the forge is not asked, and every branch is named as held by
-/// hand: never green, since hq cannot see a human keep a rule, and never red.
+/// hand: never green, since nunki cannot see a human keep a rule, and never red.
 ///
 /// It asks with the human's credential at the HQ, and without one it says it
 /// did not ask. Anything the forge declines to answer is "not checked",
 /// never green and never red: a check that cannot say "I do not know" lies.
 ///
-/// It runs on every `hq check` where a credential is present — unlike the
+/// It runs on every `nunki check` where a credential is present — unlike the
 /// container probes, which wait for `--slot`. The asymmetry is deliberate:
 /// SPEC 4.1 bis asks for it "quand un credential de forge est présent sur
 /// l'hôte", and it costs one read per protected branch, where a probe costs
@@ -532,7 +533,7 @@ pub fn forge_protection(project: &Project, api: &str, report: &mut Report) {
         return not_checked(
             report,
             format!(
-                "the remote is not on GitHub ({}), and GitHub is the only forge hq can ask",
+                "the remote is not on GitHub ({}), and GitHub is the only forge nunki can ask",
                 remote.trim()
             ),
         );
@@ -541,7 +542,7 @@ pub fn forge_protection(project: &Project, api: &str, report: &mut Report) {
         return not_checked(
             report,
             format!(
-                "no forge credential at {} — without one hq cannot ask the forge, and says so",
+                "no forge credential at {} — without one nunki cannot ask the forge, and says so",
                 project.hq_root.join(TOKEN_FILE).display()
             ),
         );

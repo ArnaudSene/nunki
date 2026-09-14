@@ -34,7 +34,7 @@ pub const FILE: &str = "MUTANTS.json";
 /// the two it can write.
 ///
 /// Two files rather than one field, because what decides who wrote a line is
-/// the **mount**, not the content: `hq` cannot read a file and tell whose
+/// the **mount**, not the content: `nunki` cannot read a file and tell whose
 /// hand a line came from (SPEC 4.1, decided 2026-09-10). The agent may write
 /// the two outcomes that rest on a committed test, and physically cannot
 /// write the third.
@@ -42,11 +42,11 @@ pub const TRIAGE_FILE: &str = "MUTANTS.triage.json";
 
 /// The campaign in flight, beside it. Its own record on purpose: the mission
 /// state holds one run handle and that one belongs to the agent — a campaign
-/// filed there would show up in `hq mission status` as an agent's run.
+/// filed there would show up in `nunki mission status` as an agent's run.
 pub const RUN_FILE: &str = "MUTANTS.run.json";
 
 /// What the stack fragment declares. It prints the survivors on stdout, one
-/// JSON object per line, and `hq` never parses a mutation tool itself: which
+/// JSON object per line, and `nunki` never parses a mutation tool itself: which
 /// tool, and how it is invoked in place on the copy, is the stack's business
 /// (SPEC 4.4: "une commande déterministe déclarée par le fragment de stack").
 pub const SCRIPT: &str = "mutation.sh";
@@ -132,7 +132,7 @@ pub struct Running {
     pub pid: Option<u32>,
     /// Where the campaign's stdout lands, on the host.
     pub log: PathBuf,
-    /// How long it is given before `hq` calls it hung (SPEC 4.4, "un délai
+    /// How long it is given before `nunki` calls it hung (SPEC 4.4, "un délai
     /// paramétré").
     pub deadline_minutes: u32,
 }
@@ -141,7 +141,7 @@ pub struct Running {
 pub enum MutantsError {
     #[error(transparent)]
     Git(#[from] git::GitError),
-    #[error("{0} is not a campaign `hq` can read: {1}")]
+    #[error("{0} is not a campaign `nunki` can read: {1}")]
     Unreadable(PathBuf, String),
     #[error("{0}: {1}")]
     Io(PathBuf, std::io::Error),
@@ -232,7 +232,7 @@ pub fn read(dir: &Path) -> Result<Option<Campaign>, MutantsError> {
 
 /// The coder's answers, by survivor id. Absent until it writes one, and an
 /// unreadable one is an error rather than an empty triage: a file the coder
-/// wrote and `hq` cannot parse must be said, not silently ignored.
+/// wrote and `nunki` cannot parse must be said, not silently ignored.
 pub fn read_triage(dir: &Path) -> Result<BTreeMap<String, Triage>, MutantsError> {
     let file = dir.join(TRIAGE_FILE);
     let text = match std::fs::read_to_string(&file) {
@@ -305,7 +305,7 @@ pub fn rule_equivalent(dir: &Path, id: &str, why: &str) -> Result<(), MutantsErr
     let mut campaign = read(dir)?.ok_or_else(|| {
         MutantsError::Unreadable(
             dir.join(FILE),
-            "there is no campaign to rule on — `hq mission mutants` runs one".to_string(),
+            "there is no campaign to rule on — `nunki mission mutants` runs one".to_string(),
         )
     })?;
     let found = campaign
@@ -506,7 +506,7 @@ pub fn campaign(
     Ok(Progress::Started { fingerprint: want })
 }
 
-/// Minutes since an RFC 3339 stamp, read the way `hq` writes them. A stamp it
+/// Minutes since an RFC 3339 stamp, read the way `nunki` writes them. A stamp it
 /// cannot read counts as zero rather than as an overrun: the campaign is not
 /// killed because a clock was unreadable.
 fn minutes_since(stamp: &str) -> u32 {

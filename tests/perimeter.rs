@@ -1,8 +1,8 @@
 //! The allowlist rules of SPEC 4.1 bis, rules 5 and 6.
 
-use hq::harness::Role;
-use hq::mission::Service;
-use hq::perimeter::{PerimeterError, Profile, Sources, compute};
+use nunki::harness::Role;
+use nunki::mission::Service;
+use nunki::perimeter::{PerimeterError, Profile, Sources, compute};
 
 fn strings(items: &[&str]) -> Vec<String> {
     items.iter().map(|s| s.to_string()).collect()

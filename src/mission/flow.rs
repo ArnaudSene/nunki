@@ -53,7 +53,7 @@ pub enum Stage {
     Findings { report: String },
     /// Stopped; the human decides.
     AwaitingHuman(Handover),
-    /// Every declared stage is green: ready for human validation and `hq push`.
+    /// Every declared stage is green: ready for human validation and `nunki push`.
     Verified,
 }
 
@@ -75,9 +75,9 @@ pub enum Event {
     Verdict { verdict: Verdict, report: String },
     /// From `Findings`: the HQ chooses to iterate.
     Iterate,
-    /// From `Findings`: the human lifted every finding (`hq mission accept`).
+    /// From `Findings`: the human lifted every finding (`nunki mission accept`).
     HumanAccepted,
-    /// The human called the mission off (`hq mission end`), with a reason.
+    /// The human called the mission off (`nunki mission end`), with a reason.
     /// Valid wherever a mission can still be worked on: what it says is
     /// "stop asking me about this", and there is no stage where that is not
     /// a thing a human may say.
@@ -95,7 +95,7 @@ pub enum FlowError {
          lot(s) — finish the lot, or stop the mission before reframing it"
     )]
     LotGone { lot: String, lots: usize },
-    #[error("the mission is already over; `hq mission archive` closes it")]
+    #[error("the mission is already over; `nunki mission archive` closes it")]
     AlreadyOver,
 }
 
@@ -140,7 +140,7 @@ impl Flow {
     /// Re-freeze the framing (SPEC 4.1, rule 3).
     ///
     /// Changing the shape of a running mission is a gesture of the HQ,
-    /// through a verb, never an edit of the file: `hq` never re-reads the
+    /// through a verb, never an edit of the file: `nunki` never re-reads the
     /// header during a mission, so a file edited behind its back changes
     /// nothing and looks as though it did.
     ///

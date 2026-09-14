@@ -4,11 +4,11 @@
 //! is replayed without costing an attempt, but not at once: each failure in
 //! a row doubles the wait before the next launch, from two minutes up to an
 //! hour. Once waiting again would run past the mission's ceiling
-//! (`harness_wait_hours`), `hq` holds the mission and hands it to the human.
+//! (`harness_wait_hours`), `nunki` holds the mission and hands it to the human.
 //! An authentication failure goes to the human at once: no wait mends a
 //! revoked token.
 //!
-//! `hq verify` does not sleep — it launches and returns. The wait is a "not
+//! `nunki verify` does not sleep — it launches and returns. The wait is a "not
 //! before" kept in the mission's state and honoured at the launch site, so it
 //! survives a machine asleep; the mission's monitor ([`crate::monitor`]) is
 //! what calls `verify` again once it is over.

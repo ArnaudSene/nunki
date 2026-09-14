@@ -1,10 +1,10 @@
-//! A project `hq` can orchestrate: where it lives, and what it declares
-//! (SPEC 4.1, `hq.yaml`).
+//! A project `nunki` can orchestrate: where it lives, and what it declares
+//! (SPEC 4.1, `nunki.yaml`).
 //!
 //! Two roots, and they are never the same place. The **repository** is the
-//! human's, and `hq` writes almost nothing in it (SPEC 3.3). The **HQ** is
-//! `~/.hq/<project>/`: journal, dashboard, state, missions — everything
-//! `hq` owns lives there, outside the tree an agent can write.
+//! human's, and `nunki` writes almost nothing in it (SPEC 3.3). The **HQ** is
+//! `~/.nunki/<project>/`: journal, dashboard, state, missions — everything
+//! `nunki` owns lives there, outside the tree an agent can write.
 
 use std::path::{Path, PathBuf};
 
@@ -23,7 +23,7 @@ pub struct Config {
     /// (SPEC 3.1, 4.1 bis rule 6).
     #[serde(default)]
     pub forge: Vec<String>,
-    /// Stack fragments this project uses, under `.hq/stacks/<name>/`.
+    /// Stack fragments this project uses, under `.nunki/stacks/<name>/`.
     #[serde(default)]
     pub stacks: Vec<String>,
     /// Branches no mission may target or push to.
@@ -37,7 +37,7 @@ pub struct Config {
     /// Which model the agents run on, when the harness takes one. Absent,
     /// the harness keeps its own default. A mission header beats it, and no
     /// name is checked against a list: what a model name means belongs to
-    /// the harness, not to `hq`, and a list here would rot with every
+    /// the harness, not to `nunki`, and a list here would rot with every
     /// release. An unknown name fails in the container, where the harness
     /// says what it accepts.
     #[serde(default)]
@@ -53,7 +53,7 @@ pub struct Config {
     /// it needed is a run that ends having done nothing.
     ///
     /// Not checked against a list, for the same reason as `model`: these
-    /// names belong to the harness's vocabulary, not to `hq`.
+    /// names belong to the harness's vocabulary, not to `nunki`.
     #[serde(default = "default_permission_mode")]
     pub permission_mode: String,
     #[serde(default)]
@@ -68,7 +68,7 @@ pub struct Config {
     pub run: Option<String>,
     /// The project's own Compose file, whose `services:` and `networks:` are
     /// merged verbatim into every system profile (SPEC 4.2, engine table:
-    /// `include:` is unusable on one of the two engines, so `hq` merges the
+    /// `include:` is unusable on one of the two engines, so `nunki` merges the
     /// YAML itself). A path inside the tree, because the file is the
     /// project's and travels with the commit; absent means the mission's
     /// system profile lifts no service of its own.
@@ -92,16 +92,16 @@ fn default_permission_mode() -> String {
 }
 
 /// A private repository on GitHub's free plan can neither protect a branch
-/// nor say it does, and a red `hq check` cannot fix that: a red that cannot
+/// nor say it does, and a red `nunki check` cannot fix that: a red that cannot
 /// be fixed teaches to ignore red. `by_hand` is the written decision that the
 /// human holds the rule instead.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ForgeProtection {
-    /// The forge refuses the push, and `hq check` asks it whether it would.
+    /// The forge refuses the push, and `nunki check` asks it whether it would.
     #[default]
     Forge,
-    /// The human holds the rule; `hq check` does not ask the forge, and says
+    /// The human holds the rule; `nunki check` does not ask the forge, and says
     /// so for every protected branch.
     ByHand,
 }
@@ -118,23 +118,23 @@ pub struct ProtectedPaths {
     pub refuse_if_exists: Vec<String>,
 }
 
-/// The file `hq init` writes and every verb reads.
-pub const CONFIG_FILE: &str = "hq.yaml";
+/// The file `nunki init` writes and every verb reads.
+pub const CONFIG_FILE: &str = "nunki.yaml";
 /// Where a project's stack fragments live, inside the project.
-pub const FRAGMENTS_DIR: &str = ".hq";
+pub const FRAGMENTS_DIR: &str = ".nunki";
 /// Where a stack fragment declares the directories an execution must be able
 /// to write when the tree is read-only.
 pub const WRITABLE_FILE: &str = "writable.txt";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProjectError {
-    #[error("no {CONFIG_FILE} in {0} or any directory above it — run `hq init` first")]
+    #[error("no {CONFIG_FILE} in {0} or any directory above it — run `nunki init` first")]
     NotAProject(PathBuf),
     #[error("{0} could not be read: {1}")]
     Unreadable(PathBuf, String),
     #[error("{0} is not valid: {1}")]
     Invalid(PathBuf, String),
-    #[error("no home directory: the HQ lives under ~/.hq")]
+    #[error("no home directory: the HQ lives under ~/.nunki")]
     NoHome,
 }
 
@@ -166,7 +166,7 @@ impl Project {
     }
 
     /// Open a project rooted exactly here, with its HQ somewhere chosen — the
-    /// form tests use, and the one `hq init` uses before a HQ exists.
+    /// form tests use, and the one `nunki init` uses before a HQ exists.
     pub fn at(root: PathBuf, config: Config, hq_root: PathBuf) -> Self {
         Self {
             root,
@@ -175,11 +175,11 @@ impl Project {
         }
     }
 
-    /// `~/.hq/` — the directory every project's HQ sits under, and where
+    /// `~/.nunki/` — the directory every project's HQ sits under, and where
     /// accounts live. Derived from the HQ rather than from `HOME`, so a test
     /// or a second machine can point the whole thing elsewhere by saying so
     /// once.
-    pub fn hq_home(&self) -> PathBuf {
+    pub fn nunki_home(&self) -> PathBuf {
         self.hq_root
             .parent()
             .map(Path::to_path_buf)
@@ -249,6 +249,6 @@ impl Project {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "project".to_string());
-        Ok(PathBuf::from(home).join(".hq").join(name))
+        Ok(PathBuf::from(home).join(".nunki").join(name))
     }
 }

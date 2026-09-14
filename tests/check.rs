@@ -1,10 +1,10 @@
-//! `hq check` (SPEC 4.2): red when a restriction is not held, and always
+//! `nunki check` (SPEC 4.2): red when a restriction is not held, and always
 //! explicit about what it could not establish.
 
 use std::path::{Path, PathBuf};
 
-use hq::check::{Report, Verdict, collisions, run};
-use hq::project::{Config, Project, ProjectError, ProtectedPaths};
+use nunki::check::{Report, Verdict, collisions, run};
+use nunki::project::{Config, Project, ProjectError, ProtectedPaths};
 
 mod common;
 use common::serve;
@@ -30,7 +30,7 @@ fn config() -> Config {
 /// A project on disk that holds everything, so a test can break one thing.
 fn sound(dir: &Path) -> Project {
     let root = dir.join("repo");
-    let hq_root = dir.join("hq");
+    let hq_root = dir.join("nunki");
     std::fs::create_dir_all(root.join(".git")).unwrap();
     std::fs::create_dir_all(&hq_root).unwrap();
     std::fs::write(root.join(".gitattributes"), "* text=auto eol=lf\n").unwrap();
@@ -200,7 +200,7 @@ fn paths_that_differ_only_by_case_are_found() {
 #[test]
 fn an_unchecked_thing_is_never_reported_as_a_pass() {
     let mut report = Report::default();
-    report.checks.push(hq::check::Check {
+    report.checks.push(nunki::check::Check {
         what: "something".to_string(),
         verdict: Verdict::NotChecked("no engine here".to_string()),
     });
@@ -220,7 +220,7 @@ fn a_project_is_found_by_walking_up_the_way_git_does() {
     let deep = root.join("src").join("engine");
     std::fs::create_dir_all(&deep).unwrap();
     std::fs::write(
-        root.join("hq.yaml"),
+        root.join("nunki.yaml"),
         "harness: claude-code\nforge: [github.com]\nstacks: [rust]\n",
     )
     .unwrap();
@@ -239,7 +239,7 @@ fn a_project_is_found_by_walking_up_the_way_git_does() {
     assert_eq!(project.config.bounds.max_volets, 3);
     // The HQ is never inside the repository.
     assert!(!project.hq_root.starts_with(&project.root));
-    assert!(project.hq_root.ends_with(".hq/repo"));
+    assert!(project.hq_root.ends_with(".nunki/repo"));
 }
 
 #[test]
@@ -247,29 +247,29 @@ fn a_directory_that_is_not_a_project_says_which_file_is_missing() {
     let dir = tempfile::tempdir().unwrap();
     let err = Project::open(dir.path()).unwrap_err();
     assert!(matches!(err, ProjectError::NotAProject(_)));
-    assert!(err.to_string().contains("hq.yaml"), "{err}");
-    assert!(err.to_string().contains("hq init"), "{err}");
+    assert!(err.to_string().contains("nunki.yaml"), "{err}");
+    assert!(err.to_string().contains("nunki init"), "{err}");
 }
 
 #[test]
 fn a_malformed_config_names_the_file_and_the_reason() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("hq.yaml"), "harness: [not, a, string]\n").unwrap();
+    std::fs::write(dir.path().join("nunki.yaml"), "harness: [not, a, string]\n").unwrap();
     let err = Project::open(dir.path()).unwrap_err();
     assert!(matches!(err, ProjectError::Invalid(..)), "{err}");
-    assert!(err.to_string().contains("hq.yaml"), "{err}");
+    assert!(err.to_string().contains("nunki.yaml"), "{err}");
 }
 
 #[test]
 fn a_report_holding_a_violation_is_red_and_says_how_many() {
     let mut report = Report::default();
-    report.checks.push(hq::check::Check {
+    report.checks.push(nunki::check::Check {
         what: "something".to_string(),
         verdict: Verdict::Green("fine".to_string()),
     });
     assert!(!report.is_red());
 
-    report.checks.push(hq::check::Check {
+    report.checks.push(nunki::check::Check {
         what: "something else".to_string(),
         verdict: Verdict::Red("not held".to_string()),
     });
@@ -289,9 +289,9 @@ fn the_verb_exits_non_zero_when_a_restriction_is_not_held() {
     let root = dir.path().join("repo");
     std::fs::create_dir_all(&root).unwrap();
     // A project with no `.git`: a slot is a clone, so this cannot stand.
-    std::fs::write(root.join("hq.yaml"), "harness: claude-code\n").unwrap();
+    std::fs::write(root.join("nunki.yaml"), "harness: claude-code\n").unwrap();
 
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_hq"))
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_nunki"))
         .args(["-C"])
         .arg(&root)
         .arg("check")
@@ -307,7 +307,7 @@ fn the_verb_exits_non_zero_when_a_restriction_is_not_held() {
 
     // And a directory that is no project at all says so on stderr, without
     // pretending to have checked anything.
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_hq"))
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_nunki"))
         .args(["-C"])
         .arg(dir.path())
         .arg("check")
@@ -319,7 +319,7 @@ fn the_verb_exits_non_zero_when_a_restriction_is_not_held() {
         "nothing was checked, so nothing is reported"
     );
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("hq init"),
+        String::from_utf8_lossy(&out.stderr).contains("nunki init"),
         "{:?}",
         String::from_utf8_lossy(&out.stderr)
     );
@@ -336,9 +336,9 @@ fn the_verb_exits_non_zero_when_a_restriction_is_not_held() {
 fn the_verb_is_green_on_this_very_repository() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let home = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(home.path().join(".hq").join("nunki")).unwrap();
+    std::fs::create_dir_all(home.path().join(".nunki").join("nunki")).unwrap();
 
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_hq"))
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_nunki"))
         .env("HOME", home.path())
         .args(["-C"])
         .arg(root)
@@ -363,11 +363,11 @@ fn the_hq_is_the_projects_own_directory_under_the_home() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("some-project");
     std::fs::create_dir_all(&root).unwrap();
-    std::fs::write(root.join("hq.yaml"), "harness: claude-code\n").unwrap();
+    std::fs::write(root.join("nunki.yaml"), "harness: claude-code\n").unwrap();
 
     let project = Project::open(&root).unwrap();
     let home = PathBuf::from(std::env::var("HOME").unwrap());
-    assert_eq!(project.hq_root, home.join(".hq").join("some-project"));
+    assert_eq!(project.hq_root, home.join(".nunki").join("some-project"));
 }
 
 #[test]
@@ -392,11 +392,11 @@ fn rules_the_harness_cannot_read_are_red() {
 
 #[test]
 fn the_account_a_project_spends_is_checked_not_assumed() {
-    use hq::account::{Account, Accounts};
+    use nunki::account::{Account, Accounts};
 
     let dir = tempfile::tempdir().unwrap();
     let project = sound(dir.path());
-    let hq_home = project.hq_home();
+    let nunki_home = project.nunki_home();
 
     // Nothing declared: something to do, not something broken.
     let v = verdict(&run(&project), "can authenticate");
@@ -404,7 +404,7 @@ fn the_account_a_project_spends_is_checked_not_assumed() {
 
     let write_index = |index: &Accounts| {
         std::fs::write(
-            hq_home.join("accounts.yaml"),
+            nunki_home.join("accounts.yaml"),
             serde_yaml_ng::to_string(index).unwrap(),
         )
         .unwrap()
@@ -450,8 +450,8 @@ fn the_account_a_project_spends_is_checked_not_assumed() {
         .collect(),
         default: None,
     });
-    std::fs::create_dir_all(hq_home.join("accounts")).unwrap();
-    let token = hq_home.join("accounts/perso");
+    std::fs::create_dir_all(nunki_home.join("accounts")).unwrap();
+    let token = nunki_home.join("accounts/perso");
     std::fs::write(&token, "sk-ant-oat-example\n").unwrap();
     #[cfg(unix)]
     {
@@ -469,7 +469,7 @@ fn the_account_a_project_spends_is_checked_not_assumed() {
 /// A real repository whose `origin` reads as GitHub, protecting two branches.
 fn on_github(dir: &Path, remote: &str) -> Project {
     let root = dir.join("repo");
-    let hq_root = dir.join("hq");
+    let hq_root = dir.join("nunki");
     std::fs::create_dir_all(&root).unwrap();
     std::fs::create_dir_all(&hq_root).unwrap();
     for args in [vec!["init", "-q"], vec!["remote", "add", "origin", remote]] {
@@ -494,7 +494,11 @@ fn on_github(dir: &Path, remote: &str) -> Project {
 }
 
 fn with_token(project: &Project) {
-    std::fs::write(project.hq_root.join(hq::forge::TOKEN_FILE), "tok-human\n").unwrap();
+    std::fs::write(
+        project.hq_root.join(nunki::forge::TOKEN_FILE),
+        "tok-human\n",
+    )
+    .unwrap();
 }
 
 fn forge_verdicts(report: &Report) -> Vec<(String, Verdict)> {
@@ -520,7 +524,7 @@ fn the_forge_is_asked_branch_by_branch_and_an_unprotected_one_is_red() {
     ]);
 
     let mut report = Report::default();
-    hq::check::forge_protection(&project, &api, &mut report);
+    nunki::check::forge_protection(&project, &api, &mut report);
     let verdicts = forge_verdicts(&report);
 
     assert!(matches!(&verdicts[0].1, Verdict::Green(_)), "{verdicts:?}");
@@ -557,13 +561,13 @@ fn without_a_credential_every_branch_is_named_as_not_checked() {
     let project = on_github(dir.path(), "https://github.com/o/r.git");
 
     let mut report = Report::default();
-    hq::check::forge_protection(&project, "http://127.0.0.1:9", &mut report);
+    nunki::check::forge_protection(&project, "http://127.0.0.1:9", &mut report);
     let verdicts = forge_verdicts(&report);
 
     assert_eq!(verdicts.len(), 2, "{verdicts:?}");
     for (_, verdict) in &verdicts {
         match verdict {
-            Verdict::NotChecked(why) => assert!(why.contains(hq::forge::TOKEN_FILE), "{why}"),
+            Verdict::NotChecked(why) => assert!(why.contains(nunki::forge::TOKEN_FILE), "{why}"),
             other => panic!("{other:?}"),
         }
     }
@@ -585,7 +589,7 @@ fn a_404_is_an_absent_branch_only_when_the_forge_says_so() {
     ]);
 
     let mut report = Report::default();
-    hq::check::forge_protection(&project, &api, &mut report);
+    nunki::check::forge_protection(&project, &api, &mut report);
     server.join().unwrap();
     let verdicts = forge_verdicts(&report);
 
@@ -611,11 +615,11 @@ fn a_404_is_an_absent_branch_only_when_the_forge_says_so() {
 fn by_hand_asks_no_forge_and_names_every_branch_as_held_by_hand() {
     let dir = tempfile::tempdir().unwrap();
     let mut project = on_github(dir.path(), "https://github.com/o/r.git");
-    project.config.forge_protection = hq::project::ForgeProtection::ByHand;
+    project.config.forge_protection = nunki::project::ForgeProtection::ByHand;
     with_token(&project);
 
     let mut report = Report::default();
-    hq::check::forge_protection(&project, "http://127.0.0.1:9", &mut report);
+    nunki::check::forge_protection(&project, "http://127.0.0.1:9", &mut report);
     let verdicts = forge_verdicts(&report);
 
     assert_eq!(verdicts.len(), 2, "{verdicts:?}");
@@ -628,11 +632,11 @@ fn by_hand_asks_no_forge_and_names_every_branch_as_held_by_hand() {
     assert!(!report.is_red());
 }
 
-/// The field reads from `hq.yaml` as written there, and is `forge` when
+/// The field reads from `nunki.yaml` as written there, and is `forge` when
 /// absent — the default asks the forge.
 #[test]
 fn forge_protection_reads_from_the_file_and_defaults_to_the_forge() {
-    use hq::project::ForgeProtection;
+    use nunki::project::ForgeProtection;
     let base = "harness: claude-code\n";
     let absent: Config = serde_yaml_ng::from_str(base).unwrap();
     assert_eq!(absent.forge_protection, ForgeProtection::Forge);
@@ -649,7 +653,7 @@ fn a_remote_off_github_is_not_asked_and_says_why() {
     with_token(&project);
 
     let mut report = Report::default();
-    hq::check::forge_protection(&project, "http://127.0.0.1:9", &mut report);
+    nunki::check::forge_protection(&project, "http://127.0.0.1:9", &mut report);
     for (_, verdict) in forge_verdicts(&report) {
         match verdict {
             Verdict::NotChecked(why) => assert!(why.contains("not on GitHub"), "{why}"),

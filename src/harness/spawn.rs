@@ -52,10 +52,10 @@ impl Signal {
 /// there"** and neither of them is "the container went away under it". A
 /// boolean forces all three into one, and the lie is always in the same
 /// direction: an engine that did not answer, a profile taken down, a machine
-/// that slept — every one of them reads as a run that died, and `hq` files a
+/// that slept — every one of them reads as a run that died, and `nunki` files a
 /// harness failure against an agent it never looked at.
 ///
-/// SPEC 4.2 already separates the last two: a restarted `hq` asks the engine
+/// SPEC 4.2 already separates the last two: a restarted `nunki` asks the engine
 /// whether the container exists and runs, and a container that is gone makes
 /// the run *interrupted by the harness* — no attempt consumed, the session
 /// resumed. That is a verdict, and it needs the engine to have answered.
@@ -66,7 +66,7 @@ pub enum Presence {
     /// The container was there and the process was not. This run has ended,
     /// whatever it left behind.
     Ended,
-    /// A human froze it with `hq mission pause`, and it is exactly where they
+    /// A human froze it with `nunki mission pause`, and it is exactly where they
     /// left it. Its own answer, and not `Running`: a run that makes no
     /// progress because somebody said so is not a run that stopped thinking,
     /// and a stall check must not read the two the same way (SPEC 4.3).
@@ -106,7 +106,7 @@ pub trait Spawner: Send + Sync {
 }
 
 /// Runs the command on this machine, in its own process group so a signal
-/// aimed at `hq` does not reach it.
+/// aimed at `nunki` does not reach it.
 #[derive(Debug, Default)]
 pub struct LocalSpawner;
 

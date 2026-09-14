@@ -5,9 +5,9 @@
 use std::fs;
 use std::path::PathBuf;
 
-use hq::harness::claude_code::{ClaudeCode, Config, FORBIDDEN_ARGS, parse_stream};
-use hq::harness::spawn::{CommandSpec, LocalSpawner, Presence, Spawned, Spawner};
-use hq::harness::{
+use nunki::harness::claude_code::{ClaudeCode, Config, FORBIDDEN_ARGS, parse_stream};
+use nunki::harness::spawn::{CommandSpec, LocalSpawner, Presence, Spawned, Spawner};
+use nunki::harness::{
     Exposure, GuardSetup, Harness, Outcome, Progress, Role, RunHandle, RunRequest, RunState,
     SessionId, Workspace,
 };
@@ -25,7 +25,7 @@ fn request(resume: bool) -> RunRequest {
         session: SessionId("11111111-2222-4333-8444-555555555555".into()),
         resume,
         // A host path, and deliberately not under the mission folder.
-        runs_dir: PathBuf::from("/hq/demo/missions/m1/runs"),
+        runs_dir: PathBuf::from("/nunki/demo/missions/m1/runs"),
     }
 }
 
@@ -99,11 +99,11 @@ fn guards_and_config_are_passed_at_invocation() {
         config_dir: Some("/home/agent/.claude".into()),
         ..Config::default()
     };
-    let hq = ClaudeCode::new(config, Box::new(LocalSpawner));
+    let nunki = ClaudeCode::new(config, Box::new(LocalSpawner));
     let guards = GuardSetup {
         args: vec!["--settings".into(), "{\"hooks\":{}}".into()],
     };
-    let cmd = hq.command(
+    let cmd = nunki.command(
         &request(false),
         &guards,
         &Exposure::SystemPromptFile("/r.md".into()),
@@ -132,7 +132,7 @@ fn a_captured_successful_run_parses_as_finished_with_its_usage() {
     assert_eq!(parsed.progress.tool_calls, 0);
     // The four kinds, as v2.1.266 reports them: the cache read is nearly all
     // of it, and a count of input and output alone would have said six.
-    let spent = hq::harness::Usage {
+    let spent = nunki::harness::Usage {
         input_tokens: 2,
         output_tokens: 4,
         cache_creation_input_tokens: 0,
@@ -213,7 +213,7 @@ fn state_reads_the_log_and_the_process() {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("runs/s.jsonl");
     fs::create_dir_all(log.parent().unwrap()).unwrap();
-    let hq = adapter();
+    let nunki = adapter();
     let session = SessionId("s".into());
 
     // No result yet, our own pid is alive: running.
@@ -228,7 +228,7 @@ fn state_reads_the_log_and_the_process() {
         pid: Some(std::process::id()),
         log: log.clone(),
     };
-    assert!(matches!(hq.state(&alive).unwrap(), RunState::Running(p) if p.events == 1));
+    assert!(matches!(nunki.state(&alive).unwrap(), RunState::Running(p) if p.events == 1));
 
     // No result, and the process is gone: a harness failure, replayed later.
     let child = std::process::Command::new("true").spawn().unwrap();
@@ -239,14 +239,14 @@ fn state_reads_the_log_and_the_process() {
         ..alive.clone()
     };
     assert!(matches!(
-        hq.state(&dead).unwrap(),
+        nunki.state(&dead).unwrap(),
         RunState::Finished(Outcome::HarnessFailure(_))
     ));
 
     // A result: finished, whatever the process.
     fs::write(&log, fixture()).unwrap();
     assert!(matches!(
-        hq.state(&dead).unwrap(),
+        nunki.state(&dead).unwrap(),
         RunState::Finished(Outcome::Finished(_))
     ));
 
@@ -255,7 +255,7 @@ fn state_reads_the_log_and_the_process() {
         log: dir.path().join("nope.jsonl"),
         ..alive
     };
-    assert!(matches!(hq.state(&none).unwrap(), RunState::Running(p) if p.events == 0));
+    assert!(matches!(nunki.state(&none).unwrap(), RunState::Running(p) if p.events == 0));
 }
 
 /// A spawner that records what it was asked and starts nothing.
@@ -279,7 +279,7 @@ impl Spawner for Recording {
     fn signal(
         &self,
         _spawned: &Spawned,
-        _signal: hq::harness::spawn::Signal,
+        _signal: nunki::harness::spawn::Signal,
     ) -> std::io::Result<()> {
         Ok(())
     }
@@ -288,8 +288,8 @@ impl Spawner for Recording {
 #[test]
 fn launch_writes_the_log_where_hq_can_read_it_not_where_the_agent_runs() {
     let rec = std::sync::Arc::new(Recording(Default::default()));
-    let hq = ClaudeCode::new(Config::default(), Box::new(RecordingRef(rec.clone())));
-    let handle = hq
+    let nunki = ClaudeCode::new(Config::default(), Box::new(RecordingRef(rec.clone())));
+    let handle = nunki
         .launch(
             &request(false),
             &GuardSetup::default(),
@@ -302,7 +302,7 @@ fn launch_writes_the_log_where_hq_can_read_it_not_where_the_agent_runs() {
     // nothing on this side of the mount.
     assert_eq!(
         handle.log,
-        PathBuf::from("/hq/demo/missions/m1/runs/11111111-2222-4333-8444-555555555555.jsonl")
+        PathBuf::from("/nunki/demo/missions/m1/runs/11111111-2222-4333-8444-555555555555.jsonl")
     );
     assert!(!handle.log.starts_with("/work"), "{:?}", handle.log);
     assert_eq!(handle.container, "c1");
@@ -323,7 +323,11 @@ impl Spawner for RecordingRef {
         self.0.alive(spawned)
     }
 
-    fn signal(&self, spawned: &Spawned, signal: hq::harness::spawn::Signal) -> std::io::Result<()> {
+    fn signal(
+        &self,
+        spawned: &Spawned,
+        signal: nunki::harness::spawn::Signal,
+    ) -> std::io::Result<()> {
         self.0.signal(spawned, signal)
     }
 }
@@ -342,7 +346,7 @@ fn live_a_real_headless_run_finishes_with_a_result() {
         }
     }
     let dir = Dir(root);
-    let hq = ClaudeCode::new(
+    let nunki = ClaudeCode::new(
         Config {
             max_turns: Some(1),
             ..Config::default()
@@ -361,10 +365,12 @@ fn live_a_real_headless_run_finishes_with_a_result() {
         ..request(false)
     };
     let exposure = Exposure::UserMessage("Reply with exactly the word OK and nothing else.".into());
-    let handle = hq.launch(&req, &GuardSetup::default(), &exposure).unwrap();
+    let handle = nunki
+        .launch(&req, &GuardSetup::default(), &exposure)
+        .unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
     loop {
-        match hq.state(&handle).unwrap() {
+        match nunki.state(&handle).unwrap() {
             RunState::Finished(Outcome::Finished(usage)) => {
                 assert!(usage.output_tokens > 0);
                 break;
@@ -418,9 +424,9 @@ fn uuid_v4() -> String {
 
 #[test]
 fn a_role_is_allowed_the_tools_its_work_needs_and_the_prompt_survives() {
-    let hq = adapter();
-    let guards = hq.guards(Role::Coder);
-    let cmd = hq.command(
+    let nunki = adapter();
+    let guards = nunki.guards(Role::Coder);
+    let cmd = nunki.command(
         &request(false),
         &guards,
         &Exposure::UserMessage("do the thing".into()),
@@ -457,7 +463,7 @@ fn a_role_is_allowed_the_tools_its_work_needs_and_the_prompt_survives() {
 
 /// A spawner that answers `answer`, and — the point of it — writes `writes`
 /// into the log at the moment it is asked. That is the race, made
-/// deterministic: the harness emits its `result` and exits between `hq`'s
+/// deterministic: the harness emits its `result` and exits between `nunki`'s
 /// two reads.
 struct EndsWhileAsked {
     answer: Presence,
@@ -479,7 +485,7 @@ impl Spawner for EndsWhileAsked {
     fn signal(
         &self,
         _spawned: &Spawned,
-        _signal: hq::harness::spawn::Signal,
+        _signal: nunki::harness::spawn::Signal,
     ) -> std::io::Result<()> {
         Ok(())
     }
@@ -498,7 +504,7 @@ fn handle_for(log: PathBuf) -> RunHandle {
 /// log is read.
 ///
 /// A run that emits its `result` and exits in between is a run that said how
-/// it ended. Read the log first and the process second, and `hq` sees an
+/// it ended. Read the log first and the process second, and `nunki` sees an
 /// empty log and a dead process, and files a harness failure against an
 /// agent that had just succeeded. A process that has ended writes nothing
 /// more, so the log read after the answer is complete — which is why this
@@ -513,25 +519,25 @@ fn a_run_that_ends_between_the_two_reads_is_not_a_harness_failure() {
     )
     .unwrap();
 
-    let hq = ClaudeCode::new(
+    let nunki = ClaudeCode::new(
         Config::default(),
         Box::new(EndsWhileAsked {
             answer: Presence::Ended,
             writes: Some((log.clone(), fixture())),
         }),
     );
-    match hq.state(&handle_for(log)).unwrap() {
+    match nunki.state(&handle_for(log)).unwrap() {
         RunState::Finished(Outcome::Finished(_)) => {}
-        other => panic!("the run said how it ended and hq must read it, got {other:?}"),
+        other => panic!("the run said how it ended and nunki must read it, got {other:?}"),
     }
 }
 
-/// A run `hq` cannot reach is not a run that died.
+/// A run `nunki` cannot reach is not a run that died.
 ///
 /// Everything that goes wrong between here and the process — the container
 /// taken down, the engine not running, the profile recycled — used to come
 /// back as "not alive", and "not alive" plus a log without a `result` is a
-/// harness failure recorded against the agent. `hq` does not know, and the
+/// harness failure recorded against the agent. `nunki` does not know, and the
 /// only honest answer is to say so.
 #[test]
 fn a_run_that_cannot_be_reached_is_not_a_run_that_died() {
@@ -543,17 +549,17 @@ fn a_run_that_cannot_be_reached_is_not_a_run_that_died() {
     )
     .unwrap();
 
-    let hq = ClaudeCode::new(
+    let nunki = ClaudeCode::new(
         Config::default(),
         Box::new(EndsWhileAsked {
             answer: Presence::Unknown("the engine did not answer: no such daemon".into()),
             writes: None,
         }),
     );
-    let err = hq.state(&handle_for(log.clone())).unwrap_err();
+    let err = nunki.state(&handle_for(log.clone())).unwrap_err();
     let said = err.to_string();
     assert!(
-        matches!(err, hq::harness::HarnessError::Unreachable(_)),
+        matches!(err, nunki::harness::HarnessError::Unreachable(_)),
         "{said}"
     );
     // And it carries the reason, so the human knows where to look.
@@ -578,15 +584,15 @@ fn a_container_that_went_away_says_so_and_does_not_blame_the_agent() {
     )
     .unwrap();
 
-    let hq = ClaudeCode::new(
+    let nunki = ClaudeCode::new(
         Config::default(),
         Box::new(EndsWhileAsked {
             answer: Presence::Vanished("the engine no longer knows container abc123def456".into()),
             writes: None,
         }),
     );
-    match hq.state(&handle_for(log)).unwrap() {
-        RunState::Finished(Outcome::HarnessFailure(hq::harness::Fault { why, .. })) => {
+    match nunki.state(&handle_for(log)).unwrap() {
+        RunState::Finished(Outcome::HarnessFailure(nunki::harness::Fault { why, .. })) => {
             assert!(why.contains("abc123def456"), "{why}");
             assert!(
                 !why.contains("without a result event"),
@@ -610,7 +616,7 @@ impl Spawner for Answering {
     fn signal(
         &self,
         _spawned: &Spawned,
-        _signal: hq::harness::spawn::Signal,
+        _signal: nunki::harness::spawn::Signal,
     ) -> std::io::Result<()> {
         Ok(())
     }
@@ -666,14 +672,14 @@ fn the_subscription_windows_are_read_from_the_stream() {
         .expect("v2.1.266 reports them");
     assert_eq!(
         windows.five_hour,
-        Some(hq::consumption::Window {
+        Some(nunki::consumption::Window {
             per_mille: 530,
             resets_at: 1_789_003_800
         })
     );
     assert_eq!(
         windows.weekly,
-        Some(hq::consumption::Window {
+        Some(nunki::consumption::Window {
             per_mille: 410,
             resets_at: 1_789_351_200
         })
@@ -703,7 +709,7 @@ fn the_last_rate_limit_event_is_the_one_kept() {
 fn a_resumed_session_writes_its_run_to_a_log_of_its_own() {
     let dir = tempfile::tempdir().unwrap();
     let rec = std::sync::Arc::new(Recording(Default::default()));
-    let hq = ClaudeCode::new(Config::default(), Box::new(RecordingRef(rec.clone())));
+    let nunki = ClaudeCode::new(Config::default(), Box::new(RecordingRef(rec.clone())));
     let mut req = request(true);
     req.runs_dir = dir.path().to_path_buf();
     let first = dir
@@ -711,12 +717,13 @@ fn a_resumed_session_writes_its_run_to_a_log_of_its_own() {
         .join("11111111-2222-4333-8444-555555555555.jsonl");
     fs::write(&first, "the first run\n").unwrap();
     let launch = || {
-        hq.launch(
-            &req,
-            &GuardSetup::default(),
-            &Exposure::SystemPromptFile("/r.md".into()),
-        )
-        .unwrap()
+        nunki
+            .launch(
+                &req,
+                &GuardSetup::default(),
+                &Exposure::SystemPromptFile("/r.md".into()),
+            )
+            .unwrap()
     };
 
     let second = launch();

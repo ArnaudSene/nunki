@@ -1,4 +1,4 @@
-//! `hq` — a mission orchestrator for AI coding agents.
+//! `nunki` — a mission orchestrator for AI coding agents.
 //!
 //! The specification lives in `SPEC.md` at the repository root. Section
 //! numbers in doc comments refer to it. This crate is the engine (SPEC 4.2):

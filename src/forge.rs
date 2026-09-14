@@ -1,4 +1,4 @@
-//! Opening the pull request on the forge (SPEC 4.2, `hq push`).
+//! Opening the pull request on the forge (SPEC 4.2, `nunki push`).
 //!
 //! The one outward-facing write in the product, and it happens under the same
 //! `--yes` as the push: SPEC names one verb that "pousse la branche … et ouvre
@@ -7,9 +7,9 @@
 //! before saying yes.
 //!
 //! It talks to GitHub with **the human's** credential, kept at the HQ and
-//! never mounted in a container: `~/.hq/<project>/forge-token`. The only
+//! never mounted in a container: `~/.nunki/<project>/forge-token`. The only
 //! part of the HQ a container ever sees is its own mission folder, one level
-//! below. Without that file `hq push` still pushes, and hands over the exact
+//! below. Without that file `nunki push` still pushes, and hands over the exact
 //! address to open the pull request at by hand.
 //!
 //! Only GitHub, because it is the only forge any project here uses; a remote
@@ -37,7 +37,7 @@ pub enum ForgeError {
     Refused { status: u16, message: String },
     #[error("the forge could not be reached: {0}")]
     Unreachable(String),
-    #[error("the forge answered something hq cannot read: {0}")]
+    #[error("the forge answered something nunki cannot read: {0}")]
     Unreadable(String),
 }
 
@@ -289,7 +289,7 @@ pub fn can_read(api: &str, token: &str, repo: &Repo) -> Result<(), ForgeError> {
 fn agent() -> ureq::Agent {
     ureq::Agent::config_builder()
         .http_status_as_error(false)
-        // A forge that does not answer should say so quickly: `hq check`
+        // A forge that does not answer should say so quickly: `nunki check`
         // asks once per protected branch, and a silent minute reads as a
         // hung verb.
         .timeout_connect(Some(Duration::from_secs(10)))
@@ -303,7 +303,7 @@ fn authorised<B>(request: ureq::RequestBuilder<B>, token: &str) -> ureq::Request
         .header("Authorization", &format!("Bearer {token}"))
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2022-11-28")
-        .header("User-Agent", concat!("hq/", env!("CARGO_PKG_VERSION")))
+        .header("User-Agent", concat!("nunki/", env!("CARGO_PKG_VERSION")))
 }
 
 fn refused(status: u16, text: &str) -> ForgeError {

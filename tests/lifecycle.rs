@@ -2,11 +2,11 @@
 
 use std::path::PathBuf;
 
-use hq::lifecycle::{self, LifecycleError};
-use hq::mission::flow::{Event, Flow, Stage, Work};
-use hq::mission::{Bounds, Header, Integration, Lot, Security, Service};
-use hq::project::{Config, Project, ProtectedPaths};
-use hq::state::{MissionState, Store};
+use nunki::lifecycle::{self, LifecycleError};
+use nunki::mission::flow::{Event, Flow, Stage, Work};
+use nunki::mission::{Bounds, Header, Integration, Lot, Security, Service};
+use nunki::project::{Config, Project, ProtectedPaths};
+use nunki::state::{MissionState, Store};
 
 fn header(lots: usize) -> Header {
     Header {
@@ -38,7 +38,7 @@ struct World {
 impl World {
     fn new(lots: usize) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let hq_root = dir.path().join("hq");
+        let hq_root = dir.path().join("nunki");
         for d in ["locks", "missions", "state/missions"] {
             std::fs::create_dir_all(hq_root.join(d)).unwrap();
         }
@@ -61,7 +61,7 @@ impl World {
             },
             hq_root.clone(),
         );
-        hq::mission::dir::create(&hq_root, "m1", &header(lots), "do it").unwrap();
+        nunki::mission::dir::create(&hq_root, "m1", &header(lots), "do it").unwrap();
         Store::open(&hq_root)
             .unwrap()
             .save(&MissionState {
@@ -85,7 +85,7 @@ impl World {
 
     /// Rewrite `MISSION.md` with a different framing, the way a human edits it.
     fn reframe_file(&self, header: &Header) {
-        hq::mission::dir::create(&self.project.hq_root, "m2", header, "x").unwrap();
+        nunki::mission::dir::create(&self.project.hq_root, "m2", header, "x").unwrap();
         let from = self.project.hq_root.join("missions/m2/MISSION.md");
         let to = self.project.hq_root.join("missions/m1/MISSION.md");
         let fresh = std::fs::read_to_string(&from).unwrap();
@@ -105,8 +105,8 @@ impl World {
     fn running(&self) {
         let store = Store::open(&self.project.hq_root).unwrap();
         let mut state = store.load("m1").unwrap();
-        state.run = Some(hq::harness::RunHandle {
-            session: hq::harness::SessionId("s1".into()),
+        state.run = Some(nunki::harness::RunHandle {
+            session: nunki::harness::SessionId("s1".into()),
             container: "cafe".into(),
             pid: Some(41),
             log: PathBuf::from("/dev/null"),
@@ -123,7 +123,7 @@ impl World {
     }
 }
 
-/// Editing `MISSION.md` changes nothing until the verb says so: `hq` never
+/// Editing `MISSION.md` changes nothing until the verb says so: `nunki` never
 /// re-reads the header during a mission. The verb puts the framing back in
 /// front of the human first — it says what would change and does nothing.
 #[test]
@@ -172,7 +172,7 @@ fn reframing_under_a_running_agent_is_refused() {
     world.running();
     let err = lifecycle::reframe(&world.project, "m1", true).unwrap_err();
     assert!(matches!(err, LifecycleError::RunInProgress { .. }), "{err}");
-    assert!(err.to_string().contains("hq mission stop"), "{err}");
+    assert!(err.to_string().contains("nunki mission stop"), "{err}");
 }
 
 /// The flow may be standing on a lot the new framing does not have.
@@ -183,7 +183,7 @@ fn a_framing_that_removes_the_lot_being_worked_on_is_refused() {
     let world = World::new(3);
     // Finish the first lot, so the flow stands on the second.
     world.at(&[Event::RunEnded {
-        outcome: hq::harness::Outcome::Finished(Default::default()),
+        outcome: nunki::harness::Outcome::Finished(Default::default()),
         lot_done: true,
     }]);
     assert!(matches!(
@@ -199,7 +199,7 @@ fn a_framing_that_removes_the_lot_being_worked_on_is_refused() {
     assert!(
         matches!(
             err,
-            LifecycleError::Flow(hq::mission::flow::FlowError::LotGone { .. })
+            LifecycleError::Flow(nunki::mission::flow::FlowError::LotGone { .. })
         ),
         "{err}"
     );
@@ -215,7 +215,7 @@ fn archiving_moves_a_finished_mission_and_keeps_everything_in_it() {
     let world = World::new(1);
     world.at(&[
         Event::RunEnded {
-            outcome: hq::harness::Outcome::Finished(Default::default()),
+            outcome: nunki::harness::Outcome::Finished(Default::default()),
             lot_done: true,
         },
         Event::GatesPassed,
@@ -288,14 +288,14 @@ fn archiving_twice_says_so() {
     let world = World::new(1);
     world.at(&[
         Event::RunEnded {
-            outcome: hq::harness::Outcome::Finished(Default::default()),
+            outcome: nunki::harness::Outcome::Finished(Default::default()),
             lot_done: true,
         },
         Event::GatesPassed,
     ]);
     lifecycle::archive(&world.project, "m1").unwrap();
 
-    hq::mission::dir::create(&world.project.hq_root, "m1", &header(1), "again").unwrap();
+    nunki::mission::dir::create(&world.project.hq_root, "m1", &header(1), "again").unwrap();
     Store::open(&world.project.hq_root)
         .unwrap()
         .save(&MissionState {
@@ -316,7 +316,7 @@ fn archiving_twice_says_so() {
         .unwrap();
     world.at(&[
         Event::RunEnded {
-            outcome: hq::harness::Outcome::Finished(Default::default()),
+            outcome: nunki::harness::Outcome::Finished(Default::default()),
             lot_done: true,
         },
         Event::GatesPassed,
@@ -380,7 +380,7 @@ fn ending_a_mission_makes_it_closable() {
     assert!(
         matches!(
             state.flow.stage(),
-            Stage::AwaitingHuman(hq::mission::flow::Handover::Abandoned { reason })
+            Stage::AwaitingHuman(nunki::mission::flow::Handover::Abandoned { reason })
                 if reason == "the approach was wrong"
         ),
         "{:?}",
@@ -412,7 +412,7 @@ fn a_mission_that_is_already_over_is_not_ended_again() {
     let world = World::new(1);
     world.at(&[
         Event::RunEnded {
-            outcome: hq::harness::Outcome::Finished(Default::default()),
+            outcome: nunki::harness::Outcome::Finished(Default::default()),
             lot_done: true,
         },
         Event::GatesPassed,
@@ -423,13 +423,13 @@ fn a_mission_that_is_already_over_is_not_ended_again() {
     assert!(
         matches!(
             err,
-            LifecycleError::State(hq::state::StateError::Flow(
-                hq::mission::flow::FlowError::AlreadyOver
+            LifecycleError::State(nunki::state::StateError::Flow(
+                nunki::mission::flow::FlowError::AlreadyOver
             ))
         ),
         "{err}"
     );
-    assert!(err.to_string().contains("hq mission archive"), "{err}");
+    assert!(err.to_string().contains("nunki mission archive"), "{err}");
     assert!(matches!(world.state().flow.stage(), Stage::Verified));
 }
 
@@ -441,7 +441,7 @@ fn ending_works_wherever_a_mission_can_still_be_worked_on() {
     for reach in [
         vec![],
         vec![Event::RunEnded {
-            outcome: hq::harness::Outcome::Finished(Default::default()),
+            outcome: nunki::harness::Outcome::Finished(Default::default()),
             lot_done: true,
         }],
     ] {
@@ -450,7 +450,7 @@ fn ending_works_wherever_a_mission_can_still_be_worked_on() {
         lifecycle::end(&world.project, "m1", "not worth finishing").unwrap();
         assert!(matches!(
             world.state().flow.stage(),
-            Stage::AwaitingHuman(hq::mission::flow::Handover::Abandoned { .. })
+            Stage::AwaitingHuman(nunki::mission::flow::Handover::Abandoned { .. })
         ));
     }
 }

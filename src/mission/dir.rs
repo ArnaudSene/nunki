@@ -1,9 +1,9 @@
 //! The mission folder, at the HQ (SPEC 4.1).
 //!
-//! It lives under `~/.hq/<project>/missions/<id>/`, outside the git tree,
+//! It lives under `~/.nunki/<project>/missions/<id>/`, outside the git tree,
 //! and is mounted into the container. That is what lets the HQ and the agent
 //! talk through files without a channel, while the tree stays clean and the
-//! folder survives `hq slot rm`.
+//! folder survives `nunki slot rm`.
 //!
 //! Five files, and the split between them is a restriction, not a
 //! convention. `MISSION.md` and `FOLLOWUP_HQ.md` belong to the human and the
@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use crate::mission::Header;
 
-/// The files of one mission. `MUTANTS.json` is `hq`'s and is written only
+/// The files of one mission. `MUTANTS.json` is `nunki`'s and is written only
 /// when a campaign ends, so it is not created here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Paths {
@@ -28,7 +28,7 @@ pub struct Paths {
     /// The coder's answers to a mutation campaign's survivors (SPEC 4.4,
     /// gate 7). Separate from `MUTANTS.json`, which is the HQ's.
     pub triage: PathBuf,
-    /// The campaign itself, written by `hq` and read-only for the agent.
+    /// The campaign itself, written by `nunki` and read-only for the agent.
     pub mutants: PathBuf,
 }
 
@@ -86,7 +86,7 @@ pub fn create(
     write(&paths.followup, &followup(header))?;
     write(&paths.journal, &journal(id))?;
     write(&paths.pr, "")?;
-    // Not `{}`: an empty verdict is the absence of one, and `hq` refuses a
+    // Not `{}`: an empty verdict is the absence of one, and `nunki` refuses a
     // verdict whose `head` is not the branch's (SPEC 4.1).
     write(&paths.verdict, "")?;
     // Created empty, and that is not cosmetic: a bind mount whose source
@@ -96,7 +96,7 @@ pub fn create(
     Ok(paths)
 }
 
-/// The header of a mission, read back from its folder. `hq` reads this once,
+/// The header of a mission, read back from its folder. `nunki` reads this once,
 /// when the human validates the framing, and freezes it in its state; during
 /// the mission it never reads it again.
 pub fn read_header(hq_root: &Path, id: &str) -> Result<Header, MissionDirError> {
@@ -172,7 +172,7 @@ fn followup(header: &Header) -> String {
 For {who} and the HQ. The agent reads this file and never writes it.
 
 Anything this mission cannot decide on its own is written here, dated and
-addressed to {who}. `hq` appends to it too: a verdict another role concluded
+addressed to {who}. `nunki` appends to it too: a verdict another role concluded
 on, and a finding {who} has lifted (SPEC 4.5).
 "#;
     TEMPLATE.replace("{who}", &who)

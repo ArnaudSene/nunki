@@ -1,4 +1,4 @@
-//! The slice of the Compose format `hq` emits (SPEC 4.2).
+//! The slice of the Compose format `nunki` emits (SPEC 4.2).
 //!
 //! Not a Compose implementation: only the keys the generator writes, in a
 //! fixed order, so that regenerating an unchanged plan yields the same bytes.
@@ -26,7 +26,7 @@ pub struct Document {
     pub networks: Mapping,
 }
 
-/// A service `hq` writes itself.
+/// A service `nunki` writes itself.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct Service {
     pub image: String,

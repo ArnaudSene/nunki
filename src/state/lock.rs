@@ -3,7 +3,7 @@
 //! Only the verbs that change a slot's state take it — `start`, `verify`,
 //! `reset`, `rebuild`, `rm`, `push`. Readers (`status`, `logs`, `watch`,
 //! `check`) and the human's gestures (`say`, `pause`, `resume`, `stop`,
-//! `kill`) never do. `hq exec` launched by `verify` runs under `verify`'s
+//! `kill`) never do. `nunki exec` launched by `verify` runs under `verify`'s
 //! own guard and does not ask twice: reentrancy is in-process, by passing
 //! the guard, not on disk.
 //!
@@ -21,7 +21,7 @@ use super::now_rfc3339;
 
 #[derive(Debug, thiserror::Error)]
 pub enum LockError {
-    #[error("slot {slot} is locked by `hq {verb}` (pid {pid}, since {since})")]
+    #[error("slot {slot} is locked by `nunki {verb}` (pid {pid}, since {since})")]
     Held {
         slot: String,
         verb: String,

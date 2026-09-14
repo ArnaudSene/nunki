@@ -1,6 +1,6 @@
 //! The container-engine boundary (SPEC 4.2).
 //!
-//! `hq` generates the Compose file itself (see [`crate::compose`]) and an
+//! `nunki` generates the Compose file itself (see [`crate::compose`]) and an
 //! engine adapter runs it. The boundary is not minuscule: the 4.2 table lists
 //! what genuinely differs between `docker compose` and `podman-compose`, and
 //! everything on that list lives behind [`Dialect`] and [`Engine`], nowhere
@@ -50,13 +50,13 @@ impl Dialect {
     }
 }
 
-/// What the engine says about a container, which is the authority `hq` asks
+/// What the engine says about a container, which is the authority `nunki` asks
 /// on restart before believing its own state (SPEC 4.2, "la reprise
 /// re-dérive avant de décider").
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Liveness {
     Running,
-    /// Frozen by `hq mission pause`: the process is there and makes no
+    /// Frozen by `nunki mission pause`: the process is there and makes no
     /// progress. Its own answer, because reporting it as running would tell a
     /// stall check that an agent stopped thinking, and reporting it as gone
     /// would tell the human their run died (measured: a paused container
@@ -100,10 +100,10 @@ pub enum EngineError {
     Io(#[from] std::io::Error),
 }
 
-/// Everything `hq` asks of a container engine, and nothing more.
+/// Everything `nunki` asks of a container engine, and nothing more.
 ///
 /// What is deliberately absent: building images, pulling, pruning, and
-/// anything resembling orchestration. `hq` orchestrates; the engine runs
+/// anything resembling orchestration. `nunki` orchestrates; the engine runs
 /// containers.
 pub trait Engine: Send + Sync {
     fn name(&self) -> &'static str;

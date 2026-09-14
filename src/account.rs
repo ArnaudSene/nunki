@@ -6,7 +6,7 @@
 //! change the account it spends halfway through, any more than it can change
 //! its perimeter.
 //!
-//! Accounts live at `~/.hq/accounts.yaml`, beside the projects' HQs and
+//! Accounts live at `~/.nunki/accounts.yaml`, beside the projects' HQs and
 //! outside every repository: an account is a property of the human, not of a
 //! project, and two projects share the same subscriptions. The tokens
 //! themselves are in files of their own, one per account, so the index can be
@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-/// The file that names the accounts, under `~/.hq/`.
+/// The file that names the accounts, under `~/.nunki/`.
 pub const INDEX_FILE: &str = "accounts.yaml";
 /// Where the tokens themselves live, one file per account.
 pub const TOKENS_DIR: &str = "accounts";
@@ -27,7 +27,7 @@ pub struct Account {
     /// Which harness this account authenticates. An Anthropic subscription
     /// is not an OpenAI one, and they are not passed the same way.
     pub harness: String,
-    /// Where the token is. Relative paths are taken from `~/.hq/`.
+    /// Where the token is. Relative paths are taken from `~/.nunki/`.
     pub token_file: PathBuf,
     /// What this account is, for a human reading the list.
     #[serde(default)]
@@ -38,7 +38,7 @@ pub struct Account {
 pub struct Accounts {
     #[serde(default)]
     pub accounts: BTreeMap<String, Account>,
-    /// Used when neither the mission nor `hq.yaml` names one.
+    /// Used when neither the mission nor `nunki.yaml` names one.
     #[serde(default)]
     pub default: Option<String>,
 }
@@ -48,8 +48,8 @@ pub enum AccountError {
     #[error("no account {name:?}; {known}")]
     Unknown { name: String, known: String },
     #[error(
-        "no account named: put one in the mission's header (`hq mission new --account <name>`), \
-         in hq.yaml, or as `default:` in {0}"
+        "no account named: put one in the mission's header (`nunki mission new --account <name>`), \
+         in nunki.yaml, or as `default:` in {0}"
     )]
     NotNamed(PathBuf),
     #[error("account {name:?} has no token at {path} — put the output of `{command}` there")]
@@ -67,8 +67,8 @@ pub enum AccountError {
 impl Accounts {
     /// Read the index. A missing file is an empty index, not an error: a
     /// project that has never named an account has nothing to read.
-    pub fn load(hq_home: &Path) -> Result<Self, AccountError> {
-        let path = hq_home.join(INDEX_FILE);
+    pub fn load(nunki_home: &Path) -> Result<Self, AccountError> {
+        let path = nunki_home.join(INDEX_FILE);
         match std::fs::read_to_string(&path) {
             Ok(text) => serde_yaml_ng::from_str(&text)
                 .map_err(|e| AccountError::Invalid(path, e.to_string())),
@@ -87,7 +87,7 @@ impl Accounts {
     /// account exists, it is the answer rather than a question.
     pub fn choose(
         &self,
-        hq_home: &Path,
+        nunki_home: &Path,
         from_mission: Option<&str>,
         from_project: Option<&str>,
     ) -> Result<(String, Account), AccountError> {
@@ -99,7 +99,7 @@ impl Accounts {
                 1 => self.accounts.keys().next().cloned(),
                 _ => None,
             })
-            .ok_or_else(|| AccountError::NotNamed(hq_home.join(INDEX_FILE)))?;
+            .ok_or_else(|| AccountError::NotNamed(nunki_home.join(INDEX_FILE)))?;
 
         let account = self
             .accounts
@@ -110,7 +110,7 @@ impl Accounts {
                 known: if self.accounts.is_empty() {
                     format!(
                         "none are declared in {}",
-                        hq_home.join(INDEX_FILE).display()
+                        nunki_home.join(INDEX_FILE).display()
                     )
                 } else {
                     format!("known: {}", self.names().join(", "))
@@ -122,19 +122,19 @@ impl Accounts {
 
 impl Account {
     /// Where the token is, resolved: a relative path is taken from
-    /// `~/.hq/`, so an index can be written without absolute paths.
-    pub fn token_path(&self, hq_home: &Path) -> PathBuf {
+    /// `~/.nunki/`, so an index can be written without absolute paths.
+    pub fn token_path(&self, nunki_home: &Path) -> PathBuf {
         if self.token_file.is_absolute() {
             self.token_file.clone()
         } else {
-            hq_home.join(&self.token_file)
+            nunki_home.join(&self.token_file)
         }
     }
 
     /// The token itself. Read at launch and passed to the container as an
     /// environment variable; never written into a slot (SPEC 3.3).
-    pub fn token(&self, hq_home: &Path, name: &str) -> Result<String, AccountError> {
-        let path = self.token_path(hq_home);
+    pub fn token(&self, nunki_home: &Path, name: &str) -> Result<String, AccountError> {
+        let path = self.token_path(nunki_home);
         let text = std::fs::read_to_string(&path).unwrap_or_default();
         let token = text.trim().to_string();
         if token.is_empty() {
@@ -158,7 +158,7 @@ pub fn setup_command(harness: &str) -> String {
     }
 }
 
-/// `~/.hq/`, the root every project's HQ sits under.
-pub fn hq_home() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".hq"))
+/// `~/.nunki/`, the root every project's HQ sits under.
+pub fn nunki_home() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".nunki"))
 }

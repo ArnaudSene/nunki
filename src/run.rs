@@ -2,10 +2,10 @@
 //!
 //! What this module does, in order, and every step is a decision written
 //! down somewhere: take the slot's lock; put the slot on the mission's
-//! branch; freeze the header into the state, because from here on `hq` reads
+//! branch; freeze the header into the state, because from here on `nunki` reads
 //! its own copy and never the file again; lift the role's profile; and launch
 //! the harness **inside** the agent's container, recording the handle so a
-//! restarted `hq` can find the run again.
+//! restarted `nunki` can find the run again.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -33,7 +33,7 @@ pub const MISSION_AT: &str = "/work/mission";
 
 #[derive(Debug, thiserror::Error)]
 pub enum RunError {
-    #[error("mission {0} has already started; `hq mission status {0}` says where it is")]
+    #[error("mission {0} has already started; `nunki mission status {0}` says where it is")]
     AlreadyStarted(String),
     #[error(transparent)]
     Account(#[from] crate::account::AccountError),
@@ -46,9 +46,9 @@ pub enum RunError {
         has: String,
         wants: String,
     },
-    #[error("no home directory: accounts live under ~/.hq")]
+    #[error("no home directory: accounts live under ~/.nunki")]
     NoHome,
-    #[error("the images are missing — `hq slot rebuild` builds them ({0})")]
+    #[error("the images are missing — `nunki slot rebuild` builds them ({0})")]
     NoImages(String),
     #[error(transparent)]
     Engine(#[from] EngineError),
@@ -69,11 +69,11 @@ pub enum RunError {
     #[error("the run could not be launched: {0}")]
     Launch(String),
     #[error(
-        "hq.yaml names {0} as the project's services file, and the slot's tree has no \
+        "nunki.yaml names {0} as the project's services file, and the slot's tree has no \
          such file on this commit"
     )]
     NoServicesFile(PathBuf),
-    #[error("{0} is not a Compose file hq can read: {1}")]
+    #[error("{0} is not a Compose file nunki can read: {1}")]
     BadServicesFile(PathBuf, String),
     #[error(transparent)]
     Application(#[from] crate::launch::LaunchError),
@@ -81,7 +81,7 @@ pub enum RunError {
         "the security profile is up but {0:?} is not writable in it — the stack declares \
          it in writable.txt, and a named volume takes its ownership from the image, so \
          an image built before that line yields a root-owned directory. \
-         `hq slot rebuild` builds it again{1}"
+         `nunki slot rebuild` builds it again{1}"
     )]
     NotWritable(String, String),
 }
@@ -94,10 +94,10 @@ pub fn account_for(
     project: &Project,
     from_mission: Option<&str>,
 ) -> Result<(String, crate::account::Account, String), RunError> {
-    let hq_home = project.hq_home();
-    let accounts = crate::account::Accounts::load(&hq_home)?;
+    let nunki_home = project.nunki_home();
+    let accounts = crate::account::Accounts::load(&nunki_home)?;
     let (name, account) =
-        accounts.choose(&hq_home, from_mission, project.config.account.as_deref())?;
+        accounts.choose(&nunki_home, from_mission, project.config.account.as_deref())?;
     if account.harness != project.config.harness {
         return Err(RunError::WrongHarness {
             account: name,
@@ -105,14 +105,14 @@ pub fn account_for(
             wants: project.config.harness.clone(),
         });
     }
-    let token = account.token(&hq_home, &name)?;
+    let token = account.token(&nunki_home, &name)?;
     Ok((name, account, token))
 }
 
 /// Which model this run asks the harness for. The mission's header wins over
 /// the project's declaration, and `None` leaves the harness its own default.
 ///
-/// Nothing here checks the name. `hq` knows harnesses, not models (SPEC
+/// Nothing here checks the name. `nunki` knows harnesses, not models (SPEC
 /// 4.3): a list of accepted names would rot with every release, and the
 /// harness itself refuses what it does not know — in the container, where
 /// its message is the one worth reading.
@@ -136,11 +136,11 @@ pub fn start(
         return Err(RunError::AlreadyStarted(id.to_string()));
     }
 
-    // The lock is taken before anything is changed: two `hq` on one slot is
+    // The lock is taken before anything is changed: two `nunki` on one slot is
     // two agents in one tree (SPEC 4.2).
     let _lock = SlotLock::acquire(&project.hq_root.join("locks"), &slot.name, "mission start")?;
 
-    // The header is read once, here, and frozen: from now on `hq` uses its
+    // The header is read once, here, and frozen: from now on `nunki` uses its
     // own copy, so nothing an agent writes can change the perimeter, the
     // bounds or the lots (SPEC 4.1).
     let header = mission_dir::read_header(&project.hq_root, id)?;
@@ -176,7 +176,7 @@ pub fn start(
         accepted: Vec::new(),
         stopped: None,
         harness_down: None,
-        // Counted when `hq verify` reads it back, like every other run.
+        // Counted when `nunki verify` reads it back, like every other run.
         spent: Default::default(),
         spared: None,
         coder_session: Some(session),
@@ -189,8 +189,8 @@ pub fn start(
 
 /// Everything one launch needs that its caller already holds. Gathered as a
 /// struct because `launch` takes no lock and asks the store nothing: the
-/// caller has both, and a second `SlotLock::acquire` under `hq verify` would
-/// be `hq` refusing itself (SPEC 4.2, "`hq exec` lancé par `verify`
+/// caller has both, and a second `SlotLock::acquire` under `nunki verify` would
+/// be `nunki` refusing itself (SPEC 4.2, "`nunki exec` lancé par `verify`
 /// s'exécute **sous** son verrou").
 pub struct Launching<'a> {
     pub project: &'a Project,
@@ -211,7 +211,7 @@ pub struct Launching<'a> {
 /// What a launch left behind, for the caller to persist.
 pub struct Launched {
     pub run: RunHandle,
-    /// The application `hq` started for this role, when the mission has one
+    /// The application `nunki` started for this role, when the mission has one
     /// to start. Kept apart from the run: "the agent is up" and "the
     /// deliverable is up" are two facts, and a single handle would report
     /// them as one.
@@ -387,7 +387,7 @@ pub fn launch(l: &Launching) -> Result<Launched, RunError> {
 
 /// The session a run is launched in, and whether the harness resumes it: the
 /// one given, resumed, or a fresh one (SPEC 4.3). Which one the caller gives
-/// is its rule to keep — `hq verify` carries the coder's from one lot to the
+/// is its rule to keep — `nunki verify` carries the coder's from one lot to the
 /// next and drops it after a failed attempt.
 pub fn session_for(given: Option<&SessionId>) -> (SessionId, bool) {
     match given {
@@ -586,18 +586,18 @@ pub fn plan(
 /// closed.
 fn volumes(project: &Project, slot: &Slot, stack: &str, role: Role) -> Vec<NamedVolume> {
     let mut volumes = vec![
-        // The clean copy of HEAD that `hq exec` replays proofs on, and its
+        // The clean copy of HEAD that `nunki exec` replays proofs on, and its
         // build cache with it: warmed once per slot and kept (SPEC 4.2,
         // 4.4 gate 7).
         crate::exec::volume(&slot.name),
         // The harness keeps its sessions here, so resuming survives a
         // rebuilt container (SPEC 4.3).
         NamedVolume {
-            name: format!("hq-{}-harness", slot.name),
+            name: format!("nunki-{}-harness", slot.name),
             at: PathBuf::from("/home/agent/.claude"),
         },
         NamedVolume {
-            name: format!("hq-{}-cargo", slot.name),
+            name: format!("nunki-{}-cargo", slot.name),
             at: PathBuf::from("/home/agent/.cargo/registry"),
         },
     ];
@@ -628,7 +628,7 @@ pub fn writable_volume(slot: &str, path: &str) -> String {
             }
         })
         .collect();
-    format!("hq-{slot}-security-{sanitised}")
+    format!("nunki-{slot}-security-{sanitised}")
 }
 
 /// Where the test credentials are mounted, read-only, on a system profile.
@@ -636,12 +636,12 @@ pub fn writable_volume(slot: &str, path: &str) -> String {
 /// whose tree and mission folder are both restrained, and a file bound
 /// underneath it stays read-only while the tmpfs above stays the agent's
 /// (measured, 2026-09-10).
-pub const CREDENTIALS_AT: &str = "/run/hq/credentials";
+pub const CREDENTIALS_AT: &str = "/run/nunki/credentials";
 
 /// The credential files a system profile mounts: every file the project's
 /// declared directory holds, sorted, so the generated profile is stable.
 ///
-/// A directory that does not exist is not an error here. `hq check` is where
+/// A directory that does not exist is not an error here. `nunki check` is where
 /// a missing credential is a finding; refusing to launch would turn "the
 /// human has not put the files there yet" into "the mission cannot run",
 /// which is a different sentence.
@@ -671,7 +671,7 @@ fn credentials(project: &Project) -> Result<Vec<(PathBuf, PathBuf)>, RunError> {
 ///
 /// From the tree and not from the repository: the file is the project's, it
 /// travels with the commit, and the integrator may amend it in its wiring —
-/// the same rule as the launch script (SPEC 4.2). What `hq.yaml` decides is
+/// the same rule as the launch script (SPEC 4.2). What `nunki.yaml` decides is
 /// **which** file; what the slot decides is what is in it.
 type ProjectBlocks = (
     Option<serde_yaml_ng::Value>,
@@ -697,7 +697,7 @@ fn project_compose(project: &Project, slot: &Slot) -> Result<ProjectBlocks, RunE
     Ok((pick("services"), pick("networks"), pick("volumes")))
 }
 
-/// A v4-shaped identifier. `hq` imposes it rather than reading one back
+/// A v4-shaped identifier. `nunki` imposes it rather than reading one back
 /// (SPEC 4.3), so it only has to be unique — but it has to be unique across
 /// its **whole** length, because the identity check greps a container's
 /// `/proc/<pid>/cmdline` for it and a prefix everybody shares tells nothing

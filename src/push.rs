@@ -1,4 +1,4 @@
-//! `hq mission fetch` and `hq push` (SPEC 4.2, verb table; 4.4; 4.5).
+//! `nunki mission fetch` and `nunki push` (SPEC 4.2, verb table; 4.4; 4.5).
 //!
 //! The only verb that touches the forge in write, and the only place a
 //! mission's commits leave their slot. Everything before it can be
@@ -8,7 +8,7 @@
 //! What it refuses, and why it can refuse it. A verdict is worth one commit
 //! (SPEC 4.5), and `VERDICT.json` holds one verdict at a time — every role
 //! overwrites it — so the file cannot answer "did the integrator pass, and on
-//! what?" once the security agent has written. `hq`'s state can, and that is
+//! what?" once the security agent has written. `nunki`'s state can, and that is
 //! what is read here.
 //!
 //! The rule for the coder is the one Arnaud decided on 2026-09-09, after the
@@ -29,13 +29,13 @@ pub enum PushError {
     #[error("mission {0} has not started — there is nothing to push")]
     NotStarted(String),
     #[error(
-        "mission {mission} is at {stage:?}, not verified — `hq verify {mission}` says what \
+        "mission {mission} is at {stage:?}, not verified — `nunki verify {mission}` says what \
          it is waiting for. There is no flag to push past this"
     )]
     NotVerified { mission: String, stage: Stage },
     #[error(
         "pushing is the one thing that is not autonomous: say so on the command line \
-         (`hq push {0} --yes`) once you have read the pull request"
+         (`nunki push {0} --yes`) once you have read the pull request"
     )]
     NotAuthorised(String),
     #[error("the {role:?} has not concluded on {head} — it concluded on {on}")]
@@ -50,7 +50,7 @@ pub enum PushError {
     Red { role: Role, verdict: Verdict },
     #[error(
         "the security agent concluded FINDINGS and nobody lifted it on {0} — \
-         `hq mission accept` records who took the risk, and why"
+         `nunki mission accept` records who took the risk, and why"
     )]
     NotLifted(String),
     #[error(
@@ -85,14 +85,14 @@ pub enum PushError {
 }
 
 /// The remote a mission is pushed to. One name, because a project with two
-/// remotes has a decision to make that `hq` must not make for it.
+/// remotes has a decision to make that `nunki` must not make for it.
 pub const REMOTE: &str = "origin";
 
 /// Bring a mission's commits from its slot into the main repository.
 ///
 /// This is the only way commits leave a slot (SPEC 4.2, "slots et
 /// branches"), and it goes one way: into the repository, never back. The
-/// repository is the human's, and `hq` writes one ref in it and nothing else.
+/// repository is the human's, and `nunki` writes one ref in it and nothing else.
 pub fn fetch(project: &Project, id: &str) -> Result<Fetched, PushError> {
     let store = Store::open(&project.hq_root)?;
     let state = store
@@ -155,13 +155,13 @@ pub struct Pushed {
 /// Not a `Result`: by the time it is decided the push has **already
 /// happened**, and it cannot be undone. A forge that refused the pull request
 /// is reported next to a push that succeeded, never in place of it — a
-/// `hq push` that exited red after pushing would be retried, and the second
+/// `nunki push` that exited red after pushing would be retried, and the second
 /// `git push` is a no-op that hides the first.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PullRequestState {
     Opened(crate::forge::Opened),
     /// Left for the human to open, and why — with the exact address when
-    /// `hq` can work one out.
+    /// `nunki` can work one out.
     ByHand {
         compare: Option<String>,
         why: String,
@@ -242,14 +242,14 @@ fn open_pull_request(
 
     let Some(repo) = crate::forge::Repo::of_remote(remote) else {
         return by_hand(format!(
-            "the remote is not on GitHub ({remote}), and GitHub is the only forge hq opens \
+            "the remote is not on GitHub ({remote}), and GitHub is the only forge nunki opens \
              pull requests on"
         ));
     };
     let Some(token) = crate::forge::token(&project.hq_root) else {
         return by_hand(format!(
             "no forge credential at {} — a GitHub token that can open pull requests on \
-             {}/{}, and hq opens it itself",
+             {}/{}, and nunki opens it itself",
             project.hq_root.join(crate::forge::TOKEN_FILE).display(),
             repo.owner,
             repo.name
@@ -295,7 +295,7 @@ fn verdicts_hold(
             })?;
         on_this_commit(Role::Security, concluded, head)?;
         // The one verdict a human may overrule, and only by having said so
-        // on this commit, with a reason, through `hq mission accept`.
+        // on this commit, with a reason, through `nunki mission accept`.
         if concluded.verdict == Some(Verdict::Findings) {
             if !state.verdict_lifted_on(head) {
                 return Err(PushError::NotLifted(head.to_string()));
@@ -403,7 +403,7 @@ fn remote_url(project: &Project) -> Result<String, PushError> {
 /// The address a human opens the pull request at, worked out from the
 /// remote's own URL.
 ///
-/// Used whenever `hq` does not open it itself — no credential, a remote that
+/// Used whenever `nunki` does not open it itself — no credential, a remote that
 /// is not on GitHub, a forge that refused. A URL nobody has to assemble is
 /// the difference between "opened by hand" and "left to figure out".
 pub fn pull_request_url(remote: &str, base: &str, branch: &str) -> Option<String> {

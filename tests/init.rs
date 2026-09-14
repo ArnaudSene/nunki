@@ -1,9 +1,9 @@
-//! `hq init` (SPEC 4.2, 3.3): creates what is absent, never overwrites what
+//! `nunki init` (SPEC 4.2, 3.3): creates what is absent, never overwrites what
 //! a human edits, keeps no manifest, and can be run again.
 
 use std::path::Path;
 
-use hq::init::{Action, InitError, KNOWN_STACKS, init};
+use nunki::init::{Action, InitError, KNOWN_STACKS, init};
 
 fn created(actions: &[Action], name: &str) -> bool {
     actions
@@ -21,32 +21,32 @@ fn kept(actions: &[Action], name: &str) -> Option<String> {
 fn fresh() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("repo");
-    let hq = dir.path().join("hq");
+    let nunki = dir.path().join("nunki");
     std::fs::create_dir_all(&root).unwrap();
-    (dir, root, hq)
+    (dir, root, nunki)
 }
 
 #[test]
 fn a_fresh_repository_gets_everything_it_needs() {
-    let (_d, root, hq) = fresh();
-    let actions = init(&root, &hq, &["rust".to_string()]).unwrap();
+    let (_d, root, nunki) = fresh();
+    let actions = init(&root, &nunki, &["rust".to_string()]).unwrap();
 
-    for name in ["hq.yaml", "AGENTS.md", "CLAUDE.md", ".gitattributes"] {
+    for name in ["nunki.yaml", "AGENTS.md", "CLAUDE.md", ".gitattributes"] {
         assert!(created(&actions, name), "{name} missing from {actions:?}");
         assert!(root.join(name).exists());
     }
-    // The HQ, outside the tree, is where everything hq owns lives.
+    // The HQ, outside the tree, is where everything nunki owns lives.
     for dir in ["state", "locks", "missions"] {
-        assert!(hq.join(dir).is_dir(), "{dir} missing");
+        assert!(nunki.join(dir).is_dir(), "{dir} missing");
     }
     // A stack fragment that says something rather than an empty directory.
-    let allow = std::fs::read_to_string(root.join(".hq/stacks/rust/allow.txt")).unwrap();
+    let allow = std::fs::read_to_string(root.join(".nunki/stacks/rust/allow.txt")).unwrap();
     assert!(allow.contains("index.crates.io"), "{allow}");
     assert!(
         !allow.contains("github.com"),
         "a fragment must not carry a forge domain: {allow}"
     );
-    assert!(root.join(".hq/stacks/rust/prepush.sh").exists());
+    assert!(root.join(".nunki/stacks/rust/prepush.sh").exists());
     // CLAUDE.md must import AGENTS.md or Claude Code never reads the rules.
     assert_eq!(
         std::fs::read_to_string(root.join("CLAUDE.md")).unwrap(),
@@ -56,15 +56,15 @@ fn a_fresh_repository_gets_everything_it_needs() {
 
 /// The rules an agent reads have to name what the gates actually refuse.
 ///
-/// Measured on 2026-09-13, on the first mission `hq` ran end to end: the
+/// Measured on 2026-09-13, on the first mission `nunki` ran end to end: the
 /// coder was never told that gate 3 wants `HEAD` named in the resume block,
 /// nor that gate 5 wants `PR.md` written — and it lost one attempt to each,
 /// on rules it had no way to learn. A gate that enforces what nothing
 /// states is a gate that grades an agent on a secret.
 #[test]
 fn the_rules_it_writes_name_what_the_gates_require() {
-    let (_d, root, hq) = fresh();
-    init(&root, &hq, &["rust".to_string()]).unwrap();
+    let (_d, root, nunki) = fresh();
+    init(&root, &nunki, &["rust".to_string()]).unwrap();
     let rules = std::fs::read_to_string(root.join("AGENTS.md")).unwrap();
 
     assert!(
@@ -77,7 +77,7 @@ fn the_rules_it_writes_name_what_the_gates_require() {
     );
     assert!(
         rules.contains("**inside** the block"),
-        "hq reads the block and not the whole file, so a line further down is \
+        "nunki reads the block and not the whole file, so a line further down is \
          one it never sees: {rules}"
     );
 }
@@ -93,9 +93,9 @@ fn the_rules_it_writes_name_what_the_gates_require() {
 /// has not been rebuilt.
 #[test]
 fn the_image_it_writes_applies_the_security_updates_of_its_base() {
-    let (_d, root, hq) = fresh();
-    init(&root, &hq, &["rust".to_string()]).unwrap();
-    let dockerfile = std::fs::read_to_string(root.join(".hq/stacks/rust/Dockerfile")).unwrap();
+    let (_d, root, nunki) = fresh();
+    init(&root, &nunki, &["rust".to_string()]).unwrap();
+    let dockerfile = std::fs::read_to_string(root.join(".nunki/stacks/rust/Dockerfile")).unwrap();
 
     assert!(
         dockerfile.contains("apt-get -qq -y upgrade"),
@@ -121,12 +121,12 @@ fn the_image_it_writes_applies_the_security_updates_of_its_base() {
 
 #[test]
 fn the_battery_is_executable_or_nothing_can_run_it() {
-    let (_d, root, hq) = fresh();
-    init(&root, &hq, &["rust".to_string()]).unwrap();
+    let (_d, root, nunki) = fresh();
+    init(&root, &nunki, &["rust".to_string()]).unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(root.join(".hq/stacks/rust/prepush.sh"))
+        let mode = std::fs::metadata(root.join(".nunki/stacks/rust/prepush.sh"))
             .unwrap()
             .permissions()
             .mode();
@@ -136,46 +136,46 @@ fn the_battery_is_executable_or_nothing_can_run_it() {
 
 #[test]
 fn running_it_again_changes_nothing() {
-    let (_d, root, hq) = fresh();
-    init(&root, &hq, &["rust".to_string()]).unwrap();
+    let (_d, root, nunki) = fresh();
+    init(&root, &nunki, &["rust".to_string()]).unwrap();
     let before = snapshot(&root);
 
-    let second = init(&root, &hq, &["rust".to_string()]).unwrap();
+    let second = init(&root, &nunki, &["rust".to_string()]).unwrap();
     assert_eq!(snapshot(&root), before, "the second run rewrote something");
     assert!(
         second.iter().all(|a| !matches!(a, Action::Created(_))),
         "{second:?}"
     );
-    assert!(kept(&second, "hq.yaml").is_some());
+    assert!(kept(&second, "nunki.yaml").is_some());
 }
 
 #[test]
 fn a_file_a_human_edits_is_never_overwritten() {
-    let (_d, root, hq) = fresh();
+    let (_d, root, nunki) = fresh();
     std::fs::write(root.join("AGENTS.md"), "mine, and better\n").unwrap();
-    std::fs::write(root.join("hq.yaml"), "harness: claude-code\n").unwrap();
+    std::fs::write(root.join("nunki.yaml"), "harness: claude-code\n").unwrap();
 
-    init(&root, &hq, &[]).unwrap();
+    init(&root, &nunki, &[]).unwrap();
     assert_eq!(
         std::fs::read_to_string(root.join("AGENTS.md")).unwrap(),
         "mine, and better\n"
     );
     assert_eq!(
-        std::fs::read_to_string(root.join("hq.yaml")).unwrap(),
+        std::fs::read_to_string(root.join("nunki.yaml")).unwrap(),
         "harness: claude-code\n"
     );
 }
 
 #[test]
 fn an_existing_claude_md_is_kept_and_the_missing_import_is_named() {
-    let (_d, root, hq) = fresh();
+    let (_d, root, nunki) = fresh();
     std::fs::write(root.join("CLAUDE.md"), "# my own instructions\n").unwrap();
-    let actions = init(&root, &hq, &[]).unwrap();
+    let actions = init(&root, &nunki, &[]).unwrap();
 
     assert_eq!(
         std::fs::read_to_string(root.join("CLAUDE.md")).unwrap(),
         "# my own instructions\n",
-        "hq must not rewrite it"
+        "nunki must not rewrite it"
     );
     let why = kept(&actions, "CLAUDE.md").expect("CLAUDE.md should be reported");
     assert!(why.contains("@AGENTS.md"), "{why}");
@@ -186,23 +186,23 @@ fn an_existing_claude_md_is_kept_and_the_missing_import_is_named() {
 
     // And one that already imports is simply fine.
     std::fs::write(root.join("CLAUDE.md"), "@AGENTS.md\nplus my own\n").unwrap();
-    let actions = init(&root, &hq, &[]).unwrap();
+    let actions = init(&root, &nunki, &[]).unwrap();
     let why = kept(&actions, "CLAUDE.md").unwrap();
     assert!(why.contains("already imports"), "{why}");
 }
 
 #[test]
 fn a_gitattributes_that_does_not_pin_lf_gets_a_suggestion_beside_it() {
-    let (_d, root, hq) = fresh();
+    let (_d, root, nunki) = fresh();
     std::fs::write(root.join(".gitattributes"), "*.png binary\n").unwrap();
-    let actions = init(&root, &hq, &[]).unwrap();
+    let actions = init(&root, &nunki, &[]).unwrap();
 
     assert_eq!(
         std::fs::read_to_string(root.join(".gitattributes")).unwrap(),
         "*.png binary\n",
-        "hq does not decide a project's git configuration"
+        "nunki does not decide a project's git configuration"
     );
-    let suggestion = root.join(".gitattributes.hq");
+    let suggestion = root.join(".gitattributes.nunki");
     assert!(suggestion.exists(), "{actions:?}");
     assert!(
         std::fs::read_to_string(&suggestion)
@@ -220,23 +220,23 @@ fn a_gitattributes_that_does_not_pin_lf_gets_a_suggestion_beside_it() {
 
 #[test]
 fn an_unknown_stack_is_refused_rather_than_left_as_an_empty_directory() {
-    let (_d, root, hq) = fresh();
-    let err = init(&root, &hq, &["cobol".to_string()]).unwrap_err();
+    let (_d, root, nunki) = fresh();
+    let err = init(&root, &nunki, &["cobol".to_string()]).unwrap_err();
     assert!(matches!(err, InitError::UnknownStack(..)), "{err}");
     assert!(err.to_string().contains(KNOWN_STACKS[0]), "{err}");
     assert!(
-        !root.join(".hq").exists(),
+        !root.join(".nunki").exists(),
         "nothing should have been written"
     );
 }
 
 #[test]
 fn the_generated_config_is_readable_by_the_reader() {
-    let (_d, root, hq) = fresh();
-    init(&root, &hq, &["rust".to_string()]).unwrap();
+    let (_d, root, nunki) = fresh();
+    init(&root, &nunki, &["rust".to_string()]).unwrap();
     // What init writes, `Project::open` must accept — otherwise the first
     // verb after `init` fails on the file `init` just produced.
-    let project = hq::project::Project::open(&root).unwrap();
+    let project = nunki::project::Project::open(&root).unwrap();
     assert_eq!(project.config.harness, "claude-code");
     assert_eq!(project.config.stacks, vec!["rust".to_string()]);
     assert!(project.config.forge.is_empty(), "the human fills that in");
@@ -269,7 +269,7 @@ fn snapshot(root: &Path) -> Vec<(String, String)> {
 }
 
 /// The two verbs in the order a human runs them, through the binary: an
-/// ordinary repository becomes one `hq check` passes.
+/// ordinary repository becomes one `nunki check` passes.
 #[test]
 fn init_then_check_is_green_on_a_repository_that_had_nothing() {
     let dir = tempfile::tempdir().unwrap();
@@ -286,8 +286,8 @@ fn init_then_check_is_green_on_a_repository_that_had_nothing() {
             .success()
     );
 
-    let hq = env!("CARGO_BIN_EXE_hq");
-    let init = std::process::Command::new(hq)
+    let nunki = env!("CARGO_BIN_EXE_nunki");
+    let init = std::process::Command::new(nunki)
         .env("HOME", &home)
         .args(["-C"])
         .arg(&root)
@@ -300,7 +300,7 @@ fn init_then_check_is_green_on_a_repository_that_had_nothing() {
         String::from_utf8_lossy(&init.stderr)
     );
 
-    let check = std::process::Command::new(hq)
+    let check = std::process::Command::new(nunki)
         .env("HOME", &home)
         .args(["-C"])
         .arg(&root)
@@ -322,12 +322,12 @@ fn a_claude_md_that_is_a_link_to_agents_md_is_recognised() {
     // The other documented shape (SPEC 4.1). Reading through the link would
     // ask whether AGENTS.md mentions its own name, which is not the question
     // — and `init` got this wrong on nunki itself before this test.
-    let (_d, root, hq) = fresh();
+    let (_d, root, nunki) = fresh();
     std::fs::write(root.join("AGENTS.md"), "# rules with no self-reference\n").unwrap();
     #[cfg(unix)]
     std::os::unix::fs::symlink("AGENTS.md", root.join("CLAUDE.md")).unwrap();
 
-    let actions = init(&root, &hq, &[]).unwrap();
+    let actions = init(&root, &nunki, &[]).unwrap();
     let why = kept(&actions, "CLAUDE.md").expect("CLAUDE.md should be reported");
     assert!(why.contains("link to AGENTS.md"), "{why}");
     assert!(!why.contains("red"), "nothing is wrong here: {why}");
@@ -336,7 +336,7 @@ fn a_claude_md_that_is_a_link_to_agents_md_is_recognised() {
 
 /// The three things that judge and fence an agent — the battery gate 6
 /// replays, the allowlist the firewall is built from, and the image it runs
-/// in — all live under `.hq/`, and none of them is that agent's to rewrite.
+/// in — all live under `.nunki/`, and none of them is that agent's to rewrite.
 /// A project that starts with an empty refusal list starts with a gate an
 /// agent can weaken in one commit.
 #[test]
@@ -344,19 +344,23 @@ fn a_new_project_protects_the_fragments_that_gate_and_fence_its_agents() {
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path().join("repo");
     std::fs::create_dir_all(&repo).unwrap();
-    init(&repo, &dir.path().join("hq"), &["rust".to_string()]).unwrap();
+    init(&repo, &dir.path().join("nunki"), &["rust".to_string()]).unwrap();
 
-    let text = std::fs::read_to_string(repo.join("hq.yaml")).unwrap();
-    let config: hq::project::Config = serde_yaml_ng::from_str(&text).unwrap();
+    let text = std::fs::read_to_string(repo.join("nunki.yaml")).unwrap();
+    let config: nunki::project::Config = serde_yaml_ng::from_str(&text).unwrap();
     assert!(
-        config.protected_paths.refuse.iter().any(|p| p == ".hq/**"),
+        config
+            .protected_paths
+            .refuse
+            .iter()
+            .any(|p| p == ".nunki/**"),
         "{text}"
     );
     // And the battery it protects is really there.
-    assert!(repo.join(".hq/stacks/rust/prepush.sh").is_file());
+    assert!(repo.join(".nunki/stacks/rust/prepush.sh").is_file());
 }
 
-/// What `hq init` writes and what `hq` reads back must agree.
+/// What `nunki init` writes and what `nunki` reads back must agree.
 ///
 /// `permission_mode` ships **uncommented**, unlike `model`: it is the one
 /// line in the template whose value every run of a new project depends on
@@ -364,21 +368,21 @@ fn a_new_project_protects_the_fragments_that_gate_and_fence_its_agents() {
 /// as something else would be invisible until an agent behaved oddly in a
 /// container nobody is watching.
 #[test]
-fn the_hq_yaml_it_writes_parses_back_with_the_permission_mode_it_declares() {
+fn the_nunki_yaml_it_writes_parses_back_with_the_permission_mode_it_declares() {
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path().join("repo");
     std::fs::create_dir_all(&repo).unwrap();
-    init(&repo, &dir.path().join("hq"), &["rust".to_string()]).unwrap();
+    init(&repo, &dir.path().join("nunki"), &["rust".to_string()]).unwrap();
 
-    let text = std::fs::read_to_string(repo.join("hq.yaml")).unwrap();
-    let config: hq::project::Config = serde_yaml_ng::from_str(&text).unwrap();
+    let text = std::fs::read_to_string(repo.join("nunki.yaml")).unwrap();
+    let config: nunki::project::Config = serde_yaml_ng::from_str(&text).unwrap();
     assert_eq!(config.permission_mode, "auto", "{text}");
     // The model ships commented out, so a new project keeps the harness's
     // own default until somebody declares one.
     assert_eq!(config.model, None, "{text}");
 }
 
-/// The prose `hq init` deposits must read as prose.
+/// The prose `nunki init` deposits must read as prose.
 ///
 /// The cause, measured on 2026-09-10: `cargo fmt` joins a `\`-continued
 /// string literal onto one line and keeps the continuation's indentation as
@@ -396,7 +400,7 @@ fn the_prose_init_writes_reads_as_prose() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("repo");
     std::fs::create_dir_all(&root).unwrap();
-    hq::init::init(&root, &dir.path().join("hq"), &["rust".to_string()]).unwrap();
+    nunki::init::init(&root, &dir.path().join("nunki"), &["rust".to_string()]).unwrap();
 
     let mut seen = 0;
     let mut stack: Vec<std::path::PathBuf> = vec![root.clone()];
@@ -452,11 +456,11 @@ fn the_rust_image_carries_what_the_mutation_campaign_calls() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("repo");
     std::fs::create_dir_all(&root).unwrap();
-    hq::init::init(&root, &dir.path().join("hq"), &["rust".to_string()]).unwrap();
+    nunki::init::init(&root, &dir.path().join("nunki"), &["rust".to_string()]).unwrap();
 
-    let script = std::fs::read_to_string(root.join(".hq/stacks/rust/mutation.sh")).unwrap();
+    let script = std::fs::read_to_string(root.join(".nunki/stacks/rust/mutation.sh")).unwrap();
     assert!(script.contains("cargo mutants"), "{script}");
-    let dockerfile = std::fs::read_to_string(root.join(".hq/stacks/rust/Dockerfile")).unwrap();
+    let dockerfile = std::fs::read_to_string(root.join(".nunki/stacks/rust/Dockerfile")).unwrap();
     assert!(
         dockerfile.contains("cargo install cargo-mutants"),
         "the campaign calls a command the image does not carry:\n{dockerfile}"
@@ -491,9 +495,9 @@ fn the_campaign_does_not_mutate_a_binarys_entry_point() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("repo");
     std::fs::create_dir_all(&root).unwrap();
-    hq::init::init(&root, &dir.path().join("hq"), &["rust".to_string()]).unwrap();
+    nunki::init::init(&root, &dir.path().join("nunki"), &["rust".to_string()]).unwrap();
 
-    let script = std::fs::read_to_string(root.join(".hq/stacks/rust/mutation.sh")).unwrap();
+    let script = std::fs::read_to_string(root.join(".nunki/stacks/rust/mutation.sh")).unwrap();
     let line = script
         .lines()
         .find(|l| l.trim_start().starts_with("cargo mutants"))

@@ -1,6 +1,6 @@
-# nunki, as a project hq can orchestrate (SPEC 4.1).
+# nunki, as a project it orchestrates itself (SPEC 4.1).
 #
-# Written by hand for now: `hq init` does not exist yet. This file is here so
+# Written by hand for now: `nunki init` does not exist yet. This file is here so
 # the tool is exercised on itself — the first project it orchestrates should
 # be the one whose rules it enforces.
 
@@ -20,7 +20,7 @@ protected_branches:
 
 # Public since 2026-09-11, so GitHub's free plan protects both branches: a
 # pull request is required, and so are the CI's checks. The forge holds the
-# rule and `hq check` asks it (SPEC 4.1 bis). It was `by_hand` while the
+# rule and `nunki check` asks it (SPEC 4.1 bis). It was `by_hand` while the
 # repository was private, when the forge could neither protect a branch nor
 # say whether one was (403, measured 2026-09-10).
 forge_protection: forge
@@ -32,7 +32,7 @@ protected_paths:
     # The battery gate 6 replays, the allowlist the firewall is built from
     # and the image the agent runs in. Weakening any of the three would let a
     # run pass a gate it should not.
-    - .hq/**
+    - .nunki/**
     - .github/workflows/**
     - assets/firewall/**
     - AGENTS.md

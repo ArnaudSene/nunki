@@ -1,15 +1,15 @@
-//! `hq mission fetch` and `hq push` (SPEC 4.2, 4.4, 4.5): the one verb that
+//! `nunki mission fetch` and `nunki push` (SPEC 4.2, 4.4, 4.5): the one verb that
 //! touches the forge in write, and everything it refuses first.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use hq::harness::Role;
-use hq::mission::flow::{Event, Flow, Stage};
-use hq::mission::{Bounds, Header, Integration, Lot, Security, Service, Verdict};
-use hq::project::{Config, Project, ProtectedPaths};
-use hq::push::{self, PushError};
-use hq::state::{MissionState, Store};
+use nunki::harness::Role;
+use nunki::mission::flow::{Event, Flow, Stage};
+use nunki::mission::{Bounds, Header, Integration, Lot, Security, Service, Verdict};
+use nunki::project::{Config, Project, ProtectedPaths};
+use nunki::push::{self, PushError};
+use nunki::state::{MissionState, Store};
 
 mod common;
 use common::serve;
@@ -71,7 +71,7 @@ struct World {
 impl World {
     fn new(integration: Integration, security: Security) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let hq_root = dir.path().join("hq");
+        let hq_root = dir.path().join("nunki");
         for d in ["locks", "missions", "state/missions"] {
             std::fs::create_dir_all(hq_root.join(d)).unwrap();
         }
@@ -96,7 +96,7 @@ impl World {
         );
         git(&root, &["push", "-q", "origin", "dev"]);
 
-        // The slot, where `hq::slot::find` looks: beside the repository.
+        // The slot, where `nunki::slot::find` looks: beside the repository.
         let slots = dir.path().join("repo-slots");
         std::fs::create_dir_all(&slots).unwrap();
         let tree = slots.join("one");
@@ -128,7 +128,7 @@ impl World {
             hq_root.clone(),
         );
         let header = header(integration, security);
-        hq::mission::dir::create(&hq_root, "m1", &header, "do it").unwrap();
+        nunki::mission::dir::create(&hq_root, "m1", &header, "do it").unwrap();
         Store::open(&hq_root)
             .unwrap()
             .save(&MissionState {
@@ -184,7 +184,7 @@ impl World {
         let mut state = store.load("m1").unwrap();
         let mut events = vec![
             Event::RunEnded {
-                outcome: hq::harness::Outcome::Finished(Default::default()),
+                outcome: nunki::harness::Outcome::Finished(Default::default()),
                 lot_done: true,
             },
             Event::GatesPassed,
@@ -333,11 +333,11 @@ fn findings_nobody_lifted_do_not_reach_the_forge() {
 
     let err = push::push(&world.project, "m1", true).unwrap_err();
     assert!(matches!(err, PushError::NotLifted(_)), "{err}");
-    assert!(err.to_string().contains("hq mission accept"), "{err}");
+    assert!(err.to_string().contains("nunki mission accept"), "{err}");
 
     // Lifted on this commit, by a human, with a reason — and it goes.
     let mut state = world.state();
-    state.accepted.push(hq::state::Accepted {
+    state.accepted.push(nunki::state::Accepted {
         finding: None,
         why: "behind the VPN".into(),
         who: "Arnaud".into(),
@@ -404,7 +404,7 @@ fn without_an_integrator_nothing_may_follow_the_coders_commit() {
     assert!(world.on_forge("mission/x").is_none());
 }
 
-/// `hq mission fetch` brings the commits over, one way, and says what moved.
+/// `nunki mission fetch` brings the commits over, one way, and says what moved.
 #[test]
 fn fetching_brings_the_slots_commits_into_the_repository() {
     let world = World::new(
@@ -427,7 +427,7 @@ fn fetching_brings_the_slots_commits_into_the_repository() {
 }
 
 /// Git refuses to fetch into the branch that is checked out, and says so in a
-/// message about refs. `hq` says it about the repository instead.
+/// message about refs. `nunki` says it about the repository instead.
 #[test]
 fn fetching_into_the_checked_out_branch_is_named_rather_than_left_to_git() {
     let world = World::new(
@@ -458,7 +458,7 @@ fn the_pull_request_address_is_worked_out_from_the_remote() {
             "{remote}"
         );
     }
-    // A forge hq does not know how to address: said as unknown rather than
+    // A forge nunki does not know how to address: said as unknown rather than
     // guessed into a URL that goes nowhere.
     assert_eq!(
         push::pull_request_url("git@gitlab.com:team/thing.git", "dev", "x"),
@@ -468,7 +468,7 @@ fn the_pull_request_address_is_worked_out_from_the_remote() {
 
 /// A volet replays the whole chain, so a role concludes more than once. The
 /// earlier answer is not a second opinion, it is a stale one — and keeping
-/// both would let `hq push` find the green it wants among answers about other
+/// both would let `nunki push` find the green it wants among answers about other
 /// commits.
 #[test]
 fn a_role_that_concludes_twice_leaves_one_answer_and_it_is_the_last() {
@@ -529,7 +529,7 @@ fn a_role_that_concludes_twice_leaves_one_answer_and_it_is_the_last() {
 
 impl World {
     /// The shape of a real project: `origin` reads as a GitHub repository, and
-    /// pushes go to the bare repository standing in for it — so `hq` works
+    /// pushes go to the bare repository standing in for it — so `nunki` works
     /// out the forge from the remote exactly as it would, and the push is
     /// still a real push.
     fn on_github(&self) {
@@ -551,7 +551,7 @@ impl World {
 
     fn with_token(&self) {
         std::fs::write(
-            self.project.hq_root.join(hq::forge::TOKEN_FILE),
+            self.project.hq_root.join(nunki::forge::TOKEN_FILE),
             "tok-human\n",
         )
         .unwrap();
@@ -592,7 +592,7 @@ fn a_verified_mission_is_pushed_and_its_pull_request_opened() {
     assert_eq!(world.on_forge("mission/x").as_deref(), Some(head.as_str()));
     assert_eq!(
         pushed.pull_request,
-        push::PullRequestState::Opened(hq::forge::Opened::Created(
+        push::PullRequestState::Opened(nunki::forge::Opened::Created(
             "https://github.com/o/r/pull/9".into()
         ))
     );
@@ -627,7 +627,7 @@ fn without_a_credential_the_push_happens_and_the_address_is_handed_over() {
                 compare.as_deref(),
                 Some("https://github.com/o/r/compare/dev...mission/x?expand=1")
             );
-            assert!(why.contains(hq::forge::TOKEN_FILE), "{why}");
+            assert!(why.contains(nunki::forge::TOKEN_FILE), "{why}");
         }
         other => panic!("{other:?}"),
     }

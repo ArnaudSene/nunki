@@ -1,13 +1,13 @@
 //! The launch script (SPEC 4.2, "les services et le lancement de
 //! l'application", rule 2): who declares it, where it is read from, and what
-//! `hq` says when it is not there.
+//! `nunki` says when it is not there.
 
 use std::path::{Path, PathBuf};
 
-use hq::launch::{self, Declared, Launch, LaunchError};
-use hq::mission::{Header, Integration, Lot, Security};
-use hq::project::{Config, Project, ProtectedPaths};
-use hq::slot::Slot;
+use nunki::launch::{self, Declared, Launch, LaunchError};
+use nunki::mission::{Header, Integration, Lot, Security};
+use nunki::project::{Config, Project, ProtectedPaths};
+use nunki::slot::Slot;
 
 fn config() -> Config {
     Config {
@@ -104,29 +104,29 @@ fn executable(_path: &Path) {}
 fn the_stacks_script_is_the_default() {
     let dir = tempfile::tempdir().unwrap();
     let slot = slot(dir.path());
-    write_script(&slot.tree, ".hq/stacks/rust/run.sh");
-    let project = Project::at(dir.path().join("repo"), config(), dir.path().join("hq"));
+    write_script(&slot.tree, ".nunki/stacks/rust/run.sh");
+    let project = Project::at(dir.path().join("repo"), config(), dir.path().join("nunki"));
 
     assert_eq!(
         launch::resolve(&project, &slot, "rust", &header()).unwrap(),
         Launch::Script {
-            path: ".hq/stacks/rust/run.sh".to_string(),
+            path: ".nunki/stacks/rust/run.sh".to_string(),
             declared: Declared::Stack,
         }
     );
 }
 
 #[test]
-fn hq_yaml_replaces_the_stacks_script() {
+fn nunki_yaml_replaces_the_stacks_script() {
     let dir = tempfile::tempdir().unwrap();
     let slot = slot(dir.path());
     // Both exist, so what is chosen says which declaration won and not which
     // file happened to be there.
-    write_script(&slot.tree, ".hq/stacks/rust/run.sh");
+    write_script(&slot.tree, ".nunki/stacks/rust/run.sh");
     write_script(&slot.tree, "bin/serve");
     let mut config = config();
     config.run = Some("bin/serve".to_string());
-    let project = Project::at(dir.path().join("repo"), config, dir.path().join("hq"));
+    let project = Project::at(dir.path().join("repo"), config, dir.path().join("nunki"));
 
     assert_eq!(
         launch::resolve(&project, &slot, "rust", &header()).unwrap(),
@@ -138,15 +138,15 @@ fn hq_yaml_replaces_the_stacks_script() {
 }
 
 #[test]
-fn the_mission_header_beats_hq_yaml() {
+fn the_mission_header_beats_nunki_yaml() {
     let dir = tempfile::tempdir().unwrap();
     let slot = slot(dir.path());
-    write_script(&slot.tree, ".hq/stacks/rust/run.sh");
+    write_script(&slot.tree, ".nunki/stacks/rust/run.sh");
     write_script(&slot.tree, "bin/serve");
     write_script(&slot.tree, "bin/serve-this-mission");
     let mut config = config();
     config.run = Some("bin/serve".to_string());
-    let project = Project::at(dir.path().join("repo"), config, dir.path().join("hq"));
+    let project = Project::at(dir.path().join("repo"), config, dir.path().join("nunki"));
     let mut header = header();
     header.run = Some("bin/serve-this-mission".to_string());
 
@@ -166,11 +166,11 @@ fn the_mission_header_beats_hq_yaml() {
 fn none_means_there_is_nothing_to_start() {
     let dir = tempfile::tempdir().unwrap();
     let slot = slot(dir.path());
-    write_script(&slot.tree, ".hq/stacks/rust/run.sh");
+    write_script(&slot.tree, ".nunki/stacks/rust/run.sh");
 
     let mut library = config();
     library.run = Some("none".to_string());
-    let project = Project::at(dir.path().join("repo"), library, dir.path().join("hq"));
+    let project = Project::at(dir.path().join("repo"), library, dir.path().join("nunki"));
     assert_eq!(
         launch::resolve(&project, &slot, "rust", &header()).unwrap(),
         Launch::Nothing {
@@ -181,7 +181,7 @@ fn none_means_there_is_nothing_to_start() {
     // And a mission may say it for itself, over a project that declares one.
     let mut other = config();
     other.run = Some("bin/serve".to_string());
-    let project = Project::at(dir.path().join("repo"), other, dir.path().join("hq"));
+    let project = Project::at(dir.path().join("repo"), other, dir.path().join("nunki"));
     let mut header = header();
     header.run = Some("none".to_string());
     assert_eq!(
@@ -193,7 +193,7 @@ fn none_means_there_is_nothing_to_start() {
 }
 
 /// The rule this piece exists for: the integrator amends the launch script
-/// and commits it, and it is **that** version `hq` uses afterwards. So the
+/// and commits it, and it is **that** version `nunki` uses afterwards. So the
 /// file is read from the slot's tree, and a copy in the repository the slot
 /// was cloned from is not an answer.
 #[test]
@@ -201,8 +201,8 @@ fn the_script_is_read_from_the_slots_tree_and_not_from_the_repository() {
     let dir = tempfile::tempdir().unwrap();
     let slot = slot(dir.path());
     let repo = dir.path().join("repo");
-    write_script(&repo, ".hq/stacks/rust/run.sh");
-    let project = Project::at(repo, config(), dir.path().join("hq"));
+    write_script(&repo, ".nunki/stacks/rust/run.sh");
+    let project = Project::at(repo, config(), dir.path().join("nunki"));
 
     let err = launch::resolve(&project, &slot, "rust", &header()).unwrap_err();
     assert!(
@@ -211,7 +211,7 @@ fn the_script_is_read_from_the_slots_tree_and_not_from_the_repository() {
     );
 
     // Put it in the slot — the integrator committing it — and it resolves.
-    write_script(&slot.tree, ".hq/stacks/rust/run.sh");
+    write_script(&slot.tree, ".nunki/stacks/rust/run.sh");
     assert!(matches!(
         launch::resolve(&project, &slot, "rust", &header()).unwrap(),
         Launch::Script { .. }
@@ -224,11 +224,11 @@ fn a_missing_script_names_the_declaration_and_the_commit() {
     let slot = slot(dir.path());
     let mut config = config();
     config.run = Some("bin/serve".to_string());
-    let project = Project::at(dir.path().join("repo"), config, dir.path().join("hq"));
+    let project = Project::at(dir.path().join("repo"), config, dir.path().join("nunki"));
 
     let err = launch::resolve(&project, &slot, "rust", &header()).unwrap_err();
     let said = err.to_string();
-    assert!(said.contains("hq.yaml"), "{said}");
+    assert!(said.contains("nunki.yaml"), "{said}");
     assert!(said.contains("bin/serve"), "{said}");
     let head = String::from_utf8(
         std::process::Command::new("git")
@@ -242,32 +242,32 @@ fn a_missing_script_names_the_declaration_and_the_commit() {
     assert!(said.contains(head.trim()), "{said} does not name {head}");
 }
 
-/// `hq` runs the script; it does not guess an interpreter for it. A file
+/// `nunki` runs the script; it does not guess an interpreter for it. A file
 /// without the bit is a launch that would fail inside a container, in a log
 /// nobody is reading.
 #[test]
 fn a_script_that_is_not_executable_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let slot = slot(dir.path());
-    let path = slot.tree.join(".hq/stacks/rust/run.sh");
+    let path = slot.tree.join(".nunki/stacks/rust/run.sh");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, "#!/bin/sh\nexec sleep infinity\n").unwrap();
-    let project = Project::at(dir.path().join("repo"), config(), dir.path().join("hq"));
+    let project = Project::at(dir.path().join("repo"), config(), dir.path().join("nunki"));
 
     let err = launch::resolve(&project, &slot, "rust", &header()).unwrap_err();
     assert!(matches!(err, LaunchError::NotExecutable { .. }), "{err}");
 }
 
-/// `hq init` must ship one, or every fresh project's first integration
+/// `nunki init` must ship one, or every fresh project's first integration
 /// mission fails on a file nobody was told to write.
 #[test]
 fn the_rust_fragment_ships_a_launch_script() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("repo");
     std::fs::create_dir_all(&root).unwrap();
-    hq::init::init(&root, &dir.path().join("hq"), &["rust".to_string()]).unwrap();
+    nunki::init::init(&root, &dir.path().join("nunki"), &["rust".to_string()]).unwrap();
 
-    let script = root.join(".hq/stacks/rust").join(launch::SCRIPT);
+    let script = root.join(".nunki/stacks/rust").join(launch::SCRIPT);
     assert!(script.is_file(), "{} is missing", script.display());
     #[cfg(unix)]
     {
@@ -276,7 +276,7 @@ fn the_rust_fragment_ships_a_launch_script() {
         assert!(mode & 0o111 != 0, "{script:?} is not executable: {mode:o}");
     }
     // And it must not `exec`: the wrapper that spawns it puts the run's
-    // identifier on the command line, `hq` recognises the process by it, and
+    // identifier on the command line, `nunki` recognises the process by it, and
     // a script that replaces itself replaces that command line — reporting an
     // application that has stopped (see the live test below).
     let body = std::fs::read_to_string(&script).unwrap();
@@ -287,16 +287,16 @@ fn the_rust_fragment_ships_a_launch_script() {
     assert!(!command.trim_start().starts_with("exec "), "{body}");
 }
 
-/// The path the stack's default resolves to is the one `hq init` writes, and
+/// The path the stack's default resolves to is the one `nunki init` writes, and
 /// the two are derived from the same constant rather than spelled twice.
 #[test]
 fn the_default_path_is_the_one_init_writes() {
     assert_eq!(
-        PathBuf::from(hq::project::FRAGMENTS_DIR)
+        PathBuf::from(nunki::project::FRAGMENTS_DIR)
             .join("stacks")
             .join("rust")
             .join(launch::SCRIPT),
-        PathBuf::from(".hq/stacks/rust/run.sh")
+        PathBuf::from(".nunki/stacks/rust/run.sh")
     );
 }
 
@@ -307,7 +307,7 @@ fn the_default_path_is_the_one_init_writes() {
 /// 1. the project's services are lifted once per slot and **never stopped
 ///    between two profiles** — what the integrator laid down in them
 ///    survives the switch;
-/// 2. `hq` starts the application in the profile of the role that will test
+/// 2. `nunki` starts the application in the profile of the role that will test
 ///    it, before that role, and can tell afterwards that it is running.
 ///
 /// It also measures the thing that makes rule 2 work at all: the run is
@@ -317,25 +317,25 @@ fn the_default_path_is_the_one_init_writes() {
 #[test]
 #[ignore = "lifts real containers; run by hand"]
 fn live_the_services_survive_a_switch_and_the_application_starts_in_the_profile() {
-    use hq::compose::{NamedVolume, Plan, UserIds, generate};
-    use hq::engine::docker::Docker;
-    use hq::engine::{Engine, Liveness};
-    use hq::harness::Role;
-    use hq::harness::spawn::{Presence, Spawned, Spawner};
-    use hq::perimeter::{Sources, compute};
+    use nunki::compose::{NamedVolume, Plan, UserIds, generate};
+    use nunki::engine::docker::Docker;
+    use nunki::engine::{Engine, Liveness};
+    use nunki::harness::Role;
+    use nunki::harness::spawn::{Presence, Spawned, Spawner};
+    use nunki::perimeter::{Sources, compute};
     use std::sync::Arc;
 
     let docker = Docker::real();
     let slot_name = "launchlive";
-    let compose_project = hq::compose::project_name(slot_name).unwrap();
+    let compose_project = nunki::compose::project_name(slot_name).unwrap();
 
     let dir = tempfile::tempdir().unwrap();
     let context = dir.path().join("firewall");
     std::fs::create_dir_all(&context).unwrap();
-    hq::firewall::materialise(&context).unwrap();
+    nunki::firewall::materialise(&context).unwrap();
     assert!(
         std::process::Command::new("docker")
-            .args(["build", "-q", "-t", "hq/firewall:test"])
+            .args(["build", "-q", "-t", "nunki/firewall:test"])
             .arg(&context)
             .status()
             .expect("docker is on the path")
@@ -360,21 +360,21 @@ fn live_the_services_survive_a_switch_and_the_application_starts_in_the_profile(
 
     let mission_dir = dir.path().join("mission");
     std::fs::create_dir_all(&mission_dir).unwrap();
-    for f in hq::compose::AGENT_WRITABLE {
+    for f in nunki::compose::AGENT_WRITABLE {
         std::fs::write(mission_dir.join(f), "").unwrap();
     }
 
-    let hq_root = dir.path().join("hq");
+    let hq_root = dir.path().join("nunki");
     let mut declared = config();
     declared.run = Some("run.sh".to_string());
     let project = Project::at(dir.path().join("repo"), declared, hq_root.clone());
-    let file = hq::run::profile_path(&project, slot_name);
+    let file = nunki::run::profile_path(&project, slot_name);
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
 
     let profile = |role: Role| {
         let services = match role {
             Role::Coder => Vec::new(),
-            _ => vec![hq::mission::Service {
+            _ => vec![nunki::mission::Service {
                 name: "db".to_string(),
                 reach: vec!["db".to_string()],
                 shared: false,
@@ -390,12 +390,12 @@ fn live_the_services_survive_a_switch_and_the_application_starts_in_the_profile(
             },
         )
         .unwrap();
-        let (uid, gid) = hq::image::host_ids();
+        let (uid, gid) = nunki::image::host_ids();
         Plan {
             slot: slot_name.to_string(),
             role,
             image: "alpine:3.20".to_string(),
-            firewall_image: "hq/firewall:test".to_string(),
+            firewall_image: "nunki/firewall:test".to_string(),
             user: UserIds { uid, gid },
             tree: slot.tree.clone(),
             tree_at: PathBuf::from("/work/tree"),
@@ -452,7 +452,7 @@ fn live_the_services_survive_a_switch_and_the_application_starts_in_the_profile(
 
     // The switch: the agent and its sidecar go, and only those.
     docker
-        .stop(&file, &compose_project, &hq::run::SERVICES)
+        .stop(&file, &compose_project, &nunki::run::SERVICES)
         .unwrap();
     write(Role::Integrator);
     docker.up(&file, &compose_project).unwrap();
@@ -480,7 +480,7 @@ fn live_the_services_survive_a_switch_and_the_application_starts_in_the_profile(
         "what the previous role laid down did not survive: {left:?}"
     );
 
-    // Rule 2: the application starts in this profile, and `hq` can tell.
+    // Rule 2: the application starts in this profile, and `nunki` can tell.
     let engine: Arc<dyn Engine> = Arc::new(Docker::real());
     let runs = dir.path().join("runs");
     let launch = launch::resolve(&project, &slot, "rust", &header()).unwrap();
@@ -495,18 +495,18 @@ fn live_the_services_survive_a_switch_and_the_application_starts_in_the_profile(
         &project,
         &slot,
         engine.clone(),
-        hq::harness::Role::Integrator,
+        nunki::harness::Role::Integrator,
         &runs,
         &launch,
     )
     .unwrap()
     .expect("a script means a started application");
 
-    let spawner = hq::engine::spawn::ContainerSpawner::new(
+    let spawner = nunki::engine::spawn::ContainerSpawner::new(
         engine.clone(),
         file.clone(),
         &compose_project,
-        hq::compose::AGENT_SERVICE,
+        nunki::compose::AGENT_SERVICE,
     )
     .identified_by(&handle.session.0);
     let spawned = Spawned {
@@ -515,7 +515,7 @@ fn live_the_services_survive_a_switch_and_the_application_starts_in_the_profile(
     };
     assert!(
         matches!(spawner.alive(&spawned).unwrap(), Presence::Running),
-        "the application is up and hq can say so"
+        "the application is up and nunki can say so"
     );
     // It really ran the project's script, in the tree, as the agent.
     let marker = slot.tree.join("app.marker");
@@ -541,17 +541,17 @@ fn live_the_services_survive_a_switch_and_the_application_starts_in_the_profile(
         &execing,
         &slot,
         engine.clone(),
-        hq::harness::Role::Integrator,
+        nunki::harness::Role::Integrator,
         &runs,
         &other,
     )
     .unwrap()
     .unwrap();
-    let exec_spawner = hq::engine::spawn::ContainerSpawner::new(
+    let exec_spawner = nunki::engine::spawn::ContainerSpawner::new(
         engine,
         file.clone(),
         &compose_project,
-        hq::compose::AGENT_SERVICE,
+        nunki::compose::AGENT_SERVICE,
     )
     .identified_by(&exec_handle.session.0);
     let exec_spawned = Spawned {
@@ -564,7 +564,7 @@ fn live_the_services_survive_a_switch_and_the_application_starts_in_the_profile(
         .exec(
             &file,
             &compose_project,
-            hq::compose::AGENT_SERVICE,
+            nunki::compose::AGENT_SERVICE,
             &[
                 "sh".to_string(),
                 "-c".to_string(),
@@ -590,25 +590,25 @@ fn live_the_services_survive_a_switch_and_the_application_starts_in_the_profile(
 ///    declared that directory yields a root-owned one — silently;
 /// 2. the mount point must also exist in the **bind source**, or the
 ///    container does not start at all;
-/// 3. `hq` can tell the two apart at launch and name `hq slot rebuild`.
+/// 3. `nunki` can tell the two apart at launch and name `nunki slot rebuild`.
 #[test]
 #[ignore = "builds images and lifts containers; run by hand"]
 fn live_the_security_profile_writes_only_what_the_stack_declared() {
-    use hq::compose::{NamedVolume, Plan, UserIds, generate};
-    use hq::engine::Engine;
-    use hq::engine::docker::Docker;
-    use hq::harness::Role;
-    use hq::perimeter::{Sources, compute};
+    use nunki::compose::{NamedVolume, Plan, UserIds, generate};
+    use nunki::engine::Engine;
+    use nunki::engine::docker::Docker;
+    use nunki::harness::Role;
+    use nunki::perimeter::{Sources, compute};
     use std::sync::Arc;
 
     let docker = Docker::real();
     let slot_name = "seclive";
-    let compose_project = hq::compose::project_name(slot_name).unwrap();
+    let compose_project = nunki::compose::project_name(slot_name).unwrap();
     let dir = tempfile::tempdir().unwrap();
 
     let context = dir.path().join("firewall");
     std::fs::create_dir_all(&context).unwrap();
-    hq::firewall::materialise(&context).unwrap();
+    nunki::firewall::materialise(&context).unwrap();
     let build = |tag: &str, at: &Path| {
         assert!(
             std::process::Command::new("docker")
@@ -620,14 +620,14 @@ fn live_the_security_profile_writes_only_what_the_stack_declared() {
             "building {tag}"
         );
     };
-    build("hq/firewall:test", &context);
+    build("nunki/firewall:test", &context);
 
     // Two agent images, identical but for the one line under measurement:
-    // the mount point `hq slot rebuild` puts there from `writable.txt`.
-    let (uid, gid) = hq::image::host_ids();
+    // the mount point `nunki slot rebuild` puts there from `writable.txt`.
+    let (uid, gid) = nunki::image::host_ids();
     for (tag, mkdir) in [
-        ("hq/sec-good:test", "RUN mkdir -p /work/tree/target\n"),
-        ("hq/sec-stale:test", ""),
+        ("nunki/sec-good:test", "RUN mkdir -p /work/tree/target\n"),
+        ("nunki/sec-stale:test", ""),
     ] {
         let at = dir.path().join(tag.replace([':', '/'], "-"));
         std::fs::create_dir_all(&at).unwrap();
@@ -638,7 +638,7 @@ fn live_the_security_profile_writes_only_what_the_stack_declared() {
                  RUN addgroup -g {gid} agent 2>/dev/null || true\n\
                  RUN adduser -D -u {uid} -G $(getent group {gid} | cut -d: -f1) agent \
                  2>/dev/null || true\n\
-                 RUN mkdir -p /work/tree /work/mission /run/hq && chown -R {uid}:{gid} /work\n\
+                 RUN mkdir -p /work/tree /work/mission /run/nunki && chown -R {uid}:{gid} /work\n\
                  USER {uid}:{gid}\n{mkdir}"
             ),
         )
@@ -649,17 +649,17 @@ fn live_the_security_profile_writes_only_what_the_stack_declared() {
     let mut slot = slot(dir.path());
     slot.name = slot_name.to_string();
     std::fs::write(slot.tree.join("secret.rs"), "fn main() {}\n").unwrap();
-    // What `hq` does before lifting the profile: the mount point has to exist
+    // What `nunki` does before lifting the profile: the mount point has to exist
     // in the bind source, or runc cannot create it under a read-only bind.
     std::fs::create_dir_all(slot.tree.join("target")).unwrap();
 
     let mission_dir = dir.path().join("mission");
     std::fs::create_dir_all(&mission_dir).unwrap();
-    for f in hq::compose::AGENT_WRITABLE {
+    for f in nunki::compose::AGENT_WRITABLE {
         std::fs::write(mission_dir.join(f), "").unwrap();
     }
-    let project = Project::at(dir.path().join("repo"), config(), dir.path().join("hq"));
-    let file = hq::run::profile_path(&project, slot_name);
+    let project = Project::at(dir.path().join("repo"), config(), dir.path().join("nunki"));
+    let file = nunki::run::profile_path(&project, slot_name);
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
 
     let write_profile = |image: &str| {
@@ -677,7 +677,7 @@ fn live_the_security_profile_writes_only_what_the_stack_declared() {
             slot: slot_name.to_string(),
             role: Role::Security,
             image: image.to_string(),
-            firewall_image: "hq/firewall:test".to_string(),
+            firewall_image: "nunki/firewall:test".to_string(),
             user: UserIds { uid, gid },
             tree: slot.tree.clone(),
             tree_at: PathBuf::from("/work/tree"),
@@ -685,7 +685,7 @@ fn live_the_security_profile_writes_only_what_the_stack_declared() {
             mission_dir_at: PathBuf::from("/work/mission"),
             credentials: Vec::new(),
             volumes: vec![NamedVolume {
-                name: hq::run::writable_volume(slot_name, "target"),
+                name: nunki::run::writable_volume(slot_name, "target"),
                 at: PathBuf::from("/work/tree/target"),
             }],
             environment: Default::default(),
@@ -707,24 +707,24 @@ fn live_the_security_profile_writes_only_what_the_stack_declared() {
                 "volume",
                 "rm",
                 "-f",
-                &hq::run::writable_volume(slot_name, "target"),
+                &nunki::run::writable_volume(slot_name, "target"),
             ])
             .status();
     };
 
     // The image the stack declared its directory to: the volume is the
-    // agent's, and `hq` says so.
-    write_profile("hq/sec-good:test");
+    // agent's, and `nunki` says so.
+    write_profile("nunki/sec-good:test");
     clean();
     docker.up(&file, &compose_project).unwrap();
-    hq::run::writable_or_rebuild(engine.clone(), &file, &compose_project, &writable)
+    nunki::run::writable_or_rebuild(engine.clone(), &file, &compose_project, &writable)
         .expect("the declared directory is writable");
 
     let said = docker
         .exec(
             &file,
             &compose_project,
-            hq::compose::AGENT_SERVICE,
+            nunki::compose::AGENT_SERVICE,
             &[
                 "sh".to_string(),
                 "-c".to_string(),
@@ -744,14 +744,14 @@ fn live_the_security_profile_writes_only_what_the_stack_declared() {
 
     // The same profile on an image built before that line: the volume is
     // root's, nothing says so, and this is the check that does.
-    write_profile("hq/sec-stale:test");
+    write_profile("nunki/sec-stale:test");
     clean();
     docker.up(&file, &compose_project).unwrap();
-    let err = hq::run::writable_or_rebuild(engine, &file, &compose_project, &writable)
+    let err = nunki::run::writable_or_rebuild(engine, &file, &compose_project, &writable)
         .expect_err("a stale image yields a root-owned volume");
     let message = err.to_string();
     assert!(message.contains("target"), "{message}");
-    assert!(message.contains("hq slot rebuild"), "{message}");
+    assert!(message.contains("nunki slot rebuild"), "{message}");
 
     clean();
 }

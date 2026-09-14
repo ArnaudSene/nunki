@@ -1,4 +1,4 @@
-# Supply-chain gate for `hq` (SPEC 3.4, "ce qui ne doit pas entrer dans le
+# Supply-chain gate for `nunki` (SPEC 3.4, "ce qui ne doit pas entrer dans le
 # commun"). `cargo audit` answers "is anything here known to be vulnerable";
 # this file answers the two questions it does not: what licences we accept,
 # and what we refuse to carry at all.
@@ -34,7 +34,7 @@ unused-allowed-license = "allow"
 # One exception, scoped to one crate, and not a line in the list above.
 # `webpki-roots` is Mozilla's root-certificate store as data, under
 # CDLA-Permissive-2.0 — a permissive licence for data, not for code. It comes
-# with `ureq`, which Arnaud chose on 2026-09-10 for `hq push` to open the pull
+# with `ureq`, which Arnaud chose on 2026-09-10 for `nunki push` to open the pull
 # request itself (SPEC 4.2): an HTTPS client needs trust anchors, and every
 # pure-Rust way of carrying them carries this crate. Bundled roots rather than
 # the platform's store because they make the client deterministic and

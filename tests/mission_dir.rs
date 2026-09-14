@@ -1,8 +1,8 @@
 //! The mission folder at the HQ (SPEC 4.1): five files, and the split
 //! between them is a restriction rather than a convention.
 
-use hq::mission::dir::{MissionDirError, Paths, create, list, read_header};
-use hq::mission::{Bounds, Header, Integration, Lot, Security, Service};
+use nunki::mission::dir::{MissionDirError, Paths, create, list, read_header};
+use nunki::mission::{Bounds, Header, Integration, Lot, Security, Service};
 
 fn header() -> Header {
     Header {
@@ -60,10 +60,10 @@ fn a_new_mission_has_its_five_files_and_the_agents_three_are_empty() {
 
 #[test]
 fn the_folder_is_outside_the_tree_and_named_after_the_mission() {
-    let paths = Paths::of(std::path::Path::new("/home/h/.hq/demo"), "m1");
+    let paths = Paths::of(std::path::Path::new("/home/h/.nunki/demo"), "m1");
     assert_eq!(
         paths.dir,
-        std::path::Path::new("/home/h/.hq/demo/missions/m1")
+        std::path::Path::new("/home/h/.nunki/demo/missions/m1")
     );
     assert!(paths.mission.starts_with(&paths.dir));
 }
@@ -73,8 +73,12 @@ fn the_header_survives_a_round_trip_through_the_file() {
     let dir = tempfile::tempdir().unwrap();
     create(dir.path(), "m1", &header(), "prose").unwrap();
     let read = read_header(dir.path(), "m1").unwrap();
-    assert_eq!(read, header(), "what hq freezes must be what was written");
-    assert_eq!(read.shape(), hq::mission::Shape::Full);
+    assert_eq!(
+        read,
+        header(),
+        "what nunki freezes must be what was written"
+    );
+    assert_eq!(read.shape(), nunki::mission::Shape::Full);
 }
 
 #[test]
@@ -163,7 +167,7 @@ fn a_mission_with_no_service_states_why_rather_than_leaving_it_open() {
     create(dir.path(), "m1", &h, "").unwrap();
 
     let read = read_header(dir.path(), "m1").unwrap();
-    assert_eq!(read.shape(), hq::mission::Shape::CodeOnly);
+    assert_eq!(read.shape(), nunki::mission::Shape::CodeOnly);
     match read.integration {
         Integration::None { reason } => assert!(reason.contains("pure domain")),
         other => panic!("{other:?}"),
@@ -179,11 +183,11 @@ fn the_verbs_write_and_read_the_same_mission() {
     let home = dir.path().join("home");
     std::fs::create_dir_all(&root).unwrap();
     std::fs::create_dir_all(&home).unwrap();
-    std::fs::write(root.join("hq.yaml"), "harness: claude-code\n").unwrap();
+    std::fs::write(root.join("nunki.yaml"), "harness: claude-code\n").unwrap();
 
-    let hq = env!("CARGO_BIN_EXE_hq");
+    let nunki = env!("CARGO_BIN_EXE_nunki");
     let run = |args: &[&str]| {
-        std::process::Command::new(hq)
+        std::process::Command::new(nunki)
             .env("HOME", &home)
             .args(["-C"])
             .arg(&root)
@@ -232,7 +236,7 @@ fn the_verbs_write_and_read_the_same_mission() {
         "{:?}",
         String::from_utf8_lossy(&bad.stderr)
     );
-    assert!(!home.join(".hq/repo/missions/beta").exists());
+    assert!(!home.join(".nunki/repo/missions/beta").exists());
 }
 
 /// `FOLLOWUP_HQ.md` is the file an agent is told to read before anything
@@ -243,7 +247,7 @@ fn the_verbs_write_and_read_the_same_mission() {
 #[test]
 fn the_follow_up_file_is_prose_and_not_a_code_block() {
     let dir = tempfile::tempdir().unwrap();
-    let paths = hq::mission::dir::create(dir.path(), "m1", &header(), "do it").unwrap();
+    let paths = nunki::mission::dir::create(dir.path(), "m1", &header(), "do it").unwrap();
     let text = std::fs::read_to_string(&paths.followup).unwrap();
 
     for line in text.lines() {

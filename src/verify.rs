@@ -1,4 +1,4 @@
-//! `hq verify <mission>` (SPEC 4.2, 4.4, 4.5).
+//! `nunki verify <mission>` (SPEC 4.2, 4.4, 4.5).
 //!
 //! One verb for a whole phase, because it is one state machine: the coder's
 //! gates, then the integration mission, then the security mission, each with
@@ -13,11 +13,11 @@
 //! needs one — then returns: a run takes hours and `verify` never waits on
 //! one. The next `verify` reads that run back — the coder's `Lot:` line, a
 //! role's verdict, or why there is none — and moves. What it does not do is
-//! lift a `FINDINGS` verdict: that is a human's (`hq mission iterate`,
-//! `hq mission accept`).
+//! lift a `FINDINGS` verdict: that is a human's (`nunki mission iterate`,
+//! `nunki mission accept`).
 //!
 //! The slot's lock is taken **once**, here, at the top: everything under it
-//! — gate 6, gate 7, every `hq exec` — runs inside it and never asks again
+//! — gate 6, gate 7, every `nunki exec` — runs inside it and never asks again
 //! (SPEC 4.2).
 
 use std::sync::Arc;
@@ -45,7 +45,7 @@ pub enum Step {
     /// campaign nobody has started, the profile that is not up. The flow
     /// does not move — there is nothing to send an agent back for, and
     /// nothing green to move on from — and `why` carries the gate's own
-    /// sentence, which names the verb that unblocks it. A later `hq verify`
+    /// sentence, which names the verb that unblocks it. A later `nunki verify`
     /// plays the gate again.
     ///
     /// It is a step and not a `Handover` because `AwaitingHuman` is where a
@@ -68,22 +68,22 @@ pub enum Step {
     /// Nothing is decided on a silence (SPEC 4.2, "la reprise re-dérive
     /// avant de décider").
     Unreachable { role: Role, why: String },
-    /// Every declared stage is green; the human validates and `hq push`
+    /// Every declared stage is green; the human validates and `nunki push`
     /// pushes.
     Verified,
     /// The flow stopped and the human decides (SPEC 4.5).
     AwaitingHuman(Handover),
-    /// The mission is held (`hq mission stop`), so no run was launched.
+    /// The mission is held (`nunki mission stop`), so no run was launched.
     /// The gates still ran and the flow still moved: holding a mission stops
-    /// `hq` from starting work, not from reading what is already there.
+    /// `nunki` from starting work, not from reading what is already there.
     Held {
         role: Role,
         who: String,
         date: String,
-        /// Why, when `hq` held it itself.
+        /// Why, when `nunki` held it itself.
         reason: Option<String>,
     },
-    /// The subscription's window is past its threshold, and `hq` launches
+    /// The subscription's window is past its threshold, and `nunki` launches
     /// nothing before it resets (SPEC 4.3).
     Saving {
         role: Role,
@@ -93,7 +93,7 @@ pub enum Step {
         stop_at_percent: u32,
         until: String,
     },
-    /// The harness keeps failing, and `hq` waits it out before launching
+    /// The harness keeps failing, and `nunki` waits it out before launching
     /// again (SPEC 4.3): nothing is launched before `until`.
     Waiting {
         role: Role,
@@ -109,8 +109,8 @@ pub enum Step {
         provider: String,
         by: String,
     },
-    /// The security agent came back with findings: `hq mission iterate` sends
-    /// them back to the coder, `hq mission accept` lifts them.
+    /// The security agent came back with findings: `nunki mission iterate` sends
+    /// them back to the coder, `nunki mission accept` lifts them.
     Findings {
         report: String,
         /// What a human has already lifted **on this commit**. An acceptance
@@ -122,11 +122,11 @@ pub enum Step {
 
 #[derive(Debug, thiserror::Error)]
 pub enum VerifyError {
-    #[error("mission {0} has not started — `hq mission start {0} --slot <slot>` does that")]
+    #[error("mission {0} has not started — `nunki mission start {0} --slot <slot>` does that")]
     NotStarted(String),
     #[error(
         "a run is still going in slot {slot}: verifying now would judge a tree the \
-         agent is still writing — `hq mission stop {mission} --now` ends its turn first"
+         agent is still writing — `nunki mission stop {mission} --now` ends its turn first"
     )]
     RunInProgress { mission: String, slot: String },
     #[error(transparent)]
@@ -152,8 +152,8 @@ pub enum VerifyError {
     Provider(#[from] crate::provider::ProviderError),
     #[error(
         "mission {mission}'s run was told to end its turn: account {account}'s \
-         {window} is at {percent}% — hq launches nothing before {until}, then goes on; \
-         `hq verify {mission}` once the turn has ended reads it back without spending an attempt"
+         {window} is at {percent}% — nunki launches nothing before {until}, then goes on; \
+         `nunki verify {mission}` once the turn has ended reads it back without spending an attempt"
     )]
     Spared {
         mission: String,
@@ -193,7 +193,7 @@ pub fn verify_as(
     let _lock = SlotLock::acquire(&project.hq_root.join("locks"), &state.slot, verb)?;
 
     // Gates read a tree. A tree an agent is still writing is not a tree to
-    // judge — this is the interlock `hq exec --tree` deliberately does not
+    // judge — this is the interlock `nunki exec --tree` deliberately does not
     // have, and this is where it belongs.
     refuse_while_running(
         project,
@@ -211,7 +211,7 @@ pub fn verify_as(
     let mut steps = Vec::new();
     loop {
         // The frozen header, never the file: from the moment a mission
-        // starts, `hq` reads its own copy (SPEC 4.1).
+        // starts, `nunki` reads its own copy (SPEC 4.1).
         let header = state.flow.header().clone();
         let subject = gate::Subject {
             role: role_of(state.flow.stage()),
@@ -260,7 +260,7 @@ pub fn verify_as(
                             &outcome,
                             now,
                         )?;
-                        // A turn `hq` ended is replayed, whatever the run
+                        // A turn `nunki` ended is replayed, whatever the run
                         // left, and nothing is judged on a tree it did not
                         // finish — a resume block one commit behind would
                         // turn a replay into a spent attempt. Only a run
@@ -295,7 +295,7 @@ pub fn verify_as(
                                 // would meet the same wall. Nothing is
                                 // decided, so nothing is forgotten either —
                                 // the run stays recorded, and the next
-                                // `hq verify` reads it back and plays the
+                                // `nunki verify` reads it back and plays the
                                 // gate again.
                                 (None, Some(why)) => {
                                     steps.push(Step::GateUnplayable {
@@ -364,7 +364,7 @@ pub fn verify_as(
                     if let Some(why) = attempt_failed(&event) {
                         crate::followup::said(
                             &paths.followup,
-                            "hq",
+                            "nunki",
                             &format!("{label}, attempt {attempt}: {why}"),
                         )?;
                         state.coder_session = None;
@@ -439,7 +439,7 @@ pub fn verify_as(
                         // attempt the coder is sent back to.
                         crate::followup::said(
                             &paths.followup,
-                            "hq",
+                            "nunki",
                             &format!(
                                 "the final gates were red on {}: {reason}",
                                 &head[..head.len().min(12)]
@@ -462,7 +462,7 @@ pub fn verify_as(
                     (None, None) => {
                         // The coder's verdict is implicit — its gates were
                         // green (SPEC 4.4) — so this is where it is recorded,
-                        // with the commit it was green on. `hq push` needs
+                        // with the commit it was green on. `nunki push` needs
                         // that commit: everything after it must be the
                         // integrator's wiring and nothing else.
                         state.conclude(Role::Coder, None, &head);
@@ -694,7 +694,7 @@ pub fn verify_as(
 }
 
 /// The step a held mission answers with instead of a launch, or `None` if it
-/// is not held. One place decides it, because "hq launches no further run"
+/// is not held. One place decides it, because "nunki launches no further run"
 /// must mean the same thing at every launch site (SPEC 4.5).
 fn held(state: &MissionState, role: Role) -> Option<Step> {
     state.stopped.as_ref().map(|s| Step::Held {
@@ -738,13 +738,13 @@ fn note_harness(state: &mut MissionState, fault: Option<&Fault>, bounds: &Bounds
     );
     state.harness_down = Some(record);
     if let backoff::Next::Human { why } = next {
-        state.hold_for("hq", why);
+        state.hold_for("nunki", why);
     }
 }
 
 /// The step a launch site answers with while the subscription's windows are
 /// past their threshold (SPEC 4.3): nothing is launched until the window
-/// resets, and then `hq` goes on by itself — a wait, not a hold. A mission
+/// resets, and then `nunki` goes on by itself — a wait, not a hold. A mission
 /// whose account cannot be named is not judged here: the launch that follows
 /// says what is wrong with it.
 fn saving(
@@ -757,7 +757,7 @@ fn saving(
         return Ok(None);
     };
     let Some(measure) =
-        crate::consumption::read(&project.hq_home(), &account).map_err(VerifyError::Usage)?
+        crate::consumption::read(&project.nunki_home(), &account).map_err(VerifyError::Usage)?
     else {
         return Ok(None);
     };
@@ -786,15 +786,15 @@ fn capped(
     let Some(why) = over_cap(&state.spent, bounds, id) else {
         return Ok(None);
     };
-    state.hold_for("hq", why);
+    state.hold_for("nunki", why);
     store.save(state)?;
     Ok(held(state, role))
 }
 
 fn over_cap(spent: &Spent, bounds: &Bounds, id: &str) -> Option<String> {
     let raise = format!(
-        "raise it in the mission's header, then `hq mission reframe {id} --yes` and \
-         `hq mission resume {id}`"
+        "raise it in the mission's header, then `nunki mission reframe {id} --yes` and \
+         `nunki mission resume {id}`"
     );
     if let Some(max) = bounds.max_runs
         && spent.runs >= max
@@ -859,7 +859,7 @@ fn attempt_failed(event: &Event) -> Option<String> {
 /// What every read-back records, whatever the role: the run and what it
 /// spent, the account's windows as it last saw them, and the harness's
 /// failures in a row. Returns the spared mark, spent by this read-back — a
-/// turn `hq` ended is no fault of the harness's, and is not counted as one.
+/// turn `nunki` ended is no fault of the harness's, and is not counted as one.
 fn tally(
     project: &Project,
     state: &mut MissionState,
@@ -887,7 +887,7 @@ enum Ended {
     /// How it ended, what it spent, and how far the subscription's windows
     /// were used — each as far as the harness said.
     With(Outcome, Option<Usage>, Option<crate::consumption::Windows>),
-    /// The question could not be put. A run `hq` cannot reach is not a run
+    /// The question could not be put. A run `nunki` cannot reach is not a run
     /// that failed, and turning one into the other would consume an attempt
     /// on a machine that was asleep.
     Unreachable(String),
@@ -918,7 +918,8 @@ fn read_back(
         // Nothing is concluded from it, and the message says whose doing it
         // is rather than leaving `verify` looking stuck.
         Ok(RunState::Paused(_)) => Ended::Unreachable(
-            "the run is paused — `hq mission resume` unfreezes it exactly where it is".to_string(),
+            "the run is paused — `nunki mission resume` unfreezes it exactly where it is"
+                .to_string(),
         ),
         // `refuse_while_running` already returned for a running run, so this
         // is a run that started running between the two questions.
@@ -970,7 +971,7 @@ fn read_verdict(
         ));
     }
     let file: crate::mission::VerdictFile = serde_json::from_str(&text)
-        .map_err(|e| format!("{} is not a verdict `hq` can read: {e}", path.display()))?;
+        .map_err(|e| format!("{} is not a verdict `nunki` can read: {e}", path.display()))?;
     if file.role != role {
         return Err(format!(
             "{} carries {:?}'s verdict, and this run was {role:?}'s",
@@ -1008,7 +1009,7 @@ fn carry(file: &std::path::Path, from: Role, event: &Event, head: &str) -> Resul
     Ok(())
 }
 
-/// What to tell the human about the application `hq` started.
+/// What to tell the human about the application `nunki` started.
 fn describe(launched: &crate::run::Launched) -> String {
     match (&launched.launch, &launched.app) {
         (Some(crate::launch::Launch::Script { path, declared }), Some(_)) => {
@@ -1050,8 +1051,8 @@ fn refuse_while_running(
             &handle.session.0,
         )),
     );
-    // A run `hq` cannot reach is not a run in progress: it says so elsewhere
-    // (`hq mission status`), and refusing to verify because the engine is
+    // A run `nunki` cannot reach is not a run in progress: it says so elsewhere
+    // (`nunki mission status`), and refusing to verify because the engine is
     // down would be the same lie in another place.
     if let Ok(RunState::Running(_)) = crate::harness::Harness::state(&harness, handle) {
         if let Some(spared) = crate::gesture::spare_under_lock(project, id, &harness, now)? {
@@ -1071,7 +1072,7 @@ fn refuse_while_running(
     Ok(())
 }
 
-/// A run `hq` stopped for the account's window costs no attempt, whatever it
+/// A run `nunki` stopped for the account's window costs no attempt, whatever it
 /// left: the flow reads it as a harness cause, which replays the same
 /// attempt. A verdict it managed to write before its turn ended still
 /// stands — it is a conclusion, and the window has nothing to say about it.
@@ -1079,7 +1080,7 @@ fn spare_event(spared: Option<&crate::state::Spared>, event: Event) -> Event {
     match (spared, event) {
         (Some(spared), Event::RunEnded { .. }) => Event::RunEnded {
             outcome: Outcome::HarnessFailure(Fault::transient(format!(
-                "hq ended the turn: account {}'s {} was at {}%",
+                "nunki ended the turn: account {}'s {} was at {}%",
                 spared.account,
                 spared.window,
                 crate::consumption::percent(spared.per_mille)
@@ -1102,7 +1103,7 @@ pub fn harness_spawner(
 ) -> crate::engine::spawn::ContainerSpawner {
     let file = crate::run::profile_path(project, slot);
     let compose_project =
-        crate::compose::project_name(slot).unwrap_or_else(|_| format!("hq-{slot}"));
+        crate::compose::project_name(slot).unwrap_or_else(|_| format!("nunki-{slot}"));
     crate::engine::spawn::ContainerSpawner::new(
         engine,
         file,

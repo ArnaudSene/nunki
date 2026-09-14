@@ -1,8 +1,8 @@
 //! The flow of SPEC 4.5, exercised without a container or a model.
 
-use hq::harness::{Outcome, Role, Usage};
-use hq::mission::flow::{Event, Flow, Handover, Stage, Work};
-use hq::mission::{Bounds, Header, Integration, Lot, Security, Service, Verdict};
+use nunki::harness::{Outcome, Role, Usage};
+use nunki::mission::flow::{Event, Flow, Handover, Stage, Work};
+use nunki::mission::{Bounds, Header, Integration, Lot, Security, Service, Verdict};
 
 fn lots(n: usize) -> Vec<Lot> {
     (1..=n)
@@ -193,7 +193,7 @@ fn a_harness_failure_replays_the_same_attempt() {
     let mut flow = Flow::new(header(none(), Security::Gates, Bounds::default())).unwrap();
     for _ in 0..10 {
         flow.advance(Event::RunEnded {
-            outcome: Outcome::HarnessFailure(hq::harness::Fault::transient("rate limit")),
+            outcome: Outcome::HarnessFailure(nunki::harness::Fault::transient("rate limit")),
             lot_done: false,
         })
         .unwrap();
@@ -271,7 +271,7 @@ fn an_event_out_of_place_is_an_error_not_a_silent_no_op() {
     let err = flow.advance(verdict(Verdict::Clear)).unwrap_err();
     assert!(matches!(
         err,
-        hq::mission::flow::FlowError::InvalidTransition { .. }
+        nunki::mission::flow::FlowError::InvalidTransition { .. }
     ));
 }
 

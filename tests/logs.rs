@@ -1,15 +1,15 @@
-//! `hq logs` (SPEC 4.2, verb table): what replaces watching a screen.
+//! `nunki logs` (SPEC 4.2, verb table): what replaces watching a screen.
 
 use std::path::PathBuf;
 
-use hq::harness::LineKind;
-use hq::harness::claude_code::ClaudeCode;
-use hq::harness::spawn::LocalSpawner;
-use hq::logs::{self, LogsError};
-use hq::mission::flow::Flow;
-use hq::mission::{Bounds, Header, Integration, Lot, Security};
-use hq::project::{Config, Project, ProtectedPaths};
-use hq::state::{MissionState, Store};
+use nunki::harness::LineKind;
+use nunki::harness::claude_code::ClaudeCode;
+use nunki::harness::spawn::LocalSpawner;
+use nunki::logs::{self, LogsError};
+use nunki::mission::flow::Flow;
+use nunki::mission::{Bounds, Header, Integration, Lot, Security};
+use nunki::project::{Config, Project, ProtectedPaths};
+use nunki::state::{MissionState, Store};
 
 fn harness() -> ClaudeCode {
     ClaudeCode::new(Default::default(), Box::new(LocalSpawner))
@@ -43,7 +43,7 @@ struct World {
 impl World {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let hq_root = dir.path().join("hq");
+        let hq_root = dir.path().join("nunki");
         for d in ["locks", "missions", "state/missions"] {
             std::fs::create_dir_all(hq_root.join(d)).unwrap();
         }
@@ -66,7 +66,7 @@ impl World {
             },
             hq_root.clone(),
         );
-        hq::mission::dir::create(&hq_root, "m1", &header(), "do it").unwrap();
+        nunki::mission::dir::create(&hq_root, "m1", &header(), "do it").unwrap();
         Self { _dir: dir, project }
     }
 
@@ -149,7 +149,7 @@ fn a_run_reads_as_what_it_was_told_what_it_said_and_what_it_did() {
     );
 }
 
-/// A line `hq` cannot parse is kept and marked. A log rendered by dropping
+/// A line `nunki` cannot parse is kept and marked. A log rendered by dropping
 /// what the reader did not expect hides exactly the run that went wrong.
 #[test]
 fn a_line_hq_cannot_read_is_kept_and_marked() {
@@ -209,7 +209,7 @@ fn a_mission_with_no_run_says_so_and_an_unknown_one_says_something_else() {
     assert!(matches!(err, LogsError::NoMission(_)), "{err}");
 }
 
-/// `hq logs` with no argument means the mission this HQ touched last, and
+/// `nunki logs` with no argument means the mission this HQ touched last, and
 /// choosing for the reader without telling them which is a guess dressed as a
 /// convenience — so the caller is given the name to print.
 #[test]
