@@ -54,6 +54,34 @@ fn a_fresh_repository_gets_everything_it_needs() {
     );
 }
 
+/// The rules an agent reads have to name what the gates actually refuse.
+///
+/// Measured on 2026-09-13, on the first mission `hq` ran end to end: the
+/// coder was never told that gate 3 wants `HEAD` named in the resume block,
+/// nor that gate 5 wants `PR.md` written — and it lost one attempt to each,
+/// on rules it had no way to learn. A gate that enforces what nothing
+/// states is a gate that grades an agent on a secret.
+#[test]
+fn the_rules_it_writes_name_what_the_gates_require() {
+    let (_d, root, hq) = fresh();
+    init(&root, &hq, &["rust".to_string()]).unwrap();
+    let rules = std::fs::read_to_string(root.join("AGENTS.md")).unwrap();
+
+    assert!(
+        rules.contains("names the commit it describes"),
+        "gate 3 refuses a resume block that does not carry HEAD: {rules}"
+    );
+    assert!(
+        rules.contains("an empty one is a red gate"),
+        "gate 5 asks for PR.md, so the rules have to ask for it: {rules}"
+    );
+    assert!(
+        rules.contains("**inside** the block"),
+        "hq reads the block and not the whole file, so a line further down is \
+         one it never sees: {rules}"
+    );
+}
+
 /// The image a project builds carries the security updates published since
 /// its base tag was cut.
 ///

@@ -373,6 +373,36 @@ fn the_role_prompts_say_what_the_role_may_not_do() {
             "the outcome nobody can check must be refused where the agent reads \
              its rules, not only where hq checks them: {prompt}"
         );
+        // The shape of the answer, not just its name. Measured on 2026-09-13:
+        // a coder left to guess it wrote MUTANTS.json's shape instead, and
+        // `hq` refused the file with a serde error that stopped the whole
+        // verification rather than reddening one gate.
+        assert!(
+            prompt.contains(r#"{"<survivor id>": {"kind": "killed", "test":"#),
+            "the triage file's shape belongs where the agent reads its rules: {prompt}"
+        );
+        // Three outcomes and no fourth (SPEC 4.4). A prompt that sanctions
+        // "unanswered" sends the agent at a gate that refuses it, and the
+        // agent obeys the prompt — measured the same day.
+        assert!(
+            !prompt.contains("left unanswered"),
+            "the prompt must not offer an outcome gate 7 refuses: {prompt}"
+        );
+        assert!(prompt.contains("no third answer of your own"), "{prompt}");
+        // What the gates actually require, said where the agent reads it and
+        // not only where `hq` checks it.
+        assert!(
+            prompt.contains("names the commit it describes"),
+            "gate 3 refuses a resume block that does not carry HEAD: {prompt}"
+        );
+        assert!(
+            prompt.contains("an empty one is a red gate"),
+            "gate 5 asks for PR.md, so the run contract has to ask for it: {prompt}"
+        );
+        assert!(
+            prompt.contains("inside the block"),
+            "hq reads the block, not the file: a line further down is unseen: {prompt}"
+        );
     }
 
     // And each says the thing that is its own.
