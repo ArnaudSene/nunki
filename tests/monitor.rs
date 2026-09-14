@@ -143,6 +143,16 @@ fn after_a_verify_the_monitor_goes_on_or_stops_for_a_human() {
         report: "one".into(),
         lifted: vec![],
     })));
+    // The one arm where stopping is what keeps the flow honest rather than
+    // what ends it: the stage has not moved, so going on would play the same
+    // gate against the same wall on every tick, for as long as the monitor
+    // lives. Nothing but a human changes the answer.
+    assert!(stops(go(Step::GateUnplayable {
+        role: Integrator,
+        why: "gate 7 (every survivor has an outcome) could not be played: no mutation \
+              campaign has run on this mission — `hq mission mutants` starts one"
+            .into(),
+    })));
 
     // A human driving the slot is not a failure: the monitor waits its turn.
     let held = VerifyError::Lock(hq::state::LockError::Held {

@@ -141,6 +141,41 @@ impl Report {
         })
     }
 
+    /// The first gate that is **red**: a verdict on the work, and the
+    /// agent's to fix.
+    ///
+    /// Told apart from [`Self::unplayed`] because the two ask different
+    /// things of the flow, even though neither is green. A red gate earns
+    /// the agent a run. A gate nobody managed to play earns it nothing: it
+    /// is the machine's or the HQ's, and sending an agent back at it asks
+    /// for a repair it cannot reach. Measured on 2026-09-13, where a
+    /// mutation campaign that had not been run cost three coder runs — each
+    /// one reading the same instruction, saying it could not act on it, and
+    /// stopping — before a human held the mission.
+    pub fn failed(&self) -> Option<String> {
+        self.outcomes.iter().find_map(|o| match &o.decision {
+            Decision::Failed(why) => Some(format!(
+                "gate {} ({}): {why}",
+                o.gate.number(),
+                o.gate.title()
+            )),
+            _ => None,
+        })
+    }
+
+    /// The first gate that could not be played at all, and what it wants —
+    /// the sentence names the verb that would unblock it.
+    pub fn unplayed(&self) -> Option<String> {
+        self.outcomes.iter().find_map(|o| match &o.decision {
+            Decision::Unplayed(why) => Some(format!(
+                "gate {} ({}) could not be played: {why}",
+                o.gate.number(),
+                o.gate.title()
+            )),
+            _ => None,
+        })
+    }
+
     pub fn passed(&self) -> bool {
         self.failure().is_none()
     }

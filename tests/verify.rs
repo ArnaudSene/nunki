@@ -510,8 +510,17 @@ fn live_a_mission_is_driven_from_its_first_lot_to_verified() {
         Some(hq::gate::Decision::Unplayed(why)) => assert!(why.contains("hq mission mutants")),
         other => panic!("no campaign has run: {other:?}"),
     }
-    // A red final gate sends the coder back, and does not consume a volet.
-    assert!(matches!(world.state().flow.stage(), Stage::Coding { .. }));
+    // That gate is unplayable, not red, and the difference decides who is
+    // owed the next move. The flow stays where it is — no volet, no attempt,
+    // no run — and says what it needs; the campaign at step 4 below is the
+    // human's to start, which is exactly what the gate's sentence asks for.
+    assert!(matches!(world.state().flow.stage(), Stage::Gates));
+    assert!(
+        steps
+            .iter()
+            .any(|s| matches!(s, Step::GateUnplayable { .. })),
+        "{steps:?}"
+    );
 
     // 4. The campaign runs, and its one survivor is answered by the coder.
     let touched = hq::gate::touched_paths(&world.tree, "dev").unwrap();
@@ -2108,6 +2117,59 @@ fn the_last_lot_done_goes_on_to_the_final_gates_at_once() {
         "{steps:?}"
     );
     assert_ne!(world.state().flow.stage(), &Stage::Gates, "{steps:?}");
+}
+
+/// A gate nobody could play stops the verification where it stands, and the
+/// coder is not sent back at it.
+///
+/// Measured on 2026-09-13, on the first mission hq drove from end to end:
+/// gate 7 said `Unplayed` because no campaign had run, and starting one is
+/// `hq mission mutants` — an HQ verb no container holds. hq opened a volet
+/// anyway, three runs in a row, each reading the same instruction, saying it
+/// had no way to carry it out, and stopping. The last cost 34 000 output
+/// tokens to say so.
+///
+/// This world owes nothing: the journal names `HEAD` and `PR.md` is written,
+/// so no gate is red. What is left is a battery with no profile up and a
+/// campaign nobody has started — two gates about the machine, which is the
+/// one thing an agent cannot be sent back to fix.
+#[test]
+fn a_gate_nobody_could_play_stops_instead_of_opening_a_volet() {
+    let world = World::new(1);
+    world.commit("src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    world.journal_names_head();
+    std::fs::write(
+        world.mission().join("PR.md"),
+        "# What this changes\n\nL1, and nothing else.\n",
+    )
+    .unwrap();
+    world.coder_finished_the_lot();
+
+    let steps = world.verify().unwrap();
+    let report = gates_of(&steps);
+    assert!(
+        report.failed().is_none(),
+        "nothing is the agent's to fix here: {report:?}"
+    );
+    assert!(
+        matches!(steps.last(), Some(Step::GateUnplayable { .. })),
+        "{steps:?}"
+    );
+
+    // The flow has not moved, which is the whole point: no volet, no
+    // attempt, no run spent against a wall the agent cannot move. A later
+    // `hq verify`, once a human has done what the gate's sentence asks,
+    // plays it again and goes on.
+    assert_eq!(world.state().flow.stage(), &Stage::Gates, "{steps:?}");
+    assert_eq!(world.state().flow.volets(), 0);
+
+    // And nothing is written to the file the next run reads first, unlike a
+    // red gate: there is no next run to read it.
+    assert!(
+        !world.followup().contains("could not be played"),
+        "{}",
+        world.followup()
+    );
 }
 
 /// A volet is called `volet-<n>`: the name the coder is given, the one its

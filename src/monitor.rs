@@ -215,6 +215,15 @@ pub fn after_verify(result: &Result<Vec<Step>, VerifyError>) -> Next {
             Some(Step::Findings { .. }) => Next::Exit(
                 "the security agent's findings are the human's to iterate or lift".to_string(),
             ),
+            // The one place where stopping is what keeps the flow honest
+            // rather than what ends it. The stage has not moved and nothing
+            // an agent does would move it, so going on would play the same
+            // gate against the same wall on every tick, forever. The mission
+            // is not over: `hq verify` picks it up once the sentence below
+            // has been acted on.
+            Some(Step::GateUnplayable { why, .. }) => {
+                Next::Exit(format!("a gate could not be played: {why}"))
+            }
             Some(
                 Step::Launched { .. }
                 | Step::Saving { .. }
