@@ -624,6 +624,63 @@ fn a_signal_is_named_the_way_kill_expects_it() {
     assert_eq!(Signal::Terminate.name(), "TERM");
 }
 
+/// A signal that fails says what failed, even when the shell says nothing.
+///
+/// Measured on 2026-09-13: `hq mission stop --now` answered `hq: io:` — that
+/// was the whole message — and the run went on as if nothing had been asked.
+/// The error carried the container's stderr and nothing else, and a `kill`
+/// that fails frequently writes no stderr at all, so the one case where a
+/// human has least to go on was the case that said least. The status is then
+/// the only thing known, which is precisely why it has to be in the sentence.
+#[test]
+fn a_signal_that_fails_is_never_an_empty_sentence() {
+    use hq::harness::spawn::{Signal, Spawned, Spawner};
+
+    let spawned = || Spawned {
+        pid: Some(41),
+        container: "cafe1234".into(),
+    };
+    let spawner = |fake: &std::sync::Arc<FakeEngine>| {
+        hq::engine::spawn::ContainerSpawner::new(
+            fake.clone(),
+            file(),
+            "hq-demo",
+            hq::compose::AGENT_SERVICE,
+        )
+    };
+
+    // The measured case: non-zero, and not a word about why.
+    let mute = std::sync::Arc::new(FakeEngine::default().with_exec(ExecOutput {
+        status: 1,
+        stdout: String::new(),
+        stderr: String::new(),
+    }));
+    let said = spawner(&mute)
+        .signal(&spawned(), Signal::Terminate)
+        .expect_err("a non-zero status is a failed kill")
+        .to_string();
+    assert!(
+        !said.trim().is_empty(),
+        "an empty error says nothing at all"
+    );
+    assert!(said.contains("(1)"), "the status is all there is: {said}");
+    assert!(said.contains("41"), "{said}");
+    assert!(said.contains("TERM"), "{said}");
+
+    // And when the shell did say something, it is still carried.
+    let noisy = std::sync::Arc::new(FakeEngine::default().with_exec(ExecOutput {
+        status: 2,
+        stdout: String::new(),
+        stderr: "no such process\n".into(),
+    }));
+    let said = spawner(&noisy)
+        .signal(&spawned(), Signal::Interrupt)
+        .expect_err("a non-zero status is a failed kill")
+        .to_string();
+    assert!(said.contains("no such process"), "{said}");
+    assert!(said.contains("(2)"), "{said}");
+}
+
 /// The three gestures on a real container, and the one reading that made this
 /// piece necessary (SPEC 4.3, and AGENTS.md §4).
 ///
