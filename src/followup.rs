@@ -7,7 +7,7 @@
 //!   speaks to another agent — everything goes through the HQ and through
 //!   files, so that losing a session loses nothing;
 //! - **a security finding is only ever lifted by a human**, through a verb,
-//!   and the lift is written here as well as into `hq`'s state.
+//!   and the lift is written here as well as into `nunki`'s state.
 //!   `VERDICT.json` stays `FINDINGS`: the verdict says what the agent found,
 //!   the state says what the human decided, and confusing the two would let a
 //!   red verdict be edited into a green one.
@@ -71,8 +71,8 @@ pub fn lifted(
             "## {date} — {who} lifted a security finding on {short}\n\n\
              **Finding:** {finding}\n\n\
              **Accepted because:** {why}\n\n\
-             `VERDICT.json` stays `FINDINGS`. This file and `hq`'s state are what\n\
-             record that a human lifted it, and `hq push` reads it there.\n",
+             `VERDICT.json` stays `FINDINGS`. This file and `nunki`'s state are what\n\
+             record that a human lifted it, and `nunki push` reads it there.\n",
             date = today(),
             short = short(head),
         ),
@@ -100,7 +100,7 @@ pub fn ended(file: &Path, who: &str, why: &str) -> Result<(), FollowupError> {
     append(
         file,
         &format!(
-            "## {date} — {who} called this mission off\n\n             **Because:** {why}\n\n             Nothing here is deleted. `hq mission archive` moves this folder under\n             `archive/`, and what it holds is the record of what was done.\n",
+            "## {date} — {who} called this mission off\n\n             **Because:** {why}\n\n             Nothing here is deleted. `nunki mission archive` moves this folder under\n             `archive/`, and what it holds is the record of what was done.\n",
             date = today(),
         ),
     )
@@ -122,7 +122,7 @@ pub fn said(file: &Path, who: &str, what: &str) -> Result<(), FollowupError> {
 }
 
 /// The first twelve characters of a commit, which is how every other message
-/// in `hq` names one.
+/// in `nunki` names one.
 fn short(head: &str) -> &str {
     &head[..12.min(head.len())]
 }

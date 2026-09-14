@@ -1,6 +1,6 @@
 //! The line a coder run leaves to say how its lot ended (SPEC 4.1, 4.3).
 
-use hq::mission::journal::{LotLine, judge, lot_line, parse};
+use nunki::mission::journal::{LotLine, judge, lot_line, parse};
 
 fn done(lot: &str) -> Option<LotLine> {
     Some(LotLine::Done { lot: lot.into() })
@@ -82,11 +82,11 @@ fn the_judgement_says_why_a_lot_is_not_done() {
 /// with a verdict are not.
 #[test]
 fn the_coder_is_told_the_line_and_the_other_roles_are_not() {
-    use hq::harness::Role;
-    let coder = hq::role::prompt(Role::Coder);
+    use nunki::harness::Role;
+    let coder = nunki::role::prompt(Role::Coder);
     assert!(coder.contains("`Lot: <lot> — done`"), "{coder}");
     assert!(coder.contains("`Lot: <lot> — failed: <why>`"), "{coder}");
     for role in [Role::Integrator, Role::Security] {
-        assert!(!hq::role::prompt(role).contains("Lot:"), "{role:?}");
+        assert!(!nunki::role::prompt(role).contains("Lot:"), "{role:?}");
     }
 }

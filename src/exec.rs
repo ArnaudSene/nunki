@@ -1,4 +1,4 @@
-//! `hq exec <slot> <cmd>` (SPEC 4.2): run a command in a slot's container.
+//! `nunki exec <slot> <cmd>` (SPEC 4.2): run a command in a slot's container.
 //!
 //! This is how the HQ **replays a proof** without having the stack on the
 //! host — and, later, how gates 6 and 7 run at all (SPEC 4.4).
@@ -30,7 +30,7 @@ pub const PROOF_AT: &str = "/work/proof";
 /// The named volume that holds it, per slot: the copy and its build cache
 /// outlive the container, which is what "warmed once per slot" means.
 pub fn proof_volume(slot: &str) -> String {
-    format!("hq-{slot}-proof")
+    format!("nunki-{slot}-proof")
 }
 
 /// Which tree a command runs against.
@@ -46,8 +46,8 @@ pub enum On {
 #[derive(Debug, thiserror::Error)]
 pub enum ExecError {
     #[error(
-        "slot {0:?} has no profile up — `hq mission start` lifts one, or \
-         `hq slot rebuild` if its images are stale"
+        "slot {0:?} has no profile up — `nunki mission start` lifts one, or \
+         `nunki slot rebuild` if its images are stale"
     )]
     NoProfile(String),
     #[error("the copy of HEAD could not be refreshed:\n{0}")]
@@ -107,7 +107,7 @@ pub fn run(
 /// replayed is the commit the slot is on, whatever branch holds it, and a
 /// detached checkout of `FETCH_HEAD` says exactly that.
 ///
-/// `git clean` without `-x`: it removes what a previous `hq exec` left
+/// `git clean` without `-x`: it removes what a previous `nunki exec` left
 /// untracked in the copy, and keeps everything the project ignores — which
 /// is where the build cache lives. With `-x` the cache would go and gate 7
 /// would recompile from cold every campaign, which SPEC 4.4 explicitly
@@ -161,7 +161,7 @@ fn refresh_at(
     }
 }
 
-/// The volume a slot's profile must carry for `hq exec` to have somewhere to
+/// The volume a slot's profile must carry for `nunki exec` to have somewhere to
 /// put the copy, as the plan wants it.
 pub fn volume(slot: &str) -> crate::compose::NamedVolume {
     crate::compose::NamedVolume {

@@ -1,4 +1,4 @@
-//! The container-engine boundary (SPEC 4.2): what `hq` asks an engine, and
+//! The container-engine boundary (SPEC 4.2): what `nunki` asks an engine, and
 //! what it must never ask it.
 
 use std::collections::VecDeque;
@@ -7,11 +7,11 @@ use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::sync::Mutex;
 
-use hq::engine::cli::Cli;
-use hq::engine::docker::{Config, Docker};
-use hq::engine::fake::{Call, FakeEngine, nowhere};
-use hq::engine::{Dialect, Engine, ExecOutput, Liveness, Netns};
-use hq::harness::spawn::CommandSpec;
+use nunki::engine::cli::Cli;
+use nunki::engine::docker::{Config, Docker};
+use nunki::engine::fake::{Call, FakeEngine, nowhere};
+use nunki::engine::{Dialect, Engine, ExecOutput, Liveness, Netns};
+use nunki::harness::spawn::CommandSpec;
 
 /// Records what the adapter asked for and answers from a script, so the
 /// command lines can be read without an engine on the machine.
@@ -93,9 +93,9 @@ fn recorded(answers: Vec<Output>) -> (Docker, &'static RecordingCli) {
 #[test]
 fn up_waits_for_health_because_that_is_what_holds_the_firewall_rule() {
     let (docker, cli) = recorded(vec![]);
-    docker.up(&file(), "hq-demo").unwrap();
+    docker.up(&file(), "nunki-demo").unwrap();
     let line = &cli.lines()[0];
-    assert!(line.contains("-p hq-demo"), "{line}");
+    assert!(line.contains("-p nunki-demo"), "{line}");
     assert!(line.contains("-f /slots/demo/mission.yml"), "{line}");
     assert!(
         line.ends_with("up -d --wait"),
@@ -107,7 +107,7 @@ fn up_waits_for_health_because_that_is_what_holds_the_firewall_rule() {
 fn a_profile_switch_stops_two_services_and_never_takes_the_project_down() {
     let (docker, cli) = recorded(vec![]);
     docker
-        .stop(&file(), "hq-demo", &["agent", "firewall"])
+        .stop(&file(), "nunki-demo", &["agent", "firewall"])
         .unwrap();
     let lines = cli.lines();
     assert_eq!(lines.len(), 2, "{lines:?}");
@@ -129,13 +129,13 @@ fn a_profile_switch_stops_two_services_and_never_takes_the_project_down() {
 fn the_three_gestures_ask_for_exactly_what_each_one_means() {
     let (docker, cli) = recorded(vec![]);
     docker
-        .pause(&file(), "hq-demo", &["agent", "firewall"])
+        .pause(&file(), "nunki-demo", &["agent", "firewall"])
         .unwrap();
     docker
-        .unpause(&file(), "hq-demo", &["agent", "firewall"])
+        .unpause(&file(), "nunki-demo", &["agent", "firewall"])
         .unwrap();
     docker
-        .kill(&file(), "hq-demo", &["agent", "firewall"])
+        .kill(&file(), "nunki-demo", &["agent", "firewall"])
         .unwrap();
     let lines = cli.lines();
     assert!(lines[0].ends_with("pause agent firewall"), "{lines:?}");
@@ -154,8 +154,8 @@ fn the_three_gestures_ask_for_exactly_what_each_one_means() {
 #[test]
 fn down_is_explicit_about_volumes_and_never_removes_orphans() {
     let (docker, cli) = recorded(vec![]);
-    docker.down(&file(), "hq-demo", false).unwrap();
-    docker.down(&file(), "hq-demo", true).unwrap();
+    docker.down(&file(), "nunki-demo", false).unwrap();
+    docker.down(&file(), "nunki-demo", true).unwrap();
     let lines = cli.lines();
     assert!(lines[0].ends_with("down --timeout 20"), "{lines:?}");
     assert!(
@@ -174,7 +174,7 @@ fn exec_never_allocates_a_terminal() {
     let out = docker
         .exec(
             &file(),
-            "hq-demo",
+            "nunki-demo",
             "agent",
             &["sh".to_string(), "-c".to_string(), "echo hello".to_string()],
         )
@@ -190,11 +190,14 @@ fn exec_never_allocates_a_terminal() {
 
 #[test]
 fn a_failing_command_names_the_verb_and_carries_the_engines_words() {
-    let (docker, _) = recorded(vec![saying(1, "", "network hq-demo_default not found")]);
-    let err = docker.up(&file(), "hq-demo").unwrap_err();
+    let (docker, _) = recorded(vec![saying(1, "", "network nunki-demo_default not found")]);
+    let err = docker.up(&file(), "nunki-demo").unwrap_err();
     let text = err.to_string();
     assert!(text.contains("up failed"), "{text}");
-    assert!(text.contains("network hq-demo_default not found"), "{text}");
+    assert!(
+        text.contains("network nunki-demo_default not found"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -229,13 +232,13 @@ fn liveness_reads_the_engine_and_treats_an_unknown_container_as_an_answer() {
 fn container_of_returns_nothing_rather_than_an_empty_name() {
     let (docker, _) = recorded(vec![saying(0, "\n", "")]);
     assert_eq!(
-        docker.container_of(&file(), "hq-demo", "agent").unwrap(),
+        docker.container_of(&file(), "nunki-demo", "agent").unwrap(),
         None
     );
 
     let (docker, _) = recorded(vec![saying(0, "abc123\n", "")]);
     assert_eq!(
-        docker.container_of(&file(), "hq-demo", "agent").unwrap(),
+        docker.container_of(&file(), "nunki-demo", "agent").unwrap(),
         Some("abc123".to_string())
     );
 }
@@ -251,11 +254,11 @@ fn the_compose_command_is_overridable_because_the_machines_are_far_apart() {
     };
     let (cli, _) = (Box::new(RecordingCli::default()), ());
     let docker = Docker::new(config, cli);
-    let spec = docker.compose_command(&file(), "hq-demo", &["up"]);
+    let spec = docker.compose_command(&file(), "nunki-demo", &["up"]);
     assert_eq!(spec.program, "/opt/compose-2.38.2");
     assert_eq!(
         spec.display(),
-        "/opt/compose-2.38.2 -p hq-demo -f /slots/demo/mission.yml up"
+        "/opt/compose-2.38.2 -p nunki-demo -f /slots/demo/mission.yml up"
     );
 }
 
@@ -266,7 +269,10 @@ fn the_two_engines_spell_a_shared_namespace_differently() {
         host_alias: "host.docker.internal".to_string(),
         userns: None,
     };
-    assert_eq!(docker.netns_ref("hq-demo", "firewall"), "service:firewall");
+    assert_eq!(
+        docker.netns_ref("nunki-demo", "firewall"),
+        "service:firewall"
+    );
 
     // podman-compose has no `service:` form: the generated container name has
     // to be known in advance (SPEC 4.2, engine table).
@@ -276,8 +282,8 @@ fn the_two_engines_spell_a_shared_namespace_differently() {
         userns: Some("keep-id".to_string()),
     };
     assert_eq!(
-        podman.netns_ref("hq-demo", "firewall"),
-        "container:hq-demo-firewall-1"
+        podman.netns_ref("nunki-demo", "firewall"),
+        "container:nunki-demo-firewall-1"
     );
 }
 
@@ -292,21 +298,21 @@ fn the_fake_engine_records_what_it_was_asked() {
             stderr: String::new(),
         });
 
-    engine.up(&nowhere(), "hq-demo").unwrap();
+    engine.up(&nowhere(), "nunki-demo").unwrap();
     let container = engine
-        .container_of(&nowhere(), "hq-demo", "agent")
+        .container_of(&nowhere(), "nunki-demo", "agent")
         .unwrap()
         .unwrap();
     assert_eq!(engine.liveness(&container).unwrap(), Liveness::Running);
-    engine.stop(&nowhere(), "hq-demo", &["agent"]).unwrap();
+    engine.stop(&nowhere(), "nunki-demo", &["agent"]).unwrap();
 
     assert_eq!(
         engine.calls(),
         vec![
-            Call::Up("hq-demo".to_string()),
-            Call::ContainerOf("hq-demo".to_string(), "agent".to_string()),
+            Call::Up("nunki-demo".to_string()),
+            Call::ContainerOf("nunki-demo".to_string(), "agent".to_string()),
             Call::Liveness("c-agent".to_string()),
-            Call::Stop("hq-demo".to_string(), vec!["agent".to_string()]),
+            Call::Stop("nunki-demo".to_string(), vec!["agent".to_string()]),
         ]
     );
 }
@@ -314,7 +320,7 @@ fn the_fake_engine_records_what_it_was_asked() {
 #[test]
 fn a_sidecar_that_never_becomes_healthy_fails_the_profile() {
     let engine = FakeEngine::default().failing_up("dependency failed to start");
-    let err = engine.up(&nowhere(), "hq-demo").unwrap_err();
+    let err = engine.up(&nowhere(), "nunki-demo").unwrap_err();
     assert!(
         err.to_string().contains("dependency failed to start"),
         "{err}"
@@ -334,14 +340,14 @@ fn a_sidecar_that_never_becomes_healthy_fails_the_profile() {
 fn live_a_profile_switch_keeps_the_projects_services() {
     let docker = Docker::real();
     let slot = "engineswitch";
-    let project = hq::compose::project_name(slot).unwrap();
+    let project = nunki::compose::project_name(slot).unwrap();
 
     let dir = tempfile::tempdir().unwrap();
     let context = dir.path().join("firewall");
     std::fs::create_dir_all(&context).unwrap();
-    hq::firewall::materialise(&context).unwrap();
+    nunki::firewall::materialise(&context).unwrap();
     let built = std::process::Command::new("docker")
-        .args(["build", "-q", "-t", "hq/firewall:test"])
+        .args(["build", "-q", "-t", "nunki/firewall:test"])
         .arg(&context)
         .output()
         .expect("docker is on the path");
@@ -351,11 +357,11 @@ fn live_a_profile_switch_keeps_the_projects_services() {
         String::from_utf8_lossy(&built.stderr)
     );
 
-    let mission = write_profile(dir.path(), slot, hq::harness::Role::Coder, "mission.yml");
+    let mission = write_profile(dir.path(), slot, nunki::harness::Role::Coder, "mission.yml");
     let system = write_profile(
         dir.path(),
         slot,
-        hq::harness::Role::Integrator,
+        nunki::harness::Role::Integrator,
         "system.yml",
     );
 
@@ -420,9 +426,9 @@ fn live_a_profile_switch_keeps_the_projects_services() {
 }
 
 /// A profile of the same slot, written where the engine can read it.
-fn write_profile(dir: &Path, slot: &str, role: hq::harness::Role, name: &str) -> PathBuf {
-    use hq::compose::{AGENT_WRITABLE, NamedVolume, Plan, UserIds, generate};
-    use hq::perimeter::{Sources, compute};
+fn write_profile(dir: &Path, slot: &str, role: nunki::harness::Role, name: &str) -> PathBuf {
+    use nunki::compose::{AGENT_WRITABLE, NamedVolume, Plan, UserIds, generate};
+    use nunki::perimeter::{Sources, compute};
 
     let tree = dir.join("tree");
     let mission_dir = dir.join("mission");
@@ -433,8 +439,8 @@ fn write_profile(dir: &Path, slot: &str, role: hq::harness::Role, name: &str) ->
     }
 
     let services = match role {
-        hq::harness::Role::Coder => Vec::new(),
-        _ => vec![hq::mission::Service {
+        nunki::harness::Role::Coder => Vec::new(),
+        _ => vec![nunki::mission::Service {
             name: "db".to_string(),
             reach: vec!["db".to_string()],
             shared: false,
@@ -455,7 +461,7 @@ fn write_profile(dir: &Path, slot: &str, role: hq::harness::Role, name: &str) ->
         slot: slot.to_string(),
         role,
         image: "alpine:3.20".to_string(),
-        firewall_image: "hq/firewall:test".to_string(),
+        firewall_image: "nunki/firewall:test".to_string(),
         user: UserIds { uid: 501, gid: 20 },
         tree,
         tree_at: PathBuf::from("/work/tree"),
@@ -474,7 +480,7 @@ fn write_profile(dir: &Path, slot: &str, role: hq::harness::Role, name: &str) ->
     };
 
     let path = dir.join(name);
-    // The engine's own dialect, not a guess: this is exactly how `hq` will
+    // The engine's own dialect, not a guess: this is exactly how `nunki` will
     // ask for a file it is about to run.
     std::fs::write(&path, generate(&plan, Docker::real().dialect()).unwrap()).unwrap();
     path
@@ -485,7 +491,7 @@ fn a_detached_command_puts_its_options_before_the_service_name() {
     let (docker, _) = recorded(vec![]);
     let spec = docker.detached_command(
         &file(),
-        "hq-demo",
+        "nunki-demo",
         "agent",
         &["-w".to_string(), "/work/tree".to_string()],
         &["sh".to_string(), "-c".to_string(), "true".to_string()],
@@ -508,17 +514,17 @@ fn a_detached_command_puts_its_options_before_the_service_name() {
 #[test]
 #[ignore = "lifts real containers; run by hand"]
 fn live_a_run_lives_in_the_container_and_is_signalled_from_inside_it() {
-    use hq::engine::spawn::ContainerSpawner;
-    use hq::harness::spawn::{Presence, Signal, Spawner};
+    use nunki::engine::spawn::ContainerSpawner;
+    use nunki::harness::spawn::{Presence, Signal, Spawner};
     use std::sync::Arc;
 
     let dir = tempfile::tempdir().unwrap();
     let context = dir.path().join("firewall");
     std::fs::create_dir_all(&context).unwrap();
-    hq::firewall::materialise(&context).unwrap();
+    nunki::firewall::materialise(&context).unwrap();
     assert!(
         std::process::Command::new("docker")
-            .args(["build", "-q", "-t", "hq/firewall:test"])
+            .args(["build", "-q", "-t", "nunki/firewall:test"])
             .arg(&context)
             .status()
             .unwrap()
@@ -526,8 +532,8 @@ fn live_a_run_lives_in_the_container_and_is_signalled_from_inside_it() {
     );
 
     let slot = "enginerun";
-    let project = hq::compose::project_name(slot).unwrap();
-    let profile = write_profile(dir.path(), slot, hq::harness::Role::Coder, "mission.yml");
+    let project = nunki::compose::project_name(slot).unwrap();
+    let profile = write_profile(dir.path(), slot, nunki::harness::Role::Coder, "mission.yml");
 
     let docker: Arc<dyn Engine> = Arc::new(Docker::real());
     let _ = docker.down(&profile, &project, true);
@@ -565,7 +571,7 @@ fn live_a_run_lives_in_the_container_and_is_signalled_from_inside_it() {
         "the run should be alive"
     );
 
-    // The stream is captured on the host, where hq reads it — the container
+    // The stream is captured on the host, where nunki reads it — the container
     // has nowhere to write it (SPEC 4.1, mounts per profile).
     let mut waited = 0;
     let captured = loop {
@@ -591,7 +597,7 @@ fn live_a_run_lives_in_the_container_and_is_signalled_from_inside_it() {
             "agent",
             &[
                 "cat".to_string(),
-                format!("{}/session-1.pid", hq::engine::spawn::RUN_DIR),
+                format!("{}/session-1.pid", nunki::engine::spawn::RUN_DIR),
             ],
         )
         .unwrap();
@@ -616,7 +622,7 @@ fn live_a_run_lives_in_the_container_and_is_signalled_from_inside_it() {
 
 #[test]
 fn a_signal_is_named_the_way_kill_expects_it() {
-    use hq::harness::spawn::Signal;
+    use nunki::harness::spawn::Signal;
     // SIGINT ends an agent's turn properly; SIGTERM leaves it unfinished
     // (SPEC 4.3). Going through a shell in the container, the difference is
     // one word.
@@ -626,7 +632,7 @@ fn a_signal_is_named_the_way_kill_expects_it() {
 
 /// A signal that fails says what failed, even when the shell says nothing.
 ///
-/// Measured on 2026-09-13: `hq mission stop --now` answered `hq: io:` — that
+/// Measured on 2026-09-13: `nunki mission stop --now` answered `nunki: io:` — that
 /// was the whole message — and the run went on as if nothing had been asked.
 /// The error carried the container's stderr and nothing else, and a `kill`
 /// that fails frequently writes no stderr at all, so the one case where a
@@ -634,18 +640,18 @@ fn a_signal_is_named_the_way_kill_expects_it() {
 /// the only thing known, which is precisely why it has to be in the sentence.
 #[test]
 fn a_signal_that_fails_is_never_an_empty_sentence() {
-    use hq::harness::spawn::{Signal, Spawned, Spawner};
+    use nunki::harness::spawn::{Signal, Spawned, Spawner};
 
     let spawned = || Spawned {
         pid: Some(41),
         container: "cafe1234".into(),
     };
     let spawner = |fake: &std::sync::Arc<FakeEngine>| {
-        hq::engine::spawn::ContainerSpawner::new(
+        nunki::engine::spawn::ContainerSpawner::new(
             fake.clone(),
             file(),
-            "hq-demo",
-            hq::compose::AGENT_SERVICE,
+            "nunki-demo",
+            nunki::compose::AGENT_SERVICE,
         )
     };
 
@@ -695,32 +701,34 @@ fn a_signal_that_fails_is_never_an_empty_sentence() {
 fn live_a_frozen_container_is_not_a_running_one() {
     let docker = Docker::real();
     let slot = "gesturelive";
-    let project = hq::compose::project_name(slot).unwrap();
+    let project = nunki::compose::project_name(slot).unwrap();
 
     let dir = tempfile::tempdir().unwrap();
     let context = dir.path().join("firewall");
     std::fs::create_dir_all(&context).unwrap();
-    hq::firewall::materialise(&context).unwrap();
+    nunki::firewall::materialise(&context).unwrap();
     assert!(
         std::process::Command::new("docker")
-            .args(["build", "-q", "-t", "hq/firewall:test"])
+            .args(["build", "-q", "-t", "nunki/firewall:test"])
             .arg(&context)
             .status()
             .expect("docker is on the path")
             .success()
     );
 
-    let file = write_profile(dir.path(), slot, hq::harness::Role::Coder, "mission.yml");
+    let file = write_profile(dir.path(), slot, nunki::harness::Role::Coder, "mission.yml");
     let _ = docker.down(&file, &project, true);
     docker.up(&file, &project).unwrap();
 
     let agent = docker
-        .container_of(&file, &project, hq::compose::AGENT_SERVICE)
+        .container_of(&file, &project, nunki::compose::AGENT_SERVICE)
         .unwrap()
         .expect("the agent has a container");
     assert_eq!(docker.liveness(&agent).unwrap(), Liveness::Running);
 
-    docker.pause(&file, &project, &hq::run::SERVICES).unwrap();
+    docker
+        .pause(&file, &project, &nunki::run::SERVICES)
+        .unwrap();
     assert_eq!(
         docker.liveness(&agent).unwrap(),
         Liveness::Paused,
@@ -734,7 +742,7 @@ fn live_a_frozen_container_is_not_a_running_one() {
         .exec(
             &file,
             &project,
-            hq::compose::AGENT_SERVICE,
+            nunki::compose::AGENT_SERVICE,
             &["true".to_string()],
         )
         .unwrap();
@@ -745,19 +753,21 @@ fn live_a_frozen_container_is_not_a_running_one() {
          first: {refused:?}"
     );
 
-    docker.unpause(&file, &project, &hq::run::SERVICES).unwrap();
+    docker
+        .unpause(&file, &project, &nunki::run::SERVICES)
+        .unwrap();
     assert_eq!(docker.liveness(&agent).unwrap(), Liveness::Running);
     // Unfrozen exactly there: the same container, not a new one.
     assert_eq!(
         docker
-            .container_of(&file, &project, hq::compose::AGENT_SERVICE)
+            .container_of(&file, &project, nunki::compose::AGENT_SERVICE)
             .unwrap()
             .as_deref(),
         Some(agent.as_str())
     );
 
     // The emergency brake: killed, not asked. `docker kill` leaves 137.
-    docker.kill(&file, &project, &hq::run::SERVICES).unwrap();
+    docker.kill(&file, &project, &nunki::run::SERVICES).unwrap();
     assert!(
         matches!(docker.liveness(&agent).unwrap(), Liveness::Exited(_)),
         "the container is gone and nothing was waited for"
@@ -782,15 +792,15 @@ fn live_a_frozen_container_is_not_a_running_one() {
 /// a run a human froze on purpose as an agent that stopped thinking.
 #[test]
 fn a_frozen_container_answers_paused_and_is_never_probed() {
-    use hq::harness::spawn::{Presence, Spawned, Spawner};
+    use nunki::harness::spawn::{Presence, Spawned, Spawner};
 
     let fake =
         std::sync::Arc::new(FakeEngine::default().with_liveness("cafe1234", Liveness::Paused));
-    let spawner = hq::engine::spawn::ContainerSpawner::new(
+    let spawner = nunki::engine::spawn::ContainerSpawner::new(
         fake.clone(),
         file(),
-        "hq-demo",
-        hq::compose::AGENT_SERVICE,
+        "nunki-demo",
+        nunki::compose::AGENT_SERVICE,
     )
     .identified_by("s1");
 

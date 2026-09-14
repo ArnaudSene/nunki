@@ -1,8 +1,8 @@
 //! Waiting out the harness (SPEC 4.3): the schedule, the ceiling, and the
 //! one failure no wait mends.
 
-use hq::backoff::{HarnessDown, Next, after, due, wait_minutes};
-use hq::harness::Fault;
+use nunki::backoff::{HarnessDown, Next, after, due, wait_minutes};
+use nunki::harness::Fault;
 
 fn down(failures: u32, since: u64) -> HarnessDown {
     HarnessDown {

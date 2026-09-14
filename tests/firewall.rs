@@ -12,11 +12,11 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use hq::compose::{AGENT_WRITABLE, NamedVolume, Plan, UserIds, generate, project_name};
-use hq::harness::Role;
-use hq::perimeter::{Sources, compute, probes};
+use nunki::compose::{AGENT_WRITABLE, NamedVolume, Plan, UserIds, generate, project_name};
+use nunki::harness::Role;
+use nunki::perimeter::{Sources, compute, probes};
 
-const FIREWALL_IMAGE: &str = "hq/firewall:test";
+const FIREWALL_IMAGE: &str = "nunki/firewall:test";
 const SLOT: &str = "fwlive";
 /// The one name the agent is allowed to resolve and reach.
 const ALLOWED: &str = "example.com";
@@ -124,7 +124,7 @@ fn live_the_firewall_holds() {
     let neighbour = address_of(&project, "neighbour");
     println!("the neighbour sits at {neighbour}");
 
-    // The battery lives in `hq::perimeter` so that `hq check` runs this very
+    // The battery lives in `nunki::perimeter` so that `nunki check` runs this very
     // list and not a copy of it (SPEC 4.1 bis, rule 7). Of the two forbidden
     // addresses, only the neighbour is hermetic: 1.1.1.1 needs the machine to
     // have a way out at all, or it goes green for the wrong reason.
@@ -169,10 +169,10 @@ fn verb(reached: bool) -> &'static str {
 }
 
 /// Built from what the binary carries, not from the repository's layout —
-/// which is how a slot will get it too (`hq::firewall`).
+/// which is how a slot will get it too (`nunki::firewall`).
 fn build_image() -> tempfile::TempDir {
     let context = tempfile::tempdir().unwrap();
-    hq::firewall::materialise(context.path()).unwrap();
+    nunki::firewall::materialise(context.path()).unwrap();
     let out = Command::new("docker")
         .args(["build", "-q", "-t", FIREWALL_IMAGE])
         .arg(context.path())
@@ -230,7 +230,7 @@ fn live_a_declared_service_is_reachable_and_nothing_else_is() {
         std::fs::write(mission.join(file), "").unwrap();
     }
 
-    let declared = vec![hq::mission::Service {
+    let declared = vec![nunki::mission::Service {
         name: "db".to_string(),
         reach: vec!["db".to_string()],
         shared: false,
@@ -324,7 +324,7 @@ fn live_a_declared_service_is_reachable_and_nothing_else_is() {
 #[test]
 fn the_build_context_travels_in_the_binary() {
     let dir = tempfile::tempdir().unwrap();
-    hq::firewall::materialise(dir.path()).unwrap();
+    nunki::firewall::materialise(dir.path()).unwrap();
 
     let dockerfile = std::fs::read_to_string(dir.path().join("Dockerfile")).unwrap();
     assert!(dockerfile.contains("dnsmasq"), "{dockerfile}");
@@ -358,9 +358,9 @@ fn the_build_context_travels_in_the_binary() {
 
 /// The engine's dialect, which the generator needs and must not spell
 /// itself. Docker's, since Docker is the first version's only target.
-fn dialect() -> hq::engine::Dialect {
-    hq::engine::Dialect {
-        netns: hq::engine::Netns::Service,
+fn dialect() -> nunki::engine::Dialect {
+    nunki::engine::Dialect {
+        netns: nunki::engine::Netns::Service,
         host_alias: "host.docker.internal".to_string(),
         userns: None,
     }

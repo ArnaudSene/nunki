@@ -1,4 +1,4 @@
-//! Opening the pull request (SPEC 4.2, `hq push`): the real HTTP client,
+//! Opening the pull request (SPEC 4.2, `nunki push`): the real HTTP client,
 //! pointed at a server this test controls.
 //!
 //! A fake forge would prove the fake. What a forge can get wrong silently is
@@ -11,7 +11,7 @@ use std::net::TcpListener;
 mod common;
 use common::serve;
 
-use hq::forge::{self, ForgeError, Opened, PullRequest, Repo};
+use nunki::forge::{self, ForgeError, Opened, PullRequest, Repo};
 
 fn repo() -> Repo {
     Repo {
@@ -57,13 +57,13 @@ fn a_pull_request_is_opened_with_the_humans_token_and_the_missions_words() {
         "without it GitHub answers 404, and that reads as a missing repository: {sent}"
     );
     assert!(
-        header(sent, "user-agent").is_some_and(|v| v.starts_with("hq/")),
+        header(sent, "user-agent").is_some_and(|v| v.starts_with("nunki/")),
         "GitHub refuses a request with no User-Agent: {sent}"
     );
     assert_eq!(
         header(sent, "content-type"),
         Some("application/json"),
-        "the body is serialised by hq, so the header is hq's to send: {sent}"
+        "the body is serialised by nunki, so the header is nunki's to send: {sent}"
     );
     let body: serde_json::Value = serde_json::from_str(sent.split("\r\n\r\n").nth(1).unwrap())
         .unwrap_or_else(|e| panic!("{e}: {sent}"));
@@ -241,7 +241,13 @@ fn live_the_real_forge_says_whether_a_branch_is_protected() {
         forge::Protection::Protected | forge::Protection::Unprotected
     ));
     assert_eq!(
-        forge::protection(forge::API, token.trim(), &repo, "no-such-branch-hq-check").unwrap(),
+        forge::protection(
+            forge::API,
+            token.trim(),
+            &repo,
+            "no-such-branch-nunki-check"
+        )
+        .unwrap(),
         forge::Protection::NoSuchBranch
     );
 }

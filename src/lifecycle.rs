@@ -1,9 +1,9 @@
 //! Re-framing a mission, and closing one (SPEC 4.1 rule 3, 4.2 verb table).
 //!
 //! Two verbs at opposite ends of a mission's life, together because they are
-//! the two moments `hq` touches its framing rather than its work.
+//! the two moments `nunki` touches its framing rather than its work.
 //!
-//! **`reframe`** exists because `hq` never re-reads the header during a
+//! **`reframe`** exists because `nunki` never re-reads the header during a
 //! mission: it froze it when the human validated the framing, and that copy
 //! is what generates every Compose file and every allowlist. So a `MISSION.md`
 //! edited behind its back changes nothing and looks as though it did. The
@@ -28,7 +28,7 @@ pub enum LifecycleError {
     NotStarted(String),
     #[error(
         "a run is going in slot {slot}: reframing now would change the perimeter under an \
-         agent that is inside it — `hq mission stop {mission}` ends its turn first"
+         agent that is inside it — `nunki mission stop {mission}` ends its turn first"
     )]
     RunInProgress { mission: String, slot: String },
     #[error(
@@ -172,7 +172,7 @@ fn lots(header: &Header) -> String {
 ///
 /// It refuses on a mission that is already over, because "call it off" is not
 /// a thing to say twice, and it takes a reason for the same purpose every
-/// other reason in `hq` is taken for: six months from now, "abandoned" alone
+/// other reason in `nunki` is taken for: six months from now, "abandoned" alone
 /// says nothing.
 pub fn end(project: &Project, id: &str, why: &str) -> Result<MissionState, LifecycleError> {
     if why.trim().is_empty() {
@@ -191,7 +191,7 @@ pub fn end(project: &Project, id: &str, why: &str) -> Result<MissionState, Lifec
     // Written where a human reads it, and before the transition: a mission
     // called off leaves a record of why, or it leaves a puzzle.
     let paths = Paths::of(&project.hq_root, id);
-    let who = crate::human::me(&project.hq_home(), Some(&project.root)).addressed();
+    let who = crate::human::me(&project.nunki_home(), Some(&project.root)).addressed();
     crate::followup::ended(&paths.followup, &who, why.trim())?;
     store.apply(
         &mut state,
@@ -217,9 +217,9 @@ pub struct Archived {
 /// Close a mission: the folder and its state move under `archive/`.
 ///
 /// Moved, never deleted — the journals, the pull request text and the
-/// verdicts are the record of what was done, and `hq` deletes nothing it did
-/// not create (SPEC 3.3). The slot is left alone: `hq slot reset` and
-/// `hq slot rm` are the verbs for a slot, and archiving a mission is not one
+/// verdicts are the record of what was done, and `nunki` deletes nothing it did
+/// not create (SPEC 3.3). The slot is left alone: `nunki slot reset` and
+/// `nunki slot rm` are the verbs for a slot, and archiving a mission is not one
 /// of them.
 pub fn archive(project: &Project, id: &str) -> Result<Archived, LifecycleError> {
     let store = Store::open(&project.hq_root)?;

@@ -1,7 +1,7 @@
 //! The harness boundary (SPEC 4.3).
 //!
 //! A harness is the coding agent's runtime — Claude Code, Codex, OpenCode.
-//! `hq` never talks to one directly: it holds a `Box<dyn Harness>` and asks
+//! `nunki` never talks to one directly: it holds a `Box<dyn Harness>` and asks
 //! it to launch a run, read its state, stop it. Everything that is specific
 //! to a harness (command line, session resumption, structured output,
 //! headless login, optional guards) lives behind this trait and nowhere
@@ -49,12 +49,12 @@ pub struct RunRequest {
     /// Which attempt this is for that lot, starting at 1.
     pub attempt: u32,
     /// Resume this harness session instead of starting a fresh one. The
-    /// identifier is chosen by `hq` at the first launch and imposed on the
+    /// identifier is chosen by `nunki` at the first launch and imposed on the
     /// harness, never read back from it.
     pub session: SessionId,
     /// Whether `session` already exists on the harness side.
     pub resume: bool,
-    /// Where the harness's structured output is written, **as `hq` sees it**
+    /// Where the harness's structured output is written, **as `nunki` sees it**
     /// — a host path, unlike everything in [`Workspace`]. It cannot be in the
     /// mission folder: that is mounted read-only but for the agent's own
     /// files (SPEC
@@ -80,11 +80,11 @@ pub enum LineKind {
     Did,
     /// How the run ended.
     Ended,
-    /// Something `hq` could not read. Kept, and marked, because a log
+    /// Something `nunki` could not read. Kept, and marked, because a log
     /// rendered by dropping what the reader did not expect hides the run
     /// that went wrong.
     Unread,
-    /// Something `hq` read and chose not to print, counted and said once.
+    /// Something `nunki` read and chose not to print, counted and said once.
     ///
     /// The distinction from [`Unread`](LineKind::Unread) is the whole point:
     /// "I could not read this" and "I read this and it is not worth a line"
@@ -93,12 +93,12 @@ pub enum LineKind {
     Noted,
 }
 
-/// A harness session identifier, chosen by `hq`.
+/// A harness session identifier, chosen by `nunki`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionId(pub String);
 
 /// Handle on a launched run. Persistable: the engine writes it to its state
-/// so a restarted `hq` can re-derive whether the run is alive (SPEC 4.2,
+/// so a restarted `nunki` can re-derive whether the run is alive (SPEC 4.2,
 /// "la reprise re-dérive avant de décider").
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunHandle {
@@ -108,7 +108,7 @@ pub struct RunHandle {
     pub container: String,
     /// Process id of the harness, when known.
     pub pid: Option<u32>,
-    /// Where the harness's structured output is written, as `hq` sees it.
+    /// Where the harness's structured output is written, as `nunki` sees it.
     pub log: PathBuf,
 }
 
@@ -123,7 +123,7 @@ pub enum Outcome {
     Finished(Usage),
     /// Quota, expired token, network, harness crash. Not the mission's fault.
     HarnessFailure(Fault),
-    /// The run was stopped by `hq` (stall observed, human `stop`/`kill`) or
+    /// The run was stopped by `nunki` (stall observed, human `stop`/`kill`) or
     /// left without honouring the run contract. The mission's fault.
     MissionFailure(String),
 }
@@ -228,12 +228,12 @@ pub struct Progress {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Provisioning {
     /// Shell commands that put the harness in the image, run **as the agent**
-    /// in a layer `hq` generates on top of the stack's image. They belong to
+    /// in a layer `nunki` generates on top of the stack's image. They belong to
     /// the adapter and not to the project: a stack fragment describes a
     /// stack, and changing harness must not mean editing every project's
     /// Dockerfile.
     pub install: Vec<String>,
-    /// What must be on the agent's `PATH` afterwards. `hq check` looks for
+    /// What must be on the agent's `PATH` afterwards. `nunki check` looks for
     /// it rather than assuming the install worked.
     pub binary: String,
     /// Directories to prepend to `PATH` for the agent, when the install puts
@@ -271,7 +271,7 @@ pub enum HarnessError {
     #[error("unknown run: {0:?}")]
     UnknownRun(SessionId),
     /// The run could not be reached, and that is not a verdict on it. A
-    /// container taken down, an engine that did not answer: `hq` says it
+    /// container taken down, an engine that did not answer: `nunki` says it
     /// does not know rather than call the agent dead (SPEC 4.2).
     #[error("the run cannot be reached: {0}")]
     Unreachable(String),
@@ -287,7 +287,7 @@ pub trait Harness: Send + Sync {
     /// way (SPEC 4.3).
     fn token_env(&self) -> &'static str;
 
-    /// Stable name, used in `hq.yaml` and in the state.
+    /// Stable name, used in `nunki.yaml` and in the state.
     fn name(&self) -> &'static str;
 
     /// What the container must carry for this harness to run.
@@ -321,7 +321,7 @@ pub trait Harness: Send + Sync {
     /// week — as this run's own stream last said (SPEC 4.3). The run's, so
     /// the account's: a coder on one token and a supervisor on another are
     /// two measures. The default is that the harness does not say, and then
-    /// `hq` says "not measured", never zero.
+    /// `nunki` says "not measured", never zero.
     fn windows(&self, _handle: &RunHandle) -> Option<crate::consumption::Windows> {
         None
     }
@@ -331,7 +331,7 @@ pub trait Harness: Send + Sync {
     /// Turn a run's own structured stream into lines a human reads.
     ///
     /// The shape of that stream is the harness's and nobody else's — which
-    /// is why `hq logs` asks for it here rather than parsing JSON of its own
+    /// is why `nunki logs` asks for it here rather than parsing JSON of its own
     /// (SPEC 4.3). A line the adapter does not recognise is **kept**, not
     /// dropped: a log rendered by throwing away what the reader did not
     /// expect is a log that hides exactly the run that went wrong.

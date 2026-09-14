@@ -1,26 +1,26 @@
-//! `hq exec` (SPEC 4.2): a command in the slot's container, on a clean copy
+//! `nunki exec` (SPEC 4.2): a command in the slot's container, on a clean copy
 //! of `HEAD`.
 //!
 //! The live test is the only one that means anything here: what is being
-//! claimed is that a proof replayed by `hq` cannot see what an agent left
+//! claimed is that a proof replayed by `nunki` cannot see what an agent left
 //! uncommitted, and only a real container with a real git can show that.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
-use hq::exec::{self, On, PROOF_AT};
-use hq::project::{Config, Project};
-use hq::slot::Slot;
+use nunki::exec::{self, On, PROOF_AT};
+use nunki::project::{Config, Project};
+use nunki::slot::Slot;
 
 #[test]
 fn a_slot_names_its_own_copy_and_mounts_it_where_the_spec_says() {
-    assert_eq!(exec::proof_volume("one"), "hq-one-proof");
+    assert_eq!(exec::proof_volume("one"), "nunki-one-proof");
     let volume = exec::volume("one");
-    assert_eq!(volume.name, "hq-one-proof");
+    assert_eq!(volume.name, "nunki-one-proof");
     assert_eq!(volume.at, PathBuf::from(PROOF_AT));
     // Not the working tree, and that is the whole point of the verb.
-    assert_ne!(PROOF_AT, hq::run::TREE_AT);
+    assert_ne!(PROOF_AT, nunki::run::TREE_AT);
 }
 
 #[test]
@@ -31,11 +31,12 @@ fn a_slot_with_no_profile_up_says_what_to_do_about_it() {
         name: "gone".into(),
         tree: dir.path().join("tree"),
     };
-    let engine: Arc<dyn hq::engine::Engine> = Arc::new(hq::engine::fake::FakeEngine::default());
+    let engine: Arc<dyn nunki::engine::Engine> =
+        Arc::new(nunki::engine::fake::FakeEngine::default());
     let err = exec::run(&project, &slot, engine, &["true".into()], On::Proof).unwrap_err();
     let said = err.to_string();
-    assert!(said.contains("hq mission start"), "{said}");
-    assert!(said.contains("hq slot rebuild"), "{said}");
+    assert!(said.contains("nunki mission start"), "{said}");
+    assert!(said.contains("nunki slot rebuild"), "{said}");
 }
 
 fn project(root: &Path) -> Project {
@@ -56,7 +57,7 @@ fn project(root: &Path) -> Project {
             permission_mode: "auto".to_string(),
             forge_protection: Default::default(),
         },
-        root.join("hq"),
+        root.join("nunki"),
     )
 }
 
@@ -76,7 +77,7 @@ fn git(at: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
-/// What `hq exec` is for, proved the only way it can be.
+/// What `nunki exec` is for, proved the only way it can be.
 ///
 /// A tree with one commit, an **uncommitted** file beside it, and an ignored
 /// directory standing in for a build cache. The copy must hold the commit,
@@ -108,10 +109,10 @@ fn live_a_proof_runs_on_the_commit_and_never_on_what_the_agent_left_behind() {
         name: "execlive".into(),
         tree: tree.clone(),
     };
-    let file = hq::run::profile_path(&project, &slot.name);
+    let file = nunki::run::profile_path(&project, &slot.name);
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
     // Alpine plus git: this test is about what the copy contains, not about
-    // ownership — that one is settled by the mount point hq's own image
+    // ownership — that one is settled by the mount point nunki's own image
     // layer creates, and measured there.
     let volume = exec::proof_volume(&slot.name);
     std::fs::write(
@@ -124,7 +125,7 @@ fn live_a_proof_runs_on_the_commit_and_never_on_what_the_agent_left_behind() {
              \x20     - {tree}:{tree_at}\n\
              \x20     - {volume}:{PROOF_AT}\n\
              \x20   tmpfs:\n\
-             \x20     - /run/hq\n\
+             \x20     - /run/nunki\n\
              \x20   command: [\"sh\", \"-c\", \"apk add --no-cache git > /dev/null && \
              sleep 600\"]\n\
              \x20   healthcheck:\n\
@@ -136,13 +137,13 @@ fn live_a_proof_runs_on_the_commit_and_never_on_what_the_agent_left_behind() {
              volumes:\n\
              \x20 {volume}:\n",
             tree = tree.display(),
-            tree_at = hq::run::TREE_AT,
+            tree_at = nunki::run::TREE_AT,
         ),
     )
     .unwrap();
 
-    let engine: Arc<dyn hq::engine::Engine> = Arc::new(hq::engine::docker::Docker::real());
-    let compose_project = hq::compose::project_name(&slot.name).unwrap();
+    let engine: Arc<dyn nunki::engine::Engine> = Arc::new(nunki::engine::docker::Docker::real());
+    let compose_project = nunki::compose::project_name(&slot.name).unwrap();
     let _ = engine.down(&file, &compose_project, true);
     engine.up(&file, &compose_project).unwrap();
 

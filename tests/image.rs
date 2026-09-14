@@ -1,11 +1,11 @@
-//! hq's own image layer (SPEC 4.1, 4.2): the harness, and the mount points
-//! hq needs that a stack fragment has no reason to know about.
+//! nunki's own image layer (SPEC 4.1, 4.2): the harness, and the mount points
+//! nunki needs that a stack fragment has no reason to know about.
 //!
 //! Building it is a live matter; what it *says* is not, and what it says is
 //! where the defects have been.
 
-use hq::harness::Provisioning;
-use hq::image;
+use nunki::harness::Provisioning;
+use nunki::image;
 
 fn provisioning() -> Provisioning {
     Provisioning {
@@ -19,14 +19,14 @@ fn provisioning() -> Provisioning {
 
 #[test]
 fn the_layer_creates_the_copy_of_head_as_the_agent_and_not_as_root() {
-    let layer = image::harness_layer("hq/demo:base", &provisioning(), &[]);
-    assert!(layer.contains("FROM hq/demo:base"), "{layer}");
+    let layer = image::harness_layer("nunki/demo:base", &provisioning(), &[]);
+    assert!(layer.contains("FROM nunki/demo:base"), "{layer}");
     // A named volume mounted over a root-owned directory is born root-owned,
     // and nothing in the container can fix that afterwards (SPEC 4.2 bis).
     // The base image ends on `USER agent`, so this layer must not take root
     // back before creating the directory.
     assert!(
-        layer.contains(&format!("RUN mkdir -p {}", hq::exec::PROOF_AT)),
+        layer.contains(&format!("RUN mkdir -p {}", nunki::exec::PROOF_AT)),
         "the copy of HEAD has nowhere to live: {layer}"
     );
     assert!(
@@ -37,7 +37,7 @@ fn the_layer_creates_the_copy_of_head_as_the_agent_and_not_as_root() {
 
 #[test]
 fn the_layer_fails_the_build_when_the_harness_is_not_on_path() {
-    let layer = image::harness_layer("hq/demo:base", &provisioning(), &[]);
+    let layer = image::harness_layer("nunki/demo:base", &provisioning(), &[]);
     // Loudly, at build time. A layer whose PATH points at nothing once
     // shipped, and the failure surfaced much later as `claude: not found`
     // inside a run nobody was watching.
@@ -58,7 +58,7 @@ fn the_layer_fails_the_build_when_the_harness_is_not_on_path() {
 /// carried `claude` and no `curl`.
 #[test]
 fn the_install_is_skipped_when_the_image_already_carries_the_harness() {
-    let layer = image::harness_layer("hq/demo:base", &provisioning(), &[]);
+    let layer = image::harness_layer("nunki/demo:base", &provisioning(), &[]);
     assert!(
         layer.contains("RUN command -v claude > /dev/null || (curl"),
         "{layer}"
@@ -73,7 +73,7 @@ fn the_install_is_skipped_when_the_image_already_carries_the_harness() {
 
 #[test]
 fn a_harness_that_needs_nothing_still_gets_the_mount_points() {
-    let layer = image::harness_layer("hq/demo:base", &Provisioning::default(), &[]);
+    let layer = image::harness_layer("nunki/demo:base", &Provisioning::default(), &[]);
     assert!(layer.contains("RUN mkdir -p"), "{layer}");
     assert!(
         !layer.contains("command -v "),
@@ -90,7 +90,7 @@ fn a_harness_that_needs_nothing_still_gets_the_mount_points() {
 #[test]
 fn the_layer_creates_the_directories_a_read_only_tree_must_write() {
     let layer = image::harness_layer(
-        "hq/demo:base",
+        "nunki/demo:base",
         &provisioning(),
         &[
             "target".to_string(),
@@ -112,7 +112,7 @@ fn the_layer_creates_the_directories_a_read_only_tree_must_write() {
 /// (SPEC 4.2, rule 3).
 #[test]
 fn a_stack_that_declares_no_writable_directory_gets_none() {
-    let layer = image::harness_layer("hq/demo:base", &provisioning(), &[]);
+    let layer = image::harness_layer("nunki/demo:base", &provisioning(), &[]);
     assert!(!layer.contains("/work/tree/"), "{layer}");
 }
 
@@ -125,7 +125,7 @@ fn a_stack_that_declares_no_writable_directory_gets_none() {
 /// missing `USER`.
 #[test]
 fn the_layer_refuses_a_stack_image_that_ends_as_root_and_says_why() {
-    let layer = image::harness_layer("hq/demo:base", &provisioning(), &[]);
+    let layer = image::harness_layer("nunki/demo:base", &provisioning(), &[]);
     let check = layer
         .find("id -u")
         .unwrap_or_else(|| panic!("nothing checks the user: {layer}"));
@@ -148,6 +148,6 @@ fn the_layer_refuses_a_stack_image_that_ends_as_root_and_says_why() {
 /// a check worth removing.
 #[test]
 fn a_harness_that_installs_nothing_is_not_asked_about_the_user() {
-    let layer = image::harness_layer("hq/demo:base", &Provisioning::default(), &[]);
+    let layer = image::harness_layer("nunki/demo:base", &Provisioning::default(), &[]);
     assert!(!layer.contains("id -u"), "{layer}");
 }

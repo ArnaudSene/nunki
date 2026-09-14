@@ -1,6 +1,6 @@
 //! Probing the perimeter from inside a container (SPEC 4.1 bis, rule 7).
 //!
-//! This is the half of `hq check` that cannot be answered by reading files:
+//! This is the half of `nunki check` that cannot be answered by reading files:
 //! whether the fence actually holds. It lifts the mission profile of a slot,
 //! tries to get out by every route the battery knows, and takes it down
 //! again. What it runs is [`crate::perimeter::probes`] — the same list the
@@ -21,7 +21,7 @@ use crate::slot::Slot;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProbeError {
-    #[error("the slot's images are missing: {0} — `hq slot rebuild {1}` builds them")]
+    #[error("the slot's images are missing: {0} — `nunki slot rebuild {1}` builds them")]
     NoImages(String, String),
     #[error("the profile did not come up: {0}")]
     Up(#[from] EngineError),
@@ -148,9 +148,9 @@ fn run_battery(
 }
 
 /// Lift the system profile of mission `id` and try to get out of it (SPEC
-/// 4.1 bis, rule 7, `hq check --mission`).
+/// 4.1 bis, rule 7, `nunki check --mission`).
 ///
-/// The profile is the one `hq verify` lifts for the integrator — planned by
+/// The profile is the one `nunki verify` lifts for the integrator — planned by
 /// [`crate::run::plan`] itself, from the mission's **frozen** header, so the
 /// check cannot drift from the run — under a slot of its own (see
 /// [`system_plan`]). Everything it lifts, it takes down again, and it does so
@@ -179,7 +179,7 @@ pub fn system_profile(
         return Ok(vec![Check {
             what,
             verdict: Verdict::NotChecked(
-                "no stack declared in hq.yaml, so no image to lift".to_string(),
+                "no stack declared in nunki.yaml, so no image to lift".to_string(),
             ),
         }]);
     };
@@ -215,12 +215,12 @@ pub fn system_profile(
         &profile,
     );
     // Said, not skipped: a service is reached on the port it listens on, and
-    // nothing tells hq which port that is. Resolving it is probed; reaching
+    // nothing tells nunki which port that is. Resolving it is probed; reaching
     // it is not, and a green here would be one nobody measured.
     checks.push(Check {
         what: format!("from inside {profile}: a declared service is reachable on its port"),
         verdict: Verdict::NotChecked(
-            "hq does not know which port a service listens on, so it probes that the \
+            "nunki does not know which port a service listens on, so it probes that the \
              service resolves, not that it answers"
                 .to_string(),
         ),
@@ -261,7 +261,7 @@ pub fn scratch_paths(
 /// The system profile a check lifts: [`crate::run::plan`]'s, for the
 /// integrator, under a slot named `<slot>-check`.
 ///
-/// The name is the safety of it. Everything hq names after a slot — the
+/// The name is the safety of it. Everything nunki names after a slot — the
 /// Compose project, the network, every named volume — becomes the check's
 /// and not the slot's, so the project's services (a database with its data)
 /// are lifted a second time **beside** the slot's rather than on top of
@@ -290,7 +290,7 @@ pub fn system_plan(
         stack,
         images,
         paths,
-        "hq-check-spends-no-subscription",
+        "nunki-check-spends-no-subscription",
         header,
         Role::Integrator,
     )?;
@@ -376,7 +376,7 @@ fn say(reached: bool) -> &'static str {
     if reached { "reached" } else { "refused" }
 }
 
-/// The profile a probe run lifts, and **not** the one `hq mission start`
+/// The profile a probe run lifts, and **not** the one `nunki mission start`
 /// lifts.
 ///
 /// It is deliberately a mission profile without a mission: no token — a

@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use hq::mutants::{self, Campaign, Survivor, Triage};
+use nunki::mutants::{self, Campaign, Survivor, Triage};
 
 fn git(at: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
@@ -169,15 +169,15 @@ fn only_two_of_the_three_outcomes_rest_on_a_test() {
 #[test]
 #[ignore = "lifts real containers; run by hand"]
 fn live_a_campaign_is_launched_watched_and_read_back() {
-    use hq::mutants::Progress;
+    use nunki::mutants::Progress;
 
     let dir = tempfile::tempdir().unwrap();
     let tree = repo(dir.path());
     write(
         &tree,
-        ".hq/stacks/rust/mutation.sh",
+        ".nunki/stacks/rust/mutation.sh",
         "#!/bin/sh\n\
-         # A stand-in campaign: the shape hq reads, without the tool.\n\
+         # A stand-in campaign: the shape nunki reads, without the tool.\n\
          echo \"campaign $1 on $# path(s)\" >&2\n\
          sleep 2\n\
          echo '{\"id\":\"src/lib.rs:1\",\"file\":\"src/lib.rs\",\"line\":1,\
@@ -190,7 +190,7 @@ fn live_a_campaign_is_launched_watched_and_read_back() {
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(
-            tree.join(".hq/stacks/rust/mutation.sh"),
+            tree.join(".nunki/stacks/rust/mutation.sh"),
             std::fs::Permissions::from_mode(0o755),
         )
         .unwrap();
@@ -201,9 +201,9 @@ fn live_a_campaign_is_launched_watched_and_read_back() {
     git(&tree, &["add", "-A"]);
     git(&tree, &["commit", "-q", "-m", "L1"]);
 
-    let project = hq::project::Project::at(
+    let project = nunki::project::Project::at(
         dir.path().join("repo"),
-        hq::project::Config {
+        nunki::project::Config {
             harness: "claude-code".into(),
             forge: vec![],
             stacks: vec!["rust".into()],
@@ -218,14 +218,14 @@ fn live_a_campaign_is_launched_watched_and_read_back() {
             permission_mode: "auto".to_string(),
             forge_protection: Default::default(),
         },
-        dir.path().join("hq"),
+        dir.path().join("nunki"),
     );
-    let slot = hq::slot::Slot {
+    let slot = nunki::slot::Slot {
         name: "mutlive".into(),
         tree: tree.clone(),
     };
-    let volume = hq::exec::proof_volume(&slot.name);
-    let file = hq::run::profile_path(&project, &slot.name);
+    let volume = nunki::exec::proof_volume(&slot.name);
+    let file = nunki::run::profile_path(&project, &slot.name);
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
     std::fs::write(
         &file,
@@ -237,7 +237,7 @@ fn live_a_campaign_is_launched_watched_and_read_back() {
              \x20     - {tree}:{tree_at}\n\
              \x20     - {volume}:{proof}\n\
              \x20   tmpfs:\n\
-             \x20     - /run/hq\n\
+             \x20     - /run/nunki\n\
              \x20   command: [\"sh\", \"-c\", \"apk add --no-cache git > /dev/null && \
              sleep 600\"]\n\
              \x20   healthcheck:\n\
@@ -249,21 +249,21 @@ fn live_a_campaign_is_launched_watched_and_read_back() {
              volumes:\n\
              \x20 {volume}:\n",
             tree = tree.display(),
-            tree_at = hq::run::TREE_AT,
-            proof = hq::exec::PROOF_AT,
+            tree_at = nunki::run::TREE_AT,
+            proof = nunki::exec::PROOF_AT,
         ),
     )
     .unwrap();
 
-    let engine: std::sync::Arc<dyn hq::engine::Engine> =
-        std::sync::Arc::new(hq::engine::docker::Docker::real());
-    let compose_project = hq::compose::project_name(&slot.name).unwrap();
+    let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+        std::sync::Arc::new(nunki::engine::docker::Docker::real());
+    let compose_project = nunki::compose::project_name(&slot.name).unwrap();
     let _ = engine.down(&file, &compose_project, true);
     engine.up(&file, &compose_project).unwrap();
 
     let mission = dir.path().join("mission");
     std::fs::create_dir_all(&mission).unwrap();
-    let touched = hq::gate::touched_paths(&tree, "dev").unwrap();
+    let touched = nunki::gate::touched_paths(&tree, "dev").unwrap();
     assert!(touched.contains(&"src/lib.rs".to_string()), "{touched:?}");
 
     let go = || {
@@ -380,7 +380,7 @@ fn only_the_two_outcomes_that_rest_on_a_test_are_the_coders_to_give() {
 fn a_triage_file_the_coder_wrote_and_hq_cannot_read_is_said_not_ignored() {
     let dir = tempfile::tempdir().unwrap();
     assert!(mutants::read_triage(dir.path()).unwrap().is_empty());
-    // Created empty by `hq mission new`, and empty is not an error.
+    // Created empty by `nunki mission new`, and empty is not an error.
     std::fs::write(dir.path().join("MUTANTS.triage.json"), "").unwrap();
     assert!(mutants::read_triage(dir.path()).unwrap().is_empty());
     // Written and unreadable is another matter: silently treating it as no
@@ -389,7 +389,7 @@ fn a_triage_file_the_coder_wrote_and_hq_cannot_read_is_said_not_ignored() {
     assert!(mutants::read_triage(dir.path()).is_err());
 }
 
-/// The mutation script `hq init` ships, run against the real cargo-mutants
+/// The mutation script `nunki init` ships, run against the real cargo-mutants
 /// (SPEC 4.4, gate 7).
 ///
 /// It had never been run. Every test of gate 7 used a stub that echoed a JSON
@@ -431,9 +431,9 @@ fn live_the_shipped_mutation_script_reads_a_real_campaign() {
     )
     .unwrap();
 
-    // The script exactly as `hq init` deposits it, not a copy of it.
-    hq::init::init(&root, &dir.path().join("hq"), &["rust".to_string()]).unwrap();
-    let script = root.join(".hq/stacks/rust").join(hq::mutants::SCRIPT);
+    // The script exactly as `nunki init` deposits it, not a copy of it.
+    nunki::init::init(&root, &dir.path().join("nunki"), &["rust".to_string()]).unwrap();
+    let script = root.join(".nunki/stacks/rust").join(nunki::mutants::SCRIPT);
     assert!(script.is_file());
 
     let out = std::process::Command::new(&script)
@@ -449,9 +449,9 @@ fn live_the_shipped_mutation_script_reads_a_real_campaign() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    // What `hq` reads is what the script printed, through the very parser
+    // What `nunki` reads is what the script printed, through the very parser
     // gate 7 uses.
-    let survivors = hq::mutants::parse(&stdout);
+    let survivors = nunki::mutants::parse(&stdout);
     assert!(
         survivors.len() >= 4,
         "a crate with an untested function has survivors: {stdout}"

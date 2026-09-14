@@ -1,6 +1,6 @@
 //! The mission's monitor (SPEC 4.3, decided by Arnaud on 2026-09-11).
 //!
-//! `hq` has no system service, and a verb returns: `verify` launches a run
+//! `nunki` has no system service, and a verb returns: `verify` launches a run
 //! and gives the terminal back. So what watches a run at night, and what
 //! calls `verify` again once a wait is over, is a process of its own — one
 //! per mission, started by the verbs that launch or resume, detached from
@@ -11,10 +11,10 @@
 //! goes, it calls `verify` — which reads the run back, waits, or launches the
 //! next one — and sleeps to the next deadline it knows: the harness wait, or
 //! the window's reset. It stops when the mission needs a human or has
-//! nothing left that `hq` can launch: verified, handed over, held, findings
-//! to lift, or a coder run owed, which `hq` does not launch yet.
+//! nothing left that `nunki` can launch: verified, handed over, held, findings
+//! to lift, or a coder run owed, which `nunki` does not launch yet.
 //!
-//! It takes the slot's lock as `hq mission monitor`, so a human who types
+//! It takes the slot's lock as `nunki mission monitor`, so a human who types
 //! `verify` meanwhile is told what holds it; and a lock already held is a
 //! human driving, not a failure — the monitor waits its turn.
 
@@ -39,10 +39,10 @@ pub const LOCK_VERB: &str = "mission monitor";
 #[derive(Debug, thiserror::Error)]
 pub enum MonitorError {
     #[error(
-        "{0} is not hq: a monitor is only ever started from the hq binary, never from \
+        "{0} is not nunki: a monitor is only ever started from the nunki binary, never from \
          another program — a test harness would fork itself into a detached process"
     )]
-    NotHq(PathBuf),
+    NotNunki(PathBuf),
     #[error("{0}: {1}")]
     Io(PathBuf, std::io::Error),
 }
@@ -122,7 +122,7 @@ fn waits_on_provider(project: &Project, state: &MissionState) -> bool {
 fn window_reset(project: &Project, state: &MissionState, now: u64) -> Option<u64> {
     let header = state.flow.header();
     let account = crate::consumption::account_of(project, header.account.as_deref()).ok()?;
-    let measure = crate::consumption::read(&project.hq_home(), &account).ok()??;
+    let measure = crate::consumption::read(&project.nunki_home(), &account).ok()??;
     crate::consumption::over(&measure, &header.bounds, now).map(|over| over.until)
 }
 
@@ -145,7 +145,7 @@ pub fn next_wake(project: &Project, state: &MissionState, now: u64) -> u64 {
 
 /// Start the mission's monitor, unless one is alive.
 ///
-/// `exe` is the binary it runs as, and anything not named `hq` is refused:
+/// `exe` is the binary it runs as, and anything not named `nunki` is refused:
 /// the call sites are the CLI's, and a future one added in the library would
 /// otherwise fork whatever test binary happened to call it.
 pub fn ensure(project: &Project, id: &str, exe: &Path) -> Result<Ensured, MonitorError> {
@@ -154,8 +154,8 @@ pub fn ensure(project: &Project, id: &str, exe: &Path) -> Result<Ensured, Monito
     if let Some(pid) = running(&project.hq_root, id) {
         return Ok(Ensured::Running(pid));
     }
-    if exe.file_name().and_then(|name| name.to_str()) != Some("hq") {
-        return Err(MonitorError::NotHq(exe.to_path_buf()));
+    if exe.file_name().and_then(|name| name.to_str()) != Some("nunki") {
+        return Err(MonitorError::NotNunki(exe.to_path_buf()));
     }
     let dir = project.hq_root.join(MONITORS_DIR);
     std::fs::create_dir_all(&dir).map_err(|e| MonitorError::Io(dir.clone(), e))?;
@@ -197,13 +197,13 @@ pub enum Next {
     Exit(String),
 }
 
-/// After a `verify`: go on, or stop because nothing is left that `hq` may do
+/// After a `verify`: go on, or stop because nothing is left that `nunki` may do
 /// without a human. Pure, so every arm is tested.
 pub fn after_verify(result: &Result<Vec<Step>, VerifyError>) -> Next {
     match result {
         Ok(steps) => match steps.last() {
             Some(Step::Verified) => {
-                Next::Exit("verified — the human reads it, then `hq push`".to_string())
+                Next::Exit("verified — the human reads it, then `nunki push`".to_string())
             }
             Some(Step::AwaitingHuman(handover)) => {
                 Next::Exit(format!("handed over to the human: {handover:?}"))
@@ -219,7 +219,7 @@ pub fn after_verify(result: &Result<Vec<Step>, VerifyError>) -> Next {
             // rather than what ends it. The stage has not moved and nothing
             // an agent does would move it, so going on would play the same
             // gate against the same wall on every tick, forever. The mission
-            // is not over: `hq verify` picks it up once the sentence below
+            // is not over: `nunki verify` picks it up once the sentence below
             // has been acted on.
             Some(Step::GateUnplayable { why, .. }) => {
                 Next::Exit(format!("a gate could not be played: {why}"))
@@ -244,7 +244,7 @@ pub fn after_verify(result: &Result<Vec<Step>, VerifyError>) -> Next {
     }
 }
 
-/// Watch mission `id` until nothing is left for `hq` to do on its own, then
+/// Watch mission `id` until nothing is left for `nunki` to do on its own, then
 /// say why. Its pid is kept while it runs and forgotten when it stops.
 pub fn run(project: &Project, id: &str, engine: Arc<dyn Engine>, engine_bin: &str) -> String {
     let me = std::process::id();

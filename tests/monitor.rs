@@ -3,13 +3,15 @@
 
 use std::path::{Path, PathBuf};
 
-use hq::harness::{RunHandle, SessionId};
-use hq::mission::flow::{Flow, Handover};
-use hq::mission::{Bounds, Header, Integration, Lot, Security};
-use hq::monitor::{Ensured, MonitorError, Next, after_verify, ensure, next_wake, running, wanted};
-use hq::project::{Config, Project, ProtectedPaths};
-use hq::state::MissionState;
-use hq::verify::{Step, VerifyError};
+use nunki::harness::{RunHandle, SessionId};
+use nunki::mission::flow::{Flow, Handover};
+use nunki::mission::{Bounds, Header, Integration, Lot, Security};
+use nunki::monitor::{
+    Ensured, MonitorError, Next, after_verify, ensure, next_wake, running, wanted,
+};
+use nunki::project::{Config, Project, ProtectedPaths};
+use nunki::state::MissionState;
+use nunki::verify::{Step, VerifyError};
 
 fn header() -> Header {
     Header {
@@ -32,7 +34,7 @@ fn header() -> Header {
 }
 
 fn project(dir: &Path) -> Project {
-    std::fs::create_dir_all(dir.join("hq")).unwrap();
+    std::fs::create_dir_all(dir.join("nunki")).unwrap();
     Project::at(
         dir.join("repo"),
         Config {
@@ -50,7 +52,7 @@ fn project(dir: &Path) -> Project {
             permission_mode: "auto".to_string(),
             forge_protection: Default::default(),
         },
-        dir.join("hq"),
+        dir.join("nunki"),
     )
 }
 
@@ -77,8 +79,8 @@ fn state(with_run: bool) -> MissionState {
     }
 }
 
-fn down_until(not_before: u64) -> Option<hq::backoff::HarnessDown> {
-    Some(hq::backoff::HarnessDown {
+fn down_until(not_before: u64) -> Option<nunki::backoff::HarnessDown> {
+    Some(nunki::backoff::HarnessDown {
         failures: 1,
         since: 0,
         not_before,
@@ -86,11 +88,11 @@ fn down_until(not_before: u64) -> Option<hq::backoff::HarnessDown> {
     })
 }
 
-/// Every arm, because the arms are the whole decision: go on while `hq` has
+/// Every arm, because the arms are the whole decision: go on while `nunki` has
 /// something to do on its own, stop the moment a human is needed.
 #[test]
 fn after_a_verify_the_monitor_goes_on_or_stops_for_a_human() {
-    use hq::harness::Role::Integrator;
+    use nunki::harness::Role::Integrator;
     let go = |step: Step| after_verify(&Ok(vec![step]));
     let stops = |next: Next| matches!(next, Next::Exit(_));
 
@@ -135,7 +137,7 @@ fn after_a_verify_the_monitor_goes_on_or_stops_for_a_human() {
     }))));
     assert!(stops(go(Step::Held {
         role: Integrator,
-        who: "hq".into(),
+        who: "nunki".into(),
         date: "now".into(),
         reason: Some("the cap".into()),
     })));
@@ -150,12 +152,12 @@ fn after_a_verify_the_monitor_goes_on_or_stops_for_a_human() {
     assert!(stops(go(Step::GateUnplayable {
         role: Integrator,
         why: "gate 7 (every survivor has an outcome) could not be played: no mutation \
-              campaign has run on this mission — `hq mission mutants` starts one"
+              campaign has run on this mission — `nunki mission mutants` starts one"
             .into(),
     })));
 
     // A human driving the slot is not a failure: the monitor waits its turn.
-    let held = VerifyError::Lock(hq::state::LockError::Held {
+    let held = VerifyError::Lock(nunki::state::LockError::Held {
         slot: "one".into(),
         verb: "verify".into(),
         pid: 1,
@@ -230,16 +232,16 @@ fn the_monitor_wakes_every_minute_during_a_run_and_at_the_deadline_otherwise() {
     );
 }
 
-/// A stand-in for the `hq` binary: named `hq`, it sleeps, and its command
+/// A stand-in for the `nunki` binary: named `nunki`, it sleeps, and its command
 /// line carries what `ensure` gave it.
-fn fake_hq(dir: &Path) -> PathBuf {
+fn fake_nunki(dir: &Path) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let bin = dir.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
-    let hq = bin.join("hq");
-    std::fs::write(&hq, "#!/bin/sh\nsleep 30\n").unwrap();
-    std::fs::set_permissions(&hq, std::fs::Permissions::from_mode(0o755)).unwrap();
-    hq
+    let nunki = bin.join("nunki");
+    std::fs::write(&nunki, "#!/bin/sh\nsleep 30\n").unwrap();
+    std::fs::set_permissions(&nunki, std::fs::Permissions::from_mode(0o755)).unwrap();
+    nunki
 }
 
 fn kill(pid: u32) {
@@ -255,7 +257,7 @@ fn kill(pid: u32) {
 fn a_monitor_is_started_once_and_replaced_when_dead() {
     let dir = tempfile::tempdir().unwrap();
     let project = project(dir.path());
-    let exe = fake_hq(dir.path());
+    let exe = fake_nunki(dir.path());
 
     let first = match ensure(&project, "m1", &exe).unwrap() {
         Ensured::Started(pid) => pid,
@@ -276,7 +278,7 @@ fn a_monitor_is_started_once_and_replaced_when_dead() {
     // One per mission: another mission's pidfile naming this pid is not a
     // monitor of that mission — `ps` must see the mission's own id.
     std::fs::write(
-        hq::monitor::pidfile(&project.hq_root, "other"),
+        nunki::monitor::pidfile(&project.hq_root, "other"),
         format!("{first}\n"),
     )
     .unwrap();
@@ -297,26 +299,26 @@ fn a_monitor_is_started_once_and_replaced_when_dead() {
     kill(second);
 }
 
-/// Only the `hq` binary starts a monitor: a test harness calling this would
+/// Only the `nunki` binary starts a monitor: a test harness calling this would
 /// otherwise fork itself into a detached process.
 #[test]
-fn only_the_hq_binary_starts_a_monitor() {
+fn only_the_nunki_binary_starts_a_monitor() {
     let dir = tempfile::tempdir().unwrap();
     let project = project(dir.path());
     let exe = std::env::current_exe().unwrap();
     assert!(matches!(
         ensure(&project, "m1", &exe),
-        Err(MonitorError::NotHq(_))
+        Err(MonitorError::NotNunki(_))
     ));
     assert!(running(&project.hq_root, "m1").is_none());
 }
 
 /// A mission at its integration stage with a shared provider.
 fn integrating(id: &str, with_run: bool) -> MissionState {
-    use hq::mission::flow::Event;
+    use nunki::mission::flow::Event;
     let mut framing = header();
     framing.integration = Integration::Services {
-        services: vec![hq::mission::Service {
+        services: vec![nunki::mission::Service {
             name: "stripe".into(),
             reach: vec!["api.stripe.com".into()],
             shared: true,
@@ -330,7 +332,7 @@ fn integrating(id: &str, with_run: bool) -> MissionState {
     state
         .flow
         .advance(Event::RunEnded {
-            outcome: hq::harness::Outcome::Finished(Default::default()),
+            outcome: nunki::harness::Outcome::Finished(Default::default()),
             lot_done: true,
         })
         .unwrap();
@@ -344,7 +346,7 @@ fn integrating(id: &str, with_run: bool) -> MissionState {
 fn a_monitor_is_wanted_while_another_mission_holds_a_provider() {
     let dir = tempfile::tempdir().unwrap();
     let project = project(dir.path());
-    let store = hq::state::Store::open(&project.hq_root).unwrap();
+    let store = nunki::state::Store::open(&project.hq_root).unwrap();
     let mine = integrating("m1", false);
 
     store.save(&integrating("m2", true)).unwrap();
@@ -359,7 +361,7 @@ fn a_monitor_is_wanted_while_another_mission_holds_a_provider() {
 fn a_busy_provider_is_waited_for_not_handed_over() {
     assert_eq!(
         after_verify(&Ok(vec![Step::Busy {
-            role: hq::harness::Role::Integrator,
+            role: nunki::harness::Role::Integrator,
             provider: "stripe".into(),
             by: "mission m2".into(),
         }])),

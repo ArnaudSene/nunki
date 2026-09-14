@@ -7,7 +7,7 @@
 //! by Arnaud on 2026-09-11) — is locked, for the other missions of the
 //! project, for as long as an integration run uses it.
 //!
-//! The lock is **derived from hq's state**, not kept beside it: a provider is
+//! The lock is **derived from nunki's state**, not kept beside it: a provider is
 //! taken while another mission stands on its integration stage with a run
 //! recorded and declares that provider. A run read back is forgotten with its
 //! transition, so the lock lifts with it — and a mission ended, reframed or
@@ -35,7 +35,7 @@ pub enum Claim {
     /// Every shared provider is free. The guards are held until the launch
     /// is recorded, then dropped: from then on the recorded run is the lock.
     Free(Vec<SlotLock>),
-    /// One is taken, and by whom — a mission, or another `hq` claiming it
+    /// One is taken, and by whom — a mission, or another `nunki` claiming it
     /// this very moment.
     Busy { provider: String, by: String },
 }
@@ -54,7 +54,7 @@ pub fn shared(header: &Header) -> Vec<&str> {
 
 /// The mission, other than `me`, whose integration run holds `provider`.
 /// A state that cannot be read holds nothing: it cannot be running a run
-/// `hq` knows of.
+/// `nunki` knows of.
 pub fn holder(store: &Store, me: &str, provider: &str) -> Result<Option<String>, StateError> {
     for id in store.missions()? {
         if id == me {
@@ -103,7 +103,7 @@ pub fn claim(
             Err(LockError::Held { verb, pid, .. }) => {
                 return Ok(Claim::Busy {
                     provider: provider.to_string(),
-                    by: format!("`hq {verb}` (pid {pid}), claiming it now"),
+                    by: format!("`nunki {verb}` (pid {pid}), claiming it now"),
                 });
             }
             Err(e) => return Err(e.into()),

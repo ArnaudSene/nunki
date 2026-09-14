@@ -1,9 +1,9 @@
-//! Who `hq` is talking to (SPEC 4.5): a mission ends by handing something
+//! Who `nunki` is talking to (SPEC 4.5): a mission ends by handing something
 //! back to a person, and it has to be able to name them.
 
 use std::path::Path;
 
-use hq::human::{Human, ME_FILE, Source, me};
+use nunki::human::{Human, ME_FILE, Source, me};
 
 fn git(at: &Path, args: &[&str]) {
     assert!(
@@ -21,20 +21,20 @@ fn git(at: &Path, args: &[&str]) {
 #[test]
 fn a_declared_name_wins_over_everything_else() {
     let dir = tempfile::tempdir().unwrap();
-    let hq_home = dir.path().join(".hq");
+    let nunki_home = dir.path().join(".nunki");
     let repo = dir.path().join("repo");
-    std::fs::create_dir_all(&hq_home).unwrap();
+    std::fs::create_dir_all(&nunki_home).unwrap();
     std::fs::create_dir_all(&repo).unwrap();
     git(&repo, &["init", "-q"]);
     git(&repo, &["config", "user.name", "Some Committer"]);
 
     std::fs::write(
-        hq_home.join(ME_FILE),
+        nunki_home.join(ME_FILE),
         "name: Arnaud\nemail: arnaud@example.com\n",
     )
     .unwrap();
 
-    let who = me(&hq_home, Some(&repo));
+    let who = me(&nunki_home, Some(&repo));
     assert_eq!(who.name.as_deref(), Some("Arnaud"));
     assert_eq!(who.email.as_deref(), Some("arnaud@example.com"));
     // Where the name came from is kept, because a name from a file is a
@@ -45,15 +45,15 @@ fn a_declared_name_wins_over_everything_else() {
 #[test]
 fn git_answers_when_nothing_was_declared() {
     let dir = tempfile::tempdir().unwrap();
-    let hq_home = dir.path().join(".hq");
+    let nunki_home = dir.path().join(".nunki");
     let repo = dir.path().join("repo");
-    std::fs::create_dir_all(&hq_home).unwrap();
+    std::fs::create_dir_all(&nunki_home).unwrap();
     std::fs::create_dir_all(&repo).unwrap();
     git(&repo, &["init", "-q"]);
     git(&repo, &["config", "user.name", "Igor"]);
     git(&repo, &["config", "user.email", "igor@example.com"]);
 
-    let who = me(&hq_home, Some(&repo));
+    let who = me(&nunki_home, Some(&repo));
     assert_eq!(who.name.as_deref(), Some("Igor"));
     assert_eq!(who.email.as_deref(), Some("igor@example.com"));
     assert_eq!(who.source, Source::Git);
@@ -62,13 +62,13 @@ fn git_answers_when_nothing_was_declared() {
 #[test]
 fn an_empty_declaration_is_not_a_name() {
     let dir = tempfile::tempdir().unwrap();
-    let hq_home = dir.path().join(".hq");
-    std::fs::create_dir_all(&hq_home).unwrap();
-    std::fs::write(hq_home.join(ME_FILE), "name: \"   \"\n").unwrap();
+    let nunki_home = dir.path().join(".nunki");
+    std::fs::create_dir_all(&nunki_home).unwrap();
+    std::fs::write(nunki_home.join(ME_FILE), "name: \"   \"\n").unwrap();
 
     // It falls through rather than addressing somebody as blank.
-    let who = me(&hq_home, None);
-    assert_ne!(who.source, Source::Declared(hq_home.join(ME_FILE)));
+    let who = me(&nunki_home, None);
+    assert_ne!(who.source, Source::Declared(nunki_home.join(ME_FILE)));
 }
 
 #[test]
@@ -92,24 +92,24 @@ fn a_name_nobody_gave_is_never_invented() {
 #[test]
 fn a_mission_says_who_arbitrates_and_the_follow_up_is_addressed_to_them() {
     let dir = tempfile::tempdir().unwrap();
-    let header = hq::mission::Header {
+    let header = nunki::mission::Header {
         branch: "feat/x".to_string(),
         base: "dev".to_string(),
-        lots: vec![hq::mission::Lot {
+        lots: vec![nunki::mission::Lot {
             id: "L1".to_string(),
             title: "one".to_string(),
         }],
-        integration: hq::mission::Integration::None {
+        integration: nunki::mission::Integration::None {
             reason: "none".to_string(),
         },
-        security: hq::mission::Security::Gates,
+        security: nunki::mission::Security::Gates,
         arbiter: Some("Igor".to_string()),
         run: None,
         account: None,
         model: None,
         bounds: Default::default(),
     };
-    let paths = hq::mission::dir::create(dir.path(), "m1", &header, "").unwrap();
+    let paths = nunki::mission::dir::create(dir.path(), "m1", &header, "").unwrap();
 
     let followup = std::fs::read_to_string(&paths.followup).unwrap();
     // The exact line, not a substring of it: "for Igorsomebody" would
@@ -123,28 +123,28 @@ fn a_mission_says_who_arbitrates_and_the_follow_up_is_addressed_to_them() {
     assert!(!followup.contains("Arnaud"), "{followup}");
 
     // And it survives the round trip through the file, frozen with the rest.
-    let read = hq::mission::dir::read_header(dir.path(), "m1").unwrap();
+    let read = nunki::mission::dir::read_header(dir.path(), "m1").unwrap();
     assert_eq!(read.arbiter.as_deref(), Some("Igor"));
 }
 
 #[test]
 fn a_mission_with_nobody_named_still_addresses_somebody() {
     let dir = tempfile::tempdir().unwrap();
-    let header = hq::mission::Header {
+    let header = nunki::mission::Header {
         branch: "feat/x".to_string(),
         base: "dev".to_string(),
         lots: Vec::new(),
-        integration: hq::mission::Integration::None {
+        integration: nunki::mission::Integration::None {
             reason: "none".to_string(),
         },
-        security: hq::mission::Security::Gates,
+        security: nunki::mission::Security::Gates,
         arbiter: None,
         run: None,
         account: None,
         model: None,
         bounds: Default::default(),
     };
-    let paths = hq::mission::dir::create(dir.path(), "m1", &header, "").unwrap();
+    let paths = nunki::mission::dir::create(dir.path(), "m1", &header, "").unwrap();
     let followup = std::fs::read_to_string(&paths.followup).unwrap();
     assert_eq!(
         followup.lines().next(),
@@ -160,11 +160,11 @@ fn whoami_says_where_the_name_came_from() {
     let root = dir.path().join("repo");
     let home = dir.path().join("home");
     std::fs::create_dir_all(&root).unwrap();
-    std::fs::create_dir_all(home.join(".hq")).unwrap();
-    std::fs::write(root.join("hq.yaml"), "harness: claude-code\n").unwrap();
-    std::fs::write(home.join(".hq").join(ME_FILE), "name: Arnaud\n").unwrap();
+    std::fs::create_dir_all(home.join(".nunki")).unwrap();
+    std::fs::write(root.join("nunki.yaml"), "harness: claude-code\n").unwrap();
+    std::fs::write(home.join(".nunki").join(ME_FILE), "name: Arnaud\n").unwrap();
 
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_hq"))
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_nunki"))
         .env("HOME", &home)
         .args(["-C"])
         .arg(&root)
@@ -182,13 +182,13 @@ fn with_nothing_to_go_on_hq_says_so_instead_of_inventing_a_name() {
     let root = dir.path().join("repo");
     let home = dir.path().join("home");
     std::fs::create_dir_all(&root).unwrap();
-    std::fs::create_dir_all(home.join(".hq")).unwrap();
-    std::fs::write(root.join("hq.yaml"), "harness: claude-code\n").unwrap();
+    std::fs::create_dir_all(home.join(".nunki")).unwrap();
+    std::fs::write(root.join("nunki.yaml"), "harness: claude-code\n").unwrap();
 
     // No declaration, no git repository, and no account name: a mission that
     // came back would have nobody to come back to, and saying "the human"
     // as if it were a name would be worse than saying nothing.
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_hq"))
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_nunki"))
         .env("HOME", &home)
         .env_remove("USER")
         .args(["-C"])

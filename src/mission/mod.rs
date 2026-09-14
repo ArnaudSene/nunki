@@ -75,7 +75,7 @@ pub enum Shape {
 }
 
 /// Bounds and cadences (SPEC 4.3 and 4.5). Project defaults come from
-/// `hq.yaml`; the mission header overrides them.
+/// `nunki.yaml`; the mission header overrides them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Bounds {
     /// Returns to the coder allowed after a red verdict. Zero means the first
@@ -91,32 +91,32 @@ pub struct Bounds {
     pub stall_checks: u32,
     /// Hours on one lot, with progress, after which the human is told.
     pub long_lot_hours: u32,
-    /// Minutes a mutation campaign is given before `hq` stops it (SPEC 4.4,
+    /// Minutes a mutation campaign is given before `nunki` stops it (SPEC 4.4,
     /// gate 7: "elle est longue, donc elle se lance et se guette comme un
     /// run, avec un délai paramétré").
     #[serde(default = "default_mutation_minutes")]
     pub mutation_minutes: u32,
-    /// Hours `hq` waits out a harness that keeps failing — quota, network,
+    /// Hours `nunki` waits out a harness that keeps failing — quota, network,
     /// crash — before it holds the mission and hands it to the human (SPEC
     /// 4.3). Counted from the first failure in a row; zero sends the first
     /// one to the human.
     #[serde(default = "default_harness_wait_hours")]
     pub harness_wait_hours: u32,
-    /// Runs a mission may spend before `hq` holds it (SPEC 7). No default:
+    /// Runs a mission may spend before `nunki` holds it (SPEC 7). No default:
     /// runs are already bounded by the attempts and the volets, and a fixed
     /// number would cut legitimate missions short (decided 2026-09-11).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_runs: Option<u32>,
-    /// Tokens a mission may spend before `hq` holds it, the four kinds
+    /// Tokens a mission may spend before `nunki` holds it, the four kinds
     /// summed (SPEC 7). No default until real missions have been measured
     /// (decided 2026-09-11).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u64>,
-    /// Percent of the subscription's five-hour window past which `hq`
+    /// Percent of the subscription's five-hour window past which `nunki`
     /// launches no run until the window resets (SPEC 4.3).
     #[serde(default = "default_five_hour_stop_percent")]
     pub five_hour_stop_percent: u32,
-    /// Percent of the subscription's weekly window past which `hq` launches
+    /// Percent of the subscription's weekly window past which `nunki` launches
     /// no run until the window resets (SPEC 4.3).
     #[serde(default = "default_weekly_stop_percent")]
     pub weekly_stop_percent: u32,
@@ -154,7 +154,7 @@ impl Default for Bounds {
 }
 
 /// Long enough to outlast a subscription window that has run dry overnight,
-/// so `hq` picks the mission up by itself when it reopens (decided by Arnaud
+/// so `nunki` picks the mission up by itself when it reopens (decided by Arnaud
 /// on 2026-09-11, against three hours that would wake him instead).
 fn default_harness_wait_hours() -> u32 {
     6
@@ -167,7 +167,7 @@ fn default_mutation_minutes() -> u32 {
 }
 
 /// The structured header of `MISSION.md`, frozen into the state at
-/// validation (SPEC 4.1). The agent cannot write it and `hq` never re-reads
+/// validation (SPEC 4.1). The agent cannot write it and `nunki` never re-reads
 /// it during the mission.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Header {
@@ -187,12 +187,12 @@ pub struct Header {
     /// through, any more than it can change its perimeter (SPEC 4.3).
     #[serde(default)]
     pub account: Option<String>,
-    /// Which model this mission's agents run on, refining `hq.yaml`. Frozen
+    /// Which model this mission's agents run on, refining `nunki.yaml`. Frozen
     /// with the rest of the header: a mission does not change model halfway
     /// through, any more than it changes the subscription it spends.
     #[serde(default)]
     pub model: Option<String>,
-    /// How the application is started for this mission, refining `hq.yaml`
+    /// How the application is started for this mission, refining `nunki.yaml`
     /// and the stack's default (SPEC 4.2, "les services et le lancement de
     /// l'application"). `none` when there is nothing to start.
     #[serde(default)]
@@ -237,7 +237,7 @@ impl Verdict {
 }
 
 /// `VERDICT.json`, written by the agent at the end of its last run and
-/// validated by `hq` against the real `HEAD` (SPEC 4.1).
+/// validated by `nunki` against the real `HEAD` (SPEC 4.1).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerdictFile {
     pub role: Role,

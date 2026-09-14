@@ -1,13 +1,13 @@
-//! The lock on a real provider (SPEC 7): derived from hq's state, with a
+//! The lock on a real provider (SPEC 7): derived from nunki's state, with a
 //! short guard around the claim.
 
 use std::path::PathBuf;
 
-use hq::harness::{Outcome, RunHandle, SessionId};
-use hq::mission::flow::{Event, Flow};
-use hq::mission::{Bounds, Header, Integration, Lot, Security, Service};
-use hq::provider::{Claim, blocked, claim, holder, shared};
-use hq::state::{MissionState, Store};
+use nunki::harness::{Outcome, RunHandle, SessionId};
+use nunki::mission::flow::{Event, Flow};
+use nunki::mission::{Bounds, Header, Integration, Lot, Security, Service};
+use nunki::provider::{Claim, blocked, claim, holder, shared};
+use nunki::state::{MissionState, Store};
 
 fn header(services: &[(&str, bool)]) -> Header {
     Header {
@@ -155,7 +155,7 @@ fn a_run_read_back_or_another_stage_holds_nothing() {
 }
 
 /// Free when nothing holds it, busy when a mission does — and busy too while
-/// another `hq` is claiming it this very moment.
+/// another `nunki` is claiming it this very moment.
 #[test]
 fn a_claim_is_refused_while_a_mission_or_another_claim_holds_the_provider() {
     let world = World::new();

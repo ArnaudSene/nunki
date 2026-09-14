@@ -7,15 +7,15 @@
 //! is the adapter's job ([`crate::harness::Harness::windows`]) and this
 //! module only keeps and judges what an adapter read.
 //!
-//! Kept **per account**, at `~/.hq/usage/<account>.json`: the windows are
+//! Kept **per account**, at `~/.nunki/usage/<account>.json`: the windows are
 //! the subscription's, shared by every mission and every project that spends
 //! it, and a supervisor on another account — or another harness — has a file
 //! of its own. Beside the account index and never in the tokens directory,
 //! which is for secrets.
 //!
-//! Measured whenever `hq` reads a run — `hq verify` reading one back, `hq
+//! Measured whenever `nunki` reads a run — `nunki verify` reading one back, `nunki
 //! mission watch` while one runs — and judged before every launch: past a
-//! threshold, `hq` launches nothing until that window resets, then goes on by
+//! threshold, `nunki` launches nothing until that window resets, then goes on by
 //! itself (decided 2026-09-11: 90 % of five hours, 80 % of the week). Between
 //! two readings the last measure stands, so what another session spends on
 //! the same account shows at the next reading, not before.
@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::mission::Bounds;
 
-/// Where the measures live, under `~/.hq/`.
+/// Where the measures live, under `~/.nunki/`.
 pub const USAGE_DIR: &str = "usage";
 
 /// One window: how much of it is used, in thousandths, and when it resets
@@ -86,19 +86,19 @@ pub fn per_mille(utilization: f64) -> u32 {
     (utilization.clamp(0.0, 10.0) * 1000.0).round() as u32
 }
 
-pub fn path(hq_home: &Path, account: &str) -> PathBuf {
-    hq_home.join(USAGE_DIR).join(format!("{account}.json"))
+pub fn path(nunki_home: &Path, account: &str) -> PathBuf {
+    nunki_home.join(USAGE_DIR).join(format!("{account}.json"))
 }
 
 /// The measure kept for `account`. `None` when nothing has been measured
 /// yet; an unreadable file is an error, not an absence, because reading it
 /// as "nothing measured" would read as "nothing spent".
-pub fn read(hq_home: &Path, account: &str) -> Result<Option<Measure>, String> {
-    let path = path(hq_home, account);
+pub fn read(nunki_home: &Path, account: &str) -> Result<Option<Measure>, String> {
+    let path = path(nunki_home, account);
     match std::fs::read_to_string(&path) {
         Ok(text) => serde_json::from_str(&text)
             .map(Some)
-            .map_err(|e| format!("{} is not a measure hq can read: {e}", path.display())),
+            .map_err(|e| format!("{} is not a measure nunki can read: {e}", path.display())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(format!("{}: {e}", path.display())),
     }
@@ -107,14 +107,14 @@ pub fn read(hq_home: &Path, account: &str) -> Result<Option<Measure>, String> {
 /// Keep a measure — unless the one on file is newer: two missions on one
 /// account read it at different times, and an older reading must not
 /// overwrite a newer one. Written atomically, so a reader never sees half.
-pub fn record(hq_home: &Path, account: &str, measure: &Measure) -> Result<(), String> {
-    if let Ok(Some(kept)) = read(hq_home, account)
+pub fn record(nunki_home: &Path, account: &str, measure: &Measure) -> Result<(), String> {
+    if let Ok(Some(kept)) = read(nunki_home, account)
         && kept.measured_at > measure.measured_at
     {
         return Ok(());
     }
-    let path = path(hq_home, account);
-    let dir = hq_home.join(USAGE_DIR);
+    let path = path(nunki_home, account);
+    let dir = nunki_home.join(USAGE_DIR);
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let tmp = path.with_extension("json.tmp");
     let body = serde_json::to_vec_pretty(measure).expect("a measure serialises");
@@ -125,7 +125,7 @@ pub fn record(hq_home: &Path, account: &str, measure: &Measure) -> Result<(), St
 /// The window that forbids a launch at `now`, if one does.
 ///
 /// A window whose reset has passed forbids nothing: the measure is about a
-/// window that is over, and that is how `hq` goes on by itself once it
+/// window that is over, and that is how `nunki` goes on by itself once it
 /// resets. When both are past their threshold, the later reset is the one
 /// to wait for.
 pub fn over(measure: &Measure, bounds: &Bounds, now: u64) -> Option<Over> {
@@ -168,7 +168,7 @@ pub fn note(
     };
     let account = account_of(project, from_mission)?;
     record(
-        &project.hq_home(),
+        &project.nunki_home(),
         &account,
         &Measure {
             windows,
@@ -193,10 +193,10 @@ pub fn account_of(
     project: &crate::project::Project,
     from_mission: Option<&str>,
 ) -> Result<String, String> {
-    let hq_home = project.hq_home();
-    let accounts = crate::account::Accounts::load(&hq_home).map_err(|e| e.to_string())?;
+    let nunki_home = project.nunki_home();
+    let accounts = crate::account::Accounts::load(&nunki_home).map_err(|e| e.to_string())?;
     accounts
-        .choose(&hq_home, from_mission, project.config.account.as_deref())
+        .choose(&nunki_home, from_mission, project.config.account.as_deref())
         .map(|(name, _)| name)
         .map_err(|e| e.to_string())
 }

@@ -18,7 +18,7 @@
 //!   waited for | nothing, it no longer exists |
 //!
 //! `stop` is the fourth, and it is two things at once (SPEC 4.5). Always, it
-//! **holds the mission**: `hq` launches no further run for it, which is a
+//! **holds the mission**: `nunki` launches no further run for it, which is a
 //! write to the state file and not a signal — the old `STOP` file, which was
 //! a marker and not a gesture. With `--now` it also ends the turn in
 //! progress, and that half is the harness's, because interrupting a turn
@@ -27,7 +27,7 @@
 //!
 //! `say` is here for the opposite reason: **there is no channel during a
 //! run**. An instruction is left in `FOLLOWUP_HQ.md` and read by the next
-//! run; if it is urgent, `hq mission stop --now` ends the current run
+//! run; if it is urgent, `nunki mission stop --now` ends the current run
 //! properly and the relaunch carries it.
 
 use std::sync::Arc;
@@ -68,11 +68,11 @@ pub enum GestureError {
 ///
 /// SIGINT, as `stop --now`, so the agent ends its turn and writes its resume
 /// block — but no hold: nothing for a human to lift. The next launch waits
-/// for the window to reset, then `hq` goes on by itself.
+/// for the window to reset, then `nunki` goes on by itself.
 ///
 /// Called every minute by the mission's monitor ([`crate::monitor`]) and by
-/// `hq mission watch`, each under its own name for the slot's lock: the mark
-/// is a transition of hq's own, and a mark written behind a `verify` that
+/// `nunki mission watch`, each under its own name for the slot's lock: the mark
+/// is a transition of nunki's own, and a mark written behind a `verify` that
 /// holds the lock would be lost when that `verify` saves — the run would then
 /// cost the attempt the mark exists to spare. So a slot someone else drives
 /// is left to them this time: their `verify` judges the run itself.
@@ -93,7 +93,7 @@ pub fn spare(
     spare_under_lock(project, id, harness, now)
 }
 
-/// [`spare`], for a caller that already holds the slot's lock: `hq verify`.
+/// [`spare`], for a caller that already holds the slot's lock: `nunki verify`.
 pub(crate) fn spare_under_lock(
     project: &Project,
     id: &str,
@@ -128,7 +128,7 @@ pub(crate) fn spare_under_lock(
         return Ok(None);
     };
     let Some(measure) =
-        crate::consumption::read(&project.hq_home(), &account).map_err(GestureError::Usage)?
+        crate::consumption::read(&project.nunki_home(), &account).map_err(GestureError::Usage)?
     else {
         return Ok(None);
     };
@@ -169,7 +169,7 @@ pub fn pause(
 
 /// Hold the mission, and with `now` end the turn in progress too.
 ///
-/// The hold is the whole point and it is written to the state file: `hq`
+/// The hold is the whole point and it is written to the state file: `nunki`
 /// launches no further run until `resume` lifts it. It is recorded even when
 /// no run is going — a human holding a mission between two runs is exactly
 /// the case a signal cannot express, and the case SPEC's old `STOP` file
@@ -197,7 +197,7 @@ pub fn stop(
         _ => false,
     };
 
-    let who = crate::human::me(&project.hq_home(), Some(&project.root)).addressed();
+    let who = crate::human::me(&project.nunki_home(), Some(&project.root)).addressed();
     state.hold(&who, interrupted);
     store.save(&state)?;
     // `expect`: `hold` has just set it.
@@ -245,7 +245,7 @@ pub fn resume(
 /// After a kill the lot in progress is a failed attempt, and the relaunch
 /// starts from the last resume block the agent wrote (SPEC 4.3). Nothing is
 /// recorded here: what a killed run costs is the flow's to decide, on the
-/// `Stalled` event a watching `hq` raises, and writing it from a verb that
+/// `Stalled` event a watching `nunki` raises, and writing it from a verb that
 /// must always pass would be two places deciding one thing.
 pub fn kill(
     project: &Project,
@@ -271,7 +271,7 @@ pub fn say(project: &Project, id: &str, what: &str) -> Result<(), GestureError> 
     // is read by the first run, which is exactly what it is for.
     let _ = store.load(id);
     let paths = crate::mission::dir::Paths::of(&project.hq_root, id);
-    let who = crate::human::me(&project.hq_home(), Some(&project.root)).addressed();
+    let who = crate::human::me(&project.nunki_home(), Some(&project.root)).addressed();
     crate::followup::said(&paths.followup, &who, what.trim())?;
     Ok(())
 }

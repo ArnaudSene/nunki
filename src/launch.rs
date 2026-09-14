@@ -1,7 +1,7 @@
 //! Starting the application (SPEC 4.2, "les services et le lancement de
 //! l'application", rule 2).
 //!
-//! Launching the application is **no agent's job**. `hq` starts it, in the
+//! Launching the application is **no agent's job**. `nunki` starts it, in the
 //! profile of the role that will test or attack it, before launching that
 //! role — so the integrator wires a deliverable that is already running, and
 //! the security agent attacks exactly what the integrator validated.
@@ -10,23 +10,23 @@
 //! may declare that script, and they are read in this order:
 //!
 //! 1. the frozen mission header (`run:`), which refines it for one mission;
-//! 2. `hq.yaml` (`run:`), which replaces the stack's default for the project;
+//! 2. `nunki.yaml` (`run:`), which replaces the stack's default for the project;
 //! 3. the stack fragment's `run.sh`, which says how an application of this
 //!    stack is normally started.
 //!
 //! `none` at any of the three means there is nothing to start — a library,
 //! whose security agent works on the code and the build artefact.
 //!
-//! The **choice** comes from those three declarations as `hq` holds them; the
+//! The **choice** comes from those three declarations as `nunki` holds them; the
 //! **file** is read from the slot's tree, at the commit the slot is on. That
 //! split is the one SPEC asks for: the integrator may amend the launch script
-//! and commit it, "et c'est cette version que `hq` utilise ensuite" — so the
+//! and commit it, "et c'est cette version que `nunki` utilise ensuite" — so the
 //! security run must read the file again rather than reuse anything cached
 //! when the integrator started.
 //!
 //! The application runs **inside the agent's container**, which is what puts
 //! it inside the perimeter the firewall owns. It therefore needs no stopping
-//! of its own: a profile switch removes that container, and `hq` starts the
+//! of its own: a profile switch removes that container, and `nunki` starts the
 //! application again in the next one.
 
 use std::path::PathBuf;
@@ -38,7 +38,7 @@ use crate::harness::{Role, RunHandle, SessionId};
 use crate::project::Project;
 use crate::slot::Slot;
 
-/// The launch script a stack fragment ships, under `.hq/stacks/<name>/`.
+/// The launch script a stack fragment ships, under `.nunki/stacks/<name>/`.
 pub const SCRIPT: &str = "run.sh";
 
 /// What a declaration says when there is nothing to start.
@@ -50,7 +50,7 @@ pub const NOTHING: &str = "none";
 pub enum Declared {
     /// The mission header's `run:`.
     Header,
-    /// `hq.yaml`'s `run:`.
+    /// `nunki.yaml`'s `run:`.
     Config,
     /// The stack fragment's default.
     Stack,
@@ -60,7 +60,7 @@ impl Declared {
     pub fn where_from(self) -> &'static str {
         match self {
             Declared::Header => "the mission header's `run:`",
-            Declared::Config => "hq.yaml's `run:`",
+            Declared::Config => "nunki.yaml's `run:`",
             Declared::Stack => "the stack fragment's default",
         }
     }
@@ -88,7 +88,7 @@ pub enum LaunchError {
         head: String,
     },
     #[error(
-        "{where_from} names {path:?}, which is not executable — `hq` runs it, it does \
+        "{where_from} names {path:?}, which is not executable — `nunki` runs it, it does \
          not guess an interpreter for it"
     )]
     NotExecutable {
@@ -170,7 +170,7 @@ pub fn start(
     };
     std::fs::create_dir_all(runs_dir).map_err(|e| LaunchError::Io(runs_dir.to_path_buf(), e))?;
 
-    let session = SessionId(format!("hq-app-{}", crate::role::slug(role)));
+    let session = SessionId(format!("nunki-app-{}", crate::role::slug(role)));
     let log = runs_dir.join(format!("{}.log", session.0));
     let compose_project = crate::compose::project_name(&slot.name)?;
     let spawner = crate::engine::spawn::ContainerSpawner::new(

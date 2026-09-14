@@ -1,5 +1,5 @@
 //! The Claude Code adapter (SPEC 4.3), against the CLI as installed:
-//! `claude -p` with `--output-format stream-json`, sessions imposed by `hq`
+//! `claude -p` with `--output-format stream-json`, sessions imposed by `nunki`
 //! with `--session-id` and resumed with `--resume`, a permission mode the
 //! project declares and a prompt nobody ever waits for
 //! (`--permission-mode <mode> --permission-prompts none`),
@@ -34,7 +34,7 @@ pub struct Config {
     /// Upper bound on agentic turns per run, or none.
     pub max_turns: Option<u32>,
     /// What the CLI does with a permission it would otherwise ask about
-    /// (`--permission-mode`). Declared per project; `hq` passes it through
+    /// (`--permission-mode`). Declared per project; `nunki` passes it through
     /// without checking the name, and the CLI refuses one it does not know.
     pub permission_mode: String,
     /// Where the harness keeps config and sessions (`CLAUDE_CONFIG_DIR`).
@@ -146,7 +146,7 @@ impl ClaudeCode {
     }
 }
 
-/// Where the agent's home is, by hq's convention: the stack image creates
+/// Where the agent's home is, by nunki's convention: the stack image creates
 /// the `agent` user with `useradd -m`, and the harness keeps its install and
 /// its sessions under it (SPEC 4.1).
 pub const AGENT_HOME: &str = "/home/agent";
@@ -183,7 +183,7 @@ impl Harness for ClaudeCode {
     /// What a role is allowed to do **through the harness**.
     ///
     /// Found by running one, on 2026-09-10, when `dontAsk` was the only mode
-    /// `hq` passed: with nothing allowed, the first real agent run had `Bash`
+    /// `nunki` passed: with nothing allowed, the first real agent run had `Bash`
     /// and `Write` refused, sat thinking, and ended without a result.
     /// Refusing is safe (SPEC 3.2) — refusing *everything* is a container
     /// that cannot work. The list still matters under `auto`, which is now
@@ -232,7 +232,7 @@ impl Harness for ClaudeCode {
             binary: "claude".into(),
             // Absolute: a Dockerfile's ENV does not expand $HOME, and the
             // first version of this shipped an image with `PATH=/.local/bin`
-            // and no reachable harness. `/home/agent` is hq's convention for
+            // and no reachable harness. `/home/agent` is nunki's convention for
             // the agent's home, and the layer fails the build if the binary
             // is not on PATH afterwards.
             path: vec![format!("{AGENT_HOME}/.local/bin")],
@@ -279,7 +279,7 @@ impl Harness for ClaudeCode {
     /// interrupts a run without costing it an attempt, but it is reported in
     /// its own words: what happened was to the container, and a human
     /// reading the record must be able to tell the two apart.
-    /// [`Presence::Unknown`] is neither, and becomes an error: `hq` does not
+    /// [`Presence::Unknown`] is neither, and becomes an error: `nunki` does not
     /// know, and saying so is the only honest thing left.
     fn state(&self, handle: &RunHandle) -> Result<RunState, HarnessError> {
         // Asked of the spawner, because where the process lives decides
@@ -336,7 +336,7 @@ impl Harness for ClaudeCode {
                 continue;
             }
             let Ok(event) = serde_json::from_str::<Value>(raw) else {
-                // Kept, not dropped: a line hq cannot parse is usually the
+                // Kept, not dropped: a line nunki cannot parse is usually the
                 // one worth reading — a stack trace, a message from the
                 // wrapper, a truncated write.
                 lines.push(Line {
@@ -637,7 +637,7 @@ fn classify_result(event: &Value) -> Outcome {
 
 /// Arguments that must never appear (SPEC 4.3): `--bare` skips `CLAUDE.md`
 /// and ignores the subscription token. Checked by the tests, and by
-/// `hq check` against the adapter's own command.
+/// `nunki check` against the adapter's own command.
 pub const FORBIDDEN_ARGS: &[&str] = &["--bare"];
 
 impl std::fmt::Debug for ClaudeCode {

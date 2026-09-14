@@ -1,11 +1,11 @@
-//! `hq logs <mission>` (SPEC 4.2, verb table) and `hq mission watch`.
+//! `nunki logs <mission>` (SPEC 4.2, verb table) and `nunki mission watch`.
 //!
 //! What replaces watching a screen. SPEC 4.3 accepts the cost of an agent
 //! nobody can look at — "plus d'écran à regarder par curiosité" — on the
 //! condition that its output is readable afterwards, and this is that
 //! condition met.
 //!
-//! `hq` parses no run format of its own. The shape of a run's stream belongs
+//! `nunki` parses no run format of its own. The shape of a run's stream belongs
 //! to the harness, so the rendering is asked of the adapter
 //! ([`crate::harness::Harness::readable`]) and this module only decides which
 //! runs to read, in which order, and how much.
@@ -19,7 +19,7 @@ use crate::state::Store;
 
 #[derive(Debug, thiserror::Error)]
 pub enum LogsError {
-    #[error("no mission {0} at this HQ — `hq mission list` says which there are")]
+    #[error("no mission {0} at this HQ — `nunki mission list` says which there are")]
     NoMission(String),
     #[error("mission {0} has no run yet: nothing has been written to read")]
     NoRuns(String),
@@ -92,7 +92,7 @@ fn logs_in(runs: &Path) -> Result<Vec<PathBuf>, LogsError> {
     Ok(files)
 }
 
-/// Which mission a `hq logs` with no argument would mean: the one this HQ
+/// Which mission a `nunki logs` with no argument would mean: the one this HQ
 /// touched last. Saying it out loud is the difference between a convenience
 /// and a guess.
 pub fn most_recent(project: &Project) -> Result<Option<String>, crate::state::StateError> {

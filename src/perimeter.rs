@@ -1,6 +1,6 @@
 //! The allowlist a firewall sidecar enforces (SPEC 4.1 bis).
 //!
-//! Computed by `hq`, never by an agent and never read back from the slot:
+//! Computed by `nunki`, never by an agent and never read back from the slot:
 //! the frozen mission header, the stack fragment and the harness adapter are
 //! the only three sources. Rule 6 of 4.1 bis is the whole of it — the
 //! coder's list is what his stack needs plus what his harness needs, and
@@ -54,14 +54,14 @@ impl Perimeter {
 /// The three sources, and the forge that must appear in none of them.
 #[derive(Debug, Clone, Default)]
 pub struct Sources<'a> {
-    /// `.hq/stacks/<name>/allow.txt`: the package registries the stack needs.
+    /// `.nunki/stacks/<name>/allow.txt`: the package registries the stack needs.
     pub stack: &'a [String],
     /// `Provisioning::domains` from the harness adapter: the model API.
     pub harness: &'a [String],
     /// The services of the frozen mission header. Ignored for a mission
     /// profile, which must not carry any.
     pub services: &'a [Service],
-    /// The project's forge, from `hq.yaml`. No agent may reach it (SPEC 3.1,
+    /// The project's forge, from `nunki.yaml`. No agent may reach it (SPEC 3.1,
     /// 3.2): the clone's origin is unreachable, and an allowlist that names
     /// the forge would undo that.
     pub forge: &'a [String],
@@ -161,9 +161,9 @@ fn forge_hit(domain: &str, forge: &[String]) -> Option<String> {
     })
 }
 
-/// One attempt to get out, as SPEC 4.1 bis rule 7 requires `hq check` to make
+/// One attempt to get out, as SPEC 4.1 bis rule 7 requires `nunki check` to make
 /// from inside a container. They live here and not in a test so that
-/// `hq check` is a caller of this list rather than a copy of it.
+/// `nunki check` is a caller of this list rather than a copy of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Probe {
     /// What is being attempted, for the report.
@@ -195,7 +195,7 @@ pub fn probes(allowed: &str, forbidden: &[(String, u16)]) -> Vec<Probe> {
             // decides is whether the address may be reached, and an allowed
             // domain has no obligation to answer on port 80. Measured —
             // against `api.anthropic.com` the HTTP form failed on the
-            // protocol and `hq check` reported a violation that was not one.
+            // protocol and `nunki check` reported a violation that was not one.
             what: format!("{allowed}, an allowed host, is reachable"),
             expected: true,
             script: format!("nc -z -w5 {allowed} 443"),
@@ -240,7 +240,7 @@ pub fn probes(allowed: &str, forbidden: &[(String, u16)]) -> Vec<Probe> {
         Probe {
             what: "the agent can even read the rules".to_string(),
             expected: false,
-            script: "nft list ruleset | grep -q hqfw".to_string(),
+            script: "nft list ruleset | grep -q nunkifw".to_string(),
         },
     ];
     for (address, port) in forbidden {

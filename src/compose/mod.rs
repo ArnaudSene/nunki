@@ -1,7 +1,7 @@
 //! Compose generation (SPEC 4.2, "la forme déclarative des conteneurs").
 //!
-//! `hq` invents no format: it writes a Compose file per profile at every
-//! launch, from the frozen mission header, `hq.yaml` and the stack fragment,
+//! `nunki` invents no format: it writes a Compose file per profile at every
+//! launch, from the frozen mission header, `nunki.yaml` and the stack fragment,
 //! and an engine adapter runs it. Nothing here talks to a container engine —
 //! this module is a pure function from a plan to bytes, which is what makes
 //! the doctrine of 4.1 bis testable without Docker.
@@ -66,7 +66,7 @@ pub struct NamedVolume {
 }
 
 /// Everything the generator needs. Assembled by the engine from the frozen
-/// header, `hq.yaml` and the stack fragment — never from the slot.
+/// header, `nunki.yaml` and the stack fragment — never from the slot.
 #[derive(Debug, Clone)]
 pub struct Plan {
     /// Slot identifier; the Compose project name is derived from it.
@@ -100,7 +100,7 @@ pub struct Plan {
     /// declares none needs none: its services and the firewall both land on
     /// the generated default network, and reach each other there (measured).
     pub project_networks: Option<Value>,
-    /// The project's own `volumes:` block, merged verbatim beside hq's.
+    /// The project's own `volumes:` block, merged verbatim beside nunki's.
     ///
     /// Not optional in practice: a service that names a volume the document
     /// does not declare makes the whole project invalid — `service "db"
@@ -117,7 +117,7 @@ pub enum ComposeError {
         "slot {0:?} yields no usable Compose project name (lowercase letters, digits, - and _)"
     )]
     SlotName(String),
-    #[error("the project declares a service named {0:?}, which hq reserves")]
+    #[error("the project declares a service named {0:?}, which nunki reserves")]
     ReservedService(String),
     #[error("the project's services must be a YAML mapping, found {0}")]
     ProjectServicesShape(&'static str),
@@ -125,7 +125,7 @@ pub enum ComposeError {
     ProjectNetworksShape(&'static str),
     #[error("the project's volumes must be a YAML mapping, found {0}")]
     ProjectVolumesShape(&'static str),
-    #[error("the project declares a volume named {0:?}, which hq reserves for the slot")]
+    #[error("the project declares a volume named {0:?}, which nunki reserves for the slot")]
     ReservedVolume(String),
     #[error("{what} must be an absolute path, found {path:?}")]
     RelativePath { what: &'static str, path: PathBuf },
@@ -166,7 +166,7 @@ pub fn project_name(slot: &str) -> Result<String, ComposeError> {
     if name.is_empty() {
         return Err(ComposeError::SlotName(slot.to_string()));
     }
-    Ok(format!("hq-{name}"))
+    Ok(format!("nunki-{name}"))
 }
 
 fn build(plan: &Plan, dialect: &Dialect) -> Result<Document, ComposeError> {
@@ -234,10 +234,10 @@ fn document(plan: &Plan, services: Mapping, networks: Mapping) -> Result<Documen
         Some(Value::Mapping(declared)) => {
             for (key, value) in declared {
                 let name = key.as_str().unwrap_or_default();
-                // hq's own volumes are named `hq-<slot>-…`; a project taking
+                // nunki's own volumes are named `nunki-<slot>-…`; a project taking
                 // one of those names would have the slot's build cache or
                 // the harness's sessions handed to a service.
-                if volumes.contains_key(key) || name.starts_with(&format!("hq-{}-", plan.slot)) {
+                if volumes.contains_key(key) || name.starts_with(&format!("nunki-{}-", plan.slot)) {
                     return Err(ComposeError::ReservedVolume(name.to_string()));
                 }
                 volumes.insert(key.clone(), value.clone());
@@ -352,7 +352,7 @@ fn agent(plan: &Plan, dialect: &Dialect) -> Result<Service, ComposeError> {
         volumes,
         // The one place the agent may write that is neither the tree nor the
         // mission folder: its own runtime files, starting with the process id
-        // a run publishes so `hq` can stop it from inside (see
+        // a run publishes so `nunki` can stop it from inside (see
         // `engine::spawn`). A tmpfs, so it dies with the container; owned by
         // the agent, so nothing else in the pair can touch it.
         tmpfs: vec![format!(

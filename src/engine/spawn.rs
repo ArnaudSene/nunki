@@ -8,7 +8,7 @@
 //! from inside too.
 //!
 //! The stream is the other way round: the client's stdout is the harness's
-//! structured output, and it is captured on the host, where `hq` reads it.
+//! structured output, and it is captured on the host, where `nunki` reads it.
 //! The mission folder cannot serve for that — it is mounted read-only but
 //! for the agent's own files (SPEC 4.1) — which is why a run's log lives in
 //! the HQ's
@@ -26,13 +26,13 @@ use crate::harness::spawn::{CommandSpec, LocalSpawner, Presence, Signal, Spawned
 /// not. Words rather than exit codes: an exit code cannot distinguish "the
 /// process is not there" from "the engine could not run the check", and
 /// those two must never be confused (see [`Presence`]).
-const IS_RUNNING: &str = "hq-run-running";
-const HAS_ENDED: &str = "hq-run-ended";
+const IS_RUNNING: &str = "nunki-run-running";
+const HAS_ENDED: &str = "nunki-run-ended";
 
 /// Where the agent may write its own runtime files. A tmpfs of its own,
 /// mounted in every profile because a read-only tree and a read-only mission
 /// folder leave nowhere else (see [`crate::compose`]).
-pub const RUN_DIR: &str = "/run/hq";
+pub const RUN_DIR: &str = "/run/nunki";
 
 pub struct ContainerSpawner {
     engine: Arc<dyn Engine>,
@@ -123,7 +123,7 @@ impl Spawner for ContainerSpawner {
     fn spawn(&self, cmd: &CommandSpec, log: &Path) -> io::Result<Spawned> {
         let client = self.command(cmd, log);
         // The client runs on the host so that its stdout — the harness's
-        // structured output — lands in a file `hq` can read.
+        // structured output — lands in a file `nunki` can read.
         self.host.spawn(&client, log)?;
 
         let container = self
@@ -166,7 +166,7 @@ impl Spawner for ContainerSpawner {
     /// and a dead run reads as running. Measured — a finished run reported
     /// itself alive because the very shell asking the question had taken its
     /// number. So the identity is checked too: the harness's command line
-    /// carries the session id `hq` imposed on it, and nothing else in the
+    /// carries the session id `nunki` imposed on it, and nothing else in the
     /// container does — the wrapper `exec`s the harness, so what the kernel
     /// reports for that pid is the harness's own command line. Measured
     /// again on 2026-09-10, against a real five-minute Claude Code run: the
@@ -263,8 +263,8 @@ impl Spawner for ContainerSpawner {
             // The status always, and what the shell said only if it said
             // anything. A `kill` that fails often writes nothing at all, and
             // an error carrying only that stderr is an error whose whole
-            // message is empty: measured on 2026-09-13, `hq mission stop
-            // --now` answered `hq: io:` and nothing else, while the run went
+            // message is empty: measured on 2026-09-13, `nunki mission stop
+            // --now` answered `nunki: io:` and nothing else, while the run went
             // on. The status is then the only thing anyone knows, so it is
             // the one thing that must never be dropped — the same reading
             // `alive` already makes just above.

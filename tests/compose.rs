@@ -7,13 +7,13 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use hq::compose::{
+use nunki::compose::{
     AGENT_SERVICE, AGENT_WRITABLE, ComposeError, FIREWALL_SERVICE, NamedVolume, Plan, UserIds,
     generate, project_name,
 };
-use hq::harness::Role;
-use hq::mission::Service;
-use hq::perimeter::{Sources, compute};
+use nunki::harness::Role;
+use nunki::mission::Service;
+use nunki::perimeter::{Sources, compute};
 
 fn strings(items: &[&str]) -> Vec<String> {
     items.iter().map(|s| s.to_string()).collect()
@@ -46,19 +46,19 @@ fn plan(role: Role) -> Plan {
     let credentials = match role {
         Role::Coder => Vec::new(),
         _ => vec![(
-            PathBuf::from("/Users/h/.hq/demo/credentials/db.env"),
-            PathBuf::from("/run/hq/credentials/db.env"),
+            PathBuf::from("/Users/h/.nunki/demo/credentials/db.env"),
+            PathBuf::from("/run/nunki/credentials/db.env"),
         )],
     };
 
     let mut volumes = vec![NamedVolume {
-        name: "hq-demo-1-harness".to_string(),
+        name: "nunki-demo-1-harness".to_string(),
         at: PathBuf::from("/home/agent/.harness"),
     }];
     if role == Role::Security {
         // What a read-only tree still needs to write, from `writable.txt`.
         volumes.push(NamedVolume {
-            name: "hq-demo-1-target".to_string(),
+            name: "nunki-demo-1-target".to_string(),
             at: PathBuf::from("/work/tree/target"),
         });
     }
@@ -69,12 +69,12 @@ fn plan(role: Role) -> Plan {
     Plan {
         slot: "demo-1".to_string(),
         role,
-        image: "hq/rust:1".to_string(),
-        firewall_image: "hq/firewall:1".to_string(),
+        image: "nunki/rust:1".to_string(),
+        firewall_image: "nunki/firewall:1".to_string(),
         user: UserIds { uid: 501, gid: 20 },
         tree: PathBuf::from("/Users/h/code/demo-slot-1"),
         tree_at: PathBuf::from("/work/tree"),
-        mission_dir: PathBuf::from("/Users/h/.hq/demo/missions/m1"),
+        mission_dir: PathBuf::from("/Users/h/.nunki/demo/missions/m1"),
         mission_dir_at: PathBuf::from("/work/mission"),
         credentials,
         volumes,
@@ -254,11 +254,11 @@ fn the_mission_folder_is_read_only_but_for_the_agents_own_files() {
         .collect();
 
     assert!(
-        mounts.contains(&"/Users/h/.hq/demo/missions/m1:/work/mission:ro".to_string()),
+        mounts.contains(&"/Users/h/.nunki/demo/missions/m1:/work/mission:ro".to_string()),
         "{mounts:?}"
     );
     for file in AGENT_WRITABLE {
-        let expected = format!("/Users/h/.hq/demo/missions/m1/{file}:/work/mission/{file}:rw");
+        let expected = format!("/Users/h/.nunki/demo/missions/m1/{file}:/work/mission/{file}:rw");
         assert!(
             mounts.contains(&expected),
             "missing {expected} in {mounts:?}"
@@ -275,12 +275,12 @@ fn the_mission_folder_is_read_only_but_for_the_agents_own_files() {
 #[test]
 fn credentials_are_read_only_and_never_on_the_mission_profile() {
     let yaml = generate(&plan(Role::Integrator), &dialect()).unwrap();
-    assert!(yaml.contains("/run/hq/credentials/db.env:ro"), "{yaml}");
+    assert!(yaml.contains("/run/nunki/credentials/db.env:ro"), "{yaml}");
 
     let mut coder = plan(Role::Coder);
     coder.credentials = vec![(
-        PathBuf::from("/Users/h/.hq/demo/credentials/db.env"),
-        PathBuf::from("/run/hq/credentials/db.env"),
+        PathBuf::from("/Users/h/.nunki/demo/credentials/db.env"),
+        PathBuf::from("/run/nunki/credentials/db.env"),
     )];
     assert!(matches!(
         generate(&coder, &dialect()).unwrap_err(),
@@ -332,16 +332,16 @@ fn the_project_name_is_stable_across_profiles_and_legal_for_compose() {
             doc["name"].as_str().unwrap().to_string()
         })
         .collect();
-    assert_eq!(names, vec!["hq-demo-1"; 3]);
+    assert_eq!(names, vec!["nunki-demo-1"; 3]);
 
     // Compose refuses anything else: "must consist only of lowercase
     // alphanumeric characters, hyphens, and underscores as well as start
     // with a letter or number" — measured.
     assert_eq!(
         project_name("Feat/Mission Resume").unwrap(),
-        "hq-feat-mission-resume"
+        "nunki-feat-mission-resume"
     );
-    assert_eq!(project_name("_1").unwrap(), "hq-1");
+    assert_eq!(project_name("_1").unwrap(), "nunki-1");
     assert!(matches!(
         project_name("///"),
         Err(ComposeError::SlotName(_))
@@ -368,7 +368,7 @@ fn an_empty_allowlist_is_refused() {
     ));
 }
 
-/// Everything above proves what `hq` writes; this one proves the engine
+/// Everything above proves what `nunki` writes; this one proves the engine
 /// accepts it. Skipped, not failed, on a machine without a container engine
 /// (SPEC 4.2 bis, CI on two platforms).
 #[test]
@@ -487,7 +487,7 @@ fn the_projects_networks_travel_verbatim_and_the_firewall_is_what_joins_them() {
 #[test]
 fn a_project_declaring_no_network_gets_no_networks_block() {
     // Measured: services and firewall both land on the generated default
-    // network and reach each other there, so hq invents nothing.
+    // network and reach each other there, so nunki invents nothing.
     let yaml = generate(&plan(Role::Integrator), &dialect()).unwrap();
     assert!(!yaml.contains("\nnetworks:"), "{yaml}");
     let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
@@ -496,15 +496,15 @@ fn a_project_declaring_no_network_gets_no_networks_block() {
 
 /// The engine's dialect, which the generator needs and must not spell
 /// itself. Docker's, since Docker is the first version's only target.
-fn dialect() -> hq::engine::Dialect {
-    hq::engine::Dialect {
-        netns: hq::engine::Netns::Service,
+fn dialect() -> nunki::engine::Dialect {
+    nunki::engine::Dialect {
+        netns: nunki::engine::Netns::Service,
         host_alias: "host.docker.internal".to_string(),
         userns: None,
     }
 }
 
-/// A project's own `volumes:` block is merged beside hq's. Measured on
+/// A project's own `volumes:` block is merged beside nunki's. Measured on
 /// Compose v5.1.2 on 2026-09-10: without it, a service naming a volume the
 /// document does not declare makes the whole project invalid — `service "db"
 /// refers to undefined volume dbdata` — and that block is exactly where a
@@ -525,9 +525,9 @@ fn the_projects_volumes_are_declared_beside_hqs() {
         volumes.contains_key(serde_yaml_ng::Value::from("dbdata")),
         "{yaml}"
     );
-    // And hq's own are still there: the two sets are merged, not replaced.
+    // And nunki's own are still there: the two sets are merged, not replaced.
     assert!(
-        volumes.contains_key(serde_yaml_ng::Value::from("hq-demo-1-harness")),
+        volumes.contains_key(serde_yaml_ng::Value::from("nunki-demo-1-harness")),
         "{yaml}"
     );
 }
@@ -538,20 +538,21 @@ fn the_projects_volumes_are_declared_beside_hqs() {
 #[test]
 fn a_project_volume_may_not_take_a_slots_own_name() {
     let mut mounted = plan(Role::Integrator);
-    mounted.project_volumes = Some(serde_yaml_ng::from_str("hq-demo-1-harness: null\n").unwrap());
+    mounted.project_volumes =
+        Some(serde_yaml_ng::from_str("nunki-demo-1-harness: null\n").unwrap());
     assert!(matches!(
         generate(&mounted, &dialect()),
         Err(ComposeError::ReservedVolume(_))
     ));
 
     let mut other = plan(Role::Integrator);
-    other.project_volumes = Some(serde_yaml_ng::from_str("hq-demo-1-proof: null\n").unwrap());
+    other.project_volumes = Some(serde_yaml_ng::from_str("nunki-demo-1-proof: null\n").unwrap());
     assert!(
         matches!(
             generate(&other, &dialect()),
             Err(ComposeError::ReservedVolume(_))
         ),
-        "the `hq-<slot>-` prefix is reserved whether or not this profile mounts it"
+        "the `nunki-<slot>-` prefix is reserved whether or not this profile mounts it"
     );
 }
 

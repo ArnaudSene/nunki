@@ -8,7 +8,7 @@ not one per tool.
 ## 1. What this project is
 
 `nunki` is a **mission orchestrator for AI coding agents**. A human frames
-a mission, `hq` runs it in an isolated slot with a coder, an integrator and a
+a mission, `nunki` runs it in an isolated slot with a coder, an integrator and a
 security agent, gates the result, and hands the push back to the human.
 
 It is **not a scaffolder**. It does not create projects, choose stacks, or
@@ -29,7 +29,7 @@ source, comments, doc comments, documentation, commit messages, pull request
 titles and descriptions, issue text, review comments.
 
 The exceptions, both deliberate: `SPEC.md`, and the HQ files that live outside
-this repository under `~/.hq/nunki/` (journal, dashboard, discussions)
+this repository under `~/.nunki/nunki/` (journal, dashboard, discussions)
 — those belong to the project's owner and stay in French. Conversation with
 him is in French too; the record is not.
 
@@ -113,7 +113,7 @@ is worth**. Applied to our own work:
 
 ## 6. Rust
 
-- Edition 2024, minimum 1.85, licence Apache-2.0. One binary `hq`, one
+- Edition 2024, minimum 1.85, licence Apache-2.0. One binary `nunki`, one
   library.
 - Before every commit, all five, and they must be silent — each read from
   its own exit code, never through a pipe:
@@ -159,18 +159,18 @@ is worth**. Applied to our own work:
   third-party action ever earns its place, it is **pinned to a commit
   digest** with the version in a comment — different owner, different rule.
 
-## 8. What `hq` may never do
+## 8. What `nunki` may never do
 
 These are the product's own restrictions (SPEC 3), and they constrain what we
 are allowed to implement:
 
-- `hq` **never writes into a repository it orchestrates** beyond what
-  `hq init` explicitly deposits, never deletes a file it did not create,
+- `nunki` **never writes into a repository it orchestrates** beyond what
+  `nunki init` explicitly deposits, never deletes a file it did not create,
   never keeps a manifest of ownership.
-- `.hq/` in a target project belongs to **that project**. It is what `hq init`
-  puts there — stack fragments, Dockerfiles. It is not where `hq` keeps its
+- `.nunki/` in a target project belongs to **that project**. It is what `nunki init`
+  puts there — stack fragments, Dockerfiles. It is not where `nunki` keeps its
   own assets.
-- No agent ever pushes, merges, or reaches the forge. `hq push` does, on an
+- No agent ever pushes, merges, or reaches the forge. `nunki push` does, on an
   explicit human argument, and it is the only verb that touches the forge in
   write.
 - An agent container holds **no capability**, runs under the host's uid, and

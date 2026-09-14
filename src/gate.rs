@@ -543,7 +543,7 @@ fn integrator_perimeter(
 /// this one is from the ripgrep tree, permissively licensed and read by half
 /// the ecosystem.
 ///
-/// Public because `hq push` judges the integrator's commits by the very
+/// Public because `nunki push` judges the integrator's commits by the very
 /// allowlist gate 4 judged them by, and two compilations of one list are two
 /// lists waiting to disagree.
 pub fn compile(patterns: &[String]) -> Result<GlobSet, GateError> {
@@ -594,7 +594,7 @@ fn deliverable(subject: &Subject) -> Result<Decision, GateError> {
             Ok(f) => f,
             Err(e) => {
                 return Ok(Decision::Failed(format!(
-                    "{} is not a verdict `hq` can read: {e}",
+                    "{} is not a verdict `nunki` can read: {e}",
                     subject.verdict.display()
                 )));
             }
@@ -618,7 +618,7 @@ fn deliverable(subject: &Subject) -> Result<Decision, GateError> {
     if subject.role == Role::Integrator && !has_heading(&text, "integration") {
         return Ok(Decision::Failed(format!(
             "{} has no `Integration` heading: the integrator completes the coder's \
-             pull request with its own section, and that heading is how `hq` sees it",
+             pull request with its own section, and that heading is how `nunki` sees it",
             subject.pr.display()
         )));
     }
@@ -646,7 +646,7 @@ pub const SYSTEM_BATTERY: &str = "system.sh";
 /// Two things SPEC 4.4 is explicit about. A battery that is **absent or not
 /// executable** makes the gate fail; it does not make it skip — a proof
 /// nobody can run is not a proof that passed. And it runs on the copy of
-/// `HEAD` (`hq exec`), never in the tree the agent has been living in.
+/// `HEAD` (`nunki exec`), never in the tree the agent has been living in.
 ///
 /// The integrator's battery is not the coder's: SPEC 4.4 says its gate 6 is
 /// **its system tests, in the system profile**. It is declared separately,
@@ -767,7 +767,7 @@ fn mutation(subject: &Subject) -> Result<Outcome, GateError> {
         return Ok(Outcome::of(
             gate,
             Decision::Unplayed(
-                "no mutation campaign has run on this mission — `hq mission mutants` \
+                "no mutation campaign has run on this mission — `nunki mission mutants` \
                  starts one"
                     .into(),
             ),
@@ -778,7 +778,7 @@ fn mutation(subject: &Subject) -> Result<Outcome, GateError> {
             gate,
             Decision::Unplayed(format!(
                 "the campaign in {} ran on other content ({} against {}), so it says \
-                 nothing about the code as it stands — `hq mission mutants` runs it again",
+                 nothing about the code as it stands — `nunki mission mutants` runs it again",
                 crate::mutants::FILE,
                 &campaign.fingerprint[..7.min(campaign.fingerprint.len())],
                 &want[..7.min(want.len())]

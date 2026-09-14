@@ -1,8 +1,8 @@
 //! What a subscription has left (SPEC 4.3): the two windows, their
 //! thresholds, and the measure kept per account.
 
-use hq::consumption::{Kind, Measure, Window, Windows, over, per_mille, percent, read, record};
-use hq::mission::Bounds;
+use nunki::consumption::{Kind, Measure, Window, Windows, over, per_mille, percent, read, record};
+use nunki::mission::Bounds;
 
 fn measure(five: Option<(u32, u64)>, week: Option<(u32, u64)>, at: u64) -> Measure {
     let window = |w: Option<(u32, u64)>| {
@@ -46,7 +46,7 @@ fn a_window_at_its_threshold_stops_and_one_below_does_not() {
     );
 }
 
-/// A window whose reset has passed forbids nothing: that is how `hq` goes
+/// A window whose reset has passed forbids nothing: that is how `nunki` goes
 /// on by itself once it resets.
 #[test]
 fn a_window_that_has_reset_stops_nothing() {
@@ -117,7 +117,7 @@ fn a_newer_measure_is_kept_and_an_older_one_is_not() {
 fn nothing_measured_is_none_and_an_unreadable_file_is_an_error() {
     let dir = tempfile::tempdir().unwrap();
     assert!(read(dir.path(), "main").unwrap().is_none());
-    std::fs::create_dir_all(dir.path().join(hq::consumption::USAGE_DIR)).unwrap();
-    std::fs::write(hq::consumption::path(dir.path(), "main"), "not json").unwrap();
+    std::fs::create_dir_all(dir.path().join(nunki::consumption::USAGE_DIR)).unwrap();
+    std::fs::write(nunki::consumption::path(dir.path(), "main"), "not json").unwrap();
     assert!(read(dir.path(), "main").is_err());
 }

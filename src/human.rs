@@ -1,4 +1,4 @@
-//! Who `hq` is talking to (SPEC 4.5, the handovers).
+//! Who `nunki` is talking to (SPEC 4.5, the handovers).
 //!
 //! A mission ends by giving something back to a person: an arbitration, a
 //! verdict to accept, a push to authorise. Saying "waiting on the human" is
@@ -6,16 +6,16 @@
 //! person works on the same project, and "arbitration for Arnaud" and
 //! "arbitration for Igor" are different sentences.
 //!
-//! `hq` therefore knows a name, and it takes it from the least surprising
+//! `nunki` therefore knows a name, and it takes it from the least surprising
 //! place that has one: a file the human wrote, then git, then the account on
 //! the machine. It is never guessed silently — [`Human::source`] says where
-//! the name came from, and `hq check` says when there is none.
+//! the name came from, and `nunki check` says when there is none.
 
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-/// The file a human writes to say who they are, under `~/.hq/`.
+/// The file a human writes to say who they are, under `~/.nunki/`.
 pub const ME_FILE: &str = "me.yaml";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,7 +30,7 @@ pub struct Declared {
 /// lying by omission.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Source {
-    /// `~/.hq/me.yaml`.
+    /// `~/.nunki/me.yaml`.
     Declared(PathBuf),
     /// `git config user.name`, in the project.
     Git,
@@ -70,13 +70,13 @@ impl Human {
     }
 }
 
-/// Who is running `hq`. `at` is the repository, for git's answer.
-pub fn me(hq_home: &Path, at: Option<&Path>) -> Human {
-    if let Some(declared) = declared(hq_home) {
+/// Who is running `nunki`. `at` is the repository, for git's answer.
+pub fn me(nunki_home: &Path, at: Option<&Path>) -> Human {
+    if let Some(declared) = declared(nunki_home) {
         return Human {
             name: Some(declared.name),
             email: declared.email,
-            source: Source::Declared(hq_home.join(ME_FILE)),
+            source: Source::Declared(nunki_home.join(ME_FILE)),
         };
     }
     if let Some(at) = at {
@@ -107,8 +107,8 @@ pub fn me(hq_home: &Path, at: Option<&Path>) -> Human {
     }
 }
 
-fn declared(hq_home: &Path) -> Option<Declared> {
-    let text = std::fs::read_to_string(hq_home.join(ME_FILE)).ok()?;
+fn declared(nunki_home: &Path) -> Option<Declared> {
+    let text = std::fs::read_to_string(nunki_home.join(ME_FILE)).ok()?;
     let declared: Declared = serde_yaml_ng::from_str(&text).ok()?;
     (!declared.name.trim().is_empty()).then_some(Declared {
         name: declared.name.trim().to_string(),
