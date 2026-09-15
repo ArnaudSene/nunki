@@ -502,15 +502,73 @@ pub fn verify_as(
                                 &outcome,
                                 now,
                             )?;
-                            let event = spare_event(
-                                spared.as_ref(),
-                                concluded(
-                                    Role::Integrator,
-                                    outcome,
-                                    paths.verdict.as_path(),
-                                    &head,
-                                ),
+                            let mut event = concluded(
+                                Role::Integrator,
+                                outcome,
+                                paths.verdict.as_path(),
+                                &head,
                             );
+                            // A verdict is the integrator's word, and an
+                            // agent's report is never the truth (SPEC 2): its
+                            // gates are what the word is worth.
+                            // An `INTEGRATED` owes all of them — its system
+                            // tests green in this profile, its section of
+                            // `PR.md` — and a `BROKEN` owes the four every
+                            // run owes. Judged even on a turn `nunki` ended:
+                            // a verdict written before that still stands, and
+                            // it stands on its gates like any other.
+                            if let Event::Verdict { verdict, .. } = &event {
+                                let report = if verdict.is_green() {
+                                    gate::at_verification(&subject, &verification)?
+                                } else {
+                                    gate::after_run(&subject)?
+                                };
+                                let failed = report.failed();
+                                let unplayed = report.unplayed();
+                                steps.push(Step::Gates {
+                                    role: Role::Integrator,
+                                    report: Box::new(report),
+                                });
+                                match (failed, unplayed) {
+                                    // The wiring, the environment and the
+                                    // system tests are the integrator's to fix,
+                                    // run after run, before it concludes (SPEC
+                                    // 4.5): a red gate is one more attempt,
+                                    // never a volet on the coder.
+                                    (Some(reason), _) => {
+                                        event = Event::RunEnded {
+                                            outcome: Outcome::MissionFailure(format!(
+                                                "the gates were red: {reason}"
+                                            )),
+                                            lot_done: false,
+                                        };
+                                    }
+                                    // Nothing red, but a gate nobody could
+                                    // play: another run would meet the same
+                                    // wall. The run stays recorded, so the next
+                                    // `nunki verify` reads it back and plays
+                                    // the gate again.
+                                    (None, Some(why)) => {
+                                        steps.push(Step::GateUnplayable {
+                                            role: Role::Integrator,
+                                            why,
+                                        });
+                                        return Ok(steps);
+                                    }
+                                    (None, None) => {}
+                                }
+                            }
+                            let event = spare_event(spared.as_ref(), event);
+                            // The next attempt is told why this one failed,
+                            // in the file every run reads first — as the
+                            // coder's is.
+                            if let Some(why) = attempt_failed(&event) {
+                                crate::followup::said(
+                                    &paths.followup,
+                                    "nunki",
+                                    &format!("integration, attempt {attempt}: {why}"),
+                                )?;
+                            }
                             carry(&paths.followup, Role::Integrator, &event, &head)?;
                             if let Event::Verdict { verdict, .. } = &event {
                                 state.conclude(Role::Integrator, Some(*verdict), &head);
