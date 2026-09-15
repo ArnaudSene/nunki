@@ -38,7 +38,8 @@ use crate::harness::{Role, RunHandle, SessionId};
 use crate::project::Project;
 use crate::slot::Slot;
 
-/// The launch script a stack fragment ships, under `.nunki/stacks/<name>/`.
+/// The launch script a stack fragment ships, in the project's home under
+/// `stacks/<name>/`, and mounted read-only at [`crate::run::STACK_AT`].
 pub const SCRIPT: &str = "run.sh";
 
 /// What a declaration says when there is nothing to start.
@@ -71,7 +72,9 @@ impl Declared {
 pub enum Launch {
     /// Nothing to start.
     Nothing { declared: Declared },
-    /// This script, as a path relative to the tree's root.
+    /// This script, as the container runs it: relative to the tree's root
+    /// when the project declared it, absolute under
+    /// [`crate::run::STACK_AT`] when it is the stack's default.
     Script { path: String, declared: Declared },
 }
 
@@ -87,6 +90,12 @@ pub enum LaunchError {
         path: String,
         head: String,
     },
+    #[error(
+        "the stack ships no launch script at {} — `nunki init --stack {stack}` writes one, \
+         or say `run: none` when there is nothing to start",
+        at.display()
+    )]
+    NoStackScript { stack: String, at: PathBuf },
     #[error(
         "{where_from} names {path:?}, which is not executable — `nunki` runs it, it does \
          not guess an interpreter for it"
@@ -118,10 +127,28 @@ pub fn resolve(
     let (declared, said) = match (header.run.as_deref(), project.config.run.as_deref()) {
         (Some(run), _) => (Declared::Header, run.to_string()),
         (None, Some(run)) => (Declared::Config, run.to_string()),
-        (None, None) => (
-            Declared::Stack,
-            format!("{}/stacks/{stack}/{SCRIPT}", crate::project::FRAGMENTS_DIR),
-        ),
+        (None, None) => {
+            // The stack's default lives in the project's home and reaches the
+            // container read-only: checked on the host, run where it is
+            // mounted.
+            let on_host = project.fragment(stack).join(SCRIPT);
+            if !on_host.is_file() {
+                return Err(LaunchError::NoStackScript {
+                    stack: stack.to_string(),
+                    at: on_host,
+                });
+            }
+            if !executable(&on_host) {
+                return Err(LaunchError::NotExecutable {
+                    where_from: Declared::Stack.where_from(),
+                    path: on_host.display().to_string(),
+                });
+            }
+            return Ok(Launch::Script {
+                path: format!("{}/{SCRIPT}", crate::run::STACK_AT),
+                declared: Declared::Stack,
+            });
+        }
     };
     if said.trim() == NOTHING {
         return Ok(Launch::Nothing { declared });
@@ -184,7 +211,14 @@ pub fn start(
     let spawned = spawner
         .spawn(
             &CommandSpec {
-                program: format!("./{path}"),
+                // Absolute when it is the stack's default, mounted from the
+                // project's home; relative to the tree when the project
+                // declared its own.
+                program: if path.starts_with('/') {
+                    path.clone()
+                } else {
+                    format!("./{path}")
+                },
                 args: vec![session.0.clone()],
                 // The tree, not the clean copy of `HEAD`: what is started is
                 // what the integrator wired and committed in this slot, and

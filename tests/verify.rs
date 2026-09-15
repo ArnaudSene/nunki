@@ -78,7 +78,7 @@ impl World {
 
     fn shaped(lots: usize, integration: Integration) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let hq_root = dir.path().join("nunki");
+        let hq_root = dir.path().join("nunki").join(nunki::project::HQ_DIR);
         std::fs::create_dir_all(hq_root.join("locks")).unwrap();
         std::fs::create_dir_all(hq_root.join("missions")).unwrap();
         std::fs::create_dir_all(hq_root.join("state/missions")).unwrap();
@@ -98,6 +98,7 @@ impl World {
         let project = Project::at(
             dir.path().join("repo"),
             Config {
+                root: None,
                 harness: "claude-code".into(),
                 forge: vec!["github.com".into()],
                 stacks: vec!["rust".into()],
@@ -115,7 +116,7 @@ impl World {
                 permission_mode: "auto".to_string(),
                 forge_protection: Default::default(),
             },
-            hq_root,
+            hq_root.parent().unwrap().to_path_buf(),
         );
         let world = Self {
             _dir: dir,
@@ -387,37 +388,30 @@ fn live_a_mission_is_driven_from_its_first_lot_to_verified() {
     use std::collections::BTreeMap;
 
     let world = World::new(1);
-    // The battery and the campaign the stack declares, committed: gate 6
-    // judges what is on the commit, never what is in the tree.
-    let executable = |path: &str, body: &str| {
-        write(&world.tree, path, body);
+    // The battery and the campaign the stack declares, in the project's home
+    // where `nunki init` puts them, and mounted read-only below: they judge
+    // the mission, so they are never the mission's to commit.
+    let stack = world.project.fragment("rust");
+    std::fs::create_dir_all(&stack).unwrap();
+    let executable = |name: &str, body: &str| {
+        let path = stack.join(name);
+        std::fs::write(&path, body).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(
-                world.tree.join(path),
-                std::fs::Permissions::from_mode(0o755),
-            )
-            .unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
     };
-    // On the base, where `nunki init` puts them: `.nunki/**` is a protected path,
-    // and a mission that committed its own battery would fail gate 4 — which
-    // is exactly what it is there for.
-    git(&world.tree, &["checkout", "-q", "dev"]);
     executable(
-        ".nunki/stacks/rust/prepush.sh",
+        nunki::gate::BATTERY,
         "#!/bin/sh\nset -eu\ntest -f src/new.rs\n",
     );
     executable(
-        ".nunki/stacks/rust/mutation.sh",
+        nunki::mutants::SCRIPT,
         "#!/bin/sh\n\
          echo '{\"id\":\"src/new.rs:1\",\"file\":\"src/new.rs\",\"line\":1,\
          \"description\":\"replace two with 0\"}'\n",
     );
-    git(&world.tree, &["add", "-A"]);
-    git(&world.tree, &["commit", "-q", "-m", "the stack fragments"]);
-    git(&world.tree, &["checkout", "-q", "-B", "mission/x", "dev"]);
 
     write(&world.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n");
     write(
@@ -451,6 +445,8 @@ fn live_a_mission_is_driven_from_its_first_lot_to_verified() {
              \x20   volumes:\n\
              \x20     - {tree}:{tree_at}\n\
              \x20     - {volume}:{proof}\n\
+             \x20     - {stack}/{battery}:{stack_at}/{battery}:ro\n\
+             \x20     - {stack}/{campaign}:{stack_at}/{campaign}:ro\n\
              \x20   tmpfs:\n\
              \x20     - /run/nunki\n\
              \x20   command: [\"sh\", \"-c\", \"apk add --no-cache git > /dev/null && \
@@ -466,6 +462,10 @@ fn live_a_mission_is_driven_from_its_first_lot_to_verified() {
             tree = world.tree.display(),
             tree_at = nunki::run::TREE_AT,
             proof = nunki::exec::PROOF_AT,
+            stack = stack.display(),
+            stack_at = nunki::run::STACK_AT,
+            battery = nunki::gate::BATTERY,
+            campaign = nunki::mutants::SCRIPT,
         ),
     )
     .unwrap();

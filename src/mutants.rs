@@ -445,7 +445,7 @@ pub fn campaign(
         });
     }
 
-    let script = format!("{}/stacks/{stack}/{SCRIPT}", crate::project::FRAGMENTS_DIR);
+    let script = format!("{}/{SCRIPT}", crate::run::STACK_AT);
     crate::exec::refresh(project, slot, engine.clone())?;
     // Absent or not executable is said here, where the message can be about
     // the campaign, rather than as a launch that times out waiting for a pid.
@@ -462,8 +462,9 @@ pub fn campaign(
     )?;
     if !probe.ok() {
         return Err(MutantsError::Launch(format!(
-            "there is no executable {script} on this commit — the mutation campaign is \
-             a deterministic command the stack fragment declares (SPEC 4.4)"
+            "there is no executable {script} in the container — the mutation campaign is \
+             a deterministic command the `{stack}` stack declares, in the project's home \
+             (SPEC 4.4)"
         )));
     }
 
@@ -482,7 +483,7 @@ pub fn campaign(
     let spawned = spawner
         .spawn(
             &CommandSpec {
-                program: format!("./{script}"),
+                program: script.clone(),
                 args,
                 cwd: PathBuf::from(crate::exec::PROOF_AT),
                 env: Default::default(),

@@ -322,8 +322,10 @@ tout refuser est aussi une manière de finir un run sans rien avoir produit.
 Pour que le socle reste commun à des gens qui travaillent différemment :
 pas de commit automatique, pas de rituel de session obligatoire, pas de porte
 propre à un type de projet, et pas d'écriture hors des quatre lieux qui sont
-au système — le dépôt cible, le HQ (`~/.nunki/<projet>/`), les slots à côté
-du dépôt, et les volumes nommés du moteur de conteneurs.
+au système — le dépôt cible (où ne vont que `AGENTS.md`, son import et un
+`.gitattributes` absent), le home du projet (`~/.nunki/<projet>/` : sa
+configuration, son HQ, ses fragments de stack), les slots à côté du dépôt, et
+les volumes nommés du moteur de conteneurs.
 
 ## 4. Le mécanisme
 
@@ -345,9 +347,9 @@ YAML, du JSON, du git. Rien d'autre.
 | le contrat de run | un run par lot (4.3) : ce qu'un run doit avoir produit avant de sortir — le lot commité et prouvé ou l'échec dit, arbre commitable, bloc `ÉTAT DE REPRISE` en tête du journal (écrit aussi toutes les 45 minutes en cours de run), et pour le dernier lot le verdict. Pour le codeur, ce bloc se termine par la ligne `Lot: <lot> — done`, ou `Lot: <lot> — failed: <raison>` : la seule que `nunki` lise pour savoir le lot fini (tranché par Arnaud le 2026-09-11) | l'agent, par `MISSION.md` ; `nunki`, à la sortie et aux checkpoints |
 | les chemins protégés | une liste déclarative par projet, **deux modes** : refuser, refuser seulement si le fichier existe déjà sur la base. Le mode « demander » a disparu : rien ne peut demander en autonome | la porte de périmètre, et l'adaptateur harnais s'il double |
 | la batterie | un script par projet, cousu depuis un fragment par stack | la porte « batterie », la CI |
-| la configuration du projet | `nunki.yaml` à la racine du dépôt : harnais, stacks, branches protégées, chemins protégés, liste blanche par stack, borne de volets, seuil de mutants, délais, dossier des identifiants de test, script de lancement (`run:`), modèle du harnais (`model:` — aucun nom n'est vérifié contre une liste : `nunki` connaît des harnais, pas des modèles, et c'est le harnais qui refuse ce qu'il ne connaît pas), mode de permission (`permission_mode:`, `auto` par défaut — voir le tableau des harnais en 4.3), fichier de services du projet (`services_file:`) et qui tient les branches protégées côté forge (`forge_protection:`, `forge` par défaut ou `by_hand`). `MISSION.md` prime sur lui pour ce qu'il redéclare | `nunki` |
+| la configuration du projet | `nunki.yaml` dans le home du projet (`~/.nunki/<projet>/nunki.yaml`), **hors du dépôt**, et qui nomme le dépôt auquel il appartient (`root:`) — un autre dépôt du même nom est refusé plutôt que servi : harnais, stacks, branches protégées, chemins protégés, liste blanche par stack, borne de volets, seuil de mutants, délais, dossier des identifiants de test, script de lancement (`run:`), modèle du harnais (`model:` — aucun nom n'est vérifié contre une liste : `nunki` connaît des harnais, pas des modèles, et c'est le harnais qui refuse ce qu'il ne connaît pas), mode de permission (`permission_mode:`, `auto` par défaut — voir le tableau des harnais en 4.3), fichier de services du projet (`services_file:`) et qui tient les branches protégées côté forge (`forge_protection:`, `forge` par défaut ou `by_hand`). `MISSION.md` prime sur lui pour ce qu'il redéclare | `nunki` |
 | le conteneur | un **Dockerfile** par stack (les anciennes « features » deviennent des étapes, l'image pré-crée les points de montage avec l'uid de l'hôte) et un fichier **Compose par profil, généré par `nunki`** à chaque lancement — voir 4.2. **Tous les conteneurs d'agent sont autonomes** : derrière un pare-feu en liste blanche, sans supervision humaine dedans, arrêtables par `nunki`. Deux variantes d'un même profil autonome — **mission** (codeur : aucun service externe) et **système** (intégrateur et sécurité : pare-feu élargi aux services déclarés, identifiants de test montés, services à côté). Un profil **interactif** n'existe que pour un seul usage possible : héberger le **HQ** lui-même si l'humain choisit de le faire tourner en conteneur plutôt que sur sa machine ; un `devcontainer.json` de quelques lignes est la **vue IDE** de ce profil, et rien de plus. Aucun agent ne tourne jamais en interactif | le moteur de conteneurs, par sa commande Compose |
-| le HQ du projet | `~/.nunki/<projet>/` : journal, tableau de bord, file de remontées, discussions, **et l'état de `nunki`** (4.2) | le superviseur, `nunki` |
+| le HQ du projet | `~/.nunki/<projet>/hq/` : journal, tableau de bord, file de remontées, discussions, **et l'état de `nunki`** (4.2). Jamais monté dans un conteneur, hormis le dossier de chaque mission | le superviseur, `nunki` |
 
 **Les montages, par profil.** La revue a montré que « où vit le dossier de
 mission » décidait de tout le reste : l'agent y écrit son journal pendant que
@@ -356,7 +358,7 @@ lecture seule, et la porte « arbre propre » ne doit pas le voir.
 
 | profil | l'arbre du slot | le dossier de mission | identifiants | services |
 |---|---|---|---|---|
-| mission (codeur) | lecture-écriture | **hors de l'arbre**, au HQ : `~/.nunki/<projet>/missions/<id>/`, monté dans le conteneur — **quatre fichiers en écriture** (`JOURNAL.md`, `PR.md`, `VERDICT.json`, `MUTANTS.triage.json`), le reste en lecture seule | aucun | aucun |
+| mission (codeur) | lecture-écriture | **hors de l'arbre**, au HQ : `~/.nunki/<projet>/hq/missions/<id>/`, monté dans le conteneur — **quatre fichiers en écriture** (`JOURNAL.md`, `PR.md`, `VERDICT.json`, `MUTANTS.triage.json`), le reste en lecture seule | aucun | aucun |
 | système (intégrateur) | lecture-écriture | idem | les fichiers nommés par la mission, en lecture seule, depuis le dossier réservé | ceux de la mission, à côté |
 | système (sécurité) | **lecture seule**, plus les répertoires d'écriture déclarés par la stack en volumes | idem | idem | idem, jamais arrêtés depuis le profil précédent |
 | interactif (HQ) | lecture-écriture | tout `~/.nunki/<projet>/` | ce que l'humain décide | ce que l'humain décide |
@@ -364,7 +366,7 @@ lecture seule, et la porte « arbre propre » ne doit pas le voir.
 **Le dossier de mission vit au HQ, pas dans le slot.** Tranché par Arnaud le
 2026-09-09. `claude-setup` le rangeait dans le slot, sous `.<prenom>/missions/`,
 protégé de git par une exclusion locale ; ici il est sous
-`~/.nunki/<projet>/missions/<id>/` et monté dans le conteneur. C'est un
+`~/.nunki/<projet>/hq/missions/<id>/` et monté dans le conteneur. C'est un
 déplacement, pas un changement de nature : le dossier reste partagé entre
 l'hôte et le conteneur par un montage, et c'est ce partage qui fait que le HQ
 et l'agent communiquent par fichiers, sans canal. Ce qu'on y gagne : le
@@ -390,7 +392,7 @@ les obtenir au run 2. Donc :
    écrit quoi est le montage, pas le contenu** : `nunki` ne peut pas lire un
    fichier et savoir de quelle main vient une ligne.
 2. `nunki` **ne relit jamais l'en-tête** du dossier pendant la mission. Il le
-   **fige dans son état** (`~/.nunki/<projet>/state/`) au moment où l'humain
+   **fige dans son état** (`~/.nunki/<projet>/hq/state/`) au moment où l'humain
    valide le cadrage, et c'est cette copie figée qui génère chaque Compose et
    chaque liste blanche.
 3. Changer la forme d'une mission en cours est un geste du HQ, par un verbe
@@ -485,14 +487,15 @@ démarrage » avait rendue. **Tranché par Arnaud le 2026-09-09** :
    « non vérifié » plutôt que d'inventer un vert.
 
 **Où vit l'image du sidecar.** Précisé le 2026-09-09, après que la question
-« pourquoi `.nunki/` ? » a montré une erreur de rangement. `.nunki/` est **ce que
-`nunki init` dépose dans un dépôt qu'il orchestre** — fragments de stack,
-Dockerfiles du projet — et jamais l'endroit où `nunki` range ses propres
-affaires. Le contexte de build du pare-feu appartient à `nunki` : il est
-**embarqué dans le binaire** et écrit dans un contexte temporaire au moment de
-construire l'image. Deux raisons au-delà du rangement : `nunki` écrit le moins
-possible dans un dépôt qu'il orchestre (3.3), et le fichier qui décrit la cage
-de l'agent n'a rien à faire dans un arbre que l'agent peut écrire.
+« pourquoi `.nunki/` ? » a montré une erreur de rangement. Les fragments de
+stack sont **ce que `nunki init` écrit pour un projet** — Dockerfile, liste
+blanche, batterie — et jamais l'endroit où `nunki` range ses propres affaires.
+Le contexte de build du pare-feu appartient à `nunki` : il est **embarqué dans
+le binaire** et écrit dans un contexte temporaire au moment de construire
+l'image. Deux raisons au-delà du rangement : les fragments sont au projet, qui
+peut les modifier, et le pare-feu ne l'est pas ; et le fichier qui décrit la
+cage de l'agent n'a rien à faire là où un agent ou un projet pourrait le
+changer.
 
 Ce que le sidecar coûte : un conteneur de plus par agent, que `nunki` lève et
 arrête avec lui, invisible pour l'humain ; et une différence de moteur, parce
@@ -508,12 +511,12 @@ par un adaptateur (4.3), et le moteur de conteneurs que par un autre.
 
 | verbe | fait |
 |---|---|
-| `nunki init <dépôt>` | rend un dépôt **existant** orchestrable. Pose, en respectant 3.3 : `nunki.yaml`, `AGENTS.md` (ou l'import dans `CLAUDE.md`), la liste des chemins protégés, la batterie cousue, les Dockerfiles et fragments de stack sous `.nunki/`, un `.gitattributes` absent. Crée ce qui n'existe pas, dépose à côté ce qui existe, ne touche à rien d'autre, ne tient aucun manifeste, ne désinstalle rien. Rejouable. |
+| `nunki init <dépôt>` | rend un dépôt **existant** orchestrable. Dans le dépôt, en respectant 3.3 : `AGENTS.md` (ou l'import dans `CLAUDE.md`) et un `.gitattributes` absent — rien d'autre. Dans le home du projet (`~/.nunki/<projet>/`) : `nunki.yaml` avec la liste des chemins protégés, le HQ (`hq/`), et les fragments de stack (`stacks/<nom>/`) avec la batterie cousue et le Dockerfile. Crée ce qui n'existe pas, dépose à côté ce qui existe, ne touche à rien d'autre, ne tient aucun manifeste, ne désinstalle rien. Rejouable. |
 | `nunki slot add/reset/rebuild/rm` | un slot = un clone local sans liens durs, un jeu de volumes nommés, et **trois profils de conteneur successifs** (voir « slots et branches » ci-dessous). Les missions s'y succèdent. |
 | `nunki mission new/start/reframe/status/say/watch/pause/resume/stop/kill/end/accept/iterate/fetch/archive` | le cycle d'une mission, du cadrage au rapatriement des commits ; `say` dépose une consigne pour le **run suivant**, `watch` rend deux états (tourne, fini) plus un troisième que l'humain provoque (gelé), `stop` termine le run proprement (4.3), **`end` déclare la mission abandonnée** |
 | `nunki exec <slot> <cmd>` | joue une commande dans le conteneur du slot — c'est ainsi que le HQ **rejoue une preuve** sans avoir la stack sur l'hôte. Par défaut sur la **copie git propre de `HEAD`** que la porte 7 utilise, pas sur l'arbre que l'agent a habité : un `Makefile`, un `pytest.ini` ou un alias `cargo` posé par l'agent y tromperait la preuve. Jamais pendant un run sur l'arbre de travail |
 | `nunki verify <mission>` | les portes de vérification sur la mission du codeur, puis enchaîne la mission d'intégration, puis la mission de sécurité, chacune avec ses portes ; à la première rouge, applique les règles d'itération (4.5) ; à la fin, rend la main à l'humain pour la validation du push. **Reprenable** : son état est persisté à chaque transition, et le relancer reprend au même point |
-| `nunki push <mission>` | après validation humaine explicite (un argument, pas un dialogue), pousse la branche depuis le dépôt principal et ouvre la pull request. C'est le seul verbe qui touche la forge en écriture, et il refuse sans `INTEGRATED` et `CLEAR` sur le dernier commit et le verdict du codeur sur son ancêtre (4.4). Il parle à l'API de la forge avec un credential de l'humain, rangé au HQ (`~/.nunki/<projet>/forge-token`, un jeton GitHub qui peut ouvrir des pull requests) et jamais monté dans un conteneur — un conteneur ne voit du HQ que son propre dossier de mission, un niveau plus bas. **Le même `--yes` couvre le push et l'ouverture** : un verbe, un argument. Titre et corps viennent du `PR.md` de la mission (la première ligne qui dit quelque chose est le titre) ; une pull request déjà ouverte pour la branche — second push après un volet — est retrouvée, pas signalée en échec. Sans credential, sur une remote hors de GitHub, ou si la forge refuse, **le push reste fait** et `nunki` rend l'adresse exacte à ouvrir avec la raison : un push rapporté rouge serait relancé, et le second `git push` ne ferait rien qu'effacer la trace du premier. Client HTTP : `ureq`, choisi par Arnaud le 2026-09-10 ; ses racines de confiance sont celles de Mozilla, embarquées (`webpki-roots`, données sous CDLA-Permissive-2.0, exception écrite dans `deny.toml` pour cette seule crate) — un proxy d'entreprise qui re-signe le TLS serait la raison d'y revenir |
+| `nunki push <mission>` | après validation humaine explicite (un argument, pas un dialogue), pousse la branche depuis le dépôt principal et ouvre la pull request. C'est le seul verbe qui touche la forge en écriture, et il refuse sans `INTEGRATED` et `CLEAR` sur le dernier commit et le verdict du codeur sur son ancêtre (4.4). Il parle à l'API de la forge avec un credential de l'humain, rangé au HQ (`~/.nunki/<projet>/hq/forge-token`, un jeton GitHub qui peut ouvrir des pull requests) et jamais monté dans un conteneur — un conteneur ne voit du HQ que son propre dossier de mission, un niveau plus bas. **Le même `--yes` couvre le push et l'ouverture** : un verbe, un argument. Titre et corps viennent du `PR.md` de la mission (la première ligne qui dit quelque chose est le titre) ; une pull request déjà ouverte pour la branche — second push après un volet — est retrouvée, pas signalée en échec. Sans credential, sur une remote hors de GitHub, ou si la forge refuse, **le push reste fait** et `nunki` rend l'adresse exacte à ouvrir avec la raison : un push rapporté rouge serait relancé, et le second `git push` ne ferait rien qu'effacer la trace du premier. Client HTTP : `ureq`, choisi par Arnaud le 2026-09-10 ; ses racines de confiance sont celles de Mozilla, embarquées (`webpki-roots`, données sous CDLA-Permissive-2.0, exception écrite dans `deny.toml` pour cette seule crate) — un proxy d'entreprise qui re-signe le TLS serait la raison d'y revenir |
 | `nunki check [--mission <id>]` | dit si un dépôt, ses slots et leurs conteneurs sont dans l'état que ce fichier décrit ; rouge si une restriction n'est pas tenue ; sonde le profil mission sans argument, et le profil système d'une mission donnée avec `--mission` ; **dit ce qu'il n'a pas pu vérifier** (la forge sans credential ou quand l'humain tient la protection à la main, LF quand un `.gitattributes` existant ne le force pas) |
 | `nunki logs <mission>` | rend la sortie structurée des runs, lisible |
 
@@ -574,7 +577,7 @@ aucun risque : ces trois gestes sont à l'humain.
 2026-09-09. `nunki verify` dure des heures et doit survivre à la mort de la
 session HQ, à une machine en veille, à un terminal fermé. Son état —
 mission, étape, run en cours, volets joués, tentatives par lot, verdicts et
-leurs `HEAD` — vit dans `~/.nunki/<projet>/state/`, un fichier par mission,
+leurs `HEAD` — vit dans `~/.nunki/<projet>/hq/state/`, un fichier par mission,
 écrit à chaque transition. Ce que la seconde revue a fait préciser :
 
 - **Le verrou ne couvre que les verbes qui changent l'état** : `start`,
@@ -827,10 +830,19 @@ rouge pour une vulnérabilité critique ou haute **qui a un correctif** ; les
 autres sont listées sans bloquer, puisque personne ne peut agir sur une
 CVE sans correctif.
 
-**Les fragments de stack.** Un dossier par stack sous `.nunki/stacks/<nom>/`
-— rappel : `.nunki/` appartient au projet orchestré, jamais à `nunki` (4.1 bis) :
+**Les fragments de stack.** Un dossier par stack dans le home du projet,
+`~/.nunki/<projet>/stacks/<nom>/`, **jamais dans le dépôt** — tranché par
+Arnaud le 2026-09-15 : l'outillage de développement n'a pas à vivre dans
+l'historique d'un projet, pas plus que les réglages d'un éditeur. Les
+fragments appartiennent au projet orchestré, jamais à `nunki` (4.1 bis). Les
+scripts qu'un conteneur exécute — `prepush.sh`, `system.sh`, `mutation.sh`,
+`run.sh` — y sont **montés en lecture seule, fichier par fichier**, à
+`/work/stack/` : ce qui juge l'agent est hors de sa portée par construction, et
+plus seulement par une porte. Le Dockerfile, `allow.txt` et `writable.txt` ne
+sont lus que sur l'hôte. Le dossier porte :
 un Dockerfile (étapes d'image), `allow.txt` (domaines des dépendances),
-`prepush.sh` (section de batterie), `mutate.sh` (commande de mutation),
+`prepush.sh` (section de batterie), `system.sh` (les tests système de
+l'intégrateur), `mutation.sh` (commande de mutation),
 `run.sh` (comment on démarre une application de cette stack, par défaut),
 `writable.txt` (les répertoires qu'une exécution doit pouvoir écrire quand
 l'arbre est en lecture seule), `perimeter.yaml` (zone de tests pour une
@@ -1183,7 +1195,7 @@ pour Igor.
 2026-09-10 : il détient deux abonnements Anthropic et un compte OpenAI, et
 veut pouvoir dire quelle mission dépense lequel. Donc :
 
-- les comptes vivent dans `~/.nunki/accounts.yaml`, **à côté des QG et hors
+- les comptes vivent dans `~/.nunki/accounts.yaml`, **à côté des homes de projet et hors
   de tout dépôt** — un compte appartient à l'humain, pas à un projet, et deux
   projets partagent les mêmes abonnements. Les jetons sont dans des fichiers
   à part, un par compte, pour que l'index se lise sans lire les secrets ;
@@ -1275,8 +1287,8 @@ lot. Les portes 5 à 7 sont jouées à la vérification finale, quand le codeur 
    acceptée que de la main de l'humain ou du HQ, dans `MUTANTS.json`. Un
    `equivalent` venu du fichier de l'agent rend la porte rouge et est nommé.
 
-   La raison est celle qui a fait passer `.nunki/**` en chemin protégé le même
-   jour : laisser le noté remplir la seule case que personne ne peut
+   La raison est celle qui a mis la batterie hors de portée de l'agent :
+   laisser le noté remplir la seule case que personne ne peut
    contrôler, c'est une porte qui se vide toute seule — il suffit de cocher
    « équivalent » partout avec une phrase crédible. Compter les équivalences
    les signale à un lecteur ; les refuser côté agent les empêche. Un seuil et un triage tiraient en sens contraire, et Google, dont la

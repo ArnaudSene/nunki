@@ -34,7 +34,7 @@ enum Command {
     /// Creates what is absent, never overwrites a file a human edits — it
     /// deposits its version beside it — and keeps no manifest. Replayable.
     Init {
-        /// Stack fragments to write under `.nunki/stacks/`.
+        /// Stack fragments to write in the project's home, under `stacks/`.
         #[arg(long = "stack", value_name = "NAME")]
         stacks: Vec<String>,
     },
@@ -432,23 +432,23 @@ fn main() -> ExitCode {
 
     match cli.command {
         Command::Init { stacks } => {
-            // `init` is the one verb that runs before a project exists, so it
-            // takes the directory as given rather than walking up to find one.
-            let root = match std::fs::canonicalize(&start) {
+            // `init` is the one verb that runs before a project exists: it
+            // finds the repository as git does, and names the home after it.
+            let root = match Project::find_root(&start) {
                 Ok(r) => r,
                 Err(e) => {
-                    eprintln!("nunki: {}: {e}", start.display());
+                    eprintln!("nunki: {e}");
                     return ExitCode::FAILURE;
                 }
             };
-            let hq_root = match hq_root_for(&root) {
-                Some(h) => h,
-                None => {
-                    eprintln!("nunki: no home directory: the HQ lives under ~/.nunki");
+            let home = match Project::home_for(&root) {
+                Ok(h) => h,
+                Err(e) => {
+                    eprintln!("nunki: {e}");
                     return ExitCode::FAILURE;
                 }
             };
-            match init::init(&root, &hq_root, &stacks) {
+            match init::init(&root, &home, &stacks) {
                 Ok(actions) => {
                     for action in &actions {
                         println!("{}", action.render());
@@ -970,12 +970,6 @@ fn open(start: &std::path::Path) -> Option<Project> {
             None
         }
     }
-}
-
-fn hq_root_for(root: &std::path::Path) -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    let name = root.file_name()?.to_string_lossy().into_owned();
-    Some(PathBuf::from(home).join(".nunki").join(name))
 }
 
 /// The container probes of SPEC 4.1 bis rule 7, when a slot was named. Never

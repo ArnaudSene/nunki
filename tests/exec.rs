@@ -43,6 +43,7 @@ fn project(root: &Path) -> Project {
     Project::at(
         root.join("repo"),
         Config {
+            root: None,
             harness: "claude-code".into(),
             forge: vec!["github.com".into()],
             stacks: vec!["rust".into()],

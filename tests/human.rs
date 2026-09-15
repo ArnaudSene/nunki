@@ -5,6 +5,8 @@ use std::path::Path;
 
 use nunki::human::{Human, ME_FILE, Source, me};
 
+mod common;
+
 fn git(at: &Path, args: &[&str]) {
     assert!(
         std::process::Command::new("git")
@@ -159,9 +161,7 @@ fn whoami_says_where_the_name_came_from() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("repo");
     let home = dir.path().join("home");
-    std::fs::create_dir_all(&root).unwrap();
-    std::fs::create_dir_all(home.join(".nunki")).unwrap();
-    std::fs::write(root.join("nunki.yaml"), "harness: claude-code\n").unwrap();
+    common::project_home(&root, &home, "harness: claude-code\n");
     std::fs::write(home.join(".nunki").join(ME_FILE), "name: Arnaud\n").unwrap();
 
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_nunki"))
@@ -181,11 +181,9 @@ fn with_nothing_to_go_on_hq_says_so_instead_of_inventing_a_name() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("repo");
     let home = dir.path().join("home");
-    std::fs::create_dir_all(&root).unwrap();
-    std::fs::create_dir_all(home.join(".nunki")).unwrap();
-    std::fs::write(root.join("nunki.yaml"), "harness: claude-code\n").unwrap();
+    common::project_home(&root, &home, "harness: claude-code\n");
 
-    // No declaration, no git repository, and no account name: a mission that
+    // No declaration, no name in git's configuration, and no account name: a mission that
     // came back would have nobody to come back to, and saying "the human"
     // as if it were a name would be worse than saying nothing.
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_nunki"))

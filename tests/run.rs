@@ -12,6 +12,7 @@ fn project(dir: &Path) -> Project {
     Project::at(
         dir.join("repo"),
         Config {
+            root: None,
             harness: "claude-code".to_string(),
             forge: vec!["github.com".to_string()],
             stacks: vec!["rust".to_string()],
@@ -438,11 +439,7 @@ fn the_integrator_is_told_what_its_own_gates_require() {
     let integrator = role::prompt(Role::Integrator);
 
     assert!(integrator.contains("wiring list"), "{integrator}");
-    let battery = format!(
-        "{}/stacks/<stack>/{}",
-        nunki::project::FRAGMENTS_DIR,
-        nunki::gate::SYSTEM_BATTERY
-    );
+    let battery = format!("{}/{}", nunki::run::STACK_AT, nunki::gate::SYSTEM_BATTERY);
     assert!(
         integrator.contains(&battery),
         "gate 6 runs {battery}, so the prompt has to name it: {integrator}"
@@ -515,13 +512,13 @@ fn live_a_mission_starts_and_its_run_is_read_back() {
 
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("repo");
-    let hq_root = dir.path().join("nunki");
+    let home = dir.path().join("nunki");
     std::fs::create_dir_all(&root).unwrap();
     git(&root, &["init", "-q", "-b", "dev"]);
     git(&root, &["config", "user.email", "t@example.com"]);
     git(&root, &["config", "user.name", "Test"]);
 
-    nunki::init::init(&root, &hq_root, &["rust".to_string()]).unwrap();
+    nunki::init::init(&root, &home, &["rust".to_string()]).unwrap();
     // A stand-in for the harness: it prints a result event and exits.
     //
     // It ends on `USER agent`, as every stack image must (SPEC 4.2 bis): the
@@ -531,7 +528,7 @@ fn live_a_mission_starts_and_its_run_is_read_back() {
     // image is allowed to have — caught by the check added the same day.
     let (uid, gid) = nunki::image::host_ids();
     std::fs::write(
-        root.join(".nunki/stacks/rust/Dockerfile"),
+        home.join("stacks/rust/Dockerfile"),
         format!(
             "FROM alpine:3.22\n\
              RUN addgroup -g {gid} agent 2>/dev/null || true\n\
@@ -551,8 +548,8 @@ fn live_a_mission_starts_and_its_run_is_read_back() {
     git(&root, &["add", "."]);
     git(&root, &["commit", "-qm", "first"]);
 
-    let opened = Project::open(&root).unwrap();
-    let project = Project::at(opened.root, opened.config, hq_root.clone());
+    let project = Project::open_at(root.clone(), home.clone()).unwrap();
+    let hq_root = project.hq_root.clone();
     let engine_bin = std::env::var("HQ_ENGINE").unwrap_or_else(|_| "docker".to_string());
     nunki::image::build(&project, "rust", &engine_bin).expect("the images build");
 

@@ -6,10 +6,13 @@ use std::path::Path;
 use nunki::image;
 use nunki::project::{Config, Project, ProtectedPaths};
 
+mod common;
+
 fn project(dir: &Path) -> Project {
     Project::at(
         dir.join("repo"),
         Config {
+            root: None,
             harness: "claude-code".to_string(),
             forge: vec!["github.com".to_string()],
             stacks: vec!["rust".to_string()],
@@ -77,7 +80,7 @@ fn the_prober_carries_its_reason_with_it() {
 fn live_a_fresh_project_ends_with_a_perimeter_that_holds() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("repo");
-    let hq_root = dir.path().join("nunki");
+    let home = dir.path().join("nunki");
     std::fs::create_dir_all(&root).unwrap();
     assert!(
         std::process::Command::new("git")
@@ -88,9 +91,9 @@ fn live_a_fresh_project_ends_with_a_perimeter_that_holds() {
             .success()
     );
 
-    nunki::init::init(&root, &hq_root, &["rust".to_string()]).unwrap();
+    nunki::init::init(&root, &home, &["rust".to_string()]).unwrap();
     std::fs::write(
-        root.join(".nunki/stacks/rust/Dockerfile"),
+        home.join("stacks/rust/Dockerfile"),
         // Debian on purpose: it carries no `nslookup`, no `nc`, no `wget`.
         // If the battery ran in the agent's container instead of the
         // prober's, every positive probe would fail here — which is exactly
@@ -135,8 +138,8 @@ fn live_a_fresh_project_ends_with_a_perimeter_that_holds() {
         );
     }
 
-    let project = Project::open(&root).map(|p| Project::at(p.root, p.config, hq_root.clone()));
-    let project = project.expect("init wrote a config Project::open accepts");
+    let project = Project::open_at(root.clone(), home.clone())
+        .expect("init wrote a config Project::open accepts");
     let engine_bin = std::env::var("HQ_ENGINE").unwrap_or_else(|_| "docker".to_string());
 
     image::build(&project, "rust", &engine_bin).expect("the images build");
@@ -416,7 +419,7 @@ fn a_mission_that_never_started_is_named() {
 fn live_a_system_profile_reaches_what_the_mission_declares_and_nothing_else() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("repo");
-    let hq_root = dir.path().join("nunki");
+    let home = dir.path().join("nunki");
     std::fs::create_dir_all(&root).unwrap();
     let git = |args: &[&str]| {
         assert!(
@@ -431,10 +434,10 @@ fn live_a_system_profile_reaches_what_the_mission_declares_and_nothing_else() {
         );
     };
     git(&["init", "-q", "-b", "main"]);
-    nunki::init::init(&root, &hq_root, &["rust".to_string()]).unwrap();
+    nunki::init::init(&root, &home, &["rust".to_string()]).unwrap();
     // Ends on the agent user, as every stack image must (SPEC 4.2 bis).
     std::fs::write(
-        root.join(".nunki/stacks/rust/Dockerfile"),
+        home.join("stacks/rust/Dockerfile"),
         "FROM debian:bookworm-slim\n\
          ARG UID=1000\n\
          ARG GID=1000\n\
@@ -453,9 +456,9 @@ fn live_a_system_profile_reaches_what_the_mission_declares_and_nothing_else() {
         "services:\n  db:\n    image: nginx:alpine\n  cache:\n    image: nginx:alpine\n",
     )
     .unwrap();
-    let config = std::fs::read_to_string(root.join("nunki.yaml")).unwrap();
+    let config = std::fs::read_to_string(home.join("nunki.yaml")).unwrap();
     std::fs::write(
-        root.join("nunki.yaml"),
+        home.join("nunki.yaml"),
         format!("{config}\nservices_file: compose.yaml\n"),
     )
     .unwrap();
@@ -464,8 +467,7 @@ fn live_a_system_profile_reaches_what_the_mission_declares_and_nothing_else() {
     git(&["add", "."]);
     git(&["commit", "-qm", "first"]);
 
-    let opened = Project::open(&root).unwrap();
-    let project = Project::at(opened.root, opened.config, hq_root.clone());
+    let project = Project::open_at(root.clone(), home.clone()).unwrap();
     let engine_bin = std::env::var("HQ_ENGINE").unwrap_or_else(|_| "docker".to_string());
     image::build(&project, "rust", &engine_bin).expect("the images build");
     let slot = nunki::slot::add(&project, "sys").expect("the slot is cloned");
@@ -581,21 +583,13 @@ fn the_battery_never_takes_a_declared_service_as_its_allowed_host() {
 fn the_verb_probes_the_system_profile_of_the_mission_it_is_given() {
     let home = tempfile::tempdir().unwrap();
     let root = home.path().join("repo");
-    std::fs::create_dir_all(root.join(".git")).unwrap();
-    std::fs::write(
-        root.join("nunki.yaml"),
-        "harness: claude-code\nstacks: [rust]\n",
-    )
-    .unwrap();
+    let project_home =
+        common::project_home(&root, home.path(), "harness: claude-code\nstacks: [rust]\n");
     let (project, _, mut header) = with_services(home.path());
     header.integration = nunki::mission::Integration::None {
         reason: "pure domain".into(),
     };
-    let project = Project::at(
-        root.clone(),
-        project.config,
-        home.path().join(".nunki").join("repo"),
-    );
+    let project = Project::at(root.clone(), project.config, project_home);
     std::fs::create_dir_all(&project.hq_root).unwrap();
     started(&project, &header);
 

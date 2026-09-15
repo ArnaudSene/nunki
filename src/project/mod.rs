@@ -1,10 +1,22 @@
 //! A project `nunki` can orchestrate: where it lives, and what it declares
 //! (SPEC 4.1, `nunki.yaml`).
 //!
-//! Two roots, and they are never the same place. The **repository** is the
-//! human's, and `nunki` writes almost nothing in it (SPEC 3.3). The **HQ** is
-//! `~/.nunki/<project>/`: journal, dashboard, state, missions — everything
-//! `nunki` owns lives there, outside the tree an agent can write.
+//! Two places, and they are never the same. The **repository** is the
+//! human's, and `nunki` writes almost nothing in it: `AGENTS.md`, the import
+//! that makes a harness read it, and a `.gitattributes` when none exists
+//! (SPEC 3.3). Development tooling is not a project's to carry in its history.
+//!
+//! Everything else lives in the project's **home**, `~/.nunki/<project>/`,
+//! laid out so that the separation can be seen:
+//!
+//! - `nunki.yaml`, the project's configuration, which names the repository
+//!   it belongs to;
+//! - `hq/`, the HQ — state, locks, missions, profiles. Never mounted into a
+//!   container, but for each mission's own folder;
+//! - `stacks/<stack>/`, the stack fragments. What an image is built from and
+//!   what a firewall is fenced by is read on the host; the scripts a gate or
+//!   a launch runs are mounted read-only into the agent's container, one file
+//!   at a time.
 
 use std::path::{Path, PathBuf};
 
@@ -12,10 +24,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::mission::Bounds;
 
-/// The file at the repository root. What it declares beats a stack default;
+/// The file in the project's home. What it declares beats a stack default;
 /// a mission header beats it in turn (SPEC 4.1).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
+    /// The repository this configuration belongs to. The home is named after
+    /// the repository's directory, so two repositories with the same name
+    /// would otherwise share one configuration and one HQ without a word.
+    #[serde(default)]
+    pub root: Option<PathBuf>,
     /// Which harness runs the agents.
     pub harness: String,
     /// The project's forge. No agent may reach it: the clone's origin is
@@ -23,7 +40,7 @@ pub struct Config {
     /// (SPEC 3.1, 4.1 bis rule 6).
     #[serde(default)]
     pub forge: Vec<String>,
-    /// Stack fragments this project uses, under `.nunki/stacks/<name>/`.
+    /// Stack fragments this project uses, under the home's `stacks/<name>/`.
     #[serde(default)]
     pub stacks: Vec<String>,
     /// Branches no mission may target or push to.
@@ -62,8 +79,8 @@ pub struct Config {
     /// profile and never anywhere else (SPEC 3.1).
     #[serde(default)]
     pub credentials: Option<PathBuf>,
-    /// How the application is started, overriding the stack's `run.sh`.
-    /// `none` for a library (SPEC 4.2).
+    /// How the application is started, overriding the stack's `run.sh`: a
+    /// path inside the tree, or `none` for a library (SPEC 4.2).
     #[serde(default)]
     pub run: Option<String>,
     /// The project's own Compose file, whose `services:` and `networks:` are
@@ -118,72 +135,141 @@ pub struct ProtectedPaths {
     pub refuse_if_exists: Vec<String>,
 }
 
-/// The file `nunki init` writes and every verb reads.
+/// The file `nunki init` writes in the project's home, and every verb reads.
 pub const CONFIG_FILE: &str = "nunki.yaml";
-/// Where a project's stack fragments live, inside the project.
-pub const FRAGMENTS_DIR: &str = ".nunki";
+/// The HQ, inside the project's home.
+pub const HQ_DIR: &str = "hq";
+/// The stack fragments, inside the project's home.
+pub const STACKS_DIR: &str = "stacks";
 /// Where a stack fragment declares the directories an execution must be able
 /// to write when the tree is read-only.
 pub const WRITABLE_FILE: &str = "writable.txt";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProjectError {
-    #[error("no {CONFIG_FILE} in {0} or any directory above it — run `nunki init` first")]
-    NotAProject(PathBuf),
+    #[error("{0} is not inside a git repository, and nunki orchestrates a repository")]
+    NotARepository(PathBuf),
+    #[error("no {} for the repository at {root} — run `nunki init` there first", config.display())]
+    NotAProject { root: PathBuf, config: PathBuf },
+    #[error(
+        "{config} belongs to the repository at {claimed}, not to {here}: two repositories \
+         with the same directory name cannot share one home — rename one of them"
+    )]
+    ClaimedBy {
+        config: PathBuf,
+        claimed: PathBuf,
+        here: PathBuf,
+    },
+    #[error("{config} does not say which repository it belongs to — add `root: {here}` to it")]
+    Unclaimed { config: PathBuf, here: PathBuf },
+    #[error(
+        "{found} is in the repository, and nunki's configuration now lives outside it: move \
+         it to {home}/{CONFIG_FILE} with `root: {root}` added, and move `.nunki/stacks/` \
+         to {home}/{STACKS_DIR}/"
+    )]
+    ConfigInTheTree {
+        found: PathBuf,
+        home: PathBuf,
+        root: PathBuf,
+    },
+    #[error(
+        "{home} holds the HQ at its top level, and the HQ now lives in {home}/{HQ_DIR}/: move \
+         state/, locks/, missions/ and whatever else nunki wrote there into it"
+    )]
+    FlatHq { home: PathBuf },
     #[error("{0} could not be read: {1}")]
     Unreadable(PathBuf, String),
     #[error("{0} is not valid: {1}")]
     Invalid(PathBuf, String),
-    #[error("no home directory: the HQ lives under ~/.nunki")]
+    #[error("no home directory: every project's home lives under ~/.nunki")]
     NoHome,
 }
 
-/// An opened project: the repository, its configuration, and its HQ.
+/// An opened project: the repository, its configuration, its home and the
+/// HQ inside it.
 #[derive(Debug, Clone)]
 pub struct Project {
     pub root: PathBuf,
     pub config: Config,
+    /// `~/.nunki/<project>/`.
+    pub home: PathBuf,
+    /// `~/.nunki/<project>/hq/`.
     pub hq_root: PathBuf,
 }
 
 impl Project {
-    /// Find the project containing `start`, the way git finds a repository:
-    /// by walking up until the file is there.
+    /// Open the project whose repository contains `start`: the repository's
+    /// top level, the way git finds it, then its home under `~/.nunki`.
     pub fn open(start: &Path) -> Result<Self, ProjectError> {
-        let root =
-            Self::find_root(start).ok_or_else(|| ProjectError::NotAProject(start.to_path_buf()))?;
-        let file = root.join(CONFIG_FILE);
+        let root = Self::find_root(start)?;
+        let home = Self::home_for(&root)?;
+        Self::open_at(root, home)
+    }
+
+    /// Open the project rooted at `root` whose home is `home` — what `open`
+    /// does once both are known, and what a test does to keep `~/.nunki` out
+    /// of it.
+    pub fn open_at(root: PathBuf, home: PathBuf) -> Result<Self, ProjectError> {
+        let file = home.join(CONFIG_FILE);
+        if !file.is_file() {
+            // Said by name rather than as "not a project": a repository that
+            // still carries the old layout is one a human has to move once,
+            // and nunki moves nothing silently.
+            let in_tree = root.join(CONFIG_FILE);
+            if in_tree.is_file() {
+                return Err(ProjectError::ConfigInTheTree {
+                    found: in_tree,
+                    home,
+                    root,
+                });
+            }
+            return Err(ProjectError::NotAProject { root, config: file });
+        }
+        if home.join("state").is_dir() && !home.join(HQ_DIR).is_dir() {
+            return Err(ProjectError::FlatHq { home });
+        }
+
         let text = std::fs::read_to_string(&file)
             .map_err(|e| ProjectError::Unreadable(file.clone(), e.to_string()))?;
         let config: Config = serde_yaml_ng::from_str(&text)
             .map_err(|e| ProjectError::Invalid(file.clone(), e.to_string()))?;
-        let hq_root = Self::hq_root_for(&root)?;
-        Ok(Self {
-            root,
-            config,
-            hq_root,
-        })
+        let Some(claimed) = config.root.clone() else {
+            return Err(ProjectError::Unclaimed {
+                config: file,
+                here: root,
+            });
+        };
+        if canonical(&claimed) != canonical(&root) {
+            return Err(ProjectError::ClaimedBy {
+                config: file,
+                claimed,
+                here: root,
+            });
+        }
+        Ok(Self::at(root, config, home))
     }
 
-    /// Open a project rooted exactly here, with its HQ somewhere chosen — the
-    /// form tests use, and the one `nunki init` uses before a HQ exists.
-    pub fn at(root: PathBuf, config: Config, hq_root: PathBuf) -> Self {
+    /// A project rooted exactly here, with its home somewhere chosen — the
+    /// form tests use, and the one `nunki init` uses before a home exists.
+    pub fn at(root: PathBuf, config: Config, home: PathBuf) -> Self {
+        let hq_root = home.join(HQ_DIR);
         Self {
             root,
             config,
+            home,
             hq_root,
         }
     }
 
-    /// `~/.nunki/` — the directory every project's HQ sits under, and where
-    /// accounts live. Derived from the HQ rather than from `HOME`, so a test
+    /// `~/.nunki/` — the directory every project's home sits under, and where
+    /// accounts live. Derived from the home rather than from `HOME`, so a test
     /// or a second machine can point the whole thing elsewhere by saying so
     /// once.
     pub fn nunki_home(&self) -> PathBuf {
-        self.hq_root
+        self.home
             .parent()
             .map(Path::to_path_buf)
-            .unwrap_or_else(|| self.hq_root.clone())
+            .unwrap_or_else(|| self.home.clone())
     }
 
     pub fn name(&self) -> String {
@@ -195,7 +281,7 @@ impl Project {
 
     /// The stack fragment directory for `stack`, whether or not it exists.
     pub fn fragment(&self, stack: &str) -> PathBuf {
-        self.root.join(FRAGMENTS_DIR).join("stacks").join(stack)
+        self.home.join(STACKS_DIR).join(stack)
     }
 
     /// The domains a stack declares for its dependencies, if it declares any.
@@ -227,23 +313,23 @@ impl Project {
             .collect()
     }
 
-    fn find_root(start: &Path) -> Option<PathBuf> {
-        let mut here = if start.is_dir() {
-            start.to_path_buf()
+    /// The top level of the repository containing `start`, as git reports it.
+    pub fn find_root(start: &Path) -> Result<PathBuf, ProjectError> {
+        let dir = if start.is_dir() {
+            start
         } else {
-            start.parent()?.to_path_buf()
+            start
+                .parent()
+                .ok_or_else(|| ProjectError::NotARepository(start.to_path_buf()))?
         };
-        loop {
-            if here.join(CONFIG_FILE).is_file() {
-                return Some(here);
-            }
-            if !here.pop() {
-                return None;
-            }
-        }
+        let top = crate::git::run(dir, &["rev-parse", "--show-toplevel"])
+            .map_err(|_| ProjectError::NotARepository(start.to_path_buf()))?;
+        Ok(canonical(Path::new(&top)))
     }
 
-    fn hq_root_for(root: &Path) -> Result<PathBuf, ProjectError> {
+    /// Where the project rooted at `root` keeps everything that is not the
+    /// repository's: `~/.nunki/<name of the repository's directory>`.
+    pub fn home_for(root: &Path) -> Result<PathBuf, ProjectError> {
         let home = std::env::var_os("HOME").ok_or(ProjectError::NoHome)?;
         let name = root
             .file_name()
@@ -251,4 +337,11 @@ impl Project {
             .unwrap_or_else(|| "project".to_string());
         Ok(PathBuf::from(home).join(".nunki").join(name))
     }
+}
+
+/// A path as the filesystem resolves it, or as given when it does not exist:
+/// `/tmp` and `/private/tmp` are one directory on macOS, and a comparison of
+/// spellings would call them two.
+fn canonical(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }

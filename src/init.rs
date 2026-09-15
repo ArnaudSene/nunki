@@ -52,7 +52,13 @@ pub enum InitError {
 /// an empty directory that reads as configured.
 pub const KNOWN_STACKS: [&str; 1] = ["rust"];
 
-pub fn init(root: &Path, hq_root: &Path, stacks: &[String]) -> Result<Vec<Action>, InitError> {
+/// Make the repository at `root` orchestrable, with its home at `home`.
+///
+/// Into the repository go only the rules an agent reads — `AGENTS.md`, the
+/// import that makes Claude Code read them, and `.gitattributes` when none
+/// exists. The configuration, the HQ and the stack fragments go into the
+/// home: development tooling is not a project's to carry in its history.
+pub fn init(root: &Path, home: &Path, stacks: &[String]) -> Result<Vec<Action>, InitError> {
     if !root.is_dir() {
         return Err(InitError::NotADirectory(root.to_path_buf()));
     }
@@ -68,6 +74,7 @@ pub fn init(root: &Path, hq_root: &Path, stacks: &[String]) -> Result<Vec<Action
     let mut actions = Vec::new();
 
     // The HQ first: everything nunki owns lives there, outside the tree.
+    let hq_root = home.join(crate::project::HQ_DIR);
     for dir in ["state", "locks", "missions"] {
         let path = hq_root.join(dir);
         if !path.is_dir() {
@@ -76,13 +83,18 @@ pub fn init(root: &Path, hq_root: &Path, stacks: &[String]) -> Result<Vec<Action
         }
     }
 
-    create_if_absent(root, "nunki.yaml", &nunki_yaml(stacks), &mut actions)?;
+    create_if_absent(
+        home,
+        crate::project::CONFIG_FILE,
+        &nunki_yaml(root, stacks),
+        &mut actions,
+    )?;
     create_if_absent(root, "AGENTS.md", AGENTS_MD, &mut actions)?;
     claude_md(root, &mut actions)?;
     gitattributes(root, &mut actions)?;
 
     for stack in stacks {
-        let dir = root.join(".nunki").join("stacks").join(stack);
+        let dir = home.join(crate::project::STACKS_DIR).join(stack);
         std::fs::create_dir_all(&dir).map_err(|e| InitError::Io(dir.clone(), e))?;
         for (name, body, executable) in fragment(stack) {
             let path = dir.join(name);
@@ -185,7 +197,7 @@ fn gitattributes(root: &Path, actions: &mut Vec<Action>) -> Result<(), InitError
     Ok(())
 }
 
-fn nunki_yaml(stacks: &[String]) -> String {
+fn nunki_yaml(root: &Path, stacks: &[String]) -> String {
     let list = if stacks.is_empty() {
         "stacks: []".to_string()
     } else {
@@ -200,7 +212,13 @@ fn nunki_yaml(stacks: &[String]) -> String {
     };
     format!(
         "# What this project declares to nunki (SPEC 4.1). A mission header beats
-# this file for what it redeclares.
+# this file for what it redeclares. It lives in the project's home, outside the
+# repository, and is never mounted into a container.
+
+# The repository this file belongs to. The home is named after the
+# repository's directory, so another repository of the same name is refused
+# here rather than handed this configuration.
+root: {root}
 
 harness: claude-code
 
@@ -248,17 +266,15 @@ protected_branches:
 # forge_protection: by_hand
 
 protected_paths:
-  # Refused outright. `.nunki/**` is here from the start and should stay: it
-  # holds the battery gate 6 replays, the allowlist the firewall is built
-  # from and the Dockerfile the agent runs in — the three things that judge
-  # and fence an agent are not that agent's to rewrite. The integrator may
-  # still amend its launch script there: its own gate 4 is the wiring list
-  # its mission declares, not this one. Add your own paths below.
-  refuse:
-    - .nunki/**
+  # Refused outright. The battery, the allowlist and the Dockerfile are not
+  # here: they live in this home, out of the tree, and reach the container
+  # read-only. Add the project's own paths — CI workflows, the rules an agent
+  # reads.
+  refuse: []
   # Refused only where the file already exists on the base.
   refuse_if_exists: []
-"
+",
+        root = root.display()
     )
 }
 
@@ -357,7 +373,8 @@ RUN mkdir -p /home/agent/.cargo/registry /home/agent/.harness
 # project's own image because they are what this stack declares and not
 # something nunki brings. `prepush.sh` beside this file runs
 # `cargo deny check`; an image without it fails gate 6 for a reason no
-# agent can repair — `.nunki/**` is a protected path. Measured on
+# agent can repair — the image is built from this file, on the host, and no
+# agent can reach it. Measured on
 # 2026-09-14: a coder spent its three attempts diagnosing that exact
 # hole, correctly, and the mission was handed over having built both its
 # lots.
@@ -389,8 +406,8 @@ RUN cargo install cargo-mutants --locked \
 "#;
 
 /// The mutation campaign a Rust project runs (SPEC 4.4, gate 7): declared by
-/// the stack, launched by `nunki`, and — being under `.nunki/` — not an agent's to
-/// weaken while it is being gated by it.
+/// the stack, launched by `nunki`, and — living in the project's home, mounted
+/// read-only — not an agent's to weaken while it is being gated by it.
 const MUTATION_RUST: &str = r#"#!/bin/sh
 # The mutation campaign for a Rust project (SPEC 4.4, gate 7).
 #
@@ -541,8 +558,9 @@ const SYSTEM_RUST: &str = r##"#!/bin/sh
 # is usually one that does not compile, and `--ignored` would try it.
 #
 # Pointing the tests at the services is the integrator's wiring, committed with
-# them. Amend this script too if the project's system tests need more than
-# this — with its path in the mission's wiring list, or gate 4 refuses it.
+# them. This script is the stack's: it lives in the project's home and reaches
+# the container read-only, so a project whose system tests need more changes
+# it there, not in a commit.
 set -eu
 
 # Beside the build rather than under /tmp: `target/` is what the copy of HEAD

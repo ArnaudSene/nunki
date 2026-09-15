@@ -43,13 +43,14 @@ struct World {
 impl World {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let hq_root = dir.path().join("nunki");
+        let hq_root = dir.path().join("nunki").join(nunki::project::HQ_DIR);
         for d in ["locks", "missions", "state/missions"] {
             std::fs::create_dir_all(hq_root.join(d)).unwrap();
         }
         let project = Project::at(
             dir.path().join("repo"),
             Config {
+                root: None,
                 harness: "claude-code".into(),
                 forge: vec![],
                 stacks: vec!["rust".into()],
@@ -64,7 +65,7 @@ impl World {
                 permission_mode: "auto".to_string(),
                 forge_protection: Default::default(),
             },
-            hq_root.clone(),
+            hq_root.parent().unwrap().to_path_buf(),
         );
         nunki::mission::dir::create(&hq_root, "m1", &header(), "do it").unwrap();
         Self { _dir: dir, project }

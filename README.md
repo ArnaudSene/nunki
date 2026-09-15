@@ -62,19 +62,29 @@ nunki init --stack rust         # rust is the stack shipped today
 ```
 
 It creates what is absent and never overwrites a file you edit — it says what
-it left alone. In the repository: `nunki.yaml` (the project's configuration),
-`AGENTS.md` (the rules every agent reads), `CLAUDE.md` importing it, a
-`.gitattributes` entry, and `.nunki/stacks/<stack>/` with the Dockerfile, the
-battery, the mutation campaign and the launch script. Outside it, your HQ at
-`~/.nunki/<project>/`: journal, state, missions.
+it left alone. In the repository, only what the agents read: `AGENTS.md` (the
+rules), `CLAUDE.md` importing it, and a `.gitattributes` entry. Everything
+else is tooling, and tooling stays out of your history — it goes into the
+project's home, `~/.nunki/<project>/`:
 
-Read `nunki.yaml` before going further. Its `protected_branches`,
+```text
+~/.nunki/<project>/
+    nunki.yaml        the project's configuration, never mounted
+    hq/               state, locks, missions, profiles — never mounted
+    stacks/<stack>/   Dockerfile, allowlist, battery, mutation campaign, launch script
+```
+
+The scripts under `stacks/` reach the agent's container read-only, one file at
+a time; the Dockerfile and the allowlist are read on this machine only.
+
+Read `~/.nunki/<project>/nunki.yaml` before going further. Its `protected_branches`,
 `protected_paths` and `forge_protection` are what the perimeter gate enforces.
 Two more decide how the agents run: `model` (which model they use, absent
 means the harness's own default) and `permission_mode` (`auto` by default —
 what the harness does with a permission it would otherwise ask a human
 about, since nobody is there to ask).
-Then commit what `nunki init` wrote, build the images and clone a slot:
+Then commit the three files `nunki init` wrote in the repository, build the
+images and clone a slot:
 
 ```sh
 nunki slot rebuild --stack rust # the agent's image and the firewall sidecar
@@ -93,7 +103,7 @@ nunki mission new m1 \
   --about "What the mission is for, in your words."
 ```
 
-That writes `~/.nunki/<project>/missions/m1/MISSION.md`: a YAML header `nunki`
+That writes `~/.nunki/<project>/hq/missions/m1/MISSION.md`: a YAML header `nunki`
 reads, and prose the agent reads. Edit the prose, then start it:
 
 ```sh
@@ -128,7 +138,7 @@ nunki mission archive m1    # close it: the folder and state move under archive/
 ```
 
 `nunki push` opens the pull request when a GitHub token that may do so sits at
-`~/.nunki/<project>/forge-token`. Without one it pushes the branch and hands
+`~/.nunki/<project>/hq/forge-token`. Without one it pushes the branch and hands
 you the URL.
 
 ## Vocabulary
@@ -255,8 +265,8 @@ Per project, from the repository:
 ```sh
 nunki mission archive <id>          # or `nunki mission end <id> --because "..."`
 nunki slot rm one                   # add --force to discard work it still holds
-rm -rf .nunki nunki.yaml AGENTS.md CLAUDE.md
-rm -rf ~/.nunki/<project>       # journal, dashboard, state, missions
+rm AGENTS.md CLAUDE.md
+rm -rf ~/.nunki/<project>       # configuration, HQ, stack fragments
 ```
 
 `nunki slot rm` refuses while a slot holds commits the repository lacks:

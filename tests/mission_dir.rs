@@ -4,6 +4,8 @@
 use nunki::mission::dir::{MissionDirError, Paths, create, list, read_header};
 use nunki::mission::{Bounds, Header, Integration, Lot, Security, Service};
 
+mod common;
+
 fn header() -> Header {
     Header {
         branch: "feat/alpha".to_string(),
@@ -181,9 +183,7 @@ fn the_verbs_write_and_read_the_same_mission() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("repo");
     let home = dir.path().join("home");
-    std::fs::create_dir_all(&root).unwrap();
-    std::fs::create_dir_all(&home).unwrap();
-    std::fs::write(root.join("nunki.yaml"), "harness: claude-code\n").unwrap();
+    common::project_home(&root, &home, "harness: claude-code\n");
 
     let nunki = env!("CARGO_BIN_EXE_nunki");
     let run = |args: &[&str]| {
@@ -236,7 +236,7 @@ fn the_verbs_write_and_read_the_same_mission() {
         "{:?}",
         String::from_utf8_lossy(&bad.stderr)
     );
-    assert!(!home.join(".nunki/repo/missions/beta").exists());
+    assert!(!home.join(".nunki/repo/hq/missions/beta").exists());
 }
 
 /// `FOLLOWUP_HQ.md` is the file an agent is told to read before anything

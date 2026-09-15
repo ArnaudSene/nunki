@@ -38,6 +38,7 @@ fn project(dir: &Path) -> Project {
     Project::at(
         dir.join("repo"),
         Config {
+            root: None,
             harness: "claude-code".into(),
             forge: vec![],
             stacks: vec![],

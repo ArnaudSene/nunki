@@ -30,6 +30,33 @@ use crate::state::{MissionState, Store, lock::SlotLock};
 /// Where the mission folder and the tree are mounted, in every profile.
 pub const TREE_AT: &str = "/work/tree";
 pub const MISSION_AT: &str = "/work/mission";
+/// Where the stack's scripts are mounted, read-only, in every profile. They
+/// live in the project's home and never in the tree: they judge the agent,
+/// and the agent cannot write what is mounted read-only.
+pub const STACK_AT: &str = "/work/stack";
+
+/// The stack scripts a container runs: the coder's battery, the integrator's,
+/// the mutation campaign and the default launch. `Dockerfile`, `allow.txt`
+/// and `writable.txt` are read on the host and never mounted.
+pub const STACK_SCRIPTS: [&str; 4] = [
+    crate::gate::BATTERY,
+    crate::gate::SYSTEM_BATTERY,
+    crate::mutants::SCRIPT,
+    crate::launch::SCRIPT,
+];
+
+/// The stack scripts to mount, as (host path, path in the container): those
+/// that exist and no other. A bind mount of a missing file makes the engine
+/// create an empty directory in its place, which would turn "the stack ships
+/// no system battery" into a gate reading a directory.
+pub fn stack_scripts(project: &Project, stack: &str) -> Vec<(PathBuf, PathBuf)> {
+    let dir = project.fragment(stack);
+    STACK_SCRIPTS
+        .iter()
+        .map(|name| (dir.join(name), PathBuf::from(STACK_AT).join(name)))
+        .filter(|(host, _)| host.is_file())
+        .collect()
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum RunError {
@@ -564,6 +591,7 @@ pub fn plan(
         tree_at: PathBuf::from(TREE_AT),
         mission_dir: paths.dir.clone(),
         mission_dir_at: PathBuf::from(MISSION_AT),
+        stack_scripts: stack_scripts(project, stack),
         credentials,
         volumes: volumes(project, slot, stack, role),
         environment,
