@@ -124,14 +124,50 @@ fn the_battery_is_executable_or_nothing_can_run_it() {
     let (_d, root, nunki) = fresh();
     init(&root, &nunki, &["rust".to_string()]).unwrap();
     #[cfg(unix)]
-    {
+    for script in ["prepush.sh", nunki::gate::SYSTEM_BATTERY] {
         use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(root.join(".nunki/stacks/rust/prepush.sh"))
+        let mode = std::fs::metadata(root.join(".nunki/stacks/rust").join(script))
             .unwrap()
             .permissions()
             .mode();
-        assert_eq!(mode & 0o111, 0o111, "{mode:o}");
+        assert_eq!(mode & 0o111, 0o111, "{script}: {mode:o}");
     }
+}
+
+/// The integrator's gate 6 runs the stack's `system.sh`, and a stack that
+/// ships none holds that gate red for a reason no agent is told — found on
+/// 2026-09-15, before the first integration mission was launched.
+///
+/// What it runs matters as much as its presence. A system test needs the
+/// services, and neither the coder's battery nor CI has them: the script
+/// runs those tests and only those, and the coder's battery never does.
+#[test]
+fn the_integrators_battery_runs_the_system_tests_and_only_those() {
+    let (_d, root, nunki) = fresh();
+    init(&root, &nunki, &["rust".to_string()]).unwrap();
+    let stack = root.join(".nunki/stacks/rust");
+
+    let script = std::fs::read_to_string(stack.join(nunki::gate::SYSTEM_BATTERY)).unwrap();
+    let line = script
+        .lines()
+        .find(|l| l.trim_start().starts_with("cargo test"))
+        .expect("the system battery calls cargo test");
+    assert!(line.contains("-- --ignored"), "{line}");
+    assert!(
+        line.contains("--tests"),
+        "doc-tests stay out: `--ignored` would compile an `ignore` block: {line}"
+    );
+    // The convention it relies on is written where the integrator reads it.
+    assert!(
+        script.contains(r#"#[ignore = "system test: needs the services"]"#),
+        "{script}"
+    );
+
+    let prepush = std::fs::read_to_string(stack.join("prepush.sh")).unwrap();
+    assert!(
+        !prepush.contains("ignored"),
+        "the coder's battery would run tests that need services it cannot reach:\n{prepush}"
+    );
 }
 
 #[test]

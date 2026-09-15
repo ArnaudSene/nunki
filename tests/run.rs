@@ -428,6 +428,45 @@ fn the_role_prompts_say_what_the_role_may_not_do() {
     );
 }
 
+/// The integrator is graded by gates of its own — the wiring list, a system
+/// battery, a completed `PR.md`, a verdict pinned to `HEAD` — and each has to
+/// be said where it reads its rules. Found on 2026-09-15, before the first
+/// integration mission was launched: none of the four was, so its first run
+/// would have gone red at gates 5 and 6 on rules it had no way to learn.
+#[test]
+fn the_integrator_is_told_what_its_own_gates_require() {
+    let integrator = role::prompt(Role::Integrator);
+
+    assert!(integrator.contains("wiring list"), "{integrator}");
+    let battery = format!(
+        "{}/stacks/<stack>/{}",
+        nunki::project::FRAGMENTS_DIR,
+        nunki::gate::SYSTEM_BATTERY
+    );
+    assert!(
+        integrator.contains(&battery),
+        "gate 6 runs {battery}, so the prompt has to name it: {integrator}"
+    );
+    assert!(
+        integrator.contains("`Integration`"),
+        "gate 5 looks for that heading in PR.md: {integrator}"
+    );
+
+    // The verdict's shape, and one `nunki` actually reads. A shape given only
+    // in prose drifts from the struct that parses it, and the agent obeys the
+    // prose — the triage file taught that on 2026-09-13.
+    let line = integrator
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("{\"role\""))
+        .expect("the prompt shows the verdict's shape");
+    let file: nunki::mission::VerdictFile = serde_json::from_str(line)
+        .unwrap_or_else(|e| panic!("the shape in the prompt is not one nunki reads: {e}\n{line}"));
+    assert_eq!(file.role, Role::Integrator);
+    assert_eq!(file.verdict, nunki::mission::Verdict::Integrated);
+    assert!(integrator.contains("`BROKEN`"), "{integrator}");
+}
+
 #[test]
 fn the_prompt_travels_as_a_file_and_never_into_the_slot() {
     // It is written into the mission folder, which is mounted read-only but
