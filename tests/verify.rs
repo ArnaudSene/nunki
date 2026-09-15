@@ -642,9 +642,29 @@ fn integration() -> Integration {
 impl World {
     /// Drive the flow to the stage where the integrator is due, the way a
     /// finished coder and a green verification do.
+    ///
+    /// And leave a world where the integrator owes its gates nothing: the
+    /// coder's commit, recorded as green the way `verify` records it, one
+    /// wiring commit after it, the journal naming `HEAD`, the integrator's
+    /// section of `PR.md`, and a profile up for the system battery to run in.
+    /// A test that wants a gate red breaks exactly one of these.
     fn at_integration(&self) {
+        self.commit("src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+        let coder = self.head();
+        self.commit("compose.yaml", "services: {}\n", "wire it");
+        self.journal_names_head();
+        std::fs::write(
+            self.mission().join("PR.md"),
+            "# L1\n\nThe lot.\n\n## Integration\n\nWired to its services.\n",
+        )
+        .unwrap();
+        let profile = nunki::run::profile_path(&self.project, "one");
+        std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+        std::fs::write(&profile, "services: {}\n").unwrap();
+
         let store = Store::open(&self.project.hq_root).unwrap();
         let mut state = store.load("m1").unwrap();
+        state.conclude(Role::Coder, None, &coder);
         store
             .apply(
                 &mut state,
@@ -712,9 +732,116 @@ fn an_integration_run_that_concluded_moves_the_mission_on() {
         matches!(steps.last(), Some(Step::Verified)),
         "the shape declares no security agent, so INTEGRATED ends it: {steps:?}"
     );
+    // On its gates, not on its word: the system battery was played.
+    let report = gates_of(&steps);
+    assert_eq!(report.role, Role::Integrator);
+    assert!(
+        report
+            .outcomes
+            .iter()
+            .any(|o| o.gate == nunki::gate::Gate::Battery
+                && o.decision == nunki::gate::Decision::Passed),
+        "{report:?}"
+    );
     // The run is forgotten with the transition: left recorded, the next
     // `verify` would read the same run back a second time.
     assert!(world.state().run.is_none(), "{:?}", world.state().run);
+}
+
+/// An `INTEGRATED` is the integrator's word, and its gates are what the word
+/// is worth: an agent's report is never the truth (SPEC 2).
+///
+/// Found on 2026-09-15, before the first integration mission was launched:
+/// the flow read the verdict and moved on, so an `INTEGRATED` with no system
+/// test run and no section of `PR.md` reached `Verified`.
+#[test]
+fn an_integrated_verdict_is_worth_its_gates_and_no_more() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    // The coder's pull request, never completed.
+    std::fs::write(world.mission().join("PR.md"), "# L1\n\nThe lot.\n").unwrap();
+    world.run_recorded(Some(41), FINISHED);
+    world.verdict("Integrator", "INTEGRATED", &world.head(), "wired");
+
+    // The relaunch that follows needs images and an account this world has
+    // neither of; what is asserted is the transition, written before.
+    let _ = world.verify();
+    let state = world.state();
+    assert!(
+        matches!(state.flow.stage(), Stage::Integration { attempt: 2 }),
+        "the integrator fixes its own work, run after run (SPEC 4.5): {:?}",
+        state.flow.stage()
+    );
+    assert_eq!(state.flow.volets(), 0, "and the coder is not sent a volet");
+    assert!(
+        state.concluded(Role::Integrator).is_none(),
+        "a verdict its gates refused is not recorded"
+    );
+    let told = world.followup();
+    assert!(
+        told.contains("integration, attempt 1") && told.contains("Integration"),
+        "the next attempt is told which gate and why: {told}"
+    );
+}
+
+/// A `BROKEN` sends the coder a volet — once the integrator's own run has
+/// honoured what every run owes. A commit outside its wiring is its own to
+/// answer for, whatever it concluded.
+#[test]
+fn a_broken_verdict_still_owes_the_gates_every_run_owes() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.commit(
+        "src/new.rs",
+        "pub fn two() -> u8 { 3 }\n",
+        "repair it myself",
+    );
+    world.journal_names_head();
+    world.run_recorded(Some(41), FINISHED);
+    world.verdict(
+        "Integrator",
+        "BROKEN",
+        &world.head(),
+        "the adapter cannot be wired as it stands",
+    );
+    world.hold();
+
+    let _ = world.verify();
+    let state = world.state();
+    assert!(
+        matches!(state.flow.stage(), Stage::Integration { attempt: 2 }),
+        "{:?}",
+        state.flow.stage()
+    );
+    assert_eq!(state.flow.volets(), 0);
+}
+
+/// A gate about the machine stops the flow instead of spending an attempt:
+/// here, no profile is up for the system battery to run in, and no
+/// integrator run would change that.
+#[test]
+fn an_integrators_gate_nobody_could_play_stops_and_spends_nothing() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    std::fs::remove_file(nunki::run::profile_path(&world.project, "one")).unwrap();
+    world.run_recorded(Some(41), FINISHED);
+    world.verdict("Integrator", "INTEGRATED", &world.head(), "wired");
+
+    let steps = world.verify().unwrap();
+    assert!(
+        matches!(steps.last(), Some(Step::GateUnplayable { role, .. }) if *role == Role::Integrator),
+        "{steps:?}"
+    );
+    let state = world.state();
+    assert!(
+        matches!(state.flow.stage(), Stage::Integration { attempt: 1 }),
+        "{:?}",
+        state.flow.stage()
+    );
+    assert!(
+        state.run.is_some(),
+        "the run stays recorded, to be read back and judged again"
+    );
 }
 
 /// "Un verdict vaut pour un `HEAD`" (SPEC 4.4). A verdict concluding on
