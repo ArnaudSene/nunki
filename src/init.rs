@@ -353,6 +353,15 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
 
 RUN mkdir -p /home/agent/.cargo/registry /home/agent/.harness
 
+# The two commands the battery and the campaign call, installed in the
+# project's own image because they are what this stack declares and not
+# something nunki brings. `prepush.sh` beside this file runs
+# `cargo deny check`; an image without it fails gate 6 for a reason no
+# agent can repair — `.nunki/**` is a protected path. Measured on
+# 2026-09-14: a coder spent its three attempts diagnosing that exact
+# hole, correctly, and the mission was handed over having built both its
+# lots.
+#
 # The mutation campaign gate 7 plays (SPEC 4.4). Installed here, in the
 # project's own image, because the campaign is what this stack declares and
 # not something nunki brings: `mutation.sh` beside this file is what calls it.
@@ -369,9 +378,13 @@ RUN mkdir -p /home/agent/.cargo/registry /home/agent/.harness
 # and no other. The registry directory stays, empty, as the mount point of the
 # slot's cargo cache.
 RUN cargo install cargo-mutants --locked \
+ && cargo install cargo-deny --locked \
  && mkdir -p /home/agent/.cargo/installed/cargo-mutants \
+              /home/agent/.cargo/installed/cargo-deny \
  && cp /home/agent/.cargo/registry/src/*/cargo-mutants-*/Cargo.lock \
        /home/agent/.cargo/installed/cargo-mutants/Cargo.lock \
+ && cp /home/agent/.cargo/registry/src/*/cargo-deny-*/Cargo.lock \
+       /home/agent/.cargo/installed/cargo-deny/Cargo.lock \
  && rm -rf /home/agent/.cargo/registry/*
 "#;
 

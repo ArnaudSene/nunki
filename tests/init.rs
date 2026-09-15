@@ -490,6 +490,42 @@ fn the_rust_image_carries_what_the_mutation_campaign_calls() {
 /// without the exclusion, 18 with it — it removes `src/main.rs`'s whole body
 /// and keeps `src/lib.rs`'s `replace run -> ExitCode`, the same shape in the
 /// function `main` delegates to, which a test can and must kill.
+/// The image carries what the **battery** calls, not only what the campaign
+/// does.
+///
+/// `prepush.sh` runs `cargo deny check`. An image that does not install
+/// `cargo-deny` fails gate 6 with `no such command: deny` — and no agent can
+/// repair it, because the Dockerfile lives under `.nunki/**`, a protected
+/// path. Measured on 2026-09-14, on the first mission the renamed tool drove:
+/// the coder diagnosed the hole correctly on all three attempts, said each
+/// time that it was outside its permission, and the mission was handed over
+/// with both its lots built and committed. Three runs to be told what the
+/// generator could have said once.
+#[test]
+fn the_rust_image_carries_what_the_battery_calls() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    nunki::init::init(&root, &dir.path().join("nunki"), &["rust".to_string()]).unwrap();
+
+    let battery = std::fs::read_to_string(root.join(".nunki/stacks/rust/prepush.sh")).unwrap();
+    assert!(battery.contains("cargo deny check"), "{battery}");
+    let dockerfile = std::fs::read_to_string(root.join(".nunki/stacks/rust/Dockerfile")).unwrap();
+    assert!(
+        dockerfile.contains("cargo install cargo-deny"),
+        "the battery calls a command the image does not carry:\n{dockerfile}"
+    );
+    // As the agent, after `USER agent`: installed as root it would land where
+    // the only user that runs it cannot read (SPEC 4.2 bis).
+    let user = dockerfile
+        .rfind("USER ")
+        .expect("the image drops to a user");
+    let install = dockerfile
+        .find("cargo install cargo-deny")
+        .expect("checked above");
+    assert!(user < install, "{dockerfile}");
+}
+
 #[test]
 fn the_campaign_does_not_mutate_a_binarys_entry_point() {
     let dir = tempfile::tempdir().unwrap();
