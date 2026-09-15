@@ -649,9 +649,9 @@ fn has_heading(text: &str, word: &str) -> bool {
 }
 
 /// Where a stack fragment declares what must be silent before anything leaves
-/// a slot, and where an integration mission declares its system tests. Paths
-/// **inside the tree**, because they are committed and therefore judged as
-/// part of what is delivered.
+/// a slot, and where an integration mission declares its system tests. They
+/// live in the project's home and reach the container read-only, at
+/// [`crate::run::STACK_AT`]: what judges an agent is not the agent's to write.
 pub const BATTERY: &str = "prepush.sh";
 pub const SYSTEM_BATTERY: &str = "system.sh";
 
@@ -677,18 +677,14 @@ fn battery(subject: &Subject, verification: &Verification) -> Result<Decision, G
         Role::Integrator => SYSTEM_BATTERY,
         _ => BATTERY,
     };
-    let at = format!(
-        "{}/stacks/{}/{script}",
-        crate::project::FRAGMENTS_DIR,
-        verification.stack
-    );
+    let at = format!("{}/{script}", crate::run::STACK_AT);
     // Absent, not executable, or its own status — told apart, because
     // "the gate is red" and "there was nothing to run" send a human to
     // different places.
     let probe = format!(
         "if [ ! -f {at} ]; then exit 66; fi\n\
          if [ ! -x {at} ]; then exit 67; fi\n\
-         exec ./{at}\n"
+         exec {at}\n"
     );
     let out = crate::exec::run(
         verification.project,
@@ -706,11 +702,11 @@ fn battery(subject: &Subject, verification: &Verification) -> Result<Decision, G
     match out.status {
         0 => Ok(Decision::Passed),
         66 => Ok(Decision::Failed(format!(
-            "there is no battery at {at} on this commit — a proof nobody can run is \
-             not a proof that passed (SPEC 4.4)"
+            "there is no battery at {at}: the stack in the project's home ships no \
+             {script} — a proof nobody can run is not a proof that passed (SPEC 4.4)"
         ))),
         67 => Ok(Decision::Failed(format!(
-            "{at} is not executable on this commit, so nothing ran"
+            "{at} is not executable, so nothing ran"
         ))),
         status => Ok(Decision::Failed(format!(
             "the battery came back {status}:\n{}",

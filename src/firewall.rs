@@ -1,12 +1,12 @@
 //! The firewall sidecar's build context, carried by the binary (SPEC 4.1
 //! bis).
 //!
-//! It does **not** live in `.nunki/` of an orchestrated project, and it never
-//! will: `.nunki/` is what `nunki init` deposits in someone else's repository, and
-//! this is `nunki`'s own asset. Two reasons beyond tidiness. `nunki` writes as
-//! little as it can into a repository it orchestrates (SPEC 3.3); and the
-//! file describing the agent's cage has no business sitting in a tree the
-//! agent can write.
+//! It does **not** live in a project's stack fragments, and it never will:
+//! those are what `nunki init` writes for a project, in that project's home,
+//! and this is `nunki`'s own asset. Two reasons beyond tidiness. A project's
+//! fragments are the project's to edit, and the firewall is not; and the
+//! file describing the agent's cage has no business anywhere an agent or a
+//! project could change it.
 //!
 //! So the sources are embedded at compile time and written out to a build
 //! context when a slot needs the image. The binary is self-contained, which

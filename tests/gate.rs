@@ -573,6 +573,7 @@ impl Fixture {
         let project = nunki::project::Project::at(
             self._dir.path().join("repo"),
             nunki::project::Config {
+                root: None,
                 harness: "claude-code".into(),
                 forge: vec![],
                 stacks: vec!["rust".into()],
@@ -753,15 +754,15 @@ fn the_security_agent_owes_findings_and_not_a_green_battery() {
 }
 
 /// Gate 6 against a real container, which is the only place it means
-/// anything: the battery runs on the clean copy of `HEAD`, and what is being
-/// judged is the committed script, not the one in the tree.
+/// anything: the battery runs on the clean copy of `HEAD`, and the script
+/// that runs is the stack's, mounted read-only from the project's home.
 ///
 /// ```text
 /// cargo test --test gate -- --ignored --nocapture
 /// ```
 #[test]
 #[ignore = "lifts real containers; run by hand"]
-fn live_the_battery_is_the_committed_one_and_an_absent_one_is_red() {
+fn live_the_battery_is_the_stacks_mounted_one_and_an_absent_one_is_red() {
     let dir = tempfile::tempdir().unwrap();
     let tree = dir.path().join("tree");
     std::fs::create_dir_all(&tree).unwrap();
@@ -775,6 +776,7 @@ fn live_the_battery_is_the_committed_one_and_an_absent_one_is_red() {
     let project = nunki::project::Project::at(
         dir.path().join("repo"),
         nunki::project::Config {
+            root: None,
             harness: "claude-code".into(),
             forge: vec![],
             stacks: vec!["rust".into()],
@@ -801,37 +803,56 @@ fn live_the_battery_is_the_committed_one_and_an_absent_one_is_red() {
     let volume = nunki::exec::proof_volume(&slot.name);
     let file = nunki::run::profile_path(&project, &slot.name);
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-    std::fs::write(
-        &file,
-        format!(
-            "services:\n\
-             \x20 agent:\n\
-             \x20   image: alpine:3.20\n\
-             \x20   volumes:\n\
-             \x20     - {tree}:{tree_at}\n\
-             \x20     - {volume}:{proof}\n\
-             \x20   command: [\"sh\", \"-c\", \"apk add --no-cache git > /dev/null && \
-             sleep 600\"]\n\
-             \x20   healthcheck:\n\
-             \x20     test: [\"CMD-SHELL\", \"command -v git > /dev/null\"]\n\
-             \x20     interval: 1s\n\
-             \x20     timeout: 2s\n\
-             \x20     retries: 60\n\
-             \x20     start_period: 1s\n\
-             volumes:\n\
-             \x20 {volume}:\n",
-            tree = tree.display(),
-            tree_at = nunki::run::TREE_AT,
-            proof = nunki::exec::PROOF_AT,
-        ),
-    )
-    .unwrap();
+    let script = project.fragment("rust").join(gate::BATTERY);
+    std::fs::create_dir_all(script.parent().unwrap()).unwrap();
 
     let engine: std::sync::Arc<dyn nunki::engine::Engine> =
         std::sync::Arc::new(nunki::engine::docker::Docker::real());
     let compose_project = nunki::compose::project_name(&slot.name).unwrap();
+    // The profile as `nunki` writes it: the battery mounted when it exists and
+    // not otherwise — a bind mount of a missing file would be a directory.
+    let lift = |with_battery: bool| {
+        let mount = if with_battery {
+            format!(
+                "\x20     - {}:{}/{}:ro\n",
+                script.display(),
+                nunki::run::STACK_AT,
+                gate::BATTERY
+            )
+        } else {
+            String::new()
+        };
+        std::fs::write(
+            &file,
+            format!(
+                "services:\n\
+                 \x20 agent:\n\
+                 \x20   image: alpine:3.20\n\
+                 \x20   volumes:\n\
+                 \x20     - {tree}:{tree_at}\n\
+                 \x20     - {volume}:{proof}\n\
+                 {mount}\
+                 \x20   command: [\"sh\", \"-c\", \"apk add --no-cache git > /dev/null && \
+                 sleep 600\"]\n\
+                 \x20   healthcheck:\n\
+                 \x20     test: [\"CMD-SHELL\", \"command -v git > /dev/null\"]\n\
+                 \x20     interval: 1s\n\
+                 \x20     timeout: 2s\n\
+                 \x20     retries: 60\n\
+                 \x20     start_period: 1s\n\
+                 volumes:\n\
+                 \x20 {volume}:\n",
+                tree = tree.display(),
+                tree_at = nunki::run::TREE_AT,
+                proof = nunki::exec::PROOF_AT,
+            ),
+        )
+        .unwrap();
+        engine.up(&file, &compose_project).unwrap();
+    };
+    std::fs::write(&file, "services: {}\n").unwrap();
     let _ = engine.down(&file, &compose_project, true);
-    engine.up(&file, &compose_project).unwrap();
+    lift(false);
 
     let journal = dir.path().join("JOURNAL.md");
     let pr = dir.path().join("PR.md");
@@ -841,26 +862,16 @@ fn live_the_battery_is_the_committed_one_and_an_absent_one_is_red() {
     let branches = vec!["main".to_string(), "dev".to_string()];
     let protected = ProtectedPaths::default();
 
+    // Rewritten in place: the mount follows the file, and nothing is committed
+    // — the battery is not the commit's.
     let battery = |body: &str, executable: bool| {
-        let at = tree.join(".nunki/stacks/rust/prepush.sh");
-        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
-        std::fs::write(&at, body).unwrap();
+        std::fs::write(&script, body).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let mode = if executable { 0o755 } else { 0o644 };
-            std::fs::set_permissions(&at, std::fs::Permissions::from_mode(mode)).unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(mode)).unwrap();
         }
-        git(&tree, &["add", "-A"]);
-        git(&tree, &["commit", "-q", "-m", "the battery"]);
-        std::fs::write(
-            &journal,
-            format!(
-                "# Journal\n\n## ÉTAT DE REPRISE\n\nHEAD is `{}`.\n",
-                git(&tree, &["rev-parse", "HEAD"])
-            ),
-        )
-        .unwrap();
     };
 
     let played = |role: Role| {
@@ -892,18 +903,27 @@ fn live_the_battery_is_the_committed_one_and_an_absent_one_is_red() {
         .decision
     };
 
-    // No battery on this commit at all.
-    std::fs::write(&journal, "# Journal\n\n## ÉTAT DE REPRISE\n\n").unwrap();
+    // No battery in the stack at all.
     write(&tree, "note.md", "a lot\n");
     git(&tree, &["add", "-A"]);
     git(&tree, &["commit", "-q", "-m", "a lot"]);
+    std::fs::write(
+        &journal,
+        format!(
+            "# Journal\n\n## ÉTAT DE REPRISE\n\nHEAD is `{}`.\n",
+            git(&tree, &["rev-parse", "HEAD"])
+        ),
+    )
+    .unwrap();
     match played(Role::Coder) {
         Decision::Failed(why) => assert!(why.contains("no battery"), "{why}"),
         other => panic!("a proof nobody can run is not one that passed: {other:?}"),
     }
 
-    // Present and executable and green.
+    // Present and executable and green — and the profile lifted again, now
+    // that there is a file to mount.
     battery("#!/bin/sh\nset -eu\ntest -f src/lib.rs\n", true);
+    lift(true);
     assert_eq!(played(Role::Coder), Decision::Passed);
 
     // Present, executable and red — and the reason carries what it said.

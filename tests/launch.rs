@@ -11,6 +11,7 @@ use nunki::slot::Slot;
 
 fn config() -> Config {
     Config {
+        root: None,
         harness: "claude-code".to_string(),
         forge: vec!["github.com".to_string()],
         stacks: vec!["rust".to_string()],
@@ -100,17 +101,23 @@ fn executable(path: &Path) {
 #[cfg(not(unix))]
 fn executable(_path: &Path) {}
 
+/// The stack's own launch script, where it lives: in the project's home.
+fn stack_script(project: &Project) {
+    write_script(&project.fragment("rust"), launch::SCRIPT);
+}
+
 #[test]
 fn the_stacks_script_is_the_default() {
     let dir = tempfile::tempdir().unwrap();
     let slot = slot(dir.path());
-    write_script(&slot.tree, ".nunki/stacks/rust/run.sh");
     let project = Project::at(dir.path().join("repo"), config(), dir.path().join("nunki"));
+    stack_script(&project);
 
+    // Run where it is mounted, not where it is on the host.
     assert_eq!(
         launch::resolve(&project, &slot, "rust", &header()).unwrap(),
         Launch::Script {
-            path: ".nunki/stacks/rust/run.sh".to_string(),
+            path: format!("{}/{}", nunki::run::STACK_AT, launch::SCRIPT),
             declared: Declared::Stack,
         }
     );
@@ -122,11 +129,11 @@ fn nunki_yaml_replaces_the_stacks_script() {
     let slot = slot(dir.path());
     // Both exist, so what is chosen says which declaration won and not which
     // file happened to be there.
-    write_script(&slot.tree, ".nunki/stacks/rust/run.sh");
     write_script(&slot.tree, "bin/serve");
     let mut config = config();
     config.run = Some("bin/serve".to_string());
     let project = Project::at(dir.path().join("repo"), config, dir.path().join("nunki"));
+    stack_script(&project);
 
     assert_eq!(
         launch::resolve(&project, &slot, "rust", &header()).unwrap(),
@@ -141,12 +148,12 @@ fn nunki_yaml_replaces_the_stacks_script() {
 fn the_mission_header_beats_nunki_yaml() {
     let dir = tempfile::tempdir().unwrap();
     let slot = slot(dir.path());
-    write_script(&slot.tree, ".nunki/stacks/rust/run.sh");
     write_script(&slot.tree, "bin/serve");
     write_script(&slot.tree, "bin/serve-this-mission");
     let mut config = config();
     config.run = Some("bin/serve".to_string());
     let project = Project::at(dir.path().join("repo"), config, dir.path().join("nunki"));
+    stack_script(&project);
     let mut header = header();
     header.run = Some("bin/serve-this-mission".to_string());
 
@@ -166,11 +173,11 @@ fn the_mission_header_beats_nunki_yaml() {
 fn none_means_there_is_nothing_to_start() {
     let dir = tempfile::tempdir().unwrap();
     let slot = slot(dir.path());
-    write_script(&slot.tree, ".nunki/stacks/rust/run.sh");
 
     let mut library = config();
     library.run = Some("none".to_string());
     let project = Project::at(dir.path().join("repo"), library, dir.path().join("nunki"));
+    stack_script(&project);
     assert_eq!(
         launch::resolve(&project, &slot, "rust", &header()).unwrap(),
         Launch::Nothing {
@@ -192,17 +199,19 @@ fn none_means_there_is_nothing_to_start() {
     );
 }
 
-/// The rule this piece exists for: the integrator amends the launch script
-/// and commits it, and it is **that** version `nunki` uses afterwards. So the
-/// file is read from the slot's tree, and a copy in the repository the slot
-/// was cloned from is not an answer.
+/// A launch script the project declares is the project's: the integrator may
+/// amend it and commit it, and it is **that** version `nunki` uses afterwards.
+/// So the file is read from the slot's tree, and a copy in the repository the
+/// slot was cloned from is not an answer.
 #[test]
-fn the_script_is_read_from_the_slots_tree_and_not_from_the_repository() {
+fn a_declared_script_is_read_from_the_slots_tree_and_not_from_the_repository() {
     let dir = tempfile::tempdir().unwrap();
     let slot = slot(dir.path());
     let repo = dir.path().join("repo");
-    write_script(&repo, ".nunki/stacks/rust/run.sh");
-    let project = Project::at(repo, config(), dir.path().join("nunki"));
+    write_script(&repo, "bin/serve");
+    let mut config = config();
+    config.run = Some("bin/serve".to_string());
+    let project = Project::at(repo, config, dir.path().join("nunki"));
 
     let err = launch::resolve(&project, &slot, "rust", &header()).unwrap_err();
     assert!(
@@ -211,10 +220,40 @@ fn the_script_is_read_from_the_slots_tree_and_not_from_the_repository() {
     );
 
     // Put it in the slot — the integrator committing it — and it resolves.
-    write_script(&slot.tree, ".nunki/stacks/rust/run.sh");
+    write_script(&slot.tree, "bin/serve");
     assert!(matches!(
         launch::resolve(&project, &slot, "rust", &header()).unwrap(),
         Launch::Script { .. }
+    ));
+}
+
+/// The stack's default is not the project's: it lives in the project's home,
+/// out of the tree, and a file of the same name committed in the tree is not
+/// it — which is what keeps it out of an agent's reach.
+#[test]
+fn the_stacks_default_is_read_from_the_home_and_never_from_the_tree() {
+    let dir = tempfile::tempdir().unwrap();
+    let slot = slot(dir.path());
+    write_script(&slot.tree, ".nunki/stacks/rust/run.sh");
+    let project = Project::at(dir.path().join("repo"), config(), dir.path().join("nunki"));
+
+    let err = launch::resolve(&project, &slot, "rust", &header()).unwrap_err();
+    assert!(
+        matches!(err, LaunchError::NoStackScript { .. }),
+        "a copy in the tree is not the stack's: {err}"
+    );
+    assert!(
+        err.to_string().contains("run: none"),
+        "it says how to declare nothing: {err}"
+    );
+
+    stack_script(&project);
+    assert!(matches!(
+        launch::resolve(&project, &slot, "rust", &header()).unwrap(),
+        Launch::Script {
+            declared: Declared::Stack,
+            ..
+        }
     ));
 }
 
@@ -249,10 +288,10 @@ fn a_missing_script_names_the_declaration_and_the_commit() {
 fn a_script_that_is_not_executable_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let slot = slot(dir.path());
-    let path = slot.tree.join(".nunki/stacks/rust/run.sh");
+    let project = Project::at(dir.path().join("repo"), config(), dir.path().join("nunki"));
+    let path = project.fragment("rust").join(launch::SCRIPT);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, "#!/bin/sh\nexec sleep infinity\n").unwrap();
-    let project = Project::at(dir.path().join("repo"), config(), dir.path().join("nunki"));
 
     let err = launch::resolve(&project, &slot, "rust", &header()).unwrap_err();
     assert!(matches!(err, LaunchError::NotExecutable { .. }), "{err}");
@@ -267,7 +306,7 @@ fn the_rust_fragment_ships_a_launch_script() {
     std::fs::create_dir_all(&root).unwrap();
     nunki::init::init(&root, &dir.path().join("nunki"), &["rust".to_string()]).unwrap();
 
-    let script = root.join(".nunki/stacks/rust").join(launch::SCRIPT);
+    let script = dir.path().join("nunki/stacks/rust").join(launch::SCRIPT);
     assert!(script.is_file(), "{} is missing", script.display());
     #[cfg(unix)]
     {
@@ -287,16 +326,26 @@ fn the_rust_fragment_ships_a_launch_script() {
     assert!(!command.trim_start().starts_with("exec "), "{body}");
 }
 
-/// The path the stack's default resolves to is the one `nunki init` writes, and
-/// the two are derived from the same constant rather than spelled twice.
+/// The path the stack's default resolves to is the one the profile mounts the
+/// script at: a launch that named a path nothing is mounted on would start
+/// nothing, in a log nobody is reading.
 #[test]
-fn the_default_path_is_the_one_init_writes() {
-    assert_eq!(
-        PathBuf::from(nunki::project::FRAGMENTS_DIR)
-            .join("stacks")
-            .join("rust")
-            .join(launch::SCRIPT),
-        PathBuf::from(".nunki/stacks/rust/run.sh")
+fn the_default_path_is_where_the_profile_mounts_the_script() {
+    let dir = tempfile::tempdir().unwrap();
+    let slot = slot(dir.path());
+    let project = Project::at(dir.path().join("repo"), config(), dir.path().join("nunki"));
+    stack_script(&project);
+
+    let Launch::Script { path, .. } = launch::resolve(&project, &slot, "rust", &header()).unwrap()
+    else {
+        panic!("the stack ships a script, so there is one to start");
+    };
+    let mounted = nunki::run::stack_scripts(&project, "rust");
+    assert!(
+        mounted.iter().any(|(host, at)| {
+            host == &project.fragment("rust").join(launch::SCRIPT) && at == Path::new(&path)
+        }),
+        "{path} is not where {mounted:?} puts it"
     );
 }
 
@@ -401,6 +450,7 @@ fn live_the_services_survive_a_switch_and_the_application_starts_in_the_profile(
             tree_at: PathBuf::from("/work/tree"),
             mission_dir: mission_dir.clone(),
             mission_dir_at: PathBuf::from("/work/mission"),
+            stack_scripts: Vec::new(),
             credentials: Vec::new(),
             volumes: Vec::<NamedVolume>::new(),
             environment: Default::default(),
@@ -683,6 +733,7 @@ fn live_the_security_profile_writes_only_what_the_stack_declared() {
             tree_at: PathBuf::from("/work/tree"),
             mission_dir: mission_dir.clone(),
             mission_dir_at: PathBuf::from("/work/mission"),
+            stack_scripts: Vec::new(),
             credentials: Vec::new(),
             volumes: vec![NamedVolume {
                 name: nunki::run::writable_volume(slot_name, "target"),

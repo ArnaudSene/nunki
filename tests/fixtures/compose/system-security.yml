@@ -38,11 +38,12 @@ services:
         condition: service_healthy
     volumes:
     - /Users/h/code/demo-slot-1:/work/tree:ro
-    - /Users/h/.nunki/demo/missions/m1:/work/mission:ro
-    - /Users/h/.nunki/demo/missions/m1/JOURNAL.md:/work/mission/JOURNAL.md:rw
-    - /Users/h/.nunki/demo/missions/m1/PR.md:/work/mission/PR.md:rw
-    - /Users/h/.nunki/demo/missions/m1/VERDICT.json:/work/mission/VERDICT.json:rw
-    - /Users/h/.nunki/demo/missions/m1/MUTANTS.triage.json:/work/mission/MUTANTS.triage.json:rw
+    - /Users/h/.nunki/demo/hq/missions/m1:/work/mission:ro
+    - /Users/h/.nunki/demo/hq/missions/m1/JOURNAL.md:/work/mission/JOURNAL.md:rw
+    - /Users/h/.nunki/demo/hq/missions/m1/PR.md:/work/mission/PR.md:rw
+    - /Users/h/.nunki/demo/hq/missions/m1/VERDICT.json:/work/mission/VERDICT.json:rw
+    - /Users/h/.nunki/demo/hq/missions/m1/MUTANTS.triage.json:/work/mission/MUTANTS.triage.json:rw
+    - /Users/h/.nunki/demo/stacks/rust/prepush.sh:/work/stack/prepush.sh:ro
     - /Users/h/.nunki/demo/credentials/db.env:/run/nunki/credentials/db.env:ro
     - nunki-demo-1-harness:/home/agent/.harness
     - nunki-demo-1-target:/work/tree/target

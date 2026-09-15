@@ -173,9 +173,12 @@ fn live_a_campaign_is_launched_watched_and_read_back() {
 
     let dir = tempfile::tempdir().unwrap();
     let tree = repo(dir.path());
-    write(
-        &tree,
-        ".nunki/stacks/rust/mutation.sh",
+    // In the project's home, where the stack lives, and mounted read-only
+    // into the container below: never in the tree the campaign runs on.
+    let script = dir.path().join("nunki/stacks/rust").join(mutants::SCRIPT);
+    std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+    std::fs::write(
+        &script,
         "#!/bin/sh\n\
          # A stand-in campaign: the shape nunki reads, without the tool.\n\
          echo \"campaign $1 on $# path(s)\" >&2\n\
@@ -185,15 +188,12 @@ fn live_a_campaign_is_launched_watched_and_read_back() {
          echo 'not a survivor, just chatter'\n\
          echo '{\"id\":\"src/lib.rs:1b\",\"file\":\"src/lib.rs\",\"line\":1,\
          \"description\":\"replace one with 255\"}'\n",
-    );
+    )
+    .unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(
-            tree.join(".nunki/stacks/rust/mutation.sh"),
-            std::fs::Permissions::from_mode(0o755),
-        )
-        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
     // Changed on the branch, so it is a touched file and the campaign has
     // something to run on.
@@ -204,6 +204,7 @@ fn live_a_campaign_is_launched_watched_and_read_back() {
     let project = nunki::project::Project::at(
         dir.path().join("repo"),
         nunki::project::Config {
+            root: None,
             harness: "claude-code".into(),
             forge: vec![],
             stacks: vec!["rust".into()],
@@ -227,6 +228,7 @@ fn live_a_campaign_is_launched_watched_and_read_back() {
     let volume = nunki::exec::proof_volume(&slot.name);
     let file = nunki::run::profile_path(&project, &slot.name);
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let script_at = format!("{}/{}", nunki::run::STACK_AT, mutants::SCRIPT);
     std::fs::write(
         &file,
         format!(
@@ -236,6 +238,7 @@ fn live_a_campaign_is_launched_watched_and_read_back() {
              \x20   volumes:\n\
              \x20     - {tree}:{tree_at}\n\
              \x20     - {volume}:{proof}\n\
+             \x20     - {script}:{script_at}:ro\n\
              \x20   tmpfs:\n\
              \x20     - /run/nunki\n\
              \x20   command: [\"sh\", \"-c\", \"apk add --no-cache git > /dev/null && \
@@ -251,6 +254,7 @@ fn live_a_campaign_is_launched_watched_and_read_back() {
             tree = tree.display(),
             tree_at = nunki::run::TREE_AT,
             proof = nunki::exec::PROOF_AT,
+            script = script.display(),
         ),
     )
     .unwrap();
@@ -433,7 +437,10 @@ fn live_the_shipped_mutation_script_reads_a_real_campaign() {
 
     // The script exactly as `nunki init` deposits it, not a copy of it.
     nunki::init::init(&root, &dir.path().join("nunki"), &["rust".to_string()]).unwrap();
-    let script = root.join(".nunki/stacks/rust").join(nunki::mutants::SCRIPT);
+    let script = dir
+        .path()
+        .join("nunki/stacks/rust")
+        .join(nunki::mutants::SCRIPT);
     assert!(script.is_file());
 
     let out = std::process::Command::new(&script)

@@ -74,8 +74,12 @@ fn plan(role: Role) -> Plan {
         user: UserIds { uid: 501, gid: 20 },
         tree: PathBuf::from("/Users/h/code/demo-slot-1"),
         tree_at: PathBuf::from("/work/tree"),
-        mission_dir: PathBuf::from("/Users/h/.nunki/demo/missions/m1"),
+        mission_dir: PathBuf::from("/Users/h/.nunki/demo/hq/missions/m1"),
         mission_dir_at: PathBuf::from("/work/mission"),
+        stack_scripts: vec![(
+            PathBuf::from("/Users/h/.nunki/demo/stacks/rust/prepush.sh"),
+            PathBuf::from("/work/stack/prepush.sh"),
+        )],
         credentials,
         volumes,
         environment,
@@ -242,6 +246,36 @@ fn the_security_agent_reads_the_tree_and_the_others_write_it() {
     }
 }
 
+/// The scripts that judge the agent reach it from the project's home, one
+/// file at a time and read-only — never the stack's directory, whose
+/// Dockerfile and allowlist are read on the host only.
+#[test]
+fn the_stacks_scripts_are_mounted_read_only_one_file_at_a_time() {
+    for role in [Role::Coder, Role::Integrator, Role::Security] {
+        let yaml = generate(&plan(role), &dialect()).unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let mounts: Vec<_> = doc["services"][AGENT_SERVICE]["volumes"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            mounts.contains(
+                &"/Users/h/.nunki/demo/stacks/rust/prepush.sh:/work/stack/prepush.sh:ro"
+                    .to_string()
+            ),
+            "{role:?}: {mounts:?}"
+        );
+        assert!(
+            !mounts
+                .iter()
+                .any(|m| m.contains("/stacks/rust:") || m.contains("/stacks/rust/:")),
+            "{role:?} mounts the whole stack directory: {mounts:?}"
+        );
+    }
+}
+
 #[test]
 fn the_mission_folder_is_read_only_but_for_the_agents_own_files() {
     let yaml = generate(&plan(Role::Coder), &dialect()).unwrap();
@@ -254,11 +288,12 @@ fn the_mission_folder_is_read_only_but_for_the_agents_own_files() {
         .collect();
 
     assert!(
-        mounts.contains(&"/Users/h/.nunki/demo/missions/m1:/work/mission:ro".to_string()),
+        mounts.contains(&"/Users/h/.nunki/demo/hq/missions/m1:/work/mission:ro".to_string()),
         "{mounts:?}"
     );
     for file in AGENT_WRITABLE {
-        let expected = format!("/Users/h/.nunki/demo/missions/m1/{file}:/work/mission/{file}:rw");
+        let expected =
+            format!("/Users/h/.nunki/demo/hq/missions/m1/{file}:/work/mission/{file}:rw");
         assert!(
             mounts.contains(&expected),
             "missing {expected} in {mounts:?}"

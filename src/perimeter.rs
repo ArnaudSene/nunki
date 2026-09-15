@@ -54,7 +54,8 @@ impl Perimeter {
 /// The three sources, and the forge that must appear in none of them.
 #[derive(Debug, Clone, Default)]
 pub struct Sources<'a> {
-    /// `.nunki/stacks/<name>/allow.txt`: the package registries the stack needs.
+    /// `stacks/<name>/allow.txt` in the project's home: the package registries
+    /// the stack needs.
     pub stack: &'a [String],
     /// `Provisioning::domains` from the harness adapter: the model API.
     pub harness: &'a [String],

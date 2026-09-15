@@ -35,6 +35,7 @@ fn repository(dir: &Path) -> Project {
     Project::at(
         root,
         Config {
+            root: None,
             harness: "claude-code".to_string(),
             forge: Vec::new(),
             stacks: Vec::new(),

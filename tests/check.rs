@@ -11,6 +11,7 @@ use common::serve;
 
 fn config() -> Config {
     Config {
+        root: None,
         harness: "claude-code".to_string(),
         forge: vec!["github.com".to_string()],
         stacks: Vec::new(),
@@ -30,9 +31,9 @@ fn config() -> Config {
 /// A project on disk that holds everything, so a test can break one thing.
 fn sound(dir: &Path) -> Project {
     let root = dir.join("repo");
-    let hq_root = dir.join("nunki");
+    let home = dir.join("nunki");
     std::fs::create_dir_all(root.join(".git")).unwrap();
-    std::fs::create_dir_all(&hq_root).unwrap();
+    std::fs::create_dir_all(home.join(nunki::project::HQ_DIR)).unwrap();
     std::fs::write(root.join(".gitattributes"), "* text=auto eol=lf\n").unwrap();
     // The rules of the place, and the file the harness actually reads.
     std::fs::write(root.join("AGENTS.md"), "# rules\n").unwrap();
@@ -41,7 +42,7 @@ fn sound(dir: &Path) -> Project {
     // this machine's global git configuration, and be green here and amber
     // on a runner that has none.
     std::fs::write(dir.join("me.yaml"), "name: Arnaud\n").unwrap();
-    Project::at(root, config(), hq_root)
+    Project::at(root, config(), home)
 }
 
 fn verdict(report: &Report, what: &str) -> Verdict {
@@ -214,19 +215,22 @@ fn an_unchecked_thing_is_never_reported_as_a_pass() {
 }
 
 #[test]
-fn a_project_is_found_by_walking_up_the_way_git_does() {
+fn a_project_is_found_from_anywhere_in_its_repository_and_read_from_its_home() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("repo");
+    let home = common::project_home(
+        &root,
+        dir.path(),
+        "harness: claude-code\nforge: [github.com]\nstacks: [rust]\n",
+    );
     let deep = root.join("src").join("engine");
     std::fs::create_dir_all(&deep).unwrap();
-    std::fs::write(
-        root.join("nunki.yaml"),
-        "harness: claude-code\nforge: [github.com]\nstacks: [rust]\n",
-    )
-    .unwrap();
 
-    let project = Project::open(&deep).unwrap();
-    assert_eq!(project.root, root);
+    // The repository's top level, the way git finds it.
+    let found = Project::find_root(&deep).unwrap();
+    assert_eq!(found, std::fs::canonicalize(&root).unwrap());
+
+    let project = Project::open_at(found, home.clone()).unwrap();
     assert_eq!(project.config.harness, "claude-code");
     assert_eq!(project.config.stacks, vec!["rust".to_string()]);
     // Defaulted rather than demanded: a short file is a readable file.
@@ -237,16 +241,31 @@ fn a_project_is_found_by_walking_up_the_way_git_does() {
             .contains(&"main".to_string())
     );
     assert_eq!(project.config.bounds.max_volets, 3);
-    // The HQ is never inside the repository.
+    // Nothing of nunki's is inside the repository: the HQ and the fragments
+    // are in the home, and the accounts one level above it.
     assert!(!project.hq_root.starts_with(&project.root));
-    assert!(project.hq_root.ends_with(".nunki/repo"));
+    assert_eq!(project.hq_root, home.join("hq"));
+    assert_eq!(project.fragment("rust"), home.join("stacks/rust"));
+    assert_eq!(project.nunki_home(), dir.path().join(".nunki"));
 }
 
 #[test]
-fn a_directory_that_is_not_a_project_says_which_file_is_missing() {
+fn a_directory_outside_any_repository_is_not_a_project() {
     let dir = tempfile::tempdir().unwrap();
-    let err = Project::open(dir.path()).unwrap_err();
-    assert!(matches!(err, ProjectError::NotAProject(_)));
+    let err = Project::find_root(dir.path()).unwrap_err();
+    assert!(matches!(err, ProjectError::NotARepository(_)), "{err}");
+    assert!(err.to_string().contains("git repository"), "{err}");
+}
+
+#[test]
+fn a_repository_nunki_was_never_given_says_which_file_is_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    let home = common::project_home(&root, dir.path(), "harness: claude-code\n");
+    std::fs::remove_file(home.join("nunki.yaml")).unwrap();
+
+    let err = Project::open_at(root, home).unwrap_err();
+    assert!(matches!(err, ProjectError::NotAProject { .. }), "{err}");
     assert!(err.to_string().contains("nunki.yaml"), "{err}");
     assert!(err.to_string().contains("nunki init"), "{err}");
 }
@@ -254,10 +273,61 @@ fn a_directory_that_is_not_a_project_says_which_file_is_missing() {
 #[test]
 fn a_malformed_config_names_the_file_and_the_reason() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("nunki.yaml"), "harness: [not, a, string]\n").unwrap();
-    let err = Project::open(dir.path()).unwrap_err();
+    let root = dir.path().join("repo");
+    let home = common::project_home(&root, dir.path(), "harness: [not, a, string]\n");
+    let err = Project::open_at(root, home).unwrap_err();
     assert!(matches!(err, ProjectError::Invalid(..)), "{err}");
     assert!(err.to_string().contains("nunki.yaml"), "{err}");
+}
+
+/// The home is named after the repository's directory, so two repositories
+/// with the same name reach the same home. The second is refused rather than
+/// handed the first one's configuration, HQ and missions.
+#[test]
+fn a_home_belongs_to_one_repository_and_refuses_another_of_the_same_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = dir.path().join("a").join("repo");
+    let home = common::project_home(&first, dir.path(), "harness: claude-code\n");
+    let second = dir.path().join("b").join("repo");
+    std::fs::create_dir_all(&second).unwrap();
+
+    assert!(Project::open_at(first, home.clone()).is_ok());
+    let err = Project::open_at(second, home).unwrap_err();
+    assert!(matches!(err, ProjectError::ClaimedBy { .. }), "{err}");
+    assert!(err.to_string().contains("rename"), "{err}");
+
+    // And a file that names no repository at all is not taken as anyone's.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    let home = common::project_home(&root, dir.path(), "harness: claude-code\n");
+    std::fs::write(home.join("nunki.yaml"), "harness: claude-code\n").unwrap();
+    let err = Project::open_at(root, home).unwrap_err();
+    assert!(matches!(err, ProjectError::Unclaimed { .. }), "{err}");
+    assert!(err.to_string().contains("root:"), "{err}");
+}
+
+/// A project set up before the configuration left the repository is said to
+/// be one, with the moves to make, and nothing is moved for the human.
+#[test]
+fn the_old_layout_is_named_with_the_moves_to_make() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    let home = common::project_home(&root, dir.path(), "harness: claude-code\n");
+
+    // The configuration still in the tree.
+    std::fs::rename(home.join("nunki.yaml"), root.join("nunki.yaml")).unwrap();
+    let err = Project::open_at(root.clone(), home.clone()).unwrap_err();
+    assert!(matches!(err, ProjectError::ConfigInTheTree { .. }), "{err}");
+    assert!(err.to_string().contains(".nunki/stacks/"), "{err}");
+    assert!(root.join("nunki.yaml").is_file(), "nothing was moved");
+
+    // The HQ at the top of the home.
+    std::fs::rename(root.join("nunki.yaml"), home.join("nunki.yaml")).unwrap();
+    std::fs::remove_dir_all(home.join("hq")).unwrap();
+    std::fs::create_dir_all(home.join("state")).unwrap();
+    let err = Project::open_at(root, home.clone()).unwrap_err();
+    assert!(matches!(err, ProjectError::FlatHq { .. }), "{err}");
+    assert!(home.join("state").is_dir(), "nothing was moved");
 }
 
 #[test]
@@ -287,11 +357,11 @@ fn a_report_holding_a_violation_is_red_and_says_how_many() {
 fn the_verb_exits_non_zero_when_a_restriction_is_not_held() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("repo");
-    std::fs::create_dir_all(&root).unwrap();
-    // A project with no `.git`: a slot is a clone, so this cannot stand.
-    std::fs::write(root.join("nunki.yaml"), "harness: claude-code\n").unwrap();
+    // A project whose rules no harness would read: no AGENTS.md, no import.
+    common::project_home(&root, dir.path(), "harness: claude-code\n");
 
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_nunki"))
+        .env("HOME", dir.path())
         .args(["-C"])
         .arg(&root)
         .arg("check")
@@ -307,9 +377,11 @@ fn the_verb_exits_non_zero_when_a_restriction_is_not_held() {
 
     // And a directory that is no project at all says so on stderr, without
     // pretending to have checked anything.
+    let elsewhere = tempfile::tempdir().unwrap();
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_nunki"))
+        .env("HOME", dir.path())
         .args(["-C"])
-        .arg(dir.path())
+        .arg(elsewhere.path())
         .arg("check")
         .output()
         .unwrap();
@@ -319,7 +391,7 @@ fn the_verb_exits_non_zero_when_a_restriction_is_not_held() {
         "nothing was checked, so nothing is reported"
     );
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("nunki init"),
+        String::from_utf8_lossy(&out.stderr).contains("git repository"),
         "{:?}",
         String::from_utf8_lossy(&out.stderr)
     );
@@ -334,9 +406,31 @@ fn the_verb_exits_non_zero_when_a_restriction_is_not_held() {
 /// than about the repository.
 #[test]
 fn the_verb_is_green_on_this_very_repository() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = std::fs::canonicalize(env!("CARGO_MANIFEST_DIR")).unwrap();
     let home = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(home.path().join(".nunki").join("nunki")).unwrap();
+    // This repository's configuration is not in it, like any project's: the
+    // test gives it one, in its own home.
+    let project_home = home.path().join(".nunki").join(root.file_name().unwrap());
+    std::fs::create_dir_all(project_home.join("hq")).unwrap();
+    std::fs::create_dir_all(project_home.join("stacks/rust")).unwrap();
+    std::fs::write(
+        project_home.join("nunki.yaml"),
+        format!(
+            "root: {}\n\
+             harness: claude-code\n\
+             forge: [github.com]\n\
+             stacks: [rust]\n\
+             protected_branches: [main, dev]\n\
+             forge_protection: forge\n",
+            root.display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        project_home.join("stacks/rust/allow.txt"),
+        "static.crates.io\nindex.crates.io\ncrates.io\n",
+    )
+    .unwrap();
 
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_nunki"))
         .env("HOME", home.path())
@@ -359,15 +453,16 @@ fn the_verb_is_green_on_this_very_repository() {
 }
 
 #[test]
-fn the_hq_is_the_projects_own_directory_under_the_home() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().join("some-project");
-    std::fs::create_dir_all(&root).unwrap();
-    std::fs::write(root.join("nunki.yaml"), "harness: claude-code\n").unwrap();
+fn the_home_is_the_projects_own_directory_under_nunkis() {
+    let root = PathBuf::from("/somewhere/some-project");
+    let user = PathBuf::from(std::env::var("HOME").unwrap());
+    let home = Project::home_for(&root).unwrap();
+    assert_eq!(home, user.join(".nunki").join("some-project"));
 
-    let project = Project::open(&root).unwrap();
-    let home = PathBuf::from(std::env::var("HOME").unwrap());
-    assert_eq!(project.hq_root, home.join(".nunki").join("some-project"));
+    // And the HQ is a directory of that home, never its top.
+    let project = Project::at(root, config(), home.clone());
+    assert_eq!(project.hq_root, home.join("hq"));
+    assert_eq!(project.nunki_home(), user.join(".nunki"));
 }
 
 #[test]
@@ -469,9 +564,9 @@ fn the_account_a_project_spends_is_checked_not_assumed() {
 /// A real repository whose `origin` reads as GitHub, protecting two branches.
 fn on_github(dir: &Path, remote: &str) -> Project {
     let root = dir.join("repo");
-    let hq_root = dir.join("nunki");
+    let home = dir.join("nunki");
     std::fs::create_dir_all(&root).unwrap();
-    std::fs::create_dir_all(&hq_root).unwrap();
+    std::fs::create_dir_all(home.join(nunki::project::HQ_DIR)).unwrap();
     for args in [vec!["init", "-q"], vec!["remote", "add", "origin", remote]] {
         assert!(
             std::process::Command::new("git")
@@ -489,7 +584,7 @@ fn on_github(dir: &Path, remote: &str) -> Project {
             protected_branches: vec!["main".to_string(), "dev".to_string()],
             ..config()
         },
-        hq_root,
+        home,
     )
 }
 

@@ -8,6 +8,8 @@ use nunki::mission::flow::{Event, Flow, Stage, Work};
 use nunki::mission::{Bounds, Header, Integration, Lot, Security};
 use nunki::state::{LockError, MissionState, SlotLock, StateError, Store};
 
+mod common;
+
 fn header() -> Header {
     Header {
         branch: "feat/x".into(),
@@ -236,9 +238,8 @@ fn dropping_a_guard_never_deletes_a_lock_retaken_by_another_process() {
 fn status_says_a_mission_is_held_and_who_held_it() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("repo");
-    fs::create_dir_all(&root).unwrap();
-    fs::write(root.join("nunki.yaml"), "harness: claude-code\n").unwrap();
-    let hq_root = dir.path().join("home/.nunki/repo");
+    let home = common::project_home(&root, &dir.path().join("home"), "harness: claude-code\n");
+    let hq_root = home.join(nunki::project::HQ_DIR);
 
     let status = || {
         let out = Command::new(env!("CARGO_BIN_EXE_nunki"))
@@ -277,9 +278,8 @@ fn status_says_a_mission_is_held_and_who_held_it() {
 fn watch_says_the_hold_before_it_says_there_is_no_run() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("repo");
-    fs::create_dir_all(&root).unwrap();
-    fs::write(root.join("nunki.yaml"), "harness: claude-code\n").unwrap();
-    let hq_root = dir.path().join("home/.nunki/repo");
+    let home = common::project_home(&root, &dir.path().join("home"), "harness: claude-code\n");
+    let hq_root = home.join(nunki::project::HQ_DIR);
 
     nunki::mission::dir::create(&hq_root, "m1", &header(), "do it").unwrap();
     let store = Store::open(&hq_root).unwrap();

@@ -83,6 +83,9 @@ pub struct Plan {
     /// The mission folder at the HQ, and where it is mounted.
     pub mission_dir: PathBuf,
     pub mission_dir_at: PathBuf,
+    /// The stack's scripts, from the project's home, mounted read-only one
+    /// file at a time. Given as (host path, path in the container).
+    pub stack_scripts: Vec<(PathBuf, PathBuf)>,
     /// Test credential files, mounted read-only on a system profile only
     /// (SPEC 3.1). Given as (host path, path in the container).
     pub credentials: Vec<(PathBuf, PathBuf)>,
@@ -332,6 +335,13 @@ fn agent(plan: &Plan, dialect: &Dialect) -> Result<Service, ComposeError> {
             &plan.mission_dir_at.join(file),
             "rw",
         ));
+    }
+
+    // The scripts that judge the agent and start its application. They live
+    // in the project's home, not in the tree, and read-only is what keeps
+    // them out of the agent's reach — by construction, not by a gate.
+    for (host, at) in &plan.stack_scripts {
+        volumes.push(mount(host, at, "ro"));
     }
 
     for (host, at) in &plan.credentials {
