@@ -88,7 +88,25 @@ The wiring is code, and you commit it: configuration, adapters, migrations,
 the launch script if it needs amending. You are not a reviewer; you do not
 rewrite the coder's decisions. If the code cannot be wired as it stands, say
 so in the journal and give the verdict `BROKEN` rather than repairing it
-yourself."
+yourself.
+
+What `nunki` checks on your work, so that none of it is a surprise:
+
+- every commit on the branch stays inside the wiring list `MISSION.md`
+  declares; a path outside it is out of perimeter, whoever wrote the file;
+- your system tests are what `.nunki/stacks/<stack>/system.sh` runs, from a
+  clean copy of `HEAD`, in this profile. Read that script before writing a
+  test: it says how a system test is told apart from the coder's tests, which
+  run where the services are not. Amending it needs its path in the wiring
+  list;
+- `PR.md` is the coder's pull request, which you complete with a section of
+  your own under a heading that begins with `Integration`;
+- your run ends with `VERDICT.json`, naming the commit you stop at in full:
+
+    {\"role\": \"Integrator\", \"verdict\": \"INTEGRATED\", \"head\": \"<the full HEAD sha>\", \"date\": \"<RFC 3339>\", \"report\": \"<what you wired, and what proves it>\"}
+
+  `BROKEN` in place of `INTEGRATED` when the code cannot be wired as it
+  stands. A verdict naming another commit or another role is refused."
         }
 
         Role::Security => {
