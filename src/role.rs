@@ -17,6 +17,11 @@ as a fact about the world and carry on; do not look for a way around it.
 Read `MISSION.md` and `FOLLOWUP_HQ.md` in the mission folder before anything
 else, and `AGENTS.md` at the root of the tree.
 
+`ALLOWLIST.txt`, in the same folder, lists every name and address this run
+may reach. A firewall enforces it: a name outside it does not resolve, and
+that is the list, not a flaky network. Do not retry it; say in the journal
+what you needed and why.
+
 What a run must leave behind, without exception:
 
 - the lot committed and proved, or the failure stated plainly in the journal;

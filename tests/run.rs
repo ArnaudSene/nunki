@@ -355,6 +355,118 @@ fn a_run_profile_carries_the_clean_copy_of_head() {
     );
 }
 
+/// The allowlist a run reads is the perimeter its firewall enforces, role by
+/// role — not the stack's `allow.txt`, which is one source of three. An
+/// autonomous agent cannot ask why a name does not resolve; it reads the
+/// list, or it retries a wall.
+#[test]
+fn the_agent_reads_the_perimeter_its_firewall_enforces() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    let slot = nunki::slot::Slot {
+        name: "one".to_string(),
+        tree: dir.path().join("slot"),
+    };
+    let images = nunki::image::Images {
+        agent: "img/agent".into(),
+        firewall: "img/fw".into(),
+        prober: "img/probe".into(),
+    };
+    let paths = nunki::mission::dir::Paths::of(&project.hq_root, "m1");
+    let header = |integration| nunki::mission::Header {
+        branch: "feat/alpha".to_string(),
+        base: "dev".to_string(),
+        lots: vec![nunki::mission::Lot {
+            id: "L1".to_string(),
+            title: "one".to_string(),
+        }],
+        integration,
+        security: nunki::mission::Security::Gates,
+        arbiter: None,
+        run: None,
+        account: None,
+        model: None,
+        bounds: Default::default(),
+    };
+    let lines = |text: &str, section: &str| -> std::collections::BTreeSet<String> {
+        text.lines()
+            .skip_while(|l| *l != section)
+            .skip(1)
+            .take_while(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect()
+    };
+
+    for (role, integration) in [
+        (
+            Role::Coder,
+            nunki::mission::Integration::None {
+                reason: "none".to_string(),
+            },
+        ),
+        (
+            Role::Integrator,
+            nunki::mission::Integration::Services {
+                services: vec![nunki::mission::Service {
+                    name: "db".to_string(),
+                    reach: vec!["db".to_string(), "10.4.0.7".to_string()],
+                    shared: false,
+                }],
+                wiring: vec!["tests/**".to_string()],
+            },
+        ),
+    ] {
+        let plan = run::plan(
+            &project,
+            &slot,
+            "rust",
+            &images,
+            &paths,
+            "stand-in-token",
+            &header(integration),
+            role,
+        )
+        .unwrap();
+        let text = run::allowlist(role, &plan.perimeter);
+
+        assert!(text.contains(role::slug(role)), "{text}");
+        assert_eq!(lines(&text, "domains:"), plan.perimeter.domains, "{text}");
+        if plan.perimeter.addresses.is_empty() {
+            assert!(lines(&text, "addresses:").contains("(none)"), "{text}");
+        } else {
+            assert_eq!(
+                lines(&text, "addresses:"),
+                plan.perimeter.addresses,
+                "{text}"
+            );
+        }
+        // The service is the integrator's, and never the coder's.
+        assert_eq!(
+            text.lines().any(|l| l == "db"),
+            role == Role::Integrator,
+            "{role:?}: {text}"
+        );
+    }
+}
+
+/// The list is `nunki`'s, like `MISSION.md`: in the mission folder, which the
+/// agent reads, and among none of the files it may write — an agent that could
+/// edit its allowlist would only mislead itself, but a list that lies is worse
+/// than no list.
+#[test]
+fn the_allowlist_is_read_only_for_the_agent_and_every_prompt_names_it() {
+    use nunki::mission::dir::ALLOWLIST_FILE;
+    assert!(!nunki::compose::AGENT_WRITABLE.contains(&ALLOWLIST_FILE));
+    let paths = nunki::mission::dir::Paths::of(Path::new("/hq"), "m1");
+    assert_eq!(paths.allowlist, paths.dir.join(ALLOWLIST_FILE));
+    for role in [Role::Coder, Role::Integrator, Role::Security] {
+        assert!(
+            role::prompt(role).contains(ALLOWLIST_FILE),
+            "{role:?} is not told where its allowlist is"
+        );
+    }
+}
+
 #[test]
 fn each_profile_is_written_where_a_restarted_hq_finds_it() {
     let dir = tempfile::tempdir().unwrap();

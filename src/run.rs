@@ -45,6 +45,41 @@ pub const STACK_SCRIPTS: [&str; 4] = [
     crate::launch::SCRIPT,
 ];
 
+/// The effective allowlist of a run, as the agent reads it in the mission
+/// folder.
+///
+/// What the firewall enforces for this role — the stack's registries, the
+/// harness's API, and the mission's services for the integrator and the
+/// security agent — and not the stack's `allow.txt`, which is one source of
+/// three. An agent that cannot ask why a name does not resolve reads a
+/// refusal as a flaky network and retries; one that has the list reads it as
+/// the list.
+pub fn allowlist(role: Role, perimeter: &crate::perimeter::Perimeter) -> String {
+    let list = |items: &std::collections::BTreeSet<String>| {
+        if items.is_empty() {
+            "(none)\n".to_string()
+        } else {
+            items.iter().map(|i| format!("{i}\n")).collect()
+        }
+    };
+    format!(
+        "# What this run may reach, as the {} it runs as.\n\
+         #\n\
+         # The firewall beside this container enforces it; this file only says it.\n\
+         # A name outside it does not resolve and an address outside it is refused:\n\
+         # that is this list, not a flaky network. Retrying will not change it —\n\
+         # say in the journal what you needed, and why.\n\
+         \n\
+         domains:\n\
+         {}\n\
+         addresses:\n\
+         {}",
+        role::slug(role),
+        list(&perimeter.domains),
+        list(&perimeter.addresses)
+    )
+}
+
 /// The stack scripts to mount, as (host path, path in the container): those
 /// that exist and no other. A bind mount of a missing file makes the engine
 /// create an empty directory in its place, which would turn "the stack ships
@@ -308,6 +343,10 @@ pub fn launch(l: &Launching) -> Result<Launched, RunError> {
     std::fs::write(&prompt, role::prompt(role)).map_err(|e| RunError::Io(prompt.clone(), e))?;
 
     let plan = plan(project, slot, &stack, &images, paths, &token, header, role)?;
+    // The perimeter the firewall is about to enforce, written where the agent
+    // reads: an autonomous agent cannot ask why a name does not resolve.
+    std::fs::write(&paths.allowlist, allowlist(role, &plan.perimeter))
+        .map_err(|e| RunError::Io(paths.allowlist.clone(), e))?;
     let file = profile_path(project, &slot.name);
     if let Some(dir) = file.parent() {
         std::fs::create_dir_all(dir).map_err(|e| RunError::Io(dir.to_path_buf(), e))?;

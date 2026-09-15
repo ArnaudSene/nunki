@@ -1,6 +1,6 @@
 //! The mission folder, at the HQ (SPEC 4.1).
 //!
-//! It lives under `~/.nunki/<project>/missions/<id>/`, outside the git tree,
+//! It lives under `~/.nunki/<project>/hq/missions/<id>/`, outside the git tree,
 //! and is mounted into the container. That is what lets the HQ and the agent
 //! talk through files without a channel, while the tree stays clean and the
 //! folder survives `nunki slot rm`.
@@ -14,6 +14,10 @@
 use std::path::{Path, PathBuf};
 
 use crate::mission::Header;
+
+/// What the run in progress may reach, written by `nunki` at every launch and
+/// read-only for the agent.
+pub const ALLOWLIST_FILE: &str = "ALLOWLIST.txt";
 
 /// The files of one mission. `MUTANTS.json` is `nunki`'s and is written only
 /// when a campaign ends, so it is not created here.
@@ -30,6 +34,10 @@ pub struct Paths {
     pub triage: PathBuf,
     /// The campaign itself, written by `nunki` and read-only for the agent.
     pub mutants: PathBuf,
+    /// The effective allowlist of the run in progress: what the firewall
+    /// enforces for its role, so that a refused name reads as the list and
+    /// not as a flaky network. Rewritten at every launch.
+    pub allowlist: PathBuf,
 }
 
 impl Paths {
@@ -43,6 +51,7 @@ impl Paths {
             verdict: dir.join("VERDICT.json"),
             triage: dir.join(crate::mutants::TRIAGE_FILE),
             mutants: dir.join(crate::mutants::FILE),
+            allowlist: dir.join(ALLOWLIST_FILE),
             dir,
         }
     }
