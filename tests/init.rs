@@ -526,6 +526,45 @@ fn the_rust_image_carries_what_the_battery_calls() {
     assert!(user < install, "{dockerfile}");
 }
 
+/// The battery asks only for what the coder's container can reach.
+///
+/// `cargo deny check` runs four stages, and `advisories` fetches its database
+/// from github.com. The coder's allowlist names no forge (SPEC 4.1 bis, rule
+/// 6), so that stage can never succeed in the container — not for want of a
+/// network, but by design.
+///
+/// Measured on 2026-09-14, in the image this generator writes: with
+/// `cargo-deny` installed the battery still came back non-zero on
+/// `failed to fetch advisory database … Could not resolve host: github.com`,
+/// while `bans licenses sources` alone passed with `bans ok, licenses ok,
+/// sources ok`. Asking for the whole thing holds gate 6 red for a reason no
+/// agent can repair — the same shape as the missing command it replaced.
+#[test]
+fn the_battery_asks_only_for_what_the_container_can_reach() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    nunki::init::init(&root, &dir.path().join("nunki"), &["rust".to_string()]).unwrap();
+
+    let battery = std::fs::read_to_string(root.join(".nunki/stacks/rust/prepush.sh")).unwrap();
+    assert!(
+        battery.contains("cargo deny check bans licenses sources"),
+        "{battery}"
+    );
+    // Never the bare form: it drags the forge-bound stage in. The check is on
+    // the line, not the substring — the corrected form contains the bare one.
+    assert!(
+        !battery.lines().any(|l| l.trim() == "cargo deny check"),
+        "the battery asks for a stage the container cannot reach:\n{battery}"
+    );
+
+    // And this holds only because the allowlist keeps the forge out: if a
+    // forge domain were ever added, both this test and `nunki check` would
+    // have something to say.
+    let allow = std::fs::read_to_string(root.join(".nunki/stacks/rust/allow.txt")).unwrap();
+    assert!(!allow.contains("github.com"), "{allow}");
+}
+
 #[test]
 fn the_campaign_does_not_mutate_a_binarys_entry_point() {
     let dir = tempfile::tempdir().unwrap();

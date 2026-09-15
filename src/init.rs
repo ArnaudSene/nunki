@@ -537,7 +537,13 @@ fn fragment(stack: &str) -> Vec<(&'static str, String, bool)> {
                  cargo fmt --all -- --check\n\
                  cargo clippy --all-targets --all-features -- -D warnings\n\
                  cargo test --all-features\n\
-                 cargo deny check\n"
+                 # Not `cargo deny check` alone: its `advisories` stage fetches\n\
+                 # its database from github.com, and the coder's allowlist names\n\
+                 # no forge (SPEC 4.1 bis, rule 6). That stage can never pass in\n\
+                 # this container — not for want of a network, but by design — so\n\
+                 # asking for it would hold gate 6 red for a reason no agent can\n\
+                 # repair. Run the advisories in CI, where the forge is reachable.\n\
+                 cargo deny check bans licenses sources\n"
                     .to_string(),
                 true,
             ),
