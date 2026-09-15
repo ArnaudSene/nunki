@@ -106,6 +106,9 @@ struct Fixture {
     header: Header,
     protected: ProtectedPaths,
     branches: Vec<String>,
+    /// Where the coder's gates were green. The base by default: a coder
+    /// that added nothing, so every commit on the branch is the integrator's.
+    coder_head: Option<String>,
 }
 
 impl Fixture {
@@ -115,6 +118,7 @@ impl Fixture {
         let journal = journal(dir.path(), "0000000");
         let pr = dir.path().join("PR.md");
         let verdict = dir.path().join("VERDICT.json");
+        let coder_head = Some(git(&tree, &["rev-parse", "HEAD"]));
         Self {
             pr,
             verdict,
@@ -124,6 +128,7 @@ impl Fixture {
             header: header(),
             protected: protected(),
             branches: vec!["main".into(), "dev".into()],
+            coder_head,
         }
     }
 
@@ -149,6 +154,7 @@ impl Fixture {
             header: &self.header,
             protected_branches: &self.branches,
             protected_paths: &self.protected,
+            coder_head: self.coder_head.as_deref(),
         })
         .unwrap()
     }
@@ -409,6 +415,88 @@ fn the_integrator_may_commit_its_wiring_and_nothing_else() {
     }
 }
 
+/// The integrator works on the coder's branch (SPEC 2), so the coder's
+/// commits come first on it — and none of them is wiring.
+///
+/// Found on 2026-09-15, before the first integration mission was launched:
+/// gate 4 judged the whole branch against its base, so the coder's `src/`
+/// held every integrator red on a perimeter it never crossed —
+/// `src/new.rs is not in this mission's wiring list, and the diff against
+/// the base touches it`.
+#[test]
+fn the_integrator_is_judged_on_what_it_added_after_the_coder() {
+    let mut f = Fixture::new();
+    f.header.integration = Integration::Services {
+        services: vec![Service {
+            name: "db".into(),
+            reach: vec!["db".into()],
+            shared: false,
+        }],
+        wiring: vec!["tests/system/**".into()],
+    };
+    commit(
+        &f.tree,
+        "src/new.rs",
+        "pub fn two() -> u8 { 2 }\n",
+        "the coder's lot",
+    );
+    f.coder_head = Some(git(&f.tree, &["rev-parse", "HEAD"]));
+    commit(
+        &f.tree,
+        "tests/system/smoke.rs",
+        "// system test\n",
+        "wire it",
+    );
+    f.journal_names_head();
+    assert_eq!(
+        f.decision(Role::Integrator, Gate::Perimeter),
+        Decision::Passed,
+        "the coder's src/new.rs is not the integrator's commit"
+    );
+
+    // Not an exemption for the coder's files: one the integrator commits
+    // after the coder is still outside its wiring.
+    commit(
+        &f.tree,
+        "src/new.rs",
+        "pub fn two() -> u8 { 3 }\n",
+        "rewrite the coder's decision",
+    );
+    f.journal_names_head();
+    match f.decision(Role::Integrator, Gate::Perimeter) {
+        Decision::Failed(why) => assert!(why.contains("src/new.rs"), "{why}"),
+        other => panic!("a coder's file the integrator rewrites is out of perimeter: {other:?}"),
+    }
+}
+
+/// Without the commit the coder's gates were green on, nothing separates the
+/// two roles' commits. That is the machine's gap, not the integrator's fault,
+/// so the gate is not played rather than red.
+#[test]
+fn without_the_coders_green_commit_the_integrators_perimeter_is_not_played() {
+    let mut f = Fixture::new();
+    f.header.integration = Integration::Services {
+        services: vec![Service {
+            name: "db".into(),
+            reach: vec!["db".into()],
+            shared: false,
+        }],
+        wiring: vec!["tests/system/**".into()],
+    };
+    f.coder_head = None;
+    commit(
+        &f.tree,
+        "tests/system/smoke.rs",
+        "// system test\n",
+        "wire it",
+    );
+    f.journal_names_head();
+    match f.decision(Role::Integrator, Gate::Perimeter) {
+        Decision::Unplayed(why) => assert!(why.contains("coder"), "{why}"),
+        other => panic!("nothing tells the two roles' commits apart: {other:?}"),
+    }
+}
+
 #[test]
 fn an_integration_mission_with_no_wiring_declared_lets_the_integrator_commit_nothing() {
     let mut f = Fixture::new();
@@ -516,6 +604,7 @@ impl Fixture {
                 header: &self.header,
                 protected_branches: &self.branches,
                 protected_paths: &self.protected,
+                coder_head: self.coder_head.as_deref(),
             },
             &gate::Verification {
                 project: &project,
@@ -786,6 +875,7 @@ fn live_the_battery_is_the_committed_one_and_an_absent_one_is_red() {
                 header: &header,
                 protected_branches: &branches,
                 protected_paths: &protected,
+                coder_head: None,
             },
             &gate::Verification {
                 project: &project,

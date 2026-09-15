@@ -213,6 +213,7 @@ pub fn verify_as(
         // The frozen header, never the file: from the moment a mission
         // starts, `nunki` reads its own copy (SPEC 4.1).
         let header = state.flow.header().clone();
+        let coder_head = state.concluded(Role::Coder).map(|c| c.head.clone());
         let subject = gate::Subject {
             role: role_of(state.flow.stage()),
             tree: &slot.tree,
@@ -223,6 +224,7 @@ pub fn verify_as(
             header: &header,
             protected_branches: &project.config.protected_branches,
             protected_paths: &project.config.protected_paths,
+            coder_head: coder_head.as_deref(),
         };
         let verification = gate::Verification {
             project,

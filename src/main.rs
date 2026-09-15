@@ -1610,6 +1610,10 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                 }
             };
             let paths = nunki::mission::dir::Paths::of(&project.hq_root, &id);
+            let coder_head = started
+                .as_ref()
+                .and_then(|s| s.concluded(nunki::harness::Role::Coder))
+                .map(|c| c.head.clone());
             let subject = nunki::gate::Subject {
                 role,
                 tree: &slot.tree,
@@ -1620,6 +1624,7 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                 header: &header,
                 protected_branches: &project.config.protected_branches,
                 protected_paths: &project.config.protected_paths,
+                coder_head: coder_head.as_deref(),
             };
             let played = if verification {
                 let engine: std::sync::Arc<dyn nunki::engine::Engine> =
