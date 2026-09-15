@@ -149,6 +149,8 @@ pub const WRITABLE_FILE: &str = "writable.txt";
 pub enum ProjectError {
     #[error("{0} is not inside a git repository, and nunki orchestrates a repository")]
     NotARepository(PathBuf),
+    #[error("git could not answer for {at}, so nunki cannot say which repository this is: {said}")]
+    GitSilent { at: PathBuf, said: String },
     #[error("no {} for the repository at {root} — run `nunki init` there first", config.display())]
     NotAProject { root: PathBuf, config: PathBuf },
     #[error(
@@ -314,6 +316,13 @@ impl Project {
     }
 
     /// The top level of the repository containing `start`, as git reports it.
+    ///
+    /// Two failures, and they send a human to different places. Git saying
+    /// there is no repository here is one; git unable to run at all — a
+    /// permission on the working directory, a missing binary — is the other,
+    /// and it is reported in git's own words. Measured on 2026-09-15: macOS
+    /// stopped git from reading its working directory, and `nunki` answered
+    /// "not inside a git repository" for an hour.
     pub fn find_root(start: &Path) -> Result<PathBuf, ProjectError> {
         let dir = if start.is_dir() {
             start
@@ -322,9 +331,18 @@ impl Project {
                 .parent()
                 .ok_or_else(|| ProjectError::NotARepository(start.to_path_buf()))?
         };
-        let top = crate::git::run(dir, &["rev-parse", "--show-toplevel"])
-            .map_err(|_| ProjectError::NotARepository(start.to_path_buf()))?;
-        Ok(canonical(Path::new(&top)))
+        match crate::git::run(dir, &["rev-parse", "--show-toplevel"]) {
+            Ok(top) => Ok(canonical(Path::new(&top))),
+            Err(crate::git::GitError::Failed { stderr, .. })
+                if stderr.contains("not a git repository") =>
+            {
+                Err(ProjectError::NotARepository(start.to_path_buf()))
+            }
+            Err(e) => Err(ProjectError::GitSilent {
+                at: dir.to_path_buf(),
+                said: e.to_string(),
+            }),
+        }
     }
 
     /// Where the project rooted at `root` keeps everything that is not the
