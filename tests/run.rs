@@ -576,6 +576,42 @@ fn the_integrator_is_told_what_its_own_gates_require() {
     assert!(integrator.contains("`BROKEN`"), "{integrator}");
 }
 
+/// The security agent commits nothing, so its gates are its journal and its
+/// report — and its verdict has a shape `nunki` refuses when it is wrong.
+/// Found on 2026-09-15, before the first security mission: its prompt named
+/// neither `CLEAR`, nor `FINDINGS`, nor the file the verdict goes in, so its
+/// first run would have been refused for a verdict it was never shown.
+#[test]
+fn the_security_agent_is_told_what_its_own_gates_require() {
+    let security = role::prompt(Role::Security);
+
+    assert!(security.contains("ÉTAT DE REPRISE"), "{security}");
+    assert!(
+        security.contains("VERDICT.json"),
+        "its report is its deliverable, and that is where it goes: {security}"
+    );
+
+    let line = security
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("{\"role\""))
+        .expect("the prompt shows the verdict's shape");
+    let file: nunki::mission::VerdictFile = serde_json::from_str(line)
+        .unwrap_or_else(|e| panic!("the shape in the prompt is not one nunki reads: {e}\n{line}"));
+    assert_eq!(file.role, Role::Security);
+    assert_eq!(file.verdict, nunki::mission::Verdict::Clear);
+    assert!(security.contains("`FINDINGS`"), "{security}");
+
+    // And both roles that meet a running application are told it may still be
+    // starting: `nunki` launches it and does not wait for it to serve.
+    for role in [Role::Integrator, Role::Security] {
+        assert!(
+            role::prompt(role).contains("still be compiling"),
+            "{role:?} is not told the application may not answer yet"
+        );
+    }
+}
+
 #[test]
 fn the_prompt_travels_as_a_file_and_never_into_the_slot() {
     // It is written into the mission folder, which is mounted read-only but

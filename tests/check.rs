@@ -257,6 +257,24 @@ fn a_directory_outside_any_repository_is_not_a_project() {
     assert!(err.to_string().contains("git repository"), "{err}");
 }
 
+/// "git says there is no repository here" and "git could not run at all" are
+/// different sentences, and they send a human to different places.
+///
+/// Measured on 2026-09-15: macOS refused git the right to read its working
+/// directory, and `nunki` answered "not inside a git repository" — for an
+/// hour, about a repository that was there all along.
+#[test]
+fn a_git_that_could_not_answer_is_not_a_missing_repository() {
+    let err = Project::find_root(Path::new("/nonexistent-for-nunki/deeper")).unwrap_err();
+    match &err {
+        ProjectError::GitSilent { said, .. } => {
+            assert!(!said.is_empty(), "git's own words are carried: {err}")
+        }
+        other => panic!("git could not run here, and that is what it must say: {other:?}"),
+    }
+    assert!(err.to_string().contains("git could not answer"), "{err}");
+}
+
 #[test]
 fn a_repository_nunki_was_never_given_says_which_file_is_missing() {
     let dir = tempfile::tempdir().unwrap();

@@ -663,10 +663,52 @@ pub fn verify_as(
                                 &outcome,
                                 now,
                             )?;
-                            let event = spare_event(
-                                spared.as_ref(),
-                                concluded(Role::Security, outcome, paths.verdict.as_path(), &head),
-                            );
+                            let mut event =
+                                concluded(Role::Security, outcome, paths.verdict.as_path(), &head);
+                            // The security agent commits nothing, so its gates
+                            // are the two things it does leave: a resume block
+                            // naming the commit it attacked, and a report
+                            // (SPEC 4.4, the per-role table). `CLEAR` and
+                            // `FINDINGS` owe them both — a verdict with no
+                            // report is a verdict about nothing.
+                            if let Event::Verdict { .. } = &event {
+                                let report = gate::at_verification(&subject, &verification)?;
+                                let failed = report.failed();
+                                let unplayed = report.unplayed();
+                                steps.push(Step::Gates {
+                                    role: Role::Security,
+                                    report: Box::new(report),
+                                });
+                                match (failed, unplayed) {
+                                    // Its own to fix, in one more attempt: the
+                                    // journal and the report are the agent's,
+                                    // and nothing else was asked of it.
+                                    (Some(reason), _) => {
+                                        event = Event::RunEnded {
+                                            outcome: Outcome::MissionFailure(format!(
+                                                "the gates were red: {reason}"
+                                            )),
+                                            lot_done: false,
+                                        };
+                                    }
+                                    (None, Some(why)) => {
+                                        steps.push(Step::GateUnplayable {
+                                            role: Role::Security,
+                                            why,
+                                        });
+                                        return Ok(steps);
+                                    }
+                                    (None, None) => {}
+                                }
+                            }
+                            let event = spare_event(spared.as_ref(), event);
+                            if let Some(why) = attempt_failed(&event) {
+                                crate::followup::said(
+                                    &paths.followup,
+                                    "nunki",
+                                    &format!("security, attempt {attempt}: {why}"),
+                                )?;
+                            }
                             carry(&paths.followup, Role::Security, &event, &head)?;
                             if let Event::Verdict { verdict, .. } = &event {
                                 state.conclude(Role::Security, Some(*verdict), &head);
