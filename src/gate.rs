@@ -216,6 +216,9 @@ pub struct Subject<'a> {
     pub header: &'a Header,
     pub protected_branches: &'a [String],
     pub protected_paths: &'a ProtectedPaths,
+    /// The commit the coder's gates were green on, once they were — where the
+    /// integrator's work begins. `None` until then.
+    pub coder_head: Option<&'a str>,
 }
 
 /// What gates 5 and 6 need beyond the tree: a way into the slot's container,
@@ -397,14 +400,25 @@ fn perimeter(subject: &Subject) -> Result<Decision, GateError> {
         return Ok(Decision::NotApplicable(READ_ONLY_TREE.into()));
     }
     let tree = subject.tree;
-    let base = base_ref(tree, &subject.header.base)?;
-
-    let Touched { seen, commits } = touched(tree, &base)?;
-
-    match subject.role {
-        Role::Integrator => integrator_perimeter(subject, &seen, &commits),
-        _ => coder_perimeter(subject, tree, &base, &seen),
+    if subject.role == Role::Integrator {
+        // The integrator works on the coder's branch (SPEC 2), so the coder's
+        // commits come first on it and none of them is wiring. Both passes —
+        // the diff and every commit — start where the coder's gates were
+        // green, the same line `nunki push` draws.
+        let Some(from) = subject.coder_head else {
+            return Ok(Decision::Unplayed(
+                "no commit is recorded for the coder's green gates, so nothing tells the \
+                 integrator's commits from the coder's"
+                    .into(),
+            ));
+        };
+        let Touched { seen, commits } = touched(tree, from)?;
+        return integrator_perimeter(subject, &seen, &commits);
     }
+
+    let base = base_ref(tree, &subject.header.base)?;
+    let Touched { seen, .. } = touched(tree, &base)?;
+    coder_perimeter(subject, tree, &base, &seen)
 }
 
 /// Every path this branch touched, and where it was seen — the diff against
