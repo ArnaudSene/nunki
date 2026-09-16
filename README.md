@@ -65,14 +65,20 @@ It creates what is absent and never overwrites a file you edit — it says what
 it left alone. In the repository, only what the agents read: `AGENTS.md` (the
 rules), `CLAUDE.md` importing it, and a `.gitattributes` entry. Everything
 else is tooling, and tooling stays out of your history — it goes into the
-project's home, `~/.nunki/<project>/`:
+project's home, named by the session `init` opens for the repository:
 
 ```text
-~/.nunki/<project>/
-    nunki.yaml        the project's configuration, never mounted
-    hq/               state, locks, missions, profiles — never mounted
-    stacks/<stack>/   Dockerfile, allowlist, battery, mutation campaign, launch script
+~/.nunki/sessions.json    the ledger: one identifier, one repository
+~/.nunki/<id>/
+    nunki.yaml            the project's configuration, never mounted
+    hq/                   state, locks, missions, profiles — never mounted
+    stacks/<stack>/       Dockerfile, allowlist, battery, mutation campaign, launch script
 ```
+
+A home is named by an identifier and not by your repository's directory, so
+two repositories called `api` are two projects rather than a collision.
+`nunki sessions` lists what this machine holds, and `nunki adopt <id>` points
+a session at the repository you are in after moving or renaming it.
 
 The scripts under `stacks/` reach the agent's container read-only, one file at
 a time; the Dockerfile and the allowlist are read on this machine only.
@@ -103,7 +109,7 @@ nunki mission new m1 \
   --about "What the mission is for, in your words."
 ```
 
-That writes `~/.nunki/<project>/hq/missions/m1/MISSION.md`: a YAML header `nunki`
+That writes `<home>/hq/missions/m1/MISSION.md`: a YAML header `nunki`
 reads, and prose the agent reads. Edit the prose, then start it:
 
 ```sh
@@ -138,7 +144,7 @@ nunki mission archive m1    # close it: the folder and state move under archive/
 ```
 
 `nunki push` opens the pull request when a GitHub token that may do so sits at
-`~/.nunki/<project>/hq/forge-token`. Without one it pushes the branch and hands
+`<home>/hq/forge-token`. Without one it pushes the branch and hands
 you the URL.
 
 ## Vocabulary
@@ -266,8 +272,12 @@ Per project, from the repository:
 nunki mission archive <id>          # or `nunki mission end <id> --because "..."`
 nunki slot rm one                   # add --force to discard work it still holds
 rm AGENTS.md CLAUDE.md
-rm -rf ~/.nunki/<project>       # configuration, HQ, stack fragments
+nunki sessions                  # which identifier this repository holds
+rm -rf ~/.nunki/<id>            # configuration, HQ, stack fragments
 ```
+
+Then remove that identifier's line from `~/.nunki/sessions.json`: `nunki`
+keeps no manifest, and it will not tidy the ledger for you.
 
 `nunki slot rm` refuses while a slot holds commits the repository lacks:
 `nunki mission fetch` brings them over first. `AGENTS.md` may be yours by now —

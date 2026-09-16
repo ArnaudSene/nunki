@@ -108,6 +108,23 @@ enum Command {
         last: bool,
     },
 
+    /// List the sessions this machine holds: an identifier, and the
+    /// repository it belongs to.
+    ///
+    /// A home is named by its identifier, so this is how a human finds the
+    /// one they are looking at (SPEC 4.1).
+    Sessions,
+
+    /// Point an existing session at the repository here — after moving or
+    /// renaming it, so that its HQ and its missions follow.
+    ///
+    /// It refuses while the recorded path still holds a repository: that one
+    /// is a live project, and adopting would take its HQ from it.
+    Adopt {
+        /// The session's identifier, as `nunki sessions` lists it.
+        id: String,
+    },
+
     /// Say whether the project holds what the specification describes.
     ///
     /// Red when a restriction is not held; and it always says what it could
@@ -441,7 +458,9 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            let home = match Project::home_for(&root) {
+            // The one verb that may open a session: every other reads the
+            // ledger and refuses what is not in it.
+            let home = match Project::home_for_new(&root) {
                 Ok(h) => h,
                 Err(e) => {
                     eprintln!("nunki: {e}");
@@ -456,6 +475,74 @@ fn main() -> ExitCode {
                     if actions.is_empty() {
                         println!("nothing to do: this project is already orchestrable.");
                     }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+
+        Command::Sessions => {
+            let nunki_home = match Project::nunki_dir() {
+                Ok(h) => h,
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            match nunki::sessions::load(&nunki_home) {
+                Ok(sessions) => {
+                    if sessions.is_empty() {
+                        println!(
+                            "no session yet: `nunki init` opens one for the repository you are in"
+                        );
+                    }
+                    for (id, root) in &sessions {
+                        // Said rather than assumed: a repository that is gone
+                        // is exactly what `nunki adopt` is for.
+                        let state = if root.join(".git").exists() {
+                            ""
+                        } else {
+                            "  (no repository there any more)"
+                        };
+                        println!("{id}  {}{state}", root.display());
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+
+        Command::Adopt { id } => {
+            let root = match Project::find_root(&start) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let nunki_home = match Project::nunki_dir() {
+                Ok(h) => h,
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            match nunki::sessions::adopt(&nunki_home, &id, &root) {
+                Ok(at) => {
+                    // The ledger and the home say the same thing, or the next
+                    // verb would refuse what this one just did.
+                    if let Err(e) = Project::claim(&nunki_home.join(&id), &at) {
+                        eprintln!("nunki: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                    println!("session {id} now belongs to {}", at.display());
+                    println!("its home is {}", nunki_home.join(&id).display());
                     ExitCode::SUCCESS
                 }
                 Err(e) => {

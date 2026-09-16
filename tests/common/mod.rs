@@ -8,10 +8,10 @@ use std::thread::JoinHandle;
 
 /// A repository `nunki` can open, and its home.
 ///
-/// `root` becomes a git repository — a project is found by its top level —
-/// and the home `nunki` derives from it, `<user_home>/.nunki/<name>/`,
-/// receives a `nunki.yaml` made of `body` and the `root:` it belongs to, and
-/// an empty HQ. Returns the home.
+/// `root` becomes a git repository — a project is found by its top level — a
+/// session is opened for it in `<user_home>/.nunki/sessions.json`, and the
+/// home that session names receives a `nunki.yaml` made of `body` and the
+/// `root:` it belongs to, plus an empty HQ. Returns the home.
 #[allow(dead_code)]
 pub fn project_home(root: &Path, user_home: &Path, body: &str) -> PathBuf {
     std::fs::create_dir_all(root).unwrap();
@@ -24,7 +24,9 @@ pub fn project_home(root: &Path, user_home: &Path, body: &str) -> PathBuf {
             .success()
     );
     let root = std::fs::canonicalize(root).unwrap();
-    let home = user_home.join(".nunki").join(root.file_name().unwrap());
+    let nunki_home = user_home.join(".nunki");
+    let id = nunki::sessions::open(&nunki_home, &root).unwrap();
+    let home = nunki_home.join(id);
     std::fs::create_dir_all(home.join(nunki::project::HQ_DIR)).unwrap();
     std::fs::write(
         home.join(nunki::project::CONFIG_FILE),

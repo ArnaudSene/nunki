@@ -427,8 +427,10 @@ fn the_verb_is_green_on_this_very_repository() {
     let root = std::fs::canonicalize(env!("CARGO_MANIFEST_DIR")).unwrap();
     let home = tempfile::tempdir().unwrap();
     // This repository's configuration is not in it, like any project's: the
-    // test gives it one, in its own home.
-    let project_home = home.path().join(".nunki").join(root.file_name().unwrap());
+    // test opens a session for it and gives it one, in the home that session
+    // names.
+    let id = nunki::sessions::open(&home.path().join(".nunki"), &root).unwrap();
+    let project_home = home.path().join(".nunki").join(id);
     std::fs::create_dir_all(project_home.join("hq")).unwrap();
     std::fs::create_dir_all(project_home.join("stacks/rust")).unwrap();
     std::fs::write(
@@ -470,17 +472,24 @@ fn the_verb_is_green_on_this_very_repository() {
     assert!(text.contains("no forge credential"), "{text}");
 }
 
+/// A home is one directory under `~/.nunki/`, named by the session's
+/// identifier, and the HQ is a directory of that home rather than its top.
 #[test]
-fn the_home_is_the_projects_own_directory_under_nunkis() {
-    let root = PathBuf::from("/somewhere/some-project");
-    let user = PathBuf::from(std::env::var("HOME").unwrap());
-    let home = Project::home_for(&root).unwrap();
-    assert_eq!(home, user.join(".nunki").join("some-project"));
+fn the_home_holds_the_hq_and_sits_under_nunkis_own_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("some-project");
+    let home = common::project_home(&root, dir.path(), "harness: claude-code\n");
 
-    // And the HQ is a directory of that home, never its top.
+    assert_eq!(home.parent(), Some(dir.path().join(".nunki").as_path()));
+    assert_ne!(
+        home.file_name().unwrap(),
+        "some-project",
+        "a home is named by its session, not by the repository's directory"
+    );
+
     let project = Project::at(root, config(), home.clone());
     assert_eq!(project.hq_root, home.join("hq"));
-    assert_eq!(project.nunki_home(), user.join(".nunki"));
+    assert_eq!(project.nunki_home(), dir.path().join(".nunki"));
 }
 
 #[test]
