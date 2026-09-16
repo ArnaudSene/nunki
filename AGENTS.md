@@ -29,7 +29,8 @@ source, comments, doc comments, documentation, commit messages, pull request
 titles and descriptions, issue text, review comments.
 
 The exceptions, both deliberate: `SPEC.md`, and the HQ files that live outside
-this repository under `~/.nunki/nunki/hq/` (journal, dashboard, discussions)
+this repository, under `hq/` in this project's own home — the one
+`nunki sessions` names (journal, dashboard, discussions)
 — those belong to the project's owner and stay in French. Conversation with
 him is in French too; the record is not.
 
@@ -169,8 +170,9 @@ are allowed to implement:
   never keeps a manifest of ownership.
 - A target project's stack fragments — Dockerfile, allowlist, battery,
   campaign, launch script — belong to **that project**, and live in its home
-  (`~/.nunki/<project>/stacks/`), never in its repository. They are what
-  `nunki init` writes for it; they are not where `nunki` keeps its own assets.
+  (`~/.nunki/<id>/stacks/`, the session's), never in its repository. They are
+  what `nunki init` writes for it; they are not where `nunki` keeps its own
+  assets.
 - No agent ever pushes, merges, or reaches the forge. `nunki push` does, on an
   explicit human argument, and it is the only verb that touches the forge in
   write.

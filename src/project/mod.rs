@@ -151,6 +151,13 @@ pub enum ProjectError {
     NotARepository(PathBuf),
     #[error("git could not answer for {at}, so nunki cannot say which repository this is: {said}")]
     GitSilent { at: PathBuf, said: String },
+    #[error(
+        "the repository at {0} is in no project of this machine — `nunki init` makes it one, \
+         and `nunki adopt <id>` points an existing project here if you moved it"
+    )]
+    NotRegistered(PathBuf),
+    #[error(transparent)]
+    Sessions(#[from] crate::sessions::SessionsError),
     #[error("no {} for the repository at {root} — run `nunki init` there first", config.display())]
     NotAProject { root: PathBuf, config: PathBuf },
     #[error(
@@ -346,14 +353,51 @@ impl Project {
     }
 
     /// Where the project rooted at `root` keeps everything that is not the
-    /// repository's: `~/.nunki/<name of the repository's directory>`.
+    /// repository's: `~/.nunki/<id>/`, the identifier the ledger holds for it.
+    ///
+    /// Named by an identifier and not by the repository's directory: two
+    /// repositories called `api` are two projects, and a name cannot tell
+    /// them apart (SPEC 4.1, decided 2026-09-16).
     pub fn home_for(root: &Path) -> Result<PathBuf, ProjectError> {
+        let nunki_home = Self::nunki_dir()?;
+        match crate::sessions::find(&nunki_home, root)? {
+            Some(id) => Ok(nunki_home.join(id)),
+            None => Err(ProjectError::NotRegistered(root.to_path_buf())),
+        }
+    }
+
+    /// The same, opening a session for the project when it has none: what
+    /// `nunki init` needs, and the only verb that may hand an identifier out.
+    pub fn home_for_new(root: &Path) -> Result<PathBuf, ProjectError> {
+        let nunki_home = Self::nunki_dir()?;
+        let id = crate::sessions::open(&nunki_home, root)?;
+        Ok(nunki_home.join(id))
+    }
+
+    /// Write `root:` into a home's configuration, so that the ledger and the
+    /// home agree on which repository this is.
+    ///
+    /// The file is rewritten line by line rather than re-serialised: it is the
+    /// human's, comments and all, and `nunki` changes the one line it owns
+    /// (SPEC 3.3).
+    pub fn claim(home: &Path, root: &Path) -> Result<(), ProjectError> {
+        let file = home.join(CONFIG_FILE);
+        let text = std::fs::read_to_string(&file)
+            .map_err(|e| ProjectError::Unreadable(file.clone(), e.to_string()))?;
+        let said = format!("root: {}", canonical(root).display());
+        let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+        match lines.iter().position(|l| l.starts_with("root:")) {
+            Some(at) => lines[at] = said,
+            None => lines.insert(0, said),
+        }
+        std::fs::write(&file, format!("{}\n", lines.join("\n")))
+            .map_err(|e| ProjectError::Unreadable(file, e.to_string()))
+    }
+
+    /// `~/.nunki/`: the homes, the accounts and the ledger.
+    pub fn nunki_dir() -> Result<PathBuf, ProjectError> {
         let home = std::env::var_os("HOME").ok_or(ProjectError::NoHome)?;
-        let name = root
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "project".to_string());
-        Ok(PathBuf::from(home).join(".nunki").join(name))
+        Ok(PathBuf::from(home).join(".nunki"))
     }
 }
 
