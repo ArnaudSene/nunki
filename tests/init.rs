@@ -97,6 +97,12 @@ fn the_rules_it_writes_name_what_the_gates_require() {
         "nunki reads the block and not the whole file, so a line further down is \
          one it never sees: {rules}"
     );
+    // Not a gate, and said so in the pull request: the rules of the place are
+    // where a house style lives, and this one is a house style.
+    assert!(
+        rules.contains("Co-Authored-By"),
+        "the rules name the trailer they forbid rather than describe it: {rules}"
+    );
 }
 
 /// The image a project builds carries the security updates published since

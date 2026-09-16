@@ -494,6 +494,17 @@ fn the_role_prompts_say_what_the_role_may_not_do() {
         assert!(prompt.contains("JOURNAL.md"), "{prompt}");
         assert!(prompt.contains("VERDICT.json"), "{prompt}");
         assert!(prompt.contains("MUTANTS.triage.json"), "{prompt}");
+        // A commit that names the tool that typed it says nothing about
+        // the change, and the author already says which role wrote it.
+        assert!(
+            prompt.contains("Co-Authored-By"),
+            "the prompt names the trailer it forbids, so there is nothing to \
+             interpret: {prompt}"
+        );
+        assert!(
+            prompt.contains("no trailer naming a harness, a model or a tool"),
+            "{prompt}"
+        );
         assert!(
             prompt.contains("not yours to give"),
             "the outcome nobody can check must be refused where the agent reads \
