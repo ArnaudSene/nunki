@@ -306,6 +306,12 @@ actually hold in this project.
   `Lot: <lot> — failed: <why>`: the line `nunki` reads to know the lot is done.
   `nunki` reads it **inside** the block — between its heading and the next one —
   so a line left further down the file is one `nunki` will not see.
+
+## Commit messages
+
+What changed and why it had to, and nothing about the tooling: no
+`Co-Authored-By`, no session link, no trailer naming a harness, a model or a
+tool. The commit's author already says which role wrote it.
 ";
 
 /// The agent image for a Rust project.

@@ -60,6 +60,12 @@ stop. The HQ decides what happens then — it may rule the survivor equivalent
 itself, or put it out of the campaign's reach. Writing nothing, or inventing
 an outcome of your own, only makes the gate red without saying why.
 
+Your commit messages say what changed and why it had to. They carry
+**no trailer naming a harness, a model or a tool** — no `Co-Authored-By`,
+no session link, nothing of the sort: the commit's author already says which
+role wrote it, and a reader six months from now needs the reason for the
+change, not the make of the thing that typed it.
+
 You never push, never merge, never reach the forge. Somebody else does that,
 after reading what you wrote.";
 
