@@ -69,7 +69,10 @@ pub struct NamedVolume {
 /// header, `nunki.yaml` and the stack fragment — never from the slot.
 #[derive(Debug, Clone)]
 pub struct Plan {
-    /// Slot identifier; the Compose project name is derived from it.
+    /// The session the project is registered under: half of the Compose
+    /// project name, and what tells two projects' slots apart.
+    pub session: String,
+    /// Slot identifier; the other half.
     pub slot: String,
     pub role: Role,
     /// The stack image for the agent container.
@@ -148,11 +151,36 @@ pub fn generate(plan: &Plan, dialect: &Dialect) -> Result<String, ComposeError> 
     Ok(serde_yaml_ng::to_string(&document).expect("the document serialises"))
 }
 
-/// The Compose project name for a slot: stable across the three profiles,
-/// which is what keeps the project's services up between them. Compose
-/// refuses anything but lowercase letters, digits, `-` and `_`.
-pub fn project_name(slot: &str) -> Result<String, ComposeError> {
-    let mut name: String = slot
+/// The Compose project name: the **session** and the slot, in that order.
+///
+/// Stable across the three profiles, which is what keeps the project's
+/// services up between them. Compose refuses anything but lowercase letters,
+/// digits, `-` and `_`.
+///
+/// The session is in it because the slot alone is not unique. Measured on
+/// 2026-09-16: `test-nunki` and `notes-api` both had a slot called `one`, so
+/// both were the Compose project `nunki-one` — one set of containers, one
+/// network, one harness volume holding both projects' sessions. Starting a
+/// mission on either would have recreated the other's containers under a
+/// running agent, and each HQ's own `locks/one` would have said the slot was
+/// free. The session comes first so that `docker ps` groups a project's
+/// containers together, which is the reading that was impossible before.
+pub fn project_name(session: &str, slot: &str) -> Result<String, ComposeError> {
+    // The slot is judged on its own, as it was before the session joined it:
+    // prefixed, a slot named `_1` or `///` would be legal for Compose by the
+    // session's grace rather than by being a usable name, and `///` would
+    // have stopped being refused at all.
+    let slot = legal(slot).ok_or_else(|| ComposeError::SlotName(slot.to_string()))?;
+    let session = legal(short(session)).ok_or_else(|| ComposeError::SlotName(slot.clone()))?;
+    Ok(format!("nunki-{session}-{slot}"))
+}
+
+/// A name Compose accepts, or nothing: lowercase letters, digits, `-` and
+/// `_`, starting on a letter or a digit — "must consist only of lowercase
+/// alphanumeric characters, hyphens, and underscores as well as start with a
+/// letter or number", measured.
+fn legal(part: &str) -> Option<String> {
+    let mut name: String = part
         .to_ascii_lowercase()
         .chars()
         .map(|c| {
@@ -166,10 +194,20 @@ pub fn project_name(slot: &str) -> Result<String, ComposeError> {
     while name.starts_with(|c: char| !c.is_ascii_alphanumeric()) {
         name.remove(0);
     }
-    if name.is_empty() {
-        return Err(ComposeError::SlotName(slot.to_string()));
-    }
-    Ok(format!("nunki-{name}"))
+    (!name.is_empty()).then_some(name)
+}
+
+/// As much of a session as a name needs: the first eight characters.
+///
+/// A whole identifier would make every container name forty characters of
+/// hexadecimal, and `docker ps` is read by a human. Eight is what `nunki`
+/// already shows of a campaign's fingerprint, and the ledger holds the whole
+/// one — two sessions that agreed on eight characters would still have two
+/// homes and two HQs; they would share a Compose project, which is the thing
+/// this function exists to stop, so it is worth saying that it is a
+/// one-in-four-billion accident and not a design.
+fn short(session: &str) -> &str {
+    &session[..8.min(session.len())]
 }
 
 fn build(plan: &Plan, dialect: &Dialect) -> Result<Document, ComposeError> {
@@ -250,7 +288,7 @@ fn document(plan: &Plan, services: Mapping, networks: Mapping) -> Result<Documen
         Some(_) => return Err(ComposeError::ProjectVolumesShape("a scalar")),
     }
     Ok(Document {
-        name: project_name(&plan.slot)?,
+        name: project_name(&plan.session, &plan.slot)?,
         services,
         volumes,
         networks,
@@ -355,7 +393,9 @@ fn agent(plan: &Plan, dialect: &Dialect) -> Result<Service, ComposeError> {
         image: plan.image.clone(),
         user: Some(format!("{}:{}", plan.user.uid, plan.user.gid)),
         working_dir: Some(display(&plan.tree_at)),
-        network_mode: Some(dialect.netns_ref(&project_name(&plan.slot)?, FIREWALL_SERVICE)),
+        network_mode: Some(
+            dialect.netns_ref(&project_name(&plan.session, &plan.slot)?, FIREWALL_SERVICE),
+        ),
         cap_drop: vec!["ALL".to_string()],
         security_opt: vec!["no-new-privileges:true".to_string()],
         depends_on: Some(depends_on_healthy(FIREWALL_SERVICE)),

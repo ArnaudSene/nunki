@@ -72,7 +72,7 @@ pub fn run(
     if !file.is_file() {
         return Err(ExecError::NoProfile(slot.name.clone()));
     }
-    let compose_project = crate::compose::project_name(&slot.name)?;
+    let compose_project = crate::compose::project_name(&project.session(), &slot.name)?;
 
     let at = match on {
         On::Proof => {
@@ -117,7 +117,7 @@ pub fn refresh(project: &Project, slot: &Slot, engine: Arc<dyn Engine>) -> Resul
     if !file.is_file() {
         return Err(ExecError::NoProfile(slot.name.clone()));
     }
-    let compose_project = crate::compose::project_name(&slot.name)?;
+    let compose_project = crate::compose::project_name(&project.session(), &slot.name)?;
     let head = git::head(&slot.tree)?;
     refresh_at(&engine, &file, &compose_project, &head)
 }

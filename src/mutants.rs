@@ -383,7 +383,7 @@ pub fn campaign(
     let head = git::head(&slot.tree)?;
     let want = fingerprint(&slot.tree, touched)?;
     let file = crate::run::profile_path(project, &slot.name);
-    let compose_project = crate::compose::project_name(&slot.name)
+    let compose_project = crate::compose::project_name(&project.session(), &slot.name)
         .map_err(|e| MutantsError::Exec(crate::exec::ExecError::Compose(e)))?;
 
     if let Some(running) = read_running(dir)? {

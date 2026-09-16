@@ -27,6 +27,8 @@ fn services() -> Vec<Service> {
     }]
 }
 
+const SESSION: &str = "11111111-2222-4333-8444-555555555555";
+
 fn plan(role: Role) -> Plan {
     let mission_services = match role {
         Role::Coder => Vec::new(),
@@ -67,6 +69,7 @@ fn plan(role: Role) -> Plan {
     environment.insert("HQ_ROLE".to_string(), format!("{role:?}").to_lowercase());
 
     Plan {
+        session: "11111111-2222-4333-8444-555555555555".into(),
         slot: "demo-1".to_string(),
         role,
         image: "nunki/rust:1".to_string(),
@@ -367,20 +370,47 @@ fn the_project_name_is_stable_across_profiles_and_legal_for_compose() {
             doc["name"].as_str().unwrap().to_string()
         })
         .collect();
-    assert_eq!(names, vec!["nunki-demo-1"; 3]);
+    assert_eq!(names, vec!["nunki-11111111-demo-1"; 3]);
 
     // Compose refuses anything else: "must consist only of lowercase
     // alphanumeric characters, hyphens, and underscores as well as start
     // with a letter or number" — measured.
     assert_eq!(
-        project_name("Feat/Mission Resume").unwrap(),
-        "nunki-feat-mission-resume"
+        project_name(SESSION, "Feat/Mission Resume").unwrap(),
+        "nunki-11111111-feat-mission-resume"
     );
-    assert_eq!(project_name("_1").unwrap(), "nunki-1");
+    assert_eq!(project_name(SESSION, "_1").unwrap(), "nunki-11111111-1");
     assert!(matches!(
-        project_name("///"),
+        project_name(SESSION, "///"),
         Err(ComposeError::SlotName(_))
     ));
+}
+
+/// Two projects, two slots of the same name, two Compose projects.
+///
+/// Measured on 2026-09-16: `test-nunki` and `notes-api` both had a slot
+/// called `one`, and both were the Compose project `nunki-one` — one set of
+/// containers, one network, and one harness volume holding both projects'
+/// sessions. Starting a mission on either would have recreated the other's
+/// containers under a running agent, and each HQ's own `locks/one` would have
+/// said the slot was free.
+#[test]
+fn a_slot_of_the_same_name_in_another_session_is_another_compose_project() {
+    let one = project_name("b885dda8-689d-4f98-a5f0-093d68f58f6d", "one").unwrap();
+    let other = project_name("127b7deb-e2c6-42be-90eb-968793abaade", "one").unwrap();
+    assert_ne!(one, other);
+    assert_eq!(one, "nunki-b885dda8-one");
+    assert_eq!(other, "nunki-127b7deb-one");
+
+    // The session comes first, so `docker ps` groups a project's containers
+    // together — the reading that was impossible before.
+    assert!(one.starts_with("nunki-b885dda8-"), "{one}");
+
+    // And the same session with two slots is still two projects.
+    assert_ne!(
+        project_name("b885dda8-689d-4f98-a5f0-093d68f58f6d", "two").unwrap(),
+        one
+    );
 }
 
 #[test]

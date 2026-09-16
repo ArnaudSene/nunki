@@ -38,10 +38,14 @@ struct World {
     project: Project,
 }
 
+/// The project home's name is the session it is registered under, as it is
+/// on a real machine — and the Compose project carries it (SPEC 4.2).
+const SESSION: &str = "2ea1f0c6-7b44-4d1e-9c3f-8e5a0b2d7c19";
+
 impl World {
     fn new(with_run: bool) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let hq_root = dir.path().join("nunki").join(nunki::project::HQ_DIR);
+        let hq_root = dir.path().join(SESSION).join(nunki::project::HQ_DIR);
         for d in ["locks", "missions", "state/missions", "profiles"] {
             std::fs::create_dir_all(hq_root.join(d)).unwrap();
         }
@@ -117,7 +121,7 @@ fn pausing_freezes_the_agent_and_its_sidecar_and_nothing_else() {
     let services: Vec<String> = nunki::run::SERVICES.iter().map(|s| s.to_string()).collect();
     assert_eq!(
         fake.calls(),
-        vec![Call::Pause("nunki-one".into(), services)]
+        vec![Call::Pause("nunki-2ea1f0c6-one".into(), services)]
     );
 }
 
@@ -131,7 +135,10 @@ fn killing_is_a_kill_and_leaves_the_projects_services_alone() {
     gesture::kill(&world.project, "m1", engine).unwrap();
 
     let services: Vec<String> = nunki::run::SERVICES.iter().map(|s| s.to_string()).collect();
-    assert_eq!(fake.calls(), vec![Call::Kill("nunki-one".into(), services)]);
+    assert_eq!(
+        fake.calls(),
+        vec![Call::Kill("nunki-2ea1f0c6-one".into(), services)]
+    );
 }
 
 /// A gesture on a mission with no run says so rather than acting on whatever
@@ -298,7 +305,7 @@ fn resuming_lifts_the_hold_and_unfreezes() {
         fake.calls(),
         vec![
             Call::Liveness("cafe1234".into()),
-            Call::Unpause("nunki-one".into(), services)
+            Call::Unpause("nunki-2ea1f0c6-one".into(), services)
         ]
     );
     assert!(

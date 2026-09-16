@@ -191,8 +191,10 @@ fn live_a_fresh_project_ends_with_a_perimeter_that_holds() {
 fn a_probe_run_has_a_compose_project_of_its_own() {
     // A slot's services are levied once and kept between profiles; probing
     // under the slot's own name would take them down at the end of the check.
-    let checking = nunki::probe::compose_project("lot2").unwrap();
-    let running = nunki::compose::project_name("lot2").unwrap();
+    let checking =
+        nunki::probe::compose_project("11111111-2222-4333-8444-555555555555", "lot2").unwrap();
+    let running =
+        nunki::compose::project_name("11111111-2222-4333-8444-555555555555", "lot2").unwrap();
     assert_ne!(checking, running);
     assert!(checking.contains("check"), "{checking}");
 }

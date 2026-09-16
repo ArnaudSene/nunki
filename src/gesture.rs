@@ -234,7 +234,7 @@ pub fn resume(
         && engine.liveness(&handle.container)? == crate::engine::Liveness::Paused
     {
         let file = crate::run::profile_path(project, &state.slot);
-        let compose_project = crate::compose::project_name(&state.slot)?;
+        let compose_project = crate::compose::project_name(&project.session(), &state.slot)?;
         engine.unpause(&file, &compose_project, &crate::run::SERVICES)?;
     }
     Ok(lifted)
@@ -300,6 +300,6 @@ fn target(
         return Err(GestureError::NoRun(id.to_string()));
     }
     let file = crate::run::profile_path(project, &state.slot);
-    let compose_project = crate::compose::project_name(&state.slot)?;
+    let compose_project = crate::compose::project_name(&project.session(), &state.slot)?;
     Ok((state, file, compose_project))
 }

@@ -661,6 +661,17 @@ Trois règles, et une seule mécanique quelle que soit la forme de la mission :
    ceux-là sont au slot, et le lui donner serait lui tendre le cache de
    compilation ou les sessions du harnais.
 
+   **Le projet Compose porte la session, puis le slot** : `nunki-<session>-<slot>`,
+   les huit premiers caractères de l'identifiant que `sessions.json` donne au
+   dépôt (tranché par Arnaud le 2026-09-16). Le slot seul ne suffit pas :
+   mesuré ce jour-là, `test-nunki` et `notes-api` avaient tous deux un slot
+   `one` et étaient donc **le même projet Compose** — un seul jeu de
+   conteneurs, un seul réseau, un seul volume de harnais portant les sessions
+   des deux projets. Lancer une mission sur l'un aurait recréé les conteneurs
+   de l'autre sous un agent en train de travailler, et le `locks/one` de
+   chaque HQ aurait dit que le slot était libre. La session d'abord, pour
+   qu'un `docker ps` groupe les conteneurs d'un projet.
+
    La sécurité attaque ainsi exactement ce que l'intégrateur a validé quand
    il est passé, et sinon ce que le projet déclare comme façon normale de
    démarrer. Aucun agent ne décide comment on lance l'application, et il n'y

@@ -471,7 +471,8 @@ fn live_a_mission_is_driven_from_its_first_lot_to_verified() {
     .unwrap();
 
     let engine: Arc<dyn nunki::engine::Engine> = Arc::new(nunki::engine::docker::Docker::real());
-    let compose_project = nunki::compose::project_name(&slot.name).unwrap();
+    let compose_project =
+        nunki::compose::project_name(&world.project.session(), &slot.name).unwrap();
     let _ = engine.down(&file, &compose_project, true);
     engine.up(&file, &compose_project).unwrap();
     let go = || verify::verify(&world.project, "m1", engine.clone(), "docker").unwrap();

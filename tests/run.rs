@@ -744,7 +744,7 @@ fn live_a_mission_starts_and_its_run_is_read_back() {
 
     let engine: std::sync::Arc<dyn nunki::engine::Engine> =
         std::sync::Arc::new(nunki::engine::docker::Docker::real());
-    let compose_project = nunki::compose::project_name("one").unwrap();
+    let compose_project = nunki::compose::project_name(&project.session(), "one").unwrap();
     let profile = run::profile_path(&project, "one");
     let _ = engine.down(&profile, &compose_project, true);
 

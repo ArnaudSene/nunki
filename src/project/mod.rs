@@ -281,6 +281,20 @@ impl Project {
             .unwrap_or_else(|| self.home.clone())
     }
 
+    /// The session this project is registered under: the name of its home,
+    /// and the ledger's key (SPEC 4.1).
+    ///
+    /// What tells two projects apart everywhere a directory name would not.
+    /// Two repositories called `notes-api` have two sessions; two projects
+    /// whose slots are both called `one` have two homes, and this is what
+    /// says so.
+    pub fn session(&self) -> String {
+        self.home
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "session".to_string())
+    }
+
     pub fn name(&self) -> String {
         self.root
             .file_name()

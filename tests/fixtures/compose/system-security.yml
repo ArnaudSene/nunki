@@ -1,4 +1,4 @@
-name: nunki-demo-1
+name: nunki-11111111-demo-1
 services:
   firewall:
     image: nunki/firewall:1

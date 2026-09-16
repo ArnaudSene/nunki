@@ -1253,8 +1253,10 @@ pub fn harness_spawner(
     session: &str,
 ) -> crate::engine::spawn::ContainerSpawner {
     let file = crate::run::profile_path(project, slot);
-    let compose_project =
-        crate::compose::project_name(slot).unwrap_or_else(|_| format!("nunki-{slot}"));
+    // `project.session()` and not the `session` above: that one is the
+    // harness run's, and the Compose project is the nunki session's.
+    let compose_project = crate::compose::project_name(&project.session(), slot)
+        .unwrap_or_else(|_| format!("nunki-{}-{slot}", project.session()));
     crate::engine::spawn::ContainerSpawner::new(
         engine,
         file,
