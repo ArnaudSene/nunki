@@ -341,6 +341,23 @@ pub enum Progress {
     Lost(String),
 }
 
+/// What a campaign that has ended says, once `FILE` is written.
+///
+/// Two sentences and not one: with nothing alive there is nobody to triage,
+/// and "each needs one of the three outcomes" would then be a sentence about
+/// no one. Measured on `notes-api` on 2026-09-16, where a clean campaign
+/// still asked for outcomes it did not need — a line that says the same
+/// thing whatever happened is a line a reader learns to skip.
+pub fn ended(survivors: usize) -> String {
+    if survivors == 0 {
+        return format!("finished — no survivor in {FILE}: gate 7 has nothing left to ask");
+    }
+    format!(
+        "finished — {survivors} survivor(s) in {FILE}; each needs one of the three \
+         outcomes before gate 7 is green"
+    )
+}
+
 /// Start the campaign, or say where the one in flight is.
 ///
 /// Long by nature, so it is launched **detached** and watched like a run: one

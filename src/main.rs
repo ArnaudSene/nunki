@@ -1623,11 +1623,9 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                         Progress::Running { started_at, lines } => {
                             println!("running since {started_at} — {lines} line(s) so far")
                         }
-                        Progress::Finished { survivors } => println!(
-                            "finished — {survivors} survivor(s) in {}; each needs one of \
-                             the three outcomes before gate 7 is green",
-                            nunki::mutants::FILE
-                        ),
+                        Progress::Finished { survivors } => {
+                            println!("{}", nunki::mutants::ended(survivors))
+                        }
                         Progress::Overrun { minutes } => {
                             eprintln!(
                                 "nunki: the campaign passed its {minutes}-minute deadline and was stopped"
