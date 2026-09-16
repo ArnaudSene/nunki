@@ -34,9 +34,16 @@ use super::{
 ///
 /// What it turns off is what the harness would otherwise add to a commit
 /// message of its own accord: the `Co-Authored-By` trailer and the
-/// session link. A commit's author already says which role wrote it
+/// session link. A commit's author says which role wrote it
 /// (`nunki coder <coder@nunki.local>`), and the message's job is to say
 /// what changed and why it had to.
+///
+/// That the author says so is not a given, and was not one when this was
+/// written: `nunki` set no identity at all until 2026-09-16, and a coder
+/// committed under the identity a previous mission's integrator had left in
+/// the slot's config. It is `run.rs` that makes the line true, in the run's
+/// environment — and turning the trailer off is only worth anything because
+/// it does.
 ///
 /// `role.rs` asks the agent for the same thing, and that is worth what
 /// the agent's care is worth; this is the half the agent cannot get
