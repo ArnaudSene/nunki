@@ -246,11 +246,14 @@ fn open_pull_request(
              pull requests on"
         ));
     };
-    let Some(token) = crate::forge::token(&project.hq_root) else {
+    let Some(token) = crate::forge::token(&project.nunki_home()) else {
         return by_hand(format!(
             "no forge credential at {} — a GitHub token that can open pull requests on \
              {}/{}, and nunki opens it itself",
-            project.hq_root.join(crate::forge::TOKEN_FILE).display(),
+            project
+                .nunki_home()
+                .join(crate::forge::TOKEN_FILE)
+                .display(),
             repo.owner,
             repo.name
         ));

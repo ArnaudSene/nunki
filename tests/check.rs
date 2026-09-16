@@ -616,11 +616,38 @@ fn on_github(dir: &Path, remote: &str) -> Project {
 }
 
 fn with_token(project: &Project) {
+    let at = project.nunki_home();
+    std::fs::create_dir_all(&at).unwrap();
+    std::fs::write(at.join(nunki::forge::TOKEN_FILE), "tok-human\n").unwrap();
+}
+
+/// A forge credential belongs to the human, not to a project: it lives beside
+/// the accounts, under `~/.nunki/`, and two projects on the same forge share
+/// it. One left in a project's HQ is not read — that would be one copy of the
+/// one secret per project.
+#[test]
+fn the_credential_is_read_beside_the_accounts_and_not_in_a_projects_hq() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = on_github(dir.path(), "https://github.com/o/r.git");
     std::fs::write(
         project.hq_root.join(nunki::forge::TOKEN_FILE),
-        "tok-human\n",
+        "tok-in-the-hq\n",
     )
     .unwrap();
+
+    let mut report = Report::default();
+    nunki::check::forge_protection(&project, "http://127.0.0.1:9", &mut report);
+    let beside = project
+        .nunki_home()
+        .join(nunki::forge::TOKEN_FILE)
+        .display()
+        .to_string();
+    for (_, verdict) in forge_verdicts(&report) {
+        match verdict {
+            Verdict::NotChecked(why) => assert!(why.contains(&beside), "{why}"),
+            other => panic!("a token in a project's HQ is not the human's: {other:?}"),
+        }
+    }
 }
 
 fn forge_verdicts(report: &Report) -> Vec<(String, Verdict)> {
