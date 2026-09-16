@@ -1423,3 +1423,39 @@ fn a_given_session_is_resumed_and_none_starts_a_fresh_one() {
     assert_ne!(fresh, given);
     assert_ne!(run::session_for(None).0, fresh, "a fresh one each time");
 }
+
+/// The coder is told to stand in for what it cannot reach, because a gate
+/// that requires what nothing states grades an agent on a secret.
+///
+/// SPEC 4.4 has said "bouchonné, ou un composant local jetable" since the
+/// first day; the prompt had not. Measured on `notes-2` on 2026-09-16: the
+/// coder wrote a PostgreSQL store with no seam, the mutation campaign left
+/// five survivors nobody in that container could kill, and gate 7 spent all
+/// three attempts on a triage that could not be won.
+#[test]
+fn the_coder_is_told_to_mock_what_its_container_cannot_reach() {
+    let coder = role::prompt(Role::Coder);
+
+    assert!(
+        coder.contains("What you cannot reach, you stand in for"),
+        "{coder}"
+    );
+    assert!(
+        coder.contains("seam"),
+        "the rule names what to write against, not only what not to do: {coder}"
+    );
+    // The half that is not the coder's, named in the same breath, so the
+    // rule does not read as "test the database yourself".
+    assert!(coder.contains("is the integrator's"), "{coder}");
+    // And the escape hatch is closed where an agent would reach for it.
+    assert!(coder.contains("`#[ignore]`"), "{coder}");
+
+    // The other two roles are not told this: the integrator has the service,
+    // and the security agent commits nothing.
+    for other in [role::prompt(Role::Integrator), role::prompt(Role::Security)] {
+        assert!(
+            !other.contains("What you cannot reach, you stand in for"),
+            "{other}"
+        );
+    }
+}

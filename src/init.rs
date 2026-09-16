@@ -307,6 +307,16 @@ actually hold in this project.
   `nunki` reads it **inside** the block — between its heading and the next one —
   so a line left further down the file is one `nunki` will not see.
 
+## Infrastructure an agent cannot reach
+
+The coder's container has no database, no queue and no third-party API, and
+never will. Code that talks to one is written against a seam — a trait, a
+function, an interface — and proved with a stand-in behind it: the query
+built, the rows mapped, what an empty answer means. Nothing is left unproved
+because the service is absent, and no test is `#[ignore]`d to make a battery
+green. The real thing is the integrator's, against the service itself, in the
+system tests.
+
 ## Commit messages
 
 What changed and why it had to, and nothing about the tooling: no

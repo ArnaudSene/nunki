@@ -99,6 +99,12 @@ fn the_rules_it_writes_name_what_the_gates_require() {
     );
     // Not a gate, and said so in the pull request: the rules of the place are
     // where a house style lives, and this one is a house style.
+    // The same rule the coder's prompt carries: a project's rules say it
+    // too, for whoever reads them first.
+    assert!(
+        rules.contains("no database, no queue"),
+        "the rules say what an agent cannot reach, and what to do about it: {rules}"
+    );
     assert!(
         rules.contains("Co-Authored-By"),
         "the rules name the trailer they forbid rather than describe it: {rules}"
