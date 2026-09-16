@@ -538,12 +538,12 @@ pub fn forge_protection(project: &Project, api: &str, report: &mut Report) {
             ),
         );
     };
-    let Some(token) = token(&project.hq_root) else {
+    let Some(token) = token(&project.nunki_home()) else {
         return not_checked(
             report,
             format!(
                 "no forge credential at {} — without one nunki cannot ask the forge, and says so",
-                project.hq_root.join(TOKEN_FILE).display()
+                project.nunki_home().join(TOKEN_FILE).display()
             ),
         );
     };

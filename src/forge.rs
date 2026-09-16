@@ -28,7 +28,12 @@ use serde::Deserialize;
 /// which the binary never calls with anything but this.
 pub const API: &str = "https://api.github.com";
 
-/// The credential's file, under the project's HQ.
+/// The credential's file, under `~/.nunki/` and beside the accounts.
+///
+/// A forge credential belongs to the human and not to a project — two
+/// projects on the same forge are the same account — so it is kept once
+/// rather than copied into every project's HQ (decided by Arnaud on
+/// 2026-09-16, as the accounts were on 2026-09-10).
 pub const TOKEN_FILE: &str = "forge-token";
 
 #[derive(Debug, thiserror::Error)]
@@ -118,8 +123,8 @@ impl Opened {
 }
 
 /// The human's token, if they put one at the HQ. An empty file is no token.
-pub fn token(hq_root: &std::path::Path) -> Option<String> {
-    std::fs::read_to_string(hq_root.join(TOKEN_FILE))
+pub fn token(nunki_home: &std::path::Path) -> Option<String> {
+    std::fs::read_to_string(nunki_home.join(TOKEN_FILE))
         .ok()
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty())

@@ -551,11 +551,9 @@ impl World {
     }
 
     fn with_token(&self) {
-        std::fs::write(
-            self.project.hq_root.join(nunki::forge::TOKEN_FILE),
-            "tok-human\n",
-        )
-        .unwrap();
+        let at = self.project.nunki_home();
+        std::fs::create_dir_all(&at).unwrap();
+        std::fs::write(at.join(nunki::forge::TOKEN_FILE), "tok-human\n").unwrap();
     }
 
     fn pr_says(&self, text: &str) {
