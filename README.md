@@ -145,9 +145,12 @@ nunki mission archive m1    # close it: the folder and state move under archive/
 
 `nunki push` opens the pull request when a GitHub token that may do so sits at
 `~/.nunki/forge-token`, beside the accounts — it is yours, not a project's,
-and every project on the same forge reads it. Without one it pushes the
-branch and hands
-you the URL.
+and every project on the same forge reads it. Without one it pushes the branch
+and hands you the address to open the pull request at yourself.
+
+GitHub is the one forge `nunki` has an adapter for. A remote on another one is
+**said to be on another one**: the branch is still pushed, and no address is
+guessed at from a shape that is GitHub's.
 
 ## Vocabulary
 

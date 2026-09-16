@@ -496,7 +496,7 @@ fn walk(root: &Path, visit: &mut impl FnMut(&Path)) {
 /// a profile lifted and taken down. Without a credential it makes no network
 /// call at all.
 pub fn forge_protection(project: &Project, api: &str, report: &mut Report) {
-    use crate::forge::{Protection, Repo, TOKEN_FILE, protection, token};
+    use crate::forge::{Protection, TOKEN_FILE, token};
     use crate::project::{CONFIG_FILE, ForgeProtection};
 
     let not_checked = |report: &mut Report, why: String| {
@@ -529,11 +529,12 @@ pub fn forge_protection(project: &Project, api: &str, report: &mut Report) {
             ),
         );
     };
-    let Some(repo) = Repo::of_remote(&remote) else {
+    let Some((forge, repo)) = crate::forge::of_remote_at(&remote, api) else {
         return not_checked(
             report,
             format!(
-                "the remote is not on GitHub ({}), and GitHub is the only forge nunki can ask",
+                "the remote is on a forge nunki has no adapter for ({}): GitHub is the one it \
+                 can ask",
                 remote.trim()
             ),
         );
@@ -549,17 +550,21 @@ pub fn forge_protection(project: &Project, api: &str, report: &mut Report) {
     };
 
     for branch in &project.config.protected_branches {
-        let verdict = match protection(api, &token, &repo, branch) {
+        let verdict = match forge.protection(&token, &repo, branch) {
             Ok(Protection::Protected) => Verdict::Green(format!(
-                "GitHub reports {branch} protected on {}/{}",
-                repo.owner, repo.name
+                "{} reports {branch} protected on {}/{}",
+                forge.name(),
+                repo.owner,
+                repo.name
             )),
             Ok(Protection::Unprotected) => Verdict::Red(format!(
-                "GitHub reports {branch} unprotected on {}/{}: the forge would accept a push \
-                 to it, and gate 2 is the only guard left (SPEC 4.1 bis). Protect it on \
-                 GitHub — on a private repository that needs a paid plan — or, if you hold \
-                 the rule yourself, declare `forge_protection: by_hand` in {CONFIG_FILE}",
-                repo.owner, repo.name
+                "{} reports {branch} unprotected on {}/{}: the forge would accept a push \
+                 to it, and gate 2 is the only guard left (SPEC 4.1 bis). Protect it on the \
+                 forge — on a private GitHub repository that needs a paid plan — or, if you \
+                 hold the rule yourself, declare `forge_protection: by_hand` in {CONFIG_FILE}",
+                forge.name(),
+                repo.owner,
+                repo.name
             )),
             Ok(Protection::NoSuchBranch) => Verdict::NotChecked(format!(
                 "{branch} does not exist on {}/{}, so there is nothing to protect yet",

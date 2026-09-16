@@ -794,7 +794,8 @@ fn forge_protection_reads_from_the_file_and_defaults_to_the_forge() {
     assert_eq!(by_hand.forge_protection, ForgeProtection::ByHand);
 }
 
-/// A remote off GitHub is named as such, and no forge is asked.
+/// A remote on a forge nunki has no adapter for is named as such, and no
+/// forge is asked.
 #[test]
 fn a_remote_off_github_is_not_asked_and_says_why() {
     let dir = tempfile::tempdir().unwrap();
@@ -805,7 +806,10 @@ fn a_remote_off_github_is_not_asked_and_says_why() {
     nunki::check::forge_protection(&project, "http://127.0.0.1:9", &mut report);
     for (_, verdict) in forge_verdicts(&report) {
         match verdict {
-            Verdict::NotChecked(why) => assert!(why.contains("not on GitHub"), "{why}"),
+            Verdict::NotChecked(why) => {
+                assert!(why.contains("no adapter for"), "{why}");
+                assert!(why.contains("git@gitlab.com:team/thing.git"), "{why}");
+            }
             other => panic!("{other:?}"),
         }
     }
