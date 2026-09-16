@@ -193,6 +193,12 @@ pub fn ensure(project: &Project, id: &str, exe: &Path) -> Result<Ensured, Monito
 pub enum Next {
     /// Look again at the next wake.
     Continue,
+    /// Run the mutation campaign gate 7 is waiting on, then look again.
+    ///
+    /// The one thing `verify` asks for that is neither a run nor a wait: the
+    /// campaign is `nunki`'s to start, not a human's to remember
+    /// (SPEC 4.4, gate 7).
+    RunCampaign,
     /// Stop, and say why.
     Exit(String),
 }
@@ -224,6 +230,11 @@ pub fn after_verify(result: &Result<Vec<Step>, VerifyError>) -> Next {
             Some(Step::GateUnplayable { why, .. }) => {
                 Next::Exit(format!("a gate could not be played: {why}"))
             }
+            // The exception to the paragraph above: this gate's obstacle is
+            // one `nunki` removes itself, so the tick that meets it runs the
+            // campaign rather than handing the mission back for a verb a
+            // human would have typed.
+            Some(Step::CampaignOwed { .. }) => Next::RunCampaign,
             Some(
                 Step::Launched { .. }
                 | Step::Saving { .. }
@@ -241,6 +252,25 @@ pub fn after_verify(result: &Result<Vec<Step>, VerifyError>) -> Next {
         | Err(VerifyError::RunInProgress { .. })
         | Err(VerifyError::Spared { .. }) => Next::Continue,
         Err(e) => Next::Exit(format!("verify failed, and a human should look: {e}")),
+    }
+}
+
+/// What a campaign that has just been looked at asks of the monitor.
+///
+/// Pure, like [`after_verify`], and for the same reason: a campaign that
+/// overran or vanished is a human's to look at, and a monitor that went on
+/// would start the same campaign at every tick against the same wall.
+pub fn after_campaign(progress: &crate::mutants::Progress) -> Next {
+    use crate::mutants::Progress;
+    match progress {
+        Progress::Started { .. }
+        | Progress::Running { .. }
+        | Progress::Fresh { .. }
+        | Progress::Finished { .. } => Next::Continue,
+        Progress::Overrun { minutes } => Next::Exit(format!(
+            "the mutation campaign passed its {minutes}-minute deadline and was stopped"
+        )),
+        Progress::Lost(why) => Next::Exit(format!("the mutation campaign was lost: {why}")),
     }
 }
 
@@ -340,8 +370,20 @@ fn watch(project: &Project, id: &str, engine: Arc<dyn Engine>, engine_bin: &str)
             }
             Err(e) => say(&format!("verify: {e}")),
         }
-        if let Next::Exit(why) = after_verify(&result) {
-            return why;
+        match after_verify(&result) {
+            Next::Exit(why) => return why,
+            // Gate 7 is owed a campaign: run it here, and let the next tick
+            // read it back. It launches detached, so this returns at once.
+            Next::RunCampaign => match crate::verify::campaign(project, id, engine.clone()) {
+                Ok(progress) => {
+                    say(&format!("mutation campaign: {progress:?}"));
+                    if let Next::Exit(why) = after_campaign(&progress) {
+                        return why;
+                    }
+                }
+                Err(e) => return format!("the mutation campaign could not be run: {e}"),
+            },
+            Next::Continue => {}
         }
         let wake = match Store::open(&project.hq_root).and_then(|store| store.load(id)) {
             Ok(state) => next_wake(project, &state, crate::state::now_secs()),

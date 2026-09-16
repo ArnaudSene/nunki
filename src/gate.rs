@@ -176,6 +176,31 @@ impl Report {
         })
     }
 
+    /// The campaign gate 7 has no usable one of — **when that is the only
+    /// gate nobody could play**.
+    ///
+    /// Told apart from [`Self::unplayed`] because this is the one obstacle
+    /// `nunki` can clear itself: gate 7 is unplayed when no campaign has run
+    /// or when the one on file ran on other content, and running one answers
+    /// both. Every other unplayed gate waits on a human (SPEC 4.4).
+    ///
+    /// Only when it is alone: a profile that will not come up leaves gate 6
+    /// unplayed too, and spending an hour of mutation in front of a wall
+    /// nothing will move is an hour spent for nothing.
+    pub fn campaign_owed(&self) -> Option<String> {
+        let mut owed = None;
+        for outcome in &self.outcomes {
+            let Decision::Unplayed(why) = &outcome.decision else {
+                continue;
+            };
+            if outcome.gate != Gate::Mutation {
+                return None;
+            }
+            owed = Some(why.clone());
+        }
+        owed
+    }
+
     pub fn passed(&self) -> bool {
         self.failure().is_none()
     }
