@@ -84,7 +84,7 @@ pub fn mission_profile(
     std::fs::write(&file, crate::compose::generate(&plan, engine.dialect())?)
         .map_err(|e| ProbeError::Io(file.clone(), e))?;
 
-    let compose_project = compose_project(&slot.name)?;
+    let compose_project = compose_project(&project.session(), &slot.name)?;
     let _ = engine.down(&file, &compose_project, true);
     engine.up(&file, &compose_project)?;
 
@@ -199,7 +199,7 @@ pub fn system_profile(
     std::fs::write(&file, crate::compose::generate(&plan, engine.dialect())?)
         .map_err(|e| ProbeError::Io(file.clone(), e))?;
 
-    let compose_project = compose_project(&slot.name)?;
+    let compose_project = compose_project(&project.session(), &slot.name)?;
     let _ = engine.down(&file, &compose_project, true);
     if let Err(e) = engine.up(&file, &compose_project) {
         let _ = engine.down(&file, &compose_project, true);
@@ -415,6 +415,7 @@ fn plan(
     let (uid, gid) = image::host_ids();
 
     Ok(Plan {
+        session: project.session(),
         slot: format!("{}-check", slot.name),
         role: Role::Coder,
         image: images.agent.clone(),
@@ -445,8 +446,8 @@ pub const PROBER_SERVICE: &str = "prober";
 /// kept between profiles (SPEC 4.2); probing under the slot's own name would
 /// take them down at the end of the check, along with the migrations and
 /// fixtures a mission had left in them.
-pub fn compose_project(slot: &str) -> Result<String, crate::compose::ComposeError> {
-    crate::compose::project_name(&format!("{slot}-check"))
+pub fn compose_project(session: &str, slot: &str) -> Result<String, crate::compose::ComposeError> {
+    crate::compose::project_name(session, &format!("{slot}-check"))
 }
 
 /// The prober, declared the way a project declares a service so that it goes

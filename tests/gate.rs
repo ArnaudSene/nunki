@@ -808,7 +808,7 @@ fn live_the_battery_is_the_stacks_mounted_one_and_an_absent_one_is_red() {
 
     let engine: std::sync::Arc<dyn nunki::engine::Engine> =
         std::sync::Arc::new(nunki::engine::docker::Docker::real());
-    let compose_project = nunki::compose::project_name(&slot.name).unwrap();
+    let compose_project = nunki::compose::project_name(&project.session(), &slot.name).unwrap();
     // The profile as `nunki` writes it: the battery mounted when it exists and
     // not otherwise — a bind mount of a missing file would be a directory.
     let lift = |with_battery: bool| {

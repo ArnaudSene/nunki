@@ -2125,8 +2125,10 @@ fn harness_for(
     let engine: std::sync::Arc<dyn nunki::engine::Engine> =
         std::sync::Arc::new(nunki::engine::docker::Docker::real());
     let file = nunki::run::profile_path(project, slot);
-    let compose_project =
-        nunki::compose::project_name(slot).unwrap_or_else(|_| format!("nunki-{slot}"));
+    // The nunki session's, not the `session` above — that one is the
+    // harness run's.
+    let compose_project = nunki::compose::project_name(&project.session(), slot)
+        .unwrap_or_else(|_| format!("nunki-{}-{slot}", project.session()));
     let mut spawner = nunki::engine::spawn::ContainerSpawner::new(
         engine,
         file,

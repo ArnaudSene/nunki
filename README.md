@@ -300,8 +300,11 @@ docker volume ls --filter name=nunki-           # a slot's caches and harness st
 ```
 
 Remove what those two list. A slot's containers belong to a Compose project
-named `nunki-<slot>`; `nunki slot rm` takes them down with the slot, and
-`nunki slot reset` clears the volumes while keeping the clone.
+named `nunki-<session>-<slot>`, the session being the first eight characters
+of the one `~/.nunki/sessions.json` gives this repository — two projects with
+a slot of the same name are two Compose projects, two networks and two sets
+of volumes. `nunki slot rm` takes them down with the slot, and `nunki slot
+reset` clears the volumes while keeping the clone.
 
 Finally, the binary and the accounts, once no project uses them:
 

@@ -351,7 +351,7 @@ pub fn launch(l: &Launching) -> Result<Launched, RunError> {
     if let Some(dir) = file.parent() {
         std::fs::create_dir_all(dir).map_err(|e| RunError::Io(dir.to_path_buf(), e))?;
     }
-    let compose_project = crate::compose::project_name(&slot.name)?;
+    let compose_project = crate::compose::project_name(&project.session(), &slot.name)?;
 
     // Step 2. The switch, read from the file that is up — the one that names
     // the services to remove. `stop` and never `down`: `down` would take the
@@ -621,6 +621,7 @@ pub fn plan(
     };
 
     Ok(Plan {
+        session: project.session(),
         slot: slot.name.clone(),
         role,
         image: images.agent.clone(),

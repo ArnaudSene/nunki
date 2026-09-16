@@ -144,7 +144,7 @@ fn live_a_proof_runs_on_the_commit_and_never_on_what_the_agent_left_behind() {
     .unwrap();
 
     let engine: Arc<dyn nunki::engine::Engine> = Arc::new(nunki::engine::docker::Docker::real());
-    let compose_project = nunki::compose::project_name(&slot.name).unwrap();
+    let compose_project = nunki::compose::project_name(&project.session(), &slot.name).unwrap();
     let _ = engine.down(&file, &compose_project, true);
     engine.up(&file, &compose_project).unwrap();
 

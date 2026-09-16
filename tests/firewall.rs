@@ -82,6 +82,7 @@ fn live_the_firewall_holds() {
     .unwrap();
 
     let plan = Plan {
+        session: "11111111-2222-4333-8444-555555555555".into(),
         slot: SLOT.to_string(),
         role: Role::Coder,
         // Busybox tools are all the probes need.
@@ -110,7 +111,7 @@ fn live_the_firewall_holds() {
     let file = dir.path().join("mission.yml");
     std::fs::write(&file, generate(&plan, &dialect()).unwrap()).unwrap();
 
-    let project = project_name(SLOT).unwrap();
+    let project = project_name("11111111-2222-4333-8444-555555555555", SLOT).unwrap();
     down(&file, &project);
     let up = compose(&file, &project, &["up", "-d", "--wait"]);
     assert!(
@@ -248,6 +249,7 @@ fn live_a_declared_service_is_reachable_and_nothing_else_is() {
     .unwrap();
 
     let plan = Plan {
+        session: "11111111-2222-4333-8444-555555555555".into(),
         slot: "fwlivesys".to_string(),
         role: Role::Integrator,
         image: "alpine:3.20".to_string(),
@@ -270,7 +272,7 @@ fn live_a_declared_service_is_reachable_and_nothing_else_is() {
 
     let file = dir.path().join("system.yml");
     std::fs::write(&file, generate(&plan, &dialect()).unwrap()).unwrap();
-    let project = project_name("fwlivesys").unwrap();
+    let project = project_name("11111111-2222-4333-8444-555555555555", "fwlivesys").unwrap();
     down(&file, &project);
     let up = compose(&file, &project, &["up", "-d", "--wait"]);
     assert!(

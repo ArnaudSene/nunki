@@ -199,7 +199,7 @@ pub fn start(
 
     let session = SessionId(format!("nunki-app-{}", crate::role::slug(role)));
     let log = runs_dir.join(format!("{}.log", session.0));
-    let compose_project = crate::compose::project_name(&slot.name)?;
+    let compose_project = crate::compose::project_name(&project.session(), &slot.name)?;
     let spawner = crate::engine::spawn::ContainerSpawner::new(
         engine,
         crate::run::profile_path(project, &slot.name),

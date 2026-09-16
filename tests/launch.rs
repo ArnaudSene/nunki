@@ -376,7 +376,8 @@ fn live_the_services_survive_a_switch_and_the_application_starts_in_the_profile(
 
     let docker = Docker::real();
     let slot_name = "launchlive";
-    let compose_project = nunki::compose::project_name(slot_name).unwrap();
+    let compose_project =
+        nunki::compose::project_name("11111111-2222-4333-8444-555555555555", slot_name).unwrap();
 
     let dir = tempfile::tempdir().unwrap();
     let context = dir.path().join("firewall");
@@ -441,6 +442,7 @@ fn live_the_services_survive_a_switch_and_the_application_starts_in_the_profile(
         .unwrap();
         let (uid, gid) = nunki::image::host_ids();
         Plan {
+            session: "11111111-2222-4333-8444-555555555555".into(),
             slot: slot_name.to_string(),
             role,
             image: "alpine:3.20".to_string(),
@@ -653,7 +655,8 @@ fn live_the_security_profile_writes_only_what_the_stack_declared() {
 
     let docker = Docker::real();
     let slot_name = "seclive";
-    let compose_project = nunki::compose::project_name(slot_name).unwrap();
+    let compose_project =
+        nunki::compose::project_name("11111111-2222-4333-8444-555555555555", slot_name).unwrap();
     let dir = tempfile::tempdir().unwrap();
 
     let context = dir.path().join("firewall");
@@ -724,6 +727,7 @@ fn live_the_security_profile_writes_only_what_the_stack_declared() {
         )
         .unwrap();
         let plan = Plan {
+            session: "11111111-2222-4333-8444-555555555555".into(),
             slot: slot_name.to_string(),
             role: Role::Security,
             image: image.to_string(),

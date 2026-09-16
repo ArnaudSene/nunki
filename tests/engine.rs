@@ -340,7 +340,8 @@ fn a_sidecar_that_never_becomes_healthy_fails_the_profile() {
 fn live_a_profile_switch_keeps_the_projects_services() {
     let docker = Docker::real();
     let slot = "engineswitch";
-    let project = nunki::compose::project_name(slot).unwrap();
+    let project =
+        nunki::compose::project_name("11111111-2222-4333-8444-555555555555", slot).unwrap();
 
     let dir = tempfile::tempdir().unwrap();
     let context = dir.path().join("firewall");
@@ -458,6 +459,7 @@ fn write_profile(dir: &Path, slot: &str, role: nunki::harness::Role, name: &str)
     .unwrap();
 
     let plan = Plan {
+        session: "11111111-2222-4333-8444-555555555555".into(),
         slot: slot.to_string(),
         role,
         image: "alpine:3.20".to_string(),
@@ -533,7 +535,8 @@ fn live_a_run_lives_in_the_container_and_is_signalled_from_inside_it() {
     );
 
     let slot = "enginerun";
-    let project = nunki::compose::project_name(slot).unwrap();
+    let project =
+        nunki::compose::project_name("11111111-2222-4333-8444-555555555555", slot).unwrap();
     let profile = write_profile(dir.path(), slot, nunki::harness::Role::Coder, "mission.yml");
 
     let docker: Arc<dyn Engine> = Arc::new(Docker::real());
@@ -702,7 +705,8 @@ fn a_signal_that_fails_is_never_an_empty_sentence() {
 fn live_a_frozen_container_is_not_a_running_one() {
     let docker = Docker::real();
     let slot = "gesturelive";
-    let project = nunki::compose::project_name(slot).unwrap();
+    let project =
+        nunki::compose::project_name("11111111-2222-4333-8444-555555555555", slot).unwrap();
 
     let dir = tempfile::tempdir().unwrap();
     let context = dir.path().join("firewall");

@@ -261,7 +261,7 @@ fn live_a_campaign_is_launched_watched_and_read_back() {
 
     let engine: std::sync::Arc<dyn nunki::engine::Engine> =
         std::sync::Arc::new(nunki::engine::docker::Docker::real());
-    let compose_project = nunki::compose::project_name(&slot.name).unwrap();
+    let compose_project = nunki::compose::project_name(&project.session(), &slot.name).unwrap();
     let _ = engine.down(&file, &compose_project, true);
     engine.up(&file, &compose_project).unwrap();
 
