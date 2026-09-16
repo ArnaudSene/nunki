@@ -859,17 +859,12 @@ fn main() -> ExitCode {
                             nunki::verify::Step::CampaignOwed { role, why } => {
                                 owed = true;
                                 println!("campaign  a {role:?} gate waits on one — {why}");
-                                match nunki::verify::campaign(
-                                    &project,
-                                    &mission,
-                                    engine.clone(),
-                                ) {
+                                match nunki::verify::campaign(&project, &mission, engine.clone()) {
                                     Ok(progress) => println!(
                                         "          {}",
                                         match progress {
                                             nunki::mutants::Progress::Started { .. } =>
-                                                "started; it runs detached, and `nunki verify`                                                  again reads it back"
-                                                    .to_string(),
+                                                nunki::mutants::started(&mission),
                                             other => format!("{other:?}"),
                                         }
                                     ),

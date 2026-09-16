@@ -522,3 +522,27 @@ fn a_campaign_with_no_survivor_asks_for_no_outcome() {
         assert!(said.contains(mutants::FILE), "{said}");
     }
 }
+
+/// Every sentence this module hands a human is one line, with no run of
+/// spaces in the middle of it.
+///
+/// Measured on 2026-09-16: `nunki verify` printed
+///
+/// ```text
+/// started; it runs detached, and `nunki verify`                    again reads it back
+/// ```
+///
+/// A multi-line string literal in `main.rs` had been joined by `cargo fmt`,
+/// which kept the continuation's indentation **inside** the string. The five
+/// gates were green — formatting a literal is not a warning, and no test read
+/// the sentence. This one does.
+#[test]
+fn what_a_campaign_says_is_a_sentence_and_not_a_layout() {
+    for said in [mutants::started("m1"), mutants::ended(0), mutants::ended(3)] {
+        assert!(!said.contains("  "), "two spaces in a row: {said:?}");
+        assert!(!said.contains('\n'), "a line break: {said:?}");
+        assert_eq!(said.trim(), said, "space at either end: {said:?}");
+    }
+    // And it names the mission, because the verb it suggests takes one.
+    assert!(mutants::started("m1").contains("nunki verify m1"));
+}
