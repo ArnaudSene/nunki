@@ -676,3 +676,42 @@ fn the_campaign_does_not_mutate_a_binarys_entry_point() {
         "a mutants.toml excluding the file would do the same damage:\n{script}"
     );
 }
+
+/// The campaign empties its output directory before it runs, so that what it
+/// reports is what **it** found.
+///
+/// Measured on 2026-09-16, on a campaign replayed over content that had not
+/// changed. The tool said:
+///
+/// ```text
+/// 51 mutants tested in 58s: 39 caught, 12 unviable
+/// ```
+///
+/// No survivor at all. `nunki` read six, from the `missed.txt` the campaign
+/// before it had left in the same directory — `--output` does not empty what
+/// it is given. A gate stayed red on mutants that were dead, which is the
+/// worst way for a gate to be wrong: it accuses, and the accusation is stale.
+#[test]
+fn the_campaign_clears_its_output_before_it_writes_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    nunki::init::init(&root, &dir.path().join("nunki"), &["rust".to_string()]).unwrap();
+
+    let script = std::fs::read_to_string(home(&root).join("stacks/rust/mutation.sh")).unwrap();
+    let out = script
+        .lines()
+        .position(|l| l.trim_start().starts_with("rm -rf \"$out\""))
+        .expect("the campaign clears its output directory");
+    let made = script
+        .lines()
+        .position(|l| l.trim_start().starts_with("mkdir -p \"$out\""))
+        .expect("and creates it again");
+    assert!(out < made, "cleared before it is created, not after");
+
+    let ran = script
+        .lines()
+        .position(|l| l.trim_start().starts_with("cargo mutants"))
+        .expect("the campaign calls cargo mutants");
+    assert!(made < ran, "created before the tool writes into it");
+}

@@ -458,9 +458,19 @@ if [ -z "$files" ]; then
 fi
 
 out="target/mutants-$campaign"
+# Cleared first, then created. `--output` does not empty the directory it is
+# given: `missed.txt` stays exactly as the campaign before it left it, and a
+# campaign that kills everything reads back the previous one's survivors.
+# Measured on 2026-09-16 — the tool said "51 mutants tested: 39 caught, 12
+# unviable", no survivor at all, and six were read from the file beside it,
+# so a gate stayed red on mutants that were dead. It only bites when the same
+# campaign id comes round twice, which is the same content twice: rare, and
+# exactly the case a human re-runs by hand when something looked wrong.
+#
 # The parent has to exist: `--output` creates its own directory and not the
 # path above it, and a clean copy of HEAD that has never been built has no
 # `target/` at all ("create output parent directory", measured).
+rm -rf "$out"
 mkdir -p "$out"
 
 # A campaign that finds survivors exits non-zero — 2, measured on
