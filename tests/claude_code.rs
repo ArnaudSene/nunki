@@ -444,10 +444,23 @@ fn a_role_is_allowed_the_tools_its_work_needs_and_the_prompt_survives() {
     // form swallows the prompt that follows it — measured, and the run died
     // on "Input must be provided either through stdin or as a prompt
     // argument".
-    assert_eq!(guards.args.len(), 1, "{:?}", guards.args);
-    assert!(
-        guards.args[0].starts_with("--allowedTools="),
+    // Asserted as the property rather than by counting the arguments: the
+    // guards carry the invocation's settings too since 2026-09-16, and a
+    // count would go red for a reason that has nothing to do with the trap
+    // it was written for.
+    assert_eq!(
+        guards
+            .args
+            .iter()
+            .filter(|a| a.starts_with("--allowedTools"))
+            .count(),
+        1,
         "{:?}",
+        guards.args
+    );
+    assert!(
+        guards.args.iter().any(|a| a.starts_with("--allowedTools=")),
+        "the separated form would swallow the prompt: {:?}",
         guards.args
     );
     assert_eq!(
@@ -756,4 +769,51 @@ fn the_coder_is_told_the_line_that_ends_its_lot() {
     integrator.role = Role::Integrator;
     let cmd = adapter().command(&integrator, &GuardSetup::default(), &exposure);
     assert!(!cmd.args.last().unwrap().contains("Lot:"));
+}
+
+/// The harness adds no attribution of its own: nunki turns it off at
+/// invocation, where the agent cannot get it wrong.
+///
+/// `role.rs` asks for the same thing, and asking is worth what the agent's
+/// care is worth. This is the other half — and it was the missing half:
+/// `notes-api`'s integrator signed `Co-Authored-By: Claude Sonnet 5` on
+/// 2026-09-16 while doing everything else it was told.
+#[test]
+fn the_harness_is_told_to_sign_nothing_and_says_it_once() {
+    use nunki::harness::Harness;
+
+    let nunki = ClaudeCode::new(Config::default(), Box::new(LocalSpawner));
+    for role in [Role::Coder, Role::Integrator, Role::Security] {
+        let guards = nunki.guards(role);
+        let line = guards.args.join(" ");
+
+        // One `--settings`, and one only: two of them and the CLI reads the
+        // last, measured in the agent image on 2026-09-16 — a second flag
+        // added elsewhere would silently take this one's place.
+        assert_eq!(
+            guards.args.iter().filter(|a| *a == "--settings").count(),
+            1,
+            "{line}"
+        );
+
+        let json = guards
+            .args
+            .iter()
+            .skip_while(|a| *a != "--settings")
+            .nth(1)
+            .unwrap_or_else(|| panic!("{line}"));
+        let settings: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert_eq!(settings["attribution"]["commitTrailers"], false, "{json}");
+        assert_eq!(settings["attribution"]["sessionUrl"], false, "{json}");
+        // Its deprecated ancestor, for an older CLI in an older image.
+        assert_eq!(settings["includeCoAuthoredBy"], false, "{json}");
+
+        // And it reaches the command line the run is launched with.
+        let cmd = nunki.command(
+            &request(false),
+            &guards,
+            &Exposure::SystemPromptFile("/r.md".into()),
+        );
+        assert!(cmd.display().contains(json), "{}", cmd.display());
+    }
 }

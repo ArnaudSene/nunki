@@ -24,6 +24,36 @@ use super::{
     RunHandle, RunRequest, RunState, Usage,
 };
 
+/// The settings this harness is launched with, as a JSON string —
+/// `--settings` takes one or a file path, and the CLI reads the same
+/// schema either way. There is **one** of these on a command line: two
+/// `--settings` and only the last is read, measured in the agent image on
+/// 2026-09-16 (an invalid path in the first position went unnoticed, in
+/// the second it stopped the run). Anything else this adapter ever needs
+/// to set goes in here, not in a second flag.
+///
+/// What it turns off is what the harness would otherwise add to a commit
+/// message of its own accord: the `Co-Authored-By` trailer and the
+/// session link. A commit's author already says which role wrote it
+/// (`nunki coder <coder@nunki.local>`), and the message's job is to say
+/// what changed and why it had to.
+///
+/// `role.rs` asks the agent for the same thing, and that is worth what
+/// the agent's care is worth; this is the half the agent cannot get
+/// wrong. Neither reaches a `Co-Authored-By` a model types into the body
+/// by hand — the prompt is what covers that.
+///
+/// Three keys because the CLI has moved: `attribution.commitTrailers` is
+/// the current one, `attribution.sessionUrl` turns off the session link,
+/// and `includeCoAuthoredBy` is their deprecated ancestor — the CLI's own
+/// words, read from the binary. An older image gets an older CLI, and a
+/// key it does not know is ignored rather than refused (measured the same
+/// day), so naming all three costs nothing and covers both.
+const SETTINGS: &str = concat!(
+    r#"{"attribution":{"commitTrailers":false,"sessionUrl":false},"#,
+    r#""includeCoAuthoredBy":false}"#
+);
+
 /// What is fixed per project or per mission, not per run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -214,7 +244,11 @@ impl Harness for ClaudeCode {
             // (`<tools...>`), so the separated form swallows the prompt that
             // follows it: measured, the run died with "Input must be provided
             // either through stdin or as a prompt argument".
-            args: vec![format!("--allowedTools={}", tools.join(","))],
+            args: vec![
+                format!("--allowedTools={}", tools.join(",")),
+                "--settings".to_string(),
+                SETTINGS.to_string(),
+            ],
         }
     }
 
