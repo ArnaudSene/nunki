@@ -1228,3 +1228,82 @@ fn system_tests_and_configuration_are_not_mutated() {
         }
     }
 }
+
+/// Built by hand rather than from the fixture: what is asked here is which
+/// unplayed gates mean what, and the fixture leaves gate 6 unplayed too —
+/// it has no profile up — so it can only ever show the case where the
+/// campaign is *not* owed. In a real mission the battery is green in the
+/// container and gate 7 stands alone, which is the case that matters.
+fn report_of(decisions: &[(Gate, Decision)]) -> gate::Report {
+    gate::Report {
+        role: Role::Coder,
+        head: "0123456789ab".into(),
+        outcomes: decisions
+            .iter()
+            .map(|(gate, decision)| nunki::gate::Outcome {
+                gate: *gate,
+                decision: decision.clone(),
+                note: None,
+            })
+            .collect(),
+    }
+}
+
+/// The one obstacle `nunki` clears itself, told apart from the ones it
+/// cannot: gate 7 without a usable campaign is a campaign to run, and any
+/// other unplayed gate is a wall.
+#[test]
+fn a_gate_seven_with_no_campaign_is_a_campaign_owed_and_not_a_wall() {
+    let owed = report_of(&[
+        (Gate::Battery, Decision::Passed),
+        (
+            Gate::Mutation,
+            Decision::Unplayed("no mutation campaign has run on this mission".into()),
+        ),
+    ]);
+    // The gate's own sentence, so the flow acts on the reason the report
+    // gives and not on one written a second time.
+    assert_eq!(
+        owed.campaign_owed().as_deref(),
+        Some("no mutation campaign has run on this mission")
+    );
+
+    // A campaign on the content as it stands leaves nothing owed, and so
+    // does a gate 7 that is red: red is the agent's to fix, and an hour of
+    // mutation would not fix it.
+    for decision in [
+        Decision::Passed,
+        Decision::Failed("1 survivor(s) have no outcome".into()),
+        Decision::NotApplicable("system tests are not mutated".into()),
+    ] {
+        let report = report_of(&[
+            (Gate::Battery, Decision::Passed),
+            (Gate::Mutation, decision),
+        ]);
+        assert_eq!(report.campaign_owed(), None, "{:?}", report.outcomes);
+    }
+}
+
+/// A gate nobody could play *beside* gate 7 is a wall, and an hour of
+/// mutation in front of it would be an hour spent for nothing.
+#[test]
+fn a_campaign_is_not_owed_while_another_gate_is_unplayable_too() {
+    let report = report_of(&[
+        (
+            Gate::Battery,
+            Decision::Unplayed("the profile did not come up".into()),
+        ),
+        (
+            Gate::Mutation,
+            Decision::Unplayed("no mutation campaign has run on this mission".into()),
+        ),
+    ]);
+    assert_eq!(report.campaign_owed(), None, "{:?}", report.outcomes);
+    // And the report still says what nobody could play: the first one, in
+    // specification order.
+    assert!(
+        report.unplayed().unwrap().contains("gate 6"),
+        "{:?}",
+        report.unplayed()
+    );
+}

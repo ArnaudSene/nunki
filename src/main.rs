@@ -835,7 +835,8 @@ fn main() -> ExitCode {
             let engine: std::sync::Arc<dyn nunki::engine::Engine> =
                 std::sync::Arc::new(nunki::engine::docker::Docker::real());
             let engine_bin = std::env::var("HQ_ENGINE").unwrap_or_else(|_| "docker".into());
-            let code = match nunki::verify::verify(&project, &mission, engine, &engine_bin) {
+            let code = match nunki::verify::verify(&project, &mission, engine.clone(), &engine_bin)
+            {
                 Ok(steps) => {
                     let mut owed = false;
                     for step in &steps {
@@ -851,6 +852,32 @@ fn main() -> ExitCode {
                                      would change that"
                                 );
                                 println!("          {why}");
+                            }
+                            // The one unplayable gate nunki clears itself, so
+                            // the verb the human just typed does it rather
+                            // than telling them to type another.
+                            nunki::verify::Step::CampaignOwed { role, why } => {
+                                owed = true;
+                                println!("campaign  a {role:?} gate waits on one — {why}");
+                                match nunki::verify::campaign(
+                                    &project,
+                                    &mission,
+                                    engine.clone(),
+                                ) {
+                                    Ok(progress) => println!(
+                                        "          {}",
+                                        match progress {
+                                            nunki::mutants::Progress::Started { .. } =>
+                                                "started; it runs detached, and `nunki verify`                                                  again reads it back"
+                                                    .to_string(),
+                                            other => format!("{other:?}"),
+                                        }
+                                    ),
+                                    Err(e) => {
+                                        eprintln!("nunki: {e}");
+                                        return ExitCode::FAILURE;
+                                    }
+                                }
                             }
                             nunki::verify::Step::Moved { to } => println!("stage     {to:?}"),
                             nunki::verify::Step::Held {

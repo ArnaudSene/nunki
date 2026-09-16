@@ -231,7 +231,9 @@ MISSION  (one branch off its base, one slot)
   4 (a clean tree, a branch ahead of its base, a resume block that names
   `HEAD`, the perimeter) are played at the end of every coder run. Gates 5 to
   7 (the deliverable, the battery on a clean copy of `HEAD`, the mutation
-  campaign) are played at the final verification.
+  campaign) are played at the final verification. A gate nobody can play
+  stops the flow rather than counting as green — except gate 7's missing or
+  stale campaign, which `nunki` runs itself before looking again.
 - **Verdict** — how the integrator (`INTEGRATED` / `BROKEN`) and the security
   agent (`CLEAR` / `FINDINGS`) conclude, in `VERDICT.json`, pinned to the
   `HEAD` it judged. The coder's verdict is implicit: its gates were green.

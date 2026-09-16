@@ -1310,6 +1310,18 @@ lot. Les portes 5 à 7 sont jouées à la vérification finale, quand le codeur 
    depuis la dernière campagne verte sur cette mission. Son résultat est un
    fichier du dossier de mission que le HQ lit.
 
+   **C'est `nunki` qui la lance, pas l'humain** (tranché par Arnaud le
+   2026-09-16, après la mission `notes-api` où le moniteur s'est arrêté deux
+   fois pour un verbe qu'il aurait pu taper lui-même : une fois pour la
+   campagne que personne n'avait démarrée, une fois pour celle qu'un volet
+   avait rendue périmée). Une porte que rien ne peut jouer arrête le flux —
+   c'est ce qui le garde honnête — mais celle-ci est la seule dont l'obstacle
+   soit à la portée de `nunki` : sans campagne, ou avec une campagne sur un
+   autre contenu, il en lance une et regarde de nouveau au tour suivant.
+   `nunki mission mutants` reste, pour l'humain qui en veut une à la main.
+   **Seulement si elle est seule** : une porte 6 injouable à côté, et
+   l'heure de mutation serait dépensée devant un mur que rien ne bouge.
+
 Ces sept portes sont celles du **codeur**. La seconde revue a montré
 qu'appliquées telles quelles aux deux autres rôles elles étaient indéfinies
 ou absurdes — une batterie sans services pour l'intégrateur, une mutation de

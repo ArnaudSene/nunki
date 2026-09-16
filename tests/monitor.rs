@@ -93,7 +93,7 @@ fn down_until(not_before: u64) -> Option<nunki::backoff::HarnessDown> {
 /// something to do on its own, stop the moment a human is needed.
 #[test]
 fn after_a_verify_the_monitor_goes_on_or_stops_for_a_human() {
-    use nunki::harness::Role::Integrator;
+    use nunki::harness::Role::{Coder, Integrator};
     let go = |step: Step| after_verify(&Ok(vec![step]));
     let stops = |next: Next| matches!(next, Next::Exit(_));
 
@@ -152,10 +152,22 @@ fn after_a_verify_the_monitor_goes_on_or_stops_for_a_human() {
     // lives. Nothing but a human changes the answer.
     assert!(stops(go(Step::GateUnplayable {
         role: Integrator,
-        why: "gate 7 (every survivor has an outcome) could not be played: no mutation \
-              campaign has run on this mission — `nunki mission mutants` starts one"
+        why: "gate 6 (the battery is green) could not be played: the system profile \
+              did not come up"
             .into(),
     })));
+    // And the exception to it: gate 7's missing campaign is an obstacle nunki
+    // removes itself, so the monitor runs one instead of handing the mission
+    // back for a verb a human would have typed.
+    assert_eq!(
+        go(Step::CampaignOwed {
+            role: Coder,
+            why: "gate 7 (every survivor has an outcome) could not be played: no mutation \
+                  campaign has run on this mission"
+                .into(),
+        }),
+        Next::RunCampaign
+    );
 
     // A human driving the slot is not a failure: the monitor waits its turn.
     let held = VerifyError::Lock(nunki::state::LockError::Held {
@@ -368,4 +380,42 @@ fn a_busy_provider_is_waited_for_not_handed_over() {
         }])),
         Next::Continue
     );
+}
+
+/// A campaign the monitor started, looked at again: it goes on while the
+/// campaign does, and stops on the two ends nobody can work through.
+#[test]
+fn a_campaign_that_overran_or_vanished_stops_the_monitor_and_the_rest_does_not() {
+    use nunki::monitor::after_campaign;
+    use nunki::mutants::Progress;
+
+    for progress in [
+        Progress::Started {
+            fingerprint: "abc1234".into(),
+        },
+        Progress::Running {
+            started_at: "2026-09-16T05:00:00Z".into(),
+            lines: 12,
+        },
+        Progress::Fresh { survivors: 0 },
+        Progress::Finished { survivors: 3 },
+    ] {
+        assert_eq!(
+            after_campaign(&progress),
+            Next::Continue,
+            "{progress:?} is a campaign in hand, not a wall"
+        );
+    }
+
+    // A campaign past its deadline was stopped, and a monitor that started
+    // another would spend the same hour again. Both of these are a human's
+    // to look at.
+    match after_campaign(&Progress::Overrun { minutes: 45 }) {
+        Next::Exit(why) => assert!(why.contains("45-minute deadline"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    match after_campaign(&Progress::Lost("the container went away".into())) {
+        Next::Exit(why) => assert!(why.contains("the container went away"), "{why}"),
+        other => panic!("{other:?}"),
+    }
 }

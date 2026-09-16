@@ -54,6 +54,16 @@ pub enum Step {
     /// yet — that is, every mission on its first pass — could never be
     /// picked up again.
     GateUnplayable { role: Role, why: String },
+    /// Gate 7 has no usable mutation campaign, and that is the one obstacle
+    /// `nunki` clears itself: the caller runs the campaign and looks again.
+    ///
+    /// Not a [`Step::GateUnplayable`], because that one means the flow waits
+    /// on a human. This one waits on nothing — a mission used to stop twice
+    /// on its way through, once for the campaign nobody had started and once
+    /// for the one that had gone stale under a volet, and both times the verb
+    /// a human typed was the verb `nunki` could have typed itself
+    /// (SPEC 4.2, `nunki mission mutants`; SPEC 4.4, gate 7).
+    CampaignOwed { role: Role, why: String },
     /// The flow moved.
     Moved { to: Stage },
     /// A run was launched for this role, and `verify` returned: a run takes
@@ -148,6 +158,8 @@ pub enum VerifyError {
     Usage(String),
     #[error(transparent)]
     Gesture(#[from] crate::gesture::GestureError),
+    #[error("the mutation campaign gate 7 waits on: {0}")]
+    Mutants(#[from] crate::mutants::MutantsError),
     #[error(transparent)]
     Provider(#[from] crate::provider::ProviderError),
     #[error(
@@ -286,6 +298,7 @@ pub fn verify_as(
                             let report = gate::after_run(&subject)?;
                             let failed = report.failed();
                             let unplayed = report.unplayed();
+                            let owed = report.campaign_owed();
                             steps.push(Step::Gates {
                                 role: Role::Coder,
                                 report: Box::new(report),
@@ -300,10 +313,7 @@ pub fn verify_as(
                                 // `nunki verify` reads it back and plays the
                                 // gate again.
                                 (None, Some(why)) => {
-                                    steps.push(Step::GateUnplayable {
-                                        role: Role::Coder,
-                                        why,
-                                    });
+                                    steps.push(stuck(Role::Coder, owed, why));
                                     return Ok(steps);
                                 }
                                 (None, None) => {
@@ -335,6 +345,7 @@ pub fn verify_as(
                         let report = gate::after_run(&subject)?;
                         let failed = report.failed();
                         let unplayed = report.unplayed();
+                        let owed = report.campaign_owed();
                         steps.push(Step::Gates {
                             role: Role::Coder,
                             report: Box::new(report),
@@ -347,10 +358,7 @@ pub fn verify_as(
                         match (failed, unplayed) {
                             (Some(reason), _) => Some(Event::GatesFailed { reason }),
                             (None, Some(why)) => {
-                                steps.push(Step::GateUnplayable {
-                                    role: Role::Coder,
-                                    why,
-                                });
+                                steps.push(stuck(Role::Coder, owed, why));
                                 return Ok(steps);
                             }
                             (None, None) => None,
@@ -429,6 +437,7 @@ pub fn verify_as(
                 let report = gate::at_verification(&subject, &verification)?;
                 let failed = report.failed();
                 let unplayed = report.unplayed();
+                let owed = report.campaign_owed();
                 steps.push(Step::Gates {
                     role: subject.role,
                     report: Box::new(report),
@@ -455,10 +464,7 @@ pub fn verify_as(
                     // here — the flow stays at the gates and the sentence
                     // goes to the human, who has the verb.
                     (None, Some(why)) => {
-                        steps.push(Step::GateUnplayable {
-                            role: subject.role,
-                            why,
-                        });
+                        steps.push(stuck(subject.role, owed, why));
                         return Ok(steps);
                     }
                     (None, None) => {
@@ -525,6 +531,7 @@ pub fn verify_as(
                                 };
                                 let failed = report.failed();
                                 let unplayed = report.unplayed();
+                                let owed = report.campaign_owed();
                                 steps.push(Step::Gates {
                                     role: Role::Integrator,
                                     report: Box::new(report),
@@ -549,10 +556,7 @@ pub fn verify_as(
                                     // `nunki verify` reads it back and plays
                                     // the gate again.
                                     (None, Some(why)) => {
-                                        steps.push(Step::GateUnplayable {
-                                            role: Role::Integrator,
-                                            why,
-                                        });
+                                        steps.push(stuck(Role::Integrator, owed, why));
                                         return Ok(steps);
                                     }
                                     (None, None) => {}
@@ -675,6 +679,7 @@ pub fn verify_as(
                                 let report = gate::at_verification(&subject, &verification)?;
                                 let failed = report.failed();
                                 let unplayed = report.unplayed();
+                                let owed = report.campaign_owed();
                                 steps.push(Step::Gates {
                                     role: Role::Security,
                                     report: Box::new(report),
@@ -692,10 +697,7 @@ pub fn verify_as(
                                         };
                                     }
                                     (None, Some(why)) => {
-                                        steps.push(Step::GateUnplayable {
-                                            role: Role::Security,
-                                            why,
-                                        });
+                                        steps.push(stuck(Role::Security, owed, why));
                                         return Ok(steps);
                                     }
                                     (None, None) => {}
@@ -1190,6 +1192,53 @@ fn spare_event(spared: Option<&crate::state::Spared>, event: Event) -> Event {
             lot_done: false,
         },
         (_, event) => event,
+    }
+}
+
+/// Run the mutation campaign gate 7 is waiting on, or say where the one in
+/// flight is (SPEC 4.4).
+///
+/// The action a [`Step::CampaignOwed`] asks for, written once so the monitor
+/// and a human's `nunki verify` do the same thing. It launches detached and
+/// returns at once, like every long thing here: the next `verify` reads the
+/// campaign back, and the call that finds it ended writes `MUTANTS.json`.
+///
+/// No slot lock, as `nunki mission mutants` takes none: `verify` refuses to
+/// judge a slot a run is writing, so nothing reaches here while an agent
+/// works.
+pub fn campaign(
+    project: &Project,
+    id: &str,
+    engine: Arc<dyn Engine>,
+) -> Result<crate::mutants::Progress, VerifyError> {
+    let store = Store::open(&project.hq_root)?;
+    let state = store
+        .load(id)
+        .map_err(|_| VerifyError::NotStarted(id.to_string()))?;
+    let header = state.flow.header();
+    let slot = crate::slot::find(project, &state.slot)?;
+    let touched = gate::touched_paths(&slot.tree, &header.base)?;
+    Ok(crate::mutants::campaign(
+        project,
+        &slot,
+        engine,
+        &Paths::of(&project.hq_root, id).dir,
+        &crate::run::stack_of(project),
+        &touched,
+        header.bounds.mutation_minutes,
+    )?)
+}
+
+/// Which step a gate nobody could play becomes.
+///
+/// A wall, or the one obstacle `nunki` clears itself. The distinction is the
+/// report's ([`gate::Report::campaign_owed`]) and not a string read here: a
+/// flow that told the two apart by matching on a sentence would start doing
+/// something else the day the sentence was reworded.
+fn stuck(role: Role, owed: Option<String>, why: String) -> Step {
+    match owed {
+        Some(why) => Step::CampaignOwed { role, why },
+        None => Step::GateUnplayable { role, why },
     }
 }
 

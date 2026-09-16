@@ -516,30 +516,20 @@ fn live_a_mission_is_driven_from_its_first_lot_to_verified() {
     }
     // That gate is unplayable, not red, and the difference decides who is
     // owed the next move. The flow stays where it is — no volet, no attempt,
-    // no run — and says what it needs; the campaign at step 4 below is the
-    // human's to start, which is exactly what the gate's sentence asks for.
+    // no run — and names what it is waiting for. Here the battery is green in
+    // a real container, so gate 7 stands alone and the obstacle is one nunki
+    // clears itself: the step is a campaign owed, not a wall.
     assert!(matches!(world.state().flow.stage(), Stage::Gates));
     assert!(
-        steps
-            .iter()
-            .any(|s| matches!(s, Step::GateUnplayable { .. })),
+        steps.iter().any(|s| matches!(s, Step::CampaignOwed { .. })),
         "{steps:?}"
     );
 
-    // 4. The campaign runs, and its one survivor is answered by the coder.
-    let touched = nunki::gate::touched_paths(&world.tree, "dev").unwrap();
+    // 4. The campaign runs — through the flow's own entry point, the one the
+    // monitor calls on that step, so this proves it against a real engine
+    // where a fake can only prove the decision to call it.
     loop {
-        match nunki::mutants::campaign(
-            &world.project,
-            &slot,
-            engine.clone(),
-            &world.mission(),
-            "rust",
-            &touched,
-            45,
-        )
-        .unwrap()
-        {
+        match nunki::verify::campaign(&world.project, "m1", engine.clone()).unwrap() {
             nunki::mutants::Progress::Running { .. } => {
                 std::thread::sleep(std::time::Duration::from_millis(300))
             }
@@ -550,6 +540,35 @@ fn live_a_mission_is_driven_from_its_first_lot_to_verified() {
             }
         }
     }
+    // 4 bis. The survivor has no outcome, so gate 7 is **red** — the agent's
+    // to answer, unlike the unplayable gate above — and a red gate at the
+    // final verification opens a volet: the coder is sent back for it.
+    //
+    // This is what the whole chain exists to do, and it was not checked here
+    // until 2026-09-16: the test wrote the triage itself before ever playing
+    // the gates again, so the volet never opened, and step 5's coder run was
+    // applied to a flow still sitting at the gates. It has been red on `dev`
+    // ever since — measured by running it there, unchanged — and nothing
+    // caught it because a live test is `#[ignore]`d and CI never plays it.
+    let steps = go();
+    assert!(
+        gates_of(&steps).failed().is_some(),
+        "a survivor with no outcome is red: {steps:?}"
+    );
+    assert!(
+        matches!(
+            world.state().flow.stage(),
+            Stage::Coding {
+                work: Work::Volet { .. },
+                ..
+            }
+        ),
+        "{:?}",
+        world.state().flow.stage()
+    );
+
+    // What the coder writes on that volet: the survivor, killed by a test it
+    // names and commits.
     let mut triage = BTreeMap::new();
     triage.insert(
         "src/new.rs:1".to_string(),
@@ -559,7 +578,7 @@ fn live_a_mission_is_driven_from_its_first_lot_to_verified() {
     );
     nunki::mutants::write_triage(&world.mission(), &triage).unwrap();
 
-    // 4 bis. A run in the slot stops verification dead: gates read a tree,
+    // 4 ter. A run in the slot stops verification dead: gates read a tree,
     // and a tree the agent is still writing is not a tree to judge.
     {
         use nunki::harness::spawn::{CommandSpec, Spawner};
@@ -611,7 +630,7 @@ fn live_a_mission_is_driven_from_its_first_lot_to_verified() {
         store.save(&state).unwrap();
     }
 
-    // 5. The coder's run happens again, and this time everything is green.
+    // 5. The volet's run ends, and this time everything is green.
     world.coder_finished_the_lot();
     world.journal_names_head();
     let steps = go();
@@ -2445,4 +2464,66 @@ fn a_service_not_declared_shared_is_not_locked() {
     world.at_integration();
     world.another_mission_integrating(true);
     assert!(world.verify().is_err(), "the launch is attempted");
+}
+
+/// Gate 7 with no campaign, and everything else played: the flow does not
+/// stop for a verb a human would have typed. It says a campaign is owed, and
+/// the monitor runs one.
+///
+/// A profile on disk and an engine that answers, so gate 6 is green and gate
+/// 7 stands alone — the shape a real mission has, and the one a world with no
+/// profile can never show: there, gate 6 is unplayable too and the report is
+/// a wall, which is what `a_gate_nobody_could_play_stops_instead_of_opening_a_volet`
+/// covers.
+#[test]
+fn a_gate_seven_with_no_campaign_asks_for_one_rather_than_stopping() {
+    use nunki::engine::{ExecOutput, fake::FakeEngine};
+
+    let world = World::new(1);
+    world.commit("src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    world.journal_names_head();
+    std::fs::write(
+        world.mission().join("PR.md"),
+        "# What this changes\n\nL1, and nothing else.\n",
+    )
+    .unwrap();
+    world.coder_finished_the_lot();
+
+    let file = nunki::run::profile_path(&world.project, "one");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, "services:\n  agent:\n    image: alpine:3.20\n").unwrap();
+    let engine: Arc<dyn nunki::engine::Engine> =
+        Arc::new(FakeEngine::default().with_exec(ExecOutput {
+            status: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+
+    let steps = verify::verify(&world.project, "m1", engine, "docker").unwrap();
+    let report = gates_of(&steps);
+    assert!(
+        report.failed().is_none(),
+        "nothing is the agent's to fix here: {report:?}"
+    );
+    assert_eq!(
+        report
+            .outcomes
+            .iter()
+            .find(|o| o.gate == Gate::Battery)
+            .map(|o| &o.decision),
+        Some(&nunki::gate::Decision::Passed),
+        "the battery has to be green for gate 7 to stand alone: {report:?}"
+    );
+    match steps.last() {
+        Some(Step::CampaignOwed { role, why }) => {
+            assert_eq!(*role, Role::Coder);
+            assert!(why.contains("no mutation campaign has run"), "{why}");
+        }
+        other => panic!("a campaign is owed, not a wall: {other:?}"),
+    }
+
+    // The flow has not moved, exactly as it does not for a wall: no volet,
+    // no attempt, no run. What changed is who is expected to act next.
+    assert_eq!(world.state().flow.stage(), &Stage::Gates, "{steps:?}");
+    assert_eq!(world.state().flow.volets(), 0);
 }
