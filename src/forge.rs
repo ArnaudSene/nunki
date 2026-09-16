@@ -6,11 +6,12 @@
 //! because there is no second decision — the human read the pull request
 //! before saying yes.
 //!
-//! It talks to GitHub with **the human's** credential, kept at the HQ and
-//! never mounted in a container: `~/.nunki/<project>/forge-token`. The only
-//! part of the HQ a container ever sees is its own mission folder, one level
-//! below. Without that file `nunki push` still pushes, and hands over the exact
-//! address to open the pull request at by hand.
+//! It talks to GitHub with **the human's** credential, kept beside the
+//! accounts at `~/.nunki/forge-token` and never mounted in a container: a
+//! forge account belongs to the human, not to a project, and the only part of
+//! a project's home a container ever sees is its own mission folder. Without
+//! that file `nunki push` still pushes, and hands over the exact address to
+//! open the pull request at by hand.
 //!
 //! Only GitHub, because it is the only forge any project here uses; a remote
 //! elsewhere is said to be elsewhere, not guessed at.
