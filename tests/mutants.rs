@@ -327,6 +327,33 @@ fn live_a_campaign_is_launched_watched_and_read_back() {
         other => panic!("it replays only when the touched files change: {other:?}"),
     }
 
+    // And forced to run again on that same content — what a human does when
+    // a campaign's answer looked wrong — it reports what **this** run found,
+    // not that plus what the one before it found.
+    //
+    // Measured on `notes-3` on 2026-09-16: four campaigns on one fingerprint
+    // wrote into one log, because the spawner appends and the name carries
+    // the fingerprint. The runs found 5, then 1, then none, then none;
+    // `MUTANTS.json` said six, every one of them dead, and gate 7 sent a
+    // coder back three times for mutants that no longer existed.
+    std::fs::remove_file(mission.join(mutants::FILE)).unwrap();
+    let again = loop {
+        match go() {
+            Progress::Running { .. } | Progress::Started { .. } => {
+                std::thread::sleep(std::time::Duration::from_millis(500))
+            }
+            other => break other,
+        }
+    };
+    match again {
+        Progress::Finished { survivors } => assert_eq!(
+            survivors, 2,
+            "the same two, and not four: the log is this campaign's alone"
+        ),
+        other => panic!("expected a finished campaign, got {other:?}"),
+    }
+    assert_eq!(mutants::read(&mission).unwrap().unwrap().survivors.len(), 2);
+
     engine.down(&file, &compose_project, true).unwrap();
 }
 

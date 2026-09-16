@@ -488,6 +488,19 @@ pub fn campaign(
     let runs = dir.join("runs");
     std::fs::create_dir_all(&runs).map_err(|e| MutantsError::Io(runs.clone(), e))?;
     let log = runs.join(format!("mutants-{}.log", &want[..7.min(want.len())]));
+    // Emptied first. The spawner opens a log **in append mode**, which is
+    // right for a harness run — one resumes into the same file and its
+    // earlier turns must survive — and wrong for a campaign, which is one
+    // measurement and not a stream. The name carries the fingerprint, so a
+    // campaign replayed over content that has not changed writes into the
+    // same file as the one before it, and `parse` reads the union.
+    //
+    // Measured on `notes-3` on 2026-09-16, four campaigns on one fingerprint:
+    // 5 survivors, then 1, then none, then none — and `MUTANTS.json` said
+    // six, every one of them dead. Gate 7 sent a coder back three times for
+    // mutants that no longer existed, and nothing in the flow could tell:
+    // the file said what the file said.
+    std::fs::write(&log, "").map_err(|e| MutantsError::Io(log.clone(), e))?;
     let spawner = crate::engine::spawn::ContainerSpawner::new(
         engine,
         crate::run::profile_path(project, &slot.name),
