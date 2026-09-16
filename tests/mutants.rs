@@ -494,3 +494,31 @@ fn live_the_shipped_mutation_script_reads_a_real_campaign() {
         "that one is caught by the test, and a caught mutant is not a survivor: {survivors:?}"
     );
 }
+
+/// A campaign that killed everything has nobody to triage, and says so.
+///
+/// The sentence used to ask for "one of the three outcomes" whatever the
+/// campaign found — measured on `notes-api` on 2026-09-16, where a clean
+/// campaign still demanded outcomes for nobody. A line that reads the same
+/// whatever happened is a line that stops being read.
+#[test]
+fn a_campaign_with_no_survivor_asks_for_no_outcome() {
+    let clean = mutants::ended(0);
+    assert!(
+        !clean.contains("outcome"),
+        "there is nobody to give one: {clean}"
+    );
+    assert!(clean.contains("no survivor"), "{clean}");
+
+    let three = mutants::ended(3);
+    assert!(three.contains("3 survivor(s)"), "{three}");
+    assert!(
+        three.contains("each needs one of the three outcomes"),
+        "{three}"
+    );
+    // Both name the file the answers are read from, so a human knows where
+    // to look either way.
+    for said in [&clean, &three] {
+        assert!(said.contains(mutants::FILE), "{said}");
+    }
+}
