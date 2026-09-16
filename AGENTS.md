@@ -135,9 +135,9 @@ is worth**. Applied to our own work:
   (SPEC 4.3), `mission/` (4.1, 4.5), `state/` (4.2), `compose/` (4.2),
   `perimeter/` (4.1 bis).
 - **Boundaries are traits** with a fake implementation for tests: `Harness`
-  for the coding agent, `Spawner` for launching processes, and the engine
-  adapter to come. Nothing harness-specific or engine-specific leaks past its
-  boundary.
+  for the coding agent, `Spawner` for launching processes, `Engine` for the
+  container engine and `Forge` for the forge. Nothing harness-specific,
+  engine-specific or forge-specific leaks past its boundary.
 - No `unwrap()` or `panic!()` on anything a user's environment can cause —
   return an error that names the file, the path or the value. `expect()` is
   acceptable only for an invariant the code itself guarantees, with the

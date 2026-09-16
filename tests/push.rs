@@ -444,29 +444,6 @@ fn fetching_into_the_checked_out_branch_is_named_rather_than_left_to_git() {
     assert!(matches!(err, PushError::FetchingIntoCurrent(_)), "{err}");
 }
 
-/// The address a human opens the pull request at, worked out from the
-/// remote's own URL — both shapes git writes.
-#[test]
-fn the_pull_request_address_is_worked_out_from_the_remote() {
-    for remote in [
-        "https://github.com/ArnaudSene/nunki.git",
-        "git@github.com:ArnaudSene/nunki.git",
-        "https://github.com/ArnaudSene/nunki",
-    ] {
-        assert_eq!(
-            push::pull_request_url(remote, "dev", "mission/x").as_deref(),
-            Some("https://github.com/ArnaudSene/nunki/compare/dev...mission/x?expand=1"),
-            "{remote}"
-        );
-    }
-    // A forge nunki does not know how to address: said as unknown rather than
-    // guessed into a URL that goes nowhere.
-    assert_eq!(
-        push::pull_request_url("git@gitlab.com:team/thing.git", "dev", "x"),
-        None
-    );
-}
-
 /// A volet replays the whole chain, so a role concludes more than once. The
 /// earlier answer is not a second opinion, it is a stale one — and keeping
 /// both would let `nunki push` find the green it wants among answers about other
@@ -664,8 +641,8 @@ fn a_forge_that_refuses_the_pull_request_leaves_the_push_standing() {
     }
 }
 
-/// A remote that is not on GitHub is said to be elsewhere. The forge is
-/// never asked — the server here would fail the test if it were.
+/// A remote on a forge nunki has no adapter for is said to be one, and named.
+/// No forge is asked — the server here would fail the test if one were.
 #[test]
 fn a_remote_elsewhere_is_named_and_no_forge_is_asked() {
     let world = World::new(with_wiring(), Security::Agent);
@@ -676,8 +653,12 @@ fn a_remote_elsewhere_is_named_and_no_forge_is_asked() {
     let pushed = push::push_to(&world.project, "m1", true, "http://127.0.0.1:9").unwrap();
     match pushed.pull_request {
         push::PullRequestState::ByHand { compare, why } => {
-            assert_eq!(compare, None, "no GitHub address to work out");
-            assert!(why.contains("not on GitHub"), "{why}");
+            assert_eq!(compare, None, "no adapter, so no address to work out");
+            assert!(why.contains("no adapter for"), "{why}");
+            assert!(
+                why.contains("forge.git"),
+                "the remote itself is named: {why}"
+            );
         }
         other => panic!("{other:?}"),
     }

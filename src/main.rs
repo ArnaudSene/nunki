@@ -1017,7 +1017,7 @@ fn main() -> ExitCode {
                 None => return ExitCode::FAILURE,
             };
             let mut report = check::run(&project);
-            check::forge_protection(&project, nunki::forge::API, &mut report);
+            check::forge_protection(&project, nunki::forge::github::API, &mut report);
             report.checks.extend(probes(&project, which.as_deref()));
             if let Some(id) = &mission {
                 let engine_bin = std::env::var("HQ_ENGINE").unwrap_or_else(|_| "docker".into());

@@ -171,7 +171,7 @@ pub enum PullRequestState {
 /// Push a verified mission's branch, on an explicit human argument, and open
 /// its pull request on the forge's real API.
 pub fn push(project: &Project, id: &str, authorised: bool) -> Result<Pushed, PushError> {
-    push_to(project, id, authorised, crate::forge::API)
+    push_to(project, id, authorised, crate::forge::github::API)
 }
 
 /// [`push`], against a given forge API — how the tests point the real client
@@ -234,26 +234,33 @@ fn open_pull_request(
     pr_file: &std::path::Path,
     api: &str,
 ) -> PullRequestState {
-    let compare = pull_request_url(remote, &header.base, branch);
+    // The forge the remote is on, if `nunki` has an adapter for it. The
+    // address a human would open the pull request at is that adapter's too:
+    // a remote elsewhere gets no address rather than a GitHub one.
+    let found = crate::forge::of_remote_at(remote, api);
+    let compare = found
+        .as_ref()
+        .map(|(forge, repo)| forge.compare(repo, &header.base, branch));
     let by_hand = |why: String| PullRequestState::ByHand {
         compare: compare.clone(),
         why,
     };
 
-    let Some(repo) = crate::forge::Repo::of_remote(remote) else {
+    let Some((forge, repo)) = found else {
         return by_hand(format!(
-            "the remote is not on GitHub ({remote}), and GitHub is the only forge nunki opens \
-             pull requests on"
+            "the remote is on a forge nunki has no adapter for ({remote}): GitHub is the one \
+             it opens pull requests on"
         ));
     };
     let Some(token) = crate::forge::token(&project.nunki_home()) else {
         return by_hand(format!(
-            "no forge credential at {} — a GitHub token that can open pull requests on \
-             {}/{}, and nunki opens it itself",
+            "no forge credential at {} — a {} token that can open pull requests on {}/{}, and \
+             nunki opens it itself",
             project
                 .nunki_home()
                 .join(crate::forge::TOKEN_FILE)
                 .display(),
+            forge.name(),
             repo.owner,
             repo.name
         ));
@@ -266,7 +273,7 @@ fn open_pull_request(
             pr_file.display()
         ));
     };
-    match crate::forge::open(api, &token, &repo, &request) {
+    match forge.open(&token, &repo, &request) {
         Ok(opened) => PullRequestState::Opened(opened),
         Err(e) => by_hand(e.to_string()),
     }
@@ -398,26 +405,13 @@ fn only_wiring_since(
     })
 }
 
+/// The remote a mission is pushed to, as git holds it.
+///
+/// The address a human would open the pull request at is not worked out here
+/// any more: it is the forge adapter's ([`crate::forge::Forge::compare`]), so
+/// a remote on a forge `nunki` has no adapter for gets no address rather than
+/// one shaped like somebody else's.
 fn remote_url(project: &Project) -> Result<String, PushError> {
     crate::git::run(&project.root, &["remote", "get-url", REMOTE])
         .map_err(|_| PushError::NoRemote(REMOTE.to_string()))
-}
-
-/// The address a human opens the pull request at, worked out from the
-/// remote's own URL.
-///
-/// Used whenever `nunki` does not open it itself — no credential, a remote that
-/// is not on GitHub, a forge that refused. A URL nobody has to assemble is
-/// the difference between "opened by hand" and "left to figure out".
-pub fn pull_request_url(remote: &str, base: &str, branch: &str) -> Option<String> {
-    let path = remote
-        .trim_end_matches(".git")
-        .rsplit_once("github.com")
-        .map(|(_, rest)| rest.trim_start_matches([':', '/']).to_string())?;
-    if path.is_empty() {
-        return None;
-    }
-    Some(format!(
-        "https://github.com/{path}/compare/{base}...{branch}?expand=1"
-    ))
 }

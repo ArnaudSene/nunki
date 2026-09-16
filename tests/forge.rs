@@ -5,19 +5,23 @@
 //! the shape of the request — a missing `Authorization` header gets a 404
 //! from GitHub, not a 401, and reads like a repository that does not exist —
 //! so the request is read byte by byte, as a server receives it.
+//!
+//! Everything here goes through the boundary the rest of the code uses: a
+//! remote names a forge and a repository, and the adapter that comes back is
+//! asked through [`Forge`]. Adding another forge is then a file beside
+//! `github.rs`, and these tests say what it would have to answer.
 
 use std::net::TcpListener;
 
 mod common;
 use common::serve;
 
-use nunki::forge::{self, ForgeError, Opened, PullRequest, Repo};
+use nunki::forge::{self, Forge, ForgeError, Opened, PullRequest, Repo};
 
-fn repo() -> Repo {
-    Repo {
-        owner: "o".into(),
-        name: "r".into(),
-    }
+/// The adapter and the repository `git@github.com:o/r.git` names, talking to
+/// the server this test lifted rather than to GitHub.
+fn at(api: &str) -> (Box<dyn Forge>, Repo) {
+    forge::of_remote_at("git@github.com:o/r.git", api).expect("github is the adapter nunki has")
 }
 
 fn request() -> PullRequest {
@@ -42,7 +46,8 @@ fn a_pull_request_is_opened_with_the_humans_token_and_the_missions_words() {
         201,
         r#"{"html_url":"https://github.com/o/r/pull/7"}"#,
     )]);
-    let opened = forge::open(&api, "tok-123", &repo(), &request()).unwrap();
+    let (forge, repo) = at(&api);
+    let opened = forge.open("tok-123", &repo, &request()).unwrap();
     assert_eq!(
         opened,
         Opened::Created("https://github.com/o/r/pull/7".into())
@@ -85,7 +90,8 @@ fn a_pull_request_already_open_is_found_rather_than_reported_as_a_failure() {
         ),
         (200, r#"[{"html_url":"https://github.com/o/r/pull/7"}]"#),
     ]);
-    let opened = forge::open(&api, "tok", &repo(), &request()).unwrap();
+    let (forge, repo) = at(&api);
+    let opened = forge.open("tok", &repo, &request()).unwrap();
     assert_eq!(
         opened,
         Opened::AlreadyOpen("https://github.com/o/r/pull/7".into())
@@ -105,7 +111,8 @@ fn a_pull_request_already_open_is_found_rather_than_reported_as_a_failure() {
 #[test]
 fn a_refusal_is_named_with_the_forges_own_reason() {
     let (api, server) = serve(vec![(401, r#"{"message":"Bad credentials"}"#)]);
-    let err = forge::open(&api, "wrong", &repo(), &request()).unwrap_err();
+    let (forge, repo) = at(&api);
+    let err = forge.open("wrong", &repo, &request()).unwrap_err();
     match err {
         ForgeError::Refused { status, message } => {
             assert_eq!(status, 401);
@@ -124,7 +131,8 @@ fn a_validation_failure_that_is_not_a_duplicate_is_a_refusal() {
         422,
         r#"{"message":"Validation Failed","errors":[{"field":"base","code":"invalid"}]}"#,
     )]);
-    let err = forge::open(&api, "tok", &repo(), &request()).unwrap_err();
+    let (forge, repo) = at(&api);
+    let err = forge.open("tok", &repo, &request()).unwrap_err();
     assert!(
         matches!(err, ForgeError::Refused { status: 422, .. }),
         "{err:?}"
@@ -138,34 +146,57 @@ fn a_forge_nobody_answers_at_is_unreachable_not_refused() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let api = format!("http://{}", listener.local_addr().unwrap());
     drop(listener);
-    let err = forge::open(&api, "tok", &repo(), &request()).unwrap_err();
+    let (forge, repo) = at(&api);
+    let err = forge.open("tok", &repo, &request()).unwrap_err();
     assert!(matches!(err, ForgeError::Unreachable(_)), "{err:?}");
 }
 
 #[test]
-fn a_github_remote_names_its_repository_and_any_other_names_none() {
+fn a_github_remote_names_its_forge_and_repository_and_any_other_names_none() {
     for remote in [
         "git@github.com:ArnaudSene/nunki.git",
         "https://github.com/ArnaudSene/nunki.git",
         "https://github.com/ArnaudSene/nunki",
         "ssh://git@github.com/ArnaudSene/nunki.git",
     ] {
+        let (forge, repo) = forge::of_remote(remote).unwrap_or_else(|| panic!("{remote}"));
+        assert_eq!(forge.name(), "GitHub", "{remote}");
         assert_eq!(
-            Repo::of_remote(remote),
-            Some(Repo {
+            repo,
+            Repo {
                 owner: "ArnaudSene".into(),
                 name: "nunki".into()
-            }),
+            },
             "{remote}"
         );
     }
+    // A forge nunki has no adapter for is said to be one, never guessed at:
+    // the credential and the request shape here are GitHub's.
     for remote in [
         "git@gitlab.com:team/thing.git",
         "/tmp/bare.git",
         "https://github.com/only-an-owner",
         "https://github.com/a/b/c",
     ] {
-        assert_eq!(Repo::of_remote(remote), None, "{remote}");
+        assert!(forge::of_remote(remote).is_none(), "{remote}");
+    }
+}
+
+/// The address a human opens the pull request at when `nunki` could not: the
+/// forge's own, worked out from the repository it named.
+#[test]
+fn the_address_to_open_the_pull_request_by_hand_is_the_forges_own() {
+    for remote in [
+        "https://github.com/ArnaudSene/nunki.git",
+        "git@github.com:ArnaudSene/nunki.git",
+        "https://github.com/ArnaudSene/nunki",
+    ] {
+        let (forge, repo) = forge::of_remote(remote).unwrap_or_else(|| panic!("{remote}"));
+        assert_eq!(
+            forge.compare(&repo, "dev", "mission/x"),
+            "https://github.com/ArnaudSene/nunki/compare/dev...mission/x?expand=1",
+            "{remote}"
+        );
     }
 }
 
@@ -213,10 +244,12 @@ fn live_the_real_forge_is_reached_over_tls_and_a_bad_token_is_refused() {
         eprintln!("skipped: HQ_LIVE_FORGE_TOKEN is not set");
         return;
     };
-    let repo = Repo::of_remote("https://github.com/ArnaudSene/nunki").unwrap();
-    forge::can_read(forge::API, token.trim(), &repo).expect("the token reads the repository");
+    let (forge, repo) = forge::of_remote("https://github.com/ArnaudSene/nunki").unwrap();
+    forge
+        .can_read(token.trim(), &repo)
+        .expect("the token reads the repository");
 
-    let err = forge::can_read(forge::API, "not-a-token", &repo).unwrap_err();
+    let err = forge.can_read("not-a-token", &repo).unwrap_err();
     assert!(
         matches!(err, ForgeError::Refused { status: 401, .. }),
         "the same call with a bad token is refused, so the green above is the token's: {err:?}"
@@ -233,21 +266,19 @@ fn live_the_real_forge_says_whether_a_branch_is_protected() {
         eprintln!("skipped: HQ_LIVE_FORGE_TOKEN is not set");
         return;
     };
-    let repo = Repo::of_remote("https://github.com/ArnaudSene/nunki").unwrap();
-    let dev = forge::protection(forge::API, token.trim(), &repo, "dev").expect("dev is readable");
+    let (forge, repo) = forge::of_remote("https://github.com/ArnaudSene/nunki").unwrap();
+    let dev = forge
+        .protection(token.trim(), &repo, "dev")
+        .expect("dev is readable");
     eprintln!("dev on the forge: {dev:?}");
     assert!(matches!(
         dev,
         forge::Protection::Protected | forge::Protection::Unprotected
     ));
     assert_eq!(
-        forge::protection(
-            forge::API,
-            token.trim(),
-            &repo,
-            "no-such-branch-nunki-check"
-        )
-        .unwrap(),
+        forge
+            .protection(token.trim(), &repo, "no-such-branch-nunki-check")
+            .unwrap(),
         forge::Protection::NoSuchBranch
     );
 }
