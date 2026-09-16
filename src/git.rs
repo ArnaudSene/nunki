@@ -20,8 +20,16 @@ pub enum GitError {
 }
 
 /// Run git in `at` and return its stdout, trimmed.
+///
+/// In the C locale, always. What git says on failure is read by `nunki` — to
+/// tell "this is not a repository" from "git could not run at all" — and
+/// carried into messages a human reads in English (AGENTS.md § 2). Measured
+/// on 2026-09-15: a macOS permission that stopped git from reading its own
+/// working directory came back in French, and a check that reads git's words
+/// would have taken it for an absent repository.
 pub fn run(at: &Path, args: &[&str]) -> Result<String, GitError> {
     let out = Command::new("git")
+        .env("LC_ALL", "C")
         .arg("-C")
         .arg(at)
         .args(args)
@@ -41,6 +49,7 @@ pub fn run(at: &Path, args: &[&str]) -> Result<String, GitError> {
 /// Run git outside any repository — `clone`, essentially.
 pub fn run_anywhere(args: &[&str]) -> Result<String, GitError> {
     let out = Command::new("git")
+        .env("LC_ALL", "C")
         .args(args)
         .output()
         .map_err(|e| GitError::Missing(e.to_string()))?;

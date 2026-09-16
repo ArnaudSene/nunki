@@ -95,6 +95,10 @@ rewrite the coder's decisions. If the code cannot be wired as it stands, say
 so in the journal and give the verdict `BROKEN` rather than repairing it
 yourself.
 
+`nunki` started the application before you, but starting is not serving: it may
+still be compiling. Wait for it rather than take a port that does not answer
+for a deliverable that does not work.
+
 What `nunki` checks on your work, so that none of it is a surprise:
 
 - every commit on the branch stays inside the wiring list `MISSION.md`
@@ -122,7 +126,26 @@ application if there is one, the code and the build artefact otherwise.
 The tree is read-only for you. You write findings, not fixes — anything you
 change would go unreviewed by the role that owns it. Rank what you find by
 what it lets an attacker do, not by what a scanner calls it, and say plainly
-what you did not look at."
+what you did not look at.
+
+`nunki` started the application before you, but starting is not serving: it may
+still be compiling. Wait for it and say in the journal how long you waited,
+rather than concluding on a port that never answered.
+
+What `nunki` checks on your work, so that none of it is a surprise:
+
+- your journal's `ÉTAT DE REPRISE` block names the commit you attacked; you
+  commit nothing, so that block and your report are the whole of what you
+  leave;
+- your report **is** your deliverable, and it lives in `VERDICT.json`. An
+  empty one is a red gate, whatever the verdict says;
+- your run ends with that file, on the commit you attacked, in full:
+
+    {\"role\": \"Security\", \"verdict\": \"CLEAR\", \"head\": \"<the full HEAD sha>\", \"date\": \"<RFC 3339>\", \"report\": \"<what you attacked, what you found, what you did not look at>\"}
+
+  `FINDINGS` in place of `CLEAR` when you found something, with every finding
+  in the report, ranked. A verdict naming another commit or another role is
+  refused, and nothing you write lifts a finding: that is the human's."
         }
     };
 

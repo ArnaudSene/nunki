@@ -1005,8 +1005,12 @@ fn with_security_agent(lots: usize) -> World {
 }
 
 impl World {
-    /// Drive the flow to the stage where the security agent is due.
+    /// Drive the flow to the stage where the security agent is due, and leave
+    /// a world where the security agent owes its gates nothing: a journal
+    /// naming `HEAD`, and a report in the verdict each test writes. A test
+    /// that wants a gate red breaks one of the two.
     fn at_security(&self) {
+        self.journal_names_head();
         let store = Store::open(&self.project.hq_root).unwrap();
         let mut state = store.load("m1").unwrap();
         for event in [
@@ -1059,6 +1063,61 @@ fn findings_park_the_mission_and_carry_the_report() {
         "{steps:?}"
     );
     assert!(matches!(world.state().flow.stage(), Stage::Findings { .. }));
+}
+
+/// A verdict is the security agent's word, and its gates are what the word is
+/// worth (SPEC 2: an agent's report is never the truth). It commits nothing,
+/// so what it owes is a resume block naming the commit it attacked and a
+/// report — and `CLEAR` with an empty report is a verdict about nothing.
+///
+/// Found on 2026-09-15, before the first security mission was launched: the
+/// flow read the verdict and moved on, so both were taken on trust.
+#[test]
+fn a_security_verdict_is_worth_its_gates_and_no_more() {
+    // An empty report, which is the deliverable this role owes.
+    let world = with_security_agent(1);
+    world.at_security();
+    world.run_recorded(Some(41), FINISHED);
+    world.verdict("Security", "CLEAR", &world.head(), "");
+
+    let _ = world.verify();
+    let state = world.state();
+    assert!(
+        matches!(state.flow.stage(), Stage::SecurityAgent { attempt: 2 }),
+        "{:?}",
+        state.flow.stage()
+    );
+    assert!(
+        state.concluded(Role::Security).is_none(),
+        "a verdict its gates refused is not recorded"
+    );
+    let told = world.followup();
+    assert!(
+        told.contains("security, attempt 1"),
+        "the next attempt is told why: {told}"
+    );
+
+    // And a journal that names another commit: the block is about work
+    // nobody attacked.
+    let other = with_security_agent(1);
+    other.at_security();
+    std::fs::write(
+        other.mission().join("JOURNAL.md"),
+        "# Journal\n\n## ÉTAT DE REPRISE\n\nHEAD is `0000000000000000000000000000000000000000`.\n",
+    )
+    .unwrap();
+    other.run_recorded(Some(41), FINISHED);
+    other.verdict("Security", "CLEAR", &other.head(), "nothing found");
+
+    let _ = other.verify();
+    assert!(
+        matches!(
+            other.state().flow.stage(),
+            Stage::SecurityAgent { attempt: 2 }
+        ),
+        "{:?}",
+        other.state().flow.stage()
+    );
 }
 
 /// The security agent's verdict is signed by the security agent. An
