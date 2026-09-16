@@ -255,8 +255,25 @@ impl Spawner for ContainerSpawner {
             ));
         };
         let flag = format!("-{}", signal.name());
+        // Through a shell, as the liveness probe above already is: `kill` is
+        // a builtin every POSIX shell has, and **not** a binary every image
+        // ships. Measured on 2026-09-16 on this project's own Debian agent
+        // image: `exec … kill -INT 7` answers `executable file not found in
+        // $PATH` and a status of 127, and no signal is ever sent — while
+        // `sh -c 'kill -INT 7'` in the same container works.
+        //
+        // Every signal `nunki` sends went through this line: `nunki mission
+        // stop --now`, the emergency brake, and the terminate a mutation
+        // campaign is given when it runs past its deadline. None of them
+        // reached a run on an image without `procps`.
+        //
+        // The live test above did not catch it, and could not: it lifts an
+        // Alpine container, where busybox provides `/bin/kill`. A guard
+        // proved against an image that happens to ship the tool says nothing
+        // about the image the product actually runs on.
+        let kill = format!("kill {flag} {pid}");
+        let out = self.in_container(&["sh", "-c", &kill])?;
         let pid = pid.to_string();
-        let out = self.in_container(&["kill", &flag, &pid])?;
         if out.ok() {
             Ok(())
         } else {

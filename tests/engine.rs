@@ -822,3 +822,53 @@ fn a_frozen_container_answers_paused_and_is_never_probed() {
         fake.calls()
     );
 }
+
+/// A signal reaches the run through a **shell**, because `kill` is a builtin
+/// every shell has and not a binary every image ships.
+///
+/// Measured on 2026-09-16, on this project's own Debian agent image:
+///
+/// ```text
+/// $ docker exec <agent> kill -0 1
+/// OCI runtime exec failed: exec: "kill": executable file not found in $PATH
+/// $ docker exec <agent> sh -c 'command -v kill'
+/// kill
+/// ```
+///
+/// `nunki mission stop --now` answered `kill -INT 7 in the container failed
+/// (127)` and no signal was ever sent. Every gesture that signals a run went
+/// through that line. The live test beside this one did not catch it and
+/// could not: it lifts an Alpine container, where busybox provides
+/// `/bin/kill`.
+#[test]
+fn a_signal_is_sent_through_a_shell_and_not_as_a_binary() {
+    use nunki::engine::fake::Call;
+    use nunki::harness::spawn::{Signal, Spawned, Spawner};
+
+    let fake = std::sync::Arc::new(FakeEngine::default());
+    let spawner = nunki::engine::spawn::ContainerSpawner::new(
+        fake.clone(),
+        file(),
+        "nunki-demo",
+        nunki::compose::AGENT_SERVICE,
+    );
+    spawner
+        .signal(
+            &Spawned {
+                pid: Some(7),
+                container: "cafe1234".into(),
+            },
+            Signal::Interrupt,
+        )
+        .unwrap();
+
+    match fake.calls().last() {
+        Some(Call::Exec(_, service, argv)) => {
+            assert_eq!(service, nunki::compose::AGENT_SERVICE);
+            assert_eq!(argv[0], "sh", "{argv:?}");
+            assert_eq!(argv[1], "-c", "{argv:?}");
+            assert_eq!(argv[2], "kill -INT 7", "{argv:?}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
