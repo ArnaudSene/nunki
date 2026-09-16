@@ -602,6 +602,31 @@ pub fn plan(
     environment.insert("HQ_ROLE".to_string(), role::slug(role).to_string());
     environment.insert("HQ_BRANCH".to_string(), header.branch.clone());
 
+    // Who a commit says wrote it — in the run's environment, where git reads
+    // it before anything in a config file and where no agent can change it
+    // for the next one.
+    //
+    // Measured on 2026-09-16, on `notes-2`'s first lot: `nunki` set no
+    // identity at all, so the agents set one themselves in the slot's config
+    // — and it is the slot's, not the run's. `notes-1`'s integrator had
+    // written `nunki integrator` there, and the **coder** of the next mission
+    // committed under it. A commit that names the wrong role is worse than
+    // one that names none: it is read, and believed.
+    //
+    // It matters more since the harness stopped signing its own commits
+    // (`harness/claude_code.rs`): the author line is now the only thing that
+    // says which role wrote a commit, and a thing that says it has to be
+    // right.
+    let who = role::slug(role);
+    for (var, value) in [
+        ("GIT_AUTHOR_NAME", format!("nunki {who}")),
+        ("GIT_AUTHOR_EMAIL", format!("{who}@nunki.local")),
+        ("GIT_COMMITTER_NAME", format!("nunki {who}")),
+        ("GIT_COMMITTER_EMAIL", format!("{who}@nunki.local")),
+    ] {
+        environment.insert(var.to_string(), value);
+    }
+
     // The test credentials, on the system profile and nowhere else (SPEC
     // 3.1). `compose::build` refuses them on a mission profile, so this is
     // two guards on one rule and that is deliberate: one of them is a type

@@ -1223,6 +1223,27 @@ fn the_profile_names_its_role() {
             Some(said)
         );
         assert_eq!(plan.role, role);
+
+        // And a commit made in that container says the same role, from the
+        // run's environment — git reads these before any config file, so the
+        // slot's config cannot answer for them.
+        //
+        // Measured on `notes-2` on 2026-09-16, before this existed: nunki set
+        // no identity, the agents set one in the slot's config, and the
+        // coder of a second mission committed as `nunki integrator` — the
+        // identity the previous mission's integrator had left there.
+        for (var, value) in [
+            ("GIT_AUTHOR_NAME", format!("nunki {said}")),
+            ("GIT_AUTHOR_EMAIL", format!("{said}@nunki.local")),
+            ("GIT_COMMITTER_NAME", format!("nunki {said}")),
+            ("GIT_COMMITTER_EMAIL", format!("{said}@nunki.local")),
+        ] {
+            assert_eq!(
+                plan.environment.get(var),
+                Some(&value),
+                "{var} on the {role:?} profile"
+            );
+        }
     }
 }
 
