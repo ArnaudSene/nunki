@@ -263,3 +263,93 @@ fn the_follow_up_file_is_prose_and_not_a_code_block() {
     // And it still says who it is for, and that the agent does not write it.
     assert!(text.contains("never writes it"), "{text}");
 }
+
+/// The four files the agent writes are bind-mounted one at a time, so the
+/// rest of the folder can stay read-only. An engine handed a source that does
+/// not exist creates a **directory** there, and the mission then fails on a
+/// message naming the symptom: `MUTANTS.triage.json: Is a directory (os error
+/// 21)`, measured on 2026-09-17 after that file was removed by hand between
+/// two runs. `create` writes the four once; this is the guard that holds at
+/// every lift, because the folder is the human's and removing a file from it
+/// — clearing a `VERDICT.json` that froze wrong — is a repair, not a mistake.
+#[test]
+fn every_file_the_agent_writes_is_put_back_before_a_lift() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = create(dir.path(), "m1", &header(), "do it").unwrap();
+
+    // Driven by the list compose mounts file by file, and not by a copy of
+    // it: a fifth writable file added there is covered here without anyone
+    // remembering to come back.
+    assert!(!nunki::compose::AGENT_WRITABLE.is_empty());
+    for file in nunki::compose::AGENT_WRITABLE {
+        let path = paths.dir.join(file);
+        std::fs::remove_file(&path).unwrap();
+
+        nunki::mission::dir::ensure_writable(&paths.dir).unwrap();
+
+        assert!(path.is_file(), "{file} is not a file after the guard");
+    }
+}
+
+/// The placeholder the engine leaves is an **empty** directory, and putting a
+/// file back means removing it. `remove_dir` is the call that does it:
+/// it succeeds on an empty directory and on nothing else, so the guard can
+/// undo the engine and can never destroy what someone put there.
+#[test]
+fn the_empty_directory_an_engine_leaves_becomes_a_file_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = create(dir.path(), "m1", &header(), "do it").unwrap();
+
+    // Exactly what the engine does with a bind mount whose source is gone.
+    std::fs::remove_file(&paths.triage).unwrap();
+    std::fs::create_dir(&paths.triage).unwrap();
+
+    nunki::mission::dir::ensure_writable(&paths.dir).unwrap();
+
+    assert!(paths.triage.is_file(), "the directory was not replaced");
+    assert_eq!(std::fs::read_to_string(&paths.triage).unwrap(), "");
+}
+
+/// A directory with something in it is not the engine's placeholder, and the
+/// guard says so rather than taking it. Nothing in the mission folder is
+/// deleted on a guess.
+#[test]
+fn a_directory_holding_something_is_named_and_not_removed() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = create(dir.path(), "m1", &header(), "do it").unwrap();
+
+    std::fs::remove_file(&paths.triage).unwrap();
+    std::fs::create_dir(&paths.triage).unwrap();
+    std::fs::write(paths.triage.join("kept.txt"), "someone's").unwrap();
+
+    let error = nunki::mission::dir::ensure_writable(&paths.dir).unwrap_err();
+
+    assert!(
+        matches!(error, MissionDirError::EngineLeftADirectory { .. }),
+        "{error:?}"
+    );
+    let said = error.to_string();
+    assert!(said.contains("is a directory"), "{said}");
+    assert!(said.contains("nothing"), "{said}");
+    assert_eq!(
+        std::fs::read_to_string(paths.triage.join("kept.txt")).unwrap(),
+        "someone's",
+        "the guard took what it found"
+    );
+}
+
+/// The guard is idempotent: a file that is there keeps its content. A run
+/// whose predecessor wrote a verdict must not find it emptied.
+#[test]
+fn a_file_that_is_there_keeps_what_it_holds() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = create(dir.path(), "m1", &header(), "do it").unwrap();
+    std::fs::write(&paths.verdict, r#"{"verdict":"CLEAR"}"#).unwrap();
+
+    nunki::mission::dir::ensure_writable(&paths.dir).unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(&paths.verdict).unwrap(),
+        r#"{"verdict":"CLEAR"}"#
+    );
+}

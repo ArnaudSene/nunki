@@ -74,6 +74,16 @@ pub enum MissionDirError {
     },
     #[error("{0}: {1}")]
     Io(PathBuf, std::io::Error),
+    #[error(
+        "{path} is a directory, and the agent writes a file there. An engine \
+         makes one when it bind-mounts a source that is missing, and nunki \
+         removes that empty placeholder — this one is not empty, so nothing \
+         was touched: look at what is in it, then remove it ({source})"
+    )]
+    EngineLeftADirectory {
+        path: PathBuf,
+        source: std::io::Error,
+    },
 }
 
 /// Write a new mission folder. Refuses to touch one that exists: a mission is
@@ -103,6 +113,49 @@ pub fn create(
     // agent would find a directory where its file should be.
     write(&paths.triage, "")?;
     Ok(paths)
+}
+
+/// Make sure every file the agent writes exists, empty when it does not.
+///
+/// [`create`] writes them once, and that was the whole guard until a
+/// `MUTANTS.triage.json` removed by hand came back as a **directory** on the
+/// next launch (measured 2026-09-17: `verify: the mutation campaign could not
+/// be read: …/MUTANTS.triage.json: Is a directory (os error 21)`). These four
+/// are bind-mounted one file at a time, so that the rest of the folder stays
+/// read-only, and a bind mount whose source is missing makes the engine
+/// create a directory in its place — after which the file is unreadable and
+/// the message names the symptom rather than the cause.
+///
+/// The mission folder belongs to the human, who may reasonably remove a file
+/// from it: clearing a `VERDICT.json` that froze wrong is a repair, not a
+/// mistake. So the guard belongs at every lift and not only at creation —
+/// which is what [`crate::probe`] already did for a check's scratch folder,
+/// and this is the same restriction, in one place.
+///
+/// A directory found where a file belongs is the engine's, and it is removed
+/// with `remove_dir` and never `remove_dir_all`: that call succeeds on an
+/// empty directory and on nothing else, so this can undo the engine's
+/// placeholder and can never destroy what someone put there. A directory
+/// with anything in it is not the engine's, and it is said rather than
+/// touched.
+///
+/// Idempotent: a file that is there is left exactly as it is, content and
+/// modification time included.
+pub fn ensure_writable(dir: &Path) -> Result<(), MissionDirError> {
+    for file in crate::compose::AGENT_WRITABLE {
+        let path = dir.join(file);
+        if path.is_file() {
+            continue;
+        }
+        if path.is_dir() {
+            std::fs::remove_dir(&path).map_err(|source| MissionDirError::EngineLeftADirectory {
+                path: path.clone(),
+                source,
+            })?;
+        }
+        write(&path, "")?;
+    }
+    Ok(())
 }
 
 /// The header of a mission, read back from its folder. `nunki` reads this once,
