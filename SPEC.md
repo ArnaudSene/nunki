@@ -1651,7 +1651,8 @@ dernier lot. La première rouge arrête tout.
 
    Une raison qui **nomme** vaut mieux qu'une qui dit « risque accepté ». Le
    cas le plus fréquent d'acceptation n'est pas « pas de correctif » mais
-   « le code vulnérable n'est pas atteignable » — que `cargo-deny` ne sait pas voir, et dont la raison peut au moins nommer la
+   « le code vulnérable n'est pas atteignable » — que `cargo-deny` ne sait
+   pas voir, et dont la raison peut au moins nommer la
    fonction.
 
    **Une exception se revérifie à chaque mission, et se retire toute seule.**
