@@ -878,7 +878,7 @@ l'intégrateur), `mutation.sh` (commande de mutation),
 `writable.txt` (les répertoires qu'une exécution doit pouvoir écrire quand
 l'arbre est en lecture seule), `perimeter.yaml` (zone de tests pour une
 mission de tests), `security.sh` (audit de dépendances, scan de secrets,
-analyse statique — la sécurité mécanique). Un
+analyse statique — la sécurité mécanique, porte 8, définie en 4.4). Un
 fragment est un script ou un fichier plat, jamais du code de `nunki`. Les trois
 premières stacks sont celles de `claude-setup` : Rust, Python, Next.js.
 
@@ -1261,7 +1261,10 @@ Déterministes. Les portes 1 à 4 sont jouées **à la fin de chaque run**, pas
 seulement à la vérification finale — tranché par Arnaud le 2026-09-09 : la revue avait
 montré qu'une porte de périmètre qui ne tombe qu'à la
 vérification finale perd une mission de six heures pour une écriture interdite au premier
-lot. Les portes 5 à 7 sont jouées à la vérification finale, quand le codeur a fini son dernier lot. La première rouge arrête tout.
+lot. La porte 8 aussi, pour la même raison et parce qu'elle est bon marché :
+un avis introduit au premier lot ne doit pas être trouvé au cinquième. Les
+portes 5 à 7 sont jouées à la vérification finale, quand le codeur a fini son
+dernier lot. La première rouge arrête tout.
 
 1. arbre propre ;
 2. branche non protégée et en avance sur sa base — si la base a avancé
@@ -1366,7 +1369,144 @@ lot. Les portes 5 à 7 sont jouées à la vérification finale, quand le codeur 
    humaine** : le moniteur ne redemande jamais de lui-même, puisque rejouer
    coûte l'heure que la section 7 compte.
 
-Ces sept portes sont celles du **codeur**. La seconde revue a montré
+8. **sécurité mécanique** : audit des dépendances, scan de secrets, analyse
+   statique, par stack, dans `security.sh`. Le tableau des rôles ci-dessous
+   la portait depuis le 2026-09-09 sans qu'elle soit définie nulle part ni
+   implémentée ; définie ici le 2026-09-17.
+
+   Elle est la porte du **codeur et de l'intégrateur**, jamais de l'agent de
+   sécurité : lui attaque ce qui tourne et doit des constats, pas un rapport
+   d'outil. C'est un script de stack, monté en lecture seule à
+   `/work/stack/security.sh`, absent ou non exécutable la porte **échoue**,
+   comme la batterie.
+
+   **Elle n'est pas la batterie.** La batterie du codeur joue déjà `clippy`
+   et `cargo deny check bans licenses sources` ; ce qu'aucune stack ne joue
+   aujourd'hui, ce sont les **vulnérabilités connues** et le **scan de
+   secrets**. Et l'intégrateur ne joue pas `prepush.sh` mais `system.sh` :
+   une vérification glissée dans la batterie ne tournerait jamais sur ses
+   commits, alors que le tableau l'exige « idem sur ses commits ». Enfin un
+   avis paraît **sans que le code bouge**, ce qui est une cadence à soi.
+
+   **Deux exécutions, et c'est la clé du mécanisme.** Mesuré le 2026-09-17
+   sur cargo-deny 0.20.2 et cargo-audit 0.22.0, un avis réel
+   (RUSTSEC-2020-0071 dans `time` 0.1.44) placé dans la liste `ignore` de
+   `deny.toml` :
+
+   - `cargo deny check advisories` répond `advisories ok`, sortie 0 — **la
+     porte**, qui honore les exceptions ;
+   - `cargo audit --json`, dans le même dossier, signale quand même l'avis —
+     **le rapport**, qui voit tout. Il ne lit pas `deny.toml` : sa
+     configuration est `.cargo/audit.toml` et son `--ignore`.
+
+   Aucune isolation n'est donc nécessaire : ni bac à sable, ni clone, ni
+   fichier renommé. Les deux outils sont déjà les deux vues, côte à côte.
+
+   **`patched` est le discriminateur**, et il est lisible par machine.
+   Mesuré le même jour : `versions.patched` vaut `[">=0.2.23"]` pour un avis
+   corrigé et `[]` pour un avis qui ne l'est pas (RUSTSEC-2021-0139,
+   `ansi_term`, abandonné). C'est ce qui permet à une exception de se retirer
+   toute seule.
+
+   **La base d'avis ne peut pas être téléchargée par l'agent.** Mesuré le
+   2026-09-17 : `~/.cargo/advisory-db` vient de
+   `https://github.com/RustSec/advisory-db.git`, donc de **github.com**, donc
+   d'une forge — et aucune forge n'entre dans la liste blanche d'un agent
+   (4.1 bis ; `nunki check` est rouge si une y apparaît). La base est donc
+   rafraîchie **sur l'hôte**, montée en lecture seule dans le conteneur, et
+   l'audit tourne avec `--no-fetch` (mesuré : il trouve la vulnérabilité sans
+   réseau). Ce qui juge l'agent reste hors de sa portée par construction,
+   comme les scripts de stack — et une porte dont la réponse dépend d'une
+   base doit **dire la date de cette base**.
+
+   **Ce qui bloque est ce qui est nouveau depuis la base.** Proposé le
+   2026-09-17, à trancher. Un avis paru cette nuit dans une dépendance que la
+   branche n'a jamais touchée est déjà sur `dev` : arrêter la mission punit
+   le mauvais changement, pour une cause hors de portée de l'agent. Même
+   grammaire que la porte 4 (les chemins touchés) et la porte 7 (l'empreinte
+   des fichiers touchés) : **ce qui est nouveau depuis la base appartient à
+   la mission, ce qui préexiste appartient au projet.**
+
+   **Ce que l'agent fait d'un avis.** Tranché par Arnaud le 2026-09-17, en
+   trois cas :
+
+   1. **aucun avis** — on continue ;
+   2. **avis avec correctif** (`patched` non vide) — l'agent l'applique :
+      montée de version, batterie rejouée, commit. Aucun humain. C'est le cas
+      courant, y compris pour une dépendance **transitive**, qu'un
+      `cargo update -p` corrige sans toucher au parent dès que sa contrainte
+      autorise la version corrigée ;
+   3. **avis sans correctif** (`patched` vide) — et là seulement, deux voies.
+
+   **La voie a : changer de librairie**, et elle a elle-même trois cas,
+   tranchés par Arnaud le 2026-09-17 :
+
+   - la librairie est **explicitement voulue** par le propriétaire : interdit
+     de la remplacer, on va en b ;
+   - rien n'a été dit sur elle : elle peut être remplacée. L'agent le tente,
+     la vérification est automatique — il rejoue `security.sh`, qui lui dit
+     s'il a échangé un avis contre un autre — et il **le dit dans `PR.md`**,
+     parce qu'un changement de dépendance se relit ;
+   - c'est une dépendance **d'une librairie explicitement voulue** : le
+     parent ne peut pas être remplacé, on va en b.
+
+   « Explicitement voulue » doit être **lisible par une machine**, sans quoi
+   les deux premiers cas ne se distinguent pas. Proposé le 2026-09-17, à
+   trancher : une section de `nunki.yaml`, qui vit hors du dépôt et **n'est
+   jamais montée** — donc que l'agent ne peut ni lire ni contourner :
+
+   ```yaml
+   dependencies:
+     keep:
+       - name: tokio
+         because: the runtime the whole service is built on
+   ```
+
+   Une librairie `keep`, et tout parent d'une dépendance vulnérable qui en
+   est une, rend la voie a impossible : l'agent va directement en b sans
+   dépenser une tentative à chercher une alternative qu'on lui refusera.
+
+   **La voie b : accepter le risque, et c'est l'humain.** C'est un jugement
+   que rien ne peut vérifier, donc la même règle que pour un survivant
+   « équivalent » de la porte 7 : *cet avis n'est pas à l'agent de le
+   donner*. L'exception s'écrit dans la liste `ignore` de `deny.toml`, avec
+   sa `reason` — tranché par Arnaud le 2026-09-17, **contre** une proposition
+   de la mettre au QG : c'est la convention de Rust, `deny.toml` doit vivre
+   dans le dépôt puisque la CI s'en sert, et une exception de sécurité y est
+   **relue en pull request** au lieu d'être enfouie là où personne ne la
+   voit. L'agent ne peut pas l'écrire lui-même : `nunki init` met déjà
+   `deny.toml` dans `protected_paths.refuse`, et la porte 4 refuse tout
+   commit qui y touche.
+
+   Une raison qui **nomme** vaut mieux qu'une qui dit « risque accepté ». Le
+   cas le plus fréquent d'acceptation n'est pas « pas de correctif » mais
+   « le code vulnérable n'est pas atteignable » — que ni `cargo audit` ni
+   `cargo deny` ne savent voir, et dont la raison peut au moins nommer la
+   fonction.
+
+   **Une exception se revérifie à chaque mission, et se retire toute seule.**
+   Tranché par Arnaud le 2026-09-17. Une exception posée au jour 1 faute de
+   correctif n'a plus lieu d'être le jour où le correctif sort, et personne
+   n'y repensera. Une date d'expiration avait été proposée et **écartée** :
+   cargo-deny 0.20.2 n'en accepte pas (mesuré : la liste `ignore` ne connaît
+   que `id` et `reason`), et surtout une date est une devinette là où la
+   vraie condition est mécanique. À chaque passage de la porte, pour chaque
+   id de `ignore` :
+
+   - `patched` vide → l'exception vaut encore, on continue ;
+   - `patched` non vide → **l'exception est périmée, un correctif existe :
+     applique-le**, et retire l'exception.
+
+   **Ce qui reste à trancher : les avis qui ne sont pas des vulnérabilités.**
+   `--deny warnings` fait aussi remonter `unmaintained`, `unsound`, `notice`
+   et `yanked`. Ils ont `patched` vide **par nature** — `ansi_term` ne sera
+   jamais corrigé, il est abandonné — donc la revérification ci-dessus ne les
+   touchera jamais et une exception sur l'un d'eux est éternelle. Les traiter
+   comme une vulnérabilité enverrait écrire des exceptions permanentes pour
+   du bruit. La voie proposée est de les rendre en **constat** plutôt qu'en
+   blocage, leur seule sortie réelle étant la voie a. Non tranché.
+
+Ces huit portes sont celles du **codeur**. La seconde revue a montré
 qu'appliquées telles quelles aux deux autres rôles elles étaient indéfinies
 ou absurdes — une batterie sans services pour l'intégrateur, une mutation de
 tests système, un `PR.md` pour une sécurité qui ne commite pas. Tranché par
@@ -1382,7 +1522,7 @@ qu'il produit.**
 | 5 livrable | `PR.md` | `PR.md` complété de la section intégration | le rapport, dans `VERDICT.json` |
 | 6 batterie | oui | **ses tests système verts**, dans le profil système | sans objet |
 | 7 mutation | oui | non (des tests système et de la configuration ne se mutent pas) | non |
-| sécurité mécanique | audit des dépendances, scan de secrets, analyse statique par stack | idem sur ses commits | sans objet |
+| 8 sécurité mécanique | audit des dépendances, scan de secrets, analyse statique par stack (`security.sh`) | idem sur ses commits | sans objet (il attaque ce qui tourne) |
 | verdict | implicite : portes vertes | `INTEGRATED` / `BROKEN` | `CLEAR` / `FINDINGS` |
 
 **Le verdict et le `HEAD`, quand l'intégrateur commite.** Tranché par Arnaud
