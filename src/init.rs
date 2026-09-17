@@ -71,6 +71,22 @@ pub fn init(root: &Path, home: &Path, stacks: &[String]) -> Result<Vec<Action>, 
         }
     }
 
+    // Re-run on a project that already has a configuration: top up the
+    // stacks it declares, rather than looking at none.
+    //
+    // `--stack` has no default, so a bare `nunki init` used to skip the
+    // fragment loop entirely and say nothing about it — measured on
+    // 2026-09-17, a project missing the `caches.txt` a release had added got
+    // four "kept" lines and no hint that its fragments were never examined.
+    // The remedy existed (`nunki init --stack rust`) and was undiscoverable.
+    let declared;
+    let stacks = if stacks.is_empty() {
+        declared = declares(home);
+        declared.as_slice()
+    } else {
+        stacks
+    };
+
     let mut actions = Vec::new();
 
     // The HQ first: everything nunki owns lives there, outside the tree.
@@ -94,9 +110,18 @@ pub fn init(root: &Path, home: &Path, stacks: &[String]) -> Result<Vec<Action>, 
     gitattributes(root, &mut actions)?;
 
     for stack in stacks {
+        // A stack `nunki` ships no fragment for gets no directory. Only an
+        // explicit `--stack` is checked against the known list; the declared
+        // ones come from a configuration a human wrote, and one naming a
+        // stack this release does not carry yet would otherwise leave an
+        // empty folder behind.
+        let files = fragment(stack);
+        if files.is_empty() {
+            continue;
+        }
         let dir = home.join(crate::project::STACKS_DIR).join(stack);
         std::fs::create_dir_all(&dir).map_err(|e| InitError::Io(dir.clone(), e))?;
-        for (name, body, executable) in fragment(stack) {
+        for (name, body, executable) in files {
             let path = dir.join(name);
             if path.exists() {
                 actions.push(Action::LeftAlone(
@@ -114,6 +139,23 @@ pub fn init(root: &Path, home: &Path, stacks: &[String]) -> Result<Vec<Action>, 
     }
 
     Ok(actions)
+}
+
+/// The stacks a project already declares, or none when it declares nothing
+/// yet.
+///
+/// Read here rather than through [`crate::project::Project::open`] because
+/// `init` is the one verb that runs before a project exists: an unreadable or
+/// absent configuration is the ordinary case on a first run, not an error.
+fn declares(home: &Path) -> Vec<String> {
+    let text = match std::fs::read_to_string(home.join(crate::project::CONFIG_FILE)) {
+        Ok(t) => t,
+        Err(_) => return Vec::new(),
+    };
+    match serde_yaml_ng::from_str::<crate::project::Config>(&text) {
+        Ok(config) => config.stacks,
+        Err(_) => Vec::new(),
+    }
 }
 
 fn create_if_absent(
