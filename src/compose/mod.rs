@@ -92,6 +92,10 @@ pub struct Plan {
     /// Test credential files, mounted read-only on a system profile only
     /// (SPEC 3.1). Given as (host path, path in the container).
     pub credentials: Vec<(PathBuf, PathBuf)>,
+    /// The advisory database gate 8 reads, mounted read-only, or `None` when
+    /// the stack declares none. Filled by the host and never by `nunki`: the
+    /// tool owns its own layout (SPEC 4.4, gate 8).
+    pub advisories: Option<(PathBuf, PathBuf)>,
     pub volumes: Vec<NamedVolume>,
     pub environment: BTreeMap<String, String>,
     pub command: Vec<String>,
@@ -383,6 +387,11 @@ fn agent(plan: &Plan, dialect: &Dialect) -> Result<Service, ComposeError> {
     }
 
     for (host, at) in &plan.credentials {
+        volumes.push(mount(host, at, "ro"));
+    }
+    // Read-only, like everything that judges the agent: a database it could
+    // write is one it could empty.
+    if let Some((host, at)) = &plan.advisories {
         volumes.push(mount(host, at, "ro"));
     }
     for volume in &plan.volumes {
