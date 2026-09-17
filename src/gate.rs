@@ -680,6 +680,12 @@ fn has_heading(text: &str, word: &str) -> bool {
 pub const BATTERY: &str = "prepush.sh";
 pub const SYSTEM_BATTERY: &str = "system.sh";
 
+/// Where a stack fragment declares its mechanical security (SPEC 4.4, gate
+/// 8): the dependency audit, the secret scan and the static analysis, each
+/// reported through the contract `nunki` reads and neither runs nor
+/// understands.
+pub const SECURITY: &str = "security.sh";
+
 /// Gate 6: the battery, green, on the clean copy of `HEAD`.
 ///
 /// Two things SPEC 4.4 is explicit about. A battery that is **absent or not

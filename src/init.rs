@@ -401,7 +401,7 @@ ARG RUST_VERSION=stable
 RUN apt-get -qq update \
  && apt-get -qq -y upgrade \
  && apt-get -qq install --no-install-recommends -y \
-      ca-certificates curl git build-essential pkg-config tmux \
+      ca-certificates curl git build-essential pkg-config tmux jq \
  && rm -rf /var/lib/apt/lists/*
 
 # The group may already exist under that id (on macOS, gid 20 is `dialout`
@@ -561,6 +561,139 @@ done < "$missed"
 /// stack because starting an application is a property of the stack, not of
 /// the mission; replaceable by `nunki.yaml`, refinable by a mission header, and
 /// amendable by the integrator as part of its wiring.
+/// The mechanical security of a Rust project (SPEC 4.4, gate 8): the
+/// dependency audit, and one day the secret scan. Like the campaign, it is
+/// declared by the stack, launched by `nunki`, and mounted read-only — what
+/// judges the agent is not the agent's to weaken.
+///
+/// Measured against the real tool on 2026-09-17 before it shipped, which is
+/// the ritual `mutation.sh` went through: cargo-deny writes its JSON to
+/// **stderr**, and `recurse(.parents[0]?)` never terminates because a node
+/// without `parents` yields `null` rather than nothing.
+const SECURITY_RUST: &str = r##"#!/bin/sh
+# The mechanical security of a Rust project (SPEC 4.4, gate 8).
+#
+# `nunki` calls this as `security.sh <base-ref>`, from the clean copy of HEAD
+# inside the slot's container. It prints **one JSON object per line** on
+# stdout, one per finding:
+#
+#   {"id":"…","kind":"…","where":"…","via":"…","fix":"…",
+#    "accepted":"…","was_at_base":false}
+#
+# `nunki` reads those seven fields and nothing else — it knows no tool, no
+# lockfile and no advisory database. Anything that is not one of these lines
+# is ignored, so progress may go to stdout freely, though this script keeps
+# its chatter on stderr.
+#
+# **Not yet covered: the secret scan.** SPEC 4.4 gives gate 8 three families —
+# dependency audit, secret scan, static analysis — and this carries the first.
+# Static analysis is `clippy`, which the battery already runs at gate 6. The
+# secret scan needs a tool the image does not ship; until it is here, this
+# script reports no `kind: "secret"` line, and a reader must not take that for
+# "no secret was found".
+set -eu
+
+base="${1:?usage: security.sh <base-ref> [advisory-db]}"
+# Second argument and not an environment variable: the agent owns its own
+# environment inside the container, and a variable would let it point this at
+# an empty directory — no findings, and a green gate. `nunki` is what invokes
+# the gate, so `nunki` is what says where the database is.
+db="${2:-/work/advisories}"
+
+[ -d "$db" ] || { echo "nunki: no advisory database at $db" >&2; exit 69; }
+
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+
+# A configuration with **no `ignore`**: this is the unfiltered view, the one
+# that still reports what the project has accepted. `--config` is what makes
+# it possible without a sandbox — measured 2026-09-17, cargo-deny reads the
+# file it is given and no other.
+printf '[advisories]\ndb-path = "%s"\n' "$db" > "$work/none.toml"
+
+# `--offline` keeps it from fetching the database, which lives on a forge no
+# agent may reach (SPEC 4.1 bis). It also keeps cargo from downloading crates,
+# so the slot's registry cache must be warm — the battery has already built by
+# the time this runs.
+#
+# **The JSON goes to stderr**, not stdout (measured 2026-09-17: with
+# `2>/dev/null` the output is empty). Findings make it exit non-zero, and that
+# is a result rather than a failure.
+audit() {
+  cargo deny --offline --config "$2" --manifest-path "$1/Cargo.toml" \
+    --format json check advisories 2>&1 >/dev/null || true
+}
+
+ids() { grep '"type":"diagnostic"' | sed -n 's/.*"id":"\([^"]*\)".*/\1/p' | sort -u; }
+
+# What the base already carried. A worktree and not a bare lockfile: measured
+# 2026-09-17, cargo-deny goes through cargo metadata and refuses a directory
+# holding only a manifest and a lockfile ("no targets specified in the
+# manifest"). Nothing is compiled here.
+: > "$work/base.ids"
+if git worktree add -q --detach "$work/base" "$base" 2>/dev/null; then
+  audit "$work/base" "$work/none.toml" | ids > "$work/base.ids" || true
+  git worktree remove --force "$work/base" 2>/dev/null || true
+else
+  echo "nunki: base $base could not be read; every finding counts as new" >&2
+fi
+
+# What the project accepts, as the difference between the two views: an id the
+# unfiltered run reports and the project's own configuration does not is one
+# `deny.toml` ignores. The reason is read from that file, best effort.
+audit . "$work/none.toml" > "$work/all.json"
+: > "$work/kept.ids"
+if [ -f deny.toml ]; then
+  audit . deny.toml | ids > "$work/kept.ids"
+fi
+
+reason() {
+  sed -n "s/.*id *= *\"$1\".*reason *= *\"\([^\"]*\)\".*/\1/p" deny.toml 2>/dev/null |
+    head -1
+}
+
+grep '"type":"diagnostic"' "$work/all.json" | while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"advisory":{.*"id":"\([^"]*\)".*/\1/p')
+  [ -n "$id" ] || continue
+  printf '%s' "$line" > "$work/one.json"
+
+  kind=$(jq -r '.fields.advisory.informational // .fields.code' "$work/one.json")
+  where=$(jq -r '.fields.graphs[0].Krate | "\(.name) \(.version)"' "$work/one.json")
+  # The chain from the finding up to the root crate. Two names means the
+  # finding is on a direct dependency and there is nothing to name; more, and
+  # `via` is the last one before the root — the direct dependency that brought
+  # it in, and the only one this project can actually replace.
+  # `.parents[0]?` is not a stopping condition: on a node without `parents`
+  # it yields `null` rather than nothing, and the recursion never ends —
+  # measured 2026-09-17, jq spun until it was killed. `has` is the guard.
+  via=$(jq -r '[.fields.graphs[0]
+                | recurse(if has("parents") then .parents[0] else empty end)
+                | .Krate.name]
+               | if length > 2 then .[-2] else "" end' "$work/one.json")
+  fix=$(jq -r '[.fields.notes[] | select(startswith("Solution: Upgrade to "))]
+               | if length == 0 then "" else .[0] end' "$work/one.json" |
+        sed -e 's/^Solution: Upgrade to //' -e 's/ *(try .*$//')
+
+  # Reported unfiltered and **not** reported through the project's own
+  # configuration: that is an id `deny.toml` ignores, and the only reliable
+  # way to know it without parsing TOML in a shell.
+  accepted=""
+  if [ -f deny.toml ] && ! grep -qx "$id" "$work/kept.ids"; then
+    accepted="$(reason "$id")"
+    [ -n "$accepted" ] || accepted="accepted in deny.toml"
+  fi
+
+  was_at_base=false
+  grep -qx "$id" "$work/base.ids" 2>/dev/null && was_at_base=true
+
+  jq -cn --arg id "$id" --arg kind "$kind" --arg where "$where" \
+     --arg via "$via" --arg fix "$fix" --arg accepted "$accepted" \
+     --argjson was_at_base "$was_at_base" \
+     '{id:$id, kind:$kind, where:$where, via:$via, fix:$fix,
+       accepted:$accepted, was_at_base:$was_at_base}'
+done
+"##;
+
 const RUN_RUST: &str = r#"#!/bin/sh
 # How an application of this stack is started (SPEC 4.2, "les services et le
 # lancement de l'application").
@@ -676,6 +809,7 @@ fn fragment(stack: &str) -> Vec<(&'static str, String, bool)> {
                 true,
             ),
             ("mutation.sh", MUTATION_RUST.to_string(), true),
+            (crate::gate::SECURITY, SECURITY_RUST.to_string(), true),
             ("run.sh", RUN_RUST.to_string(), true),
             (crate::gate::SYSTEM_BATTERY, SYSTEM_RUST.to_string(), true),
             ("Dockerfile", DOCKERFILE_RUST.to_string(), false),
@@ -684,6 +818,20 @@ fn fragment(stack: &str) -> Vec<(&'static str, String, bool)> {
                 "# Directories an execution must be able to write when the tree is\n\
                  # mounted read-only (SPEC 4.2). One relative path per line.\n\
                  target\n"
+                    .to_string(),
+                false,
+            ),
+            (
+                crate::project::ADVISORIES_FILE,
+                "# Where this toolchain's advisory database lives **on the host**.\n\
+                 # One path, and nunki mounts it read-only for gate 8.\n\
+                 #\n\
+                 # nunki does not fill it: the tool owns its own layout, and\n\
+                 # cargo-deny refuses a path that is not the one it builds from\n\
+                 # the database's URL. Refresh it with the tool itself, on this\n\
+                 # machine — `cargo deny check advisories` once is enough — and\n\
+                 # nunki will say how old it is.\n\
+                 ~/.cargo/advisory-db\n"
                     .to_string(),
                 false,
             ),
