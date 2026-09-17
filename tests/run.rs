@@ -1750,3 +1750,118 @@ fn a_stack_says_where_its_advisory_database_lives() {
     std::fs::write(&file, "# only a comment\n\n").unwrap();
     assert_eq!(project.stack_advisories("rust"), None);
 }
+
+/// Gate 8's script reaches the container the way every script that judges the
+/// agent does: read-only, one file at a time, at `/work/stack`.
+#[test]
+fn the_security_script_reaches_the_container_read_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    std::fs::create_dir_all(project.fragment("rust")).unwrap();
+    let script = project.fragment("rust").join(nunki::gate::SECURITY);
+    std::fs::write(&script, "#!/bin/sh\n").unwrap();
+    let slot = slot_at(dir.path());
+    let header = header_with(with_services());
+
+    for role in [Role::Coder, Role::Integrator, Role::Security] {
+        let (_, doc) = profile_for(&project, &slot, &header, role);
+        let mounts: Vec<String> = doc["services"][nunki::compose::AGENT_SERVICE]["volumes"]
+            .as_sequence()
+            .expect("the agent has mounts")
+            .iter()
+            .map(|v| v.as_str().unwrap_or_default().to_string())
+            .collect();
+        let at = format!("{}/{}", run::STACK_AT, nunki::gate::SECURITY);
+        assert!(
+            mounts.iter().any(|m| m.contains(&at) && m.ends_with(":ro")),
+            "{role:?} does not carry {at} read-only: {mounts:?}"
+        );
+    }
+}
+
+/// A stack that ships no `security.sh` mounts none. A bind mount of a missing
+/// source makes the engine create a directory in its place, and the gate would
+/// read a directory instead of saying the script is absent.
+#[test]
+fn a_stack_without_a_security_script_mounts_nothing_in_its_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    std::fs::create_dir_all(project.fragment("rust")).unwrap();
+    let slot = slot_at(dir.path());
+    let header = header_with(with_services());
+
+    let (plan, _) = profile_for(&project, &slot, &header, Role::Coder);
+
+    assert!(
+        !plan
+            .stack_scripts
+            .iter()
+            .any(|(_, at)| at.ends_with(nunki::gate::SECURITY)),
+        "{:?}",
+        plan.stack_scripts
+    );
+}
+
+/// The advisory database is the host's, mounted read-only at a path `nunki`
+/// fixes. The stack says where it lives; `nunki` says where it lands, because
+/// a path the agent could influence would let it point the audit at an empty
+/// directory — no findings, and a green gate.
+#[test]
+fn the_advisory_database_is_mounted_read_only_where_nunki_says() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    std::fs::create_dir_all(project.fragment("rust")).unwrap();
+    let db = dir.path().join("advisory-db");
+    std::fs::create_dir_all(&db).unwrap();
+    std::fs::write(
+        project
+            .fragment("rust")
+            .join(nunki::project::ADVISORIES_FILE),
+        format!("{}\n", db.display()),
+    )
+    .unwrap();
+    let slot = slot_at(dir.path());
+    let header = header_with(with_services());
+
+    let (plan, doc) = profile_for(&project, &slot, &header, Role::Coder);
+
+    assert_eq!(
+        plan.advisories,
+        Some((db.clone(), std::path::PathBuf::from(run::ADVISORIES_AT)))
+    );
+    let mounts: Vec<String> = doc["services"][nunki::compose::AGENT_SERVICE]["volumes"]
+        .as_sequence()
+        .expect("the agent has mounts")
+        .iter()
+        .map(|v| v.as_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(
+        mounts
+            .iter()
+            .any(|m| m.contains(run::ADVISORIES_AT) && m.ends_with(":ro")),
+        "{mounts:?}"
+    );
+}
+
+/// A database the host has not filled is not mounted at all. The engine would
+/// create an empty directory in its place, and gate 8 would read "nothing to
+/// report" where it should say it has no database.
+#[test]
+fn a_database_the_host_never_filled_is_not_mounted_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    std::fs::create_dir_all(project.fragment("rust")).unwrap();
+    std::fs::write(
+        project
+            .fragment("rust")
+            .join(nunki::project::ADVISORIES_FILE),
+        format!("{}/never-fetched\n", dir.path().display()),
+    )
+    .unwrap();
+    let slot = slot_at(dir.path());
+    let header = header_with(with_services());
+
+    let (plan, _) = profile_for(&project, &slot, &header, Role::Coder);
+
+    assert_eq!(plan.advisories, None);
+}

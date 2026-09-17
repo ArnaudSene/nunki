@@ -36,14 +36,25 @@ pub const MISSION_AT: &str = "/work/mission";
 pub const STACK_AT: &str = "/work/stack";
 
 /// The stack scripts a container runs: the coder's battery, the integrator's,
-/// the mutation campaign and the default launch. `Dockerfile`, `allow.txt`
-/// and `writable.txt` are read on the host and never mounted.
-pub const STACK_SCRIPTS: [&str; 4] = [
+/// the mutation campaign, the mechanical security and the default launch.
+/// `Dockerfile`, `allow.txt`, `writable.txt`, `caches.txt` and
+/// `advisories.txt` are read on the host and never mounted — an agent has no
+/// reason to see its own raw allowlist, nor the recipe for its image.
+pub const STACK_SCRIPTS: [&str; 5] = [
     crate::gate::BATTERY,
     crate::gate::SYSTEM_BATTERY,
+    crate::gate::SECURITY,
     crate::mutants::SCRIPT,
     crate::launch::SCRIPT,
 ];
+
+/// Where the advisory database gate 8 reads is mounted, read-only.
+///
+/// Fixed, and not something the stack chooses: the stack says where it lives
+/// **on the host**, and `nunki` decides where it lands. A path the agent could
+/// influence would let it point the audit at an empty directory — no findings,
+/// and a green gate (SPEC 4.4, gate 8).
+pub const ADVISORIES_AT: &str = "/work/advisories";
 
 /// The effective allowlist of a run, as the agent reads it in the mission
 /// folder.
@@ -709,6 +720,7 @@ pub fn plan(
         mission_dir: paths.dir.clone(),
         mission_dir_at: PathBuf::from(MISSION_AT),
         stack_scripts: stack_scripts(project, stack),
+        advisories: advisories(project, stack),
         credentials,
         volumes: volumes(project, slot, stack, role),
         environment,
@@ -792,6 +804,17 @@ fn sanitise(path: &str) -> String {
             }
         })
         .collect()
+}
+
+/// The advisory database to mount, as (host path, path in the container), or
+/// `None` when the stack declares none or the host has not filled it.
+///
+/// Absent rather than mounted empty: a bind mount of a missing source makes
+/// the engine create a directory in its place, and gate 8 would then read an
+/// empty database as "nothing to report" instead of saying it has none.
+pub fn advisories(project: &Project, stack: &str) -> Option<(PathBuf, PathBuf)> {
+    let host = project.stack_advisories(stack)?;
+    host.is_dir().then(|| (host, PathBuf::from(ADVISORIES_AT)))
 }
 
 /// Where the test credentials are mounted, read-only, on a system profile.

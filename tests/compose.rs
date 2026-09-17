@@ -84,6 +84,9 @@ fn plan(role: Role) -> Plan {
             PathBuf::from("/work/stack/prepush.sh"),
         )],
         credentials,
+        // The golden files freeze a profile without one: `nunki check` is
+        // what proves a real database reaches the container.
+        advisories: None,
         volumes,
         environment,
         command: strings(&["sleep", "infinity"]),

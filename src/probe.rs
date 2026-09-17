@@ -418,6 +418,10 @@ fn plan(
         mission_dir: scratch.to_path_buf(),
         mission_dir_at: PathBuf::from("/work/mission"),
         stack_scripts: crate::run::stack_scripts(project, stack),
+        // The check lifts a real mission profile, so it carries what a
+        // mission carries: `nunki check` is what tells a human the mounts
+        // hold before an agent depends on them.
+        advisories: crate::run::advisories(project, stack),
         credentials: Vec::new(),
         volumes: Vec::<NamedVolume>::new(),
         environment: BTreeMap::new(),
