@@ -190,11 +190,16 @@ pub fn volumes_of(project: &Project, slot: &Slot) -> Vec<String> {
     let mut names = vec![
         crate::exec::proof_volume(&slot.name),
         format!("nunki-{}-harness", slot.name),
+        // Slots made before caches were a declared fragment carry this one.
+        // Listed so a reset still removes it; nothing creates it any more.
         format!("nunki-{}-cargo", slot.name),
     ];
     for stack in &project.config.stacks {
         for path in project.stack_writable(stack) {
             names.push(crate::run::writable_volume(&slot.name, &path));
+        }
+        for path in project.stack_caches(stack) {
+            names.push(crate::run::cache_volume(&slot.name, &path));
         }
     }
     names.sort();

@@ -620,14 +620,9 @@ pub fn plan(
     role: Role,
 ) -> Result<Plan, RunError> {
     let profile = Profile::of(role);
-    let harness_domains = {
-        claude_code::ClaudeCode::new(
-            Default::default(),
-            Box::new(crate::harness::spawn::LocalSpawner),
-        )
-        .provision()
-        .domains
-    };
+    // By name, through the one place a name becomes an adapter: the core
+    // named this one directly, which is the same leak as the volume above.
+    let harness_domains = crate::image::harness_provisioning(&project.config.harness).domains;
     // A mission profile carries no service, whatever the header declares:
     // the coder has nothing to reach, and `compute` refuses one anyway. The
     // system profile adds exactly the services the frozen header declared,
@@ -740,17 +735,26 @@ fn volumes(project: &Project, slot: &Slot, stack: &str, role: Role) -> Vec<Named
         // build cache with it: warmed once per slot and kept (SPEC 4.2,
         // 4.4 gate 7).
         crate::exec::volume(&slot.name),
-        // The harness keeps its sessions here, so resuming survives a
-        // rebuilt container (SPEC 4.3).
-        NamedVolume {
-            name: format!("nunki-{}-harness", slot.name),
-            at: PathBuf::from("/home/agent/.claude"),
-        },
-        NamedVolume {
-            name: format!("nunki-{}-cargo", slot.name),
-            at: PathBuf::from("/home/agent/.cargo/registry"),
-        },
     ];
+    // The harness keeps its sessions somewhere, so resuming survives a
+    // rebuilt container (SPEC 4.3) — and **the adapter says where**. This was
+    // `/home/agent/.claude`, one harness's default written into the core.
+    if let Some(at) = crate::image::harness_provisioning(&project.config.harness).config_dir {
+        volumes.push(NamedVolume {
+            name: format!("nunki-{}-harness", slot.name),
+            at,
+        });
+    }
+    // The caches the stack declares. This was `/home/agent/.cargo/registry`,
+    // mounted for every stack and every role: a Python project carried an
+    // empty `cargo` volume and none for pip. A cache belongs to a toolchain
+    // (SPEC, "agnostique à la stack": caches are a declared fragment).
+    for path in project.stack_caches(stack) {
+        volumes.push(NamedVolume {
+            name: cache_volume(&slot.name, &path),
+            at: PathBuf::from(&path),
+        });
+    }
     if role != Role::Security {
         return volumes;
     }
@@ -768,8 +772,18 @@ fn volumes(project: &Project, slot: &Slot, stack: &str, role: Role) -> Vec<Named
 /// `target/` shared with the coder's would hand the security agent a build
 /// tree it is meant to attack from the outside.
 pub fn writable_volume(slot: &str, path: &str) -> String {
-    let sanitised: String = path
-        .chars()
+    format!("nunki-{slot}-security-{}", sanitise(path))
+}
+
+/// The volume a declared cache is kept in, named after its path so two caches
+/// of one stack cannot collide.
+pub fn cache_volume(slot: &str, path: &str) -> String {
+    format!("nunki-{slot}-cache-{}", sanitise(path))
+}
+
+/// A path as a volume name: anything a name cannot hold becomes `-`.
+fn sanitise(path: &str) -> String {
+    path.chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
                 c
@@ -777,8 +791,7 @@ pub fn writable_volume(slot: &str, path: &str) -> String {
                 '-'
             }
         })
-        .collect();
-    format!("nunki-{slot}-security-{sanitised}")
+        .collect()
 }
 
 /// Where the test credentials are mounted, read-only, on a system profile.

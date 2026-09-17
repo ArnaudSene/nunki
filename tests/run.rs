@@ -1579,3 +1579,140 @@ fn a_branch_that_already_holds_work_is_checked_out_and_never_moved() {
         "mission/x"
     );
 }
+
+/// A cache belongs to a toolchain, and `nunki` is agnostic to the stack: the
+/// principle (SPEC, section 1) names caches among the declared fragments,
+/// beside the battery and the domains.
+///
+/// It was not. `/home/agent/.cargo/registry` was mounted from `nunki`'s own
+/// code for **every stack and every role**, so a Python project would have
+/// carried an empty `cargo` volume and none for pip — the first wall the
+/// second stack would have hit.
+#[test]
+fn the_caches_a_slot_keeps_are_the_ones_its_stack_declares() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    std::fs::create_dir_all(project.fragment("rust")).unwrap();
+    std::fs::write(
+        project.fragment("rust").join(nunki::project::CACHES_FILE),
+        "# what this toolchain keeps outside the tree\n\
+         /home/agent/.cache/pip\n\n\
+         /home/agent/.venv\n",
+    )
+    .unwrap();
+    let slot = slot_at(dir.path());
+    let header = header_with(with_services());
+
+    for role in [Role::Coder, Role::Integrator, Role::Security] {
+        let (plan, _) = profile_for(&project, &slot, &header, role);
+        let at: Vec<String> = plan
+            .volumes
+            .iter()
+            .map(|v| v.at.display().to_string())
+            .collect();
+        assert!(at.contains(&"/home/agent/.cache/pip".to_string()), "{at:?}");
+        assert!(at.contains(&"/home/agent/.venv".to_string()), "{at:?}");
+        // And nothing the core invented: this stack declares no cargo.
+        assert!(
+            !at.iter().any(|p| p.contains("cargo")),
+            "the core named a cache the stack did not declare: {at:?}"
+        );
+        // Named after the path, so two caches of one stack cannot collide.
+        let names: Vec<String> = plan.volumes.iter().map(|v| v.name.clone()).collect();
+        assert!(
+            names.contains(&run::cache_volume("one", "/home/agent/.cache/pip")),
+            "{names:?}"
+        );
+        assert_ne!(
+            run::cache_volume("one", "/home/agent/.cache/pip"),
+            run::cache_volume("one", "/home/agent/.venv")
+        );
+    }
+}
+
+/// A stack that declares no cache gets none, rather than one `nunki` chose.
+#[test]
+fn a_stack_that_declares_no_cache_carries_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    std::fs::create_dir_all(project.fragment("rust")).unwrap();
+    let slot = slot_at(dir.path());
+    let header = header_with(with_services());
+
+    let (plan, _) = profile_for(&project, &slot, &header, Role::Coder);
+
+    // The exact set, not the absence of one spelling: the cache this replaces
+    // was named `-cargo`, so a test looking for `-cache-` would have watched
+    // the old code put it back and called it green.
+    let names: Vec<String> = plan.volumes.iter().map(|v| v.name.clone()).collect();
+    assert_eq!(
+        names,
+        vec![
+            nunki::exec::proof_volume("one"),
+            format!("nunki-{}-harness", slot.name),
+        ],
+        "the core carried a volume nothing declared"
+    );
+}
+
+/// Where a harness keeps its sessions is the harness's to say, through the one
+/// place a name becomes an adapter. `nunki` wrote `/home/agent/.claude` in its
+/// own volume list — one harness's default, spelled out in the core, for a
+/// system that claims to be agnostic to the harness (SPEC, section 1).
+///
+/// This one pins the wiring and **cannot fail today**: the literal it replaced
+/// is the same path this adapter declares, and there is only one adapter. It
+/// is [`a_harness_that_keeps_nothing_carries_no_volume`] that bites — measured,
+/// by putting the literal back and watching that one go red. Said here rather
+/// than left for a reader to discover.
+#[test]
+fn the_harness_says_where_it_keeps_its_sessions() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    std::fs::create_dir_all(project.fragment("rust")).unwrap();
+    let slot = slot_at(dir.path());
+    let header = header_with(with_services());
+
+    let (plan, _) = profile_for(&project, &slot, &header, Role::Coder);
+
+    let declared = nunki::image::harness_provisioning(&project.config.harness)
+        .config_dir
+        .expect("the harness says where it keeps its sessions");
+    let volume = plan
+        .volumes
+        .iter()
+        .find(|v| v.name == format!("nunki-{}-harness", slot.name))
+        .expect("the harness volume is there");
+    assert_eq!(
+        volume.at, declared,
+        "the core chose the path, not the adapter"
+    );
+}
+
+/// A harness that keeps nothing gets no volume — and the answer comes from the
+/// adapter, not from a name the core recognises.
+#[test]
+fn a_harness_that_keeps_nothing_carries_no_volume() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut project = project(dir.path());
+    std::fs::create_dir_all(project.fragment("rust")).unwrap();
+    // The stack carries the perimeter here: an unknown harness declares no
+    // domain, and `nunki` refuses an empty perimeter rather than lifting a
+    // container that can reach nothing.
+    std::fs::write(
+        project.fragment("rust").join("allow.txt"),
+        "index.crates.io\n",
+    )
+    .unwrap();
+    project.config.harness = "a-harness-nunki-has-no-adapter-for".into();
+    let slot = slot_at(dir.path());
+    let header = header_with(with_services());
+
+    let (plan, _) = profile_for(&project, &slot, &header, Role::Coder);
+
+    assert!(
+        !plan.volumes.iter().any(|v| v.name.ends_with("-harness")),
+        "{:?}",
+        plan.volumes
+    );
+}
