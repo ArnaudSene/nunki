@@ -100,7 +100,10 @@ pub fn ended(file: &Path, who: &str, why: &str) -> Result<(), FollowupError> {
     append(
         file,
         &format!(
-            "## {date} — {who} called this mission off\n\n             **Because:** {why}\n\n             Nothing here is deleted. `nunki mission archive` moves this folder under\n             `archive/`, and what it holds is the record of what was done.\n",
+            "## {date} — {who} called this mission off\n\n\
+             **Because:** {why}\n\n\
+             Nothing here is deleted. `nunki mission archive` moves this folder\n\
+             under `archive/`, and what it holds is the record of what was done.\n",
             date = today(),
         ),
     )
