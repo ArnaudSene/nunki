@@ -882,8 +882,11 @@ chemin absolu par ligne, chacun gardé comme volume nommé par slot ; ajouté le
 2026-09-17, parce que `nunki` montait `/home/agent/.cargo/registry` depuis son
 propre code pour toute stack et tout rôle, ce qui aurait donné à un projet
 Python un volume `cargo` vide et aucun pour pip), `perimeter.yaml` (zone de
-tests pour une mission de tests), `security.sh` (audit de dépendances, scan de secrets,
-analyse statique — la sécurité mécanique, porte 8, définie en 4.4). Un
+tests pour une mission de tests), le chemin de la base d'avis de la stack
+(fichier plat, jamais monté ; la base elle-même vit sous `~/.nunki/advisories/`
+et est rafraîchie par l'hôte — voir la porte 8 en 4.4), `security.sh`
+(audit de dépendances, scan de secrets, analyse statique — la sécurité
+mécanique, porte 8, définie en 4.4). Un
 fragment est un script ou un fichier plat, jamais du code de `nunki`. Les trois
 premières stacks sont celles de `claude-setup` : Rust, Python, Next.js.
 
@@ -1501,6 +1504,50 @@ dernier lot. La première rouge arrête tout.
    de sa portée par construction, comme les scripts de stack — et une porte
    dont la réponse dépend d'une base doit **dire la date de cette base**,
    sans quoi elle rend un verdict sans dire de quand il date.
+
+   **Où elle vit, et qui la remplit.** Tranché par Arnaud le 2026-09-17, en
+   trois points.
+
+   Elle vit dans `~/.nunki/advisories/<stack>/`, **partagée** entre les
+   projets, et montée en lecture seule à un chemin fixe du conteneur. Partagée
+   parce que c'est la même donnée pour toute stack donnée : un volume par slot
+   dupliquerait un dépôt de plusieurs centaines de méga-octets autant de fois
+   qu'il y a de slots. `~/.nunki/` tient déjà ce qui est commun — les comptes,
+   la consommation, le registre des sessions, le jeton de forge.
+
+   Un **bind en lecture seule et non un volume nommé**, pour une raison
+   mécanique : un volume nommé ne s'écrit que depuis un conteneur, et
+   celui-ci est rempli par l'hôte. Le remplir en volume demanderait de lever
+   un conteneur auxiliaire pour rien. C'est la forme que les fichiers
+   d'identifiants de test utilisent déjà.
+
+   **`nunki` ne la rafraîchit pas.** L'outil possède la disposition de sa
+   base : mesuré le 2026-09-17, cargo-deny crée un `advisory-db-<empreinte>`
+   dérivé de l'URL, et **refuse** un chemin qui n'a pas cette forme. Un
+   `git clone` générique ne le satisferait donc pas, et chaque écosystème aura
+   la sienne. Le rafraîchissement est une commande de l'outil, sur l'hôte,
+   lancée par l'humain ou par sa CI ; `nunki` monte et rapporte. Aucune URL
+   déclarée par un projet n'est clonée par `nunki`, et l'agent reste sans
+   forge.
+
+   **Mais `nunki` en dit l'âge, et il le lit sans rien savoir de l'écosystème.**
+   Mesuré le même jour sur les deux bases du poste : `git -C <dir> log -1
+   --format=%cI` rend la date de la dernière publication, et les deux sont de
+   simples dépôts git. La stack déclare le chemin de sa base dans un fichier
+   plat de son fragment — même famille qu'`allow.txt` et `caches.txt` — et le
+   script y pointe son outil.
+
+   **Absente ou illisible, la porte est `Unplayed` et non rouge.** C'est un
+   verdict sur la machine et non sur l'agent, la distinction que la batterie
+   fait déjà entre « il n'y a rien à jouer » et « c'est rouge ». Le flux
+   s'arrête, ce qui est honnête : une porte de sécurité qui n'a pas pu
+   consulter sa base ne doit pas rendre vert, et le remède tient en une
+   commande sur l'hôte.
+
+   Écarté pour l'instant, et nommé pour qu'on sache qu'il l'a été : un verbe
+   qui lancerait la commande de rafraîchissement de la stack **sur l'hôte**.
+   Ce serait le seul endroit où un script de fragment tournerait hors d'un
+   conteneur — une frontière de confiance nouvelle, pour une commodité.
 
    **Ce qui bloque est ce qui est nouveau depuis la base.** Tranché par
    Arnaud le 2026-09-17. Un avis paru cette nuit dans une dépendance que la
