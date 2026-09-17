@@ -247,22 +247,63 @@ fn stalls_and_mission_failures_consume_attempts_up_to_the_bound() {
     );
 }
 
+/// A red gate at the final verification sends the coder back, and **that is
+/// a return to the coder**: it counts, and the count is what ends a mission
+/// the coder cannot fix.
+///
+/// This test asserted the opposite until 2026-09-17 — it was named
+/// `a_failed_gate_sends_the_coder_a_fix_run_without_counting_a_volet` and
+/// required `volets() == 0` — and it was wrong. SPEC 7 says the loop is
+/// bounded and what the bound counts: "au troisième retour au codeur sur une
+/// même mission, le HQ ne relance pas". Any return, not only the one a red
+/// verdict opens.
+///
+/// What the exemption cost, measured on `notes-3` on 2026-09-16: gate 7 red
+/// on survivors no test could kill, the agent declaring its volet done, the
+/// gates played again, the same gate red again, the same volet 0 opened
+/// again — **twenty-eight times in half an hour**, 34 million tokens, and
+/// nothing in the flow that could have stopped it.
 #[test]
-fn a_failed_gate_sends_the_coder_a_fix_run_without_counting_a_volet() {
+fn a_failed_gate_opens_a_volet_that_counts_and_the_third_hands_over() {
     let mut flow = Flow::new(header(none(), Security::Gates, Bounds::default())).unwrap();
     code_through(&mut flow);
+
+    for n in 1..=3 {
+        flow.advance(Event::GatesFailed {
+            reason: format!("2 surviving mutants, run {n}"),
+        })
+        .unwrap();
+        assert!(
+            matches!(
+                flow.stage(),
+                Stage::Coding {
+                    work: Work::Volet { n: got, .. },
+                    attempt: 1
+                } if *got == n
+            ),
+            "{:?}",
+            flow.stage()
+        );
+        assert_eq!(flow.volets(), n);
+        // The coder does its run and says the volet is done; the flow plays
+        // the gates again, which is where the loop used to close.
+        flow.advance(finished(true)).unwrap();
+        assert_eq!(flow.stage(), &Stage::Gates);
+    }
+
+    // The fourth time, nothing is relaunched: three returns are the bound,
+    // and the three causes go to the human side by side.
     flow.advance(Event::GatesFailed {
-        reason: "2 surviving mutants".into(),
+        reason: "2 surviving mutants, run 4".into(),
     })
     .unwrap();
-    assert!(matches!(
-        flow.stage(),
-        Stage::Coding {
-            work: Work::Volet { .. },
-            attempt: 1
+    match flow.stage() {
+        Stage::AwaitingHuman(Handover::VoletsExhausted { causes }) => {
+            assert_eq!(causes.len(), 4, "{causes:?}");
+            assert!(causes.iter().all(|c| c.starts_with("gate: ")), "{causes:?}");
         }
-    ));
-    assert_eq!(flow.volets(), 0);
+        other => panic!("{other:?}"),
+    }
 }
 
 #[test]
