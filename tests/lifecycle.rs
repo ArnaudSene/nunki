@@ -465,3 +465,108 @@ fn ending_under_a_running_agent_is_refused() {
     let err = lifecycle::end(&world.project, "m1", "enough").unwrap_err();
     assert!(matches!(err, LifecycleError::RunInProgress { .. }), "{err}");
 }
+
+/// A retry that tells the agent nothing hands it back the work it already
+/// failed, on the same tree and the same cause, and spends the budget
+/// reaching the same handover. So `--because` is not paperwork: it lands in
+/// `FOLLOWUP_HQ.md`, the file every role reads before anything else.
+#[test]
+fn taking_a_mission_back_tells_the_next_run_what_changed() {
+    let world = World::new(1);
+    // Drive it into a handover the way the bounds do.
+    let mut state = world.state();
+    let store = Store::open(&world.project.hq_root).unwrap();
+    for _ in 0..state.flow.header().bounds.attempts_per_lot {
+        store
+            .apply(
+                &mut state,
+                nunki::mission::flow::Event::Stalled {
+                    reason: "the container went away".into(),
+                },
+            )
+            .unwrap();
+    }
+    assert!(
+        matches!(world.state().flow.stage(), Stage::AwaitingHuman(_)),
+        "{:?}",
+        world.state().flow.stage()
+    );
+
+    let state = lifecycle::retry(
+        &world.project,
+        "m1",
+        "the engine had no disk; it has room now",
+    )
+    .unwrap();
+
+    assert!(
+        matches!(state.flow.stage(), Stage::Coding { attempt: 1, .. }),
+        "{:?}",
+        state.flow.stage()
+    );
+    let followup =
+        std::fs::read_to_string(world.project.hq_root.join("missions/m1/FOLLOWUP_HQ.md")).unwrap();
+    assert!(
+        followup.contains("the engine had no disk; it has room now"),
+        "what changed never reached the agent:\n{followup}"
+    );
+    // And it says what had stopped it, so the reason has something to attach
+    // to six months from now.
+    assert!(followup.contains("attempt(s)"), "{followup}");
+}
+
+/// The record the agent reads is prose. A run of four spaces renders as a
+/// Markdown code block, which is how the two sentences that matter arrive
+/// monospaced and unread.
+#[test]
+fn the_record_a_retry_leaves_is_prose_and_not_a_code_block() {
+    let world = World::new(1);
+    let mut state = world.state();
+    let store = Store::open(&world.project.hq_root).unwrap();
+    for _ in 0..state.flow.header().bounds.attempts_per_lot {
+        store
+            .apply(
+                &mut state,
+                nunki::mission::flow::Event::Stalled {
+                    reason: "gone".into(),
+                },
+            )
+            .unwrap();
+    }
+    lifecycle::retry(&world.project, "m1", "the fixture is in place").unwrap();
+
+    let followup =
+        std::fs::read_to_string(world.project.hq_root.join("missions/m1/FOLLOWUP_HQ.md")).unwrap();
+    let section = followup
+        .split("## ")
+        .find(|s| s.contains("took this mission back"))
+        .expect("the section is there");
+    for line in section.lines() {
+        assert!(
+            !line.starts_with("    "),
+            "renders as a code block: {line:?}"
+        );
+        assert!(
+            !line.contains("  "),
+            "a run of spaces inside a line: {line:?}"
+        );
+    }
+}
+
+/// `retry` takes back a mission the bounds stopped. A mission that is running
+/// fine is told that, rather than moved.
+#[test]
+fn a_mission_that_never_stopped_is_not_taken_back() {
+    let world = World::new(1);
+    let err = lifecycle::retry(&world.project, "m1", "no reason").unwrap_err();
+    assert!(matches!(err, LifecycleError::NotHandedOver { .. }), "{err}");
+    assert!(matches!(world.state().flow.stage(), Stage::Coding { .. }));
+}
+
+/// Say what changed, or the verb is a way of spending the budget twice.
+#[test]
+fn taking_a_mission_back_without_saying_what_changed_is_refused() {
+    let world = World::new(1);
+    let err = lifecycle::retry(&world.project, "m1", " \n\t").unwrap_err();
+    assert!(matches!(err, LifecycleError::NoChange), "{err}");
+}

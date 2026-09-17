@@ -1467,6 +1467,22 @@ Ce que la boucle veut dire, et ce qu'elle ne veut pas dire.
   `nunki.yaml` et par mission (`MISSION.md` prime), jamais en dur dans le
   moteur ; la mettre à zéro n'est pas « sans limite » mais « aucune
   itération : le premier rouge remonte ».
+- **Et la main rendue se reprend.** Ajouté le 2026-09-17, sur un trou mesuré :
+  toutes les façons d'atteindre « rendue à l'humain » sont une borne qui
+  s'épuise — les tentatives d'un lot, celles d'un rôle, les volets — et
+  jusqu'ici aucune n'en sortait. `resume` lève une suspension, `iterate` et
+  `accept` ne partent que de `FINDINGS`, et le moniteur abandonne l'étape :
+  une mission qui avait épuisé ses volets était finie sans être terminée.
+  `nunki mission retry <mission> --because <ce qui a changé>` la reprend, sur
+  le travail où elle s'est arrêtée, **et rend les bornes entières** — remettre
+  le compteur *est* le verbe, pas un effet de bord : sans cela le rouge
+  suivant retombe dans la même remontée. La raison n'est pas facultative et ne
+  va pas que dans l'état : elle est écrite dans `FOLLOWUP_HQ.md`, que chaque
+  rôle lit avant tout le reste, parce que ni l'arbre ni la cause n'ont bougé
+  d'eux-mêmes — un `retry` qui ne dit rien rachète la même remontée. Une
+  mission que l'humain a **appelée off** avec `end` n'est pas une borne
+  épuisée : elle est refusée, sinon `end` deviendrait un verbe sur lequel il
+  ne peut pas compter.
 - **Un run tombé pour une cause du harnais ne compte pas.** Quota atteint,
   jeton expiré, réseau, plantage : `nunki` attend et rejoue le run, sans
   consommer une tentative ni un volet, ni écrire un verdict, avec l'attente

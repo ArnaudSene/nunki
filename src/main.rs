@@ -283,6 +283,21 @@ enum MissionCommand {
         why: String,
     },
 
+    /// Take a mission back from a handover, and say what changed.
+    ///
+    /// Every handover is a bound running out — a lot's attempts, a role's, or
+    /// the returns to the coder. This hands the bounds back whole and puts
+    /// the mission on the work it stopped on. A mission you called off
+    /// yourself is not a handover, and is refused.
+    Retry {
+        /// The mission.
+        id: String,
+        /// What changed since it stopped. Required: the tree and the cause
+        /// have not moved on their own, and the next run reads this.
+        #[arg(long = "because", value_name = "WHAT")]
+        why: String,
+    },
+
     /// Close a finished mission: its folder and its state move under
     /// `archive/`. Nothing is deleted, and the slot is left alone.
     Archive {
@@ -1403,6 +1418,22 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                 println!(
                     "          written to FOLLOWUP_HQ.md; `nunki mission archive {id}` closes it"
                 );
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("nunki: {e}");
+                ExitCode::FAILURE
+            }
+        },
+
+        MissionCommand::Retry { id, why } => match nunki::lifecycle::retry(project, &id, &why) {
+            Ok(state) => {
+                println!("retried   {:?}", state.flow.stage());
+                println!("          the bounds are handed back whole");
+                println!(
+                    "          written to FOLLOWUP_HQ.md; `nunki verify {id}` launches the run"
+                );
+                start_monitor(project, &id);
                 ExitCode::SUCCESS
             }
             Err(e) => {

@@ -77,6 +77,10 @@ pub enum Event {
     Iterate,
     /// From `Findings`: the human lifted every finding (`nunki mission accept`).
     HumanAccepted,
+    /// The human takes a mission back from a handover (`nunki mission
+    /// retry`), saying what changed. Only from [`Stage::AwaitingHuman`], and
+    /// never from a mission the human called off themselves.
+    Retried { because: String },
     /// The human called the mission off (`nunki mission end`), with a reason.
     /// Valid wherever a mission can still be worked on: what it says is
     /// "stop asking me about this", and there is no stage where that is not
@@ -97,6 +101,17 @@ pub enum FlowError {
     LotGone { lot: String, lots: usize },
     #[error("the mission is already over; `nunki mission archive` closes it")]
     AlreadyOver,
+    #[error(
+        "this mission was called off, and that is a decision rather than a bound it ran \
+         into — `nunki mission retry` takes back a mission the bounds stopped, never \
+         one you stopped yourself ({0})"
+    )]
+    CalledOff(String),
+    #[error(
+        "this mission handed over before `nunki mission retry` existed, so nothing \
+         recorded which work it stopped on — reframe it, or start it again"
+    )]
+    NothingToResume,
 }
 
 /// The state machine. Serializable, so the engine persists it at every
@@ -109,6 +124,19 @@ pub struct Flow {
     volet_causes: Vec<String>,
     /// Attempts used per coder work item, keyed by a stable label.
     attempts: HashMap<String, u32>,
+    /// The coder work a [`Event::Retried`] picks up, kept from the moment the
+    /// flow handed over.
+    ///
+    /// It is held here and not read back from [`Handover`], whose `lot` is a
+    /// label: [`Flow::label`] is not invertible — it folds a volet's cause
+    /// away, and nothing stops a human naming a lot `volet-2`. A label is
+    /// what a human reads; this is what the machine resumes with.
+    ///
+    /// `serde(default)` because missions handed over before this existed are
+    /// on disk: they read back as `None`, and a retry says so rather than
+    /// guessing which work it was.
+    #[serde(default)]
+    resume_with: Option<Work>,
 }
 
 impl Flow {
@@ -126,6 +154,7 @@ impl Flow {
             volets: 0,
             volet_causes: Vec::new(),
             attempts: HashMap::new(),
+            resume_with: None,
         })
     }
 
@@ -275,6 +304,45 @@ impl Flow {
             }
             (Stage::Findings { .. }, Event::HumanAccepted) => Stage::Verified,
 
+            // --- the human takes it back -------------------------------
+            //
+            // A handover is the flow saying "a bound stopped me, and the
+            // decision is yours". `Retried` is that decision, and it hands
+            // the budget back whole: resetting the counter **is** the verb,
+            // not a side effect of it. Without that the mission would land
+            // in the same handover on the very next event.
+            //
+            // `Abandoned` is not a bound. The human said stop, and a verb
+            // that undid that would make `nunki mission end` something they
+            // could not rely on.
+            (Stage::AwaitingHuman(Handover::Abandoned { reason }), Event::Retried { .. }) => {
+                return Err(FlowError::CalledOff(reason));
+            }
+            // A role's attempts: the role is typed, so the stage to go back
+            // to is read straight from the handover.
+            (
+                Stage::AwaitingHuman(Handover::RoleAttemptsExhausted { role, .. }),
+                Event::Retried { .. },
+            ) => self.role_stage(role, 1),
+            (Stage::AwaitingHuman(_), Event::Retried { .. }) => {
+                let Some(work) = self.resume_with.clone() else {
+                    return Err(FlowError::NothingToResume);
+                };
+                // A volet resumes on the budget it was given: 1 when the
+                // returns ran out, its own number when it was that volet's
+                // attempts that did.
+                //
+                // Nothing resets `attempts`: the bound is read from the
+                // stage's own `attempt`, which starts at 1 below, and the map
+                // is written but never read (measured — removing a reset here
+                // changed no test, because there is nothing to change).
+                if let Work::Volet { n, .. } = &work {
+                    self.volets = *n;
+                }
+                self.resume_with = None;
+                Stage::Coding { work, attempt: 1 }
+            }
+
             // Wherever it is, and last in the match so that no stage can
             // claim it first: a mission a human has called off is over, and
             // a verb that worked in five stages out of seven would be a verb
@@ -328,6 +396,8 @@ impl Flow {
         let label = self.label(&work);
         *self.attempts.entry(label.clone()).or_insert(0) = attempt;
         if attempt >= self.header.bounds.attempts_per_lot {
+            // Kept whole, so a retry resumes this work and not a label.
+            self.resume_with = Some(work);
             Stage::AwaitingHuman(Handover::LotAttemptsExhausted {
                 lot: label,
                 attempts: attempt,
@@ -375,6 +445,10 @@ impl Flow {
     fn volet(&mut self, cause: String) -> Stage {
         self.volet_causes.push(cause.clone());
         if self.volets >= self.header.bounds.max_volets {
+            // The cause that arrived with no budget left to open a volet for
+            // it: the one a retry has to start from, numbered 1 because a
+            // retry hands back the whole budget.
+            self.resume_with = Some(Work::Volet { n: 1, cause });
             return Stage::AwaitingHuman(Handover::VoletsExhausted {
                 causes: self.volet_causes.clone(),
             });
