@@ -1226,6 +1226,10 @@ pub fn campaign(
         &crate::run::stack_of(project),
         &touched,
         header.bounds.mutation_minutes,
+        // The monitor never asks again by itself: replaying costs an hour,
+        // and "ask again" is a human saying something changed that the
+        // fingerprint cannot see.
+        crate::mutants::Replay::WhenChanged,
     )?)
 }
 

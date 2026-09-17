@@ -1352,6 +1352,20 @@ lot. Les portes 5 à 7 sont jouées à la vérification finale, quand le codeur 
    **Seulement si elle est seule** : une porte 6 injouable à côté, et
    l'heure de mutation serait dépensée devant un mur que rien ne bouge.
 
+   **Et `--again`, pour ce que l'empreinte ne voit pas.** Ajouté le
+   2026-09-17. L'empreinte porte sur les fichiers touchés, mais la réponse
+   d'une campagne dépend aussi de ce avec quoi elle a tourné : le
+   `mutation.sh` de la stack, la version de l'outil, une exclusion ajoutée
+   depuis. Rien de tout cela ne bouge l'empreinte, et la seule façon de
+   repasser outre était de supprimer `MUTANTS.json` à la main — ce qui, le
+   2026-09-17, a emporté `MUTANTS.triage.json` avec lui : le moteur a remplacé
+   le fichier manquant par un répertoire et la mission est tombée sur
+   `Is a directory (os error 21)`. Un verbe coûte moins cher que le
+   contournement qu'il remplace. `--again` ne touche pas à une campagne en
+   vol — celle qui tourne est rapportée comme telle — et reste **une décision
+   humaine** : le moniteur ne redemande jamais de lui-même, puisque rejouer
+   coûte l'heure que la section 7 compte.
+
 Ces sept portes sont celles du **codeur**. La seconde revue a montré
 qu'appliquées telles quelles aux deux autres rôles elles étaient indéfinies
 ou absurdes — une batterie sans services pour l'intégrateur, une mutation de

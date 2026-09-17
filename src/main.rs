@@ -417,6 +417,13 @@ enum MissionCommand {
         /// it rests on.
         #[arg(long = "because", value_name = "SENTENCE", requires = "equivalent")]
         because: Option<String>,
+        /// Run it again although a campaign on this exact content is on
+        /// file. The fingerprint is over the touched files, so it cannot see
+        /// a change to the stack's `mutation.sh`, to the tool, or to an
+        /// exclusion — this is how you say one happened. A campaign already
+        /// in flight is left alone.
+        #[arg(long)]
+        again: bool,
     },
     /// Play the verification gates 1 to 4 on what the slot holds (SPEC 4.4).
     /// Deterministic, and nothing is asked of the agent.
@@ -1592,6 +1599,7 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             slot,
             equivalent,
             because,
+            again,
         } => {
             if let Some(survivor) = equivalent {
                 let Some(why) = because else {
@@ -1660,6 +1668,11 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                 &stack,
                 &base,
                 header.bounds.mutation_minutes,
+                if again {
+                    nunki::mutants::Replay::Now
+                } else {
+                    nunki::mutants::Replay::WhenChanged
+                },
             ) {
                 Ok(progress) => {
                     use nunki::mutants::Progress;
@@ -1667,7 +1680,7 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                         Progress::Fresh { survivors } => println!(
                             "a campaign on this exact content is already on file — \
                              {survivors} survivor(s); it replays only when the touched \
-                             files change"
+                             files change, or when you say `--again`"
                         ),
                         Progress::Started { fingerprint } => println!(
                             "campaign {} started; `nunki mission mutants {id}` follows it",

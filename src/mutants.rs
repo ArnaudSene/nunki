@@ -324,6 +324,57 @@ pub fn rule_equivalent(dir: &Path, id: &str, why: &str) -> Result<(), MutantsErr
     write(dir, &campaign)
 }
 
+/// Whether a campaign already on file is enough.
+///
+/// A campaign is expensive — SPEC § 7 counts the hour — so the default is
+/// that one on the same content is not run again. But "the same content" is
+/// the fingerprint over the touched files, and a campaign's answer also
+/// depends on what it ran *with*: the stack's `mutation.sh`, the tool's
+/// version, an exclusion added since. None of those move the fingerprint.
+///
+/// Before this existed the only way past it was to delete `MUTANTS.json` by
+/// hand, and on 2026-09-17 that took `MUTANTS.triage.json` with it — a file
+/// the engine then replaced with a directory, which brought the mission down.
+/// A verb is cheaper than the workaround it replaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Replay {
+    /// Only when the touched files have changed. The default (SPEC 4.4).
+    WhenChanged,
+    /// Now, whatever is on file. Never touches a campaign in flight: one
+    /// already running is reported as running, and asking again does not
+    /// start a second.
+    Now,
+}
+
+/// The campaign on file, when it answers for this content and the caller is
+/// willing to take it.
+///
+/// Public, and its own function, because it **is** the whole of [`Replay`]:
+/// reaching it through [`campaign`] needs a container, so a test that cannot
+/// call it could only check that a campaign started, never why. A campaign costs
+/// an hour (SPEC § 7), so one on the same content is not run again — unless a
+/// human says something changed that the fingerprint cannot see, since the
+/// fingerprint is over the touched files and not over `mutation.sh`, the
+/// tool's version, or an exclusion added since.
+pub fn already_answered(
+    dir: &Path,
+    want: &str,
+    replay: Replay,
+) -> Result<Option<Progress>, MutantsError> {
+    if replay == Replay::Now {
+        return Ok(None);
+    }
+    let Some(existing) = read(dir)? else {
+        return Ok(None);
+    };
+    if existing.fingerprint != want {
+        return Ok(None);
+    }
+    Ok(Some(Progress::Fresh {
+        survivors: existing.survivors.len(),
+    }))
+}
+
 /// Where a campaign is at, as a caller reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Progress {
@@ -381,6 +432,10 @@ pub fn started(mission: &str) -> String {
 /// identifiable from its own command line — process ids inside a container
 /// are recycled within seconds, and liveness here means "this campaign", not
 /// "something holds that number".
+// Eight, and the eighth is [`Replay`]. Folding them into a struct would be a
+// second change riding on this one; `run::plan` carries the same allow for
+// the same reason.
+#[allow(clippy::too_many_arguments)]
 pub fn campaign(
     project: &crate::project::Project,
     slot: &crate::slot::Slot,
@@ -389,6 +444,7 @@ pub fn campaign(
     stack: &str,
     touched: &[String],
     deadline_minutes: u32,
+    replay: Replay,
 ) -> Result<Progress, MutantsError> {
     use crate::harness::spawn::{CommandSpec, Presence, Signal, Spawned, Spawner};
 
@@ -466,12 +522,8 @@ pub fn campaign(
     // Nothing in flight. A campaign on this exact content is not run again:
     // SPEC 4.4 says it replays only when the touched files have changed, and
     // § 7 counts the hour it would otherwise spend.
-    if let Some(existing) = read(dir)?
-        && existing.fingerprint == want
-    {
-        return Ok(Progress::Fresh {
-            survivors: existing.survivors.len(),
-        });
+    if let Some(fresh) = already_answered(dir, &want, replay)? {
+        return Ok(fresh);
     }
 
     let script = format!("{}/{SCRIPT}", crate::run::STACK_AT);
