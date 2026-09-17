@@ -213,13 +213,19 @@ impl Flow {
 
             // --- gates -------------------------------------------------
             (Stage::Gates, Event::GatesPassed) => self.after_gates(),
-            (Stage::Gates, Event::GatesFailed { reason }) => Stage::Coding {
-                work: Work::Volet {
-                    n: self.volets,
-                    cause: format!("gate: {reason}"),
-                },
-                attempt: 1,
-            },
+            // Through `volet`, like a red verdict: it counts, and the count
+            // is what ends a mission the coder cannot fix.
+            //
+            // Opened by hand here until 2026-09-17, with `n: self.volets` and
+            // no increment, so every return was volet 0 and `max_volets`
+            // never came round. Measured on `notes-3`: a gate 7 red on
+            // survivors that no test could kill sent the coder back
+            // **twenty-eight times** in half an hour — the agent declared its
+            // volet done, the gates were played again, the same gate was red
+            // again, and the same volet 0 opened again. 34 million tokens,
+            // and the only thing that would have stopped it was the
+            // account's weekly cap.
+            (Stage::Gates, Event::GatesFailed { reason }) => self.volet(format!("gate: {reason}")),
 
             // --- integrator --------------------------------------------
             (Stage::Integration { attempt }, Event::RunEnded { outcome, .. }) => {
