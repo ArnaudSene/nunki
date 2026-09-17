@@ -1716,3 +1716,37 @@ fn a_harness_that_keeps_nothing_carries_no_volume() {
         plan.volumes
     );
 }
+
+/// Where the advisory database lives is the stack's to say, as a path on the
+/// host: `nunki` mounts it read-only and never fills it, because the tool owns
+/// its own layout (SPEC 4.4, gate 8).
+#[test]
+fn a_stack_says_where_its_advisory_database_lives() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    std::fs::create_dir_all(project.fragment("rust")).unwrap();
+    let file = project
+        .fragment("rust")
+        .join(nunki::project::ADVISORIES_FILE);
+
+    // Absent: the stack declares none, and that is not an error here — the
+    // gate is what says a database is missing.
+    assert_eq!(project.stack_advisories("rust"), None);
+
+    // A path a human can type, tilde and all.
+    std::fs::write(&file, "# where it lives\n~/.cargo/advisory-db\n").unwrap();
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+    assert_eq!(
+        project.stack_advisories("rust"),
+        Some(home.join(".cargo/advisory-db"))
+    );
+
+    // Relative is refused rather than resolved against whatever directory
+    // `nunki` happened to be started in.
+    std::fs::write(&file, "advisory-db\n").unwrap();
+    assert_eq!(project.stack_advisories("rust"), None);
+
+    // Comments and blank lines are not a path.
+    std::fs::write(&file, "# only a comment\n\n").unwrap();
+    assert_eq!(project.stack_advisories("rust"), None);
+}

@@ -755,3 +755,73 @@ fn a_declared_stack_nunki_has_no_fragment_for_leaves_nothing_behind() {
     // And the stack it does carry is still examined.
     assert!(kept(&actions, "prepush.sh").is_some(), "{actions:?}");
 }
+
+/// Gate 8 is a stack's to declare, like the battery and the campaign, and it
+/// reaches the container read-only. A script that judges the agent is not the
+/// agent's to weaken.
+#[test]
+fn the_rust_stack_ships_its_mechanical_security() {
+    let (_dir, root, _nunki) = fresh();
+    let home = home(&root);
+
+    let actions = init(&root, &home, &["rust".to_string()]).unwrap();
+
+    assert!(created(&actions, nunki::gate::SECURITY), "{actions:?}");
+    let script = home
+        .join(nunki::project::STACKS_DIR)
+        .join("rust")
+        .join(nunki::gate::SECURITY);
+    assert!(script.is_file());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&script).unwrap().permissions().mode();
+        assert_eq!(mode & 0o111, 0o111, "nothing could run it: {mode:o}");
+    }
+
+    let body = std::fs::read_to_string(&script).unwrap();
+    // The database is a positional argument, never an environment variable:
+    // the agent owns its environment inside the container, and a variable
+    // would let it point this at an empty directory — no findings, and a
+    // green gate.
+    assert!(!body.contains("NUNKI_ADVISORIES"), "{body}");
+    assert!(body.contains("/work/advisories"), "{body}");
+    // The seven fields of the contract, and no eighth.
+    for field in [
+        "id",
+        "kind",
+        "where",
+        "via",
+        "fix",
+        "accepted",
+        "was_at_base",
+    ] {
+        assert!(
+            body.contains(&format!("{field}:$")),
+            "{field} is not emitted"
+        );
+    }
+    // It says what it does not yet cover, rather than letting a reader take
+    // silence for "no secret was found".
+    assert!(body.contains("secret scan"), "{body}");
+}
+
+/// The image must carry a JSON parser, because the script parses JSON. A
+/// fragment that cannot run is a gate that cannot be played.
+#[test]
+fn the_image_carries_what_the_security_script_needs() {
+    let (_dir, root, _nunki) = fresh();
+    let home = home(&root);
+    init(&root, &home, &["rust".to_string()]).unwrap();
+
+    let dockerfile = std::fs::read_to_string(
+        home.join(nunki::project::STACKS_DIR)
+            .join("rust/Dockerfile"),
+    )
+    .unwrap();
+
+    assert!(
+        dockerfile.contains(" jq "),
+        "the image has no JSON parser:\n{dockerfile}"
+    );
+}

@@ -148,6 +148,10 @@ pub const WRITABLE_FILE: &str = "writable.txt";
 /// tree — a package registry, a compiler cache — each kept as a named volume
 /// per slot.
 pub const CACHES_FILE: &str = "caches.txt";
+/// Where a stack fragment declares the advisory database its auditor reads,
+/// as a path **on the host**. `nunki` mounts it read-only and never fills it
+/// (SPEC 4.4, gate 8).
+pub const ADVISORIES_FILE: &str = "advisories.txt";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProjectError {
@@ -364,6 +368,27 @@ impl Project {
             .map(|l| l.trim_end_matches('/').to_string())
             .filter(|l: &String| !l.is_empty())
             .collect()
+    }
+
+    /// The advisory database this stack's auditor reads, as a path on the
+    /// host, or `None` when the stack declares none.
+    ///
+    /// A `~` is expanded here and nowhere else: the file is written by a
+    /// human, and a path they can type is one that starts with a tilde. What
+    /// comes back is absolute or nothing — a relative advisory database would
+    /// resolve against whatever directory `nunki` happened to be started in.
+    pub fn stack_advisories(&self, stack: &str) -> Option<PathBuf> {
+        let file = self.fragment(stack).join(ADVISORIES_FILE);
+        let text = std::fs::read_to_string(file).ok()?;
+        let line = text
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty() && !l.starts_with('#'))?;
+        let path = match line.strip_prefix("~/") {
+            Some(rest) => PathBuf::from(std::env::var_os("HOME")?).join(rest),
+            None => PathBuf::from(line),
+        };
+        path.is_absolute().then_some(path)
     }
 
     /// The top level of the repository containing `start`, as git reports it.
