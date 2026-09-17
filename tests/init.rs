@@ -801,9 +801,79 @@ fn the_rust_stack_ships_its_mechanical_security() {
             "{field} is not emitted"
         );
     }
-    // It says what it does not yet cover, rather than letting a reader take
-    // silence for "no secret was found".
-    assert!(body.contains("secret scan"), "{body}");
+    // It carries the two families the battery does not: the dependency audit
+    // and the secret scan. Static analysis is `clippy`, at gate 6.
+    assert!(body.contains("cargo deny"), "no dependency audit:\n{body}");
+    assert!(body.contains("gitleaks detect"), "no secret scan:\n{body}");
+}
+
+/// A secret has no `fix` and no `via`: it is revoked, not upgraded, and
+/// nothing brought it in but the commit that wrote it. That commit is in the
+/// fingerprint, which is what tells `was_at_base` exactly.
+#[test]
+fn the_secret_scan_reads_its_exceptions_and_reports_them() {
+    let (_dir, root, _nunki) = fresh();
+    let home = home(&root);
+    init(&root, &home, &["rust".to_string()]).unwrap();
+    let body = std::fs::read_to_string(
+        home.join(nunki::project::STACKS_DIR)
+            .join("rust")
+            .join(nunki::gate::SECURITY),
+    )
+    .unwrap();
+
+    // The line that reads the file, not the word: `.gitleaksignore` appears in
+    // this script's own comments too, and a first version of this assertion
+    // watched the whole block be disabled and still called itself green.
+    //
+    // It is read directly because there is no unfiltered view to diff
+    // against: `--gitleaks-ignore-path` does not disarm the repository's own
+    // file (measured 2026-09-17).
+    assert!(
+        body.contains("if [ -f .gitleaksignore ]; then"),
+        "the exception file is never read:\n{body}"
+    );
+    // An accepted finding is reported rather than dropped — a gate that
+    // cannot say "I know, and it was ruled on" lies by omission.
+    assert!(body.contains("accepted in .gitleaksignore"), "{body}");
+    // Which commit introduced it, and not merely that it is there.
+    assert!(body.contains("merge-base --is-ancestor"), "{body}");
+}
+
+/// The tool that finds the secrets is pinned and checked. A binary nobody
+/// verifies is a dependency nobody reviewed (SPEC section 7).
+#[test]
+fn the_secret_scanner_is_pinned_and_its_download_is_checked() {
+    let (_dir, root, _nunki) = fresh();
+    let home = home(&root);
+    init(&root, &home, &["rust".to_string()]).unwrap();
+    let dockerfile = std::fs::read_to_string(
+        home.join(nunki::project::STACKS_DIR)
+            .join("rust/Dockerfile"),
+    )
+    .unwrap();
+
+    // A version, not a moving name: `ARG GITLEAKS=` alone stays true for
+    // `latest`, and a first version of this test watched that pass.
+    let pinned = dockerfile
+        .lines()
+        .find_map(|l| l.strip_prefix("ARG GITLEAKS="))
+        .expect("the scanner's version is declared");
+    assert!(
+        pinned
+            .split('.')
+            .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit())),
+        "the scanner is not pinned to a version: {pinned:?}"
+    );
+    assert!(
+        dockerfile.contains("sha256sum -c -"),
+        "the download is not checked:\n{dockerfile}"
+    );
+    // Both architectures nunki targets, or the build says so rather than
+    // producing an image with no scanner in it.
+    assert!(dockerfile.contains("amd64)"), "{dockerfile}");
+    assert!(dockerfile.contains("arm64)"), "{dockerfile}");
+    assert!(dockerfile.contains("ships no build for"), "{dockerfile}");
 }
 
 /// The image must carry a JSON parser, because the script parses JSON. A
