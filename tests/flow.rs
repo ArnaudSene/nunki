@@ -351,3 +351,212 @@ fn the_flow_survives_a_round_trip_through_json() {
     let back: Flow = serde_json::from_str(&json).unwrap();
     assert_eq!(back, flow);
 }
+
+/// The whole point of the verb, and the reason it had to exist: before it,
+/// `AwaitingHuman` was terminal. `#30` made that reachable — a red gate now
+/// opens a volet that counts, and the third hands over — so the only way the
+/// bounds could stop a mission was into a stage nothing could leave.
+///
+/// A retry hands the bounds back **whole**. Resetting the counter is the
+/// verb: without it the very next red gate lands in the same handover, and
+/// the human is back where they started having spent a run to learn it.
+#[test]
+fn a_mission_whose_volets_ran_out_is_taken_back_with_its_budget_whole() {
+    let mut flow = Flow::new(header(none(), Security::Gates, Bounds::default())).unwrap();
+    code_through(&mut flow);
+
+    for n in 1..=4 {
+        flow.advance(Event::GatesFailed {
+            reason: format!("run {n}"),
+        })
+        .unwrap();
+        if n < 4 {
+            flow.advance(finished(true)).unwrap();
+        }
+    }
+    assert!(
+        matches!(
+            flow.stage(),
+            Stage::AwaitingHuman(Handover::VoletsExhausted { .. })
+        ),
+        "{:?}",
+        flow.stage()
+    );
+
+    flow.advance(Event::Retried {
+        because: "the campaign was reading a stale log; it is fixed".into(),
+    })
+    .unwrap();
+
+    // On the cause nobody ever got to work on — the fourth, which arrived
+    // with no budget left to open a volet for it.
+    match flow.stage() {
+        Stage::Coding {
+            work: Work::Volet { n, cause },
+            attempt: 1,
+        } => {
+            assert_eq!(*n, 1, "the budget was not handed back whole");
+            assert_eq!(cause, "gate: run 4", "not the cause nobody worked on");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(flow.volets(), 1);
+
+    // And the budget really is whole: three more returns before it stops
+    // again, not zero.
+    for n in 1..=3 {
+        flow.advance(finished(true)).unwrap();
+        assert_eq!(flow.stage(), &Stage::Gates);
+        flow.advance(Event::GatesFailed {
+            reason: format!("after the retry, {n}"),
+        })
+        .unwrap();
+    }
+    assert!(
+        matches!(
+            flow.stage(),
+            Stage::AwaitingHuman(Handover::VoletsExhausted { .. })
+        ),
+        "{:?}",
+        flow.stage()
+    );
+}
+
+/// A lot that used its attempts comes back on **that** lot. The handover
+/// carries a label, and `Flow::label` is not invertible — it folds a volet's
+/// cause away, and nothing stops a human naming a lot `volet-2`. So the work
+/// is kept whole from the moment the flow hands over, and this is what says
+/// the label is not what gets resumed.
+#[test]
+fn a_lot_that_used_its_attempts_comes_back_on_that_lot() {
+    let bounds = Bounds {
+        attempts_per_lot: 2,
+        ..Bounds::default()
+    };
+    let mut flow = Flow::new(header(none(), Security::Gates, bounds)).unwrap();
+    // First lot done, so the mission is on the second when it stops.
+    flow.advance(finished(true)).unwrap();
+    for _ in 0..2 {
+        flow.advance(finished(false)).unwrap();
+    }
+    match flow.stage() {
+        Stage::AwaitingHuman(Handover::LotAttemptsExhausted { lot, attempts }) => {
+            assert_eq!(lot, "L2");
+            assert_eq!(*attempts, 2);
+        }
+        other => panic!("{other:?}"),
+    }
+
+    flow.advance(Event::Retried {
+        because: "the fixture it needed is in place now".into(),
+    })
+    .unwrap();
+
+    assert_eq!(
+        flow.stage(),
+        &Stage::Coding {
+            work: Work::Lot(1),
+            attempt: 1
+        }
+    );
+    // Whole, not one left: it fails twice again before handing over.
+    flow.advance(finished(false)).unwrap();
+    assert!(
+        matches!(flow.stage(), Stage::Coding { attempt: 2, .. }),
+        "{:?}",
+        flow.stage()
+    );
+}
+
+/// A role's attempts are read straight from the handover: `Role` is typed, so
+/// there is no label to invert.
+#[test]
+fn a_role_that_used_its_attempts_comes_back_on_that_role() {
+    let bounds = Bounds {
+        attempts_per_lot: 2,
+        ..Bounds::default()
+    };
+    let mut flow = Flow::new(header(services(), Security::Gates, bounds)).unwrap();
+    code_through(&mut flow);
+    flow.advance(Event::GatesPassed).unwrap();
+    assert_eq!(flow.stage(), &Stage::Integration { attempt: 1 });
+    for _ in 0..2 {
+        flow.advance(Event::Stalled {
+            reason: "the container went away".into(),
+        })
+        .unwrap();
+    }
+    assert!(
+        matches!(
+            flow.stage(),
+            Stage::AwaitingHuman(Handover::RoleAttemptsExhausted {
+                role: Role::Integrator,
+                ..
+            })
+        ),
+        "{:?}",
+        flow.stage()
+    );
+
+    flow.advance(Event::Retried {
+        because: "the engine was out of disk; it has room now".into(),
+    })
+    .unwrap();
+
+    assert_eq!(flow.stage(), &Stage::Integration { attempt: 1 });
+}
+
+/// A mission the human called off is not a bound that ran out. `end` says
+/// "stop asking me about this", and a verb that undid it would make `end`
+/// something they could not rely on.
+#[test]
+fn a_mission_called_off_is_not_taken_back() {
+    let mut flow = Flow::new(header(none(), Security::Gates, Bounds::default())).unwrap();
+    flow.advance(Event::Ended {
+        reason: "the feature was dropped".into(),
+    })
+    .unwrap();
+
+    let error = flow
+        .advance(Event::Retried {
+            because: "I changed my mind".into(),
+        })
+        .unwrap_err();
+
+    assert!(
+        matches!(error, nunki::mission::flow::FlowError::CalledOff(_)),
+        "{error:?}"
+    );
+    let said = error.to_string();
+    assert!(said.contains("the feature was dropped"), "{said}");
+    // And it is still where it was: a refused verb changes nothing.
+    assert!(
+        matches!(
+            flow.stage(),
+            Stage::AwaitingHuman(Handover::Abandoned { .. })
+        ),
+        "{:?}",
+        flow.stage()
+    );
+}
+
+/// A mission that is running fine has nothing to take back, and is told that
+/// rather than moved.
+#[test]
+fn a_mission_that_never_stopped_is_not_taken_back() {
+    let mut flow = Flow::new(header(none(), Security::Gates, Bounds::default())).unwrap();
+
+    let error = flow
+        .advance(Event::Retried {
+            because: "why not".into(),
+        })
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            nunki::mission::flow::FlowError::InvalidTransition { .. }
+        ),
+        "{error:?}"
+    );
+}

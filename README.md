@@ -135,6 +135,14 @@ the turn in progress too), `nunki mission resume m1` lifts the hold,
 `nunki mission say m1 "..."` leaves an instruction for the next run, and
 `nunki mission kill m1` is the emergency brake.
 
+When a bound runs out — a lot's attempts, a role's, or the returns to the
+coder — `nunki` stops and hands the mission to you. `nunki mission retry m1
+--because "what changed"` takes it back, on the work it stopped on, with the
+bounds handed back whole. The reason is required and it is not paperwork: the
+tree and the cause have not moved on their own, so the next run reads it
+before anything else. A mission you called off yourself with `mission end` is
+a decision, not a bound, and is refused.
+
 When the mission reads `VERIFIED`, the push is yours and yours alone:
 
 ```sh

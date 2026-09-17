@@ -106,6 +106,29 @@ pub fn ended(file: &Path, who: &str, why: &str) -> Result<(), FollowupError> {
     )
 }
 
+/// The human took the mission back from a handover, and said what changed.
+///
+/// It lands here and not only in the state, because this is the file every
+/// role reads before anything else: a retry that tells the agent nothing
+/// hands it back the work it already failed, with the same tree and the same
+/// cause, and spends the budget reaching the same handover. What changed is
+/// the whole point of the verb.
+pub fn retried(file: &Path, who: &str, why: &str, was: &str) -> Result<(), FollowupError> {
+    let head = format!(
+        "## {date} \u{2014} {who} took this mission back",
+        date = today()
+    );
+    let body = format!(
+        "It had stopped on its own bounds: {was}. They are handed back whole, and this is what changed since:"
+    );
+    append(
+        file,
+        &format!(
+            "{head}\n\n{body}\n\n{why}\n\nRead it before the journal. Nothing in the tree moved on its own.\n"
+        ),
+    )
+}
+
 /// An instruction left for the next run.
 ///
 /// `say` and not a channel: there is no channel during a run (SPEC 4.3). What

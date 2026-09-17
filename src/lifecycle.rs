@@ -43,6 +43,17 @@ pub enum LifecycleError {
          six months from now"
     )]
     NoReason,
+    #[error(
+        "say what changed: a retry hands the agent back the work it already failed, on \
+         the same tree and the same cause — without that, it spends the budget again \
+         reaching the same handover"
+    )]
+    NoChange,
+    #[error(
+        "mission {mission} is at {stage:?}, and `retry` takes back a mission that stopped \
+         on its own bounds — there is nothing to take back here"
+    )]
+    NotHandedOver { mission: String, stage: Stage },
     #[error("{0}: {1}")]
     Io(PathBuf, std::io::Error),
     #[error(transparent)]
@@ -200,6 +211,73 @@ pub fn end(project: &Project, id: &str, why: &str) -> Result<MissionState, Lifec
         },
     )?;
     Ok(state)
+}
+
+/// Take a mission back from a handover, and say what changed.
+///
+/// A handover is the flow saying "a bound stopped me, and the decision is
+/// yours" (SPEC 4.5). Every way of reaching one is a bound running out, and
+/// until this verb existed there was no way out of it: `resume` lifts a hold,
+/// `iterate` and `accept` only leave `Findings`, and `monitor::wanted` gives
+/// up on the stage — so a mission that exhausted its volets was over without
+/// being finished.
+///
+/// The reason is required and it is not paperwork: it is written to
+/// `FOLLOWUP_HQ.md`, which every role reads before anything else, because the
+/// tree has not changed and neither has the cause. A retry that says nothing
+/// buys the same handover a second time.
+pub fn retry(project: &Project, id: &str, why: &str) -> Result<MissionState, LifecycleError> {
+    if why.trim().is_empty() {
+        return Err(LifecycleError::NoChange);
+    }
+    let store = Store::open(&project.hq_root)?;
+    let mut state = store
+        .load(id)
+        .map_err(|_| LifecycleError::NotStarted(id.to_string()))?;
+    if state.run.is_some() {
+        return Err(LifecycleError::RunInProgress {
+            mission: id.to_string(),
+            slot: state.slot.clone(),
+        });
+    }
+    // Said before the transition is attempted, so that a mission which is
+    // simply not stopped is told that, rather than an invalid transition.
+    let Stage::AwaitingHuman(handover) = state.flow.stage().clone() else {
+        return Err(LifecycleError::NotHandedOver {
+            mission: id.to_string(),
+            stage: state.flow.stage().clone(),
+        });
+    };
+
+    // Written where the agent reads, and before the transition: a retry whose
+    // record did not land is a retry the next run cannot act on.
+    let paths = Paths::of(&project.hq_root, id);
+    let who = crate::human::me(&project.nunki_home(), Some(&project.root)).addressed();
+    crate::followup::retried(&paths.followup, &who, why.trim(), &what_stopped(&handover))?;
+    store.apply(
+        &mut state,
+        crate::mission::flow::Event::Retried {
+            because: why.trim().to_string(),
+        },
+    )?;
+    Ok(state)
+}
+
+/// A handover in one clause, for the record the agent reads.
+fn what_stopped(handover: &crate::mission::flow::Handover) -> String {
+    use crate::mission::flow::Handover;
+    match handover {
+        Handover::LotAttemptsExhausted { lot, attempts } => {
+            format!("{lot} failed {attempts} attempt(s)")
+        }
+        Handover::RoleAttemptsExhausted { role, attempts } => {
+            format!("the {role:?} failed {attempts} attempt(s)")
+        }
+        Handover::VoletsExhausted { causes } => {
+            format!("{} return(s) to the coder were used", causes.len())
+        }
+        Handover::Abandoned { reason } => format!("it was called off ({reason})"),
+    }
 }
 
 /// Where an archived mission goes.
