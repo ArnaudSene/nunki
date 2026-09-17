@@ -876,8 +876,13 @@ un Dockerfile (étapes d'image), `allow.txt` (domaines des dépendances),
 l'intégrateur), `mutation.sh` (commande de mutation),
 `run.sh` (comment on démarre une application de cette stack, par défaut),
 `writable.txt` (les répertoires qu'une exécution doit pouvoir écrire quand
-l'arbre est en lecture seule), `perimeter.yaml` (zone de tests pour une
-mission de tests), `security.sh` (audit de dépendances, scan de secrets,
+l'arbre est en lecture seule), `caches.txt` (les caches que la chaîne d'outils
+tient **hors de l'arbre** — registre de paquets, cache de compilation — un
+chemin absolu par ligne, chacun gardé comme volume nommé par slot ; ajouté le
+2026-09-17, parce que `nunki` montait `/home/agent/.cargo/registry` depuis son
+propre code pour toute stack et tout rôle, ce qui aurait donné à un projet
+Python un volume `cargo` vide et aucun pour pip), `perimeter.yaml` (zone de
+tests pour une mission de tests), `security.sh` (audit de dépendances, scan de secrets,
 analyse statique — la sécurité mécanique, porte 8, définie en 4.4). Un
 fragment est un script ou un fichier plat, jamais du code de `nunki`. Les trois
 premières stacks sont celles de `claude-setup` : Rust, Python, Next.js.

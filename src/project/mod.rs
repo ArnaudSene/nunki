@@ -144,6 +144,10 @@ pub const STACKS_DIR: &str = "stacks";
 /// Where a stack fragment declares the directories an execution must be able
 /// to write when the tree is read-only.
 pub const WRITABLE_FILE: &str = "writable.txt";
+/// Where a stack fragment declares the caches its toolchain keeps outside the
+/// tree — a package registry, a compiler cache — each kept as a named volume
+/// per slot.
+pub const CACHES_FILE: &str = "caches.txt";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProjectError {
@@ -333,6 +337,32 @@ impl Project {
             .filter(|l| !l.is_empty() && !l.starts_with('#'))
             .map(|l| l.trim_matches('/').to_string())
             .filter(|l| !l.is_empty() && l != "." && !l.split('/').any(|s| s == ".."))
+            .collect()
+    }
+
+    /// The caches a stack keeps **outside the tree**, as absolute paths in
+    /// the container (SPEC 4.2; the stack-agnostic principle names caches
+    /// among the declared fragments).
+    ///
+    /// `nunki` used to mount `/home/agent/.cargo/registry` from its own code,
+    /// for every stack and every role: a Python project carried an empty
+    /// `cargo` volume and none for pip. A cache belongs to a toolchain, so it
+    /// is declared where the toolchain is.
+    ///
+    /// Absolute, and `..` refused: the path becomes a mount point, and a
+    /// relative one would land wherever the container's working directory
+    /// happens to be.
+    pub fn stack_caches(&self, stack: &str) -> Vec<String> {
+        let file = self.fragment(stack).join(CACHES_FILE);
+        let Ok(text) = std::fs::read_to_string(file) else {
+            return Vec::new();
+        };
+        text.lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .filter(|l| l.starts_with('/') && !l.split('/').any(|s| s == ".."))
+            .map(|l| l.trim_end_matches('/').to_string())
+            .filter(|l: &String| !l.is_empty())
             .collect()
     }
 

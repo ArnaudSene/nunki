@@ -277,7 +277,18 @@ impl Harness for ClaudeCode {
             // the agent's home, and the layer fails the build if the binary
             // is not on PATH afterwards.
             path: vec![format!("{AGENT_HOME}/.local/bin")],
-            config_dir: self.config.config_dir.clone(),
+            // The adapter names it; the engine mounts whatever it names.
+            // `nunki` used to write `/home/agent/.claude` into its own volume
+            // list, which is this CLI's default spelled out in the core — the
+            // first thing a second harness would have had to fight. What the
+            // config carries is an override for a local run; in a container
+            // the CLI uses its own default, and that is what this says.
+            config_dir: Some(
+                self.config
+                    .config_dir
+                    .clone()
+                    .unwrap_or_else(|| PathBuf::from(format!("{AGENT_HOME}/.claude"))),
+            ),
             // The model API, and the feature-flag endpoint the CLI calls at
             // start; both were in the inherited allowlist.
             domains: vec!["api.anthropic.com".into(), "statsig.anthropic.com".into()],

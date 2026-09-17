@@ -645,6 +645,18 @@ fn fragment(stack: &str) -> Vec<(&'static str, String, bool)> {
                     .to_string(),
                 false,
             ),
+            (
+                crate::project::CACHES_FILE,
+                "# Caches this toolchain keeps outside the tree, kept as a named\n\
+                 # volume per slot so a rebuilt container does not download the\n\
+                 # world again. One absolute container path per line.\n\
+                 #\n\
+                 # Declared here and not in nunki: a cache belongs to a toolchain,\n\
+                 # and nunki is agnostic to the stack.\n\
+                 /home/agent/.cargo/registry\n"
+                    .to_string(),
+                false,
+            ),
         ],
         _ => Vec::new(),
     }
