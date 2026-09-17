@@ -47,7 +47,11 @@ fn a_repository_with_no_session_is_named_with_what_to_run() {
     let root = repo(&dir.path().join("api"));
 
     assert_eq!(sessions::find(&nunki_home, &root).unwrap(), None);
-    let err = Project::home_for(&root).unwrap_err();
+    // `home_in` and not `home_for`: the second reads `$HOME`, so this test
+    // would answer from whatever the machine running it happens to hold — and
+    // it passed only because a temporary path is not in the real ledger,
+    // which is a probe that passes with the rule removed.
+    let err = Project::home_in(&nunki_home, &root).unwrap_err();
     let said = err.to_string();
     assert!(said.contains("nunki init"), "{said}");
     assert!(said.contains("nunki adopt"), "{said}");
@@ -112,4 +116,27 @@ fn adopting_a_session_whose_repository_is_still_there_is_refused() {
     let err = sessions::adopt(&nunki_home, "no-such-session", &elsewhere).unwrap_err();
     assert!(matches!(err, SessionsError::Unknown { .. }), "{err}");
     assert!(err.to_string().contains("nunki init"), "{err}");
+}
+
+/// The other half of the lookup, which no test covered while it went through
+/// `$HOME`: a repository that **has** a session is given its home. It could
+/// not be reached hermetically before, because the only way in read the
+/// machine's own ledger.
+#[test]
+fn a_repository_with_a_session_is_given_its_home() {
+    let dir = tempfile::tempdir().unwrap();
+    let nunki_home = dir.path().join(".nunki");
+    let root = repo(&dir.path().join("api"));
+
+    let id = sessions::open(&nunki_home, &root).unwrap();
+
+    assert_eq!(
+        Project::home_in(&nunki_home, &root).unwrap(),
+        nunki_home.join(&id)
+    );
+    // And a session opened for a repository is the one it keeps.
+    assert_eq!(
+        Project::home_for_new_in(&nunki_home, &root).unwrap(),
+        nunki_home.join(&id)
+    );
 }

@@ -373,8 +373,20 @@ impl Project {
     /// repositories called `api` are two projects, and a name cannot tell
     /// them apart (SPEC 4.1, decided 2026-09-16).
     pub fn home_for(root: &Path) -> Result<PathBuf, ProjectError> {
-        let nunki_home = Self::nunki_dir()?;
-        match crate::sessions::find(&nunki_home, root)? {
+        Self::home_in(&Self::nunki_dir()?, root)
+    }
+
+    /// The same, in a home that is given rather than read from the
+    /// environment.
+    ///
+    /// The split is what keeps a test out of the human's `~/.nunki`.
+    /// `home_for` reads `$HOME`, so a test calling it answers from whatever
+    /// that machine happens to hold: it passed here because a temporary path
+    /// was not in the real ledger, which is a probe that would pass with the
+    /// rule removed. `nunki_dir` is now the one place the environment is
+    /// read, and it is read at the edge.
+    pub fn home_in(nunki_home: &Path, root: &Path) -> Result<PathBuf, ProjectError> {
+        match crate::sessions::find(nunki_home, root)? {
             Some(id) => Ok(nunki_home.join(id)),
             None => Err(ProjectError::NotRegistered(root.to_path_buf())),
         }
@@ -383,8 +395,14 @@ impl Project {
     /// The same, opening a session for the project when it has none: what
     /// `nunki init` needs, and the only verb that may hand an identifier out.
     pub fn home_for_new(root: &Path) -> Result<PathBuf, ProjectError> {
-        let nunki_home = Self::nunki_dir()?;
-        let id = crate::sessions::open(&nunki_home, root)?;
+        Self::home_for_new_in(&Self::nunki_dir()?, root)
+    }
+
+    /// The same, in a home that is given. Split for the reason
+    /// [`Project::home_in`] is: the environment is read at the edge, and
+    /// nowhere a test can reach by accident.
+    pub fn home_for_new_in(nunki_home: &Path, root: &Path) -> Result<PathBuf, ProjectError> {
+        let id = crate::sessions::open(nunki_home, root)?;
         Ok(nunki_home.join(id))
     }
 
@@ -409,6 +427,13 @@ impl Project {
     }
 
     /// `~/.nunki/`: the homes, the accounts and the ledger.
+    /// `~/.nunki`, and **the one place the environment is read**.
+    ///
+    /// Everything that needs a home takes one; only the verbs at the edge
+    /// call this. That is what keeps a test out of the human's home: a test
+    /// that reads it does not fail, it answers from whatever that machine
+    /// happens to hold, which is the shape of a probe that passes with the
+    /// rule removed.
     pub fn nunki_dir() -> Result<PathBuf, ProjectError> {
         let home = std::env::var_os("HOME").ok_or(ProjectError::NoHome)?;
         Ok(PathBuf::from(home).join(".nunki"))
