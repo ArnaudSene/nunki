@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::check::{Check, Verdict};
-use crate::compose::{AGENT_SERVICE, AGENT_WRITABLE, FIREWALL_SERVICE, NamedVolume, Plan, UserIds};
+use crate::compose::{AGENT_SERVICE, FIREWALL_SERVICE, NamedVolume, Plan, UserIds};
 use crate::engine::{Engine, EngineError};
 use crate::harness::Role;
 use crate::image::{self, Images};
@@ -27,6 +27,8 @@ pub enum ProbeError {
     Up(#[from] EngineError),
     #[error("{0}: {1}")]
     Io(PathBuf, std::io::Error),
+    #[error(transparent)]
+    MissionDir(#[from] crate::mission::dir::MissionDirError),
     #[error("the profile could not be generated: {0}")]
     Compose(#[from] crate::compose::ComposeError),
     #[error("the allowlist could not be computed: {0}")]
@@ -63,12 +65,7 @@ pub fn mission_profile(
 
     let scratch = project.hq_root.join("checks").join(&slot.name);
     std::fs::create_dir_all(&scratch).map_err(|e| ProbeError::Io(scratch.clone(), e))?;
-    for file in AGENT_WRITABLE {
-        let path = scratch.join(file);
-        if !path.exists() {
-            std::fs::write(&path, "").map_err(|e| ProbeError::Io(path, e))?;
-        }
-    }
+    crate::mission::dir::ensure_writable(&scratch)?;
 
     let mut plan = plan(project, slot, stack, &images, &scratch)?;
     // The probes run from a container of their own, in the very namespace
@@ -249,12 +246,7 @@ pub fn scratch_paths(
         .join(format!("{}-system", slot.name));
     let paths = crate::mission::dir::Paths::of(&root, id);
     std::fs::create_dir_all(&paths.dir).map_err(|e| ProbeError::Io(paths.dir.clone(), e))?;
-    for file in AGENT_WRITABLE {
-        let path = paths.dir.join(file);
-        if !path.exists() {
-            std::fs::write(&path, "").map_err(|e| ProbeError::Io(path, e))?;
-        }
-    }
+    crate::mission::dir::ensure_writable(&paths.dir)?;
     Ok(paths)
 }
 
