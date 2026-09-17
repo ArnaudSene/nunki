@@ -614,6 +614,25 @@ commits ne bougent jamais entre slots ; ils ne sortent du slot que par
 un clone, un conteneur » devient « un slot = un clone, des volumes, un
 conteneur d'agent à la fois ».
 
+**Une mission part d'une base que le slot a rafraîchie.** Ajouté le
+2026-09-17, sur un défaut qui avait mordu deux fois. Un slot est un clone, et
+un clone écrit son propre `dev` une fois : rien ne le rebouge ensuite. Chaque
+mission après la première partait donc de la base telle qu'elle était le jour
+où le slot a été créé, et sa pull request s'ouvrait contre une base qui avait
+avancé. L'`origin` d'un slot étant le dépôt de la machine et non la forge, le
+rafraîchir est une opération locale qui ne demande pas de réseau ; elle est
+faite au moment où le slot passe sur la branche de la mission, jamais en cours
+de mission, et son échec est dit plutôt qu'avalé — partir d'une base qu'on n'a
+pas pu rafraîchir est exactement le silence que cela remplace.
+
+**Et une branche qui porte déjà du travail est reprise, jamais repositionnée.**
+Même date, même lecture. `checkout -B` repointe une branche sur son point de
+départ : mesuré le 2026-09-17, `checkout -B mission/x dev` sur une branche
+portant un commit de travail l'a laissée n'en porter aucun. Tout lancement qui
+trouvait le slot sur une autre branche — un humain qui regarde quelque chose,
+un changement de rôle qui n'est pas revenu — payait le travail de la mission
+pour y retourner.
+
 **Les services et le lancement de l'application.** Tranché par Arnaud le
 2026-09-09, après que la seconde revue a montré que personne ne relançait le
 livrable pour la sécurité une fois le conteneur de l'intégrateur arrêté.

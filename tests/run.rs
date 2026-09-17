@@ -1480,3 +1480,102 @@ fn the_coder_is_told_to_mock_what_its_container_cannot_reach() {
         );
     }
 }
+
+/// A slot is a clone, and a clone writes its own `dev` once. Nothing moves it
+/// again — so every mission after the first branched from the base as it
+/// stood the day the slot was made, and its pull request opened against a
+/// base that had moved. Bit for real twice on `notes-api`, worked around by
+/// hand both times.
+///
+/// A slot's `origin` is the project on this machine rather than the forge, so
+/// refreshing it is local and needs no network.
+#[test]
+fn a_second_mission_branches_from_a_base_the_slot_refreshed() {
+    let dir = tempfile::tempdir().unwrap();
+    let origin = dir.path().join("origin");
+    std::fs::create_dir_all(&origin).unwrap();
+    git(&origin, &["init", "-q", "-b", "dev"]);
+    git(&origin, &["config", "user.email", "a@b.c"]);
+    git(&origin, &["config", "user.name", "t"]);
+    std::fs::write(origin.join("f"), "one").unwrap();
+    git(&origin, &["add", "-A"]);
+    git(&origin, &["commit", "-qm", "base"]);
+
+    let tree = dir.path().join("slot");
+    git(
+        dir.path(),
+        &["clone", "-q", origin.to_str().unwrap(), "slot"],
+    );
+    git(&tree, &["config", "user.email", "a@b.c"]);
+    git(&tree, &["config", "user.name", "t"]);
+    let slot = nunki::slot::Slot {
+        name: "one".into(),
+        tree: tree.clone(),
+    };
+
+    // The first mission, then the base moves the way a merged pull request
+    // moves it.
+    nunki::run::branch(&slot, "mission/first", "dev").unwrap();
+    std::fs::write(origin.join("f"), "two").unwrap();
+    git(&origin, &["add", "-A"]);
+    git(&origin, &["commit", "-qm", "what the first mission merged"]);
+    let moved = git(&origin, &["rev-parse", "HEAD"]);
+
+    nunki::run::branch(&slot, "mission/second", "dev").unwrap();
+
+    assert_eq!(
+        git(&tree, &["rev-parse", "HEAD"]),
+        moved,
+        "the second mission started from the slot's own stale dev"
+    );
+}
+
+/// `checkout -B` repoints a branch at its start. Measured on 2026-09-17:
+/// `checkout -B mission/x dev` on a branch holding one commit of work left it
+/// holding none. Any launch that found the slot on another branch — a human
+/// looking at something, a role switch that did not come back — spent the
+/// mission's work to get back to it.
+#[test]
+fn a_branch_that_already_holds_work_is_checked_out_and_never_moved() {
+    let dir = tempfile::tempdir().unwrap();
+    let origin = dir.path().join("origin");
+    std::fs::create_dir_all(&origin).unwrap();
+    git(&origin, &["init", "-q", "-b", "dev"]);
+    git(&origin, &["config", "user.email", "a@b.c"]);
+    git(&origin, &["config", "user.name", "t"]);
+    std::fs::write(origin.join("f"), "one").unwrap();
+    git(&origin, &["add", "-A"]);
+    git(&origin, &["commit", "-qm", "base"]);
+
+    let tree = dir.path().join("slot");
+    git(
+        dir.path(),
+        &["clone", "-q", origin.to_str().unwrap(), "slot"],
+    );
+    git(&tree, &["config", "user.email", "a@b.c"]);
+    git(&tree, &["config", "user.name", "t"]);
+    let slot = nunki::slot::Slot {
+        name: "one".into(),
+        tree: tree.clone(),
+    };
+
+    nunki::run::branch(&slot, "mission/x", "dev").unwrap();
+    std::fs::write(tree.join("w"), "the agent's work").unwrap();
+    git(&tree, &["add", "-A"]);
+    git(&tree, &["commit", "-qm", "the agent's work"]);
+    let work = git(&tree, &["rev-parse", "HEAD"]);
+
+    // Someone leaves the slot somewhere else, and the next role launches.
+    git(&tree, &["checkout", "-q", "dev"]);
+    nunki::run::branch(&slot, "mission/x", "dev").unwrap();
+
+    assert_eq!(
+        git(&tree, &["rev-parse", "HEAD"]),
+        work,
+        "the mission's commit was thrown away getting back to its branch"
+    );
+    assert_eq!(
+        git(&tree, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "mission/x"
+    );
+}

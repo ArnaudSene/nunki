@@ -538,19 +538,71 @@ pub fn profile_path(project: &Project, slot: &str) -> PathBuf {
 pub const SERVICES: [&str; 2] = [AGENT_SERVICE, FIREWALL_SERVICE];
 
 /// Put the slot on the mission's branch, from its base.
-fn branch(slot: &Slot, branch: &str, base: &str) -> Result<(), git::GitError> {
+/// Put the slot on the mission's branch.
+///
+/// Public for the same reason [`plan`] is: what a mission starts from is the
+/// decision, and a test that cannot call this can only check that a launch
+/// happened, never what it branched off.
+pub fn branch(slot: &Slot, branch: &str, base: &str) -> Result<(), git::GitError> {
     if git::current_branch(&slot.tree)? == branch {
         return Ok(());
     }
-    // The base as the clone knows it: a fresh clone has the remote's branches
-    // and only one of its own.
-    let start = if git::run(&slot.tree, &["rev-parse", "--verify", base]).is_ok() {
-        base.to_string()
+    // A branch that already exists is **checked out and never moved**. It was
+    // `-B` before, which repoints a branch at its start: measured on
+    // 2026-09-17 on a throwaway pair of repositories, `checkout -B mission/x
+    // dev` on a branch holding one commit of work left it holding none. Any
+    // launch that found the slot on another branch — a human looking at
+    // something, a role switch that did not come back — spent the mission's
+    // work to get back to it.
+    let exists = git::run(
+        &slot.tree,
+        &["rev-parse", "--verify", "--quiet", &refs(branch)],
+    )
+    .is_ok();
+    if exists {
+        git::run(&slot.tree, &["checkout", "-q", branch])?;
+        return Ok(());
+    }
+
+    // A slot's `origin` is the project on this machine, not the forge, so
+    // refreshing it is a local operation that needs no network. Without it
+    // the slot branched from its **own** `dev`, which a clone writes once and
+    // nothing ever moves again: every mission after the first started from
+    // the base as it stood the day the slot was made, and the pull request
+    // opened against a base that had moved. Bit for real twice, worked
+    // around by hand both times.
+    //
+    // The failure is said rather than swallowed: branching from a base that
+    // could not be refreshed is exactly the silence this replaces.
+    if !git::run(&slot.tree, &["remote"])?.trim().is_empty() {
+        git::run(&slot.tree, &["fetch", "--quiet", "origin"])?;
+    }
+    let remote = format!("origin/{base}");
+    let start = if git::run(
+        &slot.tree,
+        &["rev-parse", "--verify", "--quiet", &refs_remote(&remote)],
+    )
+    .is_ok()
+    {
+        remote
     } else {
-        format!("origin/{base}")
+        // No remote-tracking base: a slot whose origin does not carry it.
+        // The local one is all there is, and it is better than nothing.
+        base.to_string()
     };
-    git::run(&slot.tree, &["checkout", "-q", "-B", branch, &start])?;
+    git::run(&slot.tree, &["checkout", "-q", "-b", branch, &start])?;
     Ok(())
+}
+
+/// A local branch, spelled so that `rev-parse --verify` cannot match a tag or
+/// a remote-tracking branch of the same name.
+fn refs(branch: &str) -> String {
+    format!("refs/heads/{branch}")
+}
+
+/// The same, for a remote-tracking branch.
+fn refs_remote(branch: &str) -> String {
+    format!("refs/remotes/{branch}")
 }
 
 /// The profile a run lifts, as data. Public because it **is** the run's
