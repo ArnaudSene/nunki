@@ -676,3 +676,82 @@ fn the_campaign_does_not_mutate_a_binarys_entry_point() {
         "a mutants.toml excluding the file would do the same damage:\n{script}"
     );
 }
+
+/// A release that adds a fragment file must reach the projects that already
+/// exist. `init` never overwrites, but it does create what is missing — so
+/// re-running it is the migration path.
+///
+/// It was undiscoverable: `--stack` has no default, so a bare `nunki init`
+/// skipped the fragment loop entirely and said nothing about it. Measured on
+/// 2026-09-17 — a project missing the `caches.txt` a release had added got
+/// four "kept" lines and no hint that its fragments were never examined. The
+/// remedy existed and nobody could guess it.
+#[test]
+fn a_second_init_tops_up_the_stacks_the_project_already_declares() {
+    let (_dir, root, nunki) = fresh();
+    let home = home(&root);
+    init(&root, &home, &["rust".to_string()]).unwrap();
+
+    // A release adds a file to the fragment: the project is missing it.
+    let missing = home
+        .join(nunki::project::STACKS_DIR)
+        .join("rust")
+        .join(nunki::project::CACHES_FILE);
+    std::fs::remove_file(&missing).unwrap();
+
+    // Re-run the way a human does, without remembering the stack's name.
+    let actions = init(&root, &home, &[]).unwrap();
+
+    assert!(missing.is_file(), "the missing fragment was not put back");
+    assert!(
+        created(&actions, nunki::project::CACHES_FILE),
+        "{actions:?}"
+    );
+    // And what was there is untouched, as always.
+    assert!(kept(&actions, "prepush.sh").is_some(), "{actions:?}");
+    let _ = nunki;
+}
+
+/// The declared stacks come from the project's own configuration, so a
+/// project that declares none still gets none — `init` does not guess a stack
+/// for a repository that never named one.
+#[test]
+fn a_first_init_without_a_stack_writes_no_fragment() {
+    let (_dir, root, _nunki) = fresh();
+    let home = home(&root);
+
+    let actions = init(&root, &home, &[]).unwrap();
+
+    assert!(
+        !home.join(nunki::project::STACKS_DIR).join("rust").exists(),
+        "{actions:?}"
+    );
+}
+
+/// A configuration may name a stack this release does not carry yet — the
+/// owner plans Python, TypeScript and Solidity. The declared list is not
+/// checked against the known one, because it comes from a file a human wrote
+/// rather than from a flag; so a stack with no fragments is skipped, and does
+/// not leave an empty folder behind.
+#[test]
+fn a_declared_stack_nunki_has_no_fragment_for_leaves_nothing_behind() {
+    let (_dir, root, _nunki) = fresh();
+    let home = home(&root);
+    init(&root, &home, &["rust".to_string()]).unwrap();
+
+    let config = home.join(nunki::project::CONFIG_FILE);
+    let text = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(&config, text.replace("- rust", "- rust\n  - solidity")).unwrap();
+
+    let actions = init(&root, &home, &[]).unwrap();
+
+    assert!(
+        !home
+            .join(nunki::project::STACKS_DIR)
+            .join("solidity")
+            .exists(),
+        "an empty folder was left for a stack with no fragments: {actions:?}"
+    );
+    // And the stack it does carry is still examined.
+    assert!(kept(&actions, "prepush.sh").is_some(), "{actions:?}");
+}
