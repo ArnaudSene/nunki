@@ -279,6 +279,7 @@ fn live_a_campaign_is_launched_watched_and_read_back() {
             "rust",
             &touched,
             45,
+            mutants::Replay::WhenChanged,
         )
         .unwrap()
     };
@@ -572,4 +573,84 @@ fn what_a_campaign_says_is_a_sentence_and_not_a_layout() {
     }
     // And it names the mission, because the verb it suggests takes one.
     assert!(mutants::started("m1").contains("nunki verify m1"));
+}
+
+fn on_file(dir: &std::path::Path, fingerprint: &str, survivors: usize) {
+    let survivors = (0..survivors)
+        .map(|i| mutants::Survivor {
+            id: format!("src/lib.rs:{i}:1: replace a with b"),
+            file: "src/lib.rs".into(),
+            line: i as u32 + 1,
+            description: "replace a with b".into(),
+            outcome: None,
+        })
+        .collect();
+    mutants::write(
+        dir,
+        &mutants::Campaign {
+            fingerprint: fingerprint.into(),
+            head: "0".repeat(40),
+            date: "2026-09-17T00:00:00Z".into(),
+            survivors,
+        },
+    )
+    .unwrap();
+}
+
+/// A campaign costs an hour (SPEC § 7), so one on the same content is not run
+/// again. That is the default and it stays the default.
+#[test]
+fn a_campaign_on_the_same_content_is_not_run_again() {
+    let dir = tempfile::tempdir().unwrap();
+    on_file(dir.path(), "abc", 2);
+
+    let answer =
+        mutants::already_answered(dir.path(), "abc", mutants::Replay::WhenChanged).unwrap();
+
+    assert_eq!(answer, Some(mutants::Progress::Fresh { survivors: 2 }));
+}
+
+/// The fingerprint is over the **touched files**. It cannot see a change to
+/// the stack's `mutation.sh`, to the tool's version, or to an exclusion added
+/// since — and every one of those changes the answer.
+///
+/// Before this existed the only way past it was deleting `MUTANTS.json` by
+/// hand, and on 2026-09-17 that took `MUTANTS.triage.json` with it: the engine
+/// replaced the missing file with a directory and the mission came down on
+/// `Is a directory (os error 21)`. A verb is cheaper than the workaround it
+/// replaces.
+#[test]
+fn a_campaign_is_run_again_when_the_human_says_something_changed() {
+    let dir = tempfile::tempdir().unwrap();
+    on_file(dir.path(), "abc", 2);
+
+    let answer = mutants::already_answered(dir.path(), "abc", mutants::Replay::Now).unwrap();
+
+    assert_eq!(answer, None, "the campaign on file was taken anyway");
+    // And the file is left where it is: asking again is not deleting.
+    assert!(mutants::read(dir.path()).unwrap().is_some());
+}
+
+/// Content that moved is run again whoever asks, which is the rule that was
+/// already there.
+#[test]
+fn a_campaign_on_content_that_moved_is_run_again() {
+    let dir = tempfile::tempdir().unwrap();
+    on_file(dir.path(), "abc", 2);
+
+    let answer =
+        mutants::already_answered(dir.path(), "def", mutants::Replay::WhenChanged).unwrap();
+
+    assert_eq!(answer, None);
+}
+
+/// Nothing on file is nothing to reuse.
+#[test]
+fn a_campaign_that_never_ran_is_run() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let answer =
+        mutants::already_answered(dir.path(), "abc", mutants::Replay::WhenChanged).unwrap();
+
+    assert_eq!(answer, None);
 }
