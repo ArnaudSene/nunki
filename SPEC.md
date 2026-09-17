@@ -1397,7 +1397,8 @@ dernier lot. La première rouge arrête tout.
 
    ```json
    {"id":"…","kind":"vulnerability","where":"time 0.1.45",
-    "fix":">=0.2.23","accepted":"pas de correctif amont; appel jamais atteint"}
+    "fix":">=0.2.23","accepted":"pas de correctif amont; appel jamais atteint",
+    "was_at_base":false}
    ```
 
    - `id` — l'identifiant de l'écosystème, **opaque** pour `nunki` ;
@@ -1408,11 +1409,15 @@ dernier lot. La première rouge arrête tout.
    - `fix` — ce qui le corrige. **Vide veut dire qu'il n'en existe pas**, et
      c'est le discriminateur de tout ce qui suit ;
    - `accepted` — la raison, lue par le script dans le mécanisme d'exception
-     **propre à l'écosystème** ; absent si le constat n'est pas accepté.
+     **propre à l'écosystème** ; absent si le constat n'est pas accepté ;
+   - `was_at_base` — le constat était-il déjà là sur la base de la mission.
+     C'est ce qui sépare ce que la branche a apporté de ce que le dépôt
+     portait déjà.
 
-   `nunki` décide sur ces quatre champs et rien d'autre : ce qui est nouveau
-   depuis la base et non `accepted` est rouge ; `accepted` avec un `fix` non
-   vide est une exception périmée. Aucune de ces règles ne nomme un outil.
+   `nunki` décide sur ces six champs et rien d'autre : ce qui n'était pas à
+   la base et n'est pas `accepted` est rouge ; ce qui y était déjà est un
+   constat ; `accepted` avec un `fix` non vide est une exception périmée.
+   Aucune de ces règles ne nomme un outil.
 
    C'est ce qui rend les stacks suivantes possibles sans toucher au cœur :
    Rust rend `deny.toml` et `cargo audit`, Python son propre auditeur et sa
@@ -1445,8 +1450,12 @@ dernier lot. La première rouge arrête tout.
    exception de se retirer toute seule — et `nunki` n'en voit que `fix`,
    rempli ou vide.
 
-   **La base d'avis ne peut pas être téléchargée par l'agent.** Mesuré le
-   2026-09-17 : `~/.cargo/advisory-db` vient de
+   **Fin de l'exemple ; ce qui suit vaut pour toute stack.**
+
+   **La base d'avis ne peut pas être téléchargée par l'agent.** Vrai de tout
+   écosystème — un auditeur lit une base publiée quelque part, et cet endroit
+   est hors de la liste blanche d'un agent. Mesuré le 2026-09-17 sur Rust :
+   `~/.cargo/advisory-db` vient de
    `https://github.com/RustSec/advisory-db.git`, donc de **github.com**, donc
    d'une forge — et aucune forge n'entre dans la liste blanche d'un agent
    (4.1 bis ; `nunki check` est rouge si une y apparaît). La base est donc
@@ -1456,13 +1465,47 @@ dernier lot. La première rouge arrête tout.
    comme les scripts de stack — et une porte dont la réponse dépend d'une
    base doit **dire la date de cette base**.
 
-   **Ce qui bloque est ce qui est nouveau depuis la base.** Proposé le
-   2026-09-17, à trancher. Un avis paru cette nuit dans une dépendance que la
+   **Ce qui bloque est ce qui est nouveau depuis la base.** Tranché par
+   Arnaud le 2026-09-17. Un avis paru cette nuit dans une dépendance que la
    branche n'a jamais touchée est déjà sur `dev` : arrêter la mission punit
-   le mauvais changement, pour une cause hors de portée de l'agent. Même
+   le mauvais changement, pour une cause hors de portée de l'agent — la
+   réparer le ferait sortir de son périmètre, donc échouer la porte 4. Même
    grammaire que la porte 4 (les chemins touchés) et la porte 7 (l'empreinte
    des fichiers touchés) : **ce qui est nouveau depuis la base appartient à
    la mission, ce qui préexiste appartient au projet.**
+
+   **Mais le préexistant est rendu, jamais tu.** C'est la condition de la
+   règle ci-dessus et non un ornement : une porte qui ne peut pas dire « je
+   sais, et ce n'est pas de cette mission » ment par omission. Chaque constat
+   préexistant paraît dans la sortie de la porte et dans `PR.md`, sans la
+   rougir. Le risque est assumé et nommé ici : **la dette d'un dépôt ne se
+   résorbe pas toute seule**, et aucune mission de fonctionnalité ne la
+   forcera. Son foyer est un audit — la sécurité mécanique jouée hors
+   mission, sur un dépôt entier.
+
+   Le contrat porte donc un champ de plus, `was_at_base`, et `nunki` décide
+   dessus sans savoir ce qu'est un lockfile : `was_at_base` faux et pas
+   `accepted` → rouge ; `was_at_base` vrai et pas `accepted` → constat. La
+   comparaison est **au script**, comme le reste de l'écosystème : `nunki`
+   lui passe la base, comme il passe les chemins touchés à `mutation.sh`.
+   Côté Rust, `git show <base>:Cargo.lock` puis un audit sur ce fichier
+   suffit — mesuré le 2026-09-17, `cargo audit -f <lockfile>` lit n'importe
+   quel lockfile, sans second checkout et sans compiler.
+
+   Deux fuites cherchées et absentes, mesurées sur le raisonnement plutôt que
+   supposées : un codeur **ne peut pas déguiser** une vulnérabilité en
+   préexistante, parce que la comparaison porte sur les avis *rapportés* et
+   non sur la base de données — monter une lib vers une version vulnérable
+   fait paraître l'avis à `HEAD` et pas à la base. Et il ne peut pas
+   s'auto-délivrer une exception, `deny.toml` étant dans
+   `protected_paths.refuse`.
+
+   **Une troisième voie écartée : le seuil de sévérité.** Faire bloquer une
+   critique préexistante et pas une basse est la pratique courante ailleurs,
+   et c'est un seuil — que la porte 7 refuse explicitement deux points plus
+   haut (« Pas de seuil »). Un seuil ici casserait la cohérence de la
+   doctrine, et tous les avis ne portent pas de score. Écartée avec la voie
+   du délai de grâce, qui est le même seuil habillé en date.
 
    **Ce que l'agent fait d'un avis.** Tranché par Arnaud le 2026-09-17, en
    trois cas :
