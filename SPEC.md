@@ -1396,9 +1396,9 @@ dernier lot. La première rouge arrête tout.
    constat :
 
    ```json
-   {"id":"…","kind":"vulnerability","where":"time 0.1.45",
-    "fix":">=0.2.23","accepted":"pas de correctif amont; appel jamais atteint",
-    "was_at_base":false}
+   {"id":"…","kind":"unmaintained","where":"paste 1.0.15","via":"alloy",
+    "fix":"","accepted":"archivé en amont; alloy l'impose",
+    "was_at_base":true}
    ```
 
    - `id` — l'identifiant de l'écosystème, **opaque** pour `nunki` ;
@@ -1412,15 +1412,26 @@ dernier lot. La première rouge arrête tout.
      **propre à l'écosystème** ; absent si le constat n'est pas accepté ;
    - `was_at_base` — le constat était-il déjà là sur la base de la mission.
      C'est ce qui sépare ce que la branche a apporté de ce que le dépôt
-     portait déjà.
+     portait déjà ;
+   - `via` — la dépendance **directe** par laquelle le constat est entré,
+     absente quand il porte déjà sur une dépendance directe.
 
-   `nunki` décide sur ces six champs et rien d'autre : ce qui n'était pas à
+   **`via` remplace une propagation dont on n'a pas besoin.** La question
+   semblait être « une lib que le propriétaire veut conserver protège-t-elle
+   aussi ses dépendances ? ». Elle ne se pose pas : **une dépendance
+   transitive n'est remplaçable par personne** — ce n'est pas le projet qui
+   la choisit, c'est son parent. Les seules issues sont de la monter dans la
+   contrainte du parent, ou de remplacer **le parent**, qui est une
+   dépendance directe et relève donc de la règle ordinaire. Ce qui manque à
+   l'agent n'est pas un héritage, c'est de savoir quel parent aller voir.
+
+   `nunki` décide sur ces sept champs et rien d'autre : ce qui n'était pas à
    la base et n'est pas `accepted` est rouge ; ce qui y était déjà est un
    constat ; `accepted` avec un `fix` non vide est une exception périmée.
    Aucune de ces règles ne nomme un outil.
 
    C'est ce qui rend les stacks suivantes possibles sans toucher au cœur :
-   Rust rend `deny.toml` et `cargo audit`, Python son propre auditeur et sa
+   Rust rend `deny.toml` et `cargo-deny`, Python son propre auditeur et sa
    propre liste, Next.js la sienne, Solidity une analyse statique qui n'a
    même pas de notion de dépendance vulnérable. Chacune garde **sa
    convention**, ce qui est la raison même pour laquelle les exceptions
@@ -1429,41 +1440,62 @@ dernier lot. La première rouge arrête tout.
    **Le fragment Rust, en exemple travaillé.** Tout ce qui suit est le
    contenu de `security.sh` pour Rust, jamais du code de `nunki`.
 
-   **Deux exécutions, et c'est la clé du mécanisme.** Mesuré le 2026-09-17
-   sur cargo-deny 0.20.2 et cargo-audit 0.22.0, un avis réel
-   (RUSTSEC-2020-0071 dans `time` 0.1.44) placé dans la liste `ignore` de
-   `deny.toml` :
+   **Un seul outil, `cargo-deny`.** Tranché par Arnaud le 2026-09-17, contre
+   une première version qui faisait tourner `cargo-deny` pour la porte et
+   `cargo-audit` pour le rapport. Deux outils, c'étaient deux fichiers
+   d'exception — `deny.toml` et `.cargo/audit.toml` — et deux projets du
+   même propriétaire ne s'en servaient déjà pas pareil. Une exception écrite
+   dans l'un et lue dans l'autre ne compte pas : la porte rougit sur ce qui
+   a été accepté, ou se tait sur ce qui ne l'a pas été.
 
-   - `cargo deny check advisories` répond `advisories ok`, sortie 0 — **la
-     porte**, qui honore les exceptions ;
-   - `cargo audit --json`, dans le même dossier, signale quand même l'avis —
-     **le rapport**, qui voit tout. Il ne lit pas `deny.toml` : sa
-     configuration est `.cargo/audit.toml` et son `--ignore`.
+   La raison est plus forte que l'économie d'un fichier. Mesuré le
+   2026-09-17 sur cargo-deny 0.20.2, son rapport JSON porte, par constat :
+   `code` (la classe, d'où `kind`), `advisory.informational` (`unmaintained`
+   et les autres), une note `Solution: Upgrade to >=0.2.23` (d'où `fix`), et
+   **`graphs[].parents`, la chaîne de dépendances** — d'où `via`.
+   `cargo-audit` ne donne pas ce graphe. Le tri d'un fichier fait donc gagner
+   le champ qui manquait.
 
-   Aucune isolation n'est donc nécessaire : ni bac à sable, ni clone, ni
-   fichier renommé. Les deux outils sont déjà les deux vues, côte à côte.
+   Un bémol assumé : `fix` sort d'une chaîne de notes et non d'un tableau
+   typé comme le `versions.patched` de `cargo-audit`. C'est au script de
+   l'extraire, donc cela ne remonte pas dans le cœur, mais c'est plus fragile
+   qu'un champ structuré.
 
-   **`patched` est ce que le fragment Rust met dans `fix`**, et il est
-   lisible par machine. Mesuré le même jour : `versions.patched` vaut
-   `[">=0.2.23"]` pour un avis corrigé et `[]` pour un avis qui ne l'est pas
-   (RUSTSEC-2021-0139, `ansi_term`, abandonné). C'est ce qui permet à une
-   exception de se retirer toute seule — et `nunki` n'en voit que `fix`,
-   rempli ou vide.
+   **Les deux vues viennent de deux configurations, pas de deux outils.**
+   `--config <chemin>` désigne le fichier à lire, donc une configuration sans
+   `ignore` rend la vue **non filtrée** — tout, y compris ce qui est
+   accepté — et `deny.toml` rend la vue du projet, dont la liste `ignore`
+   fournit les `accepted`. Mesuré : avec l'avis dans `ignore`,
+   `cargo deny check advisories` répond `advisories ok`, sortie 0 ; avec une
+   configuration vide, il le signale.
+
+   Aucune isolation n'est nécessaire : ni bac à sable, ni clone, ni fichier
+   renommé. Une première rédaction l'affirmait déjà, mais pour `deny.toml`
+   seul — c'était faux tant que `.cargo/audit.toml` était dans le tableau,
+   puisque `cargo-audit` n'a pas d'équivalent de `--config` et qu'il fallait
+   sortir du répertoire du projet pour ne pas le lire. Un outil de moins,
+   et le problème avec.
+
+   **Et la base d'avis se lit hors ligne.** `--offline` avec un `db-path`
+   que l'hôte a rempli suffit : mesuré le 2026-09-17, cargo-deny trouve la
+   vulnérabilité sans réseau. Cela lève l'objection écrite dans le
+   `prepush.sh` de la stack Rust, qui excluait `cargo deny check advisories`
+   du conteneur parce que son étape `advisories` va chercher sa base sur
+   github.com — une forge, et aucune forge n'entre dans la liste blanche d'un
+   agent.
 
    **Fin de l'exemple ; ce qui suit vaut pour toute stack.**
 
    **La base d'avis ne peut pas être téléchargée par l'agent.** Vrai de tout
    écosystème — un auditeur lit une base publiée quelque part, et cet endroit
-   est hors de la liste blanche d'un agent. Mesuré le 2026-09-17 sur Rust :
-   `~/.cargo/advisory-db` vient de
-   `https://github.com/RustSec/advisory-db.git`, donc de **github.com**, donc
-   d'une forge — et aucune forge n'entre dans la liste blanche d'un agent
-   (4.1 bis ; `nunki check` est rouge si une y apparaît). La base est donc
-   rafraîchie **sur l'hôte**, montée en lecture seule dans le conteneur, et
-   l'audit tourne avec `--no-fetch` (mesuré : il trouve la vulnérabilité sans
-   réseau). Ce qui juge l'agent reste hors de sa portée par construction,
-   comme les scripts de stack — et une porte dont la réponse dépend d'une
-   base doit **dire la date de cette base**.
+   est hors de la liste blanche d'un agent. Côté Rust c'est
+   `https://github.com/RustSec/advisory-db.git`, donc **github.com**, donc une
+   forge, et aucune forge n'entre dans la liste blanche d'un agent (4.1 bis ;
+   `nunki check` est rouge si une y apparaît). La base est donc rafraîchie
+   **sur l'hôte** et montée en lecture seule. Ce qui juge l'agent reste hors
+   de sa portée par construction, comme les scripts de stack — et une porte
+   dont la réponse dépend d'une base doit **dire la date de cette base**,
+   sans quoi elle rend un verdict sans dire de quand il date.
 
    **Ce qui bloque est ce qui est nouveau depuis la base.** Tranché par
    Arnaud le 2026-09-17. Un avis paru cette nuit dans une dépendance que la
@@ -1488,9 +1520,14 @@ dernier lot. La première rouge arrête tout.
    `accepted` → rouge ; `was_at_base` vrai et pas `accepted` → constat. La
    comparaison est **au script**, comme le reste de l'écosystème : `nunki`
    lui passe la base, comme il passe les chemins touchés à `mutation.sh`.
-   Côté Rust, `git show <base>:Cargo.lock` puis un audit sur ce fichier
-   suffit — mesuré le 2026-09-17, `cargo audit -f <lockfile>` lit n'importe
-   quel lockfile, sans second checkout et sans compiler.
+   Côté Rust, `git worktree add` sur la base puis la même commande dans cet
+   arbre. Une première rédaction annonçait « sans second checkout », en
+   s'appuyant sur le `-f <lockfile>` de `cargo-audit` ; avec `cargo-deny`
+   seul, cela ne tient pas — mesuré le 2026-09-17, il passe par les
+   métadonnées de cargo et refuse un dossier qui n'a qu'un manifeste et un
+   lockfile (« no targets specified in the manifest »). Le worktree est une
+   opération git locale et rien n'y est compilé : le coût réel est un
+   checkout, pas une construction.
 
    Deux fuites cherchées et absentes, mesurées sur le raisonnement plutôt que
    supposées : un codeur **ne peut pas déguiser** une vulnérabilité en
@@ -1506,6 +1543,36 @@ dernier lot. La première rouge arrête tout.
    haut (« Pas de seuil »). Un seuil ici casserait la cohérence de la
    doctrine, et tous les avis ne portent pas de score. Écartée avec la voie
    du délai de grâce, qui est le même seuil habillé en date.
+
+   **Un secret est toujours l'affaire d'un humain.** Tranché par Arnaud le
+   2026-09-17. Tout ce qui suit sur les avis — le correctif, le remplacement,
+   l'exception qui se périme — ne veut rien dire pour un secret commité, et la
+   raison n'est pas sa gravité : **aucune action d'agent ne le ferme.** Le
+   retirer dans un commit suivant le laisse dans l'histoire de la branche, et
+   `nunki` n'en réécrit aucune. La porte 4 tient déjà exactement ce
+   raisonnement — « un commit interdit puis reverté laisse un arbre propre et
+   une histoire sale ». S'arrêter n'est donc pas une politique, c'est le seul
+   résultat honnête.
+
+   Des deux côtés de la base, et la différence n'est pas la gravité mais ce
+   que pousser cette branche ajoute : **nouveau dans la branche, cela rouge**
+   — la branche ne doit pas partir ; **déjà là avant elle, c'est rendu sans
+   rouge** — c'est déjà sur la base, et arrêter la mission ne le dé-fuite
+   pas. Dans les deux cas cela remonte à l'humain, et la révocation du secret
+   se fait hors de `nunki`.
+
+   **Et un faux positif doit pouvoir être dit une fois.** Les scanners de
+   secrets sont bruyants : fixtures de test, clés d'exemple, blobs qui
+   ressemblent à des clés. Sans un moyen de marquer « ce n'en est pas un »,
+   la mission se rearrête sur le même constat à chaque reprise. `accepted`
+   vaut donc pour un secret comme pour un avis, dans le mécanisme propre à
+   l'outil — et comme un secret n'a pas de `fix`, cette exception-là ne se
+   retire jamais toute seule.
+
+   **L'analyse statique**, la troisième famille que la porte porte, passe par
+   le même contrat : `kind: "lint"`, un `where` qui est un `fichier:ligne`,
+   pas de `fix`, pas de `via`. Ce que l'agent en fait est le cas ordinaire —
+   il le corrige, puisque c'est son propre code.
 
    **Ce que l'agent fait d'un avis.** Tranché par Arnaud le 2026-09-17, en
    trois cas :
@@ -1531,9 +1598,9 @@ dernier lot. La première rouge arrête tout.
      parent ne peut pas être remplacé, on va en b.
 
    « Explicitement voulue » doit être **lisible par une machine**, sans quoi
-   les deux premiers cas ne se distinguent pas. Proposé le 2026-09-17, à
-   trancher : une section de `nunki.yaml`, qui vit hors du dépôt et **n'est
-   jamais montée** — donc que l'agent ne peut ni lire ni contourner :
+   les deux premiers cas ne se distinguent pas. Tranché par Arnaud le
+   2026-09-17 : une section de `nunki.yaml`, qui vit hors du dépôt et n'est
+   **jamais montée**, donc que l'agent ne peut pas réécrire :
 
    ```yaml
    dependencies:
@@ -1542,9 +1609,33 @@ dernier lot. La première rouge arrête tout.
          because: the runtime the whole service is built on
    ```
 
-   Une librairie `keep`, et tout parent d'une dépendance vulnérable qui en
-   est une, rend la voie a impossible : l'agent va directement en b sans
-   dépenser une tentative à chercher une alternative qu'on lui refusera.
+   Mais l'agent doit quand même la **lire**, sinon il tenterait le
+   remplacement et dépenserait la tentative que `keep` existe pour épargner.
+   Le dépôt a déjà cette forme pour le périmètre : le propriétaire déclare
+   hors de portée, `nunki` rend la liste effective en lecture seule dans le
+   dossier de mission, l'agent la lit — c'est `ALLOWLIST.txt`. `keep` suit le
+   même chemin, et l'agent n'a rien à analyser puisqu'il lit de la prose.
+
+   **Ce qui la fait respecter est la revue humaine, et c'est dit comme tel.**
+   Un changement de dépendance est visible dans le diff d'une pull request
+   que personne ne fusionne sans la lire. C'est un confort au sens de 3.2, pas
+   une enforcement : rien dans le conteneur n'empêche l'agent de passer
+   outre. Le rendre mécanique demanderait à chaque stack de détecter qu'une
+   librairie `keep` a disparu de son manifeste — beaucoup de travail par
+   écosystème pour un cas rare, et c'est pourquoi ce n'est pas fait.
+
+   **La liste part vide et se remplit une entrée à la fois.** Tranché le même
+   jour, contre l'idée de la pré-remplir à `nunki init` en proposant les
+   librairies déclarées. Deux raisons : lister les dépendances d'un projet,
+   c'est analyser `Cargo.toml`, `pyproject.toml` ou `package.json` — la
+   stack de retour dans le cœur, ou un script de fragment de plus dans chaque
+   écosystème ; et `init` ne tourne qu'une fois, donc une librairie ajoutée
+   au deuxième mois ne serait jamais proposée, alors que c'est justement
+   celle à laquelle personne n'a pensé. Le seul moment où `keep` compte est
+   celui où un remplacement est envisagé — rare — et la question se pose alors
+   sur **une** librairie, à laquelle le propriétaire répond une fois. Chaque
+   entrée porte ainsi une raison, parce qu'elle a été écrite en réponse à une
+   vraie question.
 
    **La voie b : accepter le risque, et c'est l'humain.** C'est un jugement
    que rien ne peut vérifier, donc la même règle que pour un survivant
@@ -1560,8 +1651,7 @@ dernier lot. La première rouge arrête tout.
 
    Une raison qui **nomme** vaut mieux qu'une qui dit « risque accepté ». Le
    cas le plus fréquent d'acceptation n'est pas « pas de correctif » mais
-   « le code vulnérable n'est pas atteignable » — que ni `cargo audit` ni
-   `cargo deny` ne savent voir, et dont la raison peut au moins nommer la
+   « le code vulnérable n'est pas atteignable » — que `cargo-deny` ne sait pas voir, et dont la raison peut au moins nommer la
    fonction.
 
    **Une exception se revérifie à chaque mission, et se retire toute seule.**
@@ -1577,16 +1667,37 @@ dernier lot. La première rouge arrête tout.
    - `patched` non vide → **l'exception est périmée, un correctif existe :
      applique-le**, et retire l'exception.
 
-   **Ce qui reste à trancher : les avis qui ne sont pas des vulnérabilités.**
-   `--deny warnings` fait aussi remonter `unmaintained`, `unsound`, `notice`
-   et `yanked`. Ils ont `patched` vide **par nature** — `ansi_term` ne sera
-   jamais corrigé, il est abandonné — donc la revérification ci-dessus ne les
-   touchera jamais et une exception sur l'un d'eux est éternelle. Les traiter
-   comme une vulnérabilité enverrait écrire des exceptions permanentes pour
-   du bruit. La voie proposée est de les rendre en **constat** plutôt qu'en
-   blocage, leur seule sortie réelle étant la voie a. `kind` est dans le
-   contrat pour que cette règle se dise sans nommer un outil : Python et
-   Next.js porteront la même distinction sous d'autres noms. Non tranché.
+   **Une exception qu'aucun correctif ne peut périmer.** Tranché par Arnaud
+   le 2026-09-17, en réunissant deux cas qu'une première rédaction traitait
+   séparément.
+
+   Le premier : les avis qui **ne sont pas des vulnérabilités** —
+   `unmaintained`, `unsound`, `notice`, `yanked`. Leur `fix` est vide *par
+   nature* et le restera, donc la revérification ci-dessus ne les touchera
+   jamais. Le second : un **faux positif de secret**, qui n'a pas de `fix`
+   non plus et n'en aura jamais.
+
+   Dans les deux cas l'exception est **permanente**, et il vaut mieux le dire
+   que de faire semblant qu'elle expirera. Ce ne sont pas deux mécanismes :
+   c'est le même, et la règle est que `nunki` distingue, dans ce qu'il rend,
+   une exception qu'un correctif peut lever d'une exception que rien ne
+   lèvera. Les premières sont une dette qui se résorbe ; les secondes sont
+   une décision qui se relit, et leur seule sortie est la voie a — changer de
+   librairie, ou l'outil qui crie à tort.
+
+   `kind` est dans le contrat pour que cette règle se dise sans nommer un
+   outil : Python et Next.js porteront la même distinction sous d'autres noms.
+
+   **Exemple mesuré, et il est réel.** Le 2026-09-17, sur un projet du
+   propriétaire : `alloy` dépend de `paste`, que RUSTSEC-2024-0436 signale
+   `informational = "unmaintained"` avec `patched = []`. Impossible à monter.
+   L'avis nomme pourtant une issue — `pastey`, « a drop-in replacement » —
+   mais elle est **hors d'atteinte** : il faudrait un `[patch]` vers un fork,
+   et la section 7 interdit les dépendances git, ce que `deny.toml` applique.
+   La voie a n'existe donc pas ici, et le cas tombe en b sans l'avoir choisi.
+   C'est le contrat en entier sur une seule ligne : `kind: "unmaintained"`,
+   `where: "paste 1.0.15"`, `via: "alloy"`, `fix: ""`, `accepted` renseigné,
+   `was_at_base: true`.
 
 Ces huit portes sont celles du **codeur**. La seconde revue a montré
 qu'appliquées telles quelles aux deux autres rôles elles étaient indéfinies
