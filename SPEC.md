@@ -1385,13 +1385,49 @@ dernier lot. La première rouge arrête tout.
    `/work/stack/security.sh`, absent ou non exécutable la porte **échoue**,
    comme la batterie.
 
-   **Elle n'est pas la batterie.** La batterie du codeur joue déjà `clippy`
-   et `cargo deny check bans licenses sources` ; ce qu'aucune stack ne joue
+   **Elle n'est pas la batterie.** Une batterie joue des tests et une
+   analyse statique — côté Rust, `clippy` et
+   `cargo deny check bans licenses sources`. Ce qu'aucune stack ne joue
    aujourd'hui, ce sont les **vulnérabilités connues** et le **scan de
    secrets**. Et l'intégrateur ne joue pas `prepush.sh` mais `system.sh` :
    une vérification glissée dans la batterie ne tournerait jamais sur ses
    commits, alors que le tableau l'exige « idem sur ses commits ». Enfin un
    avis paraît **sans que le code bouge**, ce qui est une cadence à soi.
+
+   **Le contrat, et il est agnostique à la stack.** C'est la règle de la
+   porte 7 appliquée ici : `mutation.sh` émet une ligne JSON par survivant et
+   `nunki` ne sait rien de cargo-mutants. De même, `security.sh` fait tout le
+   travail propre à son écosystème et émet **un objet JSON par ligne**, un par
+   constat :
+
+   ```json
+   {"id":"…","kind":"vulnerability","where":"time 0.1.45",
+    "fix":">=0.2.23","accepted":"pas de correctif amont; appel jamais atteint"}
+   ```
+
+   - `id` — l'identifiant de l'écosystème, **opaque** pour `nunki` ;
+   - `kind` — `vulnerability`, `unmaintained`, `secret`, `lint` : les seules
+     classes sur lesquelles `nunki` raisonne ;
+   - `where` — où, pour un humain : paquet et version, ou `fichier:ligne`
+     pour un secret ;
+   - `fix` — ce qui le corrige. **Vide veut dire qu'il n'en existe pas**, et
+     c'est le discriminateur de tout ce qui suit ;
+   - `accepted` — la raison, lue par le script dans le mécanisme d'exception
+     **propre à l'écosystème** ; absent si le constat n'est pas accepté.
+
+   `nunki` décide sur ces quatre champs et rien d'autre : ce qui est nouveau
+   depuis la base et non `accepted` est rouge ; `accepted` avec un `fix` non
+   vide est une exception périmée. Aucune de ces règles ne nomme un outil.
+
+   C'est ce qui rend les stacks suivantes possibles sans toucher au cœur :
+   Rust rend `deny.toml` et `cargo audit`, Python son propre auditeur et sa
+   propre liste, Next.js la sienne, Solidity une analyse statique qui n'a
+   même pas de notion de dépendance vulnérable. Chacune garde **sa
+   convention**, ce qui est la raison même pour laquelle les exceptions
+   restent dans `deny.toml` côté Rust.
+
+   **Le fragment Rust, en exemple travaillé.** Tout ce qui suit est le
+   contenu de `security.sh` pour Rust, jamais du code de `nunki`.
 
    **Deux exécutions, et c'est la clé du mécanisme.** Mesuré le 2026-09-17
    sur cargo-deny 0.20.2 et cargo-audit 0.22.0, un avis réel
@@ -1407,11 +1443,12 @@ dernier lot. La première rouge arrête tout.
    Aucune isolation n'est donc nécessaire : ni bac à sable, ni clone, ni
    fichier renommé. Les deux outils sont déjà les deux vues, côte à côte.
 
-   **`patched` est le discriminateur**, et il est lisible par machine.
-   Mesuré le même jour : `versions.patched` vaut `[">=0.2.23"]` pour un avis
-   corrigé et `[]` pour un avis qui ne l'est pas (RUSTSEC-2021-0139,
-   `ansi_term`, abandonné). C'est ce qui permet à une exception de se retirer
-   toute seule.
+   **`patched` est ce que le fragment Rust met dans `fix`**, et il est
+   lisible par machine. Mesuré le même jour : `versions.patched` vaut
+   `[">=0.2.23"]` pour un avis corrigé et `[]` pour un avis qui ne l'est pas
+   (RUSTSEC-2021-0139, `ansi_term`, abandonné). C'est ce qui permet à une
+   exception de se retirer toute seule — et `nunki` n'en voit que `fix`,
+   rempli ou vide.
 
    **La base d'avis ne peut pas être téléchargée par l'agent.** Mesuré le
    2026-09-17 : `~/.cargo/advisory-db` vient de
@@ -1509,7 +1546,9 @@ dernier lot. La première rouge arrête tout.
    touchera jamais et une exception sur l'un d'eux est éternelle. Les traiter
    comme une vulnérabilité enverrait écrire des exceptions permanentes pour
    du bruit. La voie proposée est de les rendre en **constat** plutôt qu'en
-   blocage, leur seule sortie réelle étant la voie a. Non tranché.
+   blocage, leur seule sortie réelle étant la voie a. `kind` est dans le
+   contrat pour que cette règle se dise sans nommer un outil : Python et
+   Next.js porteront la même distinction sous d'autres noms. Non tranché.
 
 Ces huit portes sont celles du **codeur**. La seconde revue a montré
 qu'appliquées telles quelles aux deux autres rôles elles étaient indéfinies
