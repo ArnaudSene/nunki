@@ -1621,6 +1621,46 @@ dernier lot. La première rouge arrête tout.
    l'outil — et comme un secret n'a pas de `fix`, cette exception-là ne se
    retire jamais toute seule.
 
+   **L'outil, côté Rust et côté tout le monde : `gitleaks`.** Tranché par
+   Arnaud le 2026-09-17, sur trois candidats. `trufflehog` vérifie qu'un
+   secret trouvé est *vivant* en l'essayant contre son service, ce qu'un
+   conteneur sans forge ne peut pas faire — il n'y tournerait qu'en statique,
+   sans son avantage. Des motifs écrits à la main ne coûtent aucune
+   dépendance mais retombent dans la sonde qui ne prouve rien : personne ne
+   maintient sa propre liste de motifs. `gitleaks` est retenu pour son fichier
+   d'exceptions, qui se branche sur `accepted` sans rien inventer.
+
+   Ce n'est pas un fragment de stack mais un outil du **scan lui-même** : le
+   même pour Rust, Python ou Next.js, puisqu'un secret n'a pas d'écosystème.
+   Il entre dans l'image comme le reste, au build, sur l'hôte — jamais
+   téléchargé depuis un conteneur d'agent.
+
+   Mesuré le 2026-09-17 sur gitleaks 8.30.1, et chaque champ du contrat y
+   trouve sa source :
+
+   - `Fingerprint` — `<commit>:<fichier>:<règle>:<ligne>` — est l'`id`, et
+     c'est aussi ce que le fichier d'exceptions nomme ;
+   - `File` et `StartLine` font le `where` ;
+   - `Commit` donne `was_at_base` **exactement**, par
+     `git merge-base --is-ancestor <commit> <base>` : on sait quel commit a
+     introduit le secret, pas seulement qu'il est là ;
+   - `fix` reste vide, parce qu'un secret n'en a pas. Il se révoque.
+
+   **La vue non filtrée ne s'obtient pas comme celle des avis**, et c'est
+   mesuré plutôt que supposé : `--gitleaks-ignore-path` vers un dossier vide
+   **ne désarme pas** le `.gitleaksignore` du dépôt — le constat reste tu,
+   alors qu'il réapparaît dès que le fichier est retiré. Il n'y a donc pas de
+   second passage : `.gitleaksignore` est une **liste d'empreintes en clair**,
+   une par ligne, commentaires tolérés, que le script lit directement. Chaque
+   empreinte qu'il nomme sort en `accepted`, avec pour raison le commentaire
+   qui la précède. Une exception est ainsi **rendue** au lieu d'être perdue,
+   ce que la liste `ignore` de `deny.toml` n'offrait qu'au prix de deux
+   exécutions.
+
+   Que les deux familles s'y prennent différemment n'est pas une faiblesse :
+   le contrat est le même, et comment chaque script l'honore est l'affaire de
+   ses outils. C'est précisément ce que l'agnosticisme achète.
+
    **L'analyse statique**, la troisième famille que la porte porte, passe par
    le même contrat : `kind: "lint"`, un `where` qui est un `fichier:ligne`,
    pas de `fix`, pas de `via`. Ce que l'agent en fait est le cas ordinaire —
