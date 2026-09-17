@@ -358,6 +358,18 @@ pub fn ended(survivors: usize) -> String {
     )
 }
 
+/// What a campaign that has just been launched says to the human whose verb
+/// launched it.
+///
+/// Here rather than in `main.rs` for the same reason [`ended`] is: a sentence
+/// a test can read is a sentence a test can catch. This one was printed with
+/// fifty spaces in the middle of it for half a day — `cargo fmt` had joined a
+/// multi-line literal and kept the indentation inside the string, and nothing
+/// was looking.
+pub fn started(mission: &str) -> String {
+    format!("started; it runs detached, and `nunki verify {mission}` reads it back")
+}
+
 /// Start the campaign, or say where the one in flight is.
 ///
 /// Long by nature, so it is launched **detached** and watched like a run: one
