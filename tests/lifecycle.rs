@@ -553,6 +553,51 @@ fn the_record_a_retry_leaves_is_prose_and_not_a_code_block() {
     }
 }
 
+/// A retry the flow refuses leaves no record of having happened.
+///
+/// `FOLLOWUP_HQ.md` is the file every role reads before anything else, and
+/// what `retry` writes there is a statement of fact: somebody took this
+/// mission back, and the bounds are handed back whole. A mission called off is
+/// not taken back, and the next run must not be told it was.
+///
+/// Measured on 2026-09-18 against a real HQ, playing every exit from
+/// `AwaitingHuman` through the verb: five records for three retries. The two
+/// extra ones were the refusals.
+#[test]
+fn a_retry_the_flow_refuses_leaves_no_record() {
+    let world = World::new(1);
+    let mut state = world.state();
+    let store = Store::open(&world.project.hq_root).unwrap();
+    store
+        .apply(
+            &mut state,
+            nunki::mission::flow::Event::Ended {
+                reason: "the approach was wrong".into(),
+            },
+        )
+        .unwrap();
+    let followup = world.project.hq_root.join("missions/m1/FOLLOWUP_HQ.md");
+    let before = std::fs::read_to_string(&followup).unwrap_or_default();
+
+    let err = lifecycle::retry(&world.project, "m1", "I changed my mind").unwrap_err();
+
+    assert!(format!("{err}").contains("the approach was wrong"), "{err}");
+    let after = std::fs::read_to_string(&followup).unwrap_or_default();
+    assert_eq!(
+        before, after,
+        "the HQ says the mission was taken back, and it was not"
+    );
+    // And the mission is where it was.
+    assert!(
+        matches!(
+            world.state().flow.stage(),
+            Stage::AwaitingHuman(nunki::mission::flow::Handover::Abandoned { .. })
+        ),
+        "{:?}",
+        world.state().flow.stage()
+    );
+}
+
 /// `retry` takes back a mission the bounds stopped. A mission that is running
 /// fine is told that, rather than moved.
 #[test]
