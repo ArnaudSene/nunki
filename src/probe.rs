@@ -422,6 +422,7 @@ fn plan(
         // mission carries: `nunki check` is what tells a human the mounts
         // hold before an agent depends on them.
         advisories: crate::run::advisories(project, stack),
+        secrets: crate::run::secrets(project),
         credentials: Vec::new(),
         volumes: Vec::<NamedVolume>::new(),
         environment: BTreeMap::new(),

@@ -125,6 +125,15 @@ enum Command {
         id: String,
     },
 
+    /// Secrets gate 8 found and you have ruled on (SPEC 4.4).
+    ///
+    /// The project's, not a mission's: an exception that lived with a mission
+    /// would go into `archive/` with it, and the same secret would stop the
+    /// next one. It lives in the HQ, mounted read-only in the container, so
+    /// no agent can rule on its own finding.
+    #[command(subcommand)]
+    Secret(SecretCommand),
+
     /// Say whether the project holds what the specification describes.
     ///
     /// Red when a restriction is not held; and it always says what it could
@@ -136,6 +145,32 @@ enum Command {
         /// Probe the system profile of this mission as well.
         #[arg(long, value_name = "ID")]
         mission: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum SecretCommand {
+    /// Accept the risk of a secret gate 8 found, so it stops blocking.
+    ///
+    /// The gesture after the credential is revoked, not instead of it: a
+    /// secret cannot be taken out of a branch's history, and `nunki` rewrites
+    /// none.
+    Accept {
+        /// The finding, exactly as gate 8 names it — the first field of the
+        /// line it printed.
+        id: String,
+        /// Why the risk is acceptable. Required: a risk accepted without a
+        /// reason is not accepted, it is forgotten.
+        #[arg(long, value_name = "WHY")]
+        because: String,
+    },
+    /// What this project has ruled on, and why.
+    List,
+    /// Drop a ruling — after the credential is revoked, or when it was made
+    /// in error.
+    Forget {
+        /// The finding, as `nunki secret list` names it.
+        id: String,
     },
 }
 
@@ -1050,6 +1085,57 @@ fn main() -> ExitCode {
                     ExitCode::FAILURE
                 }
             }
+        }
+
+        Command::Secret(what) => {
+            let project = match open(&start) {
+                Some(p) => p,
+                None => return ExitCode::FAILURE,
+            };
+            let file = nunki::secrets::file(&project);
+            match what {
+                SecretCommand::Accept { id, because } => {
+                    match nunki::secrets::accept(&file, &id, &because) {
+                        Ok(nunki::secrets::Accepted::Added) => {
+                            println!("accepted  {id}");
+                            println!("because   {}", because.trim());
+                            println!("in        {}", file.display());
+                        }
+                        Ok(nunki::secrets::Accepted::Replaced(was)) => {
+                            println!("accepted  {id}");
+                            println!("because   {}", because.trim());
+                            println!("was       {was}");
+                            println!("in        {}", file.display());
+                        }
+                        Err(e) => {
+                            eprintln!("nunki: {e}");
+                            return ExitCode::FAILURE;
+                        }
+                    }
+                }
+                SecretCommand::List => {
+                    let rulings = nunki::secrets::read(&file);
+                    if rulings.is_empty() {
+                        println!(
+                            "nothing ruled on yet: `nunki secret accept <id> --because <why>`"
+                        );
+                    }
+                    for ruling in rulings {
+                        println!("{}\n  {}", ruling.id, ruling.because);
+                    }
+                }
+                SecretCommand::Forget { id } => match nunki::secrets::forget(&file, &id) {
+                    Ok(true) => println!("forgotten  {id}"),
+                    Ok(false) => {
+                        println!("nothing ruled on {id}; `nunki secret list` says what is");
+                    }
+                    Err(e) => {
+                        eprintln!("nunki: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                },
+            }
+            ExitCode::SUCCESS
         }
 
         Command::Check {

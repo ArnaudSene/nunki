@@ -603,9 +603,10 @@ done < "$missed"
 const SECURITY_RUST: &str = r##"#!/bin/sh
 # The mechanical security of a Rust project (SPEC 4.4, gate 8).
 #
-# `nunki` calls this as `security.sh <base-commit>`, from the clean copy of
-# HEAD inside the slot's container. A commit and not a branch name: the copy is
-# a detached clone and carries no branch, so a name would resolve to nothing. It prints **one JSON object per line** on
+# `nunki` calls this as `security.sh <base-commit> [advisory-db] [mission-dir]
+# [secrets-file]`, from the clean copy of HEAD inside the slot's container. A
+# commit and not a branch name: the copy is a detached clone and carries no
+# branch, so a name would resolve to nothing. It prints **one JSON object per line** on
 # stdout, one per finding:
 #
 #   {"id":"…","kind":"…","where":"…","via":"…","fix":"…",
@@ -621,13 +622,14 @@ const SECURITY_RUST: &str = r##"#!/bin/sh
 # already run by the battery at gate 6, so nothing here repeats it.
 set -eu
 
-base="${1:?usage: security.sh <base-commit> [advisory-db] [mission-dir]}"
+base="${1:?usage: security.sh <base-commit> [advisory-db] [mission-dir] [secrets]}"
 # Second argument and not an environment variable: the agent owns its own
 # environment inside the container, and a variable would let it point this at
 # an empty directory — no findings, and a green gate. `nunki` is what invokes
 # the gate, so `nunki` is what says where the database is.
 db="${2:-/work/advisories}"
 mission="${3:-/work/mission}"
+secrets="${4:-/nunki/secrets.txt}"
 
 [ -d "$db" ] || { echo "nunki: no advisory database at $db" >&2; exit 69; }
 
@@ -743,14 +745,22 @@ leaks="$work/leaks.jsonl"
 trufflehog git "file://$PWD" --json --no-update --no-ignore-tag \
   > "$leaks" 2>/dev/null || true
 
-# What the HQ has already ruled is not a secret. `nunki` renders it read-only
-# in the mission folder, the way it renders the allowlist: declared out of the
-# agent's reach, readable by it all the same. Absent, nothing is accepted.
-accepted_file="$mission/SECRETS.txt"
-
+# What a human has already ruled is not a secret. It comes from the project's
+# HQ, mounted read-only: declared out of the agent's reach, readable by it all
+# the same. Absent, nothing is accepted — and absent means absent, because the
+# path is not one the agent could create (SPEC 4.4, gate 8).
+#
+# An exact match on the first field. The first version was
+# `sed "s|^$1[[:space:]]*||p"`, which matches a **prefix**: the id
+# `…:src/a.rs:Postgres:1` also matched the line for `…:src/a.rs:Postgres:10`
+# and returned `0  <reason>` as the reason. A file path also carries regex
+# metacharacters, which a pattern reads and a comparison does not.
 reason_for() {
-  [ -f "$accepted_file" ] || return 0
-  sed -n "s|^$1[[:space:]]*||p" "$accepted_file" | head -1
+  [ -f "$secrets" ] || return 0
+  awk -v id="$1" '
+    /^[[:space:]]*#/ { next }
+    $1 == id { $1 = ""; sub(/^[[:space:]]+/, ""); print; exit }
+  ' "$secrets"
 }
 
 while IFS= read -r line; do
