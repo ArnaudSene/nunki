@@ -43,6 +43,9 @@ pub enum Gate {
     Battery,
     /// 7 — every mutant that survived has an outcome.
     Mutation,
+    /// 8 — the mechanical security: the dependency audit, the secret scan and
+    /// the static analysis the stack declares (SPEC 4.4).
+    MechanicalSecurity,
 }
 
 impl Gate {
@@ -57,6 +60,7 @@ impl Gate {
             Gate::Deliverable => 5,
             Gate::Battery => 6,
             Gate::Mutation => 7,
+            Gate::MechanicalSecurity => 8,
         }
     }
 
@@ -69,6 +73,7 @@ impl Gate {
             Gate::Deliverable => "the deliverable is there",
             Gate::Battery => "the battery is green",
             Gate::Mutation => "every survivor has an outcome",
+            Gate::MechanicalSecurity => "mechanical security",
         }
     }
 }
@@ -214,6 +219,8 @@ pub enum GateError {
     Unreadable(std::path::PathBuf, std::io::Error),
     #[error("the mutation campaign could not be read: {0}")]
     Mutants(String),
+    #[error("the mechanical security report could not be read: {0}")]
+    Security(String),
     #[error("{pattern:?} is not a usable path pattern: {source}")]
     BadPattern {
         pattern: String,
@@ -256,9 +263,13 @@ pub struct Verification<'a> {
     pub stack: &'a str,
 }
 
-/// Play gates 1 to 4 for one run.
-pub fn after_run(subject: &Subject) -> Result<Report, GateError> {
-    play(subject, None)
+/// Play the gates a run owes at its end: 1 to 4, and 8.
+///
+/// Gate 8 is here for the reason gates 1 to 4 are, and because it is cheap:
+/// an advisory introduced at the first lot must not be found at the fifth
+/// (SPEC 4.4).
+pub fn after_run(subject: &Subject, verification: &Verification) -> Result<Report, GateError> {
+    play(subject, verification, Phase::AfterRun)
 }
 
 /// Play every gate that exists today: 1 to 4, then the deliverable and the
@@ -268,10 +279,18 @@ pub fn at_verification(
     subject: &Subject,
     verification: &Verification,
 ) -> Result<Report, GateError> {
-    play(subject, Some(verification))
+    play(subject, verification, Phase::Final)
 }
 
-fn play(subject: &Subject, verification: Option<&Verification>) -> Result<Report, GateError> {
+/// Which gates are owed: SPEC 4.4 plays 1 to 4 and 8 at the end of every run,
+/// and 5 to 7 once the last lot is done.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    AfterRun,
+    Final,
+}
+
+fn play(subject: &Subject, verification: &Verification, phase: Phase) -> Result<Report, GateError> {
     let head = git::head(subject.tree)?;
     let mut outcomes = vec![
         Outcome::of(Gate::CleanTree, clean_tree(subject)?),
@@ -279,11 +298,15 @@ fn play(subject: &Subject, verification: Option<&Verification>) -> Result<Report
         Outcome::of(Gate::ResumeNamesHead, resume_names_head(subject, &head)?),
         Outcome::of(Gate::Perimeter, perimeter(subject)?),
     ];
-    if let Some(verification) = verification {
+    if phase == Phase::Final {
         outcomes.push(Outcome::of(Gate::Deliverable, deliverable(subject)?));
         outcomes.push(Outcome::of(Gate::Battery, battery(subject, verification)?));
         outcomes.push(mutation(subject)?);
     }
+    outcomes.push(Outcome::of(
+        Gate::MechanicalSecurity,
+        mechanical_security(subject, verification)?,
+    ));
     Ok(Report {
         role: subject.role,
         head,
@@ -685,6 +708,109 @@ pub const SYSTEM_BATTERY: &str = "system.sh";
 /// reported through the contract `nunki` reads and neither runs nor
 /// understands.
 pub const SECURITY: &str = "security.sh";
+
+/// Gate 8: the mechanical security the stack declares (SPEC 4.4).
+///
+/// `nunki` runs `security.sh` and reads the contract it prints. It knows no
+/// lockfile, no advisory database and no scanner: the three rules below turn
+/// on the contract's own fields, and none of them names a tool.
+///
+/// Not the security agent's. It attacks what is built and owes findings, not
+/// a tool's report — the per-role table says so, and so does the battery two
+/// gates above.
+fn mechanical_security(
+    subject: &Subject,
+    verification: &Verification,
+) -> Result<Decision, GateError> {
+    if subject.role == Role::Security {
+        return Ok(Decision::NotApplicable(
+            "the security agent attacks what is built; it owes findings, not a tool's \
+             report"
+                .into(),
+        ));
+    }
+    let at = format!("{}/{SECURITY}", crate::run::STACK_AT);
+    // Absent, not executable, no database, or its own status — told apart,
+    // because "the gate is red", "there was nothing to run" and "it could not
+    // look" send a human to three different places.
+    let probe = format!(
+        "if [ ! -f {at} ]; then exit 66; fi\n\
+         if [ ! -x {at} ]; then exit 67; fi\n\
+         exec {at} {base} {db} {mission}\n",
+        base = subject.header.base,
+        db = crate::run::ADVISORIES_AT,
+        mission = crate::run::MISSION_AT,
+    );
+    let out = crate::exec::run(
+        verification.project,
+        verification.slot,
+        verification.engine.clone(),
+        &["sh".to_string(), "-c".to_string(), probe],
+        crate::exec::On::Proof,
+    );
+    let out = match out {
+        Ok(out) => out,
+        Err(e) => return Ok(Decision::Unplayed(e.to_string())),
+    };
+    match out.status {
+        66 => {
+            return Ok(Decision::Failed(format!(
+                "there is no security script at {at}: the stack in the project's home \
+                 ships no {SECURITY} — a proof nobody can run is not a proof that \
+                 passed (SPEC 4.4). `nunki init --stack <name>` writes it"
+            )));
+        }
+        67 => {
+            return Ok(Decision::Failed(format!(
+                "{at} is not executable, so nothing ran"
+            )));
+        }
+        // The script's own word for "I have no advisory database". Unplayed
+        // and not red: a verdict on the machine rather than on the agent, and
+        // a security gate that could not consult its database must not report
+        // green (SPEC 4.4).
+        69 => {
+            return Ok(Decision::Unplayed(format!(
+                "no advisory database at {}: the stack declares where it lives on the \
+                 host, and the host fills it — `cargo deny check advisories` once is \
+                 enough",
+                crate::run::ADVISORIES_AT
+            )));
+        }
+        _ => {}
+    }
+    let findings =
+        crate::security::read(&out.stdout).map_err(|e| GateError::Security(e.to_string()))?;
+
+    // What the branch brought and nobody accepted.
+    let blocking: Vec<String> = findings
+        .iter()
+        .filter(|f| f.blocks())
+        .map(|f| f.say())
+        .collect();
+    if !blocking.is_empty() {
+        return Ok(Decision::Failed(format!(
+            "{} finding(s) this branch brought, and nobody has ruled on: {}",
+            blocking.len(),
+            head_of(&blocking, 10)
+        )));
+    }
+    // An acceptance a fix has overtaken. Red, because it is work an agent can
+    // do: the exception was written when nothing could be, and something can.
+    let stale: Vec<String> = findings
+        .iter()
+        .filter(|f| f.stale())
+        .map(|f| f.say())
+        .collect();
+    if !stale.is_empty() {
+        return Ok(Decision::Failed(format!(
+            "{} exception(s) a fix has overtaken — apply it and drop the exception: {}",
+            stale.len(),
+            head_of(&stale, 10)
+        )));
+    }
+    Ok(Decision::Passed)
+}
 
 /// Gate 6: the battery, green, on the clean copy of `HEAD`.
 ///

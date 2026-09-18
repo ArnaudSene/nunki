@@ -1771,7 +1771,7 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                 protected_paths: &project.config.protected_paths,
                 coder_head: coder_head.as_deref(),
             };
-            let played = if verification {
+            let played = {
                 let engine: std::sync::Arc<dyn nunki::engine::Engine> =
                     std::sync::Arc::new(nunki::engine::docker::Docker::real());
                 let stack = project
@@ -1780,17 +1780,18 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                     .first()
                     .cloned()
                     .unwrap_or_else(|| "rust".to_string());
-                nunki::gate::at_verification(
-                    &subject,
-                    &nunki::gate::Verification {
-                        project,
-                        slot: &slot,
-                        engine,
-                        stack: &stack,
-                    },
-                )
-            } else {
-                nunki::gate::after_run(&subject)
+                let context = nunki::gate::Verification {
+                    project,
+                    slot: &slot,
+                    engine,
+                    stack: &stack,
+                };
+                if verification {
+                    nunki::gate::at_verification(&subject, &context)
+                } else {
+                    // Gate 8 needs the container too, so both phases carry it.
+                    nunki::gate::after_run(&subject, &context)
+                }
             };
             let report = match played {
                 Ok(r) => r,
