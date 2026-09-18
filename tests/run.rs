@@ -1843,6 +1843,63 @@ fn the_advisory_database_is_mounted_read_only_where_nunki_says() {
     );
 }
 
+/// The secrets a human ruled on reach the container read-only, from the HQ,
+/// at a path `nunki` fixes — and **not under `/work`**, which the image gives
+/// to the agent. Measured on 2026-09-18: as the agent, `mkdir -p
+/// /work/advisories` succeeds and `mkdir /nunki` is refused, so a path under
+/// `/work` that is not mounted is a file the agent can write — its own
+/// exceptions.
+#[test]
+fn the_rulings_reach_the_container_read_only_where_no_agent_could_write_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    std::fs::create_dir_all(project.fragment("rust")).unwrap();
+    let at = nunki::secrets::file(&project);
+    nunki::secrets::accept(&at, "abc:src/store.rs:Postgres:22", "a disposable test DSN").unwrap();
+    let slot = slot_at(dir.path());
+    let header = header_with(with_services());
+
+    let (plan, doc) = profile_for(&project, &slot, &header, Role::Coder);
+
+    assert_eq!(
+        plan.secrets,
+        Some((at, std::path::PathBuf::from(nunki::secrets::AT)))
+    );
+    assert!(
+        !nunki::secrets::AT.starts_with("/work"),
+        "{} is the agent's to write",
+        nunki::secrets::AT
+    );
+    let mounts: Vec<String> = doc["services"][nunki::compose::AGENT_SERVICE]["volumes"]
+        .as_sequence()
+        .expect("the agent has mounts")
+        .iter()
+        .map(|v| v.as_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(
+        mounts
+            .iter()
+            .any(|m| m.contains(nunki::secrets::AT) && m.ends_with(":ro")),
+        "{mounts:?}"
+    );
+}
+
+/// A project nobody has ruled on for mounts nothing, rather than an empty
+/// file: the engine would make a **directory** at that path, and the script
+/// would be reading a folder.
+#[test]
+fn a_project_that_has_ruled_on_nothing_mounts_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    std::fs::create_dir_all(project.fragment("rust")).unwrap();
+    let slot = slot_at(dir.path());
+    let header = header_with(with_services());
+
+    let (plan, _) = profile_for(&project, &slot, &header, Role::Coder);
+
+    assert_eq!(plan.secrets, None);
+}
+
 /// A database the host has not filled is not mounted at all. The engine would
 /// create an empty directory in its place, and gate 8 would read "nothing to
 /// report" where it should say it has no database.

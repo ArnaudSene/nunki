@@ -763,9 +763,10 @@ fn mechanical_security(
     let probe = format!(
         "if [ ! -f {at} ]; then exit 66; fi\n\
          if [ ! -x {at} ]; then exit 67; fi\n\
-         exec {at} {base} {db} {mission}\n",
+         exec {at} {base} {db} {mission} {secrets}\n",
         db = crate::run::ADVISORIES_AT,
         mission = crate::run::MISSION_AT,
+        secrets = crate::secrets::AT,
     );
     let out = crate::exec::run(
         verification.project,
@@ -825,8 +826,21 @@ fn mechanical_security(
         .map(|f| f.say())
         .collect();
     if !blocking.is_empty() {
+        // A secret is the one finding no agent can close: removing it in a
+        // later commit leaves it in the branch's history. So the line says
+        // what the human's next gesture is, and the id it names is the
+        // argument of that gesture — `say()` puts it first for this.
+        let secret = findings
+            .iter()
+            .any(|f| f.blocks() && f.kind == crate::security::Kind::Secret);
+        let next = if secret {
+            ". A secret is yours to rule on: revoke it, then `nunki secret accept <id> \
+             --because <why>` so the gate stops reporting it"
+        } else {
+            ""
+        };
         return Ok(Decision::Failed(format!(
-            "{} finding(s) this branch brought, and nobody has ruled on: {}",
+            "{} finding(s) this branch brought, and nobody has ruled on: {}{next}",
             blocking.len(),
             head_of(&blocking, 10)
         )));

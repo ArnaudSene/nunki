@@ -455,6 +455,7 @@ fn live_the_services_survive_a_switch_and_the_application_starts_in_the_profile(
             stack_scripts: Vec::new(),
             credentials: Vec::new(),
             advisories: None,
+            secrets: None,
             volumes: Vec::<NamedVolume>::new(),
             environment: Default::default(),
             command: vec!["sleep".to_string(), "600".to_string()],
@@ -741,6 +742,7 @@ fn live_the_security_profile_writes_only_what_the_stack_declared() {
             stack_scripts: Vec::new(),
             credentials: Vec::new(),
             advisories: None,
+            secrets: None,
             volumes: vec![NamedVolume {
                 name: nunki::run::writable_volume(slot_name, "target"),
                 at: PathBuf::from("/work/tree/target"),

@@ -721,6 +721,7 @@ pub fn plan(
         mission_dir_at: PathBuf::from(MISSION_AT),
         stack_scripts: stack_scripts(project, stack),
         advisories: advisories(project, stack),
+        secrets: secrets(project),
         credentials,
         volumes: volumes(project, slot, stack, role),
         environment,
@@ -815,6 +816,19 @@ fn sanitise(path: &str) -> String {
 pub fn advisories(project: &Project, stack: &str) -> Option<(PathBuf, PathBuf)> {
     let host = project.stack_advisories(stack)?;
     host.is_dir().then(|| (host, PathBuf::from(ADVISORIES_AT)))
+}
+
+/// The secrets a human has ruled on, from the project's HQ, or `None` when
+/// nobody has ruled on any (SPEC 4.4, gate 8).
+///
+/// Absent rather than mounted empty, and this is safe only because of where
+/// it lands: `crate::secrets::AT` is not under `/work`, which the image gives
+/// to the agent. Under `/work` an unmounted path would be a file the agent
+/// could write, and it would be writing its own exceptions.
+pub fn secrets(project: &Project) -> Option<(PathBuf, PathBuf)> {
+    let host = crate::secrets::file(project);
+    host.is_file()
+        .then(|| (host, PathBuf::from(crate::secrets::AT)))
 }
 
 /// Where the test credentials are mounted, read-only, on a system profile.

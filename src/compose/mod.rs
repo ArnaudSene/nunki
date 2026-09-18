@@ -96,6 +96,10 @@ pub struct Plan {
     /// the stack declares none. Filled by the host and never by `nunki`: the
     /// tool owns its own layout (SPEC 4.4, gate 8).
     pub advisories: Option<(PathBuf, PathBuf)>,
+    /// The secrets a human has ruled on, from the project's HQ, mounted
+    /// read-only, or `None` when nobody has ruled on any (SPEC 4.4, gate 8).
+    /// Given as (host path, path in the container).
+    pub secrets: Option<(PathBuf, PathBuf)>,
     pub volumes: Vec<NamedVolume>,
     pub environment: BTreeMap<String, String>,
     pub command: Vec<String>,
@@ -392,6 +396,13 @@ fn agent(plan: &Plan, dialect: &Dialect) -> Result<Service, ComposeError> {
     // Read-only, like everything that judges the agent: a database it could
     // write is one it could empty.
     if let Some((host, at)) = &plan.advisories {
+        volumes.push(mount(host, at, "ro"));
+    }
+    // The one part of the HQ an agent's container sees, and it sees it the
+    // way it sees the allowlist: declared out of its reach, readable all the
+    // same, so the gate can say "a human ruled on this" in the agent's own
+    // proof rather than only in the HQ.
+    if let Some((host, at)) = &plan.secrets {
         volumes.push(mount(host, at, "ro"));
     }
     for volume in &plan.volumes {

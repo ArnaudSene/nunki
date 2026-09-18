@@ -1585,6 +1585,62 @@ fn the_commit_is_the_fork_point_and_not_wherever_the_base_has_got_to() {
     );
 }
 
+/// The rulings a human left reach the script as an argument, at the path
+/// `nunki` fixes. An environment variable would be the agent's to set, and a
+/// path it could set is a file it could write.
+#[test]
+fn the_script_is_told_where_the_rulings_are() {
+    let f = Fixture::new();
+
+    let (_, calls) = f.security_seen(Role::Coder, said(0, ""));
+    let probe = probe_of(&calls);
+
+    assert!(probe.contains(nunki::secrets::AT), "{probe}");
+}
+
+/// A secret is the one finding no agent can close: taking it out in a later
+/// commit leaves it in the branch's history, and `nunki` rewrites none. So
+/// the line says whose move it is and what the move is, with the id it names
+/// as that move's argument.
+#[test]
+fn a_secret_that_stops_the_gate_names_the_gesture_that_lifts_it() {
+    let f = Fixture::new();
+
+    let decision = f.security(
+        Role::Coder,
+        said(
+            0,
+            r#"{"id":"abc123:src/store.rs:Postgres:22","kind":"secret","where":"src/store.rs:22","via":"","fix":"","accepted":"","was_at_base":false}"#,
+        ),
+    );
+
+    let Decision::Failed(why) = decision else {
+        panic!("{decision:?}");
+    };
+    assert!(why.contains("abc123:src/store.rs:Postgres:22"), "{why}");
+    assert!(why.contains("nunki secret accept"), "{why}");
+}
+
+/// And an advisory does not, because that gesture is not the one: an advisory
+/// with a fix is an agent's to apply, and one without is `deny.toml`'s.
+#[test]
+fn an_advisory_that_stops_the_gate_does_not_send_a_human_to_the_secret_verb() {
+    let f = Fixture::new();
+
+    let decision = f.security(
+        Role::Coder,
+        said(
+            0,
+            r#"{"id":"RUSTSEC-2020-0071","kind":"vulnerability","where":"time 0.1.45","via":"chrono","fix":">=0.2.23","accepted":"","was_at_base":false}"#,
+        ),
+    );
+
+    let Decision::Failed(why) = decision else {
+        panic!("{decision:?}");
+    };
+    assert!(!why.contains("nunki secret accept"), "{why}");
+}
+
 /// And the script's own word for it, for the same reason. `nunki` resolves the
 /// commit above and should never hand over one the copy lacks — this is the
 /// second lock, not the first.

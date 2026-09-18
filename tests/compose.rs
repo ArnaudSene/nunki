@@ -87,6 +87,7 @@ fn plan(role: Role) -> Plan {
         // The golden files freeze a profile without one: `nunki check` is
         // what proves a real database reaches the container.
         advisories: None,
+        secrets: None,
         volumes,
         environment,
         command: strings(&["sleep", "infinity"]),

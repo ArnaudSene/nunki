@@ -807,6 +807,121 @@ fn the_rust_stack_ships_its_mechanical_security() {
     assert!(body.contains("trufflehog git"), "no secret scan:\n{body}");
 }
 
+/// A ruling is matched on the whole id, not on a prefix of it.
+///
+/// Run, with a stub in place of `trufflehog`: what the script does with two
+/// rulings whose ids differ only by the line number is the point, and reading
+/// the source would only prove the source says what it says.
+///
+/// The first version was `sed "s|^$1[[:space:]]*||p"`, a prefix match: asked
+/// for `…:Postgres:1`, it matched the line for `…:Postgres:10` and returned
+/// `0  <that reason>`. A human ruling on one line silenced another.
+#[test]
+#[cfg(unix)]
+fn a_ruling_is_matched_on_the_whole_id_and_not_on_a_prefix_of_it() {
+    let (_dir, root, _nunki) = fresh();
+    let home = home(&root);
+    init(&root, &home, &["rust".to_string()]).unwrap();
+    let script = home
+        .join(nunki::project::STACKS_DIR)
+        .join("rust")
+        .join(nunki::gate::SECURITY);
+
+    let repo = root.join("tree");
+    std::fs::create_dir_all(&repo).unwrap();
+    let git = |args: &[&str]| -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["-c", "user.name=Init Test", "-c", "user.email=init@test"])
+            .args(args)
+            .output()
+            .expect("git is on the path");
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    git(&["init", "-q"]);
+    std::fs::write(repo.join("README.md"), "one\n").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "the base"]);
+    let base = git(&["rev-parse", "HEAD"]);
+    std::fs::write(repo.join("README.md"), "two\n").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "the branch"]);
+    let head = git(&["rev-parse", "HEAD"]);
+
+    // One leak, on the branch's commit, at line 1.
+    let stubs = root.join("stubs");
+    std::fs::create_dir_all(&stubs).unwrap();
+    std::fs::write(
+        stubs.join("trufflehog"),
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' '{{\"SourceMetadata\":{{\"Data\":{{\"Git\":\
+             {{\"commit\":\"{head}\",\"file\":\"src/leak.rs\",\"line\":1}}}}}},\
+             \"DetectorName\":\"Postgres\"}}'\n"
+        ),
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            stubs.join("trufflehog"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+    }
+
+    // Two rulings: the one that applies, and one whose id it is a prefix of.
+    let secrets = root.join("SECRETS.txt");
+    std::fs::write(
+        &secrets,
+        format!(
+            "# a comment, which is not a ruling\n\
+             {head}:src/leak.rs:Postgres:10  the wrong line\n\
+             {head}:src/leak.rs:Postgres:1  the right line\n"
+        ),
+    )
+    .unwrap();
+    let db = root.join("db");
+    std::fs::create_dir_all(&db).unwrap();
+
+    let path = format!(
+        "{}:{}",
+        stubs.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = std::process::Command::new("sh")
+        .arg(&script)
+        .arg(&base)
+        .arg(&db)
+        .arg(&root)
+        .arg(&secrets)
+        .env("PATH", path)
+        .current_dir(&repo)
+        .output()
+        .expect("sh is on the path");
+
+    let said = String::from_utf8_lossy(&out.stdout);
+    let line = said
+        .lines()
+        .find(|l| l.contains("\"kind\":\"secret\""))
+        .unwrap_or_else(|| {
+            panic!(
+                "no secret reported: {said}\n{}",
+                String::from_utf8_lossy(&out.stderr)
+            )
+        });
+    assert!(
+        line.contains("\"accepted\":\"the right line\""),
+        "the wrong ruling applied: {line}"
+    );
+    // And the id it reports is the one a human would rule on.
+    assert!(
+        line.contains(&format!("\"id\":\"{head}:src/leak.rs:Postgres:1\"")),
+        "{line}"
+    );
+}
+
 /// A base it cannot read stops it, and does not become an audit against
 /// nothing.
 ///
@@ -893,9 +1008,20 @@ fn the_secret_scan_reads_its_exceptions_and_reports_them() {
         body.contains("--json --no-update --no-ignore-tag"),
         "the agent could silence its own secret:\n{body}"
     );
-    // What is accepted is decided outside the container, in a file the HQ
-    // renders read-only — the path `ALLOWLIST.txt` already opened.
-    assert!(body.contains("SECRETS.txt"), "{body}");
+    // What is accepted is decided outside the container, and reaches the
+    // script as an argument at a path `nunki` chooses. The default is the
+    // constant, so the two cannot drift apart.
+    assert!(
+        body.contains(&format!("secrets=\"${{4:-{}}}\"", nunki::secrets::AT)),
+        "the secrets file is not the fourth argument, at {}:\n{body}",
+        nunki::secrets::AT
+    );
+    // And not in the mission folder, which goes to `archive/` with the
+    // mission: the same secret would stop the next one.
+    assert!(
+        !body.contains("$mission/SECRETS.txt"),
+        "an exception that lives with a mission is lost with it:\n{body}"
+    );
     assert!(
         !body.contains("MISSION_DIR"),
         "the mission folder is an argument, not an environment the agent owns:\n{body}"

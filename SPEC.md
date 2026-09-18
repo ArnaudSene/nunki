@@ -1640,9 +1640,48 @@ dernier lot. La première rouge arrête tout.
    secrets sont bruyants : fixtures de test, clés d'exemple, blobs qui
    ressemblent à des clés. Sans un moyen de marquer « ce n'en est pas un »,
    la mission se rearrête sur le même constat à chaque reprise. `accepted`
-   vaut donc pour un secret comme pour un avis, dans le mécanisme propre à
-   l'outil — et comme un secret n'a pas de `fix`, cette exception-là ne se
-   retire jamais toute seule.
+   vaut donc pour un secret comme pour un avis — et comme un secret n'a pas de
+   `fix`, cette exception-là ne se retire jamais toute seule.
+
+   **Où elle vit : dans le QG du projet**, à `hq/SECRETS.txt`, et pas dans le
+   mécanisme propre à l'outil. Tranché par Arnaud le 2026-09-18, contre les
+   deux autres emplacements :
+
+   - *Pas dans l'outil.* `trufflehog` n'a d'exception qu'un commentaire
+     `trufflehog:ignore` **dans la ligne de code** — une ligne que l'agent
+     édite légitimement, donc six caractères lui suffiraient à faire taire
+     son propre constat. C'est pourquoi le fragment passe `--no-ignore-tag` :
+     tout est rapporté, et ce qui est accepté se décide hors du conteneur.
+   - *Pas dans le dossier de mission.* L'exception partirait sous `archive/`
+     avec la mission, et le même secret arrêterait la suivante sur la même
+     ligne. C'est le problème « jour 1 / jour 25 » posé pour les avis, et il
+     se pose identique ici.
+   - *Pas dans le dépôt.* Un fichier d'exceptions de secrets est la liste des
+     endroits où il y a eu un secret, donc une carte ; et un dépôt se publie.
+     `deny.toml` y vit parce que la CI le lit et qu'un avis est public ;
+     aucune des deux raisons ne vaut ici.
+
+   Le QG est à l'humain, il n'est jamais monté en entier, et il survit à
+   toutes les missions. Le fichier est monté **en lecture seule** dans le
+   conteneur et passé au script en argument, comme la base d'avis : la pile
+   dit ce dont elle a besoin, `nunki` dit où cela atterrit.
+
+   **Le point de montage n'est pas sous `/work`.** Mesuré le 2026-09-18 dans
+   le conteneur : l'agent est propriétaire de `/work` (le Dockerfile le lui
+   donne), donc `mkdir -p /work/advisories` réussit, tandis que `mkdir /nunki`
+   est refusé — `/` est à root. Un chemin monté *conditionnellement* sous
+   `/work` est donc, le jour où il n'est pas monté, un fichier que l'agent
+   écrit : ses propres exceptions. Monté sous une racine que l'image ne crée
+   pas, Docker crée le parent au nom de root, et l'absence de montage reste
+   une absence.
+
+   **Et c'est `nunki` qui l'écrit, jamais une main.** `nunki secret accept
+   <id> --because <raison>`, avec `secret list` et `secret forget` ; `--because`
+   obligatoire, pour la raison qui le rend obligatoire ailleurs — un risque
+   accepté sans raison n'est pas accepté, il est oublié. Le verbe est au
+   projet et non à une mission, ce qui est aussi la condition de l'agent de
+   sécurité lancé hors mission. L'identifiant refuse l'espace : une ligne est
+   `<id> <raison>`, et le script les sépare dessus.
 
    **L'outil, côté Rust et côté tout le monde : `trufflehog`.** Tranché par
    Arnaud le 2026-09-17. `gitleaks` avait été retenu d'abord, pour son fichier
