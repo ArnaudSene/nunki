@@ -1730,13 +1730,6 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            let base = match nunki::gate::touched_paths(&slot.tree, &header.base) {
-                Ok(paths) => paths,
-                Err(e) => {
-                    eprintln!("nunki: {e}");
-                    return ExitCode::FAILURE;
-                }
-            };
             let stack = project
                 .config
                 .stacks
@@ -1752,7 +1745,9 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                 engine,
                 &paths.dir,
                 &stack,
-                &base,
+                // The base's name: `campaign` works out what this branch
+                // brought, through the same call gate 7 makes.
+                &header.base,
                 header.bounds.mutation_minutes,
                 if again {
                     nunki::mutants::Replay::Now

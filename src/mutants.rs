@@ -442,14 +442,28 @@ pub fn campaign(
     engine: std::sync::Arc<dyn crate::engine::Engine>,
     dir: &Path,
     stack: &str,
-    touched: &[String],
+    base: &str,
     deadline_minutes: u32,
     replay: Replay,
 ) -> Result<Progress, MutantsError> {
     use crate::harness::spawn::{CommandSpec, Presence, Signal, Spawned, Spawner};
 
     let head = git::head(&slot.tree)?;
-    let want = fingerprint(&slot.tree, touched)?;
+    // The base's **name**, and the paths worked out here — not handed in.
+    //
+    // Gate 7 judges a campaign by the fingerprint of what it ran on, so the
+    // gate and the launcher have to mean the same thing by "what this branch
+    // brought". They were two calls in two files, and in a slot the base has
+    // two readings: measured on `notes-4` on 2026-09-18, the launcher's set
+    // held eight paths and the gate's four, their fingerprints never agreed,
+    // and gate 7 asked for a campaign that had just run — fifty-seven turns
+    // of `verify` went round it.
+    //
+    // One call, in the place that cannot be bypassed, rather than a rule the
+    // next caller has to know.
+    let touched = crate::gate::touched_since_base(&slot.tree, base)
+        .map_err(|e| MutantsError::Launch(e.to_string()))?;
+    let want = fingerprint(&slot.tree, &touched)?;
     let file = crate::run::profile_path(project, &slot.name);
     let compose_project = crate::compose::project_name(&project.session(), &slot.name)
         .map_err(|e| MutantsError::Exec(crate::exec::ExecError::Compose(e)))?;

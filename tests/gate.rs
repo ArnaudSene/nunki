@@ -1710,6 +1710,63 @@ fn the_gates_that_run_in_the_copy_stand_down_while_a_campaign_rewrites_it() {
     }
 }
 
+/// Gate 7 and the campaign it judges read one set, and there is one call that
+/// can produce it.
+///
+/// The base has two readings in a slot, `dev` and `origin/dev`, and from the
+/// second mission onwards they differ. Gate 7 resolved the name; `nunki
+/// verify` and `nunki mission mutants` worked the paths out themselves and
+/// passed them in raw. So the campaign ran on one set and the gate judged
+/// another, their fingerprints could never agree, and gate 7 asked for a
+/// campaign that had just run.
+///
+/// Measured live on `notes-4`, 2026-09-18: eight paths on the launcher's side
+/// and four on the gate's. Fifty-seven turns of `verify` went round it.
+///
+/// `mutants::campaign` takes the base's **name** now and makes the call
+/// itself, so there is no second reading to get wrong — which is why this
+/// test asserts on the paths that call gives, and not on two callers agreeing.
+#[test]
+fn what_a_branch_brought_has_one_reading() {
+    let dir = tempfile::tempdir().unwrap();
+    let origin = dir.path().join("origin");
+    std::fs::create_dir_all(&origin).unwrap();
+    git(&origin, &["init", "-q", "-b", "dev"]);
+    write(&origin, "AGENTS.md", "the rules of this place\n");
+    write(&origin, "src/lib.rs", "pub fn one() -> u8 { 1 }\n");
+    git(&origin, &["add", "-A"]);
+    git(&origin, &["commit", "-q", "-m", "base"]);
+
+    let tree = dir.path().join("slot");
+    git(
+        dir.path(),
+        &["clone", "-q", origin.to_str().unwrap(), "slot"],
+    );
+
+    // The base moves on, as it does between two missions, and the slot's own
+    // `dev` stays where the clone wrote it.
+    write(&origin, "src/theirs.rs", "pub fn two() -> u8 { 2 }\n");
+    git(&origin, &["add", "-A"]);
+    git(
+        &origin,
+        &["commit", "-q", "-m", "what the last mission merged"],
+    );
+
+    git(&tree, &["fetch", "-q", "origin"]);
+    git(&tree, &["checkout", "-q", "-b", "mission/x", "origin/dev"]);
+    write(&tree, "src/mine.rs", "pub fn three() -> u8 { 3 }\n");
+    git(&tree, &["add", "-A"]);
+    git(&tree, &["commit", "-q", "-m", "feat(L1): mine"]);
+
+    let asked = gate::touched_since_base(&tree, "dev").unwrap();
+
+    assert_eq!(
+        asked,
+        vec!["src/mine.rs".to_string()],
+        "the campaign would run on what the branch never opened: {asked:?}"
+    );
+}
+
 /// The rulings a human left reach the script as an argument, at the path
 /// `nunki` fixes. An environment variable would be the agent's to set, and a
 /// path it could set is a file it could write.

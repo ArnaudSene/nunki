@@ -538,8 +538,32 @@ fn touched(tree: &Path, base: &str) -> Result<Touched, GateError> {
     Ok(Touched { seen, commits })
 }
 
+/// What this branch brought, by the **name** its mission header gives the
+/// base — the one function anything outside this module should ask.
+///
+/// A name has two readings in a slot, `dev` and `origin/dev`, and they differ
+/// from the second mission onwards ([`base_ref`] says why). Gate 4 and gate 7
+/// resolve it; the campaign's launcher passed the raw name, so the two
+/// computed different sets of the same thing.
+///
+/// Measured on `notes-4`, 2026-09-18: the launcher's set held eight paths,
+/// gate 7's held four, and their fingerprints could therefore never agree.
+/// Gate 7 asked for a campaign, the campaign ran, gate 7 said it had run on
+/// other content, and round again — fifty-seven turns of it. The comment on
+/// [`touched`] already names this hazard for gates 4 and 7: "computing it
+/// twice in two ways is how the two gates would come to disagree". It was a
+/// third caller that did it.
+///
+/// [`touched_paths`] stays, for the one caller with a commit rather than a
+/// name: `nunki push`, which asks what the integrator added after the coder.
+pub fn touched_since_base(tree: &Path, base: &str) -> Result<Vec<String>, GateError> {
+    let base = base_ref(tree, base)?;
+    touched_paths(tree, &base)
+}
+
 /// The paths a mutation campaign runs on: what this branch touched, once
-/// each, in a stable order.
+/// each, in a stable order. Takes a ref that already resolves — see
+/// [`touched_since_base`] for a mission's base by name.
 pub fn touched_paths(tree: &Path, base: &str) -> Result<Vec<String>, GateError> {
     let mut paths: Vec<String> = touched(tree, base)?
         .seen
@@ -1041,8 +1065,7 @@ fn mutation(subject: &Subject) -> Result<Outcome, GateError> {
             ),
         ));
     }
-    let base = base_ref(subject.tree, &subject.header.base)?;
-    let paths = touched_paths(subject.tree, &base)?;
+    let paths = touched_since_base(subject.tree, &subject.header.base)?;
     let want = crate::mutants::fingerprint(subject.tree, &paths)
         .map_err(|e| GateError::Mutants(e.to_string()))?;
 
