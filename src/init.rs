@@ -627,7 +627,7 @@ base="${1:?usage: security.sh <base-commit> [advisory-db] [mission-dir] [secrets
 # environment inside the container, and a variable would let it point this at
 # an empty directory — no findings, and a green gate. `nunki` is what invokes
 # the gate, so `nunki` is what says where the database is.
-db="${2:-/work/advisories}"
+db="${2:-/nunki/advisories}"
 mission="${3:-/work/mission}"
 secrets="${4:-/nunki/secrets.txt}"
 

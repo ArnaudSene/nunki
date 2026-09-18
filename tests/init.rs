@@ -785,7 +785,11 @@ fn the_rust_stack_ships_its_mechanical_security() {
     // would let it point this at an empty directory — no findings, and a
     // green gate.
     assert!(!body.contains("NUNKI_ADVISORIES"), "{body}");
-    assert!(body.contains("/work/advisories"), "{body}");
+    assert!(
+        body.contains(&format!("db=\"${{2:-{}}}\"", nunki::run::ADVISORIES_AT)),
+        "the database is not the second argument, at {}:\n{body}",
+        nunki::run::ADVISORIES_AT
+    );
     // The seven fields of the contract, and no eighth.
     for field in [
         "id",

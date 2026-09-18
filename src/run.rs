@@ -48,13 +48,35 @@ pub const STACK_SCRIPTS: [&str; 5] = [
     crate::launch::SCRIPT,
 ];
 
+/// Where `nunki` mounts what judges the agent and the agent must not be able
+/// to forge.
+///
+/// A top-level directory the image never creates, and deliberately not under
+/// `/work`, which the Dockerfile gives to the agent. Anything mounted **only
+/// when it exists on the host** needs this: on the day it is not mounted, a
+/// path under `/work` is a path the agent writes, and it would be writing the
+/// thing it is judged by.
+///
+/// Measured in a container on 2026-09-18: as the agent, `mkdir -p
+/// /work/advisories` succeeds and `mkdir /nunki` is refused — `/` is root's.
+/// A bind mount under it makes Docker create the parent owned by root, so the
+/// directory exists only when `nunki` put something in it.
+pub const NUNKI_AT: &str = "/nunki";
+
 /// Where the advisory database gate 8 reads is mounted, read-only.
 ///
 /// Fixed, and not something the stack chooses: the stack says where it lives
 /// **on the host**, and `nunki` decides where it lands. A path the agent could
 /// influence would let it point the audit at an empty directory — no findings,
 /// and a green gate (SPEC 4.4, gate 8).
-pub const ADVISORIES_AT: &str = "/work/advisories";
+///
+/// It was `/work/advisories`, and that was the same green gate by another
+/// road: the mount is conditional, so on a machine whose advisory database is
+/// not filled the agent could `mkdir` it. Measured on 2026-09-18 — with no
+/// mount and the agent's own directory in its place, `security.sh` answered
+/// `exit=0` and no findings where it owed 69, "I could not look". Under
+/// [`NUNKI_AT`] there is nothing to make.
+pub const ADVISORIES_AT: &str = "/nunki/advisories";
 
 /// The effective allowlist of a run, as the agent reads it in the mission
 /// folder.

@@ -24,13 +24,10 @@ pub const FILE: &str = "SECRETS.txt";
 
 /// Where the container reads them, read-only.
 ///
-/// Under a top-level directory the image does not create, and not under
-/// `/work`: `/work` belongs to the agent (the Dockerfile chowns it), so an
-/// agent could write its own exceptions there on a run where the file is
-/// absent and nothing is mounted. Measured on 2026-09-18 — as the agent,
-/// `mkdir -p /work/advisories` succeeds and `mkdir /nunki` is refused, and a
-/// bind mount at `/nunki/secrets.txt` makes Docker create `/nunki` owned by
-/// root.
+/// Under [`crate::run::NUNKI_AT`], which is where everything the agent must
+/// not be able to forge is mounted: this file is mounted only when somebody
+/// has ruled on something, and a conditional mount under `/work` is a file
+/// the agent writes on the day it is absent — its own exceptions.
 pub const AT: &str = "/nunki/secrets.txt";
 
 /// The header a new file is born with. It is read by whoever opens the file,

@@ -1666,14 +1666,22 @@ dernier lot. La première rouge arrête tout.
    conteneur et passé au script en argument, comme la base d'avis : la pile
    dit ce dont elle a besoin, `nunki` dit où cela atterrit.
 
-   **Le point de montage n'est pas sous `/work`.** Mesuré le 2026-09-18 dans
-   le conteneur : l'agent est propriétaire de `/work` (le Dockerfile le lui
-   donne), donc `mkdir -p /work/advisories` réussit, tandis que `mkdir /nunki`
-   est refusé — `/` est à root. Un chemin monté *conditionnellement* sous
-   `/work` est donc, le jour où il n'est pas monté, un fichier que l'agent
-   écrit : ses propres exceptions. Monté sous une racine que l'image ne crée
-   pas, Docker crée le parent au nom de root, et l'absence de montage reste
-   une absence.
+   **Le point de montage n'est pas sous `/work`, et la règle vaut pour tout
+   ce qui juge l'agent.** Mesuré le 2026-09-18 dans le conteneur : l'agent est
+   propriétaire de `/work` (le Dockerfile le lui donne), donc `mkdir -p
+   /work/advisories` réussit, tandis que `mkdir /nunki` est refusé — `/` est à
+   root. Un chemin monté *conditionnellement* sous `/work` est donc, le jour
+   où il n'est pas monté, un chemin que l'agent fabrique. Monté sous une
+   racine que l'image ne crée pas, Docker crée le parent au nom de root, et
+   l'absence de montage reste une absence.
+
+   Ce n'est pas une précaution théorique : **la base d'avis y était, et la
+   faille était réelle.** Mesuré le même jour, sans montage et avec le dossier
+   de l'agent à sa place, `security.sh` a répondu `exit=0` sans constat là où
+   il devait 69 — l'agent blanchissait « je n'ai pas pu regarder » en porte
+   verte, et il suffisait d'un `mkdir`. Les deux montages conditionnels de la
+   porte 8, la base d'avis et les décisions humaines, vivent donc sous cette
+   racine.
 
    **Et c'est `nunki` qui l'écrit, jamais une main.** `nunki secret accept
    <id> --because <raison>`, avec `secret list` et `secret forget` ; `--because`

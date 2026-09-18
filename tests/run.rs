@@ -1843,12 +1843,38 @@ fn the_advisory_database_is_mounted_read_only_where_nunki_says() {
     );
 }
 
+/// Everything mounted **only when it exists** lands under `NUNKI_AT`, where
+/// the agent cannot make it.
+///
+/// Measured in a container on 2026-09-18: as the agent, `mkdir -p
+/// /work/advisories` succeeds — the Dockerfile chowns `/work` — and `mkdir
+/// /nunki` is refused. A conditional mount under `/work` is therefore, on the
+/// day it is absent, a path the agent writes: its own exceptions for the
+/// secrets file, and for the advisory database a forged empty directory that
+/// turns gate 8's 69 into a green gate (`exit=0`, no findings, measured).
+#[test]
+fn what_is_mounted_only_when_it_exists_lands_where_no_agent_could_make_it() {
+    let root = format!("{}/", run::NUNKI_AT);
+    for at in [run::ADVISORIES_AT, nunki::secrets::AT] {
+        assert!(at.starts_with(&root), "{at} is not under {}", run::NUNKI_AT);
+    }
+    assert!(
+        !run::NUNKI_AT.starts_with("/work"),
+        "{} is the agent's to write",
+        run::NUNKI_AT
+    );
+    // And it is a top level, so the agent cannot create it either: only `/`
+    // is above it, and `/` is root's.
+    assert_eq!(
+        run::NUNKI_AT.matches('/').count(),
+        1,
+        "{} has a parent the agent might own",
+        run::NUNKI_AT
+    );
+}
+
 /// The secrets a human ruled on reach the container read-only, from the HQ,
-/// at a path `nunki` fixes — and **not under `/work`**, which the image gives
-/// to the agent. Measured on 2026-09-18: as the agent, `mkdir -p
-/// /work/advisories` succeeds and `mkdir /nunki` is refused, so a path under
-/// `/work` that is not mounted is a file the agent can write — its own
-/// exceptions.
+/// at a path `nunki` fixes.
 #[test]
 fn the_rulings_reach_the_container_read_only_where_no_agent_could_write_them() {
     let dir = tempfile::tempdir().unwrap();
@@ -1864,11 +1890,6 @@ fn the_rulings_reach_the_container_read_only_where_no_agent_could_write_them() {
     assert_eq!(
         plan.secrets,
         Some((at, std::path::PathBuf::from(nunki::secrets::AT)))
-    );
-    assert!(
-        !nunki::secrets::AT.starts_with("/work"),
-        "{} is the agent's to write",
-        nunki::secrets::AT
     );
     let mounts: Vec<String> = doc["services"][nunki::compose::AGENT_SERVICE]["volumes"]
         .as_sequence()
