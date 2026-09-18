@@ -645,6 +645,87 @@ fn the_battery_asks_only_for_what_the_container_can_reach() {
     assert!(!allow.contains("github.com"), "{allow}");
 }
 
+/// A campaign that could not run reports nothing, rather than the answer of
+/// the campaign before it.
+///
+/// Run, with a stub in place of `cargo`: the script swallows the tool's status
+/// with `|| true` — right, because a campaign with survivors exits 2 and that
+/// is a result — so what it does with a run that produced no answer at all is
+/// the whole question, and reading the source would only prove it says what it
+/// says.
+///
+/// Measured on cargo-mutants 27.1.0, 2026-09-18. A campaign that reaches the
+/// mutants rotates `mutants.out` to `mutants.out.old` and writes a fresh one,
+/// so a second campaign that kills everything correctly leaves `missed.txt`
+/// empty. A campaign that **cannot run** — a crate that does not parse —
+/// fails before creating anything, and `mutants.out` is still the previous
+/// campaign's: survivors from a campaign that never happened, on code that has
+/// changed. A replay of the same fingerprint reuses the same path, so it is
+/// reachable.
+#[test]
+#[cfg(unix)]
+fn a_campaign_that_could_not_run_does_not_report_the_last_ones_survivors() {
+    let (_dir, root, _nunki) = fresh();
+    let home = home(&root);
+    init(&root, &home, &["rust".to_string()]).unwrap();
+    let script = home
+        .join(nunki::project::STACKS_DIR)
+        .join("rust")
+        .join(nunki::mutants::SCRIPT);
+
+    // A `cargo` that fails the way a crate that does not parse makes it fail:
+    // no output directory, no answer, a non-zero status.
+    let stubs = root.join("stubs");
+    std::fs::create_dir_all(&stubs).unwrap();
+    std::fs::write(
+        stubs.join("cargo"),
+        "#!/bin/sh\necho 'error: expected `!`' >&2\nexit 1\n",
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(stubs.join("cargo"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+    }
+
+    // What the campaign before it left, at the path a replay of the same
+    // fingerprint comes back to.
+    let tree = root.join("tree");
+    let stale = tree.join("target/mutants-abc123/mutants.out");
+    std::fs::create_dir_all(&stale).unwrap();
+    std::fs::write(
+        stale.join("missed.txt"),
+        "src/lib.rs:2:7: replace > with >= in keep\n",
+    )
+    .unwrap();
+
+    let path = format!(
+        "{}:{}",
+        stubs.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = std::process::Command::new("sh")
+        .arg(&script)
+        .arg("abc123")
+        .arg("src/lib.rs")
+        .env("PATH", path)
+        .current_dir(&tree)
+        .output()
+        .expect("sh is on the path");
+
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !said.contains("replace > with >="),
+        "it reported a campaign that never ran: {said}"
+    );
+    assert_ne!(out.status.code(), Some(0), "it passed on nothing: {out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("left no"),
+        "nothing said why: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 #[test]
 fn the_campaign_does_not_mutate_a_binarys_entry_point() {
     let dir = tempfile::tempdir().unwrap();
