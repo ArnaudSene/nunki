@@ -1660,6 +1660,56 @@ fn the_gates_judge_against_the_base_the_branch_came_from() {
     );
 }
 
+/// A campaign in flight owns the clean copy of `HEAD`, and every gate that
+/// runs there stands down while it does.
+///
+/// Gate 7's campaign is `cargo mutants --in-place` in that copy; gates 6 and 8
+/// reach it through `exec::run(On::Proof)`, which refreshes it first — `git
+/// reset --hard`, `git clean`. Run together they wreck each other both ways:
+/// the gate judges a mutant, and the reset pulls the tree out from under the
+/// campaign.
+///
+/// Measured on `notes-4`, 2026-09-18, the first three-agent mission run end to
+/// end. The battery came back 101 on `warning: unused variable: value` at
+/// `src/api.rs:160` — a function whose body cargo-mutants had replaced, and
+/// which uses its argument in the coder's own code. Gate 6 red, a volet, and
+/// again until the volets were spent: six runs, 59M tokens, and neither the
+/// integrator nor the security agent ever ran.
+#[test]
+fn the_gates_that_run_in_the_copy_stand_down_while_a_campaign_rewrites_it() {
+    let f = Fixture::new();
+    nunki::mutants::write_running(
+        f._dir.path(),
+        &nunki::mutants::Running {
+            fingerprint: "a62d271".into(),
+            head: git(&f.tree, &["rev-parse", "HEAD"]),
+            started_at: "2026-09-18T20:56:38Z".into(),
+            container: "64e0796ca1de".into(),
+            pid: Some(2736),
+            log: f._dir.path().join("mutants.log"),
+            deadline_minutes: 45,
+        },
+    )
+    .unwrap();
+
+    let report = f.verification(Role::Coder);
+
+    for gate in [Gate::Battery, Gate::MechanicalSecurity] {
+        let outcome = report
+            .outcomes
+            .iter()
+            .find(|o| o.gate == gate)
+            .unwrap_or_else(|| panic!("{gate:?} is played"));
+        let Decision::Unplayed(why) = &outcome.decision else {
+            panic!(
+                "{gate:?} ran in a copy a campaign is rewriting: {:?}",
+                outcome.decision
+            );
+        };
+        assert!(why.contains("2026-09-18T20:56:38Z"), "{why}");
+    }
+}
+
 /// The rulings a human left reach the script as an argument, at the path
 /// `nunki` fixes. An environment variable would be the agent's to set, and a
 /// path it could set is a file it could write.

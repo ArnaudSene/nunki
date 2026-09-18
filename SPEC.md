@@ -1316,6 +1316,26 @@ dernier lot. La première rouge arrête tout.
      l'installe maintenant dans son image, après `USER agent` : posé en root,
      il atterrit là où le seul utilisateur qui le lance ne peut pas le lire.
 
+   **Une campagne en vol possède la copie propre de `HEAD`.** Elle y tourne
+   `--in-place`, et toute porte qui travaille dans cette copie y arrive par
+   `exec::run(On::Proof)`, qui la rafraîchit d'abord — `git reset --hard`,
+   `git clean`. Jouées ensemble, elles se détruisent dans les deux sens : la
+   porte juge un mutant, et le rafraîchissement arrache l'arbre sous la
+   campagne.
+
+   Mesuré sur `notes-4` le 2026-09-18, la première mission à trois agents
+   menée de bout en bout. La batterie est revenue en 101 sur `warning: unused
+   variable: value` à `src/api.rs:160` — une fonction dont cargo-mutants avait
+   remplacé le corps, et qui utilise son argument dans le code du codeur. Le
+   flux a lu la porte 6 rouge et ouvert un volet, quatre fois, jusqu'à
+   épuisement : six runs, 59 M de tokens, et ni l'intégrateur ni l'agent de
+   sécurité n'ont jamais tourné. Aucun agent n'avait rien fait de travers.
+
+   Les portes 6 et 8 sont donc **non jouées** tant qu'une campagne est en
+   vol — un verdict sur la machine et non sur l'agent, comme la base d'avis
+   absente, et une porte que personne n'a pu jouer arrête la vérification au
+   lieu d'ouvrir un volet. La mission attend la campagne au lieu de la payer.
+
    **Une cinquième, mesurée le 2026-09-18 : une campagne qui n'a pas pu
    tourner rendait la réponse de la précédente.** Le script avale le statut de
    l'outil — `|| true`, et c'est juste, une campagne avec survivants sort en 2

@@ -2486,6 +2486,96 @@ fn a_service_not_declared_shared_is_not_locked() {
     assert!(world.verify().is_err(), "the launch is attempted");
 }
 
+/// A battery that came back red while a campaign was rewriting the copy of
+/// `HEAD` opens no volet, because it was judging a mutant.
+///
+/// Measured on `notes-4`, 2026-09-18, the first three-agent mission driven end
+/// to end. `verify` started the campaign — `cargo mutants --in-place`, in the
+/// clean copy of `HEAD` — and then, called again, played the whole gate set
+/// against that same copy. The battery came back 101 on `warning: unused
+/// variable: value` at `src/api.rs:160`, a function whose body cargo-mutants
+/// had replaced and which uses its argument in the coder's own code. Every
+/// play also reset the copy under the running campaign, `exec::run(On::Proof)`
+/// refreshing it first.
+///
+/// The flow read gate 6 red and opened a volet, four times, until the volets
+/// were spent: six runs, 59M tokens, and neither the integrator nor the
+/// security agent ever ran. Nothing any agent did was wrong.
+#[test]
+fn a_battery_red_under_a_running_campaign_opens_no_volet() {
+    use nunki::engine::{ExecOutput, fake::FakeEngine};
+
+    let world = World::new(1);
+    world.commit("src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    world.journal_names_head();
+    std::fs::write(
+        world.mission().join("PR.md"),
+        "# What this changes\n\nL1, and nothing else.\n",
+    )
+    .unwrap();
+    world.coder_finished_the_lot();
+
+    let file = nunki::run::profile_path(&world.project, "one");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, "services:\n  agent:\n    image: alpine:3.20\n").unwrap();
+    // The container answers the way it did: the battery failed, on a mutant.
+    //
+    // A queue and not one answer, because `exec::run(On::Proof)` refreshes the
+    // copy first and `battery` reports an exec that **errored** as unplayed
+    // too. With a single 101 the gate came back unplayed for the wrong reason,
+    // and this test passed with the guard taken out.
+    let ok = ExecOutput {
+        status: 0,
+        stdout: String::new(),
+        stderr: String::new(),
+    };
+    let engine: Arc<dyn nunki::engine::Engine> = Arc::new(FakeEngine::default().with_execs(vec![
+        ok.clone(),
+        ExecOutput {
+            status: 101,
+            stdout: String::new(),
+            stderr: "error: test failed, to rerun pass `--lib`".into(),
+        },
+        ok,
+    ]));
+
+    nunki::mutants::write_running(
+        &world.mission(),
+        &nunki::mutants::Running {
+            fingerprint: "a62d271".into(),
+            head: git(&world.tree, &["rev-parse", "HEAD"]),
+            started_at: "2026-09-18T20:56:38Z".into(),
+            container: "64e0796ca1de".into(),
+            pid: Some(2736),
+            log: world.mission().join("mutants.log"),
+            deadline_minutes: 45,
+        },
+    )
+    .unwrap();
+
+    let steps = verify::verify(&world.project, "m1", engine, "docker").unwrap();
+
+    let report = gates_of(&steps);
+    assert!(
+        report.failed().is_none(),
+        "the coder was sent back for a mutant it did not write: {report:?}"
+    );
+    // And unplayed for the campaign, not for something else that went wrong.
+    let battery = report
+        .outcomes
+        .iter()
+        .find(|o| o.gate == Gate::Battery)
+        .expect("gate 6 is played");
+    let nunki::gate::Decision::Unplayed(why) = &battery.decision else {
+        panic!("the battery judged a copy a campaign is rewriting: {battery:?}");
+    };
+    assert!(why.contains("2026-09-18T20:56:38Z"), "{why}");
+    // No volet, no attempt, no run spent. A later `verify`, once the campaign
+    // has been read back, plays the battery on the copy it owns again.
+    assert_eq!(world.state().flow.stage(), &Stage::Gates, "{steps:?}");
+    assert_eq!(world.state().flow.volets(), 0);
+}
+
 /// Gate 7 with no campaign, and everything else played: the flow does not
 /// stop for a verb a human would have typed. It says a campaign is owed, and
 /// the monitor runs one.
