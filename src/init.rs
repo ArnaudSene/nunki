@@ -404,8 +404,8 @@ RUN apt-get -qq update \
       ca-certificates curl git build-essential pkg-config tmux jq \
  && rm -rf /var/lib/apt/lists/*
 
-# `gitleaks` is what finds the secrets gate 8 reports (SPEC 4.4). It is not a
-# stack fragment but a tool of the scan itself — the same for Rust, Python or
+# `trufflehog` is what finds the secrets gate 8 reports (SPEC 4.4). It is not
+# a stack fragment but a tool of the scan itself — the same for Rust, Python or
 # Next.js, since a secret has no ecosystem — and it enters here, at build time
 # on the host, never downloaded from inside an agent's container.
 #
@@ -413,19 +413,26 @@ RUN apt-get -qq update \
 # nobody verifies is a dependency nobody reviewed (section 7). Raising the
 # version means raising the two sums with it, and the build fails loudly if
 # they disagree.
-ARG GITLEAKS=8.30.1
+#
+# `gitleaks` was here first and the image scan refused it, rightly: its 8.30.1
+# binary carried 33 critical or high advisories **with fixes published**, from
+# `golang.org/x/crypto v0.35.0` — thirteen months stale at its own release.
+# This one is measured current, and being a Go binary the scan keeps looking
+# inside it at every build. A tool the gate cannot inspect would not be safer,
+# it would only stop being asked about.
+ARG TRUFFLEHOG=3.97.5
 RUN set -eu; \
     case "$(dpkg --print-architecture)" in \
-      amd64) arch=x64;   sum=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb ;; \
-      arm64) arch=arm64; sum=e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080 ;; \
-      *) echo "gitleaks ships no build for $(dpkg --print-architecture)" >&2; exit 1 ;; \
+      amd64) arch=amd64; sum=e3d97199c565c37ca6152750197f667e08ae6a1edf5911fbdec168622b28620c ;; \
+      arm64) arch=arm64; sum=e5c8b2418b0a7c78cf4c47ac783c52c63f989e4e536cfe328b5271e819b6d52d ;; \
+      *) echo "trufflehog ships no build for $(dpkg --print-architecture)" >&2; exit 1 ;; \
     esac; \
-    curl -fsSL -o /tmp/gitleaks.tgz \
-      "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS}/gitleaks_${GITLEAKS}_linux_${arch}.tar.gz"; \
-    echo "${sum}  /tmp/gitleaks.tgz" | sha256sum -c -; \
-    tar -xzf /tmp/gitleaks.tgz -C /usr/local/bin gitleaks; \
-    rm /tmp/gitleaks.tgz; \
-    gitleaks version
+    curl -fsSL -o /tmp/trufflehog.tgz \
+      "https://github.com/trufflesecurity/trufflehog/releases/download/v${TRUFFLEHOG}/trufflehog_${TRUFFLEHOG}_linux_${arch}.tar.gz"; \
+    echo "${sum}  /tmp/trufflehog.tgz" | sha256sum -c -; \
+    tar -xzf /tmp/trufflehog.tgz -C /usr/local/bin trufflehog; \
+    rm /tmp/trufflehog.tgz; \
+    trufflehog --version
 
 # The group may already exist under that id (on macOS, gid 20 is `dialout`
 # here); either way the agent ends up in it.
@@ -609,16 +616,17 @@ const SECURITY_RUST: &str = r##"#!/bin/sh
 # its chatter on stderr.
 #
 # SPEC 4.4 gives gate 8 three families: the dependency audit (`cargo-deny`),
-# the secret scan (`gitleaks`), and the static analysis — which is `clippy`,
+# the secret scan (`trufflehog`), and the static analysis — which is `clippy`,
 # already run by the battery at gate 6, so nothing here repeats it.
 set -eu
 
-base="${1:?usage: security.sh <base-ref> [advisory-db]}"
+base="${1:?usage: security.sh <base-ref> [advisory-db] [mission-dir]}"
 # Second argument and not an environment variable: the agent owns its own
 # environment inside the container, and a variable would let it point this at
 # an empty directory — no findings, and a green gate. `nunki` is what invokes
 # the gate, so `nunki` is what says where the database is.
 db="${2:-/work/advisories}"
+mission="${3:-/work/mission}"
 
 [ -d "$db" ] || { echo "nunki: no advisory database at $db" >&2; exit 69; }
 
@@ -716,52 +724,53 @@ done
 # --- secrets ---------------------------------------------------------------
 #
 # A secret has no `fix` and no `via`: it is revoked, not upgraded, and nothing
-# brought it in but the commit that wrote it. `nunki` stops on one and hands
-# it to a human, because no action of an agent closes it — removing it in a
-# later commit leaves it in the branch's history, and nunki rewrites none.
-leaks="$work/leaks.json"
-gitleaks detect --no-banner --report-format json --report-path "$leaks" >&2 2>&1 || true
+# brought it in but the commit that wrote it. `nunki` stops on one and hands it
+# to a human, because no action of an agent closes it — removing it in a later
+# commit leaves it in the branch's history, and nunki rewrites none.
+#
+# `--no-ignore-tag` is a rule and not a setting. trufflehog's own exception is
+# a `trufflehog:ignore` comment **in the source line**, which the agent edits
+# legitimately: without this flag it could silence its own secret with six
+# characters. Everything is reported, and what is accepted is decided outside
+# the container.
+leaks="$work/leaks.jsonl"
+trufflehog git "file://$PWD" --json --no-update --no-ignore-tag \
+  > "$leaks" 2>/dev/null || true
 
-# A fingerprint is `<commit>:<file>:<rule>:<line>`, which is both the id and
-# what `.gitleaksignore` names — so an accepted finding can be rebuilt from
-# the exception file alone, without a second scan. Measured 2026-09-17:
-# `--gitleaks-ignore-path` pointed at an empty directory does **not** disarm
-# the repository's own file, so there is no unfiltered view to diff against.
-say_secret() {
-  # $1 fingerprint, $2 accepted reason
-  commit=${1%%:*}
-  rest=${1#*:}
-  file=${rest%%:*}
-  rest=${rest#*:}
-  line=${rest#*:}
-  was=false
-  git merge-base --is-ancestor "$commit" "$base" 2>/dev/null && was=true
-  jq -cn --arg id "$1" --arg where "$file:$line" --arg accepted "$2" \
-     --argjson was_at_base "$was" \
-     '{id:$id, kind:"secret", where:$where, via:"", fix:"",
-       accepted:$accepted, was_at_base:$was_at_base}'
+# What the HQ has already ruled is not a secret. `nunki` renders it read-only
+# in the mission folder, the way it renders the allowlist: declared out of the
+# agent's reach, readable by it all the same. Absent, nothing is accepted.
+accepted_file="$mission/SECRETS.txt"
+
+reason_for() {
+  [ -f "$accepted_file" ] || return 0
+  sed -n "s|^$1[[:space:]]*||p" "$accepted_file" | head -1
 }
 
-if [ -s "$leaks" ]; then
-  jq -r '.[].Fingerprint' "$leaks" | while IFS= read -r fp; do
-    [ -n "$fp" ] && say_secret "$fp" ""
-  done
-fi
+while IFS= read -r line; do
+  [ -n "$line" ] || continue
+  printf '%s' "$line" > "$work/leak.json"
+  git_meta=$(jq -r '.SourceMetadata.Data.Git // empty | @json' "$work/leak.json")
+  [ -n "$git_meta" ] || continue
+  commit=$(printf '%s' "$git_meta" | jq -r '.commit // ""')
+  file=$(printf '%s' "$git_meta" | jq -r '.file // ""')
+  ln=$(printf '%s' "$git_meta" | jq -r '.line // 0')
+  rule=$(jq -r '.DetectorName // "secret"' "$work/leak.json")
+  [ -n "$commit" ] && [ -n "$file" ] || continue
 
-# What the project has already said is not a secret. Reported rather than
-# dropped: a gate that cannot say "I know, and it was ruled on" lies by
-# omission. The reason is the comment above the line, which `.gitleaksignore`
-# tolerates (measured).
-if [ -f .gitleaksignore ]; then
-  why=""
-  while IFS= read -r entry || [ -n "$entry" ]; do
-    case "$entry" in
-      "#"*) why=$(printf '%s' "$entry" | sed 's/^# *//') ;;
-      "") why="" ;;
-      *) say_secret "$entry" "${why:-accepted in .gitleaksignore}"; why="" ;;
-    esac
-  done < .gitleaksignore
-fi
+  # trufflehog publishes no fingerprint, and a finding must be nameable to be
+  # accepted. Built the way gitleaks built its own, so an exception written
+  # once keeps naming the same thing.
+  id="$commit:$file:$rule:$ln"
+
+  was=false
+  git merge-base --is-ancestor "$commit" "$base" 2>/dev/null && was=true
+
+  jq -cn --arg id "$id" --arg where "$file:$ln" \
+     --arg accepted "$(reason_for "$id")" --argjson was_at_base "$was" \
+     '{id:$id, kind:"secret", where:$where, via:"", fix:"",
+       accepted:$accepted, was_at_base:$was_at_base}'
+done < "$leaks"
 "##;
 
 const RUN_RUST: &str = r#"#!/bin/sh

@@ -804,7 +804,7 @@ fn the_rust_stack_ships_its_mechanical_security() {
     // It carries the two families the battery does not: the dependency audit
     // and the secret scan. Static analysis is `clippy`, at gate 6.
     assert!(body.contains("cargo deny"), "no dependency audit:\n{body}");
-    assert!(body.contains("gitleaks detect"), "no secret scan:\n{body}");
+    assert!(body.contains("trufflehog git"), "no secret scan:\n{body}");
 }
 
 /// A secret has no `fix` and no `via`: it is revoked, not upgraded, and
@@ -822,20 +822,25 @@ fn the_secret_scan_reads_its_exceptions_and_reports_them() {
     )
     .unwrap();
 
-    // The line that reads the file, not the word: `.gitleaksignore` appears in
-    // this script's own comments too, and a first version of this assertion
-    // watched the whole block be disabled and still called itself green.
+    // `--no-ignore-tag` is a rule and not a setting: trufflehog's own
+    // exception is a comment **in the source line**, which the agent edits
+    // legitimately. Without it, six characters silence a secret.
     //
-    // It is read directly because there is no unfiltered view to diff
-    // against: `--gitleaks-ignore-path` does not disarm the repository's own
-    // file (measured 2026-09-17).
+    // The invocation, not the word: this script explains the flag in a
+    // comment just above it, so asserting the word alone watched the flag
+    // leave the command line and still called itself green. That trap has
+    // caught this file four times now.
     assert!(
-        body.contains("if [ -f .gitleaksignore ]; then"),
-        "the exception file is never read:\n{body}"
+        body.contains("--json --no-update --no-ignore-tag"),
+        "the agent could silence its own secret:\n{body}"
     );
-    // An accepted finding is reported rather than dropped — a gate that
-    // cannot say "I know, and it was ruled on" lies by omission.
-    assert!(body.contains("accepted in .gitleaksignore"), "{body}");
+    // What is accepted is decided outside the container, in a file the HQ
+    // renders read-only — the path `ALLOWLIST.txt` already opened.
+    assert!(body.contains("SECRETS.txt"), "{body}");
+    assert!(
+        !body.contains("MISSION_DIR"),
+        "the mission folder is an argument, not an environment the agent owns:\n{body}"
+    );
     // Which commit introduced it, and not merely that it is there.
     assert!(body.contains("merge-base --is-ancestor"), "{body}");
 }
@@ -857,7 +862,7 @@ fn the_secret_scanner_is_pinned_and_its_download_is_checked() {
     // `latest`, and a first version of this test watched that pass.
     let pinned = dockerfile
         .lines()
-        .find_map(|l| l.strip_prefix("ARG GITLEAKS="))
+        .find_map(|l| l.strip_prefix("ARG TRUFFLEHOG="))
         .expect("the scanner's version is declared");
     assert!(
         pinned

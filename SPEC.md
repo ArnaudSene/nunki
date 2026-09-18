@@ -1621,41 +1621,62 @@ dernier lot. La première rouge arrête tout.
    l'outil — et comme un secret n'a pas de `fix`, cette exception-là ne se
    retire jamais toute seule.
 
-   **L'outil, côté Rust et côté tout le monde : `gitleaks`.** Tranché par
-   Arnaud le 2026-09-17, sur trois candidats. `trufflehog` vérifie qu'un
-   secret trouvé est *vivant* en l'essayant contre son service, ce qu'un
-   conteneur sans forge ne peut pas faire — il n'y tournerait qu'en statique,
-   sans son avantage. Des motifs écrits à la main ne coûtent aucune
-   dépendance mais retombent dans la sonde qui ne prouve rien : personne ne
-   maintient sa propre liste de motifs. `gitleaks` est retenu pour son fichier
-   d'exceptions, qui se branche sur `accepted` sans rien inventer.
+   **L'outil, côté Rust et côté tout le monde : `trufflehog`.** Tranché par
+   Arnaud le 2026-09-17. `gitleaks` avait été retenu d'abord, pour son fichier
+   d'exceptions ; **la porte d'image l'a refusé, et elle avait raison**.
+   Mesuré le jour même : son binaire 8.30.1, publié en mars 2026, embarque
+   `golang.org/x/crypto v0.35.0` de février 2025 — treize mois de retard à sa
+   propre sortie — et porte 33 avis critiques ou élevés **dont le correctif
+   existe**, sur `x/crypto`, `x/net` et `x/text`. Ajouter à une porte de
+   sécurité l'outil le moins entretenu de l'image n'était pas défendable, et
+   33 exceptions sous une raison unique n'est pas une acceptation écrite.
+
+   `trufflehog` v3.97.5, publiée la veille, porte `x/crypto v0.53.0`, plus
+   récent que la version qui corrige ces avis. `noseyparker` est **archivé**.
+   `detect-secrets` demanderait Python dans l'image. `kingfisher` est
+   sérieux — MongoDB, publié le même jour — mais il est écrit en Rust, et
+   c'est ce qui l'écarte : mesuré, la porte d'image ne lit que les binaires
+   Go. Le choisir ne rendrait pas l'outil plus sûr, cela **cesserait de poser
+   la question** — et le prochain problème de cette forme arriverait sans
+   prévenir. Un binaire que la porte inspecte à chaque build vaut mieux qu'un
+   binaire qu'elle ne voit pas. Au passage : le crate `kingfisher` de
+   crates.io est un homonyme de 2023, sans rapport.
 
    Ce n'est pas un fragment de stack mais un outil du **scan lui-même** : le
    même pour Rust, Python ou Next.js, puisqu'un secret n'a pas d'écosystème.
    Il entre dans l'image comme le reste, au build, sur l'hôte — jamais
    téléchargé depuis un conteneur d'agent.
 
-   Mesuré le 2026-09-17 sur gitleaks 8.30.1, et chaque champ du contrat y
+   Mesuré le 2026-09-17 sur trufflehog 3.97.5, et chaque champ du contrat y
    trouve sa source :
 
-   - `Fingerprint` — `<commit>:<fichier>:<règle>:<ligne>` — est l'`id`, et
-     c'est aussi ce que le fichier d'exceptions nomme ;
-   - `File` et `StartLine` font le `where` ;
-   - `Commit` donne `was_at_base` **exactement**, par
-     `git merge-base --is-ancestor <commit> <base>` : on sait quel commit a
-     introduit le secret, pas seulement qu'il est là ;
-   - `fix` reste vide, parce qu'un secret n'en a pas. Il se révoque.
+   - `SourceMetadata.Data.Git` donne `file`, `line` et `commit` ; les deux
+     premiers font le `where`, et le troisième donne `was_at_base`
+     **exactement**, par `git merge-base --is-ancestor <commit> <base>` : on
+     sait quel commit a introduit le secret, pas seulement qu'il est là ;
+   - `DetectorName` nomme la règle. L'`id` est composé —
+     `<commit>:<fichier>:<détecteur>:<ligne>` — parce que l'outil n'en publie
+     pas un, et qu'un constat doit pouvoir être nommé pour être accepté ;
+   - `fix` reste vide, parce qu'un secret n'en a pas. Il se révoque ;
+   - `Verified` dit si le secret a été essayé contre son service. Dans un
+     conteneur sans forge il vaut toujours `false`, et `nunki` ne s'en sert
+     pas : ce serait une sonde qui ne peut pas réussir.
 
-   **La vue non filtrée ne s'obtient pas comme celle des avis**, et c'est
-   mesuré plutôt que supposé : `--gitleaks-ignore-path` vers un dossier vide
-   **ne désarme pas** le `.gitleaksignore` du dépôt — le constat reste tu,
-   alors qu'il réapparaît dès que le fichier est retiré. Il n'y a donc pas de
-   second passage : `.gitleaksignore` est une **liste d'empreintes en clair**,
-   une par ligne, commentaires tolérés, que le script lit directement. Chaque
-   empreinte qu'il nomme sort en `accepted`, avec pour raison le commentaire
-   qui la précède. Une exception est ainsi **rendue** au lieu d'être perdue,
-   ce que la liste `ignore` de `deny.toml` n'offrait qu'au prix de deux
-   exécutions.
+   **La vue non filtrée s'obtient, et elle est obligatoire.**
+   `--no-ignore-tag` rend aussi les constats qu'un commentaire
+   `trufflehog:ignore` fait taire — mesuré : deux jetons, un seul rendu par
+   défaut, les deux avec le drapeau. `nunki` le passe **toujours**, et la
+   raison est une règle et non un réglage : ce commentaire vit **dans la
+   ligne de code**, que l'agent édite légitimement. Sans ce drapeau, un agent
+   pourrait faire taire son propre secret en ajoutant six caractères.
+
+   **Donc une exception de secret ne vit pas dans le dépôt.** C'est l'inverse
+   de ce qui a été tranché pour les avis, et pour une raison qui prime ici :
+   là-bas `deny.toml` est protégé par les chemins refusés de la porte 4, et
+   une ligne de code ne peut pas l'être. La liste des constats acceptés vit
+   donc dans le home du projet, hors de portée, et `nunki` la rend en lecture
+   seule dans le dossier de mission — le chemin qu'`ALLOWLIST.txt` a déjà
+   ouvert : le propriétaire déclare hors d'atteinte, l'agent lit quand même.
 
    Que les deux familles s'y prennent différemment n'est pas une faiblesse :
    le contrat est le même, et comment chaque script l'honore est l'affaire de
