@@ -610,8 +610,14 @@ fn the_rust_image_carries_what_the_battery_calls() {
 ///
 /// `cargo deny check` runs four stages, and `advisories` fetches its database
 /// from github.com. The coder's allowlist names no forge (SPEC 4.1 bis, rule
-/// 6), so that stage can never succeed in the container — not for want of a
-/// network, but by design.
+/// 6), so the bare command fails here.
+///
+/// Not because the audit is impossible in a container — gate 8 runs it,
+/// `--offline`, against the database the host filled and `nunki` mounts
+/// (measured 2026-09-17). This comment said the stage could never pass here,
+/// and that was wrong. It is a division of labour: the advisories question
+/// needs the mounted database, the unfiltered view and the comparison against
+/// the base, and gate 8 has all three.
 ///
 /// Measured on 2026-09-14, in the image this generator writes: with
 /// `cargo-deny` installed the battery still came back non-zero on

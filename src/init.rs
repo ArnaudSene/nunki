@@ -912,10 +912,19 @@ fn fragment(stack: &str) -> Vec<(&'static str, String, bool)> {
                  cargo test --all-features\n\
                  # Not `cargo deny check` alone: its `advisories` stage fetches\n\
                  # its database from github.com, and the coder's allowlist names\n\
-                 # no forge (SPEC 4.1 bis, rule 6). That stage can never pass in\n\
-                 # this container — not for want of a network, but by design — so\n\
-                 # asking for it would hold gate 6 red for a reason no agent can\n\
-                 # repair. Run the advisories in CI, where the forge is reachable.\n\
+                 # no forge (SPEC 4.1 bis, rule 6), so the bare command fails\n\
+                 # here for a reason no agent can repair.\n\
+                 #\n\
+                 # Not because the audit is impossible in a container: gate 8\n\
+                 # runs it, `--offline`, against the database the host filled\n\
+                 # and `nunki` mounts read-only (measured 2026-09-17 — it finds\n\
+                 # the advisory with no network at all). This line said it could\n\
+                 # never pass here, and that was wrong.\n\
+                 #\n\
+                 # It is a division of labour: the advisories question needs the\n\
+                 # mounted database, the unfiltered view and the comparison\n\
+                 # against the base, and gate 8 has all three. The battery asks\n\
+                 # for the three stages it can answer on its own.\n\
                  cargo deny check bans licenses sources\n"
                     .to_string(),
                 true,

@@ -1526,12 +1526,19 @@ dernier lot. La première rouge arrête tout.
    **Où elle vit, et qui la remplit.** Tranché par Arnaud le 2026-09-17, en
    trois points.
 
-   Elle vit dans `~/.nunki/advisories/<stack>/`, **partagée** entre les
-   projets, et montée en lecture seule à un chemin fixe du conteneur. Partagée
-   parce que c'est la même donnée pour toute stack donnée : un volume par slot
-   dupliquerait un dépôt de plusieurs centaines de méga-octets autant de fois
-   qu'il y a de slots. `~/.nunki/` tient déjà ce qui est commun — les comptes,
-   la consommation, le registre des sessions, le jeton de forge.
+   Elle est **partagée** entre les projets et montée en lecture seule à un
+   chemin fixe du conteneur. Partagée parce que c'est la même donnée pour toute
+   stack donnée : un volume par slot dupliquerait un dépôt de plusieurs
+   centaines de méga-octets autant de fois qu'il y a de slots.
+
+   Une première rédaction disait `~/.nunki/advisories/<stack>/`, aux côtés de
+   ce que `~/.nunki/` tient déjà de commun — les comptes, la consommation, le
+   registre des sessions, le jeton de forge. **Cela ne tient pas**, et le
+   paragraphe « `nunki` ne la rafraîchit pas » deux points plus bas dit
+   pourquoi : l'outil possède la disposition de sa base et refuse un chemin
+   d'une autre forme. L'emplacement est donc celui de l'outil, sur l'hôte, et
+   la stack le déclare dans un fichier plat de son fragment — côté Rust,
+   `~/.cargo/advisory-db`.
 
    Un **bind en lecture seule et non un volume nommé**, pour une raison
    mécanique : un volume nommé ne s'écrit que depuis un conteneur, et
