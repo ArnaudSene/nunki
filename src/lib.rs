@@ -36,6 +36,7 @@ pub mod provider;
 pub mod push;
 pub mod role;
 pub mod run;
+pub mod security;
 pub mod sessions;
 pub mod slot;
 pub mod state;
