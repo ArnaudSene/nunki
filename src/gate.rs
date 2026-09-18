@@ -357,14 +357,40 @@ fn branch_ahead(subject: &Subject) -> Result<Decision, GateError> {
     Ok(Decision::Passed)
 }
 
-/// The base as this clone knows it: a fresh clone has the remote's branches
-/// and only one of its own, so `dev` may only exist as `origin/dev`.
+/// The base as this clone knows it, and **the remote-tracking one first**.
+///
+/// A slot is a clone whose `origin` is the project on this machine, and
+/// `run::branch` starts every mission branch from `origin/<base>` after
+/// fetching it. The clone's own `<base>` is written once, when the slot is
+/// made, and nothing moves it again — so from the second mission onwards the
+/// two disagree, and the gates were reading the one the branch did not come
+/// from.
+///
+/// Measured on 2026-09-18, on `notes-api`'s slot, with a branch that had
+/// touched nothing: `dev...HEAD` named eight files — everything the previous
+/// mission had merged — while `origin/dev...HEAD` named none. Gate 4 would
+/// have failed a coder for a perimeter it had not left, on its first lot,
+/// and gate 8's fork point was one merge too early.
+///
+/// The local branch stays as the fallback: a clone whose origin does not
+/// carry the base still has to be judged against something, and that is the
+/// only candidate left. It is the same order `run::branch` uses.
 fn base_ref(tree: &Path, base: &str) -> Result<String, GateError> {
-    if git::run(tree, &["rev-parse", "--verify", "--quiet", base]).is_ok() {
-        Ok(base.to_string())
-    } else {
-        Ok(format!("origin/{base}"))
+    let remote = format!("origin/{base}");
+    if git::run(
+        tree,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/remotes/{remote}"),
+        ],
+    )
+    .is_ok()
+    {
+        return Ok(remote);
     }
+    Ok(base.to_string())
 }
 
 /// Gate 3 reads **the block**, not the file.

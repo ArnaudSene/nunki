@@ -1574,6 +1574,21 @@ dernier lot. La première rouge arrête tout.
    Ce serait le seul endroit où un script de fragment tournerait hors d'un
    conteneur — une frontière de confiance nouvelle, pour une commodité.
 
+   **Et « la base » est celle dont la branche est partie.** Dans un slot —
+   un clone dont l'`origin` est le projet sur cette machine — `run::branch`
+   part de `origin/<base>` après l'avoir rafraîchie, tandis que la branche
+   locale du même nom est écrite une fois, à la création du slot, et ne bouge
+   plus jamais. Dès la deuxième mission les deux divergent. Mesuré le
+   2026-09-18 sur le slot de notes-api, avec une branche n'ayant **rien**
+   touché : `dev...HEAD` nommait huit fichiers, tous ceux de la mission
+   précédente, et `origin/dev...HEAD` n'en nommait aucun. Les portes 4, 7 et 8
+   lisent toutes cet ensemble : la campagne de mutation aurait tourné sur sept
+   fichiers que la mission n'a jamais ouverts, le point de fourche de la
+   porte 8 était en retard d'une fusion, et la porte 4 rougit dès que la base
+   a gagné entre-temps un chemin protégé. La référence distante passe donc
+   d'abord, la locale restant le recours d'un clone dont l'origine ne porte
+   pas la base.
+
    **Ce qui bloque est ce qui est nouveau depuis la base.** Tranché par
    Arnaud le 2026-09-17. Un avis paru cette nuit dans une dépendance que la
    branche n'a jamais touchée est déjà sur `dev` : arrêter la mission punit
