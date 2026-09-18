@@ -1572,6 +1572,29 @@ dernier lot. La première rouge arrête tout.
    `accepted` → rouge ; `was_at_base` vrai et pas `accepted` → constat. La
    comparaison est **au script**, comme le reste de l'écosystème : `nunki`
    lui passe la base, comme il passe les chemins touchés à `mutation.sh`.
+
+   **La base passée est un commit, jamais un nom de branche**, et c'est le
+   point de fourche — `git merge-base HEAD <base>`, résolu par `nunki` sur
+   l'hôte dans le slot. La raison est la forme de la copie propre de `HEAD` :
+   un clone détaché de l'arbre du slot, qui ne porte aucune branche locale, et
+   que le rafraîchissement ne nourrit que par `git fetch <arbre> HEAD` — donc
+   aucune référence de suivi ne bouge non plus. Un nom n'y résout rien.
+   Mesuré le 2026-09-18, à la première exécution de la porte 8 contre un vrai
+   conteneur : `git rev-parse --verify dev` dans la copie répond « Needed a
+   single revision », et l'unique constat de notes-api — un identifiant de
+   test que sa base portait déjà — revenait `was_at_base: false`, donc rouge.
+   Le même script, dans le même conteneur, avec le commit : `was_at_base:
+   true`. Le point de fourche et non la tête de la base, parce que la porte 2
+   a déjà dit que la branche est en avance sur sa base : la fourche est un
+   ancêtre de `HEAD`, donc dans la copie par construction, tandis que la tête
+   peut avoir avancé depuis le clone et n'y être pas.
+
+   **Et une base illisible arrête le script au lieu de comparer à rien.** Un
+   code de sortie à lui — 70, à côté du 69 de la base d'avis — et `nunki` le
+   lit comme *non jouée* : un verdict sur la machine et non sur l'agent. La
+   première rédaction avertissait sur stderr et poursuivait ; tout revenait
+   alors nouveau, et la porte rougissait sur ce que la branche n'avait pas
+   apporté, ce que cette section demande précisément de ne pas faire.
    Côté Rust, `git worktree add` sur la base puis la même commande dans cet
    arbre. Une première rédaction annonçait « sans second checkout », en
    s'appuyant sur le `-f <lockfile>` de `cargo-audit` ; avec `cargo-deny`

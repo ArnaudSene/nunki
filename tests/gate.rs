@@ -1355,6 +1355,17 @@ fn a_campaign_is_not_owed_while_another_gate_is_unplayable_too() {
 impl Fixture {
     /// Gate 8 with a container that answers what `security.sh` printed.
     fn security(&self, role: Role, out: nunki::engine::ExecOutput) -> Decision {
+        self.security_seen(role, out).0
+    }
+
+    /// The same, and what the container was actually asked to run — the probe
+    /// is half of gate 8, and a test that only reads the decision cannot see
+    /// what was handed to the script.
+    fn security_seen(
+        &self,
+        role: Role,
+        out: nunki::engine::ExecOutput,
+    ) -> (Decision, Vec<nunki::engine::fake::Call>) {
         // The refresh of the clean copy answers first, and green: what this
         // asks about is the script's own status, not the refresh's.
         let outs = vec![said(0, ""), out];
@@ -1362,7 +1373,9 @@ impl Fixture {
         let profile = nunki::run::profile_path(&project, &slot.name);
         std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
         std::fs::write(&profile, "services: {}\n").unwrap();
-        gate::after_run(
+        let engine =
+            std::sync::Arc::new(nunki::engine::fake::FakeEngine::default().with_execs(outs));
+        let decision = gate::after_run(
             &Subject {
                 role,
                 tree: &self.tree,
@@ -1378,9 +1391,7 @@ impl Fixture {
             &gate::Verification {
                 project: &project,
                 slot: &slot,
-                engine: std::sync::Arc::new(
-                    nunki::engine::fake::FakeEngine::default().with_execs(outs),
-                ),
+                engine: engine.clone(),
                 stack: "rust",
             },
         )
@@ -1389,8 +1400,22 @@ impl Fixture {
         .into_iter()
         .find(|o| o.gate == Gate::MechanicalSecurity)
         .expect("gate 8 is played")
-        .decision
+        .decision;
+        (decision, engine.calls())
     }
+}
+
+/// What the container was asked to run, last first: the refresh of the clean
+/// copy goes through the same engine, so the probe is the one that follows it.
+fn probe_of(calls: &[nunki::engine::fake::Call]) -> String {
+    calls
+        .iter()
+        .filter_map(|c| match c {
+            nunki::engine::fake::Call::Exec(_, _, argv) => Some(argv.join(" ")),
+            _ => None,
+        })
+        .find(|argv| argv.contains("security.sh"))
+        .expect("the probe runs security.sh")
 }
 
 fn said(status: i32, stdout: &str) -> nunki::engine::ExecOutput {
@@ -1507,6 +1532,72 @@ fn a_stack_with_no_security_script_is_red_and_says_how_to_get_one() {
         panic!("{decision:?}");
     };
     assert!(why.contains("nunki init --stack"), "{why}");
+}
+
+/// The script runs in the clean copy of `HEAD`, a detached clone that holds no
+/// branch at all, so a base named `dev` resolves to nothing there and the
+/// script reports every finding as new — a gate red on what the branch never
+/// brought.
+///
+/// Measured on 2026-09-18 against a real container, the first time gate 8 ran
+/// in one: `git rev-parse --verify dev` in the copy answered "Needed a single
+/// revision", and notes-api's one finding — a test credential its base already
+/// carried — came back `was_at_base: false`. The same script, in the same
+/// container, given the commit instead, came back `was_at_base: true`.
+#[test]
+fn the_base_reaches_the_script_as_a_commit_and_not_a_branch_name() {
+    let f = Fixture::new();
+    let fork = git(&f.tree, &["merge-base", "HEAD", "dev"]);
+
+    let (_, calls) = f.security_seen(Role::Coder, said(0, ""));
+    let probe = probe_of(&calls);
+
+    assert!(probe.contains(&fork), "the probe names no commit: {probe}");
+    assert!(
+        !probe.contains(" dev "),
+        "the probe hands over a branch name the copy cannot resolve: {probe}"
+    );
+}
+
+/// The fork point, and not the base's tip. Gate 2 has already said the branch
+/// is ahead of its base, so the fork point is an ancestor of `HEAD` and is in
+/// the copy by construction; a base that has moved since the copy was cloned
+/// has a tip that is not.
+#[test]
+fn the_commit_is_the_fork_point_and_not_wherever_the_base_has_got_to() {
+    let f = Fixture::new();
+    let fork = git(&f.tree, &["rev-parse", "HEAD"]);
+    // The base moves on, as a base does while a mission runs.
+    git(&f.tree, &["checkout", "-q", "dev"]);
+    write(&f.tree, "src/other.rs", "pub fn two() -> u8 { 2 }\n");
+    git(&f.tree, &["add", "-A"]);
+    git(&f.tree, &["commit", "-q", "-m", "the base moves"]);
+    let tip = git(&f.tree, &["rev-parse", "HEAD"]);
+    git(&f.tree, &["checkout", "-q", "mission/x"]);
+
+    let (_, calls) = f.security_seen(Role::Coder, said(0, ""));
+    let probe = probe_of(&calls);
+
+    assert!(probe.contains(&fork), "not the fork point: {probe}");
+    assert!(
+        !probe.contains(&tip),
+        "the base's tip is not in the copy: {probe}"
+    );
+}
+
+/// And the script's own word for it, for the same reason. `nunki` resolves the
+/// commit above and should never hand over one the copy lacks — this is the
+/// second lock, not the first.
+#[test]
+fn a_script_that_cannot_read_the_base_is_unplayed_and_not_red() {
+    let f = Fixture::new();
+
+    let decision = f.security(Role::Coder, said(70, ""));
+
+    let Decision::Unplayed(why) = decision else {
+        panic!("{decision:?}");
+    };
+    assert!(why.contains("clean copy of HEAD"), "{why}");
 }
 
 /// The security agent attacks what is built and owes findings, not a tool's
