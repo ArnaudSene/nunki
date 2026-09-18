@@ -729,15 +729,41 @@ fn mechanical_security(
                 .into(),
         ));
     }
+    // The base as a commit, and never as a name. The script runs in the clean
+    // copy of `HEAD`, which is a detached clone of the slot: it holds no local
+    // branch, and the refresh only ever fetches `HEAD`, so no remote-tracking
+    // ref follows the base either. A name resolves to nothing there and the
+    // script counts every finding as new — so the gate blocks on what the
+    // branch did not bring, which is the one thing SPEC 4.4 asks it not to do.
+    //
+    // Measured on 2026-09-18, the first time gate 8 ran against a real
+    // container: `git rev-parse --verify dev` in the copy answered "Needed a
+    // single revision", and notes-api's single finding — a test credential its
+    // base already carried — came back `was_at_base: false` and red. Passing
+    // the commit turned it green in the same container.
+    //
+    // The fork point rather than the base's tip: gate 2 has already said the
+    // branch is ahead of its base, so the fork point is an ancestor of `HEAD`
+    // and is in the copy by construction. The tip is not — a slot's base can
+    // move after the copy was cloned, and then the commit would not be there.
+    //
+    // Through `base_ref`, because a slot is a clone: its base may exist only
+    // as `origin/<base>`, and that is gate 2's reading of the same name. A base
+    // with no commit in common stops the report here rather than deciding, the
+    // way gates 2 and 4 already do — they read the same two names and would
+    // have refused first.
+    let named = base_ref(subject.tree, &subject.header.base)?;
+    let base = crate::git::run(subject.tree, &["merge-base", "HEAD", &named])?
+        .trim()
+        .to_string();
     let at = format!("{}/{SECURITY}", crate::run::STACK_AT);
-    // Absent, not executable, no database, or its own status — told apart,
-    // because "the gate is red", "there was nothing to run" and "it could not
-    // look" send a human to three different places.
+    // Absent, not executable, no database, a base it cannot read, or its own
+    // status — told apart, because "the gate is red", "there was nothing to
+    // run" and "it could not look" send a human to three different places.
     let probe = format!(
         "if [ ! -f {at} ]; then exit 66; fi\n\
          if [ ! -x {at} ]; then exit 67; fi\n\
          exec {at} {base} {db} {mission}\n",
-        base = subject.header.base,
         db = crate::run::ADVISORIES_AT,
         mission = crate::run::MISSION_AT,
     );
@@ -775,6 +801,16 @@ fn mechanical_security(
                  host, and the host fills it — `cargo deny check advisories` once is \
                  enough",
                 crate::run::ADVISORIES_AT
+            )));
+        }
+        // The script's word for "the base is not here". `nunki` resolves it to
+        // a commit above and should never hand over one the copy lacks, so
+        // this is the second lock: unplayed rather than a comparison against
+        // nothing, which would report every finding as brought by the branch.
+        70 => {
+            return Ok(Decision::Unplayed(format!(
+                "{base} is not in the clean copy of HEAD, so there is nothing to \
+                 compare this branch against"
             )));
         }
         _ => {}

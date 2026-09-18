@@ -603,8 +603,9 @@ done < "$missed"
 const SECURITY_RUST: &str = r##"#!/bin/sh
 # The mechanical security of a Rust project (SPEC 4.4, gate 8).
 #
-# `nunki` calls this as `security.sh <base-ref>`, from the clean copy of HEAD
-# inside the slot's container. It prints **one JSON object per line** on
+# `nunki` calls this as `security.sh <base-commit>`, from the clean copy of
+# HEAD inside the slot's container. A commit and not a branch name: the copy is
+# a detached clone and carries no branch, so a name would resolve to nothing. It prints **one JSON object per line** on
 # stdout, one per finding:
 #
 #   {"id":"…","kind":"…","where":"…","via":"…","fix":"…",
@@ -620,7 +621,7 @@ const SECURITY_RUST: &str = r##"#!/bin/sh
 # already run by the battery at gate 6, so nothing here repeats it.
 set -eu
 
-base="${1:?usage: security.sh <base-ref> [advisory-db] [mission-dir]}"
+base="${1:?usage: security.sh <base-commit> [advisory-db] [mission-dir]}"
 # Second argument and not an environment variable: the agent owns its own
 # environment inside the container, and a variable would let it point this at
 # an empty directory — no findings, and a green gate. `nunki` is what invokes
@@ -663,7 +664,12 @@ if git worktree add -q --detach "$work/base" "$base" 2>/dev/null; then
   audit "$work/base" "$work/none.toml" | ids > "$work/base.ids" || true
   git worktree remove --force "$work/base" 2>/dev/null || true
 else
-  echo "nunki: base $base could not be read; every finding counts as new" >&2
+  # 70, and not a warning followed by the audit. Without the base there is no
+  # "what this branch brought": every finding would come back new, and the gate
+  # would block on what was already there. `nunki` reads this as unplayed — a
+  # verdict on the machine rather than on the agent, exactly as 69 is.
+  echo "nunki: base $base is not in this repository, so nothing can be compared" >&2
+  exit 70
 fi
 
 # What the project accepts, as the difference between the two views: an id the

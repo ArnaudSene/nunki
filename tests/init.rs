@@ -807,6 +807,65 @@ fn the_rust_stack_ships_its_mechanical_security() {
     assert!(body.contains("trufflehog git"), "no secret scan:\n{body}");
 }
 
+/// A base it cannot read stops it, and does not become an audit against
+/// nothing.
+///
+/// Run, not read: the script is a script, and what it does with a base it
+/// cannot resolve is the whole point. It gets a real repository and a base
+/// that is not in it, and never reaches `cargo deny`.
+///
+/// Measured on 2026-09-18 against a real container, where it warned and
+/// carried on: every finding came back new, and notes-api's gate 8 went red on
+/// a test credential its base already carried.
+#[test]
+#[cfg(unix)]
+fn a_base_it_cannot_read_stops_the_script_instead_of_counting_everything_as_new() {
+    let (_dir, root, _nunki) = fresh();
+    let home = home(&root);
+    init(&root, &home, &["rust".to_string()]).unwrap();
+    let script = home
+        .join(nunki::project::STACKS_DIR)
+        .join("rust")
+        .join(nunki::gate::SECURITY);
+
+    // A repository with one commit, and a database directory that exists so
+    // the script gets past its own 69.
+    let repo = root.join("tree");
+    std::fs::create_dir_all(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["-c", "user.name=Init Test", "-c", "user.email=init@test"])
+            .args(args)
+            .output()
+            .expect("git is on the path");
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    };
+    git(&["init", "-q"]);
+    std::fs::write(repo.join("README.md"), "one\n").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "one"]);
+    let db = root.join("db");
+    std::fs::create_dir_all(&db).unwrap();
+
+    let out = std::process::Command::new("sh")
+        .arg(&script)
+        .arg("0000000000000000000000000000000000000000")
+        .arg(&db)
+        .arg(&root)
+        .current_dir(&repo)
+        .output()
+        .expect("sh is on the path");
+
+    assert_eq!(out.status.code(), Some(70), "{out:?}");
+    assert!(
+        out.stdout.is_empty(),
+        "it reported findings without a base to compare them to: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
 /// A secret has no `fix` and no `via`: it is revoked, not upgraded, and
 /// nothing brought it in but the commit that wrote it. That commit is in the
 /// fingerprint, which is what tells `was_at_base` exactly.
