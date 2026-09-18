@@ -143,19 +143,60 @@ impl Fixture {
         .unwrap();
     }
 
+    /// The project and slot a `Verification` borrows. Built here because
+    /// gate 8 needs a container at the end of **every** run, not only at the
+    /// final verification — so both phases carry the same context.
+    fn context(&self) -> (nunki::project::Project, nunki::slot::Slot) {
+        let nunki = self._dir.path().join("nunki");
+        let project = nunki::project::Project::at(
+            self._dir.path().join("repo"),
+            nunki::project::Config {
+                root: None,
+                harness: "claude-code".into(),
+                forge: vec![],
+                stacks: vec!["rust".into()],
+                protected_branches: self.branches.clone(),
+                protected_paths: Default::default(),
+                account: None,
+                model: None,
+                bounds: Default::default(),
+                credentials: None,
+                run: None,
+                services_file: None,
+                permission_mode: "auto".to_string(),
+                forge_protection: Default::default(),
+            },
+            nunki,
+        );
+        let slot = nunki::slot::Slot {
+            name: "nowhere".into(),
+            tree: self.tree.clone(),
+        };
+        (project, slot)
+    }
+
     fn gates(&self, role: Role) -> gate::Report {
-        gate::after_run(&Subject {
-            role,
-            tree: &self.tree,
-            journal: &self.journal,
-            pr: &self.pr,
-            verdict: &self.verdict,
-            mission_dir: self._dir.path(),
-            header: &self.header,
-            protected_branches: &self.branches,
-            protected_paths: &self.protected,
-            coder_head: self.coder_head.as_deref(),
-        })
+        let (project, slot) = self.context();
+        gate::after_run(
+            &Subject {
+                role,
+                tree: &self.tree,
+                journal: &self.journal,
+                pr: &self.pr,
+                verdict: &self.verdict,
+                mission_dir: self._dir.path(),
+                header: &self.header,
+                protected_branches: &self.branches,
+                protected_paths: &self.protected,
+                coder_head: self.coder_head.as_deref(),
+            },
+            &gate::Verification {
+                project: &project,
+                slot: &slot,
+                engine: std::sync::Arc::new(nunki::engine::fake::FakeEngine::default()),
+                stack: "rust",
+            },
+        )
         .unwrap()
     }
 
@@ -176,13 +217,38 @@ fn commit(tree: &Path, path: &str, body: &str, message: &str) {
 }
 
 #[test]
-fn a_run_that_honoured_its_contract_passes_all_four() {
+fn a_run_that_honoured_its_contract_passes_the_gates_of_its_end() {
     let f = Fixture::new();
     commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
     f.journal_names_head();
     let report = f.gates(Role::Coder);
-    assert!(report.passed(), "{:?}", report.failure());
-    assert_eq!(report.outcomes.len(), 4);
+
+    // 1 to 4, and 8 — the gates SPEC 4.4 owes at the end of every run.
+    assert_eq!(report.outcomes.len(), 5, "{:?}", report.outcomes);
+    for gate in [
+        Gate::CleanTree,
+        Gate::BranchAhead,
+        Gate::ResumeNamesHead,
+        Gate::Perimeter,
+    ] {
+        let one = report.outcomes.iter().find(|o| o.gate == gate).unwrap();
+        assert_eq!(one.decision, Decision::Passed, "{gate:?}");
+    }
+
+    // Gate 8 needs a container, and there is none here. `Unplayed` and not
+    // red: a verdict on the machine rather than on the agent, and a security
+    // gate that could not look must not report green either.
+    let eight = report
+        .outcomes
+        .iter()
+        .find(|o| o.gate == Gate::MechanicalSecurity)
+        .expect("gate 8 is played at the end of a run");
+    assert!(
+        matches!(eight.decision, Decision::Unplayed(_)),
+        "{:?}",
+        eight.decision
+    );
+    assert!(!report.passed(), "an unplayed gate is not a green report");
 }
 
 #[test]
@@ -569,31 +635,7 @@ impl Fixture {
     /// not up. Gate 6 cannot be played then, and says so — which is exactly
     /// what these tests need in order to judge gate 5 on its own.
     fn verification(&self, role: Role) -> gate::Report {
-        let nunki = self._dir.path().join("nunki");
-        let project = nunki::project::Project::at(
-            self._dir.path().join("repo"),
-            nunki::project::Config {
-                root: None,
-                harness: "claude-code".into(),
-                forge: vec![],
-                stacks: vec!["rust".into()],
-                protected_branches: self.branches.clone(),
-                protected_paths: Default::default(),
-                account: None,
-                model: None,
-                bounds: Default::default(),
-                credentials: None,
-                run: None,
-                services_file: None,
-                permission_mode: "auto".to_string(),
-                forge_protection: Default::default(),
-            },
-            nunki,
-        );
-        let slot = nunki::slot::Slot {
-            name: "nowhere".into(),
-            tree: self.tree.clone(),
-        };
+        let (project, slot) = self.context();
         gate::at_verification(
             &Subject {
                 role,
@@ -1305,5 +1347,178 @@ fn a_campaign_is_not_owed_while_another_gate_is_unplayable_too() {
         report.unplayed().unwrap().contains("gate 6"),
         "{:?}",
         report.unplayed()
+    );
+}
+
+// --- gate 8: the mechanical security ---------------------------------------
+
+impl Fixture {
+    /// Gate 8 with a container that answers what `security.sh` printed.
+    fn security(&self, role: Role, out: nunki::engine::ExecOutput) -> Decision {
+        // The refresh of the clean copy answers first, and green: what this
+        // asks about is the script's own status, not the refresh's.
+        let outs = vec![said(0, ""), out];
+        let (project, slot) = self.context();
+        let profile = nunki::run::profile_path(&project, &slot.name);
+        std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+        std::fs::write(&profile, "services: {}\n").unwrap();
+        gate::after_run(
+            &Subject {
+                role,
+                tree: &self.tree,
+                journal: &self.journal,
+                pr: &self.pr,
+                verdict: &self.verdict,
+                mission_dir: self._dir.path(),
+                header: &self.header,
+                protected_branches: &self.branches,
+                protected_paths: &self.protected,
+                coder_head: self.coder_head.as_deref(),
+            },
+            &gate::Verification {
+                project: &project,
+                slot: &slot,
+                engine: std::sync::Arc::new(
+                    nunki::engine::fake::FakeEngine::default().with_execs(outs),
+                ),
+                stack: "rust",
+            },
+        )
+        .unwrap()
+        .outcomes
+        .into_iter()
+        .find(|o| o.gate == Gate::MechanicalSecurity)
+        .expect("gate 8 is played")
+        .decision
+    }
+}
+
+fn said(status: i32, stdout: &str) -> nunki::engine::ExecOutput {
+    nunki::engine::ExecOutput {
+        status,
+        stdout: stdout.to_string(),
+        stderr: String::new(),
+    }
+}
+
+/// What the branch brought and nobody ruled on stops it. The finding is
+/// named, because a gate that says only "red" sends nobody anywhere.
+#[test]
+fn a_finding_this_branch_brought_is_red_and_the_reason_names_it() {
+    let f = Fixture::new();
+    let decision = f.security(
+        Role::Coder,
+        said(
+            0,
+            r#"{"id":"RUSTSEC-2020-0071","kind":"vulnerability","where":"time 0.1.45","via":"chrono","fix":">=0.2.23","accepted":"","was_at_base":false}"#,
+        ),
+    );
+
+    let Decision::Failed(why) = decision else {
+        panic!("{decision:?}");
+    };
+    assert!(why.contains("RUSTSEC-2020-0071"), "{why}");
+    assert!(
+        why.contains("via chrono"),
+        "the parent is what can be replaced: {why}"
+    );
+    assert!(why.contains(">=0.2.23"), "{why}");
+}
+
+/// What the repository already carried is not this branch's to answer.
+/// Blocking on it would punish the wrong change, for a cause outside the
+/// agent's reach (SPEC 4.4).
+#[test]
+fn what_the_base_already_carried_does_not_stop_this_branch() {
+    let f = Fixture::new();
+    let decision = f.security(
+        Role::Coder,
+        said(
+            0,
+            r#"{"id":"RUSTSEC-2020-0071","kind":"vulnerability","where":"time 0.1.45","via":"","fix":">=0.2.23","accepted":"","was_at_base":true}"#,
+        ),
+    );
+
+    assert_eq!(decision, Decision::Passed);
+}
+
+/// An acceptance a fix has overtaken is red: the exception was written when
+/// nothing could be done, and something can now. This is what replaces an
+/// expiry date.
+#[test]
+fn an_exception_a_fix_has_overtaken_is_red() {
+    let f = Fixture::new();
+    let decision = f.security(
+        Role::Coder,
+        said(
+            0,
+            r#"{"id":"RUSTSEC-2020-0159","kind":"vulnerability","where":"chrono 0.4.19","via":"","fix":">=0.4.20","accepted":"pas atteignable","was_at_base":true}"#,
+        ),
+    );
+
+    let Decision::Failed(why) = decision else {
+        panic!("{decision:?}");
+    };
+    assert!(why.contains("overtaken"), "{why}");
+    assert!(why.contains("RUSTSEC-2020-0159"), "{why}");
+}
+
+/// An acceptance no fix can overtake lets the mission through, and the
+/// `alloy`/`paste` case SPEC 4.4 cites is exactly that shape.
+#[test]
+fn an_acceptance_no_fix_can_overtake_lets_it_through() {
+    let f = Fixture::new();
+    let decision = f.security(
+        Role::Coder,
+        said(
+            0,
+            r#"{"id":"RUSTSEC-2024-0436","kind":"unmaintained","where":"paste 1.0.15","via":"alloy","fix":"","accepted":"archivé en amont","was_at_base":true}"#,
+        ),
+    );
+
+    assert_eq!(decision, Decision::Passed);
+}
+
+/// No advisory database: the script's own 69. `Unplayed` and not red — a
+/// verdict on the machine rather than on the agent, and a security gate that
+/// could not consult its database must not report green either.
+#[test]
+fn a_gate_that_could_not_consult_its_database_says_so() {
+    let f = Fixture::new();
+
+    let decision = f.security(Role::Coder, said(69, ""));
+
+    let Decision::Unplayed(why) = decision else {
+        panic!("{decision:?}");
+    };
+    assert!(why.contains("advisory database"), "{why}");
+    assert!(why.contains("cargo deny check advisories"), "{why}");
+}
+
+/// A stack shipping no script fails, as the battery does: a proof nobody can
+/// run is not a proof that passed. And the message says how to get one.
+#[test]
+fn a_stack_with_no_security_script_is_red_and_says_how_to_get_one() {
+    let f = Fixture::new();
+
+    let decision = f.security(Role::Coder, said(66, ""));
+
+    let Decision::Failed(why) = decision else {
+        panic!("{decision:?}");
+    };
+    assert!(why.contains("nunki init --stack"), "{why}");
+}
+
+/// The security agent attacks what is built and owes findings, not a tool's
+/// report — the per-role table, and the battery two gates above.
+#[test]
+fn the_security_agent_owes_findings_and_not_a_tools_report() {
+    let f = Fixture::new();
+
+    let decision = f.security(Role::Security, said(0, ""));
+
+    assert!(
+        matches!(decision, Decision::NotApplicable(_)),
+        "{decision:?}"
     );
 }

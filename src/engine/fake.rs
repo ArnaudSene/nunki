@@ -26,6 +26,7 @@ pub struct FakeEngine {
     containers: Mutex<BTreeMap<String, String>>,
     liveness: Mutex<BTreeMap<String, Liveness>>,
     exec_result: Mutex<ExecOutput>,
+    exec_queue: Mutex<Vec<ExecOutput>>,
     fail_up: Mutex<Option<String>>,
 }
 
@@ -45,6 +46,7 @@ impl Default for FakeEngine {
                 stdout: String::new(),
                 stderr: String::new(),
             }),
+            exec_queue: Mutex::new(Vec::new()),
             fail_up: Mutex::new(None),
         }
     }
@@ -69,6 +71,17 @@ impl FakeEngine {
 
     pub fn with_exec(self, out: ExecOutput) -> Self {
         *self.exec_result.lock().unwrap() = out;
+        self
+    }
+
+    /// Answer each `exec` in turn, and keep answering with the last.
+    ///
+    /// A gate that runs a script first refreshes the clean copy of `HEAD`,
+    /// so a single answer is given to both — and a test about the script's
+    /// own status would be a test about the refresh's. This is what lets one
+    /// be said without the other.
+    pub fn with_execs(self, outs: Vec<ExecOutput>) -> Self {
+        *self.exec_queue.lock().unwrap() = outs;
         self
     }
 
@@ -157,6 +170,13 @@ impl Engine for FakeEngine {
             service.to_string(),
             argv.to_vec(),
         ));
+        let mut queue = self.exec_queue.lock().unwrap();
+        if queue.len() > 1 {
+            return Ok(queue.remove(0));
+        }
+        if let Some(last) = queue.first() {
+            return Ok(last.clone());
+        }
         Ok(self.exec_result.lock().unwrap().clone())
     }
 

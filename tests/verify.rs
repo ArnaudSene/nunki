@@ -118,6 +118,15 @@ impl World {
             },
             hq_root.parent().unwrap().to_path_buf(),
         );
+        // A profile on disk, because gate 8 runs in the container at the end
+        // of **every** run (SPEC 4.4) and `nunki exec` refuses a slot that has
+        // none. A real run has one: the agent has just worked in it. The fake
+        // engine answers with an empty contract, which is what a scan finding
+        // nothing looks like.
+        let profile = nunki::run::profile_path(&project, "one");
+        std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+        std::fs::write(&profile, "services: {}\n").unwrap();
+
         let world = Self {
             _dir: dir,
             project,
@@ -153,6 +162,13 @@ impl World {
 
     fn mission(&self) -> PathBuf {
         self.project.hq_root.join("missions/m1")
+    }
+
+    /// Take the slot's profile away, so anything that needs the container
+    /// cannot reach it — what a slot whose profile was never lifted looks
+    /// like.
+    fn without_profile(&self) {
+        let _ = std::fs::remove_file(nunki::run::profile_path(&self.project, "one"));
     }
 
     fn journal_names_head(&self) {
@@ -2350,6 +2366,9 @@ fn the_last_lot_done_goes_on_to_the_final_gates_at_once() {
 #[test]
 fn a_gate_nobody_could_play_stops_instead_of_opening_a_volet() {
     let world = World::new(1);
+    // Take the profile away: this test is about a gate that needs the machine
+    // and cannot reach it, and the battery is the one it was written around.
+    world.without_profile();
     world.commit("src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
     world.journal_names_head();
     std::fs::write(

@@ -295,7 +295,7 @@ pub fn verify_as(
                             // lot costs one run, found at the end it costs
                             // the mission. Then the run's own word on its
                             // lot, and only the resume block's.
-                            let report = gate::after_run(&subject)?;
+                            let report = gate::after_run(&subject, &verification)?;
                             let failed = report.failed();
                             let unplayed = report.unplayed();
                             let owed = report.campaign_owed();
@@ -342,7 +342,7 @@ pub fn verify_as(
                     // run is launched on it. A red gate here is one more run
                     // on the same lot, like any other.
                     None => {
-                        let report = gate::after_run(&subject)?;
+                        let report = gate::after_run(&subject, &verification)?;
                         let failed = report.failed();
                         let unplayed = report.unplayed();
                         let owed = report.campaign_owed();
@@ -527,7 +527,7 @@ pub fn verify_as(
                                 let report = if verdict.is_green() {
                                     gate::at_verification(&subject, &verification)?
                                 } else {
-                                    gate::after_run(&subject)?
+                                    gate::after_run(&subject, &verification)?
                                 };
                                 let failed = report.failed();
                                 let unplayed = report.unplayed();

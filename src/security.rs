@@ -85,6 +85,22 @@ impl Finding {
         !self.accepted.is_empty() && !self.fix.is_empty()
     }
 
+    /// One line a human can act on, without `nunki` knowing what produced it.
+    ///
+    /// `via` is named when there is one, because a transitive finding is not
+    /// replaceable where it is: the parent is the only thing this project
+    /// chooses (SPEC 4.4).
+    pub fn say(&self) -> String {
+        let mut said = format!("{} ({:?}) {}", self.id, self.kind, self.at);
+        if !self.via.is_empty() {
+            said.push_str(&format!(" via {}", self.via));
+        }
+        if !self.fix.is_empty() {
+            said.push_str(&format!(" — fixed in {}", self.fix));
+        }
+        said
+    }
+
     /// An acceptance no fix can ever overtake: an advisory that is not a
     /// vulnerability, or a secret ruled a false positive. Permanent, and
     /// better said than pretended otherwise (SPEC 4.4).
