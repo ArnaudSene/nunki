@@ -1217,14 +1217,15 @@ pub fn campaign(
         .map_err(|_| VerifyError::NotStarted(id.to_string()))?;
     let header = state.flow.header();
     let slot = crate::slot::find(project, &state.slot)?;
-    let touched = gate::touched_paths(&slot.tree, &header.base)?;
     Ok(crate::mutants::campaign(
         project,
         &slot,
         engine,
         &Paths::of(&project.hq_root, id).dir,
         &crate::run::stack_of(project),
-        &touched,
+        // The base's name: `campaign` works out what this branch brought,
+        // through the same call gate 7 makes.
+        &header.base,
         header.bounds.mutation_minutes,
         // The monitor never asks again by itself: replaying costs an hour,
         // and "ask again" is a human saying something changed that the

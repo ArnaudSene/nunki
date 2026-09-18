@@ -1594,6 +1594,17 @@ dernier lot. La première rouge arrête tout.
    Ce serait le seul endroit où un script de fragment tournerait hors d'un
    conteneur — une frontière de confiance nouvelle, pour une commodité.
 
+   **Et « ce que la branche a apporté » n'a qu'une lecture.** La porte 4, la
+   porte 7 et le lanceur de campagne parlent tous du même ensemble ; la
+   porte 7 juge une campagne sur l'empreinte de ce sur quoi elle a tourné,
+   donc une divergence entre le lanceur et elle est une porte que rien ne peut
+   satisfaire. Mesuré sur `notes-4` le 2026-09-18 : le lanceur nommait huit
+   chemins, la porte quatre, et la porte réclamait une campagne qui venait de
+   tourner — cinquante-sept tours de `verify`. Le calcul vit donc **dans le
+   lanceur lui-même**, qui reçoit le nom de la base et non une liste : ce n'est
+   pas une règle que le prochain appelant doit connaître, c'est un appel qu'il
+   ne peut pas contourner.
+
    **Et « la base » est celle dont la branche est partie.** Dans un slot —
    un clone dont l'`origin` est le projet sur cette machine — `run::branch`
    part de `origin/<base>` après l'avoir rafraîchie, tandis que la branche

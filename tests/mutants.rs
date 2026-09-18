@@ -267,7 +267,10 @@ fn live_a_campaign_is_launched_watched_and_read_back() {
 
     let mission = dir.path().join("mission");
     std::fs::create_dir_all(&mission).unwrap();
-    let touched = nunki::gate::touched_paths(&tree, "dev").unwrap();
+    // The base by name, the way `campaign` reads it now: it works the paths
+    // out itself, so a launcher cannot mean something else by them than the
+    // gate that judges what it produced.
+    let touched = nunki::gate::touched_since_base(&tree, "dev").unwrap();
     assert!(touched.contains(&"src/lib.rs".to_string()), "{touched:?}");
 
     let go = || {
@@ -277,7 +280,7 @@ fn live_a_campaign_is_launched_watched_and_read_back() {
             engine.clone(),
             &mission,
             "rust",
-            &touched,
+            "dev",
             45,
             mutants::Replay::WhenChanged,
         )
