@@ -1647,6 +1647,15 @@ dernier lot. La première rouge arrête tout.
    Il entre dans l'image comme le reste, au build, sur l'hôte — jamais
    téléchargé depuis un conteneur d'agent.
 
+   **Et son binaire Linux est dépouillé, donc la porte d'image ne l'inspecte
+   pas.** Mesuré le 2026-09-17 : 36 Mo sans en-têtes de section contre 170 Mo
+   pour la version macOS, et aucun module lisible — là où celui de gitleaks
+   exposait les siens, ce qui lui a valu son refus. Dit ici pour qu'on ne
+   prenne pas ce vert-là pour un verdict : sur ce binaire, la porte ne dit
+   pas « propre », elle ne dit rien. C'est une lacune de la porte, pas un
+   risque d'exécution — ce scanner lit des fichiers locaux dans un conteneur
+   sans réseau — et elle est notée plutôt que comblée.
+
    Mesuré le 2026-09-17 sur trufflehog 3.97.5, et chaque champ du contrat y
    trouve sa source :
 
