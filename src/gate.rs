@@ -772,6 +772,9 @@ fn mechanical_security(
     // branch is ahead of its base, so the fork point is an ancestor of `HEAD`
     // and is in the copy by construction. The tip is not — a slot's base can
     // move after the copy was cloned, and then the commit would not be there.
+    if let Some(why) = campaign_in_flight(subject) {
+        return Ok(Decision::Unplayed(why));
+    }
     //
     // Through `base_ref`, because a slot is a clone: its base may exist only
     // as `origin/<base>`, and that is gate 2's reading of the same name. A base
@@ -898,6 +901,42 @@ fn mechanical_security(
 /// The integrator's battery is not the coder's: SPEC 4.4 says its gate 6 is
 /// **its system tests, in the system profile**. It is declared separately,
 /// and a stack that declares none fails this gate by the same rule.
+/// Why nothing may run in the clean copy of `HEAD` right now, if a campaign
+/// is in flight.
+///
+/// Gate 7's campaign runs `cargo mutants --in-place` **in that copy**, and
+/// every other gate that runs there goes through `exec::run(On::Proof)`,
+/// which refreshes it first — `git reset --hard`, `git clean`. So the two
+/// wreck each other, both ways at once: the gate compiles and tests a
+/// mutant, and the reset pulls the tree out from under the campaign.
+///
+/// Measured on `notes-4`, 2026-09-18, the first three-agent mission run end
+/// to end. The battery came back 101 on `warning: unused variable: value` at
+/// `src/api.rs:160` — a function whose body cargo-mutants had replaced, and
+/// which uses its argument in the coder's own code. The flow read gate 6 red,
+/// opened a volet, and did it again until the volets were spent: six runs,
+/// 59M tokens, and the integrator and the security agent never ran. No agent
+/// had done anything wrong.
+///
+/// Unplayed and not red, which is the rule the missing advisory database
+/// already follows: a verdict on the machine rather than on the agent. A gate
+/// nobody could play stops the verification instead of opening a volet, so
+/// the mission waits for the campaign rather than paying for it.
+///
+/// The file's presence is the answer, not the process's liveness: `verify`
+/// clears it on the turn that reads the campaign back, so a file left by a
+/// crash costs one unplayed turn and no more. Erring towards "I could not
+/// look" is the direction this project errs in.
+fn campaign_in_flight(subject: &Subject) -> Option<String> {
+    let running = crate::mutants::read_running(subject.mission_dir).ok()??;
+    Some(format!(
+        "a mutation campaign has been rewriting the clean copy of HEAD since {} — it \
+         runs in place there, so this would judge a mutant and reset the tree under \
+         the campaign. `nunki verify` plays it again once the campaign is read back",
+        running.started_at
+    ))
+}
+
 fn battery(subject: &Subject, verification: &Verification) -> Result<Decision, GateError> {
     if subject.role == Role::Security {
         return Ok(Decision::NotApplicable(
@@ -905,6 +944,9 @@ fn battery(subject: &Subject, verification: &Verification) -> Result<Decision, G
              battery"
                 .into(),
         ));
+    }
+    if let Some(why) = campaign_in_flight(subject) {
+        return Ok(Decision::Unplayed(why));
     }
     let script = match subject.role {
         Role::Integrator => SYSTEM_BATTERY,
