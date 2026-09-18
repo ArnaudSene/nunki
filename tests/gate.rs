@@ -1585,6 +1585,81 @@ fn the_commit_is_the_fork_point_and_not_wherever_the_base_has_got_to() {
     );
 }
 
+/// A slot's own `dev` is written once, when the clone is made, and nothing
+/// moves it again. The mission branch comes from `origin/dev`, which
+/// `run::branch` fetches first — so from the second mission onwards the two
+/// disagree, and every gate that reads "what this branch touched" reads the
+/// wrong answer.
+///
+/// Measured on 2026-09-18 on `notes-api`'s slot, with a branch that had
+/// touched nothing: `dev...HEAD` named eight files, every one of them the
+/// previous mission's, and `origin/dev...HEAD` named none. Gate 7 would have
+/// run a mutation campaign over seven source files the mission never opened,
+/// and handed the coder survivors in code it had not written; gate 8's fork
+/// point was one merge early, so what the previous mission brought counted as
+/// brought by this one; and gate 4 turns red the moment anything on the base
+/// between the two is a protected path — which is what this test uses,
+/// because it is the one of the three that answers in a decision.
+#[test]
+fn the_gates_judge_against_the_base_the_branch_came_from() {
+    let dir = tempfile::tempdir().unwrap();
+    let origin = dir.path().join("origin");
+    std::fs::create_dir_all(&origin).unwrap();
+    git(&origin, &["init", "-q", "-b", "dev"]);
+    write(&origin, "AGENTS.md", "the rules of this place\n");
+    write(&origin, "deny.toml", "[bans]\n");
+    write(&origin, "src/lib.rs", "pub fn one() -> u8 { 1 }\n");
+    git(&origin, &["add", "-A"]);
+    git(&origin, &["commit", "-q", "-m", "base"]);
+
+    // The slot: a clone, so it has its own `dev`, here, for good.
+    let tree = dir.path().join("slot");
+    git(
+        dir.path(),
+        &["clone", "-q", origin.to_str().unwrap(), "slot"],
+    );
+
+    // The base moves on, and what lands on it touches a protected path — a
+    // human tightening `deny.toml`, which no agent may edit and every agent
+    // inherits.
+    write(
+        &origin,
+        "deny.toml",
+        "[bans]\nmultiple-versions = \"deny\"\n",
+    );
+    git(&origin, &["add", "-A"]);
+    git(
+        &origin,
+        &["commit", "-q", "-m", "a human tightens the bans"],
+    );
+
+    // This mission's branch, from `origin/dev` as `run::branch` makes it, and
+    // one commit of its own, well inside its perimeter.
+    git(&tree, &["fetch", "-q", "origin"]);
+    git(&tree, &["checkout", "-q", "-b", "mission/x", "origin/dev"]);
+    write(&tree, "src/mine.rs", "pub fn three() -> u8 { 3 }\n");
+    git(&tree, &["add", "-A"]);
+    git(&tree, &["commit", "-q", "-m", "feat(L1): mine"]);
+
+    let mut f = Fixture::new();
+    f.tree = tree;
+    f.journal = journal(dir.path(), &git(&f.tree, &["rev-parse", "HEAD"]));
+
+    let report = f.gates(Role::Coder);
+
+    let perimeter = report
+        .outcomes
+        .iter()
+        .find(|o| o.gate == Gate::Perimeter)
+        .expect("gate 4 is played");
+    assert_eq!(
+        perimeter.decision,
+        Decision::Passed,
+        "the gate judged against the slot's stale `dev`, and blamed this branch \
+         for a protected path the base already carried"
+    );
+}
+
 /// The rulings a human left reach the script as an argument, at the path
 /// `nunki` fixes. An environment variable would be the agent's to set, and a
 /// path it could set is a file it could write.
