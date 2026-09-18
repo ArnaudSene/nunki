@@ -1316,6 +1316,24 @@ dernier lot. La première rouge arrête tout.
      l'installe maintenant dans son image, après `USER agent` : posé en root,
      il atterrit là où le seul utilisateur qui le lance ne peut pas le lire.
 
+   **Une cinquième, mesurée le 2026-09-18 : une campagne qui n'a pas pu
+   tourner rendait la réponse de la précédente.** Le script avale le statut de
+   l'outil — `|| true`, et c'est juste, une campagne avec survivants sort en 2
+   et c'est un résultat. Mais une campagne qui échoue *avant* les mutants ne
+   crée aucun dossier de sortie : `mutants.out` est encore celui d'avant, et
+   le script y lit des survivants d'une campagne qui n'a jamais eu lieu, sur
+   du code qui a changé depuis. Le rejeu d'une même empreinte revient au même
+   chemin, donc le cas est atteignable.
+
+   Ce n'est pas le cas nominal : mesuré le même jour, une campagne qui atteint
+   les mutants fait tourner `mutants.out` en `mutants.out.old` et en écrit un
+   neuf — une seconde campagne qui tue tout laisse bien `missed.txt` vide. Le
+   script **vide donc son dossier avant de lancer** : le même échec ne laisse
+   alors rien, et la garde `[ ! -f missed.txt ]` dit « la campagne n'a rien
+   laissé », ce qui est la vérité. Une porte 7 qui ne peut pas dire « je n'ai
+   pas pu mesurer » ment — c'est la règle du 4.4 sur la base d'avis, ici pour
+   la campagne.
+
    Un test live joue le script **tel que `nunki init` le dépose** sur un crate
    d'exemple dont une fonction n'a aucun test, et lit ses survivants avec le
    parseur de la porte 7. C'est ce qu'AGENTS.md § 4 appelle prouver en

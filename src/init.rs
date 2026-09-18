@@ -530,9 +530,26 @@ if [ -z "$files" ]; then
 fi
 
 out="target/mutants-$campaign"
+# Cleared, and then made. Not because a campaign that runs would leave the
+# previous one's answer — measured on cargo-mutants 27.1.0, a run that reaches
+# the mutants rotates `mutants.out` to `mutants.out.old` and writes a fresh
+# one, so a second campaign that kills everything leaves `missed.txt` empty,
+# as it should.
+#
+# It is a campaign that **cannot run** that lies. Measured the same day, on a
+# crate made not to parse: cargo-mutants fails before it creates an output
+# directory, `mutants.out` is still the previous campaign's, and this script's
+# `|| true` then reads survivors from a campaign that never happened — on code
+# that has changed since. A replay of the same fingerprint reuses the same
+# path, so it is reachable.
+#
+# Cleared first, the same failure leaves nothing, and the `[ ! -f "$missed" ]`
+# below says "the campaign left no missed.txt" — which is the truth.
+#
 # The parent has to exist: `--output` creates its own directory and not the
 # path above it, and a clean copy of HEAD that has never been built has no
 # `target/` at all ("create output parent directory", measured).
+rm -rf "$out"
 mkdir -p "$out"
 
 # A campaign that finds survivors exits non-zero — 2, measured on
