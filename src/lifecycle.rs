@@ -249,6 +249,24 @@ pub fn retry(project: &Project, id: &str, why: &str) -> Result<MissionState, Lif
         });
     };
 
+    // Refused before anything is written. The record below is read by the next
+    // run as a statement of fact — "the bounds are handed back whole" — and a
+    // retry the flow refuses leaves the mission exactly where it was. Measured
+    // on 2026-09-18 against a real HQ: five records in `FOLLOWUP_HQ.md` for
+    // three retries, the other two about a mission that had not moved.
+    //
+    // On a copy, so that the order the comment below asks for still holds: the
+    // record lands before the state does. The transition is a pure function of
+    // the flow, so playing it twice on the same flow answers the same thing —
+    // and asking the flow beats restating its rules here, which is why the
+    // check above stops at "not handed over".
+    state
+        .flow
+        .clone()
+        .advance(crate::mission::flow::Event::Retried {
+            because: why.trim().to_string(),
+        })?;
+
     // Written where the agent reads, and before the transition: a retry whose
     // record did not land is a retry the next run cannot act on.
     let paths = Paths::of(&project.hq_root, id);
