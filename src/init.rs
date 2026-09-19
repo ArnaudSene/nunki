@@ -505,8 +505,11 @@ const MUTATION_RUST: &str = r#"#!/bin/sh
 #
 # It prints **one JSON object per line** on stdout, one per surviving mutant:
 #   {"id":"…","file":"…","line":12,"description":"…"}
-# `nunki` ignores anything that is not one, so progress may go to stdout freely —
-# though this script keeps the tool's own chatter on stderr.
+# and, last of all and exactly once, the line that says it got to the end:
+#   {"campaign":"done"}
+# `nunki` reads no other line as a result, so progress may go to stdout freely —
+# though this script keeps the tool's own chatter on stderr. A campaign that
+# stops before that last line has measured nothing, whatever else it printed.
 #
 # `--in-place` is not a detail: cargo-mutants only reuses a build cache in
 # place, and the copy this runs in has its own, warmed once per slot and kept.
@@ -602,6 +605,18 @@ while IFS= read -r mutant; do
   printf '{"id":"%s","file":"%s","line":%s,"description":"%s"}\n' \
     "$(escape "$mutant")" "$file" "$line" "$(escape "$what")"
 done < "$missed"
+
+# The last thing it prints, and the only line that says the campaign got to
+# the end. Without it `nunki` cannot tell "no survivor" from "no answer": a
+# campaign killed halfway, one whose container went away and one that never
+# compiled all leave a log that parses to zero survivors — and gate 7 would go
+# green on a measurement nobody made.
+#
+# A line and not an exit status, because the status does not survive. The
+# spawner `exec`s the command so that the pid it published is the campaign's
+# own, and a shell that has been replaced cannot write `$?`. A truncated log
+# loses its last line, which is this one, so the three failures fail alike.
+printf '{"campaign":"done"}\n'
 "#;
 
 /// How a Rust application is started (SPEC 4.2, rule 2). Shipped by the
