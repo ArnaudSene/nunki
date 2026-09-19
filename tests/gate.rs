@@ -1286,6 +1286,7 @@ fn report_of(decisions: &[(Gate, Decision)]) -> gate::Report {
                 gate: *gate,
                 decision: decision.clone(),
                 note: None,
+                waits_on_campaign: false,
             })
             .collect(),
     }

@@ -1336,6 +1336,17 @@ dernier lot. La première rouge arrête tout.
    absente, et une porte que personne n'a pu jouer arrête la vérification au
    lieu d'ouvrir un volet. La mission attend la campagne au lieu de la payer.
 
+   **Mais attendre une campagne n'est pas un mur.** Une porte non jouée arrête
+   normalement le flux : rien n'est décidé, et aucun run n'y changerait quoi
+   que ce soit. La campagne, elle, est le seul obstacle que `nunki` lève
+   lui-même — c'est déjà la distinction que la porte 7 fait quand elle en
+   réclame une. Une porte qui se retire *pendant* qu'une campagne tourne est
+   donc le même obstacle vu de l'autre côté, et si elle compte comme mur, le
+   tour s'arrête avant de relire la campagne : les portes restent retirées
+   pour toujours. Mesuré sur `notes-4` le 2026-09-18 — 146 tours de `verify`,
+   chacun annonçant une campagne en vol, aucun ne la relisant. Le constat
+   porte donc un drapeau, et non une phrase que le flux relirait.
+
    **Une cinquième, mesurée le 2026-09-18 : une campagne qui n'a pas pu
    tourner rendait la réponse de la précédente.** Le script avale le statut de
    l'outil — `|| true`, et c'est juste, une campagne avec survivants sort en 2

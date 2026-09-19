@@ -105,6 +105,14 @@ pub struct Outcome {
     /// how many survivors passed on an outcome no gate can check — left
     /// unsaid, that outcome becomes the escape hatch that empties the gate.
     pub note: Option<String>,
+    /// Set when this gate could not be played **because a mutation campaign
+    /// is in flight**. Unplayed like any other, to a human; to the flow, the
+    /// one obstacle `nunki` clears itself rather than a wall it must stop at.
+    ///
+    /// A flag and not a sentence read back: [`Report::campaign_owed`] says
+    /// why — a flow that told the two apart by matching on a string would
+    /// start doing something else the day the string was reworded.
+    pub waits_on_campaign: bool,
 }
 
 impl Outcome {
@@ -113,6 +121,17 @@ impl Outcome {
             gate,
             decision,
             note: None,
+            waits_on_campaign: false,
+        }
+    }
+
+    /// A gate standing down while the campaign rewrites the copy of `HEAD`.
+    fn waiting(gate: Gate, why: &str) -> Self {
+        Self {
+            gate,
+            decision: Decision::Unplayed(why.to_string()),
+            note: None,
+            waits_on_campaign: true,
         }
     }
 }
@@ -198,6 +217,17 @@ impl Report {
             let Decision::Unplayed(why) = &outcome.decision else {
                 continue;
             };
+            // A gate that stood down *while* a campaign runs is the same
+            // obstacle seen from the other side, and must not turn the report
+            // into a wall: the flow would stop, nothing would read the
+            // campaign back, and the gates would stand down for ever.
+            //
+            // Measured on `notes-4`, 2026-09-18: 146 turns of `verify`, each
+            // one reporting a campaign in flight and none of them reading it
+            // back.
+            if outcome.waits_on_campaign {
+                continue;
+            }
             if outcome.gate != Gate::Mutation {
                 return None;
             }
@@ -292,6 +322,10 @@ enum Phase {
 
 fn play(subject: &Subject, verification: &Verification, phase: Phase) -> Result<Report, GateError> {
     let head = git::head(subject.tree)?;
+    // Asked once, here, and not inside the two gates that would have to
+    // answer it: the gates stand down together or not at all, and the flow
+    // needs to know **that** is why they did.
+    let campaign = campaign_in_flight(subject);
     let mut outcomes = vec![
         Outcome::of(Gate::CleanTree, clean_tree(subject)?),
         Outcome::of(Gate::BranchAhead, branch_ahead(subject)?),
@@ -300,13 +334,19 @@ fn play(subject: &Subject, verification: &Verification, phase: Phase) -> Result<
     ];
     if phase == Phase::Final {
         outcomes.push(Outcome::of(Gate::Deliverable, deliverable(subject)?));
-        outcomes.push(Outcome::of(Gate::Battery, battery(subject, verification)?));
+        outcomes.push(match &campaign {
+            Some(why) => Outcome::waiting(Gate::Battery, why),
+            None => Outcome::of(Gate::Battery, battery(subject, verification)?),
+        });
         outcomes.push(mutation(subject)?);
     }
-    outcomes.push(Outcome::of(
-        Gate::MechanicalSecurity,
-        mechanical_security(subject, verification)?,
-    ));
+    outcomes.push(match &campaign {
+        Some(why) => Outcome::waiting(Gate::MechanicalSecurity, why),
+        None => Outcome::of(
+            Gate::MechanicalSecurity,
+            mechanical_security(subject, verification)?,
+        ),
+    });
     Ok(Report {
         role: subject.role,
         head,
@@ -796,9 +836,6 @@ fn mechanical_security(
     // branch is ahead of its base, so the fork point is an ancestor of `HEAD`
     // and is in the copy by construction. The tip is not — a slot's base can
     // move after the copy was cloned, and then the commit would not be there.
-    if let Some(why) = campaign_in_flight(subject) {
-        return Ok(Decision::Unplayed(why));
-    }
     //
     // Through `base_ref`, because a slot is a clone: its base may exist only
     // as `origin/<base>`, and that is gate 2's reading of the same name. A base
@@ -968,9 +1005,6 @@ fn battery(subject: &Subject, verification: &Verification) -> Result<Decision, G
              battery"
                 .into(),
         ));
-    }
-    if let Some(why) = campaign_in_flight(subject) {
-        return Ok(Decision::Unplayed(why));
     }
     let script = match subject.role {
         Role::Integrator => SYSTEM_BATTERY,
