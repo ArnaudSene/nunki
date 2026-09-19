@@ -71,10 +71,67 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Tests
-        # The `#[ignore]`d ones stay out: one needs a human's subscription,
-        # the others lift real containers. They are run by hand, and the
-        # journal says when.
+        # The `#[ignore]`d ones stay out here and are played by the job
+        # below, where there is an engine to play them with.
         run: cargo test --all-features
+
+  # The `#[ignore]`d tests that need nothing but a container engine.
+  #
+  # They were run by hand, which meant they were run when somebody
+  # remembered. Measured on 2026-09-19, playing all of them for the first
+  # time in a while: three were red. Two were fixtures that had fallen behind
+  # a contract changed two days earlier — gate 8's script, and the line a
+  # campaign prints to say it finished — and would have gone red in the pull
+  # request that changed it. A proof nobody plays is a proof that rots, and
+  # this repository's own doctrine says a check that quietly skips reads as a
+  # pass.
+  #
+  # **Blocking, like every other job here.** A container job that may fail
+  # without stopping a merge is a signal nobody has to act on, and teaching
+  # people to ignore a red check costs more than the check is worth. Anything
+  # flaky in it is a defect to fix, not noise to tolerate.
+  #
+  # Two are still out, and for reasons no runner can change: the headless run
+  # spends a human's subscription, and the forge tests need a token this
+  # workflow is not given. They self-skip without one, which is why they are
+  # named here rather than silently absent.
+  #
+  # Ubuntu only: the macOS runner ships no container engine, which is also
+  # why the job above prints what it found.
+  containers:
+    name: containers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Show what the runner brought
+        run: docker compose version
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: containers-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: containers-cargo-
+
+      - name: The live tests, one suite at a time
+        # One binary at a time and one thread inside it: these lift containers
+        # under names derived from the test, and a collision between two of
+        # them would read as a defect in whichever lost the race.
+        run: |
+          set -eu
+          for suite in exec engine firewall gate launch mutants probe run verify; do
+            echo "::group::$suite"
+            cargo test --all-features --test "$suite" -- --ignored --test-threads=1
+            echo "::endgroup::"
+          done
+
+      - name: Leave nothing behind
+        if: always()
+        run: docker ps -aq | xargs -r docker rm -f
 
   supply-chain:
     name: supply chain

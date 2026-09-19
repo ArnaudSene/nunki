@@ -488,7 +488,8 @@ fn live_a_campaign_is_launched_watched_and_read_back() {
          \"description\":\"replace one with 0\"}'\n\
          echo 'not a survivor, just chatter'\n\
          echo '{\"id\":\"src/lib.rs:1b\",\"file\":\"src/lib.rs\",\"line\":1,\
-         \"description\":\"replace one with 255\"}'\n",
+         \"description\":\"replace one with 255\"}'\n\
+         echo '{\"campaign\":\"done\"}'\n",
     )
     .unwrap();
     #[cfg(unix)]
