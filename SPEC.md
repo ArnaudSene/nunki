@@ -1336,6 +1336,22 @@ dernier lot. La première rouge arrête tout.
    absente, et une porte que personne n'a pu jouer arrête la vérification au
    lieu d'ouvrir un volet. La mission attend la campagne au lieu de la payer.
 
+   **Et ce qui garde cette copie est éprouvé contre un vrai système de
+   fichiers.** Les doubles de test du projet répondent à chaque `exec` par une
+   sortie préparée, quel que soit l'argv : ils n'ont donc aucun dossier qu'un
+   `git reset --hard` pourrait détruire, aucun processus qu'un `stop` pourrait
+   tuer, et aucun statut de sortie d'où quoi que ce soit pourrait venir. Six
+   défauts d'orchestration ont traversé cinq cents tests bâtis dessus, et
+   chacun était une interaction entre une vraie commande et un vrai état.
+
+   Un moteur **local** exécute donc ce qu'on lui donne, ici, en réécrivant les
+   chemins du conteneur vers des répertoires temporaires. Il ne remplace pas
+   les tests live sur un vrai conteneur, qui restent la seule preuve qui
+   compte : il tourne là où ceux-là ne tournent jamais, dans la CI. Et ce
+   qu'il ne fait pas, il le refuse au lieu de faire semblant — un double qui
+   réussit silencieusement ce qu'il n'implémente pas est le défaut qu'il
+   remplace, un étage plus bas.
+
    **Et la copie propre a un propriétaire, pas une consigne.** Le registre de
    la campagne en vol est classé **par slot** — `hq/campaigns/<slot>.json` — et
    non par mission, parce que ce dont il parle appartient au slot : tout ce qui
