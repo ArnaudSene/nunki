@@ -176,7 +176,10 @@ impl Report {
     /// mutation campaign that had not been run cost three coder runs — each
     /// one reading the same instruction, saying it could not act on it, and
     /// stopping — before a human held the mission.
-    pub fn failed(&self) -> Option<String> {
+    /// The first red gate. Private: [`Self::verdict`] is what the flow asks,
+    /// and a second reading of the same outcomes is what this module spent a
+    /// day removing.
+    fn failed(&self) -> Option<String> {
         self.outcomes.iter().find_map(|o| match &o.decision {
             Decision::Failed(why) => Some(format!(
                 "gate {} ({}): {why}",
@@ -187,58 +190,86 @@ impl Report {
         })
     }
 
-    /// The first gate that could not be played at all, and what it wants —
-    /// the sentence names the verb that would unblock it.
-    pub fn unplayed(&self) -> Option<String> {
-        self.outcomes.iter().find_map(|o| match &o.decision {
-            Decision::Unplayed(why) => Some(format!(
-                "gate {} ({}) could not be played: {why}",
-                o.gate.number(),
-                o.gate.title()
-            )),
-            _ => None,
-        })
-    }
-
-    /// The campaign gate 7 has no usable one of — **when that is the only
-    /// gate nobody could play**.
+    /// What this report means for the flow, decided **once**.
     ///
-    /// Told apart from [`Self::unplayed`] because this is the one obstacle
-    /// `nunki` can clear itself: gate 7 is unplayed when no campaign has run
-    /// or when the one on file ran on other content, and running one answers
-    /// both. Every other unplayed gate waits on a human (SPEC 4.4).
+    /// Four answers and one reading of them. They used to be three
+    /// projections — `failed`, `unplayed`, `campaign_owed` — recombined by
+    /// hand at five sites in `verify`, and the recombination is where the
+    /// defects were: a new reason for a gate to be unplayed changed what the
+    /// old rule meant at all five, silently.
     ///
-    /// Only when it is alone: a profile that will not come up leaves gate 6
-    /// unplayed too, and spending an hour of mutation in front of a wall
-    /// nothing will move is an hour spent for nothing.
-    pub fn campaign_owed(&self) -> Option<String> {
-        let mut owed = None;
+    /// The order is the doctrine. Red first: it is the agent's to fix, and it
+    /// outranks a gate nobody could play, because then there is something to
+    /// send an agent back for. Then the campaign, which is the one obstacle
+    /// `nunki` clears itself. Then the wall, which waits on a human.
+    pub fn verdict(&self) -> Verdict {
+        if let Some(reason) = self.failed() {
+            return Verdict::Red(reason);
+        }
+        // Every gate nobody could play, and whether the campaign is what it
+        // waits on. Gate 7 unplayed **is** a campaign owed — no campaign has
+        // run, or the one on file ran on other content, and running one
+        // answers both. A gate that stood down *while* a campaign runs is the
+        // same obstacle seen from the other side.
+        let mut owed: Option<String> = None;
+        let mut wall: Option<&Outcome> = None;
         for outcome in &self.outcomes {
             let Decision::Unplayed(why) = &outcome.decision else {
                 continue;
             };
-            // A gate that stood down *while* a campaign runs is the same
-            // obstacle seen from the other side, and must not turn the report
-            // into a wall: the flow would stop, nothing would read the
-            // campaign back, and the gates would stand down for ever.
-            //
-            // Measured on `notes-4`, 2026-09-18: 146 turns of `verify`, each
-            // one reporting a campaign in flight and none of them reading it
-            // back.
-            if outcome.waits_on_campaign {
-                continue;
+            if outcome.gate == Gate::Mutation {
+                // Gate 7's own sentence first: it is the one that names the
+                // verb, where a gate standing down only says to look again.
+                owed = Some(why.clone());
+            } else if outcome.waits_on_campaign {
+                owed.get_or_insert_with(|| why.clone());
+            } else {
+                wall.get_or_insert(outcome);
             }
-            if outcome.gate != Gate::Mutation {
-                return None;
-            }
-            owed = Some(why.clone());
         }
-        owed
+        // A wall outranks the campaign, and this is the older rule kept: a
+        // profile that will not come up leaves gate 6 unplayed too, and
+        // spending an hour of mutation in front of a wall nothing will move
+        // is an hour spent for nothing.
+        if let Some(outcome) = wall {
+            let Decision::Unplayed(why) = &outcome.decision else {
+                unreachable!("only unplayed outcomes reach here")
+            };
+            return Verdict::Wall(format!(
+                "gate {} ({}) could not be played: {why}",
+                outcome.gate.number(),
+                outcome.gate.title()
+            ));
+        }
+        match owed {
+            Some(why) => Verdict::CampaignOwed(why),
+            None => Verdict::Green,
+        }
     }
 
     pub fn passed(&self) -> bool {
         self.failure().is_none()
     }
+}
+
+/// What a report means for the flow (SPEC 4.4).
+///
+/// One value and not three questions, because the three had to be asked in
+/// the right order and every caller asked them itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Verdict {
+    /// Every gate that applies was played and none is red.
+    Green,
+    /// A gate is red, and it is the agent's to fix.
+    Red(String),
+    /// A gate could not be played, and no run would change that: the profile
+    /// that is not up, the database nobody filled. The flow waits on a human,
+    /// and the sentence names the verb that unblocks it.
+    Wall(String),
+    /// The only thing in the way is a mutation campaign — one that has not
+    /// run, one that ran on other content, or one running right now that the
+    /// gates are standing down for. `nunki` clears this itself.
+    CampaignOwed(String),
 }
 
 #[derive(Debug, thiserror::Error)]

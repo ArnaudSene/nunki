@@ -776,13 +776,15 @@ fn a_battery_that_could_not_be_run_is_neither_green_nor_red() {
     // `failure()` folds the two on purpose — "is this green" has one answer —
     // but "what do I do about it" has two: a red gate is the agent's to fix,
     // and a gate nobody could play is not, so sending an agent back at it
-    // spends a run to be told the same thing again.
-    assert!(report.failed().is_none(), "{:?}", report.failed());
-    assert!(
-        report.unplayed().unwrap().contains("could not be played"),
-        "{:?}",
-        report.unplayed()
-    );
+    // spends a run to be told the same thing again. `verdict()` is that
+    // second question, and the flow asks it and nothing else.
+    let nunki::gate::Verdict::Wall(why) = report.verdict() else {
+        panic!(
+            "a gate nobody could play is not a red one: {:?}",
+            report.verdict()
+        );
+    };
+    assert!(why.contains("could not be played"), "{why}");
 }
 
 #[test]
@@ -1292,11 +1294,43 @@ fn report_of(decisions: &[(Gate, Decision)]) -> gate::Report {
     }
 }
 
-/// The one obstacle `nunki` clears itself, told apart from the ones it
-/// cannot: gate 7 without a usable campaign is a campaign to run, and any
-/// other unplayed gate is a wall.
+/// The four answers a report can give the flow, and the order they are asked
+/// in — which is the doctrine, not a detail.
+///
+/// They used to be three questions recombined by hand at five sites in
+/// `verify`, and the recombination is where the defects were: a new reason
+/// for a gate to be unplayed changed what the old rule meant at all five,
+/// silently. This is the whole decision, in one place, so a fifth reason
+/// meets one rule.
 #[test]
-fn a_gate_seven_with_no_campaign_is_a_campaign_owed_and_not_a_wall() {
+fn a_report_says_one_thing_to_the_flow() {
+    use nunki::gate::Verdict;
+
+    let green = report_of(&[
+        (Gate::Battery, Decision::Passed),
+        (Gate::Mutation, Decision::Passed),
+    ]);
+    assert_eq!(green.verdict(), Verdict::Green);
+
+    // Red first: it is the agent's to fix, and it outranks a gate nobody
+    // could play, because then there is something to send an agent back for.
+    let red = report_of(&[
+        (
+            Gate::Battery,
+            Decision::Failed("the battery came back 101".into()),
+        ),
+        (
+            Gate::Mutation,
+            Decision::Unplayed("no mutation campaign has run on this mission".into()),
+        ),
+    ]);
+    let Verdict::Red(why) = red.verdict() else {
+        panic!("{:?}", red.verdict());
+    };
+    assert!(why.contains("gate 6"), "{why}");
+
+    // Gate 7 without a usable campaign is a campaign to run, and the gate's
+    // own sentence is what the flow acts on — not one written a second time.
     let owed = report_of(&[
         (Gate::Battery, Decision::Passed),
         (
@@ -1304,34 +1338,14 @@ fn a_gate_seven_with_no_campaign_is_a_campaign_owed_and_not_a_wall() {
             Decision::Unplayed("no mutation campaign has run on this mission".into()),
         ),
     ]);
-    // The gate's own sentence, so the flow acts on the reason the report
-    // gives and not on one written a second time.
     assert_eq!(
-        owed.campaign_owed().as_deref(),
-        Some("no mutation campaign has run on this mission")
+        owed.verdict(),
+        Verdict::CampaignOwed("no mutation campaign has run on this mission".into())
     );
 
-    // A campaign on the content as it stands leaves nothing owed, and so
-    // does a gate 7 that is red: red is the agent's to fix, and an hour of
-    // mutation would not fix it.
-    for decision in [
-        Decision::Passed,
-        Decision::Failed("1 survivor(s) have no outcome".into()),
-        Decision::NotApplicable("system tests are not mutated".into()),
-    ] {
-        let report = report_of(&[
-            (Gate::Battery, Decision::Passed),
-            (Gate::Mutation, decision),
-        ]);
-        assert_eq!(report.campaign_owed(), None, "{:?}", report.outcomes);
-    }
-}
-
-/// A gate nobody could play *beside* gate 7 is a wall, and an hour of
-/// mutation in front of it would be an hour spent for nothing.
-#[test]
-fn a_campaign_is_not_owed_while_another_gate_is_unplayable_too() {
-    let report = report_of(&[
+    // A gate nobody could play *beside* gate 7 is a wall, and an hour of
+    // mutation in front of it would be an hour spent for nothing.
+    let wall = report_of(&[
         (
             Gate::Battery,
             Decision::Unplayed("the profile did not come up".into()),
@@ -1341,13 +1355,63 @@ fn a_campaign_is_not_owed_while_another_gate_is_unplayable_too() {
             Decision::Unplayed("no mutation campaign has run on this mission".into()),
         ),
     ]);
-    assert_eq!(report.campaign_owed(), None, "{:?}", report.outcomes);
-    // And the report still says what nobody could play: the first one, in
-    // specification order.
-    assert!(
-        report.unplayed().unwrap().contains("gate 6"),
+    let Verdict::Wall(why) = wall.verdict() else {
+        panic!(
+            "an hour of mutation in front of a wall: {:?}",
+            wall.verdict()
+        );
+    };
+    assert!(why.contains("gate 6"), "{why}");
+
+    // And a gate 7 that is answered leaves nothing owed.
+    for decision in [
+        Decision::Passed,
+        Decision::NotApplicable("system tests are not mutated".into()),
+    ] {
+        let report = report_of(&[
+            (Gate::Battery, Decision::Passed),
+            (Gate::Mutation, decision),
+        ]);
+        assert_eq!(report.verdict(), Verdict::Green, "{:?}", report.outcomes);
+    }
+}
+
+/// A gate standing down **while** a campaign runs is the same obstacle seen
+/// from the other side, in every phase — including the one where gate 7 is
+/// not played at all.
+///
+/// After a run, `nunki` plays gates 1 to 4 and 8, never 7. So gate 8 standing
+/// down for a campaign was the only unplayed gate in the report, gate 7 was
+/// not there to name the obstacle, and the old rule read it as a wall: the
+/// flow stopped, nothing read the campaign back, and the gate stood down for
+/// ever. The same for a gate 7 that has already answered while gates 6 and 8
+/// wait.
+#[test]
+fn a_gate_standing_down_for_a_campaign_is_never_a_wall() {
+    use nunki::gate::Verdict;
+
+    // After a run: gate 7 is not in the report at all.
+    let mut after_run = report_of(&[(Gate::MechanicalSecurity, Decision::Passed)]);
+    after_run.outcomes[0].decision = Decision::Unplayed("a campaign has been rewriting".into());
+    after_run.outcomes[0].waits_on_campaign = true;
+    assert_eq!(
+        after_run.verdict(),
+        Verdict::CampaignOwed("a campaign has been rewriting".into()),
         "{:?}",
-        report.unplayed()
+        after_run.outcomes
+    );
+
+    // And at the final gates, with gate 7 already answered.
+    let mut answered = report_of(&[
+        (Gate::Battery, Decision::Passed),
+        (Gate::Mutation, Decision::Passed),
+    ]);
+    answered.outcomes[0].decision = Decision::Unplayed("a campaign has been rewriting".into());
+    answered.outcomes[0].waits_on_campaign = true;
+    assert!(
+        matches!(answered.verdict(), Verdict::CampaignOwed(_)),
+        "{:?}",
+        answered.verdict()
     );
 }
 
