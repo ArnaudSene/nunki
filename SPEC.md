@@ -1821,7 +1821,7 @@ dernier lot. La première rouge arrête tout.
    vaut donc pour un secret comme pour un avis — et comme un secret n'a pas de
    `fix`, cette exception-là ne se retire jamais toute seule.
 
-   **Où elle vit : dans le QG du projet**, à `hq/SECRETS.txt`, et pas dans le
+   **Où elle vit : dans le HQ du projet**, à `hq/SECRETS.txt`, et pas dans le
    mécanisme propre à l'outil. Tranché par Arnaud le 2026-09-18, contre les
    deux autres emplacements :
 
@@ -1839,7 +1839,7 @@ dernier lot. La première rouge arrête tout.
      `deny.toml` y vit parce que la CI le lit et qu'un avis est public ;
      aucune des deux raisons ne vaut ici.
 
-   Le QG est à l'humain, il n'est jamais monté en entier, et il survit à
+   Le HQ est à l'humain, il n'est jamais monté en entier, et il survit à
    toutes les missions. Le fichier est monté **en lecture seule** dans le
    conteneur et passé au script en argument, comme la base d'avis : la pile
    dit ce dont elle a besoin, `nunki` dit où cela atterrit.
@@ -2012,7 +2012,7 @@ dernier lot. La première rouge arrête tout.
    « équivalent » de la porte 7 : *cet avis n'est pas à l'agent de le
    donner*. L'exception s'écrit dans la liste `ignore` de `deny.toml`, avec
    sa `reason` — tranché par Arnaud le 2026-09-17, **contre** une proposition
-   de la mettre au QG : c'est la convention de Rust, `deny.toml` doit vivre
+   de la mettre au HQ : c'est la convention de Rust, `deny.toml` doit vivre
    dans le dépôt puisque la CI s'en sert, et une exception de sécurité y est
    **relue en pull request** au lieu d'être enfouie là où personne ne la
    voit. L'agent ne peut pas l'écrire lui-même : `nunki init` met déjà
