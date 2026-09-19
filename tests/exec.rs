@@ -39,6 +39,74 @@ fn a_slot_with_no_profile_up_says_what_to_do_about_it() {
     assert!(said.contains("nunki slot rebuild"), "{said}");
 }
 
+/// A campaign in flight owns the clean copy of `HEAD`, and this is the door
+/// everything else reaches it through.
+///
+/// `mutation.sh` runs `cargo mutants --in-place` there for up to an hour,
+/// while `exec::run(On::Proof)` opens with `git reset --hard` and `git clean`.
+/// Whoever gets there second wrecks the other: the caller reads a mutant back
+/// as the project's code, and the campaign loses the tree under it. Measured
+/// on `notes-4`, 2026-09-18 — the battery came back 101 on a function whose
+/// body cargo-mutants had replaced, and the flow sent the coder back for it
+/// four times.
+///
+/// Gates 6 and 8 stand down on their own, one layer up. This is for the four
+/// callers that do not: `nunki exec`, `nunki mission gates`, and whatever asks
+/// next.
+#[test]
+fn nothing_touches_the_copy_a_campaign_is_rewriting() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    let slot = Slot {
+        name: "one".into(),
+        tree: dir.path().join("tree"),
+    };
+    let profile = nunki::run::profile_path(&project, &slot.name);
+    std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+    std::fs::write(&profile, "services: {}\n").unwrap();
+    nunki::mutants::write_running(
+        &project.hq_root,
+        &slot.name,
+        &nunki::mutants::Running {
+            fingerprint: "abc1234".into(),
+            head: "def5678".into(),
+            started_at: "2026-09-18T22:52:37Z".into(),
+            container: "cafe1234".into(),
+            pid: Some(41),
+            log: dir.path().join("mutants.log"),
+            deadline_minutes: 45,
+        },
+    )
+    .unwrap();
+    let engine = || -> Arc<dyn nunki::engine::Engine> {
+        Arc::new(nunki::engine::fake::FakeEngine::default())
+    };
+
+    let err = exec::run(&project, &slot, engine(), &["true".into()], On::Proof).unwrap_err();
+    let said = err.to_string();
+    assert!(said.contains("2026-09-18T22:52:37Z"), "{said}");
+    assert!(said.contains("reset --hard"), "{said}");
+
+    // The refresh on its own too: a campaign launcher calls it directly.
+    let err = exec::refresh(&project, &slot, engine()).unwrap_err();
+    assert!(err.to_string().contains("2026-09-18T22:52:37Z"), "{err}");
+
+    // The working tree is the agent's, and no campaign touches it.
+    assert!(
+        exec::run(&project, &slot, engine(), &["true".into()], On::Tree).is_ok(),
+        "the tree was refused for a campaign that is not in it"
+    );
+
+    // And once the campaign is gone, the door opens again — it fails further
+    // in, on a tree this fixture never made, which is the point: the refusal
+    // is no longer the answer.
+    nunki::mutants::forget_running(&project.hq_root, &slot.name).unwrap();
+    let after = exec::refresh(&project, &slot, engine())
+        .unwrap_err()
+        .to_string();
+    assert!(!after.contains("2026-09-18T22:52:37Z"), "{after}");
+}
+
 fn project(root: &Path) -> Project {
     Project::at(
         root.join("repo"),

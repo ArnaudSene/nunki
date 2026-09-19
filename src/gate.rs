@@ -325,7 +325,7 @@ fn play(subject: &Subject, verification: &Verification, phase: Phase) -> Result<
     // Asked once, here, and not inside the two gates that would have to
     // answer it: the gates stand down together or not at all, and the flow
     // needs to know **that** is why they did.
-    let campaign = campaign_in_flight(subject);
+    let campaign = campaign_in_flight(verification);
     let mut outcomes = vec![
         Outcome::of(Gate::CleanTree, clean_tree(subject)?),
         Outcome::of(Gate::BranchAhead, branch_ahead(subject)?),
@@ -988,8 +988,12 @@ fn mechanical_security(
 /// clears it on the turn that reads the campaign back, so a file left by a
 /// crash costs one unplayed turn and no more. Erring towards "I could not
 /// look" is the direction this project errs in.
-fn campaign_in_flight(subject: &Subject) -> Option<String> {
-    let running = crate::mutants::read_running(subject.mission_dir).ok()??;
+///
+/// Read by slot and not by mission, because that is what the copy belongs to.
+fn campaign_in_flight(verification: &Verification) -> Option<String> {
+    let running =
+        crate::mutants::read_running(&verification.project.hq_root, &verification.slot.name)
+            .ok()??;
     Some(format!(
         "a mutation campaign has been rewriting the clean copy of HEAD since {} — it \
          runs in place there, so this would judge a mutant and reset the tree under \

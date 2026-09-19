@@ -1336,6 +1336,21 @@ dernier lot. La première rouge arrête tout.
    absente, et une porte que personne n'a pu jouer arrête la vérification au
    lieu d'ouvrir un volet. La mission attend la campagne au lieu de la payer.
 
+   **Et la copie propre a un propriétaire, pas une consigne.** Le registre de
+   la campagne en vol est classé **par slot** — `hq/campaigns/<slot>.json` — et
+   non par mission, parce que ce dont il parle appartient au slot : tout ce qui
+   atteint cette copie sait dans quel slot il travaille, et pas quelle mission
+   a demandé. Classé par mission, le registre était introuvable par le code qui
+   doit le respecter.
+
+   Le refus vit **dans `exec::run(On::Proof)` et `exec::refresh`**, la porte
+   par laquelle tout passe, et non dans chaque appelant : « l'appelant doit y
+   penser » était la garde, et quatre d'entre eux n'y ont pas pensé — la
+   batterie, la porte 8, `nunki exec` et `nunki mission gates`. Il ne refuse
+   pas le lancement de la campagne elle-même : celle-ci rafraîchit et sonde
+   **avant** de déposer son registre, et ne retouche plus la copie ensuite.
+   L'arbre de travail, lui, n'est jamais refusé : aucune campagne n'y est.
+
    **Mais attendre une campagne n'est pas un mur.** Une porte non jouée arrête
    normalement le flux : rien n'est décidé, et aucun run n'y changerait quoi
    que ce soit. La campagne, elle, est le seul obstacle que `nunki` lève

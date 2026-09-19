@@ -1679,8 +1679,10 @@ fn the_gates_judge_against_the_base_the_branch_came_from() {
 #[test]
 fn the_gates_that_run_in_the_copy_stand_down_while_a_campaign_rewrites_it() {
     let f = Fixture::new();
+    let (project, slot) = f.context();
     nunki::mutants::write_running(
-        f._dir.path(),
+        &project.hq_root,
+        &slot.name,
         &nunki::mutants::Running {
             fingerprint: "a62d271".into(),
             head: git(&f.tree, &["rev-parse", "HEAD"]),

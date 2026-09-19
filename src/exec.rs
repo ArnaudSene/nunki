@@ -52,6 +52,13 @@ pub enum ExecError {
     NoProfile(String),
     #[error("the copy of HEAD could not be refreshed:\n{0}")]
     Refresh(String),
+    #[error(
+        "a mutation campaign has owned slot {slot:?}'s copy of HEAD since {since}: running \
+         here would `git reset --hard` the tree it is mutating, and read a mutant back as \
+         this project's code. Wait for it, or end it — `nunki mission mutants <id>` says \
+         where it is"
+    )]
+    CampaignInFlight { slot: String, since: String },
     #[error(transparent)]
     Engine(#[from] EngineError),
     #[error(transparent)]
@@ -76,10 +83,12 @@ pub fn run(
 
     let at = match on {
         On::Proof => {
+            refuse_under_a_campaign(project, slot)?;
             let head = git::head(&slot.tree)?;
             refresh_at(&engine, &file, &compose_project, &head)?;
             PROOF_AT.to_string()
         }
+        // The working tree is the agent's, and no campaign touches it.
         On::Tree => crate::run::TREE_AT.to_string(),
     };
     // The engine's `exec` has no working directory of its own, and adding
@@ -112,11 +121,40 @@ pub fn run(
 /// is where the build cache lives. With `-x` the cache would go and gate 7
 /// would recompile from cold every campaign, which SPEC 4.4 explicitly
 /// refuses.
+/// A campaign in flight owns the clean copy of `HEAD`.
+///
+/// `mutation.sh` runs `cargo mutants --in-place` there, for up to an hour,
+/// while [`refresh_at`] below opens with `git reset --hard` and `git clean`.
+/// Whoever gets there second wrecks the other: the caller reads a mutant back
+/// as the project's code, and the campaign loses the tree under it.
+///
+/// Here rather than in each caller, because "the caller must remember" was
+/// the guard, and four of them did not: the battery, gate 8, `nunki exec` and
+/// `nunki mission gates`. This is the one door they all go through (SPEC 4.4,
+/// "toute porte qui travaille dans cette copie y arrive par
+/// `exec::run(On::Proof)`").
+///
+/// It does not refuse the campaign's own launch: `mutants::campaign` refreshes
+/// and probes **before** it files the record, and never touches the copy
+/// after.
+fn refuse_under_a_campaign(project: &Project, slot: &Slot) -> Result<(), ExecError> {
+    let running = crate::mutants::read_running(&project.hq_root, &slot.name)
+        .map_err(|e| ExecError::Refresh(e.to_string()))?;
+    match running {
+        Some(running) => Err(ExecError::CampaignInFlight {
+            slot: slot.name.clone(),
+            since: running.started_at,
+        }),
+        None => Ok(()),
+    }
+}
+
 pub fn refresh(project: &Project, slot: &Slot, engine: Arc<dyn Engine>) -> Result<(), ExecError> {
     let file = crate::run::profile_path(project, &slot.name);
     if !file.is_file() {
         return Err(ExecError::NoProfile(slot.name.clone()));
     }
+    refuse_under_a_campaign(project, slot)?;
     let compose_project = crate::compose::project_name(&project.session(), &slot.name)?;
     let head = git::head(&slot.tree)?;
     refresh_at(&engine, &file, &compose_project, &head)
