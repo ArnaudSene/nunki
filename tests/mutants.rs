@@ -125,32 +125,8 @@ fn a_campaign_found_stopped_writes_no_result() {
     use nunki::engine::{ExecOutput, fake::FakeEngine};
 
     let dir = tempfile::tempdir().unwrap();
-    let tree = repo(dir.path());
-    let home = dir.path().join("nunki");
-    let project = nunki::project::Project::at(
-        tree.clone(),
-        nunki::project::Config {
-            root: None,
-            harness: "claude-code".into(),
-            forge: vec![],
-            stacks: vec!["rust".into()],
-            protected_branches: vec![],
-            protected_paths: Default::default(),
-            account: None,
-            model: None,
-            bounds: Default::default(),
-            credentials: None,
-            run: None,
-            services_file: None,
-            permission_mode: "auto".to_string(),
-            forge_protection: Default::default(),
-        },
-        home,
-    );
-    let slot = nunki::slot::Slot {
-        name: "one".into(),
-        tree: tree.clone(),
-    };
+    let (project, slot) = context(dir.path());
+    let tree = slot.tree.clone();
     let profile = nunki::run::profile_path(&project, &slot.name);
     std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
     std::fs::write(&profile, "services: {}\n").unwrap();
@@ -214,6 +190,189 @@ fn a_campaign_found_stopped_writes_no_result() {
         mutants::read_running(&project.hq_root, &slot.name)
             .unwrap()
             .is_none()
+    );
+}
+
+/// A project and a slot a campaign can be launched in, on a real repository.
+fn context(dir: &Path) -> (nunki::project::Project, nunki::slot::Slot) {
+    let tree = repo(dir);
+    let project = nunki::project::Project::at(
+        tree.clone(),
+        nunki::project::Config {
+            root: None,
+            harness: "claude-code".into(),
+            forge: vec![],
+            stacks: vec!["rust".into()],
+            protected_branches: vec![],
+            protected_paths: Default::default(),
+            account: None,
+            model: None,
+            bounds: Default::default(),
+            credentials: None,
+            run: None,
+            services_file: None,
+            permission_mode: "auto".to_string(),
+            forge_protection: Default::default(),
+        },
+        dir.join("nunki"),
+    );
+    let slot = nunki::slot::Slot {
+        name: "one".into(),
+        tree,
+    };
+    (project, slot)
+}
+
+/// What a launch does with the campaign it is about to kill.
+///
+/// `run::launch` recreates the agent's container, and a campaign is a
+/// detached process inside it: it dies either way. Three states, three
+/// answers, and only one of them is a killing.
+#[test]
+fn a_launch_ends_the_campaign_it_would_have_killed_anyway() {
+    use nunki::engine::{ExecOutput, Liveness, fake::FakeEngine};
+
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot) = context(dir.path());
+    let profile = nunki::run::profile_path(&project, &slot.name);
+    std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+    std::fs::write(&profile, "services: {}\n").unwrap();
+    let mission = dir.path().join("mission");
+    std::fs::create_dir_all(&mission).unwrap();
+    let log = mission.join("mutants.log");
+    std::fs::write(&log, "").unwrap();
+
+    let file = |what: &str| -> std::sync::Arc<dyn nunki::engine::Engine> {
+        mutants::write_running(
+            &project.hq_root,
+            &slot.name,
+            &mutants::Running {
+                fingerprint: "abc1234".into(),
+                head: "def5678".into(),
+                started_at: "2026-09-18T22:52:37Z".into(),
+                container: "cafe1234".into(),
+                pid: Some(41),
+                log: log.clone(),
+                // Never overrun, so that "still running" stays the answer
+                // however long after 2026-09-18 this test is played: the
+                // deadline has its own arm, and it is not what this is about.
+                deadline_minutes: u32::MAX,
+            },
+        )
+        .unwrap();
+        std::sync::Arc::new(
+            FakeEngine::default()
+                .with_liveness("cafe1234", Liveness::Running)
+                .with_exec(ExecOutput {
+                    status: 0,
+                    stdout: format!("{what}\n"),
+                    stderr: String::new(),
+                }),
+        )
+    };
+
+    // Nothing filed: nothing to end, and nothing said.
+    let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+        std::sync::Arc::new(FakeEngine::default());
+    assert_eq!(
+        nunki::run::end_campaign_before_switching(&project, &slot, engine, &mission).unwrap(),
+        None
+    );
+
+    // Filed, and already over: read back, cleared, and nothing to end. This
+    // is what the check mostly does — a record outlives its campaign whenever
+    // something stopped before reading it.
+    assert_eq!(
+        nunki::run::end_campaign_before_switching(
+            &project,
+            &slot,
+            file("nunki-run-ended"),
+            &mission
+        )
+        .unwrap(),
+        None
+    );
+    assert!(
+        mutants::read_running(&project.hq_root, &slot.name)
+            .unwrap()
+            .is_none()
+    );
+
+    // Genuinely running: ended, and said since when.
+    assert_eq!(
+        nunki::run::end_campaign_before_switching(
+            &project,
+            &slot,
+            file("nunki-run-running"),
+            &mission
+        )
+        .unwrap(),
+        Some("2026-09-18T22:52:37Z".to_string())
+    );
+    assert!(
+        mutants::read_running(&project.hq_root, &slot.name)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        mutants::read(&mission).unwrap(),
+        None,
+        "a campaign cut short was recorded as a measurement"
+    );
+}
+
+/// `end` stops the campaign and records nothing.
+///
+/// What `run::launch` does when it finds one genuinely running: the switch it
+/// performs recreates the container the campaign lives in, so the campaign
+/// dies either way — and a campaign cut short measured nothing, so gate 7
+/// must ask for another rather than read this one.
+#[test]
+fn ending_a_campaign_records_no_result() {
+    use nunki::engine::fake::FakeEngine;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot) = context(dir.path());
+    let profile = nunki::run::profile_path(&project, &slot.name);
+    std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+    std::fs::write(&profile, "services: {}\n").unwrap();
+    let mission = dir.path().join("mission");
+    std::fs::create_dir_all(&mission).unwrap();
+    let log = mission.join("mutants.log");
+    // It had found something, and said nothing about being finished.
+    std::fs::write(
+        &log,
+        "{\"id\":\"a\",\"file\":\"src/lib.rs\",\"line\":3,\"description\":\"replace one\"}\n",
+    )
+    .unwrap();
+    mutants::write_running(
+        &project.hq_root,
+        &slot.name,
+        &mutants::Running {
+            fingerprint: "abc1234".into(),
+            head: "def5678".into(),
+            started_at: "2026-09-18T22:52:37Z".into(),
+            container: "cafe1234".into(),
+            pid: Some(41),
+            log,
+            deadline_minutes: 45,
+        },
+    )
+    .unwrap();
+    let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+        std::sync::Arc::new(FakeEngine::default());
+
+    mutants::end(&project, &slot, engine).unwrap();
+
+    assert!(
+        mutants::read_running(&project.hq_root, &slot.name)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        mutants::read(&mission).unwrap(),
+        None,
+        "a campaign cut short was recorded as a measurement"
     );
 }
 

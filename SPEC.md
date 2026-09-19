@@ -1351,6 +1351,30 @@ dernier lot. La première rouge arrête tout.
    **avant** de déposer son registre, et ne retouche plus la copie ensuite.
    L'arbre de travail, lui, n'est jamais refusé : aucune campagne n'y est.
 
+   **Et une campagne et un run d'agent ne partagent jamais un slot.** Dans le
+   flux, ils ne se croisent pas : `verify` ne lance une campagne qu'au stade
+   `Gates`, et seulement portes 1 à 5 déjà vertes — une porte rouge est
+   traitée avant, et le tour n'atteint jamais la campagne. Rien de ce que fait
+   la campagne ne peut ensuite les rougir : elle réécrit la copie propre de
+   `HEAD`, elles lisent l'arbre du slot. La mission reste donc à `Gates`
+   jusqu'à ce que la campagne soit relue, et aucun run n'est lancé.
+
+   Ce qui peut les croiser, c'est un verbe tapé hors du flux. `nunki mission
+   mutants` prend donc le verrou du slot et refuse pendant un run d'agent,
+   exactement comme `verify` — une campagne ne lève aucun profil, ce qui la
+   faisait passer pour inoffensive, et c'est la seule porte par laquelle les
+   deux se rencontrent.
+
+   Et `run::launch` **relit la campagne avant de basculer le conteneur**. La
+   relecture est l'essentiel de ce qu'elle fait : un registre survit à sa
+   campagne dès que quelque chose s'est arrêté avant de la relire, et il n'y a
+   alors rien à terminer. Une campagne vraiment en vol à cet endroit vient
+   d'un chemin non prévu ; elle est **terminée et dite**, parce que le
+   basculement recrée le conteneur où elle vit et qu'elle meurt de toute
+   façon — et parce qu'un slot qui se tait une heure sans rien rendre mérite
+   une phrase. Rien n'est écrit dans `MUTANTS.json` : une campagne écourtée
+   n'a rien mesuré.
+
    **Mais attendre une campagne n'est pas un mur.** Une porte non jouée arrête
    normalement le flux : rien n'est décidé, et aucun run n'y changerait quoi
    que ce soit. La campagne, elle, est le seul obstacle que `nunki` lève

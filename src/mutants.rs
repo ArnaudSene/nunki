@@ -486,6 +486,136 @@ pub fn started(mission: &str) -> String {
 // Eight, and the eighth is [`Replay`]. Folding them into a struct would be a
 // second change riding on this one; `run::plan` carries the same allow for
 // the same reason.
+/// Read back the campaign that owns this slot's clean copy, if one is filed.
+///
+/// `None` when nothing is filed. Otherwise what it is now — and the reading
+/// **clears the record** whenever the campaign is over, however it ended, so
+/// a caller that asks cannot be misled by a stale file.
+///
+/// Its own function because two callers need the answer and only one of them
+/// may launch: [`campaign`] below, and `run::launch`, which recreates the
+/// container a campaign lives in and would otherwise kill it blind.
+pub fn read_back(
+    project: &crate::project::Project,
+    slot: &crate::slot::Slot,
+    engine: std::sync::Arc<dyn crate::engine::Engine>,
+    dir: &Path,
+) -> Result<Option<Progress>, MutantsError> {
+    use crate::harness::spawn::{Presence, Signal, Spawned, Spawner};
+
+    let Some(running) = read_running(&project.hq_root, &slot.name)? else {
+        return Ok(None);
+    };
+    let spawner = crate::engine::spawn::ContainerSpawner::new(
+        engine,
+        crate::run::profile_path(project, &slot.name),
+        &crate::compose::project_name(&project.session(), &slot.name)
+            .map_err(|e| MutantsError::Exec(crate::exec::ExecError::Compose(e)))?,
+        crate::compose::AGENT_SERVICE,
+    )
+    .identified_by(&running.fingerprint);
+    let spawned = Spawned {
+        pid: running.pid,
+        container: running.container.clone(),
+    };
+    let presence = spawner
+        .alive(&spawned)
+        .map_err(|e| MutantsError::Launch(e.to_string()))?;
+    let text = std::fs::read_to_string(&running.log).unwrap_or_default();
+    let progress = match presence {
+        // A frozen campaign is still in flight, and its deadline must not run
+        // against a clock the human stopped on purpose. Reported as running,
+        // with the freeze named, rather than counted as an overrun.
+        Presence::Paused => Progress::Running {
+            started_at: running.started_at.clone(),
+            lines: text.lines().count(),
+        },
+        Presence::Running => {
+            if minutes_since(&running.started_at) > running.deadline_minutes {
+                // Stopped rather than left: SPEC 4.4 gives the campaign a
+                // configured delay, and a campaign past it is holding a slot,
+                // not working in it.
+                let _ = spawner.signal(&spawned, Signal::Terminate);
+                forget_running(&project.hq_root, &slot.name)?;
+                Progress::Overrun {
+                    minutes: running.deadline_minutes,
+                }
+            } else {
+                Progress::Running {
+                    started_at: running.started_at.clone(),
+                    lines: text.lines().count(),
+                }
+            }
+        }
+        // Ended, and it said so. Anything else is a campaign that stopped:
+        // nothing is written, so gate 7 keeps asking rather than passing on a
+        // log that happens to hold no survivor.
+        Presence::Ended if completed(&text) => {
+            let survivors = parse(&text);
+            write(
+                dir,
+                &Campaign {
+                    fingerprint: running.fingerprint.clone(),
+                    head: running.head.clone(),
+                    date: crate::state::now_rfc3339(),
+                    survivors: survivors.clone(),
+                },
+            )?;
+            forget_running(&project.hq_root, &slot.name)?;
+            Progress::Finished {
+                survivors: survivors.len(),
+            }
+        }
+        Presence::Ended => {
+            forget_running(&project.hq_root, &slot.name)?;
+            Progress::Lost(format!(
+                "it stopped without saying it had finished, after {} line(s): a campaign \
+                 that was killed, whose container went away, or that never compiled \
+                 leaves exactly this, and none of them measured anything. Its log is {}",
+                text.lines().count(),
+                running.log.display()
+            ))
+        }
+        Presence::Vanished(why) | Presence::Unknown(why) => {
+            forget_running(&project.hq_root, &slot.name)?;
+            Progress::Lost(why)
+        }
+    };
+    Ok(Some(progress))
+}
+
+/// End the campaign that owns this slot's clean copy, and forget it.
+///
+/// Nothing is written to [`FILE`]: a campaign cut short measured nothing, and
+/// gate 7 must ask for another rather than read this one (SPEC 4.4).
+pub fn end(
+    project: &crate::project::Project,
+    slot: &crate::slot::Slot,
+    engine: std::sync::Arc<dyn crate::engine::Engine>,
+) -> Result<(), MutantsError> {
+    use crate::harness::spawn::{Signal, Spawned, Spawner};
+
+    let Some(running) = read_running(&project.hq_root, &slot.name)? else {
+        return Ok(());
+    };
+    let spawner = crate::engine::spawn::ContainerSpawner::new(
+        engine,
+        crate::run::profile_path(project, &slot.name),
+        &crate::compose::project_name(&project.session(), &slot.name)
+            .map_err(|e| MutantsError::Exec(crate::exec::ExecError::Compose(e)))?,
+        crate::compose::AGENT_SERVICE,
+    )
+    .identified_by(&running.fingerprint);
+    let _ = spawner.signal(
+        &Spawned {
+            pid: running.pid,
+            container: running.container.clone(),
+        },
+        Signal::Terminate,
+    );
+    forget_running(&project.hq_root, &slot.name)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn campaign(
     project: &crate::project::Project,
@@ -497,7 +627,7 @@ pub fn campaign(
     deadline_minutes: u32,
     replay: Replay,
 ) -> Result<Progress, MutantsError> {
-    use crate::harness::spawn::{CommandSpec, Presence, Signal, Spawned, Spawner};
+    use crate::harness::spawn::{CommandSpec, Spawner};
 
     let head = git::head(&slot.tree)?;
     // The base's **name**, and the paths worked out here — not handed in.
@@ -515,87 +645,11 @@ pub fn campaign(
     let touched = crate::gate::touched_since_base(&slot.tree, base)
         .map_err(|e| MutantsError::Launch(e.to_string()))?;
     let want = fingerprint(&slot.tree, &touched)?;
-    let file = crate::run::profile_path(project, &slot.name);
     let compose_project = crate::compose::project_name(&project.session(), &slot.name)
         .map_err(|e| MutantsError::Exec(crate::exec::ExecError::Compose(e)))?;
 
-    if let Some(running) = read_running(&project.hq_root, &slot.name)? {
-        let spawner = crate::engine::spawn::ContainerSpawner::new(
-            engine.clone(),
-            file,
-            &compose_project,
-            crate::compose::AGENT_SERVICE,
-        )
-        .identified_by(&running.fingerprint);
-        let spawned = Spawned {
-            pid: running.pid,
-            container: running.container.clone(),
-        };
-        let presence = spawner
-            .alive(&spawned)
-            .map_err(|e| MutantsError::Launch(e.to_string()))?;
-        let text = std::fs::read_to_string(&running.log).unwrap_or_default();
-        return match presence {
-            // A frozen campaign is still in flight, and its deadline must
-            // not run against a clock the human stopped on purpose. Reported
-            // as running, with the freeze named, rather than counted as an
-            // overrun.
-            Presence::Paused => Ok(Progress::Running {
-                started_at: running.started_at.clone(),
-                lines: text.lines().count(),
-            }),
-            Presence::Running => {
-                if minutes_since(&running.started_at) > running.deadline_minutes {
-                    // Stopped rather than left: SPEC 4.4 gives the campaign a
-                    // configured delay, and a campaign past it is holding a
-                    // slot, not working in it.
-                    let _ = spawner.signal(&spawned, Signal::Terminate);
-                    forget_running(&project.hq_root, &slot.name)?;
-                    Ok(Progress::Overrun {
-                        minutes: running.deadline_minutes,
-                    })
-                } else {
-                    Ok(Progress::Running {
-                        started_at: running.started_at.clone(),
-                        lines: text.lines().count(),
-                    })
-                }
-            }
-            // Ended, and it said so. Anything else is a campaign that
-            // stopped: nothing is written, so gate 7 keeps asking rather than
-            // passing on a log that happens to hold no survivor.
-            Presence::Ended if completed(&text) => {
-                let survivors = parse(&text);
-                write(
-                    dir,
-                    &Campaign {
-                        fingerprint: running.fingerprint.clone(),
-                        head: running.head.clone(),
-                        date: crate::state::now_rfc3339(),
-                        survivors: survivors.clone(),
-                    },
-                )?;
-                forget_running(&project.hq_root, &slot.name)?;
-                Ok(Progress::Finished {
-                    survivors: survivors.len(),
-                })
-            }
-            Presence::Ended => {
-                forget_running(&project.hq_root, &slot.name)?;
-                Ok(Progress::Lost(format!(
-                    "it stopped without saying it had finished, after {} line(s): a \
-                     campaign that was killed, whose container went away, or that never \
-                     compiled leaves exactly this, and none of them measured anything. \
-                     Its log is {}",
-                    text.lines().count(),
-                    running.log.display()
-                )))
-            }
-            Presence::Vanished(why) | Presence::Unknown(why) => {
-                forget_running(&project.hq_root, &slot.name)?;
-                Ok(Progress::Lost(why))
-            }
-        };
+    if let Some(progress) = read_back(project, slot, engine.clone(), dir)? {
+        return Ok(progress);
     }
 
     // Nothing in flight. A campaign on this exact content is not run again:

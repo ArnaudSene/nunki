@@ -314,6 +314,52 @@ pub struct Launched {
     /// How the application was declared, so the caller can say it. `None`
     /// for the coder, who has nothing to start.
     pub launch: Option<crate::launch::Launch>,
+    /// A mutation campaign this launch ended, and since when it had been
+    /// running. `None` when there was none, which is the normal case.
+    pub campaign_ended: Option<String>,
+}
+
+/// End the mutation campaign this launch is about to kill, and say since
+/// when it had been running.
+///
+/// `launch` recreates the agent's container, and a campaign is a detached
+/// process inside it: it dies either way. What this adds is that it dies
+/// **on purpose**, and that a slot going quiet for an hour with nothing to
+/// show leaves a sentence.
+///
+/// Reading it back is most of the work, and most of what this does: a record
+/// outlives its campaign whenever something stopped before reading it, and
+/// then there is nothing to end at all.
+///
+/// One genuinely running here is not part of the flow. `verify` starts a
+/// campaign only at `Stage::Gates`, only with gates 1 to 5 already green, and
+/// nothing a campaign does can turn those red — it rewrites the clean copy of
+/// `HEAD`, and they read the slot's tree. So the mission stays at
+/// `Stage::Gates` until the campaign is read back, and no run is launched.
+/// What can put one here is a verb typed outside the flow.
+///
+/// Ended rather than waited for: this launch changes `HEAD`, so gate 7 would
+/// reject the campaign's fingerprint anyway. What it measured is already
+/// worth nothing.
+///
+/// Its own function so that the decision can be played without lifting a
+/// container: `launch` below is only ever exercised against a real engine.
+pub fn end_campaign_before_switching(
+    project: &Project,
+    slot: &Slot,
+    engine: Arc<dyn Engine>,
+    mission_dir: &std::path::Path,
+) -> Result<Option<String>, RunError> {
+    let read = crate::mutants::read_back(project, slot, engine.clone(), mission_dir)
+        .map_err(|e| RunError::Launch(e.to_string()))?;
+    match read {
+        Some(crate::mutants::Progress::Running { started_at, .. }) => {
+            crate::mutants::end(project, slot, engine)
+                .map_err(|e| RunError::Launch(e.to_string()))?;
+            Ok(Some(started_at))
+        }
+        _ => Ok(None),
+    }
 }
 
 /// Lift the role's profile and launch its run, on a slot whose lock the
@@ -390,6 +436,8 @@ pub fn launch(l: &Launching) -> Result<Launched, RunError> {
         std::fs::create_dir_all(dir).map_err(|e| RunError::Io(dir.to_path_buf(), e))?;
     }
     let compose_project = crate::compose::project_name(&project.session(), &slot.name)?;
+
+    let campaign_ended = end_campaign_before_switching(project, slot, engine.clone(), &paths.dir)?;
 
     // Step 2. The switch, read from the file that is up — the one that names
     // the services to remove. `stop` and never `down`: `down` would take the
@@ -486,6 +534,7 @@ pub fn launch(l: &Launching) -> Result<Launched, RunError> {
         run,
         app,
         launch: declared,
+        campaign_ended,
     })
 }
 

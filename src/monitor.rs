@@ -237,6 +237,9 @@ pub fn after_verify(result: &Result<Vec<Step>, VerifyError>) -> Next {
             Some(Step::CampaignOwed { .. }) => Next::RunCampaign,
             Some(
                 Step::Launched { .. }
+                // Said, not acted on: the launch that ended it is the step
+                // after, and that one goes on.
+                | Step::CampaignEnded { .. }
                 | Step::Saving { .. }
                 | Step::Waiting { .. }
                 | Step::Busy { .. }

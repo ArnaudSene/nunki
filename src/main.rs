@@ -996,6 +996,17 @@ fn main() -> ExitCode {
                                      mission's monitor looks again every minute"
                                 );
                             }
+                            nunki::verify::Step::CampaignEnded { since } => {
+                                println!(
+                                    "campaign  ended — one had been rewriting the clean copy \
+                                     of HEAD since {since}, and the launch below recreates \
+                                     the container it lives in"
+                                );
+                                println!(
+                                    "          nothing was recorded from it: gate 7 asks for \
+                                     another once this run is read back"
+                                );
+                            }
                             nunki::verify::Step::Launched { role, application } => {
                                 owed = true;
                                 println!("launched  a {role:?} run — {application}");
@@ -1730,6 +1741,40 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
+            // The slot's lock, and the same refusal `nunki verify` makes.
+            //
+            // A campaign lifts no profile, so this verb looked harmless — and
+            // it is the one door through which a campaign and an agent run
+            // ever meet. `cargo mutants` rewrites the clean copy of `HEAD` in
+            // the container the agent is working in, and the agent's next
+            // launch recreates that container and ends the campaign. In the
+            // flow they cannot overlap: `verify` starts a campaign only at
+            // `Stage::Gates`, with gates 1 to 5 green, and nothing a campaign
+            // does can turn those red. Typed by hand during a run, they do.
+            let locks = project.hq_root.join("locks");
+            let _lock = match nunki::state::SlotLock::acquire(&locks, &slot.name, "mission mutants")
+            {
+                Ok(lock) => lock,
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            if let Ok(state) = nunki::state::Store::open(&project.hq_root).and_then(|s| s.load(&id))
+            {
+                let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+                    std::sync::Arc::new(nunki::engine::docker::Docker::real());
+                if let Err(e) = nunki::verify::refuse_while_running(
+                    project,
+                    engine,
+                    &id,
+                    &state,
+                    nunki::state::now_secs(),
+                ) {
+                    eprintln!("nunki: {e}");
+                    return ExitCode::FAILURE;
+                }
+            }
             let stack = project
                 .config
                 .stacks
