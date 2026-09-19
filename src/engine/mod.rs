@@ -10,6 +10,7 @@
 pub mod cli;
 pub mod docker;
 pub mod fake;
+pub mod local;
 pub mod spawn;
 
 use std::path::Path;
