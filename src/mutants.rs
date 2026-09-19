@@ -40,10 +40,20 @@ pub const FILE: &str = "MUTANTS.json";
 /// write the third.
 pub const TRIAGE_FILE: &str = "MUTANTS.triage.json";
 
-/// The campaign in flight, beside it. Its own record on purpose: the mission
-/// state holds one run handle and that one belongs to the agent — a campaign
-/// filed there would show up in `nunki mission status` as an agent's run.
-pub const RUN_FILE: &str = "MUTANTS.run.json";
+/// Where the campaigns in flight are filed, under the HQ.
+///
+/// Its own record on purpose: the mission state holds one run handle and that
+/// one belongs to the agent — a campaign filed there would show up in `nunki
+/// mission status` as an agent's run.
+///
+/// And **keyed by slot, not by mission**, because the thing it speaks for is
+/// the slot's: `cargo mutants` rewrites the clean copy of `HEAD` in place, and
+/// everything that reaches that copy — `exec::run(On::Proof)`, `nunki exec`,
+/// `nunki mission gates`, the battery — knows which slot it is working in and
+/// not which mission asked. Filed per mission, the record could not be found
+/// by the code that has to respect it, and four callers walked over a running
+/// campaign because of it (SPEC 4.4).
+pub const CAMPAIGNS_DIR: &str = "campaigns";
 
 /// What the stack fragment declares. It prints the survivors on stdout, one
 /// JSON object per line, and `nunki` never parses a mutation tool itself: which
@@ -151,9 +161,15 @@ pub enum MutantsError {
     Launch(String),
 }
 
-/// Where the two files live for a mission.
-pub fn paths(dir: &Path) -> (PathBuf, PathBuf) {
-    (dir.join(FILE), dir.join(RUN_FILE))
+/// Where a mission's campaign result lives.
+pub fn paths(dir: &Path) -> PathBuf {
+    dir.join(FILE)
+}
+
+/// Where the record of the campaign rewriting **this slot's** clean copy
+/// lives, whether or not one is in flight.
+pub fn running_path(hq_root: &Path, slot: &str) -> PathBuf {
+    hq_root.join(CAMPAIGNS_DIR).join(format!("{slot}.json"))
 }
 
 /// The fingerprint of what a campaign would run on: the **content** of the
@@ -216,7 +232,7 @@ fn hash_object(tree: &Path, text: &str) -> Result<String, git::GitError> {
 
 /// Read the campaign a mission holds, if it holds one.
 pub fn read(dir: &Path) -> Result<Option<Campaign>, MutantsError> {
-    let (file, _) = paths(dir);
+    let file = paths(dir);
     let text = match std::fs::read_to_string(&file) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -252,8 +268,8 @@ pub fn write_triage(dir: &Path, triage: &BTreeMap<String, Triage>) -> Result<(),
     std::fs::write(&file, format!("{body}\n")).map_err(|e| MutantsError::Io(file, e))
 }
 
-pub fn read_running(dir: &Path) -> Result<Option<Running>, MutantsError> {
-    let (_, file) = paths(dir);
+pub fn read_running(hq_root: &Path, slot: &str) -> Result<Option<Running>, MutantsError> {
+    let file = running_path(hq_root, slot);
     let text = match std::fs::read_to_string(&file) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -265,19 +281,22 @@ pub fn read_running(dir: &Path) -> Result<Option<Running>, MutantsError> {
 }
 
 pub fn write(dir: &Path, campaign: &Campaign) -> Result<(), MutantsError> {
-    let (file, _) = paths(dir);
+    let file = paths(dir);
     let body = serde_json::to_string_pretty(campaign).expect("a campaign serialises");
     std::fs::write(&file, format!("{body}\n")).map_err(|e| MutantsError::Io(file, e))
 }
 
-pub fn write_running(dir: &Path, running: &Running) -> Result<(), MutantsError> {
-    let (_, file) = paths(dir);
+pub fn write_running(hq_root: &Path, slot: &str, running: &Running) -> Result<(), MutantsError> {
+    let file = running_path(hq_root, slot);
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| MutantsError::Io(dir.to_path_buf(), e))?;
+    }
     let body = serde_json::to_string_pretty(running).expect("a record serialises");
     std::fs::write(&file, format!("{body}\n")).map_err(|e| MutantsError::Io(file, e))
 }
 
-pub fn forget_running(dir: &Path) -> Result<(), MutantsError> {
-    let (_, file) = paths(dir);
+pub fn forget_running(hq_root: &Path, slot: &str) -> Result<(), MutantsError> {
+    let file = running_path(hq_root, slot);
     match std::fs::remove_file(&file) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -500,7 +519,7 @@ pub fn campaign(
     let compose_project = crate::compose::project_name(&project.session(), &slot.name)
         .map_err(|e| MutantsError::Exec(crate::exec::ExecError::Compose(e)))?;
 
-    if let Some(running) = read_running(dir)? {
+    if let Some(running) = read_running(&project.hq_root, &slot.name)? {
         let spawner = crate::engine::spawn::ContainerSpawner::new(
             engine.clone(),
             file,
@@ -531,7 +550,7 @@ pub fn campaign(
                     // configured delay, and a campaign past it is holding a
                     // slot, not working in it.
                     let _ = spawner.signal(&spawned, Signal::Terminate);
-                    forget_running(dir)?;
+                    forget_running(&project.hq_root, &slot.name)?;
                     Ok(Progress::Overrun {
                         minutes: running.deadline_minutes,
                     })
@@ -556,13 +575,13 @@ pub fn campaign(
                         survivors: survivors.clone(),
                     },
                 )?;
-                forget_running(dir)?;
+                forget_running(&project.hq_root, &slot.name)?;
                 Ok(Progress::Finished {
                     survivors: survivors.len(),
                 })
             }
             Presence::Ended => {
-                forget_running(dir)?;
+                forget_running(&project.hq_root, &slot.name)?;
                 Ok(Progress::Lost(format!(
                     "it stopped without saying it had finished, after {} line(s): a \
                      campaign that was killed, whose container went away, or that never \
@@ -573,7 +592,7 @@ pub fn campaign(
                 )))
             }
             Presence::Vanished(why) | Presence::Unknown(why) => {
-                forget_running(dir)?;
+                forget_running(&project.hq_root, &slot.name)?;
                 Ok(Progress::Lost(why))
             }
         };
@@ -647,7 +666,8 @@ pub fn campaign(
         .map_err(|e| MutantsError::Launch(e.to_string()))?;
 
     write_running(
-        dir,
+        &project.hq_root,
+        &slot.name,
         &Running {
             fingerprint: want.clone(),
             head,

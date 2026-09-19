@@ -166,7 +166,8 @@ fn a_campaign_found_stopped_writes_no_result() {
     )
     .unwrap();
     mutants::write_running(
-        &mission,
+        &project.hq_root,
+        &slot.name,
         &mutants::Running {
             fingerprint: "abc1234".into(),
             head: git(&tree, &["rev-parse", "HEAD"]),
@@ -209,7 +210,11 @@ fn a_campaign_found_stopped_writes_no_result() {
     // Nothing recorded, so gate 7 keeps asking rather than passing.
     assert_eq!(mutants::read(&mission).unwrap(), None);
     // And the in-flight record is gone, so no gate stands down for it.
-    assert!(mutants::read_running(&mission).unwrap().is_none());
+    assert!(
+        mutants::read_running(&project.hq_root, &slot.name)
+            .unwrap()
+            .is_none()
+    );
 }
 
 /// A campaign is only a measurement once it has said it finished.
@@ -430,7 +435,11 @@ fn live_a_campaign_is_launched_watched_and_read_back() {
     }
     // While it runs, the record is beside the campaign — never in the mission
     // state, which holds the agent's run and only that.
-    assert!(mutants::read_running(&mission).unwrap().is_some());
+    assert!(
+        mutants::read_running(&project.hq_root, &slot.name)
+            .unwrap()
+            .is_some()
+    );
 
     let mut finished = None;
     for _ in 0..60 {
@@ -450,7 +459,9 @@ fn live_a_campaign_is_launched_watched_and_read_back() {
         other => panic!("expected a finished campaign, got {other:?}"),
     }
     assert!(
-        mutants::read_running(&mission).unwrap().is_none(),
+        mutants::read_running(&project.hq_root, &slot.name)
+            .unwrap()
+            .is_none(),
         "the record is cleared when the campaign is on file"
     );
 
