@@ -104,6 +104,14 @@ fn after_a_verify_the_monitor_goes_on_or_stops_for_a_human() {
         }),
         Next::Continue
     );
+    // A campaign this launch ended is said, not acted on: the launch is the
+    // step after it, and that one goes on.
+    assert_eq!(
+        go(Step::CampaignEnded {
+            since: "2026-09-18T22:52:37Z".into()
+        }),
+        Next::Continue
+    );
     assert_eq!(
         go(Step::Saving {
             role: Integrator,

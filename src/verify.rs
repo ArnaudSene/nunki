@@ -74,6 +74,11 @@ pub enum Step {
         /// agent, how the application was started for it, or why it was not.
         application: String,
     },
+    /// A launch ended a mutation campaign that was still running: the switch
+    /// it performs recreates the container the campaign lives in, so the
+    /// campaign dies either way. Said rather than not — a slot that went
+    /// quiet for an hour with nothing to show for it is worth a sentence.
+    CampaignEnded { since: String },
     /// A run was recorded and the engine could not be asked about it.
     /// Nothing is decided on a silence (SPEC 4.2, "la reprise re-dérive
     /// avant de décider").
@@ -423,6 +428,10 @@ pub fn verify_as(
                 state.run = Some(launched.run);
                 state.app = launched.app;
                 store.save(&state)?;
+                // Before the launch is announced, because it happened first.
+                if let Some(since) = launched.campaign_ended {
+                    steps.push(Step::CampaignEnded { since });
+                }
                 steps.push(Step::Launched {
                     role: Role::Coder,
                     application: format!("{}, attempt {attempt}", what_for(&work, &header)),
@@ -638,6 +647,10 @@ pub fn verify_as(
                 state.run = Some(launched.run);
                 state.app = launched.app;
                 store.save(&state)?;
+                // Before the launch is announced, because it happened first.
+                if let Some(since) = launched.campaign_ended {
+                    steps.push(Step::CampaignEnded { since });
+                }
                 steps.push(Step::Launched {
                     role: Role::Integrator,
                     application,
@@ -757,6 +770,10 @@ pub fn verify_as(
                 state.run = Some(launched.run);
                 state.app = launched.app;
                 store.save(&state)?;
+                // Before the launch is announced, because it happened first.
+                if let Some(since) = launched.campaign_ended {
+                    steps.push(Step::CampaignEnded { since });
+                }
                 steps.push(Step::Launched {
                     role: Role::Security,
                     application,
@@ -1136,7 +1153,11 @@ fn describe(launched: &crate::run::Launched) -> String {
 /// And the moment to judge the account's windows while a run is under way:
 /// `verify` is what gets invoked, again and again, and a run past the
 /// threshold is told to end its turn here rather than waited on (SPEC 4.3).
-fn refuse_while_running(
+/// Public because `nunki mission mutants` needs the same rule: a campaign
+/// lifts nothing, but it rewrites the clean copy of `HEAD` in the container
+/// an agent is working in, and the agent's next launch recreates that
+/// container and ends it. Two verbs, one rule, one implementation.
+pub fn refuse_while_running(
     project: &Project,
     engine: Arc<dyn Engine>,
     id: &str,
