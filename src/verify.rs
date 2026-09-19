@@ -301,15 +301,13 @@ pub fn verify_as(
                             // the mission. Then the run's own word on its
                             // lot, and only the resume block's.
                             let report = gate::after_run(&subject, &verification)?;
-                            let failed = report.failed();
-                            let unplayed = report.unplayed();
-                            let owed = report.campaign_owed();
+                            let verdict = report.verdict();
                             steps.push(Step::Gates {
                                 role: Role::Coder,
                                 report: Box::new(report),
                             });
-                            match (failed, unplayed) {
-                                (Some(reason), _) => Some(Event::GatesFailed { reason }),
+                            match verdict {
+                                gate::Verdict::Red(reason) => Some(Event::GatesFailed { reason }),
                                 // Nothing red, but a gate nobody could play:
                                 // the run is not at fault and another one
                                 // would meet the same wall. Nothing is
@@ -317,11 +315,21 @@ pub fn verify_as(
                                 // the run stays recorded, and the next
                                 // `nunki verify` reads it back and plays the
                                 // gate again.
-                                (None, Some(why)) => {
-                                    steps.push(stuck(Role::Coder, owed, why));
+                                gate::Verdict::CampaignOwed(why) => {
+                                    steps.push(Step::CampaignOwed {
+                                        role: Role::Coder,
+                                        why,
+                                    });
                                     return Ok(steps);
                                 }
-                                (None, None) => {
+                                gate::Verdict::Wall(why) => {
+                                    steps.push(Step::GateUnplayable {
+                                        role: Role::Coder,
+                                        why,
+                                    });
+                                    return Ok(steps);
+                                }
+                                gate::Verdict::Green => {
                                     let journal =
                                         std::fs::read_to_string(&paths.journal).unwrap_or_default();
                                     Some(match crate::mission::journal::judge(&journal, &label) {
@@ -348,9 +356,7 @@ pub fn verify_as(
                     // on the same lot, like any other.
                     None => {
                         let report = gate::after_run(&subject, &verification)?;
-                        let failed = report.failed();
-                        let unplayed = report.unplayed();
-                        let owed = report.campaign_owed();
+                        let verdict = report.verdict();
                         steps.push(Step::Gates {
                             role: Role::Coder,
                             report: Box::new(report),
@@ -360,13 +366,23 @@ pub fn verify_as(
                         // nothing is red does an unplayable one stop the
                         // mission, because then there is nothing to send an
                         // agent back for.
-                        match (failed, unplayed) {
-                            (Some(reason), _) => Some(Event::GatesFailed { reason }),
-                            (None, Some(why)) => {
-                                steps.push(stuck(Role::Coder, owed, why));
+                        match verdict {
+                            gate::Verdict::Red(reason) => Some(Event::GatesFailed { reason }),
+                            gate::Verdict::CampaignOwed(why) => {
+                                steps.push(Step::CampaignOwed {
+                                    role: Role::Coder,
+                                    why,
+                                });
                                 return Ok(steps);
                             }
-                            (None, None) => None,
+                            gate::Verdict::Wall(why) => {
+                                steps.push(Step::GateUnplayable {
+                                    role: Role::Coder,
+                                    why,
+                                });
+                                return Ok(steps);
+                            }
+                            gate::Verdict::Green => None,
                         }
                     }
                 };
@@ -444,17 +460,15 @@ pub fn verify_as(
             Stage::Gates => {
                 let head = crate::git::head(&slot.tree)?;
                 let report = gate::at_verification(&subject, &verification)?;
-                let failed = report.failed();
-                let unplayed = report.unplayed();
-                let owed = report.campaign_owed();
+                let verdict = report.verdict();
                 steps.push(Step::Gates {
                     role: subject.role,
                     report: Box::new(report),
                 });
                 // Every arm left here moves the flow: the one that does
                 // not has returned above.
-                let event = match (failed, unplayed) {
-                    (Some(reason), _) => {
+                let event = match verdict {
+                    gate::Verdict::Red(reason) => {
                         // The volet this opens is told why, like every
                         // attempt the coder is sent back to.
                         crate::followup::said(
@@ -472,11 +486,21 @@ pub fn verify_as(
                     // what the next run reads first, and there is no next run
                     // here — the flow stays at the gates and the sentence
                     // goes to the human, who has the verb.
-                    (None, Some(why)) => {
-                        steps.push(stuck(subject.role, owed, why));
+                    gate::Verdict::CampaignOwed(why) => {
+                        steps.push(Step::CampaignOwed {
+                            role: subject.role,
+                            why,
+                        });
                         return Ok(steps);
                     }
-                    (None, None) => {
+                    gate::Verdict::Wall(why) => {
+                        steps.push(Step::GateUnplayable {
+                            role: subject.role,
+                            why,
+                        });
+                        return Ok(steps);
+                    }
+                    gate::Verdict::Green => {
                         // The coder's verdict is implicit — its gates were
                         // green (SPEC 4.4) — so this is where it is recorded,
                         // with the commit it was green on. `nunki push` needs
@@ -538,20 +562,18 @@ pub fn verify_as(
                                 } else {
                                     gate::after_run(&subject, &verification)?
                                 };
-                                let failed = report.failed();
-                                let unplayed = report.unplayed();
-                                let owed = report.campaign_owed();
+                                let verdict = report.verdict();
                                 steps.push(Step::Gates {
                                     role: Role::Integrator,
                                     report: Box::new(report),
                                 });
-                                match (failed, unplayed) {
+                                match verdict {
                                     // The wiring, the environment and the
                                     // system tests are the integrator's to fix,
                                     // run after run, before it concludes (SPEC
                                     // 4.5): a red gate is one more attempt,
                                     // never a volet on the coder.
-                                    (Some(reason), _) => {
+                                    gate::Verdict::Red(reason) => {
                                         event = Event::RunEnded {
                                             outcome: Outcome::MissionFailure(format!(
                                                 "the gates were red: {reason}"
@@ -564,11 +586,21 @@ pub fn verify_as(
                                     // wall. The run stays recorded, so the next
                                     // `nunki verify` reads it back and plays
                                     // the gate again.
-                                    (None, Some(why)) => {
-                                        steps.push(stuck(Role::Integrator, owed, why));
+                                    gate::Verdict::CampaignOwed(why) => {
+                                        steps.push(Step::CampaignOwed {
+                                            role: Role::Integrator,
+                                            why,
+                                        });
                                         return Ok(steps);
                                     }
-                                    (None, None) => {}
+                                    gate::Verdict::Wall(why) => {
+                                        steps.push(Step::GateUnplayable {
+                                            role: Role::Integrator,
+                                            why,
+                                        });
+                                        return Ok(steps);
+                                    }
+                                    gate::Verdict::Green => {}
                                 }
                             }
                             let event = spare_event(spared.as_ref(), event);
@@ -690,18 +722,16 @@ pub fn verify_as(
                             // report is a verdict about nothing.
                             if let Event::Verdict { .. } = &event {
                                 let report = gate::at_verification(&subject, &verification)?;
-                                let failed = report.failed();
-                                let unplayed = report.unplayed();
-                                let owed = report.campaign_owed();
+                                let verdict = report.verdict();
                                 steps.push(Step::Gates {
                                     role: Role::Security,
                                     report: Box::new(report),
                                 });
-                                match (failed, unplayed) {
+                                match verdict {
                                     // Its own to fix, in one more attempt: the
                                     // journal and the report are the agent's,
                                     // and nothing else was asked of it.
-                                    (Some(reason), _) => {
+                                    gate::Verdict::Red(reason) => {
                                         event = Event::RunEnded {
                                             outcome: Outcome::MissionFailure(format!(
                                                 "the gates were red: {reason}"
@@ -709,11 +739,21 @@ pub fn verify_as(
                                             lot_done: false,
                                         };
                                     }
-                                    (None, Some(why)) => {
-                                        steps.push(stuck(Role::Security, owed, why));
+                                    gate::Verdict::CampaignOwed(why) => {
+                                        steps.push(Step::CampaignOwed {
+                                            role: Role::Security,
+                                            why,
+                                        });
                                         return Ok(steps);
                                     }
-                                    (None, None) => {}
+                                    gate::Verdict::Wall(why) => {
+                                        steps.push(Step::GateUnplayable {
+                                            role: Role::Security,
+                                            why,
+                                        });
+                                        return Ok(steps);
+                                    }
+                                    gate::Verdict::Green => {}
                                 }
                             }
                             let event = spare_event(spared.as_ref(), event);
@@ -1253,19 +1293,6 @@ pub fn campaign(
         // fingerprint cannot see.
         crate::mutants::Replay::WhenChanged,
     )?)
-}
-
-/// Which step a gate nobody could play becomes.
-///
-/// A wall, or the one obstacle `nunki` clears itself. The distinction is the
-/// report's ([`gate::Report::campaign_owed`]) and not a string read here: a
-/// flow that told the two apart by matching on a sentence would start doing
-/// something else the day the sentence was reworded.
-fn stuck(role: Role, owed: Option<String>, why: String) -> Step {
-    match owed {
-        Some(why) => Step::CampaignOwed { role, why },
-        None => Step::GateUnplayable { role, why },
-    }
 }
 
 /// The spawner that can ask about a run: the engine `verify` was given, not

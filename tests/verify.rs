@@ -569,7 +569,7 @@ fn live_a_mission_is_driven_from_its_first_lot_to_verified() {
     // caught it because a live test is `#[ignore]`d and CI never plays it.
     let steps = go();
     assert!(
-        gates_of(&steps).failed().is_some(),
+        matches!(gates_of(&steps).verdict(), nunki::gate::Verdict::Red(_)),
         "a survivor with no outcome is red: {steps:?}"
     );
     assert!(
@@ -2381,7 +2381,7 @@ fn a_gate_nobody_could_play_stops_instead_of_opening_a_volet() {
     let steps = world.verify().unwrap();
     let report = gates_of(&steps);
     assert!(
-        report.failed().is_none(),
+        !matches!(report.verdict(), nunki::gate::Verdict::Red(_)),
         "nothing is the agent's to fix here: {report:?}"
     );
     assert!(
@@ -2558,7 +2558,7 @@ fn a_battery_red_under_a_running_campaign_opens_no_volet() {
 
     let report = gates_of(&steps);
     assert!(
-        report.failed().is_none(),
+        !matches!(report.verdict(), nunki::gate::Verdict::Red(_)),
         "the coder was sent back for a mutant it did not write: {report:?}"
     );
     // And unplayed for the campaign, not for something else that went wrong.
@@ -2623,7 +2623,7 @@ fn a_gate_seven_with_no_campaign_asks_for_one_rather_than_stopping() {
     let steps = verify::verify(&world.project, "m1", engine, "docker").unwrap();
     let report = gates_of(&steps);
     assert!(
-        report.failed().is_none(),
+        !matches!(report.verdict(), nunki::gate::Verdict::Red(_)),
         "nothing is the agent's to fix here: {report:?}"
     );
     assert_eq!(

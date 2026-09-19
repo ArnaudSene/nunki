@@ -1375,6 +1375,21 @@ dernier lot. La première rouge arrête tout.
    une phrase. Rien n'est écrit dans `MUTANTS.json` : une campagne écourtée
    n'a rien mesuré.
 
+   **Et un rapport ne dit qu'une chose au flux, décidée une seule fois.**
+   Quatre réponses — vert, rouge, mur, campagne due — et un seul endroit qui
+   les lit. C'étaient trois questions recombinées à la main sur cinq sites de
+   `verify`, et la recombinaison est l'endroit où les défauts vivaient : une
+   nouvelle raison qu'une porte a de n'être pas jouée changeait le sens de
+   l'ancienne règle sur les cinq, en silence.
+
+   L'ordre est la doctrine : le rouge d'abord, parce qu'il est à l'agent et
+   qu'il prime sur une porte que personne n'a pu jouer — il y a alors quelque
+   chose à renvoyer à un agent. Puis la campagne, seul obstacle que `nunki`
+   lève lui-même. Puis le mur, qui attend un humain. Et un mur prime sur la
+   campagne : un profil qui ne se lève pas laisse aussi la porte 6 non jouée,
+   et une heure de mutation devant un mur que rien ne bougera est une heure
+   dépensée pour rien.
+
    **Mais attendre une campagne n'est pas un mur.** Une porte non jouée arrête
    normalement le flux : rien n'est décidé, et aucun run n'y changerait quoi
    que ce soit. La campagne, elle, est le seul obstacle que `nunki` lève
