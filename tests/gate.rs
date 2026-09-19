@@ -1009,12 +1009,10 @@ use std::collections::BTreeMap;
 impl Fixture {
     /// The campaign file this mission holds, written on the current content.
     fn campaign(&self, survivors: Vec<Survivor>) {
-        let base = if git(&self.tree, &["rev-parse", "--verify", "--quiet", "dev"]).is_empty() {
-            "origin/dev".to_string()
-        } else {
-            "dev".to_string()
-        };
-        let touched = nunki::gate::touched_paths(&self.tree, &base).unwrap();
+        // Through the one function that resolves the base, and not a copy of
+        // its rule: a fixture that reads the name its own way is a fixture
+        // that can agree with a gate which has stopped agreeing with itself.
+        let touched = nunki::gate::touched_since_base(&self.tree, "dev").unwrap();
         let fingerprint = nunki::mutants::fingerprint(&self.tree, &touched).unwrap();
         nunki::mutants::write(
             self._dir.path(),
@@ -1292,6 +1290,68 @@ fn report_of(decisions: &[(Gate, Decision)]) -> gate::Report {
             })
             .collect(),
     }
+}
+
+/// A mission's base by name and a revision are different things, and the
+/// compiler is what says so now.
+///
+/// `touched_paths` and `touched_since_base` had the same signature — `(&Path,
+/// &str)` — and differed only by a doc comment telling the caller which to
+/// use. In a slot the name `dev` has two readings, `dev` and `origin/dev`,
+/// and they diverge from the second mission onwards. One caller read the
+/// name where the other read the ref: gate 7's fingerprint never matched the
+/// campaign's, and `verify` went round it fifty-seven times (`notes-4`,
+/// 2026-09-18).
+///
+/// A `Rev` cannot be made from a mission's base here — only `base_ref` makes
+/// one from a name, and it is private — so the two calls can no longer be
+/// swapped by a caller who did not read the comment.
+#[test]
+fn what_a_branch_brought_and_what_it_brought_since_a_commit_are_asked_differently() {
+    let dir = tempfile::tempdir().unwrap();
+    let origin = dir.path().join("origin");
+    std::fs::create_dir_all(&origin).unwrap();
+    git(&origin, &["init", "-q", "-b", "dev"]);
+    write(&origin, "AGENTS.md", "the rules of this place\n");
+    write(&origin, "src/lib.rs", "pub fn one() -> u8 { 1 }\n");
+    git(&origin, &["add", "-A"]);
+    git(&origin, &["commit", "-q", "-m", "base"]);
+
+    let tree = dir.path().join("slot");
+    git(
+        dir.path(),
+        &["clone", "-q", origin.to_str().unwrap(), "slot"],
+    );
+
+    // The base moves on, and the clone's own `dev` stays where it was.
+    write(&origin, "src/theirs.rs", "pub fn two() -> u8 { 2 }\n");
+    git(&origin, &["add", "-A"]);
+    git(
+        &origin,
+        &["commit", "-q", "-m", "what the last mission merged"],
+    );
+
+    git(&tree, &["fetch", "-q", "origin"]);
+    git(&tree, &["checkout", "-q", "-b", "mission/x", "origin/dev"]);
+    write(&tree, "src/first.rs", "pub fn three() -> u8 { 3 }\n");
+    git(&tree, &["add", "-A"]);
+    git(&tree, &["commit", "-q", "-m", "feat(L1): the coder's"]);
+    let coder = git(&tree, &["rev-parse", "HEAD"]);
+    write(&tree, "src/second.rs", "pub fn four() -> u8 { 4 }\n");
+    git(&tree, &["add", "-A"]);
+    git(&tree, &["commit", "-q", "-m", "test: the integrator's"]);
+
+    // By name: everything this branch brought, against the base it came from.
+    assert_eq!(
+        gate::touched_since_base(&tree, "dev").unwrap(),
+        vec!["src/first.rs".to_string(), "src/second.rs".to_string()]
+    );
+    // By commit: what came after it, which is what `nunki push` asks about
+    // the integrator.
+    assert_eq!(
+        gate::touched_paths(&tree, &gate::Rev::commit(&coder)).unwrap(),
+        vec!["src/second.rs".to_string()]
+    );
 }
 
 /// The four answers a report can give the flow, and the order they are asked
