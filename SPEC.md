@@ -1678,6 +1678,13 @@ dernier lot. La première rouge arrête tout.
    Ce serait le seul endroit où un script de fragment tournerait hors d'un
    conteneur — une frontière de confiance nouvelle, pour une commodité.
 
+   **Et « une base par son nom » et « une révision » ne sont pas la même
+   chose, le compilateur le dit.** Les deux fonctions avaient la même
+   signature, `(&Path, &str)`, et ne se distinguaient que par un commentaire
+   disant à l'appelant laquelle prendre — la garde qui a échoué deux fois.
+   Une révision est un type à part maintenant, et seul le résolveur en
+   fabrique une à partir d'un nom.
+
    **Et « ce que la branche a apporté » n'a qu'une lecture.** La porte 4, la
    porte 7 et le lanceur de campagne parlent tous du même ensemble ; la
    porte 7 juge une campagne sur l'empreinte de ce sur quoi elle a tourné,

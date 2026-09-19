@@ -446,7 +446,7 @@ fn branch_ahead(subject: &Subject) -> Result<Decision, GateError> {
 /// The local branch stays as the fallback: a clone whose origin does not
 /// carry the base still has to be judged against something, and that is the
 /// only candidate left. It is the same order `run::branch` uses.
-fn base_ref(tree: &Path, base: &str) -> Result<String, GateError> {
+fn base_ref(tree: &Path, base: &str) -> Result<Rev, GateError> {
     let remote = format!("origin/{base}");
     if git::run(
         tree,
@@ -459,9 +459,41 @@ fn base_ref(tree: &Path, base: &str) -> Result<String, GateError> {
     )
     .is_ok()
     {
-        return Ok(remote);
+        return Ok(Rev(remote));
     }
-    Ok(base.to_string())
+    Ok(Rev(base.to_string()))
+}
+
+/// A revision `git` resolves exactly as given: a commit, or a ref that
+/// already names one.
+///
+/// **Never a mission's base by its header name.** In a slot that name has two
+/// readings, `dev` and `origin/dev`, and they diverge from the second mission
+/// onwards; [`touched_since_base`] is the one thing that picks between them.
+///
+/// A type and not a convention, because the convention is what failed twice.
+/// `touched_paths` and `touched_since_base` had the same signature — `(&Path,
+/// &str)` — and differed only by a doc comment telling the caller which to
+/// use. One caller read the name where the other read the ref, gate 7's
+/// fingerprint never matched the campaign's, and `verify` went round it
+/// fifty-seven times (`notes-4`, 2026-09-18). A third caller would have had
+/// the same chance to get it wrong.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rev(String);
+
+impl Rev {
+    /// A commit, as git printed it. The one caller: `nunki push`, asking what
+    /// the integrator added after the coder's gates were green — a commit,
+    /// never a base.
+    pub fn commit(sha: impl Into<String>) -> Self {
+        Self(sha.into())
+    }
+}
+
+impl std::fmt::Display for Rev {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
 /// Gate 3 reads **the block**, not the file.
@@ -557,7 +589,7 @@ fn perimeter(subject: &Subject) -> Result<Decision, GateError> {
                     .into(),
             ));
         };
-        let Touched { seen, commits } = touched(tree, from)?;
+        let Touched { seen, commits } = touched(tree, &Rev::commit(from))?;
         return integrator_perimeter(subject, &seen, &commits);
     }
 
@@ -581,7 +613,7 @@ struct Touched {
     commits: Vec<String>,
 }
 
-fn touched(tree: &Path, base: &str) -> Result<Touched, GateError> {
+fn touched(tree: &Path, base: &Rev) -> Result<Touched, GateError> {
     let diff = git::run(tree, &["diff", "--name-only", &format!("{base}...HEAD")])?;
     let commits: Vec<String> = git::run(tree, &["rev-list", &format!("{base}..HEAD")])?
         .lines()
@@ -625,17 +657,21 @@ fn touched(tree: &Path, base: &str) -> Result<Touched, GateError> {
 /// twice in two ways is how the two gates would come to disagree". It was a
 /// third caller that did it.
 ///
-/// [`touched_paths`] stays, for the one caller with a commit rather than a
-/// name: `nunki push`, which asks what the integrator added after the coder.
+/// [`touched_paths`] stays, for the one caller that has a [`Rev`] rather than
+/// a name: `nunki push`, which asks what the integrator added after the
+/// coder's gates were green — a commit, and now a commit in the type too.
 pub fn touched_since_base(tree: &Path, base: &str) -> Result<Vec<String>, GateError> {
     let base = base_ref(tree, base)?;
     touched_paths(tree, &base)
 }
 
 /// The paths a mutation campaign runs on: what this branch touched, once
-/// each, in a stable order. Takes a ref that already resolves — see
-/// [`touched_since_base`] for a mission's base by name.
-pub fn touched_paths(tree: &Path, base: &str) -> Result<Vec<String>, GateError> {
+/// each, in a stable order.
+///
+/// Takes a [`Rev`], which a mission's base by name is not — see
+/// [`touched_since_base`] for that. The two used to share a signature and be
+/// told apart by this sentence alone.
+pub fn touched_paths(tree: &Path, base: &Rev) -> Result<Vec<String>, GateError> {
     let mut paths: Vec<String> = touched(tree, base)?
         .seen
         .into_iter()
@@ -650,7 +686,7 @@ pub fn touched_paths(tree: &Path, base: &str) -> Result<Vec<String>, GateError> 
 fn coder_perimeter(
     subject: &Subject,
     tree: &Path,
-    base: &str,
+    base: &Rev,
     seen: &[(String, String)],
 ) -> Result<Decision, GateError> {
     let refuse = compile(&subject.protected_paths.refuse)?;
@@ -874,7 +910,7 @@ fn mechanical_security(
     // way gates 2 and 4 already do — they read the same two names and would
     // have refused first.
     let named = base_ref(subject.tree, &subject.header.base)?;
-    let base = crate::git::run(subject.tree, &["merge-base", "HEAD", &named])?
+    let base = crate::git::run(subject.tree, &["merge-base", "HEAD", &named.to_string()])?
         .trim()
         .to_string();
     let at = format!("{}/{SECURITY}", crate::run::STACK_AT);

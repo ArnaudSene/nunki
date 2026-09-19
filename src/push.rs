@@ -377,7 +377,9 @@ fn only_wiring_since(
     };
     // `touched_paths` reads `<base>...HEAD`, and the slot is on `head` — the
     // gates refuse to run at all on a tree that is not (gate 1).
-    let touched = crate::gate::touched_paths(&slot.tree, coder)?;
+    // A commit, and said so: what the integrator added after the coder's
+    // gates were green, never a base by name.
+    let touched = crate::gate::touched_paths(&slot.tree, &crate::gate::Rev::commit(coder))?;
     let allowed = crate::gate::compile(&wiring)?;
     let outside: Vec<String> = touched
         .into_iter()
