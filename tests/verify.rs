@@ -2574,6 +2574,16 @@ fn a_battery_red_under_a_running_campaign_opens_no_volet() {
     // has been read back, plays the battery on the copy it owns again.
     assert_eq!(world.state().flow.stage(), &Stage::Gates, "{steps:?}");
     assert_eq!(world.state().flow.volets(), 0);
+
+    // And the turn ends by going to read the campaign, not by calling it a
+    // wall. A wall stops `verify` before the campaign is read back, and the
+    // gates that stood down for it then stand down for ever: measured on
+    // `notes-4` on 2026-09-18, 146 turns of `verify`, every one of them
+    // reporting a campaign in flight and none of them reading it.
+    match steps.last() {
+        Some(Step::CampaignOwed { role, .. }) => assert_eq!(*role, Role::Coder),
+        other => panic!("waiting on the campaign became a wall: {other:?}"),
+    }
 }
 
 /// Gate 7 with no campaign, and everything else played: the flow does not
