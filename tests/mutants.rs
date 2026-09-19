@@ -113,6 +113,143 @@ fn the_survivors_are_read_out_of_whatever_else_the_tool_printed() {
     assert!(survivors.iter().all(|s| s.outcome.is_none()));
 }
 
+/// A campaign that stopped is read back as lost, not as a green gate.
+///
+/// The half that matters: `mutants::campaign` finding the process gone. It
+/// used to parse whatever the log held and write a `Campaign` from it, so a
+/// killed campaign became "no survivor" and gate 7 passed. Now nothing is
+/// written, the in-flight record is cleared so no gate stands down for ever,
+/// and the next `verify` runs a real one.
+#[test]
+fn a_campaign_found_stopped_writes_no_result() {
+    use nunki::engine::{ExecOutput, fake::FakeEngine};
+
+    let dir = tempfile::tempdir().unwrap();
+    let tree = repo(dir.path());
+    let home = dir.path().join("nunki");
+    let project = nunki::project::Project::at(
+        tree.clone(),
+        nunki::project::Config {
+            root: None,
+            harness: "claude-code".into(),
+            forge: vec![],
+            stacks: vec!["rust".into()],
+            protected_branches: vec![],
+            protected_paths: Default::default(),
+            account: None,
+            model: None,
+            bounds: Default::default(),
+            credentials: None,
+            run: None,
+            services_file: None,
+            permission_mode: "auto".to_string(),
+            forge_protection: Default::default(),
+        },
+        home,
+    );
+    let slot = nunki::slot::Slot {
+        name: "one".into(),
+        tree: tree.clone(),
+    };
+    let profile = nunki::run::profile_path(&project, &slot.name);
+    std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+    std::fs::write(&profile, "services: {}\n").unwrap();
+
+    let mission = dir.path().join("mission");
+    std::fs::create_dir_all(&mission).unwrap();
+    let log = mission.join("mutants.log");
+    // What it printed before it died: a survivor, and no line saying it
+    // reached the end.
+    std::fs::write(
+        &log,
+        "{\"id\":\"a\",\"file\":\"src/lib.rs\",\"line\":3,\"description\":\"replace one\"}\n",
+    )
+    .unwrap();
+    mutants::write_running(
+        &mission,
+        &mutants::Running {
+            fingerprint: "abc1234".into(),
+            head: git(&tree, &["rev-parse", "HEAD"]),
+            started_at: "2026-09-19T02:00:00Z".into(),
+            container: "cafe1234".into(),
+            pid: Some(41),
+            log: log.clone(),
+            deadline_minutes: 45,
+        },
+    )
+    .unwrap();
+
+    // The container is up and the process is not — the shape a kill leaves.
+    let engine: std::sync::Arc<dyn nunki::engine::Engine> = std::sync::Arc::new(
+        FakeEngine::default()
+            .with_liveness("cafe1234", nunki::engine::Liveness::Running)
+            .with_exec(ExecOutput {
+                status: 0,
+                stdout: "nunki-run-ended\n".into(),
+                stderr: String::new(),
+            }),
+    );
+
+    let progress = mutants::campaign(
+        &project,
+        &slot,
+        engine,
+        &mission,
+        "rust",
+        "dev",
+        45,
+        mutants::Replay::WhenChanged,
+    )
+    .unwrap();
+
+    let mutants::Progress::Lost(why) = progress else {
+        panic!("a campaign that never said it finished was read as one: {progress:?}");
+    };
+    assert!(why.contains("without saying it had finished"), "{why}");
+    // Nothing recorded, so gate 7 keeps asking rather than passing.
+    assert_eq!(mutants::read(&mission).unwrap(), None);
+    // And the in-flight record is gone, so no gate stands down for it.
+    assert!(mutants::read_running(&mission).unwrap().is_none());
+}
+
+/// A campaign is only a measurement once it has said it finished.
+///
+/// Three failures leave the same evidence — a log that parses to zero
+/// survivors: a campaign killed halfway, one whose container went away, and
+/// one that never compiled. `nunki` read all three as "nothing survived" and
+/// gate 7 went green on a measurement nobody made, which is the one thing
+/// SPEC 4.4 forbids it: "une porte 7 qui ne peut pas dire « je n'ai pas pu
+/// mesurer » ment".
+///
+/// The exit status cannot carry this. The spawner runs `echo $$ > pid; exec
+/// "$@"` so that the pid it publishes is the campaign's own, and a shell that
+/// has been replaced cannot write `$?`; dropping the `exec` would take the
+/// identity check for every harness run with it.
+#[test]
+fn a_log_without_the_last_line_is_not_a_finished_campaign() {
+    // What a campaign that ran to the end prints, survivors or not.
+    assert!(mutants::completed("{\"campaign\":\"done\"}\n"));
+    assert!(mutants::completed(
+        "Found 12 mutants to test\n\
+         {\"id\":\"a\",\"file\":\"src/lib.rs\",\"line\":3,\"description\":\"replace one\"}\n\
+         {\"campaign\":\"done\"}\n"
+    ));
+
+    // And the three that stopped. Each parses to a campaign with no survivor,
+    // which is exactly what a green gate 7 would have been read from.
+    for stopped in [
+        "",
+        "Found 12 mutants to test\n",
+        "{\"id\":\"a\",\"file\":\"src/lib.rs\",\"line\":3,\"description\":\"replace one\"}\n",
+        "{\"campaign\":\"started\"}\n",
+    ] {
+        assert!(
+            !mutants::completed(stopped),
+            "a campaign that never said it finished read as one: {stopped:?}"
+        );
+    }
+}
+
 #[test]
 fn a_campaign_round_trips_through_the_mission_folder() {
     let dir = tempfile::tempdir().unwrap();

@@ -1347,6 +1347,25 @@ dernier lot. La première rouge arrête tout.
    chacun annonçant une campagne en vol, aucun ne la relisant. Le constat
    porte donc un drapeau, et non une phrase que le flux relirait.
 
+   **Une campagne n'est une mesure qu'une fois qu'elle a dit l'être.** Elle
+   imprime, en dernier et une seule fois, `{"campaign":"done"}` ; `nunki` ne
+   lit aucun autre résultat. Sans cette ligne, trois échecs laissent la même
+   trace — un journal qui s'analyse en zéro survivant : une campagne tuée en
+   route, une dont le conteneur a disparu, une qui n'a jamais compilé. `nunki`
+   les lisait toutes les trois comme « rien n'a survécu », et la porte 7
+   passait au vert sur une mesure que personne n'a faite. C'est exactement ce
+   que 4.4 lui interdit plus haut : **une porte 7 qui ne peut pas dire « je
+   n'ai pas pu mesurer » ment.**
+
+   Une ligne du script et non un code de sortie, parce que le code de sortie
+   ne survit pas : le lanceur fait `exec` sur la commande pour que le pid
+   publié soit celui de la campagne, et un shell remplacé ne peut pas écrire
+   `$?` — le retirer emporterait avec lui le contrôle d'identité de tous les
+   runs d'agent. Un journal tronqué perd sa dernière ligne, qui est
+   celle-ci ; les trois échecs échouent donc pareil. Rien n'est alors écrit,
+   le registre en vol est effacé — aucune porte ne se retire pour rien — et le
+   `verify` suivant en lance une vraie.
+
    **Une cinquième, mesurée le 2026-09-18 : une campagne qui n'a pas pu
    tourner rendait la réponse de la précédente.** Le script avale le statut de
    l'outil — `|| true`, et c'est juste, une campagne avec survivants sort en 2

@@ -730,6 +730,86 @@ fn a_campaign_that_could_not_run_does_not_report_the_last_ones_survivors() {
         "nothing said why: {}",
         String::from_utf8_lossy(&out.stderr)
     );
+    // And it never says it finished, which is the line `nunki` reads: without
+    // it a stopped campaign and one that found nothing are the same log, and
+    // gate 7 goes green on a measurement nobody made.
+    assert!(
+        !nunki::mutants::completed(&said),
+        "it said it had finished: {said}"
+    );
+}
+
+/// And a campaign that does reach the end says so, on its last line.
+///
+/// Run, with a stub `cargo` that leaves the file a real campaign leaves: what
+/// matters is that the script's own last act is the line `nunki` requires, and
+/// that it comes after the survivors rather than instead of them.
+#[test]
+#[cfg(unix)]
+fn a_campaign_that_reached_the_end_says_so_on_its_last_line() {
+    let (_dir, root, _nunki) = fresh();
+    let home = home(&root);
+    init(&root, &home, &["rust".to_string()]).unwrap();
+    let script = home
+        .join(nunki::project::STACKS_DIR)
+        .join("rust")
+        .join(nunki::mutants::SCRIPT);
+
+    let stubs = root.join("stubs");
+    std::fs::create_dir_all(&stubs).unwrap();
+    // `--output DIR` writes into `DIR/mutants.out/`; the script reads
+    // `missed.txt` there. One survivor, so the two lines can be told apart.
+    std::fs::write(
+        stubs.join("cargo"),
+        "#!/bin/sh
+out=\"\"
+while [ $# -gt 0 ]; do
+  if [ \"$1\" = --output ]; then out=$2; fi
+  shift
+done
+mkdir -p \"$out/mutants.out\"
+printf '%s\\n' 'src/lib.rs:2:7: replace > with >= in keep' > \"$out/mutants.out/missed.txt\"
+",
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(stubs.join("cargo"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+    }
+
+    let tree = root.join("tree");
+    std::fs::create_dir_all(&tree).unwrap();
+    let path = format!(
+        "{}:{}",
+        stubs.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = std::process::Command::new("sh")
+        .arg(&script)
+        .arg("abc123")
+        .arg("src/lib.rs")
+        .env("PATH", path)
+        .current_dir(&tree)
+        .output()
+        .expect("sh is on the path");
+
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        nunki::mutants::completed(&said),
+        "it never said it finished: {said}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(nunki::mutants::parse(&said).len(), 1, "{said}");
+    // Last, so that a log truncated anywhere loses it.
+    assert!(
+        said.trim_end()
+            .lines()
+            .next_back()
+            .unwrap()
+            .contains("done"),
+        "the line that says it finished is not the last one: {said}"
+    );
 }
 
 #[test]

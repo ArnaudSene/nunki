@@ -289,6 +289,38 @@ pub fn forget_running(dir: &Path) -> Result<(), MutantsError> {
 /// that is not one is ignored — a mutation tool writes progress on the same
 /// stream, and a campaign that produced a hundred good lines and one banner
 /// is not a campaign that failed.
+/// The line a campaign prints, last of all, to say it got to the end.
+///
+/// Without it `nunki` cannot tell "no survivor" from "no answer": a campaign
+/// killed halfway, one whose container went away and one that never compiled
+/// all leave a log that parses to zero survivors, and gate 7 would go green
+/// on a measurement nobody made. SPEC 4.4 forbids exactly that — "une porte 7
+/// qui ne peut pas dire « je n'ai pas pu mesurer » ment".
+///
+/// A line the script prints rather than an exit status, because the status
+/// does not survive: the spawner `exec`s the command so that the pid it
+/// published is the campaign's own, and a shell that has been replaced cannot
+/// write `$?`. Dropping the `exec` would take the identity check for every
+/// harness run with it (`engine/spawn.rs`).
+#[derive(serde::Deserialize)]
+struct Terminal {
+    campaign: String,
+}
+
+/// Whether the campaign said it finished.
+///
+/// The whole log, not its last line: a campaign is read back through a file
+/// the engine is still writing, and asking for the last line would turn a
+/// half-flushed newline into "it did not finish". The line is printed last,
+/// so a truncated log has lost it either way.
+pub fn completed(text: &str) -> bool {
+    text.lines().any(|line| {
+        serde_json::from_str::<Terminal>(line.trim())
+            .map(|t| t.campaign == "done")
+            .unwrap_or(false)
+    })
+}
+
 pub fn parse(text: &str) -> Vec<Survivor> {
     text.lines()
         .filter_map(|line| serde_json::from_str::<Survivor>(line.trim()).ok())
@@ -510,7 +542,10 @@ pub fn campaign(
                     })
                 }
             }
-            Presence::Ended => {
+            // Ended, and it said so. Anything else is a campaign that
+            // stopped: nothing is written, so gate 7 keeps asking rather than
+            // passing on a log that happens to hold no survivor.
+            Presence::Ended if completed(&text) => {
                 let survivors = parse(&text);
                 write(
                     dir,
@@ -525,6 +560,17 @@ pub fn campaign(
                 Ok(Progress::Finished {
                     survivors: survivors.len(),
                 })
+            }
+            Presence::Ended => {
+                forget_running(dir)?;
+                Ok(Progress::Lost(format!(
+                    "it stopped without saying it had finished, after {} line(s): a \
+                     campaign that was killed, whose container went away, or that never \
+                     compiled leaves exactly this, and none of them measured anything. \
+                     Its log is {}",
+                    text.lines().count(),
+                    running.log.display()
+                )))
             }
             Presence::Vanished(why) | Presence::Unknown(why) => {
                 forget_running(dir)?;
