@@ -1256,3 +1256,197 @@ fn the_image_carries_what_the_security_script_needs() {
         "the image has no JSON parser:\n{dockerfile}"
     );
 }
+
+/// A Python project gets every file its gates read, and the two that are
+/// executed are executable.
+///
+/// The list is not decoration: gate 6 runs `prepush.sh`, gate 6 for the
+/// integrator runs `system.sh`, gate 7 runs `mutation.sh` and gate 8 runs
+/// `security.sh`. A fragment missing one holds that gate red for a reason no
+/// agent is told, which is what happened to the Rust stack on 2026-09-15.
+#[test]
+fn a_python_project_gets_every_file_its_gates_read() {
+    let (_d, root, nunki) = fresh();
+    let actions = init(&root, &nunki, &["python".to_string()]).unwrap();
+    let stack = home(&root).join("stacks/python");
+
+    for name in [
+        "allow.txt",
+        "prepush.sh",
+        "mutation.sh",
+        nunki::gate::SECURITY,
+        "run.sh",
+        nunki::gate::SYSTEM_BATTERY,
+        "Dockerfile",
+        "writable.txt",
+        "advisories.txt",
+        "caches.txt",
+    ] {
+        assert!(created(&actions, name), "{name} missing from {actions:?}");
+        assert!(stack.join(name).is_file(), "{name}");
+    }
+
+    #[cfg(unix)]
+    for script in [
+        "prepush.sh",
+        "mutation.sh",
+        nunki::gate::SECURITY,
+        "run.sh",
+        nunki::gate::SYSTEM_BATTERY,
+    ] {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(stack.join(script))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o111, 0o111, "{script}: {mode:o}");
+    }
+
+    let allow = std::fs::read_to_string(stack.join("allow.txt")).unwrap();
+    assert!(allow.contains("pypi.org"), "{allow}");
+    assert!(
+        !allow.contains("github.com"),
+        "a fragment must not carry a forge domain: {allow}"
+    );
+    // And the interpreter is not fetched from one either: uv downloads a
+    // Python of its own unless it is told not to, from a forge rule 6 does
+    // not name — a refusal that would read as a flaky network.
+    let dockerfile = std::fs::read_to_string(stack.join("Dockerfile")).unwrap();
+    assert!(
+        dockerfile.contains("UV_PYTHON_DOWNLOADS=never"),
+        "{dockerfile}"
+    );
+}
+
+/// Gate 8's unfiltered view has to be one the project cannot filter.
+///
+/// Measured on osv-scanner 2.6.0, 2026-09-20: the tool loads
+/// `osv-scanner.toml` **from the scanned tree on its own** — "Loaded filter
+/// from: /w/osv-scanner.toml" with no `--config` given at all. The first
+/// draft of this fragment relied on that absence, so the run meant to see
+/// everything was filtered by the very file whose effect it exists to
+/// measure: every acceptance came back empty, and an agent could have
+/// silenced any finding by writing that file.
+///
+/// So every scan whose answer is read as "everything there is" — the branch's
+/// and the base's — names a configuration that ignores nothing, and the only
+/// scan that reads the project's own is the one measuring what it accepts.
+#[test]
+fn the_python_audit_asks_for_a_view_the_project_cannot_filter() {
+    let (_d, root, nunki) = fresh();
+    init(&root, &nunki, &["python".to_string()]).unwrap();
+    let script = std::fs::read_to_string(
+        home(&root)
+            .join("stacks/python")
+            .join(nunki::gate::SECURITY),
+    )
+    .unwrap();
+    // The scans are written across continuations; read them as one line each.
+    let joined = script.replace("\\\n", " ");
+    let scans: Vec<&str> = joined
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with("osv-scanner scan source"))
+        .collect();
+    assert_eq!(
+        scans.len(),
+        3,
+        "the branch, its base, and what it accepts: {scans:?}"
+    );
+
+    let unfiltered: Vec<&&str> = scans
+        .iter()
+        .filter(|l| !l.contains("--config osv-scanner.toml"))
+        .collect();
+    assert_eq!(unfiltered.len(), 2, "{scans:?}");
+    for scan in unfiltered {
+        assert!(
+            scan.contains(r#"--config "$work/none.toml""#),
+            "this scan would be filtered by the tree's own osv-scanner.toml: {scan}"
+        );
+    }
+    // And that configuration really ignores nothing.
+    let none = script
+        .lines()
+        .find(|l| l.contains(r#"> "$work/none.toml""#))
+        .expect("the fragment writes the empty configuration");
+    assert!(!none.contains("IgnoredVulns"), "{none}");
+}
+
+/// A campaign that could not run must not reach the line that says it
+/// finished.
+///
+/// Measured on mutmut 3.8.0, 2026-09-20: `mutmut run` exits **0** whether
+/// every mutant was killed or some survived, and **1** when it could not run
+/// at all. The first draft swallowed that status and guarded on the
+/// `mutants/` directory instead — which mutmut creates *before* it generates
+/// anything, so a source file it could not parse produced
+/// `{"campaign":"done"}` with no survivor. Gate 7 green on nothing, which is
+/// the one failure this contract exists to prevent (SPEC 4.4, gate 7).
+#[test]
+fn the_python_campaign_says_nothing_when_it_could_not_run() {
+    let (_d, root, nunki) = fresh();
+    init(&root, &nunki, &["python".to_string()]).unwrap();
+    let script = std::fs::read_to_string(home(&root).join("stacks/python/mutation.sh")).unwrap();
+
+    let run = script
+        .lines()
+        .find(|l| l.contains("mutmut run") && !l.trim_start().starts_with('#'))
+        .expect("the campaign runs mutmut");
+    assert!(
+        !run.contains("|| true"),
+        "the status is the only thing that tells a dead campaign from a green one: {run}"
+    );
+    assert!(run.trim_start().starts_with("if !"), "{run}");
+
+    // The terminal line comes last, and after the guard that leaves without
+    // it: `nunki` reads no other line as the campaign having measured
+    // anything.
+    let guard = script
+        .find("the campaign could not run")
+        .expect("the guard says why it stopped");
+    let done = script
+        .find(r#"printf '{"campaign":"done"}\n'"#)
+        .expect("the campaign says when it got to the end");
+    assert!(
+        guard < done,
+        "the terminal line is printed before the guard"
+    );
+    assert_eq!(
+        script.matches(r#"printf '{"campaign":"done"}"#).count(),
+        1,
+        "the terminal line is printed in more than one place: {script}"
+    );
+}
+
+/// The integrator's gate 6 runs the system tests, and the coder's battery
+/// never does: they need the mission's services, which only the system
+/// profile has.
+#[test]
+fn the_python_integrators_battery_runs_the_system_tests_and_only_those() {
+    let (_d, root, nunki) = fresh();
+    init(&root, &nunki, &["python".to_string()]).unwrap();
+    let stack = home(&root).join("stacks/python");
+
+    let script = std::fs::read_to_string(stack.join(nunki::gate::SYSTEM_BATTERY)).unwrap();
+    let line = script
+        .lines()
+        .find(|l| l.contains("uv run") && l.contains("pytest"))
+        .expect("the system battery calls pytest");
+    assert!(line.contains("-m system"), "{line}");
+    assert!(script.contains("@pytest.mark.system"), "{script}");
+    // A battery that ran nothing proved nothing: pytest answers 5 when it
+    // collected none, and 0 when it collected them and skipped them all.
+    assert!(script.contains(r#""$status" -eq 5"#), "{script}");
+    assert!(script.contains(r#""$ran" -eq 0"#), "{script}");
+
+    let prepush = std::fs::read_to_string(stack.join("prepush.sh")).unwrap();
+    let coder = prepush
+        .lines()
+        .find(|l| l.contains("uv run") && l.contains("pytest"))
+        .expect("the coder's battery calls pytest");
+    assert!(
+        coder.contains(r#"-m "not system""#),
+        "the coder's battery would run tests that need services it cannot reach: {coder}"
+    );
+}

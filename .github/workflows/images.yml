@@ -47,6 +47,14 @@ jobs:
   scan:
     name: image scan
     runs-on: ubuntu-latest
+    # One run per stack, because a stack ships an image and an image nobody
+    # scans is the hole this workflow exists to close. The firewall and the
+    # prober are the same in both and are scanned twice; that costs a minute
+    # and needs no exception to explain itself.
+    strategy:
+      fail-fast: false
+      matrix:
+        stack: [rust, python]
     steps:
       - uses: actions/checkout@v7
 
@@ -85,10 +93,10 @@ jobs:
           cd "$RUNNER_TEMP/demo"
           git init -q -b main
           git -c user.name=ci -c user.email=ci@example.com commit -q --allow-empty -m first
-          "$nunki" init --stack rust
+          "$nunki" init --stack ${{ matrix.stack }}
           git add -A
           git -c user.name=ci -c user.email=ci@example.com commit -q -m "nunki init"
-          "$nunki" slot rebuild --stack rust | tee "$RUNNER_TEMP/images.txt"
+          "$nunki" slot rebuild --stack ${{ matrix.stack }} | tee "$RUNNER_TEMP/images.txt"
 
       - name: Scan
         run: |
