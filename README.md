@@ -58,7 +58,7 @@ nunki account list
 From inside the repository you want orchestrated:
 
 ```sh
-nunki init --stack rust         # rust is the stack shipped today
+nunki init --stack rust         # rust and python are the stacks shipped today
 ```
 
 It creates what is absent and never overwrites a file you edit — it says what

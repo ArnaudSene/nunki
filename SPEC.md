@@ -900,7 +900,29 @@ et est rafraîchie par l'hôte — voir la porte 8 en 4.4), `security.sh`
 (audit de dépendances, scan de secrets, analyse statique — la sécurité
 mécanique, porte 8, définie en 4.4). Un
 fragment est un script ou un fichier plat, jamais du code de `nunki`. Les trois
-premières stacks sont celles de `claude-setup` : Rust, Python, Next.js.
+premières stacks sont celles de `claude-setup` : Rust, Python, Next.js. Rust et
+Python sont écrites ; Next.js reste à faire, et `nunki init` refuse un nom qu'il
+ne connaît pas plutôt que de laisser un répertoire vide qui se lit comme
+configuré.
+
+**Ce que la stack Python rend, et ce qu'elle ne rend pas** (mesuré le
+2026-09-20, avant livraison) : `uv` pour le verrou, `ruff`, `mypy` et `pytest`
+pour la batterie, `mutmut` pour la campagne, `osv-scanner` hors ligne pour
+l'audit et `trufflehog` pour les secrets — le même que Rust, puisqu'un secret
+n'a pas d'écosystème. Deux écarts assumés, tous deux écrits dans les scripts
+eux-mêmes plutôt que tus :
+
+- **Aucun contrôle de licence.** Rust joue `cargo deny check bans licenses
+  sources`, trois étapes sans réseau ; `osv-scanner --licenses` passe par
+  deps.dev, que la liste blanche du codeur ne nomme pas. La stack le dit plutôt
+  que de laisser croire à une vérification qui n'a pas lieu.
+- **La campagne mute tout et filtre les survivants.** `mutmut run` n'accepte
+  que des noms de mutants exacts — ni module, ni préfixe, ni chemin de fichier
+  (mesuré sur 3.8.0) — et sa seule restriction, `only_mutate`, vit dans le
+  `pyproject.toml` du projet, que la campagne ne réécrira pas : la copie propre
+  de `HEAD` est aussi celle où tourne la porte 6. Le `--file` de Rust est un
+  drapeau et ne touche à rien ; il n'y a pas d'équivalent ici. Le coût est du
+  temps de campagne sur du code non touché.
 
 ### 4.2 bis — Les plateformes
 
