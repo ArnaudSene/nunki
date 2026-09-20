@@ -14,12 +14,38 @@ use std::process::Command;
 
 use nunki::compose::{AGENT_WRITABLE, NamedVolume, Plan, UserIds, generate, project_name};
 use nunki::harness::Role;
-use nunki::perimeter::{Sources, compute, probes};
+use nunki::perimeter::{Sources, compute, probes, resolves};
 
 const FIREWALL_IMAGE: &str = "nunki/firewall:test";
 const SLOT: &str = "fwlive";
 /// The one name the agent is allowed to resolve and reach.
 const ALLOWED: &str = "example.com";
+/// The search domain every container gets here, whatever the host has.
+const SEARCH_DOMAIN: &str = "search.internal.example";
+
+/// The generated file, with a search list on the sidecar — which owns the
+/// namespace, so the agent reads the same `resolv.conf` (measured: a
+/// container joining another's namespace gets its `search` line).
+///
+/// The engine copies the host's `search` domains into every container. A
+/// Mac has none; GitHub's ubuntu runner carries Azure's, and a Linux desktop
+/// on a DHCP-provided domain carries that one. It is what turned the
+/// declared service "refused" on the runner while every Mac said "reached"
+/// (see `nunki::perimeter::resolves`), so the battery meets it on every
+/// platform: a probe a search list can fool goes red here too.
+fn with_search_list(yaml: String) -> String {
+    let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+    let firewall = doc
+        .get_mut("services")
+        .and_then(|s| s.get_mut("firewall"))
+        .and_then(|f| f.as_mapping_mut())
+        .expect("the generated file has a firewall service");
+    firewall.insert(
+        "dns_search".into(),
+        serde_yaml_ng::Value::Sequence(vec![SEARCH_DOMAIN.into()]),
+    );
+    serde_yaml_ng::to_string(&doc).unwrap()
+}
 
 /// The address a container of this project got, so a probe can try to reach
 /// it by number.
@@ -111,7 +137,11 @@ fn live_the_firewall_holds() {
     };
 
     let file = dir.path().join("mission.yml");
-    std::fs::write(&file, generate(&plan, &dialect()).unwrap()).unwrap();
+    std::fs::write(
+        &file,
+        with_search_list(generate(&plan, &dialect()).unwrap()),
+    )
+    .unwrap();
 
     let project = project_name("11111111-2222-4333-8444-555555555555", SLOT).unwrap();
     down(&file, &project);
@@ -275,7 +305,11 @@ fn live_a_declared_service_is_reachable_and_nothing_else_is() {
     };
 
     let file = dir.path().join("system.yml");
-    std::fs::write(&file, generate(&plan, &dialect()).unwrap()).unwrap();
+    std::fs::write(
+        &file,
+        with_search_list(generate(&plan, &dialect()).unwrap()),
+    )
+    .unwrap();
     let project = project_name("11111111-2222-4333-8444-555555555555", "fwlivesys").unwrap();
     down(&file, &project);
     let up = compose(&file, &project, &["up", "-d", "--wait"]);
@@ -285,31 +319,37 @@ fn live_a_declared_service_is_reachable_and_nothing_else_is() {
         String::from_utf8_lossy(&up.stderr)
     );
 
-    let checks: &[(&str, bool, &str)] = &[
+    // The resolve probes are `nunki check`'s own, not a copy of them: what
+    // this proves is what the verb will measure (SPEC 4.1 bis, rule 7).
+    let checks: Vec<(&str, bool, String)> = vec![
         (
             "the declared service resolves by its compose name",
             true,
-            "nslookup db 2>&1 | tail -5 | grep -q 'Address: [0-9]'",
+            resolves("db"),
         ),
-        ("the declared service is reachable", true, "nc -z -w3 db 80"),
+        (
+            "the declared service is reachable",
+            true,
+            "nc -z -w3 db 80".to_string(),
+        ),
         (
             "an off-list name still refuses to resolve",
             false,
-            "nslookup github.com 2>&1 | tail -5 | grep -q 'Address: [0-9]'",
+            resolves("github.com"),
         ),
         (
             "an undeclared address is still refused",
             false,
-            "nc -z -w3 1.1.1.1 443",
+            "nc -z -w3 1.1.1.1 443".to_string(),
         ),
     ];
 
     let mut failures = Vec::new();
-    for (what, expected, script) in checks {
+    for (what, expected, script) in &checks {
         let got = compose(
             &file,
             &project,
-            &["exec", "-T", "agent", "sh", "-c", script],
+            &["exec", "-T", "agent", "sh", "-c", script.as_str()],
         )
         .status
         .success();

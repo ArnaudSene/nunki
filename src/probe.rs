@@ -339,8 +339,9 @@ pub fn system_probes(plan: &Plan, header: &crate::mission::Header) -> Vec<crate:
         .unwrap_or_else(|| "example.com".to_string());
     let mut probes = crate::perimeter::probes(&allowed, &[]);
 
-    let resolves =
-        |name: &str| format!("nslookup {name} 2>&1 | tail -5 | grep -q 'Address: [0-9]'");
+    // The battery's own form, not a copy of it: the absolute name is what
+    // survives a host's search list (see `perimeter::resolves`).
+    let resolves = crate::perimeter::resolves;
     for name in &declared {
         probes.push(Probe {
             what: format!("{name}, a service the mission declares, resolves"),

@@ -105,7 +105,13 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Show what the runner brought
-        run: docker compose version
+        # The resolver a container gets here, `search` list included: the
+        # engine copies the host's, and that list is what read a declared
+        # service as "refused" on this runner while every Mac said "reached"
+        # (2026-09-20, `perimeter::resolves`).
+        run: |
+          docker compose version
+          docker run --rm alpine:3.22 cat /etc/resolv.conf
 
       - uses: actions/cache@v6
         with:

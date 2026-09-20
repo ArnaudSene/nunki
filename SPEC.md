@@ -485,7 +485,19 @@ démarrage » avait rendue. **Tranché par Arnaud le 2026-09-09** :
    résout pas — il est sur le même réseau, et le résolveur de Compose le
    donnerait sans le pare-feu (mesuré). Joindre un service **sur son port**
    n'est pas sondé : `nunki` ne sait pas sur quel port il écoute, et le dit
-   « non vérifié » plutôt que d'inventer un vert.
+   « non vérifié » plutôt que d'inventer un vert. **Les sondes demandent un
+   nom absolu** (`db.`, jamais `db`), précisé le 2026-09-20 : le moteur
+   recopie la liste `search` de l'hôte dans chaque conteneur, et le
+   `nslookup` de busybox n'interroge alors que `db.<domaine>`, jamais `db`
+   lui-même. Mesuré sur le coureur Ubuntu de GitHub, dont l'hôte porte un
+   domaine Azure : le service déclaré ressortait « refusé » de la sonde
+   alors que `nc -z db 80` le joignait — la libc honore `ndots:0` et essaie
+   le nom nu, `nslookup` non. Un poste Linux sous un domaine DHCP est le
+   même cas, et `nunki check` y aurait signalé une violation qui n'en était
+   pas une ; un Mac, dont les conteneurs n'ont pas de liste `search`, ne
+   l'aurait jamais montré. Les deux batteries vivantes posent donc une liste
+   `search` sur le sidecar, pour que la preuve soit la même sur chaque
+   plateforme.
 
 **Où vit l'image du sidecar.** Précisé le 2026-09-09, après que la question
 « pourquoi `.nunki/` ? » a montré une erreur de rangement. Les fragments de
@@ -905,7 +917,7 @@ et qui se vérifie en CI sur les deux :
 | chemins montables | Docker Desktop ne partage que `/Users`, `/Volumes`, `/private`, `/tmp` par défaut | tout le système de fichiers WSL ; **`/mnt/c` très lent et sans permissions** | dépôt et slots vivent sous un chemin partagé sur macOS et dans le système de fichiers Linux sous WSL ; `nunki check` refuse `/mnt/` et un chemin non partagé |
 | casse des noms | APFS insensible par défaut | ext4 sensible, dans le conteneur aussi | `nunki check` signale deux chemins ne différant que par la casse |
 | services de l'hôte depuis un conteneur | `host.docker.internal` | idem avec Docker Desktop ; à déclarer soi-même avec Docker Engine seul | l'adaptateur de moteur le sait, pas le fichier de profil du projet ; et l'hôte n'est joignable que si la mission le déclare (4.1 bis) |
-| résolveur DNS du conteneur | dépend du moteur, pas de la plateforme : 127.0.0.11 sur un réseau utilisateur, autre chose sur le réseau par défaut (mesuré le 2026-09-09 sous **OrbStack**, le moteur d'Arnaud : `0.250.250.200`) | 127.0.0.11 sur un réseau utilisateur sous Engine | ne pas supposer l'adresse. Dans un profil d'agent la question ne se pose plus : le sidecar **détourne le port 53** de l'espace réseau partagé vers son propre résolveur (4.1 bis §3), quelle que soit l'adresse écrite dans `/etc/resolv.conf` par le moteur |
+| résolveur DNS du conteneur | dépend du moteur, pas de la plateforme : 127.0.0.11 sur un réseau utilisateur, autre chose sur le réseau par défaut (mesuré le 2026-09-09 sous **OrbStack**, le moteur d'Arnaud : `0.250.250.200`) | 127.0.0.11 sur un réseau utilisateur sous Engine | ne pas supposer l'adresse. Dans un profil d'agent la question ne se pose plus : le sidecar **détourne le port 53** de l'espace réseau partagé vers son propre résolveur (4.1 bis §3), quelle que soit l'adresse écrite dans `/etc/resolv.conf` par le moteur ; la liste `search` que le moteur y recopie depuis l'hôte, elle, est neutralisée par les sondes de 4.1 bis §7, qui demandent des noms absolus |
 | fins de ligne | LF | LF, mais un éditeur Windows peut écrire CRLF | `nunki init` pose un `.gitattributes` (`* text=auto eol=lf`) s'il n'en existe pas ; `nunki check` vérifie ce qu'il lit |
 | mémoire | celle de Docker Desktop | WSL2 prend la moitié de la RAM par défaut (`.wslconfig`) | `nunki check` affiche la mémoire vue par le moteur et avertit sous un seuil |
 | clone local | même système de fichiers | dans WSL | `--no-hardlinks` (3.2) ; le slot est créé à côté du dépôt, jamais sur un autre volume |
