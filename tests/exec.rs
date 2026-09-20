@@ -183,6 +183,15 @@ fn live_a_proof_runs_on_the_commit_and_never_on_what_the_agent_left_behind() {
     // Alpine plus git: this test is about what the copy contains, not about
     // ownership — that one is settled by the mount point nunki's own image
     // layer creates, and measured there.
+    //
+    // Which is why `safe.directory` is set below. A real profile runs as the
+    // host's own uid (`compose::generate` writes `user:`), so git in the
+    // container and the owner of the mounted tree are the same person and it
+    // never asks. This fixture runs as root, because it installs git at
+    // start-up and `apk` needs to. On Linux git then refuses the tree —
+    // "detected dubious ownership", measured on the ubuntu runner — while on
+    // macOS the engine's file sharing hides the mismatch and it passes. The
+    // fixture says out loud what the real profile gets by construction.
     let volume = exec::proof_volume(&slot.name);
     std::fs::write(
         &file,
@@ -196,7 +205,7 @@ fn live_a_proof_runs_on_the_commit_and_never_on_what_the_agent_left_behind() {
              \x20   tmpfs:\n\
              \x20     - /run/nunki\n\
              \x20   command: [\"sh\", \"-c\", \"apk add --no-cache git > /dev/null && \
-             sleep 600\"]\n\
+             git config --global --add safe.directory '*' && sleep 600\"]\n\
              \x20   healthcheck:\n\
              \x20     test: [\"CMD-SHELL\", \"command -v git > /dev/null\"]\n\
              \x20     interval: 1s\n\

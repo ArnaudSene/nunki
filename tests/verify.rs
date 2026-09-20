@@ -424,10 +424,19 @@ fn live_a_mission_is_driven_from_its_first_lot_to_verified() {
     );
     executable(
         nunki::mutants::SCRIPT,
+        // The last line is the one `nunki` reads as "this campaign got to the
+        // end" (SPEC 4.4). Without it a campaign that found nothing and one
+        // that was killed are the same log.
         "#!/bin/sh\n\
          echo '{\"id\":\"src/new.rs:1\",\"file\":\"src/new.rs\",\"line\":1,\
-         \"description\":\"replace two with 0\"}'\n",
+         \"description\":\"replace two with 0\"}'\n\
+         echo '{\"campaign\":\"done\"}'\n",
     );
+    // Gate 8 is played after every run and at the verification (SPEC 4.4), so
+    // a world whose stack ships no `security.sh` is a world where it is red —
+    // for the stack, not for the mission. Nothing to find here: no lockfile,
+    // no secret, and the contract says an empty answer is an empty answer.
+    executable(nunki::gate::SECURITY, "#!/bin/sh\nexit 0\n");
 
     write(&world.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n");
     write(
@@ -452,6 +461,10 @@ fn live_a_mission_is_driven_from_its_first_lot_to_verified() {
     let volume = nunki::exec::proof_volume(&slot.name);
     let file = nunki::run::profile_path(&world.project, &slot.name);
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    // `safe.directory` for the reason `tests/exec.rs` gives: the fixture
+    // runs as root so `apk` can install git, and on Linux git then refuses
+    // the mounted tree as "dubious ownership" (measured on the ubuntu
+    // runner); a real profile runs as the host's uid and is never asked.
     std::fs::write(
         &file,
         format!(
@@ -463,10 +476,11 @@ fn live_a_mission_is_driven_from_its_first_lot_to_verified() {
              \x20     - {volume}:{proof}\n\
              \x20     - {stack}/{battery}:{stack_at}/{battery}:ro\n\
              \x20     - {stack}/{campaign}:{stack_at}/{campaign}:ro\n\
+             \x20     - {stack}/{security}:{stack_at}/{security}:ro\n\
              \x20   tmpfs:\n\
              \x20     - /run/nunki\n\
              \x20   command: [\"sh\", \"-c\", \"apk add --no-cache git > /dev/null && \
-             sleep 600\"]\n\
+             git config --global --add safe.directory '*' && sleep 600\"]\n\
              \x20   healthcheck:\n\
              \x20     test: [\"CMD-SHELL\", \"command -v git > /dev/null\"]\n\
              \x20     interval: 1s\n\
@@ -482,6 +496,7 @@ fn live_a_mission_is_driven_from_its_first_lot_to_verified() {
             stack_at = nunki::run::STACK_AT,
             battery = nunki::gate::BATTERY,
             campaign = nunki::mutants::SCRIPT,
+            security = nunki::gate::SECURITY,
         ),
     )
     .unwrap();

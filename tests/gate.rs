@@ -844,6 +844,13 @@ fn live_the_battery_is_the_stacks_mounted_one_and_an_absent_one_is_red() {
     // The same shape as `tests/exec.rs`: alpine plus git, because the copy of
     // HEAD is made with git inside the container. What is being proved here
     // is which script runs, not what a stack image carries.
+    //
+    // And the same `safe.directory` as there, for the same reason: this
+    // fixture runs as root because `apk` needs to, so on Linux git refuses
+    // the mounted tree — "detected dubious ownership", measured on the
+    // ubuntu runner on 2026-09-20, the first time the job reached this suite
+    // — while macOS's file sharing hides the mismatch. A real profile runs as
+    // the host's uid and never asks.
     let volume = nunki::exec::proof_volume(&slot.name);
     let file = nunki::run::profile_path(&project, &slot.name);
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
@@ -877,7 +884,7 @@ fn live_the_battery_is_the_stacks_mounted_one_and_an_absent_one_is_red() {
                  \x20     - {volume}:{proof}\n\
                  {mount}\
                  \x20   command: [\"sh\", \"-c\", \"apk add --no-cache git > /dev/null && \
-                 sleep 600\"]\n\
+                 git config --global --add safe.directory '*' && sleep 600\"]\n\
                  \x20   healthcheck:\n\
                  \x20     test: [\"CMD-SHELL\", \"command -v git > /dev/null\"]\n\
                  \x20     interval: 1s\n\

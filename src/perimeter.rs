@@ -178,13 +178,36 @@ pub struct Probe {
     pub script: String,
 }
 
+/// The script that asks the namespace's resolver whether `name` has an
+/// address, and nothing else: its exit status is the answer.
+///
+/// The name is asked for **absolute** — `db.`, not `db` — because the engine
+/// copies the host's `search` list into the container, and busybox's
+/// `nslookup` then queries only `db.<search domain>` and never `db` itself.
+/// Measured on 2026-09-20: on GitHub's ubuntu runner, whose host carries an
+/// Azure search domain, the declared service came back "refused" from this
+/// probe while `nc -z db 80` reached it — libc honours `ndots:0` and tries
+/// the bare name, `nslookup` does not — and every Mac, whose containers get
+/// no search list, said "reached". A Linux desktop on a DHCP-provided domain
+/// is the same case, so `nunki check` would have reported a violation that
+/// was not one. Both live batteries put a search list on the sidecar so the
+/// proof is the same on every platform.
+pub fn resolves(name: &str) -> String {
+    resolves_via(name, "")
+}
+
+/// [`resolves`], asked of `server` rather than of the namespace's resolver:
+/// the probe that measures the port 53 detour (SPEC 4.1 bis, rule 3).
+pub fn resolves_via(name: &str, server: &str) -> String {
+    let name = name.trim_end_matches('.');
+    format!("nslookup {name}. {server} 2>&1 | tail -5 | grep -q 'Address: [0-9]'")
+}
+
 /// The battery. `allowed` is a domain the role's allowlist names; `forbidden`
 /// are addresses and ports nothing declared — a neighbour on the slot's own
 /// network belongs here, and it is the only hermetic one: the rest need the
 /// machine to have a way out at all, or they go green for the wrong reason.
 pub fn probes(allowed: &str, forbidden: &[(String, u16)]) -> Vec<Probe> {
-    let resolves =
-        |name: &str| format!("nslookup {name} 2>&1 | tail -5 | grep -q 'Address: [0-9]'");
     let mut probes = vec![
         Probe {
             what: format!("{allowed}, an allowed name, resolves"),
@@ -209,7 +232,7 @@ pub fn probes(allowed: &str, forbidden: &[(String, u16)]) -> Vec<Probe> {
         Probe {
             what: "an off-list name resolves through another server".to_string(),
             expected: false,
-            script: resolves("github.com 1.1.1.1"),
+            script: resolves_via("github.com", "1.1.1.1"),
         },
         Probe {
             // Not `nslookup -vc`: busybox has no such option, so that probe
