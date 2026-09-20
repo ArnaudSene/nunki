@@ -1450,3 +1450,55 @@ fn the_python_integrators_battery_runs_the_system_tests_and_only_those() {
         "the coder's battery would run tests that need services it cannot reach: {coder}"
     );
 }
+
+/// The battery does not read what the campaign leaves behind.
+///
+/// Measured on 2026-09-20, on the first mission of the Python bench. Gate 7's
+/// campaign runs `mutmut`, which copies the whole tree into `mutants/` before
+/// it generates anything. Git ignores that directory, so the `git clean -fd`
+/// `nunki exec` performs leaves it where it is, and the next battery type-checked
+/// two copies of every module — `Duplicate module named "pygrep"`, exit 2.
+///
+/// Gate 6 was green before the campaign and red after it, on a tree the coder
+/// had not touched, and `nunki` opened a volet sending the agent to repair
+/// code that was never broken. The first campaign of a project would have
+/// poisoned every battery after it.
+#[test]
+fn the_python_battery_does_not_read_what_the_campaign_leaves() {
+    let (_d, root, nunki) = fresh();
+    init(&root, &nunki, &["python".to_string()]).unwrap();
+    let stack = home(&root).join("stacks/python");
+
+    // The directory really is the campaign's: the stack declares it writable
+    // because `mutmut` writes there, which is what makes it the battery's
+    // problem rather than a stray folder nobody put there.
+    let writable = std::fs::read_to_string(stack.join(nunki::project::WRITABLE_FILE)).unwrap();
+    assert!(
+        writable.lines().any(|l| l.trim() == "mutants"),
+        "the stack does not declare the campaign's directory: {writable}"
+    );
+
+    let prepush = std::fs::read_to_string(stack.join("prepush.sh")).unwrap();
+    let tools: Vec<&str> = prepush
+        .lines()
+        .filter(|l| l.contains("uv run") && !l.trim_start().starts_with('#'))
+        .filter(|l| l.contains("ruff") || l.contains("mypy"))
+        .collect();
+    assert_eq!(tools.len(), 3, "ruff twice and mypy once: {tools:?}");
+    for tool in tools {
+        assert!(
+            tool.contains("mutants"),
+            "this reads the copy the campaign left in `mutants/`: {tool}"
+        );
+    }
+
+    // And the campaign clears it when it gets to the end — a courtesy, since
+    // one that is killed never does, which is why the exclusion above is the
+    // guard and this is not.
+    let campaign = std::fs::read_to_string(stack.join("mutation.sh")).unwrap();
+    assert_eq!(
+        campaign.matches("rm -rf mutants").count(),
+        2,
+        "cleared before the run and after it: {campaign}"
+    );
+}

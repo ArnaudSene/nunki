@@ -1065,9 +1065,30 @@ if [ -n "$missing" ]; then
   exit 1
 fi
 
-uv run --frozen --no-sync ruff format --check .
-uv run --frozen --no-sync ruff check .
-uv run --frozen --no-sync mypy .
+# `mutants/` is excluded from all three, and it is not housekeeping.
+#
+# Gate 7's campaign runs `mutmut` in this very copy of HEAD, and mutmut
+# copies the whole tree into `mutants/` before it generates anything. That
+# directory is ignored by git, so the `git clean -fd` `nunki exec` performs
+# leaves it exactly where it is — and the next battery then type-checks two
+# copies of every module:
+#
+#   error: Duplicate module named "pygrep"
+#          (also at "./mutants/src/pygrep/__init__.py")
+#
+# Measured on 2026-09-20, on the first mission of the Python bench: gate 6
+# was green before the campaign and red after it, on a tree the coder had
+# not touched, and nunki opened a volet sending the agent to repair code
+# that was never broken. The first campaign of a project would have poisoned
+# every battery after it.
+#
+# `ruff` reads `.gitignore` and had skipped it already; it is named here
+# anyway, because a project that does not ignore `mutants/` fails for the
+# same reason, and the directory is the stack's own doing — `writable.txt`
+# names it.
+uv run --frozen --no-sync ruff format --check --exclude mutants .
+uv run --frozen --no-sync ruff check --exclude mutants .
+uv run --frozen --no-sync mypy --exclude '^mutants/' .
 
 # `-m "not system"` is the counterpart of Rust's `#[ignore]` convention: a
 # system test needs the mission's services, which are not up here, and it
@@ -1286,6 +1307,12 @@ for name, status in survivors:
     what = status if not removed else "{}: {} -> {}".format(status, removed, added)
     print(json.dumps({"id": name, "file": path, "line": line, "description": what}))
 PY
+
+# Behind itself, once the survivors have been read out of it. A courtesy
+# and not a guard: a campaign that is killed — and one often is, the
+# deadline is 45 minutes — never reaches this line, which is why the
+# battery excludes the directory rather than trusting it to be gone.
+rm -rf mutants
 
 # The last thing it prints, and the only line that says the campaign got to
 # the end. Without it `nunki` cannot tell "no survivor" from "no answer": a
