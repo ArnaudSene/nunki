@@ -116,12 +116,20 @@ jobs:
       - uses: actions/cache@v6
         with:
           path: |
+            ~/.cargo/bin
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
           key: containers-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: containers-cargo-
+
+      # One suite plays the shipped `mutation.sh` against the real tool, and
+      # says so in its own reason for being ignored. Installed rather than
+      # skipped: a proof that needs a tool and does not get it is a proof
+      # nobody ran, which is what this job exists to stop.
+      - name: Install cargo-mutants if the cache did not carry it
+        run: command -v cargo-mutants >/dev/null || cargo install cargo-mutants --locked
 
       - name: The live tests, one suite at a time
         # One binary at a time and one thread inside it: these lift containers
