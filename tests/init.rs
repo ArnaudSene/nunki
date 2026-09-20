@@ -1478,18 +1478,28 @@ fn the_python_battery_does_not_read_what_the_campaign_leaves() {
         "the stack does not declare the campaign's directory: {writable}"
     );
 
-    let prepush = std::fs::read_to_string(stack.join("prepush.sh")).unwrap();
-    let tools: Vec<&str> = prepush
-        .lines()
-        .filter(|l| l.contains("uv run") && !l.trim_start().starts_with('#'))
-        .filter(|l| l.contains("ruff") || l.contains("mypy"))
-        .collect();
-    assert_eq!(tools.len(), 3, "ruff twice and mypy once: {tools:?}");
-    for tool in tools {
-        assert!(
-            tool.contains("mutants"),
-            "this reads the copy the campaign left in `mutants/`: {tool}"
-        );
+    // **Every** tool the two batteries run, and not a list written by hand.
+    // The first fix named ruff and mypy, left pytest out, and the battery
+    // was red again one command further down — a second reason wearing the
+    // same exit status. A test that enumerates what was fixed proves only
+    // that it was fixed; this one asks the property of whatever is there.
+    for script in ["prepush.sh", nunki::gate::SYSTEM_BATTERY] {
+        let text = std::fs::read_to_string(stack.join(script)).unwrap();
+        let walkers: Vec<&str> = text
+            .lines()
+            .filter(|l| !l.trim_start().starts_with('#'))
+            .filter(|l| l.contains("uv run"))
+            // `uv sync` and `--version` probes read no tree.
+            .filter(|l| l.contains("ruff") || l.contains("mypy") || l.contains("pytest"))
+            .filter(|l| !l.contains("--version"))
+            .collect();
+        assert!(!walkers.is_empty(), "{script} runs nothing");
+        for tool in walkers {
+            assert!(
+                tool.contains("mutants"),
+                "{script}: this walks the copy the campaign left in `mutants/`: {tool}"
+            );
+        }
     }
 
     // And the campaign clears it when it gets to the end — a courtesy, since

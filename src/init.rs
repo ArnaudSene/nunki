@@ -1086,6 +1086,17 @@ fi
 # anyway, because a project that does not ignore `mutants/` fails for the
 # same reason, and the directory is the stack's own doing — `writable.txt`
 # names it.
+#
+# **Every** tool that walks the tree, and the list is the point: the first
+# fix named ruff and mypy and left pytest out, which then collided on the
+# same copy one command further down —
+#
+#   import file mismatch: imported module 'test_pygrep' has this __file__
+#   attribute: /work/proof/mutants/tests/test_pygrep.py
+#
+# — and the battery was red again, for a second reason wearing the same exit
+# status. A directory this tree carries and this stack put there has to be
+# taken out of every walk, not out of the ones that happened to fail first.
 uv run --frozen --no-sync ruff format --check --exclude mutants .
 uv run --frozen --no-sync ruff check --exclude mutants .
 uv run --frozen --no-sync mypy --exclude '^mutants/' .
@@ -1098,7 +1109,7 @@ uv run --frozen --no-sync mypy --exclude '^mutants/' .
 #
 #     [tool.pytest.ini_options]
 #     markers = ["system: needs the mission's services"]
-uv run --frozen --no-sync pytest -m "not system"
+uv run --frozen --no-sync pytest --ignore=mutants -m "not system"
 "##;
 
 /// The mutation campaign a Python project runs (SPEC 4.4, gate 7): declared
@@ -1726,7 +1737,7 @@ uv sync --frozen --all-groups
 log=.venv/nunki-system-tests.log
 
 status=0
-uv run --frozen --no-sync pytest -m system >"$log" 2>&1 || status=$?
+uv run --frozen --no-sync pytest --ignore=mutants -m system >"$log" 2>&1 || status=$?
 cat "$log" >&2
 
 # 5 is pytest's "no tests were collected", which is this gate's own failure
