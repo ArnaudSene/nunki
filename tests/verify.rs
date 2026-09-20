@@ -461,6 +461,10 @@ fn live_a_mission_is_driven_from_its_first_lot_to_verified() {
     let volume = nunki::exec::proof_volume(&slot.name);
     let file = nunki::run::profile_path(&world.project, &slot.name);
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    // `safe.directory` for the reason `tests/exec.rs` gives: the fixture
+    // runs as root so `apk` can install git, and on Linux git then refuses
+    // the mounted tree as "dubious ownership" (measured on the ubuntu
+    // runner); a real profile runs as the host's uid and is never asked.
     std::fs::write(
         &file,
         format!(
@@ -476,7 +480,7 @@ fn live_a_mission_is_driven_from_its_first_lot_to_verified() {
              \x20   tmpfs:\n\
              \x20     - /run/nunki\n\
              \x20   command: [\"sh\", \"-c\", \"apk add --no-cache git > /dev/null && \
-             sleep 600\"]\n\
+             git config --global --add safe.directory '*' && sleep 600\"]\n\
              \x20   healthcheck:\n\
              \x20     test: [\"CMD-SHELL\", \"command -v git > /dev/null\"]\n\
              \x20     interval: 1s\n\
