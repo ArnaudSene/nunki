@@ -376,10 +376,18 @@ fn live_the_services_survive_a_switch_and_the_application_starts_in_the_profile(
 
     let docker = Docker::real();
     let slot_name = "launchlive";
-    let compose_project =
-        nunki::compose::project_name("11111111-2222-4333-8444-555555555555", slot_name).unwrap();
-
     let dir = tempfile::tempdir().unwrap();
+    // The session is the project's, read the way `launch::start` reads it —
+    // never a literal of this test's own. The Compose project is named after
+    // it, and a plan lifted under one session with an application started
+    // under another is an agent `nunki` cannot find: measured, `ps -q agent`
+    // under `nunki-nunki-launchlive` answered nothing while the agent ran
+    // under `nunki-11111111-launchlive`, which read for three days as
+    // `up --wait` returning early.
+    let hq_root = dir.path().join("nunki");
+    let session = Project::at(dir.path().join("repo"), config(), hq_root.clone()).session();
+    let compose_project = nunki::compose::project_name(&session, slot_name).unwrap();
+
     let context = dir.path().join("firewall");
     std::fs::create_dir_all(&context).unwrap();
     nunki::firewall::materialise(&context).unwrap();
@@ -414,7 +422,6 @@ fn live_the_services_survive_a_switch_and_the_application_starts_in_the_profile(
         std::fs::write(mission_dir.join(f), "").unwrap();
     }
 
-    let hq_root = dir.path().join("nunki");
     let mut declared = config();
     declared.run = Some("run.sh".to_string());
     let project = Project::at(dir.path().join("repo"), declared, hq_root.clone());
@@ -442,7 +449,7 @@ fn live_the_services_survive_a_switch_and_the_application_starts_in_the_profile(
         .unwrap();
         let (uid, gid) = nunki::image::host_ids();
         Plan {
-            session: "11111111-2222-4333-8444-555555555555".into(),
+            session: session.clone(),
             slot: slot_name.to_string(),
             role,
             image: "alpine:3.20".to_string(),
