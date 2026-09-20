@@ -1985,3 +1985,96 @@ fn the_security_agent_owes_findings_and_not_a_tools_report() {
         "{decision:?}"
     );
 }
+
+/// A resume block may name its commit in its heading.
+///
+/// Measured on 2026-09-20, on the first mission of the Python bench: the
+/// coder wrote `## ÉTAT DE REPRISE — commit c638a331…`, which is a fair
+/// reading of the rule it is given ("it names the commit it describes"), and
+/// the gate answered that the journal **has no block** — about a journal
+/// whose block was at the top, naming `HEAD`. It cost an attempt out of
+/// three, and it sent the agent looking for the wrong thing.
+///
+/// What still has to hold: a heading that merely begins with the same
+/// letters opens nothing, and the block still ends at the next heading, so
+/// a hash further down the file is still not the block's.
+#[test]
+fn a_resume_block_may_carry_its_commit_in_its_heading() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    let head = git(&f.tree, &["rev-parse", "HEAD"]);
+
+    for heading in [
+        format!("## ÉTAT DE REPRISE — commit {head}"),
+        format!("## ÉTAT DE REPRISE ({})", &head[..8]),
+        "## ÉTAT DE REPRISE".to_string(),
+    ] {
+        std::fs::write(
+            &f.journal,
+            format!("# Journal\n\n{heading}\n\nLot: L1 — done\n"),
+        )
+        .unwrap();
+        // The last one names HEAD nowhere in the heading, so the body does.
+        if !heading.contains(&head[..8]) {
+            std::fs::write(
+                &f.journal,
+                format!("# Journal\n\n{heading}\n\nHEAD is {head}.\n"),
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            f.decision(Role::Coder, Gate::ResumeNamesHead),
+            Decision::Passed,
+            "{heading}"
+        );
+    }
+
+    // A heading that only starts with the same letters opens no block: the
+    // name has to end there, or be followed by something that is not a word.
+    std::fs::write(
+        &f.journal,
+        format!("# Journal\n\n## ÉTAT DE REPRISES PASSÉES\n\nHEAD is {head}.\n"),
+    )
+    .unwrap();
+    match f.decision(Role::Coder, Gate::ResumeNamesHead) {
+        Decision::Failed(why) => assert!(why.contains("no `ÉTAT DE REPRISE` block"), "{why}"),
+        other => panic!("that heading opens no block: {other:?}"),
+    }
+
+    // And the block still stops at the next heading, heading-hash or not.
+    let first = git(&f.tree, &["rev-parse", "HEAD~1"]);
+    std::fs::write(
+        &f.journal,
+        format!(
+            "# Journal\n\n## ÉTAT DE REPRISE — commit {first}\n\nstale.\n\n## History\n\n{head}\n"
+        ),
+    )
+    .unwrap();
+    match f.decision(Role::Coder, Gate::ResumeNamesHead) {
+        Decision::Failed(why) => assert!(why.contains(&head[..12]), "{why}"),
+        other => panic!("a stale block with a fresh hash below it: {other:?}"),
+    }
+}
+
+/// And when there really is no block, the gate says what the journal does
+/// carry — "there is none" sent a reader looking for a file that was in
+/// front of them under another heading.
+#[test]
+fn a_journal_without_a_block_is_told_what_it_has_instead() {
+    let f = Fixture::new();
+    std::fs::write(&f.journal, "# Journal\n\n## Notes\n\nI did some work.\n").unwrap();
+
+    match f.decision(Role::Coder, Gate::ResumeNamesHead) {
+        Decision::Failed(why) => {
+            assert!(why.contains("# Journal"), "{why}");
+            assert!(why.contains("## Notes"), "{why}");
+        }
+        other => panic!("{other:?}"),
+    }
+
+    std::fs::write(&f.journal, "I did some work.\n").unwrap();
+    match f.decision(Role::Coder, Gate::ResumeNamesHead) {
+        Decision::Failed(why) => assert!(why.contains("no heading at all"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+}

@@ -507,9 +507,22 @@ fn resume_names_head(subject: &Subject, head: &str) -> Result<Decision, GateErro
     let text = std::fs::read_to_string(subject.journal)
         .map_err(|e| GateError::Unreadable(subject.journal.to_path_buf(), e))?;
     let Some(block) = resume_block(&text) else {
+        // What the journal does carry, because "there is no block" sends a
+        // human — and an agent — looking for a file that is very often right
+        // in front of them under another heading.
+        let headings: Vec<&str> = text
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with('#'))
+            .take(6)
+            .collect();
+        let found = match headings.is_empty() {
+            true => "it has no heading at all".to_string(),
+            false => format!("its headings are: {}", headings.join(" / ")),
+        };
         return Ok(Decision::Failed(format!(
             "{} has no `ÉTAT DE REPRISE` block; a run that ends without one has not \
-             honoured the run contract",
+             honoured the run contract — {found}",
             subject.journal.display()
         )));
     };
@@ -533,11 +546,7 @@ pub fn resume_block(text: &str) -> Option<&str> {
         let trimmed = line.trim();
         let hashes = trimmed.chars().take_while(|c| *c == '#').count();
         if start.is_none() {
-            if hashes > 0
-                && trimmed[hashes..]
-                    .trim()
-                    .eq_ignore_ascii_case("ÉTAT DE REPRISE")
-            {
+            if hashes > 0 && names_the_block(trimmed[hashes..].trim()) {
                 start = Some(offset);
                 level = hashes;
             }
@@ -547,6 +556,30 @@ pub fn resume_block(text: &str) -> Option<&str> {
         offset += line.len();
     }
     start.map(|s| &text[s..])
+}
+
+/// Whether a heading's text opens this block.
+///
+/// The name, and then whatever the writer put after it: `ÉTAT DE REPRISE`,
+/// `ÉTAT DE REPRISE — commit c638a33`, `ÉTAT DE REPRISE (L1)`. An exact
+/// match was the rule until 2026-09-20, when a coder read "it names the
+/// commit it describes" as an invitation to put the commit in the heading —
+/// a fair reading of the rules it is given — and lost an attempt to a gate
+/// that answered "has no `ÉTAT DE REPRISE` block" about a journal whose
+/// block was there, at the top, naming `HEAD`. A gate that refuses what
+/// nothing forbids grades an agent on a secret.
+///
+/// What follows the name has to be a separator, so that a heading which
+/// merely begins with the same letters does not open a block.
+fn names_the_block(heading: &str) -> bool {
+    const NAME: &str = "ÉTAT DE REPRISE";
+    if heading.len() < NAME.len() || !heading[..NAME.len()].eq_ignore_ascii_case(NAME) {
+        return false;
+    }
+    match heading[NAME.len()..].chars().next() {
+        None => true,
+        Some(c) => !c.is_alphanumeric(),
+    }
 }
 
 /// Whether `block` names `head` — in full or abbreviated, as a human or an
