@@ -1861,6 +1861,25 @@ RUN npx --yes playwright@${PLAYWRIGHT} install --with-deps chromium \
  && printf '%s\n' "${PLAYWRIGHT}" > /opt/playwright/nunki-version \
  && chmod -R a+rX /opt/playwright
 
+# And then npm goes, with the cache the line above left behind.
+#
+# This stack installs with pnpm, through corepack, and never calls npm — but
+# npm ships inside the Node image with a dependency tree of its own, and that
+# tree is what the image scan reports. Measured 2026-09-21, the first time
+# this image was scanned: seven critical or high advisories **with fixes
+# published**, `tar` 7.5.11 among them, none of them from a line of this
+# file. Upgrading npm to its latest took it to four rather than none: its
+# bundled tree is always a patch or two behind whatever the advisory database
+# knows.
+#
+# So it is removed rather than chased. It is the last line that needs it —
+# `npx` above is how Playwright arrives — and corepack, which is a separate
+# package, is what keeps pnpm working. The scan comes back clean.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx /root/.npm \
+ && pnpm --version \
+ && node --version \
+ && ! command -v npm
+
 # The group may already exist under that id (on macOS, gid 20 is `dialout`
 # here); either way the agent ends up in it.
 RUN groupadd -g ${GID} agent || true \
