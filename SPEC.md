@@ -900,10 +900,9 @@ et est rafraîchie par l'hôte — voir la porte 8 en 4.4), `security.sh`
 (audit de dépendances, scan de secrets, analyse statique — la sécurité
 mécanique, porte 8, définie en 4.4). Un
 fragment est un script ou un fichier plat, jamais du code de `nunki`. Les trois
-premières stacks sont celles de `claude-setup` : Rust, Python, Next.js. Rust et
-Python sont écrites ; Next.js reste à faire, et `nunki init` refuse un nom qu'il
-ne connaît pas plutôt que de laisser un répertoire vide qui se lit comme
-configuré.
+premières stacks sont celles de `claude-setup` : Rust, Python, Next.js. Les
+trois sont écrites, et `nunki init` refuse un nom qu'il ne connaît pas plutôt
+que de laisser un répertoire vide qui se lit comme configuré.
 
 **Ce que la stack Python rend, et ce qu'elle ne rend pas** (mesuré le
 2026-09-20, avant livraison) : `uv` pour le verrou, `ruff`, `mypy` et `pytest`
@@ -923,6 +922,25 @@ eux-mêmes plutôt que tus :
   de `HEAD` est aussi celle où tourne la porte 6. Le `--file` de Rust est un
   drapeau et ne touche à rien ; il n'y a pas d'équivalent ici. Le coût est du
   temps de campagne sur du code non touché.
+
+**Ce que la stack Next.js rend** (mesuré le 2026-09-21, avant livraison) :
+`pnpm` pour le verrou, `prettier`, `eslint`, `tsc` et `vitest` pour la
+batterie, `Playwright` pour celle de l'intégrateur, `Stryker` pour la
+campagne, `osv-scanner` hors ligne pour l'audit et `trufflehog` pour les
+secrets. Trois choses lui sont propres, chacune parce qu'elle a été mesurée :
+
+- **Les navigateurs vivent dans l'image**, pas dans le projet, parce que le
+  CDN de Playwright n'est nommé par aucune liste blanche et ne doit pas
+  l'être. La version est épinglée et écrite dans l'image ; `system.sh`
+  compare et nomme celle qu'elle porte, parce que le conseil de Playwright —
+  « lancez `playwright install` » — est inapplicable derrière le pare-feu.
+- **La batterie de l'intégrateur teste l'application**, pas des modules :
+  Playwright pilote un vrai Chromium contre ce que `run.sh` a lancé.
+- **Le statut de Stryker ne dit rien** — 0 avec des survivants, 0 sur un
+  fichier absent, 0 sur une source qui ne se parse pas — donc c'est son
+  rapport qui fait foi, et son identifiant de mutant étant un entier
+  séquentiel par fichier, `nunki` en reconstruit un stable à partir de la
+  position, du mutateur et du remplacement.
 
 ### 4.2 bis — Les plateformes
 
