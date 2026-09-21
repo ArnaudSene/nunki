@@ -1725,3 +1725,27 @@ fn the_next_batteries_do_not_read_what_the_campaign_leaves() {
     );
     assert!(prepush.contains("`tsc` is the exception"), "{prepush}");
 }
+
+/// Every stack `nunki init` knows has its image scanned.
+///
+/// A stack ships a Dockerfile, and an image nobody scans is the hole that
+/// workflow exists to close. Added on 2026-09-20 for Python, and nearly
+/// forgotten again the next night for Next.js — which is why the list is
+/// checked against `KNOWN_STACKS` rather than read by eye.
+#[test]
+fn the_image_scan_covers_every_stack_that_ships_one() {
+    let workflow = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/workflows/images.yml"),
+    )
+    .expect("the images workflow is in the repository");
+    let matrix = workflow
+        .lines()
+        .find(|l| l.trim_start().starts_with("stack: ["))
+        .expect("the scan runs over a matrix of stacks");
+    for stack in KNOWN_STACKS {
+        assert!(
+            matrix.contains(stack),
+            "{stack} ships an image the scan never builds: {matrix}"
+        );
+    }
+}
