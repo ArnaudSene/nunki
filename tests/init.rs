@@ -1512,3 +1512,240 @@ fn the_python_battery_does_not_read_what_the_campaign_leaves() {
         "cleared before the run and after it: {campaign}"
     );
 }
+
+/// A Next.js project gets every file its gates read, and the five that are
+/// executed are executable.
+#[test]
+fn a_next_project_gets_every_file_its_gates_read() {
+    let (_d, root, nunki) = fresh();
+    let actions = init(&root, &nunki, &["next".to_string()]).unwrap();
+    let stack = home(&root).join("stacks/next");
+
+    for name in [
+        "allow.txt",
+        "prepush.sh",
+        "mutation.sh",
+        nunki::gate::SECURITY,
+        "run.sh",
+        nunki::gate::SYSTEM_BATTERY,
+        "Dockerfile",
+        "writable.txt",
+        "advisories.txt",
+        "caches.txt",
+    ] {
+        assert!(created(&actions, name), "{name} missing from {actions:?}");
+        assert!(stack.join(name).is_file(), "{name}");
+    }
+
+    #[cfg(unix)]
+    for script in [
+        "prepush.sh",
+        "mutation.sh",
+        nunki::gate::SECURITY,
+        "run.sh",
+        nunki::gate::SYSTEM_BATTERY,
+    ] {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(stack.join(script))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o111, 0o111, "{script}: {mode:o}");
+    }
+
+    let allow = std::fs::read_to_string(stack.join("allow.txt")).unwrap();
+    assert!(allow.contains("registry.npmjs.org"), "{allow}");
+    assert!(
+        !allow.contains("github.com"),
+        "a fragment must not carry a forge domain: {allow}"
+    );
+    // Playwright's CDN is on no allowlist and must not be: the browsers come
+    // with the image, so a run can never fetch one.
+    assert!(!allow.contains("playwright"), "{allow}");
+    let dockerfile = std::fs::read_to_string(stack.join("Dockerfile")).unwrap();
+    assert!(
+        dockerfile.contains("PLAYWRIGHT_BROWSERS_PATH"),
+        "{dockerfile}"
+    );
+    // Next.js phones home to a domain rule 6 does not name, and the refusal
+    // would read as a flaky network rather than as the rule it is.
+    assert!(
+        dockerfile.contains("NEXT_TELEMETRY_DISABLED=1"),
+        "{dockerfile}"
+    );
+    // Stryker spawns `ps` to find its children, and a slim image has none.
+    assert!(dockerfile.contains("procps"), "{dockerfile}");
+}
+
+/// The Next.js campaign reads its report, never its exit status, and says
+/// nothing when there is no report to read.
+///
+/// Measured on Stryker 9.6.1, 2026-09-21: the status is **0** with survivors,
+/// 0 when `--mutate` names a file that is not there, and 0 on a source that
+/// does not parse. A campaign that trusted it would call a run that never
+/// happened a run with no survivor — gate 7 green on nothing.
+#[test]
+fn the_next_campaign_trusts_its_report_and_not_its_status() {
+    let (_d, root, nunki) = fresh();
+    init(&root, &nunki, &["next".to_string()]).unwrap();
+    let script = std::fs::read_to_string(home(&root).join("stacks/next/mutation.sh")).unwrap();
+
+    let run = script
+        .lines()
+        .find(|l| l.contains("stryker run") && !l.trim_start().starts_with('#'))
+        .expect("the campaign runs stryker");
+    // The sandbox goes even when the run fails, so a killed campaign leaves
+    // no copy of the project beside the tree.
+    assert!(run.contains("--cleanTempDir always"), "{run}");
+    // And the touched files are a flag, which is what the Python stack could
+    // not do.
+    assert!(script.contains("--mutate $path"), "{script}");
+
+    let guard = script
+        .find("left no report at")
+        .expect("the guard says the report is missing");
+    let done = script
+        .find(r#"printf '{"campaign":"done"}\n'"#)
+        .expect("the campaign says when it got to the end");
+    assert!(
+        guard < done,
+        "the terminal line is printed before the guard"
+    );
+    assert_eq!(
+        script.matches(r#"printf '{"campaign":"done"}"#).count(),
+        1,
+        "{script}"
+    );
+
+    // The id is built rather than taken: Stryker numbers its mutants per file
+    // and the numbers move between runs, so a coder answering "#7" would name
+    // something else next time. And the replacement is in it because one
+    // position carries several mutants — `ConditionalExpression` to `true`
+    // and to `false` sit on the very same column.
+    assert!(
+        script.contains("[file, at.line, at.column, mutant.mutatorName, was].join(\":\")"),
+        "{script}"
+    );
+    // Everything Stryker does not call detected or invalid owes an answer,
+    // `NoCoverage` and `Pending` included.
+    for status in [
+        "Killed",
+        "Timeout",
+        "CompileError",
+        "RuntimeError",
+        "Ignored",
+    ] {
+        assert!(
+            script.contains(status),
+            "{status} missing from the answered set"
+        );
+    }
+}
+
+/// The Next.js audit reads both range shapes, and asks for a view the project
+/// cannot filter.
+///
+/// Measured 2026-09-21: npm advisories publish their fixed versions as
+/// `SEMVER` ranges where PyPI uses `ECOSYSTEM`. A reader that looked only at
+/// the second reported **every** npm finding as having no fix — `qs 6.15.1`
+/// came back empty when 6.16.0 fixes it. An empty `fix` is not cosmetic: it
+/// tells a human nothing can be done, and it is what stops `nunki` calling an
+/// accepted finding an exception a fix has overtaken (SPEC 4.4).
+#[test]
+fn the_next_audit_reads_the_ranges_npm_publishes() {
+    let (_d, root, nunki) = fresh();
+    init(&root, &nunki, &["next".to_string()]).unwrap();
+    let script =
+        std::fs::read_to_string(home(&root).join("stacks/next").join(nunki::gate::SECURITY))
+            .unwrap();
+
+    assert!(
+        script.contains(r#"span.type !== "SEMVER" && span.type !== "ECOSYSTEM""#),
+        "{script}"
+    );
+
+    // And the same unfiltered view the Python stack had to be taught: every
+    // scan whose answer is read as "everything there is" names a
+    // configuration that ignores nothing.
+    let joined = script.replace("\\\n", " ");
+    let scans: Vec<&str> = joined
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with("osv-scanner scan source"))
+        .collect();
+    assert_eq!(scans.len(), 3, "{scans:?}");
+    for scan in scans
+        .iter()
+        .filter(|l| !l.contains("--config osv-scanner.toml"))
+    {
+        assert!(
+            scan.contains(r#"--config "$work/none.toml""#),
+            "this scan would be filtered by the tree's own osv-scanner.toml: {scan}"
+        );
+    }
+}
+
+/// No tool in either Next.js battery walks the copy the campaign leaves, and
+/// the one that cannot be told to skip is named rather than hidden.
+#[test]
+fn the_next_batteries_do_not_read_what_the_campaign_leaves() {
+    let (_d, root, nunki) = fresh();
+    init(&root, &nunki, &["next".to_string()]).unwrap();
+    let stack = home(&root).join("stacks/next");
+
+    let writable = std::fs::read_to_string(stack.join(nunki::project::WRITABLE_FILE)).unwrap();
+    for name in ["reports", ".stryker-tmp"] {
+        assert!(
+            writable.lines().any(|l| l.trim() == name),
+            "the stack does not declare {name}: {writable}"
+        );
+    }
+
+    let prepush = std::fs::read_to_string(stack.join("prepush.sh")).unwrap();
+    let walkers: Vec<&str> = prepush
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .filter(|l| l.contains("pnpm exec"))
+        .filter(|l| l.contains("eslint") || l.contains("vitest"))
+        .filter(|l| !l.contains("--version"))
+        .collect();
+    assert_eq!(walkers.len(), 2, "eslint and vitest: {walkers:?}");
+    for tool in walkers {
+        assert!(
+            tool.contains("reports") && tool.contains(".stryker-tmp"),
+            "this walks what the campaign leaves: {tool}"
+        );
+    }
+    // Prettier takes no such flag — measured, it answers "Ignored unknown
+    // option" — and tsc is driven by the project's tsconfig. Both are said in
+    // the script rather than quietly skipped.
+    assert!(
+        prepush.contains("Prettier takes no `--ignore-pattern`"),
+        "{prepush}"
+    );
+    assert!(prepush.contains("`tsc` is the exception"), "{prepush}");
+}
+
+/// Every stack `nunki init` knows has its image scanned.
+///
+/// A stack ships a Dockerfile, and an image nobody scans is the hole that
+/// workflow exists to close. Added on 2026-09-20 for Python, and nearly
+/// forgotten again the next night for Next.js — which is why the list is
+/// checked against `KNOWN_STACKS` rather than read by eye.
+#[test]
+fn the_image_scan_covers_every_stack_that_ships_one() {
+    let workflow = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/workflows/images.yml"),
+    )
+    .expect("the images workflow is in the repository");
+    let matrix = workflow
+        .lines()
+        .find(|l| l.trim_start().starts_with("stack: ["))
+        .expect("the scan runs over a matrix of stacks");
+    for stack in KNOWN_STACKS {
+        assert!(
+            matrix.contains(stack),
+            "{stack} ships an image the scan never builds: {matrix}"
+        );
+    }
+}

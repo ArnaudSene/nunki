@@ -54,7 +54,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        stack: [rust, python]
+        # Every stack `nunki init` knows, because a stack ships an image and
+        # an image nobody scans is the hole this workflow exists to close.
+        # A stack added here and forgotten there is the same defect twice.
+        stack: [rust, python, next]
     steps:
       - uses: actions/checkout@v7
 
