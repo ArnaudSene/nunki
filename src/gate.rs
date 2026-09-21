@@ -1152,16 +1152,43 @@ fn battery(subject: &Subject, verification: &Verification) -> Result<Decision, G
     }
 }
 
-/// The last lines a human needs, from whichever stream said something.
+/// The last lines a human needs — from **both** streams when both said
+/// something, and labelled so a reader knows which is which.
+///
+/// It preferred stderr and dropped stdout entirely, on the reasoning that a
+/// failure explains itself there. Measured on 2026-09-20, on the first
+/// mission of the Python bench: `uv sync` wrote "Checked 26 packages in
+/// 0.18ms" to stderr and mypy wrote `Duplicate module named "pygrep"` to
+/// stdout, so gate 6 came back
+///
+/// ```text
+/// the battery came back 2:
+/// Checked 26 packages in 0.18ms
+/// ```
+///
+/// and `nunki` opened a volet whose cause said nothing at all. The agent was
+/// sent to repair a tree against a diagnosis it never saw.
+///
+/// A battery is several commands and they do not agree on where to write; a
+/// gate that picks one stream is guessing which of them failed. Twelve lines
+/// each rather than twenty, because this text becomes a volet's cause and is
+/// read by an agent that has a lot else to hold.
 fn tail(stderr: &str, stdout: &str) -> String {
-    let text = if stderr.trim().is_empty() {
-        stdout
-    } else {
-        stderr
+    let last = |text: &str, keep: usize| -> String {
+        let lines: Vec<&str> = text.lines().collect();
+        let from = lines.len().saturating_sub(keep);
+        lines[from..].join("\n")
     };
-    let lines: Vec<&str> = text.lines().collect();
-    let from = lines.len().saturating_sub(20);
-    lines[from..].join("\n")
+    match (stderr.trim().is_empty(), stdout.trim().is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => last(stderr, 20),
+        (true, false) => last(stdout, 20),
+        (false, false) => format!(
+            "stderr:\n{}\n\nstdout:\n{}",
+            last(stderr, 12),
+            last(stdout, 12)
+        ),
+    }
 }
 
 fn read(path: &Path) -> Result<String, GateError> {
