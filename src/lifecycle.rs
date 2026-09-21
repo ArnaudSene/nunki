@@ -226,6 +226,24 @@ pub fn end(project: &Project, id: &str, why: &str) -> Result<MissionState, Lifec
 /// `FOLLOWUP_HQ.md`, which every role reads before anything else, because the
 /// tree has not changed and neither has the cause. A retry that says nothing
 /// buys the same handover a second time.
+///
+/// **It resumes the work, and does not ask whether the work is already done.**
+/// That looks wasteful when the cause was outside the mission: on 2026-09-20,
+/// a defect in gate 3 exhausted a lot whose commit was correct all along, and
+/// the retry sent a coder to re-examine a tree that already passed every gate.
+///
+/// It stays that way on purpose. The handover says a bound ran out on *this*
+/// work, and nothing on disk distinguishes "the lot is finished and something
+/// else was wrong" from "the lot is finished in the journal and is not". The
+/// flow could play the gates on entering `Coding` and advance when they are
+/// green — gate 3 would catch a stale `done` from an older commit — but that
+/// is a change to the mission's state machine to save one cheap run, in a
+/// case that arises only when `nunki` itself was wrong.
+///
+/// What carries the difference instead is the reason above, and it works:
+/// measured the same day, the coder read it, checked the tree itself, wrote
+/// no code, and closed the volet in 3545 output tokens — the shortest run of
+/// that mission by an order of magnitude.
 pub fn retry(project: &Project, id: &str, why: &str) -> Result<MissionState, LifecycleError> {
     if why.trim().is_empty() {
         return Err(LifecycleError::NoChange);
