@@ -1148,8 +1148,26 @@ shift
 
 # Only Python sources are worth mutating; the touched list holds whatever the
 # branch touched.
+#
+# Test files are left out, the way the Next.js fragment leaves its own out: a
+# mutated test proves nothing about the code. It is not a nicety here — mutmut
+# mutates what `source_paths` names and not what it is handed, so a branch
+# that touched only tests would leave nothing to mutate, and mutmut answers
+# that with `Stopping early, because we could not find any test case for any
+# mutant` and a non-zero status. `nunki` reads that as a campaign that could
+# not run, and gate 7 asks for ever. Measured on 2026-09-21, on a repository
+# whose first branch touched two test files and no source at all.
+#
+# pytest's own shapes, and no others: anything under a `tests/` directory, a
+# `test_*.py`, a `*_test.py`, and `conftest.py`.
 files=""
 for path in "$@"; do
+  case "$path" in
+    tests/*|*/tests/*) continue ;;
+    test_*.py|*/test_*.py) continue ;;
+    *_test.py) continue ;;
+    conftest.py|*/conftest.py) continue ;;
+  esac
   case "$path" in
     *.py) files="$files $path" ;;
   esac
