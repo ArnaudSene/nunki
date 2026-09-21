@@ -1815,3 +1815,76 @@ fn a_campaign_with_nothing_to_mutate_says_it_finished() {
         );
     }
 }
+
+/// A branch that touched only its own tests has nothing to mutate either, and
+/// that is not the same statement as the one above: `README.md` is not a
+/// source file in any language, while a test **is**, and a campaign that takes
+/// it for one asks its tool a question the tool cannot answer.
+///
+/// Measured on 2026-09-21, on a real repository whose first branch under
+/// `nunki` touched two files under `tests/` and no source at all: mutmut
+/// mutates what `source_paths` names rather than what it is handed, found
+/// nothing, and said `Stopping early, because we could not find any test case
+/// for any mutant` with a non-zero status. `nunki` read that as a campaign
+/// that could not run, gate 7 kept asking, and the mission stopped.
+///
+/// One stack is named and not run, deliberately. Rust hands the file to
+/// `cargo mutants --file`, which answers this correctly on its own: measured
+/// the same day on cargo-mutants 27.1.0, a selection naming only
+/// `tests/it.rs` exits 0, warns `No mutants found under the active filters`
+/// and writes an empty `missed.txt`, which the fragment already reads as no
+/// survivors. Running it here would need a crate and a toolchain to prove
+/// something the tool already guarantees. A stack added later has to answer
+/// this question rather than inherit an answer — hence the `panic!`.
+#[cfg(unix)]
+#[test]
+fn a_campaign_whose_branch_touched_only_tests_says_it_finished() {
+    for stack in KNOWN_STACKS {
+        // What a test file of this stack's language looks like, or why this
+        // stack is not asked here.
+        let touched: &[&str] = match stack {
+            "python" => &[
+                "tests/test_search.py",
+                "src/pkg/thing_test.py",
+                "conftest.py",
+            ],
+            "next" => &["src/lib/search.test.ts", "e2e/smoke.spec.ts"],
+            "rust" => continue,
+            other => panic!(
+                "{other} is a stack this test has never been told about: say what one of \
+                 its test files is called, or why its tool already refuses to mutate one"
+            ),
+        };
+
+        let (_d, root, nunki) = fresh();
+        init(&root, &nunki, &[stack.to_string()]).unwrap();
+        let script = home(&root).join("stacks").join(stack).join("mutation.sh");
+
+        let mut command = std::process::Command::new("sh");
+        command.arg(&script).arg("abc1234");
+        for path in touched {
+            command.arg(path);
+        }
+        let out = command
+            .current_dir(root.parent().unwrap())
+            .output()
+            .expect("sh runs the campaign");
+
+        assert!(
+            out.status.success(),
+            "{stack}: a campaign told about tests alone must not reach its tool — it said:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            said.contains(r#"{"campaign":"done"}"#),
+            "{stack}: a branch that touched only tests left gate 7 asking for ever — \
+             it said:\n{said}"
+        );
+        assert_eq!(
+            said.lines().filter(|l| l.contains("\"file\"")).count(),
+            0,
+            "{stack}: {said}"
+        );
+    }
+}
