@@ -2078,3 +2078,109 @@ fn a_journal_without_a_block_is_told_what_it_has_instead() {
         other => panic!("{other:?}"),
     }
 }
+
+// --- what a red gate says --------------------------------------------------
+
+impl Fixture {
+    /// Gate 6 with a container that answers what the battery printed.
+    fn battery(&self, out: nunki::engine::ExecOutput) -> Decision {
+        // The refresh of the clean copy answers first, and green: what this
+        // asks about is the battery's own status, not the refresh's.
+        let outs = vec![said(0, ""), out];
+        let (project, slot) = self.context();
+        let profile = nunki::run::profile_path(&project, &slot.name);
+        std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+        std::fs::write(&profile, "services: {}\n").unwrap();
+        let engine =
+            std::sync::Arc::new(nunki::engine::fake::FakeEngine::default().with_execs(outs));
+        // Gate 6 belongs to the final verification, not to what follows a run.
+        gate::at_verification(
+            &Subject {
+                role: Role::Coder,
+                tree: &self.tree,
+                journal: &self.journal,
+                pr: &self.pr,
+                verdict: &self.verdict,
+                mission_dir: self._dir.path(),
+                header: &self.header,
+                protected_branches: &self.branches,
+                protected_paths: &self.protected,
+                coder_head: self.coder_head.as_deref(),
+            },
+            &gate::Verification {
+                project: &project,
+                slot: &slot,
+                engine,
+                stack: "rust",
+            },
+        )
+        .unwrap()
+        .outcomes
+        .into_iter()
+        .find(|o| o.gate == Gate::Battery)
+        .expect("gate 6 is played")
+        .decision
+    }
+}
+
+/// A red gate 6 says what **both** streams said.
+///
+/// It preferred stderr and dropped stdout entirely. Measured on 2026-09-20,
+/// on the first mission of the Python bench: `uv sync` wrote its one-line
+/// chatter to stderr and `mypy` wrote the diagnosis to stdout, so the gate
+/// came back "the battery came back 2: Checked 26 packages in 0.18ms" — and
+/// `nunki` opened a volet whose cause said nothing at all. The agent was sent
+/// to repair a tree against a diagnosis it never saw.
+#[test]
+fn a_red_battery_says_what_both_streams_said() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.journal_names_head();
+    std::fs::write(&f.pr, "# What this changes\n").unwrap();
+
+    let both = nunki::engine::ExecOutput {
+        status: 2,
+        stdout: "src/store.rs:2: error: Duplicate module named \"store\"\n".into(),
+        stderr: "Checked 26 packages in 0.18ms\n".into(),
+    };
+    match f.battery(both) {
+        Decision::Failed(why) => {
+            assert!(
+                why.contains("Duplicate module"),
+                "the diagnosis is lost: {why}"
+            );
+            assert!(why.contains("Checked 26 packages"), "{why}");
+            // And labelled, because a reader has to know which said which.
+            assert!(why.contains("stdout:") && why.contains("stderr:"), "{why}");
+        }
+        other => panic!("a battery that came back 2 is red: {other:?}"),
+    }
+
+    // One stream alone is reported as it always was, with no labelling to
+    // read past: the common case does not pay for the rare one.
+    let only_stderr = nunki::engine::ExecOutput {
+        status: 101,
+        stdout: String::new(),
+        stderr: "thread 'main' panicked\n".into(),
+    };
+    match f.battery(only_stderr) {
+        Decision::Failed(why) => {
+            assert!(why.contains("panicked"), "{why}");
+            assert!(!why.contains("stderr:"), "nothing to disambiguate: {why}");
+        }
+        other => panic!("{other:?}"),
+    }
+
+    let only_stdout = nunki::engine::ExecOutput {
+        status: 1,
+        stdout: "FAILED tests/test_one.py::test_it\n".into(),
+        stderr: String::new(),
+    };
+    match f.battery(only_stdout) {
+        Decision::Failed(why) => {
+            assert!(why.contains("FAILED tests/test_one.py"), "{why}");
+            assert!(!why.contains("stdout:"), "nothing to disambiguate: {why}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
