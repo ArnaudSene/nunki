@@ -529,6 +529,12 @@ for path in "$@"; do
   esac
 done
 if [ -z "$files" ]; then
+  # Nothing this branch touched is mutable, so there are no mutants and no
+  # survivors — and that is a measurement, not a campaign that failed to
+  # happen. The terminal line is printed **before** leaving, because `nunki`
+  # reads its absence as a campaign that was killed and asks for another:
+  # a branch touching only tests or documentation would be asked for ever.
+  printf '{"campaign":"done"}\n'
   exit 0
 fi
 
@@ -1149,6 +1155,12 @@ for path in "$@"; do
   esac
 done
 if [ -z "$files" ]; then
+  # Nothing this branch touched is mutable, so there are no mutants and no
+  # survivors — and that is a measurement, not a campaign that failed to
+  # happen. The terminal line is printed **before** leaving, because `nunki`
+  # reads its absence as a campaign that was killed and asks for another:
+  # a branch touching only tests or documentation would be asked for ever.
+  printf '{"campaign":"done"}\n'
   exit 0
 fi
 
@@ -2004,6 +2016,12 @@ for path in "$@"; do
   esac
 done
 if [ -z "$files" ]; then
+  # Nothing this branch touched is mutable, so there are no mutants and no
+  # survivors — and that is a measurement, not a campaign that failed to
+  # happen. The terminal line is printed **before** leaving, because `nunki`
+  # reads its absence as a campaign that was killed and asks for another:
+  # a branch touching only tests or documentation would be asked for ever.
+  printf '{"campaign":"done"}\n'
   exit 0
 fi
 

@@ -1402,20 +1402,28 @@ fn the_python_campaign_says_nothing_when_it_could_not_run() {
     // The terminal line comes last, and after the guard that leaves without
     // it: `nunki` reads no other line as the campaign having measured
     // anything.
+    // Two terminal lines, and the order between them is the invariant: one
+    // for a branch with nothing mutable in it, which is a measurement, and
+    // one for a campaign that ran — with the guard for a campaign that could not run between
+    // them, so a dead campaign reaches neither.
+    assert_eq!(
+        script.matches(r#"printf '{"campaign":"done"}"#).count(),
+        2,
+        "{script}"
+    );
+    let nothing = script
+        .find(r#"printf '{"campaign":"done"}\n'"#)
+        .expect("a branch with nothing to mutate says so");
     let guard = script
         .find("the campaign could not run")
         .expect("the guard says why it stopped");
     let done = script
-        .find(r#"printf '{"campaign":"done"}\n'"#)
+        .rfind(r#"printf '{"campaign":"done"}\n'"#)
         .expect("the campaign says when it got to the end");
+    assert!(nothing < guard, "{script}");
     assert!(
         guard < done,
         "the terminal line is printed before the guard"
-    );
-    assert_eq!(
-        script.matches(r#"printf '{"campaign":"done"}"#).count(),
-        1,
-        "the terminal line is printed in more than one place: {script}"
     );
 }
 
@@ -1601,20 +1609,28 @@ fn the_next_campaign_trusts_its_report_and_not_its_status() {
     // not do.
     assert!(script.contains("--mutate $path"), "{script}");
 
+    // Two terminal lines, and the order between them is the invariant: one
+    // for a branch with nothing mutable in it, which is a measurement, and
+    // one for a campaign that ran — with the guard for a campaign that left no report between
+    // them, so a dead campaign reaches neither.
+    assert_eq!(
+        script.matches(r#"printf '{"campaign":"done"}"#).count(),
+        2,
+        "{script}"
+    );
+    let nothing = script
+        .find(r#"printf '{"campaign":"done"}\n'"#)
+        .expect("a branch with nothing to mutate says so");
     let guard = script
         .find("left no report at")
-        .expect("the guard says the report is missing");
+        .expect("the guard says why it stopped");
     let done = script
-        .find(r#"printf '{"campaign":"done"}\n'"#)
+        .rfind(r#"printf '{"campaign":"done"}\n'"#)
         .expect("the campaign says when it got to the end");
+    assert!(nothing < guard, "{script}");
     assert!(
         guard < done,
         "the terminal line is printed before the guard"
-    );
-    assert_eq!(
-        script.matches(r#"printf '{"campaign":"done"}"#).count(),
-        1,
-        "{script}"
     );
 
     // The id is built rather than taken: Stryker numbers its mutants per file
@@ -1746,6 +1762,56 @@ fn the_image_scan_covers_every_stack_that_ships_one() {
         assert!(
             matrix.contains(stack),
             "{stack} ships an image the scan never builds: {matrix}"
+        );
+    }
+}
+
+/// A campaign with nothing to mutate says it finished, in every stack.
+///
+/// `nunki` reads a campaign that stops without its terminal line as one that
+/// was killed: nothing is written, and gate 7 asks for another
+/// (`mutants::Progress::Lost`). A branch that touched only tests, or only
+/// documentation, has nothing mutable in it — and the three scripts left
+/// without a word, so that branch would have been asked for a campaign for
+/// ever.
+///
+/// Having nothing to mutate **is** a measurement: no mutants, therefore no
+/// survivors, and gate 7 is satisfied. The scripts are run here rather than
+/// read, because that early path exits before it needs any toolchain.
+#[cfg(unix)]
+#[test]
+fn a_campaign_with_nothing_to_mutate_says_it_finished() {
+    for stack in KNOWN_STACKS {
+        let (_d, root, nunki) = fresh();
+        init(&root, &nunki, &[stack.to_string()]).unwrap();
+        let script = home(&root).join("stacks").join(stack).join("mutation.sh");
+
+        // A path no stack mutates: the branch changed its README and nothing
+        // else.
+        let out = std::process::Command::new("sh")
+            .arg(&script)
+            .arg("abc1234")
+            .arg("README.md")
+            .current_dir(root.parent().unwrap())
+            .output()
+            .expect("sh runs the campaign");
+
+        assert!(
+            out.status.success(),
+            "{stack}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            said.contains(r#"{"campaign":"done"}"#),
+            "{stack}: a campaign that stops without this line is read as one that was \
+             killed, and gate 7 would ask again for ever — it said:\n{said}"
+        );
+        // And nothing it could be mistaken for a survivor.
+        assert_eq!(
+            said.lines().filter(|l| l.contains("\"file\"")).count(),
+            0,
+            "{stack}: {said}"
         );
     }
 }
