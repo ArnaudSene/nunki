@@ -1232,9 +1232,10 @@ fn the_profile_names_its_role() {
         // no identity, the agents set one in the slot's config, and the
         // coder of a second mission committed as `nunki integrator` — the
         // identity the previous mission's integrator had left there.
+        //
+        // The **committer** carries it. The author is the human's, and
+        // `a_commit_is_attributed_to_the_human_who_owns_it` covers that.
         for (var, value) in [
-            ("GIT_AUTHOR_NAME", format!("nunki {said}")),
-            ("GIT_AUTHOR_EMAIL", format!("{said}@nunki.local")),
             ("GIT_COMMITTER_NAME", format!("nunki {said}")),
             ("GIT_COMMITTER_EMAIL", format!("{said}@nunki.local")),
         ] {
@@ -1245,6 +1246,85 @@ fn the_profile_names_its_role() {
             );
         }
     }
+}
+
+/// A commit an agent makes is **authored** by the human whose project it is.
+///
+/// Not a nicety: a forge reads the author line and nothing else. Measured on
+/// 2026-09-21, on a real repository — GitHub resolves a commit's author email
+/// to an account and leaves `author` null when it cannot, so every commit
+/// authored as `coder@nunki.local` was attributed to nobody, absent from the
+/// contribution graph of the person who owns the repository, framed the
+/// mission, authorised the push and merged it.
+///
+/// The role is not lost: it moves to the committer, which the test above
+/// pins, and which a forge shows beside the author.
+#[test]
+fn a_commit_is_attributed_to_the_human_who_owns_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    let slot = slot_at(dir.path());
+    let header = header_with(with_services());
+
+    std::fs::create_dir_all(project.nunki_home()).unwrap();
+    std::fs::write(
+        project.nunki_home().join(nunki::human::ME_FILE),
+        "name: Ada Lovelace\nemail: ada@example.org\n",
+    )
+    .unwrap();
+
+    for role in [Role::Coder, Role::Integrator, Role::Security] {
+        let (plan, _) = profile_for(&project, &slot, &header, role);
+        assert_eq!(
+            plan.environment.get("GIT_AUTHOR_NAME").map(String::as_str),
+            Some("Ada Lovelace"),
+            "{role:?}"
+        );
+        assert_eq!(
+            plan.environment.get("GIT_AUTHOR_EMAIL").map(String::as_str),
+            Some("ada@example.org"),
+            "{role:?}: a forge resolves this address to an account, or to nobody"
+        );
+        // And the role is still on the commit, in the other line.
+        assert_eq!(
+            plan.environment
+                .get("GIT_COMMITTER_EMAIL")
+                .map(String::as_str),
+            Some(format!("{}@nunki.local", nunki::role::slug(role)).as_str()),
+            "{role:?}"
+        );
+    }
+}
+
+/// A name with no address attributes to nobody, so `nunki` does not pretend.
+///
+/// An invented address — `ada@localhost`, the machine's hostname, anything —
+/// would read as attribution on every commit and resolve to no account on
+/// any forge. The role signs both lines instead, which is visibly wrong
+/// rather than quietly wrong.
+#[test]
+fn a_human_without_an_address_does_not_get_an_invented_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    let slot = slot_at(dir.path());
+    let header = header_with(with_services());
+
+    std::fs::create_dir_all(project.nunki_home()).unwrap();
+    std::fs::write(
+        project.nunki_home().join(nunki::human::ME_FILE),
+        "name: Ada Lovelace\n",
+    )
+    .unwrap();
+
+    let (plan, _) = profile_for(&project, &slot, &header, Role::Coder);
+    assert_eq!(
+        plan.environment.get("GIT_AUTHOR_EMAIL").map(String::as_str),
+        Some("coder@nunki.local"),
+    );
+    assert_eq!(
+        plan.environment.get("GIT_AUTHOR_NAME").map(String::as_str),
+        Some("nunki coder"),
+    );
 }
 
 /// The security agent's tree is read-only, and what an execution must still
