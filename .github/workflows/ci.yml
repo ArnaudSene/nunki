@@ -46,10 +46,15 @@ jobs:
         # that label to Ubuntu 26.04 over the weeks from 2026-10-19, and a
         # label that changes what it means under a repository is the same
         # kind of thing as an unpinned action: it turns a green history red
-        # on a morning nobody chose. `ubuntu-26.04` sits in the matrix so the
-        # move is something this repository reads before it happens, and
-        # `fail-fast: false` means it reports rather than hides the others.
-        os: [ubuntu-24.04, ubuntu-26.04, macos-latest]
+        # on a morning nobody chose.
+        #
+        # 26.04 and not 24.04, already: it was added beside 24.04 on
+        # 2026-09-22 to find out whether it broke anything, every job passed
+        # on both, and once that is known, running both buys a comparison
+        # nobody is reading. Being ahead of the migration costs less than
+        # being behind it, and 24.04 comes back in one line if it is ever
+        # needed.
+        os: [ubuntu-26.04, macos-latest]
     steps:
       - uses: actions/checkout@v7
 
@@ -106,18 +111,18 @@ jobs:
   # Ubuntu only: the macOS runner ships no container engine, which is also
   # why the job above prints what it found.
   containers:
-    name: containers (${{ matrix.os }})
-    # Two images, and this is the job that needs both. What the runner brings
-    # is load-bearing here and the step below exists because it is: the
-    # engine copies the host's resolver, `search` list included, and that list
-    # is what read a declared service as "refused" on this runner while every
-    # Mac said "reached" (2026-09-20, `perimeter::resolves`). An operating
-    # system moving under that is exactly the surface it moves under.
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, ubuntu-26.04]
-    runs-on: ${{ matrix.os }}
+    name: containers
+    # The job where what the runner brings is load-bearing, and the step
+    # below exists because it is: the engine copies the host's resolver,
+    # `search` list included, and that list is what read a declared service
+    # as "refused" on this runner while every Mac said "reached"
+    # (2026-09-20, `perimeter::resolves`).
+    #
+    # So it was the one job worth running on both images while the question
+    # was open. It answered -- green on 24.04 and on 26.04, 2026-09-22 -- and
+    # this job costs seven and a half minutes, which is not a price to pay
+    # twice for an answer already on file.
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
 
@@ -166,10 +171,10 @@ jobs:
 
   supply-chain:
     name: supply chain
-    # Pinned for the reason the matrix above gives, and not doubled: this job
-    # reads `Cargo.lock` and `deny.toml`, and the answer does not depend on
-    # which Ubuntu asked.
-    runs-on: ubuntu-24.04
+    # Pinned for the reason the matrix above gives. This job reads
+    # `Cargo.lock` and `deny.toml`; the answer does not depend on which
+    # Ubuntu asked.
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
 
