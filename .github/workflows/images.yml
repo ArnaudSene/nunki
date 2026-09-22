@@ -46,7 +46,9 @@ env:
 jobs:
   scan:
     name: image scan
-    runs-on: ubuntu-latest
+    # Pinned, not `ubuntu-latest`: see `ci.yml`. The images are built from
+    # their own base, so the runner decides nothing here but the build host.
+    runs-on: ubuntu-24.04
     # One run per stack, because a stack ships an image and an image nobody
     # scans is the hole this workflow exists to close. The firewall and the
     # prober are the same in both and are scanned twice; that costs a minute
