@@ -747,17 +747,42 @@ pub fn plan(
     // committed under it. A commit that names the wrong role is worse than
     // one that names none: it is read, and believed.
     //
-    // It matters more since the harness stopped signing its own commits
-    // (`harness/claude_code.rs`): the author line is now the only thing that
-    // says which role wrote a commit, and a thing that says it has to be
-    // right.
+    // Git carries **two** identities, and they answer two different
+    // questions. The committer says which role made the commit — that is the
+    // line the paragraph above is about, and it has not moved. The author
+    // says whose work it is, and that is the human's: they framed the
+    // mission, they authorise the push, they merge it, and they answer for
+    // what it does.
+    //
+    // It is also the only line a forge reads. Measured on 2026-09-21, on a
+    // real repository: GitHub resolves a commit's author email to an account
+    // and leaves `author` null when it cannot, so eight commits authored as
+    // `coder@nunki.local` were attributed to nobody — absent from the
+    // contribution graph of the person who owns the repository and merged
+    // them. The role is not lost by this: the forge shows both lines, and
+    // `git log --format=%cn` still answers with it.
+    //
+    // No email, no author. A name alone resolves to no account, and inventing
+    // one would look like attribution while attributing to nobody — so when
+    // nothing says who the human is, the role signs both lines, as it did
+    // before, and that is visibly wrong rather than quietly wrong.
     let who = role::slug(role);
-    for (var, value) in [
-        ("GIT_AUTHOR_NAME", format!("nunki {who}")),
-        ("GIT_AUTHOR_EMAIL", format!("{who}@nunki.local")),
+    let mut identity = vec![
         ("GIT_COMMITTER_NAME", format!("nunki {who}")),
         ("GIT_COMMITTER_EMAIL", format!("{who}@nunki.local")),
-    ] {
+    ];
+    let human = crate::human::me(&project.nunki_home(), Some(&project.root));
+    match (human.name, human.email) {
+        (Some(name), Some(email)) => {
+            identity.push(("GIT_AUTHOR_NAME", name));
+            identity.push(("GIT_AUTHOR_EMAIL", email));
+        }
+        _ => {
+            identity.push(("GIT_AUTHOR_NAME", format!("nunki {who}")));
+            identity.push(("GIT_AUTHOR_EMAIL", format!("{who}@nunki.local")));
+        }
+    }
+    for (var, value) in identity {
         environment.insert(var.to_string(), value);
     }
 
