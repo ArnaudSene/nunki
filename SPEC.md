@@ -2141,6 +2141,27 @@ qu'il produit.**
 | 8 sécurité mécanique | audit des dépendances, scan de secrets, analyse statique par stack (`security.sh`) | idem sur ses commits | sans objet (il attaque ce qui tourne) |
 | verdict | implicite : portes vertes | `INTEGRATED` / `BROKEN` | `CLEAR` / `FINDINGS` |
 
+**Les lignes 4 et 7 tiennent ensemble, et la porte 4 le vérifie.** La ligne 7
+dispense l'intégrateur de la campagne **parce que** la ligne 4 borne son
+périmètre au câblage : tests système, configuration de test, fixtures, ordre
+des migrations. Rien là-dedans ne se mute, donc il n'y a rien à mesurer.
+
+L'accord ne tient que tant que la liste de câblage s'en tient à la ligne 4.
+Une mission qui déclare `src/**` en câblage le rompt en silence : l'intégrateur
+écrit du code de production, la porte 4 le laisse passer puisque la mission l'a
+listé, et la porte 7 ne le regarde jamais. Mesuré sur `qcoda-compta` le
+2026-09-23 — le câblage de sa mission-08 nommait
+`src/infrastructure/postgres/**`, tout l'adaptateur y a été écrit, et rien ne
+l'a muté jusqu'à ce qu'un **codeur** touche le fichier deux missions plus
+tard : 220 survivants dans une couche de sérialisation qui porte des montants.
+
+La porte 4 de l'intégrateur refuse donc un chemin de **source de production**
+même déclaré en câblage, et le dit avec sa conséquence — « la porte 7 ne tourne
+pas pour l'intégrateur, donc rien ne le mutera jamais ». Un fichier de
+migration sous `src/` reste du câblage : c'est l'extension qui tranche, pas le
+préfixe, et un chemin de test n'est jamais de la source de production quelle
+que soit la sienne.
+
 **Le verdict et le `HEAD`, quand l'intégrateur commite.** Tranché par Arnaud
 le 2026-09-09. La v1 disait « on ne pousse que si les trois verdicts portent
 le `HEAD` courant », ce qui est impossible dès que l'intégrateur ajoute un

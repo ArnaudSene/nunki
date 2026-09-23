@@ -481,6 +481,82 @@ fn the_integrator_may_commit_its_wiring_and_nothing_else() {
     }
 }
 
+/// A wiring list that names production code is a framing mistake, and gate 4
+/// is where it surfaces.
+///
+/// SPEC 4.4's row 7 excuses the integrator from the mutation campaign
+/// *because* row 4 limits it to wiring — system tests, test configuration,
+/// fixtures, migration order — none of which is mutable. A mission that
+/// declares `src/**` as wiring breaks that agreement without saying so: the
+/// integrator writes production code, gate 4 waves it through because the
+/// mission listed the path, and gate 7 never looks at it again.
+///
+/// Measured on `qcoda-compta`, 2026-09-23. Its mission-08 named
+/// `src/infrastructure/postgres/**` as wiring; the whole adapter was written
+/// there, and nothing mutated it until a *coder* touched the file two
+/// missions later — 220 survivors, in a serialisation layer carrying money.
+///
+/// The three cases below are that project's, and the middle one is the only
+/// one that may fail: a migration under `src/` is wiring by SPEC 4.4's own
+/// words, and a rule keyed on the `src/` prefix would refuse it.
+#[test]
+fn wiring_that_names_production_code_is_refused_although_the_mission_declared_it() {
+    let mut f = Fixture::new();
+    f.header.integration = Integration::Services {
+        services: vec![Service {
+            name: "db".into(),
+            reach: vec!["db".into()],
+            shared: false,
+        }],
+        wiring: vec![
+            "tests/system/**".into(),
+            "src/infrastructure/postgres/**".into(),
+        ],
+    };
+
+    // Declared, under `src/`, and legitimately the integrator's: SPEC 4.4
+    // names migration order as wiring.
+    commit(
+        &f.tree,
+        "src/infrastructure/postgres/schema/0002_register.sql",
+        "CREATE TABLE register_rows (identity TEXT PRIMARY KEY);\n",
+        "add the register schema",
+    );
+    // A system test, under `tests/`, whatever its extension.
+    commit(
+        &f.tree,
+        "tests/system/smoke.py",
+        "def test_smoke():\n    assert True\n",
+        "wire it",
+    );
+    f.journal_names_head();
+    assert_eq!(
+        f.decision(Role::Integrator, Gate::Perimeter),
+        Decision::Passed,
+        "a migration and a system test are wiring, and stay wiring"
+    );
+
+    // The case that exists to be caught: production source, inside the
+    // declared wiring list.
+    commit(
+        &f.tree,
+        "src/infrastructure/postgres/register_store.py",
+        "class PostgresRegisterStore:\n    pass\n",
+        "implement the adapter",
+    );
+    f.journal_names_head();
+    match f.decision(Role::Integrator, Gate::Perimeter) {
+        Decision::Failed(why) => {
+            assert!(why.contains("register_store.py"), "{why}");
+            assert!(
+                why.contains("gate 7"),
+                "the message has to name the consequence, not just the path: {why}"
+            );
+        }
+        other => panic!("production code in the wiring list is still production code: {other:?}"),
+    }
+}
+
 /// The integrator works on the coder's branch (SPEC 2), so the coder's
 /// commits come first on it — and none of them is wiring.
 ///
