@@ -1182,6 +1182,21 @@ if [ -z "$files" ]; then
   exit 0
 fi
 
+# The campaign runs the **whole** suite in its copy, and this stack's system
+# tests are the ones `prepush.sh` deselects with `-m "not system"`: they reach
+# services, and neither the coder's profile nor this campaign carries any.
+# mutmut drives pytest itself and takes no flag for it — measured on 3.8.0,
+# `mutmut run` accepts `--max-children` and nothing else — so the deselection
+# goes through pytest's own environment variable, which it honours wherever it
+# is invoked from.
+#
+# Set before anything runs, because what it protects is collection. Without
+# it the campaign dies there, and what it leaves behind is the driver's
+# connection error and "the campaign could not run" — true, unhelpful, and
+# three layers away from the cause. Measured 2026-09-23, on the first mission
+# of a real project whose system tests opened a database.
+export PYTEST_ADDOPTS="${PYTEST_ADDOPTS:+$PYTEST_ADDOPTS }-m \"not system\""
+
 uv sync --frozen --all-groups >&2
 if ! uv run --frozen --no-sync mutmut --version >/dev/null 2>&1; then
   echo "nunki: this stack's campaign needs mutmut, which this project does not declare." >&2

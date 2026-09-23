@@ -1816,6 +1816,92 @@ fn a_campaign_with_nothing_to_mutate_says_it_finished() {
     }
 }
 
+/// The campaign leaves the system tests alone, the way the battery beside it
+/// does.
+///
+/// `prepush.sh` deselects them with `-m "not system"` because they reach
+/// services and the coder's profile carries none. The campaign runs in that
+/// same profile and runs the **whole** suite in its copy, so it has to
+/// deselect them too — and it drives pytest itself, so it cannot be told on a
+/// command line: measured on mutmut 3.8.0, `mutmut run` accepts
+/// `--max-children` and nothing else.
+///
+/// Measured 2026-09-23, on the first mission of a real project whose system
+/// tests opened a database: the campaign died in collection on the driver's
+/// connection error, `nunki` read that as a campaign that could not run, and
+/// the mission stopped at gate 7 with nothing pointing at the cause.
+///
+/// The script is **run**, not read, with `uv` replaced by a stub that records
+/// the environment it was called in. Asserting that the file contains the
+/// line would pass just as well if the line were unreachable, which is the
+/// shape of test this repository has been caught writing before.
+#[cfg(unix)]
+#[test]
+fn the_campaign_deselects_the_system_tests() {
+    let (_d, root, nunki) = fresh();
+    init(&root, &nunki, &["python".to_string()]).unwrap();
+    let script = home(&root)
+        .join("stacks")
+        .join("python")
+        .join("mutation.sh");
+
+    // A `uv` that writes down how it was called, and answers every probe the
+    // script makes so it reaches the campaign.
+    let bin = root.parent().unwrap().join("stub-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let seen = root.parent().unwrap().join("pytest-addopts.txt");
+    std::fs::write(
+        bin.join("uv"),
+        format!(
+            "#!/bin/sh\nenv >> {}\necho '---' >> {}\nexit 0\n",
+            seen.display(),
+            seen.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        bin.join("uv"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = std::process::Command::new("sh")
+        .arg(&script)
+        .arg("abc1234")
+        .arg("src/pkg/thing.py")
+        .current_dir(root.parent().unwrap())
+        .env("PATH", path)
+        .output()
+        .expect("sh runs the campaign");
+
+    let recorded = std::fs::read_to_string(&seen).unwrap_or_default();
+    let calls: Vec<&str> = recorded
+        .split("---")
+        .filter(|c| !c.trim().is_empty())
+        .collect();
+    assert!(
+        !calls.is_empty(),
+        "the campaign never reached its toolchain, so this proves nothing: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    for (n, call) in calls.iter().enumerate() {
+        let addopts = call
+            .lines()
+            .find_map(|l| l.strip_prefix("PYTEST_ADDOPTS="))
+            .unwrap_or("<unset>");
+        assert!(
+            addopts.contains("not system"),
+            "call {n} would run pytest without deselecting the system tests, \
+             which reach services no campaign has — PYTEST_ADDOPTS was {addopts:?}"
+        );
+    }
+}
+
 /// A branch that touched only its own tests has nothing to mutate either, and
 /// that is not the same statement as the one above: `README.md` is not a
 /// source file in any language, while a test **is**, and a campaign that takes
