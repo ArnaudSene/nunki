@@ -781,8 +781,78 @@ fn integrator_perimeter(
                 "{path} is not in this mission's wiring list, and {where_} touches it"
             )));
         }
+        if is_production_source(path) {
+            return Ok(Decision::Failed(format!(
+                "{path} is production source, and {where_} touches it — gate 7 does not run \
+                 for the integrator (SPEC 4.4), so nothing will ever mutate it. SPEC 4.4 \
+                 defines wiring as system tests, test configuration, fixtures and migration \
+                 order; production code belongs to the coder, whatever the wiring list says"
+            )));
+        }
     }
     Ok(Decision::Passed)
+}
+
+/// Whether a path is production source: the code gate 7 exists to measure.
+///
+/// The integrator does not play gate 7 — SPEC 4.4's per-role table says "non
+/// (des tests système et de la configuration ne se mutent pas)", and that is
+/// sound **because** the same table's row 4 limits its perimeter to wiring:
+/// system tests, test configuration, fixtures, migration order. Nothing there
+/// is mutable, so there is nothing to measure.
+///
+/// The two rows only agree while the wiring list holds to row 4. A mission
+/// that declares `src/**` as wiring breaks the agreement silently: the
+/// integrator writes production code, gate 4 lets it through because the
+/// mission said so, and gate 7 never looks at it. Measured on
+/// `qcoda-compta`, 2026-09-23: mission-08's wiring named
+/// `src/infrastructure/postgres/**`, its integrator wrote the whole adapter
+/// there, and the code was first mutated two missions later — when a *coder*
+/// finally touched the file — surfacing 220 survivors in a serialisation
+/// layer carrying money.
+///
+/// The extensions are a fixed list over the stacks `nunki` knows, not a
+/// lookup: adding a stack means adding to it. Checked against the three cases
+/// that matter, all from that project:
+///
+/// - `src/infrastructure/postgres/schema/0002_register.sql` — **not**
+///   production source. SPEC 4.4 names migration order as wiring, and a
+///   mission's integrator legitimately owns it.
+/// - `src/infrastructure/postgres/register_store.py` — production source.
+///   This is the case that exists to be caught.
+/// - `tests/system/**`, `tests/conftest.py`, `compose.yaml` — **not**. The
+///   first two by their path, the third by its extension.
+///
+/// A rule keyed on `src/` alone would fail the first and the third; one keyed
+/// on extension alone would fail the second pair. It takes both.
+fn is_production_source(path: &str) -> bool {
+    const SOURCE: [&str; 8] = [".rs", ".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"];
+    if !SOURCE.iter().any(|ext| path.ends_with(ext)) {
+        return false;
+    }
+    !is_test_path(path)
+}
+
+/// Whether a path is a test's, by the same reading the stacks' own campaigns
+/// use to drop test files from a mutation run (`init.rs`, `MUTATION_PYTHON`).
+///
+/// Spelled here rather than shared with them because those run in a container
+/// as `sh`, and this runs on the host in Rust: one copy of the *reading*, two
+/// of the code, and the doc comment is what keeps them honest.
+fn is_test_path(path: &str) -> bool {
+    let file = path.rsplit('/').next().unwrap_or(path);
+    path.starts_with("tests/")
+        || path.starts_with("test/")
+        || path.contains("/tests/")
+        || path.contains("/test/")
+        || path.contains("__tests__/")
+        || file.starts_with("test_")
+        || file == "conftest.py"
+        || file.contains(".test.")
+        || file.contains(".spec.")
+        || file
+            .rsplit_once('.')
+            .is_some_and(|(stem, _)| stem.ends_with("_test"))
 }
 
 /// Path patterns, compiled once.
