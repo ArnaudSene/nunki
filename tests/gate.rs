@@ -1148,10 +1148,7 @@ fn a_campaign_that_has_already_measured_nothing_is_a_red_gate() {
     // Nothing has run yet: still unplayed, and the first attempt gets to be
     // the transient one.
     assert!(
-        matches!(
-            f.gate_seven(Role::Coder).decision,
-            Decision::Unplayed(_)
-        ),
+        matches!(f.gate_seven(Role::Coder).decision, Decision::Unplayed(_)),
         "with no attempt on file, gate 7 asks for a campaign rather than failing"
     );
 
