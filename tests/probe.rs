@@ -142,7 +142,7 @@ fn live_a_fresh_project_ends_with_a_perimeter_that_holds() {
         .expect("init wrote a config Project::open accepts");
     let engine_bin = std::env::var("HQ_ENGINE").unwrap_or_else(|_| "docker".to_string());
 
-    image::build(&project, "rust", &engine_bin).expect("the images build");
+    image::build(&project, "rust", &engine_bin, image::Harness::Install).expect("the images build");
     let slot = nunki::slot::add(&project, "probe").expect("the slot is cloned");
 
     let engine: std::sync::Arc<dyn nunki::engine::Engine> =
@@ -471,7 +471,7 @@ fn live_a_system_profile_reaches_what_the_mission_declares_and_nothing_else() {
 
     let project = Project::open_at(root.clone(), home.clone()).unwrap();
     let engine_bin = std::env::var("HQ_ENGINE").unwrap_or_else(|_| "docker".to_string());
-    image::build(&project, "rust", &engine_bin).expect("the images build");
+    image::build(&project, "rust", &engine_bin, image::Harness::Install).expect("the images build");
     let slot = nunki::slot::add(&project, "sys").expect("the slot is cloned");
 
     let (_, _, header) = with_services(dir.path());

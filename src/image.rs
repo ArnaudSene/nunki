@@ -60,7 +60,12 @@ pub fn names(project: &Project, stack: &str) -> Images {
 
 /// Build both images. `engine` is the binary that builds — `docker` unless
 /// `HQ_ENGINE` says otherwise.
-pub fn build(project: &Project, stack: &str, engine: &str) -> Result<Images, ImageError> {
+pub fn build(
+    project: &Project,
+    stack: &str,
+    engine: &str,
+    harness: Harness,
+) -> Result<Images, ImageError> {
     let images = names(project, stack);
     let (uid, gid) = host_ids();
 
@@ -102,7 +107,21 @@ pub fn build(project: &Project, stack: &str, engine: &str) -> Result<Images, Ima
         harness_layer(&base, &provisioning, &project.stack_writable(stack)),
     )
     .map_err(|e| ImageError::Io(layer.path().to_path_buf(), e))?;
-    docker_build(engine, layer.path(), &images.agent, &[])?;
+    // A value that differs at every build, so the harness layer is never
+    // served from cache and the install above fetches the current version.
+    // The `ARG` it feeds is read by a `RUN` that does nothing else: Docker
+    // invalidates from there down, which is exactly the install and what
+    // follows it.
+    docker_build(engine, layer.path(), &images.agent, &{
+        let mut args = vec![format!(
+            "NUNKI_HARNESS_BUILD={}",
+            crate::state::now_rfc3339()
+        )];
+        if harness == Harness::KeepWhatTheImageCarries {
+            args.push(format!("{HARNESS_KEEP}=1"));
+        }
+        args
+    })?;
 
     Ok(images)
 }
@@ -115,6 +134,32 @@ pub fn present(engine: &str, image: &str) -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+/// The build argument that keeps the harness an image already carries.
+const HARNESS_KEEP: &str = "NUNKI_HARNESS_KEEP";
+
+/// Whether a build installs the harness or keeps the one the image carries.
+///
+/// A parameter rather than something inferred from the image, because the
+/// previous version inferred it — it skipped the install whenever the binary
+/// happened to be present — and that had two effects where only one was
+/// wanted. It let an image carry a substitute harness, and it froze the real
+/// one for ever: an image built once kept its version until somebody deleted
+/// it, and nothing said which version that was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Harness {
+    /// Install it, at every build. What an ordinary build does, so that an
+    /// image is never older than the day it was built.
+    Install,
+    /// Keep whatever the image already has.
+    ///
+    /// For an image carrying a **substitute**: nunki's own live tests write a
+    /// `claude` that answers with canned JSON, so a mission can be started
+    /// without spending an agent. Installing the real one over it would
+    /// defeat the test, and that image carries no `curl` to install it with
+    /// — measured, exit 127.
+    KeepWhatTheImageCarries,
 }
 
 /// The Dockerfile of nunki's own layer, on top of a stack's image: the harness,
@@ -169,23 +214,56 @@ pub fn harness_layer(
              writes belongs to the human on the host (SPEC 4.2 bis)\" >&2; exit 1)\n",
         );
     }
+    if !provisioning.install.is_empty() {
+        // The harness is installed at **every** build, and the argument above
+        // it is what makes Docker believe that.
+        //
+        // It used to be `command -v <binary> || (install)`, on the reasoning
+        // that a stack image may ship its own harness and reinstalling over
+        // it wastes minutes. The reasoning was sound and the consequence was
+        // not: the layer cached, so the version in an image never moved
+        // again, and nothing said which version it was or that it was frozen.
+        //
+        // Measured on `qcoda-compta`, 2026-09-24. A mission was pinned to a
+        // model the harness in its image did not know, and the run came back
+        // `API Error: 400 Claude Code 2.1.278 does not support this model;
+        // version 2.1.280 or newer is required`. Two patch versions, and a
+        // held mission, for an image built weeks earlier.
+        //
+        // Installing at build time rather than at launch is deliberate: a
+        // build has ordinary network, while a run sits behind the sidecar
+        // whose allowlist is the stack's needs plus the harness's and
+        // nothing else (SPEC 4.1 bis, rule 6). Updating from inside a run
+        // would mean opening the installer's host for the whole of every
+        // run, to serve a need that lasts a second.
+        out.push_str(
+            "ARG NUNKI_HARNESS_BUILD\n\
+             ARG NUNKI_HARNESS_KEEP\n\
+             RUN echo \"harness build ${NUNKI_HARNESS_BUILD:-unset}\" > /dev/null\n",
+        );
+    }
     for step in &provisioning.install {
         // As the agent, not as root: the harness keeps its state under the
         // agent's home, and installing it as root would leave it unreadable
         // by the only user that runs it.
         //
-        // And only if it is not already there. A stack image is allowed to
-        // ship its own harness — pinned, or built for a base the installer
-        // does not support — and reinstalling over it wastes minutes at
-        // best. Measured: the layer failed to build on an image that already
-        // carried `claude`, because the installer wants `curl` and that
-        // image had none.
-        match &provisioning.binary {
-            binary if !binary.is_empty() => out.push_str(&format!(
-                "RUN command -v {binary} > /dev/null || ({step})\n"
-            )),
-            _ => out.push_str(&format!("RUN {step}\n")),
-        }
+        // `NUNKI_HARNESS_KEEP` is the one way out, and it is **declared**
+        // rather than inferred. The previous version skipped the install
+        // whenever the binary happened to be present, which had two effects
+        // and only one of them was wanted: it let an image carry a
+        // substitute harness, and it froze the real one for ever. Saying so
+        // with an argument keeps the first and drops the second — a build
+        // that wants the harness it already has has to ask, and a build that
+        // says nothing gets the current one.
+        //
+        // What asks for it: nunki's own live tests, whose fixture image
+        // writes a `claude` that answers with canned JSON so a mission can
+        // be started without spending an agent. Installing the real one over
+        // it would defeat the test, and that image carries no `curl` to
+        // install it with — measured, exit 127.
+        out.push_str(&format!(
+            "RUN [ -n \"${{NUNKI_HARNESS_KEEP:-}}\" ] || ({step})\n"
+        ));
     }
     if !provisioning.binary.is_empty() {
         // Loudly, at build time. The first version of this layer produced an

@@ -645,7 +645,7 @@ fn main() -> ExitCode {
                     };
                     let engine = std::env::var("HQ_ENGINE").unwrap_or_else(|_| "docker".into());
                     println!("building the images for {stack}, this takes a while…");
-                    match image::build(&project, &stack, &engine) {
+                    match image::build(&project, &stack, &engine, image::Harness::Install) {
                         Ok(images) => {
                             println!("agent     {}", images.agent);
                             println!("firewall  {}", images.firewall);
