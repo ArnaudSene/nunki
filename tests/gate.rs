@@ -1119,6 +1119,61 @@ impl Fixture {
 }
 
 impl Fixture {
+    /// The stderr a campaign on the current content left behind when it got
+    /// nowhere — what `runs/mutants-<fingerprint>.err` holds after an attempt
+    /// that never wrote `MUTANTS.json`.
+    fn campaign_said(&self, stderr: &str) {
+        let touched = nunki::gate::touched_since_base(&self.tree, "dev").unwrap();
+        let fingerprint = nunki::mutants::fingerprint(&self.tree, &touched).unwrap();
+        let short = &fingerprint[..7.min(fingerprint.len())];
+        let runs = self._dir.path().join("runs");
+        std::fs::create_dir_all(&runs).unwrap();
+        std::fs::write(runs.join(format!("mutants-{short}.err")), stderr).unwrap();
+    }
+}
+
+/// A campaign that has already run on this content and measured nothing makes
+/// gate 7 **red**, not unplayed — and the reason it gave is the cause.
+///
+/// `Unplayed` opens no volet, so the mission was wedged: nothing dispatched,
+/// and `nunki verify` only started the identical campaign again. Measured on
+/// `qcoda-compta` on 2026-09-23 and again on 2026-09-24, both times a test
+/// the branch carried failing inside `mutants/`, both times a one-line fix,
+/// both times found by a person reading a log by hand.
+#[test]
+fn a_campaign_that_has_already_measured_nothing_is_a_red_gate() {
+    let f = Fixture::new();
+    f.journal_names_head();
+
+    // Nothing has run yet: still unplayed, and the first attempt gets to be
+    // the transient one.
+    assert!(
+        matches!(f.gate_seven(Role::Coder).decision, Decision::Unplayed(_)),
+        "with no attempt on file, gate 7 asks for a campaign rather than failing"
+    );
+
+    f.campaign_said(
+        "FileNotFoundError: '/work/proof/mutants/config.toml'\n\
+         FAILED tests/test_bootstrap_config.py::test_the_tracked_config_file_parses\n\
+         nunki: the campaign could not run, so no mutant was tested\n",
+    );
+
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => {
+            assert!(
+                why.contains("already run and measured nothing"),
+                "the cause has to say that running it again changes nothing: {why}"
+            );
+            assert!(
+                why.contains("config.toml"),
+                "the cause has to carry what the campaign said, not just that it failed: {why}"
+            );
+        }
+        other => panic!("a campaign that cannot run is the branch's defect: {other:?}"),
+    }
+}
+
+impl Fixture {
     /// What the coder wrote, in its own file.
     fn coder_answers(&self, answers: &[(&str, Triage)]) {
         let map: BTreeMap<String, Triage> = answers

@@ -568,12 +568,29 @@ pub fn read_back(
         }
         Presence::Ended => {
             forget_running(&project.hq_root, &slot.name)?;
+            // The **stderr** file, not the log. A campaign that got nowhere
+            // wrote nothing to stdout — that is what "after 0 line(s)" says —
+            // so naming the log sends whoever reads this to an empty file,
+            // precisely when they need the reason. Measured twice on
+            // `qcoda-compta`, 2026-09-23 and 2026-09-24: both times the log
+            // was 0 bytes and the sibling `.err` held the traceback that
+            // explained it, and both times it had to be found by hand.
+            //
+            // The log is still named when it holds something: a campaign that
+            // printed survivors and then died says more there than in its
+            // stderr.
+            let diagnosis = if text.trim().is_empty() {
+                running.log.with_extension("err")
+            } else {
+                running.log.clone()
+            };
             Progress::Lost(format!(
                 "it stopped without saying it had finished, after {} line(s): a campaign \
                  that was killed, whose container went away, or that never compiled \
-                 leaves exactly this, and none of them measured anything. Its log is {}",
+                 leaves exactly this, and none of them measured anything. What it said \
+                 is in {}",
                 text.lines().count(),
-                running.log.display()
+                diagnosis.display()
             ))
         }
         Presence::Vanished(why) | Presence::Unknown(why) => {
