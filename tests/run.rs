@@ -710,7 +710,13 @@ fn live_a_mission_starts_and_its_run_is_read_back() {
     let project = Project::open_at(root.clone(), home.clone()).unwrap();
     let hq_root = project.hq_root.clone();
     let engine_bin = std::env::var("HQ_ENGINE").unwrap_or_else(|_| "docker".to_string());
-    nunki::image::build(&project, "rust", &engine_bin).expect("the images build");
+    nunki::image::build(
+        &project,
+        "rust",
+        &engine_bin,
+        nunki::image::Harness::KeepWhatTheImageCarries,
+    )
+    .expect("the images build");
 
     let slot = nunki::slot::add(&project, "one").expect("the slot is cloned");
     let header = nunki::mission::Header {

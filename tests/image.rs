@@ -69,18 +69,28 @@ fn the_layer_fails_the_build_when_the_harness_is_not_on_path() {
 fn the_harness_is_installed_at_every_build_and_never_served_from_cache() {
     let layer = image::harness_layer("nunki/demo:base", &provisioning(), &[]);
 
-    // Unconditional: no `command -v … ||` guarding the install itself.
-    assert!(layer.contains("RUN curl"), "{layer}");
+    // The install no longer asks whether the binary is already there — that
+    // question froze every image that answered yes.
     assert!(
         !layer.contains("RUN command -v claude > /dev/null || (curl"),
-        "the install must not be skipped when the binary is already there: {layer}"
+        "the install must not be skipped because the binary happens to exist: {layer}"
+    );
+    // What it asks instead is whether the build **said** to keep what the
+    // image carries. Declared, and defaulting to installing.
+    assert!(
+        layer.contains("ARG NUNKI_HARNESS_KEEP"),
+        "keeping a substitute harness has to be sayable: {layer}"
+    );
+    assert!(
+        layer.contains("RUN [ -n \"${NUNKI_HARNESS_KEEP:-}\" ] || (curl"),
+        "{layer}"
     );
 
     // And the cache is broken above it, or "unconditional" is a word in a
     // Dockerfile that Docker never reads again.
     assert!(layer.contains("ARG NUNKI_HARNESS_BUILD"), "{layer}");
     let arg = layer.find("ARG NUNKI_HARNESS_BUILD").unwrap();
-    let install = layer.find("RUN curl").unwrap();
+    let install = layer.find("|| (curl").unwrap();
     assert!(
         arg < install,
         "the argument has to come before the install it invalidates: {layer}"
