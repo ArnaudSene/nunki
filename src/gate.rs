@@ -1271,6 +1271,55 @@ fn read(path: &Path) -> Result<String, GateError> {
     }
 }
 
+/// What a campaign on this exact content already said when it got nowhere, if
+/// one did — the difference between "none has run" and "one ran and could
+/// not".
+///
+/// Gate 7 used to answer `Unplayed` to both, and `Unplayed` opens no volet.
+/// So a campaign that cannot run on a branch left the mission wedged: nothing
+/// was dispatched, `nunki verify` only started the identical campaign again,
+/// and the loop had no exit that did not go through a human reading a log by
+/// hand.
+///
+/// Measured on `qcoda-compta` twice, 2026-09-23 and 2026-09-24. Both times a
+/// test the branch itself carried failed inside `mutants/` — once because
+/// `mutmut` renames the functions it rewrites, once because it copies `src/`
+/// and `tests/` and no file at the repository root — and both times the
+/// campaign died during `mutmut`'s baseline collection. Both times the fix
+/// was one line, and both times it took a person to find it.
+///
+/// **The stderr of a previous attempt on the same fingerprint is the
+/// discriminator**, and it needs no new state to keep. Its presence means a
+/// campaign on this content has already ended without writing
+/// [`crate::mutants::FILE`]; its contents are why. The first attempt still
+/// gets to be transient — nothing is here to read yet — and it is the second
+/// call that finds this and stops asking.
+///
+/// A campaign killed on the 45-minute deadline lands here too, and that is
+/// the right side to err on: a red gate quoting what the tooling said is more
+/// use than a silent retry of something that will be killed again.
+fn campaign_that_could_not_run(
+    mission_dir: &Path,
+    fingerprint: &str,
+) -> Result<Option<String>, GateError> {
+    let short = &fingerprint[..7.min(fingerprint.len())];
+    let err = mission_dir
+        .join("runs")
+        .join(format!("mutants-{short}.log"))
+        .with_extension("err");
+    let said = read(&err)?;
+    if said.trim().is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(format!(
+        "a campaign on this exact content has already run and measured nothing, so \
+         running it again changes nothing — the branch has to. What it said, from \
+         {}:\n{}",
+        err.display(),
+        tail(&said, "")
+    )))
+}
+
 /// Gate 7: every mutant that survived has received an outcome (SPEC 4.4).
 ///
 /// Deterministic, and it reads a file: the campaign itself is long, runs in
@@ -1307,6 +1356,9 @@ fn mutation(subject: &Subject) -> Result<Outcome, GateError> {
     let campaign =
         crate::mutants::read(subject.mission_dir).map_err(|e| GateError::Mutants(e.to_string()))?;
     let Some(campaign) = campaign else {
+        if let Some(why) = campaign_that_could_not_run(subject.mission_dir, &want)? {
+            return Ok(Outcome::of(gate, Decision::Failed(why)));
+        }
         return Ok(Outcome::of(
             gate,
             Decision::Unplayed(
