@@ -52,19 +52,48 @@ fn the_layer_fails_the_build_when_the_harness_is_not_on_path() {
     assert!(!layer.contains("$HOME"), "{layer}");
 }
 
-/// A stack image may ship its own harness — pinned, or built for a base the
-/// installer does not support. Reinstalling over it wastes minutes when it
-/// works, and fails the build when it does not: measured on an image that
-/// carried `claude` and no `curl`.
+/// The harness is installed at **every** build, and the layer says so.
+///
+/// It used to be skipped when the image already carried the binary, on the
+/// reasoning that a stack image may ship its own pinned harness. The
+/// reasoning was sound; the consequence was not. The layer cached, so the
+/// version in an image never moved again, and nothing said which version it
+/// was or that it was frozen.
+///
+/// Measured on `qcoda-compta`, 2026-09-24: a mission pinned to a model the
+/// image's harness did not know came back `API Error: 400 Claude Code
+/// 2.1.278 does not support this model; version 2.1.280 or newer is
+/// required`. Two patch versions, and a held mission, for an image built
+/// weeks earlier.
 #[test]
-fn the_install_is_skipped_when_the_image_already_carries_the_harness() {
+fn the_harness_is_installed_at_every_build_and_never_served_from_cache() {
     let layer = image::harness_layer("nunki/demo:base", &provisioning(), &[]);
+
+    // Unconditional: no `command -v … ||` guarding the install itself.
+    assert!(layer.contains("RUN curl"), "{layer}");
     assert!(
-        layer.contains("RUN command -v claude > /dev/null || (curl"),
-        "{layer}"
+        !layer.contains("RUN command -v claude > /dev/null || (curl"),
+        "the install must not be skipped when the binary is already there: {layer}"
     );
-    // And the verification afterwards is not conditional: whichever way the
-    // binary got there, the build fails if it is not on PATH.
+
+    // And the cache is broken above it, or "unconditional" is a word in a
+    // Dockerfile that Docker never reads again.
+    assert!(layer.contains("ARG NUNKI_HARNESS_BUILD"), "{layer}");
+    let arg = layer.find("ARG NUNKI_HARNESS_BUILD").unwrap();
+    let install = layer.find("RUN curl").unwrap();
+    assert!(
+        arg < install,
+        "the argument has to come before the install it invalidates: {layer}"
+    );
+
+    // What feeds it is `image::build`, with `state::now_rfc3339()` -- a value
+    // that differs at every build, which is what makes Docker invalidate from
+    // this line down. Asserting that here would mean sleeping a second to
+    // watch a clock move, and a test that waits is a test that waits for
+    // ever, on every machine.
+
+    // The verification afterwards stays conditional in shape and absolute in
+    // effect: whichever way the binary got there, the build fails without it.
     assert!(
         layer.contains("RUN command -v claude > /dev/null || (echo"),
         "{layer}"
