@@ -259,7 +259,7 @@ enum MissionCommand {
         /// project's `model:` in nunki.yaml, then to the harness's own default.
         ///
         /// An alias for the latest of a family (`sonnet`, `opus`) or a full
-        /// name (`claude-sonnet-5`). No name is checked here: nunki knows
+        /// name (`claude-opus-5-5`). No name is checked here: nunki knows
         /// harnesses, not models, and the harness refuses what it does not
         /// know.
         #[arg(long, value_name = "MODEL")]

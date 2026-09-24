@@ -280,7 +280,7 @@ forge: []
 # harness keeps its own default — `nunki logs` names the one a run used. A
 # mission header may refine it. nunki checks no name: what a name means is the
 # harness's business, and the harness refuses what it does not know.
-# model: claude-sonnet-5
+# model: claude-opus-5-5
 
 # What the harness does with a permission it would otherwise ask about.
 # Nobody is there to ask in an autonomous container, so the only question is

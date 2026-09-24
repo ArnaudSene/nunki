@@ -105,7 +105,7 @@ nunki mission new m1 \
   --branch mission/first \
   --lot "L1:parse the header" \
   --lot "L2:reject a malformed one" \
-  --model claude-sonnet-5 \
+  --model claude-opus-5-5 \
   --about "What the mission is for, in your words."
 ```
 
