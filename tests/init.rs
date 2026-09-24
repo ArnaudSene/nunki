@@ -1510,14 +1510,28 @@ fn the_python_battery_does_not_read_what_the_campaign_leaves() {
         }
     }
 
-    // And the campaign clears it when it gets to the end — a courtesy, since
-    // one that is killed never does, which is why the exclusion above is the
-    // guard and this is not.
+    // And the campaign clears the copy itself, three times over, because the
+    // three cover different failures:
+    //
+    // - a `trap`, set before anything can create it, for every ordinary exit
+    //   — including the early ones `set -eu` leaves through, which is what a
+    //   failed campaign takes;
+    // - before the run, which is what clears the copy a *killed* campaign
+    //   left, since no trap runs for one of those;
+    // - at the end, once the survivors have been read out of it.
+    //
+    // The exclusion asserted above is still the guard rather than these: it
+    // is the only one that does not depend on this script having run at all.
     let campaign = std::fs::read_to_string(stack.join("mutation.sh")).unwrap();
+    assert!(
+        campaign.contains("trap 'rm -rf mutants' EXIT"),
+        "a campaign that exits early must not leave `mutants/` for gate 1 to \
+         read as the agent's uncommitted change: {campaign}"
+    );
     assert_eq!(
         campaign.matches("rm -rf mutants").count(),
-        2,
-        "cleared before the run and after it: {campaign}"
+        3,
+        "the trap, before the run, and after it: {campaign}"
     );
 }
 
@@ -1921,6 +1935,69 @@ fn the_campaign_deselects_the_system_tests() {
 /// and writes an empty `missed.txt`, which the fragment already reads as no
 /// survivors. Running it here would need a crate and a toolchain to prove
 /// something the tool already guarantees. A stack added later has to answer
+/// A campaign that fails leaves nothing behind, because gate 1 reads what it
+/// leaves as the agent's own uncommitted change.
+///
+/// `mutants/` is a copy of the tree. It is untracked, it is gitignored
+/// nowhere, and `.gitignore` is outside a mission's perimeter — so a
+/// directory the agent never created, and cannot ignore, fails its clean-tree
+/// gate. Measured on `qcoda-compta` on 2026-09-23: a campaign died during
+/// mutmut's baseline collection and the next gate run came back "the tree
+/// holds 1 uncommitted change(s): ?? mutants/".
+///
+/// The script cleared `mutants/` at its end already. The end is the one place
+/// a failing campaign never reaches, which is why this is a trap.
+#[test]
+fn a_campaign_that_fails_leaves_no_copy_of_the_tree_behind() {
+    let (_d, root, nunki) = fresh();
+    init(&root, &nunki, &["python".to_string()]).unwrap();
+    let script = home(&root)
+        .join("stacks")
+        .join("python")
+        .join("mutation.sh");
+
+    // A `uv` that makes the directory the real one would, then fails the way
+    // a campaign fails: non-zero, after writing nothing the script can read.
+    let bin = root.parent().unwrap().join("stub-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(
+        bin.join("uv"),
+        "#!/bin/sh\nmkdir -p mutants\necho copied > mutants/whatever.py\nexit 1\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        bin.join("uv"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+
+    let cwd = root.parent().unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = std::process::Command::new("sh")
+        .arg(&script)
+        .arg("abc1234")
+        .arg("src/pkg/thing.py")
+        .current_dir(cwd)
+        .env("PATH", path)
+        .output()
+        .expect("sh runs the campaign");
+
+    assert!(
+        !out.status.success(),
+        "this test is about a campaign that fails; it did not"
+    );
+    assert!(
+        !cwd.join("mutants").exists(),
+        "the campaign failed and left mutants/ behind, which gate 1 reads as \
+         the agent's uncommitted change: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// this question rather than inherit an answer — hence the `panic!`.
 #[cfg(unix)]
 #[test]

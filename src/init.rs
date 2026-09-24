@@ -1146,6 +1146,25 @@ set -eu
 campaign="$1"
 shift
 
+# `mutants/` is cleared however this script leaves, and not only when it
+# reaches the end. It is a copy of the tree: untracked, gitignored nowhere,
+# and written by this script rather than by the agent. Left behind, **gate 1
+# reads it as the agent's own uncommitted change** — a red clean-tree gate
+# for a directory the agent never created and, with `.gitignore` outside a
+# mission's perimeter, cannot ignore either.
+#
+# Measured on `qcoda-compta`, 2026-09-23: a campaign died during mutmut's
+# baseline collection, `mutants/` stayed, and the next gate run came back
+# "the tree holds 1 uncommitted change(s): ?? mutants/".
+#
+# A trap, and set before anything can create the directory, because the exits
+# that matter are the early ones — `set -eu` leaves through most of them. It
+# is still not a guarantee: a campaign that is *killed* runs no trap, and one
+# often is, the deadline being 45 minutes. What covers that is the `rm -rf`
+# further down, which clears the previous campaign's copy before this one
+# runs, and the battery excluding the directory for the same reason.
+trap 'rm -rf mutants' EXIT
+
 # Only Python sources are worth mutating; the touched list holds whatever the
 # branch touched.
 #
@@ -1210,6 +1229,7 @@ fi
 # writing anything leaves the previous campaign's, on code that has changed
 # since — and a replay of the same fingerprint reaches exactly that path.
 rm -rf mutants
+
 
 # mutmut mutates every file under its `source_paths` and cannot be told to do
 # less. Measured on 3.8.0: `mutmut run` takes exact mutant names only — a
