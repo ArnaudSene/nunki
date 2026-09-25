@@ -1975,6 +1975,62 @@ fn the_gates_that_run_in_the_copy_stand_down_while_a_campaign_rewrites_it() {
     }
 }
 
+/// Gate 7 waits for a campaign in flight like the gates beside it, and never
+/// reads the campaign's progress as a campaign that could not run.
+///
+/// A campaign writes its stderr while it runs. mutmut prints its progress
+/// there on every campaign, so until the campaign is read back there is no
+/// `MUTANTS.json` and there is a non-empty `.err`. Gate 7 was played anyway
+/// and took that pair for a campaign that had already measured nothing. The
+/// verdict was red, a red outranks a wait, and a volet went to the coder.
+///
+/// Measured on `qcoda-compta` mission-15, 2026-09-25: the campaign ended at
+/// 04:58:19Z with `{"campaign":"done"}` and no survivor. The gates played
+/// before the read-back, at 04:58:37Z, and the mission went to a second volet
+/// whose cause said "measured nothing". A coder run went on a green branch.
+#[test]
+fn gate_seven_waits_for_a_campaign_in_flight_and_never_reads_its_progress_as_a_failure() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.journal_names_head();
+    std::fs::write(&f.pr, "# The pull request\n").unwrap();
+    let (project, slot) = f.context();
+    nunki::mutants::write_running(
+        &project.hq_root,
+        &slot.name,
+        &nunki::mutants::Running {
+            fingerprint: "886307b".into(),
+            head: git(&f.tree, &["rev-parse", "HEAD"]),
+            started_at: "2026-09-25T04:57:48Z".into(),
+            container: "c5a93c0b0d07".into(),
+            pid: Some(7),
+            log: f._dir.path().join("mutants.log"),
+            deadline_minutes: 45,
+        },
+    )
+    .unwrap();
+    f.campaign_said("Generating mutants\nRunning mutation testing\n193.48 mutations/second\n");
+
+    let report = f.verification(Role::Coder);
+    let seven = report
+        .outcomes
+        .iter()
+        .find(|o| o.gate == Gate::Mutation)
+        .expect("gate 7 is reported");
+    let Decision::Unplayed(why) = &seven.decision else {
+        panic!(
+            "gate 7 judged a campaign that is still running: {:?}",
+            seven.decision
+        );
+    };
+    assert!(why.contains("2026-09-25T04:57:48Z"), "{why}");
+    assert!(
+        matches!(report.verdict(), nunki::gate::Verdict::CampaignOwed(_)),
+        "a campaign in flight is waited on, never sent back to the coder: {:?}",
+        report.verdict()
+    );
+}
+
 /// Gate 7 and the campaign it judges read one set, and there is one call that
 /// can produce it.
 ///
