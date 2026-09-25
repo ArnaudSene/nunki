@@ -369,7 +369,14 @@ fn play(subject: &Subject, verification: &Verification, phase: Phase) -> Result<
             Some(why) => Outcome::waiting(Gate::Battery, why),
             None => Outcome::of(Gate::Battery, battery(subject, verification)?),
         });
-        outcomes.push(mutation(subject)?);
+        // Gate 7 waits too, though it reads a file rather than the copy:
+        // until the campaign is read back there is no `MUTANTS.json` and
+        // there is a `.err` the running campaign keeps writing its progress
+        // to, and that pair is what a campaign that could not run leaves.
+        outcomes.push(match &campaign {
+            Some(why) => Outcome::waiting(Gate::Mutation, why),
+            None => mutation(subject)?,
+        });
     }
     outcomes.push(match &campaign {
         Some(why) => Outcome::waiting(Gate::MechanicalSecurity, why),
