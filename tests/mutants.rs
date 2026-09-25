@@ -193,6 +193,94 @@ fn a_campaign_found_stopped_writes_no_result() {
     );
 }
 
+/// A campaign that stopped **and said why** on stderr is the branch's defect,
+/// not a machine's, and it is told apart from one that vanished.
+///
+/// Measured on `qcoda-compta` mission-15, 2026-09-25: a guard failed inside
+/// `mutants/`, the stderr named it, and the monitor stopped on "lost" — so the
+/// volet gate 7 would have sent waited for a human to type `nunki verify`.
+#[test]
+fn a_campaign_that_stopped_and_said_why_goes_back_to_the_branch() {
+    use nunki::engine::{ExecOutput, fake::FakeEngine};
+
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot) = context(dir.path());
+    let tree = slot.tree.clone();
+    let profile = nunki::run::profile_path(&project, &slot.name);
+    std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+    std::fs::write(&profile, "services: {}\n").unwrap();
+
+    let mission = dir.path().join("mission");
+    std::fs::create_dir_all(&mission).unwrap();
+    let log = mission.join("mutants.log");
+    // What it printed before it died: a survivor, and no line saying it
+    // reached the end.
+    std::fs::write(
+        &log,
+        "{\"id\":\"a\",\"file\":\"src/lib.rs\",\"line\":3,\"description\":\"replace one\"}\n",
+    )
+    .unwrap();
+    // And why, on stderr: what a guard failing inside `mutants/` leaves.
+    std::fs::write(
+        log.with_extension("err"),
+        "FAILED tests/test_register_delivery_boundaries.py::test_br16\n\
+         nunki: the campaign could not run, so no mutant was tested\n",
+    )
+    .unwrap();
+    mutants::write_running(
+        &project.hq_root,
+        &slot.name,
+        &mutants::Running {
+            fingerprint: "abc1234".into(),
+            head: git(&tree, &["rev-parse", "HEAD"]),
+            started_at: "2026-09-19T02:00:00Z".into(),
+            container: "cafe1234".into(),
+            pid: Some(41),
+            log: log.clone(),
+            deadline_minutes: 45,
+        },
+    )
+    .unwrap();
+
+    // The container is up and the process is not — the shape a kill leaves.
+    let engine: std::sync::Arc<dyn nunki::engine::Engine> = std::sync::Arc::new(
+        FakeEngine::default()
+            .with_liveness("cafe1234", nunki::engine::Liveness::Running)
+            .with_exec(ExecOutput {
+                status: 0,
+                stdout: "nunki-run-ended\n".into(),
+                stderr: String::new(),
+            }),
+    );
+
+    let progress = mutants::campaign(
+        &project,
+        &slot,
+        engine,
+        &mission,
+        "rust",
+        "dev",
+        45,
+        mutants::Replay::WhenChanged,
+    )
+    .unwrap();
+
+    // Not lost: it said why, gate 7 will read that as red, and the monitor
+    // goes on to the volet rather than stopping for a human.
+    let mutants::Progress::CouldNotRun(why) = progress else {
+        panic!("a campaign that stopped and said why was read as {progress:?}");
+    };
+    assert!(why.contains("without saying it had finished"), "{why}");
+    // Nothing recorded, so gate 7 keeps asking rather than passing.
+    assert_eq!(mutants::read(&mission).unwrap(), None);
+    // And the in-flight record is gone, so no gate stands down for it.
+    assert!(
+        mutants::read_running(&project.hq_root, &slot.name)
+            .unwrap()
+            .is_none()
+    );
+}
+
 /// A project and a slot a campaign can be launched in, on a real repository.
 fn context(dir: &Path) -> (nunki::project::Project, nunki::slot::Slot) {
     let tree = repo(dir);

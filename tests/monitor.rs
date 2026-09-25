@@ -422,6 +422,13 @@ fn a_campaign_that_overran_or_vanished_stops_the_monitor_and_the_rest_does_not()
         Next::Exit(why) => assert!(why.contains("45-minute deadline"), "{why}"),
         other => panic!("{other:?}"),
     }
+    // Could not run, and said why: gate 7 goes red on it at the next
+    // `verify`, which sends a volet. Nothing here waits on a human.
+    assert_eq!(
+        after_campaign(&Progress::CouldNotRun("FAILED tests/test_x.py".into())),
+        Next::Continue,
+        "a campaign that could not run goes back to the branch through gate 7"
+    );
     match after_campaign(&Progress::Lost("the container went away".into())) {
         Next::Exit(why) => assert!(why.contains("the container went away"), "{why}"),
         other => panic!("{other:?}"),

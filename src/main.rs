@@ -1824,6 +1824,10 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                             );
                             return ExitCode::FAILURE;
                         }
+                        Progress::CouldNotRun(why) => {
+                            eprintln!("nunki: the campaign could not run: {why}");
+                            return ExitCode::FAILURE;
+                        }
                         Progress::Lost(why) => {
                             eprintln!("nunki: the campaign cannot be reached: {why}");
                             return ExitCode::FAILURE;
