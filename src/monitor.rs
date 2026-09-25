@@ -262,7 +262,9 @@ pub fn after_verify(result: &Result<Vec<Step>, VerifyError>) -> Next {
 ///
 /// Pure, like [`after_verify`], and for the same reason: a campaign that
 /// overran or vanished is a human's to look at, and a monitor that went on
-/// would start the same campaign at every tick against the same wall.
+/// would start the same campaign at every tick against the same wall. A
+/// campaign that could not run and said why is not one of those: gate 7 turns
+/// it into a volet.
 pub fn after_campaign(progress: &crate::mutants::Progress) -> Next {
     use crate::mutants::Progress;
     match progress {
@@ -273,6 +275,9 @@ pub fn after_campaign(progress: &crate::mutants::Progress) -> Next {
         Progress::Overrun { minutes } => Next::Exit(format!(
             "the mutation campaign passed its {minutes}-minute deadline and was stopped"
         )),
+        // The branch's to fix, and the next `verify` says so: gate 7 reads
+        // the stderr this campaign left and goes red, which sends a volet.
+        Progress::CouldNotRun(_) => Next::Continue,
         Progress::Lost(why) => Next::Exit(format!("the mutation campaign was lost: {why}")),
     }
 }

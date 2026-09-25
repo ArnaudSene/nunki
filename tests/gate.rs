@@ -1173,6 +1173,69 @@ fn a_campaign_that_has_already_measured_nothing_is_a_red_gate() {
     }
 }
 
+/// The cause a campaign that could not run hands back is what a terminal
+/// would have shown, not every frame of its progress bar.
+///
+/// mutmut redraws its spinner with `\r` and never ends the line, so a
+/// line-based tail kept all of it. Measured on `qcoda-compta` mission-15,
+/// 2026-09-25: a 230 KB cause, stored in the mission's state and sent to the
+/// coder as the reason for its volet.
+#[test]
+fn a_campaigns_progress_bar_is_not_carried_into_the_cause() {
+    let f = Fixture::new();
+    f.journal_names_head();
+
+    let mut stderr = String::from("Checked 54 packages in 0.28ms\n");
+    for n in 0..5_000 {
+        stderr.push_str(&format!("\r⠋ {n}/2764  🎉 {n} 🫥 0  ⏰ 0  🤔 0  🙁 0"));
+    }
+    stderr.push_str("\r⠙ 2764/2764  🎉 2764 🫥 0  ⏰ 0  🤔 0  🙁 0\n");
+    stderr.push_str("FAILED tests/test_register_delivery_boundaries.py::test_br16\n");
+    stderr.push_str("nunki: the campaign could not run, so no mutant was tested\n");
+    assert!(
+        stderr.len() > 200_000,
+        "the fixture has to be the size measured"
+    );
+    f.campaign_said(&stderr);
+
+    let Decision::Failed(why) = f.gate_seven(Role::Coder).decision else {
+        panic!("a campaign that could not run is a red gate");
+    };
+    assert!(
+        why.len() < 4_000,
+        "a cause of {} bytes carries the progress bar",
+        why.len()
+    );
+    assert!(
+        why.contains("2764/2764"),
+        "the last frame is what was on screen: {why}"
+    );
+    assert!(
+        !why.contains("⠋ 17/2764"),
+        "an overwritten frame was kept: {why}"
+    );
+    assert!(
+        why.contains("FAILED tests/test_register_delivery_boundaries.py"),
+        "{why}"
+    );
+}
+
+/// One line with no carriage return, however long, is still cut: a cause is
+/// read by a person and a run, and neither reads 100 KB of one line.
+#[test]
+fn a_single_endless_line_is_cut_in_the_cause() {
+    let f = Fixture::new();
+    f.journal_names_head();
+    f.campaign_said(&format!("{}\nthe reason\n", "x".repeat(100_000)));
+
+    let Decision::Failed(why) = f.gate_seven(Role::Coder).decision else {
+        panic!("a campaign that could not run is a red gate");
+    };
+    assert!(why.len() < 4_000, "{} bytes", why.len());
+    assert!(why.contains("[…]"), "a cut line says it was cut: {why}");
+    assert!(why.contains("the reason"), "{why}");
+}
+
 impl Fixture {
     /// What the coder wrote, in its own file.
     fn coder_answers(&self, answers: &[(&str, Triage)]) {

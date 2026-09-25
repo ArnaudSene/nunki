@@ -439,7 +439,19 @@ pub enum Progress {
     Finished { survivors: usize },
     /// Past its deadline and stopped (SPEC 4.4, "un délai paramétré").
     Overrun { minutes: u32 },
-    /// The container went away under it, or the engine could not be asked.
+    /// Ended without the line that says it finished, and its stderr says
+    /// why: a test the branch carries failing inside `mutants/`, a crate that
+    /// does not compile. That is the branch's to fix, and gate 7 reads the
+    /// same stderr on the next `verify` and goes red, which sends a volet —
+    /// so nothing here is waiting on a human.
+    ///
+    /// Kept apart from [`Progress::Lost`] because the monitor goes on after
+    /// this one and stops after that one. A campaign that left no word on
+    /// stderr leaves gate 7 unplayed, and a monitor that went on would start
+    /// the same campaign on every tick.
+    CouldNotRun(String),
+    /// The container went away under it, or the engine could not be asked,
+    /// or it ended having said nothing at all.
     Lost(String),
 }
 
@@ -579,19 +591,32 @@ pub fn read_back(
             // The log is still named when it holds something: a campaign that
             // printed survivors and then died says more there than in its
             // stderr.
+            let stderr = running.log.with_extension("err");
+            let said_why = std::fs::read_to_string(&stderr)
+                .map(|t| !t.trim().is_empty())
+                .unwrap_or(false);
             let diagnosis = if text.trim().is_empty() {
-                running.log.with_extension("err")
+                stderr
             } else {
                 running.log.clone()
             };
-            Progress::Lost(format!(
+            let why = format!(
                 "it stopped without saying it had finished, after {} line(s): a campaign \
                  that was killed, whose container went away, or that never compiled \
                  leaves exactly this, and none of them measured anything. What it said \
                  is in {}",
                 text.lines().count(),
                 diagnosis.display()
-            ))
+            );
+            // Measured on `qcoda-compta` mission-15, 2026-09-25: a guard
+            // failed inside `mutants/` and the stderr said so, gate 7 would
+            // have gone red on it — and the monitor stopped here instead,
+            // so the volet waited for someone to type `nunki verify`.
+            if said_why {
+                Progress::CouldNotRun(why)
+            } else {
+                Progress::Lost(why)
+            }
         }
         Presence::Vanished(why) | Presence::Unknown(why) => {
             forget_running(&project.hq_root, &slot.name)?;
