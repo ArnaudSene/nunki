@@ -1252,7 +1252,7 @@ fn battery(subject: &Subject, verification: &Verification) -> Result<Decision, G
 /// read by an agent that has a lot else to hold.
 fn tail(stderr: &str, stdout: &str) -> String {
     let last = |text: &str, keep: usize| -> String {
-        let lines: Vec<&str> = text.lines().collect();
+        let lines: Vec<String> = text.lines().filter_map(as_shown).collect();
         let from = lines.len().saturating_sub(keep);
         lines[from..].join("\n")
     };
@@ -1266,6 +1266,29 @@ fn tail(stderr: &str, stdout: &str) -> String {
             last(stdout, 12)
         ),
     }
+}
+
+/// The longest line a cause carries, in characters. A cause is read by a
+/// person and by the next run, and past this a line is noise either way.
+const SHOWN_LINE_MAX: usize = 400;
+
+/// One line as a terminal would have left it on screen, or nothing when it
+/// would show nothing.
+///
+/// A progress bar redraws itself with `\r` and never ends a line, so what
+/// `lines()` calls one line is every frame it drew. Measured on
+/// `qcoda-compta` mission-15, 2026-09-25: mutmut's spinner made one "line" of
+/// most of a 230 KB `.err`, and all of it went into a volet's cause, the
+/// mission's state and the coder's prompt. Only the last frame is what anyone
+/// saw, so that is what is kept, cut at [`SHOWN_LINE_MAX`] in case a single
+/// frame is the whole file.
+fn as_shown(line: &str) -> Option<String> {
+    let frame = line.rsplit('\r').find(|f| !f.trim().is_empty())?;
+    let mut shown: String = frame.chars().take(SHOWN_LINE_MAX).collect();
+    if frame.chars().nth(SHOWN_LINE_MAX).is_some() {
+        shown.push_str(" […]");
+    }
+    Some(shown)
 }
 
 fn read(path: &Path) -> Result<String, GateError> {
