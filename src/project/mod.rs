@@ -40,9 +40,12 @@ pub struct Config {
     /// (SPEC 3.1, 4.1 bis rule 6).
     #[serde(default)]
     pub forge: Vec<String>,
-    /// Stack fragments this project uses, under the home's `stacks/<name>/`.
+    /// Stack fragments this project uses, under the home's `stacks/<name>/`,
+    /// each in the directory of the repository it covers. The first is the
+    /// primary: its Dockerfile is the image the others are added onto
+    /// (SPEC 4.2, "plusieurs stacks").
     #[serde(default)]
-    pub stacks: Vec<String>,
+    pub stacks: Vec<Stack>,
     /// Branches no mission may target or push to.
     #[serde(default = "default_protected_branches")]
     pub protected_branches: Vec<String>,
@@ -97,6 +100,129 @@ pub struct Config {
     pub forge_protection: ForgeProtection,
 }
 
+/// One stack a project declares: a fragment's name, and the directory of the
+/// repository it covers — empty for the root.
+///
+/// Written in `nunki.yaml` as the bare name for the root (`- rust`), or as a
+/// one-entry map for a subdirectory (`- next: frontend`), so every file written
+/// before a stack could have a directory still reads.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Stack {
+    pub name: String,
+    /// Relative to the repository's root, without a leading or trailing `/`;
+    /// empty for the root itself.
+    pub dir: String,
+}
+
+impl Stack {
+    /// A stack at the repository's root.
+    pub fn root(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            dir: String::new(),
+        }
+    }
+
+    /// `name` or `name=dir`, as `nunki init --stack` takes it.
+    pub fn parse(text: &str) -> Result<Self, String> {
+        match text.split_once('=') {
+            None => Self::new(text, ""),
+            Some((name, dir)) => Self::new(name, dir),
+        }
+    }
+
+    /// A stack in `dir`, refused when the directory is not one inside the
+    /// repository: the stack's scripts run there, and its paths are read there.
+    pub fn new(name: &str, dir: &str) -> Result<Self, String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("a stack needs a name".to_string());
+        }
+        let trimmed = dir.trim().trim_matches('/');
+        if dir.trim().starts_with('/') || trimmed.split('/').any(|s| s == "..") {
+            return Err(format!(
+                "{dir:?} is not a directory inside the repository, so stack {name} cannot live there"
+            ));
+        }
+        let dir = if trimmed == "." { "" } else { trimmed };
+        Ok(Self {
+            name: name.to_string(),
+            dir: dir.to_string(),
+        })
+    }
+
+    /// `path`, relative to the stack's directory, as a path relative to the
+    /// repository's root.
+    pub fn in_tree(&self, path: &str) -> String {
+        if self.dir.is_empty() {
+            path.to_string()
+        } else {
+            format!("{}/{path}", self.dir)
+        }
+    }
+}
+
+impl std::fmt::Display for Stack {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.dir.is_empty() {
+            f.write_str(&self.name)
+        } else {
+            write!(f, "{} in {}/", self.name, self.dir)
+        }
+    }
+}
+
+impl From<&str> for Stack {
+    fn from(name: &str) -> Self {
+        Self::root(name)
+    }
+}
+
+impl PartialEq<String> for Stack {
+    fn eq(&self, other: &String) -> bool {
+        self.dir.is_empty() && &self.name == other
+    }
+}
+
+impl Serialize for Stack {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        if self.dir.is_empty() {
+            serializer.serialize_str(&self.name)
+        } else {
+            let mut map = serializer.serialize_map(Some(1))?;
+            map.serialize_entry(&self.name, &self.dir)?;
+            map.end()
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Stack {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Written {
+            Name(String),
+            InDir(std::collections::BTreeMap<String, String>),
+        }
+        let stack = match Written::deserialize(deserializer)? {
+            Written::Name(name) => Stack::new(&name, ""),
+            Written::InDir(map) => {
+                let mut entries = map.into_iter();
+                match (entries.next(), entries.next()) {
+                    (Some((name, dir)), None) => Stack::new(&name, &dir),
+                    _ => Err(
+                        "a stack in a directory is written `- <name>: <dir>`, one per \
+                              line"
+                            .to_string(),
+                    ),
+                }
+            }
+        };
+        stack.map_err(serde::de::Error::custom)
+    }
+}
+
 fn default_protected_branches() -> Vec<String> {
     vec!["main".to_string(), "master".to_string(), "dev".to_string()]
 }
@@ -148,6 +274,16 @@ pub const WRITABLE_FILE: &str = "writable.txt";
 /// tree — a package registry, a compiler cache — each kept as a named volume
 /// per slot.
 pub const CACHES_FILE: &str = "caches.txt";
+/// What a stack puts **before** the primary stack's first `FROM` when it is
+/// added onto another stack's image: the global `ARG`s and the stages its
+/// add-on copies from (SPEC 4.2, "plusieurs stacks"). A stage has to come
+/// first because `COPY --from` does not expand a variable — measured
+/// 2026-09-26 — so an official image named by a version cannot be copied from
+/// directly. Absent for a stack that copies from nothing.
+pub const ADDON_STAGES_FILE: &str = "Dockerfile.stages";
+/// What a stack appends to the primary stack's image to add its toolchain.
+/// It starts from an image that ends as the agent, and ends as the agent.
+pub const ADDON_FILE: &str = "Dockerfile.addon";
 /// Where a stack fragment declares the advisory database its auditor reads,
 /// as a path **on the host**. `nunki` mounts it read-only and never fills it
 /// (SPEC 4.4, gate 8).
@@ -250,6 +386,17 @@ impl Project {
             .map_err(|e| ProjectError::Unreadable(file.clone(), e.to_string()))?;
         let config: Config = serde_yaml_ng::from_str(&text)
             .map_err(|e| ProjectError::Invalid(file.clone(), e.to_string()))?;
+        // One fragment per name: two entries naming one would share its
+        // scripts and its image steps, and only one directory could be right.
+        let mut seen = std::collections::BTreeSet::new();
+        for stack in &config.stacks {
+            if !seen.insert(stack.name.as_str()) {
+                return Err(ProjectError::Invalid(
+                    file.clone(),
+                    format!("stack {} is declared twice", stack.name),
+                ));
+            }
+        }
         let Some(claimed) = config.root.clone() else {
             return Err(ProjectError::Unclaimed {
                 config: file,
@@ -310,6 +457,28 @@ impl Project {
             .unwrap_or_else(|| "project".to_string())
     }
 
+    /// The stack the project declares under `name`, or one at the root when it
+    /// declares none — what every single-stack caller has always assumed.
+    pub fn stack(&self, name: &str) -> Stack {
+        self.config
+            .stacks
+            .iter()
+            .find(|s| s.name == name)
+            .cloned()
+            .unwrap_or_else(|| Stack::root(name))
+    }
+
+    /// Where the stack `name` lives in the repository at `tree` — the
+    /// project's root, or a slot's clone of it.
+    pub fn stack_tree(&self, tree: &Path, name: &str) -> PathBuf {
+        let stack = self.stack(name);
+        if stack.dir.is_empty() {
+            tree.to_path_buf()
+        } else {
+            tree.join(&stack.dir)
+        }
+    }
+
     /// The stack fragment directory for `stack`, whether or not it exists.
     pub fn fragment(&self, stack: &str) -> PathBuf {
         self.home.join(STACKS_DIR).join(stack)
@@ -341,6 +510,11 @@ impl Project {
             .filter(|l| !l.is_empty() && !l.starts_with('#'))
             .map(|l| l.trim_matches('/').to_string())
             .filter(|l| !l.is_empty() && l != "." && !l.split('/').any(|s| s == ".."))
+            // Relative to the stack's directory in the fragment, and to the
+            // tree from here on: this is the one place the prefix is added, so
+            // the image's mount point, the seeded directory and the volume
+            // cannot disagree about where `node_modules` is.
+            .map(|l| self.stack(stack).in_tree(&l))
             .collect()
     }
 

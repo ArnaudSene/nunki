@@ -111,9 +111,11 @@ pub fn run(project: &Project) -> Report {
 /// the engine would drop it and the image keep its default, which is the
 /// failure the file exists to prevent — and `nunki slot rebuild` refuses it.
 fn stack_versions(project: &Project, report: &mut Report) {
-    for stack in &project.config.stacks {
-        let what = format!("the {stack} image follows the versions the repository pins");
-        let sources = match project.stack_versions(stack) {
+    let stacks = &project.config.stacks;
+    for stack in stacks {
+        let name = &stack.name;
+        let what = format!("the {name} image follows the versions the repository pins");
+        let sources = match project.stack_versions(name) {
             Ok(s) => s,
             Err(e) => {
                 report.add(what, Verdict::Red(e.to_string()));
@@ -125,36 +127,44 @@ fn stack_versions(project: &Project, report: &mut Report) {
                 what,
                 Verdict::NotChecked(format!(
                     "the fragment has no {}, so the image keeps its Dockerfile's defaults \
-                     whatever the repository pins; `nunki init --stack {stack}` writes it",
+                     whatever the repository pins; `nunki init --stack {name}` writes it",
                     crate::versions::FILE
                 )),
             );
             continue;
         }
-        let dockerfile = project.fragment(stack).join("Dockerfile");
-        let text = match std::fs::read_to_string(&dockerfile) {
+        // What this stack puts into the image: its own Dockerfile when it is
+        // the primary, its add-on onto the primary's otherwise (SPEC 4.2,
+        // "plusieurs stacks"). Its versions are read against that, and in its
+        // own directory.
+        let text = match crate::image::contribution(project, stacks, stack) {
             Ok(t) => t,
             Err(e) => {
-                report.add(what, Verdict::Red(format!("{}: {e}", dockerfile.display())));
+                report.add(what, Verdict::Red(e.to_string()));
                 continue;
             }
         };
         let missing = crate::versions::undeclared(&sources, &text);
         if !missing.is_empty() {
+            let file = if stack == &stacks[0] {
+                "Dockerfile"
+            } else {
+                crate::project::ADDON_FILE
+            };
             report.add(
                 what,
                 Verdict::Red(format!(
                     "{} declares no {}, which {} reads: the image would keep its default. \
-                     The fragment predates it — remove the Dockerfile, run `nunki init \
-                     --stack {stack}` and carry your own edits over",
-                    dockerfile.display(),
+                     The fragment predates it — remove {file}, run `nunki init \
+                     --stack {name}` and carry your own edits over",
+                    project.fragment(name).join(file).display(),
                     missing.join(", "),
                     crate::versions::FILE
                 )),
             );
             continue;
         }
-        let pins = crate::versions::resolve(&project.root, &sources);
+        let pins = crate::versions::resolve(&project.stack_tree(&project.root, name), &sources);
         let said: Vec<String> = pins
             .iter()
             .map(|p| match p {
@@ -170,36 +180,46 @@ fn stack_versions(project: &Project, report: &mut Report) {
     }
 }
 
-/// Whether the image built for each stack still carries what the repository
-/// pins now. Asks the container engine, so it is the caller's to run, like
-/// [`forge_protection`] is for the forge.
+/// Whether the project's image still carries what the repository pins now,
+/// for every stack it carries. Asks the container engine, so it is the
+/// caller's to run, like [`forge_protection`] is for the forge.
+///
+/// One image, whatever the number of stacks: the others are added onto the
+/// primary's (SPEC 4.2, "plusieurs stacks"), and a secondary stack has no
+/// image of its own to look for.
 pub fn image_versions(project: &Project, engine: &str, report: &mut Report) {
-    for stack in &project.config.stacks {
-        let what = format!("the {stack} image carries what the repository pins now");
-        let Ok(sources) = project.stack_versions(stack) else {
-            // Already red above, with the line that cannot be read.
-            continue;
-        };
-        if sources.is_empty() {
-            continue;
-        }
-        let wanted = crate::versions::pinned(&crate::versions::resolve(&project.root, &sources));
-        let image = crate::image::names(project, stack).agent;
-        let verdict = match crate::image::recorded(engine, &image) {
-            Err(e) => Verdict::NotChecked(e.to_string()),
-            Ok(crate::image::Recorded::Absent) => Verdict::NotChecked(format!(
-                "{image} is not built yet: `nunki slot rebuild` builds it"
-            )),
-            Ok(recorded) => match serves(&recorded, &wanted) {
-                Ok(()) => Verdict::Green(image),
-                Err(drift) => Verdict::Red(format!(
-                    "{}; `nunki slot rebuild` builds it again",
-                    drift.join("; ")
-                )),
-            },
-        };
-        report.add(what, verdict);
+    let Some(primary) = project.config.stacks.first() else {
+        return;
+    };
+    let what = "the image carries what the repository pins now".to_string();
+    let reads_any = project
+        .config
+        .stacks
+        .iter()
+        .any(|s| project.stack_versions(&s.name).is_ok_and(|v| !v.is_empty()));
+    if !reads_any {
+        return;
     }
+    let wanted = match crate::image::pinned_now(project, &project.root, &primary.name) {
+        Ok(w) => w,
+        // Already red above, with the fragment or the line at fault.
+        Err(_) => return,
+    };
+    let image = crate::image::names(project, &primary.name).agent;
+    let verdict = match crate::image::recorded(engine, &image) {
+        Err(e) => Verdict::NotChecked(e.to_string()),
+        Ok(crate::image::Recorded::Absent) => Verdict::NotChecked(format!(
+            "{image} is not built yet: `nunki slot rebuild` builds it"
+        )),
+        Ok(recorded) => match serves(&recorded, &wanted) {
+            Ok(()) => Verdict::Green(image),
+            Err(drift) => Verdict::Red(format!(
+                "{}; `nunki slot rebuild` builds it again",
+                drift.join("; ")
+            )),
+        },
+    };
+    report.add(what, verdict);
 }
 
 /// Whether an image built with `recorded` serves a repository pinning
@@ -548,7 +568,7 @@ fn coder_perimeter(project: &Project, report: &mut Report) {
         return;
     }
 
-    for stack in &project.config.stacks {
+    for stack in project.config.stacks.iter().map(|s| &s.name) {
         let what = format!("the coder's allowlist for {stack} names no forge domain");
         let Some(domains) = project.stack_domains(stack) else {
             report.add(

@@ -636,7 +636,9 @@ fn main() -> ExitCode {
                     ExitCode::SUCCESS
                 }
                 SlotCommand::Rebuild { stack } => {
-                    let stack = match stack.or_else(|| project.config.stacks.first().cloned()) {
+                    let stack = match stack
+                        .or_else(|| project.config.stacks.first().map(|s| s.name.clone()))
+                    {
                         Some(s) => s,
                         None => {
                             eprintln!("nunki: no stack declared in nunki.yaml; pass --stack");
@@ -1241,7 +1243,7 @@ fn probes(project: &Project, which: Option<&str>) -> Vec<check::Check> {
             }];
         }
     };
-    let Some(stack) = project.config.stacks.first().cloned() else {
+    let Some(stack) = project.config.stacks.first().map(|s| s.name.clone()) else {
         return vec![check::Check {
             what: "the perimeter holds from inside the mission profile".to_string(),
             verdict: check::Verdict::NotChecked(
@@ -1796,11 +1798,15 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             }
+            if let Err(why) = nunki::run::one_stack_judged(project) {
+                eprintln!("nunki: {why}");
+                return ExitCode::FAILURE;
+            }
             let stack = project
                 .config
                 .stacks
                 .first()
-                .cloned()
+                .map(|s| s.name.clone())
                 .unwrap_or_else(|| "rust".to_string());
             let engine: std::sync::Arc<dyn nunki::engine::Engine> =
                 std::sync::Arc::new(nunki::engine::docker::Docker::real());
@@ -1922,6 +1928,10 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                 protected_paths: &project.config.protected_paths,
                 coder_head: coder_head.as_deref(),
             };
+            if let Err(why) = nunki::run::one_stack_judged(project) {
+                eprintln!("nunki: {why}");
+                return ExitCode::FAILURE;
+            }
             let played = {
                 let engine: std::sync::Arc<dyn nunki::engine::Engine> =
                     std::sync::Arc::new(nunki::engine::docker::Docker::real());
@@ -1929,7 +1939,7 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                     .config
                     .stacks
                     .first()
-                    .cloned()
+                    .map(|s| s.name.clone())
                     .unwrap_or_else(|| "rust".to_string());
                 let context = nunki::gate::Verification {
                     project,

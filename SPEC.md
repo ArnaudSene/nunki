@@ -884,7 +884,9 @@ scripts qu'un conteneur exécute — `prepush.sh`, `system.sh`, `mutation.sh`,
 plus seulement par une porte. Le Dockerfile, `allow.txt` et `writable.txt` ne
 sont lus que sur l'hôte. Le dossier porte :
 un Dockerfile (étapes d'image), `allow.txt` (domaines des dépendances),
-`prepush.sh` (section de batterie), `system.sh` (les tests système de
+`Dockerfile.addon` et `Dockerfile.stages` (ce que la stack ajoute sur l'image
+d'une autre — « plusieurs stacks », ci-dessous), `prepush.sh` (section de
+batterie), `system.sh` (les tests système de
 l'intégrateur), `mutation.sh` (commande de mutation),
 `run.sh` (comment on démarre une application de cette stack, par défaut),
 `writable.txt` (les répertoires qu'une exécution doit pouvoir écrire quand
@@ -951,6 +953,53 @@ l'image portait `stable`.
   `engines.node` s'il est exact, et `packageManager` pour pnpm. Les outils de
   `nunki` lui-même — trufflehog, osv-scanner, Playwright — restent épinglés
   par le fragment : ils ne sont pas au dépôt.
+
+**Plusieurs stacks dans un projet** (tranché par Arnaud le 2026-09-26, après
+une analyse comparée : l'hybride ci-dessous plutôt qu'une image entièrement
+générée par `nunki`). Un dépôt peut porter du Rust à la racine et un
+Next.js dans `frontend/` ; le codeur, dans **un** conteneur, doit pouvoir
+lancer `cargo` et `pnpm` — le frontend de `trading-bot-rust-2` dépend d'un
+paquet wasm que `wasm-pack` construit avant `pnpm install`.
+
+- **La déclaration.** `stacks:` accepte un nom (`- rust`, à la racine) ou un
+  nom et son répertoire (`- next: frontend`) ; `nunki init --stack
+  next=frontend` l'écrit. Un répertoire absolu ou contenant `..` est refusé,
+  un nom déclaré deux fois aussi. La **première** stack est la principale.
+- **Une image par projet, celle de la principale, complétée.** Chaque fragment
+  porte, en plus de son Dockerfile autonome, un `Dockerfile.addon` — ce qu'il
+  ajoute sur l'image d'une autre stack, en partant de l'utilisateur agent et
+  en y revenant — et, s'il copie depuis une image officielle, un
+  `Dockerfile.stages`. Les étapes vont **avant** le premier `FROM` de la
+  principale et tous les `ARG` globaux avant toute étape : `COPY --from` ne
+  développe pas de variable (mesuré le 2026-09-26), et un `ARG` écrit après
+  un `FROM` appartient à cette étape. Les compléments suivent, dans l'ordre
+  déclaré. L'image porte le nom de la principale ; `slot rebuild --stack`
+  n'accepte qu'elle.
+- **Le runtime est copié depuis l'image officielle, pas réinstallé.** Node
+  vient de `node:<version>-bookworm-slim`, Python de
+  `python:<version>-slim-bookworm` avec les bibliothèques Debian qu'il lie et
+  `ldconfig` ; Rust reste installé par rustup, en agent. Mesuré le
+  2026-09-26 : Python réinstallé par `uv python install` embarque OpenSSL et
+  sqlite liés en statique, que le scan d'image ne voit pas et qu'`apt` ne
+  corrige pas ; copié depuis l'image officielle, le scan ne trouve rien de
+  corrigeable. Les étapes qu'une stack et son complément partagent sont un
+  seul texte dans `nunki init`, et un test vérifie qu'elles sont identiques
+  octet pour octet dans les deux fichiers.
+- **Les chemins d'une stack sont relatifs à son répertoire.** `versions.txt`
+  se lit dans le répertoire de la stack (`frontend/package.json`) ;
+  `writable.txt` y est préfixé, en un seul endroit, pour que le point de
+  montage de l'image, le répertoire amorcé et le volume ne divergent pas. Un
+  argument lu par deux stacks est refusé : une valeur l'emporterait pour les
+  deux. `nunki check` lit chaque stack contre ce qu'elle met dans l'image —
+  son Dockerfile pour la principale, son complément pour les autres — et
+  compare l'image unique à l'union de ce que le dépôt épingle.
+- **Tant que les portes ne jugent qu'une stack, aucune mission ne part sur
+  plusieurs.** Les portes 6, 7 et 8 jouent encore la batterie, la campagne et
+  l'audit de la principale, depuis la racine. Un vert y dirait « vérifié »
+  d'un projet dont les autres stacks n'ont été ni testées, ni mutées, ni
+  auditées : `mission start`, `verify`, `mission gates` et `mission mutants`
+  refusent, en le disant, jusqu'à ce que les portes jouent chaque stack dans
+  son répertoire. L'image, elle, se construit déjà.
 
 **Ce que la stack Python rend, et ce qu'elle ne rend pas** (mesuré le
 2026-09-20, avant livraison) : `uv` pour le verrou, `ruff`, `mypy` et `pytest`

@@ -11,7 +11,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::project::Project;
+use crate::project::{Project, Stack};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Images {
@@ -44,6 +44,29 @@ pub enum ImageError {
         stack: String,
         args: String,
         dockerfile: PathBuf,
+    },
+    #[error(
+        "stack {stack} is added onto {primary}'s image, and its fragment has no {at} — \
+         `nunki init --stack {stack}` writes it"
+    )]
+    NoAddon {
+        stack: String,
+        primary: String,
+        at: PathBuf,
+    },
+    #[error(
+        "the image is the project's, built from {primary} with the other stacks added onto \
+         it; {asked} is not its primary stack — drop `--stack`, or name {primary}"
+    )]
+    NotPrimary { asked: String, primary: String },
+    #[error(
+        "{arg} is read from the repository by both {first} and {second}: one value would \
+         silently win for both. Rename it in one fragment's Dockerfile and `versions.txt`"
+    )]
+    SharedArgument {
+        arg: String,
+        first: String,
+        second: String,
     },
     #[error("{engine} could not say what {image} was built with: {said}")]
     Inspect {
@@ -107,21 +130,27 @@ pub fn build(
         .map_err(|e| ImageError::Io(prober.path().to_path_buf(), e))?;
     docker_build(engine, prober.path(), &images.prober, &[])?;
 
-    let fragment = project.fragment(stack);
-    let dockerfile = fragment.join("Dockerfile");
-    if !dockerfile.is_file() {
-        return Err(ImageError::NoDockerfile {
-            stack: stack.to_string(),
-            at: dockerfile,
-        });
-    }
+    let stacks = image_stacks(project, stack)?;
     let StackBuild {
         args,
         label,
         versions,
     } = stack_build(project, stack, uid, gid)?;
     let base = base_tag(project, stack);
-    docker_build_labelled(engine, &fragment, &base, &args, &[label])?;
+    // One stack builds from its fragment, as it always has. Several build
+    // from a Dockerfile composed of the primary's and the others' add-ons,
+    // written where nothing else is — the primary's fragment is the project's
+    // and nunki writes nothing into it after `init`.
+    let composed = tempfile::tempdir().map_err(|e| ImageError::Io(PathBuf::from("."), e))?;
+    let context = if stacks.len() == 1 {
+        project.fragment(stack)
+    } else {
+        let text = compose_stacks(project, &stacks)?;
+        let file = composed.path().join("Dockerfile");
+        std::fs::write(&file, text).map_err(|e| ImageError::Io(file.clone(), e))?;
+        composed.path().to_path_buf()
+    };
+    docker_build_labelled(engine, &context, &base, &args, &[label])?;
 
     // Then the harness, in a layer of nunki's own. The stack fragment describes
     // a stack; which harness runs on it is not the project's business, and
@@ -130,7 +159,14 @@ pub fn build(
     let layer = tempfile::tempdir().map_err(|e| ImageError::Io(PathBuf::from("."), e))?;
     std::fs::write(
         layer.path().join("Dockerfile"),
-        harness_layer(&base, &provisioning, &project.stack_writable(stack)),
+        harness_layer(
+            &base,
+            &provisioning,
+            &stacks
+                .iter()
+                .flat_map(|s| project.stack_writable(&s.name))
+                .collect::<Vec<_>>(),
+        ),
     )
     .map_err(|e| ImageError::Io(layer.path().to_path_buf(), e))?;
     // A value that differs at every build, so the harness layer is never
@@ -163,33 +199,145 @@ pub struct StackBuild {
     pub versions: Vec<crate::versions::Pin>,
 }
 
-/// The build arguments for a stack's image: the human's ids, and the versions
-/// the repository pins, read now and not at `init` — the fragment never
-/// updates itself, the repository does (SPEC 4.2).
+/// The stacks one image carries, the primary first: every stack the project
+/// declares, or `stack` alone when it declares none. `stack` must be the
+/// primary — the image is the project's, not a stack's (SPEC 4.2, "plusieurs
+/// stacks").
+pub fn image_stacks(project: &Project, stack: &str) -> Result<Vec<Stack>, ImageError> {
+    let declared = &project.config.stacks;
+    match declared.first() {
+        None => Ok(vec![Stack::root(stack)]),
+        Some(primary) if primary.name == stack => Ok(declared.clone()),
+        Some(primary) => Err(ImageError::NotPrimary {
+            asked: stack.to_string(),
+            primary: primary.name.clone(),
+        }),
+    }
+}
+
+/// What a stack contributes to the image's Dockerfile: the whole of its own
+/// when it is the primary, its stages and its add-on otherwise.
+pub fn contribution(
+    project: &Project,
+    stacks: &[Stack],
+    stack: &Stack,
+) -> Result<String, ImageError> {
+    let fragment = project.fragment(&stack.name);
+    let read = |name: &str| {
+        let file = fragment.join(name);
+        std::fs::read_to_string(&file).map_err(|e| ImageError::Io(file.clone(), e))
+    };
+    let primary = &stacks[0];
+    if stack == primary {
+        let dockerfile = fragment.join("Dockerfile");
+        if !dockerfile.is_file() {
+            return Err(ImageError::NoDockerfile {
+                stack: stack.name.clone(),
+                at: dockerfile,
+            });
+        }
+        return read("Dockerfile");
+    }
+    let addon = fragment.join(crate::project::ADDON_FILE);
+    if !addon.is_file() {
+        return Err(ImageError::NoAddon {
+            stack: stack.name.clone(),
+            primary: primary.name.clone(),
+            at: addon,
+        });
+    }
+    let stages = if fragment.join(crate::project::ADDON_STAGES_FILE).is_file() {
+        read(crate::project::ADDON_STAGES_FILE)?
+    } else {
+        String::new()
+    };
+    Ok(format!("{stages}{}", read(crate::project::ADDON_FILE)?))
+}
+
+/// The Dockerfile of an image carrying several stacks.
+pub fn compose_stacks(project: &Project, stacks: &[Stack]) -> Result<String, ImageError> {
+    let fragment = |s: &Stack| project.fragment(&s.name);
+    let primary = contribution(project, stacks, &stacks[0])?;
+    let mut addons = Vec::new();
+    for stack in &stacks[1..] {
+        // Read through `contribution` for the refusal it makes on a missing
+        // add-on, then apart, since the two halves go to two places.
+        contribution(project, stacks, stack)?;
+        let stages =
+            std::fs::read_to_string(fragment(stack).join(crate::project::ADDON_STAGES_FILE))
+                .unwrap_or_default();
+        let file = fragment(stack).join(crate::project::ADDON_FILE);
+        let body = std::fs::read_to_string(&file).map_err(|e| ImageError::Io(file.clone(), e))?;
+        addons.push((stack.name.clone(), stages, body));
+    }
+    Ok(compose(&stacks[0].name, &primary, &addons))
+}
+
+/// Put an image's Dockerfile together from its primary stack's and the
+/// add-ons of the others, as `(name, stages, body)`.
 ///
-/// Refused when `versions.txt` names an argument the Dockerfile does not
-/// declare: the engine would drop it with a warning and the image keep its
-/// default, which is the failure the file exists to prevent.
+/// Every stage goes **before** the primary's first `FROM`, and every global
+/// `ARG` before any stage: an `ARG` written after a `FROM` belongs to that
+/// stage, and the primary's `FROM ${BASE}` would no longer see its own `BASE`.
+/// The bodies go at the end, in the order the stacks are declared, each
+/// starting from an image that ends as the agent and ending as the agent.
+pub fn compose(primary_name: &str, primary: &str, addons: &[(String, String, String)]) -> String {
+    let (head, rest) = split_at_first_from(primary);
+    let mut globals = String::new();
+    let mut stages = String::new();
+    for (_, text, _) in addons {
+        let (g, s) = split_at_first_from(text);
+        globals.push_str(g);
+        stages.push_str(s);
+    }
+    let names: Vec<&str> = addons.iter().map(|(n, _, _)| n.as_str()).collect();
+    let mut out = format!(
+        "# Composed by nunki from the fragments of {primary_name}, then {} (SPEC 4.2,\n\
+         # \"plusieurs stacks\"). Do not edit: `nunki slot rebuild` writes it again.\n",
+        names.join(", ")
+    );
+    out.push_str(head);
+    out.push_str(&globals);
+    out.push_str(&stages);
+    out.push_str(rest);
+    for (_, _, body) in addons {
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push('\n');
+        out.push_str(body);
+    }
+    out
+}
+
+/// A Dockerfile cut before its first `FROM`: what comes before is global.
+fn split_at_first_from(text: &str) -> (&str, &str) {
+    let mut at = 0;
+    for line in text.split_inclusive('\n') {
+        let word = line.split_whitespace().next().unwrap_or("");
+        if word.eq_ignore_ascii_case("FROM") {
+            return text.split_at(at);
+        }
+        at += line.len();
+    }
+    (text, "")
+}
+
+/// The build arguments for the image: the human's ids, and the versions the
+/// repository pins for every stack it carries, each read in that stack's
+/// directory — read now and not at `init`, since the fragment never updates
+/// itself and the repository does (SPEC 4.2).
+///
+/// Refused when `versions.txt` names an argument its stack's contribution does
+/// not declare, since the engine would drop it and the image keep its default;
+/// and when two stacks read one argument, since one value would win for both.
 pub fn stack_build(
     project: &Project,
     stack: &str,
     uid: u32,
     gid: u32,
 ) -> Result<StackBuild, ImageError> {
-    let dockerfile = project.fragment(stack).join("Dockerfile");
-    let sources = project.stack_versions(stack)?;
-    let text =
-        std::fs::read_to_string(&dockerfile).map_err(|e| ImageError::Io(dockerfile.clone(), e))?;
-    let missing = crate::versions::undeclared(&sources, &text);
-    if !missing.is_empty() {
-        return Err(ImageError::Undeclared {
-            stack: stack.to_string(),
-            args: missing.join(", "),
-            dockerfile,
-        });
-    }
-    let versions = crate::versions::resolve(&project.root, &sources);
-    let pinned = crate::versions::pinned(&versions);
+    let (versions, pinned) = read_versions(project, &project.root, stack)?;
     let mut args = vec![format!("UID={uid}"), format!("GID={gid}")];
     args.extend(pinned.iter().map(|(arg, value)| format!("{arg}={value}")));
     Ok(StackBuild {
@@ -201,6 +349,67 @@ pub fn stack_build(
         ),
         versions,
     })
+}
+
+/// What the repository at `tree` pins for the image `stack` is the primary
+/// of — every stack it carries, each read in its own directory — as the label
+/// records it. What `nunki check` and a launch compare an image against.
+pub fn pinned_now(
+    project: &Project,
+    tree: &Path,
+    stack: &str,
+) -> Result<std::collections::BTreeMap<String, String>, ImageError> {
+    Ok(read_versions(project, tree, stack)?.1)
+}
+
+type Read = (
+    Vec<crate::versions::Pin>,
+    std::collections::BTreeMap<String, String>,
+);
+
+fn read_versions(project: &Project, tree: &Path, stack: &str) -> Result<Read, ImageError> {
+    let stacks = image_stacks(project, stack)?;
+    let mut owner: std::collections::BTreeMap<String, String> = Default::default();
+    let mut versions = Vec::new();
+    for s in &stacks {
+        let sources = project.stack_versions(&s.name)?;
+        if sources.is_empty() {
+            continue;
+        }
+        let text = contribution(project, &stacks, s)?;
+        let missing = crate::versions::undeclared(&sources, &text);
+        if !missing.is_empty() {
+            return Err(ImageError::Undeclared {
+                stack: s.name.clone(),
+                args: missing.join(", "),
+                dockerfile: project.fragment(&s.name).join(if s == &stacks[0] {
+                    "Dockerfile"
+                } else {
+                    crate::project::ADDON_FILE
+                }),
+            });
+        }
+        for source in &sources {
+            match owner.get(&source.arg) {
+                Some(first) if *first != s.name => {
+                    return Err(ImageError::SharedArgument {
+                        arg: source.arg.clone(),
+                        first: first.clone(),
+                        second: s.name.clone(),
+                    });
+                }
+                _ => {
+                    owner.insert(source.arg.clone(), s.name.clone());
+                }
+            }
+        }
+        versions.extend(crate::versions::resolve(
+            &project.stack_tree(tree, &s.name),
+            &sources,
+        ));
+    }
+    let pinned = crate::versions::pinned(&versions);
+    Ok((versions, pinned))
 }
 
 /// What an image records about the versions it was built with.

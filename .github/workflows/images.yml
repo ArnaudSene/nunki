@@ -59,7 +59,11 @@ jobs:
         # Every stack `nunki init` knows, because a stack ships an image and
         # an image nobody scans is the hole this workflow exists to close.
         # A stack added here and forgotten there is the same defect twice.
-        stack: [rust, python, next]
+        #
+        # `rust+next` is a project carrying two: Rust's image with Next.js
+        # added onto it (SPEC 4.2, "plusieurs stacks"). The add-ons are built
+        # nowhere else, and an add-on nobody builds is one that drifts.
+        stack: [rust, python, next, rust+next]
     steps:
       - uses: actions/checkout@v7
 
@@ -98,10 +102,16 @@ jobs:
           cd "$RUNNER_TEMP/demo"
           git init -q -b main
           git -c user.name=ci -c user.email=ci@example.com commit -q --allow-empty -m first
-          "$nunki" init --stack ${{ matrix.stack }}
+          # `a+b` is `a` at the root with `b` in a directory of its own.
+          stack="${{ matrix.stack }}"
+          case "$stack" in
+            *+*) primary="${stack%%+*}"; set -- --stack "$primary" --stack "${stack#*+}=web" ;;
+            *) primary="$stack"; set -- --stack "$stack" ;;
+          esac
+          "$nunki" init "$@"
           git add -A
           git -c user.name=ci -c user.email=ci@example.com commit -q -m "nunki init"
-          "$nunki" slot rebuild --stack ${{ matrix.stack }} | tee "$RUNNER_TEMP/images.txt"
+          "$nunki" slot rebuild --stack "$primary" | tee "$RUNNER_TEMP/images.txt"
 
       # The runner builds as its own uid, 1001, and a developer on macOS as
       # 501. Neither is 1000, the uid of the first user of a Linux or WSL

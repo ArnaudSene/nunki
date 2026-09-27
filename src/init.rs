@@ -45,6 +45,10 @@ pub enum InitError {
     Io(PathBuf, std::io::Error),
     #[error("no stack fragment for {0:?}; known: {1}")]
     UnknownStack(String, String),
+    #[error("--stack {0:?}: {1}")]
+    BadStack(String, String),
+    #[error("stack {0} is named twice")]
+    TwiceNamed(String),
 }
 
 /// The stacks `nunki init` can write a fragment for: the three SPEC 4.2
@@ -62,13 +66,22 @@ pub fn init(root: &Path, home: &Path, stacks: &[String]) -> Result<Vec<Action>, 
     if !root.is_dir() {
         return Err(InitError::NotADirectory(root.to_path_buf()));
     }
-    for stack in stacks {
-        if !KNOWN_STACKS.contains(&stack.as_str()) {
+    // `name`, or `name=dir` for a stack that lives in a directory of the
+    // repository (SPEC 4.2, "plusieurs stacks").
+    let mut asked: Vec<crate::project::Stack> = Vec::new();
+    for text in stacks {
+        let stack = crate::project::Stack::parse(text)
+            .map_err(|why| InitError::BadStack(text.clone(), why))?;
+        if !KNOWN_STACKS.contains(&stack.name.as_str()) {
             return Err(InitError::UnknownStack(
-                stack.clone(),
+                stack.name.clone(),
                 KNOWN_STACKS.join(", "),
             ));
         }
+        if asked.iter().any(|s| s.name == stack.name) {
+            return Err(InitError::TwiceNamed(stack.name));
+        }
+        asked.push(stack);
     }
 
     // Re-run on a project that already has a configuration: top up the
@@ -79,13 +92,12 @@ pub fn init(root: &Path, home: &Path, stacks: &[String]) -> Result<Vec<Action>, 
     // 2026-09-17, a project missing the `caches.txt` a release had added got
     // four "kept" lines and no hint that its fragments were never examined.
     // The remedy existed (`nunki init --stack rust`) and was undiscoverable.
-    let declared;
-    let stacks = if stacks.is_empty() {
-        declared = declares(home);
-        declared.as_slice()
+    let stacks = if asked.is_empty() {
+        declares(home)
     } else {
-        stacks
+        asked
     };
+    let stacks = stacks.as_slice();
 
     let mut actions = Vec::new();
 
@@ -115,11 +127,11 @@ pub fn init(root: &Path, home: &Path, stacks: &[String]) -> Result<Vec<Action>, 
         // ones come from a configuration a human wrote, and one naming a
         // stack this release does not carry yet would otherwise leave an
         // empty folder behind.
-        let files = fragment(stack);
+        let files = fragment(&stack.name);
         if files.is_empty() {
             continue;
         }
-        let dir = home.join(crate::project::STACKS_DIR).join(stack);
+        let dir = home.join(crate::project::STACKS_DIR).join(&stack.name);
         std::fs::create_dir_all(&dir).map_err(|e| InitError::Io(dir.clone(), e))?;
         for (name, body, executable) in files {
             let path = dir.join(name);
@@ -147,7 +159,7 @@ pub fn init(root: &Path, home: &Path, stacks: &[String]) -> Result<Vec<Action>, 
 /// Read here rather than through [`crate::project::Project::open`] because
 /// `init` is the one verb that runs before a project exists: an unreadable or
 /// absent configuration is the ordinary case on a first run, not an error.
-fn declares(home: &Path) -> Vec<String> {
+fn declares(home: &Path) -> Vec<crate::project::Stack> {
     let text = match std::fs::read_to_string(home.join(crate::project::CONFIG_FILE)) {
         Ok(t) => t,
         Err(_) => return Vec::new(),
@@ -239,7 +251,7 @@ fn gitattributes(root: &Path, actions: &mut Vec<Action>) -> Result<(), InitError
     Ok(())
 }
 
-fn nunki_yaml(root: &Path, stacks: &[String]) -> String {
+fn nunki_yaml(root: &Path, stacks: &[crate::project::Stack]) -> String {
     let list = if stacks.is_empty() {
         "stacks: []".to_string()
     } else {
@@ -247,7 +259,13 @@ fn nunki_yaml(root: &Path, stacks: &[String]) -> String {
             "stacks:\n{}",
             stacks
                 .iter()
-                .map(|s| format!("  - {s}"))
+                .map(|s| {
+                    if s.dir.is_empty() {
+                        format!("  - {}", s.name)
+                    } else {
+                        format!("  - {}: {}", s.name, s.dir)
+                    }
+                })
                 .collect::<Vec<_>>()
                 .join("\n")
         )
@@ -425,7 +443,7 @@ PNPM package.json packageManager pnpm@{}
 /// or a file it writes is unreadable on the host and git refuses the tree;
 /// and **pre-create the mount points**, or a named volume is born owned by
 /// root and the toolchain cannot write in it (SPEC 4.2 bis).
-const DOCKERFILE_RUST: &str = r#"# The coder's image for a Rust project, built by `nunki slot rebuild`.
+const DOCKERFILE_RUST_HEAD: &str = r#"# The coder's image for a Rust project, built by `nunki slot rebuild`.
 ARG BASE=debian:bookworm-slim
 FROM ${BASE}
 
@@ -499,7 +517,12 @@ RUN mkdir -p /work/tree /work/mission /run/nunki \
  && chown -R ${UID}:${GID} /work /run/nunki
 
 USER agent
-ENV RUSTUP_HOME=/home/agent/.rustup \
+"#;
+
+/// The Rust toolchain itself, as the agent: the part of the Rust image a
+/// project whose primary stack is another adds onto its own (SPEC 4.2,
+/// "plusieurs stacks"). One text for both, so the two cannot drift.
+const RUST_TOOLCHAIN: &str = r#"ENV RUSTUP_HOME=/home/agent/.rustup \
     CARGO_HOME=/home/agent/.cargo \
     PATH=/home/agent/.cargo/bin:${PATH}
 
@@ -553,6 +576,114 @@ RUN cargo install cargo-mutants --locked \
        /home/agent/.cargo/installed/cargo-deny/Cargo.lock \
  && rm -rf /home/agent/.cargo/registry/*
 "#;
+
+/// The Rust toolchain added onto another stack's image (SPEC 4.2, "plusieurs
+/// stacks"). No stage: rustup installs it, as the agent, as the Rust image
+/// itself does.
+const ADDON_RUST: &str = r#"# Rust, added by nunki onto the image of this project's primary stack
+# (SPEC 4.2, "plusieurs stacks"). Starts as the agent, ends as the agent.
+# The versions the repository pins arrive as in the Rust image: from
+# `versions.txt` beside this file, read in the stack's own directory.
+USER root
+RUN apt-get -qq update \
+ && apt-get -qq install --no-install-recommends -y build-essential pkg-config \
+ && rm -rf /var/lib/apt/lists/*
+USER agent
+ARG RUST_VERSION=stable
+ARG RUST_COMPONENTS=
+ARG RUST_TARGETS=
+"#;
+
+/// The Python runtime's stages: the official image, and uv's.
+const ADDON_STAGES_PYTHON: &str = r#"# Python's stages, for adding it onto another stack's image (SPEC 4.2,
+# "plusieurs stacks"): the interpreter comes from the official image rather
+# than being reinstalled, so its OpenSSL stays the one Debian patches and the
+# image scan sees. `COPY --from` does not expand a variable, hence a stage.
+ARG PYTHON=3.12
+ARG UV_VERSION=0.12.17
+FROM python:${PYTHON}-slim-bookworm AS nunki-python-runtime
+FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS nunki-python-uv
+"#;
+
+/// Python added onto another stack's image.
+///
+/// `/usr/local` from the official image is the interpreter; the libraries it
+/// links against dynamically are Debian's, installed here, and `ldconfig`
+/// makes them found. Measured 2026-09-26 on `debian:bookworm-slim` with 3.12:
+/// without the libraries `sqlite3` fails to import; with them the copy
+/// behaves as the official image — ssl, sqlite3, ctypes, lzma, bz2, venv —
+/// and the image scan reports nothing fixable.
+const ADDON_PYTHON_HEAD: &str = r#"# Python, added by nunki onto the image of this project's primary stack
+# (SPEC 4.2, "plusieurs stacks"). Starts as the agent, ends as the agent.
+USER root
+RUN apt-get -qq update \
+ && apt-get -qq install --no-install-recommends -y \
+      libsqlite3-0 libreadline8 libncursesw6 netbase tzdata \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=nunki-python-runtime /usr/local/ /usr/local/
+RUN ldconfig && python3 --version
+COPY --from=nunki-python-uv /uv /uvx /usr/local/bin/
+"#;
+
+fn addon_python() -> String {
+    [
+        ADDON_PYTHON_HEAD,
+        OSV_SCANNER_INSTALL,
+        "USER agent\n",
+        PYTHON_AGENT,
+    ]
+    .concat()
+}
+
+/// Node's stage: the official image, copied from rather than reinstalled —
+/// its build is signature-checked, and a version written `22` keeps meaning
+/// what it means on the Node image's tags.
+const ADDON_STAGES_NEXT: &str = r#"# Node's stage, for adding Next.js onto another stack's image (SPEC 4.2,
+# "plusieurs stacks"). `COPY --from` does not expand a variable, hence a stage.
+ARG NODE=22
+FROM node:${NODE}-bookworm-slim AS nunki-next-node
+"#;
+
+/// Next.js added onto another stack's image. Node's runtime is the official
+/// image's `/usr/local` pieces — the binary, its modules (npm and corepack
+/// among them) and its headers, for a native module to build against — and
+/// the three links the Node image carries. Then the same tools, as root, and
+/// the same environment, as the agent, as the Next.js image.
+const ADDON_NEXT_HEAD: &str = r#"# Next.js, added by nunki onto the image of this project's primary stack
+# (SPEC 4.2, "plusieurs stacks"). Starts as the agent, ends as the agent.
+USER root
+# `procps`: Stryker spawns `ps` to find its children (see the Next.js image).
+RUN apt-get -qq update \
+ && apt-get -qq install --no-install-recommends -y procps \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=nunki-next-node /usr/local/bin/node /usr/local/bin/node
+COPY --from=nunki-next-node /usr/local/lib/node_modules /usr/local/lib/node_modules
+COPY --from=nunki-next-node /usr/local/include/node /usr/local/include/node
+RUN ln -sf ../lib/node_modules/corepack/dist/corepack.js /usr/local/bin/corepack \
+ && ln -sf ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+ && ln -sf ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
+ && node --version
+"#;
+
+fn addon_next() -> String {
+    [
+        ADDON_NEXT_HEAD,
+        OSV_SCANNER_INSTALL,
+        NEXT_TOOLS,
+        "USER agent\n",
+        NEXT_AGENT,
+    ]
+    .concat()
+}
+
+fn addon_rust() -> String {
+    [ADDON_RUST, RUST_TOOLCHAIN].concat()
+}
+
+/// The coder's image for a Rust project: its head, then the toolchain.
+fn dockerfile_rust() -> String {
+    [DOCKERFILE_RUST_HEAD, RUST_TOOLCHAIN].concat()
+}
 
 /// The mutation campaign a Rust project runs (SPEC 4.4, gate 7): declared by
 /// the stack, launched by `nunki`, and — living in the project's home, mounted
@@ -979,7 +1110,7 @@ fi
 ///
 /// The battery's tools — ruff, mypy, pytest, mutmut — are **not** here. They
 /// are the project's, pinned by its lock, for the reason `prepush.sh` gives.
-const DOCKERFILE_PYTHON: &str = r##"# The coder's image for a Python project, built by `nunki slot rebuild`.
+const DOCKERFILE_PYTHON_HEAD: &str = r##"# The coder's image for a Python project, built by `nunki slot rebuild`.
 #
 # Both `ARG`s are declared before the first `FROM` because that is the only
 # place a build argument is global. Declared after it, `BASE` belongs to the
@@ -1047,7 +1178,12 @@ RUN set -eu; \
 #
 # Checksummed against the release's own `osv-scanner_SHA256SUMS`, as
 # trufflehog is.
-ARG OSV_SCANNER=2.6.0
+"##;
+
+/// The dependency audit gates 8 runs for Python and Next.js, one text for
+/// every image that carries it — a stack's own, and the add-on another
+/// stack's image receives (SPEC 4.2, "plusieurs stacks").
+const OSV_SCANNER_INSTALL: &str = r##"ARG OSV_SCANNER=2.6.0
 RUN set -eu; \
     case "$(dpkg --print-architecture)" in \
       amd64) arch=amd64; sum=ca69b3d3cd08f889a49dc0a383122f71cc528b83803671df5fd874d97485b108 ;; \
@@ -1059,7 +1195,9 @@ RUN set -eu; \
     echo "${sum}  /usr/local/bin/osv-scanner" | sha256sum -c -; \
     chmod 0755 /usr/local/bin/osv-scanner; \
     osv-scanner --version
+"##;
 
+const DOCKERFILE_PYTHON_USER: &str = r##"
 # From the image astral publishes rather than `curl | sh`: the tag pins it,
 # and nothing is fetched by a script at build time.
 COPY --from=uv /uv /uvx /usr/local/bin/
@@ -1077,7 +1215,11 @@ RUN mkdir -p /work/tree /work/mission /run/nunki \
  && chown -R ${UID}:${GID} /work /run/nunki
 
 USER agent
+"##;
 
+/// What the agent runs Python with: shared by the Python image and the
+/// Python add-on, so the two cannot drift.
+const PYTHON_AGENT: &str = r##"
 # `UV_PYTHON_DOWNLOADS=never` is a perimeter rule, not a preference: without
 # it `uv` fetches an interpreter from a forge the coder's allowlist does not
 # name (SPEC 4.1 bis, rule 6), and the failure would read as a flaky network
@@ -1094,6 +1236,17 @@ ENV UV_PYTHON_DOWNLOADS=never \
 
 RUN mkdir -p /home/agent/.cache/uv /home/agent/.harness
 "##;
+
+/// The coder's image for a Python project.
+fn dockerfile_python() -> String {
+    [
+        DOCKERFILE_PYTHON_HEAD,
+        OSV_SCANNER_INSTALL,
+        DOCKERFILE_PYTHON_USER,
+        PYTHON_AGENT,
+    ]
+    .concat()
+}
 
 /// The battery for a Python project (SPEC 4.4, gate 6).
 ///
@@ -1901,7 +2054,7 @@ fi
 /// first use and cannot when the network is closed; and Chromium, because
 /// the integrator's battery drives a browser and no allowlist names
 /// Playwright's CDN.
-const DOCKERFILE_NEXT: &str = r##"# The coder's image for a Next.js project, built by `nunki slot rebuild`.
+const DOCKERFILE_NEXT_HEAD: &str = r##"# The coder's image for a Next.js project, built by `nunki slot rebuild`.
 #
 # glibc and not musl, as SPEC 4.2 bis requires of every stack image: Node's
 # prebuilt native binaries target glibc, and Playwright ships no musl build
@@ -1950,20 +2103,14 @@ RUN set -eu; \
 # `osv-scanner` is this stack's dependency audit, reading a database the host
 # fills and nunki mounts read-only. It needs no network to do it — measured
 # on 2.6.0 against `pnpm-lock.yaml`, with `--network none`.
-ARG OSV_SCANNER=2.6.0
-RUN set -eu; \
-    case "$(dpkg --print-architecture)" in \
-      amd64) arch=amd64; sum=ca69b3d3cd08f889a49dc0a383122f71cc528b83803671df5fd874d97485b108 ;; \
-      arm64) arch=arm64; sum=2c71403eb443d05891c4f268c3ad771cf4f16e5443463fd7851ef8f454d3c7e4 ;; \
-      *) echo "osv-scanner ships no build for $(dpkg --print-architecture)" >&2; exit 1 ;; \
-    esac; \
-    curl -fsSL -o /usr/local/bin/osv-scanner \
-      "https://github.com/google/osv-scanner/releases/download/v${OSV_SCANNER}/osv-scanner_linux_${arch}"; \
-    echo "${sum}  /usr/local/bin/osv-scanner" | sha256sum -c -; \
-    chmod 0755 /usr/local/bin/osv-scanner; \
-    osv-scanner --version
+"##;
 
-# pnpm, baked in rather than fetched on first use.
+const DOCKERFILE_NEXT_BETWEEN: &str = r##"
+"##;
+
+/// pnpm, Chromium and the removal of npm, as root: shared by the Next.js
+/// image and the Next.js add-on, so the two cannot drift.
+const NEXT_TOOLS: &str = r##"# pnpm, baked in rather than fetched on first use.
 #
 # `corepack enable` only enables it: the binary is downloaded from
 # `registry.npmjs.org` the first time it runs, into the **calling user's**
@@ -2014,7 +2161,9 @@ RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
  && node --version \
  && ! command -v npm
 
-# The official Node image ships a `node` user at uid and gid 1000 — the id the
+"##;
+
+const DOCKERFILE_NEXT_USER: &str = r##"# The official Node image ships a `node` user at uid and gid 1000 — the id the
 # first user of a Linux or WSL machine has. `useradd -u 1000` then fails with
 # "UID 1000 is not unique", and the image does not build for that human at all
 # (measured 2026-09-26; macOS, at uid 501, never saw it). Whoever holds the
@@ -2035,7 +2184,10 @@ RUN mkdir -p /work/tree /work/mission /run/nunki \
  && chown -R ${UID}:${GID} /work /run/nunki
 
 USER agent
+"##;
 
+/// What the agent runs Next.js with, shared the same way.
+const NEXT_AGENT: &str = r##"
 # `NEXT_TELEMETRY_DISABLED` is a perimeter rule, not a preference: Next.js
 # phones home to a domain rule 6 does not name, and the refusal would read as
 # a flaky network rather than as the rule it is.
@@ -2045,6 +2197,19 @@ ENV NEXT_TELEMETRY_DISABLED=1 \
 
 RUN mkdir -p /home/agent/.local/share/pnpm/store /home/agent/.harness
 "##;
+
+/// The coder's image for a Next.js project.
+fn dockerfile_next() -> String {
+    [
+        DOCKERFILE_NEXT_HEAD,
+        OSV_SCANNER_INSTALL,
+        DOCKERFILE_NEXT_BETWEEN,
+        NEXT_TOOLS,
+        DOCKERFILE_NEXT_USER,
+        NEXT_AGENT,
+    ]
+    .concat()
+}
 
 /// The battery for a Next.js project (SPEC 4.4, gate 6).
 const PREPUSH_NEXT: &str = r##"#!/bin/sh
@@ -2738,7 +2903,8 @@ fn fragment(stack: &str) -> Vec<(&'static str, String, bool)> {
             (crate::gate::SECURITY, SECURITY_RUST.to_string(), true),
             ("run.sh", RUN_RUST.to_string(), true),
             (crate::gate::SYSTEM_BATTERY, SYSTEM_RUST.to_string(), true),
-            ("Dockerfile", DOCKERFILE_RUST.to_string(), false),
+            ("Dockerfile", dockerfile_rust(), false),
+            (crate::project::ADDON_FILE, addon_rust(), false),
             (crate::versions::FILE, VERSIONS_RUST.to_string(), false),
             (
                 crate::project::WRITABLE_FILE,
@@ -2793,7 +2959,13 @@ fn fragment(stack: &str) -> Vec<(&'static str, String, bool)> {
             (crate::gate::SECURITY, SECURITY_PYTHON.to_string(), true),
             ("run.sh", RUN_PYTHON.to_string(), true),
             (crate::gate::SYSTEM_BATTERY, SYSTEM_PYTHON.to_string(), true),
-            ("Dockerfile", DOCKERFILE_PYTHON.to_string(), false),
+            ("Dockerfile", dockerfile_python(), false),
+            (crate::project::ADDON_FILE, addon_python(), false),
+            (
+                crate::project::ADDON_STAGES_FILE,
+                ADDON_STAGES_PYTHON.to_string(),
+                false,
+            ),
             (crate::versions::FILE, VERSIONS_PYTHON.to_string(), false),
             (
                 crate::project::WRITABLE_FILE,
@@ -2860,7 +3032,13 @@ fn fragment(stack: &str) -> Vec<(&'static str, String, bool)> {
             (crate::gate::SECURITY, SECURITY_NEXT.to_string(), true),
             ("run.sh", RUN_NEXT.to_string(), true),
             (crate::gate::SYSTEM_BATTERY, SYSTEM_NEXT.to_string(), true),
-            ("Dockerfile", DOCKERFILE_NEXT.to_string(), false),
+            ("Dockerfile", dockerfile_next(), false),
+            (crate::project::ADDON_FILE, addon_next(), false),
+            (
+                crate::project::ADDON_STAGES_FILE,
+                ADDON_STAGES_NEXT.to_string(),
+                false,
+            ),
             (crate::versions::FILE, VERSIONS_NEXT.to_string(), false),
             (
                 crate::project::WRITABLE_FILE,

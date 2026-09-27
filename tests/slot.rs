@@ -285,7 +285,7 @@ fn resetting_refuses_while_the_slot_holds_work_the_repository_lacks() {
 fn a_slots_volumes_are_known_without_a_profile_file() {
     let dir = tempfile::tempdir().unwrap();
     let mut project = repository(dir.path());
-    project.config.stacks = vec!["rust".to_string()];
+    project.config.stacks = vec!["rust".into()];
     std::fs::create_dir_all(project.fragment("rust")).unwrap();
     std::fs::write(
         project.fragment("rust").join(nunki::project::WRITABLE_FILE),
