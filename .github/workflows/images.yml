@@ -103,6 +103,20 @@ jobs:
           git -c user.name=ci -c user.email=ci@example.com commit -q -m "nunki init"
           "$nunki" slot rebuild --stack ${{ matrix.stack }} | tee "$RUNNER_TEMP/images.txt"
 
+      # The runner builds as its own uid, 1001, and a developer on macOS as
+      # 501. Neither is 1000, the uid of the first user of a Linux or WSL
+      # machine, and the official Node image already holds 1000 for its own
+      # `node` user: the Next image failed to build there ("UID 1000 is not
+      # unique") and nothing noticed. Built once more as that human, from the
+      # layers above, so only the user and what follows is rebuilt.
+      - name: The stack image builds for uid 1000
+        run: |
+          set -eu
+          fragment="$(ls -d "$HOME"/.nunki/*/stacks/${{ matrix.stack }})"
+          docker build -q --build-arg UID=1000 --build-arg GID=1000 -t uid-1000-probe "$fragment"
+          test "$(docker run --rm uid-1000-probe id -u)" = 1000
+          docker image rm uid-1000-probe
+
       - name: Scan
         run: |
           # Three images or the scan is not the scan: an empty list would

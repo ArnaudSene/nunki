@@ -2014,6 +2014,15 @@ RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
  && node --version \
  && ! command -v npm
 
+# The official Node image ships a `node` user at uid and gid 1000 — the id the
+# first user of a Linux or WSL machine has. `useradd -u 1000` then fails with
+# "UID 1000 is not unique", and the image does not build for that human at all
+# (measured 2026-09-26; macOS, at uid 501, never saw it). Whoever holds the
+# human's uid in the base image goes first: nothing in this image runs as
+# `node`, and the agent must be the one owning what it writes (SPEC 4.2 bis).
+RUN holder="$(getent passwd ${UID} | cut -d: -f1)" \
+ && if [ -n "$holder" ]; then userdel -r "$holder" 2>/dev/null || userdel "$holder"; fi
+
 # The group may already exist under that id (on macOS, gid 20 is `dialout`
 # here); either way the agent ends up in it.
 RUN groupadd -g ${GID} agent || true \
