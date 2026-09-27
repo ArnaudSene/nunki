@@ -95,7 +95,9 @@ pub struct Plan {
     /// The advisory database gate 8 reads, mounted read-only, or `None` when
     /// the stack declares none. Filled by the host and never by `nunki`: the
     /// tool owns its own layout (SPEC 4.4, gate 8).
-    pub advisories: Option<(PathBuf, PathBuf)>,
+    /// One advisory database per stack that declares one (SPEC 4.2,
+    /// "plusieurs stacks").
+    pub advisories: Vec<(PathBuf, PathBuf)>,
     /// The secrets a human has ruled on, from the project's HQ, mounted
     /// read-only, or `None` when nobody has ruled on any (SPEC 4.4, gate 8).
     /// Given as (host path, path in the container).
@@ -395,7 +397,7 @@ fn agent(plan: &Plan, dialect: &Dialect) -> Result<Service, ComposeError> {
     }
     // Read-only, like everything that judges the agent: a database it could
     // write is one it could empty.
-    if let Some((host, at)) = &plan.advisories {
+    for (host, at) in &plan.advisories {
         volumes.push(mount(host, at, "ro"));
     }
     // The one part of the HQ an agent's container sees, and it sees it the

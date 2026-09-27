@@ -701,27 +701,31 @@ pub fn campaign(
         return Ok(fresh);
     }
 
-    let script = format!("{}/{SCRIPT}", crate::run::STACK_AT);
+    let judged = crate::run::judged(project, stack);
     crate::exec::refresh(project, slot, engine.clone())?;
     // Absent or not executable is said here, where the message can be about
     // the campaign, rather than as a launch that times out waiting for a pid.
-    let probe = crate::exec::run(
-        project,
-        slot,
-        engine.clone(),
-        &[
-            "sh".to_string(),
-            "-c".to_string(),
-            format!("test -x {script}"),
-        ],
-        crate::exec::On::Proof,
-    )?;
-    if !probe.ok() {
-        return Err(MutantsError::Launch(format!(
-            "there is no executable {script} in the container — the mutation campaign is \
-             a deterministic command the `{stack}` stack declares, in the project's home \
-             (SPEC 4.4)"
-        )));
+    for j in &judged {
+        let script = format!("{}/{SCRIPT}", j.scripts_at);
+        let probe = crate::exec::run(
+            project,
+            slot,
+            engine.clone(),
+            &[
+                "sh".to_string(),
+                "-c".to_string(),
+                format!("test -x {script}"),
+            ],
+            crate::exec::On::Proof,
+        )?;
+        if !probe.ok() {
+            return Err(MutantsError::Launch(format!(
+                "there is no executable {script} in the container — the mutation campaign \
+                 is a deterministic command the `{}` stack declares, in the project's home \
+                 (SPEC 4.4)",
+                j.stack.name
+            )));
+        }
     }
 
     let runs = dir.join("runs");
@@ -747,12 +751,25 @@ pub fn campaign(
         crate::compose::AGENT_SERVICE,
     )
     .identified_by(&want);
-    let mut args = vec![want.clone()];
-    args.extend(touched.iter().cloned());
+    let (program, args) = match judged.as_slice() {
+        // One stack: its script, called as it always has been.
+        [one] => {
+            let mut args = vec![want.clone()];
+            args.extend(touched.iter().cloned());
+            (format!("{}/{SCRIPT}", one.scripts_at), args)
+        }
+        several => (
+            "sh".to_string(),
+            vec![
+                "-c".to_string(),
+                several_campaigns(several, &want, &touched),
+            ],
+        ),
+    };
     let spawned = spawner
         .spawn(
             &CommandSpec {
-                program: script.clone(),
+                program,
                 args,
                 cwd: PathBuf::from(crate::exec::PROOF_AT),
                 env: Default::default(),
@@ -775,6 +792,87 @@ pub fn campaign(
         },
     )?;
     Ok(Progress::Started { fingerprint: want })
+}
+
+/// The campaign of a project carrying several stacks, as one shell script
+/// (SPEC 4.2, "plusieurs stacks").
+///
+/// Each touched path goes to the stack whose directory holds it — the
+/// deepest one, so `frontend/` beats the root — relative to that directory,
+/// and each stack's `mutation.sh` runs there on its own paths; a stack this
+/// branch did not touch has nothing to mutate and is not called. What each
+/// prints keeps the contract `nunki` reads, made the project's: an id
+/// prefixed with the stack's name, since two tools number their mutants
+/// independently, and a file relative to the repository, like the touched
+/// list. `{"campaign":"done"}` is said once, at the end, and only if every
+/// stack said it: a campaign one stack did not finish measured nothing for it.
+///
+/// `jq` reads the lines, as every stack image carries it; a line that is not
+/// JSON is progress and is dropped from the result, which is where the
+/// contract already puts it.
+pub fn several_campaigns(
+    judged: &[crate::run::Judged],
+    campaign: &str,
+    touched: &[String],
+) -> String {
+    use crate::exec::quote;
+    let mut script = String::from("set -u\ncomplete=1\nout=\"$(mktemp)\"\n");
+    for j in judged {
+        let mine: Vec<String> = touched
+            .iter()
+            .filter(|path| owner(judged, path).is_some_and(|o| o.stack == j.stack))
+            .map(|path| match j.stack.dir.as_str() {
+                "" => path.clone(),
+                dir => path[dir.len() + 1..].to_string(),
+            })
+            .collect();
+        if mine.is_empty() {
+            continue;
+        }
+        let dir = if j.stack.dir.is_empty() {
+            ".".to_string()
+        } else {
+            j.stack.dir.clone()
+        };
+        let prefix = if j.stack.dir.is_empty() {
+            String::new()
+        } else {
+            format!("{}/", j.stack.dir)
+        };
+        script.push_str(&format!(
+            "( cd {dir} && {at}/{SCRIPT} {campaign} {paths} ) > \"$out\"\n\
+             jq -R -c --arg s {name} --arg d {prefix} 'fromjson? | select(type == \"object\" \
+             and has(\"id\")) | .id = ($s + \":\" + (.id | tostring)) | .file = ($d + \
+             (.file | tostring))' < \"$out\"\n\
+             jq -R -e 'fromjson? | select(type == \"object\" and .campaign == \"done\")' \
+             < \"$out\" > /dev/null || complete=0\n",
+            dir = quote(&dir),
+            at = j.scripts_at,
+            campaign = quote(campaign),
+            paths = mine.iter().map(|p| quote(p)).collect::<Vec<_>>().join(" "),
+            name = quote(&j.stack.name),
+            prefix = quote(&prefix),
+        ));
+    }
+    script.push_str(
+        "rm -f \"$out\"\n\
+         if [ \"$complete\" = 1 ]; then printf '%s\\n' '{\"campaign\":\"done\"}'; fi\n",
+    );
+    script
+}
+
+/// The stack a path of the repository belongs to: the one with the deepest
+/// directory holding it, the root holding everything.
+fn owner<'a>(judged: &'a [crate::run::Judged], path: &str) -> Option<&'a crate::run::Judged> {
+    judged
+        .iter()
+        .filter(|j| {
+            j.stack.dir.is_empty()
+                || path
+                    .strip_prefix(&j.stack.dir)
+                    .is_some_and(|rest| rest.starts_with('/'))
+        })
+        .max_by_key(|j| j.stack.dir.len())
 }
 
 /// Minutes since an RFC 3339 stamp, read the way `nunki` writes them. A stamp it

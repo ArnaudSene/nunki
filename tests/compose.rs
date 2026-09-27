@@ -86,7 +86,7 @@ fn plan(role: Role) -> Plan {
         credentials,
         // The golden files freeze a profile without one: `nunki check` is
         // what proves a real database reaches the container.
-        advisories: None,
+        advisories: vec![],
         secrets: None,
         volumes,
         environment,

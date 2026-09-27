@@ -892,8 +892,12 @@ ids() { grep '"type":"diagnostic"' | sed -n 's/.*"id":"\([^"]*\)".*/\1/p' | sort
 # holding only a manifest and a lockfile ("no targets specified in the
 # manifest"). Nothing is compiled here.
 : > "$work/base.ids"
+#
+# The worktree holds the whole repository, and this stack may live in a
+# directory of it (SPEC 4.2, "plusieurs stacks"): the base is audited where
+# this stack is, `git rev-parse --show-prefix` — empty at the root.
 if git worktree add -q --detach "$work/base" "$base" 2>/dev/null; then
-  audit "$work/base" "$work/none.toml" | ids > "$work/base.ids" || true
+  audit "$work/base/$(git rev-parse --show-prefix)" "$work/none.toml" | ids > "$work/base.ids" || true
   git worktree remove --force "$work/base" 2>/dev/null || true
 else
   # 70, and not a warning followed by the audit. Without the base there is no
@@ -972,7 +976,8 @@ done
 # characters. Everything is reported, and what is accepted is decided outside
 # the container.
 leaks="$work/leaks.jsonl"
-trufflehog git "file://$PWD" --json --no-update --no-ignore-tag \
+# The whole repository's history, wherever in it this stack lives.
+trufflehog git "file://$(git rev-parse --show-toplevel)" --json --no-update --no-ignore-tag \
   > "$leaks" 2>/dev/null || true
 
 # What a human has already ruled is not a secret. It comes from the project's
@@ -1723,9 +1728,17 @@ else
 
   # What the base already carried, audited in a worktree of the base commit.
   : > "$work/base.json"
+  #
+  # The worktree holds the whole repository, and this stack may live in a
+  # directory of it (SPEC 4.2, "plusieurs stacks"): the base's lockfile is the
+  # one at this stack's place, `git rev-parse --show-prefix` — empty at the
+  # root. Measured 2026-09-27 on `trading-bot-rust-2`'s `frontend/`: without
+  # it the base had no lockfile, and a finding the base already carried came
+  # back as brought by the branch.
+  prefix="$(git rev-parse --show-prefix)"
   if git worktree add -q --detach "$work/base" "$base" 2>/dev/null; then
-    if [ -f "$work/base/$lock" ]; then
-      osv-scanner scan source --lockfile "$work/base/$lock" --offline \
+    if [ -f "$work/base/$prefix$lock" ]; then
+      osv-scanner scan source --lockfile "$work/base/$prefix$lock" --offline \
         --offline-vulnerabilities --config "$work/none.toml" --format json \
         > "$work/base.json" 2>>"$work/scan.err" || true
     fi
@@ -1905,7 +1918,8 @@ fi
 # characters. Everything is reported, and what is accepted is decided outside
 # the container.
 leaks="$work/leaks.jsonl"
-trufflehog git "file://$PWD" --json --no-update --no-ignore-tag \
+# The whole repository's history, wherever in it this stack lives.
+trufflehog git "file://$(git rev-parse --show-toplevel)" --json --no-update --no-ignore-tag \
   > "$leaks" 2>/dev/null || true
 
 # What a human has already ruled is not a secret. It comes from the project's
@@ -2514,9 +2528,17 @@ else
 
   # What the base already carried, audited in a worktree of the base commit.
   : > "$work/base.json"
+  #
+  # The worktree holds the whole repository, and this stack may live in a
+  # directory of it (SPEC 4.2, "plusieurs stacks"): the base's lockfile is the
+  # one at this stack's place, `git rev-parse --show-prefix` — empty at the
+  # root. Measured 2026-09-27 on `trading-bot-rust-2`'s `frontend/`: without
+  # it the base had no lockfile, and a finding the base already carried came
+  # back as brought by the branch.
+  prefix="$(git rev-parse --show-prefix)"
   if git worktree add -q --detach "$work/base" "$base" 2>/dev/null; then
-    if [ -f "$work/base/$lock" ]; then
-      osv-scanner scan source --lockfile "$work/base/$lock" --offline \
+    if [ -f "$work/base/$prefix$lock" ]; then
+      osv-scanner scan source --lockfile "$work/base/$prefix$lock" --offline \
         --offline-vulnerabilities --config "$work/none.toml" --format json \
         > "$work/base.json" 2>>"$work/scan.err" || true
     fi
@@ -2716,7 +2738,8 @@ fi
 # characters. Everything is reported, and what is accepted is decided outside
 # the container.
 leaks="$work/leaks.jsonl"
-trufflehog git "file://$PWD" --json --no-update --no-ignore-tag \
+# The whole repository's history, wherever in it this stack lives.
+trufflehog git "file://$(git rev-parse --show-toplevel)" --json --no-update --no-ignore-tag \
   > "$leaks" 2>/dev/null || true
 
 # What a human has already ruled is not a secret. It comes from the project's

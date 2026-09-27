@@ -1798,10 +1798,6 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             }
-            if let Err(why) = nunki::run::one_stack_judged(project) {
-                eprintln!("nunki: {why}");
-                return ExitCode::FAILURE;
-            }
             let stack = project
                 .config
                 .stacks
@@ -1928,10 +1924,6 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                 protected_paths: &project.config.protected_paths,
                 coder_head: coder_head.as_deref(),
             };
-            if let Err(why) = nunki::run::one_stack_judged(project) {
-                eprintln!("nunki: {why}");
-                return ExitCode::FAILURE;
-            }
             let played = {
                 let engine: std::sync::Arc<dyn nunki::engine::Engine> =
                     std::sync::Arc::new(nunki::engine::docker::Docker::real());

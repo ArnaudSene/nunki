@@ -996,6 +996,17 @@ fn mechanical_security(
                 .into(),
         ));
     }
+    every_stack(verification, |j| {
+        mechanical_security_in(subject, verification, j)
+    })
+}
+
+/// Gate 8 for one stack, in its own directory, against its own database.
+fn mechanical_security_in(
+    subject: &Subject,
+    verification: &Verification,
+    judged: &crate::run::Judged,
+) -> Result<Decision, GateError> {
     // The base as a commit, and never as a name. The script runs in the clean
     // copy of `HEAD`, which is a detached clone of the slot: it holds no local
     // branch, and the refresh only ever fetches `HEAD`, so no remote-tracking
@@ -1023,15 +1034,16 @@ fn mechanical_security(
     let base = crate::git::run(subject.tree, &["merge-base", "HEAD", &named.to_string()])?
         .trim()
         .to_string();
-    let at = format!("{}/{SECURITY}", crate::run::STACK_AT);
+    let at = format!("{}/{SECURITY}", judged.scripts_at);
     // Absent, not executable, no database, a base it cannot read, or its own
     // status — told apart, because "the gate is red", "there was nothing to
     // run" and "it could not look" send a human to three different places.
     let probe = format!(
-        "if [ ! -f {at} ]; then exit 66; fi\n\
+        "{cd}if [ ! -f {at} ]; then exit 66; fi\n\
          if [ ! -x {at} ]; then exit 67; fi\n\
          exec {at} {base} {db} {mission} {secrets}\n",
-        db = crate::run::ADVISORIES_AT,
+        cd = into(&judged.stack),
+        db = judged.advisories_at,
         mission = crate::run::MISSION_AT,
         secrets = crate::secrets::AT,
     );
@@ -1063,12 +1075,13 @@ fn mechanical_security(
         // and not red: a verdict on the machine rather than on the agent, and
         // a security gate that could not consult its database must not report
         // green (SPEC 4.4).
+        68 => return Ok(not_in_the_copy(&judged.stack)),
         69 => {
             return Ok(Decision::Unplayed(format!(
                 "no advisory database at {}: the stack declares where it lives on the \
                  host, and the host fills it — `cargo deny check advisories` once is \
                  enough",
-                crate::run::ADVISORIES_AT
+                judged.advisories_at
             )));
         }
         // The script's word for "the base is not here". `nunki` resolves it to
@@ -1167,6 +1180,65 @@ fn mechanical_security(
 /// look" is the direction this project errs in.
 ///
 /// Read by slot and not by mission, because that is what the copy belongs to.
+/// Play one gate for every stack the image carries, each in its own directory
+/// (SPEC 4.2, "plusieurs stacks"), and say which stack said what.
+///
+/// Every stack is played, whatever the first says: a red battery on the
+/// primary does not excuse the others from being heard, and the agent sent
+/// back should be told everything at once. Unplayed anywhere is unplayed —
+/// a verdict nobody could reach on one stack is not a pass on the project —
+/// and red anywhere is red. One stack reads exactly as it always has.
+fn every_stack(
+    verification: &Verification,
+    mut play: impl FnMut(&crate::run::Judged) -> Result<Decision, GateError>,
+) -> Result<Decision, GateError> {
+    let judged = crate::run::judged(verification.project, verification.stack);
+    if let [one] = judged.as_slice() {
+        return play(one);
+    }
+    let mut failed = Vec::new();
+    let mut unplayed = Vec::new();
+    for j in &judged {
+        match play(j)? {
+            Decision::Passed | Decision::NotApplicable(_) => {}
+            Decision::Failed(why) => failed.push(format!("[{}] {why}", j.stack)),
+            Decision::Unplayed(why) => unplayed.push(format!("[{}] {why}", j.stack)),
+        }
+    }
+    Ok(if !unplayed.is_empty() {
+        Decision::Unplayed(
+            unplayed
+                .into_iter()
+                .chain(failed)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    } else if !failed.is_empty() {
+        Decision::Failed(failed.join("\n"))
+    } else {
+        Decision::Passed
+    })
+}
+
+/// The line that takes a gate's script into a stack's directory of the copy,
+/// or nothing for a stack at the root — which runs exactly as before.
+/// Exit 68 says the directory is not there.
+fn into(stack: &crate::project::Stack) -> String {
+    if stack.dir.is_empty() {
+        String::new()
+    } else {
+        format!("cd {} || exit 68\n", crate::exec::quote(&stack.dir))
+    }
+}
+
+fn not_in_the_copy(stack: &crate::project::Stack) -> Decision {
+    Decision::Failed(format!(
+        "{}/ is not in the clean copy of HEAD, and nunki.yaml says stack {} lives \
+         there: nothing of it could be played",
+        stack.dir, stack.name
+    ))
+}
+
 fn campaign_in_flight(verification: &Verification) -> Option<String> {
     let running =
         crate::mutants::read_running(&verification.project.hq_root, &verification.slot.name)
@@ -1187,18 +1259,28 @@ fn battery(subject: &Subject, verification: &Verification) -> Result<Decision, G
                 .into(),
         ));
     }
+    every_stack(verification, |j| battery_in(subject, verification, j))
+}
+
+/// Gate 6 for one stack: its battery, in its own directory of the copy.
+fn battery_in(
+    subject: &Subject,
+    verification: &Verification,
+    judged: &crate::run::Judged,
+) -> Result<Decision, GateError> {
     let script = match subject.role {
         Role::Integrator => SYSTEM_BATTERY,
         _ => BATTERY,
     };
-    let at = format!("{}/{script}", crate::run::STACK_AT);
+    let at = format!("{}/{script}", judged.scripts_at);
     // Absent, not executable, or its own status — told apart, because
     // "the gate is red" and "there was nothing to run" send a human to
     // different places.
     let probe = format!(
-        "if [ ! -f {at} ]; then exit 66; fi\n\
+        "{cd}if [ ! -f {at} ]; then exit 66; fi\n\
          if [ ! -x {at} ]; then exit 67; fi\n\
-         exec {at}\n"
+         exec {at}\n",
+        cd = into(&judged.stack),
     );
     let out = crate::exec::run(
         verification.project,
@@ -1215,6 +1297,7 @@ fn battery(subject: &Subject, verification: &Verification) -> Result<Decision, G
     };
     match out.status {
         0 => Ok(Decision::Passed),
+        68 => Ok(not_in_the_copy(&judged.stack)),
         66 => Ok(Decision::Failed(format!(
             "there is no battery at {at}: the stack in the project's home ships no \
              {script} — a proof nobody can run is not a proof that passed (SPEC 4.4)"

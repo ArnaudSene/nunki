@@ -1956,7 +1956,7 @@ fn the_advisory_database_is_mounted_read_only_where_nunki_says() {
 
     assert_eq!(
         plan.advisories,
-        Some((db.clone(), std::path::PathBuf::from(run::ADVISORIES_AT)))
+        vec![(db.clone(), std::path::PathBuf::from(run::ADVISORIES_AT))]
     );
     let mounts: Vec<String> = doc["services"][nunki::compose::AGENT_SERVICE]["volumes"]
         .as_sequence()
@@ -2070,5 +2070,5 @@ fn a_database_the_host_never_filled_is_not_mounted_empty() {
 
     let (plan, _) = profile_for(&project, &slot, &header, Role::Coder);
 
-    assert_eq!(plan.advisories, None);
+    assert_eq!(plan.advisories, vec![]);
 }

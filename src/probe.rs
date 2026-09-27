@@ -399,7 +399,7 @@ fn plan(
     let perimeter = compute(
         Role::Coder,
         &Sources {
-            stack: &project.stack_domains(stack).unwrap_or_default(),
+            stack: &crate::run::stack_domains(project, stack),
             harness: &harness,
             services: &[],
             forge: &project.config.forge,

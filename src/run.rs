@@ -117,12 +117,59 @@ pub fn allowlist(role: Role, perimeter: &crate::perimeter::Perimeter) -> String 
 /// that exist and no other. A bind mount of a missing file makes the engine
 /// create an empty directory in its place, which would turn "the stack ships
 /// no system battery" into a gate reading a directory.
+///
+/// Every stack the image carries has its scripts mounted: the primary's at
+/// [`STACK_AT`], each other's beside it (SPEC 4.2, "plusieurs stacks").
 pub fn stack_scripts(project: &Project, stack: &str) -> Vec<(PathBuf, PathBuf)> {
-    let dir = project.fragment(stack);
-    STACK_SCRIPTS
-        .iter()
-        .map(|name| (dir.join(name), PathBuf::from(STACK_AT).join(name)))
+    judged(project, stack)
+        .into_iter()
+        .flat_map(|j| {
+            let dir = project.fragment(&j.stack.name);
+            STACK_SCRIPTS
+                .iter()
+                .map(move |name| (dir.join(name), PathBuf::from(&j.scripts_at).join(name)))
+        })
         .filter(|(host, _)| host.is_file())
+        .collect()
+}
+
+/// A stack the gates play: where it lives in the tree, where its scripts and
+/// its advisory database are mounted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Judged {
+    pub stack: crate::project::Stack,
+    pub scripts_at: String,
+    pub advisories_at: String,
+}
+
+/// Every stack the gates play, the primary first: its own directory, its own
+/// scripts, its own advisory database (SPEC 4.2, "plusieurs stacks"). The
+/// primary keeps the paths a single stack has always had, so a project with
+/// one stack sees nothing move.
+pub fn judged(project: &Project, stack: &str) -> Vec<Judged> {
+    let stacks = if project.config.stacks.is_empty() {
+        vec![crate::project::Stack::root(stack)]
+    } else {
+        project.config.stacks.clone()
+    };
+    stacks
+        .into_iter()
+        .enumerate()
+        .map(|(i, stack)| {
+            let (scripts_at, advisories_at) = if i == 0 {
+                (STACK_AT.to_string(), ADVISORIES_AT.to_string())
+            } else {
+                (
+                    format!("{STACK_AT}-{}", stack.name),
+                    format!("{ADVISORIES_AT}-{}", stack.name),
+                )
+            };
+            Judged {
+                stack,
+                scripts_at,
+                advisories_at,
+            }
+        })
         .collect()
 }
 
@@ -152,8 +199,6 @@ pub enum RunError {
         drift.join("; ")
     )]
     StaleImage { image: String, drift: Vec<String> },
-    #[error("{0}")]
-    SeveralStacks(String),
     #[error(transparent)]
     Versions(#[from] crate::versions::SourcesError),
     #[error(transparent)]
@@ -409,7 +454,6 @@ pub fn launch(l: &Launching) -> Result<Launched, RunError> {
     // your images" to someone whose account is wrong helps nobody.
     let (_account_name, _account, token) = account_for(project, header.account.as_deref())?;
 
-    one_stack_judged(project).map_err(RunError::SeveralStacks)?;
     let stack = stack_of(project);
     let images = image::names(project, &stack);
     for image in [&images.agent, &images.firewall] {
@@ -482,7 +526,7 @@ pub fn launch(l: &Launching) -> Result<Launched, RunError> {
     // whatever the project ignores, invisible to `git status` — gate 1 stays
     // green.
     let writable = match role {
-        Role::Security => project.stack_writable(&stack),
+        Role::Security => writable(project, &stack),
         _ => Vec::new(),
     };
     seed_writable(slot, &writable)?;
@@ -634,33 +678,6 @@ pub fn stack_of(project: &Project) -> String {
         .unwrap_or_else(|| "rust".to_string())
 }
 
-/// Refused, with why, for a project declaring more than one stack.
-///
-/// Its image carries every stack's toolchain, but the gates still play one
-/// battery, one campaign and one security scan — the primary's, from the
-/// repository's root (SPEC 4.2, "plusieurs stacks"). A verdict on such a
-/// project would be green while the other stacks were never tested, mutated
-/// or scanned, and a green that did not look is worse than a refusal. Lifted
-/// when the gates play every stack in its own directory.
-pub fn one_stack_judged(project: &Project) -> Result<(), String> {
-    match project.config.stacks.as_slice() {
-        [] | [_] => Ok(()),
-        [primary, others @ ..] => Err(format!(
-            "this project declares {} stacks, and the gates judge only one: {} would be \
-             verified while {} were never tested, mutated or scanned. Its image builds \
-             (`nunki slot rebuild`), but no mission starts on it until the gates play \
-             every stack",
-            others.len() + 1,
-            primary,
-            others
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
-        )),
-    }
-}
-
 /// Refuse a launch whose image does not carry what `tree` — the slot's, on
 /// the mission's branch — pins.
 pub fn image_serves(
@@ -784,7 +801,7 @@ pub fn plan(
     let perimeter = compute(
         role,
         &Sources {
-            stack: &project.stack_domains(stack).unwrap_or_default(),
+            stack: &stack_domains(project, stack),
             harness: &harness_domains,
             services: declared,
             forge: &project.config.forge,
@@ -926,7 +943,15 @@ fn volumes(project: &Project, slot: &Slot, stack: &str, role: Role) -> Vec<Named
     // mounted for every stack and every role: a Python project carried an
     // empty `cargo` volume and none for pip. A cache belongs to a toolchain
     // (SPEC, "agnostique à la stack": caches are a declared fragment).
-    for path in project.stack_caches(stack) {
+    let mut caches: Vec<String> = Vec::new();
+    for j in judged(project, stack) {
+        for path in project.stack_caches(&j.stack.name) {
+            if !caches.contains(&path) {
+                caches.push(path);
+            }
+        }
+    }
+    for path in caches {
         volumes.push(NamedVolume {
             name: cache_volume(&slot.name, &path),
             at: PathBuf::from(&path),
@@ -935,7 +960,7 @@ fn volumes(project: &Project, slot: &Slot, stack: &str, role: Role) -> Vec<Named
     if role != Role::Security {
         return volumes;
     }
-    for path in project.stack_writable(stack) {
+    for path in writable(project, stack) {
         volumes.push(NamedVolume {
             name: writable_volume(&slot.name, &path),
             at: PathBuf::from(TREE_AT).join(&path),
@@ -977,9 +1002,40 @@ fn sanitise(path: &str) -> String {
 /// Absent rather than mounted empty: a bind mount of a missing source makes
 /// the engine create a directory in its place, and gate 8 would then read an
 /// empty database as "nothing to report" instead of saying it has none.
-pub fn advisories(project: &Project, stack: &str) -> Option<(PathBuf, PathBuf)> {
-    let host = project.stack_advisories(stack)?;
-    host.is_dir().then(|| (host, PathBuf::from(ADVISORIES_AT)))
+///
+/// One per stack that declares one, each where that stack's gate 8 reads it.
+pub fn advisories(project: &Project, stack: &str) -> Vec<(PathBuf, PathBuf)> {
+    judged(project, stack)
+        .into_iter()
+        .filter_map(|j| {
+            let host = project.stack_advisories(&j.stack.name)?;
+            host.is_dir()
+                .then(|| (host, PathBuf::from(&j.advisories_at)))
+        })
+        .collect()
+}
+
+/// The directories every stack the image carries declares writable, relative
+/// to the tree — each stack's already prefixed with its own directory.
+pub fn writable(project: &Project, stack: &str) -> Vec<String> {
+    judged(project, stack)
+        .iter()
+        .flat_map(|j| project.stack_writable(&j.stack.name))
+        .collect()
+}
+
+/// What every stack the image carries lets the coder reach, once each, in
+/// the order the stacks are declared (SPEC 4.1 bis, rule 6).
+pub fn stack_domains(project: &Project, stack: &str) -> Vec<String> {
+    let mut all: Vec<String> = Vec::new();
+    for j in judged(project, stack) {
+        for domain in project.stack_domains(&j.stack.name).unwrap_or_default() {
+            if !all.contains(&domain) {
+                all.push(domain);
+            }
+        }
+    }
+    all
 }
 
 /// The secrets a human has ruled on, from the project's HQ, or `None` when
