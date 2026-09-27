@@ -1545,17 +1545,32 @@ fn mutation(subject: &Subject) -> Result<Outcome, GateError> {
         }
     }
 
-    let equivalent = campaign
+    let equivalent: Vec<Option<String>> = campaign
         .survivors
         .iter()
-        .filter(|s| matches!(answer(s), Some(crate::mutants::Triage::Equivalent { .. })))
-        .count();
+        .filter_map(|s| match answer(s) {
+            Some(crate::mutants::Triage::Equivalent { carried_from, .. }) => Some(carried_from),
+            _ => None,
+        })
+        .collect();
     let mut outcome = Outcome::of(gate, Decision::Passed);
-    if equivalent > 0 {
+    if !equivalent.is_empty() {
+        // A carried ruling is named apart: it was given on code that has
+        // changed since, and the HQ may want to look at it again.
+        let carried = equivalent.iter().filter(|from| from.is_some()).count();
+        let carried = if carried > 0 {
+            format!(
+                ", and {carried} of those were carried from an earlier campaign — \
+                 `nunki mission mutants --lift` takes one back"
+            )
+        } else {
+            String::new()
+        };
         outcome.note = Some(format!(
-            "{equivalent} of {} rode on `equivalent`, which no machine can check — they \
+            "{} of {} rode on `equivalent`, which no machine can check — they \
              come from the HQ's own hand, and they are counted here so nobody has to \
-             go looking",
+             go looking{carried}",
+            equivalent.len(),
             campaign.survivors.len()
         ));
     }

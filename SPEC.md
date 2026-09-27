@@ -1597,6 +1597,19 @@ dernier lot. La première rouge arrête tout.
    acceptée que de la main de l'humain ou du HQ, dans `MUTANTS.json`. Un
    `equivalent` venu du fichier de l'agent rend la porte rouge et est nommé.
 
+   **Un avis survit à la campagne suivante** quand la même mutation survit
+   encore : même fichier et même description (le texte avant et après la
+   mutation), jamais la ligne, que le moindre commit au-dessus déplace. Même
+   identifiant, ou paire fichier et description qui ne désigne qu'un seul
+   survivant avant comme après ; sinon l'avis est redemandé plutôt que
+   deviné. Sans ce report, un commit qui ajoute une ligne au-dessus d'un
+   survivant jugé équivalent suffit à faire oublier l'avis, et la mission
+   revient au HQ pour entendre la même chose. Un avis reporté porte
+   le commit de la campagne où il a été donné (`carried_from`), la porte 7
+   le compte à part, et `nunki mission mutants <id> --lift <survivant>` le
+   retire. Aucune issue n'est jamais lue dans le journal de la campagne : il
+   est écrit dans le conteneur de l'agent.
+
    La raison est celle qui a mis la batterie hors de portée de l'agent :
    laisser le noté remplir la seule case que personne ne peut
    contrôler, c'est une porte qui se vide toute seule — il suffit de cocher
