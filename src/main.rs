@@ -646,10 +646,26 @@ fn main() -> ExitCode {
                     let engine = std::env::var("HQ_ENGINE").unwrap_or_else(|_| "docker".into());
                     println!("building the images for {stack}, this takes a while…");
                     match image::build(&project, &stack, &engine, image::Harness::Install) {
-                        Ok(images) => {
+                        Ok(image::Built { images, versions }) => {
                             println!("agent     {}", images.agent);
                             println!("firewall  {}", images.firewall);
                             println!("prober    {}", images.prober);
+                            // What the repository pinned, and what it did not
+                            // and why: an argument left at the Dockerfile's
+                            // default is said, never silent (SPEC 4.2).
+                            for pin in &versions {
+                                match pin {
+                                    nunki::versions::Pin::Found { arg, value, from } => {
+                                        println!("pinned    {arg}={value}  ({from})")
+                                    }
+                                    nunki::versions::Pin::Unpinned { arg, tried } => {
+                                        println!(
+                                            "default   {arg}, the Dockerfile's own — {}",
+                                            tried.join("; ")
+                                        )
+                                    }
+                                }
+                            }
                             ExitCode::SUCCESS
                         }
                         Err(e) => {
@@ -1159,6 +1175,11 @@ fn main() -> ExitCode {
             };
             let mut report = check::run(&project);
             check::forge_protection(&project, nunki::forge::github::API, &mut report);
+            check::image_versions(
+                &project,
+                &std::env::var("HQ_ENGINE").unwrap_or_else(|_| "docker".into()),
+                &mut report,
+            );
             report.checks.extend(probes(&project, which.as_deref()));
             if let Some(id) = &mission {
                 let engine_bin = std::env::var("HQ_ENGINE").unwrap_or_else(|_| "docker".into());

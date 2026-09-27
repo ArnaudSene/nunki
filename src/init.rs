@@ -366,6 +366,53 @@ What changed and why it had to, and nothing about the tooling: no
 tool. The commit's author already says which role wrote it.
 ";
 
+/// Where the repository pins what the Rust image is built with (SPEC 4.2):
+/// one line per build argument of the Dockerfile beside it. The legacy
+/// `rust-toolchain` file, without extension, is not read — it may be plain
+/// text or TOML, and nothing says which.
+const VERSIONS_RUST: &str =
+    "# Where the repository pins what this stack's image is built with (SPEC 4.2).
+# `nunki slot rebuild` reads each line from the repository and passes the value
+# as a build argument of the Dockerfile beside this file, which must declare it.
+# Columns: ARG, file in the repository, key into a .toml or .json (`-` for the
+# whole of a plain file), and an optional pattern whose `{}` is the version.
+# Several lines for one ARG are tried in order; only an exact version is taken,
+# never a range. Nothing exact, and the Dockerfile's default stands.
+RUST_VERSION rust-toolchain.toml toolchain.channel
+RUST_COMPONENTS rust-toolchain.toml toolchain.components
+RUST_TARGETS rust-toolchain.toml toolchain.targets
+";
+
+/// The Python counterpart. `requires-python` is not read: it is a range.
+const VERSIONS_PYTHON: &str =
+    "# Where the repository pins what this stack's image is built with (SPEC 4.2).
+# `nunki slot rebuild` reads each line from the repository and passes the value
+# as a build argument of the Dockerfile beside this file, which must declare it.
+# Columns: ARG, file in the repository, key into a .toml or .json (`-` for the
+# whole of a plain file), and an optional pattern whose `{}` is the version.
+# Several lines for one ARG are tried in order; only an exact version is taken,
+# never a range. Nothing exact, and the Dockerfile's default stands.
+PYTHON .python-version
+";
+
+/// The Next.js counterpart: Node from the version files the ecosystem uses,
+/// then `engines.node` when it is exact, and pnpm from `packageManager`.
+const VERSIONS_NEXT: &str =
+    "# Where the repository pins what this stack's image is built with (SPEC 4.2).
+# `nunki slot rebuild` reads each line from the repository and passes the value
+# as a build argument of the Dockerfile beside this file, which must declare it.
+# Columns: ARG, file in the repository, key into a .toml or .json (`-` for the
+# whole of a plain file), and an optional pattern whose `{}` is the version.
+# Several lines for one ARG are tried in order; only an exact version is taken,
+# never a range. Nothing exact, and the Dockerfile's default stands.
+NODE .nvmrc - v{}
+NODE .nvmrc
+NODE .node-version - v{}
+NODE .node-version
+NODE package.json engines.node
+PNPM package.json packageManager pnpm@{}
+";
+
 /// The agent image for a Rust project.
 ///
 /// Debian and not Alpine: musl costs too much where the work happens —
@@ -386,7 +433,12 @@ FROM ${BASE}
 # writes belongs to the human on the host.
 ARG UID=1000
 ARG GID=1000
+# What the repository pins, passed by nunki at build time from `versions.txt`
+# beside this file (SPEC 4.2). The defaults stand when the repository pins
+# nothing: `stable`, and no component or target beyond the battery's own.
 ARG RUST_VERSION=stable
+ARG RUST_COMPONENTS=
+ARG RUST_TARGETS=
 
 # `upgrade`, and not only `update`. The packages inherited from the base tag
 # keep the versions that tag was cut with, so a security fix Debian published
@@ -451,9 +503,18 @@ ENV RUSTUP_HOME=/home/agent/.rustup \
     CARGO_HOME=/home/agent/.cargo \
     PATH=/home/agent/.cargo/bin:${PATH}
 
+# The toolchain the repository's `rust-toolchain.toml` names, with its
+# components and targets, installed here because inside a run rustup cannot
+# fetch one: `static.rust-lang.org` is on no allowlist. `clippy` and `rustfmt`
+# whatever the repository says, since the battery calls both. Measured on
+# 2026-09-26 with `--network none`: an image built this way for `1.98.0` and
+# `wasm32-unknown-unknown,x86_64-unknown-linux-musl` answers `rustc 1.98.0`
+# under a `rust-toolchain.toml` pinning it, and lists all three targets.
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
   | sh -s -- -y --no-modify-path --profile minimal \
-      --default-toolchain ${RUST_VERSION} --component clippy,rustfmt
+      --default-toolchain ${RUST_VERSION} \
+      --component clippy,rustfmt${RUST_COMPONENTS:+,${RUST_COMPONENTS}} \
+      ${RUST_TARGETS:+--target ${RUST_TARGETS}}
 
 RUN mkdir -p /home/agent/.cargo/registry /home/agent/.harness
 
@@ -929,7 +990,12 @@ const DOCKERFILE_PYTHON: &str = r##"# The coder's image for a Python project, bu
 # `manylinux` wheels Python ships are glibc, and a musl base sends every
 # dependency without one back to compiling from source.
 ARG UV_VERSION=0.12.17
-ARG BASE=python:3.12-slim-bookworm
+# The interpreter the repository's `.python-version` names, passed by nunki at
+# build time from `versions.txt` beside this file (SPEC 4.2). A global `ARG`
+# may build on the one above it — measured 2026-09-26, `PYTHON=3.13` gives
+# `Python 3.13.15`.
+ARG PYTHON=3.12
+ARG BASE=python:${PYTHON}-slim-bookworm
 
 FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
 FROM ${BASE}
@@ -1840,7 +1906,10 @@ const DOCKERFILE_NEXT: &str = r##"# The coder's image for a Next.js project, bui
 # glibc and not musl, as SPEC 4.2 bis requires of every stack image: Node's
 # prebuilt native binaries target glibc, and Playwright ships no musl build
 # of Chromium at all.
-ARG BASE=node:22-bookworm-slim
+# The Node the repository names, passed by nunki at build time from
+# `versions.txt` beside this file (SPEC 4.2); `PNPM` below is read the same way.
+ARG NODE=22
+ARG BASE=node:${NODE}-bookworm-slim
 FROM ${BASE}
 
 # Passed by nunki at build time: the human's own ids, so that what the agent
@@ -2661,6 +2730,7 @@ fn fragment(stack: &str) -> Vec<(&'static str, String, bool)> {
             ("run.sh", RUN_RUST.to_string(), true),
             (crate::gate::SYSTEM_BATTERY, SYSTEM_RUST.to_string(), true),
             ("Dockerfile", DOCKERFILE_RUST.to_string(), false),
+            (crate::versions::FILE, VERSIONS_RUST.to_string(), false),
             (
                 crate::project::WRITABLE_FILE,
                 "# Directories an execution must be able to write when the tree is\n\
@@ -2715,6 +2785,7 @@ fn fragment(stack: &str) -> Vec<(&'static str, String, bool)> {
             ("run.sh", RUN_PYTHON.to_string(), true),
             (crate::gate::SYSTEM_BATTERY, SYSTEM_PYTHON.to_string(), true),
             ("Dockerfile", DOCKERFILE_PYTHON.to_string(), false),
+            (crate::versions::FILE, VERSIONS_PYTHON.to_string(), false),
             (
                 crate::project::WRITABLE_FILE,
                 "# Directories an execution must be able to write when the tree is\n\
@@ -2781,6 +2852,7 @@ fn fragment(stack: &str) -> Vec<(&'static str, String, bool)> {
             ("run.sh", RUN_NEXT.to_string(), true),
             (crate::gate::SYSTEM_BATTERY, SYSTEM_NEXT.to_string(), true),
             ("Dockerfile", DOCKERFILE_NEXT.to_string(), false),
+            (crate::versions::FILE, VERSIONS_NEXT.to_string(), false),
             (
                 crate::project::WRITABLE_FILE,
                 "# Directories an execution must be able to write when the tree is\n\

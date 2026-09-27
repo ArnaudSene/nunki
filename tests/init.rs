@@ -2051,3 +2051,84 @@ fn a_campaign_whose_branch_touched_only_tests_says_it_finished() {
         );
     }
 }
+
+/// Every argument a fragment's `versions.txt` reads must be one its Dockerfile
+/// declares: an undeclared build argument is dropped by the engine with a
+/// warning nobody reads, and the image keeps its default (SPEC 4.2).
+#[test]
+fn every_version_a_fragment_reads_is_an_argument_its_image_declares() {
+    for stack in KNOWN_STACKS {
+        let (_d, root, nunki) = fresh();
+        init(&root, &nunki, &[stack.to_string()]).unwrap();
+        let fragment = home(&root).join("stacks").join(stack);
+        let file = fragment.join(nunki::versions::FILE);
+        let sources = nunki::versions::parse(&std::fs::read_to_string(&file).unwrap(), &file)
+            .unwrap_or_else(|e| panic!("{stack}: {e}"));
+        assert!(!sources.is_empty(), "{stack} reads no version at all");
+        let dockerfile = std::fs::read_to_string(fragment.join("Dockerfile")).unwrap();
+        assert_eq!(
+            nunki::versions::undeclared(&sources, &dockerfile),
+            Vec::<String>::new(),
+            "{stack}"
+        );
+    }
+}
+
+/// What each fragment reads out of a repository that pins everything, the
+/// way that ecosystem writes it. A key misspelt in a fragment would leave the
+/// image on its default without a word.
+#[test]
+fn each_fragment_reads_the_versions_its_ecosystem_pins() {
+    // A stack, the files its repository holds, and what should be read.
+    type Case<'a> = (&'a str, &'a [(&'a str, &'a str)], &'a [(&'a str, &'a str)]);
+    let cases: [Case; 3] = [
+        (
+            "rust",
+            &[(
+                "rust-toolchain.toml",
+                "[toolchain]\nchannel = \"1.98.0\"\nprofile = \"minimal\"\n\
+                 components = [\"rustfmt\", \"clippy\"]\ntargets = [\"wasm32-unknown-unknown\"]\n",
+            )],
+            &[
+                ("RUST_VERSION", "1.98.0"),
+                ("RUST_COMPONENTS", "rustfmt,clippy"),
+                ("RUST_TARGETS", "wasm32-unknown-unknown"),
+            ],
+        ),
+        (
+            "python",
+            &[(".python-version", "3.13\n")],
+            &[("PYTHON", "3.13")],
+        ),
+        (
+            "next",
+            &[
+                (".nvmrc", "v24.1.0\n"),
+                (
+                    "package.json",
+                    r#"{"engines": {"node": ">=20"}, "packageManager": "pnpm@11.15.0+sha512.0f"}"#,
+                ),
+            ],
+            &[("NODE", "24.1.0"), ("PNPM", "11.15.0")],
+        ),
+    ];
+    for (stack, files, want) in cases {
+        let (_d, root, nunki) = fresh();
+        init(&root, &nunki, &[stack.to_string()]).unwrap();
+        for (name, body) in files {
+            std::fs::write(root.join(name), body).unwrap();
+        }
+        let file = home(&root)
+            .join("stacks")
+            .join(stack)
+            .join(nunki::versions::FILE);
+        let sources =
+            nunki::versions::parse(&std::fs::read_to_string(&file).unwrap(), &file).unwrap();
+        let got = nunki::versions::pinned(&nunki::versions::resolve(&root, &sources));
+        let want: std::collections::BTreeMap<String, String> = want
+            .iter()
+            .map(|(a, v)| (a.to_string(), v.to_string()))
+            .collect();
+        assert_eq!(got, want, "{stack}");
+    }
+}

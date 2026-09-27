@@ -190,3 +190,113 @@ fn a_harness_that_installs_nothing_is_not_asked_about_the_user() {
     let layer = image::harness_layer("nunki/demo:base", &Provisioning::default(), &[]);
     assert!(!layer.contains("id -u"), "{layer}");
 }
+
+/// A project whose rust fragment reads its toolchain from the repository.
+fn pinning(dir: &std::path::Path, dockerfile: &str) -> nunki::project::Project {
+    let root = dir.join("repo");
+    let home = dir.join("home");
+    let fragment = home.join("stacks/rust");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&fragment).unwrap();
+    std::fs::write(
+        fragment.join(nunki::versions::FILE),
+        "RUST_VERSION rust-toolchain.toml toolchain.channel\n\
+         RUST_TARGETS rust-toolchain.toml toolchain.targets\n",
+    )
+    .unwrap();
+    std::fs::write(fragment.join("Dockerfile"), dockerfile).unwrap();
+    std::fs::write(
+        root.join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"1.98.0\"\ntargets = [\"wasm32-unknown-unknown\"]\n",
+    )
+    .unwrap();
+    let config = serde_yaml_ng::from_str("harness: claude-code\nstacks: [rust]\n").unwrap();
+    nunki::project::Project::at(root, config, home)
+}
+
+const DECLARING: &str = "ARG RUST_VERSION=stable\nARG RUST_TARGETS=\nFROM debian\n";
+
+/// What reaches the engine: the repository's toolchain as build arguments,
+/// and the same values on the label a launch reads back.
+#[test]
+fn the_image_is_built_with_what_the_repository_pins_and_says_so_on_its_label() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = pinning(dir.path(), DECLARING);
+    let build = image::stack_build(&project, "rust", 501, 20).unwrap();
+    assert_eq!(
+        build.args,
+        [
+            "UID=501",
+            "GID=20",
+            "RUST_TARGETS=wasm32-unknown-unknown",
+            "RUST_VERSION=1.98.0"
+        ]
+    );
+    assert_eq!(
+        build.label,
+        "nunki.versions=RUST_TARGETS=wasm32-unknown-unknown;RUST_VERSION=1.98.0"
+    );
+}
+
+/// An argument the Dockerfile does not declare would be dropped by the
+/// engine, and the image built on its default as if nothing were wrong.
+#[test]
+fn a_build_whose_dockerfile_would_drop_a_version_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = pinning(dir.path(), "ARG RUST_VERSION=stable\nFROM debian\n");
+    let err = image::stack_build(&project, "rust", 501, 20).unwrap_err();
+    assert!(matches!(err, image::ImageError::Undeclared { .. }), "{err}");
+    assert!(err.to_string().contains("RUST_TARGETS"), "{err}");
+}
+
+/// A stand-in engine whose image carries `label`.
+fn engine_with(dir: &std::path::Path, label: &str) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = dir.join("engine");
+    std::fs::write(
+        &bin,
+        format!("#!/bin/sh\necho '{{\"nunki.versions\":\"{label}\"}}'\n"),
+    )
+    .unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    bin.to_string_lossy().into_owned()
+}
+
+/// A launch reads what the **slot's** tree pins, on the mission's branch —
+/// not the repository as it stood at the last rebuild. The image was built
+/// for 1.98.0; the branch moved to 1.99.0, and no agent may start on it.
+#[test]
+fn a_launch_refuses_an_image_the_branch_has_moved_away_from() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = pinning(dir.path(), DECLARING);
+    let engine = engine_with(
+        dir.path(),
+        "RUST_TARGETS=wasm32-unknown-unknown;RUST_VERSION=1.98.0",
+    );
+    let tree = dir.path().join("slot");
+    std::fs::create_dir_all(&tree).unwrap();
+    std::fs::copy(
+        project.root.join("rust-toolchain.toml"),
+        tree.join("rust-toolchain.toml"),
+    )
+    .unwrap();
+
+    nunki::run::image_serves(&project, &tree, "rust", &engine, "nunki/x-rust:latest")
+        .expect("the same toolchain serves");
+
+    std::fs::write(
+        tree.join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"1.99.0\"\ntargets = [\"wasm32-unknown-unknown\"]\n",
+    )
+    .unwrap();
+    let err = nunki::run::image_serves(&project, &tree, "rust", &engine, "nunki/x-rust:latest")
+        .unwrap_err();
+    match &err {
+        nunki::run::RunError::StaleImage { drift, .. } => {
+            assert_eq!(drift.len(), 1, "{drift:?}");
+            assert!(drift[0].contains("\"1.98.0\"") && drift[0].contains("\"1.99.0\""));
+        }
+        other => panic!("{other}"),
+    }
+    assert!(err.to_string().contains("nunki slot rebuild"), "{err}");
+}

@@ -898,11 +898,59 @@ tests pour une mission de tests), le chemin de la base d'avis de la stack
 (fichier plat, jamais monté ; la base elle-même vit sous `~/.nunki/advisories/`
 et est rafraîchie par l'hôte — voir la porte 8 en 4.4), `security.sh`
 (audit de dépendances, scan de secrets, analyse statique — la sécurité
-mécanique, porte 8, définie en 4.4). Un
+mécanique, porte 8, définie en 4.4), `versions.txt` (où le dépôt épingle les
+versions de sa chaîne d'outils — ci-dessous). Un
 fragment est un script ou un fichier plat, jamais du code de `nunki`. Les trois
 premières stacks sont celles de `claude-setup` : Rust, Python, Next.js. Les
 trois sont écrites, et `nunki init` refuse un nom qu'il ne connaît pas plutôt
 que de laisser un répertoire vide qui se lit comme configuré.
+
+**Les versions sont celles du dépôt, pas celles du fragment** (tranché par
+Arnaud le 2026-09-26). Le Dockerfile d'un fragment porte des valeurs par
+défaut — `RUST_VERSION=stable`, `python:3.12`, `node:22`, une version de
+pnpm. Un dépôt qui épingle autre chose demande à sa chaîne d'outils une
+version que l'image n'a pas, et la chaîne d'outils part la chercher derrière
+un pare-feu qui ne nomme aucun de ses hôtes. Mesuré sur `trading-bot-rust-2` :
+`rust-toolchain.toml` épingle `1.98.0` et la cible `wasm32-unknown-unknown`,
+l'image portait `stable`.
+
+- **Le fragment dit où lire, le cœur sait lire.** `versions.txt` tient une
+  ligne par argument de build du Dockerfile : l'argument, le fichier du dépôt,
+  une clé dans un `.toml` ou un `.json` (`-` pour un fichier texte entier), et
+  un motif facultatif dont `{}` est la version (`pnpm@{}` tire `11.15.0` de
+  `pnpm@11.15.0+sha512.…`). Le cœur connaît trois formats de fichier et aucune
+  stack : lire `Cargo.toml` ou `package.json` depuis le cœur, c'est la stack de
+  retour dans le cœur (3.2). Plusieurs lignes pour un argument sont essayées
+  dans l'ordre, et la première version **exacte** gagne ; un intervalle
+  (`>=20`, `^3.12`) ou un alias (`lts/iron`) est refusé, puisque le traduire
+  en étiquette d'image serait deviner. Rien d'exact : la valeur par défaut du
+  Dockerfile reste, et `nunki slot rebuild` le dit, argument par argument, avec
+  la raison pour chaque source.
+- **Lu à `nunki slot rebuild`, jamais à `nunki init`.** Un fragment ne se met
+  jamais à jour tout seul ; une version figée dedans à `init` serait fausse au
+  premier mouvement du dépôt. Les valeurs lues sont passées en `--build-arg`
+  et inscrites sur l'image dans l'étiquette `nunki.versions` : le tag seul ne
+  dit pas quelle chaîne d'outils est dedans.
+- **Un argument que le Dockerfile ne déclare pas est refusé.** Le moteur
+  l'abandonnerait avec un avertissement que personne ne lit, et l'image
+  garderait sa valeur par défaut — l'échec même que ce fichier existe à
+  empêcher. `nunki slot rebuild` refuse, `nunki check` est rouge, et les deux
+  nomment la procédure : c'est le cas d'un fragment écrit avant
+  `versions.txt`, que rien ne met à jour.
+- **Deux gardes.** `nunki check` compare ce que le dépôt épingle à ce que
+  l'image porte, rouge s'ils diffèrent ou si l'image a été construite avant
+  que `nunki` ne l'inscrive, « non vérifié » si l'image n'existe pas ou si le
+  moteur ne répond pas. Et `mission start` refuse de lancer un agent quand
+  l'arbre du slot, **sur la branche de la mission**, épingle autre chose que
+  l'image : la base ou un commit du codeur a pu bouger depuis la construction,
+  et le premier `cargo` du run se perdrait dans un téléchargement refusé.
+- **Ce que chaque stack lit.** Rust : `rust-toolchain.toml` — canal,
+  composants, cibles ; l'image ajoute toujours `clippy` et `rustfmt`, dont la
+  batterie a besoin. Python : `.python-version` ; `requires-python` n'est pas
+  lu, c'est un intervalle. Next.js : `.nvmrc`, puis `.node-version`, puis
+  `engines.node` s'il est exact, et `packageManager` pour pnpm. Les outils de
+  `nunki` lui-même — trufflehog, osv-scanner, Playwright — restent épinglés
+  par le fragment : ils ne sont pas au dépôt.
 
 **Ce que la stack Python rend, et ce qu'elle ne rend pas** (mesuré le
 2026-09-20, avant livraison) : `uv` pour le verrou, `ruff`, `mypy` et `pytest`
