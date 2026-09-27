@@ -194,7 +194,7 @@ pub fn volumes_of(project: &Project, slot: &Slot) -> Vec<String> {
         // Listed so a reset still removes it; nothing creates it any more.
         format!("nunki-{}-cargo", slot.name),
     ];
-    for stack in &project.config.stacks {
+    for stack in project.config.stacks.iter().map(|s| &s.name) {
         for path in project.stack_writable(stack) {
             names.push(crate::run::writable_volume(&slot.name, &path));
         }

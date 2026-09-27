@@ -172,7 +172,7 @@ pub fn system_profile(
             )),
         }]);
     }
-    let Some(stack) = project.config.stacks.first().cloned() else {
+    let Some(stack) = project.config.stacks.first().map(|s| s.name.clone()) else {
         return Ok(vec![Check {
             what,
             verdict: Verdict::NotChecked(

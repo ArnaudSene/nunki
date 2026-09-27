@@ -157,7 +157,7 @@ fn line_endings_are_red_when_pinned_wrongly_and_unchecked_when_not_pinned() {
 fn a_stack_that_names_the_forge_is_red_and_one_that_does_not_is_green() {
     let dir = tempfile::tempdir().unwrap();
     let mut project = sound(dir.path());
-    project.config.stacks = vec!["rust".to_string()];
+    project.config.stacks = vec!["rust".into()];
     let fragment = project.fragment("rust");
     std::fs::create_dir_all(&fragment).unwrap();
 
@@ -177,7 +177,7 @@ fn a_stack_that_names_the_forge_is_red_and_one_that_does_not_is_green() {
 fn a_stack_without_an_allowlist_is_unchecked_not_green() {
     let dir = tempfile::tempdir().unwrap();
     let mut project = sound(dir.path());
-    project.config.stacks = vec!["python".to_string()];
+    project.config.stacks = vec!["python".into()];
     assert!(matches!(
         verdict(&run(&project), "allowlist for python"),
         Verdict::NotChecked(_)
@@ -819,7 +819,7 @@ fn a_remote_off_github_is_not_asked_and_says_why() {
 /// read them into.
 fn with_versions(dir: &Path, dockerfile: &str) -> Project {
     let mut project = sound(dir);
-    project.config.stacks = vec!["rust".to_string()];
+    project.config.stacks = vec!["rust".into()];
     let fragment = project.fragment("rust");
     std::fs::create_dir_all(&fragment).unwrap();
     std::fs::write(

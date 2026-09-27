@@ -14,7 +14,7 @@ fn config() -> Config {
         root: None,
         harness: "claude-code".to_string(),
         forge: vec!["github.com".to_string()],
-        stacks: vec!["rust".to_string()],
+        stacks: vec!["rust".into()],
         protected_branches: vec!["main".to_string()],
         protected_paths: ProtectedPaths::default(),
         account: None,

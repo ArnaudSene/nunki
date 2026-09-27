@@ -152,6 +152,8 @@ pub enum RunError {
         drift.join("; ")
     )]
     StaleImage { image: String, drift: Vec<String> },
+    #[error("{0}")]
+    SeveralStacks(String),
     #[error(transparent)]
     Versions(#[from] crate::versions::SourcesError),
     #[error(transparent)]
@@ -407,6 +409,7 @@ pub fn launch(l: &Launching) -> Result<Launched, RunError> {
     // your images" to someone whose account is wrong helps nobody.
     let (_account_name, _account, token) = account_for(project, header.account.as_deref())?;
 
+    one_stack_judged(project).map_err(RunError::SeveralStacks)?;
     let stack = stack_of(project);
     let images = image::names(project, &stack);
     for image in [&images.agent, &images.firewall] {
@@ -619,13 +622,43 @@ pub fn writable_or_rebuild(
 
 /// The stack a project's profiles are built from. One place, because three
 /// modules had begun to each spell the same fallback.
+///
+/// The **primary** stack when there are several: the image is its own with the
+/// others added onto it, and is named after it (SPEC 4.2, "plusieurs stacks").
 pub fn stack_of(project: &Project) -> String {
     project
         .config
         .stacks
         .first()
-        .cloned()
+        .map(|s| s.name.clone())
         .unwrap_or_else(|| "rust".to_string())
+}
+
+/// Refused, with why, for a project declaring more than one stack.
+///
+/// Its image carries every stack's toolchain, but the gates still play one
+/// battery, one campaign and one security scan — the primary's, from the
+/// repository's root (SPEC 4.2, "plusieurs stacks"). A verdict on such a
+/// project would be green while the other stacks were never tested, mutated
+/// or scanned, and a green that did not look is worse than a refusal. Lifted
+/// when the gates play every stack in its own directory.
+pub fn one_stack_judged(project: &Project) -> Result<(), String> {
+    match project.config.stacks.as_slice() {
+        [] | [_] => Ok(()),
+        [primary, others @ ..] => Err(format!(
+            "this project declares {} stacks, and the gates judge only one: {} would be \
+             verified while {} were never tested, mutated or scanned. Its image builds \
+             (`nunki slot rebuild`), but no mission starts on it until the gates play \
+             every stack",
+            others.len() + 1,
+            primary,
+            others
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
 }
 
 /// Refuse a launch whose image does not carry what `tree` — the slot's, on
@@ -637,11 +670,7 @@ pub fn image_serves(
     engine_bin: &str,
     image: &str,
 ) -> Result<(), RunError> {
-    let sources = project.stack_versions(stack)?;
-    if sources.is_empty() {
-        return Ok(());
-    }
-    let wanted = crate::versions::pinned(&crate::versions::resolve(tree, &sources));
+    let wanted = image::pinned_now(project, tree, stack)?;
     let recorded = image::recorded(engine_bin, image)?;
     crate::check::serves(&recorded, &wanted).map_err(|drift| RunError::StaleImage {
         image: image.to_string(),
