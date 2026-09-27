@@ -1677,10 +1677,9 @@ dernier lot. La première rouge arrête tout.
    mutation), jamais la ligne, que le moindre commit au-dessus déplace. Même
    identifiant, ou paire fichier et description qui ne désigne qu'un seul
    survivant avant comme après ; sinon l'avis est redemandé plutôt que
-   deviné. Mesuré sur `qcoda-compta` de mission-17 à mission-20 : le même
-   `format(cell, "f") -> format(cell, "F")` jugé équivalent, déplacé de la
-   ligne 112 à 123 par un commit, oublié par la campagne suivante, et la
-   mission renvoyée au HQ pour entendre la même chose. Un avis reporté porte
+   deviné. Sans ce report, un commit qui ajoute une ligne au-dessus d'un
+   survivant jugé équivalent suffit à faire oublier l'avis, et la mission
+   revient au HQ pour entendre la même chose. Un avis reporté porte
    le commit de la campagne où il a été donné (`carried_from`), la porte 7
    le compte à part, et `nunki mission mutants <id> --lift <survivant>` le
    retire. Aucune issue n'est jamais lue dans le journal de la campagne : il

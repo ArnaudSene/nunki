@@ -853,10 +853,8 @@ fn log_of(survivors: &[Survivor]) -> String {
 
 const F_TO_UPPER: &str = "survived: number = format(cell, \"f\") -> number = format(cell, \"F\")";
 
-/// Measured on `qcoda-compta`: the same survivor was ruled equivalent, a
-/// commit above it moved it from line 112 to line 123, and the next campaign
-/// forgot the ruling. The line is what a commit moves; the mutation is what
-/// was ruled on.
+/// A commit above a ruled survivor moves its line and nothing else. The line
+/// is what a commit moves; the mutation is what was ruled on.
 #[test]
 fn a_ruling_follows_its_mutant_to_the_next_campaign_when_only_the_line_moved() {
     let dir = tempfile::tempdir().unwrap();

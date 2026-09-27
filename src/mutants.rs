@@ -371,12 +371,10 @@ pub fn parse(text: &str) -> Vec<Survivor> {
 /// Write the campaign a finished log describes, carrying over the HQ's
 /// rulings from the campaign it replaces.
 ///
-/// A new campaign runs whenever a touched file changes, and before this every
-/// ruling was lost with the file it lived in: measured on `qcoda-compta`
-/// across mission-17, mission-19 and mission-20, the same survivor —
-/// `format(cell, "f") -> format(cell, "F")` — was ruled equivalent, a commit
-/// moved it from line 112 to line 123, the next campaign forgot the ruling,
-/// and the mission went back to the HQ to be told the same thing again.
+/// A new campaign runs whenever a touched file changes, and a commit that
+/// only adds a line above a ruled survivor would otherwise lose the ruling
+/// with the file it lived in, sending the mission back to the HQ to be told
+/// the same thing again.
 ///
 /// Returns how many survivors the new campaign holds.
 pub fn record_finished(
