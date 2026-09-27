@@ -689,6 +689,24 @@ pub fn image_serves(
 ) -> Result<(), RunError> {
     let wanted = image::pinned_now(project, tree, stack)?;
     let recorded = image::recorded(engine_bin, image)?;
+    // And the Dockerfile it was built from, when it recorded one: a template
+    // refreshed or a project step added since is an image that does not
+    // carry what the project now says it should.
+    if let image::Recorded::Pinned {
+        dockerfile: Some(built),
+        ..
+    } = &recorded
+    {
+        let now = image::dockerfile(project, &image::image_stacks(project, stack)?)?;
+        if let Some(why) =
+            crate::check::dockerfile_drift(built, &crate::init::sha256(now.as_bytes()))
+        {
+            return Err(RunError::StaleImage {
+                image: image.to_string(),
+                drift: vec![why],
+            });
+        }
+    }
     crate::check::serves(&recorded, &wanted).map_err(|drift| RunError::StaleImage {
         image: image.to_string(),
         drift,

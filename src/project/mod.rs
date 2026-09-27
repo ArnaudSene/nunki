@@ -284,6 +284,14 @@ pub const ADDON_STAGES_FILE: &str = "Dockerfile.stages";
 /// What a stack appends to the primary stack's image to add its toolchain.
 /// It starts from an image that ends as the agent, and ends as the agent.
 pub const ADDON_FILE: &str = "Dockerfile.addon";
+/// The project's own steps for its image, in its home and not under any
+/// stack: what the image needs that no stack's template carries — a system
+/// library, a tool the build calls (SPEC 4.2, "les fragments suivent nunki").
+/// Appended after every stack's add-on, starting and ending as the agent, so
+/// the stacks' Dockerfiles stay nunki's and follow its releases.
+pub const PROJECT_ADDON_FILE: &str = "Dockerfile.project";
+/// Its stages, for a `COPY --from` an official image named by a version.
+pub const PROJECT_STAGES_FILE: &str = "Dockerfile.project.stages";
 /// Where a stack fragment declares the advisory database its auditor reads,
 /// as a path **on the host**. `nunki` mounts it read-only and never fills it
 /// (SPEC 4.4, gate 8).

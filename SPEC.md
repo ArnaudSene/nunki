@@ -524,7 +524,7 @@ par un adaptateur (4.3), et le moteur de conteneurs que par un autre.
 
 | verbe | fait |
 |---|---|
-| `nunki init <dépôt>` | rend un dépôt **existant** orchestrable. Dans le dépôt, en respectant 3.3 : `AGENTS.md` (ou l'import dans `CLAUDE.md`) et un `.gitattributes` absent — rien d'autre. Dans le home du projet (`~/.nunki/<projet>/`) : `nunki.yaml` avec la liste des chemins protégés, le HQ (`hq/`), et les fragments de stack (`stacks/<nom>/`) avec la batterie cousue et le Dockerfile. Crée ce qui n'existe pas, dépose à côté ce qui existe, ne touche à rien d'autre, ne tient aucun manifeste, ne désinstalle rien. Rejouable. **Sur un terminal, un premier `init` demande** (tranché par Arnaud le 2026-09-26) ce que `nunki.yaml` déclarera — les stacks et leurs répertoires, la forge qu'aucun agent n'atteint, qui tient les branches protégées (`forge` ou `by_hand`), le `permission_mode`, les branches protégées — en proposant ce que le dépôt dit déjà : les stacks que ses manifestes déclarent (`Cargo.toml` ; `pyproject.toml`, `requirements.txt`, `setup.py` ; un `package.json` qui dépend de `next`), sur deux niveaux, hors dépendances et code vendu, une stack couvrant ses sous-répertoires ; l'hôte de son `origin` ; celles de `main`, `master`, `dev`, `develop` qu'il porte. Détecter n'est que proposer : `nunki` lit des manifestes, il n'en écrit pas (1, pas un générateur). Chaque question a son drapeau (`--stack`, `--forge`, `--forge-protection`, `--permission-mode`, `--protected-branch`), qui y répond d'avance ; `--yes` prend toutes les propositions. Rien n'est écrit avant la confirmation, et une réponse illisible est redemandée, trois fois au plus. Hors terminal et sans `--yes`, rien n'est détecté ni demandé : seuls les drapeaux comptent, comme avant. Une fois `nunki.yaml` écrit, plus rien n'est demandé — il n'est jamais réécrit — mais une stack que les manifestes déclarent et que le fichier ne déclare pas est signalée. |
+| `nunki init <dépôt>` | rend un dépôt **existant** orchestrable. Dans le dépôt, en respectant 3.3 : `AGENTS.md` (ou l'import dans `CLAUDE.md`) et un `.gitattributes` absent — rien d'autre. Dans le home du projet (`~/.nunki/<projet>/`) : `nunki.yaml` avec la liste des chemins protégés, le HQ (`hq/`), et les fragments de stack (`stacks/<nom>/`) avec la batterie cousue et le Dockerfile. Crée ce qui n'existe pas, dépose à côté ce qui existe, ne touche à rien d'autre, ne tient aucun manifeste, ne désinstalle rien. Rejouable. **Sur un terminal, un premier `init` demande** (tranché par Arnaud le 2026-09-26) ce que `nunki.yaml` déclarera — les stacks et leurs répertoires, la forge qu'aucun agent n'atteint, qui tient les branches protégées (`forge` ou `by_hand`), le `permission_mode`, les branches protégées — en proposant ce que le dépôt dit déjà : les stacks que ses manifestes déclarent (`Cargo.toml` ; `pyproject.toml`, `requirements.txt`, `setup.py` ; un `package.json` qui dépend de `next`), sur deux niveaux, hors dépendances et code vendu, une stack couvrant ses sous-répertoires ; l'hôte de son `origin` ; celles de `main`, `master`, `dev`, `develop` qu'il porte. Détecter n'est que proposer : `nunki` lit des manifestes, il n'en écrit pas (1, pas un générateur). Chaque question a son drapeau (`--stack`, `--forge`, `--forge-protection`, `--permission-mode`, `--protected-branch`), qui y répond d'avance ; `--yes` prend toutes les propositions. Rien n'est écrit avant la confirmation, et une réponse illisible est redemandée, trois fois au plus. Hors terminal et sans `--yes`, rien n'est détecté ni demandé : seuls les drapeaux comptent, comme avant. `nunki init --refresh` remplace les fichiers de fragment qu'un nunki plus ancien a écrits et que personne n'a touchés (« les fragments suivent nunki », plus bas). Une fois `nunki.yaml` écrit, plus rien n'est demandé — il n'est jamais réécrit — mais une stack que les manifestes déclarent et que le fichier ne déclare pas est signalée. |
 | `nunki slot add/reset/rebuild/rm` | un slot = un clone local sans liens durs, un jeu de volumes nommés, et **trois profils de conteneur successifs** (voir « slots et branches » ci-dessous). Les missions s'y succèdent. |
 | `nunki mission new/start/reframe/status/say/watch/pause/resume/stop/kill/end/accept/iterate/fetch/archive` | le cycle d'une mission, du cadrage au rapatriement des commits ; `say` dépose une consigne pour le **run suivant**, `watch` rend deux états (tourne, fini) plus un troisième que l'humain provoque (gelé), `stop` termine le run proprement (4.3), **`end` déclare la mission abandonnée** |
 | `nunki exec <slot> <cmd>` | joue une commande dans le conteneur du slot — c'est ainsi que le HQ **rejoue une preuve** sans avoir la stack sur l'hôte. Par défaut sur la **copie git propre de `HEAD`** que la porte 7 utilise, pas sur l'arbre que l'agent a habité : un `Makefile`, un `pytest.ini` ou un alias `cargo` posé par l'agent y tromperait la preuve. Jamais pendant un run sur l'arbre de travail |
@@ -1010,6 +1010,52 @@ paquet wasm que `wasm-pack` construit avant `pnpm install`.
   périmètre du codeur est l'union des `allow.txt`, les caches et les
   répertoires inscriptibles l'union de ceux des stacks. Un projet à une seule
   stack ne voit rien bouger : mêmes chemins, mêmes commandes.
+
+**Les fragments suivent nunki** (tranché par Arnaud le 2026-09-27, après une
+revue indépendante). Un fragment est copié une fois par `nunki init`, qui ne
+réécrit rien : un correctif de modèle n'atteignait donc aucun projet existant
+— `trading-bot-rust-2` portait un `next/Dockerfile` identique, octet pour
+octet, au modèle d'avant le correctif uid 1000 — et la seule façon de
+rafraîchir, effacer puis relancer `init`, effaçait aussi les retouches du
+projet. La règle qui tranche entre les deux :
+
+- **Un fichier n'est à nunki que si ses octets sont des octets que nunki a
+  livrés.** Le binaire porte la liste de tout ce qu'un `nunki init` a jamais
+  écrit, reconstruite depuis l'historique (`scripts/shipped-fragments.sh`,
+  un test rouge tant que la version du jour n'y est pas). **Rien n'est
+  enregistré chez le projet** : un registre lu sur disque aurait pu
+  revendiquer une retouche humaine — exactement le « manifeste, checksums,
+  `.new` » abandonné en tête de cette spécification, où chaque règle de
+  propriété était un endroit où détruire du travail en silence. Ici, une
+  empreinte absente de la liste ne peut que faire garder le fichier.
+- **Intact et ancien : `nunki init --refresh` le remplace**, avec le mode
+  qu'il doit avoir ; un `init` simple le garde et dit que `--refresh` le
+  remplacerait, et `nunki check` est rouge pour lui — un rouge que la
+  commande nommée corrige. Le rafraîchissement est refusé tant qu'un
+  conteneur du projet tourne (les scripts y sont montés fichier par fichier
+  et l'ancien resterait monté) et tient tous les slots du projet pendant
+  qu'il écrit. `Dockerfile`, `Dockerfile.addon`, `Dockerfile.stages` et
+  `versions.txt` bougent ensemble : si le projet en a réécrit un, les autres
+  attendent.
+- **Réécrit par le projet : il est au projet.** Jamais remplacé ; la version
+  du jour est déposée à côté, `<fichier>.nunki` (3.3, règle 3), et réécrite
+  quand elle vieillit. `nunki check` le dit sans rouge : une réécriture
+  voulue — la batterie d'un projet calquée sur sa CI — ferait sinon un rouge
+  que personne ne peut lever. Le texte de nunki enregistré en CRLF est dit à
+  part : un script qui finit en `\r` ne tourne pas.
+- **Les ajouts du projet à son image vont dans `Dockerfile.project`**, dans
+  son home et sous aucune stack (et `Dockerfile.project.stages` pour un
+  `COPY --from` d'image officielle). Il est ajouté après les compléments de
+  toutes les stacks — il peut appeler n'importe laquelle de leurs chaînes
+  d'outils —, part de l'utilisateur agent et y revient : `nunki` le ferme par
+  `USER agent`. Les Dockerfiles des stacks restent alors ceux de nunki et
+  suivent ses versions. Ce qui n'est pas un ajout — changer l'image de base,
+  les options de rustup — reste un Dockerfile réécrit, donc au projet.
+- **Une image dit de quel Dockerfile elle vient.** L'étiquette
+  `nunki.dockerfile` porte l'empreinte du Dockerfile composé ; `nunki check`
+  est rouge et `mission start` refuse quand il a changé depuis la
+  construction — un modèle rafraîchi, un complément ou une étape du projet
+  retouchés.
 
 **Ce que la stack Python rend, et ce qu'elle ne rend pas** (mesuré le
 2026-09-20, avant livraison) : `uv` pour le verrou, `ruff`, `mypy` et `pytest`

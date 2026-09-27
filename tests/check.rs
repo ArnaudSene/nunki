@@ -446,11 +446,11 @@ fn the_verb_is_green_on_this_very_repository() {
         ),
     )
     .unwrap();
-    std::fs::write(
-        project_home.join("stacks/rust/allow.txt"),
-        "static.crates.io\nindex.crates.io\ncrates.io\n",
-    )
-    .unwrap();
+    // The whole fragment, as `nunki init` writes it today: a fragment
+    // missing its files, or holding an older nunki's, is red.
+    for (name, body, _) in nunki::init::fragment("rust") {
+        std::fs::write(project_home.join("stacks/rust").join(name), body).unwrap();
+    }
 
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_nunki"))
         .env("HOME", home.path())
@@ -848,7 +848,7 @@ fn a_version_the_dockerfile_does_not_declare_is_red() {
         Verdict::Red(why) => {
             assert!(why.contains("RUST_TARGETS"), "{why}");
             assert!(!why.contains("RUST_VERSION,"), "{why}");
-            assert!(why.contains("nunki init --stack rust"), "{why}");
+            assert!(why.contains("nunki init --refresh"), "{why}");
         }
         other => panic!("{other:?}"),
     }
