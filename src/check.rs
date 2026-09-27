@@ -623,7 +623,7 @@ fn harness_can_authenticate(project: &Project, report: &mut Report) {
 /// A mission ends by giving something back to a person (SPEC 4.5). "Waiting
 /// on the human" is enough while there is one; it stops being enough the
 /// moment a second person works on the project, and an arbitration for
-/// Arnaud is not an arbitration for Igor.
+/// Alice is not an arbitration for Bob.
 fn somebody_to_hand_back_to(project: &Project, report: &mut Report) {
     use crate::human::{ME_FILE, Source, me};
 

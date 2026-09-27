@@ -11,8 +11,8 @@
 //! what?" once the security agent has written. `nunki`'s state can, and that is
 //! what is read here.
 //!
-//! The rule for the coder is the one Arnaud decided on 2026-09-09, after the
-//! first version asked for something impossible: **the coder's verdict stays
+//! The rule for the coder, since requiring a fresh coder verdict after every
+//! commit would ask for something impossible: **the coder's verdict stays
 //! valid as long as everything added after it is the integrator's wiring**,
 //! judged by the same allowlist its own gate 4 uses. A commit after the
 //! coder's that touches business code invalidates it, and the coder goes back

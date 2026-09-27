@@ -2,8 +2,8 @@
 //!
 //! Its whole job is to be read, so what it holds is prose. A run of four
 //! spaces at the start of a line renders as a Markdown code block, and the
-//! sentences that matter arrive monospaced and unread — measured on
-//! 2026-09-17, `ended` put the reason a mission was called off inside one.
+//! sentences that matter arrive monospaced and unread — `ended` putting the
+//! reason a mission was called off inside one is exactly that failure.
 
 use nunki::followup;
 use nunki::harness::Role;

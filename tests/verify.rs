@@ -214,7 +214,7 @@ impl World {
     fn hold(&self) {
         let store = Store::open(&self.project.hq_root).unwrap();
         let mut state = store.load("m1").unwrap();
-        state.hold("Arnaud", false);
+        state.hold("Alex Martin", false);
         store.save(&state).unwrap();
     }
 
@@ -237,8 +237,7 @@ fn gates_of(steps: &[Step]) -> &nunki::gate::Report {
 
 /// Gates 1 to 4 are played while the coder still has lots, not only at the
 /// end. A forbidden commit found after the first lot costs one run; found at
-/// the final verification it costs the mission (SPEC 4.4, decided
-/// 2026-09-09).
+/// the final verification it costs the mission (SPEC 4.4).
 #[test]
 fn a_forbidden_commit_costs_a_run_now_and_not_the_mission_later() {
     let world = World::new(2);
@@ -576,12 +575,11 @@ fn live_a_mission_is_driven_from_its_first_lot_to_verified() {
     // to answer, unlike the unplayable gate above — and a red gate at the
     // final verification opens a volet: the coder is sent back for it.
     //
-    // This is what the whole chain exists to do, and it was not checked here
-    // until 2026-09-16: the test wrote the triage itself before ever playing
-    // the gates again, so the volet never opened, and step 5's coder run was
-    // applied to a flow still sitting at the gates. It has been red on `dev`
-    // ever since — measured by running it there, unchanged — and nothing
-    // caught it because a live test is `#[ignore]`d and CI never plays it.
+    // This is what the whole chain exists to do. A test that writes the
+    // triage itself before ever playing the gates again never opens the
+    // volet, and applies step 5's coder run to a flow still sitting at the
+    // gates — and nothing catches it, because a live test is `#[ignore]`d
+    // and CI never plays it.
     let steps = go();
     assert!(
         matches!(gates_of(&steps).verdict(), nunki::gate::Verdict::Red(_)),
@@ -802,9 +800,8 @@ fn an_integration_run_that_concluded_moves_the_mission_on() {
 /// An `INTEGRATED` is the integrator's word, and its gates are what the word
 /// is worth: an agent's report is never the truth (SPEC 2).
 ///
-/// Found on 2026-09-15, before the first integration mission was launched:
-/// the flow read the verdict and moved on, so an `INTEGRATED` with no system
-/// test run and no section of `PR.md` reached `Verified`.
+/// A flow that reads the verdict and moves on lets an `INTEGRATED` with no
+/// system test run and no section of `PR.md` reach `Verified`.
 #[test]
 fn an_integrated_verdict_is_worth_its_gates_and_no_more() {
     let world = World::shaped(1, integration());
@@ -1121,8 +1118,7 @@ fn findings_park_the_mission_and_carry_the_report() {
 /// so what it owes is a resume block naming the commit it attacked and a
 /// report — and `CLEAR` with an empty report is a verdict about nothing.
 ///
-/// Found on 2026-09-15, before the first security mission was launched: the
-/// flow read the verdict and moved on, so both were taken on trust.
+/// A flow that reads the verdict and moves on takes both on trust.
 #[test]
 fn a_security_verdict_is_worth_its_gates_and_no_more() {
     // An empty report, which is the deliverable this role owes.
@@ -1199,7 +1195,7 @@ impl World {
     fn at_findings(&self) {
         std::fs::write(
             self.project.nunki_home().join("me.yaml"),
-            "name: Arnaud\nemail: a@example.com\n",
+            "name: Alex Martin\nemail: a@example.com\n",
         )
         .unwrap();
         self.at_security();
@@ -1272,7 +1268,7 @@ fn lifting_the_verdict_concludes_the_mission_and_leaves_the_verdict_red() {
     let verdict = std::fs::read_to_string(world.mission().join("VERDICT.json")).unwrap();
     assert!(verdict.contains("FINDINGS"), "{verdict}");
     let carried = world.followup();
-    assert!(carried.contains("Arnaud"), "{carried}");
+    assert!(carried.contains("Alex Martin"), "{carried}");
     assert!(carried.contains("behind the VPN"), "{carried}");
 }
 
@@ -2367,12 +2363,11 @@ fn the_last_lot_done_goes_on_to_the_final_gates_at_once() {
 /// A gate nobody could play stops the verification where it stands, and the
 /// coder is not sent back at it.
 ///
-/// Measured on 2026-09-13, on the first mission nunki drove from end to end:
-/// gate 7 said `Unplayed` because no campaign had run, and starting one is
-/// `nunki mission mutants` — an HQ verb no container holds. nunki opened a volet
-/// anyway, three runs in a row, each reading the same instruction, saying it
-/// had no way to carry it out, and stopping. The last cost 34 000 output
-/// tokens to say so.
+/// Gate 7 says `Unplayed` when no campaign has run, and starting one is
+/// `nunki mission mutants` — an HQ verb no container holds. A volet opened
+/// anyway buys three runs in a row, each reading the same instruction,
+/// saying it has no way to carry it out, and stopping — tens of thousands of
+/// output tokens to say so.
 ///
 /// This world owes nothing: the journal names `HEAD` and `PR.md` is written,
 /// so no gate is red. What is left is a battery with no profile up and a
@@ -2504,18 +2499,17 @@ fn a_service_not_declared_shared_is_not_locked() {
 /// A battery that came back red while a campaign was rewriting the copy of
 /// `HEAD` opens no volet, because it was judging a mutant.
 ///
-/// Measured on `notes-4`, 2026-09-18, the first three-agent mission driven end
-/// to end. `verify` started the campaign — `cargo mutants --in-place`, in the
-/// clean copy of `HEAD` — and then, called again, played the whole gate set
-/// against that same copy. The battery came back 101 on `warning: unused
-/// variable: value` at `src/api.rs:160`, a function whose body cargo-mutants
-/// had replaced and which uses its argument in the coder's own code. Every
-/// play also reset the copy under the running campaign, `exec::run(On::Proof)`
-/// refreshing it first.
+/// `verify` starts the campaign — `cargo mutants --in-place`, in the clean
+/// copy of `HEAD` — and then, called again, would play the whole gate set
+/// against that same copy. The battery comes back 101 on `warning: unused
+/// variable: value`, in a function whose body cargo-mutants has replaced and
+/// which uses its argument in the coder's own code. Every play also resets
+/// the copy under the running campaign, `exec::run(On::Proof)` refreshing it
+/// first.
 ///
-/// The flow read gate 6 red and opened a volet, four times, until the volets
-/// were spent: six runs, 59M tokens, and neither the integrator nor the
-/// security agent ever ran. Nothing any agent did was wrong.
+/// A flow that reads gate 6 red opens a volet, again and again until the
+/// volets are spent, and neither the integrator nor the security agent ever
+/// runs. Nothing any agent did was wrong.
 #[test]
 fn a_battery_red_under_a_running_campaign_opens_no_volet() {
     use nunki::engine::{ExecOutput, fake::FakeEngine};
@@ -2593,9 +2587,9 @@ fn a_battery_red_under_a_running_campaign_opens_no_volet() {
 
     // And the turn ends by going to read the campaign, not by calling it a
     // wall. A wall stops `verify` before the campaign is read back, and the
-    // gates that stood down for it then stand down for ever: measured on
-    // `notes-4` on 2026-09-18, 146 turns of `verify`, every one of them
-    // reporting a campaign in flight and none of them reading it.
+    // gates that stood down for it then stand down for ever: turn after turn
+    // of `verify`, every one of them reporting a campaign in flight and none
+    // of them reading it.
     match steps.last() {
         Some(Step::CampaignOwed { role, .. }) => assert_eq!(*role, Role::Coder),
         other => panic!("waiting on the campaign became a wall: {other:?}"),

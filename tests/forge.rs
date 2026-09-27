@@ -154,18 +154,18 @@ fn a_forge_nobody_answers_at_is_unreachable_not_refused() {
 #[test]
 fn a_github_remote_names_its_forge_and_repository_and_any_other_names_none() {
     for remote in [
-        "git@github.com:ArnaudSene/nunki.git",
-        "https://github.com/ArnaudSene/nunki.git",
-        "https://github.com/ArnaudSene/nunki",
-        "ssh://git@github.com/ArnaudSene/nunki.git",
+        "git@github.com:acme/app.git",
+        "https://github.com/acme/app.git",
+        "https://github.com/acme/app",
+        "ssh://git@github.com/acme/app.git",
     ] {
         let (forge, repo) = forge::of_remote(remote).unwrap_or_else(|| panic!("{remote}"));
         assert_eq!(forge.name(), "GitHub", "{remote}");
         assert_eq!(
             repo,
             Repo {
-                owner: "ArnaudSene".into(),
-                name: "nunki".into()
+                owner: "acme".into(),
+                name: "app".into()
             },
             "{remote}"
         );
@@ -187,14 +187,14 @@ fn a_github_remote_names_its_forge_and_repository_and_any_other_names_none() {
 #[test]
 fn the_address_to_open_the_pull_request_by_hand_is_the_forges_own() {
     for remote in [
-        "https://github.com/ArnaudSene/nunki.git",
-        "git@github.com:ArnaudSene/nunki.git",
-        "https://github.com/ArnaudSene/nunki",
+        "https://github.com/acme/app.git",
+        "git@github.com:acme/app.git",
+        "https://github.com/acme/app",
     ] {
         let (forge, repo) = forge::of_remote(remote).unwrap_or_else(|| panic!("{remote}"));
         assert_eq!(
             forge.compare(&repo, "dev", "mission/x"),
-            "https://github.com/ArnaudSene/nunki/compare/dev...mission/x?expand=1",
+            "https://github.com/acme/app/compare/dev...mission/x?expand=1",
             "{remote}"
         );
     }

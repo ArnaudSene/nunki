@@ -45,10 +45,10 @@ fn a_slot_with_no_profile_up_says_what_to_do_about_it() {
 /// `mutation.sh` runs `cargo mutants --in-place` there for up to an hour,
 /// while `exec::run(On::Proof)` opens with `git reset --hard` and `git clean`.
 /// Whoever gets there second wrecks the other: the caller reads a mutant back
-/// as the project's code, and the campaign loses the tree under it. Measured
-/// on `notes-4`, 2026-09-18 — the battery came back 101 on a function whose
-/// body cargo-mutants had replaced, and the flow sent the coder back for it
-/// four times.
+/// as the project's code, and the campaign loses the tree under it. The
+/// battery then comes back 101 on a function whose body cargo-mutants has
+/// replaced, and the flow sends the coder back for a failure that is not in
+/// the code.
 ///
 /// Gates 6 and 8 stand down on their own, one layer up. This is for the four
 /// callers that do not: `nunki exec`, `nunki mission gates`, and whatever asks

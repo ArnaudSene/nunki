@@ -26,7 +26,7 @@ fn write(root: &Path, path: &str, body: &str) {
     std::fs::write(file, body).unwrap();
 }
 
-/// A repository laid out the way `trading-bot-rust-2` is, and then some: a
+/// A repository laid out like a real polyglot project, and then some: a
 /// Rust workspace at the root with member crates, a Next.js application in
 /// `frontend/`, a Python service in `api/`, and the places a manifest lives
 /// without being a stack.
@@ -77,12 +77,7 @@ fn repository(dir: &Path) -> std::path::PathBuf {
     git(&root, &["branch", "dev"]);
     git(
         &root,
-        &[
-            "remote",
-            "add",
-            "origin",
-            "git@github.com:Falkor-Labs/x.git",
-        ],
+        &["remote", "add", "origin", "git@github.com:acme/x.git"],
     );
     root
 }

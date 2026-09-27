@@ -27,8 +27,7 @@ pub mod github;
 ///
 /// A forge credential belongs to the human and not to a project — two
 /// projects on the same forge are the same account — so it is kept once
-/// rather than copied into every project's HQ (decided by Arnaud on
-/// 2026-09-16, as the accounts were on 2026-09-10).
+/// rather than copied into every project's HQ, like the accounts.
 pub const TOKEN_FILE: &str = "forge-token";
 
 #[derive(Debug, thiserror::Error)]

@@ -231,7 +231,7 @@ impl Flow {
                 self.retry_coder(work, attempt)
             }
             // Gates 1 to 4 are played at the end of **every** run, not only
-            // at the final verification (SPEC 4.4, decided 2026-09-09): a
+            // at the final verification (SPEC 4.4): a
             // perimeter gate that only falls at the end loses a six-hour
             // mission over a forbidden write in the first lot. A red one
             // here is one more run on the same lot — the work is not done,
@@ -245,15 +245,13 @@ impl Flow {
             // Through `volet`, like a red verdict: it counts, and the count
             // is what ends a mission the coder cannot fix.
             //
-            // Opened by hand here until 2026-09-17, with `n: self.volets` and
-            // no increment, so every return was volet 0 and `max_volets`
-            // never came round. Measured on `notes-3`: a gate 7 red on
-            // survivors that no test could kill sent the coder back
-            // **twenty-eight times** in half an hour — the agent declared its
-            // volet done, the gates were played again, the same gate was red
-            // again, and the same volet 0 opened again. 34 million tokens,
-            // and the only thing that would have stopped it was the
-            // account's weekly cap.
+            // Opened by hand here, with `n: self.volets` and no increment,
+            // every return would be volet 0 and `max_volets` would never come
+            // round: a gate 7 red on survivors that no test can kill would
+            // send the coder back again and again — the agent declares its
+            // volet done, the gates are played again, the same gate is red
+            // again, and the same volet 0 opens again, until the only thing
+            // left to stop it is the account's weekly cap.
             (Stage::Gates, Event::GatesFailed { reason }) => self.volet(format!("gate: {reason}")),
 
             // --- integrator --------------------------------------------

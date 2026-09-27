@@ -148,11 +148,11 @@ pub fn init_as(
     // Re-run on a project that already has a configuration: top up the
     // stacks it declares, rather than looking at none.
     //
-    // `--stack` has no default, so a bare `nunki init` used to skip the
-    // fragment loop entirely and say nothing about it — measured on
-    // 2026-09-17, a project missing the `caches.txt` a release had added got
-    // four "kept" lines and no hint that its fragments were never examined.
-    // The remedy existed (`nunki init --stack rust`) and was undiscoverable.
+    // `--stack` has no default, so without this a bare `nunki init` would
+    // skip the fragment loop entirely and say nothing about it: a project
+    // missing a fragment file a release had added would get only "kept"
+    // lines and no hint that its fragments were never examined, and the
+    // remedy (`nunki init --stack rust`) would stay undiscoverable.
     let stacks = if asked.is_empty() {
         declares(home)
     } else {
@@ -650,9 +650,9 @@ PNPM package.json packageManager pnpm@{}
 ///
 /// Debian and not Alpine: musl costs too much where the work happens —
 /// manylinux-style prebuilt artefacts, a different target triple, and a
-/// default thread stack of 128 KiB against glibc's 8 MiB (SPEC 4.2, decided
-/// 2026-09-09). The firewall sidecar is the one image on Alpine, for reasons
-/// that apply to it alone.
+/// default thread stack of 128 KiB against glibc's 8 MiB (SPEC 4.2). The
+/// firewall sidecar is the one image on Alpine, for reasons that apply to it
+/// alone.
 ///
 /// Two things it must do that are easy to forget: run as the **host's** uid,
 /// or a file it writes is unreadable on the host and git refuses the tree;
@@ -678,11 +678,11 @@ ARG RUST_TARGETS=
 # since would never reach a freshly built image — pulling the tag again does
 # not help while the tag itself has not been rebuilt.
 #
-# Measured on 2026-09-13, on a scan that went red: `libpcre2-8-0` 10.42-1,
-# carrying CVE-2026-86145 and CVE-2026-89161 — both HIGH, both with a fix
-# published. It arrives with the base image and is installed by no line here,
-# so nothing but this one moves it. `apt-get upgrade` takes it to
-# 10.42-1+deb12u1, measured in the base image itself.
+# A package that arrives with the base image and is installed by no line
+# here — `libpcre2-8-0` 10.42-1, for instance, carrying CVE-2026-86145 and
+# CVE-2026-89161, both HIGH, both with a fix published — is moved by nothing
+# but this one. `apt-get upgrade` takes that one to 10.42-1+deb12u1 in the
+# base image itself.
 RUN apt-get -qq update \
  && apt-get -qq -y upgrade \
  && apt-get -qq install --no-install-recommends -y \
@@ -699,11 +699,11 @@ RUN apt-get -qq update \
 # version means raising the two sums with it, and the build fails loudly if
 # they disagree.
 #
-# `gitleaks` was here first and the image scan refused it, rightly: its 8.30.1
-# binary carried 33 critical or high advisories **with fixes published**, from
-# `golang.org/x/crypto v0.35.0` — thirteen months stale at its own release.
-# This one is measured current, and being a Go binary the scan keeps looking
-# inside it at every build. A tool the gate cannot inspect would not be safer,
+# `gitleaks` is not the tool here because the image scan refuses it, rightly:
+# its 8.30.1 binary carries 33 critical or high advisories **with fixes
+# published**, from `golang.org/x/crypto v0.35.0` — thirteen months stale at
+# its own release. This one is current at the pinned version, and being a Go
+# binary the scan keeps looking inside it at every build. A tool the gate cannot inspect would not be safer,
 # it would only stop being asked about.
 ARG TRUFFLEHOG=3.97.5
 RUN set -eu; \
@@ -744,8 +744,8 @@ const RUST_TOOLCHAIN: &str = r#"ENV RUSTUP_HOME=/home/agent/.rustup \
 # The toolchain the repository's `rust-toolchain.toml` names, with its
 # components and targets, installed here because inside a run rustup cannot
 # fetch one: `static.rust-lang.org` is on no allowlist. `clippy` and `rustfmt`
-# whatever the repository says, since the battery calls both. Measured on
-# 2026-09-26 with `--network none`: an image built this way for `1.98.0` and
+# whatever the repository says, since the battery calls both. With
+# `--network none`, an image built this way for `1.98.0` and
 # `wasm32-unknown-unknown,x86_64-unknown-linux-musl` answers `rustc 1.98.0`
 # under a `rust-toolchain.toml` pinning it, and lists all three targets.
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
@@ -761,23 +761,21 @@ RUN mkdir -p /home/agent/.cargo/registry /home/agent/.harness
 # something nunki brings. `prepush.sh` beside this file runs
 # `cargo deny check`; an image without it fails gate 6 for a reason no
 # agent can repair — the image is built from this file, on the host, and no
-# agent can reach it. Measured on
-# 2026-09-14: a coder spent its three attempts diagnosing that exact
-# hole, correctly, and the mission was handed over having built both its
-# lots.
+# agent can reach it. A coder can diagnose that hole correctly and still
+# spend every attempt on it.
 #
 # The mutation campaign gate 7 plays (SPEC 4.4). Installed here, in the
 # project's own image, because the campaign is what this stack declares and
 # not something nunki brings: `mutation.sh` beside this file is what calls it.
-# Measured on 2026-09-10, cargo-mutants 27.1.0 on this image: 20 s and 115 MB
-# at build time, none at campaign time — which is the right way round, since
+# cargo-mutants 27.1.0 costs this image 20 s and 115 MB at build time and
+# none at campaign time — which is the right way round, since
 # `nunki slot rebuild` is rare and a campaign is not.
 #
 # What stays of the build is the binary and the lockfile it was built from,
 # kept where an image scanner finds it. The registry is emptied: it held the
 # sources of every dependency — 117 MB, each with its own development
 # lockfile, which describes nothing installed here and which Trivy read as a
-# vulnerable `regex` (measured 2026-09-11). The kept lockfile is named
+# vulnerable `regex`. The kept lockfile is named
 # `Cargo.lock`, in a folder of its own: a scanner recognises it by that name
 # and no other. The registry directory stays, empty, as the mount point of the
 # slot's cargo cache.
@@ -824,7 +822,7 @@ FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS nunki-python-uv
 ///
 /// `/usr/local` from the official image is the interpreter; the libraries it
 /// links against dynamically are Debian's, installed here, and `ldconfig`
-/// makes them found. Measured 2026-09-26 on `debian:bookworm-slim` with 3.12:
+/// makes them found. On `debian:bookworm-slim` with 3.12:
 /// without the libraries `sqlite3` fails to import; with them the copy
 /// behaves as the official image — ssl, sqlite3, ctypes, lzma, bz2, venv —
 /// and the image scan reports nothing fixable.
@@ -952,8 +950,8 @@ out="target/mutants-$campaign"
 # one, so a second campaign that kills everything leaves `missed.txt` empty,
 # as it should.
 #
-# It is a campaign that **cannot run** that lies. Measured the same day, on a
-# crate made not to parse: cargo-mutants fails before it creates an output
+# It is a campaign that **cannot run** that lies. On a crate that does not
+# parse, cargo-mutants fails before it creates an output
 # directory, `mutants.out` is still the previous campaign's, and this script's
 # `|| true` then reads survivors from a campaign that never happened — on code
 # that has changed since. A replay of the same fingerprint reuses the same
@@ -964,7 +962,7 @@ out="target/mutants-$campaign"
 #
 # The parent has to exist: `--output` creates its own directory and not the
 # path above it, and a clean copy of HEAD that has never been built has no
-# `target/` at all ("create output parent directory", measured).
+# `target/` at all (it fails with "create output parent directory").
 rm -rf "$out"
 mkdir -p "$out"
 
@@ -977,12 +975,12 @@ mkdir -p "$out"
 # `Default::default()` whenever the return type allows it, and
 # `fn main() -> ExitCode` always allows it — but no unit test calls `main`,
 # so that mutant cannot be killed by any test the coder is able to write.
-# Left in, it costs a lot for nothing: measured on 2026-09-13, a coder spent
-# a run extracting `main`'s body into a testable function, and the mutant
-# simply reappeared on the thin wrapper that was left.
+# Left in, it costs a lot for nothing: a coder can spend a run extracting
+# `main`'s body into a testable function, and the mutant simply reappears on
+# the thin wrapper that is left.
 #
-# Measured the same day, on a crate with a binary and a library: 19 mutants
-# without it, 18 with it. It removes `src/main.rs`'s whole body and keeps
+# On a crate with a binary and a library, it takes exactly one mutant away:
+# it removes `src/main.rs`'s whole body and keeps
 # `src/lib.rs`'s `replace run -> ExitCode` — the same shape, in the function
 # `main` delegates to, and that one a test can and must kill. The exclusion
 # is on the mutation, never on the file: a `main.rs` carrying real code still
@@ -991,7 +989,7 @@ mkdir -p "$out"
 cargo mutants --in-place --no-shuffle --exclude-re "replace main -> " --output "$out" $files >&2 || true
 
 # `--output DIR` writes into `DIR/mutants.out/`, not into `DIR` (measured on
-# 27.1.0). Reading the wrong path was the whole campaign silently failing.
+# 27.1.0). Reading the wrong path makes the whole campaign fail silently.
 missed="$out/mutants.out/missed.txt"
 if [ ! -f "$missed" ]; then
   echo "nunki: the campaign left no $missed" >&2
@@ -1041,8 +1039,8 @@ printf '{"campaign":"done"}\n'
 /// declared by the stack, launched by `nunki`, and mounted read-only — what
 /// judges the agent is not the agent's to weaken.
 ///
-/// Measured against the real tool on 2026-09-17 before it shipped, which is
-/// the ritual `mutation.sh` went through: cargo-deny writes its JSON to
+/// Checked against the real tool before it shipped, as `mutation.sh` was:
+/// cargo-deny writes its JSON to
 /// **stderr**, and `recurse(.parents[0]?)` never terminates because a node
 /// without `parents` yields `null` rather than nothing.
 const SECURITY_RUST: &str = r##"#!/bin/sh
@@ -1083,8 +1081,8 @@ trap 'rm -rf "$work"' EXIT
 
 # A configuration with **no `ignore`**: this is the unfiltered view, the one
 # that still reports what the project has accepted. `--config` is what makes
-# it possible without a sandbox — measured 2026-09-17, cargo-deny reads the
-# file it is given and no other.
+# it possible without a sandbox: cargo-deny reads the file it is given and
+# no other.
 printf '[advisories]\ndb-path = "%s"\n' "$db" > "$work/none.toml"
 
 # `--offline` keeps it from fetching the database, which lives on a forge no
@@ -1092,8 +1090,8 @@ printf '[advisories]\ndb-path = "%s"\n' "$db" > "$work/none.toml"
 # so the slot's registry cache must be warm — the battery has already built by
 # the time this runs.
 #
-# **The JSON goes to stderr**, not stdout (measured 2026-09-17: with
-# `2>/dev/null` the output is empty). Findings make it exit non-zero, and that
+# **The JSON goes to stderr**, not stdout (with `2>/dev/null` the output
+# is empty). Findings make it exit non-zero, and that
 # is a result rather than a failure.
 audit() {
   cargo deny --offline --config "$2" --manifest-path "$1/Cargo.toml" \
@@ -1102,8 +1100,8 @@ audit() {
 
 ids() { grep '"type":"diagnostic"' | sed -n 's/.*"id":"\([^"]*\)".*/\1/p' | sort -u; }
 
-# What the base already carried. A worktree and not a bare lockfile: measured
-# 2026-09-17, cargo-deny goes through cargo metadata and refuses a directory
+# What the base already carried. A worktree and not a bare lockfile:
+# cargo-deny goes through cargo metadata and refuses a directory
 # holding only a manifest and a lockfile ("no targets specified in the
 # manifest"). Nothing is compiled here.
 : > "$work/base.ids"
@@ -1150,7 +1148,7 @@ grep '"type":"diagnostic"' "$work/all.json" | while IFS= read -r line; do
   # it in, and the only one this project can actually replace.
   # `.parents[0]?` is not a stopping condition: on a node without `parents`
   # it yields `null` rather than nothing, and the recursion never ends —
-  # measured 2026-09-17, jq spun until it was killed. `has` is the guard.
+  # jq spins until it is killed. `has` is the guard.
   via=$(jq -r '[.fields.graphs[0]
                 | recurse(if has("parents") then .parents[0] else empty end)
                 | .Krate.name]
@@ -1200,11 +1198,9 @@ trufflehog git "file://$(git rev-parse --show-toplevel)" --json --no-update --no
 # the same. Absent, nothing is accepted — and absent means absent, because the
 # path is not one the agent could create (SPEC 4.4, gate 8).
 #
-# An exact match on the first field. The first version was
-# `sed "s|^$1[[:space:]]*||p"`, which matches a **prefix**: the id
-# `…:src/a.rs:Postgres:1` also matched the line for `…:src/a.rs:Postgres:10`
-# and returned `0  <reason>` as the reason. A file path also carries regex
-# metacharacters, which a pattern reads and a comparison does not.
+# An exact match on the first field, because a prefix match reads the ruling
+# for `…:src/a.rs:Postgres:10` as the ruling for `…:src/a.rs:Postgres:1`, and
+# because a file path carries regex metacharacters a pattern would read.
 reason_for() {
   [ -f "$secrets" ] || return 0
   awk -v id="$1" '
@@ -1254,7 +1250,7 @@ const RUN_RUST: &str = r#"#!/bin/sh
 #  - keep the id on its command line. `nunki` recognises this process by it, and
 #    that is why the command below is **not** `exec`ed: replacing the process
 #    replaces its command line, and the application would be reported as
-#    stopped one second after it started (measured, 2026-09-10).
+#    stopped one second after it started.
 #  - stay in the foreground. A script that forks and exits reports an
 #    application that is not running.
 #  - listen on the address the mission's services can reach, not only on
@@ -1271,8 +1267,7 @@ cargo run --release
 /// integrator: its system tests, in the system profile).
 ///
 /// Shipped by the stack because the gate reads it from there, and a stack that
-/// ships none holds that gate red for a reason no agent is told — found on
-/// 2026-09-15, before the first integration mission was launched.
+/// ships none holds that gate red for a reason no agent is told.
 const SYSTEM_RUST: &str = r##"#!/bin/sh
 # The integrator's battery for a Rust project: its system tests, green, in the
 # system profile (SPEC 4.4, gate 6 for the integrator).
@@ -1335,7 +1330,7 @@ const DOCKERFILE_PYTHON_HEAD: &str = r##"# The coder's image for a Python projec
 # Both `ARG`s are declared before the first `FROM` because that is the only
 # place a build argument is global. Declared after it, `BASE` belongs to the
 # `uv` stage and the second `FROM` reads it as empty — "base name (${BASE})
-# should not be blank", measured the first time this file was built.
+# should not be blank".
 #
 # glibc and not musl, as SPEC 4.2 bis requires of every stack image: the
 # `manylinux` wheels Python ships are glibc, and a musl base sends every
@@ -1343,8 +1338,7 @@ const DOCKERFILE_PYTHON_HEAD: &str = r##"# The coder's image for a Python projec
 ARG UV_VERSION=0.12.17
 # The interpreter the repository's `.python-version` names, passed by nunki at
 # build time from `versions.txt` beside this file (SPEC 4.2). A global `ARG`
-# may build on the one above it — measured 2026-09-26, `PYTHON=3.13` gives
-# `Python 3.13.15`.
+# may build on the one above it: `PYTHON=3.13` gives `Python 3.13.15`.
 ARG PYTHON=3.12
 ARG BASE=python:${PYTHON}-slim-bookworm
 
@@ -1360,7 +1354,7 @@ ARG GID=1000
 # keep the versions that tag was cut with, so a security fix Debian published
 # since would never reach a freshly built image — pulling the tag again does
 # not help while the tag itself has not been rebuilt. The Rust image carries
-# the same line, and the measurement that put it there is in its own comment.
+# the same line, and its comment gives an example.
 RUN apt-get -qq update \
  && apt-get -qq -y upgrade \
  && apt-get -qq install --no-install-recommends -y \
@@ -1486,9 +1480,9 @@ const PREPUSH_PYTHON: &str = r##"#!/bin/sh
 # A project that declares none of them fails here, with the names of what is
 # missing and the command that adds them. That failure is an agent's to
 # repair — `pypi.org` is on the coder's allowlist, so adding a development
-# dependency is work it can do. The Rust battery's equivalent hole was not:
-# `cargo-deny` lives in an image no agent can reach, and a coder once spent
-# its three attempts diagnosing that, correctly (2026-09-14).
+# dependency is work it can do. The Rust battery's equivalent hole is not:
+# `cargo-deny` lives in an image no agent can reach, and a coder can only
+# diagnose that, never repair it.
 #
 # **A known absence.** Rust's battery also runs `cargo deny check bans
 # licenses sources` — three stages that need no network. This stack checks no
@@ -1521,27 +1515,26 @@ fi
 #   error: Duplicate module named "pygrep"
 #          (also at "./mutants/src/pygrep/__init__.py")
 #
-# Measured on 2026-09-20, on the first mission of the Python bench: gate 6
-# was green before the campaign and red after it, on a tree the coder had
-# not touched, and nunki opened a volet sending the agent to repair code
-# that was never broken. The first campaign of a project would have poisoned
-# every battery after it.
+# Without the exclusion, gate 6 is green before the campaign and red after
+# it, on a tree the coder has not touched, and nunki opens a volet sending
+# the agent to repair code that was never broken. The first campaign of a
+# project would poison every battery after it.
 #
 # `ruff` reads `.gitignore` and had skipped it already; it is named here
 # anyway, because a project that does not ignore `mutants/` fails for the
 # same reason, and the directory is the stack's own doing — `writable.txt`
 # names it.
 #
-# **Every** tool that walks the tree, and the list is the point: the first
-# fix named ruff and mypy and left pytest out, which then collided on the
-# same copy one command further down —
+# **Every** tool that walks the tree, and the list is the point: excluding
+# it from ruff and mypy alone leaves pytest to collide on the same copy one
+# command further down —
 #
 #   import file mismatch: imported module 'test_pygrep' has this __file__
 #   attribute: /work/proof/mutants/tests/test_pygrep.py
 #
-# — and the battery was red again, for a second reason wearing the same exit
+# — and the battery is red again, for a second reason wearing the same exit
 # status. A directory this tree carries and this stack put there has to be
-# taken out of every walk, not out of the ones that happened to fail first.
+# taken out of every walk, not out of the ones that happen to fail first.
 uv run --frozen --no-sync ruff format --check --exclude mutants .
 uv run --frozen --no-sync ruff check --exclude mutants .
 uv run --frozen --no-sync mypy --exclude '^mutants/' .
@@ -1561,8 +1554,8 @@ uv run --frozen --no-sync pytest --ignore=mutants -m "not system"
 /// by the stack, launched by `nunki`, and — living in the project's home,
 /// mounted read-only — not an agent's to weaken while it is being gated by it.
 ///
-/// Measured against mutmut 3.8.0 on 2026-09-20 before it shipped, which is
-/// the ritual the Rust fragment went through: `mutmut run` refuses every
+/// Checked against mutmut 3.8.0 before it shipped, as the Rust fragment
+/// was: `mutmut run` refuses every
 /// filter but an exact mutant name, and a function no test covers comes back
 /// `not checked` rather than `survived` — so a campaign that reads only
 /// "survived" calls untested code green.
@@ -1592,9 +1585,9 @@ shift
 # for a directory the agent never created and, with `.gitignore` outside a
 # mission's perimeter, cannot ignore either.
 #
-# Measured on `qcoda-compta`, 2026-09-23: a campaign died during mutmut's
-# baseline collection, `mutants/` stayed, and the next gate run came back
-# "the tree holds 1 uncommitted change(s): ?? mutants/".
+# A campaign that dies during mutmut's baseline collection leaves `mutants/`
+# behind, and the next gate run comes back "the tree holds 1 uncommitted
+# change(s): ?? mutants/".
 #
 # A trap, and set before anything can create the directory, because the exits
 # that matter are the early ones — `set -eu` leaves through most of them. It
@@ -1613,8 +1606,7 @@ trap 'rm -rf mutants' EXIT
 # that touched only tests would leave nothing to mutate, and mutmut answers
 # that with `Stopping early, because we could not find any test case for any
 # mutant` and a non-zero status. `nunki` reads that as a campaign that could
-# not run, and gate 7 asks for ever. Measured on 2026-09-21, on a repository
-# whose first branch touched two test files and no source at all.
+# not run, and gate 7 asks for ever.
 #
 # pytest's own shapes, and no others: anything under a `tests/` directory, a
 # `test_*.py`, a `*_test.py`, and `conftest.py`.
@@ -1651,8 +1643,8 @@ fi
 # Set before anything runs, because what it protects is collection. Without
 # it the campaign dies there, and what it leaves behind is the driver's
 # connection error and "the campaign could not run" — true, unhelpful, and
-# three layers away from the cause. Measured 2026-09-23, on the first mission
-# of a real project whose system tests opened a database.
+# three layers away from the cause — typically a system test that opens a
+# database.
 export PYTEST_ADDOPTS="${PYTEST_ADDOPTS:+$PYTEST_ADDOPTS }-m \"not system\""
 
 uv sync --frozen --all-groups >&2
@@ -1697,8 +1689,8 @@ rm -rf mutants
 #
 # The existence of `mutants/` is no guard: mutmut copies the tree into it
 # *before* it generates anything, so the directory is there even when the
-# campaign died on the first file. Measured the same day, and the script then
-# printed `{"campaign":"done"}` with no survivor — gate 7 green on nothing,
+# campaign died on the first file. Taken as a guard, it lets the script print
+# `{"campaign":"done"}` with no survivor — gate 7 green on nothing,
 # which is the one failure this contract exists to prevent.
 if ! uv run --frozen --no-sync mutmut run >&2; then
   echo "nunki: the campaign could not run, so no mutant was tested" >&2
@@ -1847,7 +1839,7 @@ printf '{"campaign":"done"}\n'
 /// the stack, launched by `nunki`, and mounted read-only — what judges the
 /// agent is not the agent's to weaken.
 ///
-/// Measured against osv-scanner 2.6.0 on 2026-09-20 before it shipped:
+/// Checked against osv-scanner 2.6.0 before it shipped:
 /// `--offline --offline-vulnerabilities` really does run with no network at
 /// all, against a **read-only** database; there is no `--local-db-path`, so
 /// `XDG_CACHE_HOME` is the only way to say where it is; and the finding to
@@ -1947,9 +1939,9 @@ else
   # The worktree holds the whole repository, and this stack may live in a
   # directory of it (SPEC 4.2, "plusieurs stacks"): the base's lockfile is the
   # one at this stack's place, `git rev-parse --show-prefix` — empty at the
-  # root. Measured 2026-09-27 on `trading-bot-rust-2`'s `frontend/`: without
-  # it the base had no lockfile, and a finding the base already carried came
-  # back as brought by the branch.
+  # root. Without it, a stack in a subdirectory such as `frontend/` finds no
+  # lockfile at the base, and a finding the base already carried comes back
+  # as brought by the branch.
   prefix="$(git rev-parse --show-prefix)"
   if git worktree add -q --detach "$work/base" "$base" 2>/dev/null; then
     if [ -f "$work/base/$prefix$lock" ]; then
@@ -2195,7 +2187,7 @@ const RUN_PYTHON: &str = r##"#!/bin/sh
 #  - keep the id on its command line. `nunki` recognises this process by it, and
 #    that is why the command below is **not** `exec`ed: replacing the process
 #    replaces its command line, and the application would be reported as
-#    stopped one second after it started (measured, 2026-09-10).
+#    stopped one second after it started.
 #  - stay in the foreground. A script that forks and exits reports an
 #    application that is not running.
 #  - listen on the address the mission's services can reach, not only on
@@ -2277,8 +2269,8 @@ fi
 
 /// The coder's image for a Next.js project.
 ///
-/// Three things it carries that the other two stacks do not, each because it
-/// was measured: `procps`, without which Stryker dies on `spawn ps ENOENT`;
+/// Three things it carries that the other two stacks do not, each for a
+/// reason: `procps`, without which Stryker dies on `spawn ps ENOENT`;
 /// a shared `COREPACK_HOME`, without which the agent re-downloads pnpm on
 /// first use and cannot when the network is closed; and Chromium, because
 /// the integrator's battery drives a browser and no allowlist names
@@ -2304,8 +2296,8 @@ ARG GID=1000
 # since would never reach a freshly built image.
 #
 # `procps` is not decoration: Stryker spawns `ps -o pid --no-headers --ppid`
-# to find its children, and a slim image has no `ps`. Measured 2026-09-21 —
-# the campaign died with `spawn ps ENOENT` before testing a single mutant.
+# to find its children, and a slim image has no `ps`: without it the
+# campaign dies with `spawn ps ENOENT` before testing a single mutant.
 RUN apt-get -qq update \
  && apt-get -qq -y upgrade \
  && apt-get -qq install --no-install-recommends -y \
@@ -2345,7 +2337,7 @@ const NEXT_TOOLS: &str = r##"# pnpm, baked in rather than fetched on first use.
 # `registry.npmjs.org` the first time it runs, into the **calling user's**
 # `~/.cache/node/corepack`. Prepared as root and then handed to `agent`, that
 # cache is the wrong user's, and the agent fetches it again — which fails
-# outright when the network is closed. Measured 2026-09-21. `COREPACK_HOME`
+# outright when the network is closed. `COREPACK_HOME`
 # puts it somewhere both users read.
 ARG PNPM=12.5.1
 ENV COREPACK_HOME=/opt/corepack
@@ -2375,12 +2367,10 @@ RUN npx --yes playwright@${PLAYWRIGHT} install --with-deps chromium \
 #
 # This stack installs with pnpm, through corepack, and never calls npm — but
 # npm ships inside the Node image with a dependency tree of its own, and that
-# tree is what the image scan reports. Measured 2026-09-21, the first time
-# this image was scanned: seven critical or high advisories **with fixes
-# published**, `tar` 7.5.11 among them, none of them from a line of this
-# file. Upgrading npm to its latest took it to four rather than none: its
-# bundled tree is always a patch or two behind whatever the advisory database
-# knows.
+# tree is what the image scan reports: critical or high advisories **with
+# fixes published**, `tar` 7.5.11 among them, none of them from a line of
+# this file. Upgrading npm to its latest does not clear them: its bundled
+# tree is always a patch or two behind whatever the advisory database knows.
 #
 # So it is removed rather than chased. It is the last line that needs it —
 # `npx` above is how Playwright arrives — and corepack, which is a separate
@@ -2395,7 +2385,7 @@ RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 const DOCKERFILE_NEXT_USER: &str = r##"# The official Node image ships a `node` user at uid and gid 1000 — the id the
 # first user of a Linux or WSL machine has. `useradd -u 1000` then fails with
 # "UID 1000 is not unique", and the image does not build for that human at all
-# (measured 2026-09-26; macOS, at uid 501, never saw it). Whoever holds the
+# (macOS, where the first uid is 501, never meets it). Whoever holds the
 # human's uid in the base image goes first: nothing in this image runs as
 # `node`, and the agent must be the one owning what it writes (SPEC 4.2 bis).
 RUN holder="$(getent passwd ${UID} | cut -d: -f1)" \
@@ -2469,9 +2459,9 @@ if [ -n "$missing" ]; then
 fi
 
 # `reports` and `.stryker-tmp` are left out of every walk that can be told
-# to skip them. Gate 7's campaign writes both, and the Python stack was
-# bitten by exactly this: its battery type-checked the copy the campaign had
-# left beside the tree and went red on code nobody had touched (2026-09-20).
+# to skip them. Gate 7's campaign writes both, and a battery that walks into
+# them does what the Python stack's battery comment describes: it checks the
+# copy the campaign left beside the tree and goes red on code nobody touched.
 #
 # The campaign here clears its own sandbox — `--cleanTempDir always`, which
 # holds even when it is killed — and deletes its report once it has read it.
@@ -2501,7 +2491,7 @@ pnpm exec vitest run --exclude '**/reports/**' --exclude '**/.stryker-tmp/**' \
 
 /// The mutation campaign a Next.js project runs (SPEC 4.4, gate 7).
 ///
-/// Measured against Stryker 9.6.1 on 2026-09-21 before it shipped: its exit
+/// Checked against Stryker 9.6.1 before it shipped: its exit
 /// status says nothing — 0 with survivors, 0 on a file that does not exist,
 /// 0 on a source that does not parse — so the report is the guard; and its
 /// mutant ids are per-file sequential integers, so they are not the ids
@@ -2588,8 +2578,8 @@ rm -f "$report"
 # shellcheck disable=SC2086
 pnpm exec stryker run $files --cleanTempDir always --reporters json >&2 || true
 
-# The counterpart of the Rust fragment's `[ ! -f "$missed" ]`. Measured the
-# same day, on a source made not to parse: Stryker writes no report at all.
+# The counterpart of the Rust fragment's `[ ! -f "$missed" ]`. On a source
+# that does not parse, Stryker writes no report at all.
 if [ ! -f "$report" ]; then
   echo "nunki: the campaign left no report at $report, so nothing was measured" >&2
   exit 1
@@ -2747,9 +2737,9 @@ else
   # The worktree holds the whole repository, and this stack may live in a
   # directory of it (SPEC 4.2, "plusieurs stacks"): the base's lockfile is the
   # one at this stack's place, `git rev-parse --show-prefix` — empty at the
-  # root. Measured 2026-09-27 on `trading-bot-rust-2`'s `frontend/`: without
-  # it the base had no lockfile, and a finding the base already carried came
-  # back as brought by the branch.
+  # root. Without it, a stack in a subdirectory such as `frontend/` finds no
+  # lockfile at the base, and a finding the base already carried comes back
+  # as brought by the branch.
   prefix="$(git rev-parse --show-prefix)"
   if git worktree add -q --detach "$work/base" "$base" 2>/dev/null; then
     if [ -f "$work/base/$prefix$lock" ]; then
@@ -2830,10 +2820,10 @@ function groups(path) {
 // relitigate, not a debt to pay down (SPEC 4.4).
 //
 // **Both** `SEMVER` and `ECOSYSTEM`, and the first is the one that matters
-// here. Measured 2026-09-21: npm advisories publish their ranges as `SEMVER`
-// — `qs` fixed in 6.16.0 sits in one — and a reader that looked only at
-// `ECOSYSTEM`, which is what the PyPI database uses, reported every npm
-// finding as having no fix at all. That is not a cosmetic difference: an
+// here. npm advisories publish their ranges as `SEMVER` — `qs` fixed in
+// 6.16.0 sits in one — and a reader that looks only at `ECOSYSTEM`, which
+// is what the PyPI database uses, reports every npm finding as having no
+// fix at all. That is not a cosmetic difference: an
 // empty `fix` tells a human nothing can be done, and it is what stops nunki
 // calling an accepted finding an exception a fix has overtaken.
 //
@@ -2857,8 +2847,8 @@ function fixedIn(advisories, name) {
 // The direct dependency that pulled `name` in, or "" when it is one. A
 // transitive dependency is replaceable by nobody but its parent, so what is
 // named is the last link before the project itself (SPEC 4.4). Only pnpm is
-// asked, and only offline — measured 2026-09-21, `pnpm why <pkg> --offline`
-// prints the chain with no network at all.
+// asked, and only offline: `pnpm why <pkg> --offline` prints the chain
+// with no network at all.
 function broughtBy(name) {
   if (lock !== "pnpm-lock.yaml") return "";
   let out;
@@ -3015,7 +3005,7 @@ const RUN_NEXT: &str = r##"#!/bin/sh
 #  - keep the id on its command line. `nunki` recognises this process by it, and
 #    that is why the command below is **not** `exec`ed: replacing the process
 #    replaces its command line, and the application would be reported as
-#    stopped one second after it started (measured, 2026-09-10).
+#    stopped one second after it started.
 #  - stay in the foreground. A script that forks and exits reports an
 #    application that is not running.
 #  - listen on the address the mission's services can reach: `-H 0.0.0.0`,
@@ -3061,8 +3051,8 @@ fi
 # them. On a mismatch Playwright says "Looks like Playwright was just
 # installed or updated. Please run `playwright install`" — advice that cannot
 # be followed in here, because its CDN is on no allowlist and should not be
-# (SPEC 4.1 bis, rule 6). Measured 2026-09-21: browsers from 1.57.0 against a
-# project on 1.63.0, and every test failed on that message.
+# (SPEC 4.1 bis, rule 6). With browsers from one version and a project on
+# another, every test fails on that message.
 #
 # So the versions are compared first, and the answer names the one the image
 # ships. A run that cannot start a browser has proved nothing, and saying why
@@ -3126,9 +3116,8 @@ pub fn fragment(stack: &str) -> Vec<(&'static str, String, bool)> {
                  #\n\
                  # Not because the audit is impossible in a container: gate 8\n\
                  # runs it, `--offline`, against the database the host filled\n\
-                 # and `nunki` mounts read-only (measured 2026-09-17 — it finds\n\
-                 # the advisory with no network at all). This line said it could\n\
-                 # never pass here, and that was wrong.\n\
+                 # and `nunki` mounts read-only, and it finds the advisory with\n\
+                 # no network at all.\n\
                  #\n\
                  # It is a division of labour: the advisories question needs the\n\
                  # mounted database, the unfiltered view and the comparison\n\

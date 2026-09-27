@@ -6,14 +6,12 @@
 //! development tool is not a deliverable, and a second copy under version
 //! control is a copy nothing reads.
 //!
-//! Its own repository had kept six of those files since before the move.
-//! Measured on 2026-09-23: four of the six differed from the live ones at
-//! `~/.nunki/2564429a-…/stacks/rust/`, and four more files that home carries
-//! — `security.sh`, `system.sh`, `advisories.txt`, `caches.txt` — were not
-//! there at all. Nothing read them, nothing updated them, and nothing said
-//! so. Someone editing one would have been editing a file with no effect.
+//! Tracked copies of those files drift from the live ones at
+//! `~/.nunki/<project>/stacks/<stack>/`, and miss the files a release adds
+//! there. Nothing reads them, nothing updates them, and nothing says so:
+//! someone editing one edits a file with no effect.
 //!
-//! `.gitignore` alone would not have caught it: a path already tracked stays
+//! `.gitignore` alone does not catch it: a path already tracked stays
 //! tracked whatever `.gitignore` says. This asks git what it actually holds.
 
 use std::path::Path;

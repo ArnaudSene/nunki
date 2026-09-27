@@ -40,7 +40,7 @@ pub const FIREWALL_SERVICE: &str = "firewall";
 pub const AGENT_SERVICE: &str = "agent";
 /// The only files an agent may write in the mission folder (SPEC 4.1).
 ///
-/// `MUTANTS.triage.json` is the fourth, added with gate 7 on 2026-09-10: the
+/// `MUTANTS.triage.json` is the fourth, added with gate 7: the
 /// coder answers a campaign's survivors there, and it is a **different file**
 /// from `MUTANTS.json` on purpose. What decides who wrote a line is this
 /// list, not the line — so the outcome no machine can check lives in the
@@ -120,8 +120,8 @@ pub struct Plan {
     ///
     /// Not optional in practice: a service that names a volume the document
     /// does not declare makes the whole project invalid — `service "db"
-    /// refers to undefined volume dbdata: invalid compose project`, measured
-    /// on Compose v5.1.2, 2026-09-10. And it is exactly where a project keeps
+    /// refers to undefined volume dbdata: invalid compose project` on Compose
+    /// v5.1.2. And it is exactly where a project keeps
     /// what must survive a profile switch, so dropping the block would drop
     /// the state SPEC 4.2's first rule exists to keep.
     pub project_volumes: Option<Value>,
@@ -167,14 +167,13 @@ pub fn generate(plan: &Plan, dialect: &Dialect) -> Result<String, ComposeError> 
 /// services up between them. Compose refuses anything but lowercase letters,
 /// digits, `-` and `_`.
 ///
-/// The session is in it because the slot alone is not unique. Measured on
-/// 2026-09-16: `test-nunki` and `notes-api` both had a slot called `one`, so
-/// both were the Compose project `nunki-one` — one set of containers, one
-/// network, one harness volume holding both projects' sessions. Starting a
-/// mission on either would have recreated the other's containers under a
-/// running agent, and each HQ's own `locks/one` would have said the slot was
-/// free. The session comes first so that `docker ps` groups a project's
-/// containers together, which is the reading that was impossible before.
+/// The session is in it because the slot alone is not unique. Two projects
+/// that both have a slot called `one` would otherwise both be the Compose
+/// project `nunki-one` — one set of containers, one network, one harness
+/// volume holding both projects' sessions. Starting a mission on either would
+/// recreate the other's containers under a running agent, and each HQ's own
+/// `locks/one` would say the slot was free. The session comes first so that
+/// `docker ps` groups a project's containers together.
 pub fn project_name(session: &str, slot: &str) -> Result<String, ComposeError> {
     // The slot is judged on its own, as it was before the session joined it:
     // prefixed, a slot named `_1` or `///` would be legal for Compose by the

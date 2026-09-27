@@ -209,8 +209,7 @@ pub fn stop(
 /// One verb for both because they are one thing to the human who types it:
 /// the mission was held, and it is held no longer. SPEC 4.5 names `resume`
 /// as `pause`'s antonym and calls a stopped mission "reprenable" without
-/// saying by which verb; the pairing was derived from that, then confirmed
-/// by Arnaud on 2026-09-10.
+/// saying by which verb; the pairing is derived from that.
 ///
 /// It does not require a run: a mission held between two runs has none, and
 /// that is precisely a mission worth resuming.
@@ -224,12 +223,11 @@ pub fn resume(
     let lifted = state.release();
     store.save(&state)?;
 
-    // Only a frozen container is unfrozen. Measured on Docker 28 the day
-    // this was written: `unpause` on a container that is merely running is
-    // refused ("is not paused", exit 1) — and after a bare `stop` the run
-    // keeps going, so that is the *common* path here, not the odd one. The
-    // engine already has the word for the distinction (`Liveness::Paused`),
-    // which is what it was given one for.
+    // Only a frozen container is unfrozen. On Docker 28, `unpause` on a
+    // container that is merely running is refused ("is not paused", exit 1) —
+    // and after a bare `stop` the run keeps going, so that is the *common* path
+    // here, not the odd one. The engine already has the word for the
+    // distinction (`Liveness::Paused`), which is what it was given one for.
     if let Some(handle) = &state.run
         && engine.liveness(&handle.container)? == crate::engine::Liveness::Paused
     {

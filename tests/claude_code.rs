@@ -445,7 +445,7 @@ fn a_role_is_allowed_the_tools_its_work_needs_and_the_prompt_survives() {
     // on "Input must be provided either through stdin or as a prompt
     // argument".
     // Asserted as the property rather than by counting the arguments: the
-    // guards carry the invocation's settings too since 2026-09-16, and a
+    // guards carry the invocation's settings too, and a
     // count would go red for a reason that has nothing to do with the trap
     // it was written for.
     assert_eq!(
@@ -775,9 +775,9 @@ fn the_coder_is_told_the_line_that_ends_its_lot() {
 /// invocation, where the agent cannot get it wrong.
 ///
 /// `role.rs` asks for the same thing, and asking is worth what the agent's
-/// care is worth. This is the other half — and it was the missing half:
-/// `notes-api`'s integrator signed `Co-Authored-By: Claude Sonnet 5` on
-/// 2026-09-16 while doing everything else it was told.
+/// care is worth. This is the other half, and the one that holds: an agent
+/// can follow every other instruction and still sign
+/// `Co-Authored-By: Claude Sonnet 5` when only the prompt asks it not to.
 #[test]
 fn the_harness_is_told_to_sign_nothing_and_says_it_once() {
     use nunki::harness::Harness;
@@ -788,7 +788,7 @@ fn the_harness_is_told_to_sign_nothing_and_says_it_once() {
         let line = guards.args.join(" ");
 
         // One `--settings`, and one only: two of them and the CLI reads the
-        // last, measured in the agent image on 2026-09-16 — a second flag
+        // last, measured in the agent image — a second flag
         // added elsewhere would silently take this one's place.
         assert_eq!(
             guards.args.iter().filter(|a| *a == "--settings").count(),

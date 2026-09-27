@@ -196,9 +196,9 @@ fn a_campaign_found_stopped_writes_no_result() {
 /// A campaign that stopped **and said why** on stderr is the branch's defect,
 /// not a machine's, and it is told apart from one that vanished.
 ///
-/// Measured on `qcoda-compta` mission-15, 2026-09-25: a guard failed inside
-/// `mutants/`, the stderr named it, and the monitor stopped on "lost" — so the
-/// volet gate 7 would have sent waited for a human to type `nunki verify`.
+/// When a guard fails inside `mutants/` and the stderr names it, a monitor
+/// that stops on "lost" leaves the volet gate 7 would send waiting for a
+/// human to type `nunki verify`.
 #[test]
 fn a_campaign_that_stopped_and_said_why_goes_back_to_the_branch() {
     use nunki::engine::{ExecOutput, fake::FakeEngine};
@@ -342,7 +342,7 @@ fn a_launch_ends_the_campaign_it_would_have_killed_anyway() {
                 pid: Some(41),
                 log: log.clone(),
                 // Never overrun, so that "still running" stays the answer
-                // however long after 2026-09-18 this test is played: the
+                // however long after `started_at` this test is played: the
                 // deadline has its own arm, and it is not what this is about.
                 deadline_minutes: u32::MAX,
             },
@@ -743,11 +743,10 @@ fn live_a_campaign_is_launched_watched_and_read_back() {
     // a campaign's answer looked wrong — it reports what **this** run found,
     // not that plus what the one before it found.
     //
-    // Measured on `notes-3` on 2026-09-16: four campaigns on one fingerprint
-    // wrote into one log, because the spawner appends and the name carries
-    // the fingerprint. The runs found 5, then 1, then none, then none;
-    // `MUTANTS.json` said six, every one of them dead, and gate 7 sent a
-    // coder back three times for mutants that no longer existed.
+    // Several campaigns on one fingerprint write into one log, because the
+    // spawner appends and the name carries the fingerprint. If the runs find
+    // 5, then 1, then none, `MUTANTS.json` must not say six, every one of them
+    // dead — or gate 7 sends a coder back for mutants that no longer exist.
     std::fs::remove_file(mission.join(mutants::FILE)).unwrap();
     let again = loop {
         match go() {
@@ -1142,9 +1141,9 @@ fn a_triage_file_the_coder_wrote_and_hq_cannot_read_is_said_not_ignored() {
 /// The mutation script `nunki init` ships, run against the real cargo-mutants
 /// (SPEC 4.4, gate 7).
 ///
-/// It had never been run. Every test of gate 7 used a stub that echoed a JSON
-/// line, and the shipped script was wrong in two ways that only running it
-/// could show — measured against cargo-mutants 27.1.0 on 2026-09-10:
+/// A test of gate 7 that uses a stub echoing a JSON line proves nothing about
+/// the shipped script, which can be wrong in two ways that only running it
+/// shows — measured against cargo-mutants 27.1.0:
 ///
 /// 1. `--output DIR` writes into `DIR/mutants.out/`, not into `DIR`. The
 ///    script read `DIR/missed.txt`, found nothing, and exited 1: every
@@ -1243,9 +1242,8 @@ fn live_the_shipped_mutation_script_reads_a_real_campaign() {
 
 /// A campaign that killed everything has nobody to triage, and says so.
 ///
-/// The sentence used to ask for "one of the three outcomes" whatever the
-/// campaign found — measured on `notes-api` on 2026-09-16, where a clean
-/// campaign still demanded outcomes for nobody. A line that reads the same
+/// A sentence that asks for "one of the three outcomes" whatever the
+/// campaign found makes a clean campaign demand outcomes for nobody. A line that reads the same
 /// whatever happened is a line that stops being read.
 #[test]
 fn a_campaign_with_no_survivor_asks_for_no_outcome() {
@@ -1272,7 +1270,7 @@ fn a_campaign_with_no_survivor_asks_for_no_outcome() {
 /// Every sentence this module hands a human is one line, with no run of
 /// spaces in the middle of it.
 ///
-/// Measured on 2026-09-16: `nunki verify` printed
+/// Without this, `nunki verify` can print
 ///
 /// ```text
 /// started; it runs detached, and `nunki verify`                    again reads it back
@@ -1332,9 +1330,9 @@ fn a_campaign_on_the_same_content_is_not_run_again() {
 /// the stack's `mutation.sh`, to the tool's version, or to an exclusion added
 /// since — and every one of those changes the answer.
 ///
-/// Before this existed the only way past it was deleting `MUTANTS.json` by
-/// hand, and on 2026-09-17 that took `MUTANTS.triage.json` with it: the engine
-/// replaced the missing file with a directory and the mission came down on
+/// Without it the only way past is deleting `MUTANTS.json` by hand, which is
+/// easily done with `MUTANTS.triage.json` alongside: the engine then replaces
+/// the missing file with a directory and the mission comes down on
 /// `Is a directory (os error 21)`. A verb is cheaper than the workaround it
 /// replaces.
 #[test]

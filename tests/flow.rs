@@ -251,18 +251,15 @@ fn stalls_and_mission_failures_consume_attempts_up_to_the_bound() {
 /// a return to the coder**: it counts, and the count is what ends a mission
 /// the coder cannot fix.
 ///
-/// This test asserted the opposite until 2026-09-17 — it was named
-/// `a_failed_gate_sends_the_coder_a_fix_run_without_counting_a_volet` and
-/// required `volets() == 0` — and it was wrong. SPEC 7 says the loop is
-/// bounded and what the bound counts: "au troisième retour au codeur sur une
-/// même mission, le HQ ne relance pas". Any return, not only the one a red
-/// verdict opens.
+/// Exempting this return from the count is wrong. SPEC 7 says the loop is
+/// bounded and what the bound counts: on the third return to the coder on
+/// the same mission, HQ does not relaunch. Any return, not only the one a
+/// red verdict opens.
 ///
-/// What the exemption cost, measured on `notes-3` on 2026-09-16: gate 7 red
-/// on survivors no test could kill, the agent declaring its volet done, the
-/// gates played again, the same gate red again, the same volet 0 opened
-/// again — **twenty-eight times in half an hour**, 34 million tokens, and
-/// nothing in the flow that could have stopped it.
+/// What the exemption costs: gate 7 red on survivors no test can kill, the
+/// agent declaring its volet done, the gates played again, the same gate red
+/// again, the same volet 0 opened again — dozens of times, millions of
+/// tokens, and nothing in the flow that can stop it.
 #[test]
 fn a_failed_gate_opens_a_volet_that_counts_and_the_third_hands_over() {
     let mut flow = Flow::new(header(none(), Security::Gates, Bounds::default())).unwrap();

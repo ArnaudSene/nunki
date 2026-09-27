@@ -1,11 +1,11 @@
 //! The ledger of sessions: which home belongs to which repository (SPEC 4.1).
 //!
-//! A project's home used to be named after its repository's directory, so two
-//! repositories called `api` could not be orchestrated at once: the second was
-//! refused rather than served, because one name would have meant one home, one
-//! HQ and one set of missions. Decided by Arnaud on 2026-09-16: a home is named
-//! by an identifier nothing else carries, and `~/.nunki/sessions.json` is the
-//! ledger that says, for each identifier, the repository it belongs to.
+//! A home named after its repository's directory would mean two repositories
+//! called `api` could not be orchestrated at once: the second would be refused
+//! rather than served, because one name would mean one home, one HQ and one set
+//! of missions. So a home is named by an identifier nothing else carries, and
+//! `~/.nunki/sessions.json` is the ledger that says, for each identifier, the
+//! repository it belongs to.
 //!
 //! The ledger is an **index, never the authority**. Every home's `nunki.yaml`
 //! names its own repository (`root:`), so a ledger that is lost can be rebuilt

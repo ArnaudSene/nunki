@@ -35,7 +35,7 @@ pub const FILE: &str = "MUTANTS.json";
 ///
 /// Two files rather than one field, because what decides who wrote a line is
 /// the **mount**, not the content: `nunki` cannot read a file and tell whose
-/// hand a line came from (SPEC 4.1, decided 2026-09-10). The agent may write
+/// hand a line came from (SPEC 4.1). The agent may write
 /// the two outcomes that rest on a committed test, and physically cannot
 /// write the third.
 pub const TRIAGE_FILE: &str = "MUTANTS.triage.json";
@@ -87,7 +87,7 @@ pub enum Triage {
     /// check — which is why it is not the agent's to give: it lives in the
     /// HQ's file, and one found in the agent's makes the gate red. Letting
     /// the graded fill in the only box nobody can check is a gate that
-    /// empties itself (SPEC 4.4, decided 2026-09-10).
+    /// empties itself (SPEC 4.4).
     Equivalent {
         why: String,
         /// The commit of the campaign this ruling was first given on, when it
@@ -532,10 +532,10 @@ pub fn lift_equivalent(dir: &Path, id: &str) -> Result<(), MutantsError> {
 /// depends on what it ran *with*: the stack's `mutation.sh`, the tool's
 /// version, an exclusion added since. None of those move the fingerprint.
 ///
-/// Before this existed the only way past it was to delete `MUTANTS.json` by
-/// hand, and on 2026-09-17 that took `MUTANTS.triage.json` with it — a file
-/// the engine then replaced with a directory, which brought the mission down.
-/// A verb is cheaper than the workaround it replaces.
+/// Without it the only way past is to delete `MUTANTS.json` by hand, which
+/// can take `MUTANTS.triage.json` with it — a file the engine then replaces
+/// with a directory, which brings the mission down. A verb is cheaper than
+/// the workaround it replaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Replay {
     /// Only when the touched files have changed. The default (SPEC 4.4).
@@ -608,9 +608,9 @@ pub enum Progress {
 ///
 /// Two sentences and not one: with nothing alive there is nobody to triage,
 /// and "each needs one of the three outcomes" would then be a sentence about
-/// no one. Measured on `notes-api` on 2026-09-16, where a clean campaign
-/// still asked for outcomes it did not need — a line that says the same
-/// thing whatever happened is a line a reader learns to skip.
+/// no one. A clean campaign must not ask for outcomes it does not need — a
+/// line that says the same thing whatever happened is a line a reader
+/// learns to skip.
 pub fn ended(survivors: usize) -> String {
     if survivors == 0 {
         return format!("finished — no survivor in {FILE}: gate 7 has nothing left to ask");
@@ -625,10 +625,9 @@ pub fn ended(survivors: usize) -> String {
 /// launched it.
 ///
 /// Here rather than in `main.rs` for the same reason [`ended`] is: a sentence
-/// a test can read is a sentence a test can catch. This one was printed with
-/// fifty spaces in the middle of it for half a day — `cargo fmt` had joined a
-/// multi-line literal and kept the indentation inside the string, and nothing
-/// was looking.
+/// a test can read is a sentence a test can catch. `cargo fmt` can join a
+/// multi-line literal and keep the indentation inside the string, printing
+/// fifty spaces in the middle of it, and only a test notices.
 pub fn started(mission: &str) -> String {
     format!("started; it runs detached, and `nunki verify {mission}` reads it back")
 }
@@ -721,10 +720,9 @@ pub fn read_back(
             // The **stderr** file, not the log. A campaign that got nowhere
             // wrote nothing to stdout — that is what "after 0 line(s)" says —
             // so naming the log sends whoever reads this to an empty file,
-            // precisely when they need the reason. Measured twice on
-            // `qcoda-compta`, 2026-09-23 and 2026-09-24: both times the log
-            // was 0 bytes and the sibling `.err` held the traceback that
-            // explained it, and both times it had to be found by hand.
+            // precisely when they need the reason. Typically the log is
+            // 0 bytes and the sibling `.err` holds the traceback that
+            // explains it, which otherwise has to be found by hand.
             //
             // The log is still named when it holds something: a campaign that
             // printed survivors and then died says more there than in its
@@ -746,10 +744,10 @@ pub fn read_back(
                 text.lines().count(),
                 diagnosis.display()
             );
-            // Measured on `qcoda-compta` mission-15, 2026-09-25: a guard
-            // failed inside `mutants/` and the stderr said so, gate 7 would
-            // have gone red on it — and the monitor stopped here instead,
-            // so the volet waited for someone to type `nunki verify`.
+            // A campaign whose stderr explains the failure (a guard failing
+            // inside `mutants/`, say) is one gate 7 can go red on. Reporting
+            // it as lost instead stops the monitor here, and the volet waits
+            // for someone to type `nunki verify`.
             if said_why {
                 Progress::CouldNotRun(why)
             } else {
@@ -815,10 +813,9 @@ pub fn campaign(
     // Gate 7 judges a campaign by the fingerprint of what it ran on, so the
     // gate and the launcher have to mean the same thing by "what this branch
     // brought". They were two calls in two files, and in a slot the base has
-    // two readings: measured on `notes-4` on 2026-09-18, the launcher's set
-    // held eight paths and the gate's four, their fingerprints never agreed,
-    // and gate 7 asked for a campaign that had just run — fifty-seven turns
-    // of `verify` went round it.
+    // two readings. When the launcher and the gate computed the touched set
+    // separately, their fingerprints could disagree, and gate 7 kept asking
+    // for a campaign that had just run.
     //
     // One call, in the place that cannot be bypassed, rather than a rule the
     // next caller has to know.
@@ -876,11 +873,10 @@ pub fn campaign(
     // campaign replayed over content that has not changed writes into the
     // same file as the one before it, and `parse` reads the union.
     //
-    // Measured on `notes-3` on 2026-09-16, four campaigns on one fingerprint:
-    // 5 survivors, then 1, then none, then none — and `MUTANTS.json` said
-    // six, every one of them dead. Gate 7 sent a coder back three times for
-    // mutants that no longer existed, and nothing in the flow could tell:
-    // the file said what the file said.
+    // Appending instead, several campaigns on one fingerprint (5 survivors,
+    // then 1, then none) leave `MUTANTS.json` reporting six, every one of
+    // them dead. Gate 7 then sends a coder back for mutants that no longer
+    // exist, and nothing in the flow can tell: the file says what it says.
     std::fs::write(&log, "").map_err(|e| MutantsError::Io(log.clone(), e))?;
     let spawner = crate::engine::spawn::ContainerSpawner::new(
         engine,

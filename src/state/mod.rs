@@ -91,8 +91,8 @@ pub struct MissionState {
     /// has not been measured.
     #[serde(default)]
     pub spared: Option<Spared>,
-    /// The coder's harness session, resumed by its next run (SPEC 4.3,
-    /// decided by Arnaud on 2026-09-11): kept from one lot to the next and
+    /// The coder's harness session, resumed by its next run (SPEC 4.3):
+    /// kept from one lot to the next and
     /// across a harness failure or a spared turn, dropped when an attempt
     /// fails — a context that failed is not the one to carry on with.
     #[serde(default, skip_serializing_if = "Option::is_none")]

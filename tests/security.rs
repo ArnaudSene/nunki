@@ -3,7 +3,7 @@
 
 use nunki::security::{Finding, Kind, read};
 
-/// The lines `security.sh` actually printed, measured on 2026-09-17 against
+/// The lines `security.sh` actually printed, measured against
 /// cargo-deny 0.20.2 and trufflehog 3.97.5. A reader tested on invented input
 /// is a reader tested against its author's idea of the format.
 const MEASURED: &str = r#"

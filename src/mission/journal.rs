@@ -2,7 +2,7 @@
 //!
 //! It lives in the `ÉTAT DE REPRISE` block, which the agent rewrites before
 //! it stops anyway: one place to read, already demanded by the run contract.
-//! The grammar, decided by Arnaud on 2026-09-11:
+//! The grammar:
 //!
 //! ```text
 //! Lot: L2 — done

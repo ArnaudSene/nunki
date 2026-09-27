@@ -6,7 +6,7 @@
 //!
 //! 1. **The clone has no hard links.** A local clone shares its `.git`
 //!    objects with the repository it came from, and a raw write in the
-//!    container corrupts both (SPEC 3.2, decided after a review found it).
+//!    container corrupts both (SPEC 3.2).
 //! 2. **Its `origin` is a host path that does not exist in the container.**
 //!    That is what makes pushing impossible without relying on any harness.
 //! 3. **It is created beside the repository**, never on another volume: a

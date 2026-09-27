@@ -1,4 +1,4 @@
-//! The mission's monitor (SPEC 4.3, decided by Arnaud on 2026-09-11).
+//! The mission's monitor (SPEC 4.3).
 //!
 //! `nunki` has no system service, and a verb returns: `verify` launches a run
 //! and gives the terminal back. So what watches a run at night, and what

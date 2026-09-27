@@ -227,7 +227,7 @@ fn default_protected_branches() -> Vec<String> {
     vec!["main".to_string(), "master".to_string(), "dev".to_string()]
 }
 
-/// Chosen by Arnaud on 2026-09-12: an agent that keeps working is worth more
+/// An agent that keeps working is worth more
 /// than one refused a tool it needed, now that the container, the firewall
 /// and git are what actually restrain it (SPEC 3.2).
 fn default_permission_mode() -> String {
@@ -276,10 +276,10 @@ pub const WRITABLE_FILE: &str = "writable.txt";
 pub const CACHES_FILE: &str = "caches.txt";
 /// What a stack puts **before** the primary stack's first `FROM` when it is
 /// added onto another stack's image: the global `ARG`s and the stages its
-/// add-on copies from (SPEC 4.2, "plusieurs stacks"). A stage has to come
-/// first because `COPY --from` does not expand a variable — measured
-/// 2026-09-26 — so an official image named by a version cannot be copied from
-/// directly. Absent for a stack that copies from nothing.
+/// add-on copies from (SPEC 4.2, "plusieurs stacks"). A stage has to come first
+/// because `COPY --from` does not expand a variable, so an official image named
+/// by a version cannot be copied from directly. Absent for a stack that copies
+/// from nothing.
 pub const ADDON_STAGES_FILE: &str = "Dockerfile.stages";
 /// What a stack appends to the primary stack's image to add its toolchain.
 /// It starts from an image that ends as the agent, and ends as the agent.
@@ -448,7 +448,7 @@ impl Project {
     /// and the ledger's key (SPEC 4.1).
     ///
     /// What tells two projects apart everywhere a directory name would not.
-    /// Two repositories called `notes-api` have two sessions; two projects
+    /// Two repositories called `api` have two sessions; two projects
     /// whose slots are both called `one` have two homes, and this is what
     /// says so.
     pub fn session(&self) -> String {
@@ -594,9 +594,9 @@ impl Project {
     /// Two failures, and they send a human to different places. Git saying
     /// there is no repository here is one; git unable to run at all — a
     /// permission on the working directory, a missing binary — is the other,
-    /// and it is reported in git's own words. Measured on 2026-09-15: macOS
-    /// stopped git from reading its working directory, and `nunki` answered
-    /// "not inside a git repository" for an hour.
+    /// and it is reported in git's own words. When macOS stops
+    /// git from reading its working directory, `nunki` must not answer "not
+    /// inside a git repository".
     pub fn find_root(start: &Path) -> Result<PathBuf, ProjectError> {
         let dir = if start.is_dir() {
             start
@@ -624,7 +624,7 @@ impl Project {
     ///
     /// Named by an identifier and not by the repository's directory: two
     /// repositories called `api` are two projects, and a name cannot tell
-    /// them apart (SPEC 4.1, decided 2026-09-16).
+    /// them apart (SPEC 4.1).
     pub fn home_for(root: &Path) -> Result<PathBuf, ProjectError> {
         Self::home_in(&Self::nunki_dir()?, root)
     }

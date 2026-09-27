@@ -73,10 +73,9 @@ fn a_fresh_repository_gets_everything_it_needs() {
 
 /// The rules an agent reads have to name what the gates actually refuse.
 ///
-/// Measured on 2026-09-13, on the first mission `nunki` ran end to end: the
-/// coder was never told that gate 3 wants `HEAD` named in the resume block,
-/// nor that gate 5 wants `PR.md` written — and it lost one attempt to each,
-/// on rules it had no way to learn. A gate that enforces what nothing
+/// A coder never told that gate 3 wants `HEAD` named in the resume block,
+/// nor that gate 5 wants `PR.md` written, loses one attempt to each, on
+/// rules it has no way to learn. A gate that enforces what nothing
 /// states is a gate that grades an agent on a secret.
 #[test]
 fn the_rules_it_writes_name_what_the_gates_require() {
@@ -114,9 +113,8 @@ fn the_rules_it_writes_name_what_the_gates_require() {
 /// The image a project builds carries the security updates published since
 /// its base tag was cut.
 ///
-/// Measured on 2026-09-13, on a scan that went red: `libpcre2-8-0` 10.42-1,
-/// carrying CVE-2026-86145 and CVE-2026-89161 — both HIGH, both with a fix
-/// already published. That package arrives with `debian:bookworm-slim` and
+/// A scan goes red on packages such as `libpcre2-8-0`, carrying HIGH CVEs
+/// with a fix already published. Such a package arrives with `debian:bookworm-slim` and
 /// is installed by no line of this Dockerfile, so nothing but an `upgrade`
 /// moves it; pulling the base tag again does nothing while the tag itself
 /// has not been rebuilt.
@@ -164,8 +162,7 @@ fn the_battery_is_executable_or_nothing_can_run_it() {
 }
 
 /// The integrator's gate 6 runs the stack's `system.sh`, and a stack that
-/// ships none holds that gate red for a reason no agent is told — found on
-/// 2026-09-15, before the first integration mission was launched.
+/// ships none holds that gate red for a reason no agent is told.
 ///
 /// What it runs matters as much as its presence. A system test needs the
 /// services, and neither the coder's battery nor CI has them: the script
@@ -464,12 +461,12 @@ fn the_nunki_yaml_it_writes_parses_back_with_the_permission_mode_it_declares() {
 
 /// The prose `nunki init` deposits must read as prose.
 ///
-/// The cause, measured on 2026-09-10: `cargo fmt` joins a `\`-continued
+/// The cause: `cargo fmt` joins a `\`-continued
 /// string literal onto one line and keeps the continuation's indentation as
 /// **real spaces**. A template written to read nicely in the source arrives
 /// on disk with nine-space indents, and Markdown renders those as a code
-/// block. `FOLLOWUP_HQ.md` — the file an agent is told to read first — was
-/// shipped that way for a fortnight.
+/// block. `FOLLOWUP_HQ.md` — the file an agent is told to read first — is
+/// exactly the kind of file that would ship that way unnoticed.
 ///
 /// Markdown and YAML only, on purpose: the Dockerfile and the shell scripts
 /// indent continuation lines because that is how those languages read, and
@@ -528,8 +525,8 @@ fn the_prose_init_writes_reads_as_prose() {
 }
 
 /// The stack fragment ships the campaign gate 7 plays, and the image that can
-/// run it. Measured on 2026-09-10: `mutation.sh` calls `cargo mutants`, and
-/// nothing installed it — so every campaign would have died on a command that
+/// run it. `mutation.sh` calls `cargo mutants`, and if nothing installs it
+/// every campaign dies on a command that
 /// is not there, in a log written by a detached process nobody was reading.
 #[test]
 fn the_rust_image_carries_what_the_mutation_campaign_calls() {
@@ -562,11 +559,11 @@ fn the_rust_image_carries_what_the_mutation_campaign_calls() {
 /// whenever the return type allows it, and `fn main() -> ExitCode` always
 /// allows it. No unit test calls `main`, so that mutant cannot be killed by
 /// any test the coder is able to write, and gate 7 asks for every survivor to
-/// be killed or frozen as a bug. Measured on 2026-09-13: a coder spent a run
-/// extracting `main`'s body into a testable function, and the mutant
-/// reappeared on the thin wrapper that was left.
+/// be killed or frozen as a bug. A coder can spend a whole run extracting
+/// `main`'s body into a testable function, only for the mutant to reappear
+/// on the thin wrapper that is left.
 ///
-/// Measured the same day, on a crate with a binary and a library: 19 mutants
+/// Measured on a crate with a binary and a library: 19 mutants
 /// without the exclusion, 18 with it — it removes `src/main.rs`'s whole body
 /// and keeps `src/lib.rs`'s `replace run -> ExitCode`, the same shape in the
 /// function `main` delegates to, which a test can and must kill.
@@ -576,11 +573,10 @@ fn the_rust_image_carries_what_the_mutation_campaign_calls() {
 /// `prepush.sh` runs `cargo deny check`. An image that does not install
 /// `cargo-deny` fails gate 6 with `no such command: deny` — and no agent can
 /// repair it, because the image is built from a Dockerfile no agent can
-/// reach. Measured on 2026-09-14, on the first mission the renamed tool drove:
-/// the coder diagnosed the hole correctly on all three attempts, said each
-/// time that it was outside its permission, and the mission was handed over
-/// with both its lots built and committed. Three runs to be told what the
-/// generator could have said once.
+/// reach. A coder that diagnoses the hole correctly on all three attempts,
+/// and says each time that it is outside its permission, still gets its
+/// mission handed over with every lot built and committed: three runs to be
+/// told what the generator could have said once.
 #[test]
 fn the_rust_image_carries_what_the_battery_calls() {
     let dir = tempfile::tempdir().unwrap();
@@ -614,15 +610,14 @@ fn the_rust_image_carries_what_the_battery_calls() {
 ///
 /// Not because the audit is impossible in a container — gate 8 runs it,
 /// `--offline`, against the database the host filled and `nunki` mounts
-/// (measured 2026-09-17). This comment said the stage could never pass here,
-/// and that was wrong. It is a division of labour: the advisories question
+/// (measured). It is a division of labour: the advisories question
 /// needs the mounted database, the unfiltered view and the comparison against
 /// the base, and gate 8 has all three.
 ///
-/// Measured on 2026-09-14, in the image this generator writes: with
-/// `cargo-deny` installed the battery still came back non-zero on
+/// Measured in the image this generator writes: with `cargo-deny`
+/// installed the battery still comes back non-zero on
 /// `failed to fetch advisory database … Could not resolve host: github.com`,
-/// while `bans licenses sources` alone passed with `bans ok, licenses ok,
+/// while `bans licenses sources` alone passes with `bans ok, licenses ok,
 /// sources ok`. Asking for the whole thing holds gate 6 red for a reason no
 /// agent can repair — the same shape as the missing command it replaced.
 #[test]
@@ -660,7 +655,7 @@ fn the_battery_asks_only_for_what_the_container_can_reach() {
 /// the whole question, and reading the source would only prove it says what it
 /// says.
 ///
-/// Measured on cargo-mutants 27.1.0, 2026-09-18. A campaign that reaches the
+/// Measured on cargo-mutants 27.1.0. A campaign that reaches the
 /// mutants rotates `mutants.out` to `mutants.out.old` and writes a fresh one,
 /// so a second campaign that kills everything correctly leaves `missed.txt`
 /// empty. A campaign that **cannot run** — a crate that does not parse —
@@ -849,10 +844,10 @@ fn the_campaign_does_not_mutate_a_binarys_entry_point() {
 /// re-running it is the migration path.
 ///
 /// It was undiscoverable: `--stack` has no default, so a bare `nunki init`
-/// skipped the fragment loop entirely and said nothing about it. Measured on
-/// 2026-09-17 — a project missing the `caches.txt` a release had added got
-/// four "kept" lines and no hint that its fragments were never examined. The
-/// remedy existed and nobody could guess it.
+/// skipped the fragment loop entirely and said nothing about it: a project
+/// missing a fragment file a release had added got only "kept" lines and no
+/// hint that its fragments were never examined. The remedy existed and
+/// nobody could guess it.
 #[test]
 fn a_second_init_tops_up_the_stacks_the_project_already_declares() {
     let (_dir, root, nunki) = fresh();
@@ -895,8 +890,8 @@ fn a_first_init_without_a_stack_writes_no_fragment() {
     );
 }
 
-/// A configuration may name a stack this release does not carry yet — the
-/// owner plans Python, TypeScript and Solidity. The declared list is not
+/// A configuration may name a stack this release does not carry yet. The
+/// declared list is not
 /// checked against the known one, because it comes from a file a human wrote
 /// rather than from a flag; so a stack with no fragments is skipped, and does
 /// not leave an empty folder behind.
@@ -1100,9 +1095,8 @@ fn a_ruling_is_matched_on_the_whole_id_and_not_on_a_prefix_of_it() {
 /// cannot resolve is the whole point. It gets a real repository and a base
 /// that is not in it, and never reaches `cargo deny`.
 ///
-/// Measured on 2026-09-18 against a real container, where it warned and
-/// carried on: every finding came back new, and notes-api's gate 8 went red on
-/// a test credential its base already carried.
+/// A script that warns and carries on reports every finding as new, and
+/// gate 8 goes red on a test credential the base already carries.
 #[test]
 #[cfg(unix)]
 fn a_base_it_cannot_read_stops_the_script_instead_of_counting_everything_as_new() {
@@ -1263,7 +1257,7 @@ fn the_image_carries_what_the_security_script_needs() {
 /// The list is not decoration: gate 6 runs `prepush.sh`, gate 6 for the
 /// integrator runs `system.sh`, gate 7 runs `mutation.sh` and gate 8 runs
 /// `security.sh`. A fragment missing one holds that gate red for a reason no
-/// agent is told, which is what happened to the Rust stack on 2026-09-15.
+/// agent is told.
 #[test]
 fn a_python_project_gets_every_file_its_gates_read() {
     let (_d, root, nunki) = fresh();
@@ -1320,7 +1314,7 @@ fn a_python_project_gets_every_file_its_gates_read() {
 
 /// Gate 8's unfiltered view has to be one the project cannot filter.
 ///
-/// Measured on osv-scanner 2.6.0, 2026-09-20: the tool loads
+/// Measured on osv-scanner 2.6.0: the tool loads
 /// `osv-scanner.toml` **from the scanned tree on its own** — "Loaded filter
 /// from: /w/osv-scanner.toml" with no `--config` given at all. The first
 /// draft of this fragment relied on that absence, so the run meant to see
@@ -1376,7 +1370,7 @@ fn the_python_audit_asks_for_a_view_the_project_cannot_filter() {
 /// A campaign that could not run must not reach the line that says it
 /// finished.
 ///
-/// Measured on mutmut 3.8.0, 2026-09-20: `mutmut run` exits **0** whether
+/// Measured on mutmut 3.8.0: `mutmut run` exits **0** whether
 /// every mutant was killed or some survived, and **1** when it could not run
 /// at all. The first draft swallowed that status and guarded on the
 /// `mutants/` directory instead — which mutmut creates *before* it generates
@@ -1461,16 +1455,17 @@ fn the_python_integrators_battery_runs_the_system_tests_and_only_those() {
 
 /// The battery does not read what the campaign leaves behind.
 ///
-/// Measured on 2026-09-20, on the first mission of the Python bench. Gate 7's
+/// On a Python stack, gate 7's
 /// campaign runs `mutmut`, which copies the whole tree into `mutants/` before
 /// it generates anything. Git ignores that directory, so the `git clean -fd`
-/// `nunki exec` performs leaves it where it is, and the next battery type-checked
-/// two copies of every module — `Duplicate module named "pygrep"`, exit 2.
+/// `nunki exec` performs leaves it where it is, and the next battery
+/// type-checks two copies of every module — `Duplicate module named
+/// "pygrep"`, exit 2.
 ///
-/// Gate 6 was green before the campaign and red after it, on a tree the coder
-/// had not touched, and `nunki` opened a volet sending the agent to repair
-/// code that was never broken. The first campaign of a project would have
-/// poisoned every battery after it.
+/// Gate 6 is then green before the campaign and red after it, on a tree the
+/// coder has not touched, and `nunki` opens a volet sending the agent to
+/// repair code that was never broken. The first campaign of a project would
+/// poison every battery after it.
 #[test]
 fn the_python_battery_does_not_read_what_the_campaign_leaves() {
     let (_d, root, nunki) = fresh();
@@ -1602,7 +1597,7 @@ fn a_next_project_gets_every_file_its_gates_read() {
 /// The Next.js campaign reads its report, never its exit status, and says
 /// nothing when there is no report to read.
 ///
-/// Measured on Stryker 9.6.1, 2026-09-21: the status is **0** with survivors,
+/// Measured on Stryker 9.6.1: the status is **0** with survivors,
 /// 0 when `--mutate` names a file that is not there, and 0 on a source that
 /// does not parse. A campaign that trusted it would call a run that never
 /// happened a run with no survivor — gate 7 green on nothing.
@@ -1675,7 +1670,7 @@ fn the_next_campaign_trusts_its_report_and_not_its_status() {
 /// The Next.js audit reads both range shapes, and asks for a view the project
 /// cannot filter.
 ///
-/// Measured 2026-09-21: npm advisories publish their fixed versions as
+/// npm advisories publish their fixed versions as
 /// `SEMVER` ranges where PyPI uses `ECOSYSTEM`. A reader that looked only at
 /// the second reported **every** npm finding as having no fix — `qs 6.15.1`
 /// came back empty when 6.16.0 fixes it. An empty `fix` is not cosmetic: it
@@ -1759,9 +1754,8 @@ fn the_next_batteries_do_not_read_what_the_campaign_leaves() {
 /// Every stack `nunki init` knows has its image scanned.
 ///
 /// A stack ships a Dockerfile, and an image nobody scans is the hole that
-/// workflow exists to close. Added on 2026-09-20 for Python, and nearly
-/// forgotten again the next night for Next.js — which is why the list is
-/// checked against `KNOWN_STACKS` rather than read by eye.
+/// workflow exists to close. A new stack is easy to forget in that list,
+/// which is why it is checked against `KNOWN_STACKS` rather than read by eye.
 #[test]
 fn the_image_scan_covers_every_stack_that_ships_one() {
     let workflow = std::fs::read_to_string(
@@ -1840,10 +1834,10 @@ fn a_campaign_with_nothing_to_mutate_says_it_finished() {
 /// command line: measured on mutmut 3.8.0, `mutmut run` accepts
 /// `--max-children` and nothing else.
 ///
-/// Measured 2026-09-23, on the first mission of a real project whose system
-/// tests opened a database: the campaign died in collection on the driver's
-/// connection error, `nunki` read that as a campaign that could not run, and
-/// the mission stopped at gate 7 with nothing pointing at the cause.
+/// On a project whose system tests open a database, the campaign dies in
+/// collection on the driver's connection error, `nunki` reads that as a
+/// campaign that could not run, and the mission stops at gate 7 with nothing
+/// pointing at the cause.
 ///
 /// The script is **run**, not read, with `uv` replaced by a stub that records
 /// the environment it was called in. Asserting that the file contains the
@@ -1921,16 +1915,15 @@ fn the_campaign_deselects_the_system_tests() {
 /// source file in any language, while a test **is**, and a campaign that takes
 /// it for one asks its tool a question the tool cannot answer.
 ///
-/// Measured on 2026-09-21, on a real repository whose first branch under
-/// `nunki` touched two files under `tests/` and no source at all: mutmut
-/// mutates what `source_paths` names rather than what it is handed, found
-/// nothing, and said `Stopping early, because we could not find any test case
-/// for any mutant` with a non-zero status. `nunki` read that as a campaign
-/// that could not run, gate 7 kept asking, and the mission stopped.
+/// On a branch that touches only files under `tests/` and no source at all,
+/// mutmut mutates what `source_paths` names rather than what it is handed,
+/// finds nothing, and says `Stopping early, because we could not find any
+/// test case for any mutant` with a non-zero status. `nunki` reads that as a
+/// campaign that could not run, gate 7 keeps asking, and the mission stops.
 ///
 /// One stack is named and not run, deliberately. Rust hands the file to
 /// `cargo mutants --file`, which answers this correctly on its own: measured
-/// the same day on cargo-mutants 27.1.0, a selection naming only
+/// on cargo-mutants 27.1.0, a selection naming only
 /// `tests/it.rs` exits 0, warns `No mutants found under the active filters`
 /// and writes an empty `missed.txt`, which the fragment already reads as no
 /// survivors. Running it here would need a crate and a toolchain to prove
@@ -1941,11 +1934,10 @@ fn the_campaign_deselects_the_system_tests() {
 /// `mutants/` is a copy of the tree. It is untracked, it is gitignored
 /// nowhere, and `.gitignore` is outside a mission's perimeter — so a
 /// directory the agent never created, and cannot ignore, fails its clean-tree
-/// gate. Measured on `qcoda-compta` on 2026-09-23: a campaign died during
-/// mutmut's baseline collection and the next gate run came back "the tree
-/// holds 1 uncommitted change(s): ?? mutants/".
+/// gate: a campaign that dies during mutmut's baseline collection makes the
+/// next gate run come back "the tree holds 1 uncommitted change(s): ?? mutants/".
 ///
-/// The script cleared `mutants/` at its end already. The end is the one place
+/// Clearing `mutants/` at the script's end is not enough. The end is the one place
 /// a failing campaign never reaches, which is why this is a trap.
 #[test]
 fn a_campaign_that_fails_leaves_no_copy_of_the_tree_behind() {

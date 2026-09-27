@@ -4,9 +4,9 @@
 //! A stack's Dockerfile carries defaults — `RUST_VERSION=stable`, a Python
 //! base tag, a pnpm release. A repository that pins something else asks its
 //! toolchain for a version the image does not carry, and the toolchain goes
-//! to fetch it from behind a firewall that names none of its hosts. Measured
-//! on `trading-bot-rust-2`, 2026-09-26: `rust-toolchain.toml` pins `1.98.0`
-//! and the `wasm32-unknown-unknown` target, the image carried `stable`.
+//! to fetch it from behind a firewall that names none of its hosts — say a
+//! `rust-toolchain.toml` that pins `1.98.0` and the `wasm32-unknown-unknown`
+//! target, in an image that carries `stable`.
 //!
 //! Reading `rust-toolchain.toml` or `package.json` here would put the stacks
 //! back in the core (SPEC 3.2). So the fragment says **where** a version is,

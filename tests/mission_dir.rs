@@ -268,8 +268,7 @@ fn the_follow_up_file_is_prose_and_not_a_code_block() {
 /// rest of the folder can stay read-only. An engine handed a source that does
 /// not exist creates a **directory** there, and the mission then fails on a
 /// message naming the symptom: `MUTANTS.triage.json: Is a directory (os error
-/// 21)`, measured on 2026-09-17 after that file was removed by hand between
-/// two runs. `create` writes the four once; this is the guard that holds at
+/// 21)`, as happens when that file is removed by hand between two runs. `create` writes the four once; this is the guard that holds at
 /// every lift, because the folder is the human's and removing a file from it
 /// — clearing a `VERDICT.json` that froze wrong — is a repair, not a mistake.
 #[test]

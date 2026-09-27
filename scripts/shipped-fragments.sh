@@ -28,7 +28,7 @@ hash_of() {
     git -C "$project" init -q
     ( cd "$project" && HOME="$home" "$bin" init --stack "$stack" ) >/dev/null 2>&1 || continue
     # Wherever that release kept them: the home (`~/.nunki/<id>/stacks/`),
-    # or, before 2026-09-15, the repository (`.nunki/stacks/`, `.hq/stacks/`).
+    # or, in older releases, the repository (`.nunki/stacks/`, `.hq/stacks/`).
     find "$home" "$project" -type f -path "*/stacks/$stack/*" | while read -r file; do
       printf '%s %s/%s\n' "$(shasum -a 256 "$file" | cut -d' ' -f1)" "$stack" "$(basename "$file")"
     done

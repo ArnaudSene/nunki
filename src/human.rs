@@ -3,8 +3,8 @@
 //! A mission ends by giving something back to a person: an arbitration, a
 //! verdict to accept, a push to authorise. Saying "waiting on the human" is
 //! enough when there is one; it stops being enough the moment a second
-//! person works on the same project, and "arbitration for Arnaud" and
-//! "arbitration for Igor" are different sentences.
+//! person works on the same project, and "arbitration for Alice" and
+//! "arbitration for Bob" are different sentences.
 //!
 //! `nunki` therefore knows a name, and it takes it from the least surprising
 //! place that has one: a file the human wrote, then git, then the account on

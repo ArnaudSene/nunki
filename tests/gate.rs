@@ -491,12 +491,12 @@ fn the_integrator_may_commit_its_wiring_and_nothing_else() {
 /// integrator writes production code, gate 4 waves it through because the
 /// mission listed the path, and gate 7 never looks at it again.
 ///
-/// Measured on `qcoda-compta`, 2026-09-23. Its mission-08 named
-/// `src/infrastructure/postgres/**` as wiring; the whole adapter was written
-/// there, and nothing mutated it until a *coder* touched the file two
-/// missions later — 220 survivors, in a serialisation layer carrying money.
+/// A mission that names `src/infrastructure/postgres/**` as wiring gets a
+/// whole adapter written there, and nothing mutates it until a *coder*
+/// touches the file missions later — by then with hundreds of survivors, in
+/// a serialisation layer that may carry money.
 ///
-/// The three cases below are that project's, and the middle one is the only
+/// The three cases below come from that layout, and the middle one is the only
 /// one that may fail: a migration under `src/` is wiring by SPEC 4.4's own
 /// words, and a rule keyed on the `src/` prefix would refuse it.
 #[test]
@@ -518,7 +518,7 @@ fn wiring_that_names_production_code_is_refused_although_the_mission_declared_it
     // names migration order as wiring.
     commit(
         &f.tree,
-        "src/infrastructure/postgres/schema/0002_register.sql",
+        "src/infrastructure/postgres/schema/0002_orders.sql",
         "CREATE TABLE register_rows (identity TEXT PRIMARY KEY);\n",
         "add the register schema",
     );
@@ -540,14 +540,14 @@ fn wiring_that_names_production_code_is_refused_although_the_mission_declared_it
     // declared wiring list.
     commit(
         &f.tree,
-        "src/infrastructure/postgres/register_store.py",
+        "src/infrastructure/postgres/order_store.py",
         "class PostgresRegisterStore:\n    pass\n",
         "implement the adapter",
     );
     f.journal_names_head();
     match f.decision(Role::Integrator, Gate::Perimeter) {
         Decision::Failed(why) => {
-            assert!(why.contains("register_store.py"), "{why}");
+            assert!(why.contains("order_store.py"), "{why}");
             assert!(
                 why.contains("gate 7"),
                 "the message has to name the consequence, not just the path: {why}"
@@ -560,9 +560,8 @@ fn wiring_that_names_production_code_is_refused_although_the_mission_declared_it
 /// The integrator works on the coder's branch (SPEC 2), so the coder's
 /// commits come first on it — and none of them is wiring.
 ///
-/// Found on 2026-09-15, before the first integration mission was launched:
-/// gate 4 judged the whole branch against its base, so the coder's `src/`
-/// held every integrator red on a perimeter it never crossed —
+/// A gate 4 that judges the whole branch against its base holds every
+/// integrator red on the coder's `src/`, on a perimeter it never crossed —
 /// `src/new.rs is not in this mission's wiring list, and the diff against
 /// the base touches it`.
 #[test]
@@ -924,8 +923,7 @@ fn live_the_battery_is_the_stacks_mounted_one_and_an_absent_one_is_red() {
     // And the same `safe.directory` as there, for the same reason: this
     // fixture runs as root because `apk` needs to, so on Linux git refuses
     // the mounted tree — "detected dubious ownership", measured on the
-    // ubuntu runner on 2026-09-20, the first time the job reached this suite
-    // — while macOS's file sharing hides the mismatch. A real profile runs as
+    // ubuntu runner — while macOS's file sharing hides the mismatch. A real profile runs as
     // the host's uid and never asks.
     let volume = nunki::exec::proof_volume(&slot.name);
     let file = nunki::run::profile_path(&project, &slot.name);
@@ -1135,11 +1133,10 @@ impl Fixture {
 /// A campaign that has already run on this content and measured nothing makes
 /// gate 7 **red**, not unplayed — and the reason it gave is the cause.
 ///
-/// `Unplayed` opens no volet, so the mission was wedged: nothing dispatched,
-/// and `nunki verify` only started the identical campaign again. Measured on
-/// `qcoda-compta` on 2026-09-23 and again on 2026-09-24, both times a test
-/// the branch carried failing inside `mutants/`, both times a one-line fix,
-/// both times found by a person reading a log by hand.
+/// `Unplayed` opens no volet, so the mission is wedged: nothing is
+/// dispatched, and `nunki verify` only starts the identical campaign again.
+/// The typical cause is a test the branch carries failing inside `mutants/`:
+/// a one-line fix, found only by a person reading a log by hand.
 #[test]
 fn a_campaign_that_has_already_measured_nothing_is_a_red_gate() {
     let f = Fixture::new();
@@ -1177,9 +1174,8 @@ fn a_campaign_that_has_already_measured_nothing_is_a_red_gate() {
 /// would have shown, not every frame of its progress bar.
 ///
 /// mutmut redraws its spinner with `\r` and never ends the line, so a
-/// line-based tail kept all of it. Measured on `qcoda-compta` mission-15,
-/// 2026-09-25: a 230 KB cause, stored in the mission's state and sent to the
-/// coder as the reason for its volet.
+/// line-based tail keeps all of it: a cause of hundreds of kilobytes, stored
+/// in the mission's state and sent to the coder as the reason for its volet.
 #[test]
 fn a_campaigns_progress_bar_is_not_carried_into_the_cause() {
     let f = Fixture::new();
@@ -1347,7 +1343,7 @@ fn a_named_test_has_to_exist() {
     assert_eq!(f.gate_seven(Role::Coder).decision, Decision::Passed);
 }
 
-/// The split the owner decided on 2026-09-10: the coder answers with the two
+/// The split: the coder answers with the two
 /// outcomes that rest on a committed test, and the one nobody can check is
 /// not its to give. What decides who wrote a line is the mount, so an
 /// `equivalent` in the coder's file is not a mistake to tolerate — it is
@@ -1534,13 +1530,13 @@ fn report_of(decisions: &[(Gate, Decision)]) -> gate::Report {
 /// A mission's base by name and a revision are different things, and the
 /// compiler is what says so now.
 ///
-/// `touched_paths` and `touched_since_base` had the same signature — `(&Path,
-/// &str)` — and differed only by a doc comment telling the caller which to
-/// use. In a slot the name `dev` has two readings, `dev` and `origin/dev`,
-/// and they diverge from the second mission onwards. One caller read the
-/// name where the other read the ref: gate 7's fingerprint never matched the
-/// campaign's, and `verify` went round it fifty-seven times (`notes-4`,
-/// 2026-09-18).
+/// With the same signature — `(&Path, &str)` — `touched_paths` and
+/// `touched_since_base` would differ only by a doc comment telling the
+/// caller which to use. In a slot the name `dev` has two readings, `dev` and
+/// `origin/dev`, and they diverge from the second mission onwards. One
+/// caller reading the name where the other reads the ref means gate 7's
+/// fingerprint never matches the campaign's, and `verify` goes round it
+/// indefinitely.
 ///
 /// A `Rev` cannot be made from a mission's base here — only `base_ref` makes
 /// one from a name, and it is private — so the two calls can no longer be
@@ -1903,11 +1899,11 @@ fn a_stack_with_no_security_script_is_red_and_says_how_to_get_one() {
 /// script reports every finding as new — a gate red on what the branch never
 /// brought.
 ///
-/// Measured on 2026-09-18 against a real container, the first time gate 8 ran
-/// in one: `git rev-parse --verify dev` in the copy answered "Needed a single
-/// revision", and notes-api's one finding — a test credential its base already
-/// carried — came back `was_at_base: false`. The same script, in the same
-/// container, given the commit instead, came back `was_at_base: true`.
+/// Measured against a real container: `git rev-parse --verify dev` in the
+/// copy answers "Needed a single revision", and a finding the base already
+/// carries — a test credential, say — comes back `was_at_base: false`. The
+/// same script, in the same container, given the commit instead, comes back
+/// `was_at_base: true`.
 #[test]
 fn the_base_reaches_the_script_as_a_commit_and_not_a_branch_name() {
     let f = Fixture::new();
@@ -1955,13 +1951,13 @@ fn the_commit_is_the_fork_point_and_not_wherever_the_base_has_got_to() {
 /// disagree, and every gate that reads "what this branch touched" reads the
 /// wrong answer.
 ///
-/// Measured on 2026-09-18 on `notes-api`'s slot, with a branch that had
-/// touched nothing: `dev...HEAD` named eight files, every one of them the
-/// previous mission's, and `origin/dev...HEAD` named none. Gate 7 would have
-/// run a mutation campaign over seven source files the mission never opened,
-/// and handed the coder survivors in code it had not written; gate 8's fork
-/// point was one merge early, so what the previous mission brought counted as
-/// brought by this one; and gate 4 turns red the moment anything on the base
+/// On a slot with a branch that has touched nothing, `dev...HEAD` can name
+/// several files, every one of them the previous mission's, while
+/// `origin/dev...HEAD` names none. Gate 7 would then run a mutation campaign
+/// over source files the mission never opened, and hand the coder survivors
+/// in code it had not written; gate 8's fork point would be one merge early,
+/// so what the previous mission brought would count as brought by this one;
+/// and gate 4 turns red the moment anything on the base
 /// between the two is a protected path — which is what this test uses,
 /// because it is the one of the three that answers in a decision.
 #[test]
@@ -2033,12 +2029,11 @@ fn the_gates_judge_against_the_base_the_branch_came_from() {
 /// the gate judges a mutant, and the reset pulls the tree out from under the
 /// campaign.
 ///
-/// Measured on `notes-4`, 2026-09-18, the first three-agent mission run end to
-/// end. The battery came back 101 on `warning: unused variable: value` at
-/// `src/api.rs:160` — a function whose body cargo-mutants had replaced, and
-/// which uses its argument in the coder's own code. Gate 6 red, a volet, and
-/// again until the volets were spent: six runs, 59M tokens, and neither the
-/// integrator nor the security agent ever ran.
+/// The symptom: the battery comes back 101 on `warning: unused variable:
+/// value` in a function whose body cargo-mutants has replaced, and which
+/// uses its argument in the coder's own code. Gate 6 red, a volet, and again
+/// until the volets are spent — and neither the integrator nor the security
+/// agent ever runs.
 #[test]
 fn the_gates_that_run_in_the_copy_stand_down_while_a_campaign_rewrites_it() {
     let f = Fixture::new();
@@ -2081,14 +2076,13 @@ fn the_gates_that_run_in_the_copy_stand_down_while_a_campaign_rewrites_it() {
 ///
 /// A campaign writes its stderr while it runs. mutmut prints its progress
 /// there on every campaign, so until the campaign is read back there is no
-/// `MUTANTS.json` and there is a non-empty `.err`. Gate 7 was played anyway
-/// and took that pair for a campaign that had already measured nothing. The
-/// verdict was red, a red outranks a wait, and a volet went to the coder.
+/// `MUTANTS.json` and there is a non-empty `.err`. A gate 7 played anyway
+/// takes that pair for a campaign that has already measured nothing. The
+/// verdict is red, a red outranks a wait, and a volet goes to the coder.
 ///
-/// Measured on `qcoda-compta` mission-15, 2026-09-25: the campaign ended at
-/// 04:58:19Z with `{"campaign":"done"}` and no survivor. The gates played
-/// before the read-back, at 04:58:37Z, and the mission went to a second volet
-/// whose cause said "measured nothing". A coder run went on a green branch.
+/// So a campaign can end with `{"campaign":"done"}` and no survivor, the
+/// gates play before the read-back, and the mission goes to a second volet
+/// whose cause says "measured nothing": a coder run spent on a green branch.
 #[test]
 fn gate_seven_waits_for_a_campaign_in_flight_and_never_reads_its_progress_as_a_failure() {
     let f = Fixture::new();
@@ -2142,8 +2136,8 @@ fn gate_seven_waits_for_a_campaign_in_flight_and_never_reads_its_progress_as_a_f
 /// another, their fingerprints could never agree, and gate 7 asked for a
 /// campaign that had just run.
 ///
-/// Measured live on `notes-4`, 2026-09-18: eight paths on the launcher's side
-/// and four on the gate's. Fifty-seven turns of `verify` went round it.
+/// The launcher's side and the gate's side then name different paths, and
+/// `verify` goes round the mismatch turn after turn.
 ///
 /// `mutants::campaign` takes the base's **name** now and makes the call
 /// itself, so there is no second reading to get wrong — which is why this
@@ -2276,12 +2270,11 @@ fn the_security_agent_owes_findings_and_not_a_tools_report() {
 
 /// A resume block may name its commit in its heading.
 ///
-/// Measured on 2026-09-20, on the first mission of the Python bench: the
-/// coder wrote `## ÉTAT DE REPRISE — commit c638a331…`, which is a fair
-/// reading of the rule it is given ("it names the commit it describes"), and
-/// the gate answered that the journal **has no block** — about a journal
-/// whose block was at the top, naming `HEAD`. It cost an attempt out of
-/// three, and it sent the agent looking for the wrong thing.
+/// A coder may write `## ÉTAT DE REPRISE — commit c638a331…`, which is a fair
+/// reading of the rule it is given ("it names the commit it describes"). A
+/// gate that answers the journal **has no block** — about a journal whose
+/// block is at the top, naming `HEAD` — costs an attempt out of three, and
+/// sends the agent looking for the wrong thing.
 ///
 /// What still has to hold: a heading that merely begins with the same
 /// letters opens nothing, and the block still ends at the next heading, so
@@ -2413,12 +2406,12 @@ impl Fixture {
 
 /// A red gate 6 says what **both** streams said.
 ///
-/// It preferred stderr and dropped stdout entirely. Measured on 2026-09-20,
-/// on the first mission of the Python bench: `uv sync` wrote its one-line
-/// chatter to stderr and `mypy` wrote the diagnosis to stdout, so the gate
-/// came back "the battery came back 2: Checked 26 packages in 0.18ms" — and
-/// `nunki` opened a volet whose cause said nothing at all. The agent was sent
-/// to repair a tree against a diagnosis it never saw.
+/// Preferring stderr and dropping stdout fails on a Python stack: `uv sync`
+/// writes its one-line chatter to stderr and `mypy` writes the diagnosis to
+/// stdout, so the gate comes back "the battery came back 2: Checked 26
+/// packages in 0.18ms" — and `nunki` opens a volet whose cause says nothing
+/// at all. The agent is sent to repair a tree against a diagnosis it never
+/// saw.
 #[test]
 fn a_red_battery_says_what_both_streams_said() {
     let f = Fixture::new();

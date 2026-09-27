@@ -114,14 +114,14 @@ fn a_lift_names_the_human_the_reason_and_leaves_the_verdict_alone() {
     let path = file(dir.path());
     followup::lifted(
         &path,
-        "Arnaud",
+        "Alex Martin",
         "open redirect in /auth/callback",
         "the callback is behind the VPN and the host allowlist is closed",
         "abc123def4567",
     )
     .unwrap();
     let text = std::fs::read_to_string(&path).unwrap();
-    assert!(text.contains("Arnaud"), "{text}");
+    assert!(text.contains("Alex Martin"), "{text}");
     assert!(text.contains("behind the VPN"), "{text}");
     assert!(text.contains("FINDINGS"), "{text}");
 }

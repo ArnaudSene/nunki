@@ -48,10 +48,9 @@ jobs:
         # kind of thing as an unpinned action: it turns a green history red
         # on a morning nobody chose.
         #
-        # 26.04 and not 24.04, already: it was added beside 24.04 on
-        # 2026-09-22 to find out whether it broke anything, every job passed
-        # on both, and once that is known, running both buys a comparison
-        # nobody is reading. Being ahead of the migration costs less than
+        # 26.04 and not 24.04, already: every job passes on both, and once
+        # that is known, running both buys a comparison nobody is reading.
+        # Being ahead of the migration costs less than
         # being behind it, and 24.04 comes back in one line if it is ever
         # needed.
         os: [ubuntu-26.04, macos-latest]
@@ -89,13 +88,12 @@ jobs:
 
   # The `#[ignore]`d tests that need nothing but a container engine.
   #
-  # They were run by hand, which meant they were run when somebody
-  # remembered. Measured on 2026-09-19, playing all of them for the first
-  # time in a while: three were red. Two were fixtures that had fallen behind
-  # a contract changed two days earlier — gate 8's script, and the line a
-  # campaign prints to say it finished — and would have gone red in the pull
-  # request that changed it. A proof nobody plays is a proof that rots, and
-  # this repository's own doctrine says a check that quietly skips reads as a
+  # Run by hand, they are run when somebody remembers, and in between they
+  # fall behind: a fixture that trails a changed contract — gate 8's script,
+  # or the line a campaign prints to say it finished — goes red only when
+  # somebody next plays it, instead of in the pull request that changed the
+  # contract. A proof nobody plays is a proof that rots, and this
+  # repository's own doctrine says a check that quietly skips reads as a
   # pass.
   #
   # **Blocking, like every other job here.** A container job that may fail
@@ -114,23 +112,21 @@ jobs:
     name: containers
     # The job where what the runner brings is load-bearing, and the step
     # below exists because it is: the engine copies the host's resolver,
-    # `search` list included, and that list is what read a declared service
-    # as "refused" on this runner while every Mac said "reached"
-    # (2026-09-20, `perimeter::resolves`).
+    # `search` list included, and that list can read a declared service as
+    # "refused" on this runner while every Mac says "reached"
+    # (`perimeter::resolves`).
     #
-    # So it was the one job worth running on both images while the question
-    # was open. It answered -- green on 24.04 and on 26.04, 2026-09-22 -- and
-    # this job costs seven and a half minutes, which is not a price to pay
-    # twice for an answer already on file.
+    # It is green on 24.04 and on 26.04, and this job costs several minutes,
+    # which is not a price to pay twice for an answer already known.
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
 
       - name: Show what the runner brought
         # The resolver a container gets here, `search` list included: the
-        # engine copies the host's, and that list is what read a declared
-        # service as "refused" on this runner while every Mac said "reached"
-        # (2026-09-20, `perimeter::resolves`).
+        # engine copies the host's, and that list can read a declared
+        # service as "refused" on this runner while every Mac says "reached"
+        # (`perimeter::resolves`).
         run: |
           docker compose version
           docker run --rm alpine:3.22 cat /etc/resolv.conf

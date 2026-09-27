@@ -32,13 +32,13 @@ fn a_declared_name_wins_over_everything_else() {
 
     std::fs::write(
         nunki_home.join(ME_FILE),
-        "name: Arnaud\nemail: arnaud@example.com\n",
+        "name: Alex Martin\nemail: alex@example.com\n",
     )
     .unwrap();
 
     let who = me(&nunki_home, Some(&repo));
-    assert_eq!(who.name.as_deref(), Some("Arnaud"));
-    assert_eq!(who.email.as_deref(), Some("arnaud@example.com"));
+    assert_eq!(who.name.as_deref(), Some("Alex Martin"));
+    assert_eq!(who.email.as_deref(), Some("alex@example.com"));
     // Where the name came from is kept, because a name from a file is a
     // statement and a name from the environment is a guess.
     assert!(matches!(who.source, Source::Declared(_)));
@@ -52,12 +52,12 @@ fn git_answers_when_nothing_was_declared() {
     std::fs::create_dir_all(&nunki_home).unwrap();
     std::fs::create_dir_all(&repo).unwrap();
     git(&repo, &["init", "-q"]);
-    git(&repo, &["config", "user.name", "Igor"]);
-    git(&repo, &["config", "user.email", "igor@example.com"]);
+    git(&repo, &["config", "user.name", "Sam"]);
+    git(&repo, &["config", "user.email", "sam@example.com"]);
 
     let who = me(&nunki_home, Some(&repo));
-    assert_eq!(who.name.as_deref(), Some("Igor"));
-    assert_eq!(who.email.as_deref(), Some("igor@example.com"));
+    assert_eq!(who.name.as_deref(), Some("Sam"));
+    assert_eq!(who.email.as_deref(), Some("sam@example.com"));
     assert_eq!(who.source, Source::Git);
 }
 
@@ -105,7 +105,7 @@ fn a_mission_says_who_arbitrates_and_the_follow_up_is_addressed_to_them() {
             reason: "none".to_string(),
         },
         security: nunki::mission::Security::Gates,
-        arbiter: Some("Igor".to_string()),
+        arbiter: Some("Sam".to_string()),
         run: None,
         account: None,
         model: None,
@@ -114,19 +114,19 @@ fn a_mission_says_who_arbitrates_and_the_follow_up_is_addressed_to_them() {
     let paths = nunki::mission::dir::create(dir.path(), "m1", &header, "").unwrap();
 
     let followup = std::fs::read_to_string(&paths.followup).unwrap();
-    // The exact line, not a substring of it: "for Igorsomebody" would
-    // contain "for Igor" and address nobody.
+    // The exact line, not a substring of it: "for Samsomebody" would
+    // contain "for Sam" and address nobody.
     assert_eq!(
         followup.lines().next(),
-        Some("# Follow-up — for Igor"),
+        Some("# Follow-up — for Sam"),
         "{followup}"
     );
-    // An arbitration for Arnaud is not an arbitration for Igor.
-    assert!(!followup.contains("Arnaud"), "{followup}");
+    // An arbitration for Alex Martin is not an arbitration for Sam.
+    assert!(!followup.contains("Alex Martin"), "{followup}");
 
     // And it survives the round trip through the file, frozen with the rest.
     let read = nunki::mission::dir::read_header(dir.path(), "m1").unwrap();
-    assert_eq!(read.arbiter.as_deref(), Some("Igor"));
+    assert_eq!(read.arbiter.as_deref(), Some("Sam"));
 }
 
 #[test]
@@ -162,7 +162,7 @@ fn whoami_says_where_the_name_came_from() {
     let root = dir.path().join("repo");
     let home = dir.path().join("home");
     common::project_home(&root, &home, "harness: claude-code\n");
-    std::fs::write(home.join(".nunki").join(ME_FILE), "name: Arnaud\n").unwrap();
+    std::fs::write(home.join(".nunki").join(ME_FILE), "name: Alex Martin\n").unwrap();
 
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_nunki"))
         .env("HOME", &home)
@@ -172,7 +172,7 @@ fn whoami_says_where_the_name_came_from() {
         .output()
         .unwrap();
     let text = String::from_utf8_lossy(&out.stdout);
-    assert!(text.contains("Arnaud"), "{text}");
+    assert!(text.contains("Alex Martin"), "{text}");
     assert!(text.contains("me.yaml"), "it says where it got it: {text}");
 }
 

@@ -26,7 +26,7 @@ pub struct Service {
     pub reach: Vec<String>,
     /// A real provider — a third-party API's test tier — that two missions
     /// must not exercise at once: an integration run that uses it locks it
-    /// for the project's other missions (SPEC 7, decided 2026-09-11). The
+    /// for the project's other missions (SPEC 7). The
     /// human says so at framing; nothing is guessed from the domains.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub shared: bool,
@@ -104,12 +104,11 @@ pub struct Bounds {
     pub harness_wait_hours: u32,
     /// Runs a mission may spend before `nunki` holds it (SPEC 7). No default:
     /// runs are already bounded by the attempts and the volets, and a fixed
-    /// number would cut legitimate missions short (decided 2026-09-11).
+    /// number would cut legitimate missions short.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_runs: Option<u32>,
     /// Tokens a mission may spend before `nunki` holds it, the four kinds
-    /// summed (SPEC 7). No default until real missions have been measured
-    /// (decided 2026-09-11).
+    /// summed (SPEC 7). No default until real missions have been measured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u64>,
     /// Percent of the subscription's five-hour window past which `nunki`
@@ -123,13 +122,13 @@ pub struct Bounds {
 }
 
 /// The rest of the five hours is left to a supervisor that shares the
-/// account, so a human can still step in (decided by Arnaud, 2026-09-11).
+/// account, so a human can still step in.
 fn default_five_hour_stop_percent() -> u32 {
     90
 }
 
-/// A fifth of the week stays outside the agents, whatever they do (decided
-/// by Arnaud, 2026-09-11).
+/// A fifth of the week stays outside the agents, whatever they
+/// do.
 fn default_weekly_stop_percent() -> u32 {
     80
 }
@@ -154,8 +153,8 @@ impl Default for Bounds {
 }
 
 /// Long enough to outlast a subscription window that has run dry overnight,
-/// so `nunki` picks the mission up by itself when it reopens (decided by Arnaud
-/// on 2026-09-11, against three hours that would wake him instead).
+/// so `nunki` picks the mission up by itself when it reopens —
+/// a shorter wait would wake the human instead.
 fn default_harness_wait_hours() -> u32 {
     6
 }

@@ -470,10 +470,10 @@ mod tests {
     fn a_remote_names_its_host_whichever_way_it_is_written() {
         for (url, host) in [
             (
-                "https://github.com/Falkor-Labs/trading-bot-rust-2.git",
+                "https://github.com/example-org/example-repo.git",
                 Some("github.com"),
             ),
-            ("git@github.com:ArnaudSene/nunki.git", Some("github.com")),
+            ("git@github.com:example/nunki.git", Some("github.com")),
             (
                 "ssh://git@gitlab.example.org:2222/team/x.git",
                 Some("gitlab.example.org"),

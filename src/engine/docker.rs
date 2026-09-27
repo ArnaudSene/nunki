@@ -8,8 +8,8 @@ use super::{Dialect, Engine, EngineError, ExecOutput, Liveness, Netns};
 use crate::harness::spawn::CommandSpec;
 
 /// How to invoke the engine. Both halves are overridable, because the
-/// machines this runs on are further apart than they look: the development
-/// machine measured Compose v5.1.2 against a CI runner on v2.38.2 (SPEC 4.2
+/// machines this runs on are further apart than they look: a development
+/// machine can run Compose v5.1.2 while a CI runner is on v2.38.2 (SPEC 4.2
 /// bis), and the doctrine is checked under both.
 #[derive(Debug, Clone)]
 pub struct Config {

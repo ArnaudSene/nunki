@@ -227,7 +227,7 @@ fn a_monitor_is_wanted_for_a_run_or_a_wait_and_not_for_a_held_mission() {
     assert!(!wanted(&project, &waiting, now), "a wait already over");
 
     let mut held = state(true);
-    held.hold("Arnaud", false);
+    held.hold("Alex Martin", false);
     assert!(!wanted(&project, &held, now), "held: a human's to lift");
 }
 

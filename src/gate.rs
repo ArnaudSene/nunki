@@ -1,7 +1,7 @@
 //! The verification gates (SPEC 4.4).
 //!
 //! Gates **1 to 4** are played at the end of every run, not only at the final
-//! verification — decided on 2026-09-09, because a perimeter gate that only
+//! verification, because a perimeter gate that only
 //! falls at the end loses a six-hour mission over a forbidden write in the
 //! first lot. Gates **5 and 6** — the deliverable and the battery — are
 //! played at the final verification, and need a way into the slot's
@@ -172,13 +172,12 @@ impl Report {
     /// things of the flow, even though neither is green. A red gate earns
     /// the agent a run. A gate nobody managed to play earns it nothing: it
     /// is the machine's or the HQ's, and sending an agent back at it asks
-    /// for a repair it cannot reach. Measured on 2026-09-13, where a
-    /// mutation campaign that had not been run cost three coder runs — each
-    /// one reading the same instruction, saying it could not act on it, and
-    /// stopping — before a human held the mission.
+    /// for a repair it cannot reach: a mutation campaign that has not been run
+    /// would otherwise cost coder run after coder run — each one reading the
+    /// same instruction, saying it cannot act on it, and stopping — until a
+    /// human holds the mission.
     /// The first red gate. Private: [`Self::verdict`] is what the flow asks,
-    /// and a second reading of the same outcomes is what this module spent a
-    /// day removing.
+    /// and a second reading of the same outcomes is what this module avoids.
     fn failed(&self) -> Option<String> {
         self.outcomes.iter().find_map(|o| match &o.decision {
             Decision::Failed(why) => Some(format!(
@@ -441,14 +440,13 @@ fn branch_ahead(subject: &Subject) -> Result<Decision, GateError> {
 /// `run::branch` starts every mission branch from `origin/<base>` after
 /// fetching it. The clone's own `<base>` is written once, when the slot is
 /// made, and nothing moves it again — so from the second mission onwards the
-/// two disagree, and the gates were reading the one the branch did not come
-/// from.
+/// two disagree, and reading the local one reads the base the branch did
+/// not come from.
 ///
-/// Measured on 2026-09-18, on `notes-api`'s slot, with a branch that had
-/// touched nothing: `dev...HEAD` named eight files — everything the previous
-/// mission had merged — while `origin/dev...HEAD` named none. Gate 4 would
-/// have failed a coder for a perimeter it had not left, on its first lot,
-/// and gate 8's fork point was one merge too early.
+/// With a branch that has touched nothing, `dev...HEAD` then names every file
+/// the previous mission merged, while `origin/dev...HEAD` names none. Gate 4
+/// would fail a coder for a perimeter it had not left, on its first lot, and
+/// gate 8's fork point would be one merge too early.
 ///
 /// The local branch stays as the fallback: a clone whose origin does not
 /// carry the base still has to be judged against something, and that is the
@@ -478,13 +476,12 @@ fn base_ref(tree: &Path, base: &str) -> Result<Rev, GateError> {
 /// readings, `dev` and `origin/dev`, and they diverge from the second mission
 /// onwards; [`touched_since_base`] is the one thing that picks between them.
 ///
-/// A type and not a convention, because the convention is what failed twice.
-/// `touched_paths` and `touched_since_base` had the same signature — `(&Path,
-/// &str)` — and differed only by a doc comment telling the caller which to
-/// use. One caller read the name where the other read the ref, gate 7's
-/// fingerprint never matched the campaign's, and `verify` went round it
-/// fifty-seven times (`notes-4`, 2026-09-18). A third caller would have had
-/// the same chance to get it wrong.
+/// A type and not a convention, because a convention is easy to break. With
+/// `touched_paths` and `touched_since_base` sharing one signature — `(&Path,
+/// &str)` — and differing only by a doc comment telling the caller which to
+/// use, one caller can read the name where the other reads the ref; gate 7's
+/// fingerprint then never matches the campaign's, and `verify` goes round it
+/// indefinitely. Every new caller would have the same chance to get it wrong.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rev(String);
 
@@ -568,12 +565,12 @@ pub fn resume_block(text: &str) -> Option<&str> {
 /// Whether a heading's text opens this block.
 ///
 /// The name, and then whatever the writer put after it: `ÉTAT DE REPRISE`,
-/// `ÉTAT DE REPRISE — commit c638a33`, `ÉTAT DE REPRISE (L1)`. An exact
-/// match was the rule until 2026-09-20, when a coder read "it names the
-/// commit it describes" as an invitation to put the commit in the heading —
-/// a fair reading of the rules it is given — and lost an attempt to a gate
-/// that answered "has no `ÉTAT DE REPRISE` block" about a journal whose
-/// block was there, at the top, naming `HEAD`. A gate that refuses what
+/// `ÉTAT DE REPRISE — commit c638a33`, `ÉTAT DE REPRISE (L1)`. Under an exact
+/// match, a coder that reads "it names the commit it describes" as an
+/// invitation to put the commit in the heading — a fair reading of the rules
+/// it is given — loses an attempt to a gate that answers "has no `ÉTAT DE
+/// REPRISE` block" about a journal whose block is there, at the top, naming
+/// `HEAD`. A gate that refuses what
 /// nothing forbids grades an agent on a secret.
 ///
 /// What follows the name has to be a separator, so that a heading which
@@ -689,13 +686,13 @@ fn touched(tree: &Path, base: &Rev) -> Result<Touched, GateError> {
 /// resolve it; the campaign's launcher passed the raw name, so the two
 /// computed different sets of the same thing.
 ///
-/// Measured on `notes-4`, 2026-09-18: the launcher's set held eight paths,
-/// gate 7's held four, and their fingerprints could therefore never agree.
-/// Gate 7 asked for a campaign, the campaign ran, gate 7 said it had run on
-/// other content, and round again — fifty-seven turns of it. The comment on
-/// [`touched`] already names this hazard for gates 4 and 7: "computing it
-/// twice in two ways is how the two gates would come to disagree". It was a
-/// third caller that did it.
+/// When the launcher and the gate computed the touched set separately, their
+/// fingerprints could disagree, and gate 7 kept asking for a campaign that
+/// had just run: gate 7 asks for a campaign, the campaign runs, gate 7 says it
+/// ran on other content, and round again. The comment on [`touched`] already
+/// names this hazard for gates 4 and 7: "computing it twice in two ways is
+/// how the two gates would come to disagree" — and it holds for any third
+/// caller too.
 ///
 /// [`touched_paths`] stays, for the one caller that has a [`Rev`] rather than
 /// a name: `nunki push`, which asks what the integrator added after the
@@ -811,21 +808,19 @@ fn integrator_perimeter(
 /// The two rows only agree while the wiring list holds to row 4. A mission
 /// that declares `src/**` as wiring breaks the agreement silently: the
 /// integrator writes production code, gate 4 lets it through because the
-/// mission said so, and gate 7 never looks at it. Measured on
-/// `qcoda-compta`, 2026-09-23: mission-08's wiring named
-/// `src/infrastructure/postgres/**`, its integrator wrote the whole adapter
-/// there, and the code was first mutated two missions later — when a *coder*
-/// finally touched the file — surfacing 220 survivors in a serialisation
-/// layer carrying money.
+/// mission said so, and gate 7 never looks at it. A mission whose wiring
+/// names `src/infrastructure/postgres/**` lets its integrator write a whole
+/// adapter there, and that code is first mutated only when a *coder* later
+/// touches the file — surfacing survivors in a layer nobody tested.
 ///
 /// The extensions are a fixed list over the stacks `nunki` knows, not a
 /// lookup: adding a stack means adding to it. Checked against the three cases
-/// that matter, all from that project:
+/// that matter:
 ///
-/// - `src/infrastructure/postgres/schema/0002_register.sql` — **not**
+/// - `src/infrastructure/postgres/schema/0002_orders.sql` — **not**
 ///   production source. SPEC 4.4 names migration order as wiring, and a
 ///   mission's integrator legitimately owns it.
-/// - `src/infrastructure/postgres/register_store.py` — production source.
+/// - `src/infrastructure/postgres/order_store.py` — production source.
 ///   This is the case that exists to be caught.
 /// - `tests/system/**`, `tests/conftest.py`, `compose.yaml` — **not**. The
 ///   first two by their path, the third by its extension.
@@ -1014,11 +1009,10 @@ fn mechanical_security_in(
     // script counts every finding as new — so the gate blocks on what the
     // branch did not bring, which is the one thing SPEC 4.4 asks it not to do.
     //
-    // Measured on 2026-09-18, the first time gate 8 ran against a real
-    // container: `git rev-parse --verify dev` in the copy answered "Needed a
-    // single revision", and notes-api's single finding — a test credential its
-    // base already carried — came back `was_at_base: false` and red. Passing
-    // the commit turned it green in the same container.
+    // In a real container, `git rev-parse --verify dev` in the copy answers
+    // "Needed a single revision", and a finding the base already carried — a
+    // test credential, say — comes back `was_at_base: false` and red. Passing
+    // the commit turns it green in the same container.
     //
     // The fork point rather than the base's tip: gate 2 has already said the
     // branch is ahead of its base, so the fork point is an ancestor of `HEAD`
@@ -1161,13 +1155,12 @@ fn mechanical_security_in(
 /// wreck each other, both ways at once: the gate compiles and tests a
 /// mutant, and the reset pulls the tree out from under the campaign.
 ///
-/// Measured on `notes-4`, 2026-09-18, the first three-agent mission run end
-/// to end. The battery came back 101 on `warning: unused variable: value` at
-/// `src/api.rs:160` — a function whose body cargo-mutants had replaced, and
-/// which uses its argument in the coder's own code. The flow read gate 6 red,
-/// opened a volet, and did it again until the volets were spent: six runs,
-/// 59M tokens, and the integrator and the security agent never ran. No agent
-/// had done anything wrong.
+/// Played during a campaign, the battery can come back 101 on `warning:
+/// unused variable: value` — a function whose body cargo-mutants has
+/// replaced, and which uses its argument in the coder's own code. The flow
+/// would read gate 6 red, open a volet, and do it again until the volets were
+/// spent, with the integrator and the security agent never running — though
+/// no agent had done anything wrong.
 ///
 /// Unplayed and not red, which is the rule the missing advisory database
 /// already follows: a verdict on the machine rather than on the agent. A gate
@@ -1315,19 +1308,18 @@ fn battery_in(
 /// The last lines a human needs — from **both** streams when both said
 /// something, and labelled so a reader knows which is which.
 ///
-/// It preferred stderr and dropped stdout entirely, on the reasoning that a
-/// failure explains itself there. Measured on 2026-09-20, on the first
-/// mission of the Python bench: `uv sync` wrote "Checked 26 packages in
-/// 0.18ms" to stderr and mypy wrote `Duplicate module named "pygrep"` to
-/// stdout, so gate 6 came back
+/// Preferring stderr and dropping stdout, on the reasoning that a failure
+/// explains itself there, fails as soon as the commands disagree: `uv sync`
+/// writes "Checked 26 packages in 0.18ms" to stderr and mypy writes
+/// `Duplicate module named "pygrep"` to stdout, so gate 6 comes back
 ///
 /// ```text
 /// the battery came back 2:
 /// Checked 26 packages in 0.18ms
 /// ```
 ///
-/// and `nunki` opened a volet whose cause said nothing at all. The agent was
-/// sent to repair a tree against a diagnosis it never saw.
+/// and `nunki` opens a volet whose cause says nothing at all. The agent is
+/// sent to repair a tree against a diagnosis it never sees.
 ///
 /// A battery is several commands and they do not agree on where to write; a
 /// gate that picks one stream is guessing which of them failed. Twelve lines
@@ -1359,12 +1351,11 @@ const SHOWN_LINE_MAX: usize = 400;
 /// would show nothing.
 ///
 /// A progress bar redraws itself with `\r` and never ends a line, so what
-/// `lines()` calls one line is every frame it drew. Measured on
-/// `qcoda-compta` mission-15, 2026-09-25: mutmut's spinner made one "line" of
-/// most of a 230 KB `.err`, and all of it went into a volet's cause, the
-/// mission's state and the coder's prompt. Only the last frame is what anyone
-/// saw, so that is what is kept, cut at [`SHOWN_LINE_MAX`] in case a single
-/// frame is the whole file.
+/// `lines()` calls one line is every frame it drew. A spinner such as mutmut's
+/// can make one "line" of most of a 230 KB `.err`, and all of it would go into
+/// a volet's cause, the mission's state and the coder's prompt. Only the last
+/// frame is what anyone saw, so that is what is kept, cut at [`SHOWN_LINE_MAX`]
+/// in case a single frame is the whole file.
 fn as_shown(line: &str) -> Option<String> {
     let frame = line.rsplit('\r').find(|f| !f.trim().is_empty())?;
     let mut shown: String = frame.chars().take(SHOWN_LINE_MAX).collect();
@@ -1388,18 +1379,16 @@ fn read(path: &Path) -> Result<String, GateError> {
 /// one did — the difference between "none has run" and "one ran and could
 /// not".
 ///
-/// Gate 7 used to answer `Unplayed` to both, and `Unplayed` opens no volet.
-/// So a campaign that cannot run on a branch left the mission wedged: nothing
-/// was dispatched, `nunki verify` only started the identical campaign again,
-/// and the loop had no exit that did not go through a human reading a log by
-/// hand.
+/// Answering `Unplayed` to both would open no volet, so a campaign that
+/// cannot run on a branch would leave the mission wedged: nothing dispatched,
+/// `nunki verify` only starting the identical campaign again, and no exit
+/// that does not go through a human reading a log by hand.
 ///
-/// Measured on `qcoda-compta` twice, 2026-09-23 and 2026-09-24. Both times a
-/// test the branch itself carried failed inside `mutants/` — once because
-/// `mutmut` renames the functions it rewrites, once because it copies `src/`
-/// and `tests/` and no file at the repository root — and both times the
-/// campaign died during `mutmut`'s baseline collection. Both times the fix
-/// was one line, and both times it took a person to find it.
+/// The typical case is a test the branch itself carries failing inside
+/// `mutants/` — because `mutmut` renames the functions it rewrites, or
+/// because it copies `src/` and `tests/` and no file at the repository root —
+/// so the campaign dies during `mutmut`'s baseline collection. The fix is
+/// often one line, and the agent can make it once it is told.
 ///
 /// **The stderr of a previous attempt on the same fingerprint is the
 /// discriminator**, and it needs no new state to keep. Its presence means a

@@ -27,9 +27,8 @@ use super::{
 /// The settings this harness is launched with, as a JSON string —
 /// `--settings` takes one or a file path, and the CLI reads the same
 /// schema either way. There is **one** of these on a command line: two
-/// `--settings` and only the last is read, measured in the agent image on
-/// 2026-09-16 (an invalid path in the first position went unnoticed, in
-/// the second it stopped the run). Anything else this adapter ever needs
+/// `--settings` and only the last is read (an invalid path in the first
+/// position goes unnoticed, in the second it stops the run). Anything else this adapter ever needs
 /// to set goes in here, not in a second flag.
 ///
 /// What it turns off is what the harness would otherwise add to a commit
@@ -38,10 +37,9 @@ use super::{
 /// (`nunki coder <coder@nunki.local>`), and the message's job is to say
 /// what changed and why it had to.
 ///
-/// That the author says so is not a given, and was not one when this was
-/// written: `nunki` set no identity at all until 2026-09-16, and a coder
-/// committed under the identity a previous mission's integrator had left in
-/// the slot's config. It is `run.rs` that makes the line true, in the run's
+/// That the author says so is not a given: with no identity set, a coder
+/// commits under the identity a previous mission's integrator left in the
+/// slot's config. It is `run.rs` that makes the line true, in the run's
 /// environment — and turning the trailer off is only worth anything because
 /// it does.
 ///
@@ -54,8 +52,8 @@ use super::{
 /// the current one, `attribution.sessionUrl` turns off the session link,
 /// and `includeCoAuthoredBy` is their deprecated ancestor — the CLI's own
 /// words, read from the binary. An older image gets an older CLI, and a
-/// key it does not know is ignored rather than refused (measured the same
-/// day), so naming all three costs nothing and covers both.
+/// key it does not know is ignored rather than refused, so naming all
+/// three costs nothing and covers both.
 const SETTINGS: &str = concat!(
     r#"{"attribution":{"commitTrailers":false,"sessionUrl":false},"#,
     r#""includeCoAuthoredBy":false}"#
@@ -219,9 +217,8 @@ impl Harness for ClaudeCode {
 
     /// What a role is allowed to do **through the harness**.
     ///
-    /// Found by running one, on 2026-09-10, when `dontAsk` was the only mode
-    /// `nunki` passed: with nothing allowed, the first real agent run had `Bash`
-    /// and `Write` refused, sat thinking, and ended without a result.
+    /// Under `dontAsk` with nothing allowed, an agent run has `Bash` and
+    /// `Write` refused, sits thinking, and ends without a result.
     /// Refusing is safe (SPEC 3.2) — refusing *everything* is a container
     /// that cannot work. The list still matters under `auto`, which is now
     /// the default: it pre-approves the ordinary work instead of leaving it
@@ -266,8 +263,8 @@ impl Harness for ClaudeCode {
 
     fn provision(&self) -> Provisioning {
         Provisioning {
-            // The native installer, measured on debian:bookworm-slim on
-            // 2026-09-10: it needs no Node and puts a versioned install
+            // The native installer, as it behaves on debian:bookworm-slim: it
+            // needs no Node and puts a versioned install
             // under ~/.local/share/claude with a symlink in ~/.local/bin.
             install: vec!["curl -fsSL https://claude.ai/install.sh | bash".into()],
             binary: "claude".into(),
