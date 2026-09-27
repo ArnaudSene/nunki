@@ -63,6 +63,39 @@ pub const KNOWN_STACKS: [&str; 3] = ["rust", "python", "next"];
 /// exists. The configuration, the HQ and the stack fragments go into the
 /// home: development tooling is not a project's to carry in its history.
 pub fn init(root: &Path, home: &Path, stacks: &[String]) -> Result<Vec<Action>, InitError> {
+    init_with(root, home, stacks, &Answers::default())
+}
+
+/// What a fresh `nunki.yaml` declares beyond its stacks: what the interview
+/// asked, or the defaults a non-interactive `init` has always written
+/// (SPEC 4.2, `nunki init`). Read only when `nunki.yaml` is written, which is
+/// only when there is none — nunki never rewrites a file a human edits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Answers {
+    pub forge: Vec<String>,
+    pub forge_protection: crate::project::ForgeProtection,
+    pub permission_mode: String,
+    pub protected_branches: Vec<String>,
+}
+
+impl Default for Answers {
+    fn default() -> Self {
+        Self {
+            forge: Vec::new(),
+            forge_protection: crate::project::ForgeProtection::Forge,
+            permission_mode: "auto".to_string(),
+            protected_branches: vec!["main".to_string(), "dev".to_string()],
+        }
+    }
+}
+
+/// [`init`], with what the interview decided for a fresh `nunki.yaml`.
+pub fn init_with(
+    root: &Path,
+    home: &Path,
+    stacks: &[String],
+    answers: &Answers,
+) -> Result<Vec<Action>, InitError> {
     if !root.is_dir() {
         return Err(InitError::NotADirectory(root.to_path_buf()));
     }
@@ -114,7 +147,7 @@ pub fn init(root: &Path, home: &Path, stacks: &[String]) -> Result<Vec<Action>, 
     create_if_absent(
         home,
         crate::project::CONFIG_FILE,
-        &nunki_yaml(root, stacks),
+        &nunki_yaml(root, stacks, answers),
         &mut actions,
     )?;
     create_if_absent(root, "AGENTS.md", AGENTS_MD, &mut actions)?;
@@ -251,7 +284,31 @@ fn gitattributes(root: &Path, actions: &mut Vec<Action>) -> Result<(), InitError
     Ok(())
 }
 
-fn nunki_yaml(root: &Path, stacks: &[crate::project::Stack]) -> String {
+fn nunki_yaml(root: &Path, stacks: &[crate::project::Stack], answers: &Answers) -> String {
+    let list_of = |items: &[String], empty: &str| {
+        if items.is_empty() {
+            format!(" {empty}")
+        } else {
+            items
+                .iter()
+                .map(|i| format!("\n  - {i}"))
+                .collect::<String>()
+        }
+    };
+    let forge = if answers.forge.is_empty() {
+        "forge: []".to_string()
+    } else {
+        format!("forge:{}", list_of(&answers.forge, "[]"))
+    };
+    let branches = format!(
+        "protected_branches:{}",
+        list_of(&answers.protected_branches, "[]")
+    );
+    let protection = match answers.forge_protection {
+        crate::project::ForgeProtection::Forge => "# forge_protection: by_hand",
+        crate::project::ForgeProtection::ByHand => "forge_protection: by_hand",
+    };
+    let permission_mode = &answers.permission_mode;
     let list = if stacks.is_empty() {
         "stacks: []".to_string()
     } else {
@@ -284,7 +341,7 @@ harness: claude-code
 
 # No agent may reach the forge: a slot's origin is unreachable, and an
 # allowlist naming it would undo that. Put your forge's domain here.
-forge: []
+{forge}
 
 {list}
 
@@ -307,23 +364,21 @@ forge: []
 # clarification; `dontAsk` allows only what is pre-approved and denies
 # everything else. Whatever the mode, nunki refuses the prompt itself, so a run
 # never waits for a human who is not there.
-permission_mode: auto
+permission_mode: {permission_mode}
 
 # The project's own Compose file, whose services and networks nunki merges into
 # every system profile. They are lifted once per slot and never stopped
 # between two profiles, so what the integrator laid down survives.
 # services_file: compose.yaml
 
-protected_branches:
-  - main
-  - dev
+{branches}
 
 # Who refuses a push to a protected branch besides nunki's own gate: `forge`
 # (the default) — `nunki check` asks the forge, and an unprotected branch is red.
 # `by_hand` when the forge cannot, as on a private repository on GitHub's
 # free plan, and you hold the rule yourself: `nunki check` does not ask, and
 # says so.
-# forge_protection: by_hand
+{protection}
 
 protected_paths:
   # Refused outright. The battery, the allowlist and the Dockerfile are not

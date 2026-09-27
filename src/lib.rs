@@ -23,6 +23,7 @@ pub mod harness;
 pub mod human;
 pub mod image;
 pub mod init;
+pub mod interview;
 pub mod launch;
 pub mod lifecycle;
 pub mod logs;

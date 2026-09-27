@@ -27,16 +27,45 @@ struct Cli {
     command: Command,
 }
 
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum ProtectionArg {
+    Forge,
+    ByHand,
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Make an existing repository orchestrable.
     ///
     /// Creates what is absent, never overwrites a file a human edits — it
     /// deposits its version beside it — and keeps no manifest. Replayable.
+    ///
+    /// On a terminal, a first `init` asks what `nunki.yaml` should declare,
+    /// proposing what the repository already says: the stacks its manifests
+    /// declare and where, the forge its `origin` names, the branches it has.
+    /// A flag answers its question in advance; `--yes` takes every proposal.
+    /// Off a terminal, and without `--yes`, nothing is detected and nothing
+    /// asked: only the flags count, as they always have.
     Init {
-        /// Stack fragments to write in the project's home, under `stacks/`.
-        #[arg(long = "stack", value_name = "NAME")]
+        /// Stack fragments to write in the project's home, under `stacks/`:
+        /// `name`, or `name=dir` for a stack in a directory of the repository.
+        #[arg(long = "stack", value_name = "NAME[=DIR]")]
         stacks: Vec<String>,
+        /// A forge domain no agent may reach. Repeatable.
+        #[arg(long = "forge", value_name = "DOMAIN")]
+        forge: Vec<String>,
+        /// Who refuses a push to a protected branch besides nunki's gate.
+        #[arg(long = "forge-protection", value_enum)]
+        forge_protection: Option<ProtectionArg>,
+        /// How the harness answers a permission nobody is there to give.
+        #[arg(long = "permission-mode", value_parser = ["auto", "dontAsk"])]
+        permission_mode: Option<String>,
+        /// A branch no mission may target or push to. Repeatable.
+        #[arg(long = "protected-branch", value_name = "BRANCH")]
+        protected_branches: Vec<String>,
+        /// Take every proposed answer without asking.
+        #[arg(long)]
+        yes: bool,
     },
 
     /// Slots: a local clone without hard links, where missions happen.
@@ -505,11 +534,39 @@ fn main() -> ExitCode {
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
     match cli.command {
-        Command::Init { stacks } => {
+        Command::Init {
+            stacks,
+            forge,
+            forge_protection,
+            permission_mode,
+            protected_branches,
+            yes,
+        } => {
             // `init` is the one verb that runs before a project exists: it
             // finds the repository as git does, and names the home after it.
             let root = match Project::find_root(&start) {
                 Ok(r) => r,
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let given = nunki::interview::Given {
+                stacks: stacks.clone(),
+                forge,
+                forge_protection: forge_protection.map(|p| match p {
+                    ProtectionArg::Forge => nunki::project::ForgeProtection::Forge,
+                    ProtectionArg::ByHand => nunki::project::ForgeProtection::ByHand,
+                }),
+                permission_mode,
+                protected_branches,
+            };
+            // What a fresh `nunki.yaml` will say. Decided before the home is
+            // made, so an interview left unconfirmed leaves nothing behind.
+            let configured = Project::home_for(&root)
+                .is_ok_and(|h| h.join(nunki::project::CONFIG_FILE).is_file());
+            let (stacks, answers) = match first_configuration(&root, &given, yes, configured) {
+                Ok(decided) => decided,
                 Err(e) => {
                     eprintln!("nunki: {e}");
                     return ExitCode::FAILURE;
@@ -524,7 +581,7 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            match init::init(&root, &home, &stacks) {
+            match init::init_with(&root, &home, &stacks, &answers) {
                 Ok(actions) => {
                     for action in &actions {
                         println!("{}", action.render());
@@ -1209,6 +1266,84 @@ fn main() -> ExitCode {
             }
         }
     }
+}
+
+/// The stacks and the rest of a first `nunki.yaml` (SPEC 4.2, `nunki init`).
+///
+/// Once `nunki.yaml` exists nothing is asked: nunki never rewrites it, and
+/// the flags that would shape a new one say so rather than vanish. A stack
+/// the manifests declare and the file does not is named, since that is the
+/// one question whose answer changes on its own as a repository grows.
+fn first_configuration(
+    root: &std::path::Path,
+    given: &nunki::interview::Given,
+    yes: bool,
+    configured: bool,
+) -> Result<(Vec<String>, init::Answers), nunki::interview::InterviewError> {
+    use std::io::IsTerminal;
+    if configured {
+        let shaped = !given.forge.is_empty()
+            || given.forge_protection.is_some()
+            || given.permission_mode.is_some()
+            || !given.protected_branches.is_empty();
+        if shaped {
+            eprintln!(
+                "nunki: nunki.yaml already exists and nunki never rewrites it; \
+                 --forge, --forge-protection, --permission-mode and --protected-branch \
+                 only shape a new one — edit it instead"
+            );
+        }
+        if let Ok(project) = Project::open(root) {
+            for (stack, manifest) in nunki::interview::detect(root).stacks {
+                if !project.config.stacks.iter().any(|s| s.name == stack.name) {
+                    eprintln!(
+                        "nunki: {manifest} declares a {} stack nunki.yaml does not; \
+                         `nunki init --stack {}` writes its fragment, and nunki.yaml needs \
+                         the line by hand",
+                        stack.name,
+                        if stack.dir.is_empty() {
+                            stack.name.clone()
+                        } else {
+                            format!("{}={}", stack.name, stack.dir)
+                        }
+                    );
+                }
+            }
+        }
+        return Ok((given.stacks.clone(), init::Answers::default()));
+    }
+    let terminal = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+    if yes {
+        let detected = nunki::interview::detect(root);
+        return nunki::interview::interview(&detected, given, &mut nunki::interview::Proposed);
+    }
+    if terminal {
+        let detected = nunki::interview::detect(root);
+        return nunki::interview::interview(&detected, given, &mut nunki::interview::Terminal);
+    }
+    // Off a terminal and without `--yes`: the flags, over the defaults every
+    // non-interactive `init` has written.
+    let defaults = init::Answers::default();
+    Ok((
+        given.stacks.clone(),
+        init::Answers {
+            forge: if given.forge.is_empty() {
+                defaults.forge
+            } else {
+                given.forge.clone()
+            },
+            forge_protection: given.forge_protection.unwrap_or(defaults.forge_protection),
+            permission_mode: given
+                .permission_mode
+                .clone()
+                .unwrap_or(defaults.permission_mode),
+            protected_branches: if given.protected_branches.is_empty() {
+                defaults.protected_branches
+            } else {
+                given.protected_branches.clone()
+            },
+        },
+    ))
 }
 
 /// Open the project containing `start`, reporting the failure the way every
