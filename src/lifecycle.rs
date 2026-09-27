@@ -228,9 +228,9 @@ pub fn end(project: &Project, id: &str, why: &str) -> Result<MissionState, Lifec
 /// buys the same handover a second time.
 ///
 /// **It resumes the work, and does not ask whether the work is already done.**
-/// That looks wasteful when the cause was outside the mission: on 2026-09-20,
-/// a defect in gate 3 exhausted a lot whose commit was correct all along, and
-/// the retry sent a coder to re-examine a tree that already passed every gate.
+/// That looks wasteful when the cause was outside the mission: a defect in a
+/// gate can exhaust a lot whose commit was correct all along, and the retry
+/// then sends a coder to re-examine a tree that already passes every gate.
 ///
 /// It stays that way on purpose. The handover says a bound ran out on *this*
 /// work, and nothing on disk distinguishes "the lot is finished and something
@@ -240,10 +240,9 @@ pub fn end(project: &Project, id: &str, why: &str) -> Result<MissionState, Lifec
 /// is a change to the mission's state machine to save one cheap run, in a
 /// case that arises only when `nunki` itself was wrong.
 ///
-/// What carries the difference instead is the reason above, and it works:
-/// measured the same day, the coder read it, checked the tree itself, wrote
-/// no code, and closed the volet in 3545 output tokens — the shortest run of
-/// that mission by an order of magnitude.
+/// What carries the difference instead is the reason above, and it is enough:
+/// a coder that reads it checks the tree itself, writes no code, and closes
+/// the volet in a run far shorter than any other.
 pub fn retry(project: &Project, id: &str, why: &str) -> Result<MissionState, LifecycleError> {
     if why.trim().is_empty() {
         return Err(LifecycleError::NoChange);
@@ -269,9 +268,9 @@ pub fn retry(project: &Project, id: &str, why: &str) -> Result<MissionState, Lif
 
     // Refused before anything is written. The record below is read by the next
     // run as a statement of fact — "the bounds are handed back whole" — and a
-    // retry the flow refuses leaves the mission exactly where it was. Measured
-    // on 2026-09-18 against a real HQ: five records in `FOLLOWUP_HQ.md` for
-    // three retries, the other two about a mission that had not moved.
+    // retry the flow refuses leaves the mission exactly where it was. Written
+    // first, a refused retry would still leave a record in `FOLLOWUP_HQ.md`
+    // about a mission that had not moved.
     //
     // On a copy, so that the order the comment below asks for still holds: the
     // record lands before the state does. The transition is a pure function of

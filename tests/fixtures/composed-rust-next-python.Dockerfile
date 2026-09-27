@@ -32,11 +32,11 @@ ARG RUST_TARGETS=
 # since would never reach a freshly built image — pulling the tag again does
 # not help while the tag itself has not been rebuilt.
 #
-# Measured on 2026-09-13, on a scan that went red: `libpcre2-8-0` 10.42-1,
-# carrying CVE-2026-86145 and CVE-2026-89161 — both HIGH, both with a fix
-# published. It arrives with the base image and is installed by no line here,
-# so nothing but this one moves it. `apt-get upgrade` takes it to
-# 10.42-1+deb12u1, measured in the base image itself.
+# A package that arrives with the base image and is installed by no line
+# here — `libpcre2-8-0` 10.42-1, for instance, carrying CVE-2026-86145 and
+# CVE-2026-89161, both HIGH, both with a fix published — is moved by nothing
+# but this one. `apt-get upgrade` takes that one to 10.42-1+deb12u1 in the
+# base image itself.
 RUN apt-get -qq update \
  && apt-get -qq -y upgrade \
  && apt-get -qq install --no-install-recommends -y \
@@ -53,11 +53,11 @@ RUN apt-get -qq update \
 # version means raising the two sums with it, and the build fails loudly if
 # they disagree.
 #
-# `gitleaks` was here first and the image scan refused it, rightly: its 8.30.1
-# binary carried 33 critical or high advisories **with fixes published**, from
-# `golang.org/x/crypto v0.35.0` — thirteen months stale at its own release.
-# This one is measured current, and being a Go binary the scan keeps looking
-# inside it at every build. A tool the gate cannot inspect would not be safer,
+# `gitleaks` is not the tool here because the image scan refuses it, rightly:
+# its 8.30.1 binary carries 33 critical or high advisories **with fixes
+# published**, from `golang.org/x/crypto v0.35.0` — thirteen months stale at
+# its own release. This one is current at the pinned version, and being a Go
+# binary the scan keeps looking inside it at every build. A tool the gate cannot inspect would not be safer,
 # it would only stop being asked about.
 ARG TRUFFLEHOG=3.97.5
 RUN set -eu; \
@@ -93,8 +93,8 @@ ENV RUSTUP_HOME=/home/agent/.rustup \
 # The toolchain the repository's `rust-toolchain.toml` names, with its
 # components and targets, installed here because inside a run rustup cannot
 # fetch one: `static.rust-lang.org` is on no allowlist. `clippy` and `rustfmt`
-# whatever the repository says, since the battery calls both. Measured on
-# 2026-09-26 with `--network none`: an image built this way for `1.98.0` and
+# whatever the repository says, since the battery calls both. With
+# `--network none`, an image built this way for `1.98.0` and
 # `wasm32-unknown-unknown,x86_64-unknown-linux-musl` answers `rustc 1.98.0`
 # under a `rust-toolchain.toml` pinning it, and lists all three targets.
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
@@ -110,23 +110,21 @@ RUN mkdir -p /home/agent/.cargo/registry /home/agent/.harness
 # something nunki brings. `prepush.sh` beside this file runs
 # `cargo deny check`; an image without it fails gate 6 for a reason no
 # agent can repair — the image is built from this file, on the host, and no
-# agent can reach it. Measured on
-# 2026-09-14: a coder spent its three attempts diagnosing that exact
-# hole, correctly, and the mission was handed over having built both its
-# lots.
+# agent can reach it. A coder can diagnose that hole correctly and still
+# spend every attempt on it.
 #
 # The mutation campaign gate 7 plays (SPEC 4.4). Installed here, in the
 # project's own image, because the campaign is what this stack declares and
 # not something nunki brings: `mutation.sh` beside this file is what calls it.
-# Measured on 2026-09-10, cargo-mutants 27.1.0 on this image: 20 s and 115 MB
-# at build time, none at campaign time — which is the right way round, since
+# cargo-mutants 27.1.0 costs this image 20 s and 115 MB at build time and
+# none at campaign time — which is the right way round, since
 # `nunki slot rebuild` is rare and a campaign is not.
 #
 # What stays of the build is the binary and the lockfile it was built from,
 # kept where an image scanner finds it. The registry is emptied: it held the
 # sources of every dependency — 117 MB, each with its own development
 # lockfile, which describes nothing installed here and which Trivy read as a
-# vulnerable `regex` (measured 2026-09-11). The kept lockfile is named
+# vulnerable `regex`. The kept lockfile is named
 # `Cargo.lock`, in a folder of its own: a scanner recognises it by that name
 # and no other. The registry directory stays, empty, as the mount point of the
 # slot's cargo cache.
@@ -172,7 +170,7 @@ RUN set -eu; \
 # `registry.npmjs.org` the first time it runs, into the **calling user's**
 # `~/.cache/node/corepack`. Prepared as root and then handed to `agent`, that
 # cache is the wrong user's, and the agent fetches it again — which fails
-# outright when the network is closed. Measured 2026-09-21. `COREPACK_HOME`
+# outright when the network is closed. `COREPACK_HOME`
 # puts it somewhere both users read.
 ARG PNPM=12.5.1
 ENV COREPACK_HOME=/opt/corepack
@@ -202,12 +200,10 @@ RUN npx --yes playwright@${PLAYWRIGHT} install --with-deps chromium \
 #
 # This stack installs with pnpm, through corepack, and never calls npm — but
 # npm ships inside the Node image with a dependency tree of its own, and that
-# tree is what the image scan reports. Measured 2026-09-21, the first time
-# this image was scanned: seven critical or high advisories **with fixes
-# published**, `tar` 7.5.11 among them, none of them from a line of this
-# file. Upgrading npm to its latest took it to four rather than none: its
-# bundled tree is always a patch or two behind whatever the advisory database
-# knows.
+# tree is what the image scan reports: critical or high advisories **with
+# fixes published**, `tar` 7.5.11 among them, none of them from a line of
+# this file. Upgrading npm to its latest does not clear them: its bundled
+# tree is always a patch or two behind whatever the advisory database knows.
 #
 # So it is removed rather than chased. It is the last line that needs it —
 # `npx` above is how Playwright arrives — and corepack, which is a separate

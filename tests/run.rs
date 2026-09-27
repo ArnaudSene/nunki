@@ -510,17 +510,17 @@ fn the_role_prompts_say_what_the_role_may_not_do() {
             "the outcome nobody can check must be refused where the agent reads \
              its rules, not only where nunki checks them: {prompt}"
         );
-        // The shape of the answer, not just its name. Measured on 2026-09-13:
-        // a coder left to guess it wrote MUTANTS.json's shape instead, and
-        // `nunki` refused the file with a serde error that stopped the whole
-        // verification rather than reddening one gate.
+        // The shape of the answer, not just its name. A coder left to guess
+        // it writes MUTANTS.json's shape instead, and `nunki` refuses the file
+        // with a serde error that stops the whole verification rather than
+        // reddening one gate.
         assert!(
             prompt.contains(r#"{"<survivor id>": {"kind": "killed", "test":"#),
             "the triage file's shape belongs where the agent reads its rules: {prompt}"
         );
         // Three outcomes and no fourth (SPEC 4.4). A prompt that sanctions
         // "unanswered" sends the agent at a gate that refuses it, and the
-        // agent obeys the prompt — measured the same day.
+        // agent obeys the prompt.
         assert!(
             !prompt.contains("left unanswered"),
             "the prompt must not offer an outcome gate 7 refuses: {prompt}"
@@ -554,9 +554,8 @@ fn the_role_prompts_say_what_the_role_may_not_do() {
 
 /// The integrator is graded by gates of its own — the wiring list, a system
 /// battery, a completed `PR.md`, a verdict pinned to `HEAD` — and each has to
-/// be said where it reads its rules. Found on 2026-09-15, before the first
-/// integration mission was launched: none of the four was, so its first run
-/// would have gone red at gates 5 and 6 on rules it had no way to learn.
+/// be said where it reads its rules. Otherwise its first run goes red at
+/// gates 5 and 6 on rules it had no way to learn.
 #[test]
 fn the_integrator_is_told_what_its_own_gates_require() {
     let integrator = role::prompt(Role::Integrator);
@@ -574,7 +573,7 @@ fn the_integrator_is_told_what_its_own_gates_require() {
 
     // The verdict's shape, and one `nunki` actually reads. A shape given only
     // in prose drifts from the struct that parses it, and the agent obeys the
-    // prose — the triage file taught that on 2026-09-13.
+    // prose, as the triage file shows.
     let line = integrator
         .lines()
         .map(str::trim)
@@ -589,9 +588,9 @@ fn the_integrator_is_told_what_its_own_gates_require() {
 
 /// The security agent commits nothing, so its gates are its journal and its
 /// report — and its verdict has a shape `nunki` refuses when it is wrong.
-/// Found on 2026-09-15, before the first security mission: its prompt named
-/// neither `CLEAR`, nor `FINDINGS`, nor the file the verdict goes in, so its
-/// first run would have been refused for a verdict it was never shown.
+/// A prompt that names neither `CLEAR`, nor `FINDINGS`, nor the file the
+/// verdict goes in gets its first run refused for a verdict it was never
+/// shown.
 #[test]
 fn the_security_agent_is_told_what_its_own_gates_require() {
     let security = role::prompt(Role::Security);
@@ -682,9 +681,9 @@ fn live_a_mission_starts_and_its_run_is_read_back() {
     //
     // It ends on `USER agent`, as every stack image must (SPEC 4.2 bis): the
     // agent runs under the human's own id, and nunki's harness layer is built
-    // on top of whatever user the stack image leaves. A fixture that ended
-    // as root ran this whole live test as root, and proved a shape no stack
-    // image is allowed to have — caught by the check added the same day.
+    // on top of whatever user the stack image leaves. A fixture that ends
+    // as root runs this whole live test as root, and proves a shape no stack
+    // image is allowed to have.
     let (uid, gid) = nunki::image::host_ids();
     std::fs::write(
         home.join("stacks/rust/Dockerfile"),
@@ -1277,10 +1276,9 @@ fn the_profile_names_its_role() {
         // run's environment — git reads these before any config file, so the
         // slot's config cannot answer for them.
         //
-        // Measured on `notes-2` on 2026-09-16, before this existed: nunki set
-        // no identity, the agents set one in the slot's config, and the
-        // coder of a second mission committed as `nunki integrator` — the
-        // identity the previous mission's integrator had left there.
+        // If nunki sets no identity, the agents set one in the slot's config,
+        // and the coder of a second mission commits as `nunki integrator` —
+        // the identity the previous mission's integrator left there.
         //
         // The **committer** carries it. The author is the human's, and
         // `a_commit_is_attributed_to_the_human_who_owns_it` covers that.
@@ -1299,10 +1297,10 @@ fn the_profile_names_its_role() {
 
 /// A commit an agent makes is **authored** by the human whose project it is.
 ///
-/// Not a nicety: a forge reads the author line and nothing else. Measured on
-/// 2026-09-21, on a real repository — GitHub resolves a commit's author email
-/// to an account and leaves `author` null when it cannot, so every commit
-/// authored as `coder@nunki.local` was attributed to nobody, absent from the
+/// Not a nicety: a forge reads the author line and nothing else. GitHub
+/// resolves a commit's author email to an account and leaves `author` null
+/// when it cannot, so every commit authored as `coder@nunki.local` is
+/// attributed to nobody, absent from the
 /// contribution graph of the person who owns the repository, framed the
 /// mission, authorised the push and merged it.
 ///
@@ -1465,7 +1463,7 @@ fn a_writable_declaration_may_not_climb_out_of_the_tree() {
 /// A volume can only be mounted at a path the read-only bind already carries:
 /// runc creates the mount point in the assembled root filesystem, and under a
 /// `:ro` bind it cannot — `create mountpoint for /work/tree/target: read-only
-/// file system`, measured 2026-09-10. So `nunki` makes the directory in the
+/// file system`, measured. So `nunki` makes the directory in the
 /// slot's tree first, and nothing else: an empty directory the project
 /// ignores, invisible to `git status`, so gate 1 stays green.
 #[test]
@@ -1577,11 +1575,10 @@ fn a_given_session_is_resumed_and_none_starts_a_fresh_one() {
 /// The coder is told to stand in for what it cannot reach, because a gate
 /// that requires what nothing states grades an agent on a secret.
 ///
-/// SPEC 4.4 has said "bouchonné, ou un composant local jetable" since the
-/// first day; the prompt had not. Measured on `notes-2` on 2026-09-16: the
-/// coder wrote a PostgreSQL store with no seam, the mutation campaign left
-/// five survivors nobody in that container could kill, and gate 7 spent all
-/// three attempts on a triage that could not be won.
+/// SPEC 4.4 says "stubbed, or a disposable local component"; the prompt has
+/// to say it too. A coder that writes a PostgreSQL store with no seam leaves
+/// the mutation campaign survivors nobody in that container can kill, and
+/// gate 7 spends all three attempts on a triage that cannot be won.
 #[test]
 fn the_coder_is_told_to_mock_what_its_container_cannot_reach() {
     let coder = role::prompt(Role::Coder);
@@ -1611,10 +1608,9 @@ fn the_coder_is_told_to_mock_what_its_container_cannot_reach() {
 }
 
 /// A slot is a clone, and a clone writes its own `dev` once. Nothing moves it
-/// again — so every mission after the first branched from the base as it
-/// stood the day the slot was made, and its pull request opened against a
-/// base that had moved. Bit for real twice on `notes-api`, worked around by
-/// hand both times.
+/// again — so without a refresh every mission after the first branches from
+/// the base as it stood the day the slot was made, and its pull request
+/// opens against a base that has moved.
 ///
 /// A slot's `origin` is the project on this machine rather than the forge, so
 /// refreshing it is local and needs no network.
@@ -1659,9 +1655,8 @@ fn a_second_mission_branches_from_a_base_the_slot_refreshed() {
     );
 }
 
-/// `checkout -B` repoints a branch at its start. Measured on 2026-09-17:
-/// `checkout -B mission/x dev` on a branch holding one commit of work left it
-/// holding none. Any launch that found the slot on another branch — a human
+/// `checkout -B` repoints a branch at its start: `checkout -B mission/x dev`
+/// on a branch holding one commit of work leaves it holding none. Any launch that found the slot on another branch — a human
 /// looking at something, a role switch that did not come back — spent the
 /// mission's work to get back to it.
 #[test]
@@ -1975,7 +1970,7 @@ fn the_advisory_database_is_mounted_read_only_where_nunki_says() {
 /// Everything mounted **only when it exists** lands under `NUNKI_AT`, where
 /// the agent cannot make it.
 ///
-/// Measured in a container on 2026-09-18: as the agent, `mkdir -p
+/// Measured in a container: as the agent, `mkdir -p
 /// /work/advisories` succeeds — the Dockerfile chowns `/work` — and `mkdir
 /// /nunki` is refused. A conditional mount under `/work` is therefore, on the
 /// day it is absent, a path the agent writes: its own exceptions for the

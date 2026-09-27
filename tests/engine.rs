@@ -638,9 +638,9 @@ fn a_signal_is_named_the_way_kill_expects_it() {
 
 /// A signal that fails says what failed, even when the shell says nothing.
 ///
-/// Measured on 2026-09-13: `nunki mission stop --now` answered `nunki: io:` — that
-/// was the whole message — and the run went on as if nothing had been asked.
-/// The error carried the container's stderr and nothing else, and a `kill`
+/// Without this, `nunki mission stop --now` can answer `nunki: io:` — the
+/// whole message — while the run goes on as if nothing had been asked, when
+/// the error carries the container's stderr and nothing else, and a `kill`
 /// that fails frequently writes no stderr at all, so the one case where a
 /// human has least to go on was the case that said least. The status is then
 /// the only thing known, which is precisely why it has to be in the sentence.
@@ -828,7 +828,7 @@ fn a_frozen_container_answers_paused_and_is_never_probed() {
 /// A signal reaches the run through a **shell**, because `kill` is a builtin
 /// every shell has and not a binary every image ships.
 ///
-/// Measured on 2026-09-16, on this project's own Debian agent image:
+/// Measured on this project's own Debian agent image:
 ///
 /// ```text
 /// $ docker exec <agent> kill -0 1

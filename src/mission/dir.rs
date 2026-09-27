@@ -117,10 +117,10 @@ pub fn create(
 
 /// Make sure every file the agent writes exists, empty when it does not.
 ///
-/// [`create`] writes them once, and that was the whole guard until a
-/// `MUTANTS.triage.json` removed by hand came back as a **directory** on the
-/// next launch (measured 2026-09-17: `verify: the mutation campaign could not
-/// be read: …/MUTANTS.triage.json: Is a directory (os error 21)`). These four
+/// [`create`] writes them once, but that alone is no guard: a
+/// `MUTANTS.triage.json` removed by hand comes back as a **directory** on the
+/// next launch (`verify: the mutation campaign could not be read:
+/// …/MUTANTS.triage.json: Is a directory (os error 21)`). These four
 /// are bind-mounted one file at a time, so that the rest of the folder stays
 /// read-only, and a bind mount whose source is missing makes the engine
 /// create a directory in its place — after which the file is unreadable and
@@ -226,9 +226,8 @@ fn followup(header: &Header) -> String {
         .unwrap_or_else(|| "the human".to_string());
     // A raw string, and not a `\`-continued one: `cargo fmt` joins a
     // continued literal onto one line and keeps its indentation as real
-    // spaces, which is how this file came to be written with nine-space
-    // indents — Markdown renders those as a code block. Measured on this very
-    // function, 2026-09-10.
+    // spaces, which would write this file with nine-space indents —
+    // Markdown renders those as a code block.
     const TEMPLATE: &str = r#"# Follow-up — for {who}
 
 For {who} and the HQ. The agent reads this file and never writes it.

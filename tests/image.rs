@@ -60,11 +60,10 @@ fn the_layer_fails_the_build_when_the_harness_is_not_on_path() {
 /// version in an image never moved again, and nothing said which version it
 /// was or that it was frozen.
 ///
-/// Measured on `qcoda-compta`, 2026-09-24: a mission pinned to a model the
-/// image's harness did not know came back `API Error: 400 Claude Code
-/// 2.1.278 does not support this model; version 2.1.280 or newer is
-/// required`. Two patch versions, and a held mission, for an image built
-/// weeks earlier.
+/// A mission pinned to a model the image's harness does not know comes back
+/// `API Error: 400 Claude Code 2.1.278 does not support this model; version
+/// 2.1.280 or newer is required`: two patch versions, and a held mission,
+/// for an image built weeks earlier.
 #[test]
 fn the_harness_is_installed_at_every_build_and_never_served_from_cache() {
     let layer = image::harness_layer("nunki/demo:base", &provisioning(), &[]);
@@ -122,7 +121,7 @@ fn a_harness_that_needs_nothing_still_gets_the_mount_points() {
 
 /// The directories a read-only tree still has to write are created **in the
 /// image**, because that is where a named volume takes its ownership from:
-/// measured 2026-09-10, a volume mounted at a path the image does not carry
+/// measured, a volume mounted at a path the image does not carry
 /// is born owned by root, and a container with no capability cannot repair
 /// it. Depth makes no difference — `packages/web/node_modules` behaves as
 /// `target` does.

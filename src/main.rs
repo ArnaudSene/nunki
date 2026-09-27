@@ -815,7 +815,7 @@ fn main() -> ExitCode {
                         "Write {}:",
                         nunki_home.join(nunki::human::ME_FILE).display()
                     );
-                    println!("name: Arnaud");
+                    println!("name: Your Name");
                     println!("email: you@example.com");
                 }
             }

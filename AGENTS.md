@@ -16,9 +16,9 @@ generate application code. If a change starts to look like project generation,
 it is out of scope — say so rather than build it.
 
 `SPEC.md` at the repository root is the authority on what the system does and
-why. It is the one file written in French, because its author asked for it.
-Read the section your change touches before changing anything, and cite the
-section number in doc comments (`SPEC 4.1 bis`, `SPEC 4.5`). If the code and
+why. It is the one file written in French, by choice. Read the section your
+change touches before changing anything, and cite the section number in doc
+comments (`SPEC 4.1 bis`, `SPEC 4.5`). If the code and
 the spec disagree, one of the two is wrong and the discrepancy is the finding
 — do not silently pick a side.
 
@@ -31,8 +31,7 @@ titles and descriptions, issue text, review comments.
 The exceptions, both deliberate: `SPEC.md`, and the HQ files that live outside
 this repository, under `hq/` in this project's own home — the one
 `nunki sessions` names (journal, dashboard, discussions)
-— those belong to the project's owner and stay in French. Conversation with
-him is in French too; the record is not.
+— those belong to the project's owner and stay in French.
 
 ## 3. Git
 
@@ -46,8 +45,8 @@ him is in French too; the record is not.
   never `git add -A` without looking at what it swept in.
 - Commit messages say **what changed and why it had to**, not what files were
   touched. A subject line under ~72 characters, then a body that a reader six
-  months from now can act on. When a decision was measured rather than
-  reasoned, put the measurement in the message.
+  months from now can act on. When a decision rests on a measurement rather
+  than on reasoning, put the measurement in the message.
 - **Never put a harness session link in a pull request.** Whatever
   attribution a harness suggests, a pull request description is read by
   people who cannot open that link and should not have to; it carries the
@@ -62,22 +61,19 @@ is worth**. Applied to our own work:
 
 - **Prove by executing.** Do not claim a command works, a flag exists, or an
   engine behaves a certain way because it reads that way in documentation.
-  Run it, and put the result in the commit message. Several of `SPEC.md`'s
-  decisions were corrected this way.
+  Run it, and put the result in the commit message.
 - **A test that cannot fail proves nothing.** After writing a test for a
   decision, break the decision line and check the test goes red. Do this by
-  hand for every load-bearing line — it is the ritual that has caught real
-  defects here.
-- **A probe is worth nothing if it would fail without the guard.** Two
-  firewall probes once "passed" because the address was unreachable anyway.
-  Before trusting a negative result, verify the same attempt succeeds in an
+  hand for every load-bearing line.
+- **A probe is worth nothing if it would fail without the guard.** A
+  firewall probe "passes" when the address is unreachable anyway. Before
+  trusting a negative result, verify the same attempt succeeds in an
   unguarded container.
 - **A check that cannot say "I do not know" will lie.** A liveness answer
   squeezed into a `bool` reports an engine that did not answer, a container
   taken down and a machine that slept as one thing: a dead agent. Whenever a
   question can fail for a reason that is not about its subject, that reason
-  gets its own answer — measured here, and it had already put a false defect
-  in a pull request.
+  gets its own answer, or a false defect ends up in a pull request.
 - **Report faithfully.** If something is untested, say which part. If a test
   was skipped, say so. Never describe intended behaviour as verified. A
   finding that turns out to be wrong is corrected where it was published, not
@@ -127,9 +123,8 @@ is worth**. Applied to our own work:
   cargo audit --deny warnings   # known vulnerabilities (RustSec)
   ```
 
-  `cargo audit` is not redundant with `cargo deny`: CI plays both, and on
-  2026-09-10 it was `cargo audit` alone that caught RUSTSEC-2026-0009 in a
-  dependency `cargo deny` had let through locally.
+  `cargo audit` is not redundant with `cargo deny`: CI plays both, because
+  one can catch an advisory in a dependency the other lets through.
 
 - Module layout follows the spec, not the other way round: `harness/`
   (SPEC 4.3), `mission/` (4.1, 4.5), `state/` (4.2), `compose/` (4.2),
@@ -191,6 +186,7 @@ are allowed to implement:
   is left and why.
 - When a decision genuinely belongs to the owner — an architecture fork, a
   naming convention, anything that changes `SPEC.md` — put the options and a
-  recommendation in front of him and wait. Everything else, decide and move.
+  recommendation in front of the owner and wait. Everything else, decide and
+  move.
 - Uncertainty is stated once, plainly, and then the work continues under a
   named assumption.

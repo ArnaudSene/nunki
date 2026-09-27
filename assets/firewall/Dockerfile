@@ -5,13 +5,13 @@
 # resolver that answers for allowed names only, and a ruleset whose allowed
 # addresses are fed by that resolver's own answers.
 #
-# Alpine, and dnsmasq built rather than installed. Measured on 2026-09-09:
-# `debian:bookworm-slim` carries 4 critical and 52 high vulnerabilities, none
-# of them fixable — Debian marks them won't-fix — and the finished sidecar
-# came to 8 critical, 55 high, 154 MB. On Alpine the same sidecar is 0 and 0,
-# at 27 MB. That matters here more than elsewhere: the agent shares this
-# container's network namespace, so this resolver's listening socket is
-# reachable by the very process the sidecar exists to fence in.
+# Alpine, and dnsmasq built rather than installed. `debian:bookworm-slim`
+# carries critical and high vulnerabilities none of which are fixable —
+# Debian marks them won't-fix — and a sidecar built on it carries more
+# still, at several times the size. On Alpine the same sidecar has no
+# critical or high finding. That matters here more than elsewhere: the agent
+# shares this container's network namespace, so this resolver's listening
+# socket is reachable by the very process the sidecar exists to fence in.
 #
 # Alpine's packaged dnsmasq is built without `nftset` ("recompile with
 # HAVE_NFTSET defined"), and `nftset` is what rule 4 needs — the resolver

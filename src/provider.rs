@@ -3,9 +3,8 @@
 //! System tests against a real third-party API are slow, flaky and have side
 //! effects, and two missions running them at once share the same test tier
 //! and trample each other. So a service the mission's header declares
-//! `shared: true` — a real provider, as the human says at framing (decided
-//! by Arnaud on 2026-09-11) — is locked, for the other missions of the
-//! project, for as long as an integration run uses it.
+//! `shared: true` — a real provider, as the human says at framing — is
+//! locked, for the other missions of the project, for as long as an integration run uses it.
 //!
 //! The lock is **derived from nunki's state**, not kept beside it: a provider is
 //! taken while another mission stands on its integration stage with a run

@@ -584,7 +584,7 @@ pub fn harness_layer(
     // The directories a read-only tree still has to write, from the stack's
     // `writable.txt` (SPEC 4.2, rule 3). They are created **here**, in the
     // image, because that is where a named volume takes its ownership from:
-    // measured on 2026-09-10, a volume mounted at a path the image does not
+    // a volume mounted at a path the image does not
     // carry is born owned by root, and nothing in a container with no
     // capability can repair that afterwards. Depth makes no difference —
     // `packages/web/node_modules` behaves as `target` does — and the bind
@@ -624,11 +624,10 @@ pub fn harness_layer(
         // not: the layer cached, so the version in an image never moved
         // again, and nothing said which version it was or that it was frozen.
         //
-        // Measured on `qcoda-compta`, 2026-09-24. A mission was pinned to a
-        // model the harness in its image did not know, and the run came back
-        // `API Error: 400 Claude Code 2.1.278 does not support this model;
-        // version 2.1.280 or newer is required`. Two patch versions, and a
-        // held mission, for an image built weeks earlier.
+        // A mission pinned to a model the harness in its image does not know
+        // comes back `API Error: 400 Claude Code 2.1.278 does not support
+        // this model; version 2.1.280 or newer is required`: two patch
+        // versions, and a held mission, for an image built weeks earlier.
         //
         // Installing at build time rather than at launch is deliberate: a
         // build has ordinary network, while a run sits behind the sidecar

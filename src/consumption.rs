@@ -16,7 +16,7 @@
 //! Measured whenever `nunki` reads a run — `nunki verify` reading one back, `nunki
 //! mission watch` while one runs — and judged before every launch: past a
 //! threshold, `nunki` launches nothing until that window resets, then goes on by
-//! itself (decided 2026-09-11: 90 % of five hours, 80 % of the week). Between
+//! itself (by default 90 % of five hours, 80 % of the week). Between
 //! two readings the last measure stands, so what another session spends on
 //! the same account shows at the next reading, not before.
 

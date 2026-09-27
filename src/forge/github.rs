@@ -97,7 +97,7 @@ impl Forge for GitHub {
     }
 
     /// Read from the branch itself (`protected`), not from the protection
-    /// endpoint: measured on 2026-09-10, a private repository on GitHub's free
+    /// endpoint: a private repository on GitHub's free
     /// plan refuses the latter with 403 ("Upgrade to GitHub Pro") while still
     /// answering the former — and the question asked here is the one a push
     /// would meet, not how the rules are written.

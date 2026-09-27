@@ -341,7 +341,7 @@ fn findings_nobody_lifted_do_not_reach_the_forge() {
     state.accepted.push(nunki::state::Accepted {
         finding: None,
         why: "behind the VPN".into(),
-        who: "Arnaud".into(),
+        who: "Alex Martin".into(),
         head: head.clone(),
         date: "2026-09-10T00:00:00Z".into(),
     });

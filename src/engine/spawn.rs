@@ -168,10 +168,9 @@ impl Spawner for ContainerSpawner {
     /// number. So the identity is checked too: the harness's command line
     /// carries the session id `nunki` imposed on it, and nothing else in the
     /// container does — the wrapper `exec`s the harness, so what the kernel
-    /// reports for that pid is the harness's own command line. Measured
-    /// again on 2026-09-10, against a real five-minute Claude Code run: the
-    /// session id was in `/proc/<pid>/cmdline` for the whole run and gone
-    /// the moment it ended.
+    /// reports for that pid is the harness's own command line. Against a
+    /// real Claude Code run, the session id is in `/proc/<pid>/cmdline` for
+    /// the whole run and gone the moment it ends.
     ///
     /// The other half is knowing when **not** to answer. Every step here can
     /// fail for a reason that has nothing to do with the run — the container
@@ -196,8 +195,8 @@ impl Spawner for ContainerSpawner {
             Ok(Liveness::Running) => {}
             // Asked before the probe, because the probe cannot run: the
             // engine refuses to exec into a frozen container outright
-            // ("Container … is paused, unpause the container before exec",
-            // measured 2026-09-10), and that refusal would arrive here as
+            // ("Container … is paused, unpause the container before exec"),
+            // and that refusal would arrive here as
             // `Unknown` — a silence about a run whose state is perfectly
             // known.
             Ok(Liveness::Paused) => return Ok(Presence::Paused),
@@ -255,12 +254,12 @@ impl Spawner for ContainerSpawner {
             ));
         };
         let flag = format!("-{}", signal.name());
-        // Through a shell, as the liveness probe above already is: `kill` is
-        // a builtin every POSIX shell has, and **not** a binary every image
-        // ships. Measured on 2026-09-16 on this project's own Debian agent
-        // image: `exec … kill -INT 7` answers `executable file not found in
-        // $PATH` and a status of 127, and no signal is ever sent — while
-        // `sh -c 'kill -INT 7'` in the same container works.
+        // Through a shell, as the liveness probe above already is: `kill` is a
+        // builtin every POSIX shell has, and **not** a binary every image
+        // ships. On a Debian agent image, `exec … kill -INT 7` answers
+        // `executable file not found in $PATH` and a status of 127, and no
+        // signal is ever sent — while `sh -c 'kill -INT 7'` in the same
+        // container works.
         //
         // Every signal `nunki` sends went through this line: `nunki mission
         // stop --now`, the emergency brake, and the terminate a mutation
@@ -278,13 +277,12 @@ impl Spawner for ContainerSpawner {
             Ok(())
         } else {
             // The status always, and what the shell said only if it said
-            // anything. A `kill` that fails often writes nothing at all, and
-            // an error carrying only that stderr is an error whose whole
-            // message is empty: measured on 2026-09-13, `nunki mission stop
-            // --now` answered `nunki: io:` and nothing else, while the run went
-            // on. The status is then the only thing anyone knows, so it is
-            // the one thing that must never be dropped — the same reading
-            // `alive` already makes just above.
+            // anything. A `kill` that fails often writes nothing at all, and an
+            // error carrying only that stderr is an error whose whole message
+            // is empty: `nunki mission stop --now` would answer `nunki: io:`
+            // and nothing else, while the run goes on. The status is then the
+            // only thing anyone knows, so it is the one thing that must never
+            // be dropped — the same reading `alive` already makes just above.
             let said = out.stderr.trim();
             let what = format!("kill {flag} {pid} in the container failed ({})", out.status);
             Err(io::Error::other(if said.is_empty() {

@@ -339,7 +339,7 @@ fn every_decision_in_the_framing_is_compared() {
     fresh.base = "main".into();
     fresh.lots[1].title = "something else entirely".into();
     fresh.security = Security::Agent;
-    fresh.arbiter = Some("Igor".into());
+    fresh.arbiter = Some("Sam".into());
     fresh.account = Some("pro".into());
     fresh.run = Some("none".into());
     fresh.bounds.max_volets = 7;
@@ -560,9 +560,9 @@ fn the_record_a_retry_leaves_is_prose_and_not_a_code_block() {
 /// mission back, and the bounds are handed back whole. A mission called off is
 /// not taken back, and the next run must not be told it was.
 ///
-/// Measured on 2026-09-18 against a real HQ, playing every exit from
-/// `AwaitingHuman` through the verb: five records for three retries. The two
-/// extra ones were the refusals.
+/// Playing every exit from `AwaitingHuman` through the verb against a real
+/// HQ is how the failure shows: more records than retries, the extra ones
+/// being the refusals.
 #[test]
 fn a_retry_the_flow_refuses_leaves_no_record() {
     let world = World::new(1);

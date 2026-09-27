@@ -57,7 +57,7 @@ pub const STACK_SCRIPTS: [&str; 5] = [
 /// path under `/work` is a path the agent writes, and it would be writing the
 /// thing it is judged by.
 ///
-/// Measured in a container on 2026-09-18: as the agent, `mkdir -p
+/// In a container, as the agent, `mkdir -p
 /// /work/advisories` succeeds and `mkdir /nunki` is refused — `/` is root's.
 /// A bind mount under it makes Docker create the parent owned by root, so the
 /// directory exists only when `nunki` put something in it.
@@ -70,11 +70,11 @@ pub const NUNKI_AT: &str = "/nunki";
 /// influence would let it point the audit at an empty directory — no findings,
 /// and a green gate (SPEC 4.4, gate 8).
 ///
-/// It was `/work/advisories`, and that was the same green gate by another
-/// road: the mount is conditional, so on a machine whose advisory database is
-/// not filled the agent could `mkdir` it. Measured on 2026-09-18 — with no
-/// mount and the agent's own directory in its place, `security.sh` answered
-/// `exit=0` and no findings where it owed 69, "I could not look". Under
+/// `/work/advisories` would be the same green gate by another road: the mount
+/// is conditional, so on a machine whose advisory database is not filled the
+/// agent could `mkdir` it. With no mount and the agent's own directory in its
+/// place, `security.sh` answers `exit=0` and no findings where it owes "I
+/// could not look". Under
 /// [`NUNKI_AT`] there is nothing to make.
 pub const ADVISORIES_AT: &str = "/nunki/advisories";
 
@@ -521,7 +521,7 @@ pub fn launch(l: &Launching) -> Result<Launched, RunError> {
     // A volume can only be mounted at a path the read-only bind already
     // carries: runc creates the mount point in the assembled root filesystem,
     // and under a `:ro` bind it cannot ("create mountpoint for
-    // /work/tree/target: read-only file system", measured 2026-09-10). So the
+    // /work/tree/target: read-only file system"). So the
     // directory is made in the slot's tree first. It is empty and, being
     // whatever the project ignores, invisible to `git status` — gate 1 stays
     // green.
@@ -732,13 +732,12 @@ pub fn branch(slot: &Slot, branch: &str, base: &str) -> Result<(), git::GitError
     if git::current_branch(&slot.tree)? == branch {
         return Ok(());
     }
-    // A branch that already exists is **checked out and never moved**. It was
-    // `-B` before, which repoints a branch at its start: measured on
-    // 2026-09-17 on a throwaway pair of repositories, `checkout -B mission/x
-    // dev` on a branch holding one commit of work left it holding none. Any
-    // launch that found the slot on another branch — a human looking at
-    // something, a role switch that did not come back — spent the mission's
-    // work to get back to it.
+    // A branch that already exists is **checked out and never moved**. `-B`
+    // repoints a branch at its start: `checkout -B mission/x dev` on a branch
+    // holding one commit of work leaves it holding none. Any launch that
+    // found the slot on another branch — a human looking at something, a role
+    // switch that did not come back — would spend the mission's work to get
+    // back to it.
     let exists = git::run(
         &slot.tree,
         &["rev-parse", "--verify", "--quiet", &refs(branch)],
@@ -754,8 +753,7 @@ pub fn branch(slot: &Slot, branch: &str, base: &str) -> Result<(), git::GitError
     // the slot branched from its **own** `dev`, which a clone writes once and
     // nothing ever moves again: every mission after the first started from
     // the base as it stood the day the slot was made, and the pull request
-    // opened against a base that had moved. Bit for real twice, worked
-    // around by hand both times.
+    // opened against a base that had moved.
     //
     // The failure is said rather than swallowed: branching from a base that
     // could not be refreshed is exactly the silence this replaces.
@@ -843,11 +841,10 @@ pub fn plan(
     // it before anything in a config file and where no agent can change it
     // for the next one.
     //
-    // Measured on 2026-09-16, on `notes-2`'s first lot: `nunki` set no
-    // identity at all, so the agents set one themselves in the slot's config
-    // — and it is the slot's, not the run's. `notes-1`'s integrator had
-    // written `nunki integrator` there, and the **coder** of the next mission
-    // committed under it. A commit that names the wrong role is worse than
+    // Without it, the agents set an identity themselves in the slot's config
+    // — and it is the slot's, not the run's. An integrator that writes
+    // `nunki integrator` there leaves the **coder** of the next mission
+    // committing under it. A commit that names the wrong role is worse than
     // one that names none: it is read, and believed.
     //
     // Git carries **two** identities, and they answer two different
@@ -857,12 +854,11 @@ pub fn plan(
     // mission, they authorise the push, they merge it, and they answer for
     // what it does.
     //
-    // It is also the only line a forge reads. Measured on 2026-09-21, on a
-    // real repository: GitHub resolves a commit's author email to an account
-    // and leaves `author` null when it cannot, so eight commits authored as
-    // `coder@nunki.local` were attributed to nobody — absent from the
-    // contribution graph of the person who owns the repository and merged
-    // them. The role is not lost by this: the forge shows both lines, and
+    // It is also the only line a forge reads. GitHub resolves a commit's
+    // author email to an account and leaves `author` null when it cannot, so
+    // commits authored as `coder@nunki.local` are attributed to nobody —
+    // absent from the contribution graph of the person who owns the
+    // repository and merged them. The role is not lost by this: the forge shows both lines, and
     // `git log --format=%cn` still answers with it.
     //
     // No email, no author. A name alone resolves to no account, and inventing
@@ -1072,8 +1068,7 @@ pub fn secrets(project: &Project) -> Option<(PathBuf, PathBuf)> {
 /// Where the test credentials are mounted, read-only, on a system profile.
 /// Under the agent's own tmpfs: it is the one writable place in a container
 /// whose tree and mission folder are both restrained, and a file bound
-/// underneath it stays read-only while the tmpfs above stays the agent's
-/// (measured, 2026-09-10).
+/// underneath it stays read-only while the tmpfs above stays the agent's.
 pub const CREDENTIALS_AT: &str = "/run/nunki/credentials";
 
 /// The credential files a system profile mounts: every file the project's
@@ -1143,7 +1138,7 @@ fn project_compose(project: &Project, slot: &Slot) -> Result<ProjectBlocks, RunE
 ///
 /// From `/dev/urandom` when there is one. The clock-and-pid mix that came
 /// before left the top 48 bits at zero — every identifier began
-/// `00000000-0000-`, as the run logs of this project's own HQ show — because
+/// `00000000-0000-` — because
 /// nanoseconds since 1970 need 61 bits and a pid shifted by 64 reaches 80,
 /// and nothing filled the rest.
 pub fn session_id() -> String {

@@ -1,6 +1,5 @@
-# The images nunki builds, scanned for known vulnerabilities (decided by the
-# owner on 2026-09-11). The scan of 2026-09-09 was a measure; this is the
-# watch that follows it over time.
+# The images nunki builds, scanned for known vulnerabilities: a one-off scan
+# is a measure, and this is the watch that follows it over time.
 #
 # When: every Monday, because a CVE is published against an image nobody has
 # touched; and on a pull request that changes what the images are made of.
@@ -116,9 +115,10 @@ jobs:
       # The runner builds as its own uid, 1001, and a developer on macOS as
       # 501. Neither is 1000, the uid of the first user of a Linux or WSL
       # machine, and the official Node image already holds 1000 for its own
-      # `node` user: the Next image failed to build there ("UID 1000 is not
-      # unique") and nothing noticed. Built once more as that human, from the
-      # layers above, so only the user and what follows is rebuilt.
+      # `node` user: without this the Next image could fail to build there
+      # ("UID 1000 is not unique") and nothing would notice. Built once more
+      # as that human, from the layers above, so only the user and what
+      # follows is rebuilt.
       - name: The stack image builds for uid 1000
         run: |
           set -eu

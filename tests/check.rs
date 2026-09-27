@@ -41,7 +41,7 @@ fn sound(dir: &Path) -> Project {
     // And a human who said who they are — otherwise the fixture would read
     // this machine's global git configuration, and be green here and amber
     // on a runner that has none.
-    std::fs::write(dir.join("me.yaml"), "name: Arnaud\n").unwrap();
+    std::fs::write(dir.join("me.yaml"), "name: Alex Martin\n").unwrap();
     Project::at(root, config(), home)
 }
 
@@ -260,9 +260,9 @@ fn a_directory_outside_any_repository_is_not_a_project() {
 /// "git says there is no repository here" and "git could not run at all" are
 /// different sentences, and they send a human to different places.
 ///
-/// Measured on 2026-09-15: macOS refused git the right to read its working
-/// directory, and `nunki` answered "not inside a git repository" — for an
-/// hour, about a repository that was there all along.
+/// When macOS refuses git the right to read its working directory, reporting
+/// "not inside a git repository" sends a human hunting for a problem that is
+/// not there: the repository exists, git simply could not look at it.
 #[test]
 fn a_git_that_could_not_answer_is_not_a_missing_repository() {
     let err = Project::find_root(Path::new("/nonexistent-for-nunki/deeper")).unwrap_err();

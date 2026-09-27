@@ -79,8 +79,7 @@ impl Finding {
     ///
     /// The exception was written because nothing could be done; something can
     /// now. This is what replaces an expiry date: the condition is mechanical
-    /// rather than guessed, and cargo-deny has no expiry to offer anyway
-    /// (measured 2026-09-17).
+    /// rather than guessed, and cargo-deny has no expiry to offer anyway.
     pub fn stale(&self) -> bool {
         !self.accepted.is_empty() && !self.fix.is_empty()
     }

@@ -3,7 +3,7 @@
 //! Computed by `nunki`, never by an agent and never read back from the slot:
 //! the frozen mission header, the stack fragment and the harness adapter are
 //! the only three sources. Rule 6 of 4.1 bis is the whole of it — the
-//! coder's list is what his stack needs plus what his harness needs, and
+//! coder's list is what its stack needs plus what its harness needs, and
 //! nothing else; the integrator's and the security agent's add the services
 //! the mission declares, address by address.
 
@@ -184,13 +184,13 @@ pub struct Probe {
 /// The name is asked for **absolute** — `db.`, not `db` — because the engine
 /// copies the host's `search` list into the container, and busybox's
 /// `nslookup` then queries only `db.<search domain>` and never `db` itself.
-/// Measured on 2026-09-20: on GitHub's ubuntu runner, whose host carries an
-/// Azure search domain, the declared service came back "refused" from this
-/// probe while `nc -z db 80` reached it — libc honours `ndots:0` and tries
-/// the bare name, `nslookup` does not — and every Mac, whose containers get
-/// no search list, said "reached". A Linux desktop on a DHCP-provided domain
-/// is the same case, so `nunki check` would have reported a violation that
-/// was not one. Both live batteries put a search list on the sidecar so the
+/// On GitHub's ubuntu runner, whose host carries an Azure search domain, a
+/// relative name makes the declared service come back "refused" from this
+/// probe while `nc -z db 80` reaches it — libc honours `ndots:0` and tries
+/// the bare name, `nslookup` does not — whereas every Mac, whose containers
+/// get no search list, says "reached". A Linux desktop on a DHCP-provided
+/// domain is the same case, so `nunki check` would report a violation that
+/// is not one. Both live batteries put a search list on the sidecar so the
 /// proof is the same on every platform.
 pub fn resolves(name: &str) -> String {
     resolves_via(name, "")

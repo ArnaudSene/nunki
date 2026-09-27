@@ -392,12 +392,11 @@ fn the_project_name_is_stable_across_profiles_and_legal_for_compose() {
 
 /// Two projects, two slots of the same name, two Compose projects.
 ///
-/// Measured on 2026-09-16: `test-nunki` and `notes-api` both had a slot
-/// called `one`, and both were the Compose project `nunki-one` — one set of
-/// containers, one network, and one harness volume holding both projects'
-/// sessions. Starting a mission on either would have recreated the other's
-/// containers under a running agent, and each HQ's own `locks/one` would have
-/// said the slot was free.
+/// If two projects each have a slot called `one` and both become the Compose
+/// project `nunki-one`, they share one set of containers, one network, and
+/// one harness volume holding both projects' sessions. Starting a mission on
+/// either recreates the other's containers under a running agent, and each
+/// HQ's own `locks/one` says the slot is free.
 #[test]
 fn a_slot_of_the_same_name_in_another_session_is_another_compose_project() {
     let one = project_name("b885dda8-689d-4f98-a5f0-093d68f58f6d", "one").unwrap();
@@ -574,7 +573,7 @@ fn dialect() -> nunki::engine::Dialect {
 }
 
 /// A project's own `volumes:` block is merged beside nunki's. Measured on
-/// Compose v5.1.2 on 2026-09-10: without it, a service naming a volume the
+/// Compose v5.1.2: without it, a service naming a volume the
 /// document does not declare makes the whole project invalid — `service "db"
 /// refers to undefined volume dbdata` — and that block is exactly where a
 /// project keeps the state a profile switch must not take with it.
