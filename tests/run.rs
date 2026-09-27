@@ -695,6 +695,9 @@ fn live_a_mission_starts_and_its_run_is_read_back() {
              2>/dev/null || true\n\
              RUN mkdir -p /work/tree /work/mission /run/nunki \\\n\
               && chown -R {uid}:{gid} /work /run/nunki\n\
+             ARG RUST_VERSION\n\
+             ARG RUST_COMPONENTS\n\
+             ARG RUST_TARGETS\n\
              RUN printf '#!/bin/sh\\necho \\x27{{\"type\":\"system\",\"subtype\":\"init\"}}\\x27\\n\
              echo \\x27{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\
              \"usage\":{{\"input_tokens\":11,\"output_tokens\":7}}}}\\x27\\n' \
@@ -704,8 +707,24 @@ fn live_a_mission_starts_and_its_run_is_read_back() {
         ),
     )
     .unwrap();
+    // The repository pins a toolchain, which the stand-in declares and does
+    // not install: what is under test is the label the build writes and the
+    // launch reads back, not rustup. A second base pins another, as a base
+    // that moved after the image was built would.
+    let pin = |channel: &str| {
+        std::fs::write(
+            root.join("rust-toolchain.toml"),
+            format!("[toolchain]\nchannel = \"{channel}\"\n"),
+        )
+        .unwrap()
+    };
+    pin("1.98.0");
     git(&root, &["add", "."]);
     git(&root, &["commit", "-qm", "first"]);
+    git(&root, &["checkout", "-q", "-b", "moved"]);
+    pin("1.99.0");
+    git(&root, &["commit", "-qam", "a newer toolchain"]);
+    git(&root, &["checkout", "-q", "dev"]);
 
     let project = Project::open_at(root.clone(), home.clone()).unwrap();
     let hq_root = project.hq_root.clone();
@@ -753,6 +772,30 @@ fn live_a_mission_starts_and_its_run_is_read_back() {
     let compose_project = nunki::compose::project_name(&project.session(), "one").unwrap();
     let profile = run::profile_path(&project, "one");
     let _ = engine.down(&profile, &compose_project, true);
+
+    // On the base that moved, the image no longer serves, and no agent starts:
+    // nothing is recorded, so the mission can be started again once rebuilt.
+    let stale = nunki::mission::Header {
+        branch: "feat/stale".to_string(),
+        base: "moved".to_string(),
+        ..header.clone()
+    };
+    nunki::mission::dir::create(&hq_root, "stale", &stale, "Do the thing.").unwrap();
+    match run::start(&project, "stale", &slot, engine.clone(), &engine_bin) {
+        Err(run::RunError::StaleImage { drift, .. }) => {
+            assert_eq!(drift.len(), 1, "{drift:?}");
+            assert!(drift[0].contains("\"1.99.0\""), "{drift:?}");
+        }
+        Err(other) => panic!("refused for another reason: {other}"),
+        Ok(_) => panic!("an agent started on an image built for another toolchain"),
+    }
+    assert!(
+        nunki::state::Store::open(&hq_root)
+            .unwrap()
+            .load("stale")
+            .is_err(),
+        "a launch that was refused recorded a mission"
+    );
 
     let state = run::start(&project, "alpha", &slot, engine.clone(), &engine_bin)
         .expect("the mission starts");
