@@ -101,7 +101,85 @@ pub fn run(project: &Project) -> Report {
     credentials_outside_the_tree(project, &mut report);
     coder_perimeter(project, &mut report);
     stack_versions(project, &mut report);
+    fragments_follow(project, &mut report);
     report
+}
+
+/// Whether each stack's fragment is today's (SPEC 4.2, "les fragments suivent
+/// nunki").
+///
+/// Red for what `nunki init --refresh` can fix — a file an older nunki wrote
+/// and nobody touched, one missing — and for CRLF endings, which a human
+/// converts. A file the project rewrote is the project's: said, never red, or
+/// a deliberate rewrite would be a red nobody can clear.
+fn fragments_follow(project: &Project, report: &mut Report) {
+    for stack in &project.config.stacks {
+        let files = crate::init::fragment(&stack.name);
+        if files.is_empty() {
+            continue;
+        }
+        let dir = project.fragment(&stack.name);
+        let what = format!("the {} fragment is today's", stack.name);
+        let (mut older, mut absent, mut crlf, mut own) = (vec![], vec![], vec![], vec![]);
+        for (name, body, _) in &files {
+            match crate::init::kept(&stack.name, name, &dir.join(name), body) {
+                crate::init::Kept::Current => {}
+                crate::init::Kept::Older => older.push(*name),
+                crate::init::Kept::Absent => absent.push(*name),
+                crate::init::Kept::LineEndings => crlf.push(*name),
+                crate::init::Kept::Edited => own.push(*name),
+            }
+        }
+        let mut red = Vec::new();
+        if !older.is_empty() {
+            red.push(format!(
+                "{} {} an older nunki's, untouched — `nunki init --refresh` replaces them",
+                older.join(", "),
+                if older.len() == 1 { "is" } else { "are" }
+            ));
+        }
+        if !absent.is_empty() {
+            red.push(format!(
+                "{} {} missing — `nunki init` writes them",
+                absent.join(", "),
+                if absent.len() == 1 { "is" } else { "are" }
+            ));
+        }
+        if !crlf.is_empty() {
+            red.push(format!(
+                "{} {} CRLF line endings — a script ending in `\\r` does not run; \
+                 convert them to LF",
+                crlf.join(", "),
+                if crlf.len() == 1 { "has" } else { "have" }
+            ));
+        }
+        let said = if own.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "{} {} the project's own, kept; today's version lies beside each as \
+                 <file>{} once `nunki init` has run",
+                own.join(", "),
+                if own.len() == 1 { "is" } else { "are" },
+                crate::init::SUGGESTION
+            )
+        };
+        let verdict = if red.is_empty() {
+            Verdict::Green(if said.is_empty() {
+                format!("{}: every file is today's", dir.display())
+            } else {
+                said
+            })
+        } else {
+            Verdict::Red(
+                red.into_iter()
+                    .chain((!said.is_empty()).then_some(said))
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            )
+        };
+        report.add(what, verdict);
+    }
 }
 
 /// Whether each stack's fragment can read the versions the repository pins
@@ -155,8 +233,9 @@ fn stack_versions(project: &Project, report: &mut Report) {
                 what,
                 Verdict::Red(format!(
                     "{} declares no {}, which {} reads: the image would keep its default. \
-                     The fragment predates it — remove {file}, run `nunki init \
-                     --stack {name}` and carry your own edits over",
+                     The fragment predates it — `nunki init --refresh` replaces {file} if \
+                     nobody edited it; otherwise carry your edits into today's version, \
+                     beside it as {file}.nunki",
                     project.fragment(name).join(file).display(),
                     missing.join(", "),
                     crate::versions::FILE
@@ -220,6 +299,51 @@ pub fn image_versions(project: &Project, engine: &str, report: &mut Report) {
         },
     };
     report.add(what, verdict);
+    image_dockerfile(project, engine, &primary.name, report);
+}
+
+/// Whether the image was built from the Dockerfile as it stands now — the
+/// stacks' templates, their add-ons, the project's own steps. A template
+/// refreshed or a step added since changes nothing until the image is built
+/// again, and that is said rather than discovered in a run.
+fn image_dockerfile(project: &Project, engine: &str, primary: &str, report: &mut Report) {
+    let what = "the image was built from today's Dockerfile".to_string();
+    let Ok(stacks) = crate::image::image_stacks(project, primary) else {
+        return;
+    };
+    let now = match crate::image::dockerfile(project, &stacks) {
+        Ok(text) => crate::init::sha256(text.as_bytes()),
+        Err(e) => {
+            report.add(what, Verdict::Red(e.to_string()));
+            return;
+        }
+    };
+    let image = crate::image::names(project, primary).agent;
+    let verdict = match crate::image::recorded(engine, &image) {
+        Err(e) => Verdict::NotChecked(e.to_string()),
+        Ok(crate::image::Recorded::Pinned {
+            dockerfile: Some(built),
+            ..
+        }) => match dockerfile_drift(&built, &now) {
+            None => Verdict::Green(image),
+            Some(why) => Verdict::Red(why),
+        },
+        Ok(_) => Verdict::NotChecked(format!(
+            "{image} does not record the Dockerfile it was built from: `nunki slot rebuild` \
+             records it"
+        )),
+    };
+    report.add(what, verdict);
+}
+
+/// Why an image built from the Dockerfile hashed `built` does not serve the
+/// one hashed `now`, or `None` when it does.
+pub fn dockerfile_drift(built: &str, now: &str) -> Option<String> {
+    (built != now).then(|| {
+        "the Dockerfile changed since the image was built — a template refreshed, an \
+         add-on or a project step edited; `nunki slot rebuild` builds it again"
+            .to_string()
+    })
 }
 
 /// Whether an image built with `recorded` serves a repository pinning
@@ -230,7 +354,7 @@ pub fn serves(
     wanted: &BTreeMap<String, String>,
 ) -> Result<(), Vec<String>> {
     let built = match recorded {
-        crate::image::Recorded::Pinned(built) => built.clone(),
+        crate::image::Recorded::Pinned { versions, .. } => versions.clone(),
         crate::image::Recorded::Absent | crate::image::Recorded::Unrecorded => {
             if wanted.is_empty() {
                 return Ok(());

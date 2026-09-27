@@ -37,8 +37,9 @@ pub enum ImageError {
     #[error(
         "{dockerfile} declares no {args}, which `versions.txt` beside it reads from the \
          repository: the engine would drop the value and keep the default. The fragment \
-         predates it — remove the Dockerfile, run `nunki init --stack {stack}` to write \
-         the current one, and carry your own edits over"
+         predates it — `nunki init --refresh` replaces it if nobody edited it; otherwise \
+         carry your edits into today's version, which `nunki init --stack {stack}` puts \
+         beside it with a `.nunki` suffix"
     )]
     Undeclared {
         stack: String,
@@ -137,20 +138,30 @@ pub fn build(
         versions,
     } = stack_build(project, stack, uid, gid)?;
     let base = base_tag(project, stack);
-    // One stack builds from its fragment, as it always has. Several build
-    // from a Dockerfile composed of the primary's and the others' add-ons,
-    // written where nothing else is — the primary's fragment is the project's
-    // and nunki writes nothing into it after `init`.
+    // The Dockerfile the image is built from: the primary's, as it stands, or
+    // composed with the other stacks' add-ons and the project's own steps. It
+    // is written where nothing else is — the fragment is the project's and
+    // nunki writes nothing into it after `init` — and built against the
+    // primary's fragment as context either way, so a `COPY` from it means one
+    // thing whatever the composition.
+    let text = dockerfile(project, &stacks)?;
     let composed = tempfile::tempdir().map_err(|e| ImageError::Io(PathBuf::from("."), e))?;
-    let context = if stacks.len() == 1 {
-        project.fragment(stack)
-    } else {
-        let text = compose_stacks(project, &stacks)?;
-        let file = composed.path().join("Dockerfile");
-        std::fs::write(&file, text).map_err(|e| ImageError::Io(file.clone(), e))?;
-        composed.path().to_path_buf()
-    };
-    docker_build_labelled(engine, &context, &base, &args, &[label])?;
+    let file = composed.path().join("Dockerfile");
+    std::fs::write(&file, &text).map_err(|e| ImageError::Io(file.clone(), e))?;
+    docker_build_with(
+        engine,
+        &project.fragment(stack),
+        Some(&file),
+        &base,
+        &args,
+        &[
+            label,
+            format!(
+                "{DOCKERFILE_LABEL}={}",
+                crate::init::sha256(text.as_bytes())
+            ),
+        ],
+    )?;
 
     // Then the harness, in a layer of nunki's own. The stack fragment describes
     // a stack; which harness runs on it is not the project's business, and
@@ -254,7 +265,37 @@ pub fn contribution(
     Ok(format!("{stages}{}", read(crate::project::ADDON_FILE)?))
 }
 
-/// The Dockerfile of an image carrying several stacks.
+/// The label that records the hash of the Dockerfile an image was built from,
+/// so a Dockerfile changed since — a template refreshed, a project step added
+/// — reads as a stale image rather than as nothing (SPEC 4.2).
+pub const DOCKERFILE_LABEL: &str = "nunki.dockerfile";
+
+/// The Dockerfile the image of `stacks` is built from, as it stands now: the
+/// primary's own when it carries nothing else, composed otherwise.
+pub fn dockerfile(project: &Project, stacks: &[Stack]) -> Result<String, ImageError> {
+    if stacks.len() == 1 && project_addon(project)?.is_none() {
+        return contribution(project, stacks, &stacks[0]);
+    }
+    compose_stacks(project, stacks)
+}
+
+/// The project's own steps, as `(stages, body)`, when it has any. The body is
+/// closed with `USER agent`: an image that ended as root would hand the
+/// harness root's home, and the check that says so does not run for every
+/// harness.
+fn project_addon(project: &Project) -> Result<Option<(String, String)>, ImageError> {
+    let file = project.home.join(crate::project::PROJECT_ADDON_FILE);
+    if !file.is_file() {
+        return Ok(None);
+    }
+    let body = std::fs::read_to_string(&file).map_err(|e| ImageError::Io(file.clone(), e))?;
+    let stages = std::fs::read_to_string(project.home.join(crate::project::PROJECT_STAGES_FILE))
+        .unwrap_or_default();
+    Ok(Some((stages, format!("{}\nUSER agent\n", body.trim_end()))))
+}
+
+/// The Dockerfile of an image carrying several stacks, or one stack and the
+/// project's own steps.
 pub fn compose_stacks(project: &Project, stacks: &[Stack]) -> Result<String, ImageError> {
     let fragment = |s: &Stack| project.fragment(&s.name);
     let primary = contribution(project, stacks, &stacks[0])?;
@@ -269,6 +310,11 @@ pub fn compose_stacks(project: &Project, stacks: &[Stack]) -> Result<String, Ima
         let file = fragment(stack).join(crate::project::ADDON_FILE);
         let body = std::fs::read_to_string(&file).map_err(|e| ImageError::Io(file.clone(), e))?;
         addons.push((stack.name.clone(), stages, body));
+    }
+    // Last, after every stack: the project's steps may call any of their
+    // toolchains.
+    if let Some((stages, body)) = project_addon(project)? {
+        addons.push((crate::project::PROJECT_ADDON_FILE.to_string(), stages, body));
     }
     Ok(compose(&stacks[0].name, &primary, &addons))
 }
@@ -376,7 +422,14 @@ fn read_versions(project: &Project, tree: &Path, stack: &str) -> Result<Read, Im
         if sources.is_empty() {
             continue;
         }
-        let text = contribution(project, &stacks, s)?;
+        // The project's own steps may declare an argument a stack reads.
+        let text = format!(
+            "{}\n{}",
+            contribution(project, &stacks, s)?,
+            project_addon(project)?
+                .map(|(stages, body)| format!("{stages}{body}"))
+                .unwrap_or_default()
+        );
         let missing = crate::versions::undeclared(&sources, &text);
         if !missing.is_empty() {
             return Err(ImageError::Undeclared {
@@ -419,8 +472,12 @@ pub enum Recorded {
     Absent,
     /// Built before nunki recorded versions, so what it carries is unknown.
     Unrecorded,
-    /// Built with these pinned arguments.
-    Pinned(std::collections::BTreeMap<String, String>),
+    /// Built with these pinned arguments, from the Dockerfile whose hash is
+    /// `dockerfile` — `None` for an image built before nunki recorded it.
+    Pinned {
+        versions: std::collections::BTreeMap<String, String>,
+        dockerfile: Option<String>,
+    },
 }
 
 /// Read back what [`build`] wrote on an image. An engine that cannot answer is
@@ -457,7 +514,13 @@ pub fn recorded(engine: &str, image: &str) -> Result<Recorded, ImageError> {
         })?;
     Ok(
         match labels.as_ref().and_then(|l| l.get(crate::versions::LABEL)) {
-            Some(value) => Recorded::Pinned(crate::versions::parse_label(value)),
+            Some(value) => Recorded::Pinned {
+                versions: crate::versions::parse_label(value),
+                dockerfile: labels
+                    .as_ref()
+                    .and_then(|l| l.get(DOCKERFILE_LABEL))
+                    .cloned(),
+            },
             None => Recorded::Unrecorded,
         },
     )
@@ -645,8 +708,22 @@ fn docker_build_labelled(
     build_args: &[String],
     labels: &[String],
 ) -> Result<(), ImageError> {
+    docker_build_with(engine, context, None, tag, build_args, labels)
+}
+
+fn docker_build_with(
+    engine: &str,
+    context: &Path,
+    dockerfile: Option<&Path>,
+    tag: &str,
+    build_args: &[String],
+    labels: &[String],
+) -> Result<(), ImageError> {
     let mut command = Command::new(engine);
     command.args(["build", "-q", "-t", tag]);
+    if let Some(file) = dockerfile {
+        command.arg("-f").arg(file);
+    }
     for arg in build_args {
         command.args(["--build-arg", arg]);
     }

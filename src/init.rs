@@ -21,6 +21,9 @@ pub enum Action {
         kept: PathBuf,
         suggestion: PathBuf,
     },
+    /// An older nunki wrote it and nobody has touched it since, so today's
+    /// version replaced it (`nunki init --refresh`).
+    Replaced(PathBuf),
 }
 
 impl Action {
@@ -33,6 +36,9 @@ impl Action {
                 kept.display(),
                 suggestion.display()
             ),
+            Action::Replaced(p) => {
+                format!("replaced {} — an older nunki's, untouched", p.display())
+            }
         }
     }
 }
@@ -95,6 +101,28 @@ pub fn init_with(
     home: &Path,
     stacks: &[String],
     answers: &Answers,
+) -> Result<Vec<Action>, InitError> {
+    init_as(root, home, stacks, answers, Fragments::Keep)
+}
+
+/// What `init` does with a fragment file an older nunki wrote and nobody has
+/// touched since (SPEC 4.2, "les fragments suivent nunki").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fragments {
+    /// Keep it, and say that `--refresh` would replace it.
+    Keep,
+    /// Replace it with today's version. The caller has made sure no container
+    /// of the project has it mounted.
+    Refresh,
+}
+
+/// [`init_with`], saying what to do with fragments an older nunki wrote.
+pub fn init_as(
+    root: &Path,
+    home: &Path,
+    stacks: &[String],
+    answers: &Answers,
+    fragments: Fragments,
 ) -> Result<Vec<Action>, InitError> {
     if !root.is_dir() {
         return Err(InitError::NotADirectory(root.to_path_buf()));
@@ -166,24 +194,156 @@ pub fn init_with(
         }
         let dir = home.join(crate::project::STACKS_DIR).join(&stack.name);
         std::fs::create_dir_all(&dir).map_err(|e| InitError::Io(dir.clone(), e))?;
-        for (name, body, executable) in files {
+        let states: Vec<Kept> = files
+            .iter()
+            .map(|(name, body, _)| kept(&stack.name, name, &dir.join(name), body))
+            .collect();
+        // The files that describe the image and what it is built with move
+        // together: today's `versions.txt` beside a Dockerfile the project
+        // rewrote could name an argument that Dockerfile no longer declares.
+        let held = files.iter().zip(&states).any(|((name, _, _), state)| {
+            COUPLED.contains(name) && matches!(state, Kept::Edited | Kept::LineEndings)
+        });
+        for ((name, body, executable), state) in files.into_iter().zip(states) {
             let path = dir.join(name);
-            if path.exists() {
-                actions.push(Action::LeftAlone(
+            match state {
+                Kept::Absent => {
+                    write_fragment(&path, &body, executable)?;
+                    actions.push(Action::Created(path));
+                }
+                Kept::Current => actions.push(Action::LeftAlone(
                     path,
-                    "a stack fragment belongs to the project".to_string(),
-                ));
-                continue;
+                    "a stack fragment belongs to the project; it is today's".to_string(),
+                )),
+                Kept::Older
+                    if fragments == Fragments::Refresh && !(held && COUPLED.contains(&name)) =>
+                {
+                    write_fragment(&path, &body, executable)?;
+                    actions.push(Action::Replaced(path));
+                }
+                Kept::Older if fragments == Fragments::Refresh => actions.push(Action::LeftAlone(
+                    path,
+                    format!(
+                        "an older nunki's, untouched — held back, since the project rewrote \
+                         one of {} and they move together",
+                        COUPLED.join(", ")
+                    ),
+                )),
+                Kept::Older => actions.push(Action::LeftAlone(
+                    path,
+                    "an older nunki's, untouched — `nunki init --refresh` replaces it".to_string(),
+                )),
+                Kept::LineEndings => actions.push(Action::LeftAlone(
+                    path,
+                    "nunki's own text with CRLF line endings — a script ending in `\\r` \
+                     does not run; convert it to LF"
+                        .to_string(),
+                )),
+                Kept::Edited => {
+                    let suggestion = dir.join(format!("{name}{SUGGESTION}"));
+                    // Written again when it is stale, so what lies beside a
+                    // file is always today's version and never an older one.
+                    let current = std::fs::read_to_string(&suggestion).ok();
+                    if current.as_deref() != Some(body.as_str()) {
+                        write_fragment(&suggestion, &body, false)?;
+                    }
+                    actions.push(Action::DepositedBeside {
+                        kept: path,
+                        suggestion,
+                    });
+                }
             }
-            std::fs::write(&path, body).map_err(|e| InitError::Io(path.clone(), e))?;
-            if executable {
-                make_executable(&path)?;
-            }
-            actions.push(Action::Created(path));
         }
     }
 
     Ok(actions)
+}
+
+/// What sits beside a fragment file the project rewrote: today's version,
+/// for the human to read and carry over (SPEC 3.3, rule 3).
+pub const SUGGESTION: &str = ".nunki";
+
+/// The fragment files that describe the image and what it is built with.
+const COUPLED: [&str; 4] = [
+    "Dockerfile",
+    crate::project::ADDON_FILE,
+    crate::project::ADDON_STAGES_FILE,
+    crate::versions::FILE,
+];
+
+/// Every stack fragment file a nunki has ever written, as `<sha256>
+/// <stack>/<file>` lines, rebuilt from the history by
+/// `scripts/shipped-fragments.sh` (SPEC 4.2, "les fragments suivent nunki").
+///
+/// What lets nunki tell a file an older release wrote and nobody touched from
+/// a file the project rewrote, **without keeping any record of its own**: a
+/// file is nunki's to replace only if its bytes are bytes nunki shipped. A
+/// record read from disk could claim a human's edit; this list cannot, and a
+/// hash missing from it can only err toward keeping the file.
+const SHIPPED: &str = include_str!("shipped-fragments.txt");
+
+/// Where a fragment file stands against what nunki writes today.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kept {
+    Absent,
+    /// Byte for byte today's.
+    Current,
+    /// Byte for byte what an older nunki shipped, so nobody touched it.
+    Older,
+    /// nunki's own text, today's or an older one, but with CRLF endings.
+    LineEndings,
+    /// Anything else: the project's.
+    Edited,
+}
+
+/// Where the fragment file at `path` stands, for `stack`'s `name`, against
+/// `today`'s text.
+pub fn kept(stack: &str, name: &str, path: &Path, today: &str) -> Kept {
+    let Ok(bytes) = std::fs::read(path) else {
+        return Kept::Absent;
+    };
+    if bytes == today.as_bytes() {
+        return Kept::Current;
+    }
+    let file = format!("{stack}/{name}");
+    let shipped = |bytes: &[u8]| {
+        let hash = sha256(bytes);
+        SHIPPED
+            .lines()
+            .any(|l| l.split_once(' ') == Some((hash.as_str(), file.as_str())))
+    };
+    if shipped(&bytes) {
+        return Kept::Older;
+    }
+    let lf: Vec<u8> = String::from_utf8_lossy(&bytes)
+        .replace("\r\n", "\n")
+        .into_bytes();
+    if lf != bytes && (lf == today.as_bytes() || shipped(&lf)) {
+        return Kept::LineEndings;
+    }
+    Kept::Edited
+}
+
+/// `bytes`' SHA-256, in hex.
+pub fn sha256(bytes: &[u8]) -> String {
+    ring::digest::digest(&ring::digest::SHA256, bytes)
+        .as_ref()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Write a fragment file whole, then move it into place, with the mode
+/// `fragment()` gives it: a script replaced must still run.
+fn write_fragment(path: &Path, body: &str, executable: bool) -> Result<(), InitError> {
+    let mut staged = path.as_os_str().to_owned();
+    staged.push(".nunki-writing");
+    let staged = PathBuf::from(staged);
+    std::fs::write(&staged, body).map_err(|e| InitError::Io(staged.clone(), e))?;
+    if executable {
+        make_executable(&staged)?;
+    }
+    std::fs::rename(&staged, path).map_err(|e| InitError::Io(path.to_path_buf(), e))
 }
 
 /// The stacks a project already declares, or none when it declares nothing
@@ -2936,7 +3096,8 @@ fi
 "##;
 
 /// The files of a stack fragment: `(name, body, executable)`.
-fn fragment(stack: &str) -> Vec<(&'static str, String, bool)> {
+/// The files `nunki init` writes for `stack`: name, text, executable.
+pub fn fragment(stack: &str) -> Vec<(&'static str, String, bool)> {
     match stack {
         "rust" => vec![
             (

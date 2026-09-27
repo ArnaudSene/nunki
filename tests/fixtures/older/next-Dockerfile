@@ -1,0 +1,134 @@
+# The coder's image for a Next.js project, built by `nunki slot rebuild`.
+#
+# glibc and not musl, as SPEC 4.2 bis requires of every stack image: Node's
+# prebuilt native binaries target glibc, and Playwright ships no musl build
+# of Chromium at all.
+# The Node the repository names, passed by nunki at build time from
+# `versions.txt` beside this file (SPEC 4.2); `PNPM` below is read the same way.
+ARG NODE=22
+ARG BASE=node:${NODE}-bookworm-slim
+FROM ${BASE}
+
+# Passed by nunki at build time: the human's own ids, so that what the agent
+# writes belongs to the human on the host.
+ARG UID=1000
+ARG GID=1000
+
+# `upgrade`, and not only `update`. The packages inherited from the base tag
+# keep the versions that tag was cut with, so a security fix Debian published
+# since would never reach a freshly built image.
+#
+# `procps` is not decoration: Stryker spawns `ps -o pid --no-headers --ppid`
+# to find its children, and a slim image has no `ps`. Measured 2026-09-21 —
+# the campaign died with `spawn ps ENOENT` before testing a single mutant.
+RUN apt-get -qq update \
+ && apt-get -qq -y upgrade \
+ && apt-get -qq install --no-install-recommends -y \
+      ca-certificates curl git build-essential pkg-config tmux jq procps \
+ && rm -rf /var/lib/apt/lists/*
+
+# `trufflehog` is what finds the secrets gate 8 reports (SPEC 4.4). The same
+# tool as the Rust and Python images, since a secret has no ecosystem, and
+# checked against the checksums its release publishes.
+ARG TRUFFLEHOG=3.97.5
+RUN set -eu; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) arch=amd64; sum=e3d97199c565c37ca6152750197f667e08ae6a1edf5911fbdec168622b28620c ;; \
+      arm64) arch=arm64; sum=e5c8b2418b0a7c78cf4c47ac783c52c63f989e4e536cfe328b5271e819b6d52d ;; \
+      *) echo "trufflehog ships no build for $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /tmp/trufflehog.tgz \
+      "https://github.com/trufflesecurity/trufflehog/releases/download/v${TRUFFLEHOG}/trufflehog_${TRUFFLEHOG}_linux_${arch}.tar.gz"; \
+    echo "${sum}  /tmp/trufflehog.tgz" | sha256sum -c -; \
+    tar -xzf /tmp/trufflehog.tgz -C /usr/local/bin trufflehog; \
+    rm /tmp/trufflehog.tgz; \
+    trufflehog --version
+
+# `osv-scanner` is this stack's dependency audit, reading a database the host
+# fills and nunki mounts read-only. It needs no network to do it — measured
+# on 2.6.0 against `pnpm-lock.yaml`, with `--network none`.
+ARG OSV_SCANNER=2.6.0
+RUN set -eu; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) arch=amd64; sum=ca69b3d3cd08f889a49dc0a383122f71cc528b83803671df5fd874d97485b108 ;; \
+      arm64) arch=arm64; sum=2c71403eb443d05891c4f268c3ad771cf4f16e5443463fd7851ef8f454d3c7e4 ;; \
+      *) echo "osv-scanner ships no build for $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /usr/local/bin/osv-scanner \
+      "https://github.com/google/osv-scanner/releases/download/v${OSV_SCANNER}/osv-scanner_linux_${arch}"; \
+    echo "${sum}  /usr/local/bin/osv-scanner" | sha256sum -c -; \
+    chmod 0755 /usr/local/bin/osv-scanner; \
+    osv-scanner --version
+
+# pnpm, baked in rather than fetched on first use.
+#
+# `corepack enable` only enables it: the binary is downloaded from
+# `registry.npmjs.org` the first time it runs, into the **calling user's**
+# `~/.cache/node/corepack`. Prepared as root and then handed to `agent`, that
+# cache is the wrong user's, and the agent fetches it again — which fails
+# outright when the network is closed. Measured 2026-09-21. `COREPACK_HOME`
+# puts it somewhere both users read.
+ARG PNPM=12.5.1
+ENV COREPACK_HOME=/opt/corepack
+RUN corepack enable pnpm \
+ && corepack prepare pnpm@${PNPM} --activate \
+ && chmod -R a+rX /opt/corepack \
+ && pnpm --version
+
+# Chromium for the integrator's battery, installed here and nowhere else.
+#
+# Playwright downloads its browsers from its own CDN, which no role's
+# allowlist names and none should: the coder has no use for a browser, and
+# the integrator must not be able to fetch one mid-run. So they come with the
+# image, in a path both users read.
+#
+# The version is pinned and **written down**, because a project whose
+# `@playwright/test` does not match gets "Looks like Playwright was just
+# installed or updated. Please run `playwright install`" — advice it cannot
+# follow in here. `system.sh` reads this file and says so instead.
+ARG PLAYWRIGHT=1.63.0
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
+RUN npx --yes playwright@${PLAYWRIGHT} install --with-deps chromium \
+ && printf '%s\n' "${PLAYWRIGHT}" > /opt/playwright/nunki-version \
+ && chmod -R a+rX /opt/playwright
+
+# And then npm goes, with the cache the line above left behind.
+#
+# This stack installs with pnpm, through corepack, and never calls npm — but
+# npm ships inside the Node image with a dependency tree of its own, and that
+# tree is what the image scan reports. Measured 2026-09-21, the first time
+# this image was scanned: seven critical or high advisories **with fixes
+# published**, `tar` 7.5.11 among them, none of them from a line of this
+# file. Upgrading npm to its latest took it to four rather than none: its
+# bundled tree is always a patch or two behind whatever the advisory database
+# knows.
+#
+# So it is removed rather than chased. It is the last line that needs it —
+# `npx` above is how Playwright arrives — and corepack, which is a separate
+# package, is what keeps pnpm working. The scan comes back clean.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx /root/.npm \
+ && pnpm --version \
+ && node --version \
+ && ! command -v npm
+
+# The group may already exist under that id (on macOS, gid 20 is `dialout`
+# here); either way the agent ends up in it.
+RUN groupadd -g ${GID} agent || true \
+ && useradd -m -u ${UID} -g ${GID} -s /bin/bash agent
+
+# Mount points, created by root because they sit at the filesystem root, then
+# handed to the agent: a named volume mounted over a root-owned directory is
+# born root-owned, and the toolchain cannot write in it (SPEC 4.2 bis).
+RUN mkdir -p /work/tree /work/mission /run/nunki \
+ && chown -R ${UID}:${GID} /work /run/nunki
+
+USER agent
+
+# `NEXT_TELEMETRY_DISABLED` is a perimeter rule, not a preference: Next.js
+# phones home to a domain rule 6 does not name, and the refusal would read as
+# a flaky network rather than as the rule it is.
+ENV NEXT_TELEMETRY_DISABLED=1 \
+    PNPM_HOME=/home/agent/.local/share/pnpm \
+    PATH=/home/agent/.local/share/pnpm:${PATH}
+
+RUN mkdir -p /home/agent/.local/share/pnpm/store /home/agent/.harness

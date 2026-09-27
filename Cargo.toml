@@ -24,6 +24,7 @@ clap = { version = "4.6.6", features = ["derive"] }
 tempfile = "3"
 globset = "0.4.19"
 ureq = { version = "3.4.1", default-features = false, features = ["rustls"] }
+ring = "0.17"
 toml = "1.1.6"
 
 [dev-dependencies]

@@ -66,6 +66,12 @@ enum Command {
         /// Take every proposed answer without asking.
         #[arg(long)]
         yes: bool,
+        /// Replace every fragment file an older nunki wrote and nobody has
+        /// touched since with today's. A file the project rewrote is kept, and
+        /// today's version goes beside it. Refused while a container of the
+        /// project is up: its scripts are mounted file by file.
+        #[arg(long)]
+        refresh: bool,
     },
 
     /// Slots: a local clone without hard links, where missions happen.
@@ -541,6 +547,7 @@ fn main() -> ExitCode {
             permission_mode,
             protected_branches,
             yes,
+            refresh,
         } => {
             // `init` is the one verb that runs before a project exists: it
             // finds the repository as git does, and names the home after it.
@@ -581,7 +588,26 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            match init::init_with(&root, &home, &stacks, &answers) {
+            // A refresh replaces files a running container has mounted one by
+            // one: the container would keep the old inode and judge an agent
+            // with a script nobody can see. So nothing may be up, and every
+            // slot is held while it happens.
+            let mut held = Vec::new();
+            let fragments = if refresh {
+                match quiet_project(&root) {
+                    Ok(locks) => held = locks,
+                    Err(why) => {
+                        eprintln!("nunki: {why}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+                init::Fragments::Refresh
+            } else {
+                init::Fragments::Keep
+            };
+            let done = init::init_as(&root, &home, &stacks, &answers, fragments);
+            drop(held);
+            match done {
                 Ok(actions) => {
                     for action in &actions {
                         println!("{}", action.render());
@@ -1266,6 +1292,50 @@ fn main() -> ExitCode {
             }
         }
     }
+}
+
+/// Every slot of the project at `root` locked, once no container of it is up;
+/// or why not.
+fn quiet_project(root: &std::path::Path) -> Result<Vec<nunki::state::SlotLock>, String> {
+    let project = Project::open(root).map_err(|e| e.to_string())?;
+    let engine = std::env::var("HQ_ENGINE").unwrap_or_else(|_| "docker".into());
+    let mut locks = Vec::new();
+    for slot in nunki::slot::list(&project) {
+        locks.push(
+            nunki::state::SlotLock::acquire(
+                &project.hq_root.join("locks"),
+                &slot.name,
+                "init --refresh",
+            )
+            .map_err(|e| e.to_string())?,
+        );
+        let compose = nunki::compose::project_name(&project.session(), &slot.name)
+            .map_err(|e| e.to_string())?;
+        let out = std::process::Command::new(&engine)
+            .args([
+                "ps",
+                "-q",
+                "--filter",
+                &format!("label=com.docker.compose.project={compose}"),
+            ])
+            .output()
+            .map_err(|e| format!("{engine} could not say what is running: {e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "{engine} could not say what is running: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        if !String::from_utf8_lossy(&out.stdout).trim().is_empty() {
+            return Err(format!(
+                "slot {} has containers up ({compose}): they mount the fragment's scripts \
+                 file by file and would keep the old ones — take them down first \
+                 (`docker compose -p {compose} down`, never `down -v`)",
+                slot.name
+            ));
+        }
+    }
+    Ok(locks)
 }
 
 /// The stacks and the rest of a first `nunki.yaml` (SPEC 4.2, `nunki init`).
