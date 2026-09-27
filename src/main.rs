@@ -487,6 +487,12 @@ enum MissionCommand {
         /// it rests on.
         #[arg(long = "because", value_name = "SENTENCE", requires = "equivalent")]
         because: Option<String>,
+        /// Lift the HQ's `equivalent` ruling from a survivor, so that it
+        /// needs an outcome again. Rulings are carried from one campaign to
+        /// the next when the same mutation survives, so this is the way back
+        /// from one that was wrong, or that changed code made wrong.
+        #[arg(long = "lift", value_name = "SURVIVOR", conflicts_with = "equivalent")]
+        lift: Option<String>,
         /// Run it again although a campaign on this exact content is on
         /// file. The fingerprint is over the touched files, so it cannot see
         /// a change to the stack's `mutation.sh`, to the tool, or to an
@@ -1924,8 +1930,24 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             slot,
             equivalent,
             because,
+            lift,
             again,
         } => {
+            if let Some(survivor) = lift {
+                let paths = nunki::mission::dir::Paths::of(&project.hq_root, &id);
+                return match nunki::mutants::lift_equivalent(&paths.dir, &survivor) {
+                    Ok(()) => {
+                        println!(
+                            "{survivor}: the `equivalent` ruling is lifted, and it needs an outcome again"
+                        );
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("nunki: {e}");
+                        ExitCode::FAILURE
+                    }
+                };
+            }
             if let Some(survivor) = equivalent {
                 let Some(why) = because else {
                     eprintln!(

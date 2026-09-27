@@ -88,7 +88,18 @@ pub enum Triage {
     /// HQ's file, and one found in the agent's makes the gate red. Letting
     /// the graded fill in the only box nobody can check is a gate that
     /// empties itself (SPEC 4.4, decided 2026-09-10).
-    Equivalent { why: String },
+    Equivalent {
+        why: String,
+        /// The commit of the campaign this ruling was first given on, when it
+        /// was carried here from there rather than given on this one. Absent
+        /// on a ruling the HQ gave on this very campaign.
+        ///
+        /// Said, because a carried ruling is a judgement about code that has
+        /// since changed around it: the mutation is the same, its neighbours
+        /// may not be. Gate 7 counts them apart, and the HQ can lift one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        carried_from: Option<String>,
+    },
     /// Recognised as a bug and frozen in a named test.
     Bug { test: String },
 }
@@ -340,10 +351,112 @@ pub fn completed(text: &str) -> bool {
     })
 }
 
+/// The survivors a campaign's log names, **with no outcome**.
+///
+/// An outcome is never read from the log. The log is what the stack's script
+/// printed inside the agent's container, and an `equivalent` in it would land
+/// in the HQ's file with no human having given it — the one outcome no
+/// machine may give (SPEC 4.4). The rulings a new campaign carries come from
+/// the HQ's previous file, in [`record_finished`], and from nowhere else.
 pub fn parse(text: &str) -> Vec<Survivor> {
     text.lines()
         .filter_map(|line| serde_json::from_str::<Survivor>(line.trim()).ok())
+        .map(|survivor| Survivor {
+            outcome: None,
+            ..survivor
+        })
         .collect()
+}
+
+/// Write the campaign a finished log describes, carrying over the HQ's
+/// rulings from the campaign it replaces.
+///
+/// A new campaign runs whenever a touched file changes, and a commit that
+/// only adds a line above a ruled survivor would otherwise lose the ruling
+/// with the file it lived in, sending the mission back to the HQ to be told
+/// the same thing again.
+///
+/// Returns how many survivors the new campaign holds.
+pub fn record_finished(
+    dir: &Path,
+    fingerprint: &str,
+    head: &str,
+    text: &str,
+) -> Result<usize, MutantsError> {
+    let mut survivors = parse(text);
+    if let Some(previous) = read(dir)? {
+        carry(&previous, &mut survivors);
+    }
+    let count = survivors.len();
+    write(
+        dir,
+        &Campaign {
+            fingerprint: fingerprint.to_string(),
+            head: head.to_string(),
+            date: crate::state::now_rfc3339(),
+            survivors,
+        },
+    )?;
+    Ok(count)
+}
+
+/// Give each new survivor the `equivalent` ruling its twin held in the
+/// previous campaign, when the twin can be told apart without a doubt.
+///
+/// **The line is never part of the match**: it is exactly what a commit
+/// above the mutant moves. The mutation itself — its file and what it
+/// changed, the `description` — is what the ruling was about. Two tiers:
+///
+/// - the same id, file and description: the same mutant;
+/// - otherwise the same file and description, when that pair names exactly
+///   one ruled survivor before and exactly one survivor now. The same
+///   `x = False -> x = None` twice in one file is two mutants the ruling may
+///   not speak for alike, and it is ruled again rather than guessed.
+///
+/// A changed description — including a status that moved from `survived` to
+/// `no tests` — is a different mutant, and nothing is carried. No id is
+/// parsed: which tool named it is the stack's business, not `nunki`'s.
+pub fn carry(previous: &Campaign, survivors: &mut [Survivor]) {
+    let ruled: Vec<(&Survivor, &str)> = previous
+        .survivors
+        .iter()
+        .filter_map(|s| match &s.outcome {
+            Some(Triage::Equivalent { why, .. }) => Some((s, why.as_str())),
+            _ => None,
+        })
+        .collect();
+    let from = |old: &Survivor| match &old.outcome {
+        Some(Triage::Equivalent {
+            carried_from: Some(first),
+            ..
+        }) => first.clone(),
+        _ => previous.head.clone(),
+    };
+    let pair = |s: &Survivor| (s.file.clone(), s.description.clone());
+    let mut now: BTreeMap<(String, String), usize> = BTreeMap::new();
+    for s in survivors.iter() {
+        *now.entry(pair(s)).or_default() += 1;
+    }
+    for survivor in survivors.iter_mut() {
+        let exact = ruled.iter().find(|(old, _)| {
+            old.id == survivor.id
+                && old.file == survivor.file
+                && old.description == survivor.description
+        });
+        let twin = exact.or_else(|| {
+            let same: Vec<_> = ruled
+                .iter()
+                .filter(|(old, _)| pair(old) == pair(survivor))
+                .collect();
+            (same.len() == 1 && now.get(&pair(survivor)) == Some(&1)).then(|| same[0])
+        });
+        if let Some((old, why)) = twin {
+            survivor.outcome = Some(Triage::Equivalent {
+                why: (*why).to_string(),
+                carried_from: Some(from(old)),
+            });
+        }
+    }
 }
 
 /// Record the HQ's own ruling on a survivor: this mutant changes nothing
@@ -371,7 +484,43 @@ pub fn rule_equivalent(dir: &Path, id: &str, why: &str) -> Result<(), MutantsErr
         })?;
     found.outcome = Some(Triage::Equivalent {
         why: why.to_string(),
+        carried_from: None,
     });
+    write(dir, &campaign)
+}
+
+/// Lift the HQ's `equivalent` ruling from a survivor, so that it needs an
+/// outcome again.
+///
+/// The way back from a ruling that was wrong, or that a changed neighbour
+/// made wrong. Rulings are carried from one campaign to the next
+/// ([`carry`]), so without this a mistaken one would outlive every replay.
+/// Only an `equivalent` is lifted: the coder's two outcomes live in its own
+/// file, and this one never held them.
+pub fn lift_equivalent(dir: &Path, id: &str) -> Result<(), MutantsError> {
+    let mut campaign = read(dir)?.ok_or_else(|| {
+        MutantsError::Unreadable(
+            dir.join(FILE),
+            "there is no campaign to lift a ruling from".to_string(),
+        )
+    })?;
+    let found = campaign
+        .survivors
+        .iter_mut()
+        .find(|s| s.id == id)
+        .ok_or_else(|| {
+            MutantsError::Unreadable(
+                dir.join(FILE),
+                format!("no survivor is called {id:?} in this campaign"),
+            )
+        })?;
+    if !matches!(found.outcome, Some(Triage::Equivalent { .. })) {
+        return Err(MutantsError::Unreadable(
+            dir.join(FILE),
+            format!("{id:?} holds no `equivalent` ruling to lift"),
+        ));
+    }
+    found.outcome = None;
     write(dir, &campaign)
 }
 
@@ -563,20 +712,9 @@ pub fn read_back(
         // nothing is written, so gate 7 keeps asking rather than passing on a
         // log that happens to hold no survivor.
         Presence::Ended if completed(&text) => {
-            let survivors = parse(&text);
-            write(
-                dir,
-                &Campaign {
-                    fingerprint: running.fingerprint.clone(),
-                    head: running.head.clone(),
-                    date: crate::state::now_rfc3339(),
-                    survivors: survivors.clone(),
-                },
-            )?;
+            let survivors = record_finished(dir, &running.fingerprint, &running.head, &text)?;
             forget_running(&project.hq_root, &slot.name)?;
-            Progress::Finished {
-                survivors: survivors.len(),
-            }
+            Progress::Finished { survivors }
         }
         Presence::Ended => {
             forget_running(&project.hq_root, &slot.name)?;

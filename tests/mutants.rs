@@ -517,6 +517,7 @@ fn a_campaign_round_trips_through_the_mission_folder() {
             description: "replace one with 0".into(),
             outcome: Some(Triage::Equivalent {
                 why: "the branch is unreachable from any caller".into(),
+                carried_from: None,
             }),
         }],
     };
@@ -541,7 +542,14 @@ fn only_two_of_the_three_outcomes_rest_on_a_test() {
         Some("the_known_hole")
     );
     // The one no gate can check, and SPEC gives its counter-check to the HQ.
-    assert_eq!(Triage::Equivalent { why: "x".into() }.test(), None);
+    assert_eq!(
+        Triage::Equivalent {
+            why: "x".into(),
+            carried_from: None
+        }
+        .test(),
+        None
+    );
 }
 
 /// A campaign, launched detached in a real container and watched to its end,
@@ -795,11 +803,305 @@ fn an_equivalence_is_ruled_by_a_verb_and_lands_in_the_hqs_own_file() {
     assert_eq!(
         campaign.survivors[0].outcome,
         Some(Triage::Equivalent {
-            why: "no caller reaches it".into()
+            why: "no caller reaches it".into(),
+            carried_from: None,
         })
     );
     // And it landed in the HQ's file, not in the agent's.
     assert!(mutants::read_triage(dir.path()).unwrap().is_empty());
+}
+
+fn one(id: &str, line: u32, description: &str) -> Survivor {
+    Survivor {
+        id: id.into(),
+        file: "src/cells.py".into(),
+        line,
+        description: description.into(),
+        outcome: None,
+    }
+}
+
+fn ruled(mut survivor: Survivor, why: &str) -> Survivor {
+    survivor.outcome = Some(Triage::Equivalent {
+        why: why.into(),
+        carried_from: None,
+    });
+    survivor
+}
+
+fn ruled_before(dir: &std::path::Path, survivors: Vec<Survivor>) {
+    mutants::write(
+        dir,
+        &Campaign {
+            fingerprint: "old0000".into(),
+            head: "def5678".into(),
+            date: "2026-09-10T12:00:00Z".into(),
+            survivors,
+        },
+    )
+    .unwrap();
+}
+
+fn log_of(survivors: &[Survivor]) -> String {
+    let mut text: String = survivors
+        .iter()
+        .map(|s| serde_json::to_string(s).unwrap() + "\n")
+        .collect();
+    text.push_str("{\"campaign\":\"done\"}\n");
+    text
+}
+
+const F_TO_UPPER: &str = "survived: number = format(cell, \"f\") -> number = format(cell, \"F\")";
+
+/// A commit above a ruled survivor moves its line and nothing else. The line
+/// is what a commit moves; the mutation is what was ruled on.
+#[test]
+fn a_ruling_follows_its_mutant_to_the_next_campaign_when_only_the_line_moved() {
+    let dir = tempfile::tempdir().unwrap();
+    ruled_before(
+        dir.path(),
+        vec![ruled(
+            one("cells.x_json__mutmut_7", 112, F_TO_UPPER),
+            "'f' and 'F' agree on finite decimals",
+        )],
+    );
+    let count = mutants::record_finished(
+        dir.path(),
+        "new1111",
+        "abc9999",
+        &log_of(&[one("cells.x_json__mutmut_7", 123, F_TO_UPPER)]),
+    )
+    .unwrap();
+    assert_eq!(count, 1);
+    let campaign = mutants::read(dir.path()).unwrap().unwrap();
+    assert_eq!(campaign.fingerprint, "new1111");
+    assert_eq!(campaign.survivors[0].line, 123);
+    assert_eq!(
+        campaign.survivors[0].outcome,
+        Some(Triage::Equivalent {
+            why: "'f' and 'F' agree on finite decimals".into(),
+            carried_from: Some("def5678".into()),
+        })
+    );
+}
+
+/// A tool that renumbers its mutants must not lose the ruling either, as long
+/// as the mutation is told apart without a doubt.
+#[test]
+fn a_ruling_follows_a_renamed_mutant_when_its_mutation_is_unique() {
+    let dir = tempfile::tempdir().unwrap();
+    ruled_before(
+        dir.path(),
+        vec![ruled(
+            one("cells.x_json__mutmut_7", 112, F_TO_UPPER),
+            "same output",
+        )],
+    );
+    mutants::record_finished(
+        dir.path(),
+        "new1111",
+        "abc9999",
+        &log_of(&[one("cells.x_json__mutmut_9", 118, F_TO_UPPER)]),
+    )
+    .unwrap();
+    let campaign = mutants::read(dir.path()).unwrap().unwrap();
+    assert!(matches!(
+        campaign.survivors[0].outcome,
+        Some(Triage::Equivalent { .. })
+    ));
+}
+
+/// A different mutation is a different question, and that includes a status
+/// that moved: `no tests` is code nothing reaches, which a ruling about a
+/// survivor never spoke for.
+#[test]
+fn a_ruling_does_not_follow_a_mutation_that_changed() {
+    let dir = tempfile::tempdir().unwrap();
+    ruled_before(
+        dir.path(),
+        vec![ruled(
+            one("cells.x_json__mutmut_7", 112, F_TO_UPPER),
+            "same output",
+        )],
+    );
+    let moved = F_TO_UPPER.replacen("survived", "no tests", 1);
+    mutants::record_finished(
+        dir.path(),
+        "new1111",
+        "abc9999",
+        &log_of(&[one("cells.x_json__mutmut_7", 112, &moved)]),
+    )
+    .unwrap();
+    let campaign = mutants::read(dir.path()).unwrap().unwrap();
+    assert_eq!(campaign.survivors[0].outcome, None);
+}
+
+/// The same `x = False -> x = None` twice in one file is two mutants the
+/// ruling may not speak for alike. Ruled again rather than guessed.
+#[test]
+fn a_ruling_does_not_follow_a_mutation_it_cannot_tell_apart() {
+    let dir = tempfile::tempdir().unwrap();
+    let flag = "survived: quarantined = False -> quarantined = None";
+    ruled_before(
+        dir.path(),
+        vec![ruled(
+            one("run.x_once__mutmut_64", 795, flag),
+            "only truth is read",
+        )],
+    );
+    mutants::record_finished(
+        dir.path(),
+        "new1111",
+        "abc9999",
+        &log_of(&[
+            one("run.x_once__mutmut_70", 801, flag),
+            one("run.x_other__mutmut_3", 40, flag),
+        ]),
+    )
+    .unwrap();
+    let campaign = mutants::read(dir.path()).unwrap().unwrap();
+    assert!(
+        campaign.survivors.iter().all(|s| s.outcome.is_none()),
+        "{campaign:?}"
+    );
+
+    // The same id still carries, ambiguity or not: it is the same mutant.
+    ruled_before(
+        dir.path(),
+        vec![ruled(
+            one("run.x_once__mutmut_64", 795, flag),
+            "only truth is read",
+        )],
+    );
+    mutants::record_finished(
+        dir.path(),
+        "new2222",
+        "abc9999",
+        &log_of(&[
+            one("run.x_once__mutmut_64", 801, flag),
+            one("run.x_other__mutmut_3", 40, flag),
+        ]),
+    )
+    .unwrap();
+    let campaign = mutants::read(dir.path()).unwrap().unwrap();
+    assert!(campaign.survivors[0].outcome.is_some());
+    assert_eq!(campaign.survivors[1].outcome, None);
+}
+
+/// A ruling carried twice still names the campaign it was first given on.
+#[test]
+fn a_ruling_carried_again_keeps_the_campaign_it_was_given_on() {
+    let dir = tempfile::tempdir().unwrap();
+    ruled_before(
+        dir.path(),
+        vec![ruled(
+            one("cells.x_json__mutmut_7", 112, F_TO_UPPER),
+            "same output",
+        )],
+    );
+    mutants::record_finished(
+        dir.path(),
+        "new1111",
+        "abc9999",
+        &log_of(&[one("cells.x_json__mutmut_7", 123, F_TO_UPPER)]),
+    )
+    .unwrap();
+    mutants::record_finished(
+        dir.path(),
+        "new2222",
+        "fff0000",
+        &log_of(&[one("cells.x_json__mutmut_7", 130, F_TO_UPPER)]),
+    )
+    .unwrap();
+    let campaign = mutants::read(dir.path()).unwrap().unwrap();
+    assert!(matches!(
+        &campaign.survivors[0].outcome,
+        Some(Triage::Equivalent { carried_from: Some(first), .. }) if first == "def5678"
+    ));
+}
+
+/// The log is printed inside the agent's container. An `equivalent` in it
+/// would reach the HQ's file with no human having given it.
+#[test]
+fn an_outcome_written_in_the_campaigns_log_is_never_taken() {
+    let injected = ruled(one("cells.x_json__mutmut_7", 112, F_TO_UPPER), "trust me");
+    assert_eq!(
+        mutants::parse(&log_of(std::slice::from_ref(&injected)))[0].outcome,
+        None
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    mutants::record_finished(dir.path(), "new1111", "abc9999", &log_of(&[injected])).unwrap();
+    let campaign = mutants::read(dir.path()).unwrap().unwrap();
+    assert_eq!(campaign.survivors[0].outcome, None);
+}
+
+/// A carried ruling is written with where it came from, and a campaign file
+/// written before the field existed still reads.
+#[test]
+fn where_a_ruling_came_from_round_trips_and_older_files_still_read() {
+    let carried = Triage::Equivalent {
+        why: "same output".into(),
+        carried_from: Some("def5678".into()),
+    };
+    let text = serde_json::to_string(&carried).unwrap();
+    assert_eq!(serde_json::from_str::<Triage>(&text).unwrap(), carried);
+
+    let older = r#"{"kind":"equivalent","why":"same output"}"#;
+    assert_eq!(
+        serde_json::from_str::<Triage>(older).unwrap(),
+        Triage::Equivalent {
+            why: "same output".into(),
+            carried_from: None
+        }
+    );
+    // And a ruling given on this campaign writes no empty field.
+    let fresh = serde_json::to_string(&Triage::Equivalent {
+        why: "same output".into(),
+        carried_from: None,
+    })
+    .unwrap();
+    assert!(!fresh.contains("carried_from"), "{fresh}");
+}
+
+/// Carried rulings outlive every replay, so a wrong one needs a way back.
+#[test]
+fn a_ruling_can_be_lifted_and_only_a_ruling() {
+    let dir = tempfile::tempdir().unwrap();
+    let err = mutants::lift_equivalent(dir.path(), "cells.x_json__mutmut_7").unwrap_err();
+    assert!(err.to_string().contains("no campaign"), "{err}");
+
+    ruled_before(
+        dir.path(),
+        vec![
+            ruled(
+                one("cells.x_json__mutmut_7", 112, F_TO_UPPER),
+                "same output",
+            ),
+            one("cells.x_json__mutmut_8", 113, "survived: a -> b"),
+        ],
+    );
+    let err = mutants::lift_equivalent(dir.path(), "cells.x_json__mutmut_8").unwrap_err();
+    assert!(err.to_string().contains("no `equivalent` ruling"), "{err}");
+    let err = mutants::lift_equivalent(dir.path(), "nobody").unwrap_err();
+    assert!(err.to_string().contains("no survivor is called"), "{err}");
+
+    mutants::lift_equivalent(dir.path(), "cells.x_json__mutmut_7").unwrap();
+    let campaign = mutants::read(dir.path()).unwrap().unwrap();
+    assert_eq!(campaign.survivors[0].outcome, None);
+
+    // And a lifted ruling is not carried by the next campaign.
+    mutants::record_finished(
+        dir.path(),
+        "new1111",
+        "abc9999",
+        &log_of(&[one("cells.x_json__mutmut_7", 123, F_TO_UPPER)]),
+    )
+    .unwrap();
+    assert_eq!(
+        mutants::read(dir.path()).unwrap().unwrap().survivors[0].outcome,
+        None
+    );
 }
 
 #[test]
@@ -807,8 +1109,21 @@ fn only_the_two_outcomes_that_rest_on_a_test_are_the_coders_to_give() {
     assert!(Triage::Killed { test: "x".into() }.is_the_coders_to_give());
     assert!(Triage::Bug { test: "x".into() }.is_the_coders_to_give());
     // The judgement nobody can check.
-    assert!(!Triage::Equivalent { why: "x".into() }.is_the_coders_to_give());
-    assert_eq!(Triage::Equivalent { why: "x".into() }.kind(), "equivalent");
+    assert!(
+        !Triage::Equivalent {
+            why: "x".into(),
+            carried_from: None
+        }
+        .is_the_coders_to_give()
+    );
+    assert_eq!(
+        Triage::Equivalent {
+            why: "x".into(),
+            carried_from: None
+        }
+        .kind(),
+        "equivalent"
+    );
 }
 
 #[test]
