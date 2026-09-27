@@ -326,21 +326,6 @@ fn a_secondary_stack_without_an_add_on_says_how_to_get_one() {
     assert!(err.to_string().contains("nunki init --stack next"), "{err}");
 }
 
-/// Until the gates play every stack, a mission on several is refused before
-/// anything runs: a green on the primary alone would say nothing of the rest.
-#[test]
-fn no_mission_is_judged_on_one_stack_of_several() {
-    let dir = tempfile::tempdir().unwrap();
-    let one = project(&dir.path().join("one"), &["rust"]);
-    assert!(nunki::run::one_stack_judged(&one).is_ok());
-    let two = project(&dir.path().join("two"), &["rust", "next=frontend"]);
-    let why = nunki::run::one_stack_judged(&two).unwrap_err();
-    assert!(
-        why.contains("rust") && why.contains("next in frontend/"),
-        "{why}"
-    );
-}
-
 /// A secondary stack's versions are checked against its add-on, which is what
 /// it puts into the image — not against its standalone Dockerfile.
 #[test]
@@ -373,4 +358,44 @@ fn check_reads_a_secondary_stack_against_its_add_on() {
         }
         other => panic!("{other:?}"),
     }
+}
+
+/// What a profile carries for several stacks: every stack's scripts, the
+/// primary's where one stack's have always been and the others' beside them;
+/// and what each lets the coder reach, once each.
+#[test]
+fn a_profile_mounts_every_stack_and_reaches_what_each_needs() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = project(dir.path(), &["rust", "next=frontend"]);
+    let mounted: Vec<String> = nunki::run::stack_scripts(&p, "rust")
+        .into_iter()
+        .map(|(_, at)| at.display().to_string())
+        .collect();
+    for at in [
+        "/work/stack/prepush.sh",
+        "/work/stack/mutation.sh",
+        "/work/stack-next/prepush.sh",
+        "/work/stack-next/security.sh",
+    ] {
+        assert!(mounted.contains(&at.to_string()), "{at} in {mounted:?}");
+    }
+    let domains = nunki::run::stack_domains(&p, "rust");
+    assert!(
+        domains.contains(&"index.crates.io".to_string()),
+        "{domains:?}"
+    );
+    assert!(
+        domains.contains(&"registry.npmjs.org".to_string()),
+        "{domains:?}"
+    );
+    let mut unique = domains.clone();
+    unique.dedup();
+    assert_eq!(unique.len(), domains.len());
+    // The security agent writes where every stack builds.
+    let writable = nunki::run::writable(&p, "rust");
+    assert!(writable.contains(&"target".to_string()), "{writable:?}");
+    assert!(
+        writable.iter().any(|w| w == "frontend/node_modules"),
+        "{writable:?}"
+    );
 }

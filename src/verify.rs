@@ -144,8 +144,6 @@ pub enum VerifyError {
          agent is still writing — `nunki mission stop {mission} --now` ends its turn first"
     )]
     RunInProgress { mission: String, slot: String },
-    #[error("{0}")]
-    SeveralStacks(String),
     #[error(transparent)]
     Gate(#[from] gate::GateError),
     #[error(transparent)]
@@ -203,9 +201,6 @@ pub fn verify_as(
     engine_bin: &str,
     verb: &str,
 ) -> Result<Vec<Step>, VerifyError> {
-    // Before anything is judged: on several stacks the gates would judge one
-    // and call the mission verified (SPEC 4.2, "plusieurs stacks").
-    crate::run::one_stack_judged(project).map_err(VerifyError::SeveralStacks)?;
     let store = Store::open(&project.hq_root)?;
     let mut state = store
         .load(id)

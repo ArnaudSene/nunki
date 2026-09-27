@@ -993,13 +993,23 @@ paquet wasm que `wasm-pack` construit avant `pnpm install`.
   deux. `nunki check` lit chaque stack contre ce qu'elle met dans l'image —
   son Dockerfile pour la principale, son complément pour les autres — et
   compare l'image unique à l'union de ce que le dépôt épingle.
-- **Tant que les portes ne jugent qu'une stack, aucune mission ne part sur
-  plusieurs.** Les portes 6, 7 et 8 jouent encore la batterie, la campagne et
-  l'audit de la principale, depuis la racine. Un vert y dirait « vérifié »
-  d'un projet dont les autres stacks n'ont été ni testées, ni mutées, ni
-  auditées : `mission start`, `verify`, `mission gates` et `mission mutants`
-  refusent, en le disant, jusqu'à ce que les portes jouent chaque stack dans
-  son répertoire. L'image, elle, se construit déjà.
+- **Les portes jouent chaque stack, dans son répertoire.** Les scripts de la
+  principale restent montés à `/work/stack/`, ceux des autres à
+  `/work/stack-<nom>/`, et chaque base d'avis à `/nunki/advisories` ou
+  `/nunki/advisories-<nom>`. La porte 6 (et la batterie système de
+  l'intégrateur) et la porte 8 lancent le script de chaque stack depuis son
+  répertoire de la copie de `HEAD`, **toutes**, même quand la première est
+  rouge : l'agent renvoyé apprend tout d'un coup. Non jouée quelque part, la
+  porte est non jouée ; rouge quelque part, elle est rouge, et chaque ligne
+  dit quelle stack l'a dite. Un répertoire absent de la copie est rouge.
+  La campagne de mutation (porte 7) donne chaque chemin touché à la stack
+  dont le répertoire le contient — le plus profond — relativement à lui, et
+  ne lance pas une stack que la branche n'a pas touchée ; les identifiants
+  sont préfixés du nom de la stack, les fichiers de son répertoire, et
+  `{"campaign":"done"}` n'est dit qu'une fois, si chaque stack l'a dit. Le
+  périmètre du codeur est l'union des `allow.txt`, les caches et les
+  répertoires inscriptibles l'union de ceux des stacks. Un projet à une seule
+  stack ne voit rien bouger : mêmes chemins, mêmes commandes.
 
 **Ce que la stack Python rend, et ce qu'elle ne rend pas** (mesuré le
 2026-09-20, avant livraison) : `uv` pour le verrou, `ruff`, `mypy` et `pytest`

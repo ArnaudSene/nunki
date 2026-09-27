@@ -471,7 +471,7 @@ fn write_profile(dir: &Path, slot: &str, role: nunki::harness::Role, name: &str)
         mission_dir_at: PathBuf::from("/work/mission"),
         stack_scripts: Vec::new(),
         credentials: Vec::new(),
-        advisories: None,
+        advisories: vec![],
         secrets: None,
         volumes: Vec::<NamedVolume>::new(),
         environment: Default::default(),

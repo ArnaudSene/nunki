@@ -207,3 +207,9 @@ pub fn volume(slot: &str) -> crate::compose::NamedVolume {
         at: PathBuf::from(PROOF_AT),
     }
 }
+
+/// `text` as one word of a POSIX shell, whatever it holds: single-quoted,
+/// with every single quote closed, escaped and reopened.
+pub fn quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', r"'\''"))
+}

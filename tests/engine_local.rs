@@ -253,3 +253,248 @@ fn a_stop_really_ends_a_detached_process() {
     }
     panic!("the process outlived the container it was in");
 }
+
+/// A project carrying `rust` at the root and `next` in `frontend/`, each with
+/// its fragment's scripts where the image mounts them, in a world whose tree
+/// holds both (SPEC 4.2, "plusieurs stacks").
+struct Several {
+    w: World,
+    project: Project,
+    engine: std::sync::Arc<LocalEngine>,
+}
+
+fn several(scripts: &[(&str, &str, &str)]) -> Several {
+    let w = world();
+    std::fs::create_dir_all(w.slot.tree.join("frontend/app")).unwrap();
+    std::fs::write(w.slot.tree.join("frontend/package.json"), "{}\n").unwrap();
+    std::fs::write(w.slot.tree.join("frontend/app/page.ts"), "export {}\n").unwrap();
+    git(&w.slot.tree, &["add", "-A"]);
+    git(&w.slot.tree, &["commit", "-q", "-m", "a frontend"]);
+
+    let mut project = w.project.clone();
+    project.config.stacks = vec![
+        "rust".into(),
+        nunki::project::Stack::new("next", "frontend").unwrap(),
+    ];
+    for (stack, name, body) in scripts {
+        let dir = project.fragment(stack);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(name);
+        std::fs::write(&file, body).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let run = w.proof.with_file_name("run");
+    let engine = std::sync::Arc::new(LocalEngine::new(&[
+        (nunki::exec::PROOF_AT, w.proof.as_path()),
+        (nunki::run::TREE_AT, w.slot.tree.as_path()),
+        (nunki::engine::spawn::RUN_DIR, run.as_path()),
+        (nunki::run::STACK_AT, project.fragment("rust").as_path()),
+        ("/work/stack-next", project.fragment("next").as_path()),
+    ]));
+    engine.up(Path::new("profile"), "local").unwrap();
+    Several { w, project, engine }
+}
+
+fn battery_of(s: &Several) -> nunki::gate::Decision {
+    decision_of(s, nunki::gate::Gate::Battery)
+}
+
+fn decision_of(s: &Several, gate: nunki::gate::Gate) -> nunki::gate::Decision {
+    let header = nunki::mission::Header {
+        branch: "dev".to_string(),
+        base: "dev".to_string(),
+        lots: vec![],
+        integration: nunki::mission::Integration::None {
+            reason: "none".to_string(),
+        },
+        security: nunki::mission::Security::Gates,
+        arbiter: None,
+        run: None,
+        account: None,
+        model: None,
+        bounds: Default::default(),
+    };
+    let dir = s.w.proof.with_file_name("mission");
+    std::fs::create_dir_all(&dir).unwrap();
+    // What gates 3 and 5 read. Their verdicts do not matter here; that they
+    // can be read does, or the report is never made.
+    std::fs::write(dir.join("JOURNAL.md"), "# Journal\n").unwrap();
+    std::fs::write(dir.join("PR.md"), "# PR\n").unwrap();
+    let report = nunki::gate::at_verification(
+        &nunki::gate::Subject {
+            role: nunki::harness::Role::Coder,
+            tree: &s.w.slot.tree,
+            journal: &dir.join("JOURNAL.md"),
+            pr: &dir.join("PR.md"),
+            verdict: &dir.join("VERDICT.json"),
+            mission_dir: &dir,
+            header: &header,
+            protected_branches: &[],
+            protected_paths: &Default::default(),
+            coder_head: None,
+        },
+        &nunki::gate::Verification {
+            project: &s.project,
+            slot: &s.w.slot,
+            engine: s.engine.clone(),
+            stack: "rust",
+        },
+    )
+    .unwrap();
+    report
+        .outcomes
+        .into_iter()
+        .find(|o| o.gate == gate)
+        .expect("the gate is reported")
+        .decision
+}
+
+/// Gate 6 plays every stack's battery, each in its own directory of the
+/// copy, and says which stack said what. The next battery fails with 9 if it
+/// is not run from `frontend/` — so a wrong directory reads as 9, not as the
+/// 3 it owes.
+#[test]
+fn every_stack_plays_its_battery_in_its_own_directory() {
+    let s = several(&[
+        (
+            "rust",
+            "prepush.sh",
+            "#!/bin/sh\n[ -f src/lib.rs ] || exit 9\nexit 0\n",
+        ),
+        (
+            "next",
+            "prepush.sh",
+            "#!/bin/sh\n[ -f package.json ] || exit 9\necho 'a spec is red' >&2\nexit 3\n",
+        ),
+    ]);
+    match battery_of(&s) {
+        nunki::gate::Decision::Failed(why) => {
+            assert!(why.contains("[next in frontend/]"), "{why}");
+            assert!(why.contains("came back 3"), "{why}");
+            assert!(why.contains("a spec is red"), "{why}");
+            assert!(!why.contains("[rust]"), "the rust battery passed: {why}");
+        }
+        other => panic!("{other:?}"),
+    }
+
+    // Green on both is green.
+    std::fs::write(
+        s.project.fragment("next").join("prepush.sh"),
+        "#!/bin/sh\n[ -f package.json ] || exit 9\nexit 0\n",
+    )
+    .unwrap();
+    assert_eq!(battery_of(&s), nunki::gate::Decision::Passed);
+}
+
+/// A stack whose directory the copy does not hold is red, and says so,
+/// rather than running its battery from wherever it happened to be.
+#[test]
+fn a_stack_whose_directory_is_gone_is_red() {
+    let s = several(&[
+        ("rust", "prepush.sh", "#!/bin/sh\nexit 0\n"),
+        ("next", "prepush.sh", "#!/bin/sh\nexit 0\n"),
+    ]);
+    git(&s.w.slot.tree, &["rm", "-rq", "frontend"]);
+    git(&s.w.slot.tree, &["commit", "-q", "-m", "no frontend"]);
+    match battery_of(&s) {
+        nunki::gate::Decision::Failed(why) => {
+            assert!(why.contains("frontend/ is not in the clean copy"), "{why}")
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// The campaign over two stacks speaks for the project: each stack's
+/// `mutation.sh` runs in its directory on its own touched paths, relative to
+/// it; ids carry the stack's name and files the stack's directory; and the
+/// last line says the campaign finished only when both did.
+#[test]
+fn a_campaign_over_several_stacks_speaks_for_the_project() {
+    let rust = "#!/bin/sh\n[ -f src/lib.rs ] || exit 9\n\
+                [ \"$2\" = src/lib.rs ] || exit 8\n\
+                echo 'progress, not a result'\n\
+                printf '%s\\n' '{\"id\":\"7\",\"file\":\"src/lib.rs\",\"line\":2,\"description\":\"replace > with >=\"}'\n\
+                printf '%s\\n' '{\"campaign\":\"done\"}'\n";
+    let next_done = "#!/bin/sh\n[ -f package.json ] || exit 9\n\
+                     [ \"$2\" = app/page.ts ] || exit 8\n\
+                     printf '%s\\n' '{\"id\":\"7\",\"file\":\"app/page.ts\",\"line\":1,\"description\":\"remove export\"}'\n\
+                     printf '%s\\n' '{\"campaign\":\"done\"}'\n";
+    let s = several(&[
+        ("rust", "mutation.sh", rust),
+        ("next", "mutation.sh", next_done),
+    ]);
+    let judged = nunki::run::judged(&s.project, "rust");
+    let touched = vec!["src/lib.rs".to_string(), "frontend/app/page.ts".to_string()];
+    let play = |s: &Several| {
+        let script = nunki::mutants::several_campaigns(&judged, "abc1234", &touched);
+        exec::run(
+            &s.project,
+            &s.w.slot,
+            s.engine.clone(),
+            &["sh".into(), "-c".into(), script],
+            On::Proof,
+        )
+        .unwrap()
+    };
+
+    let out = play(&s);
+    let survivors = nunki::mutants::parse(&out.stdout);
+    let ids: Vec<(&str, &str)> = survivors
+        .iter()
+        .map(|m| (m.id.as_str(), m.file.as_str()))
+        .collect();
+    assert_eq!(
+        ids,
+        [("rust:7", "src/lib.rs"), ("next:7", "frontend/app/page.ts")],
+        "{}",
+        out.stdout
+    );
+    assert_eq!(
+        out.stdout
+            .lines()
+            .filter(|l| l.contains("\"campaign\""))
+            .count(),
+        1,
+        "{}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.trim_end().ends_with("{\"campaign\":\"done\"}"),
+        "{}",
+        out.stdout
+    );
+
+    // One stack that did not finish, and the campaign measured nothing.
+    std::fs::write(
+        s.project.fragment("next").join("mutation.sh"),
+        "#!/bin/sh\nexit 1\n",
+    )
+    .unwrap();
+    let out = play(&s);
+    assert!(!out.stdout.contains("\"campaign\""), "{}", out.stdout);
+}
+
+/// Gate 8 runs every stack's `security.sh` in its directory, handed its own
+/// advisory database: each script here answers 69, "I could not look",
+/// unless it is where it should be and reads what it should.
+#[test]
+fn every_stack_audits_itself_against_its_own_database() {
+    let s = several(&[
+        (
+            "rust",
+            "security.sh",
+            "#!/bin/sh\n[ -f src/lib.rs ] && [ \"$2\" = /nunki/advisories ] || exit 69\nexit 0\n",
+        ),
+        (
+            "next",
+            "security.sh",
+            "#!/bin/sh\n[ -f package.json ] && [ \"$2\" = /nunki/advisories-next ] || exit 69\n\
+             exit 0\n",
+        ),
+    ]);
+    assert_eq!(
+        decision_of(&s, nunki::gate::Gate::MechanicalSecurity),
+        nunki::gate::Decision::Passed
+    );
+}
