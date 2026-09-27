@@ -8,7 +8,7 @@
 //! restarted `nunki` can find the run again.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::compose::{AGENT_SERVICE, FIREWALL_SERVICE, NamedVolume, Plan, UserIds};
@@ -145,6 +145,17 @@ pub enum RunError {
     NoHome,
     #[error("the images are missing — `nunki slot rebuild` builds them ({0})")]
     NoImages(String),
+    #[error(
+        "{image} does not carry what this branch pins — {}. Inside the run the toolchain \
+         would try to fetch it from behind the firewall, so no agent was started; \
+         `nunki slot rebuild` builds the image from the repository again",
+        drift.join("; ")
+    )]
+    StaleImage { image: String, drift: Vec<String> },
+    #[error(transparent)]
+    Versions(#[from] crate::versions::SourcesError),
+    #[error(transparent)]
+    Image(#[from] image::ImageError),
     #[error(transparent)]
     Engine(#[from] EngineError),
     #[error(transparent)]
@@ -409,6 +420,13 @@ pub fn launch(l: &Launching) -> Result<Launched, RunError> {
     // checked out and this does nothing.
     branch(slot, &header.branch, &header.base)?;
 
+    // The image against what **this branch** pins, read from the slot's tree
+    // now that it is on it (SPEC 4.2). `slot rebuild` read the repository as
+    // it stood then; the mission's base, or a coder's commit on its branch,
+    // may pin another toolchain since, and the first `cargo` of the run would
+    // then spend it on a download the firewall refuses.
+    image_serves(project, &slot.tree, &stack, engine_bin, &images.agent)?;
+
     // Step 1. The coder starts nothing: there is nothing to test or attack
     // yet, and SPEC 4.2's table says so for the "code seul" shape.
     let declared = match role {
@@ -608,6 +626,27 @@ pub fn stack_of(project: &Project) -> String {
         .first()
         .cloned()
         .unwrap_or_else(|| "rust".to_string())
+}
+
+/// Refuse a launch whose image does not carry what `tree` — the slot's, on
+/// the mission's branch — pins.
+pub fn image_serves(
+    project: &Project,
+    tree: &Path,
+    stack: &str,
+    engine_bin: &str,
+    image: &str,
+) -> Result<(), RunError> {
+    let sources = project.stack_versions(stack)?;
+    if sources.is_empty() {
+        return Ok(());
+    }
+    let wanted = crate::versions::pinned(&crate::versions::resolve(tree, &sources));
+    let recorded = image::recorded(engine_bin, image)?;
+    crate::check::serves(&recorded, &wanted).map_err(|drift| RunError::StaleImage {
+        image: image.to_string(),
+        drift,
+    })
 }
 
 /// Where a slot's current profile is written. One file per slot, regenerated

@@ -119,6 +119,10 @@ fn live_a_fresh_project_ends_with_a_perimeter_that_holds() {
          USER agent\n",
     )
     .unwrap();
+    // A stand-in carries no Rust toolchain, so it reads no Rust versions: the
+    // fragment's `versions.txt` would name arguments it rightly does not
+    // declare, and the build would refuse (SPEC 4.2).
+    std::fs::remove_file(home.join("stacks/rust").join(nunki::versions::FILE)).unwrap();
     // A first commit, so the clone has something to carry.
     for args in [
         vec!["config", "user.email", "t@example.com"],
@@ -453,6 +457,10 @@ fn live_a_system_profile_reaches_what_the_mission_declares_and_nothing_else() {
          USER agent\n",
     )
     .unwrap();
+    // A stand-in carries no Rust toolchain, so it reads no Rust versions: the
+    // fragment's `versions.txt` would name arguments it rightly does not
+    // declare, and the build would refuse (SPEC 4.2).
+    std::fs::remove_file(home.join("stacks/rust").join(nunki::versions::FILE)).unwrap();
     std::fs::write(
         root.join("compose.yaml"),
         "services:\n  db:\n    image: nginx:alpine\n  cache:\n    image: nginx:alpine\n",

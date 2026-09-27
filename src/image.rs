@@ -32,6 +32,32 @@ pub enum ImageError {
     Io(PathBuf, std::io::Error),
     #[error("the container engine is not on this machine: {0}")]
     NoEngine(String),
+    #[error(transparent)]
+    Versions(#[from] crate::versions::SourcesError),
+    #[error(
+        "{dockerfile} declares no {args}, which `versions.txt` beside it reads from the \
+         repository: the engine would drop the value and keep the default. The fragment \
+         predates it — remove the Dockerfile, run `nunki init --stack {stack}` to write \
+         the current one, and carry your own edits over"
+    )]
+    Undeclared {
+        stack: String,
+        args: String,
+        dockerfile: PathBuf,
+    },
+    #[error("{engine} could not say what {image} was built with: {said}")]
+    Inspect {
+        engine: String,
+        image: String,
+        said: String,
+    },
+}
+
+/// What a build produced, and the versions it read from the repository.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Built {
+    pub images: Images,
+    pub versions: Vec<crate::versions::Pin>,
 }
 
 /// The uid and gid the images and containers run under: the human's own.
@@ -65,7 +91,7 @@ pub fn build(
     stack: &str,
     engine: &str,
     harness: Harness,
-) -> Result<Images, ImageError> {
+) -> Result<Built, ImageError> {
     let images = names(project, stack);
     let (uid, gid) = host_ids();
 
@@ -89,13 +115,13 @@ pub fn build(
             at: dockerfile,
         });
     }
+    let StackBuild {
+        args,
+        label,
+        versions,
+    } = stack_build(project, stack, uid, gid)?;
     let base = base_tag(project, stack);
-    docker_build(
-        engine,
-        &fragment,
-        &base,
-        &[format!("UID={uid}"), format!("GID={gid}")],
-    )?;
+    docker_build_labelled(engine, &fragment, &base, &args, &[label])?;
 
     // Then the harness, in a layer of nunki's own. The stack fragment describes
     // a stack; which harness runs on it is not the project's business, and
@@ -123,7 +149,109 @@ pub fn build(
         args
     })?;
 
-    Ok(images)
+    Ok(Built { images, versions })
+}
+
+/// What the stack's own image is built with: the build arguments and the
+/// label, before any engine is involved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StackBuild {
+    pub args: Vec<String>,
+    /// `nunki.versions=…`, written on the image where `nunki check` and a
+    /// launch read it back: the tag alone cannot say which toolchain is inside.
+    pub label: String,
+    pub versions: Vec<crate::versions::Pin>,
+}
+
+/// The build arguments for a stack's image: the human's ids, and the versions
+/// the repository pins, read now and not at `init` — the fragment never
+/// updates itself, the repository does (SPEC 4.2).
+///
+/// Refused when `versions.txt` names an argument the Dockerfile does not
+/// declare: the engine would drop it with a warning and the image keep its
+/// default, which is the failure the file exists to prevent.
+pub fn stack_build(
+    project: &Project,
+    stack: &str,
+    uid: u32,
+    gid: u32,
+) -> Result<StackBuild, ImageError> {
+    let dockerfile = project.fragment(stack).join("Dockerfile");
+    let sources = project.stack_versions(stack)?;
+    let text =
+        std::fs::read_to_string(&dockerfile).map_err(|e| ImageError::Io(dockerfile.clone(), e))?;
+    let missing = crate::versions::undeclared(&sources, &text);
+    if !missing.is_empty() {
+        return Err(ImageError::Undeclared {
+            stack: stack.to_string(),
+            args: missing.join(", "),
+            dockerfile,
+        });
+    }
+    let versions = crate::versions::resolve(&project.root, &sources);
+    let pinned = crate::versions::pinned(&versions);
+    let mut args = vec![format!("UID={uid}"), format!("GID={gid}")];
+    args.extend(pinned.iter().map(|(arg, value)| format!("{arg}={value}")));
+    Ok(StackBuild {
+        args,
+        label: format!(
+            "{}={}",
+            crate::versions::LABEL,
+            crate::versions::label(&pinned)
+        ),
+        versions,
+    })
+}
+
+/// What an image records about the versions it was built with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Recorded {
+    /// No such image on this machine.
+    Absent,
+    /// Built before nunki recorded versions, so what it carries is unknown.
+    Unrecorded,
+    /// Built with these pinned arguments.
+    Pinned(std::collections::BTreeMap<String, String>),
+}
+
+/// Read back what [`build`] wrote on an image. An engine that cannot answer is
+/// an error, never an absent image: the two send a human to different places.
+pub fn recorded(engine: &str, image: &str) -> Result<Recorded, ImageError> {
+    let out = Command::new(engine)
+        .args([
+            "image",
+            "inspect",
+            "--format",
+            "{{json .Config.Labels}}",
+            image,
+        ])
+        .output()
+        .map_err(|e| ImageError::NoEngine(e.to_string()))?;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if !out.status.success() {
+        // Docker says "No such image", Podman "image not known".
+        let lower = stderr.to_lowercase();
+        if lower.contains("no such image") || lower.contains("not known") {
+            return Ok(Recorded::Absent);
+        }
+        return Err(ImageError::Inspect {
+            engine: engine.to_string(),
+            image: image.to_string(),
+            said: stderr.trim().to_string(),
+        });
+    }
+    let labels: Option<std::collections::BTreeMap<String, String>> =
+        serde_json::from_slice(&out.stdout).map_err(|e| ImageError::Inspect {
+            engine: engine.to_string(),
+            image: image.to_string(),
+            said: format!("labels that are not JSON ({e})"),
+        })?;
+    Ok(
+        match labels.as_ref().and_then(|l| l.get(crate::versions::LABEL)) {
+            Some(value) => Recorded::Pinned(crate::versions::parse_label(value)),
+            None => Recorded::Unrecorded,
+        },
+    )
 }
 
 /// Whether an image is already on this machine, so a caller can say what is
@@ -298,10 +426,23 @@ fn docker_build(
     tag: &str,
     build_args: &[String],
 ) -> Result<(), ImageError> {
+    docker_build_labelled(engine, context, tag, build_args, &[])
+}
+
+fn docker_build_labelled(
+    engine: &str,
+    context: &Path,
+    tag: &str,
+    build_args: &[String],
+    labels: &[String],
+) -> Result<(), ImageError> {
     let mut command = Command::new(engine);
     command.args(["build", "-q", "-t", tag]);
     for arg in build_args {
         command.args(["--build-arg", arg]);
+    }
+    for label in labels {
+        command.args(["--label", label]);
     }
     command.arg(context);
     let out = command

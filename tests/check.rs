@@ -814,3 +814,145 @@ fn a_remote_off_github_is_not_asked_and_says_why() {
         }
     }
 }
+
+/// A project whose rust fragment reads its versions, with a Dockerfile to
+/// read them into.
+fn with_versions(dir: &Path, dockerfile: &str) -> Project {
+    let mut project = sound(dir);
+    project.config.stacks = vec!["rust".to_string()];
+    let fragment = project.fragment("rust");
+    std::fs::create_dir_all(&fragment).unwrap();
+    std::fs::write(
+        fragment.join(nunki::versions::FILE),
+        "RUST_VERSION rust-toolchain.toml toolchain.channel\n\
+         RUST_TARGETS rust-toolchain.toml toolchain.targets\n",
+    )
+    .unwrap();
+    std::fs::write(fragment.join("Dockerfile"), dockerfile).unwrap();
+    std::fs::write(
+        project.root.join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"1.98.0\"\n",
+    )
+    .unwrap();
+    project
+}
+
+/// A fragment written before nunki read versions reads one its Dockerfile
+/// does not declare: the image would keep its default while the repository
+/// pins another, and that is red, with the way out named.
+#[test]
+fn a_version_the_dockerfile_does_not_declare_is_red() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = with_versions(dir.path(), "FROM debian\nARG RUST_VERSION=stable\n");
+    match verdict(&run(&project), "follows the versions") {
+        Verdict::Red(why) => {
+            assert!(why.contains("RUST_TARGETS"), "{why}");
+            assert!(!why.contains("RUST_VERSION,"), "{why}");
+            assert!(why.contains("nunki init --stack rust"), "{why}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Declared, it is green and says what it read — and what it left to the
+/// Dockerfile, which is not the same thing as reading it.
+#[test]
+fn a_declared_version_is_green_and_says_what_it_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = with_versions(
+        dir.path(),
+        "ARG RUST_VERSION=stable\nARG RUST_TARGETS=\nFROM debian\n",
+    );
+    match verdict(&run(&project), "follows the versions") {
+        Verdict::Green(said) => {
+            assert!(said.contains("RUST_VERSION=1.98.0"), "{said}");
+            assert!(said.contains("RUST_TARGETS unpinned"), "{said}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A fragment with no `versions.txt` is not a pass: nobody asked the
+/// repository what it pins.
+#[test]
+fn a_fragment_without_versions_says_it_does_not_know() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = with_versions(dir.path(), "ARG RUST_VERSION\nARG RUST_TARGETS\n");
+    std::fs::remove_file(project.fragment("rust").join(nunki::versions::FILE)).unwrap();
+    assert!(matches!(
+        verdict(&run(&project), "follows the versions"),
+        Verdict::NotChecked(_)
+    ));
+}
+
+/// A stand-in for the container engine that answers `image inspect` the way
+/// Docker does, so what nunki reads off an image is tested without one.
+fn engine(dir: &Path, answer: &str) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = dir.join("engine");
+    std::fs::write(&bin, format!("#!/bin/sh\n{answer}\n")).unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    bin.to_string_lossy().into_owned()
+}
+
+/// What the image was built with against what the repository pins now: the
+/// check a human runs, and the one a launch refuses on.
+#[test]
+fn an_image_built_for_another_toolchain_is_red_and_the_same_one_green() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = with_versions(
+        dir.path(),
+        "ARG RUST_VERSION=stable\nARG RUST_TARGETS=\nFROM debian\n",
+    );
+    let cases = [
+        (
+            r#"echo '{"nunki.versions":"RUST_VERSION=1.97.0"}'"#,
+            Some("\"1.97.0\""),
+        ),
+        (r#"echo '{"nunki.versions":"RUST_VERSION=1.98.0"}'"#, None),
+        // Built before nunki recorded anything: what it carries is unknown.
+        (
+            r#"echo '{"maintainer":"someone"}'"#,
+            Some("before nunki recorded"),
+        ),
+        (r#"echo null"#, Some("before nunki recorded")),
+    ];
+    for (answer, red) in cases {
+        let mut report = Report::default();
+        nunki::check::image_versions(&project, &engine(dir.path(), answer), &mut report);
+        let v = verdict(&report, "carries what the repository pins");
+        match (red, &v) {
+            (Some(needle), Verdict::Red(why)) => assert!(why.contains(needle), "{why}"),
+            (None, Verdict::Green(_)) => {}
+            _ => panic!("{answer}: {v:?}"),
+        }
+    }
+}
+
+/// An image that is not there, and an engine that cannot answer, are two
+/// different things and neither is a pass.
+#[test]
+fn no_image_and_no_answer_are_not_checked_and_said_apart() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = with_versions(
+        dir.path(),
+        "ARG RUST_VERSION=stable\nARG RUST_TARGETS=\nFROM debian\n",
+    );
+    for (answer, needle) in [
+        (
+            "echo 'Error response from daemon: No such image: x' >&2; exit 1",
+            "not built yet",
+        ),
+        (
+            "echo 'Cannot connect to the Docker daemon' >&2; exit 1",
+            "Cannot connect",
+        ),
+    ] {
+        let mut report = Report::default();
+        nunki::check::image_versions(&project, &engine(dir.path(), answer), &mut report);
+        match verdict(&report, "carries what the repository pins") {
+            Verdict::NotChecked(why) => assert!(why.contains(needle), "{why}"),
+            other => panic!("{answer}: {other:?}"),
+        }
+    }
+}

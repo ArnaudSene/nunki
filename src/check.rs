@@ -100,7 +100,130 @@ pub fn run(project: &Project) -> Report {
     somebody_to_hand_back_to(project, &mut report);
     credentials_outside_the_tree(project, &mut report);
     coder_perimeter(project, &mut report);
+    stack_versions(project, &mut report);
     report
+}
+
+/// Whether each stack's fragment can read the versions the repository pins
+/// into its image (SPEC 4.2, `versions.txt`), and what it reads today.
+///
+/// Red when `versions.txt` names an argument the Dockerfile does not declare:
+/// the engine would drop it and the image keep its default, which is the
+/// failure the file exists to prevent — and `nunki slot rebuild` refuses it.
+fn stack_versions(project: &Project, report: &mut Report) {
+    for stack in &project.config.stacks {
+        let what = format!("the {stack} image follows the versions the repository pins");
+        let sources = match project.stack_versions(stack) {
+            Ok(s) => s,
+            Err(e) => {
+                report.add(what, Verdict::Red(e.to_string()));
+                continue;
+            }
+        };
+        if sources.is_empty() {
+            report.add(
+                what,
+                Verdict::NotChecked(format!(
+                    "the fragment has no {}, so the image keeps its Dockerfile's defaults \
+                     whatever the repository pins; `nunki init --stack {stack}` writes it",
+                    crate::versions::FILE
+                )),
+            );
+            continue;
+        }
+        let dockerfile = project.fragment(stack).join("Dockerfile");
+        let text = match std::fs::read_to_string(&dockerfile) {
+            Ok(t) => t,
+            Err(e) => {
+                report.add(what, Verdict::Red(format!("{}: {e}", dockerfile.display())));
+                continue;
+            }
+        };
+        let missing = crate::versions::undeclared(&sources, &text);
+        if !missing.is_empty() {
+            report.add(
+                what,
+                Verdict::Red(format!(
+                    "{} declares no {}, which {} reads: the image would keep its default. \
+                     The fragment predates it — remove the Dockerfile, run `nunki init \
+                     --stack {stack}` and carry your own edits over",
+                    dockerfile.display(),
+                    missing.join(", "),
+                    crate::versions::FILE
+                )),
+            );
+            continue;
+        }
+        let pins = crate::versions::resolve(&project.root, &sources);
+        let said: Vec<String> = pins
+            .iter()
+            .map(|p| match p {
+                crate::versions::Pin::Found { arg, value, from } => {
+                    format!("{arg}={value} ({from})")
+                }
+                crate::versions::Pin::Unpinned { arg, .. } => {
+                    format!("{arg} unpinned, the Dockerfile's default")
+                }
+            })
+            .collect();
+        report.add(what, Verdict::Green(said.join("; ")));
+    }
+}
+
+/// Whether the image built for each stack still carries what the repository
+/// pins now. Asks the container engine, so it is the caller's to run, like
+/// [`forge_protection`] is for the forge.
+pub fn image_versions(project: &Project, engine: &str, report: &mut Report) {
+    for stack in &project.config.stacks {
+        let what = format!("the {stack} image carries what the repository pins now");
+        let Ok(sources) = project.stack_versions(stack) else {
+            // Already red above, with the line that cannot be read.
+            continue;
+        };
+        if sources.is_empty() {
+            continue;
+        }
+        let wanted = crate::versions::pinned(&crate::versions::resolve(&project.root, &sources));
+        let image = crate::image::names(project, stack).agent;
+        let verdict = match crate::image::recorded(engine, &image) {
+            Err(e) => Verdict::NotChecked(e.to_string()),
+            Ok(crate::image::Recorded::Absent) => Verdict::NotChecked(format!(
+                "{image} is not built yet: `nunki slot rebuild` builds it"
+            )),
+            Ok(recorded) => match serves(&recorded, &wanted) {
+                Ok(()) => Verdict::Green(image),
+                Err(drift) => Verdict::Red(format!(
+                    "{}; `nunki slot rebuild` builds it again",
+                    drift.join("; ")
+                )),
+            },
+        };
+        report.add(what, verdict);
+    }
+}
+
+/// Whether an image built with `recorded` serves a repository pinning
+/// `wanted`, or every argument that moved. An image that recorded nothing
+/// serves only a repository that pins nothing: what it carries is unknown.
+pub fn serves(
+    recorded: &crate::image::Recorded,
+    wanted: &BTreeMap<String, String>,
+) -> Result<(), Vec<String>> {
+    let built = match recorded {
+        crate::image::Recorded::Pinned(built) => built.clone(),
+        crate::image::Recorded::Absent | crate::image::Recorded::Unrecorded => {
+            if wanted.is_empty() {
+                return Ok(());
+            }
+            return Err(vec![
+                "the image was built before nunki recorded versions, so what it carries \
+                 is unknown"
+                    .to_string(),
+            ]);
+        }
+    };
+    let drift = crate::versions::drift(&built, wanted);
+    if drift.is_empty() { Ok(()) } else { Err(drift) }
 }
 
 fn git_repository(project: &Project, report: &mut Report) {
