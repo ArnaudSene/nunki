@@ -1361,6 +1361,7 @@ fn the_coder_may_not_call_a_survivor_equivalent() {
         "src/new.rs:1",
         Triage::Equivalent {
             why: "nothing reads it, honest".into(),
+            carried_from: None,
         },
     )]);
     f.journal_names_head();
@@ -1381,6 +1382,7 @@ fn the_coder_may_not_call_a_survivor_equivalent() {
         1,
         Some(Triage::Equivalent {
             why: "no caller can reach that branch".into(),
+            carried_from: None,
         }),
     )]);
     assert_eq!(f.gate_seven(Role::Coder).decision, Decision::Passed);
@@ -1441,12 +1443,14 @@ fn the_equivalences_are_counted_out_loud() {
             1,
             Some(Triage::Equivalent {
                 why: "no caller can reach that branch".into(),
+                carried_from: None,
             }),
         ),
         survivor(
             2,
             Some(Triage::Equivalent {
                 why: "the constant is never read".into(),
+                carried_from: None,
             }),
         ),
     ]);
@@ -1458,6 +1462,40 @@ fn the_equivalences_are_counted_out_loud() {
         .expect("a green gate that owes the reader a number");
     assert!(note.contains("2 of 2"), "{note}");
     assert!(note.contains("HQ"), "{note}");
+}
+
+/// A ruling carried from an earlier campaign was given on code that has
+/// changed since, so the green gate names it apart and says how to take it
+/// back.
+#[test]
+fn a_carried_equivalence_is_named_apart_from_one_given_on_this_campaign() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.campaign(vec![
+        survivor(
+            1,
+            Some(Triage::Equivalent {
+                why: "no caller can reach that branch".into(),
+                carried_from: Some("def5678".into()),
+            }),
+        ),
+        survivor(
+            2,
+            Some(Triage::Equivalent {
+                why: "the constant is never read".into(),
+                carried_from: None,
+            }),
+        ),
+    ]);
+    f.journal_names_head();
+    let outcome = f.gate_seven(Role::Coder);
+    assert_eq!(outcome.decision, Decision::Passed);
+    let note = outcome
+        .note
+        .expect("a green gate that owes the reader a number");
+    assert!(note.contains("2 of 2"), "{note}");
+    assert!(note.contains("1 of those were carried"), "{note}");
+    assert!(note.contains("--lift"), "{note}");
 }
 
 #[test]
