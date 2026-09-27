@@ -122,7 +122,10 @@ jobs:
       - name: The stack image builds for uid 1000
         run: |
           set -eu
-          fragment="$(ls -d "$HOME"/.nunki/*/stacks/${{ matrix.stack }})"
+          # The primary's fragment: the user is created there, and an add-on
+          # only copies a runtime in, never another stack's users.
+          stack="${{ matrix.stack }}"
+          fragment="$(ls -d "$HOME"/.nunki/*/stacks/"${stack%%+*}")"
           docker build -q --build-arg UID=1000 --build-arg GID=1000 -t uid-1000-probe "$fragment"
           test "$(docker run --rm uid-1000-probe id -u)" = 1000
           docker image rm uid-1000-probe
