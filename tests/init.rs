@@ -2124,3 +2124,323 @@ fn each_fragment_reads_the_versions_its_ecosystem_pins() {
         assert_eq!(got, want, "{stack}");
     }
 }
+
+/// A tree with a base commit and one branch commit on top, and the fork
+/// point, for the campaign's diff.
+#[cfg(unix)]
+fn forked_tree(root: &std::path::Path) -> (std::path::PathBuf, String) {
+    let tree = root.join("tree");
+    std::fs::create_dir_all(tree.join("src")).unwrap();
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&tree)
+            .args(["-c", "user.name=T", "-c", "user.email=t@t"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    git(&["init", "-q", "-b", "dev"]);
+    std::fs::write(
+        tree.join("src/lib.rs"),
+        "pub fn keep(a: i32) -> bool { a > 2 }\n\npub fn other(a: i32) -> i32 { a + 1 }\n",
+    )
+    .unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "base"]);
+    let base = git(&["rev-parse", "HEAD"]);
+    std::fs::write(
+        tree.join("src/lib.rs"),
+        "pub fn keep(a: i32) -> bool { a > 2 }\n\npub fn other(a: i32) -> i32 { a + 2 }\n",
+    )
+    .unwrap();
+    git(&["commit", "-q", "-am", "L1"]);
+    (tree, base)
+}
+
+/// A `cargo` stub on the path, and the `PATH` that puts it first.
+#[cfg(unix)]
+fn stub_cargo(root: &std::path::Path, body: &str) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let stubs = root.join("stubs");
+    std::fs::create_dir_all(&stubs).unwrap();
+    std::fs::write(stubs.join("cargo"), body).unwrap();
+    std::fs::set_permissions(stubs.join("cargo"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    format!(
+        "{}:{}",
+        stubs.display(),
+        std::env::var("PATH").unwrap_or_default()
+    )
+}
+
+/// The campaign answers for the lines the branch changed, not for every line
+/// of the files it touched (SPEC 4.4).
+///
+/// Run, with a real `git` and a stub `cargo` that records what it was asked:
+/// given the fork point, the script hands cargo-mutants the diff since it
+/// (`--in-diff`), and no longer the whole files (`--file`). Measured on
+/// cargo-mutants 27.1.0 against a real crate: a comment-only diff yields no
+/// mutant, and a changed body yields only that function's.
+#[test]
+#[cfg(unix)]
+fn the_campaign_mutates_what_the_branch_changed_and_not_whole_files() {
+    let (_dir, root, _nunki) = fresh();
+    let home = home(&root);
+    init(&root, &home, &["rust".to_string()]).unwrap();
+    let script = home
+        .join(nunki::project::STACKS_DIR)
+        .join("rust")
+        .join(nunki::mutants::SCRIPT);
+    let (tree, base) = forked_tree(&root);
+    let asked = root.join("asked.txt");
+    let path = stub_cargo(
+        &root,
+        &format!(
+            "#!/bin/sh
+echo \"$@\" > {asked}
+out=\"\"
+while [ $# -gt 0 ]; do
+  case \"$1\" in
+    --output) out=$2 ;;
+    --in-diff) cat \"$2\" >> {asked} ;;
+  esac
+  shift
+done
+mkdir -p \"$out/mutants.out\"
+printf '%s\\n' 'src/lib.rs:3:33: replace + with - in other' > \"$out/mutants.out/missed.txt\"
+exit 2
+",
+            asked = asked.display()
+        ),
+    );
+
+    let out = std::process::Command::new("sh")
+        .arg(&script)
+        .arg("abc123")
+        .arg("src/lib.rs")
+        .env("PATH", path)
+        .env(nunki::mutants::BASE_ENV, &base)
+        .current_dir(&tree)
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        nunki::mutants::completed(&said),
+        "{said}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(nunki::mutants::parse(&said).len(), 1, "{said}");
+
+    let asked = std::fs::read_to_string(&asked).unwrap();
+    let args = asked.lines().next().unwrap();
+    assert!(
+        args.contains("--in-diff"),
+        "not restricted to the diff: {args}"
+    );
+    assert!(!args.contains("--file"), "still whole files: {args}");
+    // The diff it was handed is the branch's own change, from the fork point.
+    assert!(
+        asked.contains("+pub fn other(a: i32) -> i32 { a + 2 }"),
+        "{asked}"
+    );
+    assert!(
+        asked.contains("-pub fn other(a: i32) -> i32 { a + 1 }"),
+        "{asked}"
+    );
+}
+
+/// A diff that reaches no mutant is a campaign that found nothing, not one
+/// that could not run.
+///
+/// Measured on cargo-mutants 27.1.0: a comment-only diff makes it exit 0
+/// with "No mutants to filter", and without writing `mutants.out` at all. A
+/// crate that does not parse also leaves no `mutants.out`, but exits 1 —
+/// `a_campaign_that_could_not_run_does_not_report_the_last_ones_survivors`
+/// holds that side, with and without the fork point.
+#[test]
+#[cfg(unix)]
+fn a_diff_that_reaches_no_mutant_is_a_campaign_that_found_nothing() {
+    let (_dir, root, _nunki) = fresh();
+    let home = home(&root);
+    init(&root, &home, &["rust".to_string()]).unwrap();
+    let script = home
+        .join(nunki::project::STACKS_DIR)
+        .join("rust")
+        .join(nunki::mutants::SCRIPT);
+    let (tree, base) = forked_tree(&root);
+    let path = stub_cargo(
+        &root,
+        "#!/bin/sh\necho ' INFO No mutants to filter' >&2\nexit 0\n",
+    );
+
+    let out = std::process::Command::new("sh")
+        .arg(&script)
+        .arg("abc123")
+        .arg("src/lib.rs")
+        .env("PATH", path)
+        .env(nunki::mutants::BASE_ENV, &base)
+        .current_dir(&tree)
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        nunki::mutants::completed(&said),
+        "a campaign with nothing to mutate never finished: {said}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(nunki::mutants::parse(&said).is_empty(), "{said}");
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+}
+
+/// A base the copy cannot diff against is a campaign that cannot run, said
+/// as one — never a silent fall back to mutating whole files.
+#[test]
+#[cfg(unix)]
+fn a_campaign_that_cannot_diff_against_its_base_says_so() {
+    let (_dir, root, _nunki) = fresh();
+    let home = home(&root);
+    init(&root, &home, &["rust".to_string()]).unwrap();
+    let script = home
+        .join(nunki::project::STACKS_DIR)
+        .join("rust")
+        .join(nunki::mutants::SCRIPT);
+    let (tree, _base) = forked_tree(&root);
+    let called = root.join("called");
+    let path = stub_cargo(
+        &root,
+        &format!("#!/bin/sh\ntouch {}\nexit 0\n", called.display()),
+    );
+
+    let out = std::process::Command::new("sh")
+        .arg(&script)
+        .arg("abc123")
+        .arg("src/lib.rs")
+        .env("PATH", path)
+        .env(
+            nunki::mutants::BASE_ENV,
+            "0123456789abcdef0123456789abcdef01234567",
+        )
+        .current_dir(&tree)
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(!nunki::mutants::completed(&said), "{said}");
+    assert_ne!(out.status.code(), Some(0), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("cannot diff against the base"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!called.exists(), "it mutated anyway");
+}
+
+/// With the fork point, a campaign that left no `mutants.out` is either one
+/// with nothing to mutate or one that could not run, and only cargo-mutants'
+/// status tells them apart: a crate that does not parse exits 1 (measured on
+/// 27.1.0). Read as "nothing to mutate", gate 7 would go green on a crate
+/// nobody could mutate.
+#[test]
+#[cfg(unix)]
+fn a_campaign_that_could_not_run_is_not_read_as_one_with_nothing_to_mutate() {
+    let (_dir, root, _nunki) = fresh();
+    let home = home(&root);
+    init(&root, &home, &["rust".to_string()]).unwrap();
+    let script = home
+        .join(nunki::project::STACKS_DIR)
+        .join("rust")
+        .join(nunki::mutants::SCRIPT);
+    let (tree, base) = forked_tree(&root);
+    let path = stub_cargo(
+        &root,
+        "#!/bin/sh\necho 'cannot parse string into token stream' >&2\nexit 1\n",
+    );
+
+    let out = std::process::Command::new("sh")
+        .arg(&script)
+        .arg("abc123")
+        .arg("src/lib.rs")
+        .env("PATH", path)
+        .env(nunki::mutants::BASE_ENV, &base)
+        .current_dir(&tree)
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(!nunki::mutants::completed(&said), "{said}");
+    assert_ne!(out.status.code(), Some(0), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("left no"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// The diff's paths are the stack's own, from where cargo-mutants runs.
+///
+/// A stack below the repository's root runs its campaign from its own
+/// directory, where the crate's files are `src/…`; a diff that names them
+/// `backend/src/…` matches none of them.
+#[test]
+#[cfg(unix)]
+fn the_campaign_diff_names_files_from_the_stacks_own_directory() {
+    let (_dir, root, _nunki) = fresh();
+    let home = home(&root);
+    init(&root, &home, &["rust".to_string()]).unwrap();
+    let script = home
+        .join(nunki::project::STACKS_DIR)
+        .join("rust")
+        .join(nunki::mutants::SCRIPT);
+    let (tree, base) = forked_tree(&root);
+    // The same crate, moved below the root after the fork point: its own
+    // commit, so the change and the move are both in the diff.
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&tree)
+            .args(["-c", "user.name=T", "-c", "user.email=t@t"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    };
+    std::fs::create_dir_all(tree.join("backend")).unwrap();
+    git(&["mv", "src", "backend/src"]);
+    git(&["commit", "-q", "-m", "move"]);
+    let asked = root.join("asked.txt");
+    let path = stub_cargo(
+        &root,
+        &format!(
+            "#!/bin/sh
+out=\"\"
+while [ $# -gt 0 ]; do
+  case \"$1\" in
+    --output) out=$2 ;;
+    --in-diff) cat \"$2\" > {asked} ;;
+  esac
+  shift
+done
+mkdir -p \"$out/mutants.out\"
+: > \"$out/mutants.out/missed.txt\"
+",
+            asked = asked.display()
+        ),
+    );
+
+    let out = std::process::Command::new("sh")
+        .arg(&script)
+        .arg("abc123")
+        .arg("src/lib.rs")
+        .env("PATH", path)
+        .env(nunki::mutants::BASE_ENV, &base)
+        .current_dir(tree.join("backend"))
+        .output()
+        .unwrap();
+    assert!(
+        nunki::mutants::completed(&String::from_utf8_lossy(&out.stdout)),
+        "{out:?}"
+    );
+    let asked = std::fs::read_to_string(&asked).unwrap();
+    assert!(asked.contains("+++ b/src/lib.rs"), "{asked}");
+    assert!(!asked.contains("backend/"), "{asked}");
+}

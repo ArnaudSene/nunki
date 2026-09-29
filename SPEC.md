@@ -164,7 +164,7 @@ codeur prouve des propriétés qu'il n'a pas choisies.
   d'utilisation l'interdisent en général : le fuzz vise le livrable, pas ce
   qu'il appelle.
 - La **mutation** ne teste pas le code, elle teste les **tests**. C'est une
-  **porte du HQ** (4.4, porte 7), jouée sur les fichiers touchés avant de
+  **porte du HQ** (4.4, porte 7), jouée sur ce que la branche a changé avant de
   lancer l'intégrateur ; un mutant survivant revient au codeur avec ses trois
   issues possibles (tué par un test nommé, démontré équivalent en une phrase,
   reconnu comme bug et figé dans un test rouge). Le HQ décide et lit ; la
@@ -197,7 +197,7 @@ sont des constats présentés au relecteur, et c'est cette forme que la porte
 | étape | qui | contenu | pourquoi là |
 |---|---|---|---|
 | **commit stage** | le codeur | code ; tests unitaires et d'intégration étroite ; tests par propriétés prescrits ; lint ; analyse statique et audit de dépendances par stack ; fuzz de bibliothèque en campagne courte | tout ce qui tourne sans service, en minutes. **Ce qui parle à un service extérieur est bouchonné, jamais ignoré** — la ligne « unitaire + intégration » ci-dessus le dit, et le **prompt du codeur** le dit aussi. Il écrit contre une couture à lui — un trait, une fonction, une interface — et prouve tout ce qui entoure l'appel : la requête construite, les lignes converties, ce que veut dire une réponse vide. L'appel lui-même est à l'intégrateur, contre le service. Un `#[ignore]` est au test système de l'intégrateur et à rien d'autre. Un agent à qui rien ne dit la règle écrit un store de base de données sans couture ; la campagne de mutation rend alors **des survivants que personne dans son conteneur ne peut tuer**, et la porte 7 mange ses trois tentatives sur un triage imprenable. Une porte qui exige ce que rien n'énonce note l'agent sur un secret |
-| **mutation** sur les fichiers touchés | porte du HQ | campagne dans le conteneur du slot, chaque survivant trié par le codeur | ne dépend que du code et des tests unitaires ; jouée plus tard, elle renverrait au codeur après avoir payé l'intégration et la sécurité pour rien |
+| **mutation** sur ce que la branche a changé | porte du HQ | campagne dans le conteneur du slot, chaque survivant trié par le codeur | ne dépend que du code et des tests unitaires ; jouée plus tard, elle renverrait au codeur après avoir payé l'intégration et la sécurité pour rien |
 | **acceptation** | l'intégrateur | tests système de bout en bout sur services réels ; tests de contrat contre les API tierces ; cas d'erreur d'intégration écrits à la main (connexion refusée, 500, délai) | l'étape d'acceptation automatisée, sur un environnement proche de la production |
 | **sécurité dynamique** | la sécurité | analyse dynamique, fuzz d'API, pentest, sur le livrable intégré | les cadres la placent toujours sur un système déployé |
 | **release** | l'humain | validation, push, merge | le seul geste non délégable |
@@ -837,7 +837,8 @@ un Dockerfile (étapes d'image), `allow.txt` (domaines des dépendances),
 `Dockerfile.addon` et `Dockerfile.stages` (ce que la stack ajoute sur l'image
 d'une autre — « plusieurs stacks », ci-dessous), `prepush.sh` (section de
 batterie), `system.sh` (les tests système de
-l'intégrateur), `mutation.sh` (commande de mutation),
+l'intégrateur), `mutation.sh` (commande de mutation, qui reçoit dans
+`NUNKI_BASE` le point de fourche de la branche — porte 7),
 `run.sh` (comment on démarre une application de cette stack, par défaut),
 `writable.txt` (les répertoires qu'une exécution doit pouvoir écrire quand
 l'arbre est en lecture seule), `caches.txt` (les caches que la chaîne d'outils
@@ -1423,10 +1424,42 @@ dernier lot. La première rouge arrête tout.
 5. livrable présent (`PR.md`) ;
 6. batterie verte — absente ou non exécutable, la porte **échoue**, elle ne
    saute pas ;
-7. **mutation** : campagne jouée sur les fichiers touchés. **Pas de seuil** :
-   la porte est verte quand **chaque survivant a reçu une des trois issues** —
-   tué par un test nommé, reconnu comme bug et figé dans un test, ou démontré
-   équivalent en une phrase.
+7. **mutation** : campagne jouée sur ce que la branche a changé. **Pas de
+   seuil** : la porte est verte quand **chaque survivant a reçu une des trois
+   issues** — tué par un test nommé, reconnu comme bug et figé dans un test,
+   ou démontré équivalent en une phrase.
+
+   **Les lignes changées, pas les fichiers entiers.** Tranché par Arnaud le
+   2026-09-28, par la règle de la porte 8 : **ce qui est nouveau depuis la
+   base appartient à la mission, ce qui préexiste appartient au projet.** Une
+   campagne sur les fichiers entiers fait répondre le codeur de tout
+   l'historique de chaque fichier qu'il touche : mesuré sur un vrai dépôt, une
+   correction d'une quarantaine de lignes dans un fichier de 1 900 lignes
+   donnait **505 mutants** sur les fichiers touchés, contre **42** sur les
+   lignes changées. La campagne dépassait son délai, et le codeur aurait écrit
+   des tests pour du code qu'il n'avait pas écrit.
+
+   `nunki` passe à `mutation.sh` le **point de fourche** de la branche dans la
+   variable `NUNKI_BASE` — un commit, jamais un nom, pour la raison que donne
+   la porte 8 : la copie propre de `HEAD` ne porte aucune branche, et le point
+   de fourche y est par construction. Une variable plutôt qu'un argument, pour
+   que le `mutation.sh` qu'un projet a réécrit, qui lit
+   `<campaign-id> <path>...`, continue de marcher tel quel. La stack restreint
+   sa campagne au diff depuis ce commit quand son outil le sait : pour Rust,
+   `cargo-mutants --in-diff`, qui ne garde que les mutants que le diff
+   atteint. Python (mutmut) et Next (Stryker) ne le font pas encore : leurs
+   scripts mutent toujours les fichiers entiers, et restreindre leurs
+   campagnes est un travail de stack à part. Un diff qui n'atteint aucun mutant — un commentaire, un test — est
+   une campagne sans survivant, pas une campagne qui n'a pas pu tourner : les
+   deux ne laissent aucun `mutants.out`, et seul le statut de l'outil les
+   distingue (mesuré sur cargo-mutants 27.1.0 : 0 pour l'une, 1 pour un crate
+   qui ne se lit pas). Une base que la copie ne sait pas lire est une campagne
+   qui n'a pas pu tourner, dite comme telle, jamais un repli silencieux sur les
+   fichiers entiers.
+
+   L'empreinte reste celle des fichiers touchés : une base qui bouge sans
+   changer un fichier touché laisse leur diff identique, et une base qui les
+   change change leur contenu après le rebase.
 
    **Le script de campagne, mesuré contre le vrai outil.** Un bouchon qui
    imprime une ligne JSON ne montre rien de ce qui suit ; seule l'exécution

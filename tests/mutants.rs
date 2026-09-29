@@ -580,8 +580,8 @@ fn live_a_campaign_is_launched_watched_and_read_back() {
          # A stand-in campaign: the shape nunki reads, without the tool.\n\
          echo \"campaign $1 on $# path(s)\" >&2\n\
          sleep 2\n\
-         echo '{\"id\":\"src/lib.rs:1\",\"file\":\"src/lib.rs\",\"line\":1,\
-         \"description\":\"replace one with 0\"}'\n\
+         echo \"{\\\"id\\\":\\\"src/lib.rs:1\\\",\\\"file\\\":\\\"src/lib.rs\\\",\\\"line\\\":1,\
+         \\\"description\\\":\\\"replace one with 0 since $NUNKI_BASE\\\"}\"\n\
          echo 'not a survivor, just chatter'\n\
          echo '{\"id\":\"src/lib.rs:1b\",\"file\":\"src/lib.rs\",\"line\":1,\
          \"description\":\"replace one with 255\"}'\n\
@@ -732,6 +732,17 @@ fn live_a_campaign_is_launched_watched_and_read_back() {
         mutants::fingerprint(&tree, &touched).unwrap()
     );
     assert!(campaign.survivors.iter().all(|s| s.outcome.is_none()));
+    // The fork point reached the script inside the container, through the
+    // engine's own `exec -e`, and not only the command nunki built.
+    let fork = nunki::gate::fork_point(&tree, "dev").unwrap();
+    assert!(
+        campaign
+            .survivors
+            .iter()
+            .any(|s| s.description == format!("replace one with 0 since {fork}")),
+        "{:?}",
+        campaign.survivors
+    );
 
     // Asked again on the same content, it does not spend another campaign.
     match go() {
@@ -1369,4 +1380,126 @@ fn a_campaign_that_never_ran_is_run() {
         mutants::already_answered(dir.path(), "abc", mutants::Replay::WhenChanged).unwrap();
 
     assert_eq!(answer, None);
+}
+
+/// The campaign is told the commit its branch forked from, so a stack can
+/// answer for the lines the branch changed rather than for whole files
+/// (SPEC 4.4).
+///
+/// The fork point and not the base's tip: the base moves on after the
+/// branch leaves it, and diffing against the tip would hand the campaign
+/// every line merged there since.
+#[test]
+fn a_campaign_is_told_the_commit_its_branch_forked_from() {
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot) = context(dir.path());
+    let tree = &slot.tree;
+    let forked = git(tree, &["rev-parse", "dev"]);
+    write(tree, "src/lib.rs", "pub fn one() -> u8 { 2 }\n");
+    git(tree, &["commit", "-q", "-am", "L1"]);
+    // The base moves on after the branch left it.
+    git(tree, &["checkout", "-q", "dev"]);
+    write(tree, "src/other.rs", "pub fn other() {}\n");
+    git(tree, &["add", "-A"]);
+    git(tree, &["commit", "-q", "-m", "merged meanwhile"]);
+    git(tree, &["checkout", "-q", "mission/x"]);
+
+    let fork = nunki::gate::fork_point(tree, "dev").unwrap();
+    assert_eq!(fork, forked, "the fork point, not the base's tip");
+
+    let touched = nunki::gate::touched_since_base(tree, "dev").unwrap();
+    let judged = nunki::run::judged(&project, "rust");
+    let one = mutants::command(&judged, "abc123", &touched, &fork);
+    assert_eq!(
+        one.env.get(mutants::BASE_ENV).map(String::as_str),
+        Some(forked.as_str()),
+        "{one:?}"
+    );
+    assert_eq!(
+        one.args,
+        vec!["abc123".to_string(), "src/lib.rs".to_string()]
+    );
+
+    // Several stacks run through one shell, whose children inherit the same
+    // environment: the variable is set on that shell.
+    let mut two = judged.clone();
+    two.push(nunki::run::Judged {
+        stack: nunki::project::Stack::new("next", "frontend").unwrap(),
+        scripts_at: "/work/stack-next".to_string(),
+        advisories_at: "/nunki/advisories-next".to_string(),
+    });
+    let several = mutants::command(&two, "abc123", &touched, &fork);
+    assert_eq!(several.program, "sh");
+    assert_eq!(
+        several.env.get(mutants::BASE_ENV).map(String::as_str),
+        Some(forked.as_str())
+    );
+}
+
+/// With the fork point, the shipped script answers for the lines the branch
+/// changed, against the real tool (SPEC 4.4).
+///
+/// `keep` has no test and is not touched: its mutants would all survive a
+/// whole-file campaign, and must not appear here. `double` is changed on the
+/// branch: its mutants are the campaign's, and one of them survives.
+///
+/// ```text
+/// cargo test --test mutants live_the_shipped_mutation_script_answers -- --ignored
+/// ```
+#[test]
+#[ignore = "runs a real mutation campaign; needs cargo-mutants; run by hand"]
+fn live_the_shipped_mutation_script_answers_for_the_changed_lines() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("crate");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"tiny\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    let lib = |double: &str| {
+        format!(
+            "pub fn keep(n: u8) -> bool {{\n    n > 3\n}}\n\n\
+             pub fn double(n: u8) -> u8 {{\n    {double}\n}}\n\n\
+             #[cfg(test)]\nmod tests {{\n    #[test]\n    fn double_works() {{\n        \
+             assert!(super::double(2) > 0);\n    }}\n}}\n"
+        )
+    };
+    std::fs::write(root.join("src/lib.rs"), lib("n * 2")).unwrap();
+    std::fs::write(root.join(".gitignore"), "target/\n").unwrap();
+    git(&root, &["init", "-q", "-b", "dev"]);
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-q", "-m", "base"]);
+    let base = git(&root, &["rev-parse", "HEAD"]);
+    std::fs::write(root.join("src/lib.rs"), lib("n + n")).unwrap();
+    git(&root, &["commit", "-q", "-am", "L1"]);
+
+    nunki::init::init(&root, &dir.path().join("nunki"), &["rust".to_string()]).unwrap();
+    let script = dir
+        .path()
+        .join("nunki/stacks/rust")
+        .join(nunki::mutants::SCRIPT);
+
+    let out = std::process::Command::new(&script)
+        .arg("campaign-1")
+        .arg("src/lib.rs")
+        .env(nunki::mutants::BASE_ENV, &base)
+        .current_dir(&root)
+        .output()
+        .expect("the script runs; cargo-mutants must be installed");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        nunki::mutants::completed(&stdout),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let survivors = nunki::mutants::parse(&stdout);
+    assert!(
+        survivors.iter().all(|s| s.description.contains("double")),
+        "a mutant outside the changed function: {survivors:?}"
+    );
+    assert!(
+        !survivors.is_empty(),
+        "`double` is only checked for being positive: {stdout}"
+    );
 }

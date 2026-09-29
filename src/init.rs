@@ -908,6 +908,13 @@ const MUTATION_RUST: &str = r#"#!/bin/sh
 # copy of HEAD inside the slot's container. The id comes first so the campaign
 # is identifiable from its own command line; this script does not need it.
 #
+# The campaign answers for the lines this branch **changed**, not for every
+# line of the files it touched (SPEC 4.4). `nunki` sets `NUNKI_BASE` to the
+# commit the branch forked from, and cargo-mutants' `--in-diff` keeps only the
+# mutants the diff since that commit reaches. A twenty-line fix in a file of
+# two thousand lines owes answers for its own mutants, not for the file's
+# history. Without `NUNKI_BASE` the whole of each touched file is mutated.
+#
 # It prints **one JSON object per line** on stdout, one per surviving mutant:
 #   {"id":"…","file":"…","line":12,"description":"…"}
 # and, last of all and exactly once, the line that says it got to the end:
@@ -928,9 +935,13 @@ shift
 # Only Rust sources are worth mutating; the touched list holds whatever the
 # branch touched.
 files=""
+paths=""
 for path in "$@"; do
   case "$path" in
-    *.rs) files="$files --file $path" ;;
+    *.rs)
+      files="$files --file $path"
+      paths="$paths $path"
+      ;;
   esac
 done
 if [ -z "$files" ]; then
@@ -966,6 +977,22 @@ out="target/mutants-$campaign"
 rm -rf "$out"
 mkdir -p "$out"
 
+# What to mutate. `--relative` writes the diff's paths from here, which is
+# where cargo-mutants reads them: the stack's own directory, even when the
+# stack lives below the repository's root. A base the copy does not hold is
+# a campaign that cannot run, said as one, rather than a silent fall back to
+# every line of every file.
+scope="$files"
+if [ -n "${NUNKI_BASE:-}" ]; then
+  diff="$out/touched.diff"
+  # shellcheck disable=SC2086
+  if ! git diff --relative "$NUNKI_BASE" HEAD -- $paths > "$diff"; then
+    echo "nunki: cannot diff against the base $NUNKI_BASE" >&2
+    exit 1
+  fi
+  scope="--in-diff $diff"
+fi
+
 # A campaign that finds survivors exits non-zero — 2, measured on
 # cargo-mutants 27.1.0 — and that is a result, not a failure: `nunki` reads the
 # survivors rather than the status.
@@ -986,12 +1013,22 @@ mkdir -p "$out"
 # is on the mutation, never on the file: a `main.rs` carrying real code still
 # owes every mutant in it.
 # shellcheck disable=SC2086
-cargo mutants --in-place --no-shuffle --exclude-re "replace main -> " --output "$out" $files >&2 || true
+status=0
+cargo mutants --in-place --no-shuffle --exclude-re "replace main -> " --output "$out" $scope >&2 || status=$?
 
 # `--output DIR` writes into `DIR/mutants.out/`, not into `DIR` (measured on
 # 27.1.0). Reading the wrong path makes the whole campaign fail silently.
 missed="$out/mutants.out/missed.txt"
 if [ ! -f "$missed" ]; then
+  # A diff that reaches no mutant, a comment or a test changed, say, makes
+  # cargo-mutants exit 0 without writing `mutants.out` at all ("No mutants
+  # to filter", measured on 27.1.0). That is a measurement: nothing to mutate.
+  # A crate that does not parse also leaves no `mutants.out`, but exits 1,
+  # so only the status tells the two apart.
+  if [ -n "${NUNKI_BASE:-}" ] && [ "$status" -eq 0 ]; then
+    printf '{"campaign":"done"}\n'
+    exit 0
+  fi
   echo "nunki: the campaign left no $missed" >&2
   exit 1
 fi
