@@ -469,6 +469,23 @@ fn base_ref(tree: &Path, base: &str) -> Result<Rev, GateError> {
     Ok(Rev(base.to_string()))
 }
 
+/// The commit this branch forked from its base, as the gates that compare
+/// with the base hand it to a stack's script.
+///
+/// A commit and never a name, for the reason gate 8 gives: the clean copy of
+/// `HEAD` is a detached clone that carries no branch, so a name resolves to
+/// nothing there. The fork point is an ancestor of `HEAD`, so it is in the
+/// copy by construction. The base is read through [`base_ref`], like every
+/// other gate reads it.
+pub fn fork_point(tree: &Path, base: &str) -> Result<String, GateError> {
+    let named = base_ref(tree, base)?;
+    Ok(
+        crate::git::run(tree, &["merge-base", "HEAD", &named.to_string()])?
+            .trim()
+            .to_string(),
+    )
+}
+
 /// A revision `git` resolves exactly as given: a commit, or a ref that
 /// already names one.
 ///
@@ -1024,10 +1041,7 @@ fn mechanical_security_in(
     // with no commit in common stops the report here rather than deciding, the
     // way gates 2 and 4 already do — they read the same two names and would
     // have refused first.
-    let named = base_ref(subject.tree, &subject.header.base)?;
-    let base = crate::git::run(subject.tree, &["merge-base", "HEAD", &named.to_string()])?
-        .trim()
-        .to_string();
+    let base = fork_point(subject.tree, &subject.header.base)?;
     let at = format!("{}/{SECURITY}", judged.scripts_at);
     // Absent, not executable, no database, a base it cannot read, or its own
     // status — told apart, because "the gate is red", "there was nothing to

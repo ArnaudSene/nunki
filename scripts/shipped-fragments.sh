@@ -50,6 +50,12 @@ hash_of() {
     fi
     git -C "$repo" worktree remove --force "$tree"
   done
-  ( cd "$repo" && CARGO_TARGET_DIR="$target" cargo build -q --bin nunki ) >/dev/null
+  # The working tree last, and rebuilt for certain. The loop above has just
+  # built a checkout into the same target directory, and cargo judges
+  # freshness by modification time: sources older than that build read as
+  # built, and the binary hashed would be the last commit's, never the
+  # working tree's (measured: a changed template never reached the list).
+  ( cd "$repo" && cargo clean -q -p nunki --target-dir "$target" \
+      && CARGO_TARGET_DIR="$target" cargo build -q --bin nunki ) >/dev/null
   hash_of "$target/debug/nunki"
 } | sort -u

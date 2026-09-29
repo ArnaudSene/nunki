@@ -61,6 +61,15 @@ pub const CAMPAIGNS_DIR: &str = "campaigns";
 /// (SPEC 4.4: "une commande déterministe déclarée par le fragment de stack").
 pub const SCRIPT: &str = "mutation.sh";
 
+/// The variable that hands a campaign the commit its branch forked from.
+///
+/// Gate 7 answers for what the branch **changed**, not for every line of the
+/// files it touched (SPEC 4.4): a script that can restrict itself to the
+/// changed lines diffs against this commit. An environment variable rather
+/// than an argument, so a project's own `mutation.sh`, which reads
+/// `<campaign-id> <path>...`, keeps working unchanged.
+pub const BASE_ENV: &str = "NUNKI_BASE";
+
 /// A mutant the campaign could not kill.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Survivor {
@@ -642,7 +651,7 @@ pub fn started(mission: &str) -> String {
 /// id is the content fingerprint, and it is first so that the campaign is
 /// identifiable from its own command line — process ids inside a container
 /// are recycled within seconds, and liveness here means "this campaign", not
-/// "something holds that number".
+/// "something holds that number". The fork point travels in [`BASE_ENV`].
 // Eight, and the eighth is [`Replay`]. Folding them into a struct would be a
 // second change riding on this one; `run::plan` carries the same allow for
 // the same reason.
@@ -805,7 +814,7 @@ pub fn campaign(
     deadline_minutes: u32,
     replay: Replay,
 ) -> Result<Progress, MutantsError> {
-    use crate::harness::spawn::{CommandSpec, Spawner};
+    use crate::harness::spawn::Spawner;
 
     let head = git::head(&slot.tree)?;
     // The base's **name**, and the paths worked out here — not handed in.
@@ -820,6 +829,12 @@ pub fn campaign(
     // One call, in the place that cannot be bypassed, rather than a rule the
     // next caller has to know.
     let touched = crate::gate::touched_since_base(&slot.tree, base)
+        .map_err(|e| MutantsError::Launch(e.to_string()))?;
+    // The fingerprint stays over the touched files' content, not the fork
+    // point: a base that moves without changing a touched file leaves the
+    // diff of those files unchanged, and one that does change them changes
+    // their content after the rebase.
+    let fork = crate::gate::fork_point(&slot.tree, base)
         .map_err(|e| MutantsError::Launch(e.to_string()))?;
     let want = fingerprint(&slot.tree, &touched)?;
     let compose_project = crate::compose::project_name(&project.session(), &slot.name)
@@ -885,31 +900,8 @@ pub fn campaign(
         crate::compose::AGENT_SERVICE,
     )
     .identified_by(&want);
-    let (program, args) = match judged.as_slice() {
-        // One stack: its script, called as it always has been.
-        [one] => {
-            let mut args = vec![want.clone()];
-            args.extend(touched.iter().cloned());
-            (format!("{}/{SCRIPT}", one.scripts_at), args)
-        }
-        several => (
-            "sh".to_string(),
-            vec![
-                "-c".to_string(),
-                several_campaigns(several, &want, &touched),
-            ],
-        ),
-    };
     let spawned = spawner
-        .spawn(
-            &CommandSpec {
-                program,
-                args,
-                cwd: PathBuf::from(crate::exec::PROOF_AT),
-                env: Default::default(),
-            },
-            &log,
-        )
+        .spawn(&command(&judged, &want, &touched, &fork), &log)
         .map_err(|e| MutantsError::Launch(e.to_string()))?;
 
     write_running(
@@ -926,6 +918,42 @@ pub fn campaign(
         },
     )?;
     Ok(Progress::Started { fingerprint: want })
+}
+
+/// What a campaign runs in the container: each stack's `mutation.sh` on the
+/// touched paths, from the clean copy, with the fork point in [`BASE_ENV`].
+///
+/// `campaign` is the fingerprint, `fork` the commit the branch forked from.
+/// One stack runs its script directly, as it always has; several run through
+/// [`several_campaigns`], whose child scripts inherit the same environment.
+pub fn command(
+    judged: &[crate::run::Judged],
+    campaign: &str,
+    touched: &[String],
+    fork: &str,
+) -> crate::harness::spawn::CommandSpec {
+    let (program, args) = match judged {
+        [one] => {
+            let mut args = vec![campaign.to_string()];
+            args.extend(touched.iter().cloned());
+            (format!("{}/{SCRIPT}", one.scripts_at), args)
+        }
+        several => (
+            "sh".to_string(),
+            vec![
+                "-c".to_string(),
+                several_campaigns(several, campaign, touched),
+            ],
+        ),
+    };
+    crate::harness::spawn::CommandSpec {
+        program,
+        args,
+        cwd: PathBuf::from(crate::exec::PROOF_AT),
+        env: [(BASE_ENV.to_string(), fork.to_string())]
+            .into_iter()
+            .collect(),
+    }
 }
 
 /// The campaign of a project carrying several stacks, as one shell script
