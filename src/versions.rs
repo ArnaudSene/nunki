@@ -269,11 +269,25 @@ fn read(root: &Path, source: &Source) -> Result<String, String> {
     };
     let items = match (format(&source.file), &source.key) {
         (Format::Plain, None) => {
+            // The version is on the first line that opens as the pattern
+            // does. A lockfile names every package it resolved, one per line
+            // (`'@playwright/test@1.61.1':` in a `pnpm-lock.yaml`), and the
+            // one wanted is rarely first. A pattern that opens on the version
+            // itself, or no pattern, opens as every line does: the first line
+            // is then the whole value, as in `.nvmrc`.
+            let before = source
+                .pattern
+                .as_ref()
+                .map_or("", |(before, _)| before.as_str());
             let line = text
                 .lines()
                 .map(str::trim)
-                .find(|l| !l.is_empty() && !l.starts_with('#'))
-                .ok_or("empty")?;
+                .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                .find(|l| l.starts_with(before))
+                .ok_or_else(|| match before {
+                    "" => "empty".to_string(),
+                    before => format!("no line starts with {before:?}"),
+                })?;
             vec![line.to_string()]
         }
         (Format::Plain, Some(_)) => {
@@ -511,6 +525,56 @@ mod tests {
         let dir = repo(&[(".python-version", "# pinned for the lab\n3.13\n")]);
         let pins = resolve(dir.path(), &sources("PYTHON .python-version\n"));
         assert_eq!(pinned(&pins)["PYTHON"], "3.13");
+    }
+
+    /// A lockfile names every package it resolved, one per line, and the
+    /// one wanted is rarely first: with a pattern that opens on text of its
+    /// own, the version is on the first line that opens the same way.
+    #[test]
+    fn a_pattern_finds_its_line_in_a_lockfile() {
+        let lock = "lockfileVersion: '9.0'\n\
+                    importers:\n  .:\n    devDependencies:\n      '@playwright/test':\n\
+                    \x20       specifier: ^1.51.1\n        version: 1.61.1\n\
+                    packages:\n  '@babel/core@7.29.0':\n    resolution: {}\n\
+                    \x20 '@playwright/test@1.61.1':\n    resolution: {}\n\
+                    \x20 playwright@1.61.1:\n";
+        let dir = repo(&[("pnpm-lock.yaml", lock)]);
+        let pins = resolve(
+            dir.path(),
+            &sources("PLAYWRIGHT pnpm-lock.yaml - '@playwright/test@{}':\n"),
+        );
+        assert_eq!(pinned(&pins)["PLAYWRIGHT"], "1.61.1", "{pins:?}");
+    }
+
+    /// And a lockfile that resolved no such package pins nothing: the
+    /// Dockerfile's default stands, and the reason names the pattern.
+    #[test]
+    fn a_pattern_no_line_opens_with_pins_nothing_and_says_so() {
+        let dir = repo(&[(
+            "pnpm-lock.yaml",
+            "lockfileVersion: '9.0'\npackages:\n  next@16.3.3:\n",
+        )]);
+        let pins = resolve(
+            dir.path(),
+            &sources("PLAYWRIGHT pnpm-lock.yaml - '@playwright/test@{}':\n"),
+        );
+        assert!(pinned(&pins).is_empty(), "{pins:?}");
+        match &pins[0] {
+            Pin::Unpinned { tried, .. } => assert!(
+                tried.iter().any(|t| t.contains("no line starts with")),
+                "{tried:?}"
+            ),
+            other => panic!("pinned: {other:?}"),
+        }
+    }
+
+    /// A pattern that opens on the version itself still reads the first
+    /// line, as for a `.nvmrc`: searching would take any line at all.
+    #[test]
+    fn a_pattern_that_opens_on_the_version_reads_the_first_line() {
+        let dir = repo(&[(".python-version", "3.13\n3.12\n")]);
+        let pins = resolve(dir.path(), &sources("PYTHON .python-version - {}\n"));
+        assert_eq!(pinned(&pins)["PYTHON"], "3.13", "{pins:?}");
     }
 
     #[test]

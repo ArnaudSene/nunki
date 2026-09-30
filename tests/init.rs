@@ -553,6 +553,33 @@ fn the_rust_image_carries_what_the_mutation_campaign_calls() {
     assert!(user < install, "{dockerfile}");
 }
 
+/// Every cargo in a Rust image builds with its debug info kept out of the
+/// linked binaries, whether Rust is the project's stack or an add-on to
+/// another.
+///
+/// Measured on a crate of 170,000 lines with 17 test targets: with the debug
+/// info inside, concurrent links reached 13.6 GB and the kernel killed them;
+/// an incremental `cargo test --no-run` took 51 s against 18 s without, and a
+/// mutation campaign pays that per mutant. In the image's environment and not
+/// in the repository's `Cargo.toml`, which is the project's.
+#[test]
+fn a_rust_image_links_without_copying_debug_info_into_every_binary() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    nunki::init::init(
+        &root,
+        &dir.path().join("nunki"),
+        &["next".to_string(), "rust=backend".to_string()],
+    )
+    .unwrap();
+    let setting = "ENV CARGO_PROFILE_DEV_SPLIT_DEBUGINFO=unpacked";
+    for file in ["stacks/rust/Dockerfile", "stacks/rust/Dockerfile.addon"] {
+        let text = std::fs::read_to_string(home(&root).join(file)).unwrap();
+        assert!(text.contains(setting), "{file} lacks it:\n{text}");
+    }
+}
+
 /// The campaign does not hand the coder a survivor nobody could answer.
 ///
 /// cargo-mutants replaces a whole function body with `Default::default()`
@@ -2073,7 +2100,7 @@ fn every_version_a_fragment_reads_is_an_argument_its_image_declares() {
 fn each_fragment_reads_the_versions_its_ecosystem_pins() {
     // A stack, the files its repository holds, and what should be read.
     type Case<'a> = (&'a str, &'a [(&'a str, &'a str)], &'a [(&'a str, &'a str)]);
-    let cases: [Case; 3] = [
+    let cases: [Case; 4] = [
         (
             "rust",
             &[(
@@ -2098,10 +2125,34 @@ fn each_fragment_reads_the_versions_its_ecosystem_pins() {
                 (".nvmrc", "v24.1.0\n"),
                 (
                     "package.json",
-                    r#"{"engines": {"node": ">=20"}, "packageManager": "pnpm@11.15.0+sha512.0f"}"#,
+                    r#"{"engines": {"node": ">=20"}, "packageManager": "pnpm@11.15.0+sha512.0f",
+                        "devDependencies": {"@playwright/test": "^1.51.1"}}"#,
+                ),
+                // The range in `package.json` is not the version; the lockfile
+                // holds what was resolved, and the image's browsers must be
+                // exactly those.
+                (
+                    "pnpm-lock.yaml",
+                    "lockfileVersion: '9.0'\nimporters:\n  .:\n    devDependencies:\n\
+                     \x20     '@playwright/test':\n        specifier: ^1.51.1\n\
+                     \x20       version: 1.61.1\npackages:\n\
+                     \x20 '@playwright/test@1.61.1':\n    resolution: {}\n",
                 ),
             ],
-            &[("NODE", "24.1.0"), ("PNPM", "11.15.0")],
+            &[
+                ("NODE", "24.1.0"),
+                ("PNPM", "11.15.0"),
+                ("PLAYWRIGHT", "1.61.1"),
+            ],
+        ),
+        // npm's lockfile says the same thing another way.
+        (
+            "next",
+            &[(
+                "package-lock.json",
+                r#"{"packages": {"node_modules/@playwright/test": {"version": "1.60.0"}}}"#,
+            )],
+            &[("PLAYWRIGHT", "1.60.0")],
         ),
     ];
     for (stack, files, want) in cases {
