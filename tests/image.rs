@@ -237,6 +237,53 @@ fn the_image_is_built_with_what_the_repository_pins_and_says_so_on_its_label() {
     );
 }
 
+/// Built for a slot, the image carries what the slot's branch pins, not what
+/// the repository does. A launch compares the image with the slot's branch, so
+/// a branch that changed a pin could otherwise never be served, and neither
+/// could the run meant to change it back.
+#[test]
+fn an_image_built_for_a_slot_carries_what_its_branch_pins() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = pinning(dir.path(), DECLARING);
+    let slot = dir.path().join("slots/two");
+    std::fs::create_dir_all(&slot).unwrap();
+    std::fs::write(
+        slot.join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"1.99.0\"\ntargets = [\"wasm32-unknown-unknown\"]\n",
+    )
+    .unwrap();
+
+    let build = image::stack_build_from(&project, &slot, "rust", 501, 20).unwrap();
+    assert!(
+        build.args.contains(&"RUST_VERSION=1.99.0".to_string()),
+        "{:?}",
+        build.args
+    );
+    assert!(
+        build.label.contains("RUST_VERSION=1.99.0"),
+        "{}",
+        build.label
+    );
+    // And the repository's reading is unchanged.
+    let repo = image::stack_build(&project, "rust", 501, 20).unwrap();
+    assert!(repo.label.contains("RUST_VERSION=1.98.0"), "{}", repo.label);
+}
+
+/// A launch refused on a stale image names the command that builds it for
+/// that slot, with that slot's name.
+#[test]
+fn a_stale_image_names_the_rebuild_for_its_slot() {
+    let err = nunki::run::RunError::StaleImage {
+        image: "nunki/demo-rust:latest".into(),
+        slot: "two".into(),
+        drift: vec!["RUST_VERSION: the image has \"1.98.0\", the branch pins \"1.99.0\"".into()],
+    };
+    assert!(
+        err.to_string().contains("nunki slot rebuild --slot two"),
+        "{err}"
+    );
+}
+
 /// An argument the Dockerfile does not declare would be dropped by the
 /// engine, and the image built on its default as if nothing were wrong.
 #[test]
