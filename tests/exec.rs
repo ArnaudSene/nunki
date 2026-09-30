@@ -107,6 +107,76 @@ fn nothing_touches_the_copy_a_campaign_is_rewriting() {
     assert!(!after.contains("2026-09-18T22:52:37Z"), "{after}");
 }
 
+/// A slot whose containers are down is lifted before its copy is refreshed,
+/// and one whose containers are up is left as it is.
+///
+/// Without it a slot taken down between two runs — for a refresh of the
+/// fragments, or by a restart — has every gate played in the copy come back
+/// unplayed, and since the next run is only launched once those gates are
+/// played, nothing ever moves again.
+#[test]
+fn a_slot_whose_containers_are_down_is_lifted_before_its_copy_is_refreshed() {
+    use nunki::engine::fake::{Call, FakeEngine};
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    let tree = dir.path().join("tree");
+    std::fs::create_dir_all(&tree).unwrap();
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&tree)
+            .args(["-c", "user.name=T", "-c", "user.email=t@t"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    };
+    git(&["init", "-q"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "base"]);
+    let slot = Slot {
+        name: "one".into(),
+        tree: tree.clone(),
+    };
+    let profile = nunki::run::profile_path(&project, &slot.name);
+    std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+    std::fs::write(&profile, "services: {}\n").unwrap();
+    let ups = |fake: &FakeEngine| {
+        fake.calls()
+            .iter()
+            .filter(|c| matches!(c, Call::Up(_)))
+            .count()
+    };
+
+    // Down: lifted first, then refreshed.
+    let down = Arc::new(FakeEngine::default());
+    let _ = exec::refresh(&project, &slot, down.clone());
+    assert_eq!(ups(&down), 1, "{:?}", down.calls());
+    let calls = down.calls();
+    let up = calls.iter().position(|c| matches!(c, Call::Up(_))).unwrap();
+    let exec = calls
+        .iter()
+        .position(|c| matches!(c, Call::Exec(..)))
+        .expect("the refresh ran");
+    assert!(up < exec, "lifted after the refresh: {calls:?}");
+
+    // The same through `run`, which is how the gates reach the copy.
+    let through_run = Arc::new(FakeEngine::default());
+    let _ = exec::run(
+        &project,
+        &slot,
+        through_run.clone(),
+        &["true".into()],
+        On::Proof,
+    );
+    assert_eq!(ups(&through_run), 1, "{:?}", through_run.calls());
+
+    // Up: not lifted again.
+    let up_already =
+        Arc::new(FakeEngine::default().with_container(nunki::compose::AGENT_SERVICE, "cafe1234"));
+    let _ = exec::refresh(&project, &slot, up_already.clone());
+    assert_eq!(ups(&up_already), 0, "{:?}", up_already.calls());
+}
+
 fn project(root: &Path) -> Project {
     Project::at(
         root.join("repo"),

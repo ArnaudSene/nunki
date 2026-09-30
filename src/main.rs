@@ -220,6 +220,12 @@ enum SlotCommand {
         /// Which stack's image. Defaults to the only one declared.
         #[arg(long, value_name = "NAME")]
         stack: Option<String>,
+        /// Build with the versions this slot's branch pins, rather than the
+        /// repository's: what a launch in that slot compares the image with.
+        /// The image is shared by the project's slots, so another slot whose
+        /// branch pins differently is refused at its next launch, and says so.
+        #[arg(long, value_name = "SLOT")]
+        slot: Option<String>,
     },
     /// Remove a slot, refusing while it holds work the repository lacks.
     Rm {
@@ -729,7 +735,7 @@ fn main() -> ExitCode {
                     }
                     ExitCode::SUCCESS
                 }
-                SlotCommand::Rebuild { stack } => {
+                SlotCommand::Rebuild { stack, slot } => {
                     let stack = match stack
                         .or_else(|| project.config.stacks.first().map(|s| s.name.clone()))
                     {
@@ -741,7 +747,26 @@ fn main() -> ExitCode {
                     };
                     let engine = std::env::var("HQ_ENGINE").unwrap_or_else(|_| "docker".into());
                     println!("building the images for {stack}, this takes a while…");
-                    match image::build(&project, &stack, &engine, image::Harness::Install) {
+                    let tree = match &slot {
+                        None => project.root.clone(),
+                        Some(name) => match slot::find(&project, name) {
+                            Ok(found) => {
+                                println!("versions  read in slot {name}, on its branch");
+                                found.tree
+                            }
+                            Err(e) => {
+                                eprintln!("nunki: {e}");
+                                return ExitCode::FAILURE;
+                            }
+                        },
+                    };
+                    match image::build_from(
+                        &project,
+                        &tree,
+                        &stack,
+                        &engine,
+                        image::Harness::Install,
+                    ) {
                         Ok(image::Built { images, versions }) => {
                             println!("agent     {}", images.agent);
                             println!("firewall  {}", images.firewall);

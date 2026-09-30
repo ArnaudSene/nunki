@@ -109,9 +109,24 @@ pub fn names(project: &Project, stack: &str) -> Images {
 }
 
 /// Build both images. `engine` is the binary that builds — `docker` unless
-/// `HQ_ENGINE` says otherwise.
+/// `HQ_ENGINE` says otherwise. The versions are read in the repository.
 pub fn build(
     project: &Project,
+    stack: &str,
+    engine: &str,
+    harness: Harness,
+) -> Result<Built, ImageError> {
+    build_from(project, &project.root, stack, engine, harness)
+}
+
+/// Build both images with the versions `tree` pins — a slot's, on its
+/// mission's branch, when that branch pins something the repository does
+/// not. A launch compares the image with what the slot pins, so an image
+/// built from the repository cannot serve a branch that changed a pin, and
+/// the run that would change it back could never start.
+pub fn build_from(
+    project: &Project,
+    tree: &Path,
     stack: &str,
     engine: &str,
     harness: Harness,
@@ -136,7 +151,7 @@ pub fn build(
         args,
         label,
         versions,
-    } = stack_build(project, stack, uid, gid)?;
+    } = stack_build_from(project, tree, stack, uid, gid)?;
     let base = base_tag(project, stack);
     // The Dockerfile the image is built from: the primary's, as it stands, or
     // composed with the other stacks' add-ons and the project's own steps. It
@@ -383,7 +398,18 @@ pub fn stack_build(
     uid: u32,
     gid: u32,
 ) -> Result<StackBuild, ImageError> {
-    let (versions, pinned) = read_versions(project, &project.root, stack)?;
+    stack_build_from(project, &project.root, stack, uid, gid)
+}
+
+/// [`stack_build`], with the versions `tree` pins.
+pub fn stack_build_from(
+    project: &Project,
+    tree: &Path,
+    stack: &str,
+    uid: u32,
+    gid: u32,
+) -> Result<StackBuild, ImageError> {
+    let (versions, pinned) = read_versions(project, tree, stack)?;
     let mut args = vec![format!("UID={uid}"), format!("GID={gid}")];
     args.extend(pinned.iter().map(|(arg, value)| format!("{arg}={value}")));
     Ok(StackBuild {

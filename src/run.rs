@@ -195,10 +195,15 @@ pub enum RunError {
     #[error(
         "{image} does not carry what this branch pins — {}. Inside the run the toolchain \
          would try to fetch it from behind the firewall, so no agent was started; \
-         `nunki slot rebuild` builds the image from the repository again",
+         `nunki slot rebuild --slot {slot}` builds the image with what this slot's \
+         branch pins",
         drift.join("; ")
     )]
-    StaleImage { image: String, drift: Vec<String> },
+    StaleImage {
+        image: String,
+        slot: String,
+        drift: Vec<String>,
+    },
     #[error(transparent)]
     Versions(#[from] crate::versions::SourcesError),
     #[error(transparent)]
@@ -703,14 +708,24 @@ pub fn image_serves(
         {
             return Err(RunError::StaleImage {
                 image: image.to_string(),
+                slot: slot_of(tree),
                 drift: vec![why],
             });
         }
     }
     crate::check::serves(&recorded, &wanted).map_err(|drift| RunError::StaleImage {
         image: image.to_string(),
+        slot: slot_of(tree),
         drift,
     })
+}
+
+/// A slot's name, as the directory its tree is: what the rebuild command
+/// takes.
+fn slot_of(tree: &Path) -> String {
+    tree.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 /// Where a slot's current profile is written. One file per slot, regenerated

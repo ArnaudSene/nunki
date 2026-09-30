@@ -80,6 +80,7 @@ pub fn run(
         return Err(ExecError::NoProfile(slot.name.clone()));
     }
     let compose_project = crate::compose::project_name(&project.session(), &slot.name)?;
+    lift_if_down(&engine, &file, &compose_project)?;
 
     let at = match on {
         On::Proof => {
@@ -156,8 +157,31 @@ pub fn refresh(project: &Project, slot: &Slot, engine: Arc<dyn Engine>) -> Resul
     }
     refuse_under_a_campaign(project, slot)?;
     let compose_project = crate::compose::project_name(&project.session(), &slot.name)?;
+    lift_if_down(&engine, &file, &compose_project)?;
     let head = git::head(&slot.tree)?;
     refresh_at(&engine, &file, &compose_project, &head)
+}
+
+/// Lift the slot's containers when they are down, and leave them as they are
+/// otherwise.
+///
+/// They may be down: taken down for a refresh of the fragments, or by a
+/// restart of the machine. The copy lives in the agent's container, so
+/// without it every gate played there is unplayed, and no run can change
+/// that: the run is only launched once the gates have been played. Lifting
+/// the profile the last launch wrote is what a launch would do.
+fn lift_if_down(
+    engine: &Arc<dyn Engine>,
+    file: &std::path::Path,
+    compose_project: &str,
+) -> Result<(), ExecError> {
+    if engine
+        .container_of(file, compose_project, AGENT_SERVICE)?
+        .is_none()
+    {
+        engine.up(file, compose_project)?;
+    }
+    Ok(())
 }
 
 fn refresh_at(
