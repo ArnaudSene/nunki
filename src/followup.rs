@@ -132,6 +132,24 @@ pub fn retried(file: &Path, who: &str, why: &str, was: &str) -> Result<(), Follo
     )
 }
 
+/// The HQ read the verified branch and sends it back to the coder.
+///
+/// Here, because this is what the coder reads first: a volet whose cause is
+/// only in `nunki`'s state reaches the coder as a sentence in its prompt, and
+/// the record of what the human refused belongs with the others.
+pub fn reviewed(file: &Path, who: &str, why: &str) -> Result<(), FollowupError> {
+    append(
+        file,
+        &format!(
+            "## {date} — {who} read the verified branch and sends it back\n\n\
+             **What to change:** {why}\n\n\
+             This is a volet: change what is asked, prove it as for any lot, and\n\
+             the verification runs again from the gates.\n",
+            date = today(),
+        ),
+    )
+}
+
 /// An instruction left for the next run.
 ///
 /// `say` and not a channel: there is no channel during a run (SPEC 4.3). What

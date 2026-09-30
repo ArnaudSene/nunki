@@ -77,6 +77,11 @@ pub enum Event {
     Iterate,
     /// From `Findings`: the human lifted every finding (`nunki mission accept`).
     HumanAccepted,
+    /// From `Verified`: the HQ read the verified branch before pushing it and
+    /// sends it back to the coder, saying why (`nunki mission iterate
+    /// --because`). SPEC 4.5: the HQ reads the code, and its answer is the
+    /// iteration loop.
+    Reviewed { because: String },
     /// The human takes a mission back from a handover (`nunki mission
     /// retry`), saying what changed. Only from [`Stage::AwaitingHuman`], and
     /// never from a mission the human called off themselves.
@@ -301,6 +306,13 @@ impl Flow {
                 self.volet(format!("security FINDINGS: {report}"))
             }
             (Stage::Findings { .. }, Event::HumanAccepted) => Stage::Verified,
+            // A verified branch is not a pushed one: the HQ reads it first,
+            // and what it refuses goes back as a volet, bounded like the
+            // others. With none left, the handover says so and `retry` hands
+            // the budget back.
+            (Stage::Verified, Event::Reviewed { because }) => {
+                self.volet(format!("HQ review: {because}"))
+            }
 
             // --- the human takes it back -------------------------------
             //
