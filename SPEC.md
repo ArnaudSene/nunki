@@ -867,9 +867,17 @@ image qui porte `stable`.
 
 - **Le fragment dit où lire, le cœur sait lire.** `versions.txt` tient une
   ligne par argument de build du Dockerfile : l'argument, le fichier du dépôt,
-  une clé dans un `.toml` ou un `.json` (`-` pour un fichier texte entier), et
+  une clé dans un `.toml` ou un `.json` (`-` pour un fichier texte), et
   un motif facultatif dont `{}` est la version (`pnpm@{}` tire `11.15.0` de
-  `pnpm@11.15.0+sha512.…`). Le cœur connaît trois formats de fichier et aucune
+  `pnpm@11.15.0+sha512.…`). Dans un fichier texte, la version est sur la
+  première ligne qui commence comme le motif : un fichier de verrouillage
+  nomme chaque paquet résolu, un par ligne, et c'est ainsi que l'image Next
+  prend les navigateurs de la version de Playwright que le projet a résolue
+  (`'@playwright/test@{}':` dans `pnpm-lock.yaml`), et non ceux qu'elle
+  porterait par défaut — une batterie système refuse de démarrer sur un
+  écart, et le CDN de Playwright n'est sur aucune liste. Sans motif, ou avec
+  un motif qui commence par la version, c'est la première ligne, comme dans
+  `.nvmrc`. Le cœur connaît trois formats de fichier et aucune
   stack : lire `Cargo.toml` ou `package.json` depuis le cœur, c'est la stack de
   retour dans le cœur (3.2). Plusieurs lignes pour un argument sont essayées
   dans l'ordre, et la première version **exacte** gagne ; un intervalle
@@ -1659,7 +1667,15 @@ dernier lot. La première rouge arrête tout.
    propre cache de build**, chauffé une fois par slot et conservé : pour Rust,
    `cargo-mutants` ne réutilise le cache qu'en place (`--in-place`), donc en
    place sur la copie, jamais sur l'arbre du codeur ; sans cela chaque
-   campagne recompile à froid, et la section 7 le compte ; elle est
+   campagne recompile à froid, et la section 7 le compte. Chaque mutant y
+   coûte d'abord une compilation — mesuré sur un crate de 170 000 lignes,
+   930 s de compilation contre 88 s de tests sur une campagne de 44 mutants —
+   et c'est l'édition de liens qui domine : l'image Rust garde donc les
+   informations de débogage hors des binaires liés
+   (`CARGO_PROFILE_DEV_SPLIT_DEBUGINFO=unpacked`, 51 s ramenées à 18 s par
+   compilation incrémentale, et une mémoire d'édition de liens qui ne fait
+   plus tuer le conteneur). Dans l'environnement de l'image, jamais dans le
+   `Cargo.toml` du projet, qui est le sien. La campagne est
    **longue**, donc elle se lance et se guette comme un run, avec un délai
    paramétré ; et elle **ne rejoue que si les fichiers touchés ont changé**
    depuis la dernière campagne verte sur cette mission. Son résultat est un

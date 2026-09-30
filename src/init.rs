@@ -644,6 +644,12 @@ NODE .node-version - v{}
 NODE .node-version
 NODE package.json engines.node
 PNPM package.json packageManager pnpm@{}
+# The browsers the image carries are Playwright's, and they must be the ones the
+# project resolved: the battery refuses to start on a mismatch, and inside a
+# run Playwright cannot fetch others. The lockfile holds the exact version;
+# `package.json` holds a range.
+PLAYWRIGHT pnpm-lock.yaml - '@playwright/test@{}':
+PLAYWRIGHT package-lock.json packages.node_modules/@playwright/test.version
 ";
 
 /// The agent image for a Rust project.
@@ -788,6 +794,19 @@ RUN cargo install cargo-mutants --locked \
  && cp /home/agent/.cargo/registry/src/*/cargo-deny-*/Cargo.lock \
        /home/agent/.cargo/installed/cargo-deny/Cargo.lock \
  && rm -rf /home/agent/.cargo/registry/*
+
+# Debug info stays in the object files instead of being copied into every
+# linked binary. `cargo test` links the crate into one binary per test target,
+# several at once, and with the debug info inside each link can exhaust the
+# container's memory: measured on a 170,000-line crate with 17 test targets,
+# GNU ld reached 13.6 GB across concurrent links and the kernel killed it. It
+# is also time: an incremental `cargo test --no-run` there took 51 s with the
+# default and 18 s with this, which is what a mutation campaign pays per
+# mutant. Set here, in the environment of every cargo the agent, the battery
+# and the campaign run, rather than in the repository's `Cargo.toml`: it is a
+# property of this image, and the project's own profile is the project's.
+# Debuggers and backtraces still read the full info from `target/`.
+ENV CARGO_PROFILE_DEV_SPLIT_DEBUGINFO=unpacked
 "#;
 
 /// The Rust toolchain added onto another stack's image (SPEC 4.2, "plusieurs
@@ -2394,6 +2413,10 @@ RUN corepack enable pnpm \
 # `@playwright/test` does not match gets "Looks like Playwright was just
 # installed or updated. Please run `playwright install`" — advice it cannot
 # follow in here. `system.sh` reads this file and says so instead.
+#
+# The version is the project's: `versions.txt` reads the one its lockfile
+# resolved, and `nunki slot rebuild` passes it here. The default below serves
+# only a project that locks no `@playwright/test`.
 ARG PLAYWRIGHT=1.63.0
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
 RUN npx --yes playwright@${PLAYWRIGHT} install --with-deps chromium \
@@ -3098,7 +3121,8 @@ shipped="$(cat "${PLAYWRIGHT_BROWSERS_PATH:-/opt/playwright}/nunki-version" 2>/d
 declared="$(pnpm exec playwright --version | sed -n 's/^Version //p')"
 if [ "$shipped" != "unknown" ] && [ "$shipped" != "$declared" ]; then
   echo "nunki: this image ships the browsers of Playwright $shipped and the project pins $declared." >&2
-  echo "nunki: pin the image's version — pnpm add -D @playwright/test@$shipped — or have the image rebuilt against yours." >&2
+  echo "nunki: the image follows the project's lockfile, so it was built before the project moved: \`nunki slot rebuild\` builds it against $declared." >&2
+  echo "nunki: do not change the project's Playwright to fit the image; the image is what is out of date." >&2
   echo "nunki: playwright install cannot help here: its CDN is outside the perimeter." >&2
   exit 1
 fi

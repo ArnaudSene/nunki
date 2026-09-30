@@ -138,6 +138,19 @@ RUN cargo install cargo-mutants --locked \
        /home/agent/.cargo/installed/cargo-deny/Cargo.lock \
  && rm -rf /home/agent/.cargo/registry/*
 
+# Debug info stays in the object files instead of being copied into every
+# linked binary. `cargo test` links the crate into one binary per test target,
+# several at once, and with the debug info inside each link can exhaust the
+# container's memory: measured on a 170,000-line crate with 17 test targets,
+# GNU ld reached 13.6 GB across concurrent links and the kernel killed it. It
+# is also time: an incremental `cargo test --no-run` there took 51 s with the
+# default and 18 s with this, which is what a mutation campaign pays per
+# mutant. Set here, in the environment of every cargo the agent, the battery
+# and the campaign run, rather than in the repository's `Cargo.toml`: it is a
+# property of this image, and the project's own profile is the project's.
+# Debuggers and backtraces still read the full info from `target/`.
+ENV CARGO_PROFILE_DEV_SPLIT_DEBUGINFO=unpacked
+
 # Next.js, added by nunki onto the image of this project's primary stack
 # (SPEC 4.2, "plusieurs stacks"). Starts as the agent, ends as the agent.
 USER root
@@ -190,6 +203,10 @@ RUN corepack enable pnpm \
 # `@playwright/test` does not match gets "Looks like Playwright was just
 # installed or updated. Please run `playwright install`" — advice it cannot
 # follow in here. `system.sh` reads this file and says so instead.
+#
+# The version is the project's: `versions.txt` reads the one its lockfile
+# resolved, and `nunki slot rebuild` passes it here. The default below serves
+# only a project that locks no `@playwright/test`.
 ARG PLAYWRIGHT=1.63.0
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
 RUN npx --yes playwright@${PLAYWRIGHT} install --with-deps chromium \
