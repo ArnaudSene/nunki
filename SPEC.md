@@ -1429,9 +1429,9 @@ dernier lot. La première rouge arrête tout.
    issues** — tué par un test nommé, reconnu comme bug et figé dans un test,
    ou démontré équivalent en une phrase.
 
-   **Les lignes changées, pas les fichiers entiers.** Tranché par Arnaud le
-   2026-09-28, par la règle de la porte 8 : **ce qui est nouveau depuis la
-   base appartient à la mission, ce qui préexiste appartient au projet.** Une
+   **Les lignes changées, pas les fichiers entiers.** C'est la règle de la
+   porte 8 : **ce qui est nouveau depuis la base appartient à la mission, ce
+   qui préexiste appartient au projet.** Une
    campagne sur les fichiers entiers fait répondre le codeur de tout
    l'historique de chaque fichier qu'il touche : mesuré sur un vrai dépôt, une
    correction d'une quarantaine de lignes dans un fichier de 1 900 lignes
@@ -2363,6 +2363,16 @@ Ce que la boucle veut dire, et ce qu'elle ne veut pas dire.
     **geste**, pas un défaut : un `verify` qui renverrait de lui-même
     dépenserait un volet que l'humain voulait peut-être dépenser en
     acceptation.
+  - **Et une mission vérifiée se relit avant de se pousser.** Le HQ relit le
+    code (2) ; ce qu'il refuse repart au codeur par le même verbe,
+    `nunki mission iterate <mission> --because <ce qui est refusé>`, depuis
+    `Verified`. La raison est **obligatoire** : c'est ce que le codeur lit,
+    écrite dans `FOLLOWUP_HQ.md`, et la cause du volet. C'est un volet comme
+    les autres, compté dans la même borne ; sans volet restant, la mission
+    est rendue à l'humain et `retry` rend la borne. Sans ce geste, une
+    branche vérifiée qui porte un commit hors de son sujet — un contournement
+    d'un défaut de l'outillage, par exemple — ne peut que partir telle quelle
+    ou être abandonnée.
   - `--because` n'est jamais facultatif : un risque accepté sans raison n'est
     pas accepté, il est oublié.
   - **Une acceptation vaut pour un `HEAD`**, comme le verdict qu'elle lève.

@@ -557,3 +557,70 @@ fn a_mission_that_never_stopped_is_not_taken_back() {
         "{error:?}"
     );
 }
+
+/// The HQ reads a verified mission before it is pushed, and may send it back
+/// (SPEC 4.5): the coder gets a volet carrying the HQ's reason, and the
+/// verification runs again after it, as after any volet.
+#[test]
+fn a_verified_mission_the_hq_sends_back_is_a_volet_with_its_reason() {
+    let mut flow = Flow::new(header(none(), Security::Gates, Bounds::default())).unwrap();
+    code_through(&mut flow);
+    flow.advance(Event::GatesPassed).unwrap();
+    assert_eq!(flow.stage(), &Stage::Verified);
+
+    flow.advance(Event::Reviewed {
+        because: "revert the Playwright bump".into(),
+    })
+    .unwrap();
+    match flow.stage() {
+        Stage::Coding {
+            work: Work::Volet { n: 1, cause },
+            attempt: 1,
+        } => assert!(cause.contains("revert the Playwright bump"), "{cause}"),
+        other => panic!("not a volet: {other:?}"),
+    }
+    flow.advance(finished(true)).unwrap();
+    assert_eq!(flow.stage(), &Stage::Gates);
+    flow.advance(Event::GatesPassed).unwrap();
+    assert_eq!(flow.stage(), &Stage::Verified);
+    assert_eq!(flow.volets(), 1);
+}
+
+/// A review is a volet like any other: it spends the same bounded budget,
+/// and with none left the mission is handed back to the human rather than
+/// sent round again.
+#[test]
+fn a_review_with_no_volet_left_hands_the_mission_back() {
+    let bounds = Bounds {
+        max_volets: 0,
+        ..Bounds::default()
+    };
+    let mut flow = Flow::new(header(none(), Security::Gates, bounds)).unwrap();
+    code_through(&mut flow);
+    flow.advance(Event::GatesPassed).unwrap();
+    flow.advance(Event::Reviewed {
+        because: "one more thing".into(),
+    })
+    .unwrap();
+    assert!(
+        matches!(
+            flow.stage(),
+            Stage::AwaitingHuman(Handover::VoletsExhausted { .. })
+        ),
+        "{:?}",
+        flow.stage()
+    );
+}
+
+/// Only a verified mission is reviewed: a mission still being coded or
+/// verified has not been handed to the HQ yet.
+#[test]
+fn a_review_before_verification_is_refused() {
+    let mut flow = Flow::new(header(none(), Security::Gates, Bounds::default())).unwrap();
+    assert!(
+        flow.advance(Event::Reviewed {
+            because: "too early".into(),
+        })
+        .is_err()
+    );
+}

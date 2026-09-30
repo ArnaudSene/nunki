@@ -1361,7 +1361,7 @@ fn iterating_sends_the_mission_back_to_the_coder_as_a_volet() {
         "{again:?}"
     );
 
-    let state = nunki::findings::iterate(&world.project, "m1").unwrap();
+    let state = nunki::findings::iterate(&world.project, "m1", None).unwrap();
     assert!(
         matches!(
             state.flow.stage(),
@@ -1375,6 +1375,54 @@ fn iterating_sends_the_mission_back_to_the_coder_as_a_volet() {
     );
 }
 
+/// A verified branch is read by the HQ before it is pushed (SPEC 4.5), and
+/// what the review refuses goes back to the coder as a volet. The reason is
+/// what the coder acts on, so it lands in `FOLLOWUP_HQ.md` and a review
+/// without one is refused.
+#[test]
+fn the_hq_sends_a_verified_mission_back_with_what_its_review_refuses() {
+    let world = with_security_agent(1);
+    world.at_findings();
+    nunki::findings::accept(
+        &world.project,
+        "m1",
+        nunki::findings::Lift::Verdict,
+        "the callback is behind the VPN",
+    )
+    .unwrap();
+    assert!(matches!(world.state().flow.stage(), Stage::Verified));
+
+    let err = nunki::findings::iterate(&world.project, "m1", Some("  ")).unwrap_err();
+    assert!(
+        matches!(err, nunki::findings::FindingsError::NoReview),
+        "{err}"
+    );
+    assert!(matches!(world.state().flow.stage(), Stage::Verified));
+
+    let state = nunki::findings::iterate(
+        &world.project,
+        "m1",
+        Some("revert the Playwright bump: the image follows the lockfile now"),
+    )
+    .unwrap();
+    match state.flow.stage() {
+        Stage::Coding {
+            work: Work::Volet { cause, .. },
+            ..
+        } => assert!(cause.contains("revert the Playwright bump"), "{cause}"),
+        other => panic!("not a volet: {other:?}"),
+    }
+    let followup = world.followup();
+    assert!(
+        followup.contains("read the verified branch and sends it back"),
+        "{followup}"
+    );
+    assert!(
+        followup.contains("revert the Playwright bump: the image follows the lockfile now"),
+        "{followup}"
+    );
+}
+
 /// Neither verb applies anywhere but on a security verdict, and says where
 /// the mission actually is rather than failing obscurely.
 #[test]
@@ -1383,7 +1431,7 @@ fn neither_verb_applies_before_there_is_a_verdict_to_lift() {
     for err in [
         nunki::findings::accept(&world.project, "m1", nunki::findings::Lift::Verdict, "why")
             .unwrap_err(),
-        nunki::findings::iterate(&world.project, "m1").unwrap_err(),
+        nunki::findings::iterate(&world.project, "m1", None).unwrap_err(),
     ] {
         assert!(
             matches!(err, nunki::findings::FindingsError::NotOnFindings { .. }),

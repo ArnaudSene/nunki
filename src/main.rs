@@ -462,10 +462,15 @@ enum MissionCommand {
         why: String,
     },
 
-    /// Send a `FINDINGS` verdict back to the coder, as a volet.
+    /// Send the mission back to the coder, as a volet: a `FINDINGS` verdict,
+    /// or a verified branch the HQ refuses on review, with `--because`.
     Iterate {
         /// The mission.
         id: String,
+        /// What the review refuses, for a verified mission. It is what the
+        /// coder reads, in `FOLLOWUP_HQ.md`, and the volet's cause.
+        #[arg(long = "because", value_name = "WHAT")]
+        because: Option<String>,
     },
 
     /// Start the mutation campaign, or say where the one in flight is
@@ -1913,17 +1918,19 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             }
         }
 
-        MissionCommand::Iterate { id } => match nunki::findings::iterate(project, &id) {
-            Ok(state) => {
-                println!("stage     {:?}", state.flow.stage());
-                println!("          `nunki verify {id}` plays it from there");
-                ExitCode::SUCCESS
+        MissionCommand::Iterate { id, because } => {
+            match nunki::findings::iterate(project, &id, because.as_deref()) {
+                Ok(state) => {
+                    println!("stage     {:?}", state.flow.stage());
+                    println!("          `nunki verify {id}` plays it from there");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    ExitCode::FAILURE
+                }
             }
-            Err(e) => {
-                eprintln!("nunki: {e}");
-                ExitCode::FAILURE
-            }
-        },
+        }
 
         MissionCommand::Mutants {
             id,
