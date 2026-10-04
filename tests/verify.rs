@@ -2812,3 +2812,94 @@ fn at_standard_the_spent_security_round_is_recorded_and_the_findings_come_back()
         1
     );
 }
+
+/// At `standard`, a CLEAR spends the one round. When the HQ sends the
+/// verified branch back and its volet comes through the gates green, the
+/// mission is verified without the security agent, and the follow-up says
+/// so, with the cap, `1 / 1`, and that the last commits were not read by the
+/// agent — exactly once.
+#[test]
+fn at_standard_a_review_after_the_clear_is_verified_with_the_spent_round_recorded() {
+    let world = World::shaped(1, integration());
+    let mut header = header_of(1, integration());
+    header.security = Security::Agent;
+    header.rigor = nunki::mission::Rigor::Standard;
+    let store = Store::open(&world.project.hq_root).unwrap();
+    let mut state = store.load("m1").unwrap();
+    state.flow = Flow::new(header).unwrap();
+    store.save(&state).unwrap();
+
+    world.at_integration();
+    let mut state = store.load("m1").unwrap();
+    use nunki::mission::flow::Event;
+    for event in [
+        Event::Verdict {
+            verdict: nunki::mission::Verdict::Integrated,
+            report: "wired".into(),
+        },
+        Event::Verdict {
+            verdict: nunki::mission::Verdict::Clear,
+            report: "nothing found".into(),
+        },
+        Event::Reviewed {
+            because: "rename it".into(),
+        },
+        Event::RunEnded {
+            outcome: nunki::harness::Outcome::Finished(Default::default()),
+            lot_done: true,
+        },
+        Event::GatesPassed,
+    ] {
+        store.apply(&mut state, event).unwrap();
+    }
+    assert!(matches!(state.flow.stage(), Stage::Integration { .. }));
+    assert_eq!(state.flow.security_rounds(), 1);
+
+    world.run_recorded(Some(41), FINISHED);
+    world.verdict("Integrator", "INTEGRATED", &world.head(), "wired again");
+    let steps = world.verify().unwrap();
+    let n = steps.len();
+    assert!(matches!(steps.last(), Some(Step::Verified)), "{steps:?}");
+    assert!(
+        matches!(
+            steps[n - 2],
+            Step::SecurityRoundsSpent { rounds: 1, max: 1 }
+        ),
+        "{steps:?}"
+    );
+    assert!(
+        !steps.iter().any(|s| matches!(
+            s,
+            Step::Launched {
+                role: Role::Security,
+                ..
+            }
+        )),
+        "no second security run: {steps:?}"
+    );
+    let followup = std::fs::read_to_string(world.mission().join("FOLLOWUP_HQ.md")).unwrap();
+    assert!(
+        followup.contains("security round cap was reached: 1 / 1"),
+        "{followup}"
+    );
+    assert!(
+        followup.contains("mission is verified without"),
+        "{followup}"
+    );
+    assert!(!followup.contains("has not been attacked"), "{followup}");
+
+    // Said once: a later `verify` is verified again and says no more.
+    let again = world.verify().unwrap();
+    assert!(matches!(again.last(), Some(Step::Verified)), "{again:?}");
+    assert!(
+        !again
+            .iter()
+            .any(|s| matches!(s, Step::SecurityRoundsSpent { .. })),
+        "{again:?}"
+    );
+    let followup = std::fs::read_to_string(world.mission().join("FOLLOWUP_HQ.md")).unwrap();
+    assert_eq!(
+        followup.matches("security round cap was reached").count(),
+        1
+    );
+}
