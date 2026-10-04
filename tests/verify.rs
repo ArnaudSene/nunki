@@ -1431,6 +1431,15 @@ fn the_hq_sends_a_verified_mission_back_with_what_its_review_refuses() {
 #[test]
 fn neither_verb_applies_before_there_is_a_verdict_to_lift() {
     let world = with_security_agent(1);
+    // Who is running `nunki` is asked before where the mission is, so the
+    // world says it, as `at_findings` does. Left to the machine, the answer
+    // was git's `user.name` or `$USER`, and where neither is set — a nunki
+    // slot — the refusal was "who are you?" and never the one this asks.
+    std::fs::write(
+        world.project.nunki_home().join("me.yaml"),
+        "name: Alex Martin\n",
+    )
+    .unwrap();
     for err in [
         nunki::findings::accept(&world.project, "m1", nunki::findings::Lift::Verdict, "why")
             .unwrap_err(),
