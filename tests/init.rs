@@ -1479,7 +1479,7 @@ fn the_python_campaign_says_nothing_when_it_could_not_run() {
         .find("the campaign could not run")
         .expect("the guard says why it stopped");
     let done = script
-        .rfind(r#"printf '{"campaign":"done","tried":%s,"found":%s}\n' "$tried" "$testable""#)
+        .rfind(r#"printf '{"campaign":"done"}\n'"#)
         .expect("the campaign says when it got to the end");
     assert!(nothing < guard, "{script}");
     assert!(
@@ -1689,11 +1689,9 @@ fn the_next_campaign_trusts_its_report_and_not_its_status() {
     // for a branch with nothing mutable in it, which is a measurement, and
     // one for a campaign that ran — with the guard for a campaign that left no report between
     // them, so a dead campaign reaches neither.
-    // The campaign that ran says it two ways, with the count and — should jq
-    // have given none — without, and both come after the guard.
     assert_eq!(
         script.matches(r#"printf '{"campaign":"done""#).count(),
-        3,
+        2,
         "{script}"
     );
     let nothing = script
@@ -2643,22 +2641,20 @@ exit 2
     assert_eq!(nunki::mutants::found(&said), Some(5), "{said}\n{why}");
 }
 
-/// Python: the survivors it printed, and the killed read from mutmut's own
-/// record of each touched file — never the skipped, and nothing from a file
-/// the branch did not touch.
+/// Python: the survivors, filtered to the touched files, and **no count**.
+/// mutmut mutates whole files under `source_paths`, so any `tried` would be
+/// a share over whole files, where a well-tested file hides the branch's
+/// new untested lines (HQ review). Without one, a `standard` gate 7 judges
+/// as `critical` does. The stubs leave mutmut's per-file records exactly as
+/// a count would read them, so a script that counted again would say so.
 #[cfg(unix)]
 #[test]
-fn the_python_campaign_says_how_many_mutants_it_tried() {
-    // `mutmut run` leaves a record per mutated file; the touched one holds
-    // two killed (1, 3), one caught by type check (37), one survived (0),
-    // one not checked (null) and one skipped (34). Another file's record
-    // must not count.
+fn the_python_campaign_gives_no_count_over_whole_files() {
     let uv = r#"#!/bin/sh
 case "$*" in
   *"mutmut run"*)
     mkdir -p mutants/src/pkg
     printf '%s' '{"exit_code_by_key":{"pkg.thing.x_a__mutmut_1":1,"pkg.thing.x_a__mutmut_2":3,"pkg.thing.x_a__mutmut_3":37,"pkg.thing.x_a__mutmut_4":0,"pkg.thing.x_a__mutmut_5":null,"pkg.thing.x_a__mutmut_6":34}}' > mutants/src/pkg/thing.py.meta
-    printf '%s' '{"exit_code_by_key":{"pkg.other.x_b__mutmut_1":1}}' > mutants/src/pkg/other.py.meta
     ;;
 esac
 exit 0
@@ -2677,21 +2673,24 @@ printf '%s\n' '{"id": "pkg.thing.x_a__mutmut_5", "file": "src/pkg/thing.py", "li
     );
     assert!(nunki::mutants::completed(&said), "{said}\n{why}");
     assert_eq!(nunki::mutants::parse(&said).len(), 2, "{said}");
-    assert_eq!(nunki::mutants::tried(&said), Some(5), "{said}\n{why}");
-    // Six in the touched file's record, the skipped one left out.
-    assert_eq!(nunki::mutants::found(&said), Some(5), "{said}\n{why}");
+    assert_eq!(nunki::mutants::tried(&said), None, "{said}\n{why}");
+    assert_eq!(nunki::mutants::found(&said), None, "{said}\n{why}");
+    assert_eq!(
+        said.lines().last(),
+        Some(r#"{"campaign":"done"}"#),
+        "{said}"
+    );
     assert!(
         !why.contains("\"mutants\""),
         "mutants/ was left behind: {why}"
     );
 }
 
-/// Next.js: every mutant Stryker's report says the tests ran against —
-/// `Killed`, `Timeout`, `Survived`, `NoCoverage`, `Pending` — and none of
-/// the invalid or ignored ones.
+/// Next.js: the survivors Stryker's report names, and **no count**, for the
+/// same reason as Python: `--mutate` names whole touched files.
 #[cfg(unix)]
 #[test]
-fn the_next_campaign_says_how_many_mutants_it_tried() {
+fn the_next_campaign_gives_no_count_over_whole_files() {
     let pnpm = r#"#!/bin/sh
 case "$*" in
   *"stryker run"*)
@@ -2705,22 +2704,23 @@ case "$*" in
 esac
 exit 0
 "#;
-    // `node` reads the config for the report's path, and prints the
-    // survivors from the report; jq, which counts, is the real one.
+    // `node` prints the survivors from the report, which it is handed as
+    // its last argument.
     let node = r#"#!/bin/sh
-case "$*" in
-  *stryker.config.json*) printf 'reports/mutation/mutation.json' ;;
-  *) jq -c '.files | to_entries[] | .key as $f | .value.mutants[]
-       | select(.status == "Survived" or .status == "NoCoverage" or .status == "Pending")
-       | {id: ($f + ":" + .mutatorName), file: $f, line: .location.start.line, description: .status}' "$3" ;;
-esac
+jq -c '.files | to_entries[] | .key as $f | .value.mutants[]
+  | select(.status == "Survived" or .status == "NoCoverage" or .status == "Pending")
+  | {id: ($f + ":" + .mutatorName), file: $f, line: .location.start.line, description: .status}' "$3"
 "#;
     let (said, why) = campaign_of("next", "app/page.ts", &[("pnpm", pnpm), ("node", node)]);
     assert!(nunki::mutants::completed(&said), "{said}\n{why}");
     assert_eq!(nunki::mutants::parse(&said).len(), 3, "{said}\n{why}");
-    assert_eq!(nunki::mutants::tried(&said), Some(5), "{said}\n{why}");
-    // Every mutant the report says the tests ran against: the same count.
-    assert_eq!(nunki::mutants::found(&said), Some(5), "{said}\n{why}");
+    assert_eq!(nunki::mutants::tried(&said), None, "{said}\n{why}");
+    assert_eq!(nunki::mutants::found(&said), None, "{said}\n{why}");
+    assert_eq!(
+        said.lines().last(),
+        Some(r#"{"campaign":"done"}"#),
+        "{said}"
+    );
 }
 
 // ---------------------------------------------------------------------------
