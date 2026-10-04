@@ -1661,15 +1661,17 @@ fn a_next_project_gets_every_file_its_gates_read() {
     assert!(dockerfile.contains("procps"), "{dockerfile}");
 }
 
-/// The Next.js campaign reads its report, never its exit status, and says
-/// nothing when there is no report to read.
+/// The Next.js campaign reads its report, and of its exit status trusts only
+/// a failure: it says nothing when there is no report to read, and nothing
+/// when Stryker did not exit 0.
 ///
 /// Measured on Stryker 9.6.1: the status is **0** with survivors,
 /// 0 when `--mutate` names a file that is not there, and 0 on a source that
-/// does not parse. A campaign that trusted it would call a run that never
-/// happened a run with no survivor — gate 7 green on nothing.
+/// does not parse. A campaign that trusted a 0 would call a run that never
+/// happened a run with no survivor — gate 7 green on nothing. A status
+/// other than 0 is a campaign that did not complete (final HQ review).
 #[test]
-fn the_next_campaign_trusts_its_report_and_not_its_status() {
+fn the_next_campaign_trusts_its_report_and_only_a_failing_status() {
     let (_d, root, nunki) = fresh();
     init(&root, &nunki, &["next".to_string()]).unwrap();
     let script = std::fs::read_to_string(home(&root).join("stacks/next/mutation.sh")).unwrap();
@@ -1681,6 +1683,9 @@ fn the_next_campaign_trusts_its_report_and_not_its_status() {
     // The sandbox goes even when the run fails, so a killed campaign leaves
     // no copy of the project beside the tree.
     assert!(run.contains("--cleanTempDir always"), "{run}");
+    // Nothing on the command line overrides the project's own configuration:
+    // its test runner is the one Stryker runs.
+    assert!(!run.contains("--testRunner"), "{run}");
     // And the touched files are a flag, which is what the Python stack could
     // not do.
     assert!(script.contains("--mutate $path"), "{script}");
@@ -1703,7 +1708,11 @@ fn the_next_campaign_trusts_its_report_and_not_its_status() {
     let done = script
         .find(r#"printf '{"campaign":"done"}\n'"#)
         .expect("the campaign says when it got to the end");
-    assert!(nothing < guard, "{script}");
+    // A Stryker that did not exit 0 is stopped before the report is read.
+    let status = script
+        .find("stryker exited $status")
+        .expect("a failing status stops the campaign");
+    assert!(nothing < status && status < guard, "{script}");
     assert!(
         guard < done,
         "the terminal line is printed before the guard"
@@ -2686,6 +2695,23 @@ printf '%s\n' '{"id": "pkg.thing.x_a__mutmut_5", "file": "src/pkg/thing.py", "li
     );
 }
 
+/// A `node` standing in for the two scripts the Next.js campaign hands it,
+/// told apart by their argument count (there is no node in this image).
+/// With `-e` alone it is the locator, and answers where `stryker.config.json`
+/// puts the json report, or Stryker's default. With the report after it, it
+/// prints the survivors the report names, in the campaign's own shape.
+#[cfg(unix)]
+const NODE: &str = r#"#!/bin/sh
+if [ $# -lt 3 ]; then
+  jq -jr '.jsonReporter.fileName // "reports/mutation/mutation.json"' stryker.config.json 2>/dev/null \
+    || printf 'reports/mutation/mutation.json'
+  exit 0
+fi
+jq -c '.files | to_entries[] | .key as $f | .value.mutants[]
+  | select(.status == "Survived" or .status == "NoCoverage" or .status == "Pending")
+  | {id: ($f + ":" + .mutatorName), file: $f, line: .location.start.line, description: .status}' "$3"
+"#;
+
 /// Next.js: the survivors Stryker's report names, and **no count**, for the
 /// same reason as Python: `--mutate` names whole touched files.
 #[cfg(unix)]
@@ -2704,14 +2730,7 @@ case "$*" in
 esac
 exit 0
 "#;
-    // `node` prints the survivors from the report, which it is handed as
-    // its last argument.
-    let node = r#"#!/bin/sh
-jq -c '.files | to_entries[] | .key as $f | .value.mutants[]
-  | select(.status == "Survived" or .status == "NoCoverage" or .status == "Pending")
-  | {id: ($f + ":" + .mutatorName), file: $f, line: .location.start.line, description: .status}' "$3"
-"#;
-    let (said, why) = campaign_of("next", "app/page.ts", &[("pnpm", pnpm), ("node", node)]);
+    let (said, why) = campaign_of("next", "app/page.ts", &[("pnpm", pnpm), ("node", NODE)]);
     assert!(nunki::mutants::completed(&said), "{said}\n{why}");
     assert_eq!(nunki::mutants::parse(&said).len(), 3, "{said}\n{why}");
     assert_eq!(nunki::mutants::tried(&said), None, "{said}\n{why}");
@@ -2724,9 +2743,10 @@ jq -c '.files | to_entries[] | .key as $f | .value.mutants[]
 }
 
 // ---------------------------------------------------------------------------
-// A campaign reads no configuration from the tree it mutates, and one that
-// did not complete never says it finished (security round 1 on the rigor
-// mission, HQ ruling).
+// The Rust campaign reads no configuration from the tree it mutates, while
+// the Python and Next.js ones read theirs as on `dev` (final HQ review); and
+// a campaign that did not complete never says it finished (security round 1
+// on the rigor mission, HQ ruling).
 // ---------------------------------------------------------------------------
 
 /// A `cargo` that answers like cargo-mutants 27.1.0 on a crate with seven
@@ -2816,71 +2836,87 @@ exit 4
     }
 }
 
-/// The python campaign refuses a tree that configures mutmut, which has no
-/// flag to ignore it, and runs nothing: no done line, and mutmut never
-/// asked to run.
+/// The python campaign runs with the tree's own mutmut configuration, as on
+/// `dev`: mutmut needs `source_paths` to find a project's sources, and a
+/// campaign that refused it would turn gate 7 red at the default rigor for
+/// every project that sets it (final HQ review). That a tree configuration
+/// can shape the campaign is deferred with the rest of campaign isolation.
 #[cfg(unix)]
 #[test]
-fn the_python_campaign_refuses_a_tree_that_configures_mutmut() {
-    let uv = "#!/bin/sh\necho \"$*\" >> uv-calls\nexit 0\n";
+fn the_python_campaign_runs_with_the_trees_own_mutmut_config() {
+    let uv = "#!/bin/sh\necho \"uv $*\" >&2\nexit 0\n";
+    let python = r#"#!/bin/sh
+cat > /dev/null
+printf '%s\n' '{"id": "pkg.thing.x_a__mutmut_4", "file": "src/pkg/thing.py", "line": 3, "description": "survived: a -> b"}'
+"#;
     for (file, body) in [
         (
             "pyproject.toml",
-            "[project]\nname = \"x\"\n\n[tool.mutmut]\ndo_not_mutate = [\"*\"]\n",
+            "[project]\nname = \"x\"\n\n[tool.mutmut]\nsource_paths = [\"src/\"]\n",
         ),
-        ("setup.cfg", "[mutmut]\npaths_to_mutate = elsewhere/\n"),
-    ] {
-        let (said, why, status) =
-            campaign_in("python", "src/pkg/thing.py", &[("uv", uv)], &[(file, body)]);
-        assert!(!nunki::mutants::completed(&said), "{file}: {said}\n{why}");
-        assert_ne!(status, Some(0), "{file}: {why}");
-        assert!(
-            why.contains(file) && why.contains("configures mutmut"),
-            "{why}"
-        );
-        assert!(
-            !why.contains("uv-calls"),
-            "the toolchain was reached: {why}"
-        );
-    }
-    // A pyproject that does not configure mutmut is not refused for it.
-    let (_, why, _) = campaign_in(
-        "python",
-        "src/pkg/thing.py",
-        &[("uv", uv)],
-        &[("pyproject.toml", "[project]\nname = \"x\"\n[tool.pytest]\n")],
-    );
-    assert!(!why.contains("configures mutmut"), "{why}");
-}
-
-/// The Next.js campaign refuses a tree that carries a Stryker config, which
-/// Stryker would read from the working directory, and never runs Stryker.
-#[cfg(unix)]
-#[test]
-fn the_next_campaign_refuses_a_tree_that_configures_stryker() {
-    let pnpm = "#!/bin/sh\necho \"$*\" >> pnpm-calls\nexit 0\n";
-    for file in [
-        "stryker.config.json",
-        "stryker.conf.mjs",
-        ".stryker.conf.js",
+        ("setup.cfg", "[mutmut]\npaths_to_mutate = src/\n"),
     ] {
         let (said, why, status) = campaign_in(
-            "next",
-            "app/page.ts",
-            &[("pnpm", pnpm)],
-            &[(file, "{\"timeoutMS\": 1}\n")],
+            "python",
+            "src/pkg/thing.py",
+            &[("uv", uv), ("python3", python)],
+            &[(file, body)],
         );
-        assert!(!nunki::mutants::completed(&said), "{file}: {said}\n{why}");
-        assert_ne!(status, Some(0), "{file}: {why}");
+        assert_eq!(status, Some(0), "{file}: {why}");
         assert!(
-            why.contains(file) && why.contains("configures Stryker"),
-            "{why}"
+            why.contains("mutmut run"),
+            "{file}: mutmut never ran: {why}"
         );
-        assert!(
-            !why.contains("pnpm-calls"),
-            "the toolchain was reached: {why}"
+        assert!(nunki::mutants::completed(&said), "{file}: {said}\n{why}");
+        assert_eq!(nunki::mutants::parse(&said).len(), 1, "{file}: {said}");
+        assert_eq!(
+            said.lines().last(),
+            Some(r#"{"campaign":"done"}"#),
+            "{file}: {said}"
         );
     }
+}
+
+/// The Next.js campaign runs with the tree's own `stryker.config.json`, as
+/// on `dev`: Stryker reads it — its test runner among it, which nothing on
+/// the command line overrides — and the report is read where it says the
+/// json reporter writes (final HQ review).
+#[cfg(unix)]
+#[test]
+fn the_next_campaign_runs_with_the_trees_own_stryker_config() {
+    // A Stryker that writes its report where the configuration tells it to,
+    // and says on stderr what it was asked.
+    let pnpm = r#"#!/bin/sh
+case "$*" in
+  *"stryker run"*)
+    echo "stryker asked: $*" >&2
+    where=$(jq -r '.jsonReporter.fileName // "reports/mutation/mutation.json"' stryker.config.json)
+    mkdir -p "$(dirname "$where")"
+    printf '%s' '{"files":{"app/page.ts":{"mutants":[{"status":"Killed"},
+      {"status":"Survived","mutatorName":"M","replacement":"x","location":{"start":{"line":1,"column":1}}}]}}}' > "$where"
+    ;;
+esac
+exit 0
+"#;
+    let config = r#"{"testRunner": "vitest", "jsonReporter": {"fileName": "out/stryker.json"}}"#;
+    let (said, why, status) = campaign_in(
+        "next",
+        "app/page.ts",
+        &[("pnpm", pnpm), ("node", NODE)],
+        &[("stryker.config.json", config)],
+    );
+    assert_eq!(status, Some(0), "{why}");
+    assert!(why.contains("stryker asked: "), "Stryker never ran: {why}");
+    assert!(!why.contains("--testRunner"), "{why}");
+    assert!(nunki::mutants::completed(&said), "{said}\n{why}");
+    assert_eq!(nunki::mutants::parse(&said).len(), 1, "{said}\n{why}");
+    assert_eq!(
+        said.lines().last(),
+        Some(r#"{"campaign":"done"}"#),
+        "{said}"
+    );
+    // The report it read is the one it removes behind itself.
+    assert!(!why.contains("\"out\""), "the report was left: {why}");
 }
 
 /// Stryker's status of 0 says little, but anything else is a campaign that
@@ -2899,11 +2935,10 @@ case "$*" in
 esac
 exit 0
 "#;
-    let node = "#!/bin/sh\nexit 0\n";
     let (said, why, status) = campaign_in(
         "next",
         "app/page.ts",
-        &[("pnpm", pnpm), ("node", node)],
+        &[("pnpm", pnpm), ("node", NODE)],
         &[],
     );
     assert!(!nunki::mutants::completed(&said), "{said}\n{why}");

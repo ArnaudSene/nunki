@@ -1768,23 +1768,6 @@ if [ -z "$files" ]; then
   exit 0
 fi
 
-# The campaign does not read its configuration out of the tree it mutates,
-# and mutmut has no flag to ignore the one it finds there — measured on
-# 3.8.0, `mutmut run` takes `--max-children` and nothing else — so a tree
-# that carries one is refused, said, and not run. A `[tool.mutmut]` table in
-# `pyproject.toml` or a `[mutmut]` section in `setup.cfg` decides what is
-# mutated and how its tests are run: `do_not_mutate` or `paths_to_mutate`
-# can take every touched line out of the campaign, which then tries nothing
-# and passes. The rust stack runs cargo-mutants with `--no-config` for the
-# same reason. Moving the setting out of the tree is the project's to do.
-for config in pyproject.toml setup.cfg; do
-  [ -f "$config" ] || continue
-  if grep -Eq '^[[:space:]]*\[(tool\.)?mutmut([].]|$)' "$config"; then
-    echo "nunki: $config configures mutmut, and the campaign does not read its configuration from the tree it mutates — remove the mutmut settings from $config" >&2
-    exit 1
-  fi
-done
-
 # The campaign runs the **whole** suite in its copy, and this stack's system
 # tests are the ones `prepush.sh` deselects with `-m "not system"`: they reach
 # services, and neither the coder's profile nor this campaign carries any.
@@ -2648,9 +2631,10 @@ pnpm exec vitest run --exclude '**/reports/**' --exclude '**/.stryker-tmp/**' \
 
 /// The mutation campaign a Next.js project runs (SPEC 4.4, gate 7).
 ///
-/// Checked against Stryker 9.6.1 before it shipped: its exit
-/// status says nothing — 0 with survivors, 0 on a file that does not exist,
-/// 0 on a source that does not parse — so the report is the guard; and its
+/// Checked against Stryker 9.6.1 before it shipped: an exit status of 0
+/// says little — 0 with survivors, 0 on a file that does not exist, 0 on a
+/// source that does not parse — so the report is the guard for those, while
+/// any other status is a campaign that did not complete; and its
 /// mutant ids are per-file sequential integers, so they are not the ids
 /// `nunki` can hand back to a coder.
 const MUTATION_NEXT: &str = r##"#!/bin/sh
@@ -2707,21 +2691,6 @@ if [ -z "$files" ]; then
   exit 0
 fi
 
-# The campaign does not read its configuration out of the tree it mutates,
-# and Stryker reads one from the working directory whenever one is there:
-# `timeoutMS`, `timeoutFactor` or a test runner that always fails turns
-# survivors into timeouts or kills, both counted as detected, and
-# `mutator.excludedMutations` or `ignorers` empties the campaign. There is
-# no flag to ignore that file, so a tree that carries one is refused, said,
-# and not run, as the rust stack runs cargo-mutants with `--no-config`.
-# Moving the setting out of the tree is the project's to do.
-for config in stryker.conf.* stryker.config.* .stryker.conf.* .stryker.config.*; do
-  if [ -e "$config" ]; then
-    echo "nunki: $config configures Stryker, and the campaign does not read its configuration from the tree it mutates — remove it" >&2
-    exit 1
-  fi
-done
-
 pnpm install --frozen-lockfile >&2
 if ! pnpm exec stryker --version >/dev/null 2>&1; then
   echo "nunki: this stack's campaign needs @stryker-mutator/core, which this project does not declare." >&2
@@ -2729,8 +2698,18 @@ if ! pnpm exec stryker --version >/dev/null 2>&1; then
   exit 1
 fi
 
-# With no configuration, the report is where Stryker puts it by default.
-report=reports/mutation/mutation.json
+# Where the project's configuration puts the json report. There is no command
+# line flag for it (measured on 9.6.1), so it is read from the file that owns
+# it, with Stryker's own default when it says nothing.
+report=$(node -e '
+const fs = require("fs");
+let where = "reports/mutation/mutation.json";
+try {
+  const c = JSON.parse(fs.readFileSync("stryker.config.json", "utf8"));
+  if (c.jsonReporter && c.jsonReporter.fileName) where = c.jsonReporter.fileName;
+} catch {}
+process.stdout.write(where);
+')
 
 # Cleared before the run, for the reason the Rust fragment's own comment
 # records: it is a campaign that **cannot** run that lies. One that runs and
@@ -2743,8 +2722,8 @@ rm -f "$report"
 # even when the run fails, so a killed campaign leaves no copy of the project
 # beside the tree for the next battery to walk into.
 #
-# `--testRunner command` because no configuration chooses one: it runs the
-# project's own test script, which is the suite the battery runs too.
+# Stryker is otherwise driven by the project's own configuration — its test
+# runner among it — which it reads from the working directory.
 #
 # The status is not enough on its own, because 0 says little: measured on
 # 9.6.1, it is 0 with survivors, 0 when `--mutate` names a file that does
@@ -2754,7 +2733,7 @@ rm -f "$report"
 # never read as one that did, whatever report it left.
 # shellcheck disable=SC2086
 status=0
-pnpm exec stryker run $files --testRunner command --cleanTempDir always --reporters json >&2 || status=$?
+pnpm exec stryker run $files --cleanTempDir always --reporters json >&2 || status=$?
 if [ "$status" -ne 0 ]; then
   echo "nunki: stryker exited $status, so the campaign did not complete and measured nothing" >&2
   exit 1

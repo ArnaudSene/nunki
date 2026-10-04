@@ -178,6 +178,10 @@ runs the coder and the mechanical gates only, so `mission new`, the start of
 the mission and `mission reframe` all refuse one with a service or a security
 agent.
 
+Python and Next.js projects judge `standard` as `critical` until their
+campaigns count changed lines: mutmut and Stryker are run over whole touched
+files, so they give no count, and every survivor needs an outcome there.
+
 The rigor is frozen in the header like the bounds, and `mission reframe`
 shows a change of it. Once the security rounds are spent, the agent is not
 called again. A spent cap never verifies a red verdict: if the last round
