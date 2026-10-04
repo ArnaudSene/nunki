@@ -94,7 +94,8 @@ impl Rigor {
 
     /// How many rounds the security agent may play on a mission of this
     /// rigor (SPEC 4.5). A round is one verdict it concludes; once they are
-    /// spent, a mission whose gates are green is verified without it.
+    /// spent, green gates bring the mission back to the last `FINDINGS`, or
+    /// verify it when the last verdict was a `CLEAR`.
     pub fn max_security_rounds(self) -> u32 {
         match self {
             Rigor::Prototype => 0,

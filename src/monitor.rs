@@ -240,7 +240,7 @@ pub fn after_verify(result: &Result<Vec<Step>, VerifyError>) -> Next {
                 // Said, not acted on: the launch that ended it is the step
                 // after, and that one goes on.
                 | Step::CampaignEnded { .. }
-                // Always followed by `Verified`, which is the step that stops.
+                // Always followed by `Verified` or `Findings`, which stop.
                 | Step::SecurityRoundsSpent { .. }
                 | Step::Saving { .. }
                 | Step::Waiting { .. }

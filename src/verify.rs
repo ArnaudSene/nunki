@@ -85,7 +85,8 @@ pub enum Step {
     Unreachable { role: Role, why: String },
     /// The security agent was not launched: the rounds the mission's rigor
     /// allows are spent, `rounds` of `max` (SPEC 4.5). Always followed by
-    /// [`Step::Verified`].
+    /// [`Step::Verified`], or by [`Step::Findings`] when the last verdict
+    /// concluded was `FINDINGS`.
     SecurityRoundsSpent { rounds: u32, max: u32 },
     /// Every declared stage is green; the human validates and `nunki push`
     /// pushes.
@@ -830,6 +831,22 @@ pub fn verify_as(
             // wanted to spend on an acceptance, and lifting a risk is never
             // a machine's to do.
             Stage::Findings { report } => {
+                // Back on the last findings because the rounds are spent
+                // (SPEC 4.5): said once, like the cap on the way to
+                // `Verified`, and saying that the volet which answered them
+                // was not attacked again.
+                if let Some(cap) = state.flow.take_security_cap() {
+                    crate::followup::security_capped_on_findings(
+                        &paths.followup,
+                        cap.rounds,
+                        cap.max,
+                    )?;
+                    store.save(&state)?;
+                    steps.push(Step::SecurityRoundsSpent {
+                        rounds: cap.rounds,
+                        max: cap.max,
+                    });
+                }
                 let head = crate::git::head(&slot.tree)?;
                 steps.push(Step::Findings {
                     report,

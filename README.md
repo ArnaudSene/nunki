@@ -174,13 +174,16 @@ A mission declares how much verification asks of it, with `--rigor` on
 `critical` is what a mission that says nothing gets. Use `standard` for
 ordinary work, where a good share of killed mutants and one security round
 are enough. Keep `critical` for code exposed to hostile input. A `prototype`
-runs the coder and the mechanical gates only, so `mission new` refuses one
-with `--service` or `--security-agent`.
+runs the coder and the mechanical gates only, so `mission new`, the start of
+the mission and `mission reframe` all refuse one with a service or a security
+agent.
 
 The rigor is frozen in the header like the bounds, and `mission reframe`
-shows a change of it. Once the security rounds are spent, a mission whose
-gates are green is verified without another round, and `FOLLOWUP_HQ.md`
-says so. `nunki mission status` prints the rigor and the rounds played.
+shows a change of it. Once the security rounds are spent, the agent is not
+called again. A spent cap never verifies a red verdict: if the last round
+concluded `FINDINGS`, green gates bring the mission back to those findings,
+where `mission accept` lifts them or `mission iterate` spends a volet, and
+`FOLLOWUP_HQ.md` says the fix was not attacked again. `nunki mission status` prints the rigor and the rounds played.
 
 ## Vocabulary
 

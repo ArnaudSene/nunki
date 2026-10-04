@@ -150,8 +150,9 @@ pub fn reviewed(file: &Path, who: &str, why: &str) -> Result<(), FollowupError> 
     )
 }
 
-/// The mission was verified without the security agent, because the rounds
-/// its rigor allows were spent (SPEC 4.5): `rounds` played of `max`.
+/// The mission was verified without the security agent, after a `CLEAR`,
+/// because the rounds its rigor allows were spent (SPEC 4.5): `rounds`
+/// played of `max`.
 ///
 /// Written here, beside the verdicts the rounds concluded, so that whoever
 /// validates the push reads that the last commit was not seen by the agent,
@@ -165,6 +166,29 @@ pub fn security_capped(file: &Path, rounds: u32, max: u32) -> Result<(), Followu
              green on the code as it stands, and the mission is verified without\n\
              another round: what the last commits changed has not been read by\n\
              the security agent.\n",
+            date = today(),
+        ),
+    )
+}
+
+/// The security agent was not called again because its rounds were spent,
+/// and the last verdict it concluded was `FINDINGS`: the mission is back on
+/// that report rather than verified (SPEC 4.5). What the coder changed after
+/// it has not been attacked, and whoever accepts or iterates must know it.
+pub fn security_capped_on_findings(
+    file: &Path,
+    rounds: u32,
+    max: u32,
+) -> Result<(), FollowupError> {
+    append(
+        file,
+        &format!(
+            "## {date} — nunki did not call the security agent again\n\n\
+             The security round cap was reached: {rounds} / {max}. The last round\n\
+             concluded FINDINGS, and the fix made after it has not been attacked\n\
+             again: the gates are green on it, and that is all that was played.\n\
+             The mission is back on those findings — `nunki mission accept`\n\
+             lifts them, `nunki mission iterate` sends one more volet.\n",
             date = today(),
         ),
     )

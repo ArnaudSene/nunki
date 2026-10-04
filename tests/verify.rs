@@ -2721,10 +2721,11 @@ fn a_gate_seven_with_no_campaign_asks_for_one_rather_than_stopping() {
 
 /// At `standard`, the security agent plays one round. Once it is spent —
 /// FINDINGS, then an iterate whose volet is gated and integrated again —
-/// the security agent is not launched: the mission is verified, and the
-/// follow-up records the cap, `1 / 1`, exactly once.
+/// the security agent is not launched, and the mission is not verified
+/// either: it is back on the findings, and the follow-up records the cap,
+/// `1 / 1`, and that the fix was not attacked again, exactly once.
 #[test]
-fn at_standard_the_spent_security_round_is_recorded_and_not_played_again() {
+fn at_standard_the_spent_security_round_is_recorded_and_the_findings_come_back() {
     let world = World::shaped(1, integration());
     let mut header = header_of(1, integration());
     header.security = Security::Agent;
@@ -2762,7 +2763,10 @@ fn at_standard_the_spent_security_round_is_recorded_and_not_played_again() {
     world.verdict("Integrator", "INTEGRATED", &world.head(), "wired again");
     let steps = world.verify().unwrap();
     let n = steps.len();
-    assert!(matches!(steps.last(), Some(Step::Verified)), "{steps:?}");
+    assert!(
+        matches!(steps.last(), Some(Step::Findings { report, .. }) if report == "an open redirect"),
+        "{steps:?}"
+    );
     assert!(
         matches!(
             steps[n - 2],
@@ -2785,8 +2789,16 @@ fn at_standard_the_spent_security_round_is_recorded_and_not_played_again() {
         followup.contains("security round cap was reached: 1 / 1"),
         "{followup}"
     );
+    assert!(
+        followup.contains("has not been attacked\nagain"),
+        "{followup}"
+    );
+    assert!(
+        !followup.contains("mission is verified without"),
+        "{followup}"
+    );
 
-    // Said once: a later `verify` finds the mission verified and says no more.
+    // Said once: a later `verify` finds the same findings and says no more.
     let again = world.verify().unwrap();
     assert!(
         !again
