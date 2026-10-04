@@ -517,6 +517,15 @@ harness: claude-code
 # harness's business, and the harness refuses what it does not know.
 # model: claude-opus-5-5
 
+# How much verification asks of a mission framed without `--rigor`:
+# `prototype` (coder and mechanical gates only), `standard` (gate 7 on a share
+# of killed mutants, one security round) or `critical`, the default.
+# rigor: critical
+
+# The percentage of tried mutants a `standard` mission must kill for gate 7 to
+# pass, a whole number from 1 to 100.
+# mutation_threshold: 80
+
 # What the harness does with a permission it would otherwise ask about.
 # Nobody is there to ask in an autonomous container, so the only question is
 # which way the silence falls. `auto` lets the harness's own safety checks

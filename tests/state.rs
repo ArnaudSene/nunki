@@ -28,6 +28,7 @@ fn header() -> Header {
             reason: "pure domain".into(),
         },
         security: Security::Gates,
+        rigor: Default::default(),
         arbiter: None,
         run: None,
         account: None,

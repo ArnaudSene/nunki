@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::mission::Bounds;
+use crate::mission::{Bounds, Rigor};
 
 /// The file in the project's home. What it declares beats a stack default;
 /// a mission header beats it in turn (SPEC 4.1).
@@ -76,6 +76,22 @@ pub struct Config {
     /// names belong to the harness's vocabulary, not to `nunki`.
     #[serde(default = "default_permission_mode")]
     pub permission_mode: String,
+    /// The rigor a mission is framed at when `mission new` is given none.
+    /// Absent, `critical`. It is read once, at framing: the header freezes
+    /// it, and changing this file afterwards moves no mission already
+    /// framed.
+    #[serde(default)]
+    pub rigor: Option<Rigor>,
+    /// The share of tried mutants, as a whole percentage from 1 to 100, a
+    /// `standard` mission must kill for gate 7 to pass (SPEC 4.4, gate 7).
+    /// A value outside that range is refused when this file is read: 0
+    /// would pass a campaign that killed nothing, and above 100 nothing
+    /// could pass.
+    #[serde(
+        default = "default_mutation_threshold",
+        deserialize_with = "mutation_threshold"
+    )]
+    pub mutation_threshold: u32,
     #[serde(default)]
     pub bounds: Bounds,
     /// Where the test credentials live, mounted read-only on a system
@@ -232,6 +248,27 @@ fn default_protected_branches() -> Vec<String> {
 /// and git are what actually restrain it (SPEC 3.2).
 fn default_permission_mode() -> String {
     "auto".to_string()
+}
+
+/// What `mutation_threshold` is when `nunki.yaml` does not say: four
+/// mutants killed in five.
+pub const DEFAULT_MUTATION_THRESHOLD: u32 = 80;
+
+fn default_mutation_threshold() -> u32 {
+    DEFAULT_MUTATION_THRESHOLD
+}
+
+/// `mutation_threshold`, refused outside 1 to 100 rather than clamped: a
+/// threshold silently moved is a gate that passes on a number nobody wrote.
+fn mutation_threshold<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
+    let value = u32::deserialize(deserializer)?;
+    if (1..=100).contains(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "mutation_threshold is a whole percentage from 1 to 100, and {value} is not"
+        )))
+    }
 }
 
 /// A private repository on GitHub's free plan can neither protect a branch

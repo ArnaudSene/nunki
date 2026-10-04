@@ -6,7 +6,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 
 use nunki::harness::Harness;
-use nunki::mission::{Header, Integration, Lot, Security, Service, dir as mission_dir};
+use nunki::mission::{Header, Integration, Lot, Rigor, Security, Service, dir as mission_dir};
 use nunki::project::Project;
 use nunki::{check, image, init, probe, slot};
 
@@ -287,6 +287,12 @@ enum MissionCommand {
         /// Call the security agent, rather than the mechanical gates alone.
         #[arg(long)]
         security_agent: bool,
+        /// How much verification asks of this mission: `prototype` (the
+        /// coder and the mechanical gates only), `standard` or `critical`.
+        /// Defaults to the project's `rigor:` in nunki.yaml, then to
+        /// `critical`. Frozen into the header like the bounds.
+        #[arg(long, value_name = "RIGOR")]
+        rigor: Option<Rigor>,
         /// How `nunki` starts the application for the integrator and the
         /// security agent, as a path inside the tree. Refines `nunki.yaml` and
         /// the stack's `run.sh`; `none` when there is nothing to start.
@@ -1632,12 +1638,20 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             wiring,
             no_integration,
             security_agent,
+            rigor,
             run,
             account,
             model,
             arbiter,
             about,
         } => {
+            // Refused before anything is parsed or written: a prototype that
+            // asks for an integrator or a security agent contradicts itself.
+            let rigor = Rigor::chosen(rigor, project.config.rigor);
+            if let Err(e) = rigor.admits(!services.is_empty(), security_agent) {
+                eprintln!("nunki: {e}");
+                return ExitCode::FAILURE;
+            }
             let lots = match lots
                 .iter()
                 .map(|l| parse_lot(l))
@@ -1679,6 +1693,7 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                 } else {
                     Security::Gates
                 },
+                rigor,
                 account,
                 model,
                 run,
@@ -2275,6 +2290,15 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             println!("mission   {id}");
             println!("branch    {} (from {})", header.branch, header.base);
             println!("shape     {:?}", header.shape());
+            match header.rigor {
+                // The threshold is the project's, read now: only the rigor
+                // is frozen in the header.
+                Rigor::Standard => println!(
+                    "rigor     standard — gate 7 passes at {}% of tried mutants killed",
+                    project.config.mutation_threshold
+                ),
+                rigor => println!("rigor     {rigor}"),
+            }
             for lot in &header.lots {
                 println!("lot       {} — {}", lot.id, lot.title);
             }

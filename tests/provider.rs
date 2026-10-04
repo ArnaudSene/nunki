@@ -29,6 +29,7 @@ fn header(services: &[(&str, bool)]) -> Header {
             wiring: Vec::new(),
         },
         security: Security::Gates,
+        rigor: Default::default(),
         arbiter: None,
         run: None,
         account: None,

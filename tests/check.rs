@@ -24,6 +24,8 @@ fn config() -> Config {
         run: None,
         services_file: None,
         permission_mode: "auto".to_string(),
+        rigor: None,
+        mutation_threshold: 80,
         forge_protection: Default::default(),
     }
 }
@@ -296,6 +298,42 @@ fn a_malformed_config_names_the_file_and_the_reason() {
     let err = Project::open_at(root, home).unwrap_err();
     assert!(matches!(err, ProjectError::Invalid(..)), "{err}");
     assert!(err.to_string().contains("nunki.yaml"), "{err}");
+}
+
+/// `mutation_threshold` is a whole percentage from 1 to 100, refused outside
+/// it when `nunki.yaml` is read rather than clamped: 0 would pass a campaign
+/// that killed nothing, and above 100 nothing could pass. Both edges are
+/// accepted, and an absent value is 80.
+#[test]
+fn a_mutation_threshold_outside_one_to_a_hundred_is_refused_when_the_config_is_read() {
+    let open = |body: &str| {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        let home = common::project_home(&root, dir.path(), body);
+        Project::open_at(root, home)
+    };
+    for bad in ["0", "101", "-5"] {
+        let err = open(&format!(
+            "harness: claude-code\nmutation_threshold: {bad}\n"
+        ))
+        .unwrap_err();
+        assert!(matches!(err, ProjectError::Invalid(..)), "{bad}: {err}");
+        assert!(err.to_string().contains("nunki.yaml"), "{bad}: {err}");
+        assert!(
+            err.to_string().contains("mutation_threshold"),
+            "{bad}: {err}"
+        );
+    }
+    for edge in [1, 100] {
+        let project = open(&format!(
+            "harness: claude-code\nmutation_threshold: {edge}\n"
+        ))
+        .unwrap();
+        assert_eq!(project.config.mutation_threshold, edge);
+    }
+    let project = open("harness: claude-code\n").unwrap();
+    assert_eq!(project.config.mutation_threshold, 80);
+    assert_eq!(project.config.rigor, None);
 }
 
 /// The home is named after the repository's directory, so two repositories

@@ -24,6 +24,8 @@ fn config() -> Config {
         run: None,
         services_file: None,
         permission_mode: "auto".to_string(),
+        rigor: None,
+        mutation_threshold: 80,
         forge_protection: Default::default(),
     }
 }
@@ -41,6 +43,7 @@ fn header() -> Header {
             wiring: Vec::new(),
         },
         security: Security::Gates,
+        rigor: Default::default(),
         arbiter: None,
         run: None,
         account: None,

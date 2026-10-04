@@ -20,6 +20,7 @@ fn header(integration: Integration, security: Security, bounds: Bounds) -> Heade
         lots: lots(2),
         integration,
         security,
+        rigor: Default::default(),
         arbiter: None,
         run: None,
         account: None,

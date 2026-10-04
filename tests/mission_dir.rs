@@ -2,7 +2,7 @@
 //! between them is a restriction rather than a convention.
 
 use nunki::mission::dir::{MissionDirError, Paths, create, list, read_header};
-use nunki::mission::{Bounds, Header, Integration, Lot, Security, Service};
+use nunki::mission::{Bounds, Header, Integration, Lot, Rigor, RigorError, Security, Service};
 
 mod common;
 
@@ -29,6 +29,7 @@ fn header() -> Header {
             }],
         },
         security: Security::Agent,
+        rigor: Default::default(),
         arbiter: None,
         run: None,
         account: None,
@@ -350,5 +351,249 @@ fn a_file_that_is_there_keeps_what_it_holds() {
     assert_eq!(
         std::fs::read_to_string(&paths.verdict).unwrap(),
         r#"{"verdict":"CLEAR"}"#
+    );
+}
+
+/// Every rigor is written into MISSION.md in lowercase, as the human types
+/// it, and read back as itself.
+#[test]
+fn each_rigor_survives_a_round_trip_through_the_file() {
+    for (rigor, written) in [
+        (Rigor::Prototype, "rigor: prototype\n"),
+        (Rigor::Standard, "rigor: standard\n"),
+        (Rigor::Critical, "rigor: critical\n"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut h = header();
+        h.rigor = rigor;
+        let paths = create(dir.path(), "m1", &h, "prose").unwrap();
+        let text = std::fs::read_to_string(&paths.mission).unwrap();
+        assert!(text.contains(written), "{text}");
+        assert_eq!(read_header(dir.path(), "m1").unwrap().rigor, rigor);
+    }
+}
+
+/// Every MISSION.md written before the field has no `rigor`, and it still
+/// reads — as `critical`, which is what it was verified at all along.
+#[test]
+fn a_header_written_without_a_rigor_reads_as_critical() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = create(dir.path(), "m1", &header(), "prose").unwrap();
+    std::fs::write(
+        &paths.mission,
+        "---\n\
+         branch: feat/old\n\
+         base: dev\n\
+         lots:\n\
+         - id: L1\n  \
+           title: one\n\
+         integration:\n  \
+           kind: none\n  \
+           reason: nothing external\n\
+         security: gates\n\
+         ---\n\nAn older mission.\n",
+    )
+    .unwrap();
+    let read = read_header(dir.path(), "m1").unwrap();
+    assert_eq!(read.branch, "feat/old");
+    assert_eq!(read.rigor, Rigor::Critical);
+}
+
+/// The flag beats the project, the project beats the default, and the
+/// default is `critical`.
+#[test]
+fn the_rigor_chosen_is_the_flag_then_the_project_then_critical() {
+    assert_eq!(
+        Rigor::chosen(Some(Rigor::Prototype), Some(Rigor::Standard)),
+        Rigor::Prototype
+    );
+    assert_eq!(Rigor::chosen(None, Some(Rigor::Standard)), Rigor::Standard);
+    assert_eq!(Rigor::chosen(None, None), Rigor::Critical);
+}
+
+/// The flag and `status` speak the words the header is written in.
+#[test]
+fn a_rigor_is_parsed_and_printed_as_it_is_written_in_the_header() {
+    for rigor in [Rigor::Prototype, Rigor::Standard, Rigor::Critical] {
+        let word = rigor.to_string();
+        assert_eq!(word.parse::<Rigor>(), Ok(rigor));
+        assert_eq!(
+            serde_yaml_ng::to_string(&rigor).unwrap(),
+            format!("{word}\n")
+        );
+    }
+    assert!("Critical".parse::<Rigor>().is_err());
+}
+
+/// A prototype runs the coder and the mechanical gates only; the other two
+/// rigors take services and the security agent as declared.
+#[test]
+fn only_a_prototype_refuses_services_and_the_security_agent() {
+    assert_eq!(
+        Rigor::Prototype.admits(true, false),
+        Err(RigorError::PrototypeWithServices)
+    );
+    assert_eq!(
+        Rigor::Prototype.admits(false, true),
+        Err(RigorError::PrototypeWithSecurityAgent)
+    );
+    assert_eq!(Rigor::Prototype.admits(false, false), Ok(()));
+    for rigor in [Rigor::Standard, Rigor::Critical] {
+        assert_eq!(rigor.admits(true, true), Ok(()), "{rigor}");
+    }
+}
+
+/// A project of its own, and a way to run the binary in it.
+fn project(body: &str) -> (tempfile::TempDir, impl Fn(&[&str]) -> std::process::Output) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    let home = dir.path().join("home");
+    common::project_home(&root, &home, body);
+    let run = move |args: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_nunki"))
+            .env("HOME", &home)
+            .args(["-C"])
+            .arg(&root)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    (dir, run)
+}
+
+fn new_mission(run: &impl Fn(&[&str]) -> std::process::Output, id: &str, extra: &[&str]) {
+    let mut args = vec![
+        "mission", "new", id, "--branch", "feat/x", "--lot", "L1:one",
+    ];
+    args.extend_from_slice(extra);
+    let out = run(&args);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn frozen_rigor(dir: &tempfile::TempDir, id: &str) -> Rigor {
+    let hq = std::fs::read_dir(dir.path().join("home/.nunki"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path().join("hq"))
+        .find(|p| p.is_dir())
+        .unwrap();
+    read_header(&hq, id).unwrap().rigor
+}
+
+/// Through the verb: `mission new` writes the flag when there is one, else
+/// the project's `rigor:`, else `critical` — and `status` says which, with
+/// the threshold for `standard`.
+#[test]
+fn mission_new_freezes_the_flag_then_nunki_yaml_then_critical() {
+    let (bare, run) = project("harness: claude-code\n");
+    new_mission(&run, "plain", &[]);
+    assert_eq!(frozen_rigor(&bare, "plain"), Rigor::Critical);
+    let status = run(&["mission", "status", "plain"]);
+    let text = String::from_utf8_lossy(&status.stdout);
+    assert!(text.contains("rigor     critical\n"), "{text}");
+    assert!(!text.contains("threshold") && !text.contains('%'), "{text}");
+
+    let (declared, run) =
+        project("harness: claude-code\nrigor: standard\nmutation_threshold: 65\n");
+    new_mission(&run, "inherits", &[]);
+    assert_eq!(frozen_rigor(&declared, "inherits"), Rigor::Standard);
+    new_mission(&run, "flagged", &["--rigor", "prototype"]);
+    assert_eq!(frozen_rigor(&declared, "flagged"), Rigor::Prototype);
+    new_mission(&run, "raised", &["--rigor", "critical"]);
+    assert_eq!(frozen_rigor(&declared, "raised"), Rigor::Critical);
+
+    let status = run(&["mission", "status", "inherits"]);
+    let text = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        text.contains("rigor     standard — gate 7 passes at 65% of tried mutants killed"),
+        "{text}"
+    );
+    let status = run(&["mission", "status", "flagged"]);
+    let text = String::from_utf8_lossy(&status.stdout);
+    assert!(text.contains("rigor     prototype\n"), "{text}");
+
+    // A rigor that is none of the three is refused by the flag itself.
+    let bad = run(&[
+        "mission", "new", "odd", "--branch", "b", "--lot", "L1:one", "--rigor", "lax",
+    ]);
+    assert_eq!(bad.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&bad.stderr).contains("prototype, standard or critical"),
+        "{}",
+        String::from_utf8_lossy(&bad.stderr)
+    );
+}
+
+/// A prototype runs the coder and the mechanical gates only, so `mission
+/// new` refuses one that asks for services or the security agent, says why,
+/// and writes nothing. The rigor may come from `nunki.yaml` as well as from
+/// the flag: the refusal is about the rigor chosen.
+#[test]
+fn mission_new_refuses_a_prototype_with_services_or_a_security_agent() {
+    let (dir, run) = project("harness: claude-code\n");
+    for (id, extra, flag) in [
+        ("svc", &["--service", "db=db"][..], "--service"),
+        ("sec", &["--security-agent"][..], "--security-agent"),
+    ] {
+        let mut args = vec![
+            "mission",
+            "new",
+            id,
+            "--branch",
+            "b",
+            "--lot",
+            "L1:one",
+            "--rigor",
+            "prototype",
+        ];
+        args.extend_from_slice(extra);
+        let out = run(&args);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{err}");
+        assert!(
+            err.contains("a prototype runs the coder and the mechanical gates only"),
+            "{err}"
+        );
+        assert!(err.contains(flag), "{err}");
+        let written = std::fs::read_dir(dir.path().join("home/.nunki"))
+            .unwrap()
+            .flatten()
+            .any(|e| e.path().join("hq/missions").join(id).exists());
+        assert!(!written, "{id} was written");
+    }
+    // Standard takes both.
+    new_mission(
+        &run,
+        "std",
+        &[
+            "--rigor",
+            "standard",
+            "--service",
+            "db=db",
+            "--security-agent",
+        ],
+    );
+    assert_eq!(frozen_rigor(&dir, "std"), Rigor::Standard);
+
+    let (_dir, run) = project("harness: claude-code\nrigor: prototype\n");
+    let out = run(&[
+        "mission",
+        "new",
+        "sec",
+        "--branch",
+        "b",
+        "--lot",
+        "L1:one",
+        "--security-agent",
+    ]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("--security-agent"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
     );
 }

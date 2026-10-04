@@ -459,6 +459,32 @@ fn the_nunki_yaml_it_writes_parses_back_with_the_permission_mode_it_declares() {
     assert_eq!(config.model, None, "{text}");
 }
 
+/// The template names `rigor` and `mutation_threshold`, commented out with
+/// the defaults they would have: uncommenting them changes nothing, and
+/// leaving them commented reads as the same thing.
+#[test]
+fn the_nunki_yaml_it_writes_names_the_rigor_and_the_threshold_with_their_defaults() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    init(&repo, &home(&repo), &["rust".to_string()]).unwrap();
+
+    let text = std::fs::read_to_string(home(&repo).join("nunki.yaml")).unwrap();
+    assert!(text.contains("\n# rigor: critical\n"), "{text}");
+    assert!(text.contains("\n# mutation_threshold: 80\n"), "{text}");
+    let commented: nunki::project::Config = serde_yaml_ng::from_str(&text).unwrap();
+    let uncommented: nunki::project::Config = serde_yaml_ng::from_str(
+        &text
+            .replace("\n# rigor:", "\nrigor:")
+            .replace("\n# mutation_threshold:", "\nmutation_threshold:"),
+    )
+    .unwrap();
+    assert_eq!(commented.rigor, None);
+    assert_eq!(uncommented.rigor, Some(nunki::mission::Rigor::Critical));
+    assert_eq!(commented.mutation_threshold, 80);
+    assert_eq!(uncommented.mutation_threshold, 80);
+}
+
 /// The prose `nunki init` deposits must read as prose.
 ///
 /// The cause: `cargo fmt` joins a `\`-continued

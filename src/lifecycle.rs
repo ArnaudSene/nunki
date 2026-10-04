@@ -136,6 +136,7 @@ pub fn differences(frozen: &Header, fresh: &Header) -> Vec<Change> {
         format!("{:?}", frozen.security),
         format!("{:?}", fresh.security),
     );
+    note("rigor", frozen.rigor.to_string(), fresh.rigor.to_string());
     note(
         "arbiter",
         frozen.arbiter.clone().unwrap_or_else(|| "—".into()),
