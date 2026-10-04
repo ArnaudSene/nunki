@@ -981,7 +981,7 @@ if [ -z "$files" ]; then
   # happen. The terminal line is printed **before** leaving, because `nunki`
   # reads its absence as a campaign that was killed and asks for another:
   # a branch touching only tests or documentation would be asked for ever.
-  printf '{"campaign":"done","tried":0}\n'
+  printf '{"campaign":"done","tried":0,"found":0}\n'
   exit 0
 fi
 
@@ -1043,9 +1043,16 @@ fi
 # `main` delegates to, and that one a test can and must kill. The exclusion
 # is on the mutation, never on the file: a `main.rs` carrying real code still
 # owes every mutant in it.
+#
+# `--no-config` keeps the campaign from reading its configuration out of the
+# tree it mutates. Without it a `.cargo/mutants.toml` the branch commits
+# applies: measured on 27.1.0, `timeout_multiplier = 0.0` turned 7 survivors
+# and 4 caught into 11 timeouts — every one counted tried and killed — and an
+# exclusion empties the campaign instead. What this script passes on its own
+# command line is the whole of the campaign's configuration.
 # shellcheck disable=SC2086
 status=0
-cargo mutants --in-place --no-shuffle --exclude-re "replace main -> " --output "$out" $scope >&2 || status=$?
+cargo mutants --no-config --in-place --no-shuffle --exclude-re "replace main -> " --output "$out" $scope >&2 || status=$?
 
 # `--output DIR` writes into `DIR/mutants.out/`, not into `DIR` (measured on
 # 27.1.0). Reading the wrong path makes the whole campaign fail silently.
@@ -1057,12 +1064,26 @@ if [ ! -f "$missed" ]; then
   # A crate that does not parse also leaves no `mutants.out`, but exits 1,
   # so only the status tells the two apart.
   if [ -n "${NUNKI_BASE:-}" ] && [ "$status" -eq 0 ]; then
-    printf '{"campaign":"done","tried":0}\n'
+    printf '{"campaign":"done","tried":0,"found":0}\n'
     exit 0
   fi
   echo "nunki: the campaign left no $missed" >&2
   exit 1
 fi
+
+# The tool's own status says whether the campaign completed, and only three
+# answers do: 0, every mutant caught; 2, some missed; 3, some timed out
+# (cargo-mutants 27.1.0). Anything else measured nothing, whatever files it
+# left — 4 is a baseline whose tests fail before any mutant is tried, and
+# leaves every outcome file empty (measured: 12 mutants found, none tested,
+# an empty `missed.txt` that would read as a campaign with no survivor).
+case "$status" in
+  0|2|3) ;;
+  *)
+    echo "nunki: cargo mutants exited $status, so the campaign did not complete and measured nothing (4: the tests fail on the unmutated code, before any mutant is tried)" >&2
+    exit 1
+    ;;
+esac
 
 # One mutant per line, as `file:line:col: what it replaced`:
 #   src/lib.rs:2:7: replace > with == in keep
@@ -1098,6 +1119,23 @@ for outcome in caught missed timeout; do
   fi
 done
 
+# And how many testable mutants it found: every mutant in `mutants.json`,
+# the unviable ones left out, as they are from `tried`. A campaign that
+# found some and tried none measured nothing, and `nunki` refuses it on that
+# count even should the status above have let it through.
+found=""
+listed=$(jq length "$out/mutants.out/mutants.json" 2>/dev/null || true)
+case "$listed" in
+  ''|*[!0-9]*) ;;
+  *)
+    unviable=0
+    if [ -f "$out/mutants.out/unviable.txt" ]; then
+      unviable=$(grep -c . "$out/mutants.out/unviable.txt" || true)
+    fi
+    found=$((listed - unviable))
+    ;;
+esac
+
 # The last thing it prints, and the only line that says the campaign got to
 # the end. Without it `nunki` cannot tell "no survivor" from "no answer": a
 # campaign killed halfway, one whose container went away and one that never
@@ -1108,7 +1146,11 @@ done
 # spawner `exec`s the command so that the pid it published is the campaign's
 # own, and a shell that has been replaced cannot write `$?`. A truncated log
 # loses its last line, which is this one, so the three failures fail alike.
-printf '{"campaign":"done","tried":%s}\n' "$tried"
+if [ -n "$found" ]; then
+  printf '{"campaign":"done","tried":%s,"found":%s}\n' "$tried" "$found"
+else
+  printf '{"campaign":"done","tried":%s}\n' "$tried"
+fi
 "#;
 
 /// How a Rust application is started (SPEC 4.2, rule 2). Shipped by the
@@ -1712,9 +1754,26 @@ if [ -z "$files" ]; then
   # happen. The terminal line is printed **before** leaving, because `nunki`
   # reads its absence as a campaign that was killed and asks for another:
   # a branch touching only tests or documentation would be asked for ever.
-  printf '{"campaign":"done","tried":0}\n'
+  printf '{"campaign":"done","tried":0,"found":0}\n'
   exit 0
 fi
+
+# The campaign does not read its configuration out of the tree it mutates,
+# and mutmut has no flag to ignore the one it finds there — measured on
+# 3.8.0, `mutmut run` takes `--max-children` and nothing else — so a tree
+# that carries one is refused, said, and not run. A `[tool.mutmut]` table in
+# `pyproject.toml` or a `[mutmut]` section in `setup.cfg` decides what is
+# mutated and how its tests are run: `do_not_mutate` or `paths_to_mutate`
+# can take every touched line out of the campaign, which then tries nothing
+# and passes. The rust stack runs cargo-mutants with `--no-config` for the
+# same reason. Moving the setting out of the tree is the project's to do.
+for config in pyproject.toml setup.cfg; do
+  [ -f "$config" ] || continue
+  if grep -Eq '^[[:space:]]*\[(tool\.)?mutmut([].]|$)' "$config"; then
+    echo "nunki: $config configures mutmut, and the campaign does not read its configuration from the tree it mutates — remove the mutmut settings from $config" >&2
+    exit 1
+  fi
+done
 
 # The campaign runs the **whole** suite in its copy, and this stack's system
 # tests are the ones `prepush.sh` deselects with `-m "not system"`: they reach
@@ -1919,9 +1978,18 @@ cat "$found"
 # not found, a code not recognised — which can only lower the share a
 # `standard` gate 7 sees, never raise it.
 tried=$(grep -c '"file"' "$found" || true)
+testable=0
 for path in $files; do
   meta="mutants/${path#./}.meta"
   [ -f "$meta" ] || continue
+  # Every mutant in the file's record but the skipped (34), which ran no
+  # test: how many testable mutants the campaign found here.
+  listed=$(jq '[.exit_code_by_key // {} | .[] | select(. != 34)] | length' "$meta" \
+    2>/dev/null || true)
+  case "$listed" in
+    ''|*[!0-9]*) ;;
+    *) testable=$((testable + listed)) ;;
+  esac
   killed=$(jq '[.exit_code_by_key // {} | .[] | select(. == 1 or . == 3 or . == 37)] | length' \
     "$meta" 2>/dev/null || true)
   case "$killed" in
@@ -1947,7 +2015,7 @@ rm -rf mutants
 # spawner `exec`s the command so that the pid it published is the campaign's
 # own, and a shell that has been replaced cannot write `$?`. A truncated log
 # loses its last line, which is this one, so the three failures fail alike.
-printf '{"campaign":"done","tried":%s}\n' "$tried"
+printf '{"campaign":"done","tried":%s,"found":%s}\n' "$tried" "$testable"
 "##;
 
 /// The mechanical security of a Python project (SPEC 4.4, gate 8): the
@@ -2659,9 +2727,24 @@ if [ -z "$files" ]; then
   # happen. The terminal line is printed **before** leaving, because `nunki`
   # reads its absence as a campaign that was killed and asks for another:
   # a branch touching only tests or documentation would be asked for ever.
-  printf '{"campaign":"done","tried":0}\n'
+  printf '{"campaign":"done","tried":0,"found":0}\n'
   exit 0
 fi
+
+# The campaign does not read its configuration out of the tree it mutates,
+# and Stryker reads one from the working directory whenever one is there:
+# `timeoutMS`, `timeoutFactor` or a test runner that always fails turns
+# survivors into timeouts or kills, both counted as detected, and
+# `mutator.excludedMutations` or `ignorers` empties the campaign. There is
+# no flag to ignore that file, so a tree that carries one is refused, said,
+# and not run, as the rust stack runs cargo-mutants with `--no-config`.
+# Moving the setting out of the tree is the project's to do.
+for config in stryker.conf.* stryker.config.* .stryker.conf.* .stryker.config.*; do
+  if [ -e "$config" ]; then
+    echo "nunki: $config configures Stryker, and the campaign does not read its configuration from the tree it mutates — remove it" >&2
+    exit 1
+  fi
+done
 
 pnpm install --frozen-lockfile >&2
 if ! pnpm exec stryker --version >/dev/null 2>&1; then
@@ -2670,18 +2753,8 @@ if ! pnpm exec stryker --version >/dev/null 2>&1; then
   exit 1
 fi
 
-# Where the project's configuration puts the json report. There is no command
-# line flag for it (measured on 9.6.1), so it is read from the file that owns
-# it, with Stryker's own default when it says nothing.
-report=$(node -e '
-const fs = require("fs");
-let where = "reports/mutation/mutation.json";
-try {
-  const c = JSON.parse(fs.readFileSync("stryker.config.json", "utf8"));
-  if (c.jsonReporter && c.jsonReporter.fileName) where = c.jsonReporter.fileName;
-} catch {}
-process.stdout.write(where);
-')
+# With no configuration, the report is where Stryker puts it by default.
+report=reports/mutation/mutation.json
 
 # Cleared before the run, for the reason the Rust fragment's own comment
 # records: it is a campaign that **cannot** run that lies. One that runs and
@@ -2694,12 +2767,22 @@ rm -f "$report"
 # even when the run fails, so a killed campaign leaves no copy of the project
 # beside the tree for the next battery to walk into.
 #
-# The status is **not** read, because it says nothing: measured on 9.6.1, it
-# is 0 with survivors, 0 when `--mutate` names a file that does not exist,
-# and 0 on a source file that does not parse. The report is the only thing
-# that tells a campaign apart from one that never ran.
+# `--testRunner command` because no configuration chooses one: it runs the
+# project's own test script, which is the suite the battery runs too.
+#
+# The status is not enough on its own, because 0 says little: measured on
+# 9.6.1, it is 0 with survivors, 0 when `--mutate` names a file that does
+# not exist, and 0 on a source file that does not parse. So the report
+# below is the guard for those. But anything **other** than 0 is a campaign
+# that did not complete — a failing initial test run among them — and is
+# never read as one that did, whatever report it left.
 # shellcheck disable=SC2086
-pnpm exec stryker run $files --cleanTempDir always --reporters json >&2 || true
+status=0
+pnpm exec stryker run $files --testRunner command --cleanTempDir always --reporters json >&2 || status=$?
+if [ "$status" -ne 0 ]; then
+  echo "nunki: stryker exited $status, so the campaign did not complete and measured nothing" >&2
+  exit 1
+fi
 
 # The counterpart of the Rust fragment's `[ ! -f "$missed" ]`. On a source
 # that does not parse, Stryker writes no report at all.
@@ -2750,6 +2833,12 @@ tried=$(jq '[.files // {} | .[] | .mutants // [] | .[]
   | select(.status == "Killed" or .status == "Timeout" or .status == "Survived"
     or .status == "NoCoverage" or .status == "Pending")] | length' "$report" || true)
 
+# And how many testable mutants it found, for the contract every stack
+# speaks: the same count here, since a mutant Stryker never ran is `Pending`
+# and already counted, as a survivor. A run that tested nothing leaves no
+# report, or a non-zero status, and is refused above.
+found="$tried"
+
 # Behind itself, once the survivors have been read out of it — the file and
 # the directory Stryker made for it, because an empty `reports/` left in the
 # tree is still something the next walk has to be told about. A courtesy and
@@ -2770,7 +2859,7 @@ holder=$(dirname "$report")
 # own, and a shell that has been replaced cannot write `$?`.
 case "$tried" in
   ''|*[!0-9]*) printf '{"campaign":"done"}\n' ;;
-  *) printf '{"campaign":"done","tried":%s}\n' "$tried" ;;
+  *) printf '{"campaign":"done","tried":%s,"found":%s}\n' "$tried" "$found" ;;
 esac
 "##;
 

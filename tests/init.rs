@@ -26,6 +26,20 @@ fn fresh() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
     (dir, root, nunki)
 }
 
+/// A shell to run a stack's script in, with no campaign variable inherited.
+///
+/// The battery runs inside a campaign too: cargo-mutants runs the test suite
+/// against every mutant, with the campaign's `NUNKI_BASE` set. A template
+/// spawned here inherited it, took the campaign's base for its own, and three
+/// tests failed under the campaign and passed outside it, so the unmutated
+/// baseline failed and the campaign measured nothing (security round 1 on
+/// this mission). A test that wants the variable sets it after this.
+fn sh() -> std::process::Command {
+    let mut command = std::process::Command::new("sh");
+    command.env_remove(nunki::mutants::BASE_ENV);
+    command
+}
+
 /// The home every test here gives `init`: beside the repository, and never
 /// the real `~/.nunki`.
 fn home(root: &Path) -> std::path::PathBuf {
@@ -758,7 +772,7 @@ fn a_campaign_that_could_not_run_does_not_report_the_last_ones_survivors() {
         stubs.display(),
         std::env::var("PATH").unwrap_or_default()
     );
-    let out = std::process::Command::new("sh")
+    let out = sh()
         .arg(&script)
         .arg("abc123")
         .arg("src/lib.rs")
@@ -833,7 +847,7 @@ printf '%s\\n' 'src/lib.rs:2:7: replace > with >= in keep' > \"$out/mutants.out/
         stubs.display(),
         std::env::var("PATH").unwrap_or_default()
     );
-    let out = std::process::Command::new("sh")
+    let out = sh()
         .arg(&script)
         .arg("abc123")
         .arg("src/lib.rs")
@@ -1109,7 +1123,7 @@ fn a_ruling_is_matched_on_the_whole_id_and_not_on_a_prefix_of_it() {
         stubs.display(),
         std::env::var("PATH").unwrap_or_default()
     );
-    let out = std::process::Command::new("sh")
+    let out = sh()
         .arg(&script)
         .arg(&base)
         .arg(&db)
@@ -1182,7 +1196,7 @@ fn a_base_it_cannot_read_stops_the_script_instead_of_counting_everything_as_new(
     let db = root.join("db");
     std::fs::create_dir_all(&db).unwrap();
 
-    let out = std::process::Command::new("sh")
+    let out = sh()
         .arg(&script)
         .arg("0000000000000000000000000000000000000000")
         .arg(&db)
@@ -1459,13 +1473,13 @@ fn the_python_campaign_says_nothing_when_it_could_not_run() {
         "{script}"
     );
     let nothing = script
-        .find(r#"printf '{"campaign":"done","tried":0}\n'"#)
+        .find(r#"printf '{"campaign":"done","tried":0,"found":0}\n'"#)
         .expect("a branch with nothing to mutate says so");
     let guard = script
         .find("the campaign could not run")
         .expect("the guard says why it stopped");
     let done = script
-        .rfind(r#"printf '{"campaign":"done","tried":%s}\n' "$tried""#)
+        .rfind(r#"printf '{"campaign":"done","tried":%s,"found":%s}\n' "$tried" "$testable""#)
         .expect("the campaign says when it got to the end");
     assert!(nothing < guard, "{script}");
     assert!(
@@ -1683,7 +1697,7 @@ fn the_next_campaign_trusts_its_report_and_not_its_status() {
         "{script}"
     );
     let nothing = script
-        .find(r#"printf '{"campaign":"done","tried":0}\n'"#)
+        .find(r#"printf '{"campaign":"done","tried":0,"found":0}\n'"#)
         .expect("a branch with nothing to mutate says so");
     let guard = script
         .find("left no report at")
@@ -1851,7 +1865,7 @@ fn a_campaign_with_nothing_to_mutate_says_it_finished() {
 
         // A path no stack mutates: the branch changed its README and nothing
         // else.
-        let out = std::process::Command::new("sh")
+        let out = sh()
             .arg(&script)
             .arg("abc1234")
             .arg("README.md")
@@ -1936,7 +1950,7 @@ fn the_campaign_deselects_the_system_tests() {
         bin.display(),
         std::env::var("PATH").unwrap_or_default()
     );
-    let out = std::process::Command::new("sh")
+    let out = sh()
         .arg(&script)
         .arg("abc1234")
         .arg("src/pkg/thing.py")
@@ -2027,7 +2041,7 @@ fn a_campaign_that_fails_leaves_no_copy_of_the_tree_behind() {
         bin.display(),
         std::env::var("PATH").unwrap_or_default()
     );
-    let out = std::process::Command::new("sh")
+    let out = sh()
         .arg(&script)
         .arg("abc1234")
         .arg("src/pkg/thing.py")
@@ -2073,7 +2087,7 @@ fn a_campaign_whose_branch_touched_only_tests_says_it_finished() {
         init(&root, &nunki, &[stack.to_string()]).unwrap();
         let script = home(&root).join("stacks").join(stack).join("mutation.sh");
 
-        let mut command = std::process::Command::new("sh");
+        let mut command = sh();
         command.arg(&script).arg("abc1234");
         for path in touched {
             command.arg(path);
@@ -2301,7 +2315,7 @@ exit 2
         ),
     );
 
-    let out = std::process::Command::new("sh")
+    let out = sh()
         .arg(&script)
         .arg("abc123")
         .arg("src/lib.rs")
@@ -2360,7 +2374,7 @@ fn a_diff_that_reaches_no_mutant_is_a_campaign_that_found_nothing() {
         "#!/bin/sh\necho ' INFO No mutants to filter' >&2\nexit 0\n",
     );
 
-    let out = std::process::Command::new("sh")
+    let out = sh()
         .arg(&script)
         .arg("abc123")
         .arg("src/lib.rs")
@@ -2398,7 +2412,7 @@ fn a_campaign_that_cannot_diff_against_its_base_says_so() {
         &format!("#!/bin/sh\ntouch {}\nexit 0\n", called.display()),
     );
 
-    let out = std::process::Command::new("sh")
+    let out = sh()
         .arg(&script)
         .arg("abc123")
         .arg("src/lib.rs")
@@ -2442,7 +2456,7 @@ fn a_campaign_that_could_not_run_is_not_read_as_one_with_nothing_to_mutate() {
         "#!/bin/sh\necho 'cannot parse string into token stream' >&2\nexit 1\n",
     );
 
-    let out = std::process::Command::new("sh")
+    let out = sh()
         .arg(&script)
         .arg("abc123")
         .arg("src/lib.rs")
@@ -2512,7 +2526,7 @@ mkdir -p \"$out/mutants.out\"
         ),
     );
 
-    let out = std::process::Command::new("sh")
+    let out = sh()
         .arg(&script)
         .arg("abc123")
         .arg("src/lib.rs")
@@ -2554,13 +2568,30 @@ fn stubs(at: &Path, scripts: &[(&str, &str)]) -> String {
 
 #[cfg(unix)]
 fn campaign_of(stack: &str, touched: &str, stub: &[(&str, &str)]) -> (String, String) {
+    let (said, why, _) = campaign_in(stack, touched, stub, &[]);
+    (said, why)
+}
+
+/// [`campaign_of`], in a tree holding `files`, and with the exit status.
+#[cfg(unix)]
+fn campaign_in(
+    stack: &str,
+    touched: &str,
+    stub: &[(&str, &str)],
+    files: &[(&str, &str)],
+) -> (String, String, Option<i32>) {
     let (dir, root, nunki) = fresh();
     init(&root, &nunki, &[stack.to_string()]).unwrap();
     let script = home(&root).join("stacks").join(stack).join("mutation.sh");
     let tree = dir.path().join("tree");
     std::fs::create_dir_all(&tree).unwrap();
+    for (path, body) in files {
+        let at = tree.join(path);
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::fs::write(at, body).unwrap();
+    }
     let path = stubs(&dir.path().join("stub-bin"), stub);
-    let out = std::process::Command::new("sh")
+    let out = sh()
         .arg(&script)
         .arg("abc123")
         .arg(touched)
@@ -2579,6 +2610,7 @@ fn campaign_of(stack: &str, touched: &str, stub: &[(&str, &str)]) -> (String, St
             "{}\nleft in the tree: {left:?}",
             String::from_utf8_lossy(&out.stderr)
         ),
+        out.status.code(),
     )
 }
 
@@ -2600,12 +2632,15 @@ printf 'src/lib.rs:2:5: replace keep -> bool with true\\nsrc/lib.rs:2:7: replace
 printf 'src/lib.rs:2:7: replace > with >= in keep\\n' > \"$o/missed.txt\"
 printf 'src/lib.rs:9:1: replace spin with ()\\n' > \"$o/timeout.txt\"
 printf 'src/lib.rs:5:5: replace make -> Opaque with Default::default()\\nsrc/lib.rs:6:5: replace x\\n' > \"$o/unviable.txt\"
+printf '[1,2,3,4,5,6,7]' > \"$o/mutants.json\"
 exit 2
 ";
     let (said, why) = campaign_of("rust", "src/lib.rs", &[("cargo", cargo)]);
     assert!(nunki::mutants::completed(&said), "{said}\n{why}");
     assert_eq!(nunki::mutants::parse(&said).len(), 1, "{said}");
     assert_eq!(nunki::mutants::tried(&said), Some(5), "{said}\n{why}");
+    // Seven mutants listed, two of them unviable: five testable found.
+    assert_eq!(nunki::mutants::found(&said), Some(5), "{said}\n{why}");
 }
 
 /// Python: the survivors it printed, and the killed read from mutmut's own
@@ -2643,6 +2678,8 @@ printf '%s\n' '{"id": "pkg.thing.x_a__mutmut_5", "file": "src/pkg/thing.py", "li
     assert!(nunki::mutants::completed(&said), "{said}\n{why}");
     assert_eq!(nunki::mutants::parse(&said).len(), 2, "{said}");
     assert_eq!(nunki::mutants::tried(&said), Some(5), "{said}\n{why}");
+    // Six in the touched file's record, the skipped one left out.
+    assert_eq!(nunki::mutants::found(&said), Some(5), "{said}\n{why}");
     assert!(
         !why.contains("\"mutants\""),
         "mutants/ was left behind: {why}"
@@ -2682,4 +2719,207 @@ esac
     assert!(nunki::mutants::completed(&said), "{said}\n{why}");
     assert_eq!(nunki::mutants::parse(&said).len(), 3, "{said}\n{why}");
     assert_eq!(nunki::mutants::tried(&said), Some(5), "{said}\n{why}");
+    // Every mutant the report says the tests ran against: the same count.
+    assert_eq!(nunki::mutants::found(&said), Some(5), "{said}\n{why}");
+}
+
+// ---------------------------------------------------------------------------
+// A campaign reads no configuration from the tree it mutates, and one that
+// did not complete never says it finished (security round 1 on the rigor
+// mission, HQ ruling).
+// ---------------------------------------------------------------------------
+
+/// A `cargo` that answers like cargo-mutants 27.1.0 on a crate with seven
+/// survivors and four caught: with no `--no-config`, a tree
+/// `.cargo/mutants.toml` setting `timeout_multiplier = 0` turns all eleven
+/// into timeouts, and one with `exclude_re` empties the campaign. Measured
+/// on the real tool before this stub was written; the stub keeps what the
+/// tool does so the battery can ask the script what it passes.
+const CARGO_READING_ITS_CONFIG: &str = r#"#!/bin/sh
+out=""; noconfig=0
+for arg in "$@"; do
+  case "$arg" in --no-config) noconfig=1 ;; esac
+done
+while [ $# -gt 0 ]; do
+  if [ "$1" = --output ]; then out=$2; fi
+  shift
+done
+o="$out/mutants.out"
+mkdir -p "$o"
+: > "$o/unviable.txt"; : > "$o/caught.txt"; : > "$o/missed.txt"; : > "$o/timeout.txt"
+config=.cargo/mutants.toml
+if [ "$noconfig" = 0 ] && [ -f "$config" ] && grep -q exclude_re "$config"; then
+  printf '[]' > "$o/mutants.json"
+  exit 0
+fi
+printf '[1,2,3,4,5,6,7,8,9,10,11]' > "$o/mutants.json"
+if [ "$noconfig" = 0 ] && [ -f "$config" ] && grep -q timeout_multiplier "$config"; then
+  for n in 1 2 3 4 5 6 7 8 9 10 11; do echo "src/lib.rs:$n:1: replace m$n" >> "$o/timeout.txt"; done
+  exit 3
+fi
+for n in 1 2 3 4; do echo "src/lib.rs:$n:1: replace c$n" >> "$o/caught.txt"; done
+for n in 5 6 7 8 9 10 11; do echo "src/lib.rs:$n:1: replace m$n" >> "$o/missed.txt"; done
+exit 2
+"#;
+
+/// A tree config that would hide every survivor, or empty the campaign,
+/// changes nothing: the script runs cargo-mutants with `--no-config`.
+#[cfg(unix)]
+#[test]
+fn a_tree_config_changes_nothing_in_the_rust_campaign() {
+    let stub = [("cargo", CARGO_READING_ITS_CONFIG)];
+    let (plain, why, _) = campaign_in("rust", "src/lib.rs", &stub, &[]);
+    assert_eq!(nunki::mutants::parse(&plain).len(), 7, "{plain}\n{why}");
+    assert_eq!(nunki::mutants::tried(&plain), Some(11), "{plain}");
+    for config in [
+        "timeout_multiplier = 0.0\nminimum_test_timeout = 0.0\n",
+        "exclude_re = [\".*\"]\n",
+    ] {
+        let (said, why, _) = campaign_in(
+            "rust",
+            "src/lib.rs",
+            &stub,
+            &[(".cargo/mutants.toml", config)],
+        );
+        assert_eq!(said, plain, "{config} changed the campaign:\n{why}");
+    }
+}
+
+/// A campaign whose tool did not complete never prints the done line,
+/// whatever files it left: cargo-mutants exits 4 when the tests fail on the
+/// unmutated code, with every outcome file empty — measured on 27.1.0, 12
+/// mutants found and none tested.
+#[cfg(unix)]
+#[test]
+fn a_rust_campaign_whose_baseline_fails_never_says_it_finished() {
+    let cargo = r#"#!/bin/sh
+out=""
+while [ $# -gt 0 ]; do
+  if [ "$1" = --output ]; then out=$2; fi
+  shift
+done
+o="$out/mutants.out"
+mkdir -p "$o"
+: > "$o/caught.txt"; : > "$o/missed.txt"; : > "$o/timeout.txt"; : > "$o/unviable.txt"
+printf '[1,2,3,4,5,6,7,8,9,10,11,12]' > "$o/mutants.json"
+exit 4
+"#;
+    let (said, why, status) = campaign_in("rust", "src/lib.rs", &[("cargo", cargo)], &[]);
+    assert!(!nunki::mutants::completed(&said), "{said}\n{why}");
+    assert_ne!(status, Some(0), "{why}");
+    assert!(why.contains("exited 4"), "{why}");
+    // Any status but the three that mean it completed.
+    for status in [1, 70] {
+        let cargo = cargo.replace("exit 4", &format!("exit {status}"));
+        let (said, why, _) = campaign_in("rust", "src/lib.rs", &[("cargo", &cargo)], &[]);
+        assert!(!nunki::mutants::completed(&said), "{status}: {said}\n{why}");
+    }
+}
+
+/// The python campaign refuses a tree that configures mutmut, which has no
+/// flag to ignore it, and runs nothing: no done line, and mutmut never
+/// asked to run.
+#[cfg(unix)]
+#[test]
+fn the_python_campaign_refuses_a_tree_that_configures_mutmut() {
+    let uv = "#!/bin/sh\necho \"$*\" >> uv-calls\nexit 0\n";
+    for (file, body) in [
+        (
+            "pyproject.toml",
+            "[project]\nname = \"x\"\n\n[tool.mutmut]\ndo_not_mutate = [\"*\"]\n",
+        ),
+        ("setup.cfg", "[mutmut]\npaths_to_mutate = elsewhere/\n"),
+    ] {
+        let (said, why, status) =
+            campaign_in("python", "src/pkg/thing.py", &[("uv", uv)], &[(file, body)]);
+        assert!(!nunki::mutants::completed(&said), "{file}: {said}\n{why}");
+        assert_ne!(status, Some(0), "{file}: {why}");
+        assert!(
+            why.contains(file) && why.contains("configures mutmut"),
+            "{why}"
+        );
+        assert!(
+            !why.contains("uv-calls"),
+            "the toolchain was reached: {why}"
+        );
+    }
+    // A pyproject that does not configure mutmut is not refused for it.
+    let (_, why, _) = campaign_in(
+        "python",
+        "src/pkg/thing.py",
+        &[("uv", uv)],
+        &[("pyproject.toml", "[project]\nname = \"x\"\n[tool.pytest]\n")],
+    );
+    assert!(!why.contains("configures mutmut"), "{why}");
+}
+
+/// The Next.js campaign refuses a tree that carries a Stryker config, which
+/// Stryker would read from the working directory, and never runs Stryker.
+#[cfg(unix)]
+#[test]
+fn the_next_campaign_refuses_a_tree_that_configures_stryker() {
+    let pnpm = "#!/bin/sh\necho \"$*\" >> pnpm-calls\nexit 0\n";
+    for file in [
+        "stryker.config.json",
+        "stryker.conf.mjs",
+        ".stryker.conf.js",
+    ] {
+        let (said, why, status) = campaign_in(
+            "next",
+            "app/page.ts",
+            &[("pnpm", pnpm)],
+            &[(file, "{\"timeoutMS\": 1}\n")],
+        );
+        assert!(!nunki::mutants::completed(&said), "{file}: {said}\n{why}");
+        assert_ne!(status, Some(0), "{file}: {why}");
+        assert!(
+            why.contains(file) && why.contains("configures Stryker"),
+            "{why}"
+        );
+        assert!(
+            !why.contains("pnpm-calls"),
+            "the toolchain was reached: {why}"
+        );
+    }
+}
+
+/// Stryker's status of 0 says little, but anything else is a campaign that
+/// did not complete — a failing initial test run among them — and it never
+/// says it finished, whatever report it left behind.
+#[cfg(unix)]
+#[test]
+fn a_next_campaign_whose_stryker_fails_never_says_it_finished() {
+    let pnpm = r#"#!/bin/sh
+case "$*" in
+  *"stryker run"*)
+    mkdir -p reports/mutation
+    printf '%s' '{"files":{"app/page.ts":{"mutants":[{"status":"Killed"}]}}}' > reports/mutation/mutation.json
+    exit 1
+    ;;
+esac
+exit 0
+"#;
+    let node = "#!/bin/sh\nexit 0\n";
+    let (said, why, status) = campaign_in(
+        "next",
+        "app/page.ts",
+        &[("pnpm", pnpm), ("node", node)],
+        &[],
+    );
+    assert!(!nunki::mutants::completed(&said), "{said}\n{why}");
+    assert_ne!(status, Some(0), "{why}");
+    assert!(why.contains("stryker exited 1"), "{why}");
+}
+
+/// The shell every test here spawns a script in carries no campaign
+/// variable, whatever this process carries: the battery is the same inside a
+/// campaign and outside it. Asked of the command itself, because this
+/// process has no `NUNKI_BASE` to inherit outside a campaign, and a test
+/// that spawned one would prove nothing here.
+#[test]
+fn the_scripts_here_never_inherit_a_campaign_variable() {
+    let removed = sh()
+        .get_envs()
+        .any(|(key, value)| key == nunki::mutants::BASE_ENV && value.is_none());
+    assert!(removed, "{} reaches the scripts", nunki::mutants::BASE_ENV);
 }

@@ -360,6 +360,19 @@ struct Terminal {
     /// read exactly as it was.
     #[serde(default)]
     tried: Option<u32>,
+    /// How many testable mutants the tool found — unviable ones left out, as
+    /// they are from `tried`. A campaign that found some and tried none did
+    /// not measure: a failing baseline leaves exactly that, with every
+    /// mutant found and none tested ([`unmeasured`]).
+    #[serde(default)]
+    found: Option<u32>,
+}
+
+/// The terminal line, if the campaign printed one.
+fn terminal(text: &str) -> Option<Terminal> {
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<Terminal>(line.trim()).ok())
+        .find(|t| t.campaign == "done")
 }
 
 /// Whether the campaign said it finished.
@@ -383,10 +396,57 @@ pub fn completed(text: &str) -> bool {
 /// counting the survivors would make a campaign that tried a hundred and
 /// lost three look like one that tried three and lost them all.
 pub fn tried(text: &str) -> Option<u32> {
-    text.lines()
-        .filter_map(|line| serde_json::from_str::<Terminal>(line.trim()).ok())
-        .find(|t| t.campaign == "done")
-        .and_then(|t| t.tried)
+    terminal(text).and_then(|t| t.tried)
+}
+
+/// How many testable mutants the campaign says it found, from its terminal
+/// line; `None` when the line does not say.
+pub fn found(text: &str) -> Option<u32> {
+    terminal(text).and_then(|t| t.found)
+}
+
+/// Why a campaign that said it finished still measured nothing, if it did:
+/// it found mutants and tried none.
+///
+/// The terminal line says the script got to its end, not that the tool
+/// tested anything. A baseline that fails before the first mutant —
+/// cargo-mutants exits 4, measured on 27.1.0, with 12 mutants found and
+/// none tested — would otherwise be recorded as a campaign with no
+/// survivor, and gate 7 green at every rigor on a measurement nobody made.
+/// The stack's script refuses such a run itself; this is the same rule kept
+/// on `nunki`'s side, for a script that does not.
+pub fn unmeasured(text: &str) -> Option<String> {
+    let line = terminal(text)?;
+    match line.found {
+        Some(found) if found > 0 && line.tried.unwrap_or(0) == 0 => Some(format!(
+            "the campaign found {found} mutant(s) and tried none, so it measured nothing — \
+             a baseline whose tests fail before any mutant is tried leaves exactly this"
+        )),
+        _ => None,
+    }
+}
+
+/// Settle a campaign that said it finished and measured nothing: its reason
+/// is appended to the campaign's stderr, beside the log, where gate 7 reads
+/// the cause of a campaign that could not run — so the gate is red and says
+/// why, rather than asking for the same campaign again. Returns the reason,
+/// or `None` for a campaign that did measure.
+pub fn settle_unmeasured(log: &Path, text: &str) -> Result<Option<String>, MutantsError> {
+    let Some(why) = unmeasured(text) else {
+        return Ok(None);
+    };
+    use std::io::Write;
+    let stderr = log.with_extension("err");
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&stderr)
+        .and_then(|mut file| writeln!(file, "nunki: {why}"))
+        .map_err(|e| MutantsError::Io(stderr.clone(), e))?;
+    Ok(Some(format!(
+        "{why}. What it said is in {}",
+        stderr.display()
+    )))
 }
 
 /// The survivors a campaign's log names, **with no outcome**.
@@ -750,9 +810,16 @@ pub fn read_back(
         // nothing is written, so gate 7 keeps asking rather than passing on a
         // log that happens to hold no survivor.
         Presence::Ended if completed(&text) => {
-            let survivors = record_finished(dir, &running.fingerprint, &running.head, &text)?;
+            // Finished, and still measured nothing: not recorded, and its
+            // reason left where gate 7 reads it.
+            let progress = match settle_unmeasured(&running.log, &text)? {
+                Some(why) => Progress::CouldNotRun(why),
+                None => Progress::Finished {
+                    survivors: record_finished(dir, &running.fingerprint, &running.head, &text)?,
+                },
+            };
             forget_running(&project.hq_root, &slot.name)?;
-            Progress::Finished { survivors }
+            progress
         }
         Presence::Ended => {
             forget_running(&project.hq_root, &slot.name)?;
@@ -998,9 +1065,13 @@ pub fn command(
 /// independently, and a file relative to the repository, like the touched
 /// list. `{"campaign":"done"}` is said once, at the end, and only if every
 /// stack said it: a campaign one stack did not finish measured nothing for it.
-/// It carries `tried`, the stacks' counts added up, only when every stack
-/// that ran gave one: a sum missing a stack's mutants would be a share of
-/// the wrong whole, and without it gate 7 judges as `critical` does.
+/// A stack that found mutants and tried none measured nothing, and the
+/// campaign is then not finished either, whatever the other stacks did.
+/// It carries `tried` and `found`, each the stacks' counts added up, and
+/// each only when every stack that ran gave one: a sum missing a stack's
+/// mutants would be a share of the wrong whole. Without `tried` gate 7
+/// judges as `critical` does; without `found` the not-measured rule has
+/// nothing to compare, and the stacks' own scripts are what refuse.
 ///
 /// Whether a stack said it finished is read from what `jq` **printed**, not
 /// from `jq -e`: jq 1.6 — Debian bookworm's — exits 0 under `-e` on an
@@ -1016,7 +1087,9 @@ pub fn several_campaigns(
     touched: &[String],
 ) -> String {
     use crate::exec::quote;
-    let mut script = String::from("set -u\ncomplete=1\ncounted=1\ntried=0\nout=\"$(mktemp)\"\n");
+    let mut script = String::from(
+        "set -u\ncomplete=1\ncounted=1\ntried=0\nsized=1\nfound=0\nout=\"$(mktemp)\"\n",
+    );
     for j in judged {
         let mine: Vec<String> = touched
             .iter()
@@ -1050,7 +1123,14 @@ pub fn several_campaigns(
              '') complete=0 ;;\n\
              *[!0-9]*) counted=0 ;;\n\
              *) tried=$((tried + said)) ;;\n\
-             esac\n",
+             esac\n\
+             seen=$(jq -R -r 'fromjson? | select(type == \"object\" and .campaign == \"done\") \
+             | (.found // \"none\") | tostring' < \"$out\" | tail -n 1)\n\
+             case \"$seen\" in\n\
+             ''|*[!0-9]*) sized=0 ;;\n\
+             *) found=$((found + seen)) ;;\n\
+             esac\n\
+             case \"$said:$seen\" in 0:[1-9]*) complete=0 ;; esac\n",
             dir = quote(&dir),
             at = j.scripts_at,
             campaign = quote(campaign),
@@ -1061,9 +1141,12 @@ pub fn several_campaigns(
     }
     script.push_str(
         "rm -f \"$out\"\n\
-         if [ \"$complete\" = 1 ] && [ \"$counted\" = 1 ]; then\n\
-         printf '{\"campaign\":\"done\",\"tried\":%s}\\n' \"$tried\"\n\
-         elif [ \"$complete\" = 1 ]; then printf '%s\\n' '{\"campaign\":\"done\"}'; fi\n",
+         if [ \"$complete\" = 1 ]; then\n\
+         line='{\"campaign\":\"done\"'\n\
+         if [ \"$counted\" = 1 ]; then line=\"$line,\\\"tried\\\":$tried\"; fi\n\
+         if [ \"$sized\" = 1 ]; then line=\"$line,\\\"found\\\":$found\"; fi\n\
+         printf '%s}\\n' \"$line\"\n\
+         fi\n",
     );
     script
 }
