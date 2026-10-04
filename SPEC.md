@@ -93,7 +93,7 @@ L'en-tête de `MISSION.md`, validé par l'humain avant le lancement, déclare :
 |---|---|---|
 | `integration` | `none` (avec la raison en une ligne), ou la liste des services | avec `none`, pas de mission d'intégration ; sinon le profil système et l'intégrateur |
 | `security` | `gates` ou `agent` | `gates` : les portes mécaniques seulement ; `agent` : en plus, la mission de sécurité — dans le profil système s'il y a des services, sinon dans le profil mission, sur le livrable seul |
-| `rigor` | `prototype`, `standard` ou `critical` (absent : `critical`) | le niveau d'exigence : ce que demande la porte 7 (4.4) et combien de tours de sécurité sont joués (4.5). Un `prototype` est la forme **code seul** par construction : `mission new` refuse des services ou l'agent sécurité à côté de lui |
+| `rigor` | `prototype`, `standard` ou `critical` (absent : `critical`) | le niveau d'exigence : ce que demande la porte 7 (4.4) et combien de tours de sécurité sont joués (4.5). Un `prototype` est la forme **code seul** par construction : `mission new`, le démarrage et le recadrage refusent des services ou l'agent sécurité à côté de lui |
 
 `security: agent` s'impose dès que la mission a des services, une surface
 exposée (HTTP, fichier importé, message reçu), de l'authentification, de la
@@ -1457,14 +1457,19 @@ dernier lot. La première rouge arrête tout.
    rien trouvé à muter passe.
 
    **Une campagne qui n'a rien mesuré n'est jamais verte**, à aucun niveau.
-   La dernière ligne de la campagne porte ses comptes :
+   La ligne de fin n'est écrite que si le statut de l'outil dit que la
+   campagne est allée au bout, et **une seule** est acceptée : un journal qui
+   en porte deux est refusé. Quand la stack sait compter sur les lignes
+   changées, cette ligne porte ses comptes,
    `{"campaign":"done","tried":N,"found":M}`, tirés des résultats de l'outil,
-   mutants non viables exclus. Elle n'est écrite que si le statut de l'outil
-   dit que la campagne est allée au bout ; `found > 0` avec `tried = 0` n'est
-   pas une mesure : rien n'est enregistré et la porte est rouge avec la cause.
-   La campagne ne lit **aucune configuration de l'arbre qu'elle mute** : le
-   script de la stack passe l'option « sans configuration » de son outil, ou
-   refuse un arbre qui en porte une.
+   mutants non viables exclus ; `found > 0` avec `tried = 0` n'est pas une
+   mesure : rien n'est enregistré et la porte est rouge avec la cause. Une
+   stack qui ne sait compter que sur des fichiers entiers ne donne pas de
+   compte (sauf `tried` 0 quand rien n'est mutable), et le niveau `standard`
+   y est jugé comme `critical` : un seuil sur des fichiers entiers laisserait
+   un fichier déjà bien testé cacher des lignes nouvelles non testées.
+   La campagne Rust ne lit **aucune configuration de l'arbre qu'elle mute**
+   (`cargo mutants --no-config`).
 
    **Les lignes changées, pas les fichiers entiers.** C'est la règle de la
    porte 8 : **ce qui est nouveau depuis la base appartient à la mission, ce
@@ -2426,10 +2431,13 @@ Ce que la boucle veut dire, et ce qu'elle ne veut pas dire.
   est un verdict que l'agent sécurité conclut (`CLEAR` ou `FINDINGS`) :
   aucun au niveau `prototype`, un au niveau `standard`, trois au niveau
   `critical`. Quand les portes passent et que la sécurité viendrait ensuite,
-  tours épuisés, l'agent n'est pas lancé : la mission passe `Verified` et
-  `FOLLOWUP_HQ.md` consigne la borne atteinte (`n / max`). Un `iterate` après
-  le dernier tour reste accepté et son volet est porté par les portes comme
-  d'habitude ; seul le tour suivant n'est pas joué.
+  tours épuisés, l'agent n'est pas lancé. Si le dernier verdict conclu est
+  `CLEAR`, la mission passe `Verified`. S'il est `FINDINGS`, elle revient à
+  `Findings` avec ce dernier rapport : **la borne ne vérifie jamais seule**,
+  `Verified` reste atteint par un `CLEAR` ou par une levée humaine
+  (`accept`), et un `iterate` ouvre un volet borné comme les autres.
+  `FOLLOWUP_HQ.md` consigne la borne atteinte (`n / max`) et que la
+  correction venue après le dernier tour n'a pas été attaquée.
 - **La boucle est bornée, et la borne est un paramètre** : **trois volets**
   par défaut. Au troisième retour au codeur
   sur une même mission, le HQ ne relance pas : il s'arrête et remonte à
