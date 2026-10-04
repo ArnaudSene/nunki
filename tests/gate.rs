@@ -2838,3 +2838,27 @@ fn at_standard_the_threshold_frozen_in_the_header_beats_the_projects() {
     f.header.mutation_threshold = None;
     assert_eq!(f.gate_seven(Role::Coder).decision, Decision::Passed);
 }
+
+/// Rulings the HQ gave on this very campaign are counted, and none of them
+/// is called carried: the sentence that sends the HQ to `--lift` is for a
+/// ruling given on code that has changed since, and naming "0 of those"
+/// would send it looking for nothing.
+#[test]
+fn an_equivalence_given_on_this_campaign_is_not_called_carried() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.campaign(vec![survivor(
+        1,
+        Some(Triage::Equivalent {
+            why: "no caller can reach that branch".into(),
+            carried_from: None,
+        }),
+    )]);
+    f.journal_names_head();
+    let outcome = f.gate_seven(Role::Coder);
+    assert_eq!(outcome.decision, Decision::Passed);
+    let note = outcome.note.expect("an equivalence is counted out loud");
+    assert!(note.contains("1 of 1 rode on `equivalent`"), "{note}");
+    assert!(!note.contains("carried"), "{note}");
+    assert!(!note.contains("--lift"), "{note}");
+}
