@@ -279,6 +279,25 @@ fn kill(pid: u32) {
 /// mission's monitor.
 #[test]
 fn a_monitor_is_started_once_and_replaced_when_dead() {
+    // What this proves is what `ps` says about a pid, and it ends a monitor
+    // with `kill`, so where either cannot be run there is nothing to measure
+    // — nunki's own rust image carries no procps, and its battery runs
+    // there. Skipped and said, the way a test needing a container engine
+    // skips without one; it runs on a developer's machine and on CI, where
+    // both are part of the system.
+    for (tool, probe) in [("ps", ["-o", "pid="]), ("kill", ["-l", "1"])] {
+        if std::process::Command::new(tool)
+            .args(probe)
+            .output()
+            .is_err()
+        {
+            eprintln!(
+                "skipped: no `{tool}` on this machine, and a monitor's liveness is what \
+                 `ps` says about a process `kill` can end"
+            );
+            return;
+        }
+    }
     let dir = tempfile::tempdir().unwrap();
     let project = project(dir.path());
     let exe = fake_nunki(dir.path());
