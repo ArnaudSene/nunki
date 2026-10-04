@@ -946,7 +946,10 @@ const MUTATION_RUST: &str = r#"#!/bin/sh
 # It prints **one JSON object per line** on stdout, one per surviving mutant:
 #   {"id":"…","file":"…","line":12,"description":"…"}
 # and, last of all and exactly once, the line that says it got to the end:
-#   {"campaign":"done"}
+#   {"campaign":"done","tried":42}
+# `tried` is how many mutants were run against the tests, unviable ones left
+# out: what a `standard` mission's gate 7 divides by. It comes from the
+# tool's own results, never from counting the survivors.
 # `nunki` reads no other line as a result, so progress may go to stdout freely —
 # though this script keeps the tool's own chatter on stderr. A campaign that
 # stops before that last line has measured nothing, whatever else it printed.
@@ -978,7 +981,7 @@ if [ -z "$files" ]; then
   # happen. The terminal line is printed **before** leaving, because `nunki`
   # reads its absence as a campaign that was killed and asks for another:
   # a branch touching only tests or documentation would be asked for ever.
-  printf '{"campaign":"done"}\n'
+  printf '{"campaign":"done","tried":0}\n'
   exit 0
 fi
 
@@ -1054,7 +1057,7 @@ if [ ! -f "$missed" ]; then
   # A crate that does not parse also leaves no `mutants.out`, but exits 1,
   # so only the status tells the two apart.
   if [ -n "${NUNKI_BASE:-}" ] && [ "$status" -eq 0 ]; then
-    printf '{"campaign":"done"}\n'
+    printf '{"campaign":"done","tried":0}\n'
     exit 0
   fi
   echo "nunki: the campaign left no $missed" >&2
@@ -1082,6 +1085,19 @@ while IFS= read -r mutant; do
     "$(escape "$mutant")" "$file" "$line" "$(escape "$what")"
 done < "$missed"
 
+# How many mutants were tried: each one cargo-mutants ran the tests against,
+# from its own outcome files, one mutant per line — `caught.txt`, `missed.txt`
+# and `timeout.txt`. `unviable.txt` is left out: those mutants did not build,
+# so no test ever ran against them. Measured on 27.1.0, which writes all four
+# beside `missed.txt`, empty when nothing landed there.
+tried=0
+for outcome in caught missed timeout; do
+  if [ -f "$out/mutants.out/$outcome.txt" ]; then
+    n=$(grep -c . "$out/mutants.out/$outcome.txt" || true)
+    tried=$((tried + n))
+  fi
+done
+
 # The last thing it prints, and the only line that says the campaign got to
 # the end. Without it `nunki` cannot tell "no survivor" from "no answer": a
 # campaign killed halfway, one whose container went away and one that never
@@ -1092,7 +1108,7 @@ done < "$missed"
 # spawner `exec`s the command so that the pid it published is the campaign's
 # own, and a shell that has been replaced cannot write `$?`. A truncated log
 # loses its last line, which is this one, so the three failures fail alike.
-printf '{"campaign":"done"}\n'
+printf '{"campaign":"done","tried":%s}\n' "$tried"
 "#;
 
 /// How a Rust application is started (SPEC 4.2, rule 2). Shipped by the
@@ -1634,7 +1650,10 @@ const MUTATION_PYTHON: &str = r##"#!/bin/sh
 # It prints **one JSON object per line** on stdout, one per surviving mutant:
 #   {"id":"…","file":"…","line":12,"description":"…"}
 # and, last of all and exactly once, the line that says it got to the end:
-#   {"campaign":"done"}
+#   {"campaign":"done","tried":42}
+# `tried` is how many mutants were run against the tests, unviable ones left
+# out: what a `standard` mission's gate 7 divides by. It comes from the
+# tool's own results, never from counting the survivors.
 # `nunki` reads no other line as a result, so progress may go to stdout freely —
 # though this script keeps the tool's own chatter on stderr. A campaign that
 # stops before that last line has measured nothing, whatever else it printed.
@@ -1693,7 +1712,7 @@ if [ -z "$files" ]; then
   # happen. The terminal line is printed **before** leaving, because `nunki`
   # reads its absence as a campaign that was killed and asks for another:
   # a branch touching only tests or documentation would be asked for ever.
-  printf '{"campaign":"done"}\n'
+  printf '{"campaign":"done","tried":0}\n'
   exit 0
 fi
 
@@ -1769,8 +1788,12 @@ fi
 #
 # Under `set -e`, a failure here ends the script **before** the terminal line,
 # which is what it should do: results nobody could read are not a measurement.
+#
+# Into a file first, then printed: the survivors it names are counted below,
+# with the killed, into how many mutants this campaign tried.
+found=$(mktemp)
 # shellcheck disable=SC2086
-python3 - $files <<'PY' || exit 1
+python3 - $files <<'PY' > "$found" || exit 1
 import json
 import re
 import subprocess
@@ -1880,6 +1903,34 @@ for name, status in survivors:
     print(json.dumps({"id": name, "file": path, "line": line, "description": what}))
 PY
 
+cat "$found"
+
+# How many mutants were tried in the touched files: the survivors just
+# printed — everything not answered, `no tests` and `not checked` included —
+# and the killed, which `mutmut results` does not list. Those are read from
+# mutmut's own record of each mutated file, `mutants/<path>.meta`, whose
+# `exit_code_by_key` holds one exit code per mutant: 1 and 3 are killed, 37
+# is caught by type check. `skipped` is never counted, as it ran no test.
+#
+# Not measured against a real mutmut, unlike the rest of this script — none
+# could be installed where this was written — so the record's shape and its
+# codes are an assumption about mutmut 3, to be checked on the next real
+# campaign. Every way of getting them wrong counts **fewer** killed — a file
+# not found, a code not recognised — which can only lower the share a
+# `standard` gate 7 sees, never raise it.
+tried=$(grep -c '"file"' "$found" || true)
+for path in $files; do
+  meta="mutants/${path#./}.meta"
+  [ -f "$meta" ] || continue
+  killed=$(jq '[.exit_code_by_key // {} | .[] | select(. == 1 or . == 3 or . == 37)] | length' \
+    "$meta" 2>/dev/null || true)
+  case "$killed" in
+    ''|*[!0-9]*) ;;
+    *) tried=$((tried + killed)) ;;
+  esac
+done
+rm -f "$found"
+
 # Behind itself, once the survivors have been read out of it. A courtesy
 # and not a guard: a campaign that is killed — and one often is, the
 # deadline is 45 minutes — never reaches this line, which is why the
@@ -1896,7 +1947,7 @@ rm -rf mutants
 # spawner `exec`s the command so that the pid it published is the campaign's
 # own, and a shell that has been replaced cannot write `$?`. A truncated log
 # loses its last line, which is this one, so the three failures fail alike.
-printf '{"campaign":"done"}\n'
+printf '{"campaign":"done","tried":%s}\n' "$tried"
 "##;
 
 /// The mechanical security of a Python project (SPEC 4.4, gate 8): the
@@ -2575,7 +2626,10 @@ const MUTATION_NEXT: &str = r##"#!/bin/sh
 # It prints **one JSON object per line** on stdout, one per surviving mutant:
 #   {"id":"…","file":"…","line":12,"description":"…"}
 # and, last of all and exactly once, the line that says it got to the end:
-#   {"campaign":"done"}
+#   {"campaign":"done","tried":42}
+# `tried` is how many mutants were run against the tests, unviable ones left
+# out: what a `standard` mission's gate 7 divides by. It comes from the
+# tool's own results, never from counting the survivors.
 # `nunki` reads no other line as a result, so progress may go to stdout freely —
 # though this script keeps the tool's own chatter on stderr. A campaign that
 # stops before that last line has measured nothing, whatever else it printed.
@@ -2605,7 +2659,7 @@ if [ -z "$files" ]; then
   # happen. The terminal line is printed **before** leaving, because `nunki`
   # reads its absence as a campaign that was killed and asks for another:
   # a branch touching only tests or documentation would be asked for ever.
-  printf '{"campaign":"done"}\n'
+  printf '{"campaign":"done","tried":0}\n'
   exit 0
 fi
 
@@ -2687,6 +2741,15 @@ for (const [file, entry] of Object.entries(report.files ?? {})) {
 }
 ' "$report"
 
+# How many mutants were tried, from the same report: every mutant the tests
+# ran against — detected (`Killed`, `Timeout`) or not (`Survived`,
+# `NoCoverage`, `Pending`). The invalid ones, `CompileError` and
+# `RuntimeError`, are what Stryker calls unviable and are left out, as is
+# `Ignored`: no test was asked about them.
+tried=$(jq '[.files // {} | .[] | .mutants // [] | .[]
+  | select(.status == "Killed" or .status == "Timeout" or .status == "Survived"
+    or .status == "NoCoverage" or .status == "Pending")] | length' "$report" || true)
+
 # Behind itself, once the survivors have been read out of it — the file and
 # the directory Stryker made for it, because an empty `reports/` left in the
 # tree is still something the next walk has to be told about. A courtesy and
@@ -2705,7 +2768,10 @@ holder=$(dirname "$report")
 # A line and not an exit status, because the status does not survive. The
 # spawner `exec`s the command so that the pid it published is the campaign's
 # own, and a shell that has been replaced cannot write `$?`.
-printf '{"campaign":"done"}\n'
+case "$tried" in
+  ''|*[!0-9]*) printf '{"campaign":"done"}\n' ;;
+  *) printf '{"campaign":"done","tried":%s}\n' "$tried" ;;
+esac
 "##;
 
 /// The mechanical security of a Next.js project (SPEC 4.4, gate 8): the

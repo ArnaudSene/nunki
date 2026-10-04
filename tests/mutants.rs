@@ -511,6 +511,7 @@ fn a_campaign_round_trips_through_the_mission_folder() {
     let campaign = Campaign {
         fingerprint: "abc1234".into(),
         head: "def5678".into(),
+        tried: None,
         date: "2026-09-10T12:00:00Z".into(),
         survivors: vec![Survivor {
             id: "src/lib.rs:3".into(),
@@ -797,6 +798,7 @@ fn an_equivalence_is_ruled_by_a_verb_and_lands_in_the_hqs_own_file() {
         &Campaign {
             fingerprint: "abc1234".into(),
             head: "def5678".into(),
+            tried: None,
             date: "2026-09-10T12:00:00Z".into(),
             survivors: vec![Survivor {
                 id: "src/lib.rs:3".into(),
@@ -851,6 +853,7 @@ fn ruled_before(dir: &std::path::Path, survivors: Vec<Survivor>) {
             head: "def5678".into(),
             date: "2026-09-10T12:00:00Z".into(),
             survivors,
+            tried: None,
         },
     )
     .unwrap();
@@ -1323,6 +1326,7 @@ fn on_file(dir: &std::path::Path, fingerprint: &str, survivors: usize) {
             head: "0".repeat(40),
             date: "2026-09-17T00:00:00Z".into(),
             survivors,
+            tried: None,
         },
     )
     .unwrap();
@@ -1506,4 +1510,164 @@ fn live_the_shipped_mutation_script_answers_for_the_changed_lines() {
         !survivors.is_empty(),
         "`double` is only checked for being positive: {stdout}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// How many mutants a campaign tried, for a `standard` mission's gate 7.
+// ---------------------------------------------------------------------------
+
+/// The count is the script's own word on its terminal line, and nothing
+/// else: a line without it, a log without a terminal line, or a count on a
+/// line that is not the terminal one all say "I do not know".
+#[test]
+fn the_tried_count_is_read_from_the_terminal_line_only() {
+    let log = "Found 12 mutants to test\n\
+               {\"id\":\"a\",\"file\":\"src/lib.rs\",\"line\":3,\"description\":\"x\"}\n\
+               {\"campaign\":\"done\",\"tried\":12}\n";
+    assert!(mutants::completed(log), "a count does not hide the end");
+    assert_eq!(mutants::tried(log), Some(12));
+    assert_eq!(mutants::parse(log).len(), 1);
+
+    assert_eq!(mutants::tried("{\"campaign\":\"done\"}\n"), None);
+    assert_eq!(
+        mutants::tried("{\"campaign\":\"started\",\"tried\":4}\n"),
+        None
+    );
+    assert_eq!(mutants::tried(""), None);
+    assert_eq!(
+        mutants::tried("{\"campaign\":\"done\",\"tried\":0}\n"),
+        Some(0)
+    );
+}
+
+/// A finished campaign keeps its count in `MUTANTS.json`; one without a
+/// count writes no `tried` at all, so a campaign file is byte for byte what
+/// it was before the count existed, and an older file reads as `None`.
+#[test]
+fn a_campaign_records_how_many_mutants_it_tried_and_an_older_file_still_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    mutants::record_finished(
+        dir.path(),
+        "abc1234",
+        "def5678",
+        "{\"id\":\"a\",\"file\":\"src/lib.rs\",\"line\":3,\"description\":\"x\"}\n\
+         {\"campaign\":\"done\",\"tried\":7}\n",
+    )
+    .unwrap();
+    let campaign = mutants::read(dir.path()).unwrap().unwrap();
+    assert_eq!(campaign.tried, Some(7));
+    assert_eq!(campaign.survivors.len(), 1);
+
+    let older = tempfile::tempdir().unwrap();
+    mutants::record_finished(
+        older.path(),
+        "abc1234",
+        "def5678",
+        "{\"campaign\":\"done\"}\n",
+    )
+    .unwrap();
+    let text = std::fs::read_to_string(older.path().join(mutants::FILE)).unwrap();
+    assert!(!text.contains("tried"), "{text}");
+    assert_eq!(mutants::read(older.path()).unwrap().unwrap().tried, None);
+
+    std::fs::write(
+        older.path().join(mutants::FILE),
+        "{\"fingerprint\":\"f\",\"head\":\"h\",\"date\":\"d\",\"survivors\":[]}\n",
+    )
+    .unwrap();
+    assert_eq!(mutants::read(older.path()).unwrap().unwrap().tried, None);
+}
+
+/// Two stacks, each with a `mutation.sh` of its own, run by the script
+/// `nunki` hands a project that carries both.
+struct TwoStacks {
+    _dir: tempfile::TempDir,
+    tree: PathBuf,
+    judged: Vec<nunki::run::Judged>,
+}
+
+impl TwoStacks {
+    fn new(root_script: &str, frontend_script: &str) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let tree = dir.path().join("tree");
+        std::fs::create_dir_all(tree.join("frontend/app")).unwrap();
+        let mut judged = Vec::new();
+        for (name, sub, body) in [
+            ("rust", "", root_script),
+            ("next", "frontend", frontend_script),
+        ] {
+            let at = dir.path().join(format!("stack-{name}"));
+            std::fs::create_dir_all(&at).unwrap();
+            let script = at.join(mutants::SCRIPT);
+            std::fs::write(&script, body).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            judged.push(nunki::run::Judged {
+                stack: nunki::project::Stack::new(name, sub).unwrap(),
+                scripts_at: at.display().to_string(),
+                advisories_at: String::new(),
+            });
+        }
+        Self {
+            _dir: dir,
+            tree,
+            judged,
+        }
+    }
+
+    fn run(&self) -> String {
+        let touched = vec!["src/lib.rs".to_string(), "frontend/app/page.ts".to_string()];
+        let script = mutants::several_campaigns(&self.judged, "abc1234", &touched);
+        let out = Command::new("sh")
+            .args(["-c", &script])
+            .current_dir(&self.tree)
+            .output()
+            .expect("sh runs the campaign");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+}
+
+fn says(lines: &[&str]) -> String {
+    let mut script = String::from("#!/bin/sh\n");
+    for line in lines {
+        script.push_str(&format!("printf '%s\\n' '{line}'\n"));
+    }
+    script
+}
+
+/// Over several stacks the count is the sum of theirs, and only when every
+/// stack that ran gave one: a sum missing one stack's mutants is a share of
+/// the wrong whole.
+#[cfg(unix)]
+#[test]
+fn a_campaign_over_several_stacks_adds_up_what_each_tried() {
+    let rust = says(&[
+        r#"{"id":"1","file":"src/lib.rs","line":2,"description":"x"}"#,
+        r#"{"campaign":"done","tried":3}"#,
+    ]);
+    let next = says(&[r#"{"campaign":"done","tried":4}"#]);
+    let out = TwoStacks::new(&rust, &next).run();
+    assert!(mutants::completed(&out), "{out}");
+    assert_eq!(mutants::tried(&out), Some(7), "{out}");
+    assert_eq!(mutants::parse(&out).len(), 1, "{out}");
+
+    // One stack whose script predates the count: the campaign finished, and
+    // says it does not know how many were tried.
+    let older = says(&[r#"{"campaign":"done"}"#]);
+    let out = TwoStacks::new(&rust, &older).run();
+    assert!(mutants::completed(&out), "{out}");
+    assert_eq!(mutants::tried(&out), None, "{out}");
+}
+
+/// A stack that printed nothing did not finish, whatever jq's exit status
+/// says: jq 1.6 — Debian bookworm's — exits 0 under `-e` on an empty input,
+/// and the check that relied on it counted a silent stack as done.
+#[cfg(unix)]
+#[test]
+fn a_stack_that_printed_nothing_has_not_finished_the_campaign() {
+    let rust = says(&[r#"{"campaign":"done","tried":3}"#]);
+    let out = TwoStacks::new(&rust, "#!/bin/sh\nexit 0\n").run();
+    assert!(!mutants::completed(&out), "{out}");
+    let out = TwoStacks::new(&rust, "#!/bin/sh\necho progress\nexit 1\n").run();
+    assert!(!mutants::completed(&out), "{out}");
 }

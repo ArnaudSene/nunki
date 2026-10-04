@@ -23,7 +23,7 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 
 use crate::git;
 use crate::harness::Role;
-use crate::mission::{Header, Integration};
+use crate::mission::{Header, Integration, Rigor};
 use crate::project::ProtectedPaths;
 
 /// The four gates, in the order SPEC 4.4 lists them.
@@ -374,7 +374,7 @@ fn play(subject: &Subject, verification: &Verification, phase: Phase) -> Result<
         // to, and that pair is what a campaign that could not run leaves.
         outcomes.push(match &campaign {
             Some(why) => Outcome::waiting(Gate::Mutation, why),
-            None => mutation(subject)?,
+            None => mutation(subject, verification.project.config.mutation_threshold)?,
         });
     }
     outcomes.push(match &campaign {
@@ -1436,12 +1436,13 @@ fn campaign_that_could_not_run(
     )))
 }
 
-/// Gate 7: every mutant that survived has received an outcome (SPEC 4.4).
+/// Gate 7: every mutant that survived has received an outcome (SPEC 4.4) —
+/// or, for a `standard` mission, enough of the tried mutants are killed.
 ///
 /// Deterministic, and it reads a file: the campaign itself is long, runs in
 /// the slot's container and is watched like a run (see [`crate::mutants`]).
-/// **No threshold** — the gate is green when every survivor has one of three
-/// outcomes, never when a score clears a bar.
+/// **No threshold at `critical`** — the gate is green when every survivor
+/// has one of three outcomes, never when a score clears a bar.
 ///
 /// Three states it must keep apart:
 ///
@@ -1453,7 +1454,13 @@ fn campaign_that_could_not_run(
 ///   pas un volet", which is what a failed gate produces.
 /// - every survivor answered: green, and the note says how many rode on
 ///   `equivalent`, the one outcome no gate can check.
-fn mutation(subject: &Subject) -> Result<Outcome, GateError> {
+///
+/// The mission's rigor changes what is asked, and nothing else: a
+/// `prototype` owes no campaign at all, and a `standard` one is judged on
+/// the share of tried mutants killed against `threshold`, the project's
+/// `mutation_threshold` ([`share_killed`]). Who may give which outcome, and
+/// that a named test must exist, hold at every rigor.
+fn mutation(subject: &Subject, threshold: u32) -> Result<Outcome, GateError> {
     let gate = Gate::Mutation;
     if subject.role != Role::Coder {
         // SPEC 4.4's per-role table: "non (des tests système et de la
@@ -1462,6 +1469,18 @@ fn mutation(subject: &Subject) -> Result<Outcome, GateError> {
             gate,
             Decision::NotApplicable(
                 "system tests and configuration are not mutated (SPEC 4.4)".into(),
+            ),
+        ));
+    }
+    if subject.header.rigor == Rigor::Prototype {
+        // Not applicable rather than unplayed: an unplayed gate 7 is a
+        // campaign owed, and the monitor would start one nobody asked for.
+        return Ok(Outcome::of(
+            gate,
+            Decision::NotApplicable(
+                "a prototype owes no mutation campaign: it runs the coder and the \
+                 mechanical gates only"
+                    .into(),
             ),
         ));
     }
@@ -1520,6 +1539,41 @@ fn mutation(subject: &Subject) -> Result<Outcome, GateError> {
         coders.get(&s.id).cloned().or_else(|| s.outcome.clone())
     };
 
+    if subject.header.rigor == Rigor::Standard {
+        let why = match campaign.tried {
+            Some(tried) if tried as usize >= campaign.survivors.len() => {
+                return share_killed(subject, &campaign, tried, threshold, &answer);
+            }
+            Some(tried) => format!(
+                "the campaign says it tried {tried} mutant(s) and names {} survivor(s), \
+                 which cannot both be true, so this `standard` mission is judged as \
+                 `critical` judges it: every survivor needs an outcome",
+                campaign.survivors.len()
+            ),
+            None => "the campaign does not say how many mutants it tried — written by an \
+                     older mutation.sh, or before the count existed — so this `standard` \
+                     mission is judged as `critical` judges it: every survivor needs an \
+                     outcome"
+                .to_string(),
+        };
+        let mut outcome = every_survivor_answered(subject, &campaign, &answer)?;
+        outcome.note = Some(match outcome.note {
+            Some(note) => format!("{why}. {note}"),
+            None => why,
+        });
+        return Ok(outcome);
+    }
+    every_survivor_answered(subject, &campaign, &answer)
+}
+
+/// Gate 7 as `critical` plays it: every survivor has an outcome, every test
+/// an outcome names exists, and the equivalences are counted out loud.
+fn every_survivor_answered(
+    subject: &Subject,
+    campaign: &crate::mutants::Campaign,
+    answer: &dyn Fn(&crate::mutants::Survivor) -> Option<crate::mutants::Triage>,
+) -> Result<Outcome, GateError> {
+    let gate = Gate::Mutation;
     let untriaged: Vec<String> = campaign
         .survivors
         .iter()
@@ -1539,8 +1593,97 @@ fn mutation(subject: &Subject) -> Result<Outcome, GateError> {
         ));
     }
 
-    // A named test has to exist. "A test covers this" is not an outcome; a
-    // test called `x` is, and whether `x` is there is a fact.
+    if let Some(missing) = a_named_test_missing(subject, campaign, answer) {
+        return Ok(Outcome::of(gate, missing));
+    }
+
+    let mut outcome = Outcome::of(gate, Decision::Passed);
+    outcome.note = equivalences(campaign, answer);
+    Ok(outcome)
+}
+
+/// Gate 7 as `standard` plays it: green when the share of tried mutants
+/// killed reaches `threshold`, as a whole percentage. Killed means tried
+/// minus the survivors left without an outcome — a survivor answered by a
+/// named test, frozen as a bug or ruled equivalent counts as killed.
+///
+/// A named test must still exist, as at `critical`: an outcome resting on a
+/// test nobody wrote is no outcome, and counting it as a kill would be
+/// worse. Passed or not, the note says how many survivors were left without
+/// an outcome, so the pull request shows them.
+fn share_killed(
+    subject: &Subject,
+    campaign: &crate::mutants::Campaign,
+    tried: u32,
+    threshold: u32,
+    answer: &dyn Fn(&crate::mutants::Survivor) -> Option<crate::mutants::Triage>,
+) -> Result<Outcome, GateError> {
+    let gate = Gate::Mutation;
+    if let Some(missing) = a_named_test_missing(subject, campaign, answer) {
+        return Ok(Outcome::of(gate, missing));
+    }
+    let untriaged: Vec<String> = campaign
+        .survivors
+        .iter()
+        .filter(|s| answer(s).is_none())
+        .map(|s| format!("{}:{} {}", s.file, s.line, s.id))
+        .collect();
+    let left = if untriaged.is_empty() {
+        "no survivor is left without an outcome".to_string()
+    } else {
+        format!(
+            "{} survivor(s) left without an outcome: {}",
+            untriaged.len(),
+            head_of(&untriaged, 10)
+        )
+    };
+    let note = |said: String| match equivalences(campaign, answer) {
+        Some(equivalent) => format!("{said}; {equivalent}"),
+        None => said,
+    };
+
+    if tried == 0 {
+        let mut outcome = Outcome::of(gate, Decision::Passed);
+        outcome.note = Some(note(
+            "the campaign tried no mutant: nothing on the lines this branch changed \
+             could be mutated"
+                .to_string(),
+        ));
+        return Ok(outcome);
+    }
+    // In whole numbers, so that 79.5% is not rounded up to a pass.
+    let (tried, threshold) = (u64::from(tried), u64::from(threshold));
+    let killed = tried - untriaged.len() as u64;
+    let share = killed * 100 / tried;
+    if killed * 100 >= threshold * tried {
+        let mut outcome = Outcome::of(gate, Decision::Passed);
+        outcome.note = Some(note(format!(
+            "{killed} of {tried} tried mutant(s) killed ({share}%), at or above the \
+             project's threshold of {threshold}%; {left}"
+        )));
+        return Ok(outcome);
+    }
+    let needed = (threshold * tried).div_ceil(100) - killed;
+    let mut outcome = Outcome::of(
+        gate,
+        Decision::Failed(format!(
+            "{killed} of {tried} tried mutant(s) killed ({share}%), below the project's \
+             threshold of {threshold}%: {needed} more must be killed — a survivor answered \
+             by a named test, or frozen as a bug in one, counts as killed"
+        )),
+    );
+    outcome.note = Some(note(left));
+    Ok(outcome)
+}
+
+/// The first outcome that names a test nothing in the tree is called, as a
+/// red decision. "A test covers this" is not an outcome; a test called `x`
+/// is, and whether `x` is there is a fact.
+fn a_named_test_missing(
+    subject: &Subject,
+    campaign: &crate::mutants::Campaign,
+    answer: &dyn Fn(&crate::mutants::Survivor) -> Option<crate::mutants::Triage>,
+) -> Option<Decision> {
     for survivor in &campaign.survivors {
         let Some(outcome) = answer(survivor) else {
             continue;
@@ -1548,17 +1691,23 @@ fn mutation(subject: &Subject) -> Result<Outcome, GateError> {
         if let Some(test) = outcome.test()
             && git::run(subject.tree, &["grep", "--quiet", "-F", "--", test]).is_err()
         {
-            return Ok(Outcome::of(
-                gate,
-                Decision::Failed(format!(
-                    "{}:{} names the test {test:?}, and nothing in the tree is called \
-                     that",
-                    survivor.file, survivor.line
-                )),
-            ));
+            return Some(Decision::Failed(format!(
+                "{}:{} names the test {test:?}, and nothing in the tree is called \
+                 that",
+                survivor.file, survivor.line
+            )));
         }
     }
+    None
+}
 
+/// How many survivors rode on `equivalent`, the outcome no machine can
+/// check, when any did — left unsaid, it becomes the escape hatch that
+/// empties the gate.
+fn equivalences(
+    campaign: &crate::mutants::Campaign,
+    answer: &dyn Fn(&crate::mutants::Survivor) -> Option<crate::mutants::Triage>,
+) -> Option<String> {
     let equivalent: Vec<Option<String>> = campaign
         .survivors
         .iter()
@@ -1567,28 +1716,27 @@ fn mutation(subject: &Subject) -> Result<Outcome, GateError> {
             _ => None,
         })
         .collect();
-    let mut outcome = Outcome::of(gate, Decision::Passed);
-    if !equivalent.is_empty() {
-        // A carried ruling is named apart: it was given on code that has
-        // changed since, and the HQ may want to look at it again.
-        let carried = equivalent.iter().filter(|from| from.is_some()).count();
-        let carried = if carried > 0 {
-            format!(
-                ", and {carried} of those were carried from an earlier campaign — \
-                 `nunki mission mutants --lift` takes one back"
-            )
-        } else {
-            String::new()
-        };
-        outcome.note = Some(format!(
-            "{} of {} rode on `equivalent`, which no machine can check — they \
-             come from the HQ's own hand, and they are counted here so nobody has to \
-             go looking{carried}",
-            equivalent.len(),
-            campaign.survivors.len()
-        ));
+    if equivalent.is_empty() {
+        return None;
     }
-    Ok(outcome)
+    // A carried ruling is named apart: it was given on code that has
+    // changed since, and the HQ may want to look at it again.
+    let carried = equivalent.iter().filter(|from| from.is_some()).count();
+    let carried = if carried > 0 {
+        format!(
+            ", and {carried} of those were carried from an earlier campaign — \
+             `nunki mission mutants --lift` takes one back"
+        )
+    } else {
+        String::new()
+    };
+    Some(format!(
+        "{} of {} rode on `equivalent`, which no machine can check — they \
+         come from the HQ's own hand, and they are counted here so nobody has to \
+         go looking{carried}",
+        equivalent.len(),
+        campaign.survivors.len()
+    ))
 }
 
 fn head_of(items: &[String], n: usize) -> String {

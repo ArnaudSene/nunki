@@ -7,10 +7,12 @@
 //! watched like a run. This module owns both halves; the gate itself lives in
 //! [`crate::gate`].
 //!
-//! **No threshold.** The gate is green when every survivor has received one
-//! of three outcomes, not when a score clears a bar. A threshold and a triage
-//! pull in opposite directions, and Google, whose practice this borrows, keeps
-//! neither score nor bar.
+//! **No threshold at `critical`**, the default rigor. The gate is green when
+//! every survivor has received one of three outcomes, not when a score clears
+//! a bar. A threshold and a triage pull in opposite directions, and Google,
+//! whose practice this borrows, keeps neither score nor bar. A `standard`
+//! mission trades the triage for the project's `mutation_threshold`, and that
+//! is why a campaign also records how many mutants it [`Campaign::tried`].
 //!
 //! **A campaign replays only when the touched files have changed**, and
 //! "changed" means their content: the fingerprint is over git blob ids, not
@@ -150,6 +152,15 @@ pub struct Campaign {
     pub date: String,
     #[serde(default)]
     pub survivors: Vec<Survivor>,
+    /// How many mutants the campaign tried — every mutant it ran the tests
+    /// against, survivors included, unviable ones not — as the stack's script
+    /// said on its terminal line. What a `standard` mission's gate 7 divides
+    /// by (SPEC 4.4). Absent from a campaign written by an older script or
+    /// before the count existed, and then gate 7 judges it as `critical`
+    /// does; never worked out from the survivors, which would make every
+    /// campaign look perfect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tried: Option<u32>,
 }
 
 /// `MUTANTS.run.json`: a campaign in flight.
@@ -344,6 +355,11 @@ pub fn forget_running(hq_root: &Path, slot: &str) -> Result<(), MutantsError> {
 #[derive(serde::Deserialize)]
 struct Terminal {
     campaign: String,
+    /// How many mutants the campaign tried, unviable ones left out. Optional:
+    /// a script written before the count still says it finished, and is
+    /// read exactly as it was.
+    #[serde(default)]
+    tried: Option<u32>,
 }
 
 /// Whether the campaign said it finished.
@@ -358,6 +374,19 @@ pub fn completed(text: &str) -> bool {
             .map(|t| t.campaign == "done")
             .unwrap_or(false)
     })
+}
+
+/// How many mutants the campaign says it tried, from its terminal line.
+///
+/// `None` when the line carries no count — an older `mutation.sh` — or when
+/// there is no terminal line at all. Only the script's own word is taken:
+/// counting the survivors would make a campaign that tried a hundred and
+/// lost three look like one that tried three and lost them all.
+pub fn tried(text: &str) -> Option<u32> {
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<Terminal>(line.trim()).ok())
+        .find(|t| t.campaign == "done")
+        .and_then(|t| t.tried)
 }
 
 /// The survivors a campaign's log names, **with no outcome**.
@@ -404,6 +433,7 @@ pub fn record_finished(
             head: head.to_string(),
             date: crate::state::now_rfc3339(),
             survivors,
+            tried: tried(text),
         },
     )?;
     Ok(count)
@@ -968,6 +998,14 @@ pub fn command(
 /// independently, and a file relative to the repository, like the touched
 /// list. `{"campaign":"done"}` is said once, at the end, and only if every
 /// stack said it: a campaign one stack did not finish measured nothing for it.
+/// It carries `tried`, the stacks' counts added up, only when every stack
+/// that ran gave one: a sum missing a stack's mutants would be a share of
+/// the wrong whole, and without it gate 7 judges as `critical` does.
+///
+/// Whether a stack said it finished is read from what `jq` **printed**, not
+/// from `jq -e`: jq 1.6 — Debian bookworm's — exits 0 under `-e` on an
+/// empty input, so a stack that printed nothing at all was counted as
+/// finished.
 ///
 /// `jq` reads the lines, as every stack image carries it; a line that is not
 /// JSON is progress and is dropped from the result, which is where the
@@ -978,7 +1016,7 @@ pub fn several_campaigns(
     touched: &[String],
 ) -> String {
     use crate::exec::quote;
-    let mut script = String::from("set -u\ncomplete=1\nout=\"$(mktemp)\"\n");
+    let mut script = String::from("set -u\ncomplete=1\ncounted=1\ntried=0\nout=\"$(mktemp)\"\n");
     for j in judged {
         let mine: Vec<String> = touched
             .iter()
@@ -1006,8 +1044,13 @@ pub fn several_campaigns(
              jq -R -c --arg s {name} --arg d {prefix} 'fromjson? | select(type == \"object\" \
              and has(\"id\")) | .id = ($s + \":\" + (.id | tostring)) | .file = ($d + \
              (.file | tostring))' < \"$out\"\n\
-             jq -R -e 'fromjson? | select(type == \"object\" and .campaign == \"done\")' \
-             < \"$out\" > /dev/null || complete=0\n",
+             said=$(jq -R -r 'fromjson? | select(type == \"object\" and .campaign == \"done\") \
+             | (.tried // \"none\") | tostring' < \"$out\" | tail -n 1)\n\
+             case \"$said\" in\n\
+             '') complete=0 ;;\n\
+             *[!0-9]*) counted=0 ;;\n\
+             *) tried=$((tried + said)) ;;\n\
+             esac\n",
             dir = quote(&dir),
             at = j.scripts_at,
             campaign = quote(campaign),
@@ -1018,7 +1061,9 @@ pub fn several_campaigns(
     }
     script.push_str(
         "rm -f \"$out\"\n\
-         if [ \"$complete\" = 1 ]; then printf '%s\\n' '{\"campaign\":\"done\"}'; fi\n",
+         if [ \"$complete\" = 1 ] && [ \"$counted\" = 1 ]; then\n\
+         printf '{\"campaign\":\"done\",\"tried\":%s}\\n' \"$tried\"\n\
+         elif [ \"$complete\" = 1 ]; then printf '%s\\n' '{\"campaign\":\"done\"}'; fi\n",
     );
     script
 }
