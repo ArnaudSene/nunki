@@ -378,10 +378,16 @@ fn play(subject: &Subject, verification: &Verification, phase: Phase) -> Result<
             // reads the project's, as it always did.
             None => mutation(
                 subject,
-                subject
-                    .header
-                    .mutation_threshold
-                    .unwrap_or(verification.project.config.mutation_threshold),
+                match subject.header.mutation_threshold {
+                    Some(percent) => Threshold {
+                        percent,
+                        framed: true,
+                    },
+                    None => Threshold {
+                        percent: verification.project.config.mutation_threshold,
+                        framed: false,
+                    },
+                },
             )?,
         });
     }
@@ -1465,10 +1471,11 @@ fn campaign_that_could_not_run(
 ///
 /// The mission's rigor changes what is asked, and nothing else: a
 /// `prototype` owes no campaign at all, and a `standard` one is judged on
-/// the share of tried mutants killed against `threshold`, the project's
-/// `mutation_threshold` ([`share_killed`]). Who may give which outcome, and
+/// the share of tried mutants killed against `threshold`, the mission's
+/// frozen `mutation_threshold` or, for a header framed before it was
+/// frozen, the project's ([`share_killed`]). Who may give which outcome, and
 /// that a named test must exist, hold at every rigor.
-fn mutation(subject: &Subject, threshold: u32) -> Result<Outcome, GateError> {
+fn mutation(subject: &Subject, threshold: Threshold) -> Result<Outcome, GateError> {
     let gate = Gate::Mutation;
     if subject.role != Role::Coder {
         // SPEC 4.4's per-role table: "non (des tests système et de la
@@ -1610,6 +1617,26 @@ fn every_survivor_answered(
     Ok(outcome)
 }
 
+/// The share a `standard` gate 7 asks for, and whose it is: frozen in the
+/// mission's header at `mission new`, or the project's for a header framed
+/// before it was frozen. The gate's message says which, so whoever reads a
+/// red gate knows whether `nunki.yaml` has anything to do with it.
+#[derive(Debug, Clone, Copy)]
+struct Threshold {
+    percent: u32,
+    framed: bool,
+}
+
+impl Threshold {
+    fn whose(self) -> &'static str {
+        if self.framed {
+            "mission's"
+        } else {
+            "project's"
+        }
+    }
+}
+
 /// Gate 7 as `standard` plays it: green when the share of tried mutants
 /// killed reaches `threshold`, as a whole percentage. Killed means tried
 /// minus the survivors left without an outcome — a survivor answered by a
@@ -1623,7 +1650,7 @@ fn share_killed(
     subject: &Subject,
     campaign: &crate::mutants::Campaign,
     tried: u32,
-    threshold: u32,
+    threshold: Threshold,
     answer: &dyn Fn(&crate::mutants::Survivor) -> Option<crate::mutants::Triage>,
 ) -> Result<Outcome, GateError> {
     let gate = Gate::Mutation;
@@ -1660,14 +1687,15 @@ fn share_killed(
         return Ok(outcome);
     }
     // In whole numbers, so that 79.5% is not rounded up to a pass.
-    let (tried, threshold) = (u64::from(tried), u64::from(threshold));
+    let whose = threshold.whose();
+    let (tried, threshold) = (u64::from(tried), u64::from(threshold.percent));
     let killed = tried - untriaged.len() as u64;
     let share = killed * 100 / tried;
     if killed * 100 >= threshold * tried {
         let mut outcome = Outcome::of(gate, Decision::Passed);
         outcome.note = Some(note(format!(
             "{killed} of {tried} tried mutant(s) killed ({share}%), at or above the \
-             project's threshold of {threshold}%; {left}"
+             {whose} threshold of {threshold}%; {left}"
         )));
         return Ok(outcome);
     }
@@ -1675,7 +1703,7 @@ fn share_killed(
     let mut outcome = Outcome::of(
         gate,
         Decision::Failed(format!(
-            "{killed} of {tried} tried mutant(s) killed ({share}%), below the project's \
+            "{killed} of {tried} tried mutant(s) killed ({share}%), below the {whose} \
              threshold of {threshold}%: {needed} more must be killed — a survivor answered \
              by a named test, or frozen as a bug in one, counts as killed"
         )),

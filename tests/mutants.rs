@@ -1692,8 +1692,13 @@ fn a_campaign_that_found_mutants_and_tried_none_did_not_measure() {
 
     // One mutant found and none tried is as unmeasured as 78.
     assert!(mutants::unmeasured("{\"campaign\":\"done\",\"tried\":0,\"found\":1}\n").is_some());
-    // A count of found without one of tried is no better.
-    assert!(mutants::unmeasured("{\"campaign\":\"done\",\"found\":3}\n").is_some());
+    // A count of found without one of tried is no count at all, which gate 7
+    // judges as `critical` does, and not a campaign that said it tried
+    // nothing (HQ review).
+    assert_eq!(
+        mutants::unmeasured("{\"campaign\":\"done\",\"found\":3}\n"),
+        None
+    );
     for measured in [
         "{\"campaign\":\"done\",\"tried\":0,\"found\":0}\n",
         "{\"campaign\":\"done\",\"tried\":1,\"found\":78}\n",
@@ -1841,4 +1846,135 @@ fn a_finished_campaign_that_tried_nothing_of_what_it_found_is_not_recorded() {
             .unwrap()
             .is_none()
     );
+}
+
+// ---------------------------------------------------------------------------
+// A campaign says it finished once (HQ review of the rigor mission).
+// ---------------------------------------------------------------------------
+
+/// A log with two done lines is not a finished campaign, whichever of them
+/// carries the bigger count: the first and the last are both a line
+/// something else could have written, so neither is read.
+#[test]
+fn a_log_that_says_it_finished_twice_is_not_a_finished_campaign() {
+    let survivor = "{\"id\":\"a\",\"file\":\"src/lib.rs\",\"line\":3,\"description\":\"x\"}\n";
+    for log in [
+        format!(
+            "{{\"campaign\":\"done\",\"tried\":1000}}\n{survivor}{{\"campaign\":\"done\",\"tried\":3}}\n"
+        ),
+        format!(
+            "{survivor}{{\"campaign\":\"done\",\"tried\":3}}\n{{\"campaign\":\"done\",\"tried\":1000}}\n"
+        ),
+    ] {
+        assert!(!mutants::completed(&log), "{log}");
+        assert_eq!(mutants::tried(&log), None, "{log}");
+        let why = mutants::repeated(&log).expect("said twice");
+        assert!(why.contains("finished 2 times"), "{why}");
+    }
+    let once = format!("{survivor}{{\"campaign\":\"done\",\"tried\":3}}\n");
+    assert!(mutants::completed(&once));
+    assert_eq!(mutants::tried(&once), Some(3));
+    assert_eq!(mutants::repeated(&once), None);
+    assert_eq!(mutants::repeated(""), None);
+}
+
+/// Read back by the monitor, such a log is a campaign that could not run,
+/// with its reason where gate 7 reads it — not a lost campaign, and nothing
+/// is recorded.
+#[test]
+fn a_campaign_that_said_it_finished_twice_leaves_its_reason_and_no_result() {
+    use nunki::engine::{ExecOutput, fake::FakeEngine};
+
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot) = context(dir.path());
+    let tree = slot.tree.clone();
+    let profile = nunki::run::profile_path(&project, &slot.name);
+    std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+    std::fs::write(&profile, "services: {}\n").unwrap();
+
+    let mission = dir.path().join("mission");
+    std::fs::create_dir_all(&mission).unwrap();
+    let log = mission.join("mutants.log");
+    std::fs::write(
+        &log,
+        "{\"campaign\":\"done\",\"tried\":1000,\"found\":1000}\n\
+         {\"id\":\"a\",\"file\":\"src/lib.rs\",\"line\":3,\"description\":\"replace one\"}\n\
+         {\"campaign\":\"done\",\"tried\":1,\"found\":1}\n",
+    )
+    .unwrap();
+    mutants::write_running(
+        &project.hq_root,
+        &slot.name,
+        &mutants::Running {
+            fingerprint: "abc1234".into(),
+            head: git(&tree, &["rev-parse", "HEAD"]),
+            started_at: "2026-09-19T02:00:00Z".into(),
+            container: "cafe1234".into(),
+            pid: Some(41),
+            log: log.clone(),
+            deadline_minutes: 45,
+        },
+    )
+    .unwrap();
+    let engine: std::sync::Arc<dyn nunki::engine::Engine> = std::sync::Arc::new(
+        FakeEngine::default()
+            .with_liveness("cafe1234", nunki::engine::Liveness::Running)
+            .with_exec(ExecOutput {
+                status: 0,
+                stdout: "nunki-run-ended\n".into(),
+                stderr: String::new(),
+            }),
+    );
+
+    let progress = mutants::campaign(
+        &project,
+        &slot,
+        engine,
+        &mission,
+        "rust",
+        "dev",
+        45,
+        mutants::Replay::WhenChanged,
+    )
+    .unwrap();
+
+    let mutants::Progress::CouldNotRun(why) = progress else {
+        panic!("a log that said it finished twice was read as {progress:?}");
+    };
+    assert!(why.contains("finished 2 times"), "{why}");
+    let said = std::fs::read_to_string(log.with_extension("err")).unwrap();
+    assert!(
+        said.contains("nunki: the campaign said it had finished 2 times"),
+        "{said}"
+    );
+    assert_eq!(mutants::read(&mission).unwrap(), None);
+    assert!(
+        mutants::read_running(&project.hq_root, &slot.name)
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// Over several stacks, a stack that said it finished twice did not finish,
+/// by the same rule — and a stack that said it once still counts.
+#[cfg(unix)]
+#[test]
+fn a_stack_that_said_it_finished_twice_has_not_finished_the_campaign() {
+    let rust = says(&[r#"{"campaign":"done","tried":3,"found":3}"#]);
+    let twice = says(&[
+        r#"{"campaign":"done","tried":1000,"found":1000}"#,
+        r#"{"campaign":"done","tried":4,"found":4}"#,
+    ]);
+    let out = TwoStacks::new(&rust, &twice).run();
+    assert!(!mutants::completed(&out), "{out}");
+    assert_eq!(
+        mutants::repeated(&out),
+        None,
+        "no done line is left at all: {out}"
+    );
+
+    let once = says(&[r#"{"campaign":"done","tried":4,"found":4}"#]);
+    let out = TwoStacks::new(&rust, &once).run();
+    assert!(mutants::completed(&out), "{out}");
+    assert_eq!(mutants::tried(&out), Some(7), "{out}");
 }

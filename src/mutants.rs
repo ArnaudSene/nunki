@@ -368,24 +368,47 @@ struct Terminal {
     found: Option<u32>,
 }
 
-/// The terminal line, if the campaign printed one.
-fn terminal(text: &str) -> Option<Terminal> {
+/// Every line of the log that says the campaign is done.
+fn done_lines(text: &str) -> impl Iterator<Item = Terminal> + '_ {
     text.lines()
         .filter_map(|line| serde_json::from_str::<Terminal>(line.trim()).ok())
-        .find(|t| t.campaign == "done")
+        .filter(|t| t.campaign == "done")
 }
 
-/// Whether the campaign said it finished.
+/// The terminal line, if the campaign printed exactly one.
+///
+/// A script says it once, last. A second done line is something else
+/// writing to the campaign's output — a test reaching the script's stdout,
+/// say — and nothing tells which of the two is the script's, so neither is
+/// taken: the first would let a forged line sit before the real one, the
+/// last would let it sit after. [`several_campaigns`] reads each stack's
+/// output by the same rule.
+fn terminal(text: &str) -> Option<Terminal> {
+    let mut done = done_lines(text);
+    let only = done.next()?;
+    done.next().is_none().then_some(only)
+}
+
+/// Whether the campaign said it finished, exactly once.
 ///
 /// The whole log, not its last line: a campaign is read back through a file
 /// the engine is still writing, and asking for the last line would turn a
 /// half-flushed newline into "it did not finish". The line is printed last,
 /// so a truncated log has lost it either way.
 pub fn completed(text: &str) -> bool {
-    text.lines().any(|line| {
-        serde_json::from_str::<Terminal>(line.trim())
-            .map(|t| t.campaign == "done")
-            .unwrap_or(false)
+    terminal(text).is_some()
+}
+
+/// Why a log that says the campaign finished more than once is not read,
+/// if it does: such a log is not a finished campaign ([`completed`]), and
+/// this is the sentence that says so rather than "it stopped".
+pub fn repeated(text: &str) -> Option<String> {
+    let count = done_lines(text).count();
+    (count > 1).then(|| {
+        format!(
+            "the campaign said it had finished {count} times, and a campaign says it once, \
+             last — something else wrote to its output, so nothing it printed is read"
+        )
     })
 }
 
@@ -415,10 +438,14 @@ pub fn found(text: &str) -> Option<u32> {
 /// survivor, and gate 7 green at every rigor on a measurement nobody made.
 /// The stack's script refuses such a run itself; this is the same rule kept
 /// on `nunki`'s side, for a script that does not.
+///
+/// Both counts are needed: a `found` without a `tried` is a line that gives
+/// no count — which gate 7 judges as `critical` does — and not a campaign
+/// that said it tried nothing.
 pub fn unmeasured(text: &str) -> Option<String> {
     let line = terminal(text)?;
     match line.found {
-        Some(found) if found > 0 && line.tried.unwrap_or(0) == 0 => Some(format!(
+        Some(found) if found > 0 && line.tried == Some(0) => Some(format!(
             "the campaign found {found} mutant(s) and tried none, so it measured nothing — \
              a baseline whose tests fail before any mutant is tried leaves exactly this"
         )),
@@ -432,9 +459,25 @@ pub fn unmeasured(text: &str) -> Option<String> {
 /// why, rather than asking for the same campaign again. Returns the reason,
 /// or `None` for a campaign that did measure.
 pub fn settle_unmeasured(log: &Path, text: &str) -> Result<Option<String>, MutantsError> {
-    let Some(why) = unmeasured(text) else {
-        return Ok(None);
-    };
+    match unmeasured(text) {
+        Some(why) => settle(log, &why).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// Settle a campaign whose log says it finished more than once
+/// ([`repeated`]) the way [`settle_unmeasured`] settles one that measured
+/// nothing: its reason beside the log, where gate 7 reads it. Returns the
+/// reason, or `None` for a log that says it at most once.
+pub fn settle_repeated(log: &Path, text: &str) -> Result<Option<String>, MutantsError> {
+    match repeated(text) {
+        Some(why) => settle(log, &why).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// Append `why` to the campaign's stderr, and say where it went.
+fn settle(log: &Path, why: &str) -> Result<String, MutantsError> {
     use std::io::Write;
     let stderr = log.with_extension("err");
     std::fs::OpenOptions::new()
@@ -443,10 +486,7 @@ pub fn settle_unmeasured(log: &Path, text: &str) -> Result<Option<String>, Mutan
         .open(&stderr)
         .and_then(|mut file| writeln!(file, "nunki: {why}"))
         .map_err(|e| MutantsError::Io(stderr.clone(), e))?;
-    Ok(Some(format!(
-        "{why}. What it said is in {}",
-        stderr.display()
-    )))
+    Ok(format!("{why}. What it said is in {}", stderr.display()))
 }
 
 /// The survivors a campaign's log names, **with no outcome**.
@@ -823,6 +863,11 @@ pub fn read_back(
         }
         Presence::Ended => {
             forget_running(&project.hq_root, &slot.name)?;
+            // Said it finished more than once: not a campaign that stopped,
+            // and its reason is left where gate 7 reads it.
+            if let Some(why) = settle_repeated(&running.log, &text)? {
+                return Ok(Some(Progress::CouldNotRun(why)));
+            }
             // The **stderr** file, not the log. A campaign that got nowhere
             // wrote nothing to stdout — that is what "after 0 line(s)" says —
             // so naming the log sends whoever reads this to an empty file,
@@ -1065,6 +1110,8 @@ pub fn command(
 /// independently, and a file relative to the repository, like the touched
 /// list. `{"campaign":"done"}` is said once, at the end, and only if every
 /// stack said it: a campaign one stack did not finish measured nothing for it.
+/// A stack that said it more than once did not finish either, by the rule
+/// [`completed`] reads a log with.
 /// A stack that found mutants and tried none measured nothing, and the
 /// campaign is then not finished either, whatever the other stacks did.
 /// It carries `tried` and `found`, each the stacks' counts added up, and
@@ -1117,8 +1164,11 @@ pub fn several_campaigns(
              jq -R -c --arg s {name} --arg d {prefix} 'fromjson? | select(type == \"object\" \
              and has(\"id\")) | .id = ($s + \":\" + (.id | tostring)) | .file = ($d + \
              (.file | tostring))' < \"$out\"\n\
+             dones=$(jq -R -c 'fromjson? | select(type == \"object\" and .campaign == \"done\")' \
+             < \"$out\" | grep -c .)\n\
              said=$(jq -R -r 'fromjson? | select(type == \"object\" and .campaign == \"done\") \
              | (.tried // \"none\") | tostring' < \"$out\" | tail -n 1)\n\
+             [ \"$dones\" = 1 ] || said=''\n\
              case \"$said\" in\n\
              '') complete=0 ;;\n\
              *[!0-9]*) counted=0 ;;\n\

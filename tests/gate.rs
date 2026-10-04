@@ -2822,11 +2822,15 @@ fn a_campaign_that_measured_nothing_is_red_at_every_rigor() {
 fn at_standard_the_threshold_frozen_in_the_header_beats_the_projects() {
     let mut f = standard();
     f.campaign_tried(untriaged(2), Some(10));
-    // 80% killed: green at the project's 80, red at a frozen 90.
-    assert_eq!(f.gate_seven(Role::Coder).decision, Decision::Passed);
+    // 80% killed: green at the project's 80, red at a frozen 90 — and the
+    // message says whose threshold it was (HQ review).
+    let outcome = f.gate_seven(Role::Coder);
+    assert_eq!(outcome.decision, Decision::Passed);
+    let note = outcome.note.unwrap_or_default();
+    assert!(note.contains("project's threshold of 80%"), "{note}");
     f.header.mutation_threshold = Some(90);
     match f.gate_seven(Role::Coder).decision {
-        Decision::Failed(why) => assert!(why.contains("threshold of 90%"), "{why}"),
+        Decision::Failed(why) => assert!(why.contains("mission's threshold of 90%"), "{why}"),
         other => panic!("{other:?}"),
     }
     // And the project's changing afterwards moves nothing.
