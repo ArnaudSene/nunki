@@ -23,6 +23,7 @@ fn header(lots: usize) -> Header {
         },
         security: Security::Gates,
         rigor: Default::default(),
+        mutation_threshold: None,
         arbiter: None,
         run: None,
         account: None,
@@ -640,4 +641,19 @@ fn taking_a_mission_back_without_saying_what_changed_is_refused() {
     let world = World::new(1);
     let err = lifecycle::retry(&world.project, "m1", " \n\t").unwrap_err();
     assert!(matches!(err, LifecycleError::NoChange), "{err}");
+}
+
+/// A changed frozen threshold is a change of what a `standard` gate 7
+/// asks, and reframe names it.
+#[test]
+fn reframing_names_a_changed_mutation_threshold() {
+    let world = World::new(2);
+    let mut fresh = header(2);
+    fresh.mutation_threshold = Some(90);
+    world.reframe_file(&fresh);
+    let seen = lifecycle::reframe(&world.project, "m1", false).unwrap();
+    assert_eq!(seen.changes.len(), 1, "{:?}", seen.changes);
+    assert_eq!(seen.changes[0].what, "mutation threshold");
+    assert_eq!(seen.changes[0].from, "—");
+    assert_eq!(seen.changes[0].to, "90%");
 }

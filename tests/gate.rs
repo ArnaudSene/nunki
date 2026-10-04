@@ -67,6 +67,7 @@ fn header() -> Header {
         },
         security: Security::Gates,
         rigor: Default::default(),
+        mutation_threshold: None,
         arbiter: None,
         run: None,
         account: None,
@@ -2781,4 +2782,59 @@ fn a_prototype_owes_no_mutation_campaign() {
     ];
     decisions.push((Gate::Mutation, outcome.decision));
     assert_eq!(report_of(&decisions).verdict(), gate::Verdict::Green);
+}
+
+/// A campaign that said it finished and measured nothing — mutants found,
+/// none tried — is not green at any rigor: it is settled as one that could
+/// not run, and gate 7 is red with its reason, at `critical` as at
+/// `standard` (security round 1 on the rigor mission, HQ ruling).
+#[test]
+fn a_campaign_that_measured_nothing_is_red_at_every_rigor() {
+    let mut f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.journal_names_head();
+    let touched = nunki::gate::touched_since_base(&f.tree, "dev").unwrap();
+    let fingerprint = nunki::mutants::fingerprint(&f.tree, &touched).unwrap();
+    let runs = f._dir.path().join("runs");
+    std::fs::create_dir_all(&runs).unwrap();
+    let log = runs.join(format!("mutants-{}.log", &fingerprint[..7]));
+    let settled = nunki::mutants::settle_unmeasured(
+        &log,
+        "{\"campaign\":\"done\",\"tried\":0,\"found\":78}\n",
+    )
+    .unwrap();
+    assert!(settled.is_some());
+
+    for rigor in [Rigor::Critical, Rigor::Standard] {
+        f.header.rigor = rigor;
+        match f.gate_seven(Role::Coder).decision {
+            Decision::Failed(why) => {
+                assert!(why.contains("measured nothing"), "{rigor}: {why}")
+            }
+            other => panic!("{rigor}: a campaign that tried nothing of 78 is not green: {other:?}"),
+        }
+    }
+}
+
+/// The threshold frozen in the header is the one gate 7 reads; a header
+/// framed before it was frozen reads the project's.
+#[test]
+fn at_standard_the_threshold_frozen_in_the_header_beats_the_projects() {
+    let mut f = standard();
+    f.campaign_tried(untriaged(2), Some(10));
+    // 80% killed: green at the project's 80, red at a frozen 90.
+    assert_eq!(f.gate_seven(Role::Coder).decision, Decision::Passed);
+    f.header.mutation_threshold = Some(90);
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => assert!(why.contains("threshold of 90%"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    // And the project's changing afterwards moves nothing.
+    f.threshold = 50;
+    assert!(matches!(
+        f.gate_seven(Role::Coder).decision,
+        Decision::Failed(_)
+    ));
+    f.header.mutation_threshold = None;
+    assert_eq!(f.gate_seven(Role::Coder).decision, Decision::Passed);
 }

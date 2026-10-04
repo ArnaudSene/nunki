@@ -1698,6 +1698,9 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                     Security::Gates
                 },
                 rigor,
+                // Frozen with the rigor it serves, like the bounds: a threshold read
+                // live could be lowered under a mission already framed.
+                mutation_threshold: Some(project.config.mutation_threshold),
                 account,
                 model,
                 run,
@@ -2294,14 +2297,18 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             println!("mission   {id}");
             println!("branch    {} (from {})", header.branch, header.base);
             println!("shape     {:?}", header.shape());
-            match header.rigor {
-                // The threshold is the project's, read now: only the rigor
-                // is frozen in the header.
-                Rigor::Standard => println!(
-                    "rigor     standard — gate 7 passes at {}% of tried mutants killed",
+            match (header.rigor, header.mutation_threshold) {
+                // The threshold frozen with the rigor; a header framed before
+                // it was frozen reads the project's, and says so.
+                (Rigor::Standard, Some(threshold)) => println!(
+                    "rigor     standard — gate 7 passes at {threshold}% of tried mutants killed"
+                ),
+                (Rigor::Standard, None) => println!(
+                    "rigor     standard — gate 7 passes at {}% of tried mutants killed \
+                     (nunki.yaml's, read now: this header froze none)",
                     project.config.mutation_threshold
                 ),
-                rigor => println!("rigor     {rigor}"),
+                (rigor, _) => println!("rigor     {rigor}"),
             }
             for lot in &header.lots {
                 println!("lot       {} — {}", lot.id, lot.title);

@@ -271,6 +271,19 @@ fn mutation_threshold<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Resu
     }
 }
 
+/// The same refusal for a mission header's frozen `mutation_threshold`,
+/// which is absent from a header written before it was frozen.
+pub(crate) fn frozen_mutation_threshold<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u32>, D::Error> {
+    match Option::<u32>::deserialize(deserializer)? {
+        Some(value) if !(1..=100).contains(&value) => Err(serde::de::Error::custom(format!(
+            "mutation_threshold is a whole percentage from 1 to 100, and {value} is not"
+        ))),
+        other => Ok(other),
+    }
+}
+
 /// A private repository on GitHub's free plan can neither protect a branch
 /// nor say it does, and a red `nunki check` cannot fix that: a red that cannot
 /// be fixed teaches to ignore red. `by_hand` is the written decision that the

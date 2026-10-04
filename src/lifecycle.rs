@@ -137,6 +137,11 @@ pub fn differences(frozen: &Header, fresh: &Header) -> Vec<Change> {
         format!("{:?}", fresh.security),
     );
     note("rigor", frozen.rigor.to_string(), fresh.rigor.to_string());
+    let threshold = |h: &Header| {
+        h.mutation_threshold
+            .map_or_else(|| "—".into(), |t| format!("{t}%"))
+    };
+    note("mutation threshold", threshold(frozen), threshold(fresh));
     note(
         "arbiter",
         frozen.arbiter.clone().unwrap_or_else(|| "—".into()),

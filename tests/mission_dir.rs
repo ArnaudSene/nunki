@@ -30,6 +30,7 @@ fn header() -> Header {
         },
         security: Security::Agent,
         rigor: Default::default(),
+        mutation_threshold: None,
         arbiter: None,
         run: None,
         account: None,
@@ -596,4 +597,97 @@ fn mission_new_refuses_a_prototype_with_services_or_a_security_agent() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+fn hq_of(dir: &tempfile::TempDir) -> std::path::PathBuf {
+    std::fs::read_dir(dir.path().join("home/.nunki"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path().join("hq"))
+        .find(|p| p.is_dir())
+        .unwrap()
+}
+
+/// `mission new` freezes nunki.yaml's `mutation_threshold` with the rigor,
+/// and lowering it in nunki.yaml afterwards moves nothing a mission already
+/// framed reads: a threshold read live could be lowered under it (security
+/// round 1 on the rigor mission, HQ ruling).
+#[test]
+fn mission_new_freezes_the_mutation_threshold_with_the_rigor() {
+    let (dir, run) = project("harness: claude-code\nrigor: standard\nmutation_threshold: 65\n");
+    new_mission(&run, "m1", &[]);
+    let header = read_header(&hq_of(&dir), "m1").unwrap();
+    assert_eq!(header.mutation_threshold, Some(65));
+
+    // nunki.yaml now says 20: the framed mission still reads 65.
+    let config = std::fs::read_dir(dir.path().join("home/.nunki"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path().join("nunki.yaml"))
+        .find(|p| p.is_file())
+        .unwrap();
+    let text = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(
+        &config,
+        text.replace("mutation_threshold: 65", "mutation_threshold: 20"),
+    )
+    .unwrap();
+    let status = run(&["mission", "status", "m1"]);
+    let text = String::from_utf8_lossy(&status.stdout);
+    assert!(text.contains("gate 7 passes at 65%"), "{text}");
+    assert!(!text.contains("20%"), "{text}");
+}
+
+/// A header framed before the threshold was frozen has none, and reads the
+/// project's; a frozen one outside 1 to 100 is refused when it is read.
+#[test]
+fn a_header_without_a_frozen_threshold_still_reads_and_a_bad_one_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = create(dir.path(), "m1", &header(), "prose").unwrap();
+    let text = std::fs::read_to_string(&paths.mission).unwrap();
+    assert!(
+        !text.contains("mutation_threshold"),
+        "None is not written: {text}"
+    );
+    assert_eq!(
+        read_header(dir.path(), "m1").unwrap().mutation_threshold,
+        None
+    );
+
+    let mut framed = header();
+    framed.mutation_threshold = Some(70);
+    let paths = create(dir.path(), "m2", &framed, "prose").unwrap();
+    assert_eq!(
+        read_header(dir.path(), "m2").unwrap().mutation_threshold,
+        Some(70)
+    );
+
+    for bad in ["0", "101"] {
+        let text = std::fs::read_to_string(&paths.mission).unwrap();
+        std::fs::write(
+            &paths.mission,
+            text.replace(
+                "mutation_threshold: 70",
+                &format!("mutation_threshold: {bad}"),
+            )
+            .replace(
+                "mutation_threshold: 0",
+                &format!("mutation_threshold: {bad}"),
+            ),
+        )
+        .unwrap();
+        let err = read_header(dir.path(), "m2").unwrap_err();
+        assert!(
+            err.to_string().contains("mutation_threshold"),
+            "{bad}: {err}"
+        );
+        std::fs::write(
+            &paths.mission,
+            std::fs::read_to_string(&paths.mission).unwrap().replace(
+                &format!("mutation_threshold: {bad}"),
+                "mutation_threshold: 70",
+            ),
+        )
+        .unwrap();
+    }
 }

@@ -374,7 +374,15 @@ fn play(subject: &Subject, verification: &Verification, phase: Phase) -> Result<
         // to, and that pair is what a campaign that could not run leaves.
         outcomes.push(match &campaign {
             Some(why) => Outcome::waiting(Gate::Mutation, why),
-            None => mutation(subject, verification.project.config.mutation_threshold)?,
+            // The threshold frozen in the header; one framed before it was frozen
+            // reads the project's, as it always did.
+            None => mutation(
+                subject,
+                subject
+                    .header
+                    .mutation_threshold
+                    .unwrap_or(verification.project.config.mutation_threshold),
+            )?,
         });
     }
     outcomes.push(match &campaign {

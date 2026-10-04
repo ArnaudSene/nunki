@@ -276,6 +276,17 @@ pub struct Header {
     /// header written before the field — means `critical`.
     #[serde(default)]
     pub rigor: Rigor,
+    /// The share of tried mutants a `standard` mission must kill for gate 7,
+    /// as a whole percentage, frozen from `nunki.yaml` at `mission new` with
+    /// the rigor it serves: a threshold read live could be lowered under a
+    /// mission already framed. Absent — every header written before it was
+    /// frozen — the project's current value is read, as it was then.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::project::frozen_mutation_threshold"
+    )]
+    pub mutation_threshold: Option<u32>,
     /// Who decides when this mission comes back with a question — an
     /// arbitration, a verdict to accept, a push to authorise. Defaults to
     /// whoever framed it, and is said rather than assumed the moment a

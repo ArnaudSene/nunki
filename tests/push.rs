@@ -42,6 +42,7 @@ fn header(integration: Integration, security: Security) -> Header {
         integration,
         security,
         rigor: Default::default(),
+        mutation_threshold: None,
         arbiter: None,
         run: None,
         account: None,
