@@ -1,8 +1,8 @@
 //! The flow of SPEC 4.5, exercised without a container or a model.
 
 use nunki::harness::{Outcome, Role, Usage};
-use nunki::mission::flow::{Event, Flow, Handover, Stage, Work};
-use nunki::mission::{Bounds, Header, Integration, Lot, Security, Service, Verdict};
+use nunki::mission::flow::{Event, Flow, Handover, SecurityCap, Stage, Work};
+use nunki::mission::{Bounds, Header, Integration, Lot, Rigor, Security, Service, Verdict};
 
 fn lots(n: usize) -> Vec<Lot> {
     (1..=n)
@@ -624,4 +624,174 @@ fn a_review_before_verification_is_refused() {
         })
         .is_err()
     );
+}
+
+// ---------------------------------------------------------------------------
+// Security rounds, bounded by the mission's rigor (SPEC 4.5).
+// ---------------------------------------------------------------------------
+
+fn at(rigor: Rigor, integration: Integration) -> Flow {
+    let mut h = header(integration, Security::Agent, Bounds::default());
+    h.rigor = rigor;
+    h.bounds.max_volets = 10;
+    Flow::new(h).unwrap()
+}
+
+/// One security round that ends in findings, an iterate, the coder's volet
+/// gated as usual — and then, at `standard`, no second round: the mission
+/// is verified and the cap is left for the follow-up, once.
+#[test]
+fn at_standard_findings_then_an_iterate_end_verified_with_no_second_round() {
+    let mut flow = at(Rigor::Standard, none());
+    assert_eq!(flow.max_security_rounds(), 1);
+    code_through(&mut flow);
+    flow.advance(Event::GatesPassed).unwrap();
+    assert_eq!(flow.stage(), &Stage::SecurityAgent { attempt: 1 });
+    flow.advance(verdict(Verdict::Findings)).unwrap();
+    assert_eq!(flow.security_rounds(), 1);
+
+    // The iterate after the last round is still accepted, and its volet is
+    // run and gated like any other.
+    flow.advance(Event::Iterate).unwrap();
+    assert!(matches!(
+        flow.stage(),
+        Stage::Coding {
+            work: Work::Volet { n: 1, .. },
+            ..
+        }
+    ));
+    flow.advance(finished(true)).unwrap();
+    assert_eq!(flow.stage(), &Stage::Gates);
+    // A red gate still sends it back: the cap spares the agent, not the gates.
+    flow.advance(Event::GatesFailed {
+        reason: "battery".into(),
+    })
+    .unwrap();
+    flow.advance(finished(true)).unwrap();
+    assert_eq!(flow.take_security_cap(), None, "nothing was skipped yet");
+
+    flow.advance(Event::GatesPassed).unwrap();
+    assert_eq!(flow.stage(), &Stage::Verified, "no second security round");
+    assert_eq!(flow.security_rounds(), 1);
+    assert_eq!(
+        flow.take_security_cap(),
+        Some(SecurityCap { rounds: 1, max: 1 })
+    );
+    assert_eq!(flow.take_security_cap(), None, "said once");
+}
+
+/// The integrator still replays after an iterate at the cap; it is only the
+/// security stage that is not played.
+#[test]
+fn at_standard_the_integrator_replays_and_the_spent_round_is_skipped_after_it() {
+    let mut flow = at(Rigor::Standard, services());
+    code_through(&mut flow);
+    flow.advance(Event::GatesPassed).unwrap();
+    flow.advance(verdict(Verdict::Integrated)).unwrap();
+    flow.advance(verdict(Verdict::Findings)).unwrap();
+    flow.advance(Event::Iterate).unwrap();
+    flow.advance(finished(true)).unwrap();
+    flow.advance(Event::GatesPassed).unwrap();
+    assert_eq!(flow.stage(), &Stage::Integration { attempt: 1 });
+    flow.advance(verdict(Verdict::Integrated)).unwrap();
+    assert_eq!(flow.stage(), &Stage::Verified);
+    assert_eq!(
+        flow.take_security_cap(),
+        Some(SecurityCap { rounds: 1, max: 1 })
+    );
+}
+
+/// `critical` keeps its three rounds, and a fourth is never launched. A
+/// `CLEAR` counts as a round as much as `FINDINGS` does.
+#[test]
+fn at_critical_the_fourth_security_round_is_not_launched() {
+    let mut flow = at(Rigor::Critical, none());
+    assert_eq!(flow.max_security_rounds(), 3);
+    code_through(&mut flow);
+    for round in 1..=3 {
+        flow.advance(Event::GatesPassed).unwrap();
+        assert_eq!(
+            flow.stage(),
+            &Stage::SecurityAgent { attempt: 1 },
+            "round {round} is played"
+        );
+        flow.advance(verdict(Verdict::Findings)).unwrap();
+        assert_eq!(flow.security_rounds(), round);
+        flow.advance(Event::Iterate).unwrap();
+        flow.advance(finished(true)).unwrap();
+    }
+    flow.advance(Event::GatesPassed).unwrap();
+    assert_eq!(
+        flow.stage(),
+        &Stage::Verified,
+        "a fourth round is not played"
+    );
+    assert_eq!(
+        flow.take_security_cap(),
+        Some(SecurityCap { rounds: 3, max: 3 })
+    );
+
+    // A CLEAR is a round too: after one, a review sends the mission back,
+    // and at standard the next green gates verify it without a second.
+    let mut flow = at(Rigor::Standard, none());
+    code_through(&mut flow);
+    flow.advance(Event::GatesPassed).unwrap();
+    flow.advance(verdict(Verdict::Clear)).unwrap();
+    assert_eq!(flow.security_rounds(), 1);
+    assert_eq!(flow.take_security_cap(), None);
+    flow.advance(Event::Reviewed {
+        because: "rename it".into(),
+    })
+    .unwrap();
+    flow.advance(finished(true)).unwrap();
+    flow.advance(Event::GatesPassed).unwrap();
+    assert_eq!(flow.stage(), &Stage::Verified);
+    assert_eq!(
+        flow.take_security_cap(),
+        Some(SecurityCap { rounds: 1, max: 1 })
+    );
+}
+
+/// A prototype plays no round. `mission new` refuses one with a security
+/// agent, but a header edited by hand can still carry both: it is verified
+/// on its gates, and the cap — 0 / 0 — is said.
+#[test]
+fn a_prototype_plays_no_security_round() {
+    let mut flow = at(Rigor::Prototype, none());
+    assert_eq!(flow.max_security_rounds(), 0);
+    code_through(&mut flow);
+    flow.advance(Event::GatesPassed).unwrap();
+    assert_eq!(flow.stage(), &Stage::Verified);
+    assert_eq!(
+        flow.take_security_cap(),
+        Some(SecurityCap { rounds: 0, max: 0 })
+    );
+}
+
+/// A mission with no security agent was never going to call it: no cap is
+/// said for a round nobody asked for.
+#[test]
+fn a_mission_without_a_security_agent_records_no_cap() {
+    let mut h = header(none(), Security::Gates, Bounds::default());
+    h.rigor = Rigor::Prototype;
+    let mut flow = Flow::new(h).unwrap();
+    code_through(&mut flow);
+    flow.advance(Event::GatesPassed).unwrap();
+    assert_eq!(flow.stage(), &Stage::Verified);
+    assert_eq!(flow.take_security_cap(), None);
+}
+
+/// State written before the count reads zero rounds, and a flow that was
+/// not skipping anything carries no cap on disk.
+#[test]
+fn an_old_state_reads_zero_security_rounds() {
+    let mut flow = at(Rigor::Standard, none());
+    code_through(&mut flow);
+    let mut json: serde_json::Value = serde_json::to_value(&flow).unwrap();
+    assert!(json.get("security_cap").is_none(), "{json}");
+    let object = json.as_object_mut().unwrap();
+    assert_eq!(object.remove("security_rounds"), Some(serde_json::json!(0)));
+    let old: Flow = serde_json::from_value(json).unwrap();
+    assert_eq!(old.security_rounds(), 0);
+    assert_eq!(old, flow);
 }

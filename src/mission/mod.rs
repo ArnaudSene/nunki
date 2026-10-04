@@ -92,6 +92,17 @@ impl Rigor {
         flag.or(project).unwrap_or_default()
     }
 
+    /// How many rounds the security agent may play on a mission of this
+    /// rigor (SPEC 4.5). A round is one verdict it concludes; once they are
+    /// spent, a mission whose gates are green is verified without it.
+    pub fn max_security_rounds(self) -> u32 {
+        match self {
+            Rigor::Prototype => 0,
+            Rigor::Standard => 1,
+            Rigor::Critical => 3,
+        }
+    }
+
     /// Whether a mission framed at this rigor may declare services or call
     /// the security agent. A prototype runs the coder and the mechanical
     /// gates only, so asking it for either is a contradiction said at

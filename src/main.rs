@@ -1162,6 +1162,10 @@ fn main() -> ExitCode {
                                 owed = true;
                                 println!("unknown   the {role:?} run could not be asked — {why}");
                             }
+                            nunki::verify::Step::SecurityRoundsSpent { rounds, max } => println!(
+                                "security  round cap reached ({rounds} / {max}): the security \
+                                 agent is not called again, and FOLLOWUP_HQ.md says so"
+                            ),
                             nunki::verify::Step::Verified => println!(
                                 "VERIFIED  every declared stage is green; read it, then \
                                  `nunki push {mission}`"
@@ -2325,6 +2329,16 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             match nunki::state::Store::open(&project.hq_root).and_then(|s| s.load(&id)) {
                 Ok(state) => {
                     println!("stage     {:?} in slot {}", state.flow.stage(), state.slot);
+                    println!(
+                        "security rounds: {} / {}{}",
+                        state.flow.security_rounds(),
+                        state.flow.max_security_rounds(),
+                        if state.flow.header().has_security_agent() {
+                            ""
+                        } else {
+                            " — this mission calls no security agent"
+                        }
+                    );
                     // A hold changes what `nunki` will do next, and nothing
                     // else in this report says so: a mission held between
                     // two runs reads exactly like one nobody touched.

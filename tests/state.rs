@@ -303,3 +303,77 @@ fn watch_says_the_hold_before_it_says_there_is_no_run() {
     assert!(held < none, "the hold comes first: {text}");
     assert!(text.contains("Alex Martin"), "{text}");
 }
+
+/// `status` says how many security rounds were played of how many the
+/// mission's rigor allows, from the frozen header, and says when the mission
+/// calls no security agent at all.
+#[test]
+fn status_says_how_many_security_rounds_were_played_of_how_many() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    let home = common::project_home(&root, &dir.path().join("home"), "harness: claude-code\n");
+    let hq_root = home.join(nunki::project::HQ_DIR);
+    let status = || {
+        let out = Command::new(env!("CARGO_BIN_EXE_nunki"))
+            .args(["-C"])
+            .arg(&root)
+            .args(["mission", "status", "m1"])
+            .env("HOME", dir.path().join("home"))
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+
+    let mut framed = header();
+    framed.security = Security::Agent;
+    framed.rigor = nunki::mission::Rigor::Standard;
+    nunki::mission::dir::create(&hq_root, "m1", &framed, "do it").unwrap();
+    let store = Store::open(&hq_root).unwrap();
+    let mut st = state("m1");
+    st.flow = Flow::new(framed.clone()).unwrap();
+    use nunki::mission::flow::Event;
+    for event in [
+        Event::RunEnded {
+            outcome: nunki::harness::Outcome::Finished(Default::default()),
+            lot_done: true,
+        },
+        Event::RunEnded {
+            outcome: nunki::harness::Outcome::Finished(Default::default()),
+            lot_done: true,
+        },
+        Event::GatesPassed,
+    ] {
+        st.flow.advance(event).unwrap();
+    }
+    store.save(&st).unwrap();
+    assert!(
+        status().contains("security rounds: 0 / 1\n"),
+        "{}",
+        status()
+    );
+
+    st.flow
+        .advance(Event::Verdict {
+            verdict: nunki::mission::Verdict::Findings,
+            report: "an open redirect".into(),
+        })
+        .unwrap();
+    store.save(&st).unwrap();
+    assert!(
+        status().contains("security rounds: 1 / 1\n"),
+        "{}",
+        status()
+    );
+
+    // A mission that calls no security agent says so beside the count.
+    let mut gates_only = framed;
+    gates_only.security = Security::Gates;
+    gates_only.rigor = nunki::mission::Rigor::Critical;
+    st.flow = Flow::new(gates_only).unwrap();
+    store.save(&st).unwrap();
+    assert!(
+        status().contains("security rounds: 0 / 3 — this mission calls no security agent"),
+        "{}",
+        status()
+    );
+}

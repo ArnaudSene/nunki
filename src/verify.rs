@@ -83,6 +83,10 @@ pub enum Step {
     /// Nothing is decided on a silence (SPEC 4.2, "la reprise re-dérive
     /// avant de décider").
     Unreachable { role: Role, why: String },
+    /// The security agent was not launched: the rounds the mission's rigor
+    /// allows are spent, `rounds` of `max` (SPEC 4.5). Always followed by
+    /// [`Step::Verified`].
+    SecurityRoundsSpent { rounds: u32, max: u32 },
     /// Every declared stage is green; the human validates and `nunki push`
     /// pushes.
     Verified,
@@ -845,6 +849,18 @@ pub fn verify_as(
                 return Ok(steps);
             }
             Stage::Verified => {
+                // Reached without the security agent because its rounds were
+                // spent: said once, in the follow-up and to the caller, and
+                // the note taken from the state so a later `verify` does not
+                // say it again.
+                if let Some(cap) = state.flow.take_security_cap() {
+                    crate::followup::security_capped(&paths.followup, cap.rounds, cap.max)?;
+                    store.save(&state)?;
+                    steps.push(Step::SecurityRoundsSpent {
+                        rounds: cap.rounds,
+                        max: cap.max,
+                    });
+                }
                 // Persisted before anything is printed: a session that dies
                 // after the print must not lose the verdict.
                 steps.push(Step::Verified);

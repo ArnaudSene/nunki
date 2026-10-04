@@ -150,6 +150,26 @@ pub fn reviewed(file: &Path, who: &str, why: &str) -> Result<(), FollowupError> 
     )
 }
 
+/// The mission was verified without the security agent, because the rounds
+/// its rigor allows were spent (SPEC 4.5): `rounds` played of `max`.
+///
+/// Written here, beside the verdicts the rounds concluded, so that whoever
+/// validates the push reads that the last commit was not seen by the agent,
+/// and why — a verified mission otherwise reads as if every stage had run.
+pub fn security_capped(file: &Path, rounds: u32, max: u32) -> Result<(), FollowupError> {
+    append(
+        file,
+        &format!(
+            "## {date} — nunki did not call the security agent again\n\n\
+             The security round cap was reached: {rounds} / {max}. The gates are\n\
+             green on the code as it stands, and the mission is verified without\n\
+             another round: what the last commits changed has not been read by\n\
+             the security agent.\n",
+            date = today(),
+        ),
+    )
+}
+
 /// An instruction left for the next run.
 ///
 /// `say` and not a channel: there is no channel during a run (SPEC 4.3). What
