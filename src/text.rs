@@ -59,6 +59,17 @@ pub fn brief(text: &str, chars: usize) -> String {
     }
 }
 
+/// Whether `text` says nothing a reader can see: empty once whitespace and
+/// every character [`printable`] escapes as invisible or as a control are
+/// removed. The two joiners count as nothing too — [`printable`] keeps the
+/// zero-width joiner for the emoji it holds together, but on their own
+/// neither shows anything. What a check asking "is there a title, is there a
+/// reason" reads, since `str::trim` leaves a zero-width space standing.
+pub fn blank(text: &str) -> bool {
+    text.chars()
+        .all(|c| c.is_whitespace() || unsafe_to_print(c) || matches!(c, '\u{200c}' | '\u{200d}'))
+}
+
 /// A character that tells a terminal what to do rather than what to show, or
 /// that a reader cannot see at all.
 fn unsafe_to_print(c: char) -> bool {

@@ -349,3 +349,47 @@ fn only_a_lift_by_nunki_is_listed_as_one() {
     lift.by_nunki = false;
     assert!(nunki::findings::lifted_by_nunki(&lift).is_empty());
 }
+
+/// A title or a reason made only of characters a reader cannot see is no
+/// title and no reason: `str::trim` leaves a zero-width space standing, and
+/// the check reads what shows (SPEC 4.5, "nothing is accepted on a guess").
+#[test]
+fn a_title_or_reason_made_of_invisible_characters_is_none() {
+    let one = |severity: &str, title: &str, why: &str| serde_json::json!({"severity": severity, "title": title, "why_acceptable": why});
+    let listed = |findings: Vec<serde_json::Value>| serde_json::Value::Array(findings).to_string();
+    for (findings, why) in [
+        (
+            listed(vec![one("LOW", "\u{200b}", "x")]),
+            Withheld::Untitled { index: 1 },
+        ),
+        (
+            listed(vec![
+                one("LOW", "a", "x"),
+                one("INFO", " \u{2060}\u{feff}\u{200d} ", "x"),
+            ]),
+            Withheld::Untitled { index: 2 },
+        ),
+        (
+            listed(vec![one("LOW", "a", "\u{200b}")]),
+            Withheld::NoReason {
+                title: "a".into(),
+                severity: Severity::Low,
+            },
+        ),
+        (
+            listed(vec![one("INFO", "a", "\u{e0041}\u{2028}\u{200c}")]),
+            Withheld::NoReason {
+                title: "a".into(),
+                severity: Severity::Info,
+            },
+        ),
+    ] {
+        let file = verdict_with("FINDINGS", Some(&findings));
+        assert_eq!(file.automatic_lift(), Err(why), "{findings}");
+    }
+
+    // And a visible character beside the invisible ones is a title.
+    let findings = listed(vec![one("LOW", "\u{200b}a", "\u{200b}x")]);
+    let file = verdict_with("FINDINGS", Some(&findings));
+    assert!(file.automatic_lift().is_ok(), "{findings}");
+}

@@ -1472,6 +1472,101 @@ fn one_medium_finding_stops_at_findings_as_before() {
     assert!(!world.followup().contains("nunki lifted"));
 }
 
+/// The lift is decided on exactly the verdict that was concluded (SPEC 4.5).
+///
+/// `verify` reads `VERDICT.json`, plays the gates, carries the red verdict
+/// to `FOLLOWUP_HQ.md`, moves the flow, and only then decides the lift.
+/// Here `FOLLOWUP_HQ.md` is a named pipe, so the carry waits on this test:
+/// while it waits — the verdict read and recorded, the lift not yet decided
+/// — the honest MEDIUM report is rewritten into a LOW-only one, as code
+/// from the tree running beside the security agent could. The mission
+/// stops at `Findings` on the MEDIUM, and nothing is accepted.
+#[test]
+fn the_lift_is_decided_on_the_verdict_concluded_not_on_a_file_rewritten_after_it() {
+    use std::io::{Read, Write};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let world = with_security_agent_at(nunki::mission::Rigor::Standard);
+    world.at_security();
+    world.run_recorded(Some(41), FINISHED);
+    world.ranked(
+        "FINDINGS",
+        r#"[{"severity":"MEDIUM","title":"an open redirect"}]"#,
+    );
+    let verdict = world.mission().join("VERDICT.json");
+    let honest = std::fs::read_to_string(&verdict).unwrap();
+    let forged = honest.replace(
+        r#"{"severity":"MEDIUM","title":"an open redirect"}"#,
+        r#"{"severity":"LOW","title":"an open redirect","why_acceptable":"nothing to see"}"#,
+    );
+    assert_ne!(honest, forged);
+
+    let followup = world.mission().join("FOLLOWUP_HQ.md");
+    let before = std::fs::read_to_string(&followup).unwrap();
+    std::fs::remove_file(&followup).unwrap();
+    let made = Command::new("mkfifo").arg(&followup).status().unwrap();
+    assert!(made.success(), "mkfifo {}", followup.display());
+
+    // The other end of the pipe: the carry first reads the file, then
+    // appends to it. The verdict is rewritten while the read waits, and the
+    // pipe is a plain file again once the carry has written, whatever
+    // `verify` touches after it.
+    let server = {
+        let (followup, verdict, forged) = (followup.clone(), verdict.clone(), forged.clone());
+        std::thread::spawn(move || {
+            let reader_waits = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&followup)
+                .unwrap();
+            std::fs::write(&verdict, &forged).unwrap();
+            drop(reader_waits);
+            let mut writer = std::fs::File::open(&followup).unwrap();
+            std::fs::remove_file(&followup).unwrap();
+            let mut carried = String::new();
+            writer.read_to_string(&mut carried).unwrap();
+            let mut plain = std::fs::File::create(&followup).unwrap();
+            write!(plain, "{before}{carried}").unwrap();
+            carried
+        })
+    };
+
+    let (done, steps) = mpsc::channel();
+    {
+        let project = world.project.clone();
+        std::thread::spawn(move || {
+            let engine: Arc<dyn nunki::engine::Engine> =
+                Arc::new(nunki::engine::fake::FakeEngine::default());
+            let _ = done.send(verify::verify(&project, "m1", engine, "docker"));
+        });
+    }
+    let steps = steps
+        .recv_timeout(Duration::from_secs(60))
+        .expect("verify came back")
+        .unwrap();
+    let carried = server.join().unwrap();
+
+    assert!(carried.contains("concluded Findings"), "{carried}");
+    assert_eq!(
+        std::fs::read_to_string(&verdict).unwrap(),
+        forged,
+        "the file was rewritten before the lift was decided"
+    );
+    assert!(
+        matches!(steps.last(), Some(Step::Findings { .. })),
+        "{steps:?}"
+    );
+    assert!(
+        steps.iter().any(|s| matches!(s, Step::LeftToHuman { why }
+            if why.contains("an open redirect") && why.contains("MEDIUM"))),
+        "{steps:?}"
+    );
+    let state = world.state();
+    assert!(matches!(state.flow.stage(), Stage::Findings { .. }));
+    assert!(state.accepted.is_empty(), "{:?}", state.accepted);
+    assert!(!world.followup().contains("nunki lifted"));
+}
+
 /// Fail closed, end to end: no list, an empty one with FINDINGS, an unknown
 /// severity, a LOW without its reason — each stops at `Findings` with
 /// nothing recorded, and none costs the agent an attempt.

@@ -490,8 +490,10 @@ impl VerdictFile {
     /// (SPEC 4.5).
     ///
     /// Fail closed: a `FINDINGS` whose list is not empty and whose every
-    /// finding is `LOW` or `INFO`, titled, with a reason. Anything else —
-    /// from a missing list to one unknown severity — leaves the whole
+    /// finding is `LOW` or `INFO`, titled, with a reason; a title or a reason
+    /// that shows nothing once whitespace and invisible characters are set
+    /// aside ([`crate::text::blank`]) is none. Anything else — from a
+    /// missing list to one unknown severity — leaves the whole
     /// verdict to a human, exactly as before severities existed. Nothing is
     /// ever accepted on a guess.
     pub fn automatic_lift(&self) -> Result<Vec<LowFinding>, Withheld> {
@@ -509,7 +511,7 @@ impl VerdictFile {
         let mut lifted = Vec::with_capacity(listed.len());
         for (index, finding) in listed.iter().enumerate() {
             let title = finding.title.trim();
-            if title.is_empty() {
+            if crate::text::blank(title) {
                 return Err(Withheld::Untitled { index: index + 1 });
             }
             let Some(severity) = Severity::parse(&finding.severity) else {
@@ -525,7 +527,7 @@ impl VerdictFile {
                 });
             }
             let why = finding.why_acceptable.as_deref().map(str::trim);
-            let Some(why) = why.filter(|w| !w.is_empty()) else {
+            let Some(why) = why.filter(|w| !crate::text::blank(w)) else {
                 return Err(Withheld::NoReason {
                     title: title.to_string(),
                     severity,

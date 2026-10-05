@@ -4,7 +4,7 @@
 
 mod common;
 
-use nunki::text::{brief, one_line, printable};
+use nunki::text::{blank, brief, one_line, printable};
 
 #[test]
 fn every_control_an_agent_could_send_a_terminal_is_shown_escaped() {
@@ -99,4 +99,28 @@ fn brief_cuts_the_text_and_never_an_escape() {
     assert_eq!(brief("ab\u{1b}", 3), "ab\\u{1b}");
     assert_eq!(brief("é".repeat(5).as_str(), 2), "éé…");
     common::assert_printable(&brief(common::HOSTILE, 40), "brief");
+}
+
+/// Blank is what a reader sees: nothing. Whitespace, controls, every
+/// invisible character `printable` escapes, and the two joiners on their
+/// own are nothing; one visible character, an emoji held together by a
+/// joiner included, is something.
+#[test]
+fn blank_text_is_text_a_reader_sees_nothing_of() {
+    for nothing in [
+        "",
+        " \t\n",
+        "\u{200b}",
+        "\u{200b} \u{2060}\u{feff}",
+        "\u{e0041}\u{e0042}",
+        "\u{202e}\u{2028}",
+        "\u{200d}",
+        "\u{200c}",
+        "\u{1b}\u{7}",
+    ] {
+        assert!(blank(nothing), "{nothing:?} shows nothing");
+    }
+    for something in ["a", "\u{200b}a", "é", "👩\u{200d}💻", "-"] {
+        assert!(!blank(something), "{something:?} shows something");
+    }
 }

@@ -719,8 +719,16 @@ pub fn verify_as(
                                 &outcome,
                                 now,
                             )?;
-                            let mut event =
-                                concluded(Role::Security, outcome, paths.verdict.as_path(), &head);
+                            // The file is parsed here, once, and the lift
+                            // below is decided on this parse: the gates and
+                            // everything else in between may run while code
+                            // from the tree is still writing.
+                            let (mut event, verdict_file) = concluded_on(
+                                Role::Security,
+                                outcome,
+                                paths.verdict.as_path(),
+                                &head,
+                            );
                             // The security agent commits nothing, so its gates
                             // are the two things it does leave: a resume block
                             // naming the commit it attacked, and a report
@@ -772,13 +780,14 @@ pub fn verify_as(
                                 )?;
                             }
                             carry(&paths.followup, Role::Security, &event, &head)?;
-                            let findings = matches!(
-                                &event,
-                                Event::Verdict {
-                                    verdict: crate::mission::Verdict::Findings,
-                                    ..
-                                }
-                            );
+                            // The parsed verdict stands only if the flow is
+                            // about to move on it: a verdict its gates
+                            // refused is no verdict, and nothing is lifted
+                            // on it.
+                            let concluded_file = match &event {
+                                Event::Verdict { .. } => verdict_file,
+                                _ => None,
+                            };
                             if let Event::Verdict { verdict, .. } = &event {
                                 state.conclude(Role::Security, Some(*verdict), &head);
                             }
@@ -792,8 +801,10 @@ pub fn verify_as(
                             // lifted by `nunki` itself, as a human's `accept`
                             // would lift it; anything else stays on
                             // `Findings` for a human, as before (SPEC 4.5).
-                            if findings && matches!(state.flow.stage(), Stage::Findings { .. }) {
-                                match lift_decision(&paths.verdict, &head) {
+                            if let (Some(file), Stage::Findings { .. }) =
+                                (&concluded_file, state.flow.stage())
+                            {
+                                match file.automatic_lift().map_err(|why| why.to_string()) {
                                     Ok(lifted) => {
                                         crate::findings::lift_by_nunki(
                                             &store,
@@ -1224,21 +1235,43 @@ fn read_back(
 /// attempt. A harness failure costs none, and that distinction is the whole
 /// of SPEC 4.3 on this point.
 fn concluded(role: Role, outcome: Outcome, verdict: &std::path::Path, head: &str) -> Event {
+    concluded_on(role, outcome, verdict, head).0
+}
+
+/// [`concluded`], with the verdict file it read when it read one: what the
+/// security stage decides its lift on, so that the lift rests on exactly the
+/// verdict that was concluded and never on a second read of a file the
+/// application may have rewritten in between (SPEC 4.5).
+fn concluded_on(
+    role: Role,
+    outcome: Outcome,
+    verdict: &std::path::Path,
+    head: &str,
+) -> (Event, Option<crate::mission::VerdictFile>) {
     let Outcome::Finished(_) = &outcome else {
-        return Event::RunEnded {
-            outcome,
-            lot_done: false,
-        };
+        return (
+            Event::RunEnded {
+                outcome,
+                lot_done: false,
+            },
+            None,
+        );
     };
     match read_verdict(verdict, role, head) {
-        Ok(file) => Event::Verdict {
-            verdict: file.verdict,
-            report: file.report,
-        },
-        Err(why) => Event::RunEnded {
-            outcome: Outcome::MissionFailure(why),
-            lot_done: false,
-        },
+        Ok(file) => (
+            Event::Verdict {
+                verdict: file.verdict,
+                report: file.report.clone(),
+            },
+            Some(file),
+        ),
+        Err(why) => (
+            Event::RunEnded {
+                outcome: Outcome::MissionFailure(why),
+                lot_done: false,
+            },
+            None,
+        ),
     }
 }
 
@@ -1276,20 +1309,6 @@ fn read_verdict(
         ));
     }
     Ok(file)
-}
-
-/// The findings `nunki` lifts itself on the security verdict just concluded
-/// on `head`, or why it leaves them to a human
-/// ([`crate::mission::VerdictFile::automatic_lift`]). The file is the one
-/// [`concluded`] has just read and found on `head`; read again here, and
-/// any failure to read it is one more reason to lift nothing.
-fn lift_decision(
-    verdict: &std::path::Path,
-    head: &str,
-) -> Result<Vec<crate::mission::LowFinding>, String> {
-    read_verdict(verdict, Role::Security, head)?
-        .automatic_lift()
-        .map_err(|why| why.to_string())
 }
 
 /// Carry a red verdict to the coder before the flow moves on it.
