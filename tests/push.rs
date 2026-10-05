@@ -68,12 +68,34 @@ struct World {
     tree: PathBuf,
     /// A bare repository standing in for the forge.
     forge: PathBuf,
+    /// The user home the real binary is run with, for a world [`World::opened`].
+    home: PathBuf,
 }
 
 impl World {
     fn new(integration: Integration, security: Security) -> Self {
+        Self::built(integration, security, false)
+    }
+
+    /// The same world, in a project home the real binary opens with `HOME`
+    /// set to [`World::home`]: for what `nunki push` prints, which nothing
+    /// below the binary can see.
+    fn opened(integration: Integration, security: Security) -> Self {
+        Self::built(integration, security, true)
+    }
+
+    fn built(integration: Integration, security: Security, opened: bool) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let hq_root = dir.path().join("nunki").join(nunki::project::HQ_DIR);
+        let root = dir.path().join("repo");
+        let nunki_home = if opened {
+            common::project_home(&root, &dir.path().join("home"), "harness: claude-code\n")
+        } else {
+            std::fs::create_dir_all(&root).unwrap();
+            git(&root, &["init", "-q", "-b", "dev"]);
+            dir.path().join("nunki")
+        };
+        let root = std::fs::canonicalize(&root).unwrap();
+        let hq_root = nunki_home.join(nunki::project::HQ_DIR);
         for d in ["locks", "missions", "state/missions"] {
             std::fs::create_dir_all(hq_root.join(d)).unwrap();
         }
@@ -86,9 +108,6 @@ impl World {
         );
 
         // The repository, with the forge as its origin.
-        let root = dir.path().join("repo");
-        std::fs::create_dir_all(&root).unwrap();
-        git(&root, &["init", "-q", "-b", "dev"]);
         std::fs::write(root.join("src.rs"), "pub fn one() -> u8 { 1 }\n").unwrap();
         git(&root, &["add", "-A"]);
         git(&root, &["commit", "-q", "-m", "base"]);
@@ -96,7 +115,7 @@ impl World {
             &root,
             &["remote", "add", "origin", &forge.display().to_string()],
         );
-        git(&root, &["push", "-q", "origin", "dev"]);
+        git(&root, &["push", "-q", "origin", "HEAD"]);
 
         // The slot, where `nunki::slot::find` looks: beside the repository.
         let slots = dir.path().join("repo-slots");
@@ -154,6 +173,7 @@ impl World {
             .unwrap();
 
         Self {
+            home: dir.path().join("home"),
             _dir: dir,
             project,
             tree,
@@ -690,13 +710,40 @@ fn no_integration() -> Integration {
 impl World {
     /// A mission with a security agent and no integrator, at `rigor`.
     fn at(rigor: nunki::mission::Rigor) -> Self {
-        let world = World::new(no_integration(), Security::Agent);
+        Self::rigged(World::new(no_integration(), Security::Agent), rigor)
+    }
+
+    /// [`World::at`], in a project home the real binary opens.
+    fn opened_at(rigor: nunki::mission::Rigor) -> Self {
+        Self::rigged(World::opened(no_integration(), Security::Agent), rigor)
+    }
+
+    fn rigged(world: World, rigor: nunki::mission::Rigor) -> Self {
         let mut h = header(no_integration(), Security::Agent);
         h.rigor = rigor;
         let mut state = world.state();
         state.flow = Flow::new(h).unwrap();
         world.store().save(&state).unwrap();
         world
+    }
+
+    /// `nunki push m1 --yes`, run by the real binary: what it printed, once
+    /// it succeeded.
+    fn pushed_by_the_binary(&self) -> String {
+        let out = Command::new(env!("CARGO_BIN_EXE_nunki"))
+            .arg("-C")
+            .arg(&self.project.root)
+            .args(["push", "m1", "--yes"])
+            .env("HOME", &self.home)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(
+            out.status.success(),
+            "{stdout}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        stdout
     }
 
     fn event(&self, event: Event) {
@@ -1052,4 +1099,28 @@ fn a_prototype_is_pushed_without_a_security_verdict() {
     let pushed = push::push(&world.project, "m1", true).unwrap();
     assert!(pushed.not_attacked.is_empty());
     assert_eq!(world.on_forge("mission/x").as_deref(), Some(head.as_str()));
+}
+
+/// What `nunki push` prints is what the human reads before opening the pull
+/// request, so the commits the security agent never saw are said there —
+/// and only when there are some: a push on a verdict on `HEAD` names none,
+/// and a heading over an empty list would read as a warning about nothing.
+/// The real binary, because the decision is in what the CLI prints.
+#[test]
+fn the_push_command_names_the_commits_not_attacked_and_only_when_there_are_some() {
+    let spent = World::opened_at(nunki::mission::Rigor::Standard);
+    spent.coded("pub fn one() -> u8 { 2 }\n", "the lot");
+    spent.security(Verdict::Clear, T1);
+    spent.review();
+    let volet = spent.coded("pub fn one() -> u8 { 3 }\n", "the volet");
+    let out = spent.pushed_by_the_binary();
+    assert!(out.contains("not attacked by the security agent"), "{out}");
+    assert!(out.contains(&named(&volet, "the volet")), "{out}");
+
+    let on_head = World::opened_at(nunki::mission::Rigor::Critical);
+    on_head.coded("pub fn one() -> u8 { 2 }\n", "the lot");
+    on_head.security(Verdict::Clear, T1);
+    let out = on_head.pushed_by_the_binary();
+    assert!(out.contains("pushed"), "the push happened: {out}");
+    assert!(!out.contains("not attacked"), "{out}");
 }
