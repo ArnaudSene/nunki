@@ -2,6 +2,8 @@
 //! the loop, driven by a clock and a reader the tests hold; and the HQ's own
 //! files read the way the monitor leaves them.
 
+mod common;
+
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
@@ -553,7 +555,18 @@ fn durations_are_seconds_minutes_or_hours() {
     assert_eq!(parse_duration("90s"), Ok(90));
     assert_eq!(parse_duration("5m"), Ok(300));
     assert_eq!(parse_duration("2h"), Ok(7_200));
-    for wrong in ["", "m", "-5", "5d", "1.5h", "h5", "99999999999999999999h"] {
+    // `u64` parsing takes a leading `+`; a duration does not.
+    for wrong in [
+        "",
+        "m",
+        "-5",
+        "+5",
+        "+5m",
+        "5d",
+        "1.5h",
+        "h5",
+        "99999999999999999999h",
+    ] {
         assert!(
             parse_duration(wrong).is_err(),
             "{wrong:?} is not a duration"
@@ -729,7 +742,7 @@ fn a_transition_after_a_push_forgets_the_push() {
 /// it was; one that fits is left whole.
 #[test]
 fn a_long_report_is_cut_with_an_ellipsis_and_a_short_one_is_whole() {
-    use nunki::mission::flow::brief;
+    use nunki::text::brief;
     let long = "é".repeat(200);
     assert_eq!(brief(&long, 120), format!("{}…", "é".repeat(120)));
     assert_eq!(brief(&"a".repeat(120), 120), "a".repeat(120));
@@ -751,5 +764,164 @@ fn a_long_report_is_cut_with_an_ellipsis_and_a_short_one_is_whole() {
         said.detail.ends_with(&format!("{}…", "x".repeat(160))),
         "{}",
         said.detail
+    );
+}
+
+/// Whatever an agent wrote — a report, a volet's cause, a survivor's id, the
+/// reason a monitor or a hold gives, a lot's label — reaches `wait`'s line,
+/// and so the monitor's log, escaped and never raw; `--json` likewise.
+#[test]
+fn agent_text_reaches_waits_line_escaped_never_raw() {
+    let hostile = common::HOSTILE.to_string();
+    let report = |verdict| Event::Verdict {
+        verdict,
+        report: hostile.clone(),
+    };
+    let mut lines: Vec<(&str, Status)> = Vec::new();
+
+    let found = state_of(flow(
+        Security::Agent,
+        vec![
+            finished(true),
+            Event::GatesPassed,
+            report(Verdict::Findings),
+        ],
+    ));
+    lines.push(("a findings report", stop_of(&found)));
+
+    let mut events = vec![finished(true)];
+    for _ in 0..3 {
+        events.push(Event::GatesFailed {
+            reason: hostile.clone(),
+        });
+        events.push(finished(true));
+    }
+    events.push(Event::GatesFailed {
+        reason: hostile.clone(),
+    });
+    lines.push((
+        "the volets' causes",
+        stop_of(&state_of(flow(Security::Gates, events))),
+    ));
+
+    lines.push((
+        "a survivor's id",
+        stop_of(&state_of(flow(
+            Security::Gates,
+            vec![Event::RulingAwaited {
+                what: hostile.clone(),
+                survivors: vec![hostile.clone()],
+            }],
+        ))),
+    ));
+    lines.push((
+        "the reason a mission was called off",
+        stop_of(&state_of(flow(
+            Security::Gates,
+            vec![Event::Ended {
+                reason: hostile.clone(),
+            }],
+        ))),
+    ));
+
+    let mut held = coding();
+    held.stopped = Some(Stopped {
+        who: hostile.clone(),
+        date: "now".into(),
+        interrupted: false,
+        reason: Some(hostile.clone()),
+    });
+    lines.push(("a hold's reason", stop_of(&held)));
+
+    let stopped = Context {
+        watcher: Watcher::Stopped {
+            why: hostile.clone(),
+        },
+        window: None,
+    };
+    lines.push((
+        "the monitor's word",
+        status("m1", &coding(), &stopped).unwrap(),
+    ));
+
+    let mut header = header(Security::Gates);
+    header.lots[0].id = hostile.clone();
+    let gone = Context {
+        watcher: Watcher::Gone,
+        window: None,
+    };
+    lines.push((
+        "a lot's label",
+        status("m1", &state_of(Flow::new(header).unwrap()), &gone).unwrap(),
+    ));
+
+    for (outlet, said) in lines {
+        common::assert_printable(&said.line(), outlet);
+        assert!(!said.line().contains('\n'), "{outlet}: {}", said.line());
+        let json = said.json();
+        assert!(
+            !json.chars().any(common::raw_control),
+            "{outlet} in JSON: {json}"
+        );
+    }
+}
+
+/// The real clock reads the machine's time; how it sleeps is the one thing
+/// no test here exercises, by the mission's rule that no test sleeps.
+#[test]
+fn the_system_clock_reads_the_machines_time() {
+    use nunki::wait::SystemClock;
+    let before = nunki::state::now_secs();
+    let read = SystemClock.now();
+    let after = nunki::state::now_secs();
+    assert!(
+        before <= read && read <= after,
+        "{before} ≤ {read} ≤ {after}"
+    );
+}
+
+/// The HQ reads the account's last measure: past its threshold, a mission
+/// still being driven stops on 12 and names the window and its reset; below
+/// it, nothing stops it.
+#[test]
+fn the_hq_reads_a_spent_window_from_the_accounts_measure() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    let home = project.nunki_home();
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(
+        home.join("accounts.yaml"),
+        "accounts:\n  main:\n    harness: claude-code\n    token_file: accounts/main.token\n",
+    )
+    .unwrap();
+    let resets = nunki::state::now_secs() + 3_600;
+    let measure = |per_mille| nunki::consumption::Measure {
+        windows: nunki::consumption::Windows {
+            five_hour: Some(nunki::consumption::Window {
+                per_mille,
+                resets_at: resets,
+            }),
+            weekly: None,
+        },
+        measured_at: nunki::state::now_secs(),
+        harness: "claude-code".into(),
+    };
+    save(&project, &coding());
+    let observe = || match nunki::wait::Hq::new(&project).observe("m1").unwrap() {
+        Observed::Live { context, .. } => context.window,
+        other => panic!("{other:?}"),
+    };
+
+    nunki::consumption::record(&home, "main", &measure(500)).unwrap();
+    assert_eq!(observe(), None, "below the threshold");
+
+    nunki::consumption::record(&home, "main", &measure(950)).unwrap();
+    assert_eq!(
+        observe(),
+        Some(Spent {
+            account: "main".into(),
+            window: "five-hour window".into(),
+            until: resets,
+        })
     );
 }

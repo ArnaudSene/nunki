@@ -1131,3 +1131,68 @@ fn the_push_command_names_the_commits_not_attacked_and_only_when_there_are_some(
     assert!(out.contains("pushed"), "the push happened: {out}");
     assert!(!out.contains("not attacked"), "{out}");
 }
+
+impl World {
+    /// The real binary, run on this world with `args`: what it printed on
+    /// both streams, whatever its exit.
+    fn printed_by_the_binary(&self, args: &[&str]) -> String {
+        let out = Command::new(env!("CARGO_BIN_EXE_nunki"))
+            .arg("-C")
+            .arg(&self.project.root)
+            .args(args)
+            .env("HOME", &self.home)
+            .env("HQ_NO_MONITOR", "1")
+            .output()
+            .unwrap();
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    }
+}
+
+/// A commit subject is its author's text. Push names the commits the
+/// security agent did not attack, on the terminal and in the follow-up, and
+/// a subject carrying escape sequences reaches neither raw.
+#[test]
+fn a_commit_subject_not_attacked_is_printed_escaped_never_raw() {
+    let world = World::opened_at(nunki::mission::Rigor::Standard);
+    world.coded("pub fn one() -> u8 { 2 }\n", "the lot");
+    world.security(Verdict::Clear, T1);
+    world.review();
+    let volet = world.coded("pub fn one() -> u8 { 3 }\n", common::HOSTILE);
+
+    let not_attacked = push::not_attacked(&world.tree, "HEAD~1", &volet).unwrap();
+    assert_eq!(not_attacked.len(), 1);
+    common::assert_printable(&not_attacked[0], "push::not_attacked");
+
+    let printed = world.pushed_by_the_binary();
+    assert!(printed.contains(&volet[..12]), "{printed}");
+    common::assert_printable(&printed, "nunki push");
+}
+
+/// The security agent's report is its own text: `verify` prints it, and
+/// `mission status` prints the stage that holds it, escaped and never raw.
+#[test]
+fn a_findings_report_is_printed_escaped_never_raw() {
+    let world = World::opened_at(nunki::mission::Rigor::Standard);
+    world.coded("pub fn one() -> u8 { 2 }\n", "the lot");
+    let mut state = world.state();
+    state.conclude(Role::Security, Some(Verdict::Findings), &world.head());
+    world.store().save(&state).unwrap();
+    world.event(Event::Verdict {
+        verdict: Verdict::Findings,
+        report: common::HOSTILE.into(),
+    });
+    world.lifted(Some(common::HOSTILE), &world.head(), T1);
+
+    let verified = world.printed_by_the_binary(&["verify", "m1"]);
+    assert!(verified.contains("findings  "), "{verified}");
+    assert!(verified.contains("lifted    "), "{verified}");
+    common::assert_printable(&verified, "nunki verify");
+
+    let status = world.printed_by_the_binary(&["mission", "status", "m1"]);
+    assert!(status.contains("stage     Findings"), "{status}");
+    assert!(!status.chars().any(common::raw_control), "{status}");
+}

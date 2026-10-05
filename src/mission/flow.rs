@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::harness::{Outcome, Role};
+use crate::text::{brief, one_line};
 
 use super::{Header, RigorError, Verdict};
 
@@ -65,8 +66,10 @@ impl Handover {
 
     /// What stopped, in one line: the lot and its attempts, the role, the
     /// causes of the volets, the reason it was called off, the survivors.
+    /// Agent-written as most of it is (causes, survivors), it is made
+    /// printable as a whole ([`crate::text`]).
     pub fn detail(&self) -> String {
-        match self {
+        let raw = match self {
             Handover::LotAttemptsExhausted { lot, attempts } => {
                 format!("lot {lot} failed {attempts} attempt(s)")
             }
@@ -82,7 +85,7 @@ impl Handover {
                     .collect::<Vec<_>>()
                     .join("; ")
             ),
-            Handover::Abandoned { reason } => format!("called off: {}", one_line(reason)),
+            Handover::Abandoned { reason } => format!("called off: {reason}"),
             Handover::AwaitingRuling {
                 lot,
                 attempt,
@@ -96,7 +99,8 @@ impl Handover {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
-        }
+        };
+        one_line(&raw)
     }
 
     /// Who the handover waits on, and what they are expected to do, with the
@@ -130,22 +134,6 @@ impl Handover {
 /// How much of one volet's cause a handover's line carries: the start says
 /// which verdict or gate it was, and the journals hold the rest.
 const CAUSE_CHARS: usize = 120;
-
-/// `text` on one line: every run of whitespace, line breaks included, made
-/// one space. A status line that broke in two would be read as two.
-pub fn one_line(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// `text` on one line, cut after `chars` characters with an ellipsis when it
-/// was longer.
-pub fn brief(text: &str, chars: usize) -> String {
-    let flat = one_line(text);
-    match flat.char_indices().nth(chars) {
-        Some((at, _)) => format!("{}…", &flat[..at]),
-        None => flat,
-    }
-}
 
 /// Where the mission is.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

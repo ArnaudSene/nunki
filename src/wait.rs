@@ -18,9 +18,10 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::mission::flow::{Flow, Stage, Work, brief, one_line};
+use crate::mission::flow::{Flow, Stage, Work};
 use crate::project::Project;
 use crate::state::{MissionState, StateError, Store};
+use crate::text::{brief, one_line};
 
 /// How often the state is read again, by default.
 pub const EVERY_SECONDS: u64 = 30;
@@ -104,9 +105,12 @@ pub struct Status {
 
 impl Status {
     fn new(id: &str, stage: String, detail: String, who: &str, what: String, stop: Stop) -> Self {
+        // Every part an agent may have written, and not only the detail: a
+        // lot's label reaches the stage as a report reaches the detail. The
+        // id is the operator's own argument.
         Self {
             id: id.to_string(),
-            stage,
+            stage: one_line(&stage),
             detail: one_line(&detail),
             awaits: Awaits {
                 who: who.to_string(),

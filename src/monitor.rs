@@ -306,7 +306,14 @@ pub fn run(project: &Project, id: &str, engine: Arc<dyn Engine>, engine_bin: &st
     // What the previous monitor said no longer holds: this one watches.
     let _ = std::fs::remove_file(exitfile(&project.hq_root, id));
 
-    let why = watch(project, id, engine, engine_bin);
+    let why = watch(
+        project,
+        id,
+        engine,
+        engine_bin,
+        &mut crate::wait::SystemClock,
+        &mut std::io::stdout(),
+    );
     let line = stop(&project.hq_root, id, &why);
 
     // The last act: forget the pid, if it is still this monitor's.
@@ -320,17 +327,26 @@ pub fn run(project: &Project, id: &str, engine: Arc<dyn Engine>, engine_bin: &st
     line
 }
 
-fn watch(project: &Project, id: &str, engine: Arc<dyn Engine>, engine_bin: &str) -> String {
+/// The monitor's loop: what [`run`] does between taking the pid and giving it
+/// back, and why it stopped. Its clock and its log are parameters, as
+/// `wait`'s are, so that a test drives the ticks and reads what was written.
+pub fn watch(
+    project: &Project,
+    id: &str,
+    engine: Arc<dyn Engine>,
+    engine_bin: &str,
+    clock: &mut dyn crate::wait::Clock,
+    out: &mut dyn std::io::Write,
+) -> String {
     // The log is for what changed: a tick that changed nothing writes nothing.
     let mut said = Changes::default();
-    let mut out = std::io::stdout();
     loop {
-        let now = crate::state::now_secs();
+        let now = clock.now();
         let state = match Store::open(&project.hq_root).and_then(|store| store.load(id)) {
             Ok(state) => state,
             Err(e) => return format!("the mission's state cannot be read: {e}"),
         };
-        said.tick(&mut out, now, &state);
+        said.tick(out, now, &state);
 
         if let Some(handle) = &state.run {
             let harness = crate::harness::claude_code::ClaudeCode::new(
@@ -351,7 +367,7 @@ fn watch(project: &Project, id: &str, engine: Arc<dyn Engine>, engine_bin: &str)
                         now,
                     ) {
                         said.note(
-                            &mut out,
+                            out,
                             now,
                             "measure",
                             &format!("the measure could not be kept: {e}"),
@@ -360,7 +376,7 @@ fn watch(project: &Project, id: &str, engine: Arc<dyn Engine>, engine_bin: &str)
                     match crate::gesture::spare(project, id, &harness, now, LOCK_VERB) {
                         Ok(Some(spared)) => {
                             said.note(
-                                &mut out,
+                                out,
                                 now,
                                 "spare",
                                 &format!(
@@ -374,19 +390,19 @@ fn watch(project: &Project, id: &str, engine: Arc<dyn Engine>, engine_bin: &str)
                         Ok(None) => {}
                         Err(e) => {
                             said.note(
-                                &mut out,
+                                out,
                                 now,
                                 "spare",
                                 &format!("the run could not be spared: {e}"),
                             );
                         }
                     }
-                    sleep_until(now + TICK_SECONDS);
+                    sleep_until(clock, now + TICK_SECONDS);
                     continue;
                 }
                 // A human froze it, and a frozen run is theirs to thaw.
                 Ok(RunState::Paused(_)) => {
-                    sleep_until(now + TICK_SECONDS);
+                    sleep_until(clock, now + TICK_SECONDS);
                     continue;
                 }
                 // Ended, or unreachable: `verify` reads it back, or says it
@@ -399,11 +415,11 @@ fn watch(project: &Project, id: &str, engine: Arc<dyn Engine>, engine_bin: &str)
         match &result {
             Ok(steps) => {
                 if let Some(last) = steps.last() {
-                    said.note(&mut out, now, "verify", &format!("verify: {last:?}"));
+                    said.note(out, now, "verify", &format!("verify: {last:?}"));
                 }
             }
             Err(e) => {
-                said.note(&mut out, now, "verify", &format!("verify: {e}"));
+                said.note(out, now, "verify", &format!("verify: {e}"));
             }
         }
         match after_verify(id, &result) {
@@ -412,7 +428,7 @@ fn watch(project: &Project, id: &str, engine: Arc<dyn Engine>, engine_bin: &str)
             // read it back. It launches detached, so this returns at once.
             Next::RunCampaign => match crate::verify::campaign(project, id, engine.clone()) {
                 Ok(progress) => {
-                    said.note(&mut out, now, "campaign", &campaign_line(&progress));
+                    said.note(out, now, "campaign", &campaign_line(&progress));
                     if let Next::Exit(why) = after_campaign(&progress) {
                         return why;
                     }
@@ -422,17 +438,17 @@ fn watch(project: &Project, id: &str, engine: Arc<dyn Engine>, engine_bin: &str)
             Next::Continue => {}
         }
         let wake = match Store::open(&project.hq_root).and_then(|store| store.load(id)) {
-            Ok(state) => next_wake(project, &state, crate::state::now_secs()),
-            Err(_) => crate::state::now_secs() + TICK_SECONDS,
+            Ok(state) => next_wake(project, &state, clock.now()),
+            Err(_) => clock.now() + TICK_SECONDS,
         };
-        sleep_until(wake);
+        sleep_until(clock, wake);
     }
 }
 
-fn sleep_until(epoch: u64) {
-    let now = crate::state::now_secs();
+fn sleep_until(clock: &mut dyn crate::wait::Clock, epoch: u64) {
+    let now = clock.now();
     if epoch > now {
-        std::thread::sleep(std::time::Duration::from_secs(epoch - now));
+        clock.sleep(epoch - now);
     }
 }
 
@@ -473,7 +489,11 @@ pub fn last_exit(hq_root: &Path, id: &str) -> Option<Exited> {
 pub fn stop(hq_root: &Path, id: &str, why: &str) -> String {
     let state = match Store::open(hq_root).and_then(|store| store.load(id)) {
         Ok(state) => state,
-        Err(e) => return format!("{id} · unknown · {why}; the state cannot be read: {e}"),
+        Err(e) => {
+            return crate::text::one_line(&format!(
+                "{id} · unknown · {why}; the state cannot be read: {e}"
+            ));
+        }
     };
     let exited = Exited {
         why: why.to_string(),
@@ -497,7 +517,9 @@ pub struct Changes {
 
 impl Changes {
     /// Write `what` under `topic`, stamped `at`, unless it is what that topic
-    /// said last. Returns whether it wrote.
+    /// said last. Returns whether it wrote. What it writes is one printable
+    /// line ([`crate::text`]): a `verify` step or a campaign's stderr carries
+    /// what an agent wrote.
     pub fn note(
         &mut self,
         out: &mut dyn std::io::Write,
@@ -505,11 +527,12 @@ impl Changes {
         topic: &'static str,
         what: &str,
     ) -> bool {
-        if self.said.get(topic).is_some_and(|last| last == what) {
+        let what = crate::text::one_line(what);
+        if self.said.get(topic).is_some_and(|last| *last == what) {
             return false;
         }
         let _ = writeln!(out, "{}  {what}", crate::state::rfc3339(at));
-        self.said.insert(topic, what.to_string());
+        self.said.insert(topic, what);
         true
     }
 
@@ -529,8 +552,8 @@ impl Changes {
 /// The count of lines a running campaign has written is left out, or every
 /// tick would be a change.
 pub fn campaign_line(progress: &crate::mutants::Progress) -> String {
-    use crate::mission::flow::one_line;
     use crate::mutants::Progress;
+    use crate::text::one_line;
     match progress {
         Progress::Fresh { survivors } => {
             format!("mutation campaign already fresh: {survivors} survivor(s)")

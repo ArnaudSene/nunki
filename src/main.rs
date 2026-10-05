@@ -1089,14 +1089,17 @@ fn main() -> ExitCode {
                                     "unplayed  a {role:?} gate could not be played, and no run \
                                      would change that"
                                 );
-                                println!("          {why}");
+                                println!("          {}", nunki::text::printable(why));
                             }
                             // The one unplayable gate nunki clears itself, so
                             // the verb the human just typed does it rather
                             // than telling them to type another.
                             nunki::verify::Step::CampaignOwed { role, why } => {
                                 owed = true;
-                                println!("campaign  a {role:?} gate waits on one — {why}");
+                                println!(
+                                    "campaign  a {role:?} gate waits on one — {}",
+                                    nunki::text::printable(why)
+                                );
                                 match nunki::verify::campaign(&project, &mission, engine.clone()) {
                                     Ok(progress) => println!(
                                         "          {}",
@@ -1125,7 +1128,7 @@ fn main() -> ExitCode {
                                      — {who} held this mission on {date}"
                                 );
                                 if let Some(why) = reason {
-                                    println!("          {why}");
+                                    println!("          {}", nunki::text::printable(why));
                                 }
                                 println!(
                                     "          `nunki mission resume {mission}` lifts the hold"
@@ -1159,7 +1162,8 @@ fn main() -> ExitCode {
                                 owed = true;
                                 println!(
                                     "waiting   a {role:?} run is owed; the harness failed \
-                                     {failures} time(s) in a row — last: {last}"
+                                     {failures} time(s) in a row — last: {}",
+                                    nunki::text::printable(last)
                                 );
                                 println!(
                                     "          nunki launches none before {until}; \
@@ -1214,9 +1218,9 @@ fn main() -> ExitCode {
                             }
                             nunki::verify::Step::Findings { report, lifted } => {
                                 owed = true;
-                                println!("findings  {report}");
+                                println!("findings  {}", nunki::text::printable(report));
                                 for one in lifted {
-                                    println!("lifted    {one}");
+                                    println!("lifted    {}", nunki::text::printable(one));
                                 }
                                 println!(
                                     "          `nunki mission iterate {mission}` sends it back \
@@ -2509,7 +2513,7 @@ fn print_hold(state: &nunki::state::MissionState, id: &str) {
             hold.who, hold.date
         );
         if let Some(why) = &hold.reason {
-            println!("          {why}");
+            println!("          {}", nunki::text::printable(why));
         }
         println!("          `nunki mission resume {id}` lifts it");
     } else if let Some(down) = &state.harness_down {
@@ -2517,7 +2521,7 @@ fn print_hold(state: &nunki::state::MissionState, id: &str) {
             "harness   failed {} time(s) in a row — no run before {} — last: {}",
             down.failures,
             nunki::state::rfc3339(down.not_before),
-            down.last
+            nunki::text::printable(&down.last)
         );
     }
     if let Some(spared) = &state.spared {
@@ -2663,13 +2667,19 @@ fn print_gates(report: &nunki::gate::Report) {
     for outcome in &report.outcomes {
         let (mark, detail) = match &outcome.decision {
             nunki::gate::Decision::Passed => ("pass", String::new()),
-            nunki::gate::Decision::Failed(why) => ("FAIL", format!(" — {why}")),
+            nunki::gate::Decision::Failed(why) => {
+                ("FAIL", format!(" — {}", nunki::text::printable(why)))
+            }
             // Said, never folded into a pass: a skipped gate reported as
             // green is how a report stops being worth reading (SPEC 4.4,
             // the per-role table).
-            nunki::gate::Decision::NotApplicable(why) => ("n/a ", format!(" — {why}")),
+            nunki::gate::Decision::NotApplicable(why) => {
+                ("n/a ", format!(" — {}", nunki::text::printable(why)))
+            }
             // Neither green nor red: nobody managed to play it.
-            nunki::gate::Decision::Unplayed(why) => ("????", format!(" — {why}")),
+            nunki::gate::Decision::Unplayed(why) => {
+                ("????", format!(" — {}", nunki::text::printable(why)))
+            }
         };
         println!(
             "gate {}    {mark}  {}{detail}",
@@ -2678,7 +2688,7 @@ fn print_gates(report: &nunki::gate::Report) {
         );
         // What a green gate still owes the reader.
         if let Some(note) = &outcome.note {
-            println!("          note  {note}");
+            println!("          note  {}", nunki::text::printable(note));
         }
     }
 }

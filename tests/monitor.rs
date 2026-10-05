@@ -1,6 +1,8 @@
 //! The mission's monitor (SPEC 4.3): when one is wanted, what it does after a
 //! `verify`, when it wakes, and how it is started exactly once.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 
 use nunki::harness::{RunHandle, SessionId};
@@ -554,4 +556,136 @@ fn a_running_campaign_is_said_once_whatever_it_has_written() {
         campaign_line(&Progress::Finished { survivors: 2 }),
         "mutation campaign ended: 2 survivor(s)"
     );
+}
+
+/// The monitor's log and its last line carry what an agent wrote — a
+/// `verify` step quoting a report, a campaign's stderr, the reason it stops —
+/// escaped and never raw.
+#[test]
+fn agent_text_reaches_the_monitors_log_escaped_never_raw() {
+    use nunki::monitor::{Changes, campaign_line, stop};
+    let mut said = Changes::default();
+    let mut log: Vec<u8> = Vec::new();
+    assert!(said.note(&mut log, 0, "verify", common::HOSTILE));
+    // The same hostile text again is the same line: nothing more is written.
+    assert!(!said.note(&mut log, 60, "verify", common::HOSTILE));
+    said.note(
+        &mut log,
+        120,
+        "campaign",
+        &campaign_line(&nunki::mutants::Progress::CouldNotRun(
+            common::HOSTILE.into(),
+        )),
+    );
+    let log = String::from_utf8(log).unwrap();
+    assert_eq!(log.lines().count(), 2, "{log}");
+    common::assert_printable(&log, "the monitor's log");
+
+    let dir = tempfile::tempdir().unwrap();
+    // No state: the line says the state cannot be read, and the reason.
+    let last = stop(dir.path(), "m1", common::HOSTILE);
+    common::assert_printable(&last, "the monitor's last line, no state");
+    let store = nunki::state::Store::open(dir.path()).unwrap();
+    store.save(&state(false)).unwrap();
+    let last = stop(dir.path(), "m1", common::HOSTILE);
+    common::assert_printable(&last, "the monitor's last line");
+}
+
+/// A clock for the monitor's loop: it never sleeps, remembers each pause, and
+/// at each one does what the test says the world did meanwhile.
+struct Ticks<'a> {
+    now: u64,
+    slept: Vec<u64>,
+    meanwhile: Box<dyn FnMut() + 'a>,
+}
+
+impl nunki::wait::Clock for Ticks<'_> {
+    fn now(&mut self) -> u64 {
+        self.now
+    }
+    fn sleep(&mut self, seconds: u64) {
+        assert!(self.slept.len() < 10, "the loop should have stopped");
+        self.slept.push(seconds);
+        self.now += seconds;
+        (self.meanwhile)();
+    }
+}
+
+fn save(project: &Project, state: &MissionState) {
+    nunki::state::Store::open(&project.hq_root)
+        .unwrap()
+        .save(state)
+        .unwrap();
+}
+
+/// The monitor stops on a `verify` that fails — here, the slot is gone —
+/// and the line it ends on is `wait`'s for the same state: the code 13 stop,
+/// carrying the monitor's own word.
+#[test]
+fn a_monitor_that_cannot_verify_stops_on_the_line_wait_prints() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    save(&project, &state(false));
+    let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+        std::sync::Arc::new(nunki::engine::fake::FakeEngine::default());
+
+    let line = nunki::monitor::run(&project, "m1", engine, "docker");
+    assert!(
+        line.contains("the monitor stopped: verify failed, and a human should look"),
+        "{line}"
+    );
+    let said = nunki::wait::wait(
+        "m1",
+        &mut nunki::wait::Hq::new(&project),
+        &mut nunki::wait::SystemClock,
+        30,
+        Some(0),
+    )
+    .unwrap();
+    assert_eq!(said.code, 13, "{}", said.line());
+    assert_eq!(said.line(), line);
+    assert!(
+        !nunki::monitor::pidfile(&project.hq_root, "m1").exists(),
+        "the pid is forgotten once the monitor stops"
+    );
+}
+
+/// While the run goes, the monitor watches it and does not call `verify`: a
+/// tick on a live run measures and sleeps a minute. Once the run is read back
+/// (here, by the test, during that minute), the next tick calls `verify`.
+#[test]
+fn a_running_run_is_watched_and_verify_waits_for_it_to_end() {
+    use nunki::engine::{ExecOutput, Liveness, fake::FakeEngine};
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    save(&project, &state(true));
+    let engine: std::sync::Arc<dyn nunki::engine::Engine> = std::sync::Arc::new(
+        FakeEngine::default()
+            .with_liveness("cafe1234", Liveness::Running)
+            .with_exec(ExecOutput {
+                status: 0,
+                stdout: "nunki-run-running\n".into(),
+                stderr: String::new(),
+            }),
+    );
+    let mut clock = Ticks {
+        now: 1_000,
+        slept: Vec::new(),
+        meanwhile: Box::new(|| save(&project, &state(false))),
+    };
+    let mut log: Vec<u8> = Vec::new();
+
+    let why = nunki::monitor::watch(&project, "m1", engine, "docker", &mut clock, &mut log);
+
+    let log = String::from_utf8(log).unwrap();
+    assert!(why.starts_with("verify failed"), "{why}\n{log}");
+    assert_eq!(clock.slept, vec![60], "{log}");
+    let verifies: Vec<&str> = log.lines().filter(|l| l.contains("verify:")).collect();
+    assert_eq!(
+        verifies.len(),
+        1,
+        "verify is called once, after the run: {log}"
+    );
+    assert!(!log.contains("a run is still going"), "{log}");
+    assert!(log.contains("run s1 under way"), "{log}");
 }

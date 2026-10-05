@@ -442,7 +442,9 @@ pub fn not_attacked(
             &format!("{since}..{head}"),
         ],
     )?;
-    Ok(out.lines().map(str::to_string).collect())
+    // A subject is its author's text, printed by `push` and written into
+    // `FOLLOWUP_HQ.md`: made printable here, once, for both.
+    Ok(out.lines().map(crate::text::printable).collect())
 }
 
 fn on_this_commit(

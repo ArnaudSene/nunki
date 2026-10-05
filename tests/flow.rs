@@ -1,5 +1,7 @@
 //! The flow of SPEC 4.5, exercised without a container or a model.
 
+mod common;
+
 use nunki::harness::{Outcome, Role, Usage};
 use nunki::mission::flow::{Event, Flow, Handover, SecurityCap, Stage, Work};
 use nunki::mission::{Bounds, Header, Integration, Lot, Rigor, Security, Service, Verdict};
@@ -1260,4 +1262,37 @@ fn the_ruling_handover_names_the_lot_the_attempt_and_the_ids_in_one_line() {
         "{exhausted}"
     );
     assert!(exhausted.contains("nunki mission retry m7"), "{exhausted}");
+}
+
+/// Every handover's line — what `verify`, `mission status` and the monitor
+/// print — carries what an agent wrote escaped, never raw.
+#[test]
+fn every_handover_line_shows_agent_text_escaped() {
+    let hostile = || common::HOSTILE.to_string();
+    for handover in [
+        Handover::LotAttemptsExhausted {
+            lot: hostile(),
+            attempts: 3,
+        },
+        Handover::VoletsExhausted {
+            causes: vec![hostile(), hostile()],
+        },
+        Handover::Abandoned { reason: hostile() },
+        Handover::AwaitingRuling {
+            lot: "L1".into(),
+            what: hostile(),
+            attempt: 1,
+            survivors: vec![hostile()],
+        },
+    ] {
+        let line = handover.line("m7");
+        common::assert_printable(&line, &format!("{handover:?}"));
+        assert!(!line.contains('\n'), "{line}");
+    }
+    let role = Handover::RoleAttemptsExhausted {
+        role: Role::Security,
+        attempts: 3,
+    }
+    .line("m7");
+    assert!(!role.chars().any(common::raw_control), "{role}");
 }

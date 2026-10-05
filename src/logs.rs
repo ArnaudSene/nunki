@@ -62,7 +62,15 @@ pub fn of(project: &Project, id: &str, harness: &dyn Harness) -> Result<Vec<Run>
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_default(),
-            lines: harness.readable(&text),
+            // A run's stream is the agent's own words, and this is printed.
+            lines: harness
+                .readable(&text)
+                .into_iter()
+                .map(|line| crate::harness::Line {
+                    text: crate::text::printable(&line.text),
+                    ..line
+                })
+                .collect(),
             log,
         });
     }
