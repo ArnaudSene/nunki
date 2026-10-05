@@ -247,8 +247,10 @@ MISSION  (one branch off its base, one slot)
 - **Volet** — unplanned coder work, opened by a red verdict (the integrator's
   `BROKEN`, the security agent's `FINDINGS`, or red final gates). Named
   `volet-1`, `volet-2`…, bounded by `max_volets` (3 by default). After a
-  volet every later stage is replayed, because a verdict is worth one commit
-  and no other.
+  volet every later stage is replayed while rounds are left, because a
+  verdict is worth one commit and no other; once the security rounds are
+  spent, the last verdict stands for the commits after it (see "Choosing a
+  rigor").
 - **Attempt** — one try at a lot, a volet, or a role's mission. A failure
   costs one, up to `attempts_per_lot` (3 by default); then the mission is
   handed to the human. A harness failure, or a turn `nunki` ended at the

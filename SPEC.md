@@ -2390,7 +2390,8 @@ Ce que la boucle veut dire, et ce qu'elle ne veut pas dire.
   lequel le rôle a conclu, et `nunki` le refuse s'il ne correspond pas au `HEAD`
   réel. Un nouveau commit du codeur rend caducs l'`INTEGRATED` et le `CLEAR`
   précédents : après une correction, l'intégrateur rejoue, puis la sécurité.
-  `nunki push` refuse sans les deux verdicts sur le `HEAD` courant.
+  `nunki push` refuse sans les deux verdicts sur le `HEAD` courant — tant
+  qu'il reste un tour de sécurité (voir plus bas, tours épuisés).
 - **Rien ne se pousse en rouge.** Il n'existe pas de drapeau pour passer
   outre. Un constat de sécurité ne se ferme que corrigé, ou démontré faux
   positif en une phrase que le HQ contre-vérifie, ou **accepté comme risque
@@ -2426,7 +2427,9 @@ Ce que la boucle veut dire, et ce qu'elle ne veut pas dire.
   - `--because` n'est jamais facultatif : un risque accepté sans raison n'est
     pas accepté, il est oublié.
   - **Une acceptation vaut pour un `HEAD`**, comme le verdict qu'elle lève.
-    Un nouveau commit la périme au lieu de la reporter en silence.
+    Un nouveau commit la périme au lieu de la reporter en silence. Seule
+    exception : une fois les tours de sécurité épuisés, la levée du dernier
+    verdict vaut pour les commits venus après lui (ci-dessous).
 - **Les tours de sécurité sont bornés par le niveau d'exigence.** Un tour
   est un verdict que l'agent sécurité conclut (`CLEAR` ou `FINDINGS`) :
   aucun au niveau `prototype`, un au niveau `standard`, trois au niveau
@@ -2438,6 +2441,19 @@ Ce que la boucle veut dire, et ce qu'elle ne veut pas dire.
   (`accept`), et un `iterate` ouvre un volet borné comme les autres.
   `FOLLOWUP_HQ.md` consigne la borne atteinte (`n / max`) et que la
   correction venue après le dernier tour n'a pas été attaquée.
+  - **`push`, tours épuisés.** Aucun verdict ne peut plus venir sur un
+    commit ultérieur : le dernier verdict conclu vaut donc pour les commits
+    venus après lui sur la branche — un `CLEAR` tel quel, un `FINDINGS`
+    seulement si un humain a levé le verdict entier **après** sa conclusion,
+    sur son commit ou un commit ultérieur de la branche. Un verdict sur un
+    commit que la branche ne contient pas est refusé. `push` et
+    `FOLLOWUP_HQ.md` nomment ces commits « non attaqués par l'agent
+    sécurité ». Tant qu'un tour reste, la règle du `HEAD` est inchangée.
+  - **Une levée tient.** `accept` efface le rapport retenu : après une
+    levée, une revue du HQ dont le volet passe les portes à la borne est
+    vérifiée, et le rapport levé ne revient pas.
+  - **Un `prototype`** ne joue aucun tour, et `push` ne lui demande aucun
+    verdict de sécurité, comme pour `security: gates`.
 - **La boucle est bornée, et la borne est un paramètre** : **trois volets**
   par défaut. Au troisième retour au codeur
   sur une même mission, le HQ ne relance pas : il s'arrête et remonte à
