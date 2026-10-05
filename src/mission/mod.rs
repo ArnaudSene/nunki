@@ -486,6 +486,25 @@ pub enum Withheld {
 }
 
 impl VerdictFile {
+    /// What makes this verdict contradict itself, if anything: a `CLEAR`
+    /// whose `findings` lists a finding, or cannot be read. An absent or
+    /// empty list is what a `CLEAR` carries. The other verdicts are not
+    /// read here: a `FINDINGS` with a bad list is left to a human by
+    /// [`VerdictFile::automatic_lift`], and stops where it always did.
+    pub fn contradiction(&self) -> Option<&'static str> {
+        if self.verdict != Verdict::Clear {
+            return None;
+        }
+        match &self.findings {
+            None => None,
+            Some(FindingList::Listed(listed)) if listed.is_empty() => None,
+            Some(FindingList::Listed(_)) => Some("a CLEAR that lists findings"),
+            Some(FindingList::Unreadable(_)) => {
+                Some("a CLEAR whose `findings` is not a list nunki can read")
+            }
+        }
+    }
+
     /// The findings `nunki` lifts on its own, or why it lifts nothing
     /// (SPEC 4.5).
     ///

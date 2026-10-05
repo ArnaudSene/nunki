@@ -23,10 +23,12 @@
 /// bidirectional controls that make a line read in another order than it is
 /// written, and what a reader cannot see: zero-width and invisible
 /// characters, the byte-order mark, the tag block, the line and paragraph
-/// separators. Every visible letter, accent and emoji is kept, and so is the
-/// zero-width joiner that holds an emoji sequence together. Line breaks and
-/// tabs are kept — this is for text that may span lines — and a `\r\n` is
-/// read as the line break it means.
+/// separators, the variation selectors and the characters that look blank
+/// (the soft hyphen, the Hangul fillers, the blank braille pattern). Every
+/// visible letter and accent is kept, every emoji too but for a variation
+/// selector it carries, and so is the zero-width joiner that holds an emoji
+/// sequence together. Line breaks and tabs are kept — this is for text that
+/// may span lines — and a `\r\n` is read as the line break it means.
 pub fn printable(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
@@ -85,6 +87,14 @@ fn unsafe_to_print(c: char) -> bool {
             // The zero-width joiner (U+200D) is not among them: it holds
             // emoji sequences together.
             | '\u{200b}' | '\u{2060}'..='\u{2064}' | '\u{feff}' | '\u{e0000}'..='\u{e007f}'
+            // Characters that show nothing of their own: the soft hyphen,
+            // the Mongolian vowel separator, the combining grapheme joiner,
+            // the variation selectors (which also spell hidden bytes after
+            // a visible character, so an emoji's presentation selector is
+            // shown escaped too), and the blank-looking letters — the
+            // Hangul fillers and the blank braille pattern.
+            | '\u{00ad}' | '\u{180e}' | '\u{034f}' | '\u{fe00}'..='\u{fe0f}'
+            | '\u{3164}' | '\u{115f}' | '\u{1160}' | '\u{ffa0}' | '\u{2800}'
             // Line and paragraph separators: a break some readers make and a
             // terminal does not. `\n` is the line break this text keeps.
             | '\u{2028}' | '\u{2029}'

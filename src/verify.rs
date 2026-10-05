@@ -801,10 +801,10 @@ pub fn verify_as(
                             // lifted by `nunki` itself, as a human's `accept`
                             // would lift it; anything else stays on
                             // `Findings` for a human, as before (SPEC 4.5).
-                            if let (Some(file), Stage::Findings { .. }) =
-                                (&concluded_file, state.flow.stage())
+                            if let Some(decision) =
+                                lift_on(concluded_file.as_ref(), state.flow.stage())
                             {
-                                match file.automatic_lift().map_err(|why| why.to_string()) {
+                                match decision {
                                     Ok(lifted) => {
                                         crate::findings::lift_by_nunki(
                                             &store,
@@ -1308,7 +1308,33 @@ fn read_verdict(
             file.head
         ));
     }
+    // A CLEAR says nothing was found, and a list says something was: a
+    // verdict that says both is malformed, and refused as one rather than
+    // read as whichever half suits (fail closed, SPEC 4.5).
+    if let Some(why) = file.contradiction() {
+        return Err(format!("{} is {why}", path.display()));
+    }
     Ok(file)
+}
+
+/// The lift `nunki` decides on a security verdict just concluded: `None`
+/// when there is nothing to decide — no verdict concluded, or the flow not
+/// on `Findings` — else the findings it lifts, or why it lifts nothing
+/// (SPEC 4.5).
+///
+/// It takes the verdict [`concluded_on`] parsed and no path: the lift rests
+/// on exactly the verdict that was concluded, and there is no file here to
+/// read a second time, whatever was written to it since.
+fn lift_on(
+    concluded: Option<&crate::mission::VerdictFile>,
+    stage: &Stage,
+) -> Option<Result<Vec<crate::mission::LowFinding>, String>> {
+    match (concluded, stage) {
+        (Some(file), Stage::Findings { .. }) => {
+            Some(file.automatic_lift().map_err(|why| why.to_string()))
+        }
+        _ => None,
+    }
 }
 
 /// Carry a red verdict to the coder before the flow moves on it.
@@ -1474,4 +1500,87 @@ pub fn harness_spawner(
         crate::compose::AGENT_SERVICE,
     )
     .identified_by(session)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const HEAD: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    fn ranked(findings: &str) -> String {
+        format!(
+            "{{\"role\":\"Security\",\"verdict\":\"FINDINGS\",\"head\":\"{HEAD}\",\
+             \"date\":\"2026-10-05T00:00:00Z\",\"report\":\"what was found\",\
+             \"findings\":{findings}}}"
+        )
+    }
+
+    fn findings() -> Stage {
+        Stage::Findings {
+            report: "what was found".into(),
+        }
+    }
+
+    /// The lift is decided on the verdict concluded, not on the file as it
+    /// stands after (SPEC 4.5). The honest MEDIUM report is read and
+    /// concluded; the file is then rewritten LOW-only, as code from the tree
+    /// running beside the security agent could; the decision is made on
+    /// what was concluded and leaves the verdict to a human.
+    #[test]
+    fn the_lift_is_decided_on_the_verdict_concluded_not_on_the_file_rewritten_after_it() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let path = dir.path().join("VERDICT.json");
+        std::fs::write(
+            &path,
+            ranked(r#"[{"severity":"MEDIUM","title":"an open redirect"}]"#),
+        )
+        .expect("the verdict is written");
+
+        let (event, concluded) = concluded_on(
+            Role::Security,
+            Outcome::Finished(Default::default()),
+            &path,
+            HEAD,
+        );
+        assert!(
+            matches!(
+                event,
+                Event::Verdict {
+                    verdict: crate::mission::Verdict::Findings,
+                    ..
+                }
+            ),
+            "{event:?}"
+        );
+
+        let forged = ranked(
+            r#"[{"severity":"LOW","title":"an open redirect","why_acceptable":"nothing to see"}]"#,
+        );
+        std::fs::write(&path, &forged).expect("the verdict is rewritten");
+        // The forged file is one that would be lifted, had it been read.
+        let reread = read_verdict(&path, Role::Security, HEAD).expect("the forged verdict reads");
+        assert!(lift_on(Some(&reread), &findings()).is_some_and(|d| d.is_ok()));
+
+        match lift_on(concluded.as_ref(), &findings()) {
+            Some(Err(why)) => assert!(
+                why.contains("an open redirect") && why.contains("MEDIUM"),
+                "{why}"
+            ),
+            other => panic!("the MEDIUM concluded is left to a human: {other:?}"),
+        }
+    }
+
+    /// Nothing is decided without a verdict concluded, or off `Findings`.
+    #[test]
+    fn no_lift_is_decided_without_a_concluded_verdict_or_off_findings() {
+        let low: crate::mission::VerdictFile = serde_json::from_str(&ranked(
+            r#"[{"severity":"LOW","title":"a","why_acceptable":"x"}]"#,
+        ))
+        .expect("the verdict parses");
+        assert!(lift_on(None, &findings()).is_none());
+        assert!(lift_on(Some(&low), &Stage::Verified).is_none());
+        assert!(lift_on(Some(&low), &Stage::SecurityAgent { attempt: 1 }).is_none());
+        assert!(lift_on(Some(&low), &findings()).is_some_and(|d| d.is_ok()));
+    }
 }

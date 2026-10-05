@@ -393,3 +393,35 @@ fn a_title_or_reason_made_of_invisible_characters_is_none() {
     let file = verdict_with("FINDINGS", Some(&findings));
     assert!(file.automatic_lift().is_ok(), "{findings}");
 }
+
+/// A CLEAR contradicts itself when it lists a finding, or carries a list
+/// nunki cannot read; none, an empty list or `null` is what a CLEAR says.
+/// A FINDINGS is never called contradictory here: its list is read by the
+/// lift, which leaves a bad one to a human.
+#[test]
+fn a_clear_contradicts_itself_only_when_it_lists_or_garbles_findings() {
+    for findings in [
+        Some(r#"[{"severity":"INFO","title":"a","why_acceptable":"x"}]"#),
+        Some(r#""none""#),
+        Some(r#"[{"severity":1}]"#),
+    ] {
+        assert!(
+            verdict_with("CLEAR", findings).contradiction().is_some(),
+            "{findings:?}"
+        );
+    }
+    for findings in [None, Some("[]"), Some("null")] {
+        assert_eq!(
+            verdict_with("CLEAR", findings).contradiction(),
+            None,
+            "{findings:?}"
+        );
+    }
+    for findings in [Some(r#""none""#), Some("[]"), None] {
+        assert_eq!(
+            verdict_with("FINDINGS", findings).contradiction(),
+            None,
+            "{findings:?}"
+        );
+    }
+}
