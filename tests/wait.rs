@@ -55,6 +55,7 @@ fn state_of(flow: Flow) -> MissionState {
         coder_session: None,
         pushed: None,
         updated_at: "2026-10-05T10:00:00Z".into(),
+        revision: 0,
     }
 }
 
@@ -676,6 +677,73 @@ fn a_monitors_word_on_an_older_state_is_not_read_as_its_exit() {
     assert_eq!(read(&project).stop, Stop::MonitorGone);
 }
 
+/// A write that leaves `updated_at` as it was — a reframe sets nothing but
+/// the header — still moves the mission past what its monitor said.
+#[test]
+fn a_reframe_after_the_monitors_exit_moves_the_mission_past_its_word() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    let gates = state_of(flow(Security::Gates, vec![finished(true)]));
+    nunki::mission::dir::create(&project.hq_root, "m1", gates.flow.header(), "x").unwrap();
+    save(&project, &gates);
+    nunki::monitor::stop(
+        &project.hq_root,
+        "m1",
+        "a gate could not be played: gate 6 could not be played: the profile is down",
+    );
+    assert_eq!(read(&project).stop, Stop::MonitorFailed);
+
+    // The human edits the framing and re-freezes it.
+    let mut fresh = gates.flow.header().clone();
+    fresh.mutation_threshold = Some(90);
+    nunki::mission::dir::create(&project.hq_root, "m2", &fresh, "x").unwrap();
+    std::fs::copy(
+        project.hq_root.join("missions/m2/MISSION.md"),
+        project.hq_root.join("missions/m1/MISSION.md"),
+    )
+    .unwrap();
+    let before = Store::open(&project.hq_root).unwrap().load("m1").unwrap();
+    assert!(
+        nunki::lifecycle::reframe(&project, "m1", true)
+            .unwrap()
+            .applied
+    );
+    let after = Store::open(&project.hq_root).unwrap().load("m1").unwrap();
+    assert_eq!(
+        after.updated_at, before.updated_at,
+        "the reframe kept the time"
+    );
+    assert_eq!(read(&project).stop, Stop::MonitorGone);
+}
+
+/// The monitor stops between `wait`'s two readings: it writes the state it
+/// stops on, keeps its word, then forgets its pid. Read monitor first and
+/// state after, `wait` sees the stop the state now shows; read the other way
+/// round, it would pair the state from before the stop with a monitor already
+/// gone, and say nobody watches a mission that reached its findings.
+#[test]
+fn a_monitor_that_stops_while_wait_reads_is_read_on_its_stop_never_as_gone() {
+    for (stop_on, why, stop) in [
+        (findings(), "the findings are the human's", Stop::Findings),
+        (verified(), "verified — the human reads it", Stop::Verified),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let project = project(dir.path());
+        save(&project, &coding());
+        let mut stopped = false;
+        let mut hq = nunki::wait::Hq::watched_by(&project, |hq_root, id| {
+            if !stopped {
+                stopped = true;
+                Store::open(hq_root).unwrap().save(&stop_on).unwrap();
+                nunki::monitor::stop(hq_root, id, why);
+            }
+            false
+        });
+        let said = wait("m1", &mut hq, &mut clock(), 30, Some(0)).unwrap();
+        assert_eq!(said.stop, stop, "{}", said.line());
+    }
+}
+
 #[test]
 fn an_archived_mission_returns_0_and_names_where_it_ended() {
     let dir = tempfile::tempdir().unwrap();
@@ -863,6 +931,19 @@ fn agent_text_reaches_waits_line_escaped_never_raw() {
             !json.chars().any(common::raw_control),
             "{outlet} in JSON: {json}"
         );
+        // Not by JSON's escaping alone: decoded, the fields are the line's,
+        // escapes included.
+        let decoded: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let fields = format!(
+            "{} · {} · {} · awaits {}: {}",
+            decoded["id"].as_str().unwrap(),
+            decoded["stage"].as_str().unwrap(),
+            decoded["detail"].as_str().unwrap(),
+            decoded["awaits"]["who"].as_str().unwrap(),
+            decoded["awaits"]["what"].as_str().unwrap(),
+        );
+        assert_eq!(fields, said.line(), "{outlet} in JSON");
+        common::assert_printable(&fields, outlet);
     }
 }
 

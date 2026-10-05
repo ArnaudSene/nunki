@@ -10,9 +10,10 @@
 //!
 //! `wait` reads; it never drives. It takes no lock, launches nothing, and
 //! moving a mission stays the monitor's job: two `wait` on one mission are
-//! harmless. Its loop takes its clock and its reader as parameters
-//! ([`Clock`], [`Reader`]), so that a test drives time and the state without
-//! sleeping and without a monitor.
+//! harmless. (Opening the store creates the HQ's state directories when
+//! they are missing; nothing else is written.) Its loop takes its clock and
+//! its reader as parameters ([`Clock`], [`Reader`]), so that a test drives
+//! time and the state without sleeping and without a monitor.
 
 use std::path::{Path, PathBuf};
 
@@ -428,15 +429,34 @@ impl Clock for SystemClock {
     }
 }
 
+/// Whether a mission's monitor is alive, asked with the HQ root and the
+/// mission's id.
+type Liveness<'a> = dyn FnMut(&Path, &str) -> bool + 'a;
+
 /// The HQ's own files: the state, the monitor's pidfile and the record of
 /// its exit, and the account's last measure.
 pub struct Hq<'a> {
     project: &'a Project,
+    /// Whether the mission's monitor is alive: its pidfile, and whether that
+    /// pid is this mission's monitor. A parameter so that a test can stop the
+    /// monitor at the moment `wait` asks.
+    alive: Box<Liveness<'a>>,
 }
 
 impl<'a> Hq<'a> {
+    /// Liveness read exactly as `mission status` reads it.
     pub fn new(project: &'a Project) -> Self {
-        Self { project }
+        Self::watched_by(project, |hq_root, id| {
+            crate::monitor::running(hq_root, id).is_some()
+        })
+    }
+
+    /// The HQ's files, with the monitor's liveness answered by `alive`.
+    pub fn watched_by(project: &'a Project, alive: impl FnMut(&Path, &str) -> bool + 'a) -> Self {
+        Self {
+            project,
+            alive: Box::new(alive),
+        }
     }
 
     /// The account's window past its threshold now, if it is.
@@ -457,6 +477,18 @@ impl<'a> Hq<'a> {
 impl Reader for Hq<'_> {
     fn observe(&mut self, id: &str) -> Result<Observed, WaitError> {
         let hq_root = &self.project.hq_root;
+        // The monitor first, the state after. A monitor writes the state it
+        // stops on, then its exit, then removes its pidfile: read in this
+        // order, a monitor that stops between the two readings is seen alive
+        // or its stop is in the state read after. Read the other way, the
+        // state from before the stop meets a monitor already gone, and a
+        // mission that reached its findings reads as one nobody watches.
+        let alive = (self.alive)(hq_root, id);
+        let exited = if alive {
+            None
+        } else {
+            crate::monitor::last_exit(hq_root, id)
+        };
         let state = match Store::open(hq_root)?.load(id) {
             Ok(state) => state,
             Err(StateError::Missing(_)) => {
@@ -472,15 +504,13 @@ impl Reader for Hq<'_> {
             }
             Err(e) => return Err(e.into()),
         };
-        // Liveness exactly as `mission status` reads it: the pidfile, and
-        // whether that pid is this mission's monitor.
-        let watcher = if crate::monitor::running(hq_root, id).is_some() {
+        let watcher = if alive {
             Watcher::Alive
         } else {
-            match crate::monitor::last_exit(hq_root, id) {
-                // Said on this very state: a state written since has moved
-                // on from what the monitor saw.
-                Some(exited) if exited.updated_at == state.updated_at => {
+            match exited {
+                // Said on this very state: any write since has moved on from
+                // what the monitor saw.
+                Some(exited) if exited.revision == state.revision => {
                     Watcher::Stopped { why: exited.why }
                 }
                 _ => Watcher::Gone,

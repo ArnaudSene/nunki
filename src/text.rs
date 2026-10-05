@@ -12,14 +12,21 @@
 //! character is shown as its escape, `\u{1b}`, rather than dropped: the
 //! reader sees that something was there.
 //!
-//! `--json` output keeps its own escaping, which already does this.
+//! `nunki mission wait --json` is no exception: its fields are the status
+//! line's, made one line by [`one_line`] before they are serialised, so it
+//! carries the same `\u{1b}` escapes as the line, and JSON's own escaping
+//! applies to what is left.
 
 /// `text` with every control character replaced by its visible escape
 /// (`\u{1b}`): the C0 controls and DEL, ESC and so every CSI and OSC, the C1
-/// controls (which a terminal may read as CSI or OSC by themselves), and the
+/// controls (which a terminal may read as CSI or OSC by themselves), the
 /// bidirectional controls that make a line read in another order than it is
-/// written. Line breaks and tabs are kept — this is for text that may span
-/// lines — and a `\r\n` is read as the line break it means.
+/// written, and what a reader cannot see: zero-width and invisible
+/// characters, the byte-order mark, the tag block, the line and paragraph
+/// separators. Every visible letter, accent and emoji is kept, and so is the
+/// zero-width joiner that holds an emoji sequence together. Line breaks and
+/// tabs are kept — this is for text that may span lines — and a `\r\n` is
+/// read as the line break it means.
 pub fn printable(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
@@ -52,11 +59,23 @@ pub fn brief(text: &str, chars: usize) -> String {
     }
 }
 
-/// A character that tells a terminal what to do rather than what to show.
+/// A character that tells a terminal what to do rather than what to show, or
+/// that a reader cannot see at all.
 fn unsafe_to_print(c: char) -> bool {
     c.is_control()
         || matches!(
             c,
+            // Bidirectional controls: the line reads in another order than
+            // it is written.
             '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+            // Invisible: a zero-width space, the word joiner and the
+            // invisible operators, the byte-order mark, and the tag block,
+            // which spells hidden text a model reads and a human does not.
+            // The zero-width joiner (U+200D) is not among them: it holds
+            // emoji sequences together.
+            | '\u{200b}' | '\u{2060}'..='\u{2064}' | '\u{feff}' | '\u{e0000}'..='\u{e007f}'
+            // Line and paragraph separators: a break some readers make and a
+            // terminal does not. `\n` is the line break this text keeps.
+            | '\u{2028}' | '\u{2029}'
         )
 }

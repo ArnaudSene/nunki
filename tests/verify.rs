@@ -160,6 +160,7 @@ impl World {
                 coder_session: None,
                 pushed: None,
                 updated_at: String::new(),
+                revision: 0,
             })
             .unwrap();
         world
@@ -1053,6 +1054,7 @@ fn with_security_agent(lots: usize) -> World {
             coder_session: None,
             pushed: None,
             updated_at: String::new(),
+            revision: 0,
         })
         .unwrap();
     world

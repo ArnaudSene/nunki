@@ -103,6 +103,7 @@ impl World {
                 coder_session: None,
                 pushed: None,
                 updated_at: when.into(),
+                revision: 0,
             })
             .unwrap();
     }

@@ -97,6 +97,7 @@ impl World {
                 coder_session: None,
                 pushed: None,
                 updated_at: String::new(),
+                revision: 0,
             })
             .unwrap();
         Self { _dir: dir, project }

@@ -143,6 +143,16 @@ pub fn next_wake(project: &Project, state: &MissionState, now: u64) -> u64 {
         .unwrap_or(tick)
 }
 
+/// [`next_wake`] for the state as the monitor read it back after `verify`,
+/// or a minute from now when it could not be read: the next tick reads it
+/// again, and stops there, saying why, if it still cannot.
+pub fn wake_after_reading(project: &Project, state: Option<&MissionState>, now: u64) -> u64 {
+    match state {
+        Some(state) => next_wake(project, state, now),
+        None => now + TICK_SECONDS,
+    }
+}
+
 /// Start the mission's monitor, unless one is alive.
 ///
 /// `exe` is the binary it runs as, and anything not named `nunki` is refused:
@@ -437,10 +447,10 @@ pub fn watch(
             },
             Next::Continue => {}
         }
-        let wake = match Store::open(&project.hq_root).and_then(|store| store.load(id)) {
-            Ok(state) => next_wake(project, &state, clock.now()),
-            Err(_) => clock.now() + TICK_SECONDS,
-        };
+        let after = Store::open(&project.hq_root)
+            .and_then(|store| store.load(id))
+            .ok();
+        let wake = wake_after_reading(project, after.as_ref(), clock.now());
         sleep_until(clock, wake);
     }
 }
@@ -458,12 +468,12 @@ pub fn exitfile(hq_root: &Path, id: &str) -> PathBuf {
 }
 
 /// Why the mission's last monitor stopped, and on which state: its
-/// `updated_at`, so that a reader can tell the word still holds from one the
-/// mission has moved past.
+/// [`MissionState::revision`], so that a reader can tell the word still holds
+/// from one any write since has moved past.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Exited {
     pub why: String,
-    pub updated_at: String,
+    pub revision: u64,
 }
 
 /// Keep why the monitor stopped.
@@ -472,7 +482,7 @@ pub fn record_exit(hq_root: &Path, id: &str, exited: &Exited) -> Result<(), Moni
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| MonitorError::Io(dir.to_path_buf(), e))?;
     }
-    let text = serde_json::to_string(exited).expect("an Exited is two strings");
+    let text = serde_json::to_string(exited).expect("an Exited is a string and a number");
     std::fs::write(&path, text).map_err(|e| MonitorError::Io(path, e))
 }
 
@@ -497,7 +507,7 @@ pub fn stop(hq_root: &Path, id: &str, why: &str) -> String {
     };
     let exited = Exited {
         why: why.to_string(),
-        updated_at: state.updated_at.clone(),
+        revision: state.revision,
     };
     let line = crate::wait::monitor_exit(id, &state, why).line();
     match record_exit(hq_root, id, &exited) {

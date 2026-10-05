@@ -9,7 +9,8 @@ use nunki::harness::{RunHandle, SessionId};
 use nunki::mission::flow::{Flow, Handover};
 use nunki::mission::{Bounds, Header, Integration, Lot, Security};
 use nunki::monitor::{
-    Ensured, MonitorError, Next, after_verify, ensure, next_wake, running, wanted,
+    Ensured, MonitorError, Next, after_verify, ensure, next_wake, running, wake_after_reading,
+    wanted,
 };
 use nunki::project::{Config, Project, ProtectedPaths};
 use nunki::state::MissionState;
@@ -84,6 +85,7 @@ fn state(with_run: bool) -> MissionState {
         coder_session: None,
         pushed: None,
         updated_at: String::new(),
+        revision: 0,
     }
 }
 
@@ -265,6 +267,12 @@ fn the_monitor_wakes_every_minute_during_a_run_and_at_the_deadline_otherwise() {
         now + 60,
         "never sooner than a minute"
     );
+
+    // Read back after `verify`: the same wake for a state that was read, a
+    // minute for one that could not be.
+    waiting.harness_down = down_until(now + 600);
+    assert_eq!(wake_after_reading(&project, Some(&waiting), now), now + 600);
+    assert_eq!(wake_after_reading(&project, None, now), now + 60);
 }
 
 /// A stand-in for the `nunki` binary: named `nunki`, it sleeps, and its command
@@ -592,15 +600,31 @@ fn agent_text_reaches_the_monitors_log_escaped_never_raw() {
 }
 
 /// A clock for the monitor's loop: it never sleeps, remembers each pause, and
-/// at each one does what the test says the world did meanwhile.
+/// at each one does what the test says the world did meanwhile. A loop that
+/// reads the time over and over without pausing is a loop that spins: it is
+/// stopped, rather than left to hang the battery.
 struct Ticks<'a> {
     now: u64,
+    reads: usize,
     slept: Vec<u64>,
     meanwhile: Box<dyn FnMut() + 'a>,
 }
 
+impl<'a> Ticks<'a> {
+    fn at(now: u64, meanwhile: impl FnMut() + 'a) -> Self {
+        Self {
+            now,
+            reads: 0,
+            slept: Vec::new(),
+            meanwhile: Box::new(meanwhile),
+        }
+    }
+}
+
 impl nunki::wait::Clock for Ticks<'_> {
     fn now(&mut self) -> u64 {
+        self.reads += 1;
+        assert!(self.reads < 50, "the loop spins without pausing");
         self.now
     }
     fn sleep(&mut self, seconds: u64) {
@@ -608,6 +632,30 @@ impl nunki::wait::Clock for Ticks<'_> {
         self.slept.push(seconds);
         self.now += seconds;
         (self.meanwhile)();
+    }
+}
+
+/// A clock on which every reading comes a minute after the one before: each
+/// tick of the monitor outlasts its minute. At its second reading, the world
+/// does what the test says.
+struct Slow<'a> {
+    reads: u64,
+    slept: Vec<u64>,
+    meanwhile: Box<dyn FnMut() + 'a>,
+}
+
+impl nunki::wait::Clock for Slow<'_> {
+    fn now(&mut self) -> u64 {
+        self.reads += 1;
+        assert!(self.reads < 50, "the loop spins without pausing");
+        if self.reads == 2 {
+            (self.meanwhile)();
+        }
+        1_000 + 60 * (self.reads - 1)
+    }
+    fn sleep(&mut self, seconds: u64) {
+        assert!(self.slept.len() < 10, "the loop should have stopped");
+        self.slept.push(seconds);
     }
 }
 
@@ -668,11 +716,7 @@ fn a_running_run_is_watched_and_verify_waits_for_it_to_end() {
                 stderr: String::new(),
             }),
     );
-    let mut clock = Ticks {
-        now: 1_000,
-        slept: Vec::new(),
-        meanwhile: Box::new(|| save(&project, &state(false))),
-    };
+    let mut clock = Ticks::at(1_000, || save(&project, &state(false)));
     let mut log: Vec<u8> = Vec::new();
 
     let why = nunki::monitor::watch(&project, "m1", engine, "docker", &mut clock, &mut log);
@@ -688,4 +732,52 @@ fn a_running_run_is_watched_and_verify_waits_for_it_to_end() {
     );
     assert!(!log.contains("a run is still going"), "{log}");
     assert!(log.contains("run s1 under way"), "{log}");
+}
+
+/// A run a human froze is theirs to thaw: the monitor neither measures it nor
+/// calls `verify` on it, and looks again a minute later. Once the run is read
+/// back (here, by the test, during that minute), the next tick calls
+/// `verify`.
+#[test]
+fn a_paused_run_is_left_alone_and_looked_at_again_a_minute_later() {
+    use nunki::engine::{Liveness, fake::FakeEngine};
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    save(&project, &state(true));
+    let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+        std::sync::Arc::new(FakeEngine::default().with_liveness("cafe1234", Liveness::Paused));
+    let mut clock = Ticks::at(1_000, || save(&project, &state(false)));
+    let mut log: Vec<u8> = Vec::new();
+
+    let why = nunki::monitor::watch(&project, "m1", engine, "docker", &mut clock, &mut log);
+
+    let log = String::from_utf8(log).unwrap();
+    assert!(why.starts_with("verify failed"), "{why}\n{log}");
+    assert_eq!(clock.slept, vec![60], "{log}");
+    let verifies = log.lines().filter(|l| l.contains("verify:")).count();
+    assert_eq!(verifies, 1, "verify is called once, after the run: {log}");
+}
+
+/// A tick that outlasts its minute goes straight on to the next: the
+/// monitor pauses only for time still to wait, never for none.
+#[test]
+fn a_tick_that_outlasts_its_minute_goes_on_without_a_pause() {
+    use nunki::engine::{Liveness, fake::FakeEngine};
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    save(&project, &state(true));
+    let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+        std::sync::Arc::new(FakeEngine::default().with_liveness("cafe1234", Liveness::Paused));
+    let mut clock = Slow {
+        reads: 0,
+        slept: Vec::new(),
+        meanwhile: Box::new(|| save(&project, &state(false))),
+    };
+    let mut log: Vec<u8> = Vec::new();
+
+    let why = nunki::monitor::watch(&project, "m1", engine, "docker", &mut clock, &mut log);
+
+    let log = String::from_utf8(log).unwrap();
+    assert!(why.starts_with("verify failed"), "{why}\n{log}");
+    assert_eq!(clock.slept, Vec::<u64>::new(), "{log}");
 }

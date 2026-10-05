@@ -372,6 +372,7 @@ fn started(project: &Project, header: &nunki::mission::Header) {
             coder_session: None,
             pushed: None,
             updated_at: String::new(),
+            revision: 0,
         })
         .unwrap();
 }
@@ -506,6 +507,7 @@ fn live_a_system_profile_reaches_what_the_mission_declares_and_nothing_else() {
             coder_session: None,
             pushed: None,
             updated_at: String::new(),
+            revision: 0,
         })
         .unwrap();
 

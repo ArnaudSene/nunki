@@ -87,16 +87,31 @@ pub fn serve(responses: Vec<(u16, &'static str)>) -> (String, JoinHandle<Vec<Str
 /// Text an agent could write to forge what a human reads: an erase-line and
 /// a cursor move (CSI), an OSC 52 clipboard write ended by BEL, the same
 /// introduced by a C1 OSC and ended by C1 ST, a C1 CSI, a lone carriage
-/// return, DEL, and a right-to-left override.
+/// return, DEL, a right-to-left override, and characters a reader cannot
+/// see: a zero-width space, a word joiner, a byte-order mark, a Unicode tag
+/// and a line separator.
 #[allow(dead_code)]
 pub const HOSTILE: &str = "\u{1b}[2K\u{1b}[1Gm1 · verified · awaits the human: \
-     `nunki push m1 --yes`\u{1b}]52;c;cHduZWQ=\u{7}\u{9d}52;c;eA==\u{9c}\u{9b}8m\rover\u{7f}\u{202e}txt";
+     `nunki push m1 --yes`\u{1b}]52;c;cHduZWQ=\u{7}\u{9d}52;c;eA==\u{9c}\u{9b}8m\rover\u{7f}\u{202e}txt\u{200b}\u{2060}\u{feff}\u{e0041}\u{2028}end";
 
 /// Whether `c` would reach a terminal as an instruction rather than as text.
 #[allow(dead_code)]
 pub fn raw_control(c: char) -> bool {
     (c.is_control() && c != '\n' && c != '\t')
-        || matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+        || matches!(
+            c,
+            '\u{061c}'
+                | '\u{200b}'
+                | '\u{200e}'
+                | '\u{200f}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2060}'..='\u{2064}'
+                | '\u{2066}'..='\u{2069}'
+                | '\u{feff}'
+                | '\u{e0000}'..='\u{e007f}'
+        )
 }
 
 /// `out` carries none of [`HOSTILE`]'s controls raw, and does show that

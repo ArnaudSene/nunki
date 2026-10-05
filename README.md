@@ -174,8 +174,13 @@ and exits with a code that says which stop it is:
 | No monitor runs while the mission is still being driven | 14 |
 | `--timeout` reached | 15 |
 
-`wait` only reads: it takes no lock and launches nothing, so two of them on the
-same mission are harmless. The monitor ends its log on the same line.
+`wait` drives nothing: it takes no lock and launches nothing, so two of them on
+the same mission are harmless. (Opening the HQ's state creates its
+directories if they are missing; that is all it may write.) The monitor ends
+its log on the same line.
+
+`--json` prints the same fields as the line, already made printable: what an
+agent wrote reaches it with the same `\u{1b}` escapes, then JSON's own.
 
 When the mission reads `VERIFIED`, the push is yours and yours alone:
 

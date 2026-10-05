@@ -170,6 +170,7 @@ impl World {
                 coder_session: None,
                 pushed: None,
                 updated_at: String::new(),
+                revision: 0,
             })
             .unwrap();
 
@@ -1195,4 +1196,26 @@ fn a_findings_report_is_printed_escaped_never_raw() {
     let status = world.printed_by_the_binary(&["mission", "status", "m1"]);
     assert!(status.contains("stage     Findings"), "{status}");
     assert!(!status.chars().any(common::raw_control), "{status}");
+}
+
+/// `nunki mission gates` prints one line per gate, its mark and why: a pass,
+/// a failure and its reason, and a gate nobody could play — here gate 8,
+/// with no profile up — said as such, never folded into a pass.
+#[test]
+fn the_gates_are_printed_one_line_each_with_their_mark_and_why() {
+    let world = World::opened_at(nunki::mission::Rigor::Standard);
+    world.coded("pub fn one() -> u8 { 2 }\n", "the lot");
+    // The base the gates measure the branch against, in the slot.
+    git(&world.tree, &["branch", "-q", "dev", "HEAD~1"]);
+
+    let out = world.printed_by_the_binary(&["mission", "gates", "m1"]);
+    for line in [
+        "gate 1    pass  clean tree",
+        "gate 2    pass  branch not protected and ahead of its base",
+        "gate 3    FAIL  the resume block names HEAD — the resume block does not name HEAD",
+        "gate 4    pass  perimeter",
+        "gate 8    ????  mechanical security — slot \"one\" has no profile up",
+    ] {
+        assert!(out.contains(line), "{line}\nin:\n{out}");
+    }
 }
