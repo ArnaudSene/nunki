@@ -55,6 +55,9 @@ fn every_record_the_hq_leaves_is_prose_and_not_a_code_block() {
     followup::lifted_all(&file, "Someone", "the risk is accepted", &head()).unwrap();
     followup::ended(&file, "Someone", "the approach was wrong").unwrap();
     followup::said(&file, "Someone", "read the migration before the store").unwrap();
+    followup::security_capped(&file, 1, 1, &["0123456789ab the volet".to_string()]).unwrap();
+    followup::security_capped_on_findings(&file, 3, 3, &["0123456789ab the fix".to_string()])
+        .unwrap();
 
     let text = std::fs::read_to_string(&file).unwrap();
     assert_prose(&text, "a record");
@@ -65,6 +68,8 @@ fn every_record_the_hq_leaves_is_prose_and_not_a_code_block() {
         "lifted the security verdict",
         "called this mission off",
         "left an instruction",
+        "did not call the security agent again",
+        "Not attacked by the security agent",
     ] {
         assert!(text.contains(needle), "{needle} is missing:\n{text}");
     }
@@ -86,4 +91,39 @@ fn the_reason_a_mission_was_called_off_is_readable() {
         text.contains("**Because:** the approach was wrong"),
         "{text}"
     );
+}
+
+/// A spent round cap names the commits after the last round, oldest first,
+/// one per line — and when there are none to name, says nothing about them
+/// rather than a heading over an empty list (SPEC 4.5).
+#[test]
+fn a_spent_round_cap_names_the_commits_not_attacked_and_only_when_there_are_some() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("FOLLOWUP_HQ.md");
+    let commits = [
+        "0123456789ab the volet begins".to_string(),
+        "ba9876543210 the volet ends".to_string(),
+    ];
+    followup::security_capped(&file, 1, 1, &commits).unwrap();
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(
+        text.contains(
+            "Not attacked by the security agent:\n\n\
+             - 0123456789ab the volet begins\n\
+             - ba9876543210 the volet ends\n"
+        ),
+        "{text}"
+    );
+
+    for capped in [
+        followup::security_capped,
+        followup::security_capped_on_findings,
+    ] {
+        let empty = dir.path().join("EMPTY.md");
+        let _ = std::fs::remove_file(&empty);
+        capped(&empty, 1, 1, &[]).unwrap();
+        let text = std::fs::read_to_string(&empty).unwrap();
+        assert!(text.contains("security round cap was reached"), "{text}");
+        assert!(!text.contains("Not attacked"), "{text}");
+    }
 }
