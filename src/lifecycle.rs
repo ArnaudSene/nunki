@@ -283,18 +283,43 @@ pub fn retry(project: &Project, id: &str, why: &str) -> Result<MissionState, Lif
     // the flow, so playing it twice on the same flow answers the same thing —
     // and asking the flow beats restating its rules here, which is why the
     // check above stops at "not handed over".
-    state
+    let after = state
         .flow
         .clone()
         .advance(crate::mission::flow::Event::Retried {
             because: why.trim().to_string(),
-        })?;
+        })?
+        .clone();
 
     // Written where the agent reads, and before the transition: a retry whose
-    // record did not land is a retry the next run cannot act on.
+    // record did not land is a retry the next run cannot act on. What it says
+    // about the bounds is read from where the retry really leads, so a ruling
+    // asked on the last attempt is not recorded as a resumed lot.
     let paths = Paths::of(&project.hq_root, id);
     let who = crate::human::me(&project.nunki_home(), Some(&project.root)).addressed();
-    crate::followup::retried(&paths.followup, &who, why.trim(), &what_stopped(&handover))?;
+    let was = what_stopped(&handover);
+    let taken = match &handover {
+        crate::mission::flow::Handover::AwaitingRuling {
+            lot,
+            attempt,
+            survivors,
+            ..
+        } => match after {
+            Stage::Coding { .. } => crate::followup::Retaken::Ruling {
+                lot,
+                survivors,
+                asked: *attempt,
+                of: state.flow.header().bounds.attempts_per_lot,
+            },
+            _ => crate::followup::Retaken::RulingOnTheLastAttempt {
+                lot,
+                survivors,
+                asked: *attempt,
+            },
+        },
+        _ => crate::followup::Retaken::Bound { was: &was },
+    };
+    crate::followup::retried(&paths.followup, &who, why.trim(), &taken)?;
     store.apply(
         &mut state,
         crate::mission::flow::Event::Retried {
@@ -318,6 +343,15 @@ fn what_stopped(handover: &crate::mission::flow::Handover) -> String {
             format!("{} return(s) to the coder were used", causes.len())
         }
         Handover::Abandoned { reason } => format!("it was called off ({reason})"),
+        Handover::AwaitingRuling {
+            lot,
+            attempt,
+            survivors,
+            ..
+        } => format!(
+            "{lot}, attempt {attempt}, awaited a ruling on {}",
+            survivors.join(", ")
+        ),
     }
 }
 

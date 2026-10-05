@@ -337,16 +337,7 @@ pub fn verify_as(
                                 gate::Verdict::Green => {
                                     let journal =
                                         std::fs::read_to_string(&paths.journal).unwrap_or_default();
-                                    Some(match crate::mission::journal::judge(&journal, &label) {
-                                        Ok(()) => Event::RunEnded {
-                                            outcome,
-                                            lot_done: true,
-                                        },
-                                        Err(why) => Event::RunEnded {
-                                            outcome: Outcome::MissionFailure(why),
-                                            lot_done: false,
-                                        },
-                                    })
+                                    Some(lot_said(&paths, &journal, &label, outcome))
                                 }
                             }
                         } else {
@@ -1056,11 +1047,52 @@ fn what_for(work: &Work, header: &crate::mission::Header) -> String {
     }
 }
 
+/// The coder run's word on its lot, as the event the flow is fed: done, a
+/// ruling awaited on open survivors, or a failed attempt that says why.
+///
+/// A ruling line is checked here, against the mission's campaign, because
+/// the flow reads no file: a line naming no open survivor is a failed
+/// attempt, like any other line that does not say the lot is done.
+fn lot_said(paths: &Paths, journal: &str, label: &str, outcome: Outcome) -> Event {
+    use crate::mission::journal::{Judgement, awaitable, judge};
+    let failed = |why: String| Event::RunEnded {
+        outcome: Outcome::MissionFailure(why),
+        lot_done: false,
+    };
+    match judge(journal, label) {
+        Judgement::Done => Event::RunEnded {
+            outcome,
+            lot_done: true,
+        },
+        Judgement::Failed(why) => failed(why),
+        Judgement::AwaitsRuling { what, survivors } => {
+            let open = match crate::mutants::open(&paths.dir) {
+                Ok(open) => open,
+                Err(e) => {
+                    return failed(format!(
+                        "the run said lot {label} awaits a ruling, and the campaign it \
+                         would be on could not be read: {e}"
+                    ));
+                }
+            };
+            match awaitable(label, &survivors, &open) {
+                Ok(()) => Event::RulingAwaited { what, survivors },
+                Err(why) => failed(why),
+            }
+        }
+    }
+}
+
 /// Why a coder attempt failed, when the event says it did: the words the
 /// next attempt is given, and the sign that its session is not carried on.
 /// A harness failure is not one — the same attempt is replayed.
+///
+/// A ruling awaited is not a failure either, and is written all the same:
+/// the attempt that follows the ruling starts afresh too, and reads what
+/// its predecessor asked for and the HQ answered in the same file.
 fn attempt_failed(event: &Event) -> Option<String> {
     match event {
+        Event::RulingAwaited { what, .. } => Some(format!("awaits the HQ's ruling: {what}")),
         Event::RunEnded {
             outcome: Outcome::MissionFailure(why),
             ..

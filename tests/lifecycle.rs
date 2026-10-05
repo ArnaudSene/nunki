@@ -657,3 +657,82 @@ fn reframing_names_a_changed_mutation_threshold() {
     assert_eq!(seen.changes[0].from, "—");
     assert_eq!(seen.changes[0].to, "90%");
 }
+
+/// A lot that awaited a ruling is taken back at its next attempt, not its
+/// first: a ruling is not a bound, and the retry hands none back. The record
+/// says what was awaited, so the next run knows the ruling is what changed.
+#[test]
+fn taking_back_a_lot_that_awaited_a_ruling_resumes_at_its_next_attempt() {
+    let world = World::new(1);
+    world.at(&[
+        Event::Stalled {
+            reason: "silent".into(),
+        },
+        Event::RulingAwaited {
+            what: "`m1` is equivalent".into(),
+            survivors: vec!["m1".into()],
+        },
+    ]);
+
+    let state = lifecycle::retry(&world.project, "m1", "m1 ruled equivalent").unwrap();
+
+    assert_eq!(
+        state.flow.stage(),
+        &Stage::Coding {
+            work: Work::Lot(0),
+            attempt: 3
+        }
+    );
+    let followup =
+        std::fs::read_to_string(world.project.hq_root.join("missions/m1/FOLLOWUP_HQ.md")).unwrap();
+    assert!(followup.contains("m1 ruled equivalent"), "{followup}");
+    assert!(
+        followup.contains("L1, attempt 2, awaiting the HQ's ruling on `m1`"),
+        "{followup}"
+    );
+    assert!(followup.contains("this is attempt 3 of 3"), "{followup}");
+    // The record is read as a statement of fact, and for a ruling this one
+    // would be false: no bound is handed back.
+    assert!(!followup.contains("handed back whole"), "{followup}");
+}
+
+/// Asked on the last attempt, the retry hands the lot over as out of
+/// attempts rather than run past the bound, and the record says so — not
+/// that the lot resumes.
+#[test]
+fn taking_back_a_ruling_asked_on_the_last_attempt_hands_it_over_as_exhausted() {
+    let world = World::new(1);
+    let stalled = Event::Stalled {
+        reason: "silent".into(),
+    };
+    world.at(&[
+        stalled.clone(),
+        stalled,
+        Event::RulingAwaited {
+            what: "`m1` is equivalent".into(),
+            survivors: vec!["m1".into()],
+        },
+    ]);
+
+    let state = lifecycle::retry(&world.project, "m1", "m1 ruled equivalent").unwrap();
+
+    assert_eq!(
+        state.flow.stage(),
+        &Stage::AwaitingHuman(nunki::mission::flow::Handover::LotAttemptsExhausted {
+            lot: "L1".into(),
+            attempts: 3
+        })
+    );
+    let followup =
+        std::fs::read_to_string(world.project.hq_root.join("missions/m1/FOLLOWUP_HQ.md")).unwrap();
+    assert!(
+        followup.contains("L1, attempt 3, awaiting the HQ's ruling on `m1`"),
+        "{followup}"
+    );
+    assert!(followup.contains("that was the last attempt"), "{followup}");
+    assert!(!followup.contains("this is attempt"), "{followup}");
+    assert!(
+        !followup.contains("They are handed back whole"),
+        "{followup}"
+    );
+}

@@ -204,16 +204,18 @@ pub enum Next {
 }
 
 /// After a `verify`: go on, or stop because nothing is left that `nunki` may do
-/// without a human. Pure, so every arm is tested.
-pub fn after_verify(result: &Result<Vec<Step>, VerifyError>) -> Next {
+/// without a human. Pure, so every arm is tested. `mission` is the id the
+/// verbs in a handover line are spelled with, so the line can be copied.
+pub fn after_verify(mission: &str, result: &Result<Vec<Step>, VerifyError>) -> Next {
     match result {
         Ok(steps) => match steps.last() {
             Some(Step::Verified) => {
                 Next::Exit("verified — the human reads it, then `nunki push`".to_string())
             }
-            Some(Step::AwaitingHuman(handover)) => {
-                Next::Exit(format!("handed over to the human: {handover:?}"))
-            }
+            Some(Step::AwaitingHuman(handover)) => Next::Exit(format!(
+                "handed over to the human: {}",
+                handover.line(mission)
+            )),
             Some(Step::Held { who, reason, .. }) => Next::Exit(match reason {
                 Some(reason) => format!("held by {who}: {reason}"),
                 None => format!("held by {who}"),
@@ -380,7 +382,7 @@ fn watch(project: &Project, id: &str, engine: Arc<dyn Engine>, engine_bin: &str)
             }
             Err(e) => say(&format!("verify: {e}")),
         }
-        match after_verify(&result) {
+        match after_verify(id, &result) {
             Next::Exit(why) => return why,
             // Gate 7 is owed a campaign: run it here, and let the next tick
             // read it back. It launches detached, so this returns at once.

@@ -54,11 +54,13 @@ it is the one answer nobody can check, so it is decided for you, and an
 `equivalent` in your file makes the gate red.
 
 There is no third answer of your own. A survivor you can neither kill nor call
-a bug leaves the lot unfinished: say in the journal what you tried and why
-neither outcome was honest, close the lot the way your role is told to, and
-stop. The HQ decides what happens then — it may rule the survivor equivalent
-itself, or put it out of the campaign's reach. Writing nothing, or inventing
-an outcome of your own, only makes the gate red without saying why.
+a bug leaves the lot waiting on the HQ: say in the journal what you tried and
+why neither outcome was honest, end the lot with the line that awaits the
+HQ's ruling on it — `Lot: <lot> — awaits ruling: <what>`, with the survivor's
+id between backquotes — and stop. The HQ decides what happens then — it may
+rule the survivor equivalent itself, or put it out of the campaign's reach.
+Writing nothing, or inventing an outcome of your own, only makes the gate red
+without saying why.
 
 Your commit messages say what changed and why it had to. They carry
 **no trailer naming a harness, a model or a tool** — no `Co-Authored-By`,
@@ -106,7 +108,20 @@ Your half is that everything around it is right. Theirs is that it is — and
 Before you stop, end the `ÉTAT DE REPRISE` block with one line saying how
 the lot ended: `Lot: <lot> — done` once it is committed and proved, or
 `Lot: <lot> — failed: <why>` if it is not, `<lot>` being the identifier you
-were given. That line, and nothing else, tells the HQ the lot is done."
+were given. That line, and nothing else, tells the HQ the lot is done.
+
+There is a third line, for one case only:
+`Lot: <lot> — awaits ruling: <what>`, when the lot is finished but for
+survivors you can neither kill nor freeze as a bug, and whose equivalence is
+a ruling you are forbidden to give. Name each of them in `<what>` between
+backquotes, spelled exactly as `MUTANTS.json` spells its id — every
+backquoted span there is read as a survivor id, so quote nothing else — and
+say why you believe it equivalent. `nunki` checks that each is a survivor of
+`MUTANTS.json` with no outcome; a line that names none, or names anything
+else, is a failed attempt.
+It is not a way out of a hard lot: everything else in the lot is done,
+committed and proved before you write it. The HQ then rules, and the next
+attempt picks the lot up from there."
         }
 
         Role::Integrator => {

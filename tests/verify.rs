@@ -2939,3 +2939,158 @@ fn at_standard_a_review_after_the_clear_is_verified_with_the_spent_round_recorde
         1
     );
 }
+
+// --- a coder run that awaits a ruling (SPEC 4.4 gate 7, 4.5) -----------------
+
+impl World {
+    /// The mission's campaign: `m1` with no outcome, `m2` ruled by the HQ,
+    /// `m3` answered by the coder — only `m1` is open.
+    fn campaign_with_survivors(&self) {
+        use nunki::mutants::{Campaign, Survivor, Triage};
+        let survivor = |id: &str, outcome: Option<Triage>| Survivor {
+            id: id.into(),
+            file: "src/lib.rs".into(),
+            line: 1,
+            description: "replace 1 with 0".into(),
+            outcome,
+        };
+        nunki::mutants::write(
+            &self.mission(),
+            &Campaign {
+                fingerprint: "f".into(),
+                head: self.head(),
+                date: "2026-10-05T12:00:00Z".into(),
+                survivors: vec![
+                    survivor("m1", None),
+                    survivor(
+                        "m2",
+                        Some(Triage::Equivalent {
+                            why: "ruled".into(),
+                            carried_from: None,
+                        }),
+                    ),
+                    survivor("m3", None),
+                ],
+                tried: Some(10),
+            },
+        )
+        .unwrap();
+        std::fs::write(
+            self.mission().join(nunki::mutants::TRIAGE_FILE),
+            r#"{"m3": {"kind": "killed", "test": "one_is_one"}}"#,
+        )
+        .unwrap();
+    }
+}
+
+/// One run, and the mission is the HQ's at once: no further attempt is
+/// launched, and the handover names the survivors to rule on.
+#[test]
+fn a_run_that_awaits_a_ruling_on_an_open_survivor_hands_over_after_one_run() {
+    let world = World::new(2);
+    world.commit("src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    world.campaign_with_survivors();
+    let steps = world.coder_ran("Lot: L1 — awaits ruling: `m1` changes nothing observable");
+
+    let state = world.state();
+    assert_eq!(
+        state.flow.stage(),
+        &Stage::AwaitingHuman(nunki::mission::flow::Handover::AwaitingRuling {
+            lot: "L1".into(),
+            what: "`m1` changes nothing observable".into(),
+            attempt: 1,
+            survivors: vec!["m1".into()],
+        })
+    );
+    assert_eq!(state.spent.runs, 1, "exactly one run");
+    assert!(state.run.is_none());
+    assert!(
+        matches!(steps.last(), Some(Step::AwaitingHuman(_))),
+        "nothing launched after it: {steps:?}"
+    );
+    let followup = world.followup();
+    assert!(
+        followup.contains("L1, attempt 1: awaits the HQ's ruling: `m1`"),
+        "{followup}"
+    );
+}
+
+/// The id check is what keeps the line from being a free exit: a survivor
+/// already answered — by the HQ or by the coder — or one the campaign never
+/// had is no ruling to await, and the run is a failed attempt like any other.
+#[test]
+fn a_ruling_on_anything_but_an_open_survivor_is_a_failed_attempt() {
+    for (named, why) in [
+        ("`m2`", "`m2`"),
+        ("`m3`", "`m3`"),
+        ("`m1` and `nowhere`", "`nowhere`"),
+        ("nothing quoted", "named no survivor"),
+    ] {
+        let world = World::new(2);
+        world.commit("src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+        world.campaign_with_survivors();
+        world.coder_ran(&format!("Lot: L1 — awaits ruling: {named}"));
+
+        let state = world.state();
+        assert_eq!(coding(&state), (Work::Lot(0), 2), "{named}");
+        assert!(state.coder_session.is_none(), "{named}");
+        let followup = world.followup();
+        assert!(followup.contains("L1, attempt 1"), "{named}: {followup}");
+        assert!(followup.contains(why), "{named}: {followup}");
+    }
+}
+
+/// No campaign, no survivor to await a ruling on.
+#[test]
+fn a_ruling_with_no_campaign_on_file_is_a_failed_attempt() {
+    let world = World::new(2);
+    world.commit("src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    world.coder_ran("Lot: L1 — awaits ruling: `m1`");
+
+    assert_eq!(coding(&world.state()), (Work::Lot(0), 2));
+    assert!(
+        world.followup().contains("not a survivor of MUTANTS.json"),
+        "{}",
+        world.followup()
+    );
+}
+
+/// `awaits ruling` with nothing after it is not the third line, and is judged
+/// as a run that said nothing about its lot.
+#[test]
+fn awaits_ruling_with_nothing_after_it_is_judged_as_no_line() {
+    let world = World::new(2);
+    world.commit("src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    world.campaign_with_survivors();
+    world.coder_ran("Lot: L1 — awaits ruling:");
+
+    assert_eq!(coding(&world.state()), (Work::Lot(0), 2));
+    assert!(
+        world.followup().contains("no `Lot: L1 — done` line"),
+        "{}",
+        world.followup()
+    );
+}
+
+/// The gates come before the run's word on its lot: a ruling line on a tree
+/// whose gates 1 to 4 are red is a red gate — one more attempt, told why —
+/// and never a handover, so the line cannot carry a forbidden commit past
+/// them.
+#[test]
+fn a_ruling_line_behind_a_red_gate_is_a_red_gate_and_not_a_ruling() {
+    let world = World::new(2);
+    world.commit("AGENTS.md", "rewritten by the agent\n", "loosen the rules");
+    world.campaign_with_survivors();
+    world.coder_ran("Lot: L1 — awaits ruling: `m1` changes nothing observable");
+
+    let state = world.state();
+    assert_eq!(
+        coding(&state),
+        (Work::Lot(0), 2),
+        "{:?}",
+        state.flow.stage()
+    );
+    let followup = world.followup();
+    assert!(followup.contains("the gates were red"), "{followup}");
+    assert!(!followup.contains("awaits the HQ's ruling"), "{followup}");
+}

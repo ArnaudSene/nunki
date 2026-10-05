@@ -590,6 +590,13 @@ actually hold in this project.
   `Lot: <lot> — failed: <why>`: the line `nunki` reads to know the lot is done.
   `nunki` reads it **inside** the block — between its heading and the next one —
   so a line left further down the file is one `nunki` will not see.
+  There is a third line, for one case only: `Lot: <lot> — awaits ruling: <what>`,
+  when the lot is done but for survivors whose equivalence only the HQ may
+  rule on, each named in `<what>` between backquotes as `MUTANTS.json`
+  spells its id. Every backquoted span in `<what>` is read as a survivor id,
+  so nothing else is quoted. `nunki` checks every one is a survivor with no
+  outcome — a line naming none is a failed attempt — and hands the mission
+  over at once. It is not a way out of a hard lot.
 
 ## Infrastructure an agent cannot reach
 

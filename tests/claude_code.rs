@@ -765,6 +765,11 @@ fn the_coder_is_told_the_line_that_ends_its_lot() {
         last.contains("`Lot: L2 — done`") && last.contains("`Lot: L2 — failed: <why>`"),
         "{last}"
     );
+    assert!(
+        last.contains("`Lot: L2 — awaits ruling: <what>`")
+            && last.contains("every backquoted span in <what> is read as a survivor id, so nothing else is quoted"),
+        "the third line, with how its survivors are named: {last}"
+    );
     let mut integrator = request(false);
     integrator.role = Role::Integrator;
     let cmd = adapter().command(&integrator, &GuardSetup::default(), &exposure);

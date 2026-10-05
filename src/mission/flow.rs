@@ -35,6 +35,63 @@ pub enum Handover {
     VoletsExhausted { causes: Vec<String> },
     /// The human called it off before it was verified, and said why.
     Abandoned { reason: String },
+    /// The coder's run on `lot`, at `attempt`, said the lot cannot finish
+    /// without a ruling it is forbidden to give: the equivalence of the
+    /// `survivors` it names, every one an open survivor of the campaign.
+    /// Handed over at once, with no further attempt spent; the HQ rules
+    /// (`nunki mission mutants --equivalent … --because …`), then `retry`
+    /// resumes at the next attempt — or, when the one that asked was the last,
+    /// hands over as [`Handover::LotAttemptsExhausted`] rather than go past
+    /// the bound.
+    ///
+    /// A new variant and not a field on an old one, so that every state file
+    /// written before it still reads.
+    AwaitingRuling {
+        lot: String,
+        what: String,
+        attempt: u32,
+        survivors: Vec<String>,
+    },
+}
+
+impl Handover {
+    /// The handover in one line, for `mission status`, `verify` and the
+    /// monitor's exit: what stopped, and for a ruling, what the HQ is
+    /// expected to do about it. `mission` is the id the verbs are spelled
+    /// with.
+    pub fn line(&self, mission: &str) -> String {
+        match self {
+            Handover::LotAttemptsExhausted { lot, attempts } => format!(
+                "lot {lot} failed {attempts} attempt(s) — read the journals, then \
+                 `nunki mission retry {mission} --because <what changed>`"
+            ),
+            Handover::RoleAttemptsExhausted { role, attempts } => format!(
+                "the {role:?} failed {attempts} attempt(s) — `nunki mission retry {mission} \
+                 --because <what changed>`"
+            ),
+            Handover::VoletsExhausted { causes } => format!(
+                "{} return(s) to the coder were used — `nunki mission retry {mission} \
+                 --because <what changed>`",
+                causes.len()
+            ),
+            Handover::Abandoned { reason } => format!("called off: {reason}"),
+            Handover::AwaitingRuling {
+                lot,
+                attempt,
+                survivors,
+                ..
+            } => format!(
+                "lot {lot}, attempt {attempt}, awaits the HQ's ruling on {} — rule each \
+                 (`nunki mission mutants {mission} --equivalent <survivor> --because \
+                 <why>`), then `nunki mission retry {mission} --because <what was ruled>`",
+                survivors
+                    .iter()
+                    .map(|id| format!("`{id}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }
+    }
 }
 
 /// Where the mission is.
@@ -86,6 +143,13 @@ pub enum Event {
     /// retry`), saying what changed. Only from [`Stage::AwaitingHuman`], and
     /// never from a mission the human called off themselves.
     Retried { because: String },
+    /// The coder's run said its lot awaits a ruling on `survivors`, and the
+    /// engine checked that each is an open survivor of the campaign. Only
+    /// while coding; what the run wrote is `what`.
+    RulingAwaited {
+        what: String,
+        survivors: Vec<String>,
+    },
     /// The human called the mission off (`nunki mission end`), with a reason.
     /// Valid wherever a mission can still be worked on: what it says is
     /// "stop asking me about this", and there is no stage where that is not
@@ -96,7 +160,10 @@ pub enum Event {
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum FlowError {
     #[error("event {event:?} is not valid in stage {stage:?}")]
-    InvalidTransition { stage: Stage, event: Event },
+    InvalidTransition {
+        stage: Box<Stage>,
+        event: Box<Event>,
+    },
     #[error("a mission needs at least one lot")]
     NoLots,
     #[error(
@@ -289,6 +356,20 @@ impl Flow {
             (Stage::Coding { work, attempt }, Event::Stalled { .. }) => {
                 self.retry_coder(work, attempt)
             }
+            // A ruling the coder may not give: no attempt would change it, so
+            // none is spent. The attempt that asked is the one recorded, and
+            // the work is kept whole for the retry, as for any handover.
+            (Stage::Coding { work, attempt }, Event::RulingAwaited { what, survivors }) => {
+                let lot = self.label(&work);
+                *self.attempts.entry(lot.clone()).or_insert(0) = attempt;
+                self.resume_with = Some(work);
+                Stage::AwaitingHuman(Handover::AwaitingRuling {
+                    lot,
+                    what,
+                    attempt,
+                    survivors,
+                })
+            }
             // Gates 1 to 4 are played at the end of **every** run, not only
             // at the final verification (SPEC 4.4): a
             // perimeter gate that only falls at the end loses a six-hour
@@ -402,6 +483,33 @@ impl Flow {
                 Stage::AwaitingHuman(Handover::RoleAttemptsExhausted { role, .. }),
                 Event::Retried { .. },
             ) => self.role_stage(role, 1),
+            // A ruling is not a bound running out, so it hands no budget
+            // back: the lot resumes at the attempt after the one that asked.
+            // Never past the bound: when the attempt that asked was the last
+            // one, the retry hands over as exhausted instead, and the next
+            // `retry` — from a bound, this time — hands the attempts back
+            // whole. Without that, a coder that asked on every attempt would
+            // go on past `attempts_per_lot` one human retry at a time.
+            (
+                Stage::AwaitingHuman(Handover::AwaitingRuling { lot, attempt, .. }),
+                Event::Retried { .. },
+            ) => {
+                let Some(work) = self.resume_with.clone() else {
+                    return Err(FlowError::NothingToResume);
+                };
+                if attempt >= self.header.bounds.attempts_per_lot {
+                    Stage::AwaitingHuman(Handover::LotAttemptsExhausted {
+                        lot,
+                        attempts: attempt,
+                    })
+                } else {
+                    self.resume_with = None;
+                    Stage::Coding {
+                        work,
+                        attempt: attempt + 1,
+                    }
+                }
+            }
             (Stage::AwaitingHuman(_), Event::Retried { .. }) => {
                 let Some(work) = self.resume_with.clone() else {
                     return Err(FlowError::NothingToResume);
@@ -431,7 +539,12 @@ impl Flow {
             }
             (_, Event::Ended { reason }) => Stage::AwaitingHuman(Handover::Abandoned { reason }),
 
-            (stage, event) => return Err(FlowError::InvalidTransition { stage, event }),
+            (stage, event) => {
+                return Err(FlowError::InvalidTransition {
+                    stage: Box::new(stage),
+                    event: Box::new(event),
+                });
+            }
         };
         self.stage = next;
         Ok(&self.stage)
