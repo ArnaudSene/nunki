@@ -187,7 +187,17 @@ shows a change of it. Once the security rounds are spent, the agent is not
 called again. A spent cap never verifies a red verdict: if the last round
 concluded `FINDINGS`, green gates bring the mission back to those findings,
 where `mission accept` lifts them or `mission iterate` spends a volet, and
-`FOLLOWUP_HQ.md` says the fix was not attacked again. `nunki mission status` prints the rigor and the rounds played.
+`FOLLOWUP_HQ.md` says the fix was not attacked again. A lifted report stays
+lifted: a later review whose volet comes through the gates green is verified
+without bringing it back. `nunki mission status` prints the rigor and the rounds played.
+
+`nunki push` asks for a security verdict on the branch's `HEAD` while a round
+is left. Once the rounds are spent, no verdict can come on a later commit, so
+the last one stands for the commits after it: a `CLEAR` as it is, a `FINDINGS`
+only once `mission accept` lifted it after it was concluded — never one nobody
+lifted. Those commits are named, by push and in `FOLLOWUP_HQ.md`, as not
+attacked by the security agent. A `prototype` plays no round, and push asks
+it for no security verdict.
 
 ## Vocabulary
 

@@ -840,6 +840,7 @@ pub fn verify_as(
                         &paths.followup,
                         cap.rounds,
                         cap.max,
+                        &last_round_since(&state, &slot.tree)?,
                     )?;
                     store.save(&state)?;
                     steps.push(Step::SecurityRoundsSpent {
@@ -871,7 +872,12 @@ pub fn verify_as(
                 // the note taken from the state so a later `verify` does not
                 // say it again.
                 if let Some(cap) = state.flow.take_security_cap() {
-                    crate::followup::security_capped(&paths.followup, cap.rounds, cap.max)?;
+                    crate::followup::security_capped(
+                        &paths.followup,
+                        cap.rounds,
+                        cap.max,
+                        &last_round_since(&state, &slot.tree)?,
+                    )?;
                     store.save(&state)?;
                     steps.push(Step::SecurityRoundsSpent {
                         rounds: cap.rounds,
@@ -885,6 +891,20 @@ pub fn verify_as(
             }
         }
     }
+}
+
+/// The commits after the security agent's last concluded round, named as
+/// `nunki push` names them (SPEC 4.5): what a spent round cap leaves
+/// unattacked. Nothing when the agent never concluded.
+fn last_round_since(
+    state: &MissionState,
+    tree: &std::path::Path,
+) -> Result<Vec<String>, VerifyError> {
+    let Some(last) = state.concluded(Role::Security) else {
+        return Ok(Vec::new());
+    };
+    let head = crate::git::head(tree)?;
+    Ok(crate::push::not_attacked(tree, &last.head, &head)?)
 }
 
 /// The step a held mission answers with instead of a launch, or `None` if it

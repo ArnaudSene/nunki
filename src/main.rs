@@ -997,6 +997,17 @@ fn main() -> ExitCode {
                 Ok(pushed) => {
                     println!("pushed    {} → {}", pushed.branch, pushed.remote);
                     println!("head      {}", &pushed.head[..12.min(pushed.head.len())]);
+                    // Pushed on a spent round cap (SPEC 4.5): said before the
+                    // pull request, so whoever opens it reads what the
+                    // security agent never saw.
+                    if !pushed.not_attacked.is_empty() {
+                        println!(
+                            "security  the rounds were spent; not attacked by the security agent:"
+                        );
+                        for commit in &pushed.not_attacked {
+                            println!("          {commit}");
+                        }
+                    }
                     match pushed.pull_request {
                         nunki::push::PullRequestState::Opened(nunki::forge::Opened::Created(
                             url,

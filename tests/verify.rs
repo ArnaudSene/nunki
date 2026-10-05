@@ -2758,6 +2758,17 @@ fn at_standard_the_spent_security_round_is_recorded_and_the_findings_come_back()
     }
     assert!(matches!(state.flow.stage(), Stage::Integration { .. }));
     assert_eq!(state.flow.security_rounds(), 1);
+    // The round was played on the commit as it stood; what came after it is
+    // what the spent cap leaves unattacked, and the note names it.
+    state.conclude(
+        Role::Security,
+        Some(nunki::mission::Verdict::Findings),
+        &world.head(),
+    );
+    store.save(&state).unwrap();
+    world.commit("compose.yaml", "services: {db: {}}\n", "rewire it");
+    let rewire = world.head();
+    world.journal_names_head();
 
     world.run_recorded(Some(41), FINISHED);
     world.verdict("Integrator", "INTEGRATED", &world.head(), "wired again");
@@ -2787,6 +2798,13 @@ fn at_standard_the_spent_security_round_is_recorded_and_the_findings_come_back()
     let followup = std::fs::read_to_string(world.mission().join("FOLLOWUP_HQ.md")).unwrap();
     assert!(
         followup.contains("security round cap was reached: 1 / 1"),
+        "{followup}"
+    );
+    assert!(
+        followup.contains(&format!(
+            "Not attacked by the security agent:\n\n- {} rewire it\n",
+            &rewire[..12]
+        )),
         "{followup}"
     );
     assert!(
@@ -2854,6 +2872,17 @@ fn at_standard_a_review_after_the_clear_is_verified_with_the_spent_round_recorde
     }
     assert!(matches!(state.flow.stage(), Stage::Integration { .. }));
     assert_eq!(state.flow.security_rounds(), 1);
+    // The round was played on the commit as it stood; what came after it is
+    // what the spent cap leaves unattacked, and the note names it.
+    state.conclude(
+        Role::Security,
+        Some(nunki::mission::Verdict::Clear),
+        &world.head(),
+    );
+    store.save(&state).unwrap();
+    world.commit("compose.yaml", "services: {db: {}}\n", "rewire it");
+    let rewire = world.head();
+    world.journal_names_head();
 
     world.run_recorded(Some(41), FINISHED);
     world.verdict("Integrator", "INTEGRATED", &world.head(), "wired again");
@@ -2880,6 +2909,13 @@ fn at_standard_a_review_after_the_clear_is_verified_with_the_spent_round_recorde
     let followup = std::fs::read_to_string(world.mission().join("FOLLOWUP_HQ.md")).unwrap();
     assert!(
         followup.contains("security round cap was reached: 1 / 1"),
+        "{followup}"
+    );
+    assert!(
+        followup.contains(&format!(
+            "Not attacked by the security agent:\n\n- {} rewire it\n",
+            &rewire[..12]
+        )),
         "{followup}"
     );
     assert!(

@@ -17,6 +17,14 @@
 //! judged by the same allowlist its own gate 4 uses. A commit after the
 //! coder's that touches business code invalidates it, and the coder goes back
 //! out in a volet.
+//!
+//! The rule for the security agent once its rounds are spent (SPEC 4.5):
+//! the rigor caps its rounds, and once the cap is reached it is never
+//! launched again, so a verdict on a later `HEAD` can never come. Its last
+//! concluded verdict then stands for the commits after it — a `CLEAR` as it
+//! is, a `FINDINGS` only once a human lifted it after it was concluded — and
+//! those commits are named, in push's answer, as not attacked by the security
+//! agent. While a round is left, nothing changes: a verdict on `HEAD`.
 
 use crate::harness::Role;
 use crate::mission::Verdict;
@@ -65,6 +73,12 @@ pub enum PushError {
     },
     #[error("the coder's verdict is on {0}, which is not an ancestor of {1}")]
     NotAnAncestor(String, String),
+    #[error(
+        "the security rounds are spent and the last security verdict is on {on}, which is \
+         not an ancestor of {head} — what follows it on another branch is not what came \
+         after the last round"
+    )]
+    SecurityNotAnAncestor { on: String, head: String },
     #[error(
         "the repository is on {0}, which is the branch being fetched — git refuses to \
          fetch into the branch that is checked out. Move off it first"
@@ -148,6 +162,11 @@ pub struct Pushed {
     pub head: String,
     pub remote: String,
     pub pull_request: PullRequestState,
+    /// The commits after the last security round, oldest first, as
+    /// `<short sha> <subject>`: pushed because the rounds were spent, and
+    /// not attacked by the security agent. Empty when its verdict is on
+    /// `HEAD`, or when the mission has no security agent.
+    pub not_attacked: Vec<String>,
 }
 
 /// Where the pull request stands once the branch is on the forge.
@@ -202,7 +221,7 @@ pub fn push_to(
     let slot = crate::slot::find(project, &state.slot)?;
     let head = crate::git::head(&slot.tree)?;
     let header = state.flow.header().clone();
-    verdicts_hold(&slot, &state, &head)?;
+    let not_attacked = verdicts_hold(&slot, &state, &head)?;
 
     let fetched = fetch(project, id)?;
     let remote = remote_url(project)?;
@@ -220,6 +239,7 @@ pub fn push_to(
         head,
         remote,
         pull_request,
+        not_attacked,
     })
 }
 
@@ -280,11 +300,14 @@ fn open_pull_request(
 }
 
 /// Every precondition of SPEC 4.4, in the order a human would ask them.
+///
+/// Returns the commits the security agent did not attack because its rounds
+/// were spent — empty whenever its verdict is on `HEAD`.
 fn verdicts_hold(
     slot: &crate::slot::Slot,
     state: &MissionState,
     head: &str,
-) -> Result<(), PushError> {
+) -> Result<Vec<String>, PushError> {
     let header = state.flow.header();
 
     if header.has_integration() {
@@ -297,12 +320,51 @@ fn verdicts_hold(
         green(Role::Integrator, concluded.verdict)?;
     }
 
-    if header.has_security_agent() {
-        let concluded = state
-            .concluded(Role::Security)
-            .ok_or(PushError::NoVerdict {
-                role: Role::Security,
-            })?;
+    let not_attacked = if header.has_security_agent() {
+        security_holds(slot, state, head)?
+    } else {
+        Vec::new()
+    };
+
+    // The coder's, and the rule that makes it survive the integrator's
+    // commits (SPEC 4.4, "le verdict et le `HEAD`, quand l'intégrateur
+    // commite").
+    let coder = state
+        .concluded(Role::Coder)
+        .ok_or(PushError::NoVerdict { role: Role::Coder })?;
+    only_wiring_since(slot, &coder.head, head, header)?;
+    Ok(not_attacked)
+}
+
+/// The security agent's precondition (SPEC 4.5).
+///
+/// While the mission has a round left, a verdict on `HEAD`: a later commit
+/// can still be attacked, so it must be. Once the rounds are spent, no
+/// verdict on a later commit can ever come, and asking for one would refuse
+/// every mission with a volet after its last round. The last verdict then
+/// stands for what came after it, and only that way: a `CLEAR` as it is, a
+/// `FINDINGS` lifted by a human after it was concluded — never one nobody
+/// lifted. What came after is returned, to be named as not attacked.
+///
+/// A prototype plays no round: there was never a security agent to
+/// conclude, and none is asked for, as for `security: gates`. A header
+/// framed today cannot carry both ([`crate::mission::Rigor::admits`]), but
+/// a state frozen before that refusal can.
+fn security_holds(
+    slot: &crate::slot::Slot,
+    state: &MissionState,
+    head: &str,
+) -> Result<Vec<String>, PushError> {
+    if state.flow.max_security_rounds() == 0 {
+        return Ok(Vec::new());
+    }
+    let concluded = state
+        .concluded(Role::Security)
+        .ok_or(PushError::NoVerdict {
+            role: Role::Security,
+        })?;
+    let spent = state.flow.security_rounds() >= state.flow.max_security_rounds();
+    if !spent {
         on_this_commit(Role::Security, concluded, head)?;
         // The one verdict a human may overrule, and only by having said so
         // on this commit, with a reason, through `nunki mission accept`.
@@ -313,15 +375,70 @@ fn verdicts_hold(
         } else {
             green(Role::Security, concluded.verdict)?;
         }
+        return Ok(Vec::new());
     }
 
-    // The coder's, and the rule that makes it survive the integrator's
-    // commits (SPEC 4.4, "le verdict et le `HEAD`, quand l'intégrateur
-    // commite").
-    let coder = state
-        .concluded(Role::Coder)
-        .ok_or(PushError::NoVerdict { role: Role::Coder })?;
-    only_wiring_since(slot, &coder.head, head, header)
+    // "What came after the last round" means something only on its branch.
+    if !is_ancestor(&slot.tree, &concluded.head, head) {
+        return Err(PushError::SecurityNotAnAncestor {
+            on: concluded.head.clone(),
+            head: head.to_string(),
+        });
+    }
+    if concluded.verdict == Some(Verdict::Findings) {
+        if !lifted_after(&slot.tree, state, concluded, head) {
+            return Err(PushError::NotLifted(head.to_string()));
+        }
+    } else {
+        green(Role::Security, concluded.verdict)?;
+    }
+    Ok(not_attacked(&slot.tree, &concluded.head, head)?)
+}
+
+/// Whether a human lifted the verdict as a whole after `concluded` was
+/// concluded — on its commit or a later one of the branch being pushed, and
+/// no earlier in time. A lift given on an earlier report is a decision about
+/// that report, not about this one.
+fn lifted_after(
+    tree: &std::path::Path,
+    state: &MissionState,
+    concluded: &crate::state::Concluded,
+    head: &str,
+) -> bool {
+    state.accepted.iter().any(|a| {
+        a.finding.is_none()
+            && a.date >= concluded.date
+            && is_ancestor(tree, &concluded.head, &a.head)
+            && is_ancestor(tree, &a.head, head)
+    })
+}
+
+/// Whether `older` is `newer` or one of its ancestors. Anything git cannot
+/// answer — an unknown commit — is a no.
+fn is_ancestor(tree: &std::path::Path, older: &str, newer: &str) -> bool {
+    crate::git::run(tree, &["merge-base", "--is-ancestor", older, newer]).is_ok()
+}
+
+/// The commits after `since` up to `head`, oldest first, each as
+/// `<short sha> <subject>`: what the security agent did not attack once its
+/// rounds were spent on `since` (SPEC 4.5). `nunki push` and the follow-up
+/// note name them the same way.
+pub fn not_attacked(
+    tree: &std::path::Path,
+    since: &str,
+    head: &str,
+) -> Result<Vec<String>, crate::git::GitError> {
+    let out = crate::git::run(
+        tree,
+        &[
+            "log",
+            "--reverse",
+            "--abbrev=12",
+            "--format=%h %s",
+            &format!("{since}..{head}"),
+        ],
+    )?;
+    Ok(out.lines().map(str::to_string).collect())
 }
 
 fn on_this_commit(

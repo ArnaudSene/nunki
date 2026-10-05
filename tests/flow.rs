@@ -785,12 +785,14 @@ fn at_critical_the_fourth_round_is_not_launched_and_the_third_findings_stand() {
     assert_eq!(flow.stage(), &Stage::Verified);
 }
 
-/// The rule reads the last verdict, not the way back to the gates. A
-/// finding the human lifted, then a review that sends the branch back: the
-/// lift was worth the commit it was given on, so the new volet's green gates
-/// bring the mission back to those findings, not to `Verified`.
+/// A report a human lifted is not held any more. A finding lifted, then a
+/// review that sends the branch back: at the cap, the new volet's green
+/// gates verify the mission, the cap said, rather than bringing back a
+/// report somebody already lifted and asking for the same lift again on
+/// every volet. `nunki push` is what then reads the lift, and names the
+/// commits after the last round as not attacked (SPEC 4.5).
 #[test]
-fn a_review_after_lifted_findings_at_the_cap_comes_back_to_them() {
+fn after_an_accept_a_review_and_green_gates_at_the_cap_the_old_report_does_not_come_back() {
     let mut flow = at(Rigor::Standard, none());
     code_through(&mut flow);
     flow.advance(Event::GatesPassed).unwrap();
@@ -803,11 +805,50 @@ fn a_review_after_lifted_findings_at_the_cap_comes_back_to_them() {
     .unwrap();
     flow.advance(finished(true)).unwrap();
     flow.advance(Event::GatesPassed).unwrap();
-    assert_eq!(flow.stage(), &back_on(1));
+    assert_eq!(flow.stage(), &Stage::Verified);
     assert_eq!(
         flow.take_security_cap(),
         Some(SecurityCap { rounds: 1, max: 1 })
     );
+
+    // And after a second review too: nothing brings the lifted report back.
+    flow.advance(Event::Reviewed {
+        because: "and this".into(),
+    })
+    .unwrap();
+    flow.advance(finished(true)).unwrap();
+    flow.advance(Event::GatesPassed).unwrap();
+    assert_eq!(flow.stage(), &Stage::Verified);
+}
+
+/// The lift clears the report it lifted, and only that: findings concluded
+/// after it, on a round still left, are held again, and come back at the
+/// cap like any other.
+#[test]
+fn findings_after_an_accept_are_held_again_and_come_back_at_the_cap() {
+    let mut flow = at(Rigor::Critical, none());
+    code_through(&mut flow);
+    flow.advance(Event::GatesPassed).unwrap();
+    flow.advance(findings(1)).unwrap();
+    flow.advance(Event::HumanAccepted).unwrap();
+    flow.advance(Event::Reviewed {
+        because: "rename it".into(),
+    })
+    .unwrap();
+    flow.advance(finished(true)).unwrap();
+    flow.advance(Event::GatesPassed).unwrap();
+    assert_eq!(flow.stage(), &Stage::SecurityAgent { attempt: 1 });
+    flow.advance(findings(2)).unwrap();
+    flow.advance(Event::Iterate).unwrap();
+    flow.advance(finished(true)).unwrap();
+    flow.advance(Event::GatesPassed).unwrap();
+    flow.advance(findings(3)).unwrap();
+    assert_eq!(flow.security_rounds(), 3);
+    flow.advance(Event::Iterate).unwrap();
+    assert_eq!(flow.volets(), 3, "a review and two iterates");
+    flow.advance(finished(true)).unwrap();
+    flow.advance(Event::GatesPassed).unwrap();
+    assert_eq!(flow.stage(), &back_on(3));
 }
 
 /// Same rule after a retry: the volet the human took back from a handover

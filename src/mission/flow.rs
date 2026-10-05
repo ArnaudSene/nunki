@@ -161,7 +161,7 @@ pub struct Flow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     security_cap: Option<SecurityCap>,
     /// The report of the last `FINDINGS` the security agent concluded, while
-    /// no `CLEAR` has followed it. A spent round cap brings the mission back
+    /// no `CLEAR` has followed it and no human has lifted it. A spent round cap brings the mission back
     /// to it rather than verifying a branch whose last verdict was red
     /// (SPEC 4.5). `serde(default)` because state written before it reads
     /// as "no findings held".
@@ -367,7 +367,13 @@ impl Flow {
             (Stage::Findings { report }, Event::Iterate) => {
                 self.volet(format!("security FINDINGS: {report}"))
             }
-            (Stage::Findings { .. }, Event::HumanAccepted) => Stage::Verified,
+            // A report a human lifted is no longer held: kept, it would come
+            // back at the cap after a later HQ review, as if nobody had
+            // lifted it, and ask for the same lift on every volet (SPEC 4.5).
+            (Stage::Findings { .. }, Event::HumanAccepted) => {
+                self.last_findings = None;
+                Stage::Verified
+            }
             // A verified branch is not a pushed one: the HQ reads it first,
             // and what it refuses goes back as a volet, bounded like the
             // others. With none left, the handover says so and `retry` hands

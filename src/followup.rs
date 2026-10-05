@@ -88,7 +88,9 @@ pub fn lifted_all(file: &Path, who: &str, why: &str, head: &str) -> Result<(), F
              **Accepted because:** {why}\n\n\
              Everything the report still carried is lifted from here on. A new\n\
              commit makes this stale: a verdict, and its lift, are worth one\n\
-             commit and no other (SPEC 4.5).\n",
+             commit and no other (SPEC 4.5) — unless the security rounds are\n\
+             spent, when no verdict can follow and this lift stands for the\n\
+             commits after it, which `nunki push` names as not attacked.\n",
             date = today(),
             short = short(head),
         ),
@@ -150,14 +152,20 @@ pub fn reviewed(file: &Path, who: &str, why: &str) -> Result<(), FollowupError> 
     )
 }
 
-/// The mission was verified without the security agent, after a `CLEAR`,
-/// because the rounds its rigor allows were spent (SPEC 4.5): `rounds`
-/// played of `max`.
+/// The mission was verified without the security agent, after a `CLEAR` or
+/// a lifted `FINDINGS`, because the rounds its rigor allows were spent
+/// (SPEC 4.5): `rounds` played of `max`, and `not_attacked` the commits
+/// after the last round, as [`crate::push::not_attacked`] names them.
 ///
 /// Written here, beside the verdicts the rounds concluded, so that whoever
 /// validates the push reads that the last commit was not seen by the agent,
 /// and why — a verified mission otherwise reads as if every stage had run.
-pub fn security_capped(file: &Path, rounds: u32, max: u32) -> Result<(), FollowupError> {
+pub fn security_capped(
+    file: &Path,
+    rounds: u32,
+    max: u32,
+    not_attacked: &[String],
+) -> Result<(), FollowupError> {
     append(
         file,
         &format!(
@@ -165,8 +173,9 @@ pub fn security_capped(file: &Path, rounds: u32, max: u32) -> Result<(), Followu
              The security round cap was reached: {rounds} / {max}. The gates are\n\
              green on the code as it stands, and the mission is verified without\n\
              another round: what the last commits changed has not been read by\n\
-             the security agent.\n",
+             the security agent.\n{commits}",
             date = today(),
+            commits = unattacked(not_attacked),
         ),
     )
 }
@@ -174,11 +183,13 @@ pub fn security_capped(file: &Path, rounds: u32, max: u32) -> Result<(), Followu
 /// The security agent was not called again because its rounds were spent,
 /// and the last verdict it concluded was `FINDINGS`: the mission is back on
 /// that report rather than verified (SPEC 4.5). What the coder changed after
-/// it has not been attacked, and whoever accepts or iterates must know it.
+/// it has not been attacked, and whoever accepts or iterates must know it:
+/// `not_attacked` names those commits.
 pub fn security_capped_on_findings(
     file: &Path,
     rounds: u32,
     max: u32,
+    not_attacked: &[String],
 ) -> Result<(), FollowupError> {
     append(
         file,
@@ -188,10 +199,24 @@ pub fn security_capped_on_findings(
              concluded FINDINGS, and the fix made after it has not been attacked\n\
              again: the gates are green on it, and that is all that was played.\n\
              The mission is back on those findings — `nunki mission accept`\n\
-             lifts them, `nunki mission iterate` sends one more volet.\n",
+             lifts them, `nunki mission iterate` sends one more volet.\n{commits}",
             date = today(),
+            commits = unattacked(not_attacked),
         ),
     )
+}
+
+/// The commits after the last round, as a list a human can check against
+/// `git log`; nothing when there are none to name.
+fn unattacked(commits: &[String]) -> String {
+    if commits.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\nNot attacked by the security agent:\n\n");
+    for commit in commits {
+        out.push_str(&format!("- {commit}\n"));
+    }
+    out
 }
 
 /// An instruction left for the next run.

@@ -68,12 +68,34 @@ struct World {
     tree: PathBuf,
     /// A bare repository standing in for the forge.
     forge: PathBuf,
+    /// The user home the real binary is run with, for a world [`World::opened`].
+    home: PathBuf,
 }
 
 impl World {
     fn new(integration: Integration, security: Security) -> Self {
+        Self::built(integration, security, false)
+    }
+
+    /// The same world, in a project home the real binary opens with `HOME`
+    /// set to [`World::home`]: for what `nunki push` prints, which nothing
+    /// below the binary can see.
+    fn opened(integration: Integration, security: Security) -> Self {
+        Self::built(integration, security, true)
+    }
+
+    fn built(integration: Integration, security: Security, opened: bool) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let hq_root = dir.path().join("nunki").join(nunki::project::HQ_DIR);
+        let root = dir.path().join("repo");
+        let nunki_home = if opened {
+            common::project_home(&root, &dir.path().join("home"), "harness: claude-code\n")
+        } else {
+            std::fs::create_dir_all(&root).unwrap();
+            git(&root, &["init", "-q", "-b", "dev"]);
+            dir.path().join("nunki")
+        };
+        let root = std::fs::canonicalize(&root).unwrap();
+        let hq_root = nunki_home.join(nunki::project::HQ_DIR);
         for d in ["locks", "missions", "state/missions"] {
             std::fs::create_dir_all(hq_root.join(d)).unwrap();
         }
@@ -86,9 +108,6 @@ impl World {
         );
 
         // The repository, with the forge as its origin.
-        let root = dir.path().join("repo");
-        std::fs::create_dir_all(&root).unwrap();
-        git(&root, &["init", "-q", "-b", "dev"]);
         std::fs::write(root.join("src.rs"), "pub fn one() -> u8 { 1 }\n").unwrap();
         git(&root, &["add", "-A"]);
         git(&root, &["commit", "-q", "-m", "base"]);
@@ -96,7 +115,7 @@ impl World {
             &root,
             &["remote", "add", "origin", &forge.display().to_string()],
         );
-        git(&root, &["push", "-q", "origin", "dev"]);
+        git(&root, &["push", "-q", "origin", "HEAD"]);
 
         // The slot, where `nunki::slot::find` looks: beside the repository.
         let slots = dir.path().join("repo-slots");
@@ -154,6 +173,7 @@ impl World {
             .unwrap();
 
         Self {
+            home: dir.path().join("home"),
             _dir: dir,
             project,
             tree,
@@ -666,4 +686,441 @@ fn a_remote_elsewhere_is_named_and_no_forge_is_asked() {
         }
         other => panic!("{other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Push once the security rounds are spent (SPEC 4.5).
+//
+// The flow is driven the way `nunki verify` drives it — an event, and the
+// verdict recorded on the commit it was given on — without lifting a
+// container. Dates are written by hand, so the order of a verdict and a lift
+// is the test's and not the clock's.
+// ---------------------------------------------------------------------------
+
+const T1: &str = "2026-10-01T10:00:00Z";
+const T2: &str = "2026-10-01T11:00:00Z";
+const T3: &str = "2026-10-01T12:00:00Z";
+
+fn no_integration() -> Integration {
+    Integration::None {
+        reason: "none".into(),
+    }
+}
+
+impl World {
+    /// A mission with a security agent and no integrator, at `rigor`.
+    fn at(rigor: nunki::mission::Rigor) -> Self {
+        Self::rigged(World::new(no_integration(), Security::Agent), rigor)
+    }
+
+    /// [`World::at`], in a project home the real binary opens.
+    fn opened_at(rigor: nunki::mission::Rigor) -> Self {
+        Self::rigged(World::opened(no_integration(), Security::Agent), rigor)
+    }
+
+    fn rigged(world: World, rigor: nunki::mission::Rigor) -> Self {
+        let mut h = header(no_integration(), Security::Agent);
+        h.rigor = rigor;
+        let mut state = world.state();
+        state.flow = Flow::new(h).unwrap();
+        world.store().save(&state).unwrap();
+        world
+    }
+
+    /// `nunki push m1 --yes`, run by the real binary: what it printed, once
+    /// it succeeded.
+    fn pushed_by_the_binary(&self) -> String {
+        let out = Command::new(env!("CARGO_BIN_EXE_nunki"))
+            .arg("-C")
+            .arg(&self.project.root)
+            .args(["push", "m1", "--yes"])
+            .env("HOME", &self.home)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(
+            out.status.success(),
+            "{stdout}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        stdout
+    }
+
+    fn event(&self, event: Event) {
+        let mut state = self.state();
+        self.store().apply(&mut state, event).unwrap();
+    }
+
+    fn stage(&self) -> Stage {
+        self.state().flow.stage().clone()
+    }
+
+    /// The coder's run ends on a commit, and its gates pass on it.
+    fn coded(&self, body: &str, message: &str) -> String {
+        let head = self.commit("src.rs", body, message);
+        self.event(Event::RunEnded {
+            outcome: nunki::harness::Outcome::Finished(Default::default()),
+            lot_done: true,
+        });
+        let mut state = self.state();
+        state.conclude(Role::Coder, None, &head);
+        self.store().save(&state).unwrap();
+        self.event(Event::GatesPassed);
+        head
+    }
+
+    /// The security agent concludes `verdict` on `HEAD`, at `date`.
+    fn security(&self, verdict: Verdict, date: &str) {
+        let mut state = self.state();
+        assert!(
+            matches!(state.flow.stage(), Stage::SecurityAgent { .. }),
+            "a round is played: {:?}",
+            state.flow.stage()
+        );
+        state.conclude(Role::Security, Some(verdict), &self.head());
+        state.verdicts.last_mut().unwrap().date = date.into();
+        self.store().save(&state).unwrap();
+        self.event(Event::Verdict {
+            verdict,
+            report: format!("{verdict:?}"),
+        });
+    }
+
+    /// A human's lift of the verdict as a whole, on `head`, at `date`, as
+    /// `nunki mission accept` records it; the flow moves when it is on the
+    /// findings.
+    fn accepted(&self, head: &str, date: &str) {
+        self.lifted(None, head, date);
+    }
+
+    fn lifted(&self, finding: Option<&str>, head: &str, date: &str) {
+        let mut state = self.state();
+        state.accepted.push(nunki::state::Accepted {
+            finding: finding.map(str::to_string),
+            why: "behind the VPN".into(),
+            who: "Alex Martin".into(),
+            head: head.to_string(),
+            date: date.to_string(),
+        });
+        self.store().save(&state).unwrap();
+        if matches!(self.stage(), Stage::Findings { .. }) && finding.is_none() {
+            self.event(Event::HumanAccepted);
+        }
+    }
+
+    fn review(&self) {
+        self.event(Event::Reviewed {
+            because: "rename it".into(),
+        });
+    }
+}
+
+/// How `nunki push` names a commit it did not see attacked.
+fn named(head: &str, subject: &str) -> String {
+    format!("{} {subject}", &head[..12])
+}
+
+/// At `standard`, a CLEAR spends the one round. The HQ reads the branch and
+/// sends it back; the volet's gates are green and the mission is verified
+/// without a second round. Push takes the CLEAR for the commits after it —
+/// no verdict could ever come on them — and names them as not attacked.
+#[test]
+fn at_standard_a_clear_a_review_and_a_volet_are_pushed_naming_the_commit_not_attacked() {
+    let world = World::at(nunki::mission::Rigor::Standard);
+    world.coded("pub fn one() -> u8 { 2 }\n", "the lot");
+    world.security(Verdict::Clear, T1);
+    assert_eq!(world.stage(), Stage::Verified);
+    world.review();
+    let first = world.commit("notes.rs", "// first\n", "the volet begins");
+    let volet = world.coded("pub fn one() -> u8 { 3 }\n", "the volet ends");
+    assert_eq!(world.stage(), Stage::Verified, "no second round");
+
+    let pushed = push::push(&world.project, "m1", true).unwrap();
+    assert_eq!(pushed.head, volet);
+    assert_eq!(
+        pushed.not_attacked,
+        vec![
+            named(&first, "the volet begins"),
+            named(&volet, "the volet ends")
+        ],
+        "every commit after the round, oldest first"
+    );
+    assert_eq!(world.on_forge("mission/x").as_deref(), Some(volet.as_str()));
+}
+
+/// At `standard`, FINDINGS spends the round. The HQ iterates, the fix is
+/// gated green, and the mission is back on the findings — not pushed. The
+/// human lifts them on the fix, and push takes the lift for the commits
+/// after the round. A lift given in the same second as the verdict counts:
+/// a human cannot be faster than the clock's resolution.
+#[test]
+fn at_standard_findings_a_fix_and_an_accept_are_pushed_naming_the_fix() {
+    let world = World::at(nunki::mission::Rigor::Standard);
+    world.coded("pub fn one() -> u8 { 2 }\n", "the lot");
+    world.security(Verdict::Findings, T1);
+    world.event(Event::Iterate);
+    let fix = world.coded("pub fn one() -> u8 { 3 }\n", "the fix");
+    assert!(matches!(world.stage(), Stage::Findings { .. }));
+    let err = push::push(&world.project, "m1", true).unwrap_err();
+    assert!(matches!(err, PushError::NotVerified { .. }), "{err}");
+
+    world.accepted(&fix, T1);
+    assert_eq!(world.stage(), Stage::Verified);
+    let pushed = push::push(&world.project, "m1", true).unwrap();
+    assert_eq!(pushed.not_attacked, vec![named(&fix, "the fix")]);
+    assert_eq!(world.on_forge("mission/x").as_deref(), Some(fix.as_str()));
+}
+
+/// After an accept at the cap, an HQ review and a volet: the old report does
+/// not come back, and push still finds the lift, which now stands for two
+/// commits.
+#[test]
+fn after_an_accept_at_the_cap_a_review_and_a_volet_are_pushed() {
+    let world = World::at(nunki::mission::Rigor::Standard);
+    let lot = world.coded("pub fn one() -> u8 { 2 }\n", "the lot");
+    world.security(Verdict::Findings, T1);
+    world.accepted(&lot, T2);
+    world.review();
+    let volet = world.coded("pub fn one() -> u8 { 3 }\n", "the volet");
+    assert_eq!(
+        world.stage(),
+        Stage::Verified,
+        "the lifted report stays lifted"
+    );
+
+    let pushed = push::push(&world.project, "m1", true).unwrap();
+    assert_eq!(pushed.not_attacked, vec![named(&volet, "the volet")]);
+    assert_eq!(world.on_forge("mission/x").as_deref(), Some(volet.as_str()));
+}
+
+/// The same at `critical`, once its third round is played: a CLEAR on the
+/// third, a review, a volet.
+#[test]
+fn at_critical_a_clear_on_the_third_round_stands_for_the_volet_after_it() {
+    let world = World::at(nunki::mission::Rigor::Critical);
+    world.coded("pub fn one() -> u8 { 2 }\n", "the lot");
+    world.security(Verdict::Findings, T1);
+    world.event(Event::Iterate);
+    world.coded("pub fn one() -> u8 { 3 }\n", "fix one");
+    world.security(Verdict::Findings, T2);
+    world.event(Event::Iterate);
+    world.coded("pub fn one() -> u8 { 4 }\n", "fix two");
+    world.security(Verdict::Clear, T3);
+    assert_eq!(world.state().flow.security_rounds(), 3);
+    world.review();
+    let volet = world.coded("pub fn one() -> u8 { 5 }\n", "the volet");
+    assert_eq!(world.stage(), Stage::Verified, "no fourth round");
+
+    let pushed = push::push(&world.project, "m1", true).unwrap();
+    assert_eq!(pushed.not_attacked, vec![named(&volet, "the volet")]);
+}
+
+/// And FINDINGS on the third round at `critical`: a fix, an accept, and the
+/// fix is pushed, named.
+#[test]
+fn at_critical_findings_on_the_third_round_a_fix_and_an_accept_are_pushed() {
+    let world = World::at(nunki::mission::Rigor::Critical);
+    world.coded("pub fn one() -> u8 { 2 }\n", "the lot");
+    for (round, date) in [(1, T1), (2, T2)] {
+        world.security(Verdict::Findings, date);
+        world.event(Event::Iterate);
+        world.coded(
+            &format!("pub fn one() -> u8 {{ {} }}\n", round + 2),
+            "a fix",
+        );
+    }
+    world.security(Verdict::Findings, T3);
+    world.event(Event::Iterate);
+    let fix = world.coded("pub fn one() -> u8 { 9 }\n", "the last fix");
+    assert!(matches!(world.stage(), Stage::Findings { .. }));
+    world.accepted(&fix, T3);
+
+    let pushed = push::push(&world.project, "m1", true).unwrap();
+    assert_eq!(pushed.not_attacked, vec![named(&fix, "the last fix")]);
+}
+
+/// While a round is left, nothing changed: the verdict must be on `HEAD`.
+/// At `critical`, one CLEAR leaves two rounds, and a CLEAR on an older
+/// commit does not stand for a newer one.
+#[test]
+fn rounds_not_spent_push_still_refuses_a_verdict_on_an_older_commit() {
+    let world = World::at(nunki::mission::Rigor::Critical);
+    let lot = world.coded("pub fn one() -> u8 { 2 }\n", "the lot");
+    world.security(Verdict::Clear, T1);
+    assert_eq!(world.state().flow.security_rounds(), 1);
+    let later = world.commit("src.rs", "pub fn one() -> u8 { 3 }\n", "unseen");
+    let mut state = world.state();
+    state.conclude(Role::Coder, None, &later);
+    world.store().save(&state).unwrap();
+
+    let err = push::push(&world.project, "m1", true).unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            PushError::VerdictElsewhere { role: Role::Security, on, .. } if *on == lot
+        ),
+        "{err}"
+    );
+    assert!(world.on_forge("mission/x").is_none());
+}
+
+/// Rounds not spent, the push on the verdict's own commit is unchanged, and
+/// names nothing.
+#[test]
+fn rounds_not_spent_a_clear_on_head_names_no_commit() {
+    let world = World::at(nunki::mission::Rigor::Critical);
+    world.coded("pub fn one() -> u8 { 2 }\n", "the lot");
+    world.security(Verdict::Clear, T1);
+    let pushed = push::push(&world.project, "m1", true).unwrap();
+    assert!(pushed.not_attacked.is_empty(), "{:?}", pushed.not_attacked);
+}
+
+/// A FINDINGS at the cap that nobody lifted is still refused, whatever the
+/// flow says. Forged here — the flow lets a mission reach `Verified` there
+/// only through a lift — because push is the last check, and it is worth
+/// what it refuses on its own.
+#[test]
+fn at_the_cap_findings_never_lifted_are_still_refused() {
+    let world = World::at(nunki::mission::Rigor::Standard);
+    world.coded("pub fn one() -> u8 { 2 }\n", "the lot");
+    world.security(Verdict::Findings, T1);
+    world.event(Event::Iterate);
+    world.coded("pub fn one() -> u8 { 3 }\n", "the fix");
+    world.event(Event::HumanAccepted);
+    assert_eq!(world.stage(), Stage::Verified);
+
+    let err = push::push(&world.project, "m1", true).unwrap_err();
+    assert!(matches!(err, PushError::NotLifted(_)), "{err}");
+    assert!(world.on_forge("mission/x").is_none());
+}
+
+/// A lift is a decision about the report that was in front of the human.
+/// At the cap, push refuses a lift given before the last verdict was
+/// concluded, one given on a commit before it, one given on another branch,
+/// and one that lifted a single finding rather than the verdict.
+#[test]
+fn at_the_cap_a_lift_that_is_not_about_the_last_verdict_is_refused() {
+    let world = World::at(nunki::mission::Rigor::Standard);
+    let base = git(&world.tree, &["rev-parse", "HEAD"]);
+    let lot = world.coded("pub fn one() -> u8 { 2 }\n", "the lot");
+    world.security(Verdict::Findings, T2);
+    world.event(Event::Iterate);
+    let fix = world.coded("pub fn one() -> u8 { 3 }\n", "the fix");
+    // A commit on another branch, which the pushed branch does not hold.
+    git(&world.tree, &["checkout", "-q", "-b", "elsewhere"]);
+    let elsewhere = world.commit("other.rs", "// elsewhere\n", "elsewhere");
+    git(&world.tree, &["checkout", "-q", "mission/x"]);
+    world.event(Event::HumanAccepted);
+
+    for (finding, head, date, what) in [
+        (None, fix.as_str(), T1, "before the verdict"),
+        (None, base.as_str(), T3, "on a commit before the verdict's"),
+        (None, elsewhere.as_str(), T3, "on another branch"),
+        (Some("the redirect"), fix.as_str(), T3, "one finding only"),
+    ] {
+        let mut state = world.state();
+        state.accepted.clear();
+        world.store().save(&state).unwrap();
+        world.lifted(finding, head, date);
+        let err = push::push(&world.project, "m1", true).unwrap_err();
+        assert!(matches!(err, PushError::NotLifted(_)), "{what}: {err}");
+    }
+    assert!(world.on_forge("mission/x").is_none());
+
+    // And the one about it goes: on the verdict's own commit, after it.
+    let mut state = world.state();
+    state.accepted.clear();
+    world.store().save(&state).unwrap();
+    world.accepted(&lot, T3);
+    let pushed = push::push(&world.project, "m1", true).unwrap();
+    assert_eq!(pushed.not_attacked, vec![named(&fix, "the fix")]);
+}
+
+/// "What came after the last round" is read on the branch. A verdict on a
+/// commit the branch no longer holds is not one the commits after it can
+/// lean on.
+#[test]
+fn at_the_cap_a_verdict_off_the_branch_is_refused() {
+    let world = World::at(nunki::mission::Rigor::Standard);
+    let lot = world.coded("pub fn one() -> u8 { 2 }\n", "the lot");
+    world.security(Verdict::Clear, T1);
+    world.review();
+    git(&world.tree, &["reset", "-q", "--hard", "HEAD~1"]);
+    world.coded("pub fn one() -> u8 { 3 }\n", "rewritten");
+    assert_eq!(world.stage(), Stage::Verified);
+
+    let err = push::push(&world.project, "m1", true).unwrap_err();
+    assert!(
+        matches!(&err, PushError::SecurityNotAnAncestor { on, .. } if *on == lot),
+        "{err}"
+    );
+    assert!(world.on_forge("mission/x").is_none());
+}
+
+/// A spent cap never turns a red verdict green: a security verdict that is
+/// neither CLEAR nor FINDINGS — forged, the agent cannot write one — is red
+/// at the cap as it is anywhere.
+#[test]
+fn at_the_cap_a_red_security_verdict_is_still_red() {
+    let world = World::at(nunki::mission::Rigor::Standard);
+    let lot = world.coded("pub fn one() -> u8 { 2 }\n", "the lot");
+    world.security(Verdict::Clear, T1);
+    let mut state = world.state();
+    state.conclude(Role::Security, Some(Verdict::Broken), &lot);
+    world.store().save(&state).unwrap();
+
+    let err = push::push(&world.project, "m1", true).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            PushError::Red {
+                role: Role::Security,
+                verdict: Verdict::Broken
+            }
+        ),
+        "{err}"
+    );
+}
+
+/// A prototype plays no security round, so push asks for no security
+/// verdict — as for `security: gates`. A state frozen before the flow
+/// refused a prototype with a security agent can still carry both.
+#[test]
+fn a_prototype_is_pushed_without_a_security_verdict() {
+    let world = World::new(no_integration(), Security::Agent);
+    let mut state = world.state();
+    let mut json = serde_json::to_value(&state.flow).unwrap();
+    json["header"]["rigor"] = serde_json::json!("prototype");
+    state.flow = serde_json::from_value(json).unwrap();
+    world.store().save(&state).unwrap();
+    let head = world.coded("pub fn one() -> u8 { 2 }\n", "the lot");
+    assert_eq!(world.stage(), Stage::Verified);
+
+    let pushed = push::push(&world.project, "m1", true).unwrap();
+    assert!(pushed.not_attacked.is_empty());
+    assert_eq!(world.on_forge("mission/x").as_deref(), Some(head.as_str()));
+}
+
+/// What `nunki push` prints is what the human reads before opening the pull
+/// request, so the commits the security agent never saw are said there —
+/// and only when there are some: a push on a verdict on `HEAD` names none,
+/// and a heading over an empty list would read as a warning about nothing.
+/// The real binary, because the decision is in what the CLI prints.
+#[test]
+fn the_push_command_names_the_commits_not_attacked_and_only_when_there_are_some() {
+    let spent = World::opened_at(nunki::mission::Rigor::Standard);
+    spent.coded("pub fn one() -> u8 { 2 }\n", "the lot");
+    spent.security(Verdict::Clear, T1);
+    spent.review();
+    let volet = spent.coded("pub fn one() -> u8 { 3 }\n", "the volet");
+    let out = spent.pushed_by_the_binary();
+    assert!(out.contains("not attacked by the security agent"), "{out}");
+    assert!(out.contains(&named(&volet, "the volet")), "{out}");
+
+    let on_head = World::opened_at(nunki::mission::Rigor::Critical);
+    on_head.coded("pub fn one() -> u8 { 2 }\n", "the lot");
+    on_head.security(Verdict::Clear, T1);
+    let out = on_head.pushed_by_the_binary();
+    assert!(out.contains("pushed"), "the push happened: {out}");
+    assert!(!out.contains("not attacked"), "{out}");
 }
