@@ -202,7 +202,9 @@ fn lot_prompt(request: &RunRequest, exposure: &Exposure) -> String {
         base.push_str(&format!(
             " End that block with `Lot: {} — done`, or `Lot: {} — failed: <why>` — or, only when \
              the lot is done but for survivors whose equivalence you may not rule on, \
-             `Lot: {} — awaits ruling: <what>`, naming each survivor id between backquotes.",
+             `Lot: {} — awaits ruling: <what>`, naming each survivor id between backquotes: \
+             every backquoted span in <what> is read as a survivor id, so nothing else is \
+             quoted.",
             request.lot, request.lot, request.lot
         ));
     }

@@ -40,7 +40,9 @@ pub enum Handover {
     /// `survivors` it names, every one an open survivor of the campaign.
     /// Handed over at once, with no further attempt spent; the HQ rules
     /// (`nunki mission mutants --equivalent … --because …`), then `retry`
-    /// resumes at the next attempt.
+    /// resumes at the next attempt — or, when the one that asked was the last,
+    /// hands over as [`Handover::LotAttemptsExhausted`] rather than go past
+    /// the bound.
     ///
     /// A new variant and not a field on an old one, so that every state file
     /// written before it still reads.
@@ -483,19 +485,29 @@ impl Flow {
             ) => self.role_stage(role, 1),
             // A ruling is not a bound running out, so it hands no budget
             // back: the lot resumes at the attempt after the one that asked.
-            // A coder that asks on every attempt still meets the bound — the
-            // attempt after the last one, if it does not finish, hands over
-            // as exhausted at once.
+            // Never past the bound: when the attempt that asked was the last
+            // one, the retry hands over as exhausted instead, and the next
+            // `retry` — from a bound, this time — hands the attempts back
+            // whole. Without that, a coder that asked on every attempt would
+            // go on past `attempts_per_lot` one human retry at a time.
             (
-                Stage::AwaitingHuman(Handover::AwaitingRuling { attempt, .. }),
+                Stage::AwaitingHuman(Handover::AwaitingRuling { lot, attempt, .. }),
                 Event::Retried { .. },
             ) => {
-                let Some(work) = self.resume_with.take() else {
+                let Some(work) = self.resume_with.clone() else {
                     return Err(FlowError::NothingToResume);
                 };
-                Stage::Coding {
-                    work,
-                    attempt: attempt + 1,
+                if attempt >= self.header.bounds.attempts_per_lot {
+                    Stage::AwaitingHuman(Handover::LotAttemptsExhausted {
+                        lot,
+                        attempts: attempt,
+                    })
+                } else {
+                    self.resume_with = None;
+                    Stage::Coding {
+                        work,
+                        attempt: attempt + 1,
+                    }
                 }
             }
             (Stage::AwaitingHuman(_), Event::Retried { .. }) => {

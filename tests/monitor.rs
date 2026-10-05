@@ -98,7 +98,7 @@ fn down_until(not_before: u64) -> Option<nunki::backoff::HarnessDown> {
 #[test]
 fn after_a_verify_the_monitor_goes_on_or_stops_for_a_human() {
     use nunki::harness::Role::{Coder, Integrator};
-    let go = |step: Step| after_verify(&Ok(vec![step]));
+    let go = |step: Step| after_verify("m1", &Ok(vec![step]));
     let stops = |next: Next| matches!(next, Next::Exit(_));
 
     assert_eq!(
@@ -188,28 +188,35 @@ fn after_a_verify_the_monitor_goes_on_or_stops_for_a_human() {
         pid: 1,
         since: "now".into(),
     });
-    assert_eq!(after_verify(&Err(held)), Next::Continue);
+    assert_eq!(after_verify("m1", &Err(held)), Next::Continue);
     assert_eq!(
-        after_verify(&Err(VerifyError::RunInProgress {
-            mission: "m1".into(),
-            slot: "one".into()
-        })),
+        after_verify(
+            "m1",
+            &Err(VerifyError::RunInProgress {
+                mission: "m1".into(),
+                slot: "one".into()
+            })
+        ),
         Next::Continue
     );
     assert_eq!(
-        after_verify(&Err(VerifyError::Spared {
-            mission: "m1".into(),
-            account: "main".into(),
-            window: "five-hour window".into(),
-            percent: "95".into(),
-            until: "later".into(),
-        })),
+        after_verify(
+            "m1",
+            &Err(VerifyError::Spared {
+                mission: "m1".into(),
+                account: "main".into(),
+                window: "five-hour window".into(),
+                percent: "95".into(),
+                until: "later".into(),
+            })
+        ),
         Next::Continue
     );
     // Anything else wants a human to look, not a loop retrying it all night.
-    assert!(stops(after_verify(&Err(VerifyError::NotStarted(
-        "m1".into()
-    )))));
+    assert!(stops(after_verify(
+        "m1",
+        &Err(VerifyError::NotStarted("m1".into()))
+    )));
 }
 
 #[test]
@@ -404,11 +411,14 @@ fn a_monitor_is_wanted_while_another_mission_holds_a_provider() {
 #[test]
 fn a_busy_provider_is_waited_for_not_handed_over() {
     assert_eq!(
-        after_verify(&Ok(vec![Step::Busy {
-            role: nunki::harness::Role::Integrator,
-            provider: "stripe".into(),
-            by: "mission m2".into(),
-        }])),
+        after_verify(
+            "m1",
+            &Ok(vec![Step::Busy {
+                role: nunki::harness::Role::Integrator,
+                provider: "stripe".into(),
+                by: "mission m2".into(),
+            }])
+        ),
         Next::Continue
     );
 }
@@ -462,24 +472,31 @@ fn a_campaign_that_overran_or_vanished_stops_the_monitor_and_the_rest_does_not()
 /// one line what the HQ is to rule on and what to type after.
 #[test]
 fn the_monitor_stops_on_a_ruling_and_names_the_survivors() {
-    let next = after_verify(&Ok(vec![nunki::verify::Step::AwaitingHuman(
-        Handover::AwaitingRuling {
-            lot: "L1".into(),
-            what: "`m1` and `m2` are equivalent".into(),
-            attempt: 2,
-            survivors: vec!["m1".into(), "m2".into()],
-        },
-    )]));
+    let next = after_verify(
+        "m7",
+        &Ok(vec![nunki::verify::Step::AwaitingHuman(
+            Handover::AwaitingRuling {
+                lot: "L1".into(),
+                what: "`m1` and `m2` are equivalent".into(),
+                attempt: 2,
+                survivors: vec!["m1".into(), "m2".into()],
+            },
+        )]),
+    );
     let Next::Exit(said) = next else {
         panic!("a ruling is the human's: {next:?}");
     };
     assert!(!said.contains('\n'), "{said}");
+    assert!(
+        !said.contains("<mission>"),
+        "the real id, so it can be copied: {said}"
+    );
     for part in [
         "lot L1",
         "attempt 2",
         "`m1`, `m2`",
-        "--equivalent",
-        "nunki mission retry",
+        "nunki mission mutants m7 --equivalent",
+        "nunki mission retry m7",
     ] {
         assert!(said.contains(part), "{part:?} in {said}");
     }

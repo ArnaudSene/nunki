@@ -3071,3 +3071,26 @@ fn awaits_ruling_with_nothing_after_it_is_judged_as_no_line() {
         world.followup()
     );
 }
+
+/// The gates come before the run's word on its lot: a ruling line on a tree
+/// whose gates 1 to 4 are red is a red gate — one more attempt, told why —
+/// and never a handover, so the line cannot carry a forbidden commit past
+/// them.
+#[test]
+fn a_ruling_line_behind_a_red_gate_is_a_red_gate_and_not_a_ruling() {
+    let world = World::new(2);
+    world.commit("AGENTS.md", "rewritten by the agent\n", "loosen the rules");
+    world.campaign_with_survivors();
+    world.coder_ran("Lot: L1 — awaits ruling: `m1` changes nothing observable");
+
+    let state = world.state();
+    assert_eq!(
+        coding(&state),
+        (Work::Lot(0), 2),
+        "{:?}",
+        state.flow.stage()
+    );
+    let followup = world.followup();
+    assert!(followup.contains("the gates were red"), "{followup}");
+    assert!(!followup.contains("awaits the HQ's ruling"), "{followup}");
+}

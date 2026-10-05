@@ -111,6 +111,30 @@ pub fn ended(file: &Path, who: &str, why: &str) -> Result<(), FollowupError> {
     )
 }
 
+/// What a retry took the mission back from, for the record it leaves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Retaken<'a> {
+    /// A bound ran out — `was` says which, in one clause — and the retry
+    /// hands it back whole.
+    Bound { was: &'a str },
+    /// The coder awaited the HQ's ruling on `survivors` at `asked` of `of`
+    /// attempts. A ruling is not a bound, so none is handed back: the lot
+    /// resumes at the next attempt.
+    Ruling {
+        lot: &'a str,
+        survivors: &'a [String],
+        asked: u32,
+        of: u32,
+    },
+    /// The same, asked on the last attempt: there is no next one, so the
+    /// retry hands the lot over as out of attempts instead.
+    RulingOnTheLastAttempt {
+        lot: &'a str,
+        survivors: &'a [String],
+        asked: u32,
+    },
+}
+
 /// The human took the mission back from a handover, and said what changed.
 ///
 /// It lands here and not only in the state, because this is the file every
@@ -118,14 +142,50 @@ pub fn ended(file: &Path, who: &str, why: &str) -> Result<(), FollowupError> {
 /// hands it back the work it already failed, with the same tree and the same
 /// cause, and spends the budget reaching the same handover. What changed is
 /// the whole point of the verb.
-pub fn retried(file: &Path, who: &str, why: &str, was: &str) -> Result<(), FollowupError> {
+///
+/// What it says about the bounds depends on what stopped the mission, and is
+/// read by the next run as a statement of fact: only a bound is handed back
+/// whole, never a ruling.
+pub fn retried(file: &Path, who: &str, why: &str, taken: &Retaken) -> Result<(), FollowupError> {
     let head = format!(
         "## {date} \u{2014} {who} took this mission back",
         date = today()
     );
-    let body = format!(
-        "It had stopped on its own bounds: {was}. They are handed back whole, and this is what changed since:"
-    );
+    let quoted = |ids: &[String]| {
+        ids.iter()
+            .map(|id| format!("`{id}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let body = match taken {
+        Retaken::Bound { was } => format!(
+            "It had stopped on its own bounds: {was}. They are handed back whole, and this is what changed since:"
+        ),
+        Retaken::Ruling {
+            lot,
+            survivors,
+            asked,
+            of,
+        } => format!(
+            "It had stopped on {lot}, attempt {asked}, awaiting the HQ's ruling on {}. A ruling \
+             is not a bound, and none is handed back: this is attempt {} of {of}. What the HQ \
+             ruled, or what changed since:",
+            quoted(survivors),
+            asked + 1
+        ),
+        Retaken::RulingOnTheLastAttempt {
+            lot,
+            survivors,
+            asked,
+        } => format!(
+            "It had stopped on {lot}, attempt {asked}, awaiting the HQ's ruling on {}. A ruling \
+             is not a bound, and none is handed back — and that was the last attempt, so {lot} \
+             is handed over as out of attempts rather than run past the bound. A further \
+             `nunki mission retry` hands the attempts back whole. What the HQ ruled, or what \
+             changed since:",
+            quoted(survivors)
+        ),
+    };
     append(
         file,
         &format!(

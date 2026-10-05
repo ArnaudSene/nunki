@@ -277,13 +277,16 @@ MISSION  (one branch off its base, one slot)
 
   The third line is for one case: the lot is done but for mutation
   survivors the coder can neither kill nor freeze as a bug, and whose
-  equivalence it is forbidden to rule on. Each is named between backquotes;
-  `nunki` checks every one is a survivor of `MUTANTS.json` with no outcome
-  (a line naming none is a failed attempt) and hands the mission over at
-  once, as `AwaitingRuling`, without spending another attempt. The HQ rules
-  (`nunki mission mutants <mission> --equivalent <survivor> --because
-  <why>`), then `nunki mission retry` resumes the lot at the next attempt —
-  not at the first, so a coder that keeps asking still meets the bound.
+  equivalence it is forbidden to rule on. Each is named between backquotes,
+  and every backquoted span in `<what>` is read as a survivor id, so nothing
+  else is quoted. `nunki` checks every one is a survivor of `MUTANTS.json`
+  with no outcome (a line naming none is a failed attempt) and hands the
+  mission over at once, as `AwaitingRuling`, without spending another
+  attempt. The HQ rules (`nunki mission mutants <mission> --equivalent
+  <survivor> --because <why>`), then `nunki mission retry` resumes the lot at
+  the next attempt — not at the first, and never past the bound: a ruling
+  asked on the last attempt is handed over as out of attempts by that retry,
+  and only a further `retry` hands the attempts back whole.
 
 - **Gates** — deterministic checks, each read from its own result. Gates 1 to
   4 (a clean tree, a branch ahead of its base, a resume block that names

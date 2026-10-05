@@ -215,7 +215,8 @@ fn journal(id: &str) -> String {
          > coder ends it with `Lot: <lot> — done`, or `Lot: <lot> — failed: <why>`;\n\
          > or, only when the lot is done but for survivors whose equivalence is\n\
          > the HQ's to rule, `Lot: <lot> — awaits ruling: <what>`, each survivor\n\
-         > id between backquotes.\n"
+         > id between backquotes: every backquoted span in <what>\n\
+         > is read as a survivor id, so nothing else is quoted.\n"
     )
 }
 

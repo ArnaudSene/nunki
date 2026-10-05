@@ -534,6 +534,13 @@ fn the_role_prompts_say_what_the_role_may_not_do() {
             "the prompt must not offer an outcome gate 7 refuses: {prompt}"
         );
         assert!(prompt.contains("no third answer of your own"), "{prompt}");
+        // A survivor nobody can answer points at the line that hands it to
+        // the HQ, not at a line the role has to guess.
+        assert!(
+            prompt.contains("`Lot: <lot> — awaits ruling: <what>`, with the survivor's"),
+            "{prompt}"
+        );
+        assert!(!prompt.contains("the way your role is told to"), "{prompt}");
         // What the gates actually require, said where the agent reads it and
         // not only where `nunki` checks it.
         assert!(
@@ -552,8 +559,8 @@ fn the_role_prompts_say_what_the_role_may_not_do() {
 
     // And each says the thing that is its own.
     assert!(coder.contains("break the decision and check the test goes red"));
-    // The third lot line is the coder's alone, and said with what bounds it:
-    // a line that names no open survivor is a failed attempt.
+    // The coder is told when and how to use the third lot line, and what
+    // bounds it: a line that names no open survivor is a failed attempt.
     assert!(
         coder.contains("`Lot: <lot> — awaits ruling: <what>`"),
         "{coder}"
@@ -563,8 +570,12 @@ fn the_role_prompts_say_what_the_role_may_not_do() {
         coder.contains("read as a survivor id, so quote nothing else"),
         "{coder}"
     );
-    assert!(!integrator.contains("awaits ruling"), "{integrator}");
-    assert!(!security.contains("awaits ruling"), "{security}");
+    // The how-to is the coder's alone: the other roles end no lot.
+    assert!(
+        !integrator.contains("read as a survivor id"),
+        "{integrator}"
+    );
+    assert!(!security.contains("read as a survivor id"), "{security}");
     assert!(integrator.contains("not a reviewer"));
     assert!(security.contains("read-only"));
     assert!(

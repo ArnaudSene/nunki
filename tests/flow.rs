@@ -1108,10 +1108,11 @@ fn a_retry_after_a_ruling_resumes_at_the_next_attempt_and_the_bound_holds() {
     );
 }
 
-/// Asked on the last attempt, a retry still gives one more and no more: a
-/// failure there is exhausted at once, not a fresh budget.
+/// Asked on the last attempt, a retry does not go past the bound: it hands
+/// over as exhausted, and only the retry after that — from a bound — hands
+/// the attempts back whole.
 #[test]
-fn a_ruling_on_the_last_attempt_buys_one_more_attempt_and_no_budget() {
+fn a_ruling_on_the_last_attempt_is_retried_into_exhaustion_not_past_the_bound() {
     let mut flow = bounded(1);
     flow.advance(ruling(&["m1"])).unwrap();
     flow.advance(Event::Retried {
@@ -1120,23 +1121,44 @@ fn a_ruling_on_the_last_attempt_buys_one_more_attempt_and_no_budget() {
     .unwrap();
     assert_eq!(
         flow.stage(),
-        &Stage::Coding {
-            work: Work::Lot(0),
-            attempt: 2
-        }
+        &Stage::AwaitingHuman(Handover::LotAttemptsExhausted {
+            lot: "L1".into(),
+            attempts: 1
+        })
     );
-    flow.advance(Event::Stalled {
-        reason: "silent".into(),
+    flow.advance(Event::Retried {
+        because: "a fresh budget".into(),
     })
     .unwrap();
-    assert!(
-        matches!(
-            flow.stage(),
-            Stage::AwaitingHuman(Handover::LotAttemptsExhausted { attempts: 2, .. })
-        ),
-        "{:?}",
-        flow.stage()
+    assert_eq!(
+        flow.stage(),
+        &Stage::Coding {
+            work: Work::Lot(0),
+            attempt: 1
+        },
+        "the work is kept through both handovers"
     );
+}
+
+/// The HQ's probe: a coder that asks for a ruling on every attempt never
+/// runs an attempt past `attempts_per_lot`, however many times it is
+/// taken back.
+#[test]
+fn a_coder_that_always_asks_never_runs_past_the_bound() {
+    let mut flow = bounded(1);
+    for round in 0..3 {
+        if let Stage::Coding { attempt, .. } = flow.stage() {
+            assert!(*attempt <= 1, "round {round}: attempt {attempt}");
+            flow.advance(ruling(&["m1"])).unwrap();
+        }
+        flow.advance(Event::Retried {
+            because: format!("round {round}"),
+        })
+        .unwrap();
+        if let Stage::Coding { attempt, .. } = flow.stage() {
+            assert!(*attempt <= 1, "round {round}: attempt {attempt}");
+        }
+    }
 }
 
 /// A volet awaits a ruling like a lot, and comes back as the same volet.

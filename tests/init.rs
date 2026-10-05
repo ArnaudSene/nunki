@@ -113,7 +113,8 @@ fn the_rules_it_writes_name_what_the_gates_require() {
     // The third lot line, and the case it is for (the mission that added it).
     assert!(
         rules.contains("`Lot: <lot> — awaits ruling: <what>`")
-            && rules.contains("not a way out of a hard lot"),
+            && rules.contains("not a way out of a hard lot")
+            && rules.contains("Every backquoted span in `<what>` is read as a survivor id"),
         "the rules state every line nunki reads, and when the third is not one: {rules}"
     );
     // Not a gate, and said so in the pull request: the rules of the place are

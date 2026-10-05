@@ -61,7 +61,8 @@ fn a_new_mission_has_its_five_files_and_the_agents_three_are_empty() {
     let journal = std::fs::read_to_string(&paths.journal).unwrap();
     assert!(journal.contains("ÉTAT DE REPRISE"), "{journal}");
     assert!(
-        journal.contains("`Lot: <lot> — awaits ruling: <what>`"),
+        journal.contains("`Lot: <lot> — awaits ruling: <what>`")
+            && journal.contains("is read as a survivor id, so nothing else is quoted"),
         "the template states all three lot lines: {journal}"
     );
 }

@@ -54,11 +54,13 @@ it is the one answer nobody can check, so it is decided for you, and an
 `equivalent` in your file makes the gate red.
 
 There is no third answer of your own. A survivor you can neither kill nor call
-a bug leaves the lot unfinished: say in the journal what you tried and why
-neither outcome was honest, close the lot the way your role is told to, and
-stop. The HQ decides what happens then — it may rule the survivor equivalent
-itself, or put it out of the campaign's reach. Writing nothing, or inventing
-an outcome of your own, only makes the gate red without saying why.
+a bug leaves the lot waiting on the HQ: say in the journal what you tried and
+why neither outcome was honest, end the lot with the line that awaits the
+HQ's ruling on it — `Lot: <lot> — awaits ruling: <what>`, with the survivor's
+id between backquotes — and stop. The HQ decides what happens then — it may
+rule the survivor equivalent itself, or put it out of the campaign's reach.
+Writing nothing, or inventing an outcome of your own, only makes the gate red
+without saying why.
 
 Your commit messages say what changed and why it had to. They carry
 **no trailer naming a harness, a model or a tool** — no `Co-Authored-By`,
