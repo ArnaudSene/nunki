@@ -168,6 +168,7 @@ impl World {
                 spent: Default::default(),
                 spared: None,
                 coder_session: None,
+                pushed: None,
                 updated_at: String::new(),
             })
             .unwrap();
@@ -590,6 +591,12 @@ fn a_verified_mission_is_pushed_and_its_pull_request_opened() {
     let pushed = push::push_to(&world.project, "m1", true, &api).unwrap();
 
     assert_eq!(world.on_forge("mission/x").as_deref(), Some(head.as_str()));
+    // The state says so, on the commit pushed: `mission wait` reads it there.
+    let state = world.store().load("m1").unwrap();
+    assert_eq!(
+        state.pushed.as_ref().map(|p| p.head.as_str()),
+        Some(head.as_str())
+    );
     assert_eq!(
         pushed.pull_request,
         push::PullRequestState::Opened(nunki::forge::Opened::Created(

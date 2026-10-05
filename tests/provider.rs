@@ -66,6 +66,7 @@ fn integrating(id: &str, header: Header, with_run: bool) -> MissionState {
         spent: Default::default(),
         spared: None,
         coder_session: None,
+        pushed: None,
         updated_at: String::new(),
     }
 }

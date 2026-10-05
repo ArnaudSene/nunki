@@ -338,6 +338,7 @@ pub fn start(
         spent: Default::default(),
         spared: None,
         coder_session: Some(session),
+        pushed: None,
         updated_at: String::new(),
     };
     store.save(&state)?;

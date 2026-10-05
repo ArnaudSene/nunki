@@ -410,6 +410,31 @@ enum MissionCommand {
         every: u64,
     },
 
+    /// Block until the mission needs someone, then say so in one line.
+    ///
+    /// Returns at once if the mission is already stopped. The exit code says
+    /// which stop: 0 verified (or pushed, or archived), 10 findings, 11
+    /// handed over, 12 held or the account's window spent, 13 the monitor
+    /// stopped on an error or a gate that could not be played, 14 no monitor
+    /// while the mission is still being driven, 15 `--timeout` reached. It
+    /// reads and never drives: it takes no lock and launches nothing.
+    Wait {
+        /// The mission.
+        id: String,
+        /// Give up after this long: seconds, or `<n>m`, or `<n>h`. Default:
+        /// never.
+        #[arg(long, value_parser = nunki::wait::parse_duration)]
+        timeout: Option<u64>,
+        /// Seconds between readings of the state.
+        #[arg(long, default_value_t = nunki::wait::EVERY_SECONDS,
+              value_parser = clap::value_parser!(u64).range(1..))]
+        every: u64,
+        /// Print the stop as one JSON object (`id`, `stage`, `detail`,
+        /// `awaits`, `code`) rather than a line.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Freeze the agent's container where it is.
     ///
     /// Nothing is lost: the processes are suspended by the engine. A model
@@ -1861,15 +1886,44 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             let engine_bin = std::env::var("HQ_ENGINE").unwrap_or_else(|_| "docker".into());
             let engine: std::sync::Arc<dyn nunki::engine::Engine> =
                 std::sync::Arc::new(nunki::engine::docker::Docker::real());
-            let why = nunki::monitor::run(project, &id, engine, &engine_bin);
+            let line = nunki::monitor::run(project, &id, engine, &engine_bin);
             println!(
-                "{}  monitor stops: {why}",
+                "{}  monitor stops: {line}",
                 nunki::state::rfc3339(nunki::state::now_secs())
             );
             ExitCode::SUCCESS
         }
 
         MissionCommand::Watch { id, every } => watch(project, &id, every),
+
+        MissionCommand::Wait {
+            id,
+            timeout,
+            every,
+            json,
+        } => {
+            let mut reader = nunki::wait::Hq::new(project);
+            match nunki::wait::wait(
+                &id,
+                &mut reader,
+                &mut nunki::wait::SystemClock,
+                every,
+                timeout,
+            ) {
+                Ok(status) => {
+                    if json {
+                        println!("{}", status.json());
+                    } else {
+                        println!("{}", status.line());
+                    }
+                    ExitCode::from(status.code)
+                }
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
 
         MissionCommand::Pause { id } => pause(project, &id),
         MissionCommand::Resume { id } => {

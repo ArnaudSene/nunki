@@ -228,6 +228,10 @@ pub fn push_to(
     crate::git::run(&project.root, &["push", REMOTE, &fetched.branch])?;
 
     state.updated_at = crate::state::now_rfc3339();
+    state.pushed = Some(crate::state::PushedAt {
+        head: head.clone(),
+        date: state.updated_at.clone(),
+    });
     store.save(&state)?;
 
     // After the push, and under the same `--yes`: SPEC names one verb that

@@ -80,6 +80,7 @@ fn state(with_run: bool) -> MissionState {
         spent: Default::default(),
         spared: None,
         coder_session: None,
+        pushed: None,
         updated_at: String::new(),
     }
 }
@@ -500,4 +501,57 @@ fn the_monitor_stops_on_a_ruling_and_names_the_survivors() {
     ] {
         assert!(said.contains(part), "{part:?} in {said}");
     }
+}
+
+/// The log is for what changed. Ten ticks on the same state write nothing
+/// after the first; a run launched, a stage moved, a new word from `verify`
+/// each write one line.
+#[test]
+fn ten_quiet_ticks_write_nothing_to_the_monitors_log() {
+    use nunki::monitor::Changes;
+    let mut said = Changes::default();
+    let mut log: Vec<u8> = Vec::new();
+    let quiet = state(false);
+
+    said.tick(&mut log, 0, &quiet);
+    let first = String::from_utf8(log.clone()).unwrap();
+    assert!(first.contains("no run under way"), "{first}");
+    assert!(first.contains("stage coding lot L1, attempt 1"), "{first}");
+    said.note(&mut log, 0, "verify", "verify: Waiting");
+    let before = log.len();
+
+    for minute in 1..=10 {
+        said.tick(&mut log, minute * 60, &quiet);
+        assert!(!said.note(&mut log, minute * 60, "verify", "verify: Waiting"));
+    }
+    assert_eq!(
+        log.len(),
+        before,
+        "{}",
+        String::from_utf8_lossy(&log[before..])
+    );
+
+    // A run launched: one line, for the run, and the stage is unchanged.
+    said.tick(&mut log, 700, &state(true));
+    let launched = String::from_utf8(log[before..].to_vec()).unwrap();
+    assert_eq!(launched.lines().count(), 1, "{launched}");
+    assert!(launched.contains("run s1 under way"), "{launched}");
+    // A new word from `verify` is written, under its own topic.
+    assert!(said.note(&mut log, 760, "verify", "verify: Launched"));
+}
+
+/// A running campaign is said once, not at every tick its line count grows.
+#[test]
+fn a_running_campaign_is_said_once_whatever_it_has_written() {
+    use nunki::monitor::campaign_line;
+    use nunki::mutants::Progress;
+    let running = |lines| Progress::Running {
+        started_at: "2026-10-05T10:00:00Z".into(),
+        lines,
+    };
+    assert_eq!(campaign_line(&running(3)), campaign_line(&running(300)));
+    assert_eq!(
+        campaign_line(&Progress::Finished { survivors: 2 }),
+        "mutation campaign ended: 2 survivor(s)"
+    );
 }

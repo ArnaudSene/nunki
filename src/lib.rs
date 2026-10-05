@@ -44,3 +44,4 @@ pub mod slot;
 pub mod state;
 pub mod verify;
 pub mod versions;
+pub mod wait;

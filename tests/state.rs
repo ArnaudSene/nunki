@@ -52,6 +52,7 @@ fn state(id: &str) -> MissionState {
         spent: Default::default(),
         spared: None,
         coder_session: None,
+        pushed: None,
         updated_at: String::new(),
     }
 }

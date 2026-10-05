@@ -60,30 +60,36 @@ impl Handover {
     /// expected to do about it. `mission` is the id the verbs are spelled
     /// with.
     pub fn line(&self, mission: &str) -> String {
+        format!("{} — {}", self.detail(), self.awaits(mission).1)
+    }
+
+    /// What stopped, in one line: the lot and its attempts, the role, the
+    /// causes of the volets, the reason it was called off, the survivors.
+    pub fn detail(&self) -> String {
         match self {
-            Handover::LotAttemptsExhausted { lot, attempts } => format!(
-                "lot {lot} failed {attempts} attempt(s) — read the journals, then \
-                 `nunki mission retry {mission} --because <what changed>`"
-            ),
-            Handover::RoleAttemptsExhausted { role, attempts } => format!(
-                "the {role:?} failed {attempts} attempt(s) — `nunki mission retry {mission} \
-                 --because <what changed>`"
-            ),
+            Handover::LotAttemptsExhausted { lot, attempts } => {
+                format!("lot {lot} failed {attempts} attempt(s)")
+            }
+            Handover::RoleAttemptsExhausted { role, attempts } => {
+                format!("the {role:?} failed {attempts} attempt(s)")
+            }
             Handover::VoletsExhausted { causes } => format!(
-                "{} return(s) to the coder were used — `nunki mission retry {mission} \
-                 --because <what changed>`",
-                causes.len()
+                "{} return(s) to the coder were used: {}",
+                causes.len(),
+                causes
+                    .iter()
+                    .map(|cause| brief(cause, CAUSE_CHARS))
+                    .collect::<Vec<_>>()
+                    .join("; ")
             ),
-            Handover::Abandoned { reason } => format!("called off: {reason}"),
+            Handover::Abandoned { reason } => format!("called off: {}", one_line(reason)),
             Handover::AwaitingRuling {
                 lot,
                 attempt,
                 survivors,
                 ..
             } => format!(
-                "lot {lot}, attempt {attempt}, awaits the HQ's ruling on {} — rule each \
-                 (`nunki mission mutants {mission} --equivalent <survivor> --because \
-                 <why>`), then `nunki mission retry {mission} --because <what was ruled>`",
+                "lot {lot}, attempt {attempt}, awaits the HQ's ruling on {}",
                 survivors
                     .iter()
                     .map(|id| format!("`{id}`"))
@@ -91,6 +97,53 @@ impl Handover {
                     .join(", ")
             ),
         }
+    }
+
+    /// Who the handover waits on, and what they are expected to do, with the
+    /// verbs spelled for `mission`. A ruling is the HQ's; the rest are the
+    /// human's, whose word ends a bound.
+    pub fn awaits(&self, mission: &str) -> (&'static str, String) {
+        let retry = format!("`nunki mission retry {mission} --because <what changed>`");
+        match self {
+            Handover::LotAttemptsExhausted { .. } => {
+                ("the human", format!("read the journals, then {retry}"))
+            }
+            Handover::RoleAttemptsExhausted { .. } | Handover::VoletsExhausted { .. } => {
+                ("the human", retry)
+            }
+            Handover::Abandoned { .. } => (
+                "the human",
+                format!("`nunki mission archive {mission}` closes it"),
+            ),
+            Handover::AwaitingRuling { .. } => (
+                "the HQ",
+                format!(
+                    "rule each (`nunki mission mutants {mission} --equivalent <survivor> \
+                     --because <why>`), then `nunki mission retry {mission} --because <what \
+                     was ruled>`"
+                ),
+            ),
+        }
+    }
+}
+
+/// How much of one volet's cause a handover's line carries: the start says
+/// which verdict or gate it was, and the journals hold the rest.
+const CAUSE_CHARS: usize = 120;
+
+/// `text` on one line: every run of whitespace, line breaks included, made
+/// one space. A status line that broke in two would be read as two.
+pub fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// `text` on one line, cut after `chars` characters with an ellipsis when it
+/// was longer.
+pub fn brief(text: &str, chars: usize) -> String {
+    let flat = one_line(text);
+    match flat.char_indices().nth(chars) {
+        Some((at, _)) => format!("{}…", &flat[..at]),
+        None => flat,
     }
 }
 

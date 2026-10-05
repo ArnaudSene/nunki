@@ -97,8 +97,22 @@ pub struct MissionState {
     /// fails — a context that failed is not the one to carry on with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coder_session: Option<crate::harness::SessionId>,
+    /// Set by `nunki push` once the branch is on the forge, and forgotten at
+    /// the next transition of the flow: it says the push happened at the
+    /// stage the mission stands at, and a review sent back after it moves the
+    /// mission off that stage. What `nunki mission wait` reads to tell a
+    /// pushed mission from one still to be read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pushed: Option<PushedAt>,
     /// RFC 3339 time of the last write; informational.
     pub updated_at: String,
+}
+
+/// A push `nunki push` made: the commit, and when.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushedAt {
+    pub head: String,
+    pub date: String,
 }
 
 /// A run `nunki` ended because the account's window passed its threshold.
@@ -341,6 +355,9 @@ impl Store {
     /// rejected event writes nothing.
     pub fn apply(&self, state: &mut MissionState, event: Event) -> Result<(), StateError> {
         state.flow.advance(event)?;
+        // A push describes the stage it was made at, and the flow just left
+        // it.
+        state.pushed = None;
         state.updated_at = now_rfc3339();
         self.save(state)
     }
