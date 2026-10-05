@@ -358,8 +358,185 @@ pub struct VerdictFile {
     pub head: String,
     /// RFC 3339 date.
     pub date: String,
-    /// The report, as text; for the security role this is the whole finding
-    /// list.
+    /// The report, as text: the prose deliverable. For the security role it
+    /// carries every finding, ranked, whatever `findings` says.
     #[serde(default)]
     pub report: String,
+    /// The security agent's findings, one entry each, with a severity: what
+    /// lets `nunki` lift a report whose worst finding is below `MEDIUM` on
+    /// its own ([`VerdictFile::automatic_lift`], SPEC 4.5). Absent from
+    /// older verdicts and from the other roles'.
+    ///
+    /// Read leniently, on purpose: a list `nunki` cannot read is kept as it
+    /// was written, so the verdict still reads and the mission stops at
+    /// `Findings` as it did before severities existed. Refusing the whole
+    /// file would turn a malformed ranking into a failed attempt instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub findings: Option<FindingList>,
+}
+
+/// The `findings` of a verdict file, as written.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum FindingList {
+    /// A list of findings, each read as an object.
+    Listed(Vec<Finding>),
+    /// Anything else, kept verbatim: nothing is lifted on it.
+    Unreadable(serde_json::Value),
+}
+
+/// One finding in a verdict file.
+///
+/// The severity is kept as the agent wrote it and read by
+/// [`Severity::parse`], so an unknown one is a reason not to lift rather
+/// than a verdict nobody can read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Finding {
+    #[serde(default)]
+    pub severity: String,
+    #[serde(default)]
+    pub title: String,
+    /// Why it can be accepted: required for `LOW` and `INFO`, ignored above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why_acceptable: Option<String>,
+}
+
+/// How bad a finding is, by what it lets an attacker do. Ordered, least
+/// severe first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Severity {
+    Info,
+    Low,
+    Medium,
+    High,
+}
+
+impl Severity {
+    /// The severity as the verdict file spells it, exactly: `HIGH`,
+    /// `MEDIUM`, `LOW` or `INFO`. Anything else is unknown, and an unknown
+    /// severity is never guessed at.
+    pub fn parse(text: &str) -> Option<Severity> {
+        match text {
+            "HIGH" => Some(Severity::High),
+            "MEDIUM" => Some(Severity::Medium),
+            "LOW" => Some(Severity::Low),
+            "INFO" => Some(Severity::Info),
+            _ => None,
+        }
+    }
+
+    /// Whether `nunki` may accept a finding of this severity on its own:
+    /// below `MEDIUM`, and nothing else.
+    pub fn lifted_by_nunki(self) -> bool {
+        self < Severity::Medium
+    }
+}
+
+impl std::fmt::Display for Severity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Severity::High => "HIGH",
+            Severity::Medium => "MEDIUM",
+            Severity::Low => "LOW",
+            Severity::Info => "INFO",
+        })
+    }
+}
+
+/// A finding `nunki` accepts on its own, with the agent's reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LowFinding {
+    pub severity: Severity,
+    pub title: String,
+    pub why_acceptable: String,
+}
+
+impl LowFinding {
+    /// The finding in one line, as the lift's reason records it, one line
+    /// per finding.
+    pub fn line(&self) -> String {
+        crate::text::one_line(&format!(
+            "{} — {}: {}",
+            self.severity, self.title, self.why_acceptable
+        ))
+    }
+}
+
+/// Why `nunki` leaves a `FINDINGS` to a human rather than lifting it.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum Withheld {
+    #[error("the verdict is {0:?}, and only a FINDINGS is lifted")]
+    NotFindings(Verdict),
+    #[error("the verdict ranks no finding: it has no `findings` list")]
+    NoList,
+    #[error("the verdict's `findings` is not a list of findings nunki can read")]
+    Unreadable,
+    #[error("the verdict is FINDINGS and its `findings` list is empty")]
+    Empty,
+    #[error("finding {index} of the list has no title")]
+    Untitled { index: usize },
+    #[error(
+        "finding {title:?} has severity {severity:?}, which is none of HIGH, MEDIUM, LOW, INFO"
+    )]
+    UnknownSeverity { title: String, severity: String },
+    #[error("finding {title:?} is {severity}, and nunki lifts LOW and INFO only")]
+    TooSevere { title: String, severity: Severity },
+    #[error("finding {title:?} is {severity} and does not say why it is acceptable")]
+    NoReason { title: String, severity: Severity },
+}
+
+impl VerdictFile {
+    /// The findings `nunki` lifts on its own, or why it lifts nothing
+    /// (SPEC 4.5).
+    ///
+    /// Fail closed: a `FINDINGS` whose list is not empty and whose every
+    /// finding is `LOW` or `INFO`, titled, with a reason. Anything else —
+    /// from a missing list to one unknown severity — leaves the whole
+    /// verdict to a human, exactly as before severities existed. Nothing is
+    /// ever accepted on a guess.
+    pub fn automatic_lift(&self) -> Result<Vec<LowFinding>, Withheld> {
+        if self.verdict != Verdict::Findings {
+            return Err(Withheld::NotFindings(self.verdict));
+        }
+        let listed = match &self.findings {
+            None => return Err(Withheld::NoList),
+            Some(FindingList::Unreadable(_)) => return Err(Withheld::Unreadable),
+            Some(FindingList::Listed(listed)) => listed,
+        };
+        if listed.is_empty() {
+            return Err(Withheld::Empty);
+        }
+        let mut lifted = Vec::with_capacity(listed.len());
+        for (index, finding) in listed.iter().enumerate() {
+            let title = finding.title.trim();
+            if title.is_empty() {
+                return Err(Withheld::Untitled { index: index + 1 });
+            }
+            let Some(severity) = Severity::parse(&finding.severity) else {
+                return Err(Withheld::UnknownSeverity {
+                    title: title.to_string(),
+                    severity: finding.severity.clone(),
+                });
+            };
+            if !severity.lifted_by_nunki() {
+                return Err(Withheld::TooSevere {
+                    title: title.to_string(),
+                    severity,
+                });
+            }
+            let why = finding.why_acceptable.as_deref().map(str::trim);
+            let Some(why) = why.filter(|w| !w.is_empty()) else {
+                return Err(Withheld::NoReason {
+                    title: title.to_string(),
+                    severity,
+                });
+            };
+            lifted.push(LowFinding {
+                severity,
+                title: title.to_string(),
+                why_acceptable: why.to_string(),
+            });
+        }
+        Ok(lifted)
+    }
 }

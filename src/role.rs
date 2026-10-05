@@ -182,11 +182,26 @@ What `nunki` checks on your work, so that none of it is a surprise:
   empty one is a red gate, whatever the verdict says;
 - your run ends with that file, on the commit you attacked, in full:
 
-    {\"role\": \"Security\", \"verdict\": \"CLEAR\", \"head\": \"<the full HEAD sha>\", \"date\": \"<RFC 3339>\", \"report\": \"<what you attacked, what you found, what you did not look at>\"}
+    {\"role\": \"Security\", \"verdict\": \"CLEAR\", \"head\": \"<the full HEAD sha>\", \"date\": \"<RFC 3339>\", \"report\": \"<what you attacked, what you found, what you did not look at>\", \"findings\": []}
 
   `FINDINGS` in place of `CLEAR` when you found something, with every finding
-  in the report, ranked. A verdict naming another commit or another role is
-  refused, and nothing you write lifts a finding: that is the human's."
+  in the report, ranked, and the same findings listed in `findings`, one
+  entry each, worst first:
+
+    {\"role\": \"Security\", \"verdict\": \"FINDINGS\", \"head\": \"<the full HEAD sha>\", \"date\": \"<RFC 3339>\", \"report\": \"<what you attacked, what you found, what you did not look at>\", \"findings\": [{\"severity\": \"MEDIUM\", \"title\": \"<the finding, in a line>\"}, {\"severity\": \"LOW\", \"title\": \"<the finding, in a line>\", \"why_acceptable\": \"<one sentence: why it can be accepted>\"}]}
+
+  A severity is one of `HIGH`, `MEDIUM`, `LOW`, `INFO`, spelled so, and it
+  says what the finding lets an attacker do — not what a scanner calls it.
+  `LOW` and `INFO` carry `why_acceptable`, one sentence on why the risk can
+  be accepted as it stands; above them it is not asked. `CLEAR` has an empty
+  list.
+
+  A verdict naming another commit or another role is refused. Nothing you
+  write lifts a `MEDIUM` or a `HIGH`: that is the human's. A `FINDINGS` whose
+  every finding is `LOW` or `INFO`, each with its reason, is accepted by
+  `nunki` in your words and the mission goes on — so a severity you set lower
+  than the finding deserves is a risk accepted on your word alone. When in
+  doubt between two, give the higher."
         }
     };
 

@@ -430,3 +430,26 @@ fn status_says_how_many_security_rounds_were_played_of_how_many() {
         status()
     );
 }
+
+/// A lift written before `nunki` could record one itself reads back as a
+/// human's — which every lift then was — and a human's lift is still
+/// written without the marker, so an older `nunki` reads a newer file.
+#[test]
+fn an_old_lift_reads_as_a_humans_and_a_humans_is_written_as_before() {
+    let old: nunki::state::Accepted = serde_json::from_str(
+        r#"{"finding":null,"why":"behind the VPN","who":"Alex Martin","head":"abc","date":"2026-09-10T00:00:00Z"}"#,
+    )
+    .unwrap();
+    assert!(!old.by_nunki);
+    let written = serde_json::to_string(&old).unwrap();
+    assert!(!written.contains("by_nunki"), "{written}");
+
+    let ours = nunki::state::Accepted {
+        by_nunki: true,
+        ..old
+    };
+    let written = serde_json::to_string(&ours).unwrap();
+    assert!(written.contains("\"by_nunki\":true"), "{written}");
+    let back: nunki::state::Accepted = serde_json::from_str(&written).unwrap();
+    assert_eq!(back, ours);
+}

@@ -254,6 +254,10 @@ pub fn after_verify(mission: &str, result: &Result<Vec<Step>, VerifyError>) -> N
                 | Step::CampaignEnded { .. }
                 // Always followed by `Verified` or `Findings`, which stop.
                 | Step::SecurityRoundsSpent { .. }
+                // A lift `nunki` made goes on as a human's would; one it
+                // withheld is followed by `Findings`, which stops.
+                | Step::LiftedByNunki { .. }
+                | Step::LeftToHuman { .. }
                 | Step::Saving { .. }
                 | Step::Waiting { .. }
                 | Step::Busy { .. }

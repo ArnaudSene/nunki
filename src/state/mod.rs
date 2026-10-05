@@ -176,21 +176,32 @@ pub struct Concluded {
     pub date: String,
 }
 
-/// One risk a human took, on the record.
+/// One risk taken, on the record: by a human through `nunki mission
+/// accept`, or by `nunki` itself on a report whose every finding is `LOW` or
+/// `INFO` (SPEC 4.5).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Accepted {
     /// What was lifted. `None` means the verdict as a whole — the human read
     /// the report and lifted what remained of it.
     pub finding: Option<String>,
     /// Why. Never empty: a risk accepted without a reason is not accepted,
-    /// it is forgotten.
+    /// it is forgotten. For a lift `nunki` recorded, one line per finding:
+    /// its severity, its title and the agent's reason.
     pub why: String,
-    /// Who took it, as `nunki whoami` knows them.
+    /// Who took it, as `nunki whoami` knows them — or [`NUNKI`].
     pub who: String,
     /// The commit it was given on.
     pub head: String,
     pub date: String,
+    /// Recorded by `nunki` rather than by a person. Its own field and not
+    /// only a name in `who`, because a person may be called anything. Absent
+    /// from older state files, which only ever held a human's lifts.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub by_nunki: bool,
 }
+
+/// Who an automatic lift names.
+pub const NUNKI: &str = "nunki";
 
 /// A hold a human put on a mission: no further run is launched until
 /// `nunki mission resume` lifts it.

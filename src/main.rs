@@ -1035,6 +1035,15 @@ fn main() -> ExitCode {
                             println!("          {commit}");
                         }
                     }
+                    // A lift nobody typed (SPEC 4.5): said here, so whoever
+                    // opens the pull request reads what was accepted, and by
+                    // whom.
+                    if !pushed.lifted_by_nunki.is_empty() {
+                        println!("security  accepted by nunki (LOW/INFO):");
+                        for finding in &pushed.lifted_by_nunki {
+                            println!("          {}", nunki::text::one_line(finding));
+                        }
+                    }
                     match pushed.pull_request {
                         nunki::push::PullRequestState::Opened(nunki::forge::Opened::Created(
                             url,
@@ -1207,6 +1216,19 @@ fn main() -> ExitCode {
                             nunki::verify::Step::SecurityRoundsSpent { rounds, max } => println!(
                                 "security  round cap reached ({rounds} / {max}): the security \
                                  agent is not called again, and FOLLOWUP_HQ.md says so"
+                            ),
+                            nunki::verify::Step::LiftedByNunki { findings } => {
+                                println!(
+                                    "lifted    by nunki, every finding LOW or INFO; \
+                                     FOLLOWUP_HQ.md says so:"
+                                );
+                                for one in findings {
+                                    println!("          {}", nunki::text::one_line(one));
+                                }
+                            }
+                            nunki::verify::Step::LeftToHuman { why } => println!(
+                                "security  not lifted by nunki: {}",
+                                nunki::text::one_line(why)
                             ),
                             nunki::verify::Step::Verified => println!(
                                 "VERIFIED  every declared stage is green; read it, then \
@@ -2421,6 +2443,17 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                             " — this mission calls no security agent"
                         }
                     );
+                    // The lifts nobody typed: a verified mission otherwise
+                    // reads as if a CLEAR or a human had verified it.
+                    for lift in state.accepted.iter().filter(|a| a.by_nunki) {
+                        println!(
+                            "accepted  by nunki (LOW/INFO) on {}:",
+                            &lift.head[..12.min(lift.head.len())]
+                        );
+                        for finding in nunki::findings::lifted_by_nunki(lift) {
+                            println!("          {finding}");
+                        }
+                    }
                     // A hold changes what `nunki` will do next, and nothing
                     // else in this report says so: a mission held between
                     // two runs reads exactly like one nobody touched.

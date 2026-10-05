@@ -1354,6 +1354,205 @@ fn a_lift_without_a_reason_is_refused() {
     assert!(matches!(world.state().flow.stage(), Stage::Findings { .. }));
 }
 
+// --- the lift nunki records itself (SPEC 4.5) ------------------------------
+
+impl World {
+    /// The security agent's verdict, ranked: `findings` is spliced in as the
+    /// raw JSON the agent wrote.
+    fn ranked(&self, verdict: &str, findings: &str) {
+        std::fs::write(
+            self.mission().join("VERDICT.json"),
+            format!(
+                "{{\"role\":\"Security\",\"verdict\":\"{verdict}\",\"head\":\"{}\",\
+                 \"date\":\"2026-10-05T00:00:00Z\",\"report\":\"what was attacked and found\",\
+                 \"findings\":{findings}}}",
+                self.head()
+            ),
+        )
+        .unwrap();
+    }
+}
+
+/// [`with_security_agent`], framed at `rigor`.
+fn with_security_agent_at(rigor: nunki::mission::Rigor) -> World {
+    let world = with_security_agent(1);
+    let mut header = header_of(1, integration());
+    header.security = Security::Agent;
+    header.rigor = rigor;
+    let store = Store::open(&world.project.hq_root).unwrap();
+    let mut state = store.load("m1").unwrap();
+    state.flow = Flow::new(header).unwrap();
+    store.save(&state).unwrap();
+    world
+}
+
+const LOW_AND_INFO: &str = r#"[{"severity":"LOW","title":"verbose error page","why_acceptable":"it names no path"},{"severity":"INFO","title":"no security.txt","why_acceptable":"nothing is exposed by its absence"}]"#;
+
+/// A FINDINGS whose every finding is LOW or INFO is lifted by nunki itself,
+/// at `standard` and at `critical`: one acceptance for the verdict as a
+/// whole, on this commit, marked as nunki's, its reason the findings — and
+/// the mission goes on to `Verified` as after a human's accept. The verdict
+/// stays FINDINGS, and the follow-up says who lifted it.
+#[test]
+fn a_findings_verdict_with_only_low_and_info_is_lifted_by_nunki_and_verified() {
+    for rigor in [
+        nunki::mission::Rigor::Standard,
+        nunki::mission::Rigor::Critical,
+    ] {
+        let world = with_security_agent_at(rigor);
+        world.at_security();
+        world.run_recorded(Some(41), FINISHED);
+        world.ranked("FINDINGS", LOW_AND_INFO);
+
+        let steps = world.verify().unwrap();
+        assert!(
+            matches!(steps.last(), Some(Step::Verified)),
+            "{rigor}: {steps:?}"
+        );
+        assert!(
+            steps
+                .iter()
+                .any(|s| matches!(s, Step::LiftedByNunki { findings }
+                if findings == &vec![
+                    "LOW — verbose error page: it names no path".to_string(),
+                    "INFO — no security.txt: nothing is exposed by its absence".to_string(),
+                ])),
+            "{rigor}: {steps:?}"
+        );
+
+        let state = world.state();
+        assert_eq!(state.flow.stage(), &Stage::Verified);
+        assert_eq!(state.accepted.len(), 1, "{:?}", state.accepted);
+        let lift = &state.accepted[0];
+        assert!(lift.by_nunki);
+        assert_eq!(lift.who, nunki::state::NUNKI);
+        assert_eq!(lift.finding, None, "the verdict as a whole");
+        assert_eq!(lift.head, world.head());
+        assert!(lift.why.contains("verbose error page: it names no path"));
+        assert!(state.verdict_lifted_on(&world.head()));
+        assert_eq!(
+            state.concluded(Role::Security).and_then(|c| c.verdict),
+            Some(nunki::mission::Verdict::Findings),
+            "what the agent concluded is kept as it said it"
+        );
+
+        let verdict = std::fs::read_to_string(world.mission().join("VERDICT.json")).unwrap();
+        assert!(verdict.contains("\"FINDINGS\""), "{verdict}");
+        let told = world.followup();
+        assert!(told.contains("nunki lifted the security verdict"), "{told}");
+        assert!(told.contains("no security.txt"), "{told}");
+    }
+}
+
+/// One MEDIUM in the list and the mission stops at `Findings` exactly as
+/// before: nothing is recorded, and verify says why nunki did not lift it.
+#[test]
+fn one_medium_finding_stops_at_findings_as_before() {
+    let world = with_security_agent_at(nunki::mission::Rigor::Standard);
+    world.at_security();
+    world.run_recorded(Some(41), FINISHED);
+    world.ranked(
+        "FINDINGS",
+        r#"[{"severity":"MEDIUM","title":"an open redirect"},{"severity":"LOW","title":"verbose error page","why_acceptable":"it names no path"}]"#,
+    );
+
+    let steps = world.verify().unwrap();
+    assert!(
+        matches!(steps.last(), Some(Step::Findings { .. })),
+        "{steps:?}"
+    );
+    assert!(
+        steps.iter().any(|s| matches!(s, Step::LeftToHuman { why }
+            if why.contains("an open redirect") && why.contains("MEDIUM"))),
+        "{steps:?}"
+    );
+    let state = world.state();
+    assert!(matches!(state.flow.stage(), Stage::Findings { .. }));
+    assert!(state.accepted.is_empty(), "{:?}", state.accepted);
+    assert!(!world.followup().contains("nunki lifted"));
+}
+
+/// Fail closed, end to end: no list, an empty one with FINDINGS, an unknown
+/// severity, a LOW without its reason — each stops at `Findings` with
+/// nothing recorded, and none costs the agent an attempt.
+#[test]
+fn a_findings_verdict_nunki_cannot_read_for_certain_stops_at_findings() {
+    for findings in [
+        "null",
+        "[]",
+        r#"[{"severity":"CRITICAL","title":"a","why_acceptable":"x"}]"#,
+        r#"[{"severity":"LOW","title":"a"}]"#,
+        r#""all LOW""#,
+    ] {
+        let world = with_security_agent_at(nunki::mission::Rigor::Standard);
+        world.at_security();
+        world.run_recorded(Some(41), FINISHED);
+        world.ranked("FINDINGS", findings);
+
+        let steps = world.verify().unwrap();
+        assert!(
+            matches!(steps.last(), Some(Step::Findings { .. })),
+            "{findings}: {steps:?}"
+        );
+        let state = world.state();
+        assert!(
+            state.accepted.is_empty(),
+            "{findings}: {:?}",
+            state.accepted
+        );
+        assert_eq!(
+            state.flow.security_rounds(),
+            1,
+            "{findings}: the round counts"
+        );
+    }
+}
+
+/// The lift is a lift, and a lift is the answer to a FINDINGS: nothing is
+/// recorded outside one, and never with no finding to show for it.
+#[test]
+fn nunki_lifts_nothing_outside_findings_or_without_a_finding() {
+    let world = with_security_agent_at(nunki::mission::Rigor::Standard);
+    world.at_security();
+    let store = Store::open(&world.project.hq_root).unwrap();
+    let mut state = store.load("m1").unwrap();
+    let one = [nunki::mission::LowFinding {
+        severity: nunki::mission::Severity::Low,
+        title: "a".into(),
+        why_acceptable: "x".into(),
+    }];
+    let err = nunki::findings::lift_by_nunki(
+        &store,
+        &mut state,
+        &world.mission().join("FOLLOWUP_HQ.md"),
+        &one,
+        &world.head(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, nunki::findings::FindingsError::NotOnFindings { .. }),
+        "{err}"
+    );
+
+    world.run_recorded(Some(41), FINISHED);
+    world.verdict("Security", "FINDINGS", &world.head(), "an open redirect");
+    world.verify().unwrap();
+    let mut state = store.load("m1").unwrap();
+    let err = nunki::findings::lift_by_nunki(
+        &store,
+        &mut state,
+        &world.mission().join("FOLLOWUP_HQ.md"),
+        &[],
+        &world.head(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, nunki::findings::FindingsError::NoReason),
+        "{err}"
+    );
+    assert!(store.load("m1").unwrap().accepted.is_empty());
+}
+
 /// Iterating is a gesture, not a default: a `verify` that sent the mission
 /// back by itself would spend a volet the human might have wanted to spend on
 /// an acceptance instead.

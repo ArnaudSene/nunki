@@ -129,6 +129,15 @@ pub enum Step {
         provider: String,
         by: String,
     },
+    /// The security agent concluded `FINDINGS`, every finding `LOW` or
+    /// `INFO`, and `nunki` lifted the verdict itself (SPEC 4.5): the
+    /// findings, one line each. Always followed by the flow moving on, as
+    /// after a human's `accept`.
+    LiftedByNunki { findings: Vec<String> },
+    /// The security agent concluded `FINDINGS` and `nunki` did not lift it,
+    /// for this reason: a finding at `MEDIUM` or above, or a ranking it
+    /// cannot read. Always followed by [`Step::Findings`].
+    LeftToHuman { why: String },
     /// The security agent came back with findings: `nunki mission iterate` sends
     /// them back to the coder, `nunki mission accept` lifts them.
     Findings {
@@ -163,6 +172,8 @@ pub enum VerifyError {
     Git(#[from] crate::git::GitError),
     #[error(transparent)]
     Followup(#[from] crate::followup::FollowupError),
+    #[error(transparent)]
+    Findings(#[from] crate::findings::FindingsError),
     /// The subscription's measure could not be kept or read.
     #[error("the subscription's usage: {0}")]
     Usage(String),
@@ -761,6 +772,13 @@ pub fn verify_as(
                                 )?;
                             }
                             carry(&paths.followup, Role::Security, &event, &head)?;
+                            let findings = matches!(
+                                &event,
+                                Event::Verdict {
+                                    verdict: crate::mission::Verdict::Findings,
+                                    ..
+                                }
+                            );
                             if let Event::Verdict { verdict, .. } = &event {
                                 state.conclude(Role::Security, Some(*verdict), &head);
                             }
@@ -770,6 +788,27 @@ pub fn verify_as(
                             steps.push(Step::Moved {
                                 to: state.flow.stage().clone(),
                             });
+                            // A report whose every finding is LOW or INFO is
+                            // lifted by `nunki` itself, as a human's `accept`
+                            // would lift it; anything else stays on
+                            // `Findings` for a human, as before (SPEC 4.5).
+                            if findings && matches!(state.flow.stage(), Stage::Findings { .. }) {
+                                match lift_decision(&paths.verdict, &head) {
+                                    Ok(lifted) => {
+                                        crate::findings::lift_by_nunki(
+                                            &store,
+                                            &mut state,
+                                            &paths.followup,
+                                            &lifted,
+                                            &head,
+                                        )?;
+                                        steps.push(Step::LiftedByNunki {
+                                            findings: lifted.iter().map(|f| f.line()).collect(),
+                                        });
+                                    }
+                                    Err(why) => steps.push(Step::LeftToHuman { why }),
+                                }
+                            }
                             continue;
                         }
                     }
@@ -1237,6 +1276,20 @@ fn read_verdict(
         ));
     }
     Ok(file)
+}
+
+/// The findings `nunki` lifts itself on the security verdict just concluded
+/// on `head`, or why it leaves them to a human
+/// ([`crate::mission::VerdictFile::automatic_lift`]). The file is the one
+/// [`concluded`] has just read and found on `head`; read again here, and
+/// any failure to read it is one more reason to lift nothing.
+fn lift_decision(
+    verdict: &std::path::Path,
+    head: &str,
+) -> Result<Vec<crate::mission::LowFinding>, String> {
+    read_verdict(verdict, Role::Security, head)?
+        .automatic_lift()
+        .map_err(|why| why.to_string())
 }
 
 /// Carry a red verdict to the coder before the flow moves on it.

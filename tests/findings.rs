@@ -5,7 +5,7 @@ use std::path::Path;
 
 use nunki::followup;
 use nunki::harness::Role;
-use nunki::mission::Verdict;
+use nunki::mission::{LowFinding, Severity, Verdict, VerdictFile, Withheld};
 
 fn file(dir: &Path) -> std::path::PathBuf {
     dir.join("FOLLOWUP_HQ.md")
@@ -124,4 +124,228 @@ fn a_lift_names_the_human_the_reason_and_leaves_the_verdict_alone() {
     assert!(text.contains("Alex Martin"), "{text}");
     assert!(text.contains("behind the VPN"), "{text}");
     assert!(text.contains("FINDINGS"), "{text}");
+}
+
+// --- severities, and the lift nunki records itself (SPEC 4.5) --------------
+
+/// A security verdict as the agent writes it, with `findings` spliced in as
+/// raw JSON — or left out when `None`.
+fn verdict_with(verdict: &str, findings: Option<&str>) -> VerdictFile {
+    let findings = findings
+        .map(|f| format!(",\"findings\":{f}"))
+        .unwrap_or_default();
+    serde_json::from_str(&format!(
+        "{{\"role\":\"Security\",\"verdict\":\"{verdict}\",\"head\":\"abc\",\
+         \"date\":\"2026-10-05T00:00:00Z\",\"report\":\"what was attacked\"{findings}}}"
+    ))
+    .unwrap_or_else(|e| panic!("a verdict with findings {findings} does not read: {e}"))
+}
+
+/// A report whose every finding is LOW or INFO, each with its reason, is
+/// lifted, finding by finding, in the agent's words.
+#[test]
+fn a_findings_verdict_with_only_low_and_info_is_lifted_by_nunki() {
+    let file = verdict_with(
+        "FINDINGS",
+        Some(
+            r#"[{"severity":"LOW","title":"verbose error page","why_acceptable":"it names no path"},
+                {"severity":"INFO","title":"no security.txt","why_acceptable":"nothing is exposed by its absence"}]"#,
+        ),
+    );
+    let lifted = file.automatic_lift().unwrap();
+    assert_eq!(
+        lifted,
+        vec![
+            LowFinding {
+                severity: Severity::Low,
+                title: "verbose error page".into(),
+                why_acceptable: "it names no path".into(),
+            },
+            LowFinding {
+                severity: Severity::Info,
+                title: "no security.txt".into(),
+                why_acceptable: "nothing is exposed by its absence".into(),
+            },
+        ]
+    );
+    assert_eq!(
+        lifted[0].line(),
+        "LOW — verbose error page: it names no path"
+    );
+}
+
+/// One MEDIUM, or one HIGH, anywhere in the list, and nothing is lifted:
+/// the whole verdict is left to a human, the LOW beside it included.
+#[test]
+fn one_medium_or_high_finding_leaves_the_whole_verdict_to_a_human() {
+    for (severity, list) in [
+        (
+            Severity::Medium,
+            r#"[{"severity":"LOW","title":"a","why_acceptable":"fine"},{"severity":"MEDIUM","title":"b","why_acceptable":"said anyway"}]"#,
+        ),
+        (
+            Severity::High,
+            r#"[{"severity":"HIGH","title":"b"},{"severity":"INFO","title":"a","why_acceptable":"fine"}]"#,
+        ),
+    ] {
+        let file = verdict_with("FINDINGS", Some(list));
+        assert_eq!(
+            file.automatic_lift(),
+            Err(Withheld::TooSevere {
+                title: "b".into(),
+                severity,
+            }),
+            "{list}"
+        );
+    }
+}
+
+/// Fail closed: whatever nunki cannot read for certain stops at `Findings`
+/// as it did before severities existed — never a guess, and never a verdict
+/// file refused for it, which would cost the agent an attempt instead.
+#[test]
+fn a_ranking_nunki_cannot_read_for_certain_lifts_nothing() {
+    let cases: [(Option<&str>, Withheld); 10] = [
+        (None, Withheld::NoList),
+        (Some("null"), Withheld::NoList),
+        (Some("[]"), Withheld::Empty),
+        (Some(r#""LOW""#), Withheld::Unreadable),
+        (
+            Some(r#"[{"severity":1,"title":"a"}]"#),
+            Withheld::Unreadable,
+        ),
+        (
+            Some(r#"[{"severity":"CRITICAL","title":"a","why_acceptable":"x"}]"#),
+            Withheld::UnknownSeverity {
+                title: "a".into(),
+                severity: "CRITICAL".into(),
+            },
+        ),
+        (
+            Some(r#"[{"severity":"low","title":"a","why_acceptable":"x"}]"#),
+            Withheld::UnknownSeverity {
+                title: "a".into(),
+                severity: "low".into(),
+            },
+        ),
+        (
+            Some(r#"[{"severity":"LOW","title":"a"}]"#),
+            Withheld::NoReason {
+                title: "a".into(),
+                severity: Severity::Low,
+            },
+        ),
+        (
+            Some(r#"[{"severity":"INFO","title":"a","why_acceptable":"  "}]"#),
+            Withheld::NoReason {
+                title: "a".into(),
+                severity: Severity::Info,
+            },
+        ),
+        (
+            Some(r#"[{"severity":"LOW","title":" ","why_acceptable":"x"}]"#),
+            Withheld::Untitled { index: 1 },
+        ),
+    ];
+    for (findings, why) in cases {
+        let file = verdict_with("FINDINGS", findings);
+        assert_eq!(file.automatic_lift(), Err(why), "{findings:?}");
+    }
+}
+
+/// A `CLEAR` is not lifted, whatever its list says: there is nothing to
+/// lift, and a lift recorded on it would be a decision about nothing.
+#[test]
+fn only_a_findings_verdict_is_ever_lifted() {
+    let file = verdict_with(
+        "CLEAR",
+        Some(r#"[{"severity":"LOW","title":"a","why_acceptable":"x"}]"#),
+    );
+    assert_eq!(
+        file.automatic_lift(),
+        Err(Withheld::NotFindings(Verdict::Clear))
+    );
+}
+
+/// A verdict written before severities existed still reads, as one whose
+/// findings are left to a human.
+#[test]
+fn an_old_verdict_file_still_reads() {
+    let file: VerdictFile = serde_json::from_str(
+        r#"{"role":"Security","verdict":"FINDINGS","head":"abc","date":"2026-09-10T00:00:00Z","report":"an open redirect"}"#,
+    )
+    .unwrap();
+    assert_eq!(file.findings, None);
+    assert_eq!(file.automatic_lift(), Err(Withheld::NoList));
+}
+
+/// The severities, and the line between them: LOW and INFO below it,
+/// MEDIUM and HIGH above.
+#[test]
+fn severities_are_spelled_exactly_and_only_low_and_info_are_lifted() {
+    for (text, severity, lifted) in [
+        ("HIGH", Severity::High, false),
+        ("MEDIUM", Severity::Medium, false),
+        ("LOW", Severity::Low, true),
+        ("INFO", Severity::Info, true),
+    ] {
+        assert_eq!(Severity::parse(text), Some(severity));
+        assert_eq!(severity.to_string(), text);
+        assert_eq!(severity.lifted_by_nunki(), lifted, "{text}");
+    }
+    for unknown in ["", "Low", "CRITICAL", "LOW "] {
+        assert_eq!(Severity::parse(unknown), None, "{unknown:?}");
+    }
+}
+
+/// The follow-up says the lift is nunki's, on which commit, and lists each
+/// finding with the agent's reason — and that `VERDICT.json` has not moved.
+#[test]
+fn a_lift_by_nunki_is_said_as_nunkis_with_every_finding() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = file(dir.path());
+    followup::lifted_by_nunki(
+        &path,
+        &[
+            "LOW — verbose error page: it names no path".to_string(),
+            "INFO — no security.txt: nothing is exposed".to_string(),
+        ],
+        "0123456789abcdef0123456789abcdef01234567",
+    )
+    .unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        text.contains("nunki lifted the security verdict on 0123456789ab (LOW/INFO)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("- LOW — verbose error page: it names no path"),
+        "{text}"
+    );
+    assert!(
+        text.contains("- INFO — no security.txt: nothing is exposed"),
+        "{text}"
+    );
+    assert!(text.contains("`VERDICT.json` stays `FINDINGS`"), "{text}");
+}
+
+/// What `push` and `mission status` print of a lift: its findings when
+/// nunki made it, nothing when a human did — a human's reason is not a
+/// list of findings nunki accepted.
+#[test]
+fn only_a_lift_by_nunki_is_listed_as_one() {
+    let mut lift = nunki::state::Accepted {
+        finding: None,
+        why: "LOW — a: x\nINFO — b: y".into(),
+        who: nunki::state::NUNKI.into(),
+        head: "abc".into(),
+        date: "2026-10-05T00:00:00Z".into(),
+        by_nunki: true,
+    };
+    assert_eq!(
+        nunki::findings::lifted_by_nunki(&lift),
+        vec!["LOW — a: x".to_string(), "INFO — b: y".to_string()]
+    );
+    lift.by_nunki = false;
+    assert!(nunki::findings::lifted_by_nunki(&lift).is_empty());
 }

@@ -149,6 +149,22 @@ fn after_a_verify_the_monitor_goes_on_or_stops_for_a_human() {
         Next::Continue
     );
 
+    // A lift nunki made is not a human's decision to wait for: the mission
+    // goes on, as after a human's accept. One it withheld is followed by
+    // the findings, which stop.
+    assert_eq!(
+        go(Step::LiftedByNunki {
+            findings: vec!["LOW — a: x".into()]
+        }),
+        Next::Continue
+    );
+    assert_eq!(
+        go(Step::LeftToHuman {
+            why: "finding \"a\" is MEDIUM".into()
+        }),
+        Next::Continue
+    );
+
     assert!(stops(go(Step::Verified)));
     assert!(stops(go(Step::AwaitingHuman(Handover::Abandoned {
         reason: "no".into()

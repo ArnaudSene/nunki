@@ -97,6 +97,34 @@ pub fn lifted_all(file: &Path, who: &str, why: &str, head: &str) -> Result<(), F
     )
 }
 
+/// Record that `nunki` lifted a security verdict itself, every finding in it
+/// being `LOW` or `INFO`: the findings, one per line, with the agent's
+/// reason for each (SPEC 4.5).
+///
+/// Said as `nunki`'s, never as a human's: the HQ reads here which lifts it
+/// did not make, and can still send the mission back with `iterate`.
+pub fn lifted_by_nunki(file: &Path, findings: &[String], head: &str) -> Result<(), FollowupError> {
+    let listed = findings
+        .iter()
+        .map(|line| format!("- {}", crate::text::one_line(line)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    append(
+        file,
+        &format!(
+            "## {date} — nunki lifted the security verdict on {short} (LOW/INFO)\n\n\
+             Every finding the security agent ranked is LOW or INFO, so nunki\n\
+             accepted them itself, with the agent's own reasons:\n\n\
+             {listed}\n\n\
+             `VERDICT.json` stays `FINDINGS`. This lift obeys the rules of a\n\
+             human's: it is worth this commit, and a later `FINDINGS` is not\n\
+             covered by it. `nunki mission iterate` still sends the mission back.\n",
+            date = today(),
+            short = short(head),
+        ),
+    )
+}
+
 /// A mission called off, and why.
 pub fn ended(file: &Path, who: &str, why: &str) -> Result<(), FollowupError> {
     append(
