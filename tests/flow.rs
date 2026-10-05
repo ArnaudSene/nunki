@@ -1,8 +1,8 @@
 //! The flow of SPEC 4.5, exercised without a container or a model.
 
 use nunki::harness::{Outcome, Role, Usage};
-use nunki::mission::flow::{Event, Flow, Handover, Stage, Work};
-use nunki::mission::{Bounds, Header, Integration, Lot, Security, Service, Verdict};
+use nunki::mission::flow::{Event, Flow, Handover, SecurityCap, Stage, Work};
+use nunki::mission::{Bounds, Header, Integration, Lot, Rigor, Security, Service, Verdict};
 
 fn lots(n: usize) -> Vec<Lot> {
     (1..=n)
@@ -20,6 +20,8 @@ fn header(integration: Integration, security: Security, bounds: Bounds) -> Heade
         lots: lots(2),
         integration,
         security,
+        rigor: Default::default(),
+        mutation_threshold: None,
         arbiter: None,
         run: None,
         account: None,
@@ -623,4 +625,340 @@ fn a_review_before_verification_is_refused() {
         })
         .is_err()
     );
+}
+
+// ---------------------------------------------------------------------------
+// Security rounds, bounded by the mission's rigor (SPEC 4.5).
+// ---------------------------------------------------------------------------
+
+/// A flow at `rigor`, with a security agent and the default bounds — the
+/// ones a mission gets when its header says nothing, three volets.
+fn at(rigor: Rigor, integration: Integration) -> Flow {
+    let mut h = header(integration, Security::Agent, Bounds::default());
+    h.rigor = rigor;
+    Flow::new(h).unwrap()
+}
+
+/// A `FINDINGS` whose report says which round it was.
+fn findings(round: u32) -> Event {
+    Event::Verdict {
+        verdict: Verdict::Findings,
+        report: format!("round {round}: an open redirect"),
+    }
+}
+
+fn back_on(round: u32) -> Stage {
+    Stage::Findings {
+        report: format!("round {round}: an open redirect"),
+    }
+}
+
+/// One security round that ends in findings, an iterate, the coder's volet
+/// gated as usual — and then, at `standard`, no second round. The volet
+/// that answered the findings was never attacked, so the mission is not
+/// verified: it goes back to those findings, where `accept` or `iterate`
+/// decide, and the cap is left for the follow-up, once.
+#[test]
+fn at_standard_findings_then_an_iterate_come_back_to_the_findings_with_no_second_round() {
+    let mut flow = at(Rigor::Standard, none());
+    assert_eq!(flow.max_security_rounds(), 1);
+    code_through(&mut flow);
+    flow.advance(Event::GatesPassed).unwrap();
+    assert_eq!(flow.stage(), &Stage::SecurityAgent { attempt: 1 });
+    flow.advance(findings(1)).unwrap();
+    assert_eq!(flow.security_rounds(), 1);
+
+    // The iterate after the last round is still accepted, and its volet is
+    // run and gated like any other.
+    flow.advance(Event::Iterate).unwrap();
+    assert!(matches!(
+        flow.stage(),
+        Stage::Coding {
+            work: Work::Volet { n: 1, .. },
+            ..
+        }
+    ));
+    flow.advance(finished(true)).unwrap();
+    assert_eq!(flow.stage(), &Stage::Gates);
+    // A red gate still sends it back: the cap spares the agent, not the gates.
+    flow.advance(Event::GatesFailed {
+        reason: "battery".into(),
+    })
+    .unwrap();
+    flow.advance(finished(true)).unwrap();
+    assert_eq!(flow.take_security_cap(), None, "nothing was skipped yet");
+
+    flow.advance(Event::GatesPassed).unwrap();
+    assert_eq!(
+        flow.stage(),
+        &back_on(1),
+        "no second round, and no Verified"
+    );
+    assert_eq!(flow.security_rounds(), 1);
+    assert_eq!(
+        flow.take_security_cap(),
+        Some(SecurityCap { rounds: 1, max: 1 })
+    );
+    assert_eq!(flow.take_security_cap(), None, "said once");
+
+    // The verbs of a FINDINGS apply. Iterate spends a volet, bounded, and
+    // comes back to the same findings; accept is what verifies.
+    flow.advance(Event::Iterate).unwrap();
+    flow.advance(finished(true)).unwrap();
+    flow.advance(Event::GatesPassed).unwrap();
+    assert_eq!(flow.stage(), &back_on(1));
+    assert_eq!(flow.volets(), 3);
+    flow.advance(Event::HumanAccepted).unwrap();
+    assert_eq!(flow.stage(), &Stage::Verified);
+}
+
+/// The integrator still replays after an iterate at the cap; it is only the
+/// security stage that is not played, and the mission is back on its
+/// findings after the integrator's verdict.
+#[test]
+fn at_standard_the_integrator_replays_and_the_spent_round_is_skipped_after_it() {
+    let mut flow = at(Rigor::Standard, services());
+    code_through(&mut flow);
+    flow.advance(Event::GatesPassed).unwrap();
+    flow.advance(verdict(Verdict::Integrated)).unwrap();
+    flow.advance(findings(1)).unwrap();
+    flow.advance(Event::Iterate).unwrap();
+    flow.advance(finished(true)).unwrap();
+    flow.advance(Event::GatesPassed).unwrap();
+    assert_eq!(flow.stage(), &Stage::Integration { attempt: 1 });
+    flow.advance(verdict(Verdict::Integrated)).unwrap();
+    assert_eq!(flow.stage(), &back_on(1));
+    assert_eq!(
+        flow.take_security_cap(),
+        Some(SecurityCap { rounds: 1, max: 1 })
+    );
+}
+
+/// `critical` keeps its three rounds, and a fourth is never launched. With
+/// the default bounds, three FINDINGS rounds and three iterates use every
+/// volet; the third volet's green gates do not verify the mission — it is
+/// back on the third round's findings, and dev never let a mission reach
+/// `Verified` without a CLEAR or a human's lift.
+#[test]
+fn at_critical_the_fourth_round_is_not_launched_and_the_third_findings_stand() {
+    let mut flow = at(Rigor::Critical, none());
+    assert_eq!(flow.max_security_rounds(), 3);
+    code_through(&mut flow);
+    for round in 1..=3 {
+        flow.advance(Event::GatesPassed).unwrap();
+        assert_eq!(
+            flow.stage(),
+            &Stage::SecurityAgent { attempt: 1 },
+            "round {round} is played"
+        );
+        flow.advance(findings(round)).unwrap();
+        assert_eq!(flow.security_rounds(), round);
+        flow.advance(Event::Iterate).unwrap();
+        flow.advance(finished(true)).unwrap();
+    }
+    assert_eq!(flow.volets(), 3);
+    flow.advance(Event::GatesPassed).unwrap();
+    assert_eq!(
+        flow.stage(),
+        &back_on(3),
+        "a fourth round is not played, and nothing is verified"
+    );
+    assert_eq!(
+        flow.take_security_cap(),
+        Some(SecurityCap { rounds: 3, max: 3 })
+    );
+
+    // Iterate is bounded as any volet: none is left.
+    let mut spent = flow.clone();
+    spent.advance(Event::Iterate).unwrap();
+    assert!(
+        matches!(
+            spent.stage(),
+            Stage::AwaitingHuman(Handover::VoletsExhausted { .. })
+        ),
+        "{:?}",
+        spent.stage()
+    );
+
+    // Only the human's lift verifies it.
+    flow.advance(Event::HumanAccepted).unwrap();
+    assert_eq!(flow.stage(), &Stage::Verified);
+}
+
+/// The rule reads the last verdict, not the way back to the gates. A
+/// finding the human lifted, then a review that sends the branch back: the
+/// lift was worth the commit it was given on, so the new volet's green gates
+/// bring the mission back to those findings, not to `Verified`.
+#[test]
+fn a_review_after_lifted_findings_at_the_cap_comes_back_to_them() {
+    let mut flow = at(Rigor::Standard, none());
+    code_through(&mut flow);
+    flow.advance(Event::GatesPassed).unwrap();
+    flow.advance(findings(1)).unwrap();
+    flow.advance(Event::HumanAccepted).unwrap();
+    assert_eq!(flow.stage(), &Stage::Verified);
+    flow.advance(Event::Reviewed {
+        because: "rename it".into(),
+    })
+    .unwrap();
+    flow.advance(finished(true)).unwrap();
+    flow.advance(Event::GatesPassed).unwrap();
+    assert_eq!(flow.stage(), &back_on(1));
+    assert_eq!(
+        flow.take_security_cap(),
+        Some(SecurityCap { rounds: 1, max: 1 })
+    );
+}
+
+/// Same rule after a retry: the volet the human took back from a handover
+/// is gated, and the findings it was answering come back.
+#[test]
+fn a_retry_after_findings_at_the_cap_comes_back_to_them() {
+    let mut flow = at(Rigor::Standard, none());
+    code_through(&mut flow);
+    flow.advance(Event::GatesPassed).unwrap();
+    flow.advance(findings(1)).unwrap();
+    flow.advance(Event::Iterate).unwrap();
+    for _ in 0..3 {
+        flow.advance(finished(false)).unwrap();
+    }
+    assert!(
+        matches!(
+            flow.stage(),
+            Stage::AwaitingHuman(Handover::LotAttemptsExhausted { .. })
+        ),
+        "{:?}",
+        flow.stage()
+    );
+    flow.advance(Event::Retried {
+        because: "the harness is back".into(),
+    })
+    .unwrap();
+    flow.advance(finished(true)).unwrap();
+    flow.advance(Event::GatesPassed).unwrap();
+    assert_eq!(flow.stage(), &back_on(1));
+}
+
+/// A CLEAR is a round too, and it clears the findings before it. After a
+/// CLEAR the mission was verified by the agent; a review that sends it back
+/// is the HQ's own request, and at `standard` the next green gates verify
+/// it without a second round, the cap said.
+#[test]
+fn a_review_after_a_clear_at_the_cap_is_verified_with_the_cap_said() {
+    let mut flow = at(Rigor::Critical, none());
+    code_through(&mut flow);
+    flow.advance(Event::GatesPassed).unwrap();
+    flow.advance(findings(1)).unwrap();
+    flow.advance(Event::Iterate).unwrap();
+    flow.advance(finished(true)).unwrap();
+    flow.advance(Event::GatesPassed).unwrap();
+    flow.advance(findings(2)).unwrap();
+    flow.advance(Event::Iterate).unwrap();
+    flow.advance(finished(true)).unwrap();
+    flow.advance(Event::GatesPassed).unwrap();
+    flow.advance(verdict(Verdict::Clear)).unwrap();
+    assert_eq!(flow.stage(), &Stage::Verified);
+    assert_eq!(flow.security_rounds(), 3);
+    assert_eq!(flow.take_security_cap(), None);
+    flow.advance(Event::Reviewed {
+        because: "rename it".into(),
+    })
+    .unwrap();
+    flow.advance(finished(true)).unwrap();
+    flow.advance(Event::GatesPassed).unwrap();
+    assert_eq!(flow.stage(), &Stage::Verified);
+    assert_eq!(
+        flow.take_security_cap(),
+        Some(SecurityCap { rounds: 3, max: 3 })
+    );
+}
+
+/// A prototype runs the coder and the mechanical gates only. `mission new`
+/// says so, and the flow says it again where a header is frozen — at the
+/// start and at a reframe — because a header can be written by hand.
+#[test]
+fn a_prototype_with_a_security_agent_or_services_is_refused_where_it_is_frozen() {
+    use nunki::mission::RigorError;
+    use nunki::mission::flow::FlowError;
+
+    let mut agent = header(none(), Security::Agent, Bounds::default());
+    agent.rigor = Rigor::Prototype;
+    assert_eq!(
+        Flow::new(agent.clone()),
+        Err(FlowError::Rigor(RigorError::PrototypeWithSecurityAgent))
+    );
+    let mut wired = header(services(), Security::Gates, Bounds::default());
+    wired.rigor = Rigor::Prototype;
+    assert_eq!(
+        Flow::new(wired.clone()),
+        Err(FlowError::Rigor(RigorError::PrototypeWithServices))
+    );
+    let err = Flow::new(wired.clone()).unwrap_err().to_string();
+    assert!(err.contains("a prototype runs the coder"), "{err}");
+
+    let mut flow = Flow::new(header(none(), Security::Agent, Bounds::default())).unwrap();
+    let before = flow.clone();
+    assert_eq!(
+        flow.reframe(agent),
+        Err(FlowError::Rigor(RigorError::PrototypeWithSecurityAgent))
+    );
+    assert_eq!(
+        flow.reframe(wired),
+        Err(FlowError::Rigor(RigorError::PrototypeWithServices))
+    );
+    assert_eq!(flow, before, "a refused reframe changes nothing");
+
+    // A prototype that declares neither is framed, and reframed, as before.
+    let mut bare = header(none(), Security::Gates, Bounds::default());
+    bare.rigor = Rigor::Prototype;
+    assert!(Flow::new(bare.clone()).is_ok());
+    assert_eq!(flow.reframe(bare), Ok(()));
+}
+
+/// A prototype plays no round. A state frozen before the flow refused one
+/// with a security agent can still carry both: it is verified on its gates,
+/// and the cap — 0 / 0 — is said.
+#[test]
+fn a_prototype_plays_no_security_round() {
+    let flow = at(Rigor::Critical, none());
+    let mut json = serde_json::to_value(&flow).unwrap();
+    json["header"]["rigor"] = serde_json::json!("prototype");
+    let mut flow: Flow = serde_json::from_value(json).unwrap();
+    assert_eq!(flow.max_security_rounds(), 0);
+    code_through(&mut flow);
+    flow.advance(Event::GatesPassed).unwrap();
+    assert_eq!(flow.stage(), &Stage::Verified);
+    assert_eq!(
+        flow.take_security_cap(),
+        Some(SecurityCap { rounds: 0, max: 0 })
+    );
+}
+
+/// A mission with no security agent was never going to call it: no cap is
+/// said for a round nobody asked for.
+#[test]
+fn a_mission_without_a_security_agent_records_no_cap() {
+    let mut h = header(none(), Security::Gates, Bounds::default());
+    h.rigor = Rigor::Prototype;
+    let mut flow = Flow::new(h).unwrap();
+    code_through(&mut flow);
+    flow.advance(Event::GatesPassed).unwrap();
+    assert_eq!(flow.stage(), &Stage::Verified);
+    assert_eq!(flow.take_security_cap(), None);
+}
+
+/// State written before the count reads zero rounds and no findings held,
+/// and a flow that was not skipping anything carries no cap on disk.
+#[test]
+fn an_old_state_reads_zero_security_rounds() {
+    let mut flow = at(Rigor::Standard, none());
+    code_through(&mut flow);
+    let mut json: serde_json::Value = serde_json::to_value(&flow).unwrap();
+    assert!(json.get("security_cap").is_none(), "{json}");
+    assert!(json.get("last_findings").is_none(), "{json}");
+    let object = json.as_object_mut().unwrap();
+    assert_eq!(object.remove("security_rounds"), Some(serde_json::json!(0)));
+    let old: Flow = serde_json::from_value(json).unwrap();
+    assert_eq!(old.security_rounds(), 0);
+    assert_eq!(old, flow);
 }

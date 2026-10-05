@@ -93,6 +93,7 @@ L'en-tête de `MISSION.md`, validé par l'humain avant le lancement, déclare :
 |---|---|---|
 | `integration` | `none` (avec la raison en une ligne), ou la liste des services | avec `none`, pas de mission d'intégration ; sinon le profil système et l'intégrateur |
 | `security` | `gates` ou `agent` | `gates` : les portes mécaniques seulement ; `agent` : en plus, la mission de sécurité — dans le profil système s'il y a des services, sinon dans le profil mission, sur le livrable seul |
+| `rigor` | `prototype`, `standard` ou `critical` (absent : `critical`) | le niveau d'exigence : ce que demande la porte 7 (4.4) et combien de tours de sécurité sont joués (4.5). Un `prototype` est la forme **code seul** par construction : `mission new`, le démarrage et le recadrage refusent des services ou l'agent sécurité à côté de lui |
 
 `security: agent` s'impose dès que la mission a des services, une surface
 exposée (HTTP, fichier importé, message reçu), de l'authentification, de la
@@ -323,12 +324,12 @@ YAML, du JSON, du git. Rien d'autre.
 | les règles du lieu | `AGENTS.md` à la racine (et par zone) ; `CLAUDE.md` n'est qu'un import (`@AGENTS.md`) ou un lien vers lui, les deux documentés par Claude Code. Un `CLAUDE.md` existant n'est pas écrasé (3.3) : `nunki init` dépose l'import à côté, le résumé le dit, et **`nunki check` est rouge** tant que ce `CLAUDE.md` n'importe pas `AGENTS.md` — sinon les règles ne seraient jamais lues par ce harnais et `mission start` partirait sans elles. L'adaptateur peut, en attendant, passer `AGENTS.md` par `--append-system-prompt-file` | tous les harnais qui le supportent, Claude Code via import ou lien |
 | les compétences | `SKILL.md`, standard ouvert (agentskills.io) adopté par OpenCode, Codex, Gemini CLI, Cursor, Copilot et d'autres ; il peut porter des choses essentielles | les harnais |
 | la mission | un dossier **au HQ, hors de l'arbre git** (voir les montages) : `MISSION.md`, `FOLLOWUP_HQ.md` et `MUTANTS.json` (à l'humain et au HQ, lecture seule pour l'agent), `JOURNAL.md`, `PR.md`, `VERDICT.json`, `MUTANTS.triage.json` (à l'agent) — la même forme pour les trois rôles | l'agent qui la porte, le HQ |
-| le bloc structuré de `MISSION.md` | un en-tête YAML que `nunki` lit, valide et **fige dans son état à la validation humaine** : forme (`integration`, `security`), rôle, branche, base, **la liste des lots** (un identifiant et un titre chacun — c'est elle qui donne « un run par lot » et qui fait refuser un `VERDICT.json` écrit avant que le dernier lot ait son entrée « fini » dans le journal), borne de volets, tentatives par lot, délais, script de lancement, **modèle** (`model:`, quand le harnais en prend un ; `nunki.yaml` le déclare pour le projet et l'en-tête le raffine), et pour une mission d'intégration les **services** (réseau nommé, adresses, domaines, et `shared: true` pour un fournisseur réel, que les autres missions attendent — 7) et les **fichiers d'identifiants** montés. La prose du gabarit vient après, pour l'agent. L'agent ne peut pas l'écrire, et `nunki` ne le relit pas en cours de mission | `nunki`, puis l'agent |
+| le bloc structuré de `MISSION.md` | un en-tête YAML que `nunki` lit, valide et **fige dans son état à la validation humaine** : forme (`integration`, `security`), rôle, branche, base, **la liste des lots** (un identifiant et un titre chacun — c'est elle qui donne « un run par lot » et qui fait refuser un `VERDICT.json` écrit avant que le dernier lot ait son entrée « fini » dans le journal), borne de volets, tentatives par lot, délais, script de lancement, **niveau d'exigence** (`rigor:`, pris de `--rigor`, sinon de `nunki.yaml`, sinon `critical`) et **seuil de mutation** (`mutation_threshold:`, figé depuis `nunki.yaml` avec lui ; un en-tête plus ancien qui ne le porte pas lit celui du projet), **modèle** (`model:`, quand le harnais en prend un ; `nunki.yaml` le déclare pour le projet et l'en-tête le raffine), et pour une mission d'intégration les **services** (réseau nommé, adresses, domaines, et `shared: true` pour un fournisseur réel, que les autres missions attendent — 7) et les **fichiers d'identifiants** montés. La prose du gabarit vient après, pour l'agent. L'agent ne peut pas l'écrire, et `nunki` ne le relit pas en cours de mission | `nunki`, puis l'agent |
 | le verdict | `VERDICT.json` dans le dossier de mission : `{ role, verdict, head, date, report }`, écrit par l'agent à la fin de son dernier run ; `nunki` le refuse si `head` n'est pas le `HEAD` réel de la branche | `nunki` |
 | le contrat de run | un run par lot (4.3) : ce qu'un run doit avoir produit avant de sortir — le lot commité et prouvé ou l'échec dit, arbre commitable, bloc `ÉTAT DE REPRISE` en tête du journal (écrit aussi toutes les 45 minutes en cours de run), et pour le dernier lot le verdict. Pour le codeur, ce bloc se termine par la ligne `Lot: <lot> — done`, ou `Lot: <lot> — failed: <raison>` : la seule que `nunki` lise pour savoir le lot fini | l'agent, par `MISSION.md` ; `nunki`, à la sortie et aux checkpoints |
 | les chemins protégés | une liste déclarative par projet, **deux modes** : refuser, refuser seulement si le fichier existe déjà sur la base. Le mode « demander » a disparu : rien ne peut demander en autonome | la porte de périmètre, et l'adaptateur harnais s'il double |
 | la batterie | un script par projet, cousu depuis un fragment par stack | la porte « batterie », la CI |
-| la configuration du projet | `nunki.yaml` dans le home du projet (`~/.nunki/<id>/nunki.yaml`), **hors du dépôt**, et qui nomme le dépôt auquel il appartient (`root:`) — le home porte l'identifiant de la session, jamais le nom du dossier, et `root:` reste la source de vérité si le registre et le home se contredisent : harnais, stacks, branches protégées, chemins protégés, liste blanche par stack, borne de volets, seuil de mutants, délais, dossier des identifiants de test, script de lancement (`run:`), modèle du harnais (`model:` — aucun nom n'est vérifié contre une liste : `nunki` connaît des harnais, pas des modèles, et c'est le harnais qui refuse ce qu'il ne connaît pas), mode de permission (`permission_mode:`, `auto` par défaut — voir le tableau des harnais en 4.3), fichier de services du projet (`services_file:`) et qui tient les branches protégées côté forge (`forge_protection:`, `forge` par défaut ou `by_hand`). `MISSION.md` prime sur lui pour ce qu'il redéclare | `nunki` |
+| la configuration du projet | `nunki.yaml` dans le home du projet (`~/.nunki/<id>/nunki.yaml`), **hors du dépôt**, et qui nomme le dépôt auquel il appartient (`root:`) — le home porte l'identifiant de la session, jamais le nom du dossier, et `root:` reste la source de vérité si le registre et le home se contredisent : harnais, stacks, branches protégées, chemins protégés, liste blanche par stack, borne de volets, niveau d'exigence par défaut (`rigor:`), seuil de mutation du niveau `standard` (`mutation_threshold:`, un pourcentage entier de 1 à 100, 80 par défaut, refusé hors de cet intervalle), délais, dossier des identifiants de test, script de lancement (`run:`), modèle du harnais (`model:` — aucun nom n'est vérifié contre une liste : `nunki` connaît des harnais, pas des modèles, et c'est le harnais qui refuse ce qu'il ne connaît pas), mode de permission (`permission_mode:`, `auto` par défaut — voir le tableau des harnais en 4.3), fichier de services du projet (`services_file:`) et qui tient les branches protégées côté forge (`forge_protection:`, `forge` par défaut ou `by_hand`). `MISSION.md` prime sur lui pour ce qu'il redéclare | `nunki` |
 | le conteneur | un **Dockerfile** par stack (les anciennes « features » deviennent des étapes, l'image pré-crée les points de montage avec l'uid de l'hôte) et un fichier **Compose par profil, généré par `nunki`** à chaque lancement — voir 4.2. **Tous les conteneurs d'agent sont autonomes** : derrière un pare-feu en liste blanche, sans supervision humaine dedans, arrêtables par `nunki`. Deux variantes d'un même profil autonome — **mission** (codeur : aucun service externe) et **système** (intégrateur et sécurité : pare-feu élargi aux services déclarés, identifiants de test montés, services à côté). Un profil **interactif** n'existe que pour un seul usage possible : héberger le **HQ** lui-même si l'humain choisit de le faire tourner en conteneur plutôt que sur sa machine ; un `devcontainer.json` de quelques lignes est la **vue IDE** de ce profil, et rien de plus. Aucun agent ne tourne jamais en interactif | le moteur de conteneurs, par sa commande Compose |
 | le HQ du projet | `~/.nunki/<id>/hq/` : journal, tableau de bord, file de remontées, discussions, **et l'état de `nunki`** (4.2). Jamais monté dans un conteneur, hormis le dossier de chaque mission | le superviseur, `nunki` |
 | le registre des sessions | `~/.nunki/sessions.json` : une ligne par projet, **un identifiant et le chemin de son dépôt**, parce qu'un home nommé d'après le dossier du dépôt refuserait le second projet appelé `api` au lieu de le servir. C'est un **index**, jamais l'autorité : chaque home nomme son dépôt (`root:`), donc un registre perdu se reconstruit depuis les homes, et un registre qui contredit un home est refusé plutôt que suivi. `nunki init` ouvre une session, `nunki sessions` les liste, et `nunki adopt <id>` réinscrit un dépôt déplacé — en refusant tant que l'ancien chemin abrite encore un dépôt, qui est le projet de quelqu'un | `nunki` |
@@ -1442,9 +1443,33 @@ dernier lot. La première rouge arrête tout.
 6. batterie verte — absente ou non exécutable, la porte **échoue**, elle ne
    saute pas ;
 7. **mutation** : campagne jouée sur ce que la branche a changé. **Pas de
-   seuil** : la porte est verte quand **chaque survivant a reçu une des trois
-   issues** — tué par un test nommé, reconnu comme bug et figé dans un test,
-   ou démontré équivalent en une phrase.
+   seuil** au niveau `critical` : la porte est verte quand **chaque survivant
+   a reçu une des trois issues** — tué par un test nommé, reconnu comme bug et
+   figé dans un test, ou démontré équivalent en une phrase.
+
+   **Le niveau d'exigence règle cette porte.** Au niveau `prototype`, elle ne
+   s'applique pas et aucune campagne n'est due. Au niveau `standard`, elle est
+   verte quand la part de mutants tués (essayés moins les survivants restés
+   sans issue, rapportés aux essayés) atteint `mutation_threshold` ; les
+   survivants sans issue sont comptés dans sa note, sans la rendre rouge. Une
+   campagne qui ne donne pas son compte, ou un compte inférieur à ses
+   survivants, est jugée comme au niveau `critical` ; une campagne qui n'a
+   rien trouvé à muter passe.
+
+   **Une campagne qui n'a rien mesuré n'est jamais verte**, à aucun niveau.
+   La ligne de fin n'est écrite que si le statut de l'outil dit que la
+   campagne est allée au bout, et **une seule** est acceptée : un journal qui
+   en porte deux est refusé. Quand la stack sait compter sur les lignes
+   changées, cette ligne porte ses comptes,
+   `{"campaign":"done","tried":N,"found":M}`, tirés des résultats de l'outil,
+   mutants non viables exclus ; `found > 0` avec `tried = 0` n'est pas une
+   mesure : rien n'est enregistré et la porte est rouge avec la cause. Une
+   stack qui ne sait compter que sur des fichiers entiers ne donne pas de
+   compte (sauf `tried` 0 quand rien n'est mutable), et le niveau `standard`
+   y est jugé comme `critical` : un seuil sur des fichiers entiers laisserait
+   un fichier déjà bien testé cacher des lignes nouvelles non testées.
+   La campagne Rust ne lit **aucune configuration de l'arbre qu'elle mute**
+   (`cargo mutants --no-config`).
 
    **Les lignes changées, pas les fichiers entiers.** C'est la règle de la
    porte 8 : **ce qui est nouveau depuis la base appartient à la mission, ce
@@ -2402,6 +2427,17 @@ Ce que la boucle veut dire, et ce qu'elle ne veut pas dire.
     pas accepté, il est oublié.
   - **Une acceptation vaut pour un `HEAD`**, comme le verdict qu'elle lève.
     Un nouveau commit la périme au lieu de la reporter en silence.
+- **Les tours de sécurité sont bornés par le niveau d'exigence.** Un tour
+  est un verdict que l'agent sécurité conclut (`CLEAR` ou `FINDINGS`) :
+  aucun au niveau `prototype`, un au niveau `standard`, trois au niveau
+  `critical`. Quand les portes passent et que la sécurité viendrait ensuite,
+  tours épuisés, l'agent n'est pas lancé. Si le dernier verdict conclu est
+  `CLEAR`, la mission passe `Verified`. S'il est `FINDINGS`, elle revient à
+  `Findings` avec ce dernier rapport : **la borne ne vérifie jamais seule**,
+  `Verified` reste atteint par un `CLEAR` ou par une levée humaine
+  (`accept`), et un `iterate` ouvre un volet borné comme les autres.
+  `FOLLOWUP_HQ.md` consigne la borne atteinte (`n / max`) et que la
+  correction venue après le dernier tour n'a pas été attaquée.
 - **La boucle est bornée, et la borne est un paramètre** : **trois volets**
   par défaut. Au troisième retour au codeur
   sur une même mission, le HQ ne relance pas : il s'arrête et remonte à

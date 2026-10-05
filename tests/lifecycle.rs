@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use nunki::lifecycle::{self, LifecycleError};
 use nunki::mission::flow::{Event, Flow, Stage, Work};
-use nunki::mission::{Bounds, Header, Integration, Lot, Security, Service};
+use nunki::mission::{Bounds, Header, Integration, Lot, Rigor, Security, Service};
 use nunki::project::{Config, Project, ProtectedPaths};
 use nunki::state::{MissionState, Store};
 
@@ -22,6 +22,8 @@ fn header(lots: usize) -> Header {
             reason: "none".into(),
         },
         security: Security::Gates,
+        rigor: Default::default(),
+        mutation_threshold: None,
         arbiter: None,
         run: None,
         account: None,
@@ -58,6 +60,8 @@ impl World {
                 run: None,
                 services_file: None,
                 permission_mode: "auto".to_string(),
+                rigor: None,
+                mutation_threshold: 80,
                 forge_protection: Default::default(),
             },
             hq_root.parent().unwrap().to_path_buf(),
@@ -163,6 +167,28 @@ fn an_unchanged_framing_is_reported_as_unchanged() {
     let seen = lifecycle::reframe(&world.project, "m1", true).unwrap();
     assert!(seen.changes.is_empty(), "{:?}", seen.changes);
     assert!(!seen.applied);
+}
+
+/// A change of rigor is a change of what verification will ask, and reframe
+/// names it with both values, so the human decides on the move and not on
+/// the fact that something moved. Applied, the frozen header carries it.
+#[test]
+fn reframing_names_a_changed_rigor() {
+    let world = World::new(2);
+    let mut fresh = header(2);
+    fresh.rigor = Rigor::Standard;
+    world.reframe_file(&fresh);
+
+    let seen = lifecycle::reframe(&world.project, "m1", false).unwrap();
+    assert_eq!(seen.changes.len(), 1, "{:?}", seen.changes);
+    let change = &seen.changes[0];
+    assert_eq!(change.what, "rigor");
+    assert_eq!(change.from, "critical");
+    assert_eq!(change.to, "standard");
+    assert_eq!(world.state().flow.header().rigor, Rigor::Critical);
+
+    lifecycle::reframe(&world.project, "m1", true).unwrap();
+    assert_eq!(world.state().flow.header().rigor, Rigor::Standard);
 }
 
 /// Reframing under a running agent would change the perimeter the agent is
@@ -339,6 +365,7 @@ fn every_decision_in_the_framing_is_compared() {
     fresh.base = "main".into();
     fresh.lots[1].title = "something else entirely".into();
     fresh.security = Security::Agent;
+    fresh.rigor = Rigor::Standard;
     fresh.arbiter = Some("Sam".into());
     fresh.account = Some("pro".into());
     fresh.run = Some("none".into());
@@ -350,7 +377,7 @@ fn every_decision_in_the_framing_is_compared() {
     assert_eq!(
         what,
         vec![
-            "branch", "base", "lots", "security", "arbiter", "account", "run", "bounds"
+            "branch", "base", "lots", "security", "rigor", "arbiter", "account", "run", "bounds"
         ],
         "{:?}",
         seen.changes
@@ -614,4 +641,19 @@ fn taking_a_mission_back_without_saying_what_changed_is_refused() {
     let world = World::new(1);
     let err = lifecycle::retry(&world.project, "m1", " \n\t").unwrap_err();
     assert!(matches!(err, LifecycleError::NoChange), "{err}");
+}
+
+/// A changed frozen threshold is a change of what a `standard` gate 7
+/// asks, and reframe names it.
+#[test]
+fn reframing_names_a_changed_mutation_threshold() {
+    let world = World::new(2);
+    let mut fresh = header(2);
+    fresh.mutation_threshold = Some(90);
+    world.reframe_file(&fresh);
+    let seen = lifecycle::reframe(&world.project, "m1", false).unwrap();
+    assert_eq!(seen.changes.len(), 1, "{:?}", seen.changes);
+    assert_eq!(seen.changes[0].what, "mutation threshold");
+    assert_eq!(seen.changes[0].from, "—");
+    assert_eq!(seen.changes[0].to, "90%");
 }

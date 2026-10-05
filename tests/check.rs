@@ -24,6 +24,8 @@ fn config() -> Config {
         run: None,
         services_file: None,
         permission_mode: "auto".to_string(),
+        rigor: None,
+        mutation_threshold: 80,
         forge_protection: Default::default(),
     }
 }
@@ -298,6 +300,42 @@ fn a_malformed_config_names_the_file_and_the_reason() {
     assert!(err.to_string().contains("nunki.yaml"), "{err}");
 }
 
+/// `mutation_threshold` is a whole percentage from 1 to 100, refused outside
+/// it when `nunki.yaml` is read rather than clamped: 0 would pass a campaign
+/// that killed nothing, and above 100 nothing could pass. Both edges are
+/// accepted, and an absent value is 80.
+#[test]
+fn a_mutation_threshold_outside_one_to_a_hundred_is_refused_when_the_config_is_read() {
+    let open = |body: &str| {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        let home = common::project_home(&root, dir.path(), body);
+        Project::open_at(root, home)
+    };
+    for bad in ["0", "101", "-5"] {
+        let err = open(&format!(
+            "harness: claude-code\nmutation_threshold: {bad}\n"
+        ))
+        .unwrap_err();
+        assert!(matches!(err, ProjectError::Invalid(..)), "{bad}: {err}");
+        assert!(err.to_string().contains("nunki.yaml"), "{bad}: {err}");
+        assert!(
+            err.to_string().contains("mutation_threshold"),
+            "{bad}: {err}"
+        );
+    }
+    for edge in [1, 100] {
+        let project = open(&format!(
+            "harness: claude-code\nmutation_threshold: {edge}\n"
+        ))
+        .unwrap();
+        assert_eq!(project.config.mutation_threshold, edge);
+    }
+    let project = open("harness: claude-code\n").unwrap();
+    assert_eq!(project.config.mutation_threshold, 80);
+    assert_eq!(project.config.rigor, None);
+}
+
 /// The home is named after the repository's directory, so two repositories
 /// with the same name reach the same home. The second is refused rather than
 /// handed the first one's configuration, HQ and missions.
@@ -468,8 +506,33 @@ fn the_verb_is_green_on_this_very_repository() {
     // repository lets the forge hold the rule, and a home of its own has no
     // credential to ask it with: every protected branch is named as not
     // checked, and why — never read off the forge from a test, never red.
-    assert!(text.contains("main is protected on the forge"), "{text}");
-    assert!(text.contains("no forge credential"), "{text}");
+    assert!(
+        text.contains("--  main is protected on the forge"),
+        "not checked, and said so: {text}"
+    );
+    // Why it was not checked depends on the clone this runs in, and the
+    // test must not assume one. A clone of GitHub — a developer's, CI's —
+    // has a forge to ask and no credential to ask it with. A nunki slot's
+    // `origin` is the path it was cloned from, which no adapter speaks for.
+    // Asserting the first everywhere was asserting something about the
+    // machine again, and it was red in every slot nunki gates this
+    // repository in.
+    let why = match std::process::Command::new("git")
+        .arg("-C")
+        .arg(env!("CARGO_MANIFEST_DIR"))
+        .args(["remote", "get-url", "origin"])
+        .output()
+    {
+        Ok(out) if out.status.success() => {
+            if String::from_utf8_lossy(&out.stdout).contains("github.com") {
+                "no forge credential"
+            } else {
+                "the remote is on a forge nunki has no adapter for"
+            }
+        }
+        _ => "has no `origin` remote",
+    };
+    assert!(text.contains(why), "expected {why:?}: {text}");
 }
 
 /// A home is one directory under `~/.nunki/`, named by the session's

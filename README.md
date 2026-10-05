@@ -160,6 +160,35 @@ GitHub is the one forge `nunki` has an adapter for. A remote on another one is
 **said to be on another one**: the branch is still pushed, and no address is
 guessed at from a shape that is GitHub's.
 
+## Choosing a rigor
+
+A mission declares how much verification asks of it, with `--rigor` on
+`mission new`, or for the whole project with `rigor:` in `nunki.yaml`:
+
+| | `prototype` | `standard` | `critical` (the default) |
+|---|---|---|---|
+| Gate 7, the mutation campaign | not played | passes when the share of tried mutants killed reaches `mutation_threshold` (80 unless `nunki.yaml` says otherwise) | every survivor needs an outcome |
+| Security agent rounds | none | at most 1 | at most 3 |
+| Integration | none | as declared | as declared |
+
+`critical` is what a mission that says nothing gets. Use `standard` for
+ordinary work, where a good share of killed mutants and one security round
+are enough. Keep `critical` for code exposed to hostile input. A `prototype`
+runs the coder and the mechanical gates only, so `mission new`, the start of
+the mission and `mission reframe` all refuse one with a service or a security
+agent.
+
+Python and Next.js projects judge `standard` as `critical` until their
+campaigns count changed lines: mutmut and Stryker are run over whole touched
+files, so they give no count, and every survivor needs an outcome there.
+
+The rigor is frozen in the header like the bounds, and `mission reframe`
+shows a change of it. Once the security rounds are spent, the agent is not
+called again. A spent cap never verifies a red verdict: if the last round
+concluded `FINDINGS`, green gates bring the mission back to those findings,
+where `mission accept` lifts them or `mission iterate` spends a volet, and
+`FOLLOWUP_HQ.md` says the fix was not attacked again. `nunki mission status` prints the rigor and the rounds played.
+
 ## Vocabulary
 
 The mission is the parent of everything else. It moves through **stages**;

@@ -300,6 +300,8 @@ fn context(dir: &Path) -> (nunki::project::Project, nunki::slot::Slot) {
             run: None,
             services_file: None,
             permission_mode: "auto".to_string(),
+            rigor: None,
+            mutation_threshold: 80,
             forge_protection: Default::default(),
         },
         dir.join("nunki"),
@@ -509,6 +511,7 @@ fn a_campaign_round_trips_through_the_mission_folder() {
     let campaign = Campaign {
         fingerprint: "abc1234".into(),
         head: "def5678".into(),
+        tried: None,
         date: "2026-09-10T12:00:00Z".into(),
         survivors: vec![Survivor {
             id: "src/lib.rs:3".into(),
@@ -615,6 +618,8 @@ fn live_a_campaign_is_launched_watched_and_read_back() {
             run: None,
             services_file: None,
             permission_mode: "auto".to_string(),
+            rigor: None,
+            mutation_threshold: 80,
             forge_protection: Default::default(),
         },
         dir.path().join("nunki"),
@@ -793,6 +798,7 @@ fn an_equivalence_is_ruled_by_a_verb_and_lands_in_the_hqs_own_file() {
         &Campaign {
             fingerprint: "abc1234".into(),
             head: "def5678".into(),
+            tried: None,
             date: "2026-09-10T12:00:00Z".into(),
             survivors: vec![Survivor {
                 id: "src/lib.rs:3".into(),
@@ -847,6 +853,7 @@ fn ruled_before(dir: &std::path::Path, survivors: Vec<Survivor>) {
             head: "def5678".into(),
             date: "2026-09-10T12:00:00Z".into(),
             survivors,
+            tried: None,
         },
     )
     .unwrap();
@@ -1319,6 +1326,7 @@ fn on_file(dir: &std::path::Path, fingerprint: &str, survivors: usize) {
             head: "0".repeat(40),
             date: "2026-09-17T00:00:00Z".into(),
             survivors,
+            tried: None,
         },
     )
     .unwrap();
@@ -1502,4 +1510,471 @@ fn live_the_shipped_mutation_script_answers_for_the_changed_lines() {
         !survivors.is_empty(),
         "`double` is only checked for being positive: {stdout}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// How many mutants a campaign tried, for a `standard` mission's gate 7.
+// ---------------------------------------------------------------------------
+
+/// The count is the script's own word on its terminal line, and nothing
+/// else: a line without it, a log without a terminal line, or a count on a
+/// line that is not the terminal one all say "I do not know".
+#[test]
+fn the_tried_count_is_read_from_the_terminal_line_only() {
+    let log = "Found 12 mutants to test\n\
+               {\"id\":\"a\",\"file\":\"src/lib.rs\",\"line\":3,\"description\":\"x\"}\n\
+               {\"campaign\":\"done\",\"tried\":12}\n";
+    assert!(mutants::completed(log), "a count does not hide the end");
+    assert_eq!(mutants::tried(log), Some(12));
+    assert_eq!(mutants::parse(log).len(), 1);
+
+    assert_eq!(mutants::tried("{\"campaign\":\"done\"}\n"), None);
+    assert_eq!(
+        mutants::tried("{\"campaign\":\"started\",\"tried\":4}\n"),
+        None
+    );
+    assert_eq!(mutants::tried(""), None);
+    assert_eq!(
+        mutants::tried("{\"campaign\":\"done\",\"tried\":0}\n"),
+        Some(0)
+    );
+}
+
+/// A finished campaign keeps its count in `MUTANTS.json`; one without a
+/// count writes no `tried` at all, so a campaign file is byte for byte what
+/// it was before the count existed, and an older file reads as `None`.
+#[test]
+fn a_campaign_records_how_many_mutants_it_tried_and_an_older_file_still_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    mutants::record_finished(
+        dir.path(),
+        "abc1234",
+        "def5678",
+        "{\"id\":\"a\",\"file\":\"src/lib.rs\",\"line\":3,\"description\":\"x\"}\n\
+         {\"campaign\":\"done\",\"tried\":7}\n",
+    )
+    .unwrap();
+    let campaign = mutants::read(dir.path()).unwrap().unwrap();
+    assert_eq!(campaign.tried, Some(7));
+    assert_eq!(campaign.survivors.len(), 1);
+
+    let older = tempfile::tempdir().unwrap();
+    mutants::record_finished(
+        older.path(),
+        "abc1234",
+        "def5678",
+        "{\"campaign\":\"done\"}\n",
+    )
+    .unwrap();
+    let text = std::fs::read_to_string(older.path().join(mutants::FILE)).unwrap();
+    assert!(!text.contains("tried"), "{text}");
+    assert_eq!(mutants::read(older.path()).unwrap().unwrap().tried, None);
+
+    std::fs::write(
+        older.path().join(mutants::FILE),
+        "{\"fingerprint\":\"f\",\"head\":\"h\",\"date\":\"d\",\"survivors\":[]}\n",
+    )
+    .unwrap();
+    assert_eq!(mutants::read(older.path()).unwrap().unwrap().tried, None);
+}
+
+/// Two stacks, each with a `mutation.sh` of its own, run by the script
+/// `nunki` hands a project that carries both.
+struct TwoStacks {
+    _dir: tempfile::TempDir,
+    tree: PathBuf,
+    judged: Vec<nunki::run::Judged>,
+}
+
+impl TwoStacks {
+    fn new(root_script: &str, frontend_script: &str) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let tree = dir.path().join("tree");
+        std::fs::create_dir_all(tree.join("frontend/app")).unwrap();
+        let mut judged = Vec::new();
+        for (name, sub, body) in [
+            ("rust", "", root_script),
+            ("next", "frontend", frontend_script),
+        ] {
+            let at = dir.path().join(format!("stack-{name}"));
+            std::fs::create_dir_all(&at).unwrap();
+            let script = at.join(mutants::SCRIPT);
+            std::fs::write(&script, body).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            judged.push(nunki::run::Judged {
+                stack: nunki::project::Stack::new(name, sub).unwrap(),
+                scripts_at: at.display().to_string(),
+                advisories_at: String::new(),
+            });
+        }
+        Self {
+            _dir: dir,
+            tree,
+            judged,
+        }
+    }
+
+    fn run(&self) -> String {
+        let touched = vec!["src/lib.rs".to_string(), "frontend/app/page.ts".to_string()];
+        let script = mutants::several_campaigns(&self.judged, "abc1234", &touched);
+        let out = Command::new("sh")
+            .args(["-c", &script])
+            .current_dir(&self.tree)
+            .output()
+            .expect("sh runs the campaign");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+}
+
+fn says(lines: &[&str]) -> String {
+    let mut script = String::from("#!/bin/sh\n");
+    for line in lines {
+        script.push_str(&format!("printf '%s\\n' '{line}'\n"));
+    }
+    script
+}
+
+/// Over several stacks the count is the sum of theirs, and only when every
+/// stack that ran gave one: a sum missing one stack's mutants is a share of
+/// the wrong whole.
+#[cfg(unix)]
+#[test]
+fn a_campaign_over_several_stacks_adds_up_what_each_tried() {
+    let rust = says(&[
+        r#"{"id":"1","file":"src/lib.rs","line":2,"description":"x"}"#,
+        r#"{"campaign":"done","tried":3}"#,
+    ]);
+    let next = says(&[r#"{"campaign":"done","tried":4}"#]);
+    let out = TwoStacks::new(&rust, &next).run();
+    assert!(mutants::completed(&out), "{out}");
+    assert_eq!(mutants::tried(&out), Some(7), "{out}");
+    assert_eq!(mutants::parse(&out).len(), 1, "{out}");
+
+    // One stack whose script predates the count: the campaign finished, and
+    // says it does not know how many were tried.
+    let older = says(&[r#"{"campaign":"done"}"#]);
+    let out = TwoStacks::new(&rust, &older).run();
+    assert!(mutants::completed(&out), "{out}");
+    assert_eq!(mutants::tried(&out), None, "{out}");
+}
+
+/// A stack that printed nothing did not finish, whatever jq's exit status
+/// says: jq 1.6 — Debian bookworm's — exits 0 under `-e` on an empty input,
+/// and the check that relied on it counted a silent stack as done.
+#[cfg(unix)]
+#[test]
+fn a_stack_that_printed_nothing_has_not_finished_the_campaign() {
+    let rust = says(&[r#"{"campaign":"done","tried":3}"#]);
+    let out = TwoStacks::new(&rust, "#!/bin/sh\nexit 0\n").run();
+    assert!(!mutants::completed(&out), "{out}");
+    let out = TwoStacks::new(&rust, "#!/bin/sh\necho progress\nexit 1\n").run();
+    assert!(!mutants::completed(&out), "{out}");
+}
+
+// ---------------------------------------------------------------------------
+// A campaign that found mutants and tried none did not measure (security
+// round 1 on the rigor mission, HQ ruling).
+// ---------------------------------------------------------------------------
+
+/// Found some, tried none: not measured, whatever the terminal line says.
+/// Found none, or a line that does not say, is not this rule's to judge.
+#[test]
+fn a_campaign_that_found_mutants_and_tried_none_did_not_measure() {
+    let log = "{\"campaign\":\"done\",\"tried\":0,\"found\":78}\n";
+    assert!(mutants::completed(log));
+    assert_eq!(mutants::found(log), Some(78));
+    let why = mutants::unmeasured(log).expect("78 found and none tried");
+    assert!(
+        why.contains("found 78") && why.contains("measured nothing"),
+        "{why}"
+    );
+
+    // One mutant found and none tried is as unmeasured as 78.
+    assert!(mutants::unmeasured("{\"campaign\":\"done\",\"tried\":0,\"found\":1}\n").is_some());
+    // A count of found without one of tried is no count at all, which gate 7
+    // judges as `critical` does, and not a campaign that said it tried
+    // nothing (HQ review).
+    assert_eq!(
+        mutants::unmeasured("{\"campaign\":\"done\",\"found\":3}\n"),
+        None
+    );
+    for measured in [
+        "{\"campaign\":\"done\",\"tried\":0,\"found\":0}\n",
+        "{\"campaign\":\"done\",\"tried\":1,\"found\":78}\n",
+        "{\"campaign\":\"done\",\"tried\":5}\n",
+        "{\"campaign\":\"done\"}\n",
+        "",
+    ] {
+        assert_eq!(mutants::unmeasured(measured), None, "{measured:?}");
+    }
+}
+
+/// Settling one appends the reason to the campaign's stderr, where gate 7
+/// reads why a campaign could not run, and leaves a measured one alone.
+#[test]
+fn an_unmeasured_campaign_leaves_its_reason_where_gate_seven_reads_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("mutants-abc1234.log");
+    let err = log.with_extension("err");
+    std::fs::write(&err, "Found 78 mutants to test\n").unwrap();
+
+    let why =
+        mutants::settle_unmeasured(&log, "{\"campaign\":\"done\",\"tried\":0,\"found\":78}\n")
+            .unwrap()
+            .expect("not measured");
+    assert!(why.contains("measured nothing"), "{why}");
+    let said = std::fs::read_to_string(&err).unwrap();
+    assert!(
+        said.starts_with("Found 78 mutants to test\n"),
+        "appended: {said}"
+    );
+    assert!(said.contains("nunki: the campaign found 78"), "{said}");
+
+    let measured = dir.path().join("mutants-def5678.log");
+    assert_eq!(
+        mutants::settle_unmeasured(
+            &measured,
+            "{\"campaign\":\"done\",\"tried\":3,\"found\":3}\n"
+        )
+        .unwrap(),
+        None
+    );
+    assert!(!measured.with_extension("err").exists());
+}
+
+/// Over several stacks `found` is summed like `tried`, and given only when
+/// every stack gave one.
+#[cfg(unix)]
+#[test]
+fn a_campaign_over_several_stacks_adds_up_what_each_found() {
+    let rust = says(&[r#"{"campaign":"done","tried":3,"found":5}"#]);
+    let next = says(&[r#"{"campaign":"done","tried":4,"found":4}"#]);
+    let out = TwoStacks::new(&rust, &next).run();
+    assert_eq!(mutants::tried(&out), Some(7), "{out}");
+    assert_eq!(mutants::found(&out), Some(9), "{out}");
+
+    let older = says(&[r#"{"campaign":"done","tried":4}"#]);
+    let out = TwoStacks::new(&rust, &older).run();
+    assert_eq!(mutants::tried(&out), Some(7), "{out}");
+    assert_eq!(mutants::found(&out), None, "{out}");
+
+    // A stack that found mutants and tried none leaves the whole campaign
+    // unfinished, even beside a stack that tried nothing either.
+    let none = says(&[r#"{"campaign":"done","tried":0,"found":12}"#]);
+    let empty = says(&[r#"{"campaign":"done","tried":0,"found":0}"#]);
+    let out = TwoStacks::new(&none, &empty).run();
+    assert!(!mutants::completed(&out), "{out}");
+}
+
+/// One stack that found mutants and tried none measured nothing, and the
+/// sum must not hide it behind another stack's count.
+#[cfg(unix)]
+#[test]
+fn a_stack_that_found_mutants_and_tried_none_leaves_the_campaign_unfinished() {
+    let none = says(&[r#"{"campaign":"done","tried":0,"found":12}"#]);
+    let some = says(&[r#"{"campaign":"done","tried":5,"found":5}"#]);
+    let out = TwoStacks::new(&none, &some).run();
+    assert!(!mutants::completed(&out), "{out}");
+    let out = TwoStacks::new(&some, &none).run();
+    assert!(!mutants::completed(&out), "{out}");
+}
+
+/// Read back, a campaign that said it finished having found mutants and
+/// tried none is not recorded: it goes back to the branch as one that could
+/// not run, with its reason left where gate 7 reads it.
+#[test]
+fn a_finished_campaign_that_tried_nothing_of_what_it_found_is_not_recorded() {
+    use nunki::engine::{ExecOutput, fake::FakeEngine};
+
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot) = context(dir.path());
+    let tree = slot.tree.clone();
+    let profile = nunki::run::profile_path(&project, &slot.name);
+    std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+    std::fs::write(&profile, "services: {}\n").unwrap();
+
+    let mission = dir.path().join("mission");
+    std::fs::create_dir_all(&mission).unwrap();
+    let log = mission.join("mutants.log");
+    std::fs::write(&log, "{\"campaign\":\"done\",\"tried\":0,\"found\":12}\n").unwrap();
+    mutants::write_running(
+        &project.hq_root,
+        &slot.name,
+        &mutants::Running {
+            fingerprint: "abc1234".into(),
+            head: git(&tree, &["rev-parse", "HEAD"]),
+            started_at: "2026-09-19T02:00:00Z".into(),
+            container: "cafe1234".into(),
+            pid: Some(41),
+            log: log.clone(),
+            deadline_minutes: 45,
+        },
+    )
+    .unwrap();
+    let engine: std::sync::Arc<dyn nunki::engine::Engine> = std::sync::Arc::new(
+        FakeEngine::default()
+            .with_liveness("cafe1234", nunki::engine::Liveness::Running)
+            .with_exec(ExecOutput {
+                status: 0,
+                stdout: "nunki-run-ended\n".into(),
+                stderr: String::new(),
+            }),
+    );
+
+    let progress = mutants::campaign(
+        &project,
+        &slot,
+        engine,
+        &mission,
+        "rust",
+        "dev",
+        45,
+        mutants::Replay::WhenChanged,
+    )
+    .unwrap();
+
+    let mutants::Progress::CouldNotRun(why) = progress else {
+        panic!("a campaign that tried none of 12 was read as {progress:?}");
+    };
+    assert!(why.contains("measured nothing"), "{why}");
+    assert_eq!(mutants::read(&mission).unwrap(), None, "nothing recorded");
+    let said = std::fs::read_to_string(log.with_extension("err")).unwrap();
+    assert!(said.contains("found 12"), "{said}");
+    assert!(
+        mutants::read_running(&project.hq_root, &slot.name)
+            .unwrap()
+            .is_none()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A campaign says it finished once (HQ review of the rigor mission).
+// ---------------------------------------------------------------------------
+
+/// A log with two done lines is not a finished campaign, whichever of them
+/// carries the bigger count: the first and the last are both a line
+/// something else could have written, so neither is read.
+#[test]
+fn a_log_that_says_it_finished_twice_is_not_a_finished_campaign() {
+    let survivor = "{\"id\":\"a\",\"file\":\"src/lib.rs\",\"line\":3,\"description\":\"x\"}\n";
+    for log in [
+        format!(
+            "{{\"campaign\":\"done\",\"tried\":1000}}\n{survivor}{{\"campaign\":\"done\",\"tried\":3}}\n"
+        ),
+        format!(
+            "{survivor}{{\"campaign\":\"done\",\"tried\":3}}\n{{\"campaign\":\"done\",\"tried\":1000}}\n"
+        ),
+    ] {
+        assert!(!mutants::completed(&log), "{log}");
+        assert_eq!(mutants::tried(&log), None, "{log}");
+        let why = mutants::repeated(&log).expect("said twice");
+        assert!(why.contains("finished 2 times"), "{why}");
+    }
+    let once = format!("{survivor}{{\"campaign\":\"done\",\"tried\":3}}\n");
+    assert!(mutants::completed(&once));
+    assert_eq!(mutants::tried(&once), Some(3));
+    assert_eq!(mutants::repeated(&once), None);
+    assert_eq!(mutants::repeated(""), None);
+}
+
+/// Read back by the monitor, such a log is a campaign that could not run,
+/// with its reason where gate 7 reads it — not a lost campaign, and nothing
+/// is recorded.
+#[test]
+fn a_campaign_that_said_it_finished_twice_leaves_its_reason_and_no_result() {
+    use nunki::engine::{ExecOutput, fake::FakeEngine};
+
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot) = context(dir.path());
+    let tree = slot.tree.clone();
+    let profile = nunki::run::profile_path(&project, &slot.name);
+    std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+    std::fs::write(&profile, "services: {}\n").unwrap();
+
+    let mission = dir.path().join("mission");
+    std::fs::create_dir_all(&mission).unwrap();
+    let log = mission.join("mutants.log");
+    std::fs::write(
+        &log,
+        "{\"campaign\":\"done\",\"tried\":1000,\"found\":1000}\n\
+         {\"id\":\"a\",\"file\":\"src/lib.rs\",\"line\":3,\"description\":\"replace one\"}\n\
+         {\"campaign\":\"done\",\"tried\":1,\"found\":1}\n",
+    )
+    .unwrap();
+    mutants::write_running(
+        &project.hq_root,
+        &slot.name,
+        &mutants::Running {
+            fingerprint: "abc1234".into(),
+            head: git(&tree, &["rev-parse", "HEAD"]),
+            started_at: "2026-09-19T02:00:00Z".into(),
+            container: "cafe1234".into(),
+            pid: Some(41),
+            log: log.clone(),
+            deadline_minutes: 45,
+        },
+    )
+    .unwrap();
+    let engine: std::sync::Arc<dyn nunki::engine::Engine> = std::sync::Arc::new(
+        FakeEngine::default()
+            .with_liveness("cafe1234", nunki::engine::Liveness::Running)
+            .with_exec(ExecOutput {
+                status: 0,
+                stdout: "nunki-run-ended\n".into(),
+                stderr: String::new(),
+            }),
+    );
+
+    let progress = mutants::campaign(
+        &project,
+        &slot,
+        engine,
+        &mission,
+        "rust",
+        "dev",
+        45,
+        mutants::Replay::WhenChanged,
+    )
+    .unwrap();
+
+    let mutants::Progress::CouldNotRun(why) = progress else {
+        panic!("a log that said it finished twice was read as {progress:?}");
+    };
+    assert!(why.contains("finished 2 times"), "{why}");
+    let said = std::fs::read_to_string(log.with_extension("err")).unwrap();
+    assert!(
+        said.contains("nunki: the campaign said it had finished 2 times"),
+        "{said}"
+    );
+    assert_eq!(mutants::read(&mission).unwrap(), None);
+    assert!(
+        mutants::read_running(&project.hq_root, &slot.name)
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// Over several stacks, a stack that said it finished twice did not finish,
+/// by the same rule — and a stack that said it once still counts.
+#[cfg(unix)]
+#[test]
+fn a_stack_that_said_it_finished_twice_has_not_finished_the_campaign() {
+    let rust = says(&[r#"{"campaign":"done","tried":3,"found":3}"#]);
+    let twice = says(&[
+        r#"{"campaign":"done","tried":1000,"found":1000}"#,
+        r#"{"campaign":"done","tried":4,"found":4}"#,
+    ]);
+    let out = TwoStacks::new(&rust, &twice).run();
+    assert!(!mutants::completed(&out), "{out}");
+    assert_eq!(
+        mutants::repeated(&out),
+        None,
+        "no done line is left at all: {out}"
+    );
+
+    let once = says(&[r#"{"campaign":"done","tried":4,"found":4}"#]);
+    let out = TwoStacks::new(&rust, &once).run();
+    assert!(mutants::completed(&out), "{out}");
+    assert_eq!(mutants::tried(&out), Some(7), "{out}");
 }

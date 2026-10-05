@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::harness::{Outcome, Role};
 
-use super::{Header, Verdict};
+use super::{Header, RigorError, Verdict};
 
 /// Which piece of work a coder run is for.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,6 +117,12 @@ pub enum FlowError {
          recorded which work it stopped on — reframe it, or start it again"
     )]
     NothingToResume,
+    /// The header asks for a role its rigor does not run. Said where a header
+    /// is frozen — at the start of a mission and at a reframe — and not
+    /// only by `mission new`, which a header written by hand never went
+    /// through.
+    #[error(transparent)]
+    Rigor(#[from] RigorError),
 }
 
 /// The state machine. Serializable, so the engine persists it at every
@@ -142,6 +148,33 @@ pub struct Flow {
     /// guessing which work it was.
     #[serde(default)]
     resume_with: Option<Work>,
+    /// Verdicts the security agent has concluded, `CLEAR` or `FINDINGS`:
+    /// its rounds, bounded by the mission's rigor
+    /// ([`super::Rigor::max_security_rounds`]). `serde(default)` because
+    /// state written before the count reads it as zero.
+    #[serde(default)]
+    security_rounds: u32,
+    /// Set when the flow went past the security stage without the agent
+    /// because its rounds were spent, and taken once by whoever records it
+    /// in the follow-up ([`Flow::take_security_cap`]). This module writes no
+    /// file, so it leaves the fact here rather than losing it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    security_cap: Option<SecurityCap>,
+    /// The report of the last `FINDINGS` the security agent concluded, while
+    /// no `CLEAR` has followed it. A spent round cap brings the mission back
+    /// to it rather than verifying a branch whose last verdict was red
+    /// (SPEC 4.5). `serde(default)` because state written before it reads
+    /// as "no findings held".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_findings: Option<String>,
+}
+
+/// The security agent was not launched because its rounds were spent:
+/// `rounds` played, `max` allowed by the rigor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecurityCap {
+    pub rounds: u32,
+    pub max: u32,
 }
 
 impl Flow {
@@ -150,6 +183,7 @@ impl Flow {
         if header.lots.is_empty() {
             return Err(FlowError::NoLots);
         }
+        admitted(&header)?;
         Ok(Self {
             header,
             stage: Stage::Coding {
@@ -160,6 +194,9 @@ impl Flow {
             volet_causes: Vec::new(),
             attempts: HashMap::new(),
             resume_with: None,
+            security_rounds: 0,
+            security_cap: None,
+            last_findings: None,
         })
     }
 
@@ -196,6 +233,7 @@ impl Flow {
                 lots: header.lots.len(),
             });
         }
+        admitted(&header)?;
         self.header = header;
         Ok(())
     }
@@ -213,6 +251,22 @@ impl Flow {
     /// Returns to the coder used so far.
     pub fn volets(&self) -> u32 {
         self.volets
+    }
+
+    /// Rounds the security agent has played: verdicts it concluded.
+    pub fn security_rounds(&self) -> u32 {
+        self.security_rounds
+    }
+
+    /// Rounds the security agent may play on this mission, by its rigor.
+    pub fn max_security_rounds(&self) -> u32 {
+        self.header.rigor.max_security_rounds()
+    }
+
+    /// The round cap the flow ran into past the security stage, once: the
+    /// caller records it in the follow-up, and a second call says nothing.
+    pub fn take_security_cap(&mut self) -> Option<SecurityCap> {
+        self.security_cap.take()
     }
 
     /// Apply an event; returns the new stage. An event that makes no sense
@@ -294,14 +348,22 @@ impl Flow {
                     verdict: Verdict::Clear,
                     ..
                 },
-            ) => Stage::Verified,
+            ) => {
+                self.security_rounds += 1;
+                self.last_findings = None;
+                Stage::Verified
+            }
             (
                 Stage::SecurityAgent { .. },
                 Event::Verdict {
                     verdict: Verdict::Findings,
                     report,
                 },
-            ) => Stage::Findings { report },
+            ) => {
+                self.security_rounds += 1;
+                self.last_findings = Some(report.clone());
+                Stage::Findings { report }
+            }
             (Stage::Findings { report }, Event::Iterate) => {
                 self.volet(format!("security FINDINGS: {report}"))
             }
@@ -382,22 +444,50 @@ impl Flow {
     }
 
     /// The stage after the final gates: what the mission's shape declares.
-    fn after_gates(&self) -> Stage {
+    fn after_gates(&mut self) -> Stage {
         if self.header.has_integration() {
             Stage::Integration { attempt: 1 }
-        } else if self.header.has_security_agent() {
-            Stage::SecurityAgent { attempt: 1 }
         } else {
-            Stage::Verified
+            self.security_or_verified()
         }
     }
 
-    fn after_integration(&self) -> Stage {
-        if self.header.has_security_agent() {
-            Stage::SecurityAgent { attempt: 1 }
-        } else {
-            Stage::Verified
+    fn after_integration(&mut self) -> Stage {
+        self.security_or_verified()
+    }
+
+    /// The security agent, when the mission declares one and it has a round
+    /// left; otherwise `Verified`, or the last findings. An `iterate` after
+    /// the last round still runs and is gated as usual; only the next round
+    /// is not played, and the cap is left for the follow-up to record
+    /// (SPEC 4.5).
+    ///
+    /// A spent cap never turns a red verdict green. When the last verdict
+    /// concluded is `FINDINGS`, the mission goes back to it, with its
+    /// report, so that the verbs a `FINDINGS` already has decide: `accept`
+    /// lifts it, `iterate` spends a volet. Verifying it here would make
+    /// `Verified` reachable with no `CLEAR` and no human lift, and the
+    /// volet that answered the findings has not been attacked again. The
+    /// same holds whichever way the coder got here — an iterate, a review,
+    /// a retry — because the rule reads the verdict, not the way back.
+    fn security_or_verified(&mut self) -> Stage {
+        if !self.header.has_security_agent() {
+            return Stage::Verified;
         }
+        let max = self.max_security_rounds();
+        if self.security_rounds >= max {
+            self.security_cap = Some(SecurityCap {
+                rounds: self.security_rounds,
+                max,
+            });
+            return match &self.last_findings {
+                Some(report) => Stage::Findings {
+                    report: report.clone(),
+                },
+                None => Stage::Verified,
+            };
+        }
+        Stage::SecurityAgent { attempt: 1 }
     }
 
     /// One more attempt on the same coder work, or the human once the bound
@@ -472,4 +562,15 @@ impl Flow {
             attempt: 1,
         }
     }
+}
+
+/// Refuse a header whose rigor does not run the roles it declares
+/// ([`super::Rigor::admits`]): a prototype with services or a security
+/// agent. `mission new` already says it, but a header can be written by
+/// hand and frozen without going through it.
+fn admitted(header: &Header) -> Result<(), FlowError> {
+    header
+        .rigor
+        .admits(header.has_integration(), header.has_security_agent())?;
+    Ok(())
 }

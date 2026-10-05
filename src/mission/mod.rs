@@ -66,6 +66,102 @@ pub enum Security {
     Agent,
 }
 
+/// How much a mission's verification asks of it: what gate 7 demands, how
+/// many security rounds are played, which roles run (SPEC 2, 4.4 gate 7,
+/// 4.5). `critical` is what every mission got before a rigor could be
+/// declared, and it stays the default, so a header or a `nunki.yaml` that
+/// says nothing keeps that treatment.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Rigor {
+    /// The coder and the mechanical gates only: no mutation campaign, no
+    /// security agent, no integration.
+    Prototype,
+    /// Gate 7 passes on the project's share of killed mutants rather than
+    /// on an outcome per survivor, and the security agent plays one round.
+    Standard,
+    /// An outcome for every survivor, and up to three security rounds.
+    #[default]
+    Critical,
+}
+
+impl Rigor {
+    /// The rigor `mission new` freezes into a header: the flag when one is
+    /// given, else the project's `rigor:` in `nunki.yaml`, else `critical`.
+    pub fn chosen(flag: Option<Rigor>, project: Option<Rigor>) -> Rigor {
+        flag.or(project).unwrap_or_default()
+    }
+
+    /// How many rounds the security agent may play on a mission of this
+    /// rigor (SPEC 4.5). A round is one verdict it concludes; once they are
+    /// spent, green gates bring the mission back to the last `FINDINGS`, or
+    /// verify it when the last verdict was a `CLEAR`.
+    pub fn max_security_rounds(self) -> u32 {
+        match self {
+            Rigor::Prototype => 0,
+            Rigor::Standard => 1,
+            Rigor::Critical => 3,
+        }
+    }
+
+    /// Whether a mission framed at this rigor may declare services or call
+    /// the security agent. A prototype runs the coder and the mechanical
+    /// gates only, so asking it for either is a contradiction said at
+    /// framing rather than discovered at verification.
+    pub fn admits(self, services: bool, security_agent: bool) -> Result<(), RigorError> {
+        if self != Rigor::Prototype {
+            return Ok(());
+        }
+        if services {
+            return Err(RigorError::PrototypeWithServices);
+        }
+        if security_agent {
+            return Err(RigorError::PrototypeWithSecurityAgent);
+        }
+        Ok(())
+    }
+}
+
+impl std::fmt::Display for Rigor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Rigor::Prototype => "prototype",
+            Rigor::Standard => "standard",
+            Rigor::Critical => "critical",
+        })
+    }
+}
+
+impl std::str::FromStr for Rigor {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        match text {
+            "prototype" => Ok(Rigor::Prototype),
+            "standard" => Ok(Rigor::Standard),
+            "critical" => Ok(Rigor::Critical),
+            other => Err(format!(
+                "a rigor is prototype, standard or critical, and {other:?} is none of them"
+            )),
+        }
+    }
+}
+
+/// A framing the chosen rigor contradicts.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RigorError {
+    #[error(
+        "a prototype runs the coder and the mechanical gates only, so it declares no \
+         service: drop --service, or frame the mission at standard or critical"
+    )]
+    PrototypeWithServices,
+    #[error(
+        "a prototype runs the coder and the mechanical gates only, so it calls no \
+         security agent: drop --security-agent, or frame the mission at standard or critical"
+    )]
+    PrototypeWithSecurityAgent,
+}
+
 /// The three shapes of SPEC 2, derived from the header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Shape {
@@ -175,6 +271,23 @@ pub struct Header {
     pub lots: Vec<Lot>,
     pub integration: Integration,
     pub security: Security,
+    /// How much verification asks of this mission. Frozen with the rest of
+    /// the header, like `bounds`: verification reads the rigor the mission
+    /// was framed at, not whatever `nunki.yaml` says today. Absent — every
+    /// header written before the field — means `critical`.
+    #[serde(default)]
+    pub rigor: Rigor,
+    /// The share of tried mutants a `standard` mission must kill for gate 7,
+    /// as a whole percentage, frozen from `nunki.yaml` at `mission new` with
+    /// the rigor it serves: a threshold read live could be lowered under a
+    /// mission already framed. Absent — every header written before it was
+    /// frozen — the project's current value is read, as it was then.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::project::frozen_mutation_threshold"
+    )]
+    pub mutation_threshold: Option<u32>,
     /// Who decides when this mission comes back with a question — an
     /// arbitration, a verdict to accept, a push to authorise. Defaults to
     /// whoever framed it, and is said rather than assumed the moment a

@@ -9,7 +9,7 @@ use std::process::Command;
 
 use nunki::gate::{self, Decision, Gate, Subject};
 use nunki::harness::Role;
-use nunki::mission::{Bounds, Header, Integration, Lot, Security, Service};
+use nunki::mission::{Bounds, Header, Integration, Lot, Rigor, Security, Service};
 use nunki::project::ProtectedPaths;
 
 /// Run git in `at`, with an identity so commits work on a bare machine.
@@ -66,6 +66,8 @@ fn header() -> Header {
             reason: "no external service is involved".into(),
         },
         security: Security::Gates,
+        rigor: Default::default(),
+        mutation_threshold: None,
         arbiter: None,
         run: None,
         account: None,
@@ -109,6 +111,9 @@ struct Fixture {
     /// Where the coder's gates were green. The base by default: a coder
     /// that added nothing, so every commit on the branch is the integrator's.
     coder_head: Option<String>,
+    /// The project's `mutation_threshold`, which a `standard` mission's
+    /// gate 7 is judged against.
+    threshold: u32,
 }
 
 impl Fixture {
@@ -129,6 +134,7 @@ impl Fixture {
             protected: protected(),
             branches: vec!["main".into(), "dev".into()],
             coder_head,
+            threshold: 80,
         }
     }
 
@@ -164,6 +170,8 @@ impl Fixture {
                 run: None,
                 services_file: None,
                 permission_mode: "auto".to_string(),
+                rigor: None,
+                mutation_threshold: self.threshold,
                 forge_protection: Default::default(),
             },
             nunki,
@@ -908,6 +916,8 @@ fn live_the_battery_is_the_stacks_mounted_one_and_an_absent_one_is_red() {
             run: None,
             services_file: None,
             permission_mode: "auto".to_string(),
+            rigor: None,
+            mutation_threshold: 80,
             forge_protection: Default::default(),
         },
         dir.path().join("nunki"),
@@ -1090,6 +1100,12 @@ use std::collections::BTreeMap;
 impl Fixture {
     /// The campaign file this mission holds, written on the current content.
     fn campaign(&self, survivors: Vec<Survivor>) {
+        self.campaign_tried(survivors, None);
+    }
+
+    /// The same, saying how many mutants it tried, as a script that counts
+    /// does on its terminal line.
+    fn campaign_tried(&self, survivors: Vec<Survivor>, tried: Option<u32>) {
         // Through the one function that resolves the base, and not a copy of
         // its rule: a fixture that reads the name its own way is a fixture
         // that can agree with a gate which has stopped agreeing with itself.
@@ -1102,6 +1118,7 @@ impl Fixture {
                 head: git(&self.tree, &["rev-parse", "HEAD"]),
                 date: "2026-09-10T12:00:00Z".into(),
                 survivors,
+                tried,
             },
         )
         .unwrap();
@@ -2464,4 +2481,388 @@ fn a_red_battery_says_what_both_streams_said() {
         }
         other => panic!("{other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Gate 7 by rigor: a prototype owes no campaign, and a standard mission is
+// judged on the share of tried mutants killed.
+// ---------------------------------------------------------------------------
+
+/// A `standard` fixture with the source the survivors live in, and two
+/// tests an outcome can name.
+fn standard() -> Fixture {
+    let mut f = Fixture::new();
+    f.header.rigor = Rigor::Standard;
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    commit(
+        &f.tree,
+        "tests/thing.rs",
+        "#[test]\nfn the_thing_holds() {}\n#[test]\nfn the_known_hole() {}\n",
+        "tests",
+    );
+    f.journal_names_head();
+    f
+}
+
+fn untriaged(n: u32) -> Vec<Survivor> {
+    (1..=n).map(|line| survivor(line, None)).collect()
+}
+
+/// At the threshold it passes; one survivor more and it is red, and the
+/// reason gives the share, the threshold and how many more must be killed.
+/// Survivors left without an outcome do not turn a passing gate red, and the
+/// note counts them so the pull request shows them.
+#[test]
+fn at_standard_a_campaign_at_the_threshold_passes_and_one_just_below_is_red() {
+    let f = standard();
+    // 8 of 10 killed is 80%: exactly the default threshold.
+    f.campaign_tried(untriaged(2), Some(10));
+    let outcome = f.gate_seven(Role::Coder);
+    assert_eq!(outcome.decision, Decision::Passed);
+    let note = outcome.note.expect("a passing standard gate still counts");
+    assert!(
+        note.contains("8 of 10 tried mutant(s) killed (80%)"),
+        "{note}"
+    );
+    assert!(note.contains("threshold of 80%"), "{note}");
+    assert!(
+        note.contains("2 survivor(s) left without an outcome"),
+        "{note}"
+    );
+    assert!(note.contains("src/new.rs:1"), "{note}");
+
+    // 7 of 10 is 70%: one more must be killed.
+    f.campaign_tried(untriaged(3), Some(10));
+    let outcome = f.gate_seven(Role::Coder);
+    match &outcome.decision {
+        Decision::Failed(why) => {
+            assert!(
+                why.contains("7 of 10 tried mutant(s) killed (70%)"),
+                "{why}"
+            );
+            assert!(why.contains("threshold of 80%"), "{why}");
+            assert!(why.contains("1 more must be killed"), "{why}");
+        }
+        other => panic!("70% is below 80%: {other:?}"),
+    }
+    let note = outcome
+        .note
+        .expect("a red standard gate counts the survivors too");
+    assert!(
+        note.contains("3 survivor(s) left without an outcome"),
+        "{note}"
+    );
+}
+
+/// The share is compared in whole numbers: 7 of 9 is 77.7%, which no
+/// rounding may carry to a pass at 78%, and the count still owed rounds up.
+#[test]
+fn at_standard_a_share_just_short_of_the_threshold_is_not_rounded_up() {
+    let mut f = standard();
+    f.threshold = 78;
+    f.campaign_tried(untriaged(2), Some(9));
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => {
+            assert!(why.contains("7 of 9 tried mutant(s) killed (77%)"), "{why}");
+            assert!(why.contains("1 more must be killed"), "{why}");
+        }
+        other => panic!("77.7% is below 78%: {other:?}"),
+    }
+    // The threshold is the project's: the same campaign at 77% passes.
+    f.threshold = 77;
+    assert_eq!(f.gate_seven(Role::Coder).decision, Decision::Passed);
+    // And the count owed is the whole gap: at 100%, both survivors.
+    f.threshold = 100;
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => assert!(why.contains("2 more must be killed"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A survivor answered by a named test, frozen as a bug, or ruled
+/// equivalent by the HQ counts as killed.
+#[test]
+fn at_standard_a_survivor_with_an_outcome_counts_as_killed() {
+    let f = standard();
+    f.campaign_tried(
+        vec![
+            survivor(1, None),
+            survivor(
+                2,
+                Some(Triage::Equivalent {
+                    why: "no caller can reach that branch".into(),
+                    carried_from: None,
+                }),
+            ),
+            survivor(3, None),
+            survivor(4, None),
+        ],
+        Some(10),
+    );
+    f.coder_answers(&[
+        (
+            "src/new.rs:3",
+            Triage::Killed {
+                test: "the_thing_holds".into(),
+            },
+        ),
+        (
+            "src/new.rs:4",
+            Triage::Bug {
+                test: "the_known_hole".into(),
+            },
+        ),
+    ]);
+    // 4 survivors, 3 answered: 9 of 10 killed.
+    let outcome = f.gate_seven(Role::Coder);
+    assert_eq!(outcome.decision, Decision::Passed);
+    let note = outcome.note.unwrap();
+    assert!(note.contains("9 of 10"), "{note}");
+    assert!(
+        note.contains("1 survivor(s) left without an outcome"),
+        "{note}"
+    );
+    // The equivalence is still counted out loud.
+    assert!(note.contains("1 of 4 rode on `equivalent`"), "{note}");
+}
+
+/// Who may give which outcome, and that a named test exists, hold at
+/// `standard` as at `critical` — even when the share would pass anyway.
+#[test]
+fn at_standard_a_named_test_must_exist_and_the_coder_may_not_rule() {
+    let f = standard();
+    f.campaign_tried(untriaged(1), Some(100));
+    f.coder_answers(&[(
+        "src/new.rs:1",
+        Triage::Killed {
+            test: "a_test_nobody_wrote".into(),
+        },
+    )]);
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => assert!(why.contains("a_test_nobody_wrote"), "{why}"),
+        other => panic!("99% does not excuse a test that does not exist: {other:?}"),
+    }
+
+    f.coder_answers(&[(
+        "src/new.rs:1",
+        Triage::Equivalent {
+            why: "trust me".into(),
+            carried_from: None,
+        },
+    )]);
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => assert!(why.contains("not the coder's to give"), "{why}"),
+        other => panic!("standard does not change who rules: {other:?}"),
+    }
+}
+
+/// A campaign that does not say how many it tried — an older script, an
+/// older file — is judged as `critical` judges it, and the note says why.
+#[test]
+fn at_standard_a_campaign_without_a_count_is_judged_as_critical() {
+    let f = standard();
+    f.campaign_tried(untriaged(1), None);
+    let outcome = f.gate_seven(Role::Coder);
+    match &outcome.decision {
+        Decision::Failed(why) => assert!(why.contains("no threshold to hide behind"), "{why}"),
+        other => panic!("judged as critical, one survivor is red: {other:?}"),
+    }
+    let note = outcome.note.expect("the fallback is said");
+    assert!(
+        note.contains("does not say how many mutants it tried"),
+        "{note}"
+    );
+
+    f.coder_answers(&[(
+        "src/new.rs:1",
+        Triage::Killed {
+            test: "the_thing_holds".into(),
+        },
+    )]);
+    let outcome = f.gate_seven(Role::Coder);
+    assert_eq!(outcome.decision, Decision::Passed);
+    assert!(
+        outcome
+            .note
+            .unwrap()
+            .contains("judged as `critical` judges it"),
+        "a green fallback still says it was one"
+    );
+
+    // And when the critical judgement has a note of its own, both are said.
+    f.coder_answers(&[]);
+    f.campaign_tried(
+        vec![survivor(
+            1,
+            Some(Triage::Equivalent {
+                why: "no caller can reach that branch".into(),
+                carried_from: None,
+            }),
+        )],
+        None,
+    );
+    let outcome = f.gate_seven(Role::Coder);
+    assert_eq!(outcome.decision, Decision::Passed);
+    let note = outcome.note.unwrap();
+    assert!(note.contains("judged as `critical` judges it"), "{note}");
+    assert!(note.contains("1 of 1 rode on `equivalent`"), "{note}");
+}
+
+/// A count smaller than the survivors named cannot be true, and a share
+/// built on it would be a lie; that campaign is judged as `critical`.
+#[test]
+fn at_standard_a_count_below_the_survivors_is_judged_as_critical() {
+    let f = standard();
+    f.campaign_tried(untriaged(2), Some(1));
+    let outcome = f.gate_seven(Role::Coder);
+    assert!(
+        matches!(outcome.decision, Decision::Failed(_)),
+        "{outcome:?}"
+    );
+    assert!(
+        outcome.note.unwrap().contains("cannot both be true"),
+        "the fallback is said"
+    );
+    // At the boundary, as many tried as survived is a share of 0%.
+    f.campaign_tried(untriaged(2), Some(2));
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => assert!(why.contains("0 of 2"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// No mutant on the lines the branch changed: nothing was tried, and that
+/// passes.
+#[test]
+fn at_standard_a_campaign_that_tried_nothing_passes() {
+    let f = standard();
+    f.campaign_tried(vec![], Some(0));
+    let outcome = f.gate_seven(Role::Coder);
+    assert_eq!(outcome.decision, Decision::Passed);
+    assert!(outcome.note.unwrap().contains("tried no mutant"));
+}
+
+/// `critical` does not read the count: one survivor without an outcome is
+/// red, however many mutants were killed beside it.
+#[test]
+fn at_critical_the_count_changes_nothing() {
+    let mut f = standard();
+    f.header.rigor = Rigor::Critical;
+    f.campaign_tried(untriaged(1), Some(1000));
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => assert!(why.contains("no threshold"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A prototype owes no campaign: gate 7 is not applicable, never unplayed —
+/// an unplayed gate 7 is a campaign owed, which the monitor would start.
+#[test]
+fn a_prototype_owes_no_mutation_campaign() {
+    let mut f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.journal_names_head();
+    assert!(
+        matches!(f.gate_seven(Role::Coder).decision, Decision::Unplayed(_)),
+        "the same mission at critical owes one"
+    );
+
+    f.header.rigor = Rigor::Prototype;
+    let outcome = f.gate_seven(Role::Coder);
+    match &outcome.decision {
+        Decision::NotApplicable(why) => assert!(why.contains("prototype"), "{why}"),
+        other => panic!("a prototype owes no campaign: {other:?}"),
+    }
+    assert!(!outcome.waits_on_campaign);
+    // Read the way the flow reads it: with every other gate green, nothing
+    // is owed and nothing is in the way.
+    let mut decisions: Vec<(Gate, Decision)> = vec![
+        (Gate::CleanTree, Decision::Passed),
+        (Gate::Battery, Decision::Passed),
+    ];
+    decisions.push((Gate::Mutation, outcome.decision));
+    assert_eq!(report_of(&decisions).verdict(), gate::Verdict::Green);
+}
+
+/// A campaign that said it finished and measured nothing — mutants found,
+/// none tried — is not green at any rigor: it is settled as one that could
+/// not run, and gate 7 is red with its reason, at `critical` as at
+/// `standard` (security round 1 on the rigor mission, HQ ruling).
+#[test]
+fn a_campaign_that_measured_nothing_is_red_at_every_rigor() {
+    let mut f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.journal_names_head();
+    let touched = nunki::gate::touched_since_base(&f.tree, "dev").unwrap();
+    let fingerprint = nunki::mutants::fingerprint(&f.tree, &touched).unwrap();
+    let runs = f._dir.path().join("runs");
+    std::fs::create_dir_all(&runs).unwrap();
+    let log = runs.join(format!("mutants-{}.log", &fingerprint[..7]));
+    let settled = nunki::mutants::settle_unmeasured(
+        &log,
+        "{\"campaign\":\"done\",\"tried\":0,\"found\":78}\n",
+    )
+    .unwrap();
+    assert!(settled.is_some());
+
+    for rigor in [Rigor::Critical, Rigor::Standard] {
+        f.header.rigor = rigor;
+        match f.gate_seven(Role::Coder).decision {
+            Decision::Failed(why) => {
+                assert!(why.contains("measured nothing"), "{rigor}: {why}")
+            }
+            other => panic!("{rigor}: a campaign that tried nothing of 78 is not green: {other:?}"),
+        }
+    }
+}
+
+/// The threshold frozen in the header is the one gate 7 reads; a header
+/// framed before it was frozen reads the project's.
+#[test]
+fn at_standard_the_threshold_frozen_in_the_header_beats_the_projects() {
+    let mut f = standard();
+    f.campaign_tried(untriaged(2), Some(10));
+    // 80% killed: green at the project's 80, red at a frozen 90 — and the
+    // message says whose threshold it was (HQ review).
+    let outcome = f.gate_seven(Role::Coder);
+    assert_eq!(outcome.decision, Decision::Passed);
+    let note = outcome.note.unwrap_or_default();
+    assert!(note.contains("project's threshold of 80%"), "{note}");
+    f.header.mutation_threshold = Some(90);
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => assert!(why.contains("mission's threshold of 90%"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    // And the project's changing afterwards moves nothing.
+    f.threshold = 50;
+    assert!(matches!(
+        f.gate_seven(Role::Coder).decision,
+        Decision::Failed(_)
+    ));
+    f.header.mutation_threshold = None;
+    assert_eq!(f.gate_seven(Role::Coder).decision, Decision::Passed);
+}
+
+/// Rulings the HQ gave on this very campaign are counted, and none of them
+/// is called carried: the sentence that sends the HQ to `--lift` is for a
+/// ruling given on code that has changed since, and naming "0 of those"
+/// would send it looking for nothing.
+#[test]
+fn an_equivalence_given_on_this_campaign_is_not_called_carried() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.campaign(vec![survivor(
+        1,
+        Some(Triage::Equivalent {
+            why: "no caller can reach that branch".into(),
+            carried_from: None,
+        }),
+    )]);
+    f.journal_names_head();
+    let outcome = f.gate_seven(Role::Coder);
+    assert_eq!(outcome.decision, Decision::Passed);
+    let note = outcome.note.expect("an equivalence is counted out loud");
+    assert!(note.contains("1 of 1 rode on `equivalent`"), "{note}");
+    assert!(!note.contains("carried"), "{note}");
+    assert!(!note.contains("--lift"), "{note}");
 }
