@@ -1,6 +1,6 @@
 //! The line a coder run leaves to say how its lot ended (SPEC 4.1, 4.3).
 
-use nunki::mission::journal::{LotLine, judge, lot_line, parse};
+use nunki::mission::journal::{Judgement, LotLine, awaitable, judge, lot_line, parse};
 
 fn done(lot: &str) -> Option<LotLine> {
     Some(LotLine::Done { lot: lot.into() })
@@ -69,24 +69,106 @@ fn only_the_resume_block_is_read_and_its_last_line_wins() {
 
 #[test]
 fn the_judgement_says_why_a_lot_is_not_done() {
-    assert_eq!(judge(&journal("Lot: L1 — done"), "L1"), Ok(()));
-    let why = |block: &str| judge(&journal(block), "L1").unwrap_err();
+    assert_eq!(judge(&journal("Lot: L1 — done"), "L1"), Judgement::Done);
+    let why = |block: &str| match judge(&journal(block), "L1") {
+        Judgement::Failed(why) => why,
+        other => panic!("{block}: {other:?}"),
+    };
     assert!(why("Lot: L1 — failed: X is red").contains("failed: X is red"));
     assert!(why("Lot: L1 — failed").contains("without saying why"));
     assert!(why("Lot: L2 — done").contains("reports lot L2"));
     assert!(why("Lot: L2 — failed: no").contains("reports lot L2"));
+    assert!(why("Lot: L2 — awaits ruling: `a`").contains("reports lot L2"));
     assert!(why("Nothing said.").contains("`Lot: L1 — done`"));
 }
 
-/// The coder is told the line in its role prompt; the roles that conclude
-/// with a verdict are not.
+// --- the third line: a ruling the coder may not give -------------------------
+
+fn awaits(lot: &str, what: &str) -> Option<LotLine> {
+    Some(LotLine::AwaitsRuling {
+        lot: lot.into(),
+        what: what.into(),
+    })
+}
+
 #[test]
-fn the_coder_is_told_the_line_and_the_other_roles_are_not() {
-    use nunki::harness::Role;
-    let coder = nunki::role::prompt(Role::Coder);
-    assert!(coder.contains("`Lot: <lot> — done`"), "{coder}");
-    assert!(coder.contains("`Lot: <lot> — failed: <why>`"), "{coder}");
-    for role in [Role::Integrator, Role::Security] {
-        assert!(!nunki::role::prompt(role).contains("Lot:"), "{role:?}");
+fn a_ruling_line_reads_with_the_tolerance_of_the_other_two() {
+    assert_eq!(
+        parse("Lot: L1 — awaits ruling: `m1` is equivalent"),
+        awaits("L1", "`m1` is equivalent")
+    );
+    assert_eq!(
+        parse("- Lot: `L1` – Awaits Ruling:  `m1` "),
+        awaits("L1", "`m1`"),
+        "a list item, an en dash, case, spaces"
+    );
+    assert_eq!(
+        parse("* lot: volet-2 - awaits ruling `m1`"),
+        awaits("volet-2", "`m1`"),
+        "a hyphen between spaces, no colon"
+    );
+}
+
+#[test]
+fn awaits_ruling_with_nothing_after_it_is_not_a_ruling() {
+    for line in [
+        "Lot: L1 — awaits ruling",
+        "Lot: L1 — awaits ruling:",
+        "Lot: L1 — awaits ruling:   ",
+        "Lot: L1 — awaits ruling.",
+        "Lot: L1 — awaits rulingx: `m1`",
+    ] {
+        assert_eq!(parse(line), None, "{line}");
     }
+    // And so the judgement is today's: no valid line, a failed attempt.
+    match judge(&journal("Lot: L1 — awaits ruling"), "L1") {
+        Judgement::Failed(why) => assert!(why.contains("`Lot: L1 — done`"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_ruling_names_the_survivors_between_its_backquotes() {
+    match judge(
+        &journal(
+            "Lot: L1 — awaits ruling: `src/lib.rs:3:1: replace + with -` and ` m2 ` and \
+             `m2` again, both equivalent",
+        ),
+        "L1",
+    ) {
+        Judgement::AwaitsRuling { what, survivors } => {
+            assert!(what.starts_with("`src/lib.rs:3:1"), "{what}");
+            assert_eq!(survivors, ["src/lib.rs:3:1: replace + with -", "m2"]);
+        }
+        other => panic!("{other:?}"),
+    }
+    match judge(&journal("Lot: L1 — awaits ruling: nothing quoted"), "L1") {
+        Judgement::AwaitsRuling { survivors, .. } => assert!(survivors.is_empty()),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_ruling_is_awaited_only_on_open_survivors() {
+    let ids = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let open = ids(&["m1", "m2"]);
+    assert_eq!(awaitable("L1", &ids(&["m1"]), &open), Ok(()));
+    assert_eq!(awaitable("L1", &ids(&["m2", "m1"]), &open), Ok(()));
+
+    let none = awaitable("L1", &[], &open).unwrap_err();
+    assert!(none.contains("named no survivor"), "{none}");
+
+    let stranger = awaitable("L1", &ids(&["m1", "m9"]), &open).unwrap_err();
+    assert!(stranger.contains("`m9`"), "{stranger}");
+    assert!(
+        !stranger.contains("`m1`"),
+        "only the one at fault: {stranger}"
+    );
+    assert!(stranger.contains("that is not a survivor"), "{stranger}");
+
+    let two = awaitable("L1", &ids(&["m8", "m9"]), &open).unwrap_err();
+    assert!(two.contains("`m8`, `m9`, and those are"), "{two}");
+
+    let nothing_open = awaitable("L1", &ids(&["m1"]), &[]).unwrap_err();
+    assert!(nothing_open.contains("`m1`"), "{nothing_open}");
 }

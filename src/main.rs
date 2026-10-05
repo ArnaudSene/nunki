@@ -369,8 +369,10 @@ enum MissionCommand {
     ///
     /// Every handover is a bound running out — a lot's attempts, a role's, or
     /// the returns to the coder. This hands the bounds back whole and puts
-    /// the mission on the work it stopped on. A mission you called off
-    /// yourself is not a handover, and is refused.
+    /// the mission on the work it stopped on. A lot that awaited your ruling
+    /// on survivors is no bound: it resumes at its next attempt, once you
+    /// have ruled. A mission you called off yourself is not a handover, and
+    /// is refused.
     Retry {
         /// The mission.
         id: String,
@@ -1183,7 +1185,7 @@ fn main() -> ExitCode {
                             ),
                             nunki::verify::Step::AwaitingHuman(handover) => {
                                 owed = true;
-                                println!("stopped   {handover:?}");
+                                println!("stopped   {}", handover.line(&mission));
                             }
                             nunki::verify::Step::Findings { report, lifted } => {
                                 owed = true;
@@ -2347,6 +2349,10 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             match nunki::state::Store::open(&project.hq_root).and_then(|s| s.load(&id)) {
                 Ok(state) => {
                     println!("stage     {:?} in slot {}", state.flow.stage(), state.slot);
+                    if let nunki::mission::flow::Stage::AwaitingHuman(handover) = state.flow.stage()
+                    {
+                        println!("handover  {}", handover.line(&id));
+                    }
                     println!(
                         "security rounds: {} / {}{}",
                         state.flow.security_rounds(),

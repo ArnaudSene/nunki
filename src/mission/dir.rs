@@ -212,7 +212,10 @@ fn journal(id: &str) -> String {
          Nothing has run yet.\n\n\
          > Rewrite the block above at every checkpoint and before stopping. A\n\
          > run that ends without it has not honoured the run contract. The\n\
-         > coder ends it with `Lot: <lot> — done`, or `Lot: <lot> — failed: <why>`.\n"
+         > coder ends it with `Lot: <lot> — done`, or `Lot: <lot> — failed: <why>`;\n\
+         > or, only when the lot is done but for survivors whose equivalence is\n\
+         > the HQ's to rule, `Lot: <lot> — awaits ruling: <what>`, each survivor\n\
+         > id between backquotes.\n"
     )
 }
 

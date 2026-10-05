@@ -1003,3 +1003,239 @@ fn an_old_state_reads_zero_security_rounds() {
     assert_eq!(old.security_rounds(), 0);
     assert_eq!(old, flow);
 }
+
+// --- a lot that awaits a ruling (SPEC 4.4 gate 7, 4.5) -----------------------
+
+fn ruling(ids: &[&str]) -> Event {
+    Event::RulingAwaited {
+        what: ids
+            .iter()
+            .map(|id| format!("`{id}`"))
+            .collect::<Vec<_>>()
+            .join(" and ")
+            + " change nothing observable",
+        survivors: ids.iter().map(|id| id.to_string()).collect(),
+    }
+}
+
+fn bounded(attempts_per_lot: u32) -> Flow {
+    Flow::new(header(
+        none(),
+        Security::Gates,
+        Bounds {
+            attempts_per_lot,
+            ..Bounds::default()
+        },
+    ))
+    .unwrap()
+}
+
+/// A ruling the coder may not give is not worth another attempt: the next
+/// one would meet the same survivor and say the same thing. The flow hands
+/// over at once, on the attempt that asked, naming what is to be ruled.
+#[test]
+fn a_lot_that_awaits_a_ruling_hands_over_at_once_on_the_attempt_that_asked() {
+    let mut flow = bounded(3);
+    flow.advance(finished(false)).unwrap();
+    assert!(matches!(flow.stage(), Stage::Coding { attempt: 2, .. }));
+
+    flow.advance(ruling(&["m1", "m2"])).unwrap();
+    assert_eq!(
+        flow.stage(),
+        &Stage::AwaitingHuman(Handover::AwaitingRuling {
+            lot: "L1".into(),
+            what: "`m1` and `m2` change nothing observable".into(),
+            attempt: 2,
+            survivors: vec!["m1".into(), "m2".into()],
+        })
+    );
+}
+
+/// Only the coder ends a run on a lot line; a ruling anywhere else is out of
+/// place, and said.
+#[test]
+fn a_ruling_outside_a_coder_run_is_refused() {
+    let mut flow = bounded(3);
+    code_through(&mut flow);
+    assert!(matches!(
+        flow.advance(ruling(&["m1"])),
+        Err(nunki::mission::flow::FlowError::InvalidTransition { .. })
+    ));
+}
+
+/// A ruling is not a bound running out, so `retry` hands no budget back: the
+/// lot resumes at the attempt after the one that asked, and a coder that
+/// keeps asking still meets the bound.
+#[test]
+fn a_retry_after_a_ruling_resumes_at_the_next_attempt_and_the_bound_holds() {
+    let mut flow = bounded(3);
+    flow.advance(finished(true)).unwrap();
+    flow.advance(ruling(&["m1"])).unwrap();
+    flow.advance(Event::Retried {
+        because: "m1 ruled equivalent".into(),
+    })
+    .unwrap();
+    assert_eq!(
+        flow.stage(),
+        &Stage::Coding {
+            work: Work::Lot(1),
+            attempt: 2
+        },
+        "the same lot, the next attempt — not the first"
+    );
+
+    flow.advance(ruling(&["m2"])).unwrap();
+    flow.advance(Event::Retried {
+        because: "m2 ruled equivalent".into(),
+    })
+    .unwrap();
+    assert_eq!(
+        flow.stage(),
+        &Stage::Coding {
+            work: Work::Lot(1),
+            attempt: 3
+        }
+    );
+
+    // The last attempt: a failure hands over as exhausted, at once.
+    flow.advance(finished(false)).unwrap();
+    assert_eq!(
+        flow.stage(),
+        &Stage::AwaitingHuman(Handover::LotAttemptsExhausted {
+            lot: "L2".into(),
+            attempts: 3
+        })
+    );
+}
+
+/// Asked on the last attempt, a retry still gives one more and no more: a
+/// failure there is exhausted at once, not a fresh budget.
+#[test]
+fn a_ruling_on_the_last_attempt_buys_one_more_attempt_and_no_budget() {
+    let mut flow = bounded(1);
+    flow.advance(ruling(&["m1"])).unwrap();
+    flow.advance(Event::Retried {
+        because: "ruled".into(),
+    })
+    .unwrap();
+    assert_eq!(
+        flow.stage(),
+        &Stage::Coding {
+            work: Work::Lot(0),
+            attempt: 2
+        }
+    );
+    flow.advance(Event::Stalled {
+        reason: "silent".into(),
+    })
+    .unwrap();
+    assert!(
+        matches!(
+            flow.stage(),
+            Stage::AwaitingHuman(Handover::LotAttemptsExhausted { attempts: 2, .. })
+        ),
+        "{:?}",
+        flow.stage()
+    );
+}
+
+/// A volet awaits a ruling like a lot, and comes back as the same volet.
+#[test]
+fn a_volet_that_awaits_a_ruling_comes_back_as_that_volet() {
+    let mut flow = bounded(3);
+    code_through(&mut flow);
+    flow.advance(Event::GatesFailed {
+        reason: "gate 7".into(),
+    })
+    .unwrap();
+    flow.advance(ruling(&["m1"])).unwrap();
+    match flow.stage() {
+        Stage::AwaitingHuman(Handover::AwaitingRuling { lot, attempt, .. }) => {
+            assert_eq!(lot, "volet-1");
+            assert_eq!(*attempt, 1);
+        }
+        other => panic!("{other:?}"),
+    }
+    flow.advance(Event::Retried {
+        because: "ruled".into(),
+    })
+    .unwrap();
+    match flow.stage() {
+        Stage::Coding {
+            work: Work::Volet { n, cause },
+            attempt,
+        } => {
+            assert_eq!((*n, cause.as_str(), *attempt), (1, "gate: gate 7", 2));
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(flow.volets(), 1, "a ruling spends no volet");
+}
+
+/// The handover read back, and the old ones with it: a state file written
+/// before the variant existed still reads. Frozen from the code before
+/// this change, serialised by it.
+#[test]
+fn an_old_state_file_handed_over_on_attempts_still_reads() {
+    let old = r#"{"header":{"branch":"feat/x","base":"dev","lots":[{"id":"L1","title":"lot 1"}],"integration":{"kind":"none","reason":"pure domain"},"security":"gates","rigor":"critical","arbiter":null,"account":null,"model":null,"run":null,"bounds":{"max_volets":3,"attempts_per_lot":1,"checkpoint_minutes":45,"check_minutes":15,"stall_checks":3,"long_lot_hours":8,"mutation_minutes":45,"harness_wait_hours":6,"five_hour_stop_percent":90,"weekly_stop_percent":80}},"stage":{"AwaitingHuman":{"LotAttemptsExhausted":{"lot":"L1","attempts":1}}},"volets":0,"volet_causes":[],"attempts":{"L1":1},"resume_with":{"Lot":0},"security_rounds":0}"#;
+    let mut flow: Flow = serde_json::from_str(old).unwrap();
+    assert_eq!(
+        flow.stage(),
+        &Stage::AwaitingHuman(Handover::LotAttemptsExhausted {
+            lot: "L1".into(),
+            attempts: 1
+        })
+    );
+    flow.advance(Event::Retried {
+        because: "fixed".into(),
+    })
+    .unwrap();
+    assert_eq!(
+        flow.stage(),
+        &Stage::Coding {
+            work: Work::Lot(0),
+            attempt: 1
+        },
+        "and a retry from it still hands the budget back whole"
+    );
+
+    let mut asked = bounded(3);
+    asked.advance(ruling(&["m1"])).unwrap();
+    let back: Flow = serde_json::from_str(&serde_json::to_string(&asked).unwrap()).unwrap();
+    assert_eq!(back, asked);
+}
+
+/// One line says it all: the lot, the attempt, the ids, and the verbs the HQ
+/// is expected to type, spelled with the mission's id.
+#[test]
+fn the_ruling_handover_names_the_lot_the_attempt_and_the_ids_in_one_line() {
+    let said = Handover::AwaitingRuling {
+        lot: "L2".into(),
+        what: "`m1` and `src/lib.rs:3: replace + with -` are equivalent".into(),
+        attempt: 2,
+        survivors: vec!["m1".into(), "src/lib.rs:3: replace + with -".into()],
+    }
+    .line("m7");
+    assert!(!said.contains('\n'), "{said}");
+    for part in [
+        "lot L2",
+        "attempt 2",
+        "`m1`, `src/lib.rs:3: replace + with -`",
+        "nunki mission mutants m7 --equivalent",
+        "--because",
+        "nunki mission retry m7",
+    ] {
+        assert!(said.contains(part), "{part:?} in {said}");
+    }
+    // The other handovers keep saying what stopped them.
+    let exhausted = Handover::LotAttemptsExhausted {
+        lot: "L2".into(),
+        attempts: 3,
+    }
+    .line("m7");
+    assert!(
+        exhausted.contains("lot L2 failed 3 attempt(s)"),
+        "{exhausted}"
+    );
+    assert!(exhausted.contains("nunki mission retry m7"), "{exhausted}");
+}

@@ -106,7 +106,20 @@ Your half is that everything around it is right. Theirs is that it is — and
 Before you stop, end the `ÉTAT DE REPRISE` block with one line saying how
 the lot ended: `Lot: <lot> — done` once it is committed and proved, or
 `Lot: <lot> — failed: <why>` if it is not, `<lot>` being the identifier you
-were given. That line, and nothing else, tells the HQ the lot is done."
+were given. That line, and nothing else, tells the HQ the lot is done.
+
+There is a third line, for one case only:
+`Lot: <lot> — awaits ruling: <what>`, when the lot is finished but for
+survivors you can neither kill nor freeze as a bug, and whose equivalence is
+a ruling you are forbidden to give. Name each of them in `<what>` between
+backquotes, spelled exactly as `MUTANTS.json` spells its id — every
+backquoted span there is read as a survivor id, so quote nothing else — and
+say why you believe it equivalent. `nunki` checks that each is a survivor of
+`MUTANTS.json` with no outcome; a line that names none, or names anything
+else, is a failed attempt.
+It is not a way out of a hard lot: everything else in the lot is done,
+committed and proved before you write it. The HQ then rules, and the next
+attempt picks the lot up from there."
         }
 
         Role::Integrator => {

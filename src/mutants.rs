@@ -293,6 +293,23 @@ pub fn read_triage(dir: &Path) -> Result<BTreeMap<String, Triage>, MutantsError>
     serde_json::from_str(&text).map_err(|e| MutantsError::Unreadable(file, e.to_string()))
 }
 
+/// The ids of the survivors still waiting for an outcome: in the mission's
+/// campaign, answered neither there (the HQ's file) nor in the coder's
+/// triage. The only survivors a coder may hand a lot over for, awaiting a
+/// ruling ([`crate::mission::journal::awaitable`]). No campaign, none.
+pub fn open(dir: &Path) -> Result<Vec<String>, MutantsError> {
+    let Some(campaign) = read(dir)? else {
+        return Ok(Vec::new());
+    };
+    let coders = read_triage(dir)?;
+    Ok(campaign
+        .survivors
+        .into_iter()
+        .filter(|s| s.outcome.is_none() && !coders.contains_key(&s.id))
+        .map(|s| s.id)
+        .collect())
+}
+
 pub fn write_triage(dir: &Path, triage: &BTreeMap<String, Triage>) -> Result<(), MutantsError> {
     let file = dir.join(TRIAGE_FILE);
     let body = serde_json::to_string_pretty(triage).expect("a triage serialises");

@@ -318,6 +318,15 @@ fn what_stopped(handover: &crate::mission::flow::Handover) -> String {
             format!("{} return(s) to the coder were used", causes.len())
         }
         Handover::Abandoned { reason } => format!("it was called off ({reason})"),
+        Handover::AwaitingRuling {
+            lot,
+            attempt,
+            survivors,
+            ..
+        } => format!(
+            "{lot}, attempt {attempt}, awaited a ruling on {}",
+            survivors.join(", ")
+        ),
     }
 }
 

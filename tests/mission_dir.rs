@@ -60,6 +60,10 @@ fn a_new_mission_has_its_five_files_and_the_agents_three_are_empty() {
     // The journal starts with the block the run contract demands.
     let journal = std::fs::read_to_string(&paths.journal).unwrap();
     assert!(journal.contains("ÉTAT DE REPRISE"), "{journal}");
+    assert!(
+        journal.contains("`Lot: <lot> — awaits ruling: <what>`"),
+        "the template states all three lot lines: {journal}"
+    );
 }
 
 #[test]

@@ -457,3 +457,30 @@ fn a_campaign_that_overran_or_vanished_stops_the_monitor_and_the_rest_does_not()
         other => panic!("{other:?}"),
     }
 }
+
+/// A lot awaiting a ruling stops the monitor once, and its exit line says in
+/// one line what the HQ is to rule on and what to type after.
+#[test]
+fn the_monitor_stops_on_a_ruling_and_names_the_survivors() {
+    let next = after_verify(&Ok(vec![nunki::verify::Step::AwaitingHuman(
+        Handover::AwaitingRuling {
+            lot: "L1".into(),
+            what: "`m1` and `m2` are equivalent".into(),
+            attempt: 2,
+            survivors: vec!["m1".into(), "m2".into()],
+        },
+    )]));
+    let Next::Exit(said) = next else {
+        panic!("a ruling is the human's: {next:?}");
+    };
+    assert!(!said.contains('\n'), "{said}");
+    for part in [
+        "lot L1",
+        "attempt 2",
+        "`m1`, `m2`",
+        "--equivalent",
+        "nunki mission retry",
+    ] {
+        assert!(said.contains(part), "{part:?} in {said}");
+    }
+}

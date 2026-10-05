@@ -657,3 +657,37 @@ fn reframing_names_a_changed_mutation_threshold() {
     assert_eq!(seen.changes[0].from, "—");
     assert_eq!(seen.changes[0].to, "90%");
 }
+
+/// A lot that awaited a ruling is taken back at its next attempt, not its
+/// first: a ruling is not a bound, and the retry hands none back. The record
+/// says what was awaited, so the next run knows the ruling is what changed.
+#[test]
+fn taking_back_a_lot_that_awaited_a_ruling_resumes_at_its_next_attempt() {
+    let world = World::new(1);
+    world.at(&[
+        Event::Stalled {
+            reason: "silent".into(),
+        },
+        Event::RulingAwaited {
+            what: "`m1` is equivalent".into(),
+            survivors: vec!["m1".into()],
+        },
+    ]);
+
+    let state = lifecycle::retry(&world.project, "m1", "m1 ruled equivalent").unwrap();
+
+    assert_eq!(
+        state.flow.stage(),
+        &Stage::Coding {
+            work: Work::Lot(0),
+            attempt: 3
+        }
+    );
+    let followup =
+        std::fs::read_to_string(world.project.hq_root.join("missions/m1/FOLLOWUP_HQ.md")).unwrap();
+    assert!(followup.contains("m1 ruled equivalent"), "{followup}");
+    assert!(
+        followup.contains("L1, attempt 2, awaited a ruling on m1"),
+        "{followup}"
+    );
+}

@@ -200,8 +200,10 @@ fn lot_prompt(request: &RunRequest, exposure: &Exposure) -> String {
     // with their verdict.
     if request.role == Role::Coder {
         base.push_str(&format!(
-            " End that block with `Lot: {} — done`, or `Lot: {} — failed: <why>`.",
-            request.lot, request.lot
+            " End that block with `Lot: {} — done`, or `Lot: {} — failed: <why>` — or, only when \
+             the lot is done but for survivors whose equivalence you may not rule on, \
+             `Lot: {} — awaits ruling: <what>`, naming each survivor id between backquotes.",
+            request.lot, request.lot, request.lot
         ));
     }
     match exposure {

@@ -552,6 +552,19 @@ fn the_role_prompts_say_what_the_role_may_not_do() {
 
     // And each says the thing that is its own.
     assert!(coder.contains("break the decision and check the test goes red"));
+    // The third lot line is the coder's alone, and said with what bounds it:
+    // a line that names no open survivor is a failed attempt.
+    assert!(
+        coder.contains("`Lot: <lot> — awaits ruling: <what>`"),
+        "{coder}"
+    );
+    assert!(coder.contains("not a way out of a hard lot"), "{coder}");
+    assert!(
+        coder.contains("read as a survivor id, so quote nothing else"),
+        "{coder}"
+    );
+    assert!(!integrator.contains("awaits ruling"), "{integrator}");
+    assert!(!security.contains("awaits ruling"), "{security}");
     assert!(integrator.contains("not a reviewer"));
     assert!(security.contains("read-only"));
     assert!(

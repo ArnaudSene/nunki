@@ -212,7 +212,12 @@ pub fn after_verify(result: &Result<Vec<Step>, VerifyError>) -> Next {
                 Next::Exit("verified — the human reads it, then `nunki push`".to_string())
             }
             Some(Step::AwaitingHuman(handover)) => {
-                Next::Exit(format!("handed over to the human: {handover:?}"))
+                // Spelled with a placeholder: this function is pure and knows
+                // no mission id, and the exit line is printed under one.
+                Next::Exit(format!(
+                    "handed over to the human: {}",
+                    handover.line("<mission>")
+                ))
             }
             Some(Step::Held { who, reason, .. }) => Next::Exit(match reason {
                 Some(reason) => format!("held by {who}: {reason}"),

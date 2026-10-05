@@ -110,6 +110,12 @@ fn the_rules_it_writes_name_what_the_gates_require() {
         "nunki reads the block and not the whole file, so a line further down is \
          one it never sees: {rules}"
     );
+    // The third lot line, and the case it is for (the mission that added it).
+    assert!(
+        rules.contains("`Lot: <lot> — awaits ruling: <what>`")
+            && rules.contains("not a way out of a hard lot"),
+        "the rules state every line nunki reads, and when the third is not one: {rules}"
+    );
     // Not a gate, and said so in the pull request: the rules of the place are
     // where a house style lives, and this one is a house style.
     // The same rule the coder's prompt carries: a project's rules say it
