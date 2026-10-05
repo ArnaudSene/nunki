@@ -168,7 +168,9 @@ impl World {
                 spent: Default::default(),
                 spared: None,
                 coder_session: None,
+                pushed: None,
                 updated_at: String::new(),
+                revision: 0,
             })
             .unwrap();
 
@@ -590,6 +592,12 @@ fn a_verified_mission_is_pushed_and_its_pull_request_opened() {
     let pushed = push::push_to(&world.project, "m1", true, &api).unwrap();
 
     assert_eq!(world.on_forge("mission/x").as_deref(), Some(head.as_str()));
+    // The state says so, on the commit pushed: `mission wait` reads it there.
+    let state = world.store().load("m1").unwrap();
+    assert_eq!(
+        state.pushed.as_ref().map(|p| p.head.as_str()),
+        Some(head.as_str())
+    );
     assert_eq!(
         pushed.pull_request,
         push::PullRequestState::Opened(nunki::forge::Opened::Created(
@@ -1123,4 +1131,91 @@ fn the_push_command_names_the_commits_not_attacked_and_only_when_there_are_some(
     let out = on_head.pushed_by_the_binary();
     assert!(out.contains("pushed"), "the push happened: {out}");
     assert!(!out.contains("not attacked"), "{out}");
+}
+
+impl World {
+    /// The real binary, run on this world with `args`: what it printed on
+    /// both streams, whatever its exit.
+    fn printed_by_the_binary(&self, args: &[&str]) -> String {
+        let out = Command::new(env!("CARGO_BIN_EXE_nunki"))
+            .arg("-C")
+            .arg(&self.project.root)
+            .args(args)
+            .env("HOME", &self.home)
+            .env("HQ_NO_MONITOR", "1")
+            .output()
+            .unwrap();
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    }
+}
+
+/// A commit subject is its author's text. Push names the commits the
+/// security agent did not attack, on the terminal and in the follow-up, and
+/// a subject carrying escape sequences reaches neither raw.
+#[test]
+fn a_commit_subject_not_attacked_is_printed_escaped_never_raw() {
+    let world = World::opened_at(nunki::mission::Rigor::Standard);
+    world.coded("pub fn one() -> u8 { 2 }\n", "the lot");
+    world.security(Verdict::Clear, T1);
+    world.review();
+    let volet = world.coded("pub fn one() -> u8 { 3 }\n", common::HOSTILE);
+
+    let not_attacked = push::not_attacked(&world.tree, "HEAD~1", &volet).unwrap();
+    assert_eq!(not_attacked.len(), 1);
+    common::assert_printable(&not_attacked[0], "push::not_attacked");
+
+    let printed = world.pushed_by_the_binary();
+    assert!(printed.contains(&volet[..12]), "{printed}");
+    common::assert_printable(&printed, "nunki push");
+}
+
+/// The security agent's report is its own text: `verify` prints it, and
+/// `mission status` prints the stage that holds it, escaped and never raw.
+#[test]
+fn a_findings_report_is_printed_escaped_never_raw() {
+    let world = World::opened_at(nunki::mission::Rigor::Standard);
+    world.coded("pub fn one() -> u8 { 2 }\n", "the lot");
+    let mut state = world.state();
+    state.conclude(Role::Security, Some(Verdict::Findings), &world.head());
+    world.store().save(&state).unwrap();
+    world.event(Event::Verdict {
+        verdict: Verdict::Findings,
+        report: common::HOSTILE.into(),
+    });
+    world.lifted(Some(common::HOSTILE), &world.head(), T1);
+
+    let verified = world.printed_by_the_binary(&["verify", "m1"]);
+    assert!(verified.contains("findings  "), "{verified}");
+    assert!(verified.contains("lifted    "), "{verified}");
+    common::assert_printable(&verified, "nunki verify");
+
+    let status = world.printed_by_the_binary(&["mission", "status", "m1"]);
+    assert!(status.contains("stage     Findings"), "{status}");
+    assert!(!status.chars().any(common::raw_control), "{status}");
+}
+
+/// `nunki mission gates` prints one line per gate, its mark and why: a pass,
+/// a failure and its reason, and a gate nobody could play — here gate 8,
+/// with no profile up — said as such, never folded into a pass.
+#[test]
+fn the_gates_are_printed_one_line_each_with_their_mark_and_why() {
+    let world = World::opened_at(nunki::mission::Rigor::Standard);
+    world.coded("pub fn one() -> u8 { 2 }\n", "the lot");
+    // The base the gates measure the branch against, in the slot.
+    git(&world.tree, &["branch", "-q", "dev", "HEAD~1"]);
+
+    let out = world.printed_by_the_binary(&["mission", "gates", "m1"]);
+    for line in [
+        "gate 1    pass  clean tree",
+        "gate 2    pass  branch not protected and ahead of its base",
+        "gate 3    FAIL  the resume block names HEAD — the resume block does not name HEAD",
+        "gate 4    pass  perimeter",
+        "gate 8    ????  mechanical security — slot \"one\" has no profile up",
+    ] {
+        assert!(out.contains(line), "{line}\nin:\n{out}");
+    }
 }

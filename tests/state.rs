@@ -52,7 +52,9 @@ fn state(id: &str) -> MissionState {
         spent: Default::default(),
         spared: None,
         coder_session: None,
+        pushed: None,
         updated_at: String::new(),
+        revision: 0,
     }
 }
 
@@ -108,6 +110,56 @@ fn apply_persists_only_a_valid_transition() {
             attempt: 1
         }
     );
+}
+
+/// Every write advances the revision, whatever it changed and whoever holds
+/// which copy: a writer with an older copy still writes past the file, and
+/// the writers that hold the state itself see the revision they wrote.
+#[test]
+fn every_write_advances_the_revision_even_from_an_older_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let older = state("m3");
+    assert_eq!(older.revision, 0);
+
+    store.save(&older).unwrap();
+    assert_eq!(store.load("m3").unwrap().revision, 1);
+    // The same copy, unchanged, saved again: still a new write.
+    store.save(&older).unwrap();
+    assert_eq!(store.load("m3").unwrap().revision, 2);
+
+    let mut held = store.load("m3").unwrap();
+    store.set_run(&mut held, None).unwrap();
+    assert_eq!(held.revision, 3);
+    store
+        .apply(
+            &mut held,
+            Event::RunEnded {
+                outcome: Outcome::Finished(Usage::default()),
+                lot_done: true,
+            },
+        )
+        .unwrap();
+    assert_eq!(held.revision, 4);
+    assert_eq!(store.load("m3").unwrap(), held);
+
+    // A file from before the revision existed reads as 0, and its next
+    // write as 1.
+    let path = dir.path().join("state/missions/m3.json");
+    let mut json: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    json.as_object_mut().unwrap().remove("revision");
+    fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+    let old = store.load("m3").unwrap();
+    assert_eq!(old.revision, 0);
+    store.save(&old).unwrap();
+    assert_eq!(store.load("m3").unwrap().revision, 1);
+
+    // A copy written where its file is gone does not start again from 1,
+    // where a word said on an older revision could be met again.
+    let mut moved = state("m4");
+    moved.revision = 7;
+    store.save(&moved).unwrap();
+    assert_eq!(store.load("m4").unwrap().revision, 8);
 }
 
 #[test]

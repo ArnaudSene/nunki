@@ -1,13 +1,16 @@
 //! The mission's monitor (SPEC 4.3): when one is wanted, what it does after a
 //! `verify`, when it wakes, and how it is started exactly once.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 
 use nunki::harness::{RunHandle, SessionId};
 use nunki::mission::flow::{Flow, Handover};
 use nunki::mission::{Bounds, Header, Integration, Lot, Security};
 use nunki::monitor::{
-    Ensured, MonitorError, Next, after_verify, ensure, next_wake, running, wanted,
+    Ensured, MonitorError, Next, after_verify, ensure, next_wake, running, wake_after_reading,
+    wanted,
 };
 use nunki::project::{Config, Project, ProtectedPaths};
 use nunki::state::MissionState;
@@ -80,7 +83,9 @@ fn state(with_run: bool) -> MissionState {
         spent: Default::default(),
         spared: None,
         coder_session: None,
+        pushed: None,
         updated_at: String::new(),
+        revision: 0,
     }
 }
 
@@ -262,6 +267,12 @@ fn the_monitor_wakes_every_minute_during_a_run_and_at_the_deadline_otherwise() {
         now + 60,
         "never sooner than a minute"
     );
+
+    // Read back after `verify`: the same wake for a state that was read, a
+    // minute for one that could not be.
+    waiting.harness_down = down_until(now + 600);
+    assert_eq!(wake_after_reading(&project, Some(&waiting), now), now + 600);
+    assert_eq!(wake_after_reading(&project, None, now), now + 60);
 }
 
 /// A stand-in for the `nunki` binary: named `nunki`, it sleeps, and its command
@@ -500,4 +511,273 @@ fn the_monitor_stops_on_a_ruling_and_names_the_survivors() {
     ] {
         assert!(said.contains(part), "{part:?} in {said}");
     }
+}
+
+/// The log is for what changed. Ten ticks on the same state write nothing
+/// after the first; a run launched, a stage moved, a new word from `verify`
+/// each write one line.
+#[test]
+fn ten_quiet_ticks_write_nothing_to_the_monitors_log() {
+    use nunki::monitor::Changes;
+    let mut said = Changes::default();
+    let mut log: Vec<u8> = Vec::new();
+    let quiet = state(false);
+
+    said.tick(&mut log, 0, &quiet);
+    let first = String::from_utf8(log.clone()).unwrap();
+    assert!(first.contains("no run under way"), "{first}");
+    assert!(first.contains("stage coding lot L1, attempt 1"), "{first}");
+    said.note(&mut log, 0, "verify", "verify: Waiting");
+    let before = log.len();
+
+    for minute in 1..=10 {
+        said.tick(&mut log, minute * 60, &quiet);
+        assert!(!said.note(&mut log, minute * 60, "verify", "verify: Waiting"));
+    }
+    assert_eq!(
+        log.len(),
+        before,
+        "{}",
+        String::from_utf8_lossy(&log[before..])
+    );
+
+    // A run launched: one line, for the run, and the stage is unchanged.
+    said.tick(&mut log, 700, &state(true));
+    let launched = String::from_utf8(log[before..].to_vec()).unwrap();
+    assert_eq!(launched.lines().count(), 1, "{launched}");
+    assert!(launched.contains("run s1 under way"), "{launched}");
+    // A new word from `verify` is written, under its own topic.
+    assert!(said.note(&mut log, 760, "verify", "verify: Launched"));
+}
+
+/// A running campaign is said once, not at every tick its line count grows.
+#[test]
+fn a_running_campaign_is_said_once_whatever_it_has_written() {
+    use nunki::monitor::campaign_line;
+    use nunki::mutants::Progress;
+    let running = |lines| Progress::Running {
+        started_at: "2026-10-05T10:00:00Z".into(),
+        lines,
+    };
+    assert_eq!(campaign_line(&running(3)), campaign_line(&running(300)));
+    assert_eq!(
+        campaign_line(&Progress::Finished { survivors: 2 }),
+        "mutation campaign ended: 2 survivor(s)"
+    );
+}
+
+/// The monitor's log and its last line carry what an agent wrote — a
+/// `verify` step quoting a report, a campaign's stderr, the reason it stops —
+/// escaped and never raw.
+#[test]
+fn agent_text_reaches_the_monitors_log_escaped_never_raw() {
+    use nunki::monitor::{Changes, campaign_line, stop};
+    let mut said = Changes::default();
+    let mut log: Vec<u8> = Vec::new();
+    assert!(said.note(&mut log, 0, "verify", common::HOSTILE));
+    // The same hostile text again is the same line: nothing more is written.
+    assert!(!said.note(&mut log, 60, "verify", common::HOSTILE));
+    said.note(
+        &mut log,
+        120,
+        "campaign",
+        &campaign_line(&nunki::mutants::Progress::CouldNotRun(
+            common::HOSTILE.into(),
+        )),
+    );
+    let log = String::from_utf8(log).unwrap();
+    assert_eq!(log.lines().count(), 2, "{log}");
+    common::assert_printable(&log, "the monitor's log");
+
+    let dir = tempfile::tempdir().unwrap();
+    // No state: the line says the state cannot be read, and the reason.
+    let last = stop(dir.path(), "m1", common::HOSTILE);
+    common::assert_printable(&last, "the monitor's last line, no state");
+    let store = nunki::state::Store::open(dir.path()).unwrap();
+    store.save(&state(false)).unwrap();
+    let last = stop(dir.path(), "m1", common::HOSTILE);
+    common::assert_printable(&last, "the monitor's last line");
+}
+
+/// A clock for the monitor's loop: it never sleeps, remembers each pause, and
+/// at each one does what the test says the world did meanwhile. A loop that
+/// reads the time over and over without pausing is a loop that spins: it is
+/// stopped, rather than left to hang the battery.
+struct Ticks<'a> {
+    now: u64,
+    reads: usize,
+    slept: Vec<u64>,
+    meanwhile: Box<dyn FnMut() + 'a>,
+}
+
+impl<'a> Ticks<'a> {
+    fn at(now: u64, meanwhile: impl FnMut() + 'a) -> Self {
+        Self {
+            now,
+            reads: 0,
+            slept: Vec::new(),
+            meanwhile: Box::new(meanwhile),
+        }
+    }
+}
+
+impl nunki::wait::Clock for Ticks<'_> {
+    fn now(&mut self) -> u64 {
+        self.reads += 1;
+        assert!(self.reads < 50, "the loop spins without pausing");
+        self.now
+    }
+    fn sleep(&mut self, seconds: u64) {
+        assert!(self.slept.len() < 10, "the loop should have stopped");
+        self.slept.push(seconds);
+        self.now += seconds;
+        (self.meanwhile)();
+    }
+}
+
+/// A clock on which every reading comes a minute after the one before: each
+/// tick of the monitor outlasts its minute. At its second reading, the world
+/// does what the test says.
+struct Slow<'a> {
+    reads: u64,
+    slept: Vec<u64>,
+    meanwhile: Box<dyn FnMut() + 'a>,
+}
+
+impl nunki::wait::Clock for Slow<'_> {
+    fn now(&mut self) -> u64 {
+        self.reads += 1;
+        assert!(self.reads < 50, "the loop spins without pausing");
+        if self.reads == 2 {
+            (self.meanwhile)();
+        }
+        1_000 + 60 * (self.reads - 1)
+    }
+    fn sleep(&mut self, seconds: u64) {
+        assert!(self.slept.len() < 10, "the loop should have stopped");
+        self.slept.push(seconds);
+    }
+}
+
+fn save(project: &Project, state: &MissionState) {
+    nunki::state::Store::open(&project.hq_root)
+        .unwrap()
+        .save(state)
+        .unwrap();
+}
+
+/// The monitor stops on a `verify` that fails — here, the slot is gone —
+/// and the line it ends on is `wait`'s for the same state: the code 13 stop,
+/// carrying the monitor's own word.
+#[test]
+fn a_monitor_that_cannot_verify_stops_on_the_line_wait_prints() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    save(&project, &state(false));
+    let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+        std::sync::Arc::new(nunki::engine::fake::FakeEngine::default());
+
+    let line = nunki::monitor::run(&project, "m1", engine, "docker");
+    assert!(
+        line.contains("the monitor stopped: verify failed, and a human should look"),
+        "{line}"
+    );
+    let said = nunki::wait::wait(
+        "m1",
+        &mut nunki::wait::Hq::new(&project),
+        &mut nunki::wait::SystemClock,
+        30,
+        Some(0),
+    )
+    .unwrap();
+    assert_eq!(said.code, 13, "{}", said.line());
+    assert_eq!(said.line(), line);
+    assert!(
+        !nunki::monitor::pidfile(&project.hq_root, "m1").exists(),
+        "the pid is forgotten once the monitor stops"
+    );
+}
+
+/// While the run goes, the monitor watches it and does not call `verify`: a
+/// tick on a live run measures and sleeps a minute. Once the run is read back
+/// (here, by the test, during that minute), the next tick calls `verify`.
+#[test]
+fn a_running_run_is_watched_and_verify_waits_for_it_to_end() {
+    use nunki::engine::{ExecOutput, Liveness, fake::FakeEngine};
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    save(&project, &state(true));
+    let engine: std::sync::Arc<dyn nunki::engine::Engine> = std::sync::Arc::new(
+        FakeEngine::default()
+            .with_liveness("cafe1234", Liveness::Running)
+            .with_exec(ExecOutput {
+                status: 0,
+                stdout: "nunki-run-running\n".into(),
+                stderr: String::new(),
+            }),
+    );
+    let mut clock = Ticks::at(1_000, || save(&project, &state(false)));
+    let mut log: Vec<u8> = Vec::new();
+
+    let why = nunki::monitor::watch(&project, "m1", engine, "docker", &mut clock, &mut log);
+
+    let log = String::from_utf8(log).unwrap();
+    assert!(why.starts_with("verify failed"), "{why}\n{log}");
+    assert_eq!(clock.slept, vec![60], "{log}");
+    let verifies: Vec<&str> = log.lines().filter(|l| l.contains("verify:")).collect();
+    assert_eq!(
+        verifies.len(),
+        1,
+        "verify is called once, after the run: {log}"
+    );
+    assert!(!log.contains("a run is still going"), "{log}");
+    assert!(log.contains("run s1 under way"), "{log}");
+}
+
+/// A run a human froze is theirs to thaw: the monitor neither measures it nor
+/// calls `verify` on it, and looks again a minute later. Once the run is read
+/// back (here, by the test, during that minute), the next tick calls
+/// `verify`.
+#[test]
+fn a_paused_run_is_left_alone_and_looked_at_again_a_minute_later() {
+    use nunki::engine::{Liveness, fake::FakeEngine};
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    save(&project, &state(true));
+    let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+        std::sync::Arc::new(FakeEngine::default().with_liveness("cafe1234", Liveness::Paused));
+    let mut clock = Ticks::at(1_000, || save(&project, &state(false)));
+    let mut log: Vec<u8> = Vec::new();
+
+    let why = nunki::monitor::watch(&project, "m1", engine, "docker", &mut clock, &mut log);
+
+    let log = String::from_utf8(log).unwrap();
+    assert!(why.starts_with("verify failed"), "{why}\n{log}");
+    assert_eq!(clock.slept, vec![60], "{log}");
+    let verifies = log.lines().filter(|l| l.contains("verify:")).count();
+    assert_eq!(verifies, 1, "verify is called once, after the run: {log}");
+}
+
+/// A tick that outlasts its minute goes straight on to the next: the
+/// monitor pauses only for time still to wait, never for none.
+#[test]
+fn a_tick_that_outlasts_its_minute_goes_on_without_a_pause() {
+    use nunki::engine::{Liveness, fake::FakeEngine};
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    save(&project, &state(true));
+    let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+        std::sync::Arc::new(FakeEngine::default().with_liveness("cafe1234", Liveness::Paused));
+    let mut clock = Slow {
+        reads: 0,
+        slept: Vec::new(),
+        meanwhile: Box::new(|| save(&project, &state(false))),
+    };
+    let mut log: Vec<u8> = Vec::new();
+
+    let why = nunki::monitor::watch(&project, "m1", engine, "docker", &mut clock, &mut log);
+
+    let log = String::from_utf8(log).unwrap();
+    assert!(why.starts_with("verify failed"), "{why}\n{log}");
+    assert_eq!(clock.slept, Vec::<u64>::new(), "{log}");
 }

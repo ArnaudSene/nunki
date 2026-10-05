@@ -97,8 +97,37 @@ pub struct MissionState {
     /// fails — a context that failed is not the one to carry on with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coder_session: Option<crate::harness::SessionId>,
+    /// Set by `nunki push` once the branch is on the forge, and forgotten at
+    /// the next transition of the flow: it says the push happened at the
+    /// stage the mission stands at, and a review sent back after it moves the
+    /// mission off that stage. What `nunki mission wait` reads to tell a
+    /// pushed mission from one still to be read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pushed: Option<PushedAt>,
     /// RFC 3339 time of the last write; informational.
     pub updated_at: String,
+    /// How many times this state has been written: [`Store::save`] advances
+    /// it on every write, whoever writes and whatever changed. What tells two
+    /// writes apart when `updated_at`, to the second and not set by every
+    /// writer, does not — `nunki mission wait` reads the monitor's exit as
+    /// current only on the revision it was said on. Absent from older files,
+    /// read as 0.
+    #[serde(default)]
+    pub revision: u64,
+}
+
+/// The one field [`Store::save`] reads back from the file it replaces.
+#[derive(Deserialize)]
+struct Revision {
+    #[serde(default)]
+    revision: u64,
+}
+
+/// A push `nunki push` made: the commit, and when.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushedAt {
+    pub head: String,
+    pub date: String,
 }
 
 /// A run `nunki` ended because the account's window passed its threshold.
@@ -286,11 +315,24 @@ impl Store {
 
     /// Write a mission's state atomically: to a temp file in the same
     /// directory, then rename. A crash mid-write leaves the previous file
-    /// intact, never a truncated one.
+    /// intact, never a truncated one. The state written carries the next
+    /// [`MissionState::revision`] — one past both the file's and `state`'s,
+    /// so a caller holding an older copy still writes a newer revision.
     pub fn save(&self, state: &MissionState) -> Result<(), StateError> {
+        self.write(state).map(|_| ())
+    }
+
+    /// [`Store::save`], returning the revision it wrote.
+    fn write(&self, state: &MissionState) -> Result<u64, StateError> {
         let path = self.mission_path(&state.id);
         let tmp = path.with_extension("json.tmp");
-        let bytes = serde_json::to_vec_pretty(state).expect("MissionState serializes");
+        let on_disk = fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Revision>(&bytes).ok())
+            .map_or(0, |r| r.revision);
+        let mut written = state.clone();
+        written.revision = on_disk.max(state.revision).saturating_add(1);
+        let bytes = serde_json::to_vec_pretty(&written).expect("MissionState serializes");
         fs::write(&tmp, bytes).map_err(|source| StateError::Io {
             path: tmp.clone(),
             source,
@@ -298,7 +340,8 @@ impl Store {
         fs::rename(&tmp, &path).map_err(|source| StateError::Io {
             path: path.clone(),
             source,
-        })
+        })?;
+        Ok(written.revision)
     }
 
     pub fn load(&self, id: &str) -> Result<MissionState, StateError> {
@@ -341,8 +384,12 @@ impl Store {
     /// rejected event writes nothing.
     pub fn apply(&self, state: &mut MissionState, event: Event) -> Result<(), StateError> {
         state.flow.advance(event)?;
+        // A push describes the stage it was made at, and the flow just left
+        // it.
+        state.pushed = None;
         state.updated_at = now_rfc3339();
-        self.save(state)
+        state.revision = self.write(state)?;
+        Ok(())
     }
 
     /// Record the run launched for the current stage (or clear it), and
@@ -354,7 +401,8 @@ impl Store {
     ) -> Result<(), StateError> {
         state.run = run;
         state.updated_at = now_rfc3339();
-        self.save(state)
+        state.revision = self.write(state)?;
+        Ok(())
     }
 }
 

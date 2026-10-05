@@ -5,6 +5,8 @@
 //! sentences that matter arrive monospaced and unread — `ended` putting the
 //! reason a mission was called off inside one is exactly that failure.
 
+mod common;
+
 use nunki::followup;
 use nunki::harness::Role;
 use nunki::mission::Verdict;
@@ -126,4 +128,24 @@ fn a_spent_round_cap_names_the_commits_not_attacked_and_only_when_there_are_some
         assert!(text.contains("security round cap was reached"), "{text}");
         assert!(!text.contains("Not attacked"), "{text}");
     }
+}
+
+/// What agents and authors write here — a verdict's report, the commits not
+/// attacked — is read by a human, often with `cat`: every record carries
+/// it escaped, never raw, and keeps its line breaks.
+#[test]
+fn agent_text_is_written_into_the_follow_up_escaped_never_raw() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("FOLLOWUP_HQ.md");
+    std::fs::write(&file, "").unwrap();
+    let report = format!("first line\n{}", common::HOSTILE);
+
+    followup::carry(&file, Role::Security, Verdict::Findings, &report, &head()).unwrap();
+    followup::security_capped(&file, 1, 1, &[common::HOSTILE.to_string()]).unwrap();
+    followup::security_capped_on_findings(&file, 1, 1, &[common::HOSTILE.to_string()]).unwrap();
+
+    let text = std::fs::read_to_string(&file).unwrap();
+    common::assert_printable(&text, "FOLLOWUP_HQ.md");
+    assert!(text.contains("first line\n"), "{text}");
+    assert_eq!(text.matches("\\u{1b}[2K").count(), 3, "{text}");
 }

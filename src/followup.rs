@@ -310,6 +310,10 @@ fn today() -> String {
 
 fn append(file: &Path, block: &str) -> Result<(), FollowupError> {
     use std::io::Write;
+    // Reports, causes and commit subjects are written here by agents and
+    // authors, and this file is read by a human, in a terminal as often as
+    // not: every block is made printable on its way in.
+    let block = crate::text::printable(block);
     let existing = std::fs::read_to_string(file).unwrap_or_default();
     let mut out = std::fs::OpenOptions::new()
         .create(true)

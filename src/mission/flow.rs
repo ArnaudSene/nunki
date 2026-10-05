@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::harness::{Outcome, Role};
+use crate::text::{brief, one_line};
 
 use super::{Header, RigorError, Verdict};
 
@@ -60,19 +61,29 @@ impl Handover {
     /// expected to do about it. `mission` is the id the verbs are spelled
     /// with.
     pub fn line(&self, mission: &str) -> String {
-        match self {
-            Handover::LotAttemptsExhausted { lot, attempts } => format!(
-                "lot {lot} failed {attempts} attempt(s) — read the journals, then \
-                 `nunki mission retry {mission} --because <what changed>`"
-            ),
-            Handover::RoleAttemptsExhausted { role, attempts } => format!(
-                "the {role:?} failed {attempts} attempt(s) — `nunki mission retry {mission} \
-                 --because <what changed>`"
-            ),
+        format!("{} — {}", self.detail(), self.awaits(mission).1)
+    }
+
+    /// What stopped, in one line: the lot and its attempts, the role, the
+    /// causes of the volets, the reason it was called off, the survivors.
+    /// Agent-written as most of it is (causes, survivors), it is made
+    /// printable as a whole ([`crate::text`]).
+    pub fn detail(&self) -> String {
+        let raw = match self {
+            Handover::LotAttemptsExhausted { lot, attempts } => {
+                format!("lot {lot} failed {attempts} attempt(s)")
+            }
+            Handover::RoleAttemptsExhausted { role, attempts } => {
+                format!("the {role:?} failed {attempts} attempt(s)")
+            }
             Handover::VoletsExhausted { causes } => format!(
-                "{} return(s) to the coder were used — `nunki mission retry {mission} \
-                 --because <what changed>`",
-                causes.len()
+                "{} return(s) to the coder were used: {}",
+                causes.len(),
+                causes
+                    .iter()
+                    .map(|cause| brief(cause, CAUSE_CHARS))
+                    .collect::<Vec<_>>()
+                    .join("; ")
             ),
             Handover::Abandoned { reason } => format!("called off: {reason}"),
             Handover::AwaitingRuling {
@@ -81,18 +92,48 @@ impl Handover {
                 survivors,
                 ..
             } => format!(
-                "lot {lot}, attempt {attempt}, awaits the HQ's ruling on {} — rule each \
-                 (`nunki mission mutants {mission} --equivalent <survivor> --because \
-                 <why>`), then `nunki mission retry {mission} --because <what was ruled>`",
+                "lot {lot}, attempt {attempt}, awaits the HQ's ruling on {}",
                 survivors
                     .iter()
                     .map(|id| format!("`{id}`"))
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
+        };
+        one_line(&raw)
+    }
+
+    /// Who the handover waits on, and what they are expected to do, with the
+    /// verbs spelled for `mission`. A ruling is the HQ's; the rest are the
+    /// human's, whose word ends a bound.
+    pub fn awaits(&self, mission: &str) -> (&'static str, String) {
+        let retry = format!("`nunki mission retry {mission} --because <what changed>`");
+        match self {
+            Handover::LotAttemptsExhausted { .. } => {
+                ("the human", format!("read the journals, then {retry}"))
+            }
+            Handover::RoleAttemptsExhausted { .. } | Handover::VoletsExhausted { .. } => {
+                ("the human", retry)
+            }
+            Handover::Abandoned { .. } => (
+                "the human",
+                format!("`nunki mission archive {mission}` closes it"),
+            ),
+            Handover::AwaitingRuling { .. } => (
+                "the HQ",
+                format!(
+                    "rule each (`nunki mission mutants {mission} --equivalent <survivor> \
+                     --because <why>`), then `nunki mission retry {mission} --because <what \
+                     was ruled>`"
+                ),
+            ),
         }
     }
 }
+
+/// How much of one volet's cause a handover's line carries: the start says
+/// which verdict or gate it was, and the journals hold the rest.
+const CAUSE_CHARS: usize = 120;
 
 /// Where the mission is.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

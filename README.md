@@ -143,6 +143,45 @@ tree and the cause have not moved on their own, so the next run reads it
 before anything else. A mission you called off yourself with `mission end` is
 a decision, not a bound, and is refused.
 
+### Following a mission
+
+A mission runs for hours. Rather than polling `mission status`, block until it
+needs someone:
+
+```sh
+nunki mission wait m1                  # returns when the mission stops
+nunki mission wait m1 --timeout 8h     # or gives up after eight hours
+nunki mission wait m1 --json           # the same, as one JSON object
+```
+
+It returns at once if the mission is already stopped, and otherwise reads the
+state again every 30 seconds (`--every`). It prints one line — what stopped,
+and who it waits on —
+
+```text
+m1 · findings · security round 1 of 1 found: … · awaits the HQ: `nunki mission iterate m1` sends it back to the coder, or `nunki mission accept m1 --because <why>` lifts it
+```
+
+and exits with a code that says which stop it is:
+
+| Stop | Code |
+|---|---|
+| Verified, or already pushed or archived | 0 |
+| Findings from the security agent | 10 |
+| Handed over to the human, a ruling included | 11 |
+| Held, or the account's window spent | 12 |
+| The monitor stopped on an error, or a gate could not be played | 13 |
+| No monitor runs while the mission is still being driven | 14 |
+| `--timeout` reached | 15 |
+
+`wait` drives nothing: it takes no lock and launches nothing, so two of them on
+the same mission are harmless. (Opening the HQ's state creates its
+directories if they are missing; that is all it may write.) The monitor ends
+its log on the same line.
+
+`--json` prints the same fields as the line, already made printable: what an
+agent wrote reaches it with the same `\u{1b}` escapes, then JSON's own.
+
 When the mission reads `VERIFIED`, the push is yours and yours alone:
 
 ```sh

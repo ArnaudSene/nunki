@@ -338,7 +338,9 @@ pub fn start(
         spent: Default::default(),
         spared: None,
         coder_session: Some(session),
+        pushed: None,
         updated_at: String::new(),
+        revision: 0,
     };
     store.save(&state)?;
     state.updated_at = crate::state::now_rfc3339();

@@ -143,6 +143,16 @@ pub fn next_wake(project: &Project, state: &MissionState, now: u64) -> u64 {
         .unwrap_or(tick)
 }
 
+/// [`next_wake`] for the state as the monitor read it back after `verify`,
+/// or a minute from now when it could not be read: the next tick reads it
+/// again, and stops there, saying why, if it still cannot.
+pub fn wake_after_reading(project: &Project, state: Option<&MissionState>, now: u64) -> u64 {
+    match state {
+        Some(state) => next_wake(project, state, now),
+        None => now + TICK_SECONDS,
+    }
+}
+
 /// Start the mission's monitor, unless one is alive.
 ///
 /// `exe` is the binary it runs as, and anything not named `nunki` is refused:
@@ -287,7 +297,10 @@ pub fn after_campaign(progress: &crate::mutants::Progress) -> Next {
 }
 
 /// Watch mission `id` until nothing is left for `nunki` to do on its own, then
-/// say why. Its pid is kept while it runs and forgotten when it stops.
+/// say why, in the line `nunki mission wait` prints for the same state. Its
+/// pid is kept while it runs and forgotten when it stops; why it stopped is
+/// kept before the pid is forgotten, so that no reader finds it gone without
+/// a word.
 pub fn run(project: &Project, id: &str, engine: Arc<dyn Engine>, engine_bin: &str) -> String {
     let me = std::process::id();
     if let Some(other) = running(&project.hq_root, id)
@@ -300,8 +313,18 @@ pub fn run(project: &Project, id: &str, engine: Arc<dyn Engine>, engine_bin: &st
         let _ = std::fs::create_dir_all(dir);
     }
     let _ = std::fs::write(&path, format!("{me}\n"));
+    // What the previous monitor said no longer holds: this one watches.
+    let _ = std::fs::remove_file(exitfile(&project.hq_root, id));
 
-    let why = watch(project, id, engine, engine_bin);
+    let why = watch(
+        project,
+        id,
+        engine,
+        engine_bin,
+        &mut crate::wait::SystemClock,
+        &mut std::io::stdout(),
+    );
+    let line = stop(&project.hq_root, id, &why);
 
     // The last act: forget the pid, if it is still this monitor's.
     let ours = std::fs::read_to_string(&path)
@@ -311,23 +334,29 @@ pub fn run(project: &Project, id: &str, engine: Arc<dyn Engine>, engine_bin: &st
     if ours {
         let _ = std::fs::remove_file(&path);
     }
-    why
+    line
 }
 
-fn say(what: &str) {
-    println!(
-        "{}  {what}",
-        crate::state::rfc3339(crate::state::now_secs())
-    );
-}
-
-fn watch(project: &Project, id: &str, engine: Arc<dyn Engine>, engine_bin: &str) -> String {
+/// The monitor's loop: what [`run`] does between taking the pid and giving it
+/// back, and why it stopped. Its clock and its log are parameters, as
+/// `wait`'s are, so that a test drives the ticks and reads what was written.
+pub fn watch(
+    project: &Project,
+    id: &str,
+    engine: Arc<dyn Engine>,
+    engine_bin: &str,
+    clock: &mut dyn crate::wait::Clock,
+    out: &mut dyn std::io::Write,
+) -> String {
+    // The log is for what changed: a tick that changed nothing writes nothing.
+    let mut said = Changes::default();
     loop {
-        let now = crate::state::now_secs();
+        let now = clock.now();
         let state = match Store::open(&project.hq_root).and_then(|store| store.load(id)) {
             Ok(state) => state,
             Err(e) => return format!("the mission's state cannot be read: {e}"),
         };
+        said.tick(out, now, &state);
 
         if let Some(handle) = &state.run {
             let harness = crate::harness::claude_code::ClaudeCode::new(
@@ -347,24 +376,43 @@ fn watch(project: &Project, id: &str, engine: Arc<dyn Engine>, engine_bin: &str)
                         harness.windows(handle),
                         now,
                     ) {
-                        say(&format!("the measure could not be kept: {e}"));
+                        said.note(
+                            out,
+                            now,
+                            "measure",
+                            &format!("the measure could not be kept: {e}"),
+                        );
                     }
                     match crate::gesture::spare(project, id, &harness, now, LOCK_VERB) {
-                        Ok(Some(spared)) => say(&format!(
-                            "account {}'s {} at {}% — the run was told to end its turn",
-                            spared.account,
-                            spared.window,
-                            crate::consumption::percent(spared.per_mille)
-                        )),
+                        Ok(Some(spared)) => {
+                            said.note(
+                                out,
+                                now,
+                                "spare",
+                                &format!(
+                                    "account {}'s {} at {}% — the run was told to end its turn",
+                                    spared.account,
+                                    spared.window,
+                                    crate::consumption::percent(spared.per_mille)
+                                ),
+                            );
+                        }
                         Ok(None) => {}
-                        Err(e) => say(&format!("the run could not be spared: {e}")),
+                        Err(e) => {
+                            said.note(
+                                out,
+                                now,
+                                "spare",
+                                &format!("the run could not be spared: {e}"),
+                            );
+                        }
                     }
-                    sleep_until(now + TICK_SECONDS);
+                    sleep_until(clock, now + TICK_SECONDS);
                     continue;
                 }
                 // A human froze it, and a frozen run is theirs to thaw.
                 Ok(RunState::Paused(_)) => {
-                    sleep_until(now + TICK_SECONDS);
+                    sleep_until(clock, now + TICK_SECONDS);
                     continue;
                 }
                 // Ended, or unreachable: `verify` reads it back, or says it
@@ -377,10 +425,12 @@ fn watch(project: &Project, id: &str, engine: Arc<dyn Engine>, engine_bin: &str)
         match &result {
             Ok(steps) => {
                 if let Some(last) = steps.last() {
-                    say(&format!("verify: {last:?}"));
+                    said.note(out, now, "verify", &format!("verify: {last:?}"));
                 }
             }
-            Err(e) => say(&format!("verify: {e}")),
+            Err(e) => {
+                said.note(out, now, "verify", &format!("verify: {e}"));
+            }
         }
         match after_verify(id, &result) {
             Next::Exit(why) => return why,
@@ -388,7 +438,7 @@ fn watch(project: &Project, id: &str, engine: Arc<dyn Engine>, engine_bin: &str)
             // read it back. It launches detached, so this returns at once.
             Next::RunCampaign => match crate::verify::campaign(project, id, engine.clone()) {
                 Ok(progress) => {
-                    say(&format!("mutation campaign: {progress:?}"));
+                    said.note(out, now, "campaign", &campaign_line(&progress));
                     if let Next::Exit(why) = after_campaign(&progress) {
                         return why;
                     }
@@ -397,17 +447,142 @@ fn watch(project: &Project, id: &str, engine: Arc<dyn Engine>, engine_bin: &str)
             },
             Next::Continue => {}
         }
-        let wake = match Store::open(&project.hq_root).and_then(|store| store.load(id)) {
-            Ok(state) => next_wake(project, &state, crate::state::now_secs()),
-            Err(_) => crate::state::now_secs() + TICK_SECONDS,
-        };
-        sleep_until(wake);
+        let after = Store::open(&project.hq_root)
+            .and_then(|store| store.load(id))
+            .ok();
+        let wake = wake_after_reading(project, after.as_ref(), clock.now());
+        sleep_until(clock, wake);
     }
 }
 
-fn sleep_until(epoch: u64) {
-    let now = crate::state::now_secs();
+fn sleep_until(clock: &mut dyn crate::wait::Clock, epoch: u64) {
+    let now = clock.now();
     if epoch > now {
-        std::thread::sleep(std::time::Duration::from_secs(epoch - now));
+        clock.sleep(epoch - now);
+    }
+}
+
+/// Where a monitor that stopped says why, for `nunki mission wait`.
+pub fn exitfile(hq_root: &Path, id: &str) -> PathBuf {
+    hq_root.join(MONITORS_DIR).join(format!("{id}.exit"))
+}
+
+/// Why the mission's last monitor stopped, and on which state: its
+/// [`MissionState::revision`], so that a reader can tell the word still holds
+/// from one any write since has moved past.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Exited {
+    pub why: String,
+    pub revision: u64,
+}
+
+/// Keep why the monitor stopped.
+pub fn record_exit(hq_root: &Path, id: &str, exited: &Exited) -> Result<(), MonitorError> {
+    let path = exitfile(hq_root, id);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| MonitorError::Io(dir.to_path_buf(), e))?;
+    }
+    let text = serde_json::to_string(exited).expect("an Exited is a string and a number");
+    std::fs::write(&path, text).map_err(|e| MonitorError::Io(path, e))
+}
+
+/// Why the mission's last monitor stopped, if it said.
+pub fn last_exit(hq_root: &Path, id: &str) -> Option<Exited> {
+    let text = std::fs::read_to_string(exitfile(hq_root, id)).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// The line a monitor that stopped for `why` ends on: the one
+/// `nunki mission wait` prints for the same state ([`crate::wait::monitor_exit`]).
+/// Written as it is kept, so that `wait` reads the very word the line was
+/// built from.
+pub fn stop(hq_root: &Path, id: &str, why: &str) -> String {
+    let state = match Store::open(hq_root).and_then(|store| store.load(id)) {
+        Ok(state) => state,
+        Err(e) => {
+            return crate::text::one_line(&format!(
+                "{id} · unknown · {why}; the state cannot be read: {e}"
+            ));
+        }
+    };
+    let exited = Exited {
+        why: why.to_string(),
+        revision: state.revision,
+    };
+    let line = crate::wait::monitor_exit(id, &state, why).line();
+    match record_exit(hq_root, id, &exited) {
+        Ok(()) => line,
+        Err(e) => format!("{line} (not kept for `nunki mission wait`: {e})"),
+    }
+}
+
+/// What the monitor has written to its log, by topic, so that it writes a
+/// line only when something changed: a run launched or ended, a stage
+/// changed, a campaign started or ended, a `verify` that said something new.
+/// A tick that changed nothing writes nothing.
+#[derive(Debug, Default)]
+pub struct Changes {
+    said: std::collections::HashMap<&'static str, String>,
+}
+
+impl Changes {
+    /// Write `what` under `topic`, stamped `at`, unless it is what that topic
+    /// said last. Returns whether it wrote. What it writes is one printable
+    /// line ([`crate::text`]): a `verify` step or a campaign's stderr carries
+    /// what an agent wrote.
+    pub fn note(
+        &mut self,
+        out: &mut dyn std::io::Write,
+        at: u64,
+        topic: &'static str,
+        what: &str,
+    ) -> bool {
+        let what = crate::text::one_line(what);
+        if self.said.get(topic).is_some_and(|last| *last == what) {
+            return false;
+        }
+        let _ = writeln!(out, "{}  {what}", crate::state::rfc3339(at));
+        self.said.insert(topic, what);
+        true
+    }
+
+    /// One tick's reading of the state: the run under way and the stage.
+    pub fn tick(&mut self, out: &mut dyn std::io::Write, at: u64, state: &MissionState) {
+        let run = match &state.run {
+            Some(handle) => format!("run {} under way", handle.session.0),
+            None => "no run under way".to_string(),
+        };
+        self.note(out, at, "run", &run);
+        let stage = format!("stage {}", crate::wait::stage_name(&state.flow));
+        self.note(out, at, "stage", &stage);
+    }
+}
+
+/// A campaign's progress as the log says it: started, running since, ended.
+/// The count of lines a running campaign has written is left out, or every
+/// tick would be a change.
+pub fn campaign_line(progress: &crate::mutants::Progress) -> String {
+    use crate::mutants::Progress;
+    use crate::text::one_line;
+    match progress {
+        Progress::Fresh { survivors } => {
+            format!("mutation campaign already fresh: {survivors} survivor(s)")
+        }
+        Progress::Started { fingerprint } => {
+            format!("mutation campaign started on {fingerprint}")
+        }
+        Progress::Running { started_at, .. } => {
+            format!("mutation campaign running since {started_at}")
+        }
+        Progress::Finished { survivors } => {
+            format!("mutation campaign ended: {survivors} survivor(s)")
+        }
+        Progress::Overrun { minutes } => {
+            format!("mutation campaign stopped past its {minutes}-minute deadline")
+        }
+        Progress::CouldNotRun(why) => {
+            format!("mutation campaign could not run: {}", one_line(why))
+        }
+        Progress::Lost(why) => format!("mutation campaign lost: {}", one_line(why)),
     }
 }

@@ -2,6 +2,8 @@
 
 use std::path::PathBuf;
 
+mod common;
+
 use nunki::harness::LineKind;
 use nunki::harness::claude_code::ClaudeCode;
 use nunki::harness::spawn::LocalSpawner;
@@ -99,7 +101,9 @@ impl World {
                 spent: Default::default(),
                 spared: None,
                 coder_session: None,
+                pushed: None,
                 updated_at: when.into(),
+                revision: 0,
             })
             .unwrap();
     }
@@ -283,4 +287,23 @@ fn a_run_with_nothing_hidden_says_nothing_about_it() {
         "{:?}",
         runs[0].lines
     );
+}
+
+/// A run's stream is the agent's own words, printed to whoever reads the
+/// logs: what it said, and a line nunki could not parse, come back escaped,
+/// never raw.
+#[test]
+fn what_a_run_wrote_is_read_back_escaped_never_raw() {
+    let world = World::new();
+    let said = serde_json::json!({
+        "type": "assistant",
+        "message": {"content": [{"type": "text", "text": common::HOSTILE}]}
+    });
+    world.run_log("s1", &format!("{said}\n{}\n", common::HOSTILE));
+
+    let runs = logs::of(&world.project, "m1", &harness()).unwrap();
+    assert_eq!(runs[0].lines.len(), 2, "{:?}", runs[0].lines);
+    for line in &runs[0].lines {
+        common::assert_printable(&line.text, &format!("{:?}", line.kind));
+    }
 }

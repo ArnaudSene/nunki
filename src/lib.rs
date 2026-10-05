@@ -42,5 +42,7 @@ pub mod security;
 pub mod sessions;
 pub mod slot;
 pub mod state;
+pub mod text;
 pub mod verify;
 pub mod versions;
+pub mod wait;

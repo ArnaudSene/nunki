@@ -82,7 +82,9 @@ impl World {
                 spent: Default::default(),
                 spared: None,
                 coder_session: None,
+                pushed: None,
                 updated_at: "2026-09-10T00:00:00Z".into(),
+                revision: 0,
             })
             .unwrap();
         Self { _dir: dir, project }
@@ -338,7 +340,9 @@ fn archiving_twice_says_so() {
             spent: Default::default(),
             spared: None,
             coder_session: None,
+            pushed: None,
             updated_at: String::new(),
+            revision: 0,
         })
         .unwrap();
     world.at(&[
