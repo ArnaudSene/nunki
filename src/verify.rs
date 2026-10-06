@@ -514,6 +514,14 @@ pub fn verify_as(
                         // that commit: everything after it must be the
                         // integrator's wiring and nothing else.
                         state.conclude(Role::Coder, None, &head);
+                        // Gate 7 counted the coder's proposals as outcomes;
+                        // the HQ reads them here, with their reasons, long
+                        // before `nunki push` refuses on them.
+                        crate::followup::proposals_await(
+                            &paths.followup,
+                            id,
+                            &crate::mutants::awaiting_ruling(&paths.dir)?,
+                        )?;
                         Event::GatesPassed
                     }
                 };

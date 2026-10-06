@@ -53,9 +53,22 @@ the survivor's id, spelled exactly as `MUTANTS.json` spells it:
 it is the one answer nobody can check, so it is decided for you, and an
 `equivalent` in your file makes the gate red.
 
-There is no third answer of your own. A survivor you can neither kill nor call
-a bug leaves the lot waiting on the HQ: say in the journal what you tried and
-why neither outcome was honest, end the lot with the line that awaits the
+You may **propose** it instead, with its reason in one sentence:
+
+    {\"<survivor id>\": {\"kind\": \"equivalent_proposed\", \"why\": \"<one sentence>\"}}
+
+Use it only for a survivor whose mutation cannot change any observable
+behaviour, and say why in that sentence — never for a survivor that is merely
+hard to test: that one needs a seam and a test. A proposal lets the gate pass
+and the mission go on, but it is not a ruling: the HQ ratifies or refuses
+each one, and nothing is pushed until it has. A proposal with a blank `why`
+is no outcome, and one the HQ refused is no outcome either — its reason is in
+`FOLLOWUP_HQ.md`, and the survivor needs a test.
+
+There is no third answer of your own. A survivor you can neither kill, call
+a bug nor honestly propose leaves the lot waiting on the HQ: say in the
+journal what you tried and why no outcome was honest, end the lot with the
+line that awaits the
 HQ's ruling on it — `Lot: <lot> — awaits ruling: <what>`, with the survivor's
 id between backquotes — and stop. The HQ decides what happens then — it may
 rule the survivor equivalent itself, or put it out of the campaign's reach.
@@ -118,7 +131,9 @@ backquotes, spelled exactly as `MUTANTS.json` spells its id — every
 backquoted span there is read as a survivor id, so quote nothing else — and
 say why you believe it equivalent. `nunki` checks that each is a survivor of
 `MUTANTS.json` with no outcome; a line that names none, or names anything
-else, is a failed attempt.
+else, is a failed attempt. A survivor you proposed equivalent has an
+outcome, so it is never awaited: propose it, or await a ruling on it, not
+both.
 It is not a way out of a hard lot: everything else in the lot is done,
 committed and proved before you write it. The HQ then rules, and the next
 attempt picks the lot up from there."

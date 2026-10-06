@@ -528,9 +528,30 @@ enum MissionCommand {
         equivalent: Option<String>,
         /// Why it is equivalent, in one sentence. Required with
         /// `--equivalent`: a ruling nobody can check must at least say what
-        /// it rests on.
-        #[arg(long = "because", value_name = "SENTENCE", requires = "equivalent")]
+        /// it rests on. With `--ratify`, it replaces the coder's sentence;
+        /// with `--refuse`, it is required, and it is what the next coder run
+        /// reads.
+        #[arg(long = "because", value_name = "SENTENCE")]
         because: Option<String>,
+        /// Ratify the equivalence the coder proposed on a survivor: the HQ's
+        /// ruling, written exactly as `--equivalent` writes it, with the
+        /// coder's sentence as its reason unless `--because` replaces it.
+        #[arg(
+            long = "ratify",
+            value_name = "SURVIVOR",
+            conflicts_with_all = ["equivalent", "lift", "refuse"]
+        )]
+        ratify: Option<String>,
+        /// Refuse the equivalence the coder proposed on a survivor, with
+        /// `--because`: the proposal is removed, the refusal recorded, and the
+        /// survivor needs an outcome again. The next coder run reads why in
+        /// `FOLLOWUP_HQ.md`.
+        #[arg(
+            long = "refuse",
+            value_name = "SURVIVOR",
+            conflicts_with_all = ["equivalent", "lift"]
+        )]
+        refuse: Option<String>,
         /// Lift the HQ's `equivalent` ruling from a survivor, so that it
         /// needs an outcome again. Rulings are carried from one campaign to
         /// the next when the same mutation survives, so this is the way back
@@ -2077,9 +2098,62 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             slot,
             equivalent,
             because,
+            ratify,
+            refuse,
             lift,
             again,
         } => {
+            if because.is_some() && equivalent.is_none() && ratify.is_none() && refuse.is_none() {
+                eprintln!(
+                    "nunki: --because goes with --equivalent, --ratify or --refuse: it is the \
+                     reason of a ruling"
+                );
+                return ExitCode::FAILURE;
+            }
+            if let Some(survivor) = ratify {
+                let paths = nunki::mission::dir::Paths::of(&project.hq_root, &id);
+                return match nunki::mutants::ratify(&paths.dir, &survivor, because.as_deref()) {
+                    Ok(why) => {
+                        println!(
+                            "{} ruled equivalent — {}",
+                            nunki::text::one_line(&survivor),
+                            nunki::text::one_line(&why)
+                        );
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("nunki: {e}");
+                        ExitCode::FAILURE
+                    }
+                };
+            }
+            if let Some(survivor) = refuse {
+                let Some(why) = because else {
+                    eprintln!(
+                        "nunki: --refuse needs --because: the next coder run reads why, and a \
+                         refusal that says nothing teaches it nothing"
+                    );
+                    return ExitCode::FAILURE;
+                };
+                let paths = nunki::mission::dir::Paths::of(&project.hq_root, &id);
+                let who = nunki::human::me(&project.nunki_home(), Some(&project.root))
+                    .name
+                    .unwrap_or_else(|| "the HQ".to_string());
+                return match nunki::mutants::refuse_and_say(&paths, &who, &survivor, &why) {
+                    Ok(()) => {
+                        println!(
+                            "{}: the proposal is refused, and it needs an outcome again — the \
+                             next coder run reads why in FOLLOWUP_HQ.md",
+                            nunki::text::one_line(&survivor)
+                        );
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("nunki: {e}");
+                        ExitCode::FAILURE
+                    }
+                };
+            }
             if let Some(survivor) = lift {
                 let paths = nunki::mission::dir::Paths::of(&project.hq_root, &id);
                 return match nunki::mutants::lift_equivalent(&paths.dir, &survivor) {
@@ -2443,6 +2517,7 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                             " — this mission calls no security agent"
                         }
                     );
+                    print_proposals(project, &id);
                     // The lifts nobody typed: a verified mission otherwise
                     // reads as if a CLEAR or a human had verified it.
                     for lift in state.accepted.iter().filter(|a| a.by_nunki) {
@@ -2532,6 +2607,32 @@ fn parse_service(spec: &str) -> Result<Service, String> {
         reach,
         shared: false,
     })
+}
+
+/// The equivalences the coder proposed that await the HQ, each with its
+/// reason: `nunki push` refuses until each is ratified or refused, and this
+/// is where the HQ finds them without opening two JSON files.
+fn print_proposals(project: &Project, id: &str) {
+    let dir = mission_dir::Paths::of(&project.hq_root, id).dir;
+    match nunki::mutants::awaiting_ruling(&dir) {
+        Ok(waiting) => {
+            if let Some(line) = nunki::mutants::proposals_await(waiting.len()) {
+                println!("proposals {line}");
+                for p in &waiting {
+                    println!(
+                        "          {} — {}",
+                        nunki::text::one_line(&p.id),
+                        nunki::text::one_line(&p.why)
+                    );
+                }
+                println!(
+                    "          `nunki mission mutants {id} --ratify <survivor>` or \
+                     `--refuse <survivor> --because <why>`"
+                );
+            }
+        }
+        Err(e) => println!("proposals could not be read: {e}"),
+    }
 }
 
 /// One line per gate, the same wherever gates are reported — `nunki mission

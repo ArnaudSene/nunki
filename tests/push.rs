@@ -1364,3 +1364,192 @@ fn push_and_status_print_what_nunki_accepted_and_only_then() {
     assert!(out.contains("pushed"), "the push happened: {out}");
     assert!(!out.contains("accepted by nunki"), "{out}");
 }
+
+/// Gate 7 lets a coder's proposed equivalence through so the mission goes
+/// on; push is where it waits. A verified mission whose campaign carries two
+/// proposals is not pushed until the HQ ratified or refused both — and the
+/// refusal names each survivor still waiting, and the two verbs.
+#[test]
+fn push_refuses_until_every_proposed_equivalence_is_ratified_or_refused() {
+    use nunki::mutants::{self, Campaign, Survivor, Triage};
+    let world = World::new(
+        Integration::None {
+            reason: "none".into(),
+        },
+        Security::Gates,
+    );
+    let head = world.commit("src.rs", "pub fn one() -> u8 { 2 }\n", "the lot");
+    world.verified(&[(Role::Coder, None, head.clone())]);
+
+    let dir = nunki::mission::dir::Paths::of(&world.project.hq_root, "m1").dir;
+    let survivor = |id: &str| Survivor {
+        id: id.into(),
+        file: "src.rs".into(),
+        line: 1,
+        description: "replace 2 with 0".into(),
+        outcome: None,
+        refused: None,
+    };
+    mutants::write(
+        &dir,
+        &Campaign {
+            fingerprint: "f".into(),
+            head: head.clone(),
+            date: "2026-10-06T12:00:00Z".into(),
+            survivors: vec![survivor("s1"), survivor("s2"), survivor("s3")],
+            tried: None,
+        },
+    )
+    .unwrap();
+    mutants::write_triage(
+        &dir,
+        &[
+            (
+                "s1".to_string(),
+                Triage::EquivalentProposed {
+                    why: "only a log line reads it".into(),
+                },
+            ),
+            (
+                "s2".to_string(),
+                Triage::EquivalentProposed {
+                    why: "both arms return the same constant".into(),
+                },
+            ),
+            (
+                "s3".to_string(),
+                Triage::Killed {
+                    test: "one_is_two".into(),
+                },
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    )
+    .unwrap();
+
+    let err = push::push(&world.project, "m1", true).unwrap_err();
+    match &err {
+        PushError::ProposalsAwait { count, .. } => assert_eq!(*count, 2),
+        other => panic!("two proposals nobody ruled on: {other}"),
+    }
+    let said = err.to_string();
+    for part in [
+        "`s1` (only a log line reads it)",
+        "`s2` (both arms return the same constant)",
+        "nunki mission mutants m1 --ratify <survivor>",
+        "nunki mission mutants m1 --refuse <survivor> --because <why>",
+    ] {
+        assert!(said.contains(part), "{part:?} in {said}");
+    }
+    assert!(
+        !said.contains("s3"),
+        "a killed survivor awaits nothing: {said}"
+    );
+    assert!(world.on_forge("mission/x").is_none(), "nothing was pushed");
+
+    // One ruled: the other still holds the push, and only it is named.
+    mutants::ratify(&dir, "s1", None).unwrap();
+    let err = push::push(&world.project, "m1", true).unwrap_err();
+    let said = err.to_string();
+    assert!(said.contains("`s2`"), "{said}");
+    assert!(!said.contains("`s1`"), "{said}");
+    assert!(world.on_forge("mission/x").is_none());
+
+    // Both ruled — one ratified, one refused — and the push goes.
+    mutants::refuse(&dir, "s2", "the constant is printed").unwrap();
+    let pushed = push::push(&world.project, "m1", true).unwrap();
+    assert_eq!(world.on_forge("mission/x").as_deref(), Some(head.as_str()));
+    assert_eq!(pushed.head, head);
+}
+
+/// The HQ's two verbs, and where the proposals show, through the real
+/// binary: `mission status` lists each proposal with its reason, `--ratify`
+/// and `--refuse` rule on them, a `--refuse` without a reason and a lone
+/// `--because` are refused, and the refusal reaches `FOLLOWUP_HQ.md`.
+#[test]
+fn the_hq_rules_on_proposals_with_two_verbs_and_status_lists_them() {
+    use nunki::mutants::{self, Campaign, Survivor, Triage};
+    let world = World::opened(
+        Integration::None {
+            reason: "none".into(),
+        },
+        Security::Gates,
+    );
+    let head = world.commit("src.rs", "pub fn one() -> u8 { 2 }\n", "the lot");
+    let paths = nunki::mission::dir::Paths::of(&world.project.hq_root, "m1");
+    let survivor = |id: &str| Survivor {
+        id: id.into(),
+        file: "src.rs".into(),
+        line: 1,
+        description: "replace 2 with 0".into(),
+        outcome: None,
+        refused: None,
+    };
+    mutants::write(
+        &paths.dir,
+        &Campaign {
+            fingerprint: "f".into(),
+            head,
+            date: "2026-10-06T12:00:00Z".into(),
+            survivors: vec![survivor("s1"), survivor("s2")],
+            tried: None,
+        },
+    )
+    .unwrap();
+    let propose = |id: &str, why: &str| {
+        (
+            id.to_string(),
+            Triage::EquivalentProposed { why: why.into() },
+        )
+    };
+    mutants::write_triage(
+        &paths.dir,
+        &[
+            propose("s1", "only a log line reads it"),
+            propose("s2", "both arms return the same constant"),
+        ]
+        .into_iter()
+        .collect(),
+    )
+    .unwrap();
+
+    let status = world.printed_by_the_binary(&["mission", "status", "m1"]);
+    assert!(
+        status.contains("proposals 2 equivalence proposal(s) await the HQ's ruling"),
+        "{status}"
+    );
+    assert!(status.contains("s1 — only a log line reads it"), "{status}");
+    assert!(
+        status.contains("s2 — both arms return the same constant"),
+        "{status}"
+    );
+
+    let said = world.printed_by_the_binary(&["mission", "mutants", "m1", "--refuse", "s2"]);
+    assert!(said.contains("--refuse needs --because"), "{said}");
+    let said = world.printed_by_the_binary(&["mission", "mutants", "m1", "--because", "x"]);
+    assert!(said.contains("--because goes with"), "{said}");
+    assert_eq!(mutants::awaiting_ruling(&paths.dir).unwrap().len(), 2);
+
+    let said = world.printed_by_the_binary(&["mission", "mutants", "m1", "--ratify", "s1"]);
+    assert!(
+        said.contains("s1 ruled equivalent — only a log line reads it"),
+        "{said}"
+    );
+    let said = world.printed_by_the_binary(&[
+        "mission",
+        "mutants",
+        "m1",
+        "--refuse",
+        "s2",
+        "--because",
+        "the constant is printed",
+    ]);
+    assert!(said.contains("s2: the proposal is refused"), "{said}");
+    assert!(mutants::awaiting_ruling(&paths.dir).unwrap().is_empty());
+    let followup = std::fs::read_to_string(&paths.followup).unwrap();
+    assert!(followup.contains("the constant is printed"), "{followup}");
+
+    let status = world.printed_by_the_binary(&["mission", "status", "m1"]);
+    assert!(!status.contains("proposals "), "{status}");
+}

@@ -307,6 +307,75 @@ fn unattacked(commits: &[String]) -> String {
     out
 }
 
+/// The HQ refused an equivalence the coder proposed on `survivor`.
+///
+/// Here because this is the file the next coder run reads first: the
+/// survivor is open again, and a refusal it cannot read would send it back to
+/// propose the same sentence.
+pub fn proposal_refused(
+    file: &Path,
+    who: &str,
+    survivor: &str,
+    refusal: &crate::mutants::Refusal,
+) -> Result<(), FollowupError> {
+    append(
+        file,
+        &format!(
+            "## {date} — {who} refused an equivalence the coder proposed\n\n\
+             **Survivor:** `{survivor}`\n\n\
+             **Proposed:** {proposed}\n\n\
+             **Refused because:** {because}\n\n\
+             The survivor needs an outcome again: killed by a named test, or a bug\n\
+             frozen in one. A proposal written again on it is no outcome.\n",
+            date = today(),
+            survivor = crate::text::one_line(survivor),
+            proposed = crate::text::one_line(&refusal.proposed),
+            because = refusal.because.trim(),
+        ),
+    )
+}
+
+/// Gate 7 passed with equivalences the coder proposed that the HQ has not
+/// ruled on: each listed with its reason, for the HQ to ratify or refuse
+/// before `nunki push`, which refuses until it has.
+///
+/// Nothing is written when there are none.
+pub fn proposals_await(
+    file: &Path,
+    mission: &str,
+    proposals: &[crate::mutants::Proposal],
+) -> Result<(), FollowupError> {
+    if proposals.is_empty() {
+        return Ok(());
+    }
+    let listed = proposals
+        .iter()
+        .map(|p| {
+            format!(
+                "- `{}` ({}:{}) — {}",
+                crate::text::one_line(&p.id),
+                crate::text::one_line(&p.file),
+                p.line,
+                crate::text::one_line(&p.why)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    append(
+        file,
+        &format!(
+            "## {date} — {count} equivalence(s) the coder proposed await the HQ\n\n\
+             Gate 7 counted them as outcomes, and the mission went on. They are\n\
+             not rulings, and `nunki push` refuses until each is ratified or refused:\n\n\
+             {listed}\n\n\
+             `nunki mission mutants {mission} --ratify <survivor>` ratifies one,\n\
+             `--refuse <survivor> --because <why>` refuses it.\n",
+            date = today(),
+            count = proposals.len(),
+        ),
+    )
+}
+
 /// An instruction left for the next run.
 ///
 /// `say` and not a channel: there is no channel during a run (SPEC 4.3). What

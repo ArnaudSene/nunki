@@ -1542,7 +1542,9 @@ fn mutation(subject: &Subject, threshold: Threshold) -> Result<Outcome, GateErro
                 gate,
                 Decision::Failed(format!(
                     "{} answers {id} with `{}`, and that outcome is not the coder's to \
-                     give: nothing can check it, so it is the HQ's — write it in {}",
+                     give: nothing can check it, so it is the HQ's — write it in {}. \
+                     The coder proposes one instead, with `equivalent_proposed` and its \
+                     reason, and the HQ rules on it",
                     crate::mutants::TRIAGE_FILE,
                     outcome.kind(),
                     crate::mutants::FILE
@@ -1550,14 +1552,14 @@ fn mutation(subject: &Subject, threshold: Threshold) -> Result<Outcome, GateErro
             ));
         }
     }
-    let answer = |s: &crate::mutants::Survivor| -> Option<crate::mutants::Triage> {
-        coders.get(&s.id).cloned().or_else(|| s.outcome.clone())
-    };
+    // A proposal is an outcome here, so the mission goes on; whether the HQ
+    // ruled on it is `nunki push`'s question, not this gate's.
+    let answer = &Answers { coders: &coders };
 
     if subject.header.rigor == Rigor::Standard {
         let why = match campaign.tried {
             Some(tried) if tried as usize >= campaign.survivors.len() => {
-                return share_killed(subject, &campaign, tried, threshold, &answer);
+                return share_killed(subject, &campaign, tried, threshold, answer);
             }
             Some(tried) => format!(
                 "the campaign says it tried {tried} mutant(s) and names {} survivor(s), \
@@ -1571,14 +1573,14 @@ fn mutation(subject: &Subject, threshold: Threshold) -> Result<Outcome, GateErro
                      outcome"
                 .to_string(),
         };
-        let mut outcome = every_survivor_answered(subject, &campaign, &answer)?;
+        let mut outcome = every_survivor_answered(subject, &campaign, answer)?;
         outcome.note = Some(match outcome.note {
             Some(note) => format!("{why}. {note}"),
             None => why,
         });
         return Ok(outcome);
     }
-    every_survivor_answered(subject, &campaign, &answer)
+    every_survivor_answered(subject, &campaign, answer)
 }
 
 /// Gate 7 as `critical` plays it: every survivor has an outcome, every test
@@ -1586,21 +1588,16 @@ fn mutation(subject: &Subject, threshold: Threshold) -> Result<Outcome, GateErro
 fn every_survivor_answered(
     subject: &Subject,
     campaign: &crate::mutants::Campaign,
-    answer: &dyn Fn(&crate::mutants::Survivor) -> Option<crate::mutants::Triage>,
+    answer: &Answers,
 ) -> Result<Outcome, GateError> {
     let gate = Gate::Mutation;
-    let untriaged: Vec<String> = campaign
-        .survivors
-        .iter()
-        .filter(|s| answer(s).is_none())
-        .map(|s| format!("{}:{} {}", s.file, s.line, s.id))
-        .collect();
+    let untriaged = answer.unanswered(campaign);
     if !untriaged.is_empty() {
         return Ok(Outcome::of(
             gate,
             Decision::Failed(format!(
                 "{} survivor(s) have no outcome, and there is no threshold to hide \
-                 behind — each needs a named test, a sentence saying it is equivalent, \
+                 behind — each needs a named test, an equivalence proposed in one sentence, \
                  or a bug frozen in a test: {}",
                 untriaged.len(),
                 head_of(&untriaged, 10)
@@ -1613,7 +1610,7 @@ fn every_survivor_answered(
     }
 
     let mut outcome = Outcome::of(gate, Decision::Passed);
-    outcome.note = equivalences(campaign, answer);
+    outcome.note = rulings(campaign, answer);
     Ok(outcome)
 }
 
@@ -1640,7 +1637,8 @@ impl Threshold {
 /// Gate 7 as `standard` plays it: green when the share of tried mutants
 /// killed reaches `threshold`, as a whole percentage. Killed means tried
 /// minus the survivors left without an outcome — a survivor answered by a
-/// named test, frozen as a bug or ruled equivalent counts as killed.
+/// named test, frozen as a bug, ruled equivalent or proposed equivalent by the
+/// coder counts as killed.
 ///
 /// A named test must still exist, as at `critical`: an outcome resting on a
 /// test nobody wrote is no outcome, and counting it as a kill would be
@@ -1651,18 +1649,13 @@ fn share_killed(
     campaign: &crate::mutants::Campaign,
     tried: u32,
     threshold: Threshold,
-    answer: &dyn Fn(&crate::mutants::Survivor) -> Option<crate::mutants::Triage>,
+    answer: &Answers,
 ) -> Result<Outcome, GateError> {
     let gate = Gate::Mutation;
     if let Some(missing) = a_named_test_missing(subject, campaign, answer) {
         return Ok(Outcome::of(gate, missing));
     }
-    let untriaged: Vec<String> = campaign
-        .survivors
-        .iter()
-        .filter(|s| answer(s).is_none())
-        .map(|s| format!("{}:{} {}", s.file, s.line, s.id))
-        .collect();
+    let untriaged = answer.unanswered(campaign);
     let left = if untriaged.is_empty() {
         "no survivor is left without an outcome".to_string()
     } else {
@@ -1672,7 +1665,7 @@ fn share_killed(
             head_of(&untriaged, 10)
         )
     };
-    let note = |said: String| match equivalences(campaign, answer) {
+    let note = |said: String| match rulings(campaign, answer) {
         Some(equivalent) => format!("{said}; {equivalent}"),
         None => said,
     };
@@ -1705,7 +1698,8 @@ fn share_killed(
         Decision::Failed(format!(
             "{killed} of {tried} tried mutant(s) killed ({share}%), below the {whose} \
              threshold of {threshold}%: {needed} more must be killed — a survivor answered \
-             by a named test, or frozen as a bug in one, counts as killed"
+             by a named test, frozen as a bug in one, or proposed equivalent with a reason, \
+             counts as killed"
         )),
     );
     outcome.note = Some(note(left));
@@ -1718,10 +1712,10 @@ fn share_killed(
 fn a_named_test_missing(
     subject: &Subject,
     campaign: &crate::mutants::Campaign,
-    answer: &dyn Fn(&crate::mutants::Survivor) -> Option<crate::mutants::Triage>,
+    answer: &Answers,
 ) -> Option<Decision> {
     for survivor in &campaign.survivors {
-        let Some(outcome) = answer(survivor) else {
+        let Some(outcome) = answer.of(survivor) else {
             continue;
         };
         if let Some(test) = outcome.test()
@@ -1740,14 +1734,11 @@ fn a_named_test_missing(
 /// How many survivors rode on `equivalent`, the outcome no machine can
 /// check, when any did — left unsaid, it becomes the escape hatch that
 /// empties the gate.
-fn equivalences(
-    campaign: &crate::mutants::Campaign,
-    answer: &dyn Fn(&crate::mutants::Survivor) -> Option<crate::mutants::Triage>,
-) -> Option<String> {
+fn equivalences(campaign: &crate::mutants::Campaign, answer: &Answers) -> Option<String> {
     let equivalent: Vec<Option<String>> = campaign
         .survivors
         .iter()
-        .filter_map(|s| match answer(s) {
+        .filter_map(|s| match answer.of(s) {
             Some(crate::mutants::Triage::Equivalent { carried_from, .. }) => Some(carried_from),
             _ => None,
         })
@@ -1773,6 +1764,65 @@ fn equivalences(
         equivalent.len(),
         campaign.survivors.len()
     ))
+}
+
+/// How many survivors rode on an equivalence the coder proposed and the HQ
+/// has not ruled on, when any did. Counted apart from the HQ's rulings,
+/// because it is not one: the gate lets the mission go on, and `nunki push`
+/// is where it waits.
+fn proposals(campaign: &crate::mutants::Campaign, answer: &Answers) -> Option<String> {
+    let proposed = campaign
+        .survivors
+        .iter()
+        .filter(|s| {
+            matches!(
+                answer.of(s),
+                Some(crate::mutants::Triage::EquivalentProposed { .. })
+            )
+        })
+        .count();
+    (proposed > 0).then(|| {
+        format!(
+            "{proposed} of {} rode on an equivalence the coder proposed and the HQ has \
+             not ruled on — `nunki push` refuses until each is ratified or refused",
+            campaign.survivors.len()
+        )
+    })
+}
+
+/// What gate 7's note says about the outcomes no test stands behind: the
+/// HQ's rulings, then the coder's proposals, each counted apart.
+fn rulings(campaign: &crate::mutants::Campaign, answer: &Answers) -> Option<String> {
+    match (equivalences(campaign, answer), proposals(campaign, answer)) {
+        (Some(ruled), Some(proposed)) => Some(format!("{ruled}; {proposed}")),
+        (ruled, proposed) => ruled.or(proposed),
+    }
+}
+
+/// The survivors' outcomes as gate 7 reads them: the coder's file and the
+/// HQ's together ([`crate::mutants::answer`]).
+struct Answers<'a> {
+    coders: &'a std::collections::BTreeMap<String, crate::mutants::Triage>,
+}
+
+impl Answers<'_> {
+    fn of(&self, survivor: &crate::mutants::Survivor) -> Option<crate::mutants::Triage> {
+        crate::mutants::answer(survivor, self.coders)
+    }
+
+    /// The survivors with no outcome, as the gate names them — with the
+    /// reason a line the coder wrote for one was not read, when it wrote one.
+    fn unanswered(&self, campaign: &crate::mutants::Campaign) -> Vec<String> {
+        campaign
+            .survivors
+            .iter()
+            .filter(|s| self.of(s).is_none())
+            .map(|s| match crate::mutants::not_an_outcome(s, self.coders) {
+                Some(why) => format!("{}:{} {} ({why})", s.file, s.line, s.id),
+                None => format!("{}:{} {}", s.file, s.line, s.id),
+            })
+            .collect()
+    }
 }
 
 fn head_of(items: &[String], n: usize) -> String {

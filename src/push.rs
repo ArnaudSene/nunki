@@ -86,6 +86,20 @@ pub enum PushError {
     FetchingIntoCurrent(String),
     #[error("the repository has no remote named {0} — `git remote -v` says what it has")]
     NoRemote(String),
+    #[error(
+        "{count} equivalence(s) the coder proposed await the HQ's ruling: {listed}. A \
+         proposal is not a ruling, and nothing rests on one that nobody ruled: \
+         `nunki mission mutants {mission} --ratify <survivor>` makes it the HQ's \
+         equivalence, `nunki mission mutants {mission} --refuse <survivor> --because <why>` \
+         sends it back to the coder"
+    )]
+    ProposalsAwait {
+        mission: String,
+        count: usize,
+        listed: String,
+    },
+    #[error(transparent)]
+    Mutants(#[from] crate::mutants::MutantsError),
     #[error(transparent)]
     Git(#[from] crate::git::GitError),
     #[error(transparent)]
@@ -229,6 +243,7 @@ pub fn push_to(
         not_attacked,
         lifted_by_nunki,
     } = verdicts_hold(&slot, &state, &head)?;
+    proposals_ruled(project, id)?;
 
     let fetched = fetch(project, id)?;
     let remote = remote_url(project)?;
@@ -309,6 +324,36 @@ fn open_pull_request(
         Ok(opened) => PullRequestState::Opened(opened),
         Err(e) => by_hand(e.to_string()),
     }
+}
+
+/// Every equivalence the coder proposed on the current campaign has been
+/// ratified or refused by the HQ (SPEC 4.4, gate 7).
+///
+/// Gate 7 counts a proposal as an outcome so that the mission is not stopped
+/// for it; this is where it waits instead. The decision on an equivalence is
+/// the HQ's, and a branch whose triage rests on a sentence nobody ruled on is
+/// not pushed.
+fn proposals_ruled(project: &Project, id: &str) -> Result<(), PushError> {
+    let dir = crate::mission::dir::Paths::of(&project.hq_root, id).dir;
+    let waiting = crate::mutants::awaiting_ruling(&dir)?;
+    if waiting.is_empty() {
+        return Ok(());
+    }
+    Err(PushError::ProposalsAwait {
+        mission: id.to_string(),
+        count: waiting.len(),
+        listed: waiting
+            .iter()
+            .map(|p| {
+                format!(
+                    "`{}` ({})",
+                    crate::text::one_line(&p.id),
+                    crate::text::brief(&p.why, 120)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; "),
+    })
 }
 
 /// What the verdicts a push stands on leave to say.

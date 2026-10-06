@@ -522,6 +522,7 @@ fn a_campaign_round_trips_through_the_mission_folder() {
                 why: "the branch is unreachable from any caller".into(),
                 carried_from: None,
             }),
+            refused: None,
         }],
     };
     mutants::write(dir.path(), &campaign).unwrap();
@@ -806,6 +807,7 @@ fn an_equivalence_is_ruled_by_a_verb_and_lands_in_the_hqs_own_file() {
                 line: 3,
                 description: "replace one with 0".into(),
                 outcome: None,
+                refused: None,
             }],
         },
     )
@@ -834,6 +836,7 @@ fn one(id: &str, line: u32, description: &str) -> Survivor {
         line,
         description: description.into(),
         outcome: None,
+        refused: None,
     }
 }
 
@@ -1317,6 +1320,7 @@ fn on_file(dir: &std::path::Path, fingerprint: &str, survivors: usize) {
             line: i as u32 + 1,
             description: "replace a with b".into(),
             outcome: None,
+            refused: None,
         })
         .collect();
     mutants::write(
@@ -1977,4 +1981,332 @@ fn a_stack_that_said_it_finished_twice_has_not_finished_the_campaign() {
     let out = TwoStacks::new(&rust, &once).run();
     assert!(mutants::completed(&out), "{out}");
     assert_eq!(mutants::tried(&out), Some(7), "{out}");
+}
+
+// ---------------------------------------------------------------------------
+// The coder's proposal of an equivalence, and the HQ's ruling on it.
+// ---------------------------------------------------------------------------
+
+fn proposes(dir: &Path, answers: &[(&str, &str)]) {
+    let map = answers
+        .iter()
+        .map(|(id, why)| {
+            (
+                (*id).to_string(),
+                Triage::EquivalentProposed {
+                    why: (*why).to_string(),
+                },
+            )
+        })
+        .collect();
+    mutants::write_triage(dir, &map).unwrap();
+}
+
+/// The coder's file takes the proposal in the shape the prompt gives, and
+/// `why` is required: a proposal with no reason field is not a file `nunki`
+/// reads as one.
+#[test]
+fn a_proposal_reads_in_the_shape_the_prompt_gives_and_needs_its_reason() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join(mutants::TRIAGE_FILE),
+        r#"{"m1": {"kind": "equivalent_proposed", "why": "only a log line reads it"}}"#,
+    )
+    .unwrap();
+    let triage = mutants::read_triage(dir.path()).unwrap();
+    assert_eq!(
+        triage.get("m1"),
+        Some(&Triage::EquivalentProposed {
+            why: "only a log line reads it".into()
+        })
+    );
+    assert!(triage["m1"].is_the_coders_to_give());
+    assert_eq!(triage["m1"].test(), None);
+    assert_eq!(triage["m1"].kind(), "equivalent_proposed");
+
+    std::fs::write(
+        dir.path().join(mutants::TRIAGE_FILE),
+        r#"{"m1": {"kind": "equivalent_proposed"}}"#,
+    )
+    .unwrap();
+    let err = mutants::read_triage(dir.path()).unwrap_err();
+    assert!(err.to_string().contains("why"), "{err}");
+}
+
+/// Old files keep reading: a campaign and a triage written before the
+/// proposal existed read as they did, and a campaign with no refusal writes
+/// no field for one.
+#[test]
+fn old_triage_and_campaign_files_still_read() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join(mutants::FILE),
+        r#"{"fingerprint":"f","head":"h","date":"d","survivors":[
+            {"id":"m1","file":"src/lib.rs","line":3,"description":"replace one with 0",
+             "outcome":{"kind":"equivalent","why":"same output"}},
+            {"id":"m2","file":"src/lib.rs","line":4}]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join(mutants::TRIAGE_FILE),
+        r#"{"m2": {"kind": "killed", "test": "one_is_one"}}"#,
+    )
+    .unwrap();
+    let campaign = mutants::read(dir.path()).unwrap().unwrap();
+    assert_eq!(campaign.survivors[0].refused, None);
+    assert_eq!(campaign.survivors[1].refused, None);
+    assert!(mutants::open(dir.path()).unwrap().is_empty());
+    assert!(mutants::awaiting_ruling(dir.path()).unwrap().is_empty());
+
+    mutants::write(dir.path(), &campaign).unwrap();
+    let written = std::fs::read_to_string(dir.path().join(mutants::FILE)).unwrap();
+    assert!(!written.contains("refused"), "{written}");
+}
+
+/// A survivor with a valid proposal is no longer open — it cannot be awaited
+/// and proposed at once — and it awaits the HQ. A blank one leaves it open,
+/// and awaits nothing.
+#[test]
+fn a_survivor_with_a_proposal_is_not_open_and_awaits_the_hq() {
+    let dir = tempfile::tempdir().unwrap();
+    ruled_before(
+        dir.path(),
+        vec![
+            one("m1", 1, "a"),
+            one("m2", 2, "b"),
+            one("m3", 3, "c"),
+            ruled(one("m4", 4, "d"), "the HQ's"),
+        ],
+    );
+    proposes(
+        dir.path(),
+        &[
+            ("m1", "only a log line reads it"),
+            ("m2", "  "),
+            ("m4", "the HQ's already"),
+        ],
+    );
+    assert_eq!(mutants::open(dir.path()).unwrap(), vec!["m2", "m3"]);
+    let waiting = mutants::awaiting_ruling(dir.path()).unwrap();
+    assert_eq!(
+        waiting,
+        vec![mutants::Proposal {
+            id: "m1".into(),
+            file: "src/cells.py".into(),
+            line: 1,
+            why: "only a log line reads it".into(),
+        }]
+    );
+    assert_eq!(
+        mutants::proposals_await(1).as_deref(),
+        Some(
+            "1 equivalence proposal(s) await the HQ's ruling, and `nunki push` refuses until \
+             each is ratified or refused"
+        )
+    );
+    assert_eq!(mutants::proposals_await(0), None);
+}
+
+/// `--ratify` writes exactly what `--equivalent` writes: the same campaign
+/// file, byte for byte, when the reason is the same — and the proposal is
+/// gone from the coder's file, because it is a ruling now.
+#[test]
+fn ratifying_writes_the_same_equivalence_equivalent_writes() {
+    let by_hand = tempfile::tempdir().unwrap();
+    let ratified = tempfile::tempdir().unwrap();
+    for dir in [by_hand.path(), ratified.path()] {
+        ruled_before(dir, vec![one("m1", 1, "a"), one("m2", 2, "b")]);
+    }
+    mutants::rule_equivalent(by_hand.path(), "m1", "only a log line reads it").unwrap();
+    proposes(
+        ratified.path(),
+        &[("m1", "only a log line reads it"), ("m2", "kept")],
+    );
+    let why = mutants::ratify(ratified.path(), "m1", None).unwrap();
+    assert_eq!(why, "only a log line reads it");
+    assert_eq!(
+        std::fs::read_to_string(by_hand.path().join(mutants::FILE)).unwrap(),
+        std::fs::read_to_string(ratified.path().join(mutants::FILE)).unwrap()
+    );
+    let left = mutants::read_triage(ratified.path()).unwrap();
+    assert!(!left.contains_key("m1"), "{left:?}");
+    assert!(left.contains_key("m2"), "only the ratified one is taken");
+
+    // `--because` replaces the coder's sentence.
+    let why = mutants::ratify(ratified.path(), "m2", Some("the HQ's own words")).unwrap();
+    assert_eq!(why, "the HQ's own words");
+    let campaign = mutants::read(ratified.path()).unwrap().unwrap();
+    assert_eq!(
+        campaign.survivors[1].outcome,
+        Some(Triage::Equivalent {
+            why: "the HQ's own words".into(),
+            carried_from: None,
+        })
+    );
+    assert!(
+        mutants::awaiting_ruling(ratified.path())
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// Only a proposal is ratified, and one with a reason: anything else is said.
+#[test]
+fn ratifying_needs_a_proposal_with_a_reason() {
+    let dir = tempfile::tempdir().unwrap();
+    ruled_before(dir.path(), vec![one("m1", 1, "a"), one("m2", 2, "b")]);
+    proposes(dir.path(), &[("m2", " ")]);
+
+    let err = mutants::ratify(dir.path(), "m1", None).unwrap_err();
+    assert!(err.to_string().contains("proposes no equivalence"), "{err}");
+    let err = mutants::ratify(dir.path(), "m2", None).unwrap_err();
+    assert!(err.to_string().contains("gives no reason"), "{err}");
+    proposes(dir.path(), &[("m2", "only a log line reads it")]);
+    let err = mutants::ratify(dir.path(), "m2", Some(" \u{200b}")).unwrap_err();
+    assert!(err.to_string().contains("blank"), "{err}");
+    // Nothing was written by the refusals.
+    let campaign = mutants::read(dir.path()).unwrap().unwrap();
+    assert!(campaign.survivors.iter().all(|s| s.outcome.is_none()));
+}
+
+/// A ratified proposal is carried to the next campaign as a ruling; a
+/// proposal never is — nothing it says lands in the HQ's file.
+#[test]
+fn a_ratified_proposal_is_carried_as_a_ruling_and_a_proposal_never_is() {
+    let dir = tempfile::tempdir().unwrap();
+    let before = vec![one("m1", 1, "a"), one("m2", 2, "b")];
+    ruled_before(dir.path(), before.clone());
+    proposes(
+        dir.path(),
+        &[("m1", "only a log line reads it"), ("m2", "same constant")],
+    );
+    mutants::ratify(dir.path(), "m2", None).unwrap();
+
+    // A commit above both moves their lines; the next campaign finds them.
+    let moved: Vec<Survivor> = before
+        .iter()
+        .map(|s| Survivor {
+            line: s.line + 5,
+            ..s.clone()
+        })
+        .collect();
+    mutants::record_finished(dir.path(), "new0000", "abc9999", &log_of(&moved)).unwrap();
+    let campaign = mutants::read(dir.path()).unwrap().unwrap();
+    assert_eq!(
+        campaign.survivors[0].outcome, None,
+        "a proposal is never carried"
+    );
+    assert_eq!(
+        campaign.survivors[1].outcome,
+        Some(Triage::Equivalent {
+            why: "same constant".into(),
+            carried_from: Some("def5678".into()),
+        })
+    );
+    // The proposal is still the coder's, in the coder's file: still awaiting.
+    let waiting = mutants::awaiting_ruling(dir.path()).unwrap();
+    assert_eq!(waiting.len(), 1);
+    assert_eq!(waiting[0].id, "m1");
+}
+
+/// `--refuse` takes the proposal out of the coder's file, records the
+/// refusal on the survivor, reopens it — and the next run reads why in
+/// `FOLLOWUP_HQ.md`. A proposal written again on it is no outcome.
+#[test]
+fn refusing_reopens_the_survivor_and_the_next_run_reads_why() {
+    let hq = tempfile::tempdir().unwrap();
+    let paths = nunki::mission::dir::Paths::of(hq.path(), "m1");
+    std::fs::create_dir_all(&paths.dir).unwrap();
+    ruled_before(&paths.dir, vec![one("m1", 1, "a"), one("m2", 2, "b")]);
+    proposes(
+        &paths.dir,
+        &[("m1", "only a log line reads it"), ("m2", "kept")],
+    );
+    assert_eq!(mutants::open(&paths.dir).unwrap(), Vec::<String>::new());
+
+    mutants::refuse_and_say(&paths, "Arnaud", "m1", "the CLI prints that line").unwrap();
+
+    assert_eq!(mutants::open(&paths.dir).unwrap(), vec!["m1"]);
+    let triage = mutants::read_triage(&paths.dir).unwrap();
+    assert!(!triage.contains_key("m1"), "{triage:?}");
+    assert!(triage.contains_key("m2"), "only the refused one is taken");
+    let campaign = mutants::read(&paths.dir).unwrap().unwrap();
+    assert_eq!(
+        campaign.survivors[0].refused,
+        Some(mutants::Refusal {
+            proposed: "only a log line reads it".into(),
+            because: "the CLI prints that line".into(),
+        })
+    );
+    assert_eq!(campaign.survivors[0].outcome, None);
+    let followup = std::fs::read_to_string(&paths.followup).unwrap();
+    assert!(
+        followup.contains("Arnaud refused an equivalence"),
+        "{followup}"
+    );
+    assert!(followup.contains("`m1`"), "{followup}");
+    assert!(followup.contains("only a log line reads it"), "{followup}");
+    assert!(followup.contains("the CLI prints that line"), "{followup}");
+
+    // Proposed again: still open, and not awaiting the HQ.
+    proposes(
+        &paths.dir,
+        &[("m1", "only a log line reads it, truly"), ("m2", "kept")],
+    );
+    assert_eq!(mutants::open(&paths.dir).unwrap(), vec!["m1"]);
+    let waiting = mutants::awaiting_ruling(&paths.dir).unwrap();
+    assert_eq!(
+        waiting.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+        vec!["m2"]
+    );
+    let survivor = &campaign.survivors[0];
+    let coders = mutants::read_triage(&paths.dir).unwrap();
+    assert_eq!(mutants::answer(survivor, &coders), None);
+    assert!(
+        mutants::not_an_outcome(survivor, &coders)
+            .unwrap()
+            .contains("the CLI prints that line")
+    );
+
+    // And a later ruling of the HQ's supersedes its refusal.
+    mutants::ratify(&paths.dir, "m1", None).unwrap();
+    let campaign = mutants::read(&paths.dir).unwrap().unwrap();
+    assert_eq!(campaign.survivors[0].refused, None);
+    assert!(mutants::open(&paths.dir).unwrap().is_empty());
+}
+
+/// A refusal says why, and is of a proposal: anything else is refused, and
+/// nothing is written.
+#[test]
+fn refusing_needs_a_reason_and_a_proposal() {
+    let hq = tempfile::tempdir().unwrap();
+    let paths = nunki::mission::dir::Paths::of(hq.path(), "m1");
+    std::fs::create_dir_all(&paths.dir).unwrap();
+    ruled_before(&paths.dir, vec![one("m1", 1, "a")]);
+    proposes(&paths.dir, &[("m1", "only a log line reads it")]);
+
+    let err = mutants::refuse_and_say(&paths, "Arnaud", "m1", " \n").unwrap_err();
+    assert!(err.to_string().contains("--because"), "{err}");
+    let err = mutants::refuse_and_say(&paths, "Arnaud", "m9", "no").unwrap_err();
+    assert!(err.to_string().contains("proposes no equivalence"), "{err}");
+    assert!(
+        !paths.followup.exists(),
+        "nothing said for a refusal refused"
+    );
+    assert_eq!(mutants::awaiting_ruling(&paths.dir).unwrap().len(), 1);
+
+    // A proposal on a survivor the campaign does not hold is said too.
+    proposes(&paths.dir, &[("gone", "only a log line reads it")]);
+    let err = mutants::refuse_and_say(&paths, "Arnaud", "gone", "no").unwrap_err();
+    assert!(err.to_string().contains("no survivor is called"), "{err}");
+}
+
+/// A refusal is the HQ's, and is never read from a campaign's log: the log
+/// is written inside the agent's container.
+#[test]
+fn a_refusal_written_in_the_campaigns_log_is_never_taken() {
+    let line = r#"{"id":"m1","file":"a","line":1,"refused":{"proposed":"x","because":"y"}}"#;
+    let parsed = mutants::parse(line);
+    assert_eq!(parsed.len(), 1);
+    assert_eq!(parsed[0].refused, None);
 }
