@@ -129,29 +129,125 @@ pub fn line_digest(line: &str) -> String {
     let mut digest = ring::digest::Context::new(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY);
     digest.update(format!("blob {}\0", content.len()).as_bytes());
     digest.update(content.as_bytes());
-    digest
-        .finish()
-        .as_ref()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    hex(digest.finish().as_ref())
 }
 
 /// The content of `file` at `commit` in the repository at `tree`, exactly as
 /// committed, or `None` when it cannot be read: a commit the repository does
-/// not hold, a file that is not there, bytes that are not text.
+/// not hold, a file that is not there, bytes that are not text — or an
+/// object that is not what its id says.
+///
+/// **The repository is not trusted.** It is the slot's, and the coder's
+/// container writes its `.git`: a replace ref (`refs/replace/`) or a graft
+/// would make git hand back the ruled content for a line that has changed,
+/// and gate 7 would pass on a ruling the HQ never gave on this code
+/// (security round 1, MEDIUM). So replace objects and grafts are switched off
+/// for every read, and every object on the way — the commit, each tree
+/// down the path, the blob — is hashed here and compared with the id it was
+/// asked by. A loose object rewritten on disk reads as nothing, not as what
+/// it was made to say. `commit` is resolved under the same switches: the
+/// campaign's full id comes back as itself, and `HEAD` — for `--registry`,
+/// in the human's repository — as the commit it names.
 pub fn source_at(tree: &Path, commit: &str, file: &str) -> Option<String> {
-    let out = Command::new("git")
-        .env("LC_ALL", "C")
+    let commit = resolved(tree, commit)?;
+    let body = object(tree, "commit", &commit)?;
+    let mut at = String::from_utf8(body)
+        .ok()?
+        .lines()
+        .next()?
+        .strip_prefix("tree ")?
+        .to_string();
+    let parts: Vec<&str> = file.split('/').collect();
+    for (i, name) in parts.iter().enumerate() {
+        let listing = object(tree, "tree", &at)?;
+        let (mode, oid) = entry(&listing, name, at.len() / 2)?;
+        let last = i + 1 == parts.len();
+        match (last, mode.as_str()) {
+            (false, "40000") => at = oid,
+            (true, "100644" | "100755") => {
+                return String::from_utf8(object(tree, "blob", &oid)?).ok();
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// `git` in `tree`, with replace objects and grafts switched off.
+fn git_untrusted(tree: &Path) -> Command {
+    let mut git = Command::new("git");
+    git.env("LC_ALL", "C")
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
+        .env("GIT_GRAFT_FILE", "/dev/null")
         .arg("-C")
-        .arg(tree)
-        .args(["cat-file", "blob", &format!("{commit}:{file}")])
+        .arg(tree);
+    git
+}
+
+/// `name` as a full commit id, resolved with replace objects off: a full id
+/// comes back as itself, `HEAD` as the commit it names.
+fn resolved(tree: &Path, name: &str) -> Option<String> {
+    let out = git_untrusted(tree)
+        .args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "--end-of-options",
+            &format!("{name}^{{commit}}"),
+        ])
+        .output()
+        .ok()?;
+    let oid = String::from_utf8(out.stdout).ok()?.trim().to_string();
+    out.status.success().then_some(oid)
+}
+
+/// The content of object `oid` of type `kind`, only when it hashes to `oid`
+/// — which nothing but a full id of that very content can.
+fn object(tree: &Path, kind: &str, oid: &str) -> Option<Vec<u8>> {
+    let out = git_untrusted(tree)
+        .args(["cat-file", kind, oid])
         .output()
         .ok()?;
     if !out.status.success() {
         return None;
     }
-    String::from_utf8(out.stdout).ok()
+    (object_id(kind, &out.stdout, oid.len()) == oid).then_some(out.stdout)
+}
+
+/// Git's id of an object of type `kind` holding `content`, in the hash the
+/// repository uses — SHA-1 for a 40-digit id, SHA-256 for a 64-digit one.
+fn object_id(kind: &str, content: &[u8], digits: usize) -> String {
+    let algorithm = if digits == 64 {
+        &ring::digest::SHA256
+    } else {
+        &ring::digest::SHA1_FOR_LEGACY_USE_ONLY
+    };
+    let mut digest = ring::digest::Context::new(algorithm);
+    digest.update(format!("{kind} {}\0", content.len()).as_bytes());
+    digest.update(content);
+    hex(digest.finish().as_ref())
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The mode and id of `name` in a raw tree object: entries are
+/// `<mode> <name>\0<id>`, the id `width` raw bytes.
+fn entry(listing: &[u8], name: &str, width: usize) -> Option<(String, String)> {
+    let mut rest = listing;
+    while !rest.is_empty() {
+        let space = rest.iter().position(|&b| b == b' ')?;
+        let nul = space + rest[space..].iter().position(|&b| b == 0)?;
+        let end = nul + 1 + width;
+        let id = rest.get(nul + 1..end)?;
+        if &rest[space + 1..nul] == name.as_bytes() {
+            let mode = std::str::from_utf8(&rest[..space]).ok()?.to_string();
+            return Some((mode, hex(id)));
+        }
+        rest = &rest[end..];
+    }
+    None
 }
 
 /// The 1-based `line` of `source`, if it has one.

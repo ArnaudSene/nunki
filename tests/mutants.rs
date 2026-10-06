@@ -3295,3 +3295,142 @@ fn a_ruling_on_one_of_two_same_mutations_never_lands_on_the_killed_one() {
         );
     }
 }
+
+/// The slot's repository is written by the coder's container. A replace
+/// ref that hands back the ruled file for a changed one must change
+/// nothing: the line reads as changed, the survivor stays open, and the
+/// listing says the line has changed (security round 1, MEDIUM).
+#[test]
+fn a_replace_ref_cannot_make_a_changed_line_read_as_the_ruled_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = registry_project(dir.path(), BODY);
+    let ruled_blob = git(&project.root, &["rev-parse", "HEAD:src/lib.rs"]);
+    ruled_on_a(&project);
+    commit_lib(&project, "pub fn one() -> u8 {\n    1 + 0\n}\n");
+    let changed_blob = git(&project.root, &["rev-parse", "HEAD:src/lib.rs"]);
+    git(&project.root, &["replace", &changed_blob, &ruled_blob]);
+    // The forgery holds for git as it is configured: it is what a reader
+    // that trusts the repository would see.
+    assert_eq!(
+        git(&project.root, &["show", "HEAD:src/lib.rs"]),
+        BODY.trim()
+    );
+
+    let (campaign, recorded) = campaign_on(&project, "b", &[on_lib(2)]);
+    assert_eq!(recorded.from_registry, 0);
+    assert_eq!(campaign.survivors[0].outcome, None);
+    let entry = &equivalences::read(&project.hq_root).unwrap().entries[0];
+    assert_eq!(
+        equivalences::standing(&project.root, entry),
+        equivalences::Standing::Changed
+    );
+    // A replaced commit reads as itself too.
+    let head = git(&project.root, &["rev-parse", "HEAD"]);
+    let first = git(&project.root, &["rev-parse", "HEAD~1"]);
+    git(&project.root, &["replace", "-f", &head, &first]);
+    assert_eq!(
+        equivalences::digest_at(&project.root, &head, "src/lib.rs", 2),
+        Some(equivalences::line_digest("1 + 0"))
+    );
+}
+
+/// The objects git hands back are hashed and compared with the id they
+/// were asked by: a loose object rewritten on disk to hold the ruled
+/// content is not read as it, and matches nothing.
+#[test]
+fn an_object_rewritten_on_disk_is_not_read_as_what_it_was_made_to_say() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = registry_project(dir.path(), BODY);
+    let ruled_blob = git(&project.root, &["rev-parse", "HEAD:src/lib.rs"]);
+    ruled_on_a(&project);
+    commit_lib(&project, "pub fn one() -> u8 {\n    1 + 0\n}\n");
+    let changed_blob = git(&project.root, &["rev-parse", "HEAD:src/lib.rs"]);
+    let loose = |oid: &str| {
+        project
+            .root
+            .join(".git/objects")
+            .join(&oid[..2])
+            .join(&oid[2..])
+    };
+    let forged = loose(&changed_blob);
+    let mut perms = std::fs::metadata(&forged).unwrap().permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    perms.set_readonly(false);
+    std::fs::set_permissions(&forged, perms).unwrap();
+    std::fs::copy(loose(&ruled_blob), &forged).unwrap();
+    // git itself hands back the forged content without a word.
+    assert_eq!(
+        git(&project.root, &["cat-file", "blob", &changed_blob]),
+        BODY.trim()
+    );
+
+    let (campaign, recorded) = campaign_on(&project, "b", &[on_lib(2)]);
+    assert_eq!(recorded.from_registry, 0);
+    assert_eq!(campaign.survivors[0].outcome, None);
+    let head = git(&project.root, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        equivalences::source_at(&project.root, &head, "src/lib.rs"),
+        None
+    );
+}
+
+/// The line reader walks the trees itself: it finds a file among several
+/// entries, at any depth, executable or not, in a SHA-1 or a SHA-256
+/// repository — and reads nothing for a directory asked as a file, a file
+/// asked as a directory, or a name that is not there.
+#[test]
+fn the_source_is_read_through_every_tree_on_its_path() {
+    for format in ["sha1", "sha256"] {
+        let dir = tempfile::tempdir().unwrap();
+        let tree = dir.path().join("tree");
+        std::fs::create_dir_all(&tree).unwrap();
+        git(&tree, &["init", "-q", "--object-format", format]);
+        write(&tree, "README.md", "read me\n");
+        write(&tree, "src/a.rs", "pub fn a() {}\n");
+        write(&tree, "src/lib.rs", "first\nsecond\n");
+        write(&tree, "src/deep/z.rs", "deep\n");
+        write(&tree, "tool.sh", "#!/bin/sh\necho tool\n");
+        git(&tree, &["add", "-A"]);
+        git(&tree, &["update-index", "--chmod=+x", "tool.sh"]);
+        git(&tree, &["commit", "-q", "-m", "files"]);
+        let head = git(&tree, &["rev-parse", "HEAD"]);
+        let read = |file: &str| equivalences::source_at(&tree, &head, file);
+
+        assert_eq!(read("README.md").as_deref(), Some("read me\n"), "{format}");
+        assert_eq!(
+            read("src/a.rs").as_deref(),
+            Some("pub fn a() {}\n"),
+            "{format}"
+        );
+        assert_eq!(
+            read("src/lib.rs").as_deref(),
+            Some("first\nsecond\n"),
+            "{format}"
+        );
+        assert_eq!(read("src/deep/z.rs").as_deref(), Some("deep\n"), "{format}");
+        assert_eq!(
+            read("tool.sh").as_deref(),
+            Some("#!/bin/sh\necho tool\n"),
+            "{format}"
+        );
+        assert_eq!(read("src"), None, "a directory is not a file: {format}");
+        assert_eq!(read("README.md/x"), None, "{format}");
+        assert_eq!(read("src/b.rs"), None, "{format}");
+        assert_eq!(read("src/lib.rs/"), None, "{format}");
+        assert_eq!(
+            equivalences::source_at(&tree, "HEAD", "src/lib.rs").as_deref(),
+            Some("first\nsecond\n"),
+            "HEAD resolves: {format}"
+        );
+        assert_eq!(
+            equivalences::source_at(&tree, "--all", "src/lib.rs"),
+            None,
+            "{format}"
+        );
+        assert_eq!(
+            equivalences::digest_at(&tree, &head, "src/lib.rs", 2),
+            Some(equivalences::line_digest("second")),
+            "{format}"
+        );
+    }
+}
