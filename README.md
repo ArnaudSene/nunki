@@ -362,8 +362,13 @@ MISSION  (one branch off its base, one slot)
   campaign as it stands — every survivor answered at `critical`, the share
   reached at `standard` — so a survivor reopened after the gates is never
   pushed. A `--refuse` on a verified mission sends it back to the coder as a
-  volet, with the refusal as its cause. `--ratify`, `--refuse` and `--lift`
-  act on every survivor carrying the id they name. `mission status` and
+  volet, with the refusal as its cause, and a survivor that already holds
+  the HQ's ruling is refused with a pointer to `--lift`. A refusal is
+  carried to the next campaign on the same tiers as a ruling, so the same
+  proposal written again is still no outcome. With no campaign on file at
+  `standard` or `critical`, push refuses: no campaign, no push. `--ratify`,
+  `--equivalent`, `--refuse` and `--lift` take the slot's lock and act on
+  every survivor carrying the id they name. `mission status` and
   `mission wait` count the proposals that await the HQ, and the follow-up
   lists them with their reasons when the final gates pass.
 

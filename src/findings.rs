@@ -294,3 +294,62 @@ pub fn refuse_proposal(
         sent_back: Some(state.flow.stage().clone()),
     })
 }
+
+/// Run `ruling` on mission `id`'s files under its slot's lock, the lock
+/// `--refuse` takes: a ruling rewrites `MUTANTS.json` and the coder's
+/// triage, which `verify` and a campaign's read-back write too, and two
+/// writers on one file lose one of them (HQ review of the pull request,
+/// item 4). A mission that has not started has no slot and nothing else
+/// writing its files: the ruling runs as it is.
+fn under_slot_lock<T>(
+    project: &Project,
+    id: &str,
+    verb: &str,
+    ruling: impl FnOnce(&Paths) -> Result<T, crate::mutants::MutantsError>,
+) -> Result<T, FindingsError> {
+    let paths = Paths::of(&project.hq_root, id);
+    let store = Store::open(&project.hq_root)?;
+    let _lock = match store.load(id) {
+        Ok(state) => Some(SlotLock::acquire(
+            &project.hq_root.join("locks"),
+            &state.slot,
+            verb,
+        )?),
+        Err(_) => None,
+    };
+    Ok(ruling(&paths)?)
+}
+
+/// `nunki mission mutants --ratify`: [`crate::mutants::ratify`], under the
+/// slot's lock. Returns the reason the ruling was written with.
+pub fn ratify_proposal(
+    project: &Project,
+    id: &str,
+    survivor: &str,
+    because: Option<&str>,
+) -> Result<String, FindingsError> {
+    under_slot_lock(project, id, "mission mutants --ratify", |paths| {
+        crate::mutants::ratify(&paths.dir, survivor, because)
+    })
+}
+
+/// `nunki mission mutants --equivalent`: [`crate::mutants::rule_equivalent`],
+/// under the slot's lock.
+pub fn rule_equivalent(
+    project: &Project,
+    id: &str,
+    survivor: &str,
+    why: &str,
+) -> Result<(), FindingsError> {
+    under_slot_lock(project, id, "mission mutants --equivalent", |paths| {
+        crate::mutants::rule_equivalent(&paths.dir, survivor, why)
+    })
+}
+
+/// `nunki mission mutants --lift`: [`crate::mutants::lift_equivalent`],
+/// under the slot's lock.
+pub fn lift_equivalent(project: &Project, id: &str, survivor: &str) -> Result<(), FindingsError> {
+    under_slot_lock(project, id, "mission mutants --lift", |paths| {
+        crate::mutants::lift_equivalent(&paths.dir, survivor)
+    })
+}

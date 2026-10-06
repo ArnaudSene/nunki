@@ -2515,3 +2515,124 @@ fn ratify_refuse_and_lift_act_on_every_survivor_sharing_the_id() {
     let err = mutants::lift_equivalent(dir.path(), "Z").unwrap_err();
     assert!(err.to_string().contains("no survivor is called"), "{err}");
 }
+
+// ---------------------------------------------------------------------------
+// HQ review of the pull request.
+// ---------------------------------------------------------------------------
+
+fn refused(mut survivor: Survivor, because: &str) -> Survivor {
+    survivor.refused = Some(mutants::Refusal {
+        proposed: "only a log line reads it".into(),
+        because: because.into(),
+    });
+    survivor
+}
+
+/// A refusal survives a new campaign on the same two tiers as a ruling: the
+/// same proposal written again on the same mutation after a replay is still
+/// no outcome. Where the twin cannot be told apart, nothing is carried.
+#[test]
+fn a_refusal_follows_its_mutant_to_the_next_campaign_like_a_ruling() {
+    let dir = tempfile::tempdir().unwrap();
+    ruled_before(
+        dir.path(),
+        vec![
+            refused(one("m1", 1, "a"), "the CLI prints it"),
+            refused(one("old-name", 2, "b"), "a test can see it"),
+            refused(one("d1", 3, "dup"), "twice in one file"),
+            one("m4", 4, "c"),
+        ],
+    );
+    // A commit above everything; `old-name` is renamed; `dup` now names two
+    // survivors, so it cannot be told apart.
+    let now = vec![
+        one("m1", 11, "a"),
+        one("new-name", 12, "b"),
+        one("d1", 13, "dup"),
+        one("d2", 14, "dup"),
+        one("m4", 15, "c"),
+    ];
+    mutants::record_finished(dir.path(), "new0000", "abc9999", &log_of(&now)).unwrap();
+    let campaign = mutants::read(dir.path()).unwrap().unwrap();
+    let because = |i: usize| {
+        campaign.survivors[i]
+            .refused
+            .as_ref()
+            .map(|r| r.because.as_str())
+    };
+    assert_eq!(
+        because(0),
+        Some("the CLI prints it"),
+        "same id, file and mutation"
+    );
+    assert_eq!(
+        because(1),
+        Some("a test can see it"),
+        "one twin by file and mutation"
+    );
+    assert_eq!(
+        because(2),
+        Some("twice in one file"),
+        "the same id is exact"
+    );
+    assert_eq!(because(3), None, "an ambiguous pair carries nothing");
+    assert_eq!(because(4), None, "never refused, nothing to carry");
+    assert!(campaign.survivors.iter().all(|s| s.outcome.is_none()));
+
+    // The same proposal written again: still no outcome, still open.
+    proposes(
+        dir.path(),
+        &[("m1", "only a log line reads it"), ("new-name", "same")],
+    );
+    assert!(mutants::awaiting_ruling(dir.path()).unwrap().is_empty());
+    assert_eq!(
+        mutants::open(dir.path()).unwrap(),
+        vec!["m1", "new-name", "d1", "d2", "m4"]
+    );
+}
+
+/// A ruling and a refusal never both land: a survivor whose twin was ruled
+/// is carried the ruling, and the refusal list is not read for it.
+#[test]
+fn a_carried_ruling_is_not_also_carried_a_refusal() {
+    let dir = tempfile::tempdir().unwrap();
+    ruled_before(
+        dir.path(),
+        vec![
+            ruled(one("m1", 1, "a"), "same output"),
+            refused(one("m2", 2, "a"), "the CLI prints it"),
+        ],
+    );
+    let now = vec![one("m1", 5, "a")];
+    mutants::record_finished(dir.path(), "new0000", "abc9999", &log_of(&now)).unwrap();
+    let campaign = mutants::read(dir.path()).unwrap().unwrap();
+    assert!(
+        matches!(
+            campaign.survivors[0].outcome,
+            Some(Triage::Equivalent { .. })
+        ),
+        "{:?}",
+        campaign.survivors[0]
+    );
+    assert_eq!(campaign.survivors[0].refused, None);
+}
+
+/// A refusal cannot undo the HQ's own ruling: refusing a survivor that holds
+/// one is an error that points at `--lift`, and nothing is written.
+#[test]
+fn refusing_a_survivor_the_hq_already_ruled_is_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    ruled_before(
+        dir.path(),
+        vec![ruled(one("X", 1, "a"), "same output"), one("X", 2, "b")],
+    );
+    proposes(dir.path(), &[("X", "only a log line reads it")]);
+    let before = std::fs::read_to_string(dir.path().join(mutants::FILE)).unwrap();
+    let err = mutants::refuse(dir.path(), "X", "the CLI prints it").unwrap_err();
+    assert!(err.to_string().contains("--lift X"), "{err}");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join(mutants::FILE)).unwrap(),
+        before
+    );
+    assert!(mutants::read_triage(dir.path()).unwrap().contains_key("X"));
+}

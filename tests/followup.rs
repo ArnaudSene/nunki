@@ -212,3 +212,41 @@ fn the_proposals_awaiting_the_hq_are_listed_with_their_reasons() {
         assert!(text.contains(part), "{part:?} in:\n{text}");
     }
 }
+
+/// One section per change: the final gates passing again on the same
+/// proposals writes nothing new; a changed list writes one more section;
+/// going back to an earlier list is a change too. A section written by
+/// someone else in between does not hide the last one.
+#[test]
+fn the_proposals_are_written_once_per_change_and_not_on_every_pass() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("FOLLOWUP_HQ.md");
+    std::fs::write(&file, "# Follow-up\n").unwrap();
+    let count = || {
+        std::fs::read_to_string(&file)
+            .unwrap()
+            .matches("the coder proposed await the HQ")
+            .count()
+    };
+    let a = [proposal("s1", "only a log line reads it")];
+    let b = [
+        proposal("s1", "only a log line reads it"),
+        proposal("s2", "same constant"),
+    ];
+
+    followup::proposals_await(&file, "m1", &a).unwrap();
+    followup::proposals_await(&file, "m1", &a).unwrap();
+    assert_eq!(count(), 1, "the same list twice is one section");
+
+    followup::said(&file, "nunki", "L1, attempt 2: something else").unwrap();
+    followup::proposals_await(&file, "m1", &a).unwrap();
+    assert_eq!(count(), 1, "a section in between hides nothing");
+
+    followup::proposals_await(&file, "m1", &b).unwrap();
+    assert_eq!(count(), 2, "a changed list is a new section");
+    followup::proposals_await(&file, "m1", &b).unwrap();
+    assert_eq!(count(), 2);
+
+    followup::proposals_await(&file, "m1", &a).unwrap();
+    assert_eq!(count(), 3, "back to an earlier list is a change too");
+}

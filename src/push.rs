@@ -100,11 +100,20 @@ pub enum PushError {
     },
     #[error(
         "gate 7's rule no longer holds on the campaign as it stands — {owed}. A survivor \
-         reopened after the gates (a refused proposal) needs a coder run: `nunki mission \
-         iterate {mission} --because <why>` sends one, or `nunki mission mutants {mission} \
-         --refuse` does it as it refuses"
+         reopened after the gates needs a coder run: `nunki mission iterate {mission} \
+         --because <why>` sends one"
     )]
     MutantsOwed { mission: String, owed: String },
+    #[error(
+        "mission {mission} is at `{rigor}` rigor and {file} holds no mutation campaign — \
+         no campaign, no push: `nunki mission mutants {mission}` runs one, and `nunki \
+         verify {mission}` plays gate 7 on it"
+    )]
+    NoCampaign {
+        mission: String,
+        rigor: crate::mission::Rigor,
+        file: &'static str,
+    },
     #[error(transparent)]
     Mutants(#[from] crate::mutants::MutantsError),
     #[error(transparent)]
@@ -372,12 +381,25 @@ fn proposals_ruled(project: &Project, id: &str) -> Result<(), PushError> {
 /// HQ has ruled after the gates: a refused proposal reopens its survivor,
 /// and a branch carrying a mutant nobody answered is not pushed (security
 /// round 1, MEDIUM).
+///
+/// And it fails closed: a mission whose rigor owes a campaign and whose
+/// `MUTANTS.json` is missing or empty is not pushed. Gate 7 never lets such
+/// a mission reach `Verified`, so the only way here is a file taken away
+/// after the gates — and "nothing on file" must not read as "nothing owed"
+/// (HQ review of the pull request, item 3).
 fn nothing_owed(
     project: &Project,
     id: &str,
     header: &crate::mission::Header,
 ) -> Result<(), PushError> {
     let dir = crate::mission::dir::Paths::of(&project.hq_root, id).dir;
+    if header.rigor != crate::mission::Rigor::Prototype && crate::mutants::read(&dir)?.is_none() {
+        return Err(PushError::NoCampaign {
+            mission: id.to_string(),
+            rigor: header.rigor,
+            file: crate::mutants::FILE,
+        });
+    }
     let threshold = header
         .mutation_threshold
         .unwrap_or(project.config.mutation_threshold);

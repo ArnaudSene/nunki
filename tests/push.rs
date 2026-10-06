@@ -153,6 +153,20 @@ impl World {
         );
         let header = header(integration, security);
         nunki::mission::dir::create(&hq_root, "m1", &header, "do it").unwrap();
+        // The campaign a green gate 7 leaves behind, with nothing surviving:
+        // push fails closed on a mission whose rigor owes one and that has
+        // none, so every world starts where a verified mission stands.
+        nunki::mutants::write(
+            &nunki::mission::dir::Paths::of(&hq_root, "m1").dir,
+            &nunki::mutants::Campaign {
+                fingerprint: "f".into(),
+                head: String::new(),
+                date: "2026-10-06T12:00:00Z".into(),
+                survivors: Vec::new(),
+                tried: Some(0),
+            },
+        )
+        .unwrap();
         Store::open(&hq_root)
             .unwrap()
             .save(&MissionState {
@@ -1721,4 +1735,202 @@ fn refusing_a_proposal_on_a_verified_mission_sends_it_back_to_the_coder() {
     let err = nunki::findings::refuse_proposal(&world.project, "m1", "s1", " ").unwrap_err();
     assert!(err.to_string().contains("--because"), "{err}");
     assert_eq!(world.stage(), Stage::Verified);
+}
+
+/// A world verified at `rigor`, with no service and no security agent, and a
+/// campaign holding `survivors` — each open — written over the empty one.
+fn verified_with(rigor: nunki::mission::Rigor, survivors: &[&str]) -> (World, PathBuf, String) {
+    use nunki::mutants::{self, Campaign, Survivor};
+    let world = World::new(
+        Integration::None {
+            reason: "none".into(),
+        },
+        Security::Gates,
+    );
+    let mut h = header(
+        Integration::None {
+            reason: "none".into(),
+        },
+        Security::Gates,
+    );
+    h.rigor = rigor;
+    let mut state = world.state();
+    state.flow = Flow::new(h).unwrap();
+    world.store().save(&state).unwrap();
+    let head = world.commit("src.rs", "pub fn one() -> u8 { 2 }\n", "the lot");
+    world.verified(&[(Role::Coder, None, head.clone())]);
+    let dir = nunki::mission::dir::Paths::of(&world.project.hq_root, "m1").dir;
+    mutants::write(
+        &dir,
+        &Campaign {
+            fingerprint: "f".into(),
+            head: head.clone(),
+            date: "2026-10-06T12:00:00Z".into(),
+            survivors: survivors
+                .iter()
+                .map(|id| Survivor {
+                    id: (*id).into(),
+                    file: "src.rs".into(),
+                    line: 1,
+                    description: "replace 2 with 0".into(),
+                    outcome: None,
+                    refused: None,
+                })
+                .collect(),
+            tried: None,
+        },
+    )
+    .unwrap();
+    (world, dir, head)
+}
+
+/// At `critical`, push plays gate 7's rule again: a survivor with no
+/// outcome at all — no test, no ruling, no proposal — holds the push, and
+/// the refusal names it and points at the one verb that answers it.
+#[test]
+fn at_critical_push_refuses_a_survivor_left_without_an_outcome() {
+    let (world, dir, head) = verified_with(nunki::mission::Rigor::Critical, &["s1"]);
+    let err = push::push(&world.project, "m1", true).unwrap_err();
+    match &err {
+        PushError::MutantsOwed { owed, .. } => {
+            assert!(
+                owed.contains("1 survivor(s) have no outcome: src.rs:1 s1"),
+                "{owed}"
+            )
+        }
+        other => panic!("an open survivor at critical holds the push: {other}"),
+    }
+    // The hint names `iterate`, and never `--refuse`, which cannot answer a
+    // survivor already refused.
+    let said = err.to_string();
+    assert!(
+        said.contains("nunki mission iterate m1 --because <why>"),
+        "{said}"
+    );
+    assert!(!said.contains("--refuse"), "{said}");
+    assert!(world.on_forge("mission/x").is_none());
+
+    nunki::mutants::write_triage(
+        &dir,
+        &[(
+            "s1".to_string(),
+            nunki::mutants::Triage::Bug {
+                test: "one_is_two".into(),
+            },
+        )]
+        .into_iter()
+        .collect(),
+    )
+    .unwrap();
+    push::push(&world.project, "m1", true).unwrap();
+    assert_eq!(world.on_forge("mission/x").as_deref(), Some(head.as_str()));
+}
+
+/// No campaign, no push: a mission whose rigor owes one and whose
+/// `MUTANTS.json` is missing or empty is refused. A prototype owes none.
+#[test]
+fn push_fails_closed_when_the_campaign_is_missing_or_empty() {
+    use nunki::mission::Rigor;
+    for rigor in [Rigor::Critical, Rigor::Standard] {
+        for leave in [None, Some("   \n")] {
+            let (world, dir, _) = verified_with(rigor, &[]);
+            let file = dir.join(nunki::mutants::FILE);
+            match leave {
+                None => std::fs::remove_file(&file).unwrap(),
+                Some(text) => std::fs::write(&file, text).unwrap(),
+            }
+            let err = push::push(&world.project, "m1", true).unwrap_err();
+            match &err {
+                PushError::NoCampaign { .. } => {}
+                other => panic!("{rigor} with {leave:?}: no campaign, no push: {other}"),
+            }
+            let said = err.to_string();
+            assert!(said.contains("no campaign, no push"), "{said}");
+            assert!(said.contains(&format!("`{rigor}`")), "{said}");
+            assert!(world.on_forge("mission/x").is_none());
+        }
+    }
+
+    let (world, dir, head) = verified_with(Rigor::Prototype, &[]);
+    std::fs::remove_file(dir.join(nunki::mutants::FILE)).unwrap();
+    push::push(&world.project, "m1", true).unwrap();
+    assert_eq!(world.on_forge("mission/x").as_deref(), Some(head.as_str()));
+}
+
+/// `--ratify`, `--equivalent` and `--lift` take the slot's lock, as
+/// `--refuse` does: while something else holds it, each is refused and
+/// writes nothing; once it is free, each goes through.
+#[test]
+fn the_hqs_rulings_take_the_slots_lock() {
+    use nunki::mutants::{self, Triage};
+    let (world, dir, _) = verified_with(nunki::mission::Rigor::Critical, &["s1", "s2"]);
+    mutants::write_triage(
+        &dir,
+        &[(
+            "s1".to_string(),
+            Triage::EquivalentProposed {
+                why: "only a log line reads it".into(),
+            },
+        )]
+        .into_iter()
+        .collect(),
+    )
+    .unwrap();
+    let campaign = || std::fs::read_to_string(dir.join(mutants::FILE)).unwrap();
+    let before = campaign();
+
+    let held = nunki::state::SlotLock::acquire(
+        &world.project.hq_root.join("locks"),
+        "one",
+        "a test holding the slot",
+    )
+    .unwrap();
+    let locked = |err: nunki::findings::FindingsError| {
+        assert!(
+            matches!(err, nunki::findings::FindingsError::Lock(_)),
+            "the lock is held: {err}"
+        )
+    };
+    locked(nunki::findings::ratify_proposal(&world.project, "m1", "s1", None).unwrap_err());
+    locked(nunki::findings::rule_equivalent(&world.project, "m1", "s2", "same").unwrap_err());
+    locked(nunki::findings::lift_equivalent(&world.project, "m1", "s2").unwrap_err());
+    locked(nunki::findings::refuse_proposal(&world.project, "m1", "s1", "printed").unwrap_err());
+    assert_eq!(campaign(), before, "nothing was written under a held lock");
+    drop(held);
+
+    nunki::findings::ratify_proposal(&world.project, "m1", "s1", None).unwrap();
+    nunki::findings::rule_equivalent(&world.project, "m1", "s2", "same").unwrap();
+    nunki::findings::lift_equivalent(&world.project, "m1", "s2").unwrap();
+    let after = mutants::read(&dir).unwrap().unwrap();
+    assert!(matches!(
+        after.survivors[0].outcome,
+        Some(Triage::Equivalent { .. })
+    ));
+    assert_eq!(after.survivors[1].outcome, None);
+}
+
+/// Refusing a survivor that already holds the HQ's ruling is an error, not
+/// a send-back: the mission stays verified, and the error points at `--lift`.
+#[test]
+fn refusing_a_ruled_survivor_on_a_verified_mission_sends_nothing_back() {
+    use nunki::mutants::{self, Triage};
+    let (world, dir, _) = verified_with(nunki::mission::Rigor::Critical, &["s1"]);
+    mutants::write_triage(
+        &dir,
+        &[(
+            "s1".to_string(),
+            Triage::EquivalentProposed {
+                why: "only a log line reads it".into(),
+            },
+        )]
+        .into_iter()
+        .collect(),
+    )
+    .unwrap();
+    mutants::rule_equivalent(&dir, "s1", "the HQ's own words").unwrap();
+
+    let err = nunki::findings::refuse_proposal(&world.project, "m1", "s1", "printed").unwrap_err();
+    assert!(err.to_string().contains("--lift s1"), "{err}");
+    assert_eq!(world.stage(), Stage::Verified);
+    assert_eq!(world.state().flow.volets(), 0);
 }

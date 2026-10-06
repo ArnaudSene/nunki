@@ -2111,8 +2111,12 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                 return ExitCode::FAILURE;
             }
             if let Some(survivor) = ratify {
-                let paths = nunki::mission::dir::Paths::of(&project.hq_root, &id);
-                return match nunki::mutants::ratify(&paths.dir, &survivor, because.as_deref()) {
+                return match nunki::findings::ratify_proposal(
+                    project,
+                    &id,
+                    &survivor,
+                    because.as_deref(),
+                ) {
                     Ok(why) => {
                         println!(
                             "{} ruled equivalent — {}",
@@ -2158,8 +2162,7 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                 };
             }
             if let Some(survivor) = lift {
-                let paths = nunki::mission::dir::Paths::of(&project.hq_root, &id);
-                return match nunki::mutants::lift_equivalent(&paths.dir, &survivor) {
+                return match nunki::findings::lift_equivalent(project, &id, &survivor) {
                     Ok(()) => {
                         println!(
                             "{survivor}: the `equivalent` ruling is lifted, and it needs an outcome again"
@@ -2180,8 +2183,7 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                     );
                     return ExitCode::FAILURE;
                 };
-                let paths = nunki::mission::dir::Paths::of(&project.hq_root, &id);
-                return match nunki::mutants::rule_equivalent(&paths.dir, &survivor, &why) {
+                return match nunki::findings::rule_equivalent(project, &id, &survivor, &why) {
                     Ok(()) => {
                         println!("{survivor} ruled equivalent — {why}");
                         ExitCode::SUCCESS

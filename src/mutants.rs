@@ -466,8 +466,8 @@ pub fn owed(
 }
 
 /// [`owed`], on the mission folder's own two files. No campaign, nothing
-/// owed: whether one was due is gate 7's question, answered before
-/// `Verified`.
+/// owed here: whether one is due is the caller's question — `nunki push`
+/// refuses a mission that owes one and has none before it asks this.
 pub fn owed_on_file(
     dir: &Path,
     rigor: crate::mission::Rigor,
@@ -762,7 +762,8 @@ pub fn record_finished(
 }
 
 /// Give each new survivor the `equivalent` ruling its twin held in the
-/// previous campaign, when the twin can be told apart without a doubt.
+/// previous campaign, when the twin can be told apart without a doubt — and
+/// likewise the HQ's refusal of a proposal on it.
 ///
 /// **The line is never part of the match**: it is exactly what a commit
 /// above the mutant moves. The mutation itself — its file and what it
@@ -774,17 +775,25 @@ pub fn record_finished(
 ///   `x = False -> x = None` twice in one file is two mutants the ruling may
 ///   not speak for alike, and it is ruled again rather than guessed.
 ///
+/// A refusal is carried on the same two tiers, among the refused survivors:
+/// without it, the same proposal written again on the same mutation after a
+/// new campaign would count as an outcome again, though the HQ has said no
+/// to it — and the prompt and the follow-up both tell the coder it does not
+/// (HQ review of the pull request, item 1). A proposal is never carried.
+///
 /// A changed description — including a status that moved from `survived` to
 /// `no tests` — is a different mutant, and nothing is carried. No id is
 /// parsed: which tool named it is the stack's business, not `nunki`'s.
 pub fn carry(previous: &Campaign, survivors: &mut [Survivor]) {
-    let ruled: Vec<(&Survivor, &str)> = previous
+    let ruled: Vec<&Survivor> = previous
         .survivors
         .iter()
-        .filter_map(|s| match &s.outcome {
-            Some(Triage::Equivalent { why, .. }) => Some((s, why.as_str())),
-            _ => None,
-        })
+        .filter(|s| matches!(s.outcome, Some(Triage::Equivalent { .. })))
+        .collect();
+    let refused: Vec<&Survivor> = previous
+        .survivors
+        .iter()
+        .filter(|s| s.refused.is_some())
         .collect();
     let from = |old: &Survivor| match &old.outcome {
         Some(Triage::Equivalent {
@@ -793,31 +802,50 @@ pub fn carry(previous: &Campaign, survivors: &mut [Survivor]) {
         }) => first.clone(),
         _ => previous.head.clone(),
     };
-    let pair = |s: &Survivor| (s.file.clone(), s.description.clone());
     let mut now: BTreeMap<(String, String), usize> = BTreeMap::new();
     for s in survivors.iter() {
         *now.entry(pair(s)).or_default() += 1;
     }
     for survivor in survivors.iter_mut() {
-        let exact = ruled.iter().find(|(old, _)| {
-            old.id == survivor.id
-                && old.file == survivor.file
-                && old.description == survivor.description
-        });
-        let twin = exact.or_else(|| {
-            let same: Vec<_> = ruled
-                .iter()
-                .filter(|(old, _)| pair(old) == pair(survivor))
-                .collect();
-            (same.len() == 1 && now.get(&pair(survivor)) == Some(&1)).then(|| same[0])
-        });
-        if let Some((old, why)) = twin {
+        if let Some(old) = twin(&ruled, survivor, &now)
+            && let Some(Triage::Equivalent { why, .. }) = &old.outcome
+        {
             survivor.outcome = Some(Triage::Equivalent {
-                why: (*why).to_string(),
+                why: why.clone(),
                 carried_from: Some(from(old)),
             });
+        } else if let Some(old) = twin(&refused, survivor, &now) {
+            survivor.refused = old.refused.clone();
         }
     }
+}
+
+/// What [`carry`] matches a mutation on when the id has changed: its file
+/// and what it changed, never its line.
+fn pair(s: &Survivor) -> (String, String) {
+    (s.file.clone(), s.description.clone())
+}
+
+/// The survivor of `before` that `survivor` is, on [`carry`]'s two tiers:
+/// the same id, file and description; or else the only one of `before` with
+/// its file and description, when that pair also names one survivor `now`.
+fn twin<'a>(
+    before: &[&'a Survivor],
+    survivor: &Survivor,
+    now: &BTreeMap<(String, String), usize>,
+) -> Option<&'a Survivor> {
+    let exact = before.iter().find(|old| {
+        old.id == survivor.id
+            && old.file == survivor.file
+            && old.description == survivor.description
+    });
+    exact.copied().or_else(|| {
+        let same: Vec<&&Survivor> = before
+            .iter()
+            .filter(|old| pair(old) == pair(survivor))
+            .collect();
+        (same.len() == 1 && now.get(&pair(survivor)) == Some(&1)).then(|| *same[0])
+    })
 }
 
 /// Record the HQ's own ruling on a survivor: this mutant changes nothing
@@ -944,7 +972,21 @@ pub fn refuse(dir: &Path, id: &str, because: &str) -> Result<Refusal, MutantsErr
         proposed,
         because: because.to_string(),
     };
-    for found in called(&mut campaign, dir, id)? {
+    let found = called(&mut campaign, dir, id)?;
+    // The HQ already ruled on it: its ruling answers the survivor whatever
+    // the coder's file says, so a refusal would change nothing and send a
+    // verified mission back for a survivor that is answered. Taking a ruling
+    // back is `--lift`'s (HQ review of the pull request, item 5).
+    if found
+        .iter()
+        .any(|s| matches!(s.outcome, Some(Triage::Equivalent { .. })))
+    {
+        return Err(MutantsError::NoProposal(format!(
+            "{id:?} holds the HQ's own `equivalent` ruling, and a refusal cannot undo a \
+             ruling — `nunki mission mutants <id> --lift {id}` takes it back first"
+        )));
+    }
+    for found in found {
         found.refused = Some(refusal.clone());
     }
     write(dir, &campaign)?;
