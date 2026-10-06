@@ -380,31 +380,45 @@ MISSION  (one branch off its base, one slot)
   `mission wait` count the proposals that await the HQ, and the follow-up
   lists them with their reasons when the final gates pass.
 
-  A ruling is given **once per project, for as long as its line stands**.
+  A ruling is given **once per project, for as long as its code stands**.
   `--equivalent` and `--ratify` also enter it in the project's registry of
   equivalences, `hq/equivalences.json` in the project's home — never in the
   repository, never mounted in an agent's container, and written by those
   verbs and `--lift` only: a proposal never enters it, and a refusal is not
   an equivalence. An entry holds the mutant's file and description (never
-  its line number), the git blob id of the source line's content at the
-  ruling's commit with whitespace at both ends trimmed
-  (`printf '%s' '<line>' | git hash-object --stdin` reproduces it), the
-  sentence, who ruled, the mission, the commit and the date. When any
+  its line number), the git blob id of the code the mutation replaces — every
+  line of its span, as the tool's own listing gives it (`end_line` in the
+  campaign's output; cargo-mutants' `mutants.json`), each trimmed at both
+  ends and joined by newlines, so that `printf '%s' '<line>' | git
+  hash-object --stdin` reproduces a one-line span — its number of lines, the
+  sentence, who ruled, the mission, the commit and the date.
+
+  **Only what is identified without a doubt.** A ruling is entered only when
+  the campaign it is given on holds exactly one survivor on its file and
+  description, the span is known, and its text occurs exactly once in the
+  file at the campaign's commit; otherwise the ruling stands on its mission,
+  and the verb says on stderr why the registry was left alone. When any
   mission's campaign is recorded, a survivor with no outcome and no refusal
-  whose file and description match an entry, and whose line now has the same
-  digest, receives the ruling as `equivalent_registered`, with the mission
-  and commit it was given on: a line that only moved still matches, one
-  whose content changed matches nothing. Two survivors of the campaign, or
-  two entries, on the same file and description match nothing; ruling again
-  on a mutation replaces its entry. A registry that cannot be read applies
-  nothing, and `FOLLOWUP_HQ.md` says so; a line that cannot be read matches
-  nothing. Such a ruling is the HQ's like any other — the coder cannot write
-  it, `--refuse` will not undo it — and is never carried between campaigns:
-  each campaign asks the registry again. Gate 7's note and `mission status`
-  count it apart, and `--lift` on any mission takes it out of the mission
-  and the registry both, so the next mission is asked again.
+  whose file and description match exactly one entry and one survivor, and
+  whose span now has the same digest and occurs exactly once in the file,
+  receives the ruling as `equivalent_registered`, with the mission and commit
+  it was given on: code that only moved still matches, code any line of which
+  changed matches nothing. The same rule holds `carry`'s looser tier: a
+  survivor under a new id gets nothing from a ruling on code that occurs twice
+  in its file. Ruling again on a mutation replaces its entry. The registry is
+  read under its lock; one that cannot be read — a zero-length file included —
+  applies nothing, and `FOLLOWUP_HQ.md` says so; a span that cannot be read
+  matches nothing. The source is read through objects `nunki` hashes itself,
+  with replace refs and grafts off, and a tree that names an entry twice or
+  out of git's order is read as nothing. Such a ruling is the HQ's like any
+  other — the coder cannot write it, `--refuse` will not undo it — and is
+  never carried between campaigns: each campaign asks the registry again.
+  Gate 7's note and `mission status` count it apart. `--lift` on any mission
+  takes it out of the registry first and then out of the mission: when the
+  registry cannot be locked, read or written, it fails and changes nothing,
+  and it still cleans a registry entry its mission no longer holds.
   `nunki mission mutants --registry` lists the entries, each with whether its
-  line still stands at the repository's `HEAD`.
+  code still stands at the repository's `HEAD` — once, changed, or repeated.
 
 - **Gates** — deterministic checks, each read from its own result. Gates 1 to
   4 (a clean tree, a branch ahead of its base, a resume block that names

@@ -1401,6 +1401,7 @@ fn push_refuses_until_every_proposed_equivalence_is_ratified_or_refused() {
         id: id.into(),
         file: "src.rs".into(),
         line: 1,
+        end_line: None,
         description: "replace 2 with 0".into(),
         outcome: None,
         refused: None,
@@ -1523,6 +1524,7 @@ fn the_hq_rules_on_proposals_with_two_verbs_and_status_lists_them() {
         id: id.into(),
         file: "src.rs".into(),
         line: 1,
+        end_line: None,
         description: "replace 2 with 0".into(),
         outcome: None,
         refused: None,
@@ -1611,6 +1613,7 @@ fn at_standard_push_refuses_a_share_below_the_threshold_gate_seven_used() {
         id: format!("s{line}"),
         file: "src.rs".into(),
         line,
+        end_line: None,
         description: "replace 2 with 0".into(),
         outcome: None,
         refused: None,
@@ -1676,6 +1679,7 @@ fn refusing_a_proposal_on_a_verified_mission_sends_it_back_to_the_coder() {
                     id: "s1".into(),
                     file: "src.rs".into(),
                     line: 1,
+                    end_line: None,
                     description: "replace 2 with 0".into(),
                     outcome: None,
                     refused: None,
@@ -1772,6 +1776,7 @@ fn verified_with(rigor: nunki::mission::Rigor, survivors: &[&str]) -> (World, Pa
                     id: (*id).into(),
                     file: "src.rs".into(),
                     line: 1,
+                    end_line: None,
                     description: "replace 2 with 0".into(),
                     outcome: None,
                     refused: None,
@@ -1958,6 +1963,7 @@ fn the_binary_lists_registry_rulings_and_says_when_the_registry_is_left_alone() 
                 id: id.into(),
                 file: "src.rs".into(),
                 line: 1,
+                end_line: None,
                 description: "replace one -> u8 with 0".into(),
                 outcome: Some(Triage::EquivalentRegistered {
                     why: "nothing reads the value".into(),
@@ -1998,16 +2004,28 @@ fn the_binary_lists_registry_rulings_and_says_when_the_registry_is_left_alone() 
         "{ not a registry",
     )
     .unwrap();
+    // A lift the registry cannot take fails, and changes nothing (HQ review,
+    // item 4).
     let (ok, stdout, stderr) = run(&["mission", "mutants", "m1", "--lift", id]);
-    assert!(
-        ok,
-        "the ruling is lifted from the mission: {stdout}{stderr}"
-    );
+    assert!(!ok, "{stdout}{stderr}");
+    assert!(stderr.contains("Nothing was lifted"), "{stderr}");
+    assert!(stderr.contains("equivalences.json"), "{stderr}");
+    // A ruling stands on its mission, and says on stderr that the registry
+    // was left alone.
+    let (ok, stdout, stderr) = run(&[
+        "mission",
+        "mutants",
+        "m1",
+        "--equivalent",
+        id,
+        "--because",
+        "nothing reads it",
+    ]);
+    assert!(ok, "the ruling is the mission's: {stdout}{stderr}");
     assert!(
         stderr.contains("the registry of equivalences is unchanged"),
         "{stderr}"
     );
-    assert!(stderr.contains("equivalences.json"), "{stderr}");
     let (_, stdout, _) = run(&["mission", "status", "m1"]);
     assert!(stdout.contains("registry  could not be read"), "{stdout}");
 }

@@ -1265,6 +1265,7 @@ fn survivor(line: u32, outcome: Option<Triage>) -> Survivor {
         id: format!("src/new.rs:{line}"),
         file: "src/new.rs".into(),
         line,
+        end_line: None,
         description: "replace two with 0".into(),
         outcome,
         refused: None,

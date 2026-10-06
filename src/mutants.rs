@@ -80,6 +80,14 @@ pub struct Survivor {
     pub id: String,
     pub file: String,
     pub line: u32,
+    /// The last line of the code the mutation replaces, from the tool's own
+    /// listing: a function body replaced whole spans every line of it.
+    /// Absent for a tool that gives no span, which is then the single
+    /// [`Self::line`]; a value before `line` — what a stack's script prints
+    /// when the tool's listing did not name the mutant once — is a span
+    /// nobody knows ([`Survivor::span`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_line: Option<u32>,
     /// What the mutation did, in the tool's words.
     #[serde(default)]
     pub description: String,
@@ -91,6 +99,19 @@ pub struct Survivor {
     /// the HQ has already said no, and the survivor is open again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refused: Option<Refusal>,
+}
+
+impl Survivor {
+    /// The first and last line of the code the mutation replaces: the one
+    /// line when the tool gives no span, and `None` when the span is not
+    /// known — an end before the start, which no ruling may be tied to.
+    pub fn span(&self) -> Option<(u32, u32)> {
+        match self.end_line {
+            None => Some((self.line, self.line)),
+            Some(end) if end >= self.line => Some((self.line, end)),
+            Some(_) => None,
+        }
+    }
 }
 
 /// The HQ said no to an equivalence the coder proposed, and why.
@@ -806,7 +827,7 @@ pub fn record_finished(
     head: &str,
     text: &str,
 ) -> Result<usize, MutantsError> {
-    record(dir, fingerprint, head, text, |_| {})
+    record(dir, fingerprint, head, text, |_| true, |_| {})
 }
 
 /// What [`record_finished_with_registry`] did with the project's registry.
@@ -829,7 +850,14 @@ pub struct Recorded {
 /// After [`carry`], so that a ruling given on this mission keeps its own
 /// origin. **Fails closed**: a registry that cannot be read applies nothing,
 /// and the reason is appended to the mission's `FOLLOWUP_HQ.md`, the file the
-/// HQ reads, rather than lost in a log.
+/// HQ reads, rather than lost in a log. The registry is read under its lock
+/// ([`crate::equivalences::read_locked`]).
+///
+/// With the source at hand, the class rule holds for [`carry`] too: its
+/// looser tier — the same file and description under another id — gives a
+/// survivor nothing unless the code its mutation replaces occurs once in the
+/// file ([`crate::equivalences::identify`]). The same text on two lines,
+/// ruled on one, is otherwise answered on the other by the next campaign.
 pub fn record_finished_with_registry(
     dir: &Path,
     hq_root: &Path,
@@ -838,19 +866,24 @@ pub fn record_finished_with_registry(
     head: &str,
     text: &str,
 ) -> Result<Recorded, MutantsError> {
-    let registry = crate::equivalences::read(hq_root);
+    let registry = crate::equivalences::read_locked(hq_root);
+    let identified = |s: &Survivor| crate::equivalences::identify(tree, head, s).ok();
     let mut from_registry = 0;
-    let survivors = record(dir, fingerprint, head, text, |survivors| {
-        if let Ok(registry) = &registry {
-            from_registry = crate::equivalences::apply(registry, survivors, |s| {
-                crate::equivalences::digest_at(tree, head, &s.file, s.line)
-            });
-        }
-    })?;
+    let survivors = record(
+        dir,
+        fingerprint,
+        head,
+        text,
+        |s| identified(s).is_some(),
+        |survivors| {
+            if let Ok(registry) = &registry {
+                from_registry = crate::equivalences::apply(registry, survivors, identified);
+            }
+        },
+    )?;
     let registry_unread = match registry {
         Ok(_) => None,
-        Err(e) => {
-            let why = e.to_string();
+        Err(why) => {
             crate::followup::registry_unread(&dir.join(crate::mission::dir::FOLLOWUP_FILE), &why)?;
             Some(why)
         }
@@ -862,17 +895,19 @@ pub fn record_finished_with_registry(
     })
 }
 
-/// Parse, carry, let `then` add what it has, write.
+/// Parse, carry ([`carry_identified`] with `identified`), let `then` add
+/// what it has, write.
 fn record(
     dir: &Path,
     fingerprint: &str,
     head: &str,
     text: &str,
+    identified: impl Fn(&Survivor) -> bool,
     then: impl FnOnce(&mut [Survivor]),
 ) -> Result<usize, MutantsError> {
     let mut survivors = parse(text);
     if let Some(previous) = read(dir)? {
-        carry(&previous, &mut survivors);
+        carry_identified(&previous, &mut survivors, identified);
     }
     then(&mut survivors);
     let count = survivors.len();
@@ -923,6 +958,19 @@ fn record(
 /// `no tests` — is a different mutant, and nothing is carried. No id is
 /// parsed: which tool named it is the stack's business, not `nunki`'s.
 pub fn carry(previous: &Campaign, survivors: &mut [Survivor]) {
+    carry_identified(previous, survivors, |_| true)
+}
+
+/// [`carry`], with its looser tier — the same file and description under
+/// another id — given only to a survivor `identified` says is told apart by
+/// its source: the code its mutation replaces occurs once in its file. The
+/// exact tier, the same id, is the tool's own word for the same mutant and
+/// is not asked.
+pub fn carry_identified(
+    previous: &Campaign,
+    survivors: &mut [Survivor],
+    identified: impl Fn(&Survivor) -> bool,
+) {
     let from = |old: &Survivor| match &old.outcome {
         Some(Triage::Equivalent {
             carried_from: Some(first),
@@ -935,7 +983,8 @@ pub fn carry(previous: &Campaign, survivors: &mut [Survivor]) {
         *now.entry(pair(s)).or_default() += 1;
     }
     for survivor in survivors.iter_mut() {
-        let Some(old) = twin(&previous.survivors, survivor, &now) else {
+        let loose = identified(survivor);
+        let Some(old) = twin(&previous.survivors, survivor, &now, loose) else {
             continue;
         };
         if let Some(Triage::Equivalent { why, .. }) = &old.outcome {
@@ -958,11 +1007,13 @@ fn pair(s: &Survivor) -> (String, String) {
 /// The survivor of `before` — the whole previous campaign — that `survivor`
 /// is, on [`carry`]'s two tiers: the same id, file and description; or else
 /// the only one of `before` with its file and description, when that pair
-/// also names one survivor `now`.
+/// also names one survivor `now` — tried only when `loose` says the survivor
+/// is told apart by its source ([`carry_identified`]).
 fn twin<'a>(
     before: &'a [Survivor],
     survivor: &Survivor,
     now: &BTreeMap<(String, String), usize>,
+    loose: bool,
 ) -> Option<&'a Survivor> {
     let exact = before.iter().find(|old| {
         old.id == survivor.id
@@ -974,7 +1025,7 @@ fn twin<'a>(
             .iter()
             .filter(|old| pair(old) == pair(survivor))
             .collect();
-        (same.len() == 1 && now.get(&pair(survivor)) == Some(&1)).then(|| same[0])
+        (loose && same.len() == 1 && now.get(&pair(survivor)) == Some(&1)).then(|| same[0])
     })
 }
 

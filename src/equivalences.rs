@@ -11,17 +11,26 @@
 //! `--ratify` enter a ruling, `--lift` takes one out. A coder's proposal never
 //! enters it, and a refusal is not an equivalence.
 //!
-//! **A ruling is about a line's content.** Each entry carries the mutant's
-//! file and description — what the mutation changes, never its line number,
-//! which the smallest commit above it moves — and a digest of the content of
-//! the source line it sat on, whitespace at both ends ignored. A later
-//! campaign applies it while that line is unchanged, wherever it moved to,
-//! and stops the moment its content changes: the ruling was about other code.
+//! **A ruling is about the code the mutation replaces.** Each entry carries
+//! the mutant's file and description — what the mutation changes, never its
+//! line number, which the smallest commit above it moves — and a digest of
+//! every line of the code it replaced, its whole span as the tool lists it,
+//! whitespace at both ends of each line ignored. A later campaign applies it
+//! while that code is unchanged, wherever it moved to, and stops the moment
+//! any line of it changes: the ruling was about other code.
+//!
+//! **Only what is identified without a doubt** (HQ review of the pull
+//! request, the class rule). A ruling is entered, and later applied, only
+//! when the span's text occurs exactly once in its file, and only when the
+//! campaign it was given on holds exactly one survivor on its file and
+//! description. The same code twice in one file, the same mutation twice in
+//! one campaign, a span the tool did not give: the HQ's ruling stands on its
+//! mission, and the registry says nothing about it.
 //!
 //! **Fail closed.** A registry that cannot be read applies nothing and says
-//! so; a source line that cannot be read — file gone, line out of range —
-//! matches nothing; two survivors of a campaign, or two entries, sharing a
-//! file and description match nothing either.
+//! so; a span that cannot be read — file gone, lines out of range — matches
+//! nothing; two survivors of a campaign, or two entries, sharing a file and
+//! description match nothing either.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -52,8 +61,15 @@ pub struct Entry {
     /// What the mutation changes, in the tool's words. With the file, what
     /// the ruling is about.
     pub description: String,
-    /// [`line_digest`] of the source line the mutant sat on, at [`Self::commit`].
+    /// [`span_digest`] of the code the mutation replaced, at
+    /// [`Self::commit`]: every line of its span. The key keeps the name it
+    /// had when the digest covered one line, which a span of one line still
+    /// gives the same value for.
     pub line: String,
+    /// How many lines that span has: one, for an entry written before spans
+    /// were carried.
+    #[serde(default = "one_line")]
+    pub lines: u32,
     /// The HQ's sentence.
     pub why: String,
     /// Who ruled.
@@ -63,6 +79,10 @@ pub struct Entry {
     /// The commit of the campaign it was ruled on.
     pub commit: String,
     pub date: String,
+}
+
+fn one_line() -> u32 {
+    1
 }
 
 /// `equivalences.json`.
@@ -85,11 +105,12 @@ pub enum RegistryError {
     Lock(#[from] crate::state::LockError),
 }
 
-/// Read the registry. No file, or an empty one, is an empty registry — a
-/// project that never ruled behaves exactly as before the registry existed.
-/// One that cannot be parsed is an error, never an empty registry: a file
-/// the HQ wrote and `nunki` cannot read must be said, and writing over it
-/// would lose every ruling it holds.
+/// Read the registry. No file is an empty registry — a project that never
+/// ruled behaves exactly as before the registry existed. Anything else that
+/// does not parse is an error, never an empty registry — a zero-length file
+/// included, which is what a write cut short by a crash leaves (HQ review,
+/// item 5): a file the HQ wrote and `nunki` cannot read must be said, and
+/// writing over it would lose every ruling it held.
 pub fn read(hq_root: &Path) -> Result<Registry, RegistryError> {
     let file = path(hq_root);
     let text = match std::fs::read_to_string(&file) {
@@ -97,23 +118,42 @@ pub fn read(hq_root: &Path) -> Result<Registry, RegistryError> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Registry::default()),
         Err(e) => return Err(RegistryError::Unreadable(file, e.to_string())),
     };
-    if text.trim().is_empty() {
-        return Ok(Registry::default());
-    }
     serde_json::from_str(&text).map_err(|e| RegistryError::Unreadable(file, e.to_string()))
+}
+
+/// [`read`], under the registry's lock, the lock its writers take: a
+/// campaign recorded while an HQ verb rewrites the registry reads it before
+/// or after, never between (HQ review, item 6). Why it could not be read,
+/// when it could not.
+pub fn read_locked(hq_root: &Path) -> Result<Registry, String> {
+    let _lock = lock(hq_root, "mission mutants (registry read)")?;
+    read(hq_root).map_err(|e| e.to_string())
 }
 
 /// Write the registry whole, through a file renamed into place: a reader —
 /// a campaign being recorded on another mission — sees the old registry or
-/// the new one, never half of one.
+/// the new one, never half of one. The staged file and its directory are
+/// synced to disk before the rename, and the directory again after it, so
+/// that a crash cannot leave the new name on a file whose bytes never
+/// reached the disk (HQ review, item 5).
 pub fn write(hq_root: &Path, registry: &Registry) -> Result<(), RegistryError> {
+    use std::io::Write as _;
     std::fs::create_dir_all(hq_root).map_err(|e| RegistryError::Io(hq_root.to_path_buf(), e))?;
     let file = path(hq_root);
     let staged = hq_root.join(format!("{FILE}.tmp"));
     let body = serde_json::to_string_pretty(registry).expect("a registry serialises");
-    std::fs::write(&staged, format!("{body}\n"))
-        .map_err(|e| RegistryError::Io(staged.clone(), e))?;
-    std::fs::rename(&staged, &file).map_err(|e| RegistryError::Io(file, e))
+    let io = |path: &Path| {
+        let path = path.to_path_buf();
+        move |e| RegistryError::Io(path, e)
+    };
+    let mut out = std::fs::File::create(&staged).map_err(io(&staged))?;
+    out.write_all(format!("{body}\n").as_bytes())
+        .map_err(io(&staged))?;
+    out.sync_all().map_err(io(&staged))?;
+    let dir = std::fs::File::open(hq_root).map_err(io(hq_root))?;
+    dir.sync_all().map_err(io(hq_root))?;
+    std::fs::rename(&staged, &file).map_err(io(&file))?;
+    dir.sync_all().map_err(io(hq_root))
 }
 
 /// The digest of a source line's content: git's blob id of the line with
@@ -125,7 +165,18 @@ pub fn write(hq_root: &Path, registry: &Registry) -> Result<(), RegistryError> {
 /// same whatever hash a repository's objects use: an entry must not change
 /// meaning because one repository moved to SHA-256.
 pub fn line_digest(line: &str) -> String {
-    let content = line.trim();
+    span_digest(&[line])
+}
+
+/// The digest of a span of source lines: [`line_digest`]'s, over the lines
+/// each trimmed at both ends and joined by a newline. One line gives exactly
+/// its [`line_digest`].
+pub fn span_digest(lines: &[&str]) -> String {
+    let content = lines
+        .iter()
+        .map(|l| l.trim())
+        .collect::<Vec<_>>()
+        .join("\n");
     let mut digest = ring::digest::Context::new(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY);
     digest.update(format!("blob {}\0", content.len()).as_bytes());
     digest.update(content.as_bytes());
@@ -234,20 +285,37 @@ fn hex(bytes: &[u8]) -> String {
 
 /// The mode and id of `name` in a raw tree object: entries are
 /// `<mode> <name>\0<id>`, the id `width` raw bytes.
+///
+/// The whole tree is read first, and a tree git itself would never write is
+/// refused: one that names an entry twice, or whose entries are not strictly
+/// in git's order (names compared as bytes, a directory's as if it ended in
+/// `/`). A forged commit can list `lib.rs` twice — `git show` reads the
+/// first, a checkout writes the last — and which of the two the campaign ran
+/// on is then a guess (HQ review, item 2).
 fn entry(listing: &[u8], name: &str, width: usize) -> Option<(String, String)> {
+    let mut entries: Vec<(&[u8], &[u8], &[u8])> = Vec::new();
     let mut rest = listing;
     while !rest.is_empty() {
         let space = rest.iter().position(|&b| b == b' ')?;
         let nul = space + rest[space..].iter().position(|&b| b == 0)?;
         let end = nul + 1 + width;
         let id = rest.get(nul + 1..end)?;
-        if &rest[space + 1..nul] == name.as_bytes() {
-            let mode = std::str::from_utf8(&rest[..space]).ok()?.to_string();
-            return Some((mode, hex(id)));
-        }
+        entries.push((&rest[..space], &rest[space + 1..nul], id));
         rest = &rest[end..];
     }
-    None
+    let key = |(mode, name, _): &(&[u8], &[u8], &[u8])| {
+        let mut key = name.to_vec();
+        if *mode == b"40000" {
+            key.push(b'/');
+        }
+        key
+    };
+    let names: std::collections::BTreeSet<&[u8]> = entries.iter().map(|e| e.1).collect();
+    if names.len() != entries.len() || entries.windows(2).any(|w| key(&w[0]) >= key(&w[1])) {
+        return None;
+    }
+    let (mode, _, id) = entries.iter().find(|e| e.1 == name.as_bytes())?;
+    Some((std::str::from_utf8(mode).ok()?.to_string(), hex(id)))
 }
 
 /// The 1-based `line` of `source`, if it has one.
@@ -263,6 +331,68 @@ pub fn digest_at(tree: &Path, commit: &str, file: &str, line: u32) -> Option<Str
     nth_line(&source, line).map(line_digest)
 }
 
+/// The lines `start` to `end` of `source`, 1-based and inclusive, when the
+/// file has them all.
+fn span_of(source: &str, start: u32, end: u32) -> Option<Vec<&str>> {
+    let lines: Vec<&str> = source.lines().collect();
+    let from = usize::try_from(start).ok()?.checked_sub(1)?;
+    let to = usize::try_from(end).ok()?;
+    (from < to && to <= lines.len()).then(|| lines[from..to].to_vec())
+}
+
+/// How many times `span` occurs in `source`, line for line, each line
+/// trimmed at both ends.
+fn occurrences(source: &str, span: &[&str]) -> usize {
+    let lines: Vec<&str> = source.lines().collect();
+    lines
+        .windows(span.len())
+        .filter(|w| w.iter().zip(span).all(|(a, b)| a.trim() == b.trim()))
+        .count()
+}
+
+/// [`span_digest`] of the code `survivor`'s mutation replaces, at `commit`
+/// in the repository at `tree` — **only when it is identified without a
+/// doubt**: its span is known, every line of it can be read, and that text
+/// occurs exactly once in the file. Otherwise why not, in a sentence.
+pub fn identify(tree: &Path, commit: &str, survivor: &Survivor) -> Result<String, String> {
+    let at = format!("{}:{}", survivor.file, survivor.line);
+    let (start, end) = survivor.span().ok_or_else(|| {
+        format!("{at}: the campaign does not say which lines the mutation replaces")
+    })?;
+    let source = source_at(tree, commit, &survivor.file).ok_or_else(|| {
+        format!(
+            "{} cannot be read at {} in {}",
+            survivor.file,
+            short(commit),
+            tree.display()
+        )
+    })?;
+    identified(&source, start, end).map_err(|why| format!("{at}: {why}"))
+}
+
+/// [`span_digest`] of lines `start` to `end` of `source`, when that text
+/// occurs exactly once in it.
+pub fn identified(source: &str, start: u32, end: u32) -> Result<String, String> {
+    let span = span_of(source, start, end)
+        .ok_or_else(|| format!("lines {start} to {end} are not all in the file"))?;
+    match occurrences(source, &span) {
+        1 => Ok(span_digest(&span)),
+        n => Err(format!(
+            "the code the mutation replaces occurs {n} times in the file, so which one \
+             was ruled on would be a guess"
+        )),
+    }
+}
+
+/// [`span_digest`] of the code `survivor`'s mutation replaces at `commit`,
+/// whether or not it is unique — what a lift looks for, where taking out too
+/// much is the safe side.
+fn span_at(tree: &Path, commit: &str, survivor: &Survivor) -> Option<String> {
+    let (start, end) = survivor.span()?;
+    let source = source_at(tree, commit, &survivor.file)?;
+    span_of(&source, start, end).map(|span| span_digest(&span))
+}
+
 /// What [`apply`] matches on: the mutant's file and what it changes.
 fn pair(file: &str, description: &str) -> (String, String) {
     (file.to_string(), description.to_string())
@@ -270,8 +400,10 @@ fn pair(file: &str, description: &str) -> (String, String) {
 
 /// Give each survivor still without an outcome the registry's ruling on it,
 /// when there is exactly one and it is about the code the survivor sits on:
-/// the same file and description, and the same [`line_digest`] for the line
-/// it sits on now, as `digest` reads it. Returns how many were given one.
+/// the same file and description, and the same [`span_digest`] for the code
+/// its mutation replaces now, as `digest` reads it — [`identify`], in a
+/// campaign, which reads nothing for code that occurs more than once.
+/// Returns how many were given one.
 ///
 /// Nothing is applied to a survivor when its file and description name two
 /// survivors of the campaign, or two entries: which ruling speaks for which
@@ -341,6 +473,24 @@ impl Registered {
     }
 }
 
+/// The registry's lock. Asked again for two seconds while another verb
+/// holds it — a ruling takes milliseconds — and then refused, with why.
+fn lock(hq_root: &Path, verb: &str) -> Result<crate::state::SlotLock, String> {
+    let locks = hq_root.join("locks");
+    std::fs::create_dir_all(&locks).map_err(|e| format!("{}: {e}", locks.display()))?;
+    let mut tries = 0;
+    loop {
+        match crate::state::SlotLock::acquire(&locks, LOCK, verb) {
+            Ok(lock) => return Ok(lock),
+            Err(_) if tries < 20 => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+}
+
 /// Take the registry's lock, read it, change it with `change`, and write it
 /// back when `change` changed something. Any failure becomes
 /// [`Registered::Not`], and an unreadable registry is never written over.
@@ -349,13 +499,9 @@ fn under_lock(
     verb: &str,
     change: impl FnOnce(&mut Registry) -> Result<usize, String>,
 ) -> Registered {
-    let locks = hq_root.join("locks");
-    if let Err(e) = std::fs::create_dir_all(&locks) {
-        return Registered::Not(format!("{}: {e}", locks.display()));
-    }
-    let _lock = match crate::state::SlotLock::acquire(&locks, LOCK, verb) {
+    let _lock = match lock(hq_root, verb) {
         Ok(lock) => lock,
-        Err(e) => return Registered::Not(e.to_string()),
+        Err(why) => return Registered::Not(why),
     };
     let mut registry = match read(hq_root) {
         Ok(r) => r,
@@ -392,8 +538,13 @@ pub struct Ruling<'a> {
 /// An entry already there on the same file and description is replaced:
 /// it is a ruling on the same mutation, given again, and two entries on one
 /// mutation would make every later match ambiguous, so the mutation would
-/// be asked again forever. A survivor whose line cannot be read at the
-/// campaign's commit is not entered, and the answer says so.
+/// be asked again forever.
+///
+/// Nothing is entered — the ruling holds on this mission only, and the
+/// answer says why — unless the survivor is identified without a doubt: the
+/// campaign holds no other survivor on its file and description, and
+/// [`identify`] reads the code its mutation replaces, once, at the
+/// campaign's commit.
 pub fn enter(ruling: &Ruling, campaign: &Campaign, id: &str) -> Registered {
     let mut fresh = Vec::new();
     for s in campaign.survivors.iter().filter(|s| s.id == id) {
@@ -401,19 +552,31 @@ pub fn enter(ruling: &Ruling, campaign: &Campaign, id: &str) -> Registered {
             Some(Triage::Equivalent { why, .. }) => why.clone(),
             _ => continue,
         };
-        let Some(line) = digest_at(ruling.tree, &campaign.head, &s.file, s.line) else {
-            return Registered::Not(format!(
-                "{}:{} cannot be read at {} in {}, so the ruling holds on this mission only",
-                s.file,
-                s.line,
-                short(&campaign.head),
-                ruling.tree.display()
-            ));
+        let only = |why: String| {
+            Registered::Not(format!("{why}, so the ruling holds on this mission only"))
         };
+        let twins = campaign
+            .survivors
+            .iter()
+            .filter(|t| pair(&t.file, &t.description) == pair(&s.file, &s.description))
+            .count();
+        if twins != 1 {
+            return only(format!(
+                "the campaign holds {twins} survivors on {} with this mutation, and the \
+                 registry cannot tell them apart",
+                s.file
+            ));
+        }
+        let line = match identify(ruling.tree, &campaign.head, s) {
+            Ok(digest) => digest,
+            Err(why) => return only(why),
+        };
+        let (start, end) = s.span().expect("identify read the span");
         fresh.push(Entry {
             file: s.file.clone(),
             description: s.description.clone(),
             line,
+            lines: end - start + 1,
             why,
             by: ruling.by.to_string(),
             mission: ruling.mission.to_string(),
@@ -454,24 +617,26 @@ fn origin<'a>(
     }
 }
 
-/// Take out of the registry the rulings survivor `id` of `campaign` holds,
+/// Take out of the registry the rulings on survivor `id` of `campaign`,
 /// read **before** `--lift` took them off the mission's file: each entry on
 /// the same file and description that was given where the survivor's ruling
-/// was (the same mission and commit), or that is about the line the survivor
-/// sits on now.
+/// was (the same mission and commit), or that is about the code the
+/// survivor's mutation replaces now — the second also for a survivor the
+/// mission's file no longer holds a ruling on, so that a registry entry left
+/// behind can still be lifted (HQ review, item 4).
 pub fn remove(ruling: &Ruling, campaign: &Campaign, id: &str) -> Registered {
-    let held: Vec<(&Survivor, (&str, &str))> = campaign
+    let held: Vec<(&Survivor, Option<(&str, &str)>)> = campaign
         .survivors
         .iter()
         .filter(|s| s.id == id)
-        .filter_map(|s| origin(s, campaign, ruling.mission).map(|o| (s, o)))
+        .map(|s| (s, origin(s, campaign, ruling.mission)))
         .collect();
     if held.is_empty() {
         return Registered::Done(0);
     }
     let lines: Vec<Option<String>> = held
         .iter()
-        .map(|(s, _)| digest_at(ruling.tree, &campaign.head, &s.file, s.line))
+        .map(|(s, _)| span_at(ruling.tree, &campaign.head, s))
         .collect();
     under_lock(
         ruling.hq_root,
@@ -479,49 +644,65 @@ pub fn remove(ruling: &Ruling, campaign: &Campaign, id: &str) -> Registered {
         |registry| {
             let before = registry.entries.len();
             registry.entries.retain(|e| {
-                !held
-                    .iter()
-                    .zip(&lines)
-                    .any(|((s, (mission, commit)), line)| {
-                        e.file == s.file
-                            && e.description == s.description
-                            && ((e.mission == *mission && e.commit == *commit)
-                                || line.as_deref() == Some(e.line.as_str()))
-                    })
+                !held.iter().zip(&lines).any(|((s, origin), line)| {
+                    e.file == s.file
+                        && e.description == s.description
+                        && (*origin == Some((e.mission.as_str(), e.commit.as_str()))
+                            || line.as_deref() == Some(e.line.as_str()))
+                })
             });
             Ok(before - registry.entries.len())
         },
     )
 }
 
-/// Whether an entry's line still stands in a repository's `HEAD`.
+/// Whether an entry's code still stands in a repository's `HEAD`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Standing {
-    /// A line of the file at `HEAD` has the entry's digest.
+    /// The file at `HEAD` holds the entry's code once.
     Stands,
-    /// The file is there, and no line of it has the entry's digest.
+    /// The file is there, and does not hold the entry's code.
     Changed,
+    /// The file holds the entry's code more than once: no campaign is
+    /// answered from it there.
+    Repeated(usize),
     /// The file cannot be read at `HEAD`.
     Gone,
 }
 
 impl Standing {
-    pub fn said(&self) -> &'static str {
+    pub fn said(&self) -> String {
         match self {
-            Standing::Stands => "its line stands at HEAD",
-            Standing::Changed => "its line has changed at HEAD: it applies to nothing there",
-            Standing::Gone => "its file cannot be read at HEAD: it applies to nothing there",
+            Standing::Stands => "its code stands at HEAD".to_string(),
+            Standing::Changed => {
+                "its code has changed at HEAD: it applies to nothing there".to_string()
+            }
+            Standing::Repeated(n) => {
+                format!("its code occurs {n} times at HEAD: it applies to nothing there")
+            }
+            Standing::Gone => {
+                "its file cannot be read at HEAD: it applies to nothing there".to_string()
+            }
         }
     }
 }
 
-/// Where `entry`'s line is in the repository at `tree`, at `HEAD`. Any line
-/// of the file counts, since a line that moved still matches.
+/// Where `entry`'s code is in the repository at `tree`, at `HEAD`: any run
+/// of its many lines counts, since code that moved still matches.
 pub fn standing(tree: &Path, entry: &Entry) -> Standing {
-    match source_at(tree, "HEAD", &entry.file) {
-        None => Standing::Gone,
-        Some(source) if source.lines().any(|l| line_digest(l) == entry.line) => Standing::Stands,
-        Some(_) => Standing::Changed,
+    let Some(source) = source_at(tree, "HEAD", &entry.file) else {
+        return Standing::Gone;
+    };
+    let lines: Vec<&str> = source.lines().collect();
+    let width = usize::try_from(entry.lines.max(1)).unwrap_or(1);
+    match lines
+        .windows(width)
+        .filter(|w| span_digest(w) == entry.line)
+        .count()
+    {
+        0 => Standing::Changed,
+        1 => Standing::Stands,
+        n => Standing::Repeated(n),
     }
 }
 

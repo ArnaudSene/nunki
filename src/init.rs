@@ -956,9 +956,13 @@ const MUTATION_RUST: &str = r#"#!/bin/sh
 # history. Without `NUNKI_BASE` the whole of each touched file is mutated.
 #
 # It prints **one JSON object per line** on stdout, one per surviving mutant:
-#   {"id":"…","file":"…","line":12,"description":"…"}
+#   {"id":"…","file":"…","line":12,"end_line":14,"description":"…"}
 # and, last of all and exactly once, the line that says it got to the end:
 #   {"campaign":"done","tried":42,"found":45}
+# `end_line` is the last line of the code the mutation replaces, from the
+# tool's own listing: a function body replaced whole spans every line of it,
+# and a ruling on it is about all of them. 0 when the listing does not name
+# the mutant exactly once — a span nobody knows, which no ruling is tied to.
 # `tried` is how many mutants were run against the tests, unviable ones left
 # out: what a `standard` mission's gate 7 divides by. `found` is how many
 # testable mutants the tool listed; `tried` 0 beside a `found` above 0 is a
@@ -1110,6 +1114,12 @@ esac
 # `file:line:col` hand the coder survivors it cannot tell apart, in a file
 # whose whole purpose is answering them one by one. The tool's own name for a
 # mutant is that line, so that is the name nunki uses.
+#
+# The span comes from `mutants.json`, the tool's listing of every mutant it
+# made: its `name` is that same line, and its `span` the code replaced —
+# measured on 27.1.0, `replace body -> u8 with 0` on a two-line body spans
+# lines 6 to 7, where `missed.txt` says only 6.
+listing="$out/mutants.out/mutants.json"
 while IFS= read -r mutant; do
   [ -n "$mutant" ] || continue
   file=${mutant%%:*}
@@ -1118,8 +1128,12 @@ while IFS= read -r mutant; do
   rest=${rest#*:}
   what=${rest#*: }
   escape() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
-  printf '{"id":"%s","file":"%s","line":%s,"description":"%s"}\n' \
-    "$(escape "$mutant")" "$file" "$line" "$(escape "$what")"
+  end=$(jq -r --arg name "$mutant" \
+    '[.[] | select(.name == $name)] | if length == 1 then .[0].span.end.line else 0 end' \
+    "$listing" 2>/dev/null || true)
+  case "$end" in ''|*[!0-9]*) end=0 ;; esac
+  printf '{"id":"%s","file":"%s","line":%s,"end_line":%s,"description":"%s"}\n' \
+    "$(escape "$mutant")" "$file" "$line" "$end" "$(escape "$what")"
 done < "$missed"
 
 # How many mutants were tried: each one cargo-mutants ran the tests against,
@@ -1706,7 +1720,11 @@ const MUTATION_PYTHON: &str = r##"#!/bin/sh
 # is identifiable from its own command line; this script does not need it.
 #
 # It prints **one JSON object per line** on stdout, one per surviving mutant:
-#   {"id":"…","file":"…","line":12,"description":"…"}
+#   {"id":"…","file":"…","line":12,"end_line":12,"description":"…"}
+# `end_line` is the last line of the code the mutation replaces: the diff
+# mutmut shows removes that code, one `-` line per line of it. 0 when the
+# removed lines are not one run — a span nobody knows, which no ruling is
+# tied to.
 # and, last of all and exactly once, the line that says it got to the end:
 #   {"campaign":"done"}
 # with **no** `tried` and no `found`. A `standard` mission's gate 7 divides
@@ -1899,6 +1917,7 @@ def where(diff):
     removed_raw = ""
     added = ""
     at = None
+    gone = []
     for text in diff.splitlines():
         if text.startswith("--- "):
             path = text[4:].strip()
@@ -1914,11 +1933,16 @@ def where(diff):
                 at = within + 1
             elif text.startswith("+") and not added:
                 added = text[1:].strip()
+            if text.startswith("-"):
+                gone.append(within + 1)
             if text[:1] in (" ", "-"):
                 within += 1
+    # How many lines the mutation replaced: the removed lines, when they are
+    # one run; 0 when they are not, which says the span is not known.
+    span = len(gone) if gone and gone == list(range(gone[0], gone[0] + len(gone))) else 0
     if path is None or at is None:
-        return path, None, removed, added
-    return path, in_file(path, head, at, removed_raw), removed, added
+        return path, None, removed, added, span
+    return path, in_file(path, head, at, removed_raw), removed, added, span
 
 
 def in_file(path, head, at, removed_raw):
@@ -1951,7 +1975,7 @@ for text in mutmut("results").splitlines():
     survivors.append((name, status))
 
 for name, status in survivors:
-    path, line, removed, added = where(mutmut("show", name))
+    path, line, removed, added, span = where(mutmut("show", name))
     # Loudly, rather than a survivor with an empty file: a line nunki cannot
     # place is a line the coder cannot answer, and printing it anyway would
     # spend the triage on nothing.
@@ -1960,7 +1984,8 @@ for name, status in survivors:
     if path not in touched:
         continue
     what = status if not removed else "{}: {} -> {}".format(status, removed, added)
-    print(json.dumps({"id": name, "file": path, "line": line, "description": what}))
+    end = line + span - 1 if span else 0
+    print(json.dumps({"id": name, "file": path, "line": line, "end_line": end, "description": what}))
 PY
 
 # Behind itself, once the survivors have been read out of it. A courtesy
@@ -2657,7 +2682,10 @@ const MUTATION_NEXT: &str = r##"#!/bin/sh
 # is identifiable from its own command line; this script does not need it.
 #
 # It prints **one JSON object per line** on stdout, one per surviving mutant:
-#   {"id":"…","file":"…","line":12,"description":"…"}
+#   {"id":"…","file":"…","line":12,"end_line":12,"description":"…"}
+# `end_line` is the last line of the code the mutation replaces, from the
+# location Stryker's report gives each mutant; 0 when it gives none — a span
+# nobody knows, which no ruling is tied to.
 # and, last of all and exactly once, the line that says it got to the end:
 #   {"campaign":"done"}
 # with **no** `tried` and no `found`. A `standard` mission's gate 7 divides
@@ -2786,7 +2814,8 @@ for (const [file, entry] of Object.entries(report.files ?? {})) {
     // very same column.
     const id = [file, at.line, at.column, mutant.mutatorName, was].join(":");
     const what = `${mutant.status}: ${mutant.mutatorName} -> ${was}`;
-    process.stdout.write(JSON.stringify({ id, file, line: at.line, description: what }) + "\n");
+    const end_line = mutant.location?.end?.line ?? 0;
+    process.stdout.write(JSON.stringify({ id, file, line: at.line, end_line, description: what }) + "\n");
   }
 }
 ' "$report"

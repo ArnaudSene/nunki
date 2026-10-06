@@ -69,6 +69,12 @@ pub enum FindingsError {
     Followup(#[from] crate::followup::FollowupError),
     #[error(transparent)]
     Mutants(#[from] crate::mutants::MutantsError),
+    #[error(
+        "the registry of equivalences could not be changed — {0}. Nothing was lifted, on \
+         the mission or in the registry: a ruling lifted from the mission and left in the \
+         registry would answer the next mission still"
+    )]
+    RegistryUnchanged(String),
 }
 
 /// Record a human's acceptance, and — for [`Lift::Verdict`] — conclude.
@@ -313,7 +319,7 @@ fn under_slot_lock<T>(
     project: &Project,
     id: &str,
     verb: &str,
-    ruling: impl FnOnce(&Paths, &std::path::Path) -> Result<T, crate::mutants::MutantsError>,
+    ruling: impl FnOnce(&Paths, &std::path::Path) -> Result<T, FindingsError>,
 ) -> Result<T, FindingsError> {
     let paths = Paths::of(&project.hq_root, id);
     let store = Store::open(&project.hq_root)?;
@@ -330,7 +336,7 @@ fn under_slot_lock<T>(
         ),
         None => (None, project.root.clone()),
     };
-    Ok(ruling(&paths, &tree)?)
+    ruling(&paths, &tree)
 }
 
 /// Mission `id`'s state, or `None` when it has not started — and only then.
@@ -427,10 +433,19 @@ pub fn rule_equivalent(
     )
 }
 
-/// `nunki mission mutants --lift`: [`crate::mutants::lift_equivalent`],
-/// under the slot's lock, and the ruling taken out of the project's
+/// `nunki mission mutants --lift`: the ruling taken out of the project's
 /// registry of equivalences — whichever mission gave it — so that the next
-/// mission is asked again. Returns what became of the registry.
+/// mission is asked again, and then out of the mission's file
+/// ([`crate::mutants::lift_equivalent`]), under the slot's lock. Returns how
+/// many registry entries went.
+///
+/// **The registry first, and failing closed** (HQ review, item 4): when it
+/// cannot be locked, read or written, the verb fails and the mission's file
+/// is left as it was. The other order lifted the ruling from the mission and
+/// left it in the registry, answering every later mission still, behind a
+/// verb that had said "lifted". And a registry entry is taken out even when
+/// the mission's file no longer holds the ruling — lifted there before, by a
+/// verb whose registry half failed — so that it can always be cleaned.
 pub fn lift_equivalent(
     project: &Project,
     id: &str,
@@ -438,17 +453,36 @@ pub fn lift_equivalent(
 ) -> Result<crate::equivalences::Registered, FindingsError> {
     let by = who(project);
     under_slot_lock(project, id, "mission mutants --lift", |paths, tree| {
-        // Read before the lift: what the survivor held is what says which
-        // entry to take out.
-        let before = crate::mutants::read(&paths.dir)?;
-        crate::mutants::lift_equivalent(&paths.dir, survivor)?;
-        Ok(match before {
-            Some(campaign) => crate::equivalences::remove(
-                &registry_ruling(project, id, tree, &by),
-                &campaign,
-                survivor,
-            ),
-            None => crate::equivalences::Registered::Done(0),
-        })
+        // No campaign, or no survivor of that name: the mission's own verb
+        // says so, and writes nothing.
+        let campaign = match crate::mutants::read(&paths.dir)? {
+            Some(c) if c.survivors.iter().any(|s| s.id == survivor) => c,
+            _ => {
+                crate::mutants::lift_equivalent(&paths.dir, survivor)?;
+                return Ok(crate::equivalences::Registered::Done(0));
+            }
+        };
+        let removed = match crate::equivalences::remove(
+            &registry_ruling(project, id, tree, &by),
+            &campaign,
+            survivor,
+        ) {
+            crate::equivalences::Registered::Done(n) => n,
+            crate::equivalences::Registered::Not(why) => {
+                return Err(FindingsError::RegistryUnchanged(why));
+            }
+        };
+        let holds = campaign.survivors.iter().any(|s| {
+            s.id == survivor
+                && s.outcome
+                    .as_ref()
+                    .is_some_and(crate::mutants::Triage::is_a_ruling)
+        });
+        // Nothing held here and nothing in the registry: the mission's verb
+        // refuses, naming the survivor.
+        if holds || removed == 0 {
+            crate::mutants::lift_equivalent(&paths.dir, survivor)?;
+        }
+        Ok(crate::equivalences::Registered::Done(removed))
     })
 }

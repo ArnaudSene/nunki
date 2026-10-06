@@ -517,6 +517,7 @@ fn a_campaign_round_trips_through_the_mission_folder() {
             id: "src/lib.rs:3".into(),
             file: "src/lib.rs".into(),
             line: 3,
+            end_line: None,
             description: "replace one with 0".into(),
             outcome: Some(Triage::Equivalent {
                 why: "the branch is unreachable from any caller".into(),
@@ -805,6 +806,7 @@ fn an_equivalence_is_ruled_by_a_verb_and_lands_in_the_hqs_own_file() {
                 id: "src/lib.rs:3".into(),
                 file: "src/lib.rs".into(),
                 line: 3,
+                end_line: None,
                 description: "replace one with 0".into(),
                 outcome: None,
                 refused: None,
@@ -834,6 +836,7 @@ fn one(id: &str, line: u32, description: &str) -> Survivor {
         id: id.into(),
         file: "src/cells.py".into(),
         line,
+        end_line: None,
         description: description.into(),
         outcome: None,
         refused: None,
@@ -1259,6 +1262,112 @@ fn live_the_shipped_mutation_script_reads_a_real_campaign() {
             .any(|s| s.description.contains("replace * with /")),
         "that one is caught by the test, and a caught mutant is not a survivor: {survivors:?}"
     );
+
+    // Every survivor carries the span of the code it replaces, from the
+    // tool's own listing: one line for an operator, the whole body for a
+    // body replaced whole (HQ review, the class rule).
+    for s in &survivors {
+        assert!(s.span().is_some(), "a span the listing named once: {s:?}");
+    }
+    let operator = survivors
+        .iter()
+        .find(|s| s.description.starts_with("replace > with"))
+        .expect("an operator survives in `keep`");
+    assert_eq!(operator.span(), Some((2, 2)), "{operator:?}");
+}
+
+/// The Rust stack's script carries each survivor's span from cargo-mutants'
+/// own listing, `mutants.json`: its `name` is the line `missed.txt` holds,
+/// its `span` the code replaced. Run as `nunki init` deposits it, with a
+/// `cargo` that writes what cargo-mutants 27.1.0 was measured to write — a
+/// body replaced whole spanning lines 6 to 7 — and a name the listing gives
+/// twice, whose span is then said to be unknown.
+#[cfg(unix)]
+#[test]
+fn the_rust_campaign_carries_each_survivors_span_from_the_tools_listing() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("crate");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    nunki::init::init(&root, &dir.path().join("nunki"), &["rust".to_string()]).unwrap();
+    let script = dir
+        .path()
+        .join("nunki/stacks/rust")
+        .join(nunki::mutants::SCRIPT);
+
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let listing = r#"[
+ {"name":"src/lib.rs:6:5: replace body -> u8 with 0","span":{"start":{"line":6,"column":5},"end":{"line":7,"column":10}}},
+ {"name":"src/lib.rs:2:7: replace > with < in keep","span":{"start":{"line":2,"column":7},"end":{"line":2,"column":8}}},
+ {"name":"src/lib.rs:9:1: twice","span":{"start":{"line":9,"column":1},"end":{"line":9,"column":2}}},
+ {"name":"src/lib.rs:9:1: twice","span":{"start":{"line":9,"column":1},"end":{"line":12,"column":2}}}
+]"#;
+    let missed = "src/lib.rs:6:5: replace body -> u8 with 0\n\
+                  src/lib.rs:2:7: replace > with < in keep\n\
+                  src/lib.rs:9:1: twice\n";
+    std::fs::write(dir.path().join("listing.json"), listing).unwrap();
+    std::fs::write(dir.path().join("missed.txt"), missed).unwrap();
+    std::fs::write(
+        bin.join("cargo"),
+        format!(
+            "#!/bin/sh\n\
+             out=''\n\
+             while [ $# -gt 0 ]; do [ \"$1\" = --output ] && out=$2; shift; done\n\
+             mkdir -p \"$out/mutants.out\"\n\
+             cp {listing} \"$out/mutants.out/mutants.json\"\n\
+             cp {missed} \"$out/mutants.out/missed.txt\"\n\
+             : > \"$out/mutants.out/caught.txt\"\n\
+             exit 2\n",
+            listing = dir.path().join("listing.json").display(),
+            missed = dir.path().join("missed.txt").display(),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        bin.join("cargo"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+
+    let out = std::process::Command::new("sh")
+        .arg(&script)
+        .arg("campaign-1")
+        .arg("src/lib.rs")
+        .current_dir(&root)
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .env_remove(nunki::mutants::BASE_ENV)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && mutants::completed(&stdout),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let survivors = mutants::parse(&stdout);
+    let span = |id: &str| {
+        survivors
+            .iter()
+            .find(|s| s.id == id)
+            .unwrap_or_else(|| panic!("{id} in {stdout}"))
+            .span()
+    };
+    assert_eq!(
+        span("src/lib.rs:6:5: replace body -> u8 with 0"),
+        Some((6, 7))
+    );
+    assert_eq!(
+        span("src/lib.rs:2:7: replace > with < in keep"),
+        Some((2, 2))
+    );
+    assert_eq!(span("src/lib.rs:9:1: twice"), None, "named twice: unknown");
 }
 
 /// A campaign that killed everything has nobody to triage, and says so.
@@ -1318,6 +1427,7 @@ fn on_file(dir: &std::path::Path, fingerprint: &str, survivors: usize) {
             id: format!("src/lib.rs:{i}:1: replace a with b"),
             file: "src/lib.rs".into(),
             line: i as u32 + 1,
+            end_line: None,
             description: "replace a with b".into(),
             outcome: None,
             refused: None,
@@ -2187,6 +2297,7 @@ fn a_ratified_proposal_is_carried_as_a_ruling_and_a_proposal_never_is() {
         .iter()
         .map(|s| Survivor {
             line: s.line + 5,
+            end_line: None,
             ..s.clone()
         })
         .collect();
@@ -2675,6 +2786,7 @@ fn on_lib(line: u32) -> Survivor {
         id: format!("src/lib.rs:{line}:5: {LIFTED}"),
         file: "src/lib.rs".into(),
         line,
+        end_line: None,
         description: LIFTED.into(),
         outcome: None,
         refused: None,
@@ -3113,7 +3225,7 @@ fn the_registry_listing_says_whether_each_line_still_stands() {
     assert!(listing.contains(LIFTED), "{listing}");
     assert!(listing.contains("nothing reads the value"), "{listing}");
     assert!(listing.contains("mission a"), "{listing}");
-    assert!(listing.contains("its line stands at HEAD"), "{listing}");
+    assert!(listing.contains("its code stands at HEAD"), "{listing}");
 
     commit_lib(&project, MOVED);
     assert_eq!(
@@ -3123,7 +3235,7 @@ fn the_registry_listing_says_whether_each_line_still_stands() {
     );
     commit_lib(&project, "pub fn one() -> u8 {\n    2\n}\n");
     assert!(
-        equivalences::listing(&registry, &project.root).contains("its line has changed"),
+        equivalences::listing(&registry, &project.root).contains("its code has changed"),
         "the line changed"
     );
     git(&project.root, &["rm", "-q", "src/lib.rs"]);
@@ -3594,4 +3706,401 @@ fn only_the_hqs_rulings_are_rulings() {
     ] {
         assert_eq!(outcome.is_a_ruling(), ruling, "{outcome:?}");
     }
+}
+
+// HQ review of the pull request: the registry never puts a ruling on a
+// mutant the HQ did not rule on.
+
+const TWICE: &str = "pub fn one() -> u8 {\n    1\n}\npub fn uno() -> u8 {\n    1\n}\n";
+
+/// A survivor of `src/lib.rs` on lines `line` to `end`, mutated by `what`.
+fn spanning(line: u32, end: u32, what: &str) -> Survivor {
+    Survivor {
+        id: format!("src/lib.rs:{line}:5: {what}"),
+        file: "src/lib.rs".into(),
+        line,
+        end_line: Some(end),
+        description: what.into(),
+        outcome: None,
+        refused: None,
+    }
+}
+
+/// The same text on two lines, the same mutation on both, ruled on the one
+/// the campaign kept: the registry cannot tell which was ruled, so nothing
+/// is entered — and the other is answered neither by the same mission's
+/// next campaign nor by another mission (class rule, b).
+#[test]
+fn the_same_text_on_two_lines_ruled_on_one_never_answers_the_other() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = registry_project(dir.path(), TWICE);
+    let (campaign, _) = campaign_on(&project, "a", &[on_lib(2)]);
+    let ruled = campaign.survivors[0].id.clone();
+    match nunki::findings::rule_equivalent(&project, "a", &ruled, "nothing reads it").unwrap() {
+        Registered::Not(why) => {
+            assert!(why.contains("occurs 2 times"), "{why}");
+            assert!(why.contains("this mission only"), "{why}");
+        }
+        other => panic!("entered code that occurs twice: {other:?}"),
+    }
+    assert!(!equivalences::path(&project.hq_root).exists());
+
+    // The same mission, next campaign: only the other line survives, under
+    // its own id. The looser tier of carry does not hand it the ruling.
+    let (campaign, _) = campaign_on(&project, "a", &[on_lib(5)]);
+    assert_eq!(campaign.survivors[0].outcome, None, "the same mission");
+    // Another mission.
+    let (campaign, recorded) = campaign_on(&project, "b", &[on_lib(5)]);
+    assert_eq!(recorded.from_registry, 0);
+    assert_eq!(campaign.survivors[0].outcome, None, "another mission");
+}
+
+/// A registry entry on code that occurs once when it was ruled applies to
+/// nothing in a campaign where that code occurs twice.
+#[test]
+fn an_entry_applies_to_nothing_where_its_code_occurs_twice() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = registry_project(dir.path(), BODY);
+    ruled_on_a(&project);
+    commit_lib(&project, TWICE);
+    let (campaign, recorded) = campaign_on(&project, "b", &[on_lib(2)]);
+    assert_eq!(recorded.from_registry, 0);
+    assert_eq!(campaign.survivors[0].outcome, None);
+    let entry = &equivalences::read(&project.hq_root).unwrap().entries[0];
+    assert_eq!(
+        equivalences::standing(&project.root, entry),
+        equivalences::Standing::Repeated(2)
+    );
+}
+
+/// A ruling on a function body replaced whole is about every line of it:
+/// one of its later lines changed, and the survivor is open again — the
+/// first line alone would still have matched (class rule, a).
+#[test]
+fn a_body_replacement_whose_later_lines_change_is_open_again() {
+    const LONG: &str = "pub fn body(x: u8) -> u8 {\n    let y = x + 1;\n    y * 2\n}\n";
+    const WHOLE: &str = "replace body -> u8 with 0";
+    let dir = tempfile::tempdir().unwrap();
+    let project = registry_project(dir.path(), LONG);
+    let (campaign, _) = campaign_on(&project, "a", &[spanning(2, 3, WHOLE)]);
+    let id = campaign.survivors[0].id.clone();
+    assert_eq!(
+        nunki::findings::rule_equivalent(&project, "a", &id, "the value is discarded").unwrap(),
+        Registered::Done(1)
+    );
+    let entry = &equivalences::read(&project.hq_root).unwrap().entries[0];
+    assert_eq!(entry.lines, 2);
+    assert_eq!(
+        entry.line,
+        equivalences::span_digest(&["let y = x + 1;", "y * 2"])
+    );
+
+    // Unchanged, moved: applied.
+    commit_lib(&project, &format!("// a comment\n{LONG}"));
+    let (campaign, _) = campaign_on(&project, "b", &[spanning(3, 4, WHOLE)]);
+    assert!(matches!(
+        campaign.survivors[0].outcome,
+        Some(Triage::EquivalentRegistered { .. })
+    ));
+    // Its second line changed: open again.
+    commit_lib(
+        &project,
+        "pub fn body(x: u8) -> u8 {\n    let y = x + 1;\n    y * 3\n}\n",
+    );
+    let (campaign, recorded) = campaign_on(&project, "c", &[spanning(2, 3, WHOLE)]);
+    assert_eq!(recorded.from_registry, 0);
+    assert_eq!(campaign.survivors[0].outcome, None);
+    // And a span nobody knows is tied to nothing.
+    let mut unknown = spanning(2, 3, WHOLE);
+    unknown.end_line = Some(0);
+    assert_eq!(unknown.span(), None);
+    commit_lib(&project, LONG);
+    let (campaign, _) = campaign_on(&project, "d", &[unknown]);
+    assert_eq!(campaign.survivors[0].outcome, None);
+}
+
+/// A campaign that holds two survivors on one file and description cannot
+/// say which one a ruling is about, even when their code differs: nothing
+/// is entered (class rule, c).
+#[test]
+fn a_ruling_given_beside_a_twin_survivor_is_not_entered() {
+    const TWO: &str = "pub fn one() -> u8 {\n    1\n}\npub fn two() -> u8 {\n    2\n}\n";
+    let dir = tempfile::tempdir().unwrap();
+    let project = registry_project(dir.path(), TWO);
+    let (campaign, _) = campaign_on(&project, "a", &[on_lib(2), on_lib(5)]);
+    let id = campaign.survivors[0].id.clone();
+    match nunki::findings::rule_equivalent(&project, "a", &id, "nothing reads it").unwrap() {
+        Registered::Not(why) => assert!(why.contains("2 survivors"), "{why}"),
+        other => panic!("entered beside a twin: {other:?}"),
+    }
+    assert!(!equivalences::path(&project.hq_root).exists());
+    // The ruling stands on the mission.
+    assert!(matches!(
+        mutants::read(&mission_dir(&project, "a"))
+            .unwrap()
+            .unwrap()
+            .survivors[0]
+            .outcome,
+        Some(Triage::Equivalent { .. })
+    ));
+}
+
+/// m1 ruled, m2's proposal refused, the same mutation in the same file; the
+/// new campaign holds only m2, renamed. Neither tier, nor the registry, may
+/// hand it m1's ruling (HQ review, item 6).
+#[test]
+fn m1_ruled_m2_refused_and_m2_renamed_gets_no_equivalence() {
+    const TWO: &str = "pub fn one() -> u8 {\n    1\n}\npub fn two() -> u8 {\n    2\n}\n";
+    let dir = tempfile::tempdir().unwrap();
+    let project = registry_project(dir.path(), TWO);
+    let mut m1 = on_lib(2);
+    m1.id = "m1".into();
+    let mut m2 = on_lib(5);
+    m2.id = "m2".into();
+    campaign_on(&project, "a", &[m1, m2]);
+    let a = mission_dir(&project, "a");
+    nunki::findings::rule_equivalent(&project, "a", "m1", "nothing reads it").unwrap();
+    proposes(&a, &[("m2", "nothing reads it either")]);
+    nunki::findings::refuse_proposal(&project, "a", "m2", "it is returned").unwrap();
+
+    let mut renamed = on_lib(5);
+    renamed.id = "m2-renamed".into();
+    let (campaign, recorded) = campaign_on(&project, "a", &[renamed.clone()]);
+    assert_eq!(recorded.from_registry, 0);
+    assert_eq!(campaign.survivors[0].outcome, None, "no equivalence");
+    let (campaign, _) = campaign_on(&project, "b", &[renamed]);
+    assert_eq!(
+        campaign.survivors[0].outcome, None,
+        "nor on another mission"
+    );
+}
+
+/// A tree object git itself would never write — an entry named twice, or
+/// entries out of git's order — is read as nothing, at every tree on the
+/// path. A forged commit can list `lib.rs` twice: `git show` reads the
+/// first, a checkout writes the last (HQ review, item 2).
+#[test]
+fn a_tree_naming_an_entry_twice_or_out_of_order_is_read_as_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let tree = repo(dir.path());
+    let hash = |kind: &str, body: &[u8]| {
+        use std::io::Write;
+        let mut child = Command::new("git")
+            .arg("-C")
+            .arg(&tree)
+            .args(["hash-object", "-t", kind, "--literally", "-w", "--stdin"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(body).unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success());
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    let raw = |oid: &str| -> Vec<u8> {
+        (0..oid.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&oid[i..i + 2], 16).unwrap())
+            .collect()
+    };
+    let tree_of = |entries: &[(&str, &str, &str)]| {
+        let mut body = Vec::new();
+        for (mode, name, oid) in entries {
+            body.extend_from_slice(format!("{mode} {name}\0").as_bytes());
+            body.extend_from_slice(&raw(oid));
+        }
+        hash("tree", &body)
+    };
+    let commit_of = |root: &str| git(&tree, &["commit-tree", root, "-m", "forged"]);
+    let ruled = hash("blob", b"ruled\n");
+    let other = hash("blob", b"other\n");
+    let read = |root: &str, file: &str| equivalences::source_at(&tree, &commit_of(root), file);
+
+    // Written as git writes them, they read.
+    let src = tree_of(&[("100644", "a.rs", &other), ("100644", "lib.rs", &ruled)]);
+    let root = tree_of(&[("40000", "src", &src)]);
+    assert_eq!(read(&root, "src/lib.rs").as_deref(), Some("ruled\n"));
+
+    // lib.rs twice, in the tree the file is in.
+    let twice = tree_of(&[("100644", "lib.rs", &ruled), ("100644", "lib.rs", &other)]);
+    assert_eq!(
+        read(&tree_of(&[("40000", "src", &twice)]), "src/lib.rs"),
+        None
+    );
+    // Out of order there.
+    let unsorted = tree_of(&[("100644", "lib.rs", &ruled), ("100644", "a.rs", &other)]);
+    assert_eq!(
+        read(&tree_of(&[("40000", "src", &unsorted)]), "src/lib.rs"),
+        None
+    );
+    // src twice, in the root above it.
+    let doubled = tree_of(&[("40000", "src", &src), ("40000", "src", &src)]);
+    assert_eq!(read(&doubled, "src/lib.rs"), None);
+    // A file and a directory of one name: still one name twice.
+    // In git's order (`src` before `src/`), so only the names give it away
+    // — asked for as the file, or through the directory.
+    let both = tree_of(&[("100644", "src", &other), ("40000", "src", &src)]);
+    assert_eq!(read(&both, "src"), None);
+    assert_eq!(read(&both, "src/lib.rs"), None);
+
+    // A directory sorts as if its name ended in `/`: `x.rs` before `x/`, as
+    // git writes it, reads.
+    write(&tree, "x.rs", "file\n");
+    write(&tree, "x/y.rs", "nested\n");
+    git(&tree, &["add", "-A"]);
+    git(&tree, &["commit", "-q", "-m", "x"]);
+    let head = git(&tree, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        equivalences::source_at(&tree, &head, "x/y.rs").as_deref(),
+        Some("nested\n")
+    );
+    assert_eq!(
+        equivalences::source_at(&tree, &head, "x.rs").as_deref(),
+        Some("file\n")
+    );
+}
+
+/// A span read out of a source is its lines start to end, all of them in
+/// the file; anything else — reversed, out of range, from line 0 — is not
+/// a span.
+#[test]
+fn a_span_is_read_only_when_every_line_of_it_is_there() {
+    let source = "a\nb\nc\n";
+    assert_eq!(
+        equivalences::identified(source, 2, 3),
+        Ok(equivalences::span_digest(&["b", "c"]))
+    );
+    assert_eq!(
+        equivalences::identified(source, 3, 3),
+        Ok(equivalences::line_digest("c"))
+    );
+    for (start, end) in [(3, 2), (0, 1), (3, 4), (4, 4)] {
+        assert!(
+            equivalences::identified(source, start, end).is_err(),
+            "{start}..{end}"
+        );
+    }
+}
+
+/// A lock file held by a live process: this test's own.
+fn hold_the_registry_lock(hq_root: &Path) {
+    let locks = hq_root.join("locks");
+    std::fs::create_dir_all(&locks).unwrap();
+    std::fs::write(
+        locks.join(".equivalences.lock"),
+        format!(
+            "{{\"slot\":\".equivalences\",\"verb\":\"a test\",\"pid\":{},\"since\":\"2026-10-06T00:00:00Z\"}}",
+            std::process::id()
+        ),
+    )
+    .unwrap();
+}
+
+/// `--lift` changes the registry first, and when it cannot — locked, or
+/// unreadable — it fails and leaves the mission's file as it was: a ruling
+/// lifted from the mission and left in the registry would answer the next
+/// mission still (HQ review, item 4).
+#[test]
+fn a_lift_the_registry_cannot_take_fails_and_leaves_the_mission_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = registry_project(dir.path(), BODY);
+    let id = ruled_on_a(&project);
+    let a = mission_dir(&project, "a");
+    let before = std::fs::read_to_string(a.join(mutants::FILE)).unwrap();
+
+    hold_the_registry_lock(&project.hq_root);
+    let err = nunki::findings::lift_equivalent(&project, "a", &id).unwrap_err();
+    assert!(err.to_string().contains("Nothing was lifted"), "{err}");
+    assert_eq!(
+        std::fs::read_to_string(a.join(mutants::FILE)).unwrap(),
+        before
+    );
+    std::fs::remove_file(project.hq_root.join("locks/.equivalences.lock")).unwrap();
+
+    let file = equivalences::path(&project.hq_root);
+    let registry = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(&file, "{ not a registry").unwrap();
+    let err = nunki::findings::lift_equivalent(&project, "a", &id).unwrap_err();
+    assert!(err.to_string().contains("equivalences.json"), "{err}");
+    assert_eq!(
+        std::fs::read_to_string(a.join(mutants::FILE)).unwrap(),
+        before
+    );
+
+    // Repaired, it lifts both.
+    std::fs::write(&file, registry).unwrap();
+    assert_eq!(
+        nunki::findings::lift_equivalent(&project, "a", &id).unwrap(),
+        Registered::Done(1)
+    );
+    assert!(mutants::open(&a).unwrap().contains(&id));
+}
+
+/// A registry entry outlives the ruling on its mission — lifted there by a
+/// verb whose registry half failed — and `--lift` still takes it out. With
+/// nothing on either side, it refuses.
+#[test]
+fn a_lift_cleans_a_registry_entry_the_mission_no_longer_holds() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = registry_project(dir.path(), BODY);
+    let id = ruled_on_a(&project);
+    let a = mission_dir(&project, "a");
+    mutants::lift_equivalent(&a, &id).unwrap();
+    assert_eq!(
+        equivalences::read(&project.hq_root).unwrap().entries.len(),
+        1
+    );
+
+    assert_eq!(
+        nunki::findings::lift_equivalent(&project, "a", &id).unwrap(),
+        Registered::Done(1)
+    );
+    assert!(
+        equivalences::read(&project.hq_root)
+            .unwrap()
+            .entries
+            .is_empty()
+    );
+    let err = nunki::findings::lift_equivalent(&project, "a", &id).unwrap_err();
+    assert!(err.to_string().contains("no `equivalent` ruling"), "{err}");
+}
+
+/// A zero-length registry is what a write cut short leaves: unreadable,
+/// never an empty registry that would drop every ruling it held (HQ review,
+/// item 5). And a write leaves no staged file behind.
+#[test]
+fn a_zero_length_registry_is_unreadable() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(equivalences::path(dir.path()), "").unwrap();
+    let err = equivalences::read(dir.path()).unwrap_err();
+    assert!(err.to_string().contains("equivalences.json"), "{err}");
+    std::fs::write(equivalences::path(dir.path()), "  \n").unwrap();
+    assert!(equivalences::read(dir.path()).is_err());
+
+    equivalences::write(dir.path(), &equivalences::Registry::default()).unwrap();
+    assert_eq!(
+        equivalences::read(dir.path()).unwrap(),
+        equivalences::Registry::default()
+    );
+    let left: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(left, vec![std::ffi::OsString::from(equivalences::FILE)]);
+}
+
+/// A campaign is recorded against the registry under the registry's lock:
+/// held by a writer that does not let go, nothing is applied, and why is
+/// said (HQ review, item 6).
+#[test]
+fn a_campaign_reads_the_registry_under_its_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = registry_project(dir.path(), BODY);
+    ruled_on_a(&project);
+    hold_the_registry_lock(&project.hq_root);
+    let (campaign, recorded) = campaign_on(&project, "b", &[on_lib(2)]);
+    assert_eq!(campaign.survivors[0].outcome, None);
+    let why = recorded.registry_unread.expect("said");
+    assert!(why.contains("a test"), "{why}");
 }
