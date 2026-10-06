@@ -326,7 +326,7 @@ YAML, du JSON, du git. Rien d'autre.
 | la mission | un dossier **au HQ, hors de l'arbre git** (voir les montages) : `MISSION.md`, `FOLLOWUP_HQ.md` et `MUTANTS.json` (à l'humain et au HQ, lecture seule pour l'agent), `JOURNAL.md`, `PR.md`, `VERDICT.json`, `MUTANTS.triage.json` (à l'agent) — la même forme pour les trois rôles | l'agent qui la porte, le HQ |
 | le bloc structuré de `MISSION.md` | un en-tête YAML que `nunki` lit, valide et **fige dans son état à la validation humaine** : forme (`integration`, `security`), rôle, branche, base, **la liste des lots** (un identifiant et un titre chacun — c'est elle qui donne « un run par lot » et qui fait refuser un `VERDICT.json` écrit avant que le dernier lot ait son entrée « fini » dans le journal), borne de volets, tentatives par lot, délais, script de lancement, **niveau d'exigence** (`rigor:`, pris de `--rigor`, sinon de `nunki.yaml`, sinon `critical`) et **seuil de mutation** (`mutation_threshold:`, figé depuis `nunki.yaml` avec lui ; un en-tête plus ancien qui ne le porte pas lit celui du projet), **modèle** (`model:`, quand le harnais en prend un ; `nunki.yaml` le déclare pour le projet et l'en-tête le raffine), et pour une mission d'intégration les **services** (réseau nommé, adresses, domaines, et `shared: true` pour un fournisseur réel, que les autres missions attendent — 7) et les **fichiers d'identifiants** montés. La prose du gabarit vient après, pour l'agent. L'agent ne peut pas l'écrire, et `nunki` ne le relit pas en cours de mission | `nunki`, puis l'agent |
 | le verdict | `VERDICT.json` dans le dossier de mission : `{ role, verdict, head, date, report }`, écrit par l'agent à la fin de son dernier run ; `nunki` le refuse si `head` n'est pas le `HEAD` réel de la branche | `nunki` |
-| le contrat de run | un run par lot (4.3) : ce qu'un run doit avoir produit avant de sortir — le lot commité et prouvé ou l'échec dit, arbre commitable, bloc `ÉTAT DE REPRISE` en tête du journal (écrit aussi toutes les 45 minutes en cours de run), et pour le dernier lot le verdict. Pour le codeur, ce bloc se termine par la ligne `Lot: <lot> — done`, ou `Lot: <lot> — failed: <raison>` : la seule que `nunki` lise pour savoir le lot fini | l'agent, par `MISSION.md` ; `nunki`, à la sortie et aux checkpoints |
+| le contrat de run | un run par lot (4.3) : ce qu'un run doit avoir produit avant de sortir — le lot commité et prouvé ou l'échec dit, arbre commitable, bloc `ÉTAT DE REPRISE` en tête du journal (écrit aussi toutes les 45 minutes en cours de run), et pour le dernier lot le verdict. Pour le codeur, ce bloc se termine par la ligne `Lot: <lot> — done`, `Lot: <lot> — failed: <raison>`, ou — seulement quand le lot est fini hormis des survivants dont il ne peut pas donner l'équivalence — `Lot: <lot> — awaits ruling: <quoi>`, chaque identifiant de survivant entre accents graves dans `<quoi>` : la seule que `nunki` lise pour savoir le lot fini | l'agent, par `MISSION.md` ; `nunki`, à la sortie et aux checkpoints |
 | les chemins protégés | une liste déclarative par projet, **deux modes** : refuser, refuser seulement si le fichier existe déjà sur la base. Le mode « demander » a disparu : rien ne peut demander en autonome | la porte de périmètre, et l'adaptateur harnais s'il double |
 | la batterie | un script par projet, cousu depuis un fragment par stack | la porte « batterie », la CI |
 | la configuration du projet | `nunki.yaml` dans le home du projet (`~/.nunki/<id>/nunki.yaml`), **hors du dépôt**, et qui nomme le dépôt auquel il appartient (`root:`) — le home porte l'identifiant de la session, jamais le nom du dossier, et `root:` reste la source de vérité si le registre et le home se contredisent : harnais, stacks, branches protégées, chemins protégés, liste blanche par stack, borne de volets, niveau d'exigence par défaut (`rigor:`), seuil de mutation du niveau `standard` (`mutation_threshold:`, un pourcentage entier de 1 à 100, 80 par défaut, refusé hors de cet intervalle), délais, dossier des identifiants de test, script de lancement (`run:`), modèle du harnais (`model:` — aucun nom n'est vérifié contre une liste : `nunki` connaît des harnais, pas des modèles, et c'est le harnais qui refuse ce qu'il ne connaît pas), mode de permission (`permission_mode:`, `auto` par défaut — voir le tableau des harnais en 4.3), fichier de services du projet (`services_file:`) et qui tient les branches protégées côté forge (`forge_protection:`, `forge` par défaut ou `by_hand`). `MISSION.md` prime sur lui pour ce qu'il redéclare | `nunki` |
@@ -1166,7 +1166,9 @@ Trois choses en découlent :
   commité et sa preuve passe, ou le run dit qu'il a échoué ; l'arbre est
   commitable ; le journal porte un bloc `ÉTAT DE REPRISE` qui nomme `HEAD`, le
   lot, la prochaine action ; pour le codeur, il se termine par
-  `Lot: <lot> — done` ou `Lot: <lot> — failed: <raison>` ; et pour le dernier
+  `Lot: <lot> — done`, `Lot: <lot> — failed: <raison>` ou
+  `Lot: <lot> — awaits ruling: <quoi>` (une décision attendue du HQ sur des
+  survivants nommés, voir 4.4 et 4.5) ; et pour le dernier
   lot, `VERDICT.json` existe. Un run qui sort sans ce contrat est une
   tentative échouée du lot. `nunki verify` relit le run du codeur dans cet
   ordre : un tour épargné ou une panne du harnais rejoue la même tentative
@@ -2401,6 +2403,25 @@ Ce que la boucle veut dire, et ce qu'elle ne veut pas dire.
   `FINDINGS` — c'est l'état qui sait que l'humain a levé le constat, et
   `nunki push` le lit là. Aucun agent n'accepte un risque.
 
+  **La levée par `nunki` des seuls `LOW` et `INFO`.** `VERDICT.json` porte,
+  en plus du rapport, une liste `findings` où chaque constat a une sévérité
+  (`HIGH`, `MEDIUM`, `LOW`, `INFO`, selon ce qu'il permet à un attaquant)
+  et, pour `LOW` et `INFO`, une phrase `why_acceptable`. Quand l'agent
+  sécurité conclut `FINDINGS` et que **tous** les constats sont `LOW` ou
+  `INFO`, liste non vide, `nunki` lève lui-même le verdict entier : une
+  acceptation inscrite dans l'état comme celle de `mission accept`, marquée
+  comme celle de `nunki` et non d'une personne, sa raison étant la liste des
+  constats et de leurs `why_acceptable`, puis la même transition. Ce n'est
+  pas un agent qui accepte : c'est une règle de `nunki`, sur le classement de
+  l'agent, et elle est décidée sur le verdict lu une seule fois. Fermé par
+  défaut : sans liste, liste vide, liste illisible, sévérité inconnue,
+  constat sans titre visible, `LOW`/`INFO` sans raison visible, un seul
+  `MEDIUM` ou `HIGH`, ou un `CLEAR` qui porte des constats : arrêt à
+  `Findings`, ou verdict refusé, comme avant. La levée par `nunki` obéit à
+  toutes les règles de `push` sur la levée humaine ; `FOLLOWUP_HQ.md` la
+  consigne avec les constats, `mission status` la liste, `push` l'affiche
+  sous « accepted by nunki (LOW/INFO) ».
+
   **Deux formes, et deux verbes**, pour nommer par quoi passe le geste du
   HQ :
 
@@ -2461,9 +2482,22 @@ Ce que la boucle veut dire, et ce qu'elle ne veut pas dire.
   `nunki.yaml` et par mission (`MISSION.md` prime), jamais en dur dans le
   moteur ; la mettre à zéro n'est pas « sans limite » mais « aucune
   itération : le premier rouge remonte ».
-- **Et la main rendue se reprend.** Toutes les façons d'atteindre « rendue à
-  l'humain » sont une borne qui s'épuise — les tentatives d'un lot, celles
-  d'un rôle, les volets. `resume` lève une suspension, `iterate` et `accept`
+- **Une décision attendue n'est pas une borne épuisée.** Un codeur qui finit
+  son lot hormis des survivants qu'il ne peut ni tuer ni figer en bug le
+  termine par `Lot: <lot> — awaits ruling: <quoi>`. `nunki` vérifie que
+  chaque identifiant nommé est un survivant de `MUTANTS.json` sans issue (ni
+  celle du HQ, ni celle du codeur) — une ligne qui n'en nomme aucun est une
+  tentative échouée — puis rend la mission tout de suite,
+  `AwaitingRuling { lot, what, attempt, survivors }`, sans consommer de
+  tentative. Le HQ tranche (`nunki mission mutants <id> --equivalent …
+  --because …`) puis reprend. Depuis cette remise, `retry` reprend le même
+  travail **à la tentative suivante**, sans rendre de budget, ou, si la
+  tentative qui demandait était la dernière, rend la mission comme
+  `LotAttemptsExhausted` : aucune tentative ne dépasse la borne, et
+  `FOLLOWUP_HQ.md` dit lequel des deux.
+- **Et la main rendue se reprend.** Hors décision attendue, les façons
+  d'atteindre « rendue à l'humain » sont une borne qui s'épuise — les
+  tentatives d'un lot, celles d'un rôle, les volets. `resume` lève une suspension, `iterate` et `accept`
   ne partent que de `FINDINGS`, et le moniteur abandonne l'étape : sans verbe
   pour en sortir, une mission qui a épuisé ses volets serait finie sans être
   terminée.
@@ -2477,6 +2511,23 @@ Ce que la boucle veut dire, et ce qu'elle ne veut pas dire.
   mission que l'humain a **appelée off** avec `end` n'est pas une borne
   épuisée : elle est refusée, sinon `end` deviendrait un verbe sur lequel il
   ne peut pas compter.
+- **Savoir quand la mission s'arrête.** `nunki mission wait <mission>` bloque
+  jusqu'à un arrêt sur lequel quelqu'un doit agir, puis écrit une ligne,
+  `<id> · <étape> · <détail> · awaits <qui>: <quoi>`, et sort avec un code
+  par sorte d'arrêt : 0 vérifiée (ou déjà poussée, ou archivée), 10
+  `FINDINGS`, 11 rendue à l'humain (une décision attendue comprise), 12
+  suspendue ou fenêtre du compte épuisée, 13 moniteur arrêté sur une erreur
+  ou porte injouable, 14 aucun moniteur alors que l'étape n'est pas un
+  arrêt, 15 délai `--timeout` atteint. Elle **lit** et ne conduit jamais :
+  aucun verrou, aucun lancement (ouvrir l'état peut créer ses répertoires
+  manquants). Le moniteur termine son journal sur la même ligne, construite
+  par la même fonction, et son journal n'écrit que ce qui change. L'état
+  porte une révision, avancée à chaque écriture ; le moniteur consigne
+  pourquoi il s'arrête avec la révision de l'état sur lequel il s'arrête, et
+  `wait`, qui lit le moniteur avant l'état, ne tient ce mot pour actuel que
+  sur cette révision. Tout texte écrit par un agent ou un auteur de commit
+  est affiché échappé : caractères de contrôle, bidirectionnels et
+  invisibles rendus visibles, jamais bruts.
 - **Un run tombé pour une cause du harnais ne compte pas.** Quota atteint,
   jeton expiré, réseau, plantage : `nunki` attend et rejoue le run, sans
   consommer une tentative ni un volet, ni écrire un verdict, avec l'attente
@@ -2508,6 +2559,7 @@ Vérifié sur les pages des projets et la documentation officielle.
 - Le format de la prose de `MISSION.md` et de `JOURNAL.md`, à reprendre des
   gabarits existants ; seul l'en-tête structuré est fixé (4.1).
 - Le schéma exact de `nunki.yaml`, de l'en-tête de mission, de `VERDICT.json`
+  (dont le champ `findings` est désormais fixé, 4.5)
   et des définitions de profil : leurs champs sont nommés ici, leur forme se
   fixe avec le premier code, et se versionne.
 - L'observabilité (Langfuse ou autre), volontairement hors du socle.
