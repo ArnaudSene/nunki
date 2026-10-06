@@ -98,6 +98,13 @@ pub enum PushError {
         count: usize,
         listed: String,
     },
+    #[error(
+        "gate 7's rule no longer holds on the campaign as it stands — {owed}. A survivor \
+         reopened after the gates (a refused proposal) needs a coder run: `nunki mission \
+         iterate {mission} --because <why>` sends one, or `nunki mission mutants {mission} \
+         --refuse` does it as it refuses"
+    )]
+    MutantsOwed { mission: String, owed: String },
     #[error(transparent)]
     Mutants(#[from] crate::mutants::MutantsError),
     #[error(transparent)]
@@ -244,6 +251,7 @@ pub fn push_to(
         lifted_by_nunki,
     } = verdicts_hold(&slot, &state, &head)?;
     proposals_ruled(project, id)?;
+    nothing_owed(project, id, &header)?;
 
     let fetched = fetch(project, id)?;
     let remote = remote_url(project)?;
@@ -354,6 +362,32 @@ fn proposals_ruled(project: &Project, id: &str) -> Result<(), PushError> {
             .collect::<Vec<_>>()
             .join("; "),
     })
+}
+
+/// Gate 7's rule still holds on the campaign as it stands
+/// ([`crate::mutants::owed`]), with the threshold the gate used: the one
+/// frozen in the header, or the project's for a header framed before it.
+///
+/// Asked again here because `Verified` is not proof of it any more once the
+/// HQ has ruled after the gates: a refused proposal reopens its survivor,
+/// and a branch carrying a mutant nobody answered is not pushed (security
+/// round 1, MEDIUM).
+fn nothing_owed(
+    project: &Project,
+    id: &str,
+    header: &crate::mission::Header,
+) -> Result<(), PushError> {
+    let dir = crate::mission::dir::Paths::of(&project.hq_root, id).dir;
+    let threshold = header
+        .mutation_threshold
+        .unwrap_or(project.config.mutation_threshold);
+    match crate::mutants::owed_on_file(&dir, header.rigor, threshold)? {
+        None => Ok(()),
+        Some(owed) => Err(PushError::MutantsOwed {
+            mission: id.to_string(),
+            owed,
+        }),
+    }
 }
 
 /// What the verdicts a push stands on leave to say.

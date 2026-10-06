@@ -2310,3 +2310,208 @@ fn a_refusal_written_in_the_campaigns_log_is_never_taken() {
     assert_eq!(parsed.len(), 1);
     assert_eq!(parsed[0].refused, None);
 }
+
+// ---------------------------------------------------------------------------
+// Security round 1: what push re-checks, and survivors sharing an id.
+// ---------------------------------------------------------------------------
+
+fn campaign_of(survivors: Vec<Survivor>, tried: Option<u32>) -> Campaign {
+    Campaign {
+        fingerprint: "f".into(),
+        head: "h".into(),
+        date: "d".into(),
+        survivors,
+        tried,
+    }
+}
+
+/// Gate 7's rule, as push asks it again: nothing at prototype; at critical
+/// every survivor answered, a pending proposal included; at standard the
+/// share, judged as critical when the count is missing or cannot be true.
+#[test]
+fn what_gate_seven_still_owes_follows_its_rule_at_every_rigor() {
+    use nunki::mission::Rigor;
+    let three = || vec![one("m1", 1, "a"), one("m2", 2, "b"), one("m3", 3, "c")];
+    let mut coders = std::collections::BTreeMap::new();
+    coders.insert(
+        "m1".to_string(),
+        Triage::EquivalentProposed {
+            why: "only a log line reads it".into(),
+        },
+    );
+    coders.insert(
+        "m2".to_string(),
+        Triage::Killed {
+            test: "two_holds".into(),
+        },
+    );
+
+    // Critical: m3 is open, and only m3 is named.
+    let owed = mutants::owed(
+        &campaign_of(three(), Some(10)),
+        &coders,
+        Rigor::Critical,
+        80,
+    )
+    .expect("m3 has no outcome");
+    assert!(owed.contains("1 survivor(s) have no outcome"), "{owed}");
+    assert!(owed.contains("src/cells.py:3 m3"), "{owed}");
+    assert!(!owed.contains("m1") && !owed.contains("m2"), "{owed}");
+
+    // Prototype owes nothing, whatever is open.
+    assert_eq!(
+        mutants::owed(
+            &campaign_of(three(), Some(10)),
+            &coders,
+            Rigor::Prototype,
+            80
+        ),
+        None
+    );
+
+    // Standard: 9 of 10 clears 80%, 9 of 10 does not clear 95%.
+    assert_eq!(
+        mutants::owed(
+            &campaign_of(three(), Some(10)),
+            &coders,
+            Rigor::Standard,
+            80
+        ),
+        None
+    );
+    assert_eq!(
+        mutants::owed(
+            &campaign_of(three(), Some(10)),
+            &coders,
+            Rigor::Standard,
+            90
+        ),
+        None,
+        "exactly at the threshold passes"
+    );
+    let owed = mutants::owed(
+        &campaign_of(three(), Some(10)),
+        &coders,
+        Rigor::Standard,
+        95,
+    )
+    .expect("90% is below 95%");
+    assert!(owed.contains("9 of 10 tried mutant(s) killed"), "{owed}");
+    assert!(owed.contains("threshold of 95%"), "{owed}");
+    assert!(owed.contains("src/cells.py:3 m3"), "{owed}");
+
+    // Standard with no count, or a count below the survivors: as critical.
+    for tried in [None, Some(2)] {
+        let owed = mutants::owed(&campaign_of(three(), tried), &coders, Rigor::Standard, 0)
+            .unwrap_or_else(|| panic!("{tried:?} is judged as critical"));
+        assert!(owed.contains("1 survivor(s) have no outcome"), "{owed}");
+    }
+    // Exactly as many tried as survivors is a count, and nothing killed of
+    // three is 0%.
+    let owed = mutants::owed(
+        &campaign_of(three(), Some(3)),
+        &std::collections::BTreeMap::new(),
+        Rigor::Standard,
+        1,
+    )
+    .expect("0 of 3 is below 1%");
+    assert!(owed.contains("0 of 3"), "{owed}");
+    // A campaign that tried nothing owes nothing at standard.
+    assert_eq!(
+        mutants::owed(&campaign_of(vec![], Some(0)), &coders, Rigor::Standard, 80),
+        None
+    );
+
+    // Everything answered: nothing owed at critical.
+    coders.insert(
+        "m3".to_string(),
+        Triage::Bug {
+            test: "three_is_wrong".into(),
+        },
+    );
+    assert_eq!(
+        mutants::owed(&campaign_of(three(), None), &coders, Rigor::Critical, 80),
+        None
+    );
+}
+
+/// On the mission folder: no campaign owes nothing, and one with an open
+/// survivor says so.
+#[test]
+fn what_is_owed_is_read_from_the_mission_folder() {
+    use nunki::mission::Rigor;
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(
+        mutants::owed_on_file(dir.path(), Rigor::Critical, 80).unwrap(),
+        None
+    );
+    ruled_before(dir.path(), vec![one("m1", 1, "a")]);
+    assert!(
+        mutants::owed_on_file(dir.path(), Rigor::Critical, 80)
+            .unwrap()
+            .unwrap()
+            .contains("m1")
+    );
+    proposes(dir.path(), &[("m1", "only a log line reads it")]);
+    assert_eq!(
+        mutants::owed_on_file(dir.path(), Rigor::Critical, 80).unwrap(),
+        None
+    );
+}
+
+/// The share is compared in whole numbers.
+#[test]
+fn the_share_is_reached_only_at_or_above_the_threshold() {
+    assert!(mutants::share_reached(8, 10, 80));
+    assert!(!mutants::share_reached(7, 9, 78), "77.7% is not 78%");
+    assert!(mutants::share_reached(0, 0, 80));
+}
+
+/// One proposal answers every survivor carrying its id, so the HQ's ruling
+/// and its refusal land on every one of them — and lifting a ruling lifts
+/// it from all. With the first only, the twin stayed answered by a proposal
+/// nobody ruled on, and push let it through.
+#[test]
+fn ratify_refuse_and_lift_act_on_every_survivor_sharing_the_id() {
+    let twins = || vec![one("X", 1, "a"), one("X", 2, "b"), one("Y", 3, "c")];
+
+    let dir = tempfile::tempdir().unwrap();
+    ruled_before(dir.path(), twins());
+    proposes(dir.path(), &[("X", "only a log line reads it")]);
+    mutants::ratify(dir.path(), "X", None).unwrap();
+    let campaign = mutants::read(dir.path()).unwrap().unwrap();
+    for s in &campaign.survivors[..2] {
+        assert_eq!(
+            s.outcome,
+            Some(Triage::Equivalent {
+                why: "only a log line reads it".into(),
+                carried_from: None,
+            }),
+            "{s:?}"
+        );
+    }
+    assert_eq!(campaign.survivors[2].outcome, None, "Y is not X");
+    assert!(mutants::awaiting_ruling(dir.path()).unwrap().is_empty());
+    assert_eq!(mutants::open(dir.path()).unwrap(), vec!["Y"]);
+
+    mutants::lift_equivalent(dir.path(), "X").unwrap();
+    let campaign = mutants::read(dir.path()).unwrap().unwrap();
+    assert!(campaign.survivors.iter().all(|s| s.outcome.is_none()));
+
+    let dir = tempfile::tempdir().unwrap();
+    ruled_before(dir.path(), twins());
+    proposes(dir.path(), &[("X", "only a log line reads it")]);
+    mutants::refuse(dir.path(), "X", "the CLI prints it").unwrap();
+    let campaign = mutants::read(dir.path()).unwrap().unwrap();
+    for s in &campaign.survivors[..2] {
+        assert!(s.refused.is_some(), "{s:?}");
+    }
+    assert_eq!(campaign.survivors[2].refused, None);
+    assert_eq!(mutants::open(dir.path()).unwrap(), vec!["X", "X", "Y"]);
+
+    // A ruling on an id nobody carries is still refused.
+    let err = mutants::rule_equivalent(dir.path(), "Z", "no").unwrap_err();
+    assert!(err.to_string().contains("no survivor is called"), "{err}");
+    let err = mutants::lift_equivalent(dir.path(), "Z").unwrap_err();
+    assert!(err.to_string().contains("no survivor is called"), "{err}");
+}

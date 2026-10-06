@@ -1684,7 +1684,7 @@ fn share_killed(
     let (tried, threshold) = (u64::from(tried), u64::from(threshold.percent));
     let killed = tried - untriaged.len() as u64;
     let share = killed * 100 / tried;
-    if killed * 100 >= threshold * tried {
+    if crate::mutants::share_reached(killed, tried, threshold) {
         let mut outcome = Outcome::of(gate, Decision::Passed);
         outcome.note = Some(note(format!(
             "{killed} of {tried} tried mutant(s) killed ({share}%), at or above the \

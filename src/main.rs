@@ -2135,17 +2135,20 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                     );
                     return ExitCode::FAILURE;
                 };
-                let paths = nunki::mission::dir::Paths::of(&project.hq_root, &id);
-                let who = nunki::human::me(&project.nunki_home(), Some(&project.root))
-                    .name
-                    .unwrap_or_else(|| "the HQ".to_string());
-                return match nunki::mutants::refuse_and_say(&paths, &who, &survivor, &why) {
-                    Ok(()) => {
+                return match nunki::findings::refuse_proposal(project, &id, &survivor, &why) {
+                    Ok(refused) => {
                         println!(
                             "{}: the proposal is refused, and it needs an outcome again — the \
                              next coder run reads why in FOLLOWUP_HQ.md",
                             nunki::text::one_line(&survivor)
                         );
+                        if let Some(stage) = refused.sent_back {
+                            println!("stage     {stage:?}");
+                            println!(
+                                "          the mission was verified, so the refusal sends it \
+                                 back to the coder — `nunki verify {id}` plays it from there"
+                            );
+                        }
                         ExitCode::SUCCESS
                     }
                     Err(e) => {

@@ -67,6 +67,8 @@ pub enum FindingsError {
     Git(#[from] crate::git::GitError),
     #[error(transparent)]
     Followup(#[from] crate::followup::FollowupError),
+    #[error(transparent)]
+    Mutants(#[from] crate::mutants::MutantsError),
 }
 
 /// Record a human's acceptance, and — for [`Lift::Verdict`] — conclude.
@@ -236,4 +238,59 @@ fn on_findings(id: &str, state: &MissionState) -> Result<(), FindingsError> {
             stage: stage.clone(),
         }),
     }
+}
+
+/// What [`refuse_proposal`] did beyond the refusal itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refused {
+    /// The mission was verified, and the refusal sent it back to the coder:
+    /// the stage it is at now.
+    pub sent_back: Option<Stage>,
+}
+
+/// The HQ refuses the equivalence the coder proposed on `survivor`, because
+/// of `because` ([`crate::mutants::refuse_and_say`]) — and on a verified
+/// mission, sends it back to the coder as a volet, the path an HQ review
+/// takes, with the refusal as its cause.
+///
+/// A refusal reopens its survivor, and a verified mission has no coder run
+/// left to answer it: without the volet it would wait on a `nunki push`
+/// that refuses it (security round 1, MEDIUM). On any other stage the flow
+/// is still going, and gate 7 reads the reopened survivor when the final
+/// gates are played. A mission that has not started is only refused on file.
+pub fn refuse_proposal(
+    project: &Project,
+    id: &str,
+    survivor: &str,
+    because: &str,
+) -> Result<Refused, FindingsError> {
+    let paths = Paths::of(&project.hq_root, id);
+    let who = crate::human::me(&project.nunki_home(), Some(&project.root)).addressed();
+    let store = Store::open(&project.hq_root)?;
+    let Ok(mut state) = store.load(id) else {
+        crate::mutants::refuse_and_say(&paths, &who, survivor, because)?;
+        return Ok(Refused { sent_back: None });
+    };
+    let _lock = SlotLock::acquire(
+        &project.hq_root.join("locks"),
+        &state.slot,
+        "mission mutants --refuse",
+    )?;
+    crate::mutants::refuse_and_say(&paths, &who, survivor, because)?;
+    if !matches!(state.flow.stage(), Stage::Verified) {
+        return Ok(Refused { sent_back: None });
+    }
+    store.apply(
+        &mut state,
+        Event::Reviewed {
+            because: format!(
+                "the HQ refused the equivalence proposed on `{}`: {}",
+                crate::text::one_line(survivor),
+                crate::text::one_line(because)
+            ),
+        },
+    )?;
+    Ok(Refused {
+        sent_back: Some(state.flow.stage().clone()),
+    })
 }

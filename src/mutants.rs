@@ -400,6 +400,85 @@ pub struct Proposal {
     pub why: String,
 }
 
+/// Whether `killed` of `tried` reaches `threshold` percent, compared in
+/// whole numbers so that 79.5% is never rounded up to a pass. Gate 7 at
+/// `standard` and [`owed`] both ask it here, so they cannot disagree.
+pub fn share_reached(killed: u64, tried: u64, threshold: u64) -> bool {
+    killed * 100 >= threshold * tried
+}
+
+/// What gate 7's rule still owes on `campaign`, read with the coder's
+/// answers, as a sentence naming the survivors left open — `None` when
+/// nothing is owed.
+///
+/// The rule as the gate plays it (SPEC 4.4): nothing at `prototype`; at
+/// `standard`, the share of tried mutants killed reaches `threshold` (a
+/// campaign that gives no usable count is judged as `critical`); at
+/// `critical`, every survivor has an outcome. A proposal still pending is an
+/// outcome here, as at the gate — `nunki push` refuses it on its own.
+///
+/// `nunki push` asks it again on the campaign as it stands, because the HQ
+/// can reopen a survivor after the gates were green: a refused proposal
+/// leaves one without an outcome, and the gates are not replayed before the
+/// push (security round 1, MEDIUM).
+pub fn owed(
+    campaign: &Campaign,
+    coders: &BTreeMap<String, Triage>,
+    rigor: crate::mission::Rigor,
+    threshold: u32,
+) -> Option<String> {
+    use crate::mission::Rigor;
+    if rigor == Rigor::Prototype {
+        return None;
+    }
+    let open: Vec<String> = campaign
+        .survivors
+        .iter()
+        .filter(|s| answer(s, coders).is_none())
+        .map(|s| {
+            format!(
+                "{}:{} {}",
+                crate::text::one_line(&s.file),
+                s.line,
+                crate::text::one_line(&s.id)
+            )
+        })
+        .collect();
+    let listed = open.join("; ");
+    match campaign.tried {
+        Some(tried) if rigor == Rigor::Standard && tried as usize >= campaign.survivors.len() => {
+            let (tried, killed) = (u64::from(tried), u64::from(tried) - open.len() as u64);
+            if share_reached(killed, tried, u64::from(threshold)) {
+                return None;
+            }
+            Some(format!(
+                "{killed} of {tried} tried mutant(s) killed, below the threshold of \
+                 {threshold}%, with {} survivor(s) left without an outcome: {listed}",
+                open.len()
+            ))
+        }
+        _ if open.is_empty() => None,
+        _ => Some(format!(
+            "{} survivor(s) have no outcome: {listed}",
+            open.len()
+        )),
+    }
+}
+
+/// [`owed`], on the mission folder's own two files. No campaign, nothing
+/// owed: whether one was due is gate 7's question, answered before
+/// `Verified`.
+pub fn owed_on_file(
+    dir: &Path,
+    rigor: crate::mission::Rigor,
+    threshold: u32,
+) -> Result<Option<String>, MutantsError> {
+    let Some(campaign) = read(dir)? else {
+        return Ok(None);
+    };
+    Ok(owed(&campaign, &read_triage(dir)?, rigor, threshold))
+}
+
 /// How `mission status` and `mission wait` say that `count` proposals await
 /// the HQ — nothing when none does.
 pub fn proposals_await(count: usize) -> Option<String> {
@@ -754,23 +833,44 @@ pub fn rule_equivalent(dir: &Path, id: &str, why: &str) -> Result<(), MutantsErr
             "there is no campaign to rule on — `nunki mission mutants` runs one".to_string(),
         )
     })?;
-    let found = campaign
+    // Every survivor the id names: a ruling given on one id and read on all
+    // of them (`answer` goes by id) must be written on all of them.
+    for found in called(&mut campaign, dir, id)? {
+        found.outcome = Some(Triage::Equivalent {
+            why: why.to_string(),
+            carried_from: None,
+        });
+        // A ruling supersedes a refusal the HQ gave earlier on the same
+        // survivor.
+        found.refused = None;
+    }
+    write(dir, &campaign)
+}
+
+/// Every survivor of `campaign` called `id`, or an error naming the id when
+/// none is.
+///
+/// Every one, not the first: an id is what the coder's file answers by
+/// ([`answer`]), so one line there answers every survivor carrying it, and a
+/// ruling or a refusal written on only the first would leave its twin
+/// answered by a proposal nobody ruled on — and `nunki push` would pass it.
+fn called<'a>(
+    campaign: &'a mut Campaign,
+    dir: &Path,
+    id: &str,
+) -> Result<Vec<&'a mut Survivor>, MutantsError> {
+    let found: Vec<&mut Survivor> = campaign
         .survivors
         .iter_mut()
-        .find(|s| s.id == id)
-        .ok_or_else(|| {
-            MutantsError::Unreadable(
-                dir.join(FILE),
-                format!("no survivor is called {id:?} in this campaign"),
-            )
-        })?;
-    found.outcome = Some(Triage::Equivalent {
-        why: why.to_string(),
-        carried_from: None,
-    });
-    // A ruling supersedes a refusal the HQ gave earlier on the same survivor.
-    found.refused = None;
-    write(dir, &campaign)
+        .filter(|s| s.id == id)
+        .collect();
+    if found.is_empty() {
+        return Err(MutantsError::Unreadable(
+            dir.join(FILE),
+            format!("no survivor is called {id:?} in this campaign"),
+        ));
+    }
+    Ok(found)
 }
 
 /// The coder's file, and its valid proposal on survivor `id` — or an error
@@ -840,21 +940,13 @@ pub fn refuse(dir: &Path, id: &str, because: &str) -> Result<Refusal, MutantsErr
             "there is no campaign to rule on — `nunki mission mutants` runs one".to_string(),
         )
     })?;
-    let found = campaign
-        .survivors
-        .iter_mut()
-        .find(|s| s.id == id)
-        .ok_or_else(|| {
-            MutantsError::Unreadable(
-                dir.join(FILE),
-                format!("no survivor is called {id:?} in this campaign"),
-            )
-        })?;
     let refusal = Refusal {
         proposed,
         because: because.to_string(),
     };
-    found.refused = Some(refusal.clone());
+    for found in called(&mut campaign, dir, id)? {
+        found.refused = Some(refusal.clone());
+    }
     write(dir, &campaign)?;
     coders.remove(id);
     write_triage(dir, &coders)?;
@@ -890,23 +982,21 @@ pub fn lift_equivalent(dir: &Path, id: &str) -> Result<(), MutantsError> {
             "there is no campaign to lift a ruling from".to_string(),
         )
     })?;
-    let found = campaign
-        .survivors
-        .iter_mut()
-        .find(|s| s.id == id)
-        .ok_or_else(|| {
-            MutantsError::Unreadable(
-                dir.join(FILE),
-                format!("no survivor is called {id:?} in this campaign"),
-            )
-        })?;
-    if !matches!(found.outcome, Some(Triage::Equivalent { .. })) {
+    let found = called(&mut campaign, dir, id)?;
+    if !found
+        .iter()
+        .any(|s| matches!(s.outcome, Some(Triage::Equivalent { .. })))
+    {
         return Err(MutantsError::Unreadable(
             dir.join(FILE),
             format!("{id:?} holds no `equivalent` ruling to lift"),
         ));
     }
-    found.outcome = None;
+    for survivor in found {
+        if matches!(survivor.outcome, Some(Triage::Equivalent { .. })) {
+            survivor.outcome = None;
+        }
+    }
     write(dir, &campaign)
 }
 

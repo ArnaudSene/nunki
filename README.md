@@ -358,9 +358,14 @@ MISSION  (one branch off its base, one slot)
   --because <why>` removes the proposal, records the refusal and reopens the
   survivor, and the next coder run reads why in `FOLLOWUP_HQ.md`.
   `nunki push` refuses while any proposal of the current campaign is neither
-  ratified nor refused, naming each. `mission status` and `mission wait`
-  count the proposals that await the HQ, and the follow-up lists them with
-  their reasons when the final gates pass.
+  ratified nor refused, naming each, and it plays gate 7's rule again on the
+  campaign as it stands — every survivor answered at `critical`, the share
+  reached at `standard` — so a survivor reopened after the gates is never
+  pushed. A `--refuse` on a verified mission sends it back to the coder as a
+  volet, with the refusal as its cause. `--ratify`, `--refuse` and `--lift`
+  act on every survivor carrying the id they name. `mission status` and
+  `mission wait` count the proposals that await the HQ, and the follow-up
+  lists them with their reasons when the final gates pass.
 
 - **Gates** — deterministic checks, each read from its own result. Gates 1 to
   4 (a clean tree, a branch ahead of its base, a resume block that names
