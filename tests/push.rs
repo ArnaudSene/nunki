@@ -1938,3 +1938,76 @@ fn refusing_a_ruled_survivor_on_a_verified_mission_sends_nothing_back() {
     assert_eq!(world.stage(), Stage::Verified);
     assert_eq!(world.state().flow.volets(), 0);
 }
+
+/// `nunki mission status` lists the rulings the project's registry gave the
+/// campaign, and a ruling verb says on stderr when it left the registry as
+/// it was: the mission's file changed, the next mission's will not. Both
+/// are only ever printed by the binary.
+#[test]
+fn the_binary_lists_registry_rulings_and_says_when_the_registry_is_left_alone() {
+    use nunki::mutants::{Campaign, Survivor, Triage};
+    let world = World::opened_at(nunki::mission::Rigor::Critical);
+    let id = "src.rs:1:5: replace one -> u8 with 0";
+    nunki::mutants::write(
+        &nunki::mission::dir::Paths::of(&world.project.hq_root, "m1").dir,
+        &Campaign {
+            fingerprint: "f".into(),
+            head: "0123456789abcdef0123456789abcdef01234567".into(),
+            date: "2026-10-06T12:00:00Z".into(),
+            survivors: vec![Survivor {
+                id: id.into(),
+                file: "src.rs".into(),
+                line: 1,
+                description: "replace one -> u8 with 0".into(),
+                outcome: Some(Triage::EquivalentRegistered {
+                    why: "nothing reads the value".into(),
+                    mission: "earlier".into(),
+                    commit: "fedcba9876543210fedcba9876543210fedcba98".into(),
+                }),
+                refused: None,
+            }],
+            tried: Some(1),
+        },
+    )
+    .unwrap();
+    let run = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_nunki"))
+            .arg("-C")
+            .arg(&world.project.root)
+            .args(args)
+            .env("HOME", &world.home)
+            .output()
+            .unwrap();
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+
+    let (ok, stdout, stderr) = run(&["mission", "status", "m1"]);
+    assert!(ok, "{stdout}{stderr}");
+    assert!(
+        stdout.contains("registry  1 equivalence(s) applied from the project's registry"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("ruled on mission earlier"), "{stdout}");
+
+    std::fs::write(
+        nunki::equivalences::path(&world.project.hq_root),
+        "{ not a registry",
+    )
+    .unwrap();
+    let (ok, stdout, stderr) = run(&["mission", "mutants", "m1", "--lift", id]);
+    assert!(
+        ok,
+        "the ruling is lifted from the mission: {stdout}{stderr}"
+    );
+    assert!(
+        stderr.contains("the registry of equivalences is unchanged"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("equivalences.json"), "{stderr}");
+    let (_, stdout, _) = run(&["mission", "status", "m1"]);
+    assert!(stdout.contains("registry  could not be read"), "{stdout}");
+}

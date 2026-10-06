@@ -3434,3 +3434,164 @@ fn the_source_is_read_through_every_tree_on_its_path() {
         );
     }
 }
+
+// The survivors of the 17:51Z campaign on 4023dc8, each answered by a test.
+
+/// A registry that is there and cannot be read — here a directory where
+/// the file should be — is an error, never an empty registry: only a file
+/// that does not exist means the project never ruled.
+#[test]
+fn a_registry_that_cannot_be_opened_is_not_an_empty_one() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(equivalences::path(dir.path())).unwrap();
+    let err = equivalences::read(dir.path()).unwrap_err();
+    assert!(err.to_string().contains("equivalences.json"), "{err}");
+    std::fs::remove_dir(equivalences::path(dir.path())).unwrap();
+    assert_eq!(
+        equivalences::read(dir.path()).unwrap(),
+        equivalences::Registry::default()
+    );
+}
+
+/// A ruling is about its own mutation: another mutation on the same line —
+/// the same digest — gets nothing from it, and does not stop it applying to
+/// its own.
+#[test]
+fn a_ruling_applies_only_to_its_own_mutation() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = registry_project(dir.path(), BODY);
+    ruled_on_a(&project);
+    let mut other = on_lib(2);
+    other.id = "src/lib.rs:2:5: replace one -> u8 with 1".into();
+    other.description = "replace one -> u8 with 1".into();
+    let mut elsewhere = on_lib(2);
+    elsewhere.file = "src/other.rs".into();
+    elsewhere.id = format!("src/other.rs:2:5: {LIFTED}");
+    let (campaign, recorded) = campaign_on(&project, "b", &[other, on_lib(2), elsewhere]);
+    assert_eq!(recorded.from_registry, 1);
+    assert_eq!(campaign.survivors[0].outcome, None, "another mutation");
+    assert!(matches!(
+        campaign.survivors[1].outcome,
+        Some(Triage::EquivalentRegistered { .. })
+    ));
+    assert_eq!(campaign.survivors[2].outcome, None, "another file");
+}
+
+/// What a verb says when the registry was left as it was — and says
+/// nothing when it was changed.
+#[test]
+fn a_registry_left_as_it_was_says_why_and_a_changed_one_says_nothing() {
+    assert_eq!(Registered::Done(0).warning(), None);
+    assert_eq!(Registered::Done(2).warning(), None);
+    assert_eq!(
+        Registered::Not("the lock is held".into()).warning(),
+        Some("the lock is held".to_string())
+    );
+}
+
+/// Two mutations of one file ruled on one mission are two entries, and
+/// lifting one leaves the other — whatever they share: the file, the
+/// mission and commit, the line.
+#[test]
+fn two_mutations_of_one_file_are_entered_and_lifted_apart() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = registry_project(dir.path(), BODY);
+    let mut other = on_lib(2);
+    other.id = "src/lib.rs:2:5: replace one -> u8 with 1".into();
+    other.description = "replace one -> u8 with 1".into();
+    let (campaign, _) = campaign_on(&project, "a", &[on_lib(2), other]);
+    let (first, second) = (
+        campaign.survivors[0].id.clone(),
+        campaign.survivors[1].id.clone(),
+    );
+    for id in [&first, &second] {
+        assert_eq!(
+            nunki::findings::rule_equivalent(&project, "a", id, "nothing reads it").unwrap(),
+            Registered::Done(1)
+        );
+    }
+    assert_eq!(
+        equivalences::read(&project.hq_root).unwrap().entries.len(),
+        2
+    );
+
+    assert_eq!(
+        nunki::findings::lift_equivalent(&project, "a", &first).unwrap(),
+        Registered::Done(1)
+    );
+    let left = equivalences::read(&project.hq_root).unwrap().entries;
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].description, "replace one -> u8 with 1");
+}
+
+/// An entry on the same mutation from the same mission, but given on
+/// another commit about another line, is not the ruling being lifted.
+#[test]
+fn a_lift_leaves_an_entry_given_on_another_commit_about_another_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = registry_project(dir.path(), BODY);
+    let id = ruled_on_a(&project);
+    let mut registry = equivalences::read(&project.hq_root).unwrap();
+    let mut other = registry.entries[0].clone();
+    other.commit = "0123456789abcdef0123456789abcdef01234567".into();
+    other.line = equivalences::line_digest("2");
+    registry.entries.push(other.clone());
+    equivalences::write(&project.hq_root, &registry).unwrap();
+
+    assert_eq!(
+        nunki::findings::lift_equivalent(&project, "a", &id).unwrap(),
+        Registered::Done(1)
+    );
+    assert_eq!(
+        equivalences::read(&project.hq_root).unwrap().entries,
+        vec![other]
+    );
+}
+
+/// The listing names the commit a ruling was given on by its first twelve
+/// characters, and the entry names who ruled as the HQ's verbs know them.
+#[test]
+fn an_entry_names_who_ruled_and_the_listing_names_its_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = registry_project(dir.path(), BODY);
+    let head = git(&project.root, &["rev-parse", "HEAD"]);
+    ruled_on_a(&project);
+    let registry = equivalences::read(&project.hq_root).unwrap();
+    assert_eq!(
+        registry.entries[0].by,
+        nunki::human::me(&project.nunki_home(), Some(&project.root)).addressed()
+    );
+    let listing = equivalences::listing(&registry, &project.root);
+    assert!(
+        listing.contains(&format!("on mission a at {},", &head[..12])),
+        "{listing}"
+    );
+}
+
+/// Only the HQ's two rulings are rulings; the outcomes that rest on a test,
+/// and the coder's proposal, are not.
+#[test]
+fn only_the_hqs_rulings_are_rulings() {
+    for (outcome, ruling) in [
+        (
+            Triage::Equivalent {
+                why: "w".into(),
+                carried_from: None,
+            },
+            true,
+        ),
+        (
+            Triage::EquivalentRegistered {
+                why: "w".into(),
+                mission: "a".into(),
+                commit: "c".into(),
+            },
+            true,
+        ),
+        (Triage::Killed { test: "t".into() }, false),
+        (Triage::Bug { test: "t".into() }, false),
+        (Triage::EquivalentProposed { why: "w".into() }, false),
+    ] {
+        assert_eq!(outcome.is_a_ruling(), ruling, "{outcome:?}");
+    }
+}
