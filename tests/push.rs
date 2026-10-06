@@ -1847,6 +1847,10 @@ fn push_fails_closed_when_the_campaign_is_missing_or_empty() {
             let said = err.to_string();
             assert!(said.contains("no campaign, no push"), "{said}");
             assert!(said.contains(&format!("`{rigor}`")), "{said}");
+            // The verb that writes a campaign, and not `nunki verify`, which
+            // replays no gate on a verified mission.
+            assert!(said.contains("`nunki mission mutants m1`"), "{said}");
+            assert!(!said.contains("nunki verify"), "{said}");
             assert!(world.on_forge("mission/x").is_none());
         }
     }

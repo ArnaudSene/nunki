@@ -895,34 +895,34 @@ fn record(
 ///
 /// **The line is never part of the match**: it is exactly what a commit
 /// above the mutant moves. The mutation itself — its file and what it
-/// changed, the `description` — is what the ruling was about. Two tiers:
+/// changed, the `description` — is what the ruling was about. Two tiers,
+/// each over **every** survivor of the previous campaign, whatever it held:
 ///
-/// - the same id, file and description: the same mutant;
+/// - the same id, file and description: the same mutant. Tried first, and
+///   when it finds one, it decides — the twin's ruling, its refusal, or
+///   nothing, for a twin that held neither;
 /// - otherwise the same file and description, when that pair names exactly
-///   one ruled survivor before and exactly one survivor now. The same
-///   `x = False -> x = None` twice in one file is two mutants the ruling may
-///   not speak for alike, and it is ruled again rather than guessed.
+///   one survivor of the whole previous campaign and exactly one now. The
+///   same `x = False -> x = None` twice in one file is two mutants the ruling
+///   may not speak for alike, and it is ruled again rather than guessed.
 ///
-/// A refusal is carried on the same two tiers, among the refused survivors:
-/// without it, the same proposal written again on the same mutation after a
-/// new campaign would count as an outcome again, though the HQ has said no
-/// to it — and the prompt and the follow-up both tell the coder it does not
-/// (HQ review of the pull request, item 1). A proposal is never carried.
+/// Both tiers look at the whole campaign, and not at the ruled survivors
+/// apart from the refused ones: counted that way, a ruling given on one of
+/// two identical mutations was carried onto the other — onto one whose
+/// proposal the HQ had refused, or one a test had killed — because among the
+/// ruled it looked unique. That is a gate emptying itself; the match fails
+/// closed instead.
+///
+/// The refusal is carried for the reason the ruling is: without it, the same
+/// proposal written again on the same mutation after a new campaign would
+/// count as an outcome again, though the HQ has said no to it (HQ review of
+/// the pull request, item 1). A proposal is never carried, and neither is a
+/// ruling applied from the project's registry: the registry is asked again.
 ///
 /// A changed description — including a status that moved from `survived` to
 /// `no tests` — is a different mutant, and nothing is carried. No id is
 /// parsed: which tool named it is the stack's business, not `nunki`'s.
 pub fn carry(previous: &Campaign, survivors: &mut [Survivor]) {
-    let ruled: Vec<&Survivor> = previous
-        .survivors
-        .iter()
-        .filter(|s| matches!(s.outcome, Some(Triage::Equivalent { .. })))
-        .collect();
-    let refused: Vec<&Survivor> = previous
-        .survivors
-        .iter()
-        .filter(|s| s.refused.is_some())
-        .collect();
     let from = |old: &Survivor| match &old.outcome {
         Some(Triage::Equivalent {
             carried_from: Some(first),
@@ -935,14 +935,15 @@ pub fn carry(previous: &Campaign, survivors: &mut [Survivor]) {
         *now.entry(pair(s)).or_default() += 1;
     }
     for survivor in survivors.iter_mut() {
-        if let Some(old) = twin(&ruled, survivor, &now)
-            && let Some(Triage::Equivalent { why, .. }) = &old.outcome
-        {
+        let Some(old) = twin(&previous.survivors, survivor, &now) else {
+            continue;
+        };
+        if let Some(Triage::Equivalent { why, .. }) = &old.outcome {
             survivor.outcome = Some(Triage::Equivalent {
                 why: why.clone(),
                 carried_from: Some(from(old)),
             });
-        } else if let Some(old) = twin(&refused, survivor, &now) {
+        } else if old.refused.is_some() {
             survivor.refused = old.refused.clone();
         }
     }
@@ -954,11 +955,12 @@ fn pair(s: &Survivor) -> (String, String) {
     (s.file.clone(), s.description.clone())
 }
 
-/// The survivor of `before` that `survivor` is, on [`carry`]'s two tiers:
-/// the same id, file and description; or else the only one of `before` with
-/// its file and description, when that pair also names one survivor `now`.
+/// The survivor of `before` — the whole previous campaign — that `survivor`
+/// is, on [`carry`]'s two tiers: the same id, file and description; or else
+/// the only one of `before` with its file and description, when that pair
+/// also names one survivor `now`.
 fn twin<'a>(
-    before: &[&'a Survivor],
+    before: &'a [Survivor],
     survivor: &Survivor,
     now: &BTreeMap<(String, String), usize>,
 ) -> Option<&'a Survivor> {
@@ -967,12 +969,12 @@ fn twin<'a>(
             && old.file == survivor.file
             && old.description == survivor.description
     });
-    exact.copied().or_else(|| {
-        let same: Vec<&&Survivor> = before
+    exact.or_else(|| {
+        let same: Vec<&Survivor> = before
             .iter()
             .filter(|old| pair(old) == pair(survivor))
             .collect();
-        (same.len() == 1 && now.get(&pair(survivor)) == Some(&1)).then(|| *same[0])
+        (same.len() == 1 && now.get(&pair(survivor)) == Some(&1)).then(|| same[0])
     })
 }
 

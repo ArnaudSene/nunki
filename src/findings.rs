@@ -267,7 +267,7 @@ pub fn refuse_proposal(
     let paths = Paths::of(&project.hq_root, id);
     let who = crate::human::me(&project.nunki_home(), Some(&project.root)).addressed();
     let store = Store::open(&project.hq_root)?;
-    let Ok(mut state) = store.load(id) else {
+    let Some(mut state) = started(&store, id)? else {
         crate::mutants::refuse_and_say(&paths, &who, survivor, because)?;
         return Ok(Refused { sent_back: None });
     };
@@ -300,7 +300,9 @@ pub fn refuse_proposal(
 /// triage, which `verify` and a campaign's read-back write too, and two
 /// writers on one file lose one of them (HQ review of the pull request,
 /// item 4). A mission that has not started has no slot and nothing else
-/// writing its files: the ruling runs as it is.
+/// writing its files: the ruling runs as it is. A state that cannot be read
+/// is not a mission that has not started: it is an error, and no ruling is
+/// written ([`started`]).
 ///
 /// `ruling` is also handed a repository holding the campaign's commit, for
 /// the project's registry of equivalences to read the survivor's line in:
@@ -315,8 +317,8 @@ fn under_slot_lock<T>(
 ) -> Result<T, FindingsError> {
     let paths = Paths::of(&project.hq_root, id);
     let store = Store::open(&project.hq_root)?;
-    let (_lock, tree) = match store.load(id) {
-        Ok(state) => (
+    let (_lock, tree) = match started(&store, id)? {
+        Some(state) => (
             Some(SlotLock::acquire(
                 &project.hq_root.join("locks"),
                 &state.slot,
@@ -326,9 +328,26 @@ fn under_slot_lock<T>(
                 .map(|s| s.tree)
                 .unwrap_or_else(|_| project.root.clone()),
         ),
-        Err(_) => (None, project.root.clone()),
+        None => (None, project.root.clone()),
     };
     Ok(ruling(&paths, &tree)?)
+}
+
+/// Mission `id`'s state, or `None` when it has not started — and only then.
+///
+/// The HQ's rulings run without the slot's lock on a mission that has not
+/// started, since nothing else writes its files. Any other reason the state
+/// cannot be read — a file that does not parse, one that cannot be opened —
+/// says nothing about whether a run, a `verify` or a campaign's read-back is
+/// writing `MUTANTS.json` right now. Read as "not started", it would let a
+/// ruling be written without the lock beside such a writer, and one of the
+/// two writes would be lost: so it is an error, and nothing is written.
+fn started(store: &Store, id: &str) -> Result<Option<MissionState>, FindingsError> {
+    match store.load(id) {
+        Ok(state) => Ok(Some(state)),
+        Err(crate::state::StateError::Missing(_)) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// The registry's view of a ruling the HQ gives on mission `id`.

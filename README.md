@@ -365,10 +365,18 @@ MISSION  (one branch off its base, one slot)
   volet, with the refusal as its cause, and a survivor that already holds
   the HQ's ruling is refused with a pointer to `--lift`. A refusal is
   carried to the next campaign on the same tiers as a ruling, so the same
-  proposal written again is still no outcome. With no campaign on file at
-  `standard` or `critical`, push refuses: no campaign, no push. `--ratify`,
-  `--equivalent`, `--refuse` and `--lift` take the slot's lock and act on
-  every survivor carrying the id they name. `mission status` and
+  proposal written again is still no outcome. The tiers look at the whole
+  previous campaign: first the same id, file and description, which decides
+  whatever that survivor held — a ruling, a refusal, or nothing; then, only
+  when the file and description name exactly one survivor of the previous
+  campaign and exactly one now, that pair. A ruling given on one of two
+  identical mutations is never carried onto the other. With no campaign on
+  file at `standard` or `critical`, push refuses: no campaign, no push, and it
+  names `nunki mission mutants <mission>`, the verb that writes one.
+  `--ratify`, `--equivalent`, `--refuse` and `--lift` take the slot's lock
+  and act on every survivor carrying the id they name; a mission whose state
+  cannot be read is refused, and only one that has not started is ruled on
+  without the lock. `mission status` and
   `mission wait` count the proposals that await the HQ, and the follow-up
   lists them with their reasons when the final gates pass.
 

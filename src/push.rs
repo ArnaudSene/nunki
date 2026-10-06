@@ -106,8 +106,8 @@ pub enum PushError {
     MutantsOwed { mission: String, owed: String },
     #[error(
         "mission {mission} is at `{rigor}` rigor and {file} holds no mutation campaign — \
-         no campaign, no push: `nunki mission mutants {mission}` runs one, and `nunki \
-         verify {mission}` plays gate 7 on it"
+         no campaign, no push: `nunki mission mutants {mission}` runs one, and the same \
+         verb, once the campaign has finished, writes it; `nunki push` reads it then"
     )]
     NoCampaign {
         mission: String,

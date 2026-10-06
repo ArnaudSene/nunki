@@ -3173,3 +3173,125 @@ fn a_mutation_ruled_again_replaces_its_entry() {
     assert_eq!(registry.entries[0].mission, "b");
     assert_eq!(registry.entries[0].line, equivalences::line_digest("1 + 0"));
 }
+
+/// Only a mission that has not started is ruled on without its slot's
+/// lock. A state that cannot be read is not that: the lock it would name is
+/// unknown, and a run or a read-back may be writing the same files, so every
+/// ruling is refused and nothing is written.
+#[test]
+fn a_ruling_against_an_unreadable_state_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = registry_project(dir.path(), BODY);
+    let (campaign, _) = campaign_on(&project, "a", &[on_lib(2)]);
+    let id = campaign.survivors[0].id.clone();
+    let a = mission_dir(&project, "a");
+    proposes(&a, &[(&id, "nothing reads the value")]);
+    let before = std::fs::read_to_string(a.join(mutants::FILE)).unwrap();
+
+    let states = project.hq_root.join("state").join("missions");
+    std::fs::create_dir_all(&states).unwrap();
+    std::fs::write(states.join("a.json"), "{ not a state").unwrap();
+
+    let refused = |what: &str, err: nunki::findings::FindingsError| {
+        let said = err.to_string();
+        assert!(said.contains("a.json"), "{what}: {said}");
+    };
+    refused(
+        "--equivalent",
+        nunki::findings::rule_equivalent(&project, "a", &id, "nothing reads it").unwrap_err(),
+    );
+    refused(
+        "--ratify",
+        nunki::findings::ratify_proposal(&project, "a", &id, None).unwrap_err(),
+    );
+    refused(
+        "--refuse",
+        nunki::findings::refuse_proposal(&project, "a", &id, "it is returned").unwrap_err(),
+    );
+    refused(
+        "--lift",
+        nunki::findings::lift_equivalent(&project, "a", &id).unwrap_err(),
+    );
+    assert_eq!(
+        std::fs::read_to_string(a.join(mutants::FILE)).unwrap(),
+        before,
+        "no ruling was written"
+    );
+    assert!(!equivalences::path(&project.hq_root).exists());
+    assert_eq!(
+        mutants::read_triage(&a).unwrap().len(),
+        1,
+        "the proposal stands"
+    );
+
+    // The same mission with no state at all has not started, and is ruled
+    // on as before.
+    std::fs::remove_file(states.join("a.json")).unwrap();
+    nunki::findings::rule_equivalent(&project, "a", &id, "nothing reads it").unwrap();
+}
+
+/// m1 was ruled equivalent and m2's proposal refused, the same mutation in
+/// the same file. The new campaign holds only m2: it is m2 by its id, so it
+/// keeps its refusal — and the ruling given on m1 is never carried onto it,
+/// though among the ruled survivors alone the pair looked unique.
+#[test]
+fn a_ruling_on_one_of_two_same_mutations_never_lands_on_the_refused_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let refusal = mutants::Refusal {
+        proposed: "the format is never read".into(),
+        because: "it is printed".into(),
+    };
+    let mut m2 = one("m2", 12, F_TO_UPPER);
+    m2.refused = Some(refusal.clone());
+    ruled_before(
+        dir.path(),
+        vec![ruled(one("m1", 7, F_TO_UPPER), "the cell is empty"), m2],
+    );
+    mutants::record_finished(
+        dir.path(),
+        "new0000",
+        "abc9999",
+        &log_of(&[one("m2", 14, F_TO_UPPER)]),
+    )
+    .unwrap();
+    let now = mutants::read(dir.path()).unwrap().unwrap();
+    assert_eq!(now.survivors.len(), 1);
+    assert_eq!(now.survivors[0].outcome, None, "m1's ruling is not m2's");
+    assert_eq!(now.survivors[0].refused, Some(refusal));
+}
+
+/// The mirror: m2 was merely killed before — nothing on it in the HQ's
+/// file. The new campaign holds only m2, and m1's ruling still does not
+/// land on it: the pair named two survivors of the previous campaign.
+#[test]
+fn a_ruling_on_one_of_two_same_mutations_never_lands_on_the_killed_one() {
+    let dir = tempfile::tempdir().unwrap();
+    ruled_before(
+        dir.path(),
+        vec![
+            ruled(one("m1", 7, F_TO_UPPER), "the cell is empty"),
+            one("m2", 12, F_TO_UPPER),
+        ],
+    );
+    // m2 under its own id, then under a new one: neither tier speaks for it.
+    for id in ["m2", "m9"] {
+        mutants::record_finished(
+            dir.path(),
+            "new0000",
+            "abc9999",
+            &log_of(&[one(id, 14, F_TO_UPPER)]),
+        )
+        .unwrap();
+        let now = mutants::read(dir.path()).unwrap().unwrap();
+        assert_eq!(now.survivors[0].outcome, None, "{id}");
+        assert_eq!(now.survivors[0].refused, None, "{id}");
+        // Back to the campaign the ruling was given on, for the next id.
+        ruled_before(
+            dir.path(),
+            vec![
+                ruled(one("m1", 7, F_TO_UPPER), "the cell is empty"),
+                one("m2", 12, F_TO_UPPER),
+            ],
+        );
+    }
+}
