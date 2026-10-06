@@ -25,9 +25,9 @@
 /// characters, the byte-order mark, the tag block, the line and paragraph
 /// separators, the variation selectors and the characters that look blank
 /// (the soft hyphen, the Hangul fillers, the blank braille pattern). Every
-/// visible letter and accent is kept, every emoji too but for a variation
-/// selector it carries, and so is the zero-width joiner that holds an emoji
-/// sequence together. Line breaks and tabs are kept — this is for text that
+/// visible letter, accent and emoji is kept, and so are the two presentation
+/// selectors (U+FE0E, U+FE0F) and the zero-width joiner that emoji are
+/// written with. Line breaks and tabs are kept — this is for text that
 /// may span lines — and a `\r\n` is read as the line break it means.
 pub fn printable(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
@@ -63,13 +63,17 @@ pub fn brief(text: &str, chars: usize) -> String {
 
 /// Whether `text` says nothing a reader can see: empty once whitespace and
 /// every character [`printable`] escapes as invisible or as a control are
-/// removed. The two joiners count as nothing too — [`printable`] keeps the
-/// zero-width joiner for the emoji it holds together, but on their own
-/// neither shows anything. What a check asking "is there a title, is there a
+/// removed. The two joiners and the two presentation selectors (U+FE0E,
+/// U+FE0F) count as nothing too — [`printable`] keeps the zero-width joiner
+/// and the selectors for the emoji they belong to, but on their own none of
+/// them shows anything. What a check asking "is there a title, is there a
 /// reason" reads, since `str::trim` leaves a zero-width space standing.
 pub fn blank(text: &str) -> bool {
-    text.chars()
-        .all(|c| c.is_whitespace() || unsafe_to_print(c) || matches!(c, '\u{200c}' | '\u{200d}'))
+    text.chars().all(|c| {
+        c.is_whitespace()
+            || unsafe_to_print(c)
+            || matches!(c, '\u{200c}' | '\u{200d}' | '\u{fe0e}' | '\u{fe0f}')
+    })
 }
 
 /// A character that tells a terminal what to do rather than what to show, or
@@ -89,11 +93,13 @@ fn unsafe_to_print(c: char) -> bool {
             | '\u{200b}' | '\u{2060}'..='\u{2064}' | '\u{feff}' | '\u{e0000}'..='\u{e007f}'
             // Characters that show nothing of their own: the soft hyphen,
             // the Mongolian vowel separator, the combining grapheme joiner,
-            // the variation selectors (which also spell hidden bytes after
-            // a visible character, so an emoji's presentation selector is
-            // shown escaped too), and the blank-looking letters — the
-            // Hangul fillers and the blank braille pattern.
-            | '\u{00ad}' | '\u{180e}' | '\u{034f}' | '\u{fe00}'..='\u{fe0f}'
+            // the variation selectors, which also spell hidden bytes after a
+            // visible character — all but the text and emoji presentation
+            // selectors (U+FE0E, U+FE0F), which ordinary emoji carry (❤️,
+            // ⚠️, 1️⃣) — and the supplementary ones, and the blank-looking
+            // letters: the Hangul fillers and the blank braille pattern.
+            | '\u{00ad}' | '\u{180e}' | '\u{034f}' | '\u{fe00}'..='\u{fe0d}'
+            | '\u{e0100}'..='\u{e01ef}'
             | '\u{3164}' | '\u{115f}' | '\u{1160}' | '\u{ffa0}' | '\u{2800}'
             // Line and paragraph separators: a break some readers make and a
             // terminal does not. `\n` is the line break this text keeps.
