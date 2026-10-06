@@ -19,6 +19,9 @@ use crate::mission::Header;
 /// read-only for the agent.
 pub const ALLOWLIST_FILE: &str = "ALLOWLIST.txt";
 
+/// The HQ's follow-up, which every role reads first and `nunki` appends to.
+pub const FOLLOWUP_FILE: &str = "FOLLOWUP_HQ.md";
+
 /// The files of one mission. `MUTANTS.json` is `nunki`'s and is written only
 /// when a campaign ends, so it is not created here.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,7 +48,7 @@ impl Paths {
         let dir = hq_root.join("missions").join(id);
         Self {
             mission: dir.join("MISSION.md"),
-            followup: dir.join("FOLLOWUP_HQ.md"),
+            followup: dir.join(FOLLOWUP_FILE),
             journal: dir.join("JOURNAL.md"),
             pr: dir.join("PR.md"),
             verdict: dir.join("VERDICT.json"),

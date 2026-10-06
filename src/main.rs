@@ -516,7 +516,17 @@ enum MissionCommand {
     /// (SPEC 4.4, gate 7). Long: it is launched detached and watched, and
     /// the call that finds it finished writes `MUTANTS.json`.
     Mutants {
-        id: String,
+        /// The mission. Not needed with `--registry`.
+        id: Option<String>,
+        /// Print the project's registry of equivalences — the HQ's rulings
+        /// applied to every mission's campaigns while their line stands —
+        /// each with whether its line still stands at the repository's
+        /// `HEAD`. Needs no mission.
+        #[arg(
+            long,
+            conflicts_with_all = ["equivalent", "ratify", "refuse", "lift", "again", "slot", "because"]
+        )]
+        registry: bool,
         /// Which slot runs it. Defaults to the one the mission started in.
         #[arg(long)]
         slot: Option<String>,
@@ -2102,7 +2112,24 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             refuse,
             lift,
             again,
+            registry,
         } => {
+            if registry {
+                return match nunki::equivalences::read(&project.hq_root) {
+                    Ok(entries) => {
+                        println!("{}", nunki::equivalences::listing(&entries, &project.root));
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("nunki: {e}");
+                        ExitCode::FAILURE
+                    }
+                };
+            }
+            let Some(id) = id else {
+                eprintln!("nunki: name the mission — only `--registry` needs none");
+                return ExitCode::FAILURE;
+            };
             if because.is_some() && equivalent.is_none() && ratify.is_none() && refuse.is_none() {
                 eprintln!(
                     "nunki: --because goes with --equivalent, --ratify or --refuse: it is the \
@@ -2117,12 +2144,13 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                     &survivor,
                     because.as_deref(),
                 ) {
-                    Ok(why) => {
+                    Ok((why, registered)) => {
                         println!(
                             "{} ruled equivalent — {}",
                             nunki::text::one_line(&survivor),
                             nunki::text::one_line(&why)
                         );
+                        say_registered(&registered);
                         ExitCode::SUCCESS
                     }
                     Err(e) => {
@@ -2163,10 +2191,11 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             }
             if let Some(survivor) = lift {
                 return match nunki::findings::lift_equivalent(project, &id, &survivor) {
-                    Ok(()) => {
+                    Ok(registered) => {
                         println!(
                             "{survivor}: the `equivalent` ruling is lifted, and it needs an outcome again"
                         );
+                        say_registered(&registered);
                         ExitCode::SUCCESS
                     }
                     Err(e) => {
@@ -2184,8 +2213,9 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                     return ExitCode::FAILURE;
                 };
                 return match nunki::findings::rule_equivalent(project, &id, &survivor, &why) {
-                    Ok(()) => {
+                    Ok(registered) => {
                         println!("{survivor} ruled equivalent — {why}");
+                        say_registered(&registered);
                         ExitCode::SUCCESS
                     }
                     Err(e) => {
@@ -2523,6 +2553,7 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                         }
                     );
                     print_proposals(project, &id);
+                    print_registered(project, &id);
                     // The lifts nobody typed: a verified mission otherwise
                     // reads as if a CLEAR or a human had verified it.
                     for lift in state.accepted.iter().filter(|a| a.by_nunki) {
@@ -2612,6 +2643,35 @@ fn parse_service(spec: &str) -> Result<Service, String> {
         reach,
         shared: false,
     })
+}
+
+/// What a ruling or a lift left in the project's registry of equivalences,
+/// when it left it as it was: the mission's own file is written, and the HQ
+/// must know the next mission will not see it.
+fn say_registered(registered: &nunki::equivalences::Registered) {
+    if let Some(why) = registered.warning() {
+        eprintln!("nunki: the registry of equivalences is unchanged — {why}");
+    }
+}
+
+/// The survivors of the mission's campaign answered by the project's
+/// registry of equivalences — rulings the HQ gave on another mission, and
+/// did not give on this one — and a registry that cannot be read, which
+/// applies nothing.
+fn print_registered(project: &Project, id: &str) {
+    let dir = mission_dir::Paths::of(&project.hq_root, id).dir;
+    if let Err(e) = nunki::equivalences::read(&project.hq_root) {
+        println!("registry  could not be read: {e}");
+    }
+    match nunki::mutants::read(&dir) {
+        Ok(Some(campaign)) => {
+            if let Some(line) = nunki::mutants::registered(&campaign) {
+                println!("registry  {line}");
+            }
+        }
+        Ok(None) => {}
+        Err(e) => println!("registry  the campaign could not be read: {e}"),
+    }
 }
 
 /// The equivalences the coder proposed that await the HQ, each with its

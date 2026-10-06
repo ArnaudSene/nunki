@@ -372,6 +372,32 @@ MISSION  (one branch off its base, one slot)
   `mission wait` count the proposals that await the HQ, and the follow-up
   lists them with their reasons when the final gates pass.
 
+  A ruling is given **once per project, for as long as its line stands**.
+  `--equivalent` and `--ratify` also enter it in the project's registry of
+  equivalences, `hq/equivalences.json` in the project's home — never in the
+  repository, never mounted in an agent's container, and written by those
+  verbs and `--lift` only: a proposal never enters it, and a refusal is not
+  an equivalence. An entry holds the mutant's file and description (never
+  its line number), the git blob id of the source line's content at the
+  ruling's commit with whitespace at both ends trimmed
+  (`printf '%s' '<line>' | git hash-object --stdin` reproduces it), the
+  sentence, who ruled, the mission, the commit and the date. When any
+  mission's campaign is recorded, a survivor with no outcome and no refusal
+  whose file and description match an entry, and whose line now has the same
+  digest, receives the ruling as `equivalent_registered`, with the mission
+  and commit it was given on: a line that only moved still matches, one
+  whose content changed matches nothing. Two survivors of the campaign, or
+  two entries, on the same file and description match nothing; ruling again
+  on a mutation replaces its entry. A registry that cannot be read applies
+  nothing, and `FOLLOWUP_HQ.md` says so; a line that cannot be read matches
+  nothing. Such a ruling is the HQ's like any other — the coder cannot write
+  it, `--refuse` will not undo it — and is never carried between campaigns:
+  each campaign asks the registry again. Gate 7's note and `mission status`
+  count it apart, and `--lift` on any mission takes it out of the mission
+  and the registry both, so the next mission is asked again.
+  `nunki mission mutants --registry` lists the entries, each with whether its
+  line still stands at the repository's `HEAD`.
+
 - **Gates** — deterministic checks, each read from its own result. Gates 1 to
   4 (a clean tree, a branch ahead of its base, a resume block that names
   `HEAD`, the perimeter) are played at the end of every coder run. Gates 5 to

@@ -2636,3 +2636,540 @@ fn refusing_a_survivor_the_hq_already_ruled_is_an_error() {
     );
     assert!(mutants::read_triage(dir.path()).unwrap().contains_key("X"));
 }
+
+// The project's registry of equivalences: a ruling given on one mission is
+// applied to every later campaign while the line it sat on is unchanged.
+
+use nunki::equivalences::{self, Registered};
+
+const LIFTED: &str = "replace one -> u8 with 0";
+
+/// A project whose repository holds `src/lib.rs` as `body`, committed; the
+/// mission folders live under its `hq/`.
+fn registry_project(dir: &Path, body: &str) -> nunki::project::Project {
+    let (project, _) = context(dir);
+    write(&project.root, "src/lib.rs", body);
+    git(
+        &project.root,
+        &["commit", "-q", "-am", "the code under test"],
+    );
+    project
+}
+
+/// Commit `body` as `src/lib.rs` and say which commit holds it.
+fn commit_lib(project: &nunki::project::Project, body: &str) -> String {
+    write(&project.root, "src/lib.rs", body);
+    git(&project.root, &["commit", "-q", "-am", "change"]);
+    git(&project.root, &["rev-parse", "HEAD"])
+}
+
+fn mission_dir(project: &nunki::project::Project, id: &str) -> PathBuf {
+    let dir = nunki::mission::dir::Paths::of(&project.hq_root, id).dir;
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// The survivor a campaign names on `line` of `src/lib.rs`.
+fn on_lib(line: u32) -> Survivor {
+    Survivor {
+        id: format!("src/lib.rs:{line}:5: {LIFTED}"),
+        file: "src/lib.rs".into(),
+        line,
+        description: LIFTED.into(),
+        outcome: None,
+        refused: None,
+    }
+}
+
+/// A campaign of mission `id` on the repository's `HEAD`, read back the way
+/// a finished campaign is.
+fn campaign_on(
+    project: &nunki::project::Project,
+    id: &str,
+    survivors: &[Survivor],
+) -> (Campaign, mutants::Recorded) {
+    let dir = mission_dir(project, id);
+    let head = git(&project.root, &["rev-parse", "HEAD"]);
+    let recorded = mutants::record_finished_with_registry(
+        &dir,
+        &project.hq_root,
+        &project.root,
+        &format!("fp-{head}"),
+        &head,
+        &log_of(survivors),
+    )
+    .unwrap();
+    (mutants::read(&dir).unwrap().unwrap(), recorded)
+}
+
+const BODY: &str = "pub fn one() -> u8 {\n    1\n}\n";
+const MOVED: &str = "pub fn zero() -> u8 {\n    0\n}\n\npub fn one() -> u8 {\n    1\n}\n";
+
+/// Mission A's campaign, and the HQ's ruling on its one survivor.
+fn ruled_on_a(project: &nunki::project::Project) -> String {
+    let (campaign, _) = campaign_on(project, "a", &[on_lib(2)]);
+    let id = campaign.survivors[0].id.clone();
+    let registered =
+        nunki::findings::rule_equivalent(project, "a", &id, "nothing reads the value").unwrap();
+    assert_eq!(registered, Registered::Done(1));
+    id
+}
+
+#[test]
+fn a_mutant_ruled_on_one_mission_is_not_asked_again_on_the_next() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = registry_project(dir.path(), BODY);
+    let head_a = git(&project.root, &["rev-parse", "HEAD"]);
+    ruled_on_a(&project);
+
+    // The entry: the mutation, the line's digest, the ruling and its origin.
+    let registry = equivalences::read(&project.hq_root).unwrap();
+    assert_eq!(registry.entries.len(), 1);
+    let entry = &registry.entries[0];
+    assert_eq!(entry.file, "src/lib.rs");
+    assert_eq!(entry.description, LIFTED);
+    assert_eq!(entry.line, equivalences::line_digest("1"));
+    assert_eq!(entry.why, "nothing reads the value");
+    assert_eq!(entry.mission, "a");
+    assert_eq!(entry.commit, head_a);
+    assert!(!entry.by.is_empty() && !entry.date.is_empty());
+
+    // Mission B: another branch, the same line, the same mutation.
+    git(&project.root, &["checkout", "-q", "-b", "mission/b"]);
+    commit_lib(&project, &format!("{BODY}// unrelated\n"));
+    let (campaign, recorded) = campaign_on(&project, "b", &[on_lib(2)]);
+    assert_eq!(recorded.from_registry, 1);
+    assert_eq!(recorded.registry_unread, None);
+    assert_eq!(
+        campaign.survivors[0].outcome,
+        Some(Triage::EquivalentRegistered {
+            why: "nothing reads the value".into(),
+            mission: "a".into(),
+            commit: head_a.clone(),
+        })
+    );
+    let b = mission_dir(&project, "b");
+    assert!(
+        mutants::open(&b).unwrap().is_empty(),
+        "B is not asked again"
+    );
+    let status = mutants::registered(&campaign).expect("status lists it");
+    assert!(status.contains("1 equivalence(s) applied"), "{status}");
+    assert!(status.contains("ruled on mission a"), "{status}");
+    assert!(status.contains("nothing reads the value"), "{status}");
+}
+
+#[test]
+fn a_line_that_only_moved_still_matches() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = registry_project(dir.path(), BODY);
+    ruled_on_a(&project);
+    // Code added above it: the line is now the sixth.
+    commit_lib(&project, MOVED);
+    let (campaign, recorded) = campaign_on(&project, "b", &[on_lib(6)]);
+    assert_eq!(recorded.from_registry, 1);
+    assert!(matches!(
+        campaign.survivors[0].outcome,
+        Some(Triage::EquivalentRegistered { .. })
+    ));
+}
+
+#[test]
+fn after_its_line_changes_the_same_mutation_is_open_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = registry_project(dir.path(), BODY);
+    ruled_on_a(&project);
+    // The same mutation, on a line whose content changed.
+    commit_lib(&project, "pub fn one() -> u8 {\n    1 + 0\n}\n");
+    let (campaign, recorded) = campaign_on(&project, "b", &[on_lib(2)]);
+    assert_eq!(recorded.from_registry, 0);
+    assert_eq!(campaign.survivors[0].outcome, None);
+    assert_eq!(
+        mutants::open(&mission_dir(&project, "b")).unwrap().len(),
+        1,
+        "the ruling was about other code"
+    );
+    assert_eq!(mutants::registered(&campaign), None);
+
+    // Whitespace at both ends is not content: a re-indented line still
+    // matches.
+    commit_lib(&project, "pub fn one() -> u8 {\n\t\t1  \n}\n");
+    let (_, recorded) = campaign_on(&project, "c", &[on_lib(2)]);
+    assert_eq!(recorded.from_registry, 1);
+}
+
+#[test]
+fn a_line_that_cannot_be_read_matches_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = registry_project(dir.path(), BODY);
+    ruled_on_a(&project);
+    let head = git(&project.root, &["rev-parse", "HEAD"]);
+    // Out of range, and line zero.
+    assert_eq!(
+        equivalences::digest_at(&project.root, &head, "src/lib.rs", 99),
+        None
+    );
+    assert_eq!(
+        equivalences::digest_at(&project.root, &head, "src/lib.rs", 0),
+        None
+    );
+    let (campaign, _) = campaign_on(&project, "b", &[on_lib(99)]);
+    assert_eq!(campaign.survivors[0].outcome, None);
+
+    // The file gone.
+    git(&project.root, &["rm", "-q", "src/lib.rs"]);
+    git(&project.root, &["commit", "-q", "-m", "gone"]);
+    let head = git(&project.root, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        equivalences::digest_at(&project.root, &head, "src/lib.rs", 2),
+        None
+    );
+    let (campaign, _) = campaign_on(&project, "c", &[on_lib(2)]);
+    assert_eq!(campaign.survivors[0].outcome, None);
+    // And a commit the repository does not hold.
+    assert_eq!(
+        equivalences::digest_at(&project.root, "0123456789abcdef", "src/lib.rs", 2),
+        None
+    );
+}
+
+#[test]
+fn two_same_mutations_in_the_file_apply_nothing_on_either_side() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = registry_project(dir.path(), BODY);
+    ruled_on_a(&project);
+
+    // The campaign's side: the same mutation twice in the file.
+    commit_lib(
+        &project,
+        "pub fn one() -> u8 {\n    1\n}\npub fn uno() -> u8 {\n    1\n}\n",
+    );
+    let (campaign, recorded) = campaign_on(&project, "b", &[on_lib(2), on_lib(5)]);
+    assert_eq!(recorded.from_registry, 0);
+    assert!(campaign.survivors.iter().all(|s| s.outcome.is_none()));
+
+    // The registry's side: two entries on the same file and description.
+    let mut registry = equivalences::read(&project.hq_root).unwrap();
+    let mut twin = registry.entries[0].clone();
+    twin.line = equivalences::line_digest("2");
+    twin.mission = "z".into();
+    registry.entries.push(twin);
+    equivalences::write(&project.hq_root, &registry).unwrap();
+    commit_lib(&project, BODY);
+    let (campaign, recorded) = campaign_on(&project, "c", &[on_lib(2)]);
+    assert_eq!(recorded.from_registry, 0);
+    assert_eq!(campaign.survivors[0].outcome, None);
+
+    // And with one of them gone, the other applies again: it was the
+    // ambiguity, not the entry, that held it back.
+    registry.entries.pop();
+    equivalences::write(&project.hq_root, &registry).unwrap();
+    let (_, recorded) = campaign_on(&project, "d", &[on_lib(2)]);
+    assert_eq!(recorded.from_registry, 1);
+}
+
+#[test]
+fn lifting_on_a_later_mission_takes_the_ruling_out_and_the_next_is_asked_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = registry_project(dir.path(), BODY);
+    ruled_on_a(&project);
+    let (campaign, _) = campaign_on(&project, "b", &[on_lib(2)]);
+    let id = campaign.survivors[0].id.clone();
+
+    let registered = nunki::findings::lift_equivalent(&project, "b", &id).unwrap();
+    assert_eq!(registered, Registered::Done(1));
+    assert!(
+        equivalences::read(&project.hq_root)
+            .unwrap()
+            .entries
+            .is_empty()
+    );
+    let b = mission_dir(&project, "b");
+    assert_eq!(
+        mutants::open(&b).unwrap(),
+        vec![id.clone()],
+        "B needs an outcome"
+    );
+
+    let (campaign, recorded) = campaign_on(&project, "c", &[on_lib(2)]);
+    assert_eq!(recorded.from_registry, 0);
+    assert_eq!(campaign.survivors[0].outcome, None, "C is asked again");
+}
+
+#[test]
+fn lifting_on_the_mission_that_ruled_takes_the_ruling_out_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = registry_project(dir.path(), BODY);
+    let id = ruled_on_a(&project);
+    // Carried once inside mission A onto a line whose content has changed
+    // since: the entry is found by where the ruling was given, not by the
+    // line as it stands.
+    commit_lib(&project, "pub fn one() -> u8 {\n    1 + 0\n}\n");
+    let (campaign, _) = campaign_on(&project, "a", &[on_lib(2)]);
+    assert!(matches!(
+        campaign.survivors[0].outcome,
+        Some(Triage::Equivalent {
+            carried_from: Some(_),
+            ..
+        })
+    ));
+
+    let registered = nunki::findings::lift_equivalent(&project, "a", &id).unwrap();
+    assert_eq!(registered, Registered::Done(1));
+    assert!(
+        equivalences::read(&project.hq_root)
+            .unwrap()
+            .entries
+            .is_empty()
+    );
+}
+
+/// A ruling lifted is a ruling on the mutation of that code: an entry on
+/// the same line, whoever entered it since, goes with it.
+#[test]
+fn lifting_takes_out_an_entry_on_the_same_line_given_elsewhere() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = registry_project(dir.path(), BODY);
+    let id = ruled_on_a(&project);
+    let (campaign, _) = campaign_on(&project, "b", &[on_lib(2)]);
+    let id_b = campaign.survivors[0].id.clone();
+    nunki::findings::rule_equivalent(&project, "b", &id_b, "ruled again on b").unwrap();
+    assert_eq!(
+        equivalences::read(&project.hq_root).unwrap().entries[0].mission,
+        "b"
+    );
+
+    let registered = nunki::findings::lift_equivalent(&project, "a", &id).unwrap();
+    assert_eq!(registered, Registered::Done(1));
+    assert!(
+        equivalences::read(&project.hq_root)
+            .unwrap()
+            .entries
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_ruling_from_the_registry_is_not_carried_and_is_asked_of_the_registry_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = registry_project(dir.path(), BODY);
+    ruled_on_a(&project);
+    campaign_on(&project, "b", &[on_lib(2)]);
+    // The registry no longer holds it — removed by hand, say: the next
+    // campaign of B does not keep it on the strength of the last one.
+    equivalences::write(&project.hq_root, &equivalences::Registry::default()).unwrap();
+    commit_lib(&project, MOVED);
+    let (campaign, _) = campaign_on(&project, "b", &[on_lib(6)]);
+    assert_eq!(campaign.survivors[0].outcome, None);
+}
+
+#[test]
+fn a_proposal_and_a_refusal_never_reach_the_registry() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = registry_project(dir.path(), BODY);
+    let (campaign, _) = campaign_on(&project, "a", &[on_lib(2)]);
+    let id = campaign.survivors[0].id.clone();
+    let a = mission_dir(&project, "a");
+
+    proposes(&a, &[(&id, "nothing reads the value")]);
+    assert!(!equivalences::path(&project.hq_root).exists());
+    nunki::findings::refuse_proposal(&project, "a", &id, "the value is returned").unwrap();
+    assert!(!equivalences::path(&project.hq_root).exists());
+
+    // And a survivor refused on this mission is not answered by the
+    // registry either: the HQ said no to it here.
+    let (campaign, _) = campaign_on(&project, "b", &[on_lib(2)]);
+    let id_b = campaign.survivors[0].id.clone();
+    nunki::findings::rule_equivalent(&project, "b", &id_b, "nothing reads the value").unwrap();
+    let (campaign, recorded) = campaign_on(&project, "a", &[on_lib(2)]);
+    assert!(campaign.survivors[0].refused.is_some());
+    assert_eq!(campaign.survivors[0].outcome, None);
+    assert_eq!(recorded.from_registry, 0);
+
+    // A ratified proposal is a ruling, and is entered.
+    equivalences::write(&project.hq_root, &equivalences::Registry::default()).unwrap();
+    let (campaign, _) = campaign_on(&project, "c", &[on_lib(2)]);
+    let c = mission_dir(&project, "c");
+    let id_c = campaign.survivors[0].id.clone();
+    assert_eq!(campaign.survivors[0].outcome, None);
+    proposes(&c, &[(&id_c, "nothing reads the value")]);
+    let (_, registered) = nunki::findings::ratify_proposal(&project, "c", &id_c, None).unwrap();
+    assert_eq!(registered, Registered::Done(1));
+    assert_eq!(
+        equivalences::read(&project.hq_root).unwrap().entries[0].mission,
+        "c"
+    );
+}
+
+#[test]
+fn an_unreadable_registry_applies_nothing_and_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = registry_project(dir.path(), BODY);
+    ruled_on_a(&project);
+    let file = equivalences::path(&project.hq_root);
+    std::fs::write(&file, "{ this is not a registry").unwrap();
+
+    let (campaign, recorded) = campaign_on(&project, "b", &[on_lib(2)]);
+    assert_eq!(campaign.survivors[0].outcome, None);
+    assert_eq!(recorded.from_registry, 0);
+    let why = recorded.registry_unread.expect("it is reported");
+    assert!(why.contains("equivalences.json"), "{why}");
+    let followup =
+        std::fs::read_to_string(nunki::mission::dir::Paths::of(&project.hq_root, "b").followup)
+            .unwrap();
+    assert!(
+        followup.contains("the registry of equivalences could not be read"),
+        "{followup}"
+    );
+
+    // A ruling given meanwhile stands on its mission, says the registry was
+    // left alone, and does not write over the file it could not read.
+    let id = campaign.survivors[0].id.clone();
+    match nunki::findings::rule_equivalent(&project, "b", &id, "still").unwrap() {
+        Registered::Not(why) => assert!(why.contains("equivalences.json"), "{why}"),
+        other => panic!("an unreadable registry was written: {other:?}"),
+    }
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "{ this is not a registry"
+    );
+    assert!(
+        mutants::open(&mission_dir(&project, "b"))
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn with_no_registry_a_campaign_is_recorded_as_before() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = registry_project(dir.path(), BODY);
+    let (campaign, recorded) = campaign_on(&project, "a", &[on_lib(2)]);
+    assert_eq!(
+        recorded,
+        mutants::Recorded {
+            survivors: 1,
+            from_registry: 0,
+            registry_unread: None,
+        }
+    );
+    assert_eq!(campaign.survivors[0].outcome, None);
+    assert!(!equivalences::path(&project.hq_root).exists());
+    assert!(
+        !nunki::mission::dir::Paths::of(&project.hq_root, "a")
+            .followup
+            .exists(),
+        "nothing to report"
+    );
+}
+
+/// The digest is the one the campaign fingerprint uses — git's blob id —
+/// of the line with its ends trimmed, so a human can check an entry with
+/// one command.
+#[test]
+fn the_line_digest_is_gits_blob_id_of_the_trimmed_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let tree = repo(dir.path());
+    let by_git = |text: &str| {
+        let mut child = Command::new("git")
+            .arg("-C")
+            .arg(&tree)
+            .args(["hash-object", "--stdin"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        use std::io::Write;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(text.as_bytes())
+            .unwrap();
+        String::from_utf8(child.wait_with_output().unwrap().stdout)
+            .unwrap()
+            .trim()
+            .to_string()
+    };
+    assert_eq!(
+        equivalences::line_digest("    return a > b;  "),
+        by_git("return a > b;")
+    );
+    assert_eq!(equivalences::line_digest(""), by_git(""));
+    assert_ne!(
+        equivalences::line_digest("return a > b;"),
+        equivalences::line_digest("return a >= b;")
+    );
+}
+
+#[test]
+fn the_registry_listing_says_whether_each_line_still_stands() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = registry_project(dir.path(), BODY);
+    ruled_on_a(&project);
+    let registry = equivalences::read(&project.hq_root).unwrap();
+    let listing = equivalences::listing(&registry, &project.root);
+    assert!(listing.contains("src/lib.rs"), "{listing}");
+    assert!(listing.contains(LIFTED), "{listing}");
+    assert!(listing.contains("nothing reads the value"), "{listing}");
+    assert!(listing.contains("mission a"), "{listing}");
+    assert!(listing.contains("its line stands at HEAD"), "{listing}");
+
+    commit_lib(&project, MOVED);
+    assert_eq!(
+        equivalences::standing(&project.root, &registry.entries[0]),
+        equivalences::Standing::Stands,
+        "a line that moved still stands"
+    );
+    commit_lib(&project, "pub fn one() -> u8 {\n    2\n}\n");
+    assert!(
+        equivalences::listing(&registry, &project.root).contains("its line has changed"),
+        "the line changed"
+    );
+    git(&project.root, &["rm", "-q", "src/lib.rs"]);
+    git(&project.root, &["commit", "-q", "-m", "gone"]);
+    assert_eq!(
+        equivalences::standing(&project.root, &registry.entries[0]),
+        equivalences::Standing::Gone
+    );
+    assert!(
+        equivalences::listing(&equivalences::Registry::default(), &project.root)
+            .contains("holds no ruling")
+    );
+}
+
+#[test]
+fn a_ruling_from_the_registry_is_the_hqs_and_a_refusal_cannot_undo_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = registry_project(dir.path(), BODY);
+    ruled_on_a(&project);
+    let (campaign, _) = campaign_on(&project, "b", &[on_lib(2)]);
+    let id = campaign.survivors[0].id.clone();
+    let outcome = campaign.survivors[0].outcome.clone().unwrap();
+    assert!(!outcome.is_the_coders_to_give());
+    assert!(outcome.is_a_ruling());
+    assert_eq!(outcome.kind(), "equivalent_registered");
+    assert_eq!(outcome.test(), None);
+
+    let b = mission_dir(&project, "b");
+    proposes(&b, &[(&id, "nothing reads the value")]);
+    let err = mutants::refuse(&b, &id, "no").unwrap_err();
+    assert!(err.to_string().contains("--lift"), "{err}");
+}
+
+/// Ruling again on the same mutation replaces the entry rather than adding
+/// a second one, which would make every later match ambiguous.
+#[test]
+fn a_mutation_ruled_again_replaces_its_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = registry_project(dir.path(), BODY);
+    ruled_on_a(&project);
+    commit_lib(&project, "pub fn one() -> u8 {\n    1 + 0\n}\n");
+    let (campaign, _) = campaign_on(&project, "b", &[on_lib(2)]);
+    let id = campaign.survivors[0].id.clone();
+    nunki::findings::rule_equivalent(&project, "b", &id, "still nothing reads it").unwrap();
+    let registry = equivalences::read(&project.hq_root).unwrap();
+    assert_eq!(registry.entries.len(), 1);
+    assert_eq!(registry.entries[0].mission, "b");
+    assert_eq!(registry.entries[0].line, equivalences::line_digest("1 + 0"));
+}

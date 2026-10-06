@@ -1735,11 +1735,22 @@ fn a_named_test_missing(
 /// check, when any did — left unsaid, it becomes the escape hatch that
 /// empties the gate.
 fn equivalences(campaign: &crate::mutants::Campaign, answer: &Answers) -> Option<String> {
-    let equivalent: Vec<Option<String>> = campaign
+    use crate::mutants::Triage;
+    /// Where a ruling was given, as the note counts it.
+    enum Given {
+        Here,
+        Carried,
+        Registry,
+    }
+    let equivalent: Vec<Given> = campaign
         .survivors
         .iter()
         .filter_map(|s| match answer.of(s) {
-            Some(crate::mutants::Triage::Equivalent { carried_from, .. }) => Some(carried_from),
+            Some(Triage::Equivalent {
+                carried_from: None, ..
+            }) => Some(Given::Here),
+            Some(Triage::Equivalent { .. }) => Some(Given::Carried),
+            Some(Triage::EquivalentRegistered { .. }) => Some(Given::Registry),
             _ => None,
         })
         .collect();
@@ -1747,20 +1758,41 @@ fn equivalences(campaign: &crate::mutants::Campaign, answer: &Answers) -> Option
         return None;
     }
     // A carried ruling is named apart: it was given on code that has
-    // changed since, and the HQ may want to look at it again.
-    let carried = equivalent.iter().filter(|from| from.is_some()).count();
-    let carried = if carried > 0 {
-        format!(
-            ", and {carried} of those were carried from an earlier campaign — \
-             `nunki mission mutants --lift` takes one back"
-        )
-    } else {
+    // changed since, and the HQ may want to look at it again. One from the
+    // project's registry too: the HQ gave it on another mission, and did not
+    // rule on this one.
+    let carried = equivalent
+        .iter()
+        .filter(|g| matches!(g, Given::Carried))
+        .count();
+    let registry = equivalent
+        .iter()
+        .filter(|g| matches!(g, Given::Registry))
+        .count();
+    let apart: Vec<String> = [
+        (carried > 0).then(|| format!("{carried} of those were carried from an earlier campaign")),
+        (registry > 0).then(|| {
+            format!(
+                "{registry} of those come from the project's registry of equivalences, \
+                 ruled on another mission on a line that has not changed since"
+            )
+        }),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let apart = if apart.is_empty() {
         String::new()
+    } else {
+        format!(
+            ", and {} — `nunki mission mutants --lift` takes one back",
+            apart.join(", and ")
+        )
     };
     Some(format!(
         "{} of {} rode on `equivalent`, which no machine can check — they \
          come from the HQ's own hand, and they are counted here so nobody has to \
-         go looking{carried}",
+         go looking{apart}",
         equivalent.len(),
         campaign.survivors.len()
     ))

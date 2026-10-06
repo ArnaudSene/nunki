@@ -1512,6 +1512,76 @@ fn a_carried_equivalence_is_named_apart_from_one_given_on_this_campaign() {
     assert!(note.contains("--lift"), "{note}");
 }
 
+/// A ruling applied from the project's registry was given on another
+/// mission: the HQ did not rule on this one, so the green gate counts it
+/// apart from the rulings given here and from the carried ones, and says
+/// how to take it back.
+#[test]
+fn a_ruling_from_the_registry_is_counted_apart_from_the_others() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.campaign(vec![
+        survivor(
+            1,
+            Some(Triage::EquivalentRegistered {
+                why: "no caller can reach that branch".into(),
+                mission: "earlier".into(),
+                commit: "def5678".into(),
+            }),
+        ),
+        survivor(
+            2,
+            Some(Triage::Equivalent {
+                why: "the constant is never read".into(),
+                carried_from: Some("abc1234".into()),
+            }),
+        ),
+        survivor(
+            3,
+            Some(Triage::Equivalent {
+                why: "the value is overwritten before use".into(),
+                carried_from: None,
+            }),
+        ),
+    ]);
+    f.journal_names_head();
+    let outcome = f.gate_seven(Role::Coder);
+    assert_eq!(outcome.decision, Decision::Passed);
+    let note = outcome
+        .note
+        .expect("a green gate that owes the reader a number");
+    assert!(note.contains("3 of 3"), "{note}");
+    assert!(note.contains("1 of those were carried"), "{note}");
+    assert!(
+        note.contains("1 of those come from the project's registry of equivalences"),
+        "{note}"
+    );
+    assert!(note.contains("--lift"), "{note}");
+}
+
+/// The coder cannot answer a survivor with a ruling from the registry: it
+/// is the HQ's, like the `equivalent` it stands for, and one written in the
+/// coder's file turns the gate red by name.
+#[test]
+fn a_registry_ruling_written_by_the_coder_is_refused() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.campaign(vec![survivor(1, None)]);
+    f.coder_answers(&[(
+        "src/new.rs:1",
+        Triage::EquivalentRegistered {
+            why: "trust me".into(),
+            mission: "earlier".into(),
+            commit: "def5678".into(),
+        },
+    )]);
+    f.journal_names_head();
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => assert!(why.contains("equivalent_registered"), "{why}"),
+        other => panic!("the coder gave the HQ's outcome: {other:?}"),
+    }
+}
+
 #[test]
 fn system_tests_and_configuration_are_not_mutated() {
     let f = Fixture::new();

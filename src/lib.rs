@@ -11,6 +11,7 @@ pub mod check;
 pub mod compose;
 pub mod consumption;
 pub mod engine;
+pub mod equivalences;
 pub mod exec;
 pub mod findings;
 pub mod firewall;

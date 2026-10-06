@@ -335,6 +335,27 @@ pub fn proposal_refused(
     )
 }
 
+/// The project's registry of equivalences could not be read when a campaign
+/// was recorded, so no ruling was applied from it ([`crate::equivalences`]).
+///
+/// Said here because the registry fails closed: the survivors it would have
+/// answered are open, and whoever reads gate 7 asking for them again should
+/// find why without reading a log.
+pub fn registry_unread(file: &Path, why: &str) -> Result<(), FollowupError> {
+    append(
+        file,
+        &format!(
+            "## {date} — the registry of equivalences could not be read\n\n\
+             {why}\n\n\
+             The campaign was recorded without it: no ruling given on another\n\
+             mission was applied, and the survivors it would have answered need\n\
+             an outcome here.\n",
+            date = today(),
+            why = why.trim(),
+        ),
+    )
+}
+
 /// Gate 7 passed with equivalences the coder proposed that the HQ has not
 /// ruled on: each listed with its reason, for the HQ to ratify or refuse
 /// before `nunki push`, which refuses until it has.

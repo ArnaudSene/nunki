@@ -137,6 +137,20 @@ pub enum Triage {
     /// in [`FILE`] as `equivalent` — only [`ratify`], the HQ's verb, turns it
     /// into one. A blank `why` is no outcome at all ([`answer`]).
     EquivalentProposed { why: String },
+    /// The HQ's ruling, given on another mission and applied here from the
+    /// project's registry of equivalences ([`crate::equivalences`]): the same
+    /// mutation, on a line whose content has not changed since. An
+    /// `equivalent` in every way that counts — the HQ's, never the coder's —
+    /// and kept apart so that gate 7 and `mission status` can say the HQ did
+    /// not rule on it on this mission. Never carried by [`carry`]: the next
+    /// campaign asks the registry again, against the line as it stands then.
+    EquivalentRegistered {
+        why: String,
+        /// The mission the ruling was given on.
+        mission: String,
+        /// The commit of the campaign it was given on.
+        commit: String,
+    },
 }
 
 impl Triage {
@@ -146,7 +160,7 @@ impl Triage {
     pub fn is_the_coders_to_give(&self) -> bool {
         match self {
             Triage::Killed { .. } | Triage::Bug { .. } | Triage::EquivalentProposed { .. } => true,
-            Triage::Equivalent { .. } => false,
+            Triage::Equivalent { .. } | Triage::EquivalentRegistered { .. } => false,
         }
     }
 
@@ -157,14 +171,27 @@ impl Triage {
             Triage::Equivalent { .. } => "equivalent",
             Triage::Bug { .. } => "bug",
             Triage::EquivalentProposed { .. } => "equivalent_proposed",
+            Triage::EquivalentRegistered { .. } => "equivalent_registered",
         }
+    }
+
+    /// Whether this is the HQ's `equivalent` ruling — given on this mission,
+    /// or applied from the project's registry. What `--refuse` will not undo
+    /// and `--lift` takes back.
+    pub fn is_a_ruling(&self) -> bool {
+        matches!(
+            self,
+            Triage::Equivalent { .. } | Triage::EquivalentRegistered { .. }
+        )
     }
 
     /// The test this outcome rests on, when it rests on one.
     pub fn test(&self) -> Option<&str> {
         match self {
             Triage::Killed { test } | Triage::Bug { test } => Some(test),
-            Triage::Equivalent { .. } | Triage::EquivalentProposed { .. } => None,
+            Triage::Equivalent { .. }
+            | Triage::EquivalentProposed { .. }
+            | Triage::EquivalentRegistered { .. } => None,
         }
     }
 }
@@ -490,6 +517,40 @@ pub fn proposals_await(count: usize) -> Option<String> {
     })
 }
 
+/// What `mission status` says of the survivors of `campaign` that the
+/// project's registry of equivalences answered — nothing when none did. One
+/// line naming how many, then one per survivor: its id, the sentence, and the
+/// mission and commit the HQ ruled on. Listed because the HQ did not rule on
+/// them on this mission, and `--lift` is how it takes one back.
+pub fn registered(campaign: &Campaign) -> Option<String> {
+    let lines: Vec<String> = campaign
+        .survivors
+        .iter()
+        .filter_map(|s| match &s.outcome {
+            Some(Triage::EquivalentRegistered {
+                why,
+                mission,
+                commit,
+            }) => Some(format!(
+                "          {} — {} (ruled on mission {}, at {})",
+                crate::text::one_line(&s.id),
+                crate::text::one_line(why),
+                crate::text::one_line(mission),
+                crate::text::one_line(commit.get(..12).unwrap_or(commit)),
+            )),
+            _ => None,
+        })
+        .collect();
+    (!lines.is_empty()).then(|| {
+        format!(
+            "{} equivalence(s) applied from the project's registry, ruled on another \
+             mission — `nunki mission mutants <id> --lift <survivor>` takes one back\n{}",
+            lines.len(),
+            lines.join("\n")
+        )
+    })
+}
+
 /// The proposals of the current campaign that await the HQ — exactly those
 /// [`answer`] reads as a proposal. What `nunki push` refuses on while any is
 /// left, and what `mission status`, `mission wait` and the follow-up count.
@@ -736,17 +797,84 @@ pub fn parse(text: &str) -> Vec<Survivor> {
 /// with the file it lived in, sending the mission back to the HQ to be told
 /// the same thing again.
 ///
-/// Returns how many survivors the new campaign holds.
+/// Returns how many survivors the new campaign holds. The project's
+/// registry is not asked: [`record_finished_with_registry`] is what a
+/// campaign read back in its slot records through.
 pub fn record_finished(
     dir: &Path,
     fingerprint: &str,
     head: &str,
     text: &str,
 ) -> Result<usize, MutantsError> {
+    record(dir, fingerprint, head, text, |_| {})
+}
+
+/// What [`record_finished_with_registry`] did with the project's registry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Recorded {
+    /// How many survivors the new campaign holds.
+    pub survivors: usize,
+    /// How many of them received a ruling from the registry.
+    pub from_registry: usize,
+    /// Why the registry could not be read, when it could not: nothing was
+    /// applied from it, and `FOLLOWUP_HQ.md` says so.
+    pub registry_unread: Option<String>,
+}
+
+/// [`record_finished`], and then the project's registry of equivalences
+/// ([`crate::equivalences`]) applied to every survivor still without an
+/// outcome, reading each survivor's line at `head` in the repository at
+/// `tree` — the slot, which holds the campaign's commit.
+///
+/// After [`carry`], so that a ruling given on this mission keeps its own
+/// origin. **Fails closed**: a registry that cannot be read applies nothing,
+/// and the reason is appended to the mission's `FOLLOWUP_HQ.md`, the file the
+/// HQ reads, rather than lost in a log.
+pub fn record_finished_with_registry(
+    dir: &Path,
+    hq_root: &Path,
+    tree: &Path,
+    fingerprint: &str,
+    head: &str,
+    text: &str,
+) -> Result<Recorded, MutantsError> {
+    let registry = crate::equivalences::read(hq_root);
+    let mut from_registry = 0;
+    let survivors = record(dir, fingerprint, head, text, |survivors| {
+        if let Ok(registry) = &registry {
+            from_registry = crate::equivalences::apply(registry, survivors, |s| {
+                crate::equivalences::digest_at(tree, head, &s.file, s.line)
+            });
+        }
+    })?;
+    let registry_unread = match registry {
+        Ok(_) => None,
+        Err(e) => {
+            let why = e.to_string();
+            crate::followup::registry_unread(&dir.join(crate::mission::dir::FOLLOWUP_FILE), &why)?;
+            Some(why)
+        }
+    };
+    Ok(Recorded {
+        survivors,
+        from_registry,
+        registry_unread,
+    })
+}
+
+/// Parse, carry, let `then` add what it has, write.
+fn record(
+    dir: &Path,
+    fingerprint: &str,
+    head: &str,
+    text: &str,
+    then: impl FnOnce(&mut [Survivor]),
+) -> Result<usize, MutantsError> {
     let mut survivors = parse(text);
     if let Some(previous) = read(dir)? {
         carry(&previous, &mut survivors);
     }
+    then(&mut survivors);
     let count = survivors.len();
     write(
         dir,
@@ -979,7 +1107,7 @@ pub fn refuse(dir: &Path, id: &str, because: &str) -> Result<Refusal, MutantsErr
     // back is `--lift`'s (HQ review of the pull request, item 5).
     if found
         .iter()
-        .any(|s| matches!(s.outcome, Some(Triage::Equivalent { .. })))
+        .any(|s| s.outcome.as_ref().is_some_and(Triage::is_a_ruling))
     {
         return Err(MutantsError::NoProposal(format!(
             "{id:?} holds the HQ's own `equivalent` ruling, and a refusal cannot undo a \
@@ -1015,8 +1143,11 @@ pub fn refuse_and_say(
 /// The way back from a ruling that was wrong, or that a changed neighbour
 /// made wrong. Rulings are carried from one campaign to the next
 /// ([`carry`]), so without this a mistaken one would outlive every replay.
-/// Only an `equivalent` is lifted: the coder's two outcomes live in its own
-/// file, and this one never held them.
+/// Only an `equivalent` is lifted — given here, or applied from the
+/// project's registry: the coder's two outcomes live in its own file, and
+/// this one never held them. Taking it out of the registry too is the
+/// caller's ([`crate::equivalences::remove`]), from the campaign as it stood
+/// before the lift.
 pub fn lift_equivalent(dir: &Path, id: &str) -> Result<(), MutantsError> {
     let mut campaign = read(dir)?.ok_or_else(|| {
         MutantsError::Unreadable(
@@ -1027,7 +1158,7 @@ pub fn lift_equivalent(dir: &Path, id: &str) -> Result<(), MutantsError> {
     let found = called(&mut campaign, dir, id)?;
     if !found
         .iter()
-        .any(|s| matches!(s.outcome, Some(Triage::Equivalent { .. })))
+        .any(|s| s.outcome.as_ref().is_some_and(Triage::is_a_ruling))
     {
         return Err(MutantsError::Unreadable(
             dir.join(FILE),
@@ -1035,7 +1166,7 @@ pub fn lift_equivalent(dir: &Path, id: &str) -> Result<(), MutantsError> {
         ));
     }
     for survivor in found {
-        if matches!(survivor.outcome, Some(Triage::Equivalent { .. })) {
+        if survivor.outcome.as_ref().is_some_and(Triage::is_a_ruling) {
             survivor.outcome = None;
         }
     }
@@ -1234,7 +1365,15 @@ pub fn read_back(
             let progress = match settle_unmeasured(&running.log, &text)? {
                 Some(why) => Progress::CouldNotRun(why),
                 None => Progress::Finished {
-                    survivors: record_finished(dir, &running.fingerprint, &running.head, &text)?,
+                    survivors: record_finished_with_registry(
+                        dir,
+                        &project.hq_root,
+                        &slot.tree,
+                        &running.fingerprint,
+                        &running.head,
+                        &text,
+                    )?
+                    .survivors,
                 },
             };
             forget_running(&project.hq_root, &slot.name)?;
