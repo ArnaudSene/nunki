@@ -238,6 +238,20 @@ lifted. Those commits are named, by push and in `FOLLOWUP_HQ.md`, as not
 attacked by the security agent. A `prototype` plays no round, and push asks
 it for no security verdict.
 
+The security agent ranks every finding in `VERDICT.json` — `HIGH`, `MEDIUM`,
+`LOW` or `INFO`, by what it lets an attacker do — and gives each `LOW` and
+`INFO` one sentence on why it can be accepted. When it concludes `FINDINGS`
+and every finding is `LOW` or `INFO`, `nunki` lifts the verdict itself, as
+`mission accept` would: one acceptance for the verdict as a whole, recorded as
+`nunki`'s and not a person's, its reason the findings and the agent's words.
+The mission goes on to `Verified`, and `FOLLOWUP_HQ.md`, `nunki mission
+status` and `nunki push` ("accepted by nunki (LOW/INFO)") list the findings
+it lifted. One `MEDIUM` or `HIGH` stops at `Findings` as before, and so does
+anything `nunki` cannot read for certain: no ranking at all, an empty list, an
+unknown severity, a `LOW` without its reason. Such a lift obeys every rule
+push applies to a human's: it is worth its commit, and a later `FINDINGS` is
+not covered by it.
+
 ## Vocabulary
 
 The mission is the parent of everything else. It moves through **stages**;

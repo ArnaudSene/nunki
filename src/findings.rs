@@ -113,6 +113,7 @@ pub fn accept(
         who,
         head,
         date: crate::state::now_rfc3339(),
+        by_nunki: false,
     });
     // The file is written before the state, and the state before the
     // transition: a session that dies in between leaves a record of what the
@@ -122,6 +123,54 @@ pub fn accept(
         store.apply(&mut state, Event::HumanAccepted)?;
     }
     Ok(state)
+}
+
+/// Record `nunki`'s own lift of a `FINDINGS` whose every finding is `LOW` or
+/// `INFO` ([`crate::mission::VerdictFile::automatic_lift`] decides that),
+/// and conclude as [`accept`] does for a human's lift of the whole verdict.
+///
+/// A lift and nothing more: one [`Accepted`] for the verdict as a whole, on
+/// `head`, marked as `nunki`'s, its reason the findings line by line — so
+/// every rule `nunki push` applies to a human's lift applies to it
+/// unchanged. Written in the same order as [`accept`]: the follow-up, then
+/// the state, then the transition.
+pub fn lift_by_nunki(
+    store: &Store,
+    state: &mut MissionState,
+    followup: &std::path::Path,
+    lifted: &[crate::mission::LowFinding],
+    head: &str,
+) -> Result<(), FindingsError> {
+    on_findings(&state.id, state)?;
+    if lifted.is_empty() {
+        // Nothing ranked is nothing to lift: the caller's decision refuses an
+        // empty list, and this refuses it again rather than record a lift
+        // with no reason.
+        return Err(FindingsError::NoReason);
+    }
+    let lines: Vec<String> = lifted.iter().map(|f| f.line()).collect();
+    crate::followup::lifted_by_nunki(followup, &lines, head)?;
+    state.accepted.push(Accepted {
+        finding: None,
+        why: lines.join("\n"),
+        who: crate::state::NUNKI.to_string(),
+        head: head.to_string(),
+        date: crate::state::now_rfc3339(),
+        by_nunki: true,
+    });
+    store.save(state)?;
+    store.apply(state, Event::HumanAccepted)?;
+    Ok(())
+}
+
+/// The findings a lift `nunki` recorded itself carries, one line each and
+/// printable, as `nunki push` and `nunki mission status` print them; nothing
+/// for a human's lift.
+pub fn lifted_by_nunki(accepted: &Accepted) -> Vec<String> {
+    if !accepted.by_nunki {
+        return Vec::new();
+    }
+    accepted.why.lines().map(crate::text::one_line).collect()
 }
 
 /// Send the mission back to the coder, bounded by `max_volets`.

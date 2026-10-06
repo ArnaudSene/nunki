@@ -4,7 +4,7 @@
 
 mod common;
 
-use nunki::text::{brief, one_line, printable};
+use nunki::text::{blank, brief, one_line, printable};
 
 #[test]
 fn every_control_an_agent_could_send_a_terminal_is_shown_escaped() {
@@ -99,4 +99,94 @@ fn brief_cuts_the_text_and_never_an_escape() {
     assert_eq!(brief("ab\u{1b}", 3), "ab\\u{1b}");
     assert_eq!(brief("é".repeat(5).as_str(), 2), "éé…");
     common::assert_printable(&brief(common::HOSTILE, 40), "brief");
+}
+
+/// Blank is what a reader sees: nothing. Whitespace, controls, every
+/// invisible character `printable` escapes, and the two joiners on their
+/// own are nothing; one visible character, an emoji held together by a
+/// joiner included, is something.
+#[test]
+fn blank_text_is_text_a_reader_sees_nothing_of() {
+    for nothing in [
+        "",
+        " \t\n",
+        "\u{200b}",
+        "\u{200b} \u{2060}\u{feff}",
+        "\u{e0041}\u{e0042}",
+        "\u{202e}\u{2028}",
+        "\u{200d}",
+        "\u{200c}",
+        "\u{1b}\u{7}",
+    ] {
+        assert!(blank(nothing), "{nothing:?} shows nothing");
+    }
+    for something in ["a", "\u{200b}a", "é", "👩\u{200d}💻", "-"] {
+        assert!(!blank(something), "{something:?} shows something");
+    }
+}
+
+/// The characters that show nothing of their own are shown escaped, each at
+/// both ends of its range, and a text of nothing but them is blank: the soft
+/// hyphen, the Mongolian vowel separator, the combining grapheme joiner, the
+/// variation selectors but the two presentation ones, the supplementary
+/// variation selectors, the Hangul fillers and the blank braille pattern.
+#[test]
+fn every_character_that_looks_blank_is_shown_escaped_and_is_blank() {
+    for (c, escape) in [
+        ('\u{00ad}', "\\u{ad}"),
+        ('\u{180e}', "\\u{180e}"),
+        ('\u{034f}', "\\u{34f}"),
+        ('\u{fe00}', "\\u{fe00}"),
+        ('\u{fe0d}', "\\u{fe0d}"),
+        ('\u{e0100}', "\\u{e0100}"),
+        ('\u{e01ef}', "\\u{e01ef}"),
+        ('\u{3164}', "\\u{3164}"),
+        ('\u{115f}', "\\u{115f}"),
+        ('\u{1160}', "\\u{1160}"),
+        ('\u{ffa0}', "\\u{ffa0}"),
+        ('\u{2800}', "\\u{2800}"),
+    ] {
+        assert_eq!(printable(&format!("a{c}b")), format!("a{escape}b"));
+        assert!(blank(&format!(" {c}{c} ")), "{escape} shows nothing");
+    }
+    // Hidden bytes in variation selectors after a visible letter.
+    assert_eq!(printable("ok\u{fe01}\u{e0101}"), "ok\\u{fe01}\\u{e0101}");
+
+    // And beside each range, what does show stays as it was written, and is
+    // not blank — the joiner inside an emoji sequence included.
+    for text in [
+        "\u{00ac}\u{00ae}",
+        "\u{fe10}",
+        "\u{3163}\u{3165}",
+        "\u{115e}",
+        "\u{ff9f}\u{ffa1}",
+        "\u{27ff}\u{2801}",
+        "👩\u{200d}💻",
+        "a",
+    ] {
+        assert_eq!(printable(text), text);
+        assert!(!blank(text), "{text:?} shows something");
+    }
+}
+
+/// The text and emoji presentation selectors (U+FE0E, U+FE0F) are part of
+/// ordinary emoji, and printing them escaped mangled every red heart and
+/// warning sign: they stay as written. Alone, they show nothing, and are
+/// blank.
+#[test]
+fn emoji_with_presentation_selectors_are_printed_as_written() {
+    for text in [
+        "\u{2764}\u{fe0f}",
+        "\u{26a0}\u{fe0f}",
+        "1\u{fe0f}\u{20e3}",
+        "\u{1f3f3}\u{fe0f}\u{200d}\u{1f308}",
+        "\u{2764}\u{fe0e}",
+    ] {
+        assert_eq!(printable(text), text);
+        assert_eq!(one_line(text), text);
+        assert!(!blank(text), "{text:?} shows something");
+    }
+    for nothing in ["\u{fe0f}", "\u{fe0e}", " \u{fe0f}\u{fe0e} "] {
+        assert!(blank(nothing), "{nothing:?} shows nothing");
+    }
 }

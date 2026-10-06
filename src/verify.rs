@@ -129,6 +129,15 @@ pub enum Step {
         provider: String,
         by: String,
     },
+    /// The security agent concluded `FINDINGS`, every finding `LOW` or
+    /// `INFO`, and `nunki` lifted the verdict itself (SPEC 4.5): the
+    /// findings, one line each. Always followed by the flow moving on, as
+    /// after a human's `accept`.
+    LiftedByNunki { findings: Vec<String> },
+    /// The security agent concluded `FINDINGS` and `nunki` did not lift it,
+    /// for this reason: a finding at `MEDIUM` or above, or a ranking it
+    /// cannot read. Always followed by [`Step::Findings`].
+    LeftToHuman { why: String },
     /// The security agent came back with findings: `nunki mission iterate` sends
     /// them back to the coder, `nunki mission accept` lifts them.
     Findings {
@@ -163,6 +172,8 @@ pub enum VerifyError {
     Git(#[from] crate::git::GitError),
     #[error(transparent)]
     Followup(#[from] crate::followup::FollowupError),
+    #[error(transparent)]
+    Findings(#[from] crate::findings::FindingsError),
     /// The subscription's measure could not be kept or read.
     #[error("the subscription's usage: {0}")]
     Usage(String),
@@ -708,69 +719,28 @@ pub fn verify_as(
                                 &outcome,
                                 now,
                             )?;
-                            let mut event =
-                                concluded(Role::Security, outcome, paths.verdict.as_path(), &head);
-                            // The security agent commits nothing, so its gates
-                            // are the two things it does leave: a resume block
-                            // naming the commit it attacked, and a report
-                            // (SPEC 4.4, the per-role table). `CLEAR` and
-                            // `FINDINGS` owe them both — a verdict with no
-                            // report is a verdict about nothing.
-                            if let Event::Verdict { .. } = &event {
-                                let report = gate::at_verification(&subject, &verification)?;
-                                let verdict = report.verdict();
-                                steps.push(Step::Gates {
-                                    role: Role::Security,
-                                    report: Box::new(report),
-                                });
-                                match verdict {
-                                    // Its own to fix, in one more attempt: the
-                                    // journal and the report are the agent's,
-                                    // and nothing else was asked of it.
-                                    gate::Verdict::Red(reason) => {
-                                        event = Event::RunEnded {
-                                            outcome: Outcome::MissionFailure(format!(
-                                                "the gates were red: {reason}"
-                                            )),
-                                            lot_done: false,
-                                        };
-                                    }
-                                    gate::Verdict::CampaignOwed(why) => {
-                                        steps.push(Step::CampaignOwed {
-                                            role: Role::Security,
-                                            why,
-                                        });
-                                        return Ok(steps);
-                                    }
-                                    gate::Verdict::Wall(why) => {
-                                        steps.push(Step::GateUnplayable {
-                                            role: Role::Security,
-                                            why,
-                                        });
-                                        return Ok(steps);
-                                    }
-                                    gate::Verdict::Green => {}
-                                }
+                            // The gates are played by the closure, between
+                            // the single parse of the verdict and the lift
+                            // decided on it ([`security_concluded`]).
+                            let gates = || -> Result<gate::Report, VerifyError> {
+                                Ok(gate::at_verification(&subject, &verification)?)
+                            };
+                            match security_concluded(
+                                &store,
+                                &mut state,
+                                &paths,
+                                &head,
+                                Concluding {
+                                    attempt,
+                                    outcome,
+                                    spared: spared.as_ref(),
+                                },
+                                gates,
+                                &mut steps,
+                            )? {
+                                ReadBack::Moved => continue,
+                                ReadBack::Stopped => return Ok(steps),
                             }
-                            let event = spare_event(spared.as_ref(), event);
-                            if let Some(why) = attempt_failed(&event) {
-                                crate::followup::said(
-                                    &paths.followup,
-                                    "nunki",
-                                    &format!("security, attempt {attempt}: {why}"),
-                                )?;
-                            }
-                            carry(&paths.followup, Role::Security, &event, &head)?;
-                            if let Event::Verdict { verdict, .. } = &event {
-                                state.conclude(Role::Security, Some(*verdict), &head);
-                            }
-                            state.run = None;
-                            state.app = None;
-                            store.apply(&mut state, event)?;
-                            steps.push(Step::Moved {
-                                to: state.flow.stage().clone(),
-                            });
-                            continue;
                         }
                     }
                 }
@@ -1185,21 +1155,43 @@ fn read_back(
 /// attempt. A harness failure costs none, and that distinction is the whole
 /// of SPEC 4.3 on this point.
 fn concluded(role: Role, outcome: Outcome, verdict: &std::path::Path, head: &str) -> Event {
+    concluded_on(role, outcome, verdict, head).0
+}
+
+/// [`concluded`], with the verdict file it read when it read one: what the
+/// security stage decides its lift on, so that the lift rests on exactly the
+/// verdict that was concluded and never on a second read of a file the
+/// application may have rewritten in between (SPEC 4.5).
+fn concluded_on(
+    role: Role,
+    outcome: Outcome,
+    verdict: &std::path::Path,
+    head: &str,
+) -> (Event, Option<crate::mission::VerdictFile>) {
     let Outcome::Finished(_) = &outcome else {
-        return Event::RunEnded {
-            outcome,
-            lot_done: false,
-        };
+        return (
+            Event::RunEnded {
+                outcome,
+                lot_done: false,
+            },
+            None,
+        );
     };
     match read_verdict(verdict, role, head) {
-        Ok(file) => Event::Verdict {
-            verdict: file.verdict,
-            report: file.report,
-        },
-        Err(why) => Event::RunEnded {
-            outcome: Outcome::MissionFailure(why),
-            lot_done: false,
-        },
+        Ok(file) => (
+            Event::Verdict {
+                verdict: file.verdict,
+                report: file.report.clone(),
+            },
+            Some(file),
+        ),
+        Err(why) => (
+            Event::RunEnded {
+                outcome: Outcome::MissionFailure(why),
+                lot_done: false,
+            },
+            None,
+        ),
     }
 }
 
@@ -1236,7 +1228,147 @@ fn read_verdict(
             file.head
         ));
     }
+    // A CLEAR says nothing was found, and a list says something was: a
+    // verdict that says both is malformed, and refused as one rather than
+    // read as whichever half suits (fail closed, SPEC 4.5).
+    if let Some(why) = file.contradiction() {
+        return Err(format!("{} is {why}", path.display()));
+    }
     Ok(file)
+}
+
+/// What the read-back of a finished security run asks of the loop: go on
+/// with the stage the flow moved to, or stop and return the steps.
+enum ReadBack {
+    Moved,
+    Stopped,
+}
+
+/// The finished security run being read back: its attempt, its outcome, and
+/// whether `nunki` ended its turn.
+struct Concluding<'a> {
+    attempt: u32,
+    outcome: Outcome,
+    spared: Option<&'a crate::state::Spared>,
+}
+
+/// Conclude a finished security run (SPEC 4.4, 4.5): parse its verdict
+/// **once**, play its `gates`, move the flow, and decide `nunki`'s own lift
+/// on that same parse.
+///
+/// The gates run between the parse and the lift, and while they run code
+/// from the tree may still be writing `VERDICT.json`. So the verdict is
+/// read here once, at the top, and everything after — the event, the record,
+/// the lift — rests on that parse; nothing below reads the file again. The
+/// gates are a parameter so that a test can stand exactly there and rewrite
+/// the file, and see that the lift does not follow.
+fn security_concluded(
+    store: &Store,
+    state: &mut MissionState,
+    paths: &Paths,
+    head: &str,
+    run: Concluding,
+    gates: impl FnOnce() -> Result<gate::Report, VerifyError>,
+    steps: &mut Vec<Step>,
+) -> Result<ReadBack, VerifyError> {
+    let (mut event, verdict_file) =
+        concluded_on(Role::Security, run.outcome, paths.verdict.as_path(), head);
+    // The security agent commits nothing, so its gates are the two things it
+    // does leave: a resume block naming the commit it attacked, and a report
+    // (SPEC 4.4, the per-role table). `CLEAR` and `FINDINGS` owe them both —
+    // a verdict with no report is a verdict about nothing.
+    if let Event::Verdict { .. } = &event {
+        let report = gates()?;
+        let verdict = report.verdict();
+        steps.push(Step::Gates {
+            role: Role::Security,
+            report: Box::new(report),
+        });
+        match verdict {
+            // Its own to fix, in one more attempt: the journal and the report
+            // are the agent's, and nothing else was asked of it.
+            gate::Verdict::Red(reason) => {
+                event = Event::RunEnded {
+                    outcome: Outcome::MissionFailure(format!("the gates were red: {reason}")),
+                    lot_done: false,
+                };
+            }
+            gate::Verdict::CampaignOwed(why) => {
+                steps.push(Step::CampaignOwed {
+                    role: Role::Security,
+                    why,
+                });
+                return Ok(ReadBack::Stopped);
+            }
+            gate::Verdict::Wall(why) => {
+                steps.push(Step::GateUnplayable {
+                    role: Role::Security,
+                    why,
+                });
+                return Ok(ReadBack::Stopped);
+            }
+            gate::Verdict::Green => {}
+        }
+    }
+    let event = spare_event(run.spared, event);
+    if let Some(why) = attempt_failed(&event) {
+        crate::followup::said(
+            &paths.followup,
+            "nunki",
+            &format!("security, attempt {}: {why}", run.attempt),
+        )?;
+    }
+    carry(&paths.followup, Role::Security, &event, head)?;
+    // The parsed verdict stands only if the flow is about to move on it: a
+    // verdict its gates refused is no verdict, and nothing is lifted on it.
+    let concluded_file = match &event {
+        Event::Verdict { .. } => verdict_file,
+        _ => None,
+    };
+    if let Event::Verdict { verdict, .. } = &event {
+        state.conclude(Role::Security, Some(*verdict), head);
+    }
+    state.run = None;
+    state.app = None;
+    store.apply(state, event)?;
+    steps.push(Step::Moved {
+        to: state.flow.stage().clone(),
+    });
+    // A report whose every finding is LOW or INFO is lifted by `nunki`
+    // itself, as a human's `accept` would lift it; anything else stays on
+    // `Findings` for a human, as before (SPEC 4.5).
+    if let Some(decision) = lift_on(concluded_file.as_ref(), state.flow.stage()) {
+        match decision {
+            Ok(lifted) => {
+                crate::findings::lift_by_nunki(store, state, &paths.followup, &lifted, head)?;
+                steps.push(Step::LiftedByNunki {
+                    findings: lifted.iter().map(|f| f.line()).collect(),
+                });
+            }
+            Err(why) => steps.push(Step::LeftToHuman { why }),
+        }
+    }
+    Ok(ReadBack::Moved)
+}
+
+/// The lift `nunki` decides on a security verdict just concluded: `None`
+/// when there is nothing to decide — no verdict concluded, or the flow not
+/// on `Findings` — else the findings it lifts, or why it lifts nothing
+/// (SPEC 4.5).
+///
+/// It takes the verdict [`concluded_on`] parsed and no path: the lift rests
+/// on exactly the verdict that was concluded, and there is no file here to
+/// read a second time, whatever was written to it since.
+fn lift_on(
+    concluded: Option<&crate::mission::VerdictFile>,
+    stage: &Stage,
+) -> Option<Result<Vec<crate::mission::LowFinding>, String>> {
+    match (concluded, stage) {
+        (Some(file), Stage::Findings { .. }) => {
+            Some(file.automatic_lift().map_err(|why| why.to_string()))
+        }
+        _ => None,
+    }
 }
 
 /// Carry a red verdict to the coder before the flow moves on it.
@@ -1402,4 +1534,202 @@ pub fn harness_spawner(
         crate::compose::AGENT_SERVICE,
     )
     .identified_by(session)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const HEAD: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    fn ranked(findings: &str) -> String {
+        format!(
+            "{{\"role\":\"Security\",\"verdict\":\"FINDINGS\",\"head\":\"{HEAD}\",\
+             \"date\":\"2026-10-05T00:00:00Z\",\"report\":\"what was found\",\
+             \"findings\":{findings}}}"
+        )
+    }
+
+    fn findings() -> Stage {
+        Stage::Findings {
+            report: "what was found".into(),
+        }
+    }
+
+    /// A mission framed at `standard` with the security agent, at the stage
+    /// where its run is read back, in a fresh HQ under `dir`.
+    fn at_security(dir: &std::path::Path) -> (Store, MissionState, Paths) {
+        let header = crate::mission::Header {
+            branch: "mission/x".into(),
+            base: "dev".into(),
+            lots: vec![crate::mission::Lot {
+                id: "L1".into(),
+                title: "one".into(),
+            }],
+            integration: crate::mission::Integration::None {
+                reason: "none".into(),
+            },
+            security: crate::mission::Security::Agent,
+            rigor: crate::mission::Rigor::Standard,
+            mutation_threshold: None,
+            arbiter: None,
+            account: None,
+            model: None,
+            run: None,
+            bounds: Default::default(),
+        };
+        let paths =
+            crate::mission::dir::create(dir, "m1", &header, "do it").expect("the mission folder");
+        let store = Store::open(dir).expect("the state directory");
+        let mut state = MissionState {
+            id: "m1".into(),
+            slot: "one".into(),
+            flow: crate::mission::flow::Flow::new(header).expect("a valid header"),
+            run: None,
+            app: None,
+            verdicts: Vec::new(),
+            accepted: Vec::new(),
+            stopped: None,
+            harness_down: None,
+            spent: Default::default(),
+            spared: None,
+            coder_session: None,
+            pushed: None,
+            updated_at: String::new(),
+            revision: 0,
+        };
+        for event in [
+            Event::RunEnded {
+                outcome: Outcome::Finished(Default::default()),
+                lot_done: true,
+            },
+            Event::GatesPassed,
+        ] {
+            store.apply(&mut state, event).expect("the flow moves");
+        }
+        assert!(matches!(state.flow.stage(), Stage::SecurityAgent { .. }));
+        (store, state, paths)
+    }
+
+    fn green(head: &str) -> gate::Report {
+        gate::Report {
+            role: Role::Security,
+            head: head.into(),
+            outcomes: Vec::new(),
+        }
+    }
+
+    fn finished() -> Concluding<'static> {
+        Concluding {
+            attempt: 1,
+            outcome: Outcome::Finished(Default::default()),
+            spared: None,
+        }
+    }
+
+    /// The lift is decided on the verdict concluded, not on the file as it
+    /// stands after (SPEC 4.5). The honest MEDIUM report is parsed; the gates
+    /// — which run between the parse and the lift, while code from the tree
+    /// may still be writing — rewrite it LOW-only; the decision is the
+    /// MEDIUM's: left to a human, nothing accepted. Any read of the file put
+    /// back after the gates would see the forged list and lift it.
+    #[test]
+    fn the_lift_is_decided_on_the_verdict_concluded_not_on_the_file_rewritten_after_it() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let (store, mut state, paths) = at_security(dir.path());
+        std::fs::write(
+            &paths.verdict,
+            ranked(r#"[{"severity":"MEDIUM","title":"an open redirect"}]"#),
+        )
+        .expect("the verdict is written");
+        let forged = ranked(
+            r#"[{"severity":"LOW","title":"an open redirect","why_acceptable":"nothing to see"}]"#,
+        );
+
+        let mut rewritten = false;
+        let gates = || {
+            std::fs::write(&paths.verdict, &forged).expect("the verdict is rewritten");
+            rewritten = true;
+            Ok(green(HEAD))
+        };
+        let mut steps = Vec::new();
+        let next = security_concluded(
+            &store,
+            &mut state,
+            &paths,
+            HEAD,
+            finished(),
+            gates,
+            &mut steps,
+        )
+        .expect("the run is concluded");
+
+        assert!(rewritten, "the gates ran, between the parse and the lift");
+        assert!(matches!(next, ReadBack::Moved));
+        assert!(
+            steps.iter().any(|s| matches!(s, Step::LeftToHuman { why }
+                if why.contains("an open redirect") && why.contains("MEDIUM"))),
+            "{steps:?}"
+        );
+        assert!(
+            !steps
+                .iter()
+                .any(|s| matches!(s, Step::LiftedByNunki { .. })),
+            "{steps:?}"
+        );
+        assert!(matches!(state.flow.stage(), Stage::Findings { .. }));
+        assert!(state.accepted.is_empty(), "{:?}", state.accepted);
+        assert!(store.load("m1").expect("the state").accepted.is_empty());
+
+        // The forged file is one that would have been lifted, had it been
+        // read: the test stands where a second read would make a difference.
+        let reread = read_verdict(&paths.verdict, Role::Security, HEAD).expect("it reads");
+        assert!(lift_on(Some(&reread), &findings()).is_some_and(|d| d.is_ok()));
+    }
+
+    /// The same seam, nothing rewritten: a LOW-only verdict is lifted, so
+    /// the test above is red for the reason it says and not because the
+    /// seam lifts nothing at all.
+    #[test]
+    fn through_the_same_seam_a_low_only_verdict_is_lifted() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let (store, mut state, paths) = at_security(dir.path());
+        std::fs::write(
+            &paths.verdict,
+            ranked(r#"[{"severity":"LOW","title":"a","why_acceptable":"x"}]"#),
+        )
+        .expect("the verdict is written");
+        let mut steps = Vec::new();
+        security_concluded(
+            &store,
+            &mut state,
+            &paths,
+            HEAD,
+            finished(),
+            || Ok(green(HEAD)),
+            &mut steps,
+        )
+        .expect("the run is concluded");
+        assert!(
+            steps
+                .iter()
+                .any(|s| matches!(s, Step::LiftedByNunki { .. })),
+            "{steps:?}"
+        );
+        assert_eq!(state.flow.stage(), &Stage::Verified);
+        assert_eq!(state.accepted.len(), 1);
+    }
+
+    /// Nothing is decided without a verdict concluded, or off `Findings`.
+    #[test]
+    fn no_lift_is_decided_without_a_concluded_verdict_or_off_findings() {
+        let low: crate::mission::VerdictFile = serde_json::from_str(&ranked(
+            r#"[{"severity":"LOW","title":"a","why_acceptable":"x"}]"#,
+        ))
+        .expect("the verdict parses");
+        assert!(lift_on(None, &findings()).is_none());
+        assert!(lift_on(Some(&low), &Stage::Verified).is_none());
+        assert!(lift_on(Some(&low), &Stage::SecurityAgent { attempt: 1 }).is_none());
+        assert!(lift_on(Some(&low), &findings()).is_some_and(|d| d.is_ok()));
+    }
 }

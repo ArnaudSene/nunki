@@ -370,6 +370,7 @@ fn findings_nobody_lifted_do_not_reach_the_forge() {
         who: "Alex Martin".into(),
         head: head.clone(),
         date: "2026-09-10T00:00:00Z".into(),
+        by_nunki: false,
     });
     world.store().save(&state).unwrap();
     push::push(&world.project, "m1", true).unwrap();
@@ -809,6 +810,7 @@ impl World {
             who: "Alex Martin".into(),
             head: head.to_string(),
             date: date.to_string(),
+            by_nunki: false,
         });
         self.store().save(&state).unwrap();
         if matches!(self.stage(), Stage::Findings { .. }) && finding.is_none() {
@@ -1218,4 +1220,147 @@ fn the_gates_are_printed_one_line_each_with_their_mark_and_why() {
     ] {
         assert!(out.contains(line), "{line}\nin:\n{out}");
     }
+}
+
+// --- the lift nunki records itself (SPEC 4.5) ------------------------------
+
+impl World {
+    /// The lift `nunki` records on a FINDINGS whose every finding is LOW or
+    /// INFO, on `HEAD`, as `verify` records it.
+    fn lifted_by_nunki(&self) {
+        let store = self.store();
+        let mut state = store.load("m1").unwrap();
+        nunki::findings::lift_by_nunki(
+            &store,
+            &mut state,
+            &nunki::mission::dir::Paths::of(&self.project.hq_root, "m1").followup,
+            &[
+                nunki::mission::LowFinding {
+                    severity: nunki::mission::Severity::Low,
+                    title: "verbose error page".into(),
+                    why_acceptable: "it names no path".into(),
+                },
+                nunki::mission::LowFinding {
+                    severity: nunki::mission::Severity::Info,
+                    title: "no security.txt".into(),
+                    why_acceptable: "nothing is exposed".into(),
+                },
+            ],
+            &self.head(),
+        )
+        .unwrap();
+    }
+}
+
+const LIFTED: [&str; 2] = [
+    "LOW — verbose error page: it names no path",
+    "INFO — no security.txt: nothing is exposed",
+];
+
+/// A FINDINGS nunki lifted on `HEAD` is pushed as a human's lift would be,
+/// and the push says what nunki accepted — while a human's lift names
+/// nothing as nunki's.
+#[test]
+fn a_lift_by_nunki_on_head_is_pushed_naming_its_findings() {
+    let world = World::at(nunki::mission::Rigor::Critical);
+    world.coded("pub fn one() -> u8 { 2 }\n", "the lot");
+    world.security(Verdict::Findings, T1);
+    world.lifted_by_nunki();
+    assert_eq!(world.stage(), Stage::Verified);
+
+    let pushed = push::push(&world.project, "m1", true).unwrap();
+    assert_eq!(pushed.lifted_by_nunki, LIFTED.map(str::to_string).to_vec());
+    assert_eq!(
+        world.on_forge("mission/x").as_deref(),
+        Some(world.head().as_str())
+    );
+
+    let human = World::at(nunki::mission::Rigor::Critical);
+    let lot = human.coded("pub fn one() -> u8 { 2 }\n", "the lot");
+    human.security(Verdict::Findings, T1);
+    human.accepted(&lot, T2);
+    let pushed = push::push(&human.project, "m1", true).unwrap();
+    assert!(
+        pushed.lifted_by_nunki.is_empty(),
+        "{:?}",
+        pushed.lifted_by_nunki
+    );
+}
+
+/// A lift is worth the verdict it answered. A later FINDINGS, on a later
+/// commit, is not covered by nunki's lift of an earlier one — not even when
+/// something forged the flow to `Verified`.
+#[test]
+fn a_later_findings_is_not_covered_by_an_earlier_lift_by_nunki() {
+    let world = World::at(nunki::mission::Rigor::Critical);
+    world.coded("pub fn one() -> u8 { 2 }\n", "the lot");
+    world.security(Verdict::Findings, T1);
+    world.lifted_by_nunki();
+    world.review();
+    let volet = world.coded("pub fn one() -> u8 { 3 }\n", "the volet");
+    world.security(Verdict::Findings, T2);
+    assert!(matches!(world.stage(), Stage::Findings { .. }));
+    world.event(Event::HumanAccepted);
+
+    let err = push::push(&world.project, "m1", true).unwrap_err();
+    assert!(
+        matches!(&err, PushError::NotLifted(head) if *head == volet),
+        "{err}"
+    );
+    assert!(world.on_forge("mission/x").is_none());
+}
+
+/// At `standard`, nunki's lift of the one round's FINDINGS stands for the
+/// volet after it, by the rule a human's lift follows at the cap: the
+/// commits are named as not attacked, and the findings as nunki's.
+#[test]
+fn at_the_cap_a_lift_by_nunki_stands_for_the_commits_after_it() {
+    let world = World::at(nunki::mission::Rigor::Standard);
+    world.coded("pub fn one() -> u8 { 2 }\n", "the lot");
+    world.security(Verdict::Findings, "2000-01-01T00:00:00Z");
+    world.lifted_by_nunki();
+    world.review();
+    let volet = world.coded("pub fn one() -> u8 { 3 }\n", "the volet");
+    assert_eq!(world.stage(), Stage::Verified, "no second round");
+
+    let pushed = push::push(&world.project, "m1", true).unwrap();
+    assert_eq!(pushed.not_attacked, vec![named(&volet, "the volet")]);
+    assert_eq!(pushed.lifted_by_nunki, LIFTED.map(str::to_string).to_vec());
+}
+
+/// What `nunki push` and `nunki mission status` print: the findings nunki
+/// accepted, under a heading that says it was nunki — and nothing of the
+/// sort on a push no lift by nunki stands under. The real binary, because
+/// the decision is in what the CLI prints.
+#[test]
+fn push_and_status_print_what_nunki_accepted_and_only_then() {
+    let world = World::opened_at(nunki::mission::Rigor::Critical);
+    world.coded("pub fn one() -> u8 { 2 }\n", "the lot");
+    world.security(Verdict::Findings, T1);
+    world.lifted_by_nunki();
+
+    let status = world.printed_by_the_binary(&["mission", "status", "m1"]);
+    assert!(
+        status.contains(&format!(
+            "accepted  by nunki (LOW/INFO) on {}:",
+            &world.head()[..12]
+        )),
+        "{status}"
+    );
+    for line in LIFTED {
+        assert!(status.contains(line), "{line}\nin:\n{status}");
+    }
+
+    let out = world.pushed_by_the_binary();
+    assert!(out.contains("accepted by nunki (LOW/INFO):"), "{out}");
+    for line in LIFTED {
+        assert!(out.contains(line), "{line}\nin:\n{out}");
+    }
+
+    let clear = World::opened_at(nunki::mission::Rigor::Critical);
+    clear.coded("pub fn one() -> u8 { 2 }\n", "the lot");
+    clear.security(Verdict::Clear, T1);
+    let out = clear.pushed_by_the_binary();
+    assert!(out.contains("pushed"), "the push happened: {out}");
+    assert!(!out.contains("accepted by nunki"), "{out}");
 }

@@ -173,7 +173,10 @@ pub enum Event {
     Verdict { verdict: Verdict, report: String },
     /// From `Findings`: the HQ chooses to iterate.
     Iterate,
-    /// From `Findings`: the human lifted every finding (`nunki mission accept`).
+    /// From `Findings`: the human lifted every finding (`nunki mission
+    /// accept`) — or `nunki` did, every finding being `LOW` or `INFO`
+    /// ([`crate::findings::lift_by_nunki`]). One transition for both, so a
+    /// lift by `nunki` moves the flow exactly as a human's does.
     HumanAccepted,
     /// From `Verified`: the HQ read the verified branch before pushing it and
     /// sends it back to the coder, saying why (`nunki mission iterate

@@ -55,6 +55,12 @@ fn every_record_the_hq_leaves_is_prose_and_not_a_code_block() {
     )
     .unwrap();
     followup::lifted_all(&file, "Someone", "the risk is accepted", &head()).unwrap();
+    followup::lifted_by_nunki(
+        &file,
+        &["LOW — a verbose error page: it names no path".to_string()],
+        &head(),
+    )
+    .unwrap();
     followup::ended(&file, "Someone", "the approach was wrong").unwrap();
     followup::said(&file, "Someone", "read the migration before the store").unwrap();
     followup::security_capped(&file, 1, 1, &["0123456789ab the volet".to_string()]).unwrap();
@@ -68,6 +74,7 @@ fn every_record_the_hq_leaves_is_prose_and_not_a_code_block() {
         "carried",
         "lifted a security finding",
         "lifted the security verdict",
+        "nunki lifted the security verdict",
         "called this mission off",
         "left an instruction",
         "did not call the security agent again",

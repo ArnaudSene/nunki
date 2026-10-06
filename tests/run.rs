@@ -642,7 +642,37 @@ fn the_security_agent_is_told_what_its_own_gates_require() {
         .unwrap_or_else(|e| panic!("the shape in the prompt is not one nunki reads: {e}\n{line}"));
     assert_eq!(file.role, Role::Security);
     assert_eq!(file.verdict, nunki::mission::Verdict::Clear);
+    assert_eq!(
+        file.findings,
+        Some(nunki::mission::FindingList::Listed(Vec::new())),
+        "CLEAR has an empty list"
+    );
     assert!(security.contains("`FINDINGS`"), "{security}");
+
+    // The ranked shape, read by the very rule that decides the lift: its
+    // MEDIUM is the human's, and its LOW carries the reason nunki would need.
+    let ranked = security
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("{\"role\"") && l.contains("\"FINDINGS\""))
+        .expect("the prompt shows a FINDINGS with its ranked list");
+    let file: nunki::mission::VerdictFile = serde_json::from_str(ranked)
+        .unwrap_or_else(|e| panic!("the ranked shape is not one nunki reads: {e}\n{ranked}"));
+    let Some(nunki::mission::FindingList::Listed(findings)) = &file.findings else {
+        panic!("the ranked shape lists its findings: {ranked}");
+    };
+    assert_eq!(findings.len(), 2, "{ranked}");
+    assert!(
+        matches!(
+            file.automatic_lift(),
+            Err(nunki::mission::Withheld::TooSevere { .. })
+        ),
+        "{ranked}"
+    );
+    assert!(findings[1].why_acceptable.is_some(), "{ranked}");
+    for severity in ["`HIGH`", "`MEDIUM`", "`LOW`", "`INFO`", "why_acceptable"] {
+        assert!(security.contains(severity), "{severity}: {security}");
+    }
 
     // And both roles that meet a running application are told it may still be
     // starting: `nunki` launches it and does not wait for it to serve.

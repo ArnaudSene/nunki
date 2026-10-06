@@ -167,6 +167,10 @@ pub struct Pushed {
     /// not attacked by the security agent. Empty when its verdict is on
     /// `HEAD`, or when the mission has no security agent.
     pub not_attacked: Vec<String>,
+    /// The findings `nunki` lifted itself, every one `LOW` or `INFO`, in the
+    /// lift this push stands on, one line each (SPEC 4.5). Empty when the
+    /// security verdict was a `CLEAR`, or a human lifted it.
+    pub lifted_by_nunki: Vec<String>,
 }
 
 /// Where the pull request stands once the branch is on the forge.
@@ -221,7 +225,10 @@ pub fn push_to(
     let slot = crate::slot::find(project, &state.slot)?;
     let head = crate::git::head(&slot.tree)?;
     let header = state.flow.header().clone();
-    let not_attacked = verdicts_hold(&slot, &state, &head)?;
+    let Held {
+        not_attacked,
+        lifted_by_nunki,
+    } = verdicts_hold(&slot, &state, &head)?;
 
     let fetched = fetch(project, id)?;
     let remote = remote_url(project)?;
@@ -244,6 +251,7 @@ pub fn push_to(
         remote,
         pull_request,
         not_attacked,
+        lifted_by_nunki,
     })
 }
 
@@ -303,15 +311,21 @@ fn open_pull_request(
     }
 }
 
+/// What the verdicts a push stands on leave to say.
+struct Held {
+    /// The commits the security agent did not attack because its rounds
+    /// were spent — empty whenever its verdict is on `HEAD`.
+    not_attacked: Vec<String>,
+    /// The findings `nunki` lifted itself in the lift the push stands on.
+    lifted_by_nunki: Vec<String>,
+}
+
 /// Every precondition of SPEC 4.4, in the order a human would ask them.
-///
-/// Returns the commits the security agent did not attack because its rounds
-/// were spent — empty whenever its verdict is on `HEAD`.
 fn verdicts_hold(
     slot: &crate::slot::Slot,
     state: &MissionState,
     head: &str,
-) -> Result<Vec<String>, PushError> {
+) -> Result<Held, PushError> {
     let header = state.flow.header();
 
     if header.has_integration() {
@@ -324,10 +338,13 @@ fn verdicts_hold(
         green(Role::Integrator, concluded.verdict)?;
     }
 
-    let not_attacked = if header.has_security_agent() {
+    let held = if header.has_security_agent() {
         security_holds(slot, state, head)?
     } else {
-        Vec::new()
+        Held {
+            not_attacked: Vec::new(),
+            lifted_by_nunki: Vec::new(),
+        }
     };
 
     // The coder's, and the rule that makes it survive the integrator's
@@ -337,7 +354,7 @@ fn verdicts_hold(
         .concluded(Role::Coder)
         .ok_or(PushError::NoVerdict { role: Role::Coder })?;
     only_wiring_since(slot, &coder.head, head, header)?;
-    Ok(not_attacked)
+    Ok(held)
 }
 
 /// The security agent's precondition (SPEC 4.5).
@@ -347,8 +364,12 @@ fn verdicts_hold(
 /// verdict on a later commit can ever come, and asking for one would refuse
 /// every mission with a volet after its last round. The last verdict then
 /// stands for what came after it, and only that way: a `CLEAR` as it is, a
-/// `FINDINGS` lifted by a human after it was concluded — never one nobody
-/// lifted. What came after is returned, to be named as not attacked.
+/// `FINDINGS` lifted after it was concluded — never one nobody lifted. What
+/// came after is returned, to be named as not attacked.
+///
+/// A lift `nunki` recorded itself, on a report whose every finding is `LOW`
+/// or `INFO`, is read by exactly these rules, and its findings are returned
+/// so the push names them.
 ///
 /// A prototype plays no round: there was never a security agent to
 /// conclude, and none is asked for, as for `security: gates`. A header
@@ -358,9 +379,13 @@ fn security_holds(
     slot: &crate::slot::Slot,
     state: &MissionState,
     head: &str,
-) -> Result<Vec<String>, PushError> {
+) -> Result<Held, PushError> {
+    let mut held = Held {
+        not_attacked: Vec::new(),
+        lifted_by_nunki: Vec::new(),
+    };
     if state.flow.max_security_rounds() == 0 {
-        return Ok(Vec::new());
+        return Ok(held);
     }
     let concluded = state
         .concluded(Role::Security)
@@ -370,16 +395,23 @@ fn security_holds(
     let spent = state.flow.security_rounds() >= state.flow.max_security_rounds();
     if !spent {
         on_this_commit(Role::Security, concluded, head)?;
-        // The one verdict a human may overrule, and only by having said so
-        // on this commit, with a reason, through `nunki mission accept`.
+        // The one verdict that may be overruled, and only by a lift on this
+        // commit, with a reason: a human's through `nunki mission accept`,
+        // or `nunki`'s own on a report below MEDIUM.
         if concluded.verdict == Some(Verdict::Findings) {
-            if !state.verdict_lifted_on(head) {
+            let lifts: Vec<&crate::state::Accepted> = state
+                .accepted_on(head)
+                .into_iter()
+                .filter(|a| a.finding.is_none())
+                .collect();
+            if lifts.is_empty() {
                 return Err(PushError::NotLifted(head.to_string()));
             }
+            held.lifted_by_nunki = by_nunki(&lifts);
         } else {
             green(Role::Security, concluded.verdict)?;
         }
-        return Ok(Vec::new());
+        return Ok(held);
     }
 
     // "What came after the last round" means something only on its branch.
@@ -390,31 +422,46 @@ fn security_holds(
         });
     }
     if concluded.verdict == Some(Verdict::Findings) {
-        if !lifted_after(&slot.tree, state, concluded, head) {
+        let lifts = lifted_after(&slot.tree, state, concluded, head);
+        if lifts.is_empty() {
             return Err(PushError::NotLifted(head.to_string()));
         }
+        held.lifted_by_nunki = by_nunki(&lifts);
     } else {
         green(Role::Security, concluded.verdict)?;
     }
-    Ok(not_attacked(&slot.tree, &concluded.head, head)?)
+    held.not_attacked = not_attacked(&slot.tree, &concluded.head, head)?;
+    Ok(held)
 }
 
-/// Whether a human lifted the verdict as a whole after `concluded` was
+/// The findings `nunki` lifted itself among `lifts`, one line each.
+fn by_nunki(lifts: &[&crate::state::Accepted]) -> Vec<String> {
+    lifts
+        .iter()
+        .flat_map(|a| crate::findings::lifted_by_nunki(a))
+        .collect()
+}
+
+/// The lifts of the verdict as a whole given after `concluded` was
 /// concluded — on its commit or a later one of the branch being pushed, and
 /// no earlier in time. A lift given on an earlier report is a decision about
 /// that report, not about this one.
-fn lifted_after(
+fn lifted_after<'s>(
     tree: &std::path::Path,
-    state: &MissionState,
+    state: &'s MissionState,
     concluded: &crate::state::Concluded,
     head: &str,
-) -> bool {
-    state.accepted.iter().any(|a| {
-        a.finding.is_none()
-            && a.date >= concluded.date
-            && is_ancestor(tree, &concluded.head, &a.head)
-            && is_ancestor(tree, &a.head, head)
-    })
+) -> Vec<&'s crate::state::Accepted> {
+    state
+        .accepted
+        .iter()
+        .filter(|a| {
+            a.finding.is_none()
+                && a.date >= concluded.date
+                && is_ancestor(tree, &concluded.head, &a.head)
+                && is_ancestor(tree, &a.head, head)
+        })
+        .collect()
 }
 
 /// Whether `older` is `newer` or one of its ancestors. Anything git cannot
