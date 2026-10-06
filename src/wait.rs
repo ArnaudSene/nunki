@@ -164,6 +164,9 @@ pub struct Spent {
 pub struct Context {
     pub watcher: Watcher,
     pub window: Option<Spent>,
+    /// How many equivalences the coder proposed await the HQ's ruling
+    /// ([`crate::mutants::awaiting_ruling`]), or why that could not be read.
+    pub proposals: Result<usize, String>,
 }
 
 /// The stage as the line names it.
@@ -188,6 +191,38 @@ pub fn stage_name(flow: &Flow) -> String {
 /// account's window: the first is the most a reader can act on, and a
 /// monitor that is gone is something to mend whatever the window says.
 pub fn status(id: &str, state: &MissionState, context: &Context) -> Option<Status> {
+    stopped(id, state, context).map(|stop| with_proposals(id, stop, &context.proposals))
+}
+
+/// A stop, saying how many equivalences the coder proposed await the HQ.
+///
+/// A verified mission with one waits on the HQ and not on the human's push:
+/// `nunki push` would refuse, so the line names the two verbs that rule.
+fn with_proposals(id: &str, mut stop: Status, proposals: &Result<usize, String>) -> Status {
+    let (said, waiting) = match proposals {
+        Ok(count) => match crate::mutants::proposals_await(*count) {
+            Some(said) => (said, true),
+            None => return stop,
+        },
+        Err(why) => (
+            format!("the equivalence proposals could not be read: {why}"),
+            false,
+        ),
+    };
+    stop.detail = one_line(&format!("{}; {said}", stop.detail));
+    if waiting && stop.stop == Stop::Verified {
+        stop.awaits = Awaits {
+            who: "the HQ".to_string(),
+            what: format!(
+                "`nunki mission mutants {id} --ratify <survivor>`, or `--refuse <survivor> \
+                 --because <why>`, for each; then `nunki push {id} --yes`"
+            ),
+        };
+    }
+    stop
+}
+
+fn stopped(id: &str, state: &MissionState, context: &Context) -> Option<Status> {
     if let Some(settled) = settled(id, state) {
         return Some(settled);
     }
@@ -517,9 +552,17 @@ impl Reader for Hq<'_> {
             }
         };
         let window = self.window(&state);
+        let proposals =
+            crate::mutants::awaiting_ruling(&crate::mission::dir::Paths::of(hq_root, id).dir)
+                .map(|waiting| waiting.len())
+                .map_err(|e| e.to_string());
         Ok(Observed::Live {
             state: Box::new(state),
-            context: Context { watcher, window },
+            context: Context {
+                watcher,
+                window,
+                proposals,
+            },
         })
     }
 }

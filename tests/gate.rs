@@ -1267,6 +1267,7 @@ fn survivor(line: u32, outcome: Option<Triage>) -> Survivor {
         line,
         description: "replace two with 0".into(),
         outcome,
+        refused: None,
     }
 }
 
@@ -2865,4 +2866,188 @@ fn an_equivalence_given_on_this_campaign_is_not_called_carried() {
     assert!(note.contains("1 of 1 rode on `equivalent`"), "{note}");
     assert!(!note.contains("carried"), "{note}");
     assert!(!note.contains("--lift"), "{note}");
+}
+
+// ---------------------------------------------------------------------------
+// Gate 7 and the coder's proposal of an equivalence (SPEC 4.4).
+// ---------------------------------------------------------------------------
+
+fn proposed(why: &str) -> Triage {
+    Triage::EquivalentProposed { why: why.into() }
+}
+
+/// A critical mission whose coder proposed two equivalences passes gate 7:
+/// a proposal is an outcome, so nothing stops for the HQ here. The note
+/// counts the proposals apart from the HQ's rulings, so a reader sees which
+/// outcomes nobody has ruled on yet.
+#[test]
+fn a_critical_mission_with_two_proposals_passes_gate_seven_and_counts_them_apart() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    commit(
+        &f.tree,
+        "tests/thing.rs",
+        "#[test]\nfn the_thing_holds() {}\n",
+        "tests",
+    );
+    f.campaign(vec![
+        survivor(1, None),
+        survivor(2, None),
+        survivor(3, None),
+        survivor(
+            4,
+            Some(Triage::Equivalent {
+                why: "no caller can reach that branch".into(),
+                carried_from: None,
+            }),
+        ),
+    ]);
+    f.coder_answers(&[
+        ("src/new.rs:1", proposed("the value is only ever logged")),
+        (
+            "src/new.rs:2",
+            proposed("both arms return the same constant"),
+        ),
+        (
+            "src/new.rs:3",
+            Triage::Killed {
+                test: "the_thing_holds".into(),
+            },
+        ),
+    ]);
+    f.journal_names_head();
+    let outcome = f.gate_seven(Role::Coder);
+    assert_eq!(outcome.decision, Decision::Passed);
+    let note = outcome.note.expect("proposals are counted out loud");
+    assert!(
+        note.contains("2 of 4 rode on an equivalence the coder proposed"),
+        "{note}"
+    );
+    assert!(note.contains("`nunki push` refuses"), "{note}");
+    // And the HQ's own ruling is counted on its own.
+    assert!(note.contains("1 of 4 rode on `equivalent`"), "{note}");
+}
+
+/// A proposal is one sentence, and a blank one — whitespace, or characters
+/// nobody can see — says nothing: it is no outcome, and the gate says why
+/// the line was not read.
+#[test]
+fn a_proposal_with_a_blank_reason_is_no_outcome() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.campaign(vec![survivor(1, None)]);
+    f.journal_names_head();
+    for blank in ["", "   ", "\u{200b}\u{200d}"] {
+        f.coder_answers(&[("src/new.rs:1", proposed(blank))]);
+        match f.gate_seven(Role::Coder).decision {
+            Decision::Failed(why) => {
+                assert!(why.contains("src/new.rs:1"), "{blank:?}: {why}");
+                assert!(why.contains("gives no reason"), "{blank:?}: {why}");
+            }
+            other => panic!("{blank:?} is no reason: {other:?}"),
+        }
+    }
+    f.coder_answers(&[("src/new.rs:1", proposed("only a log line reads it"))]);
+    assert_eq!(f.gate_seven(Role::Coder).decision, Decision::Passed);
+}
+
+/// A proposal the HQ refused is no outcome, even written again: the HQ has
+/// said no on that survivor, and only a test answers it now.
+#[test]
+fn a_proposal_the_hq_refused_is_no_outcome() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    let mut refused = survivor(1, None);
+    refused.refused = Some(nunki::mutants::Refusal {
+        proposed: "nothing reads it".into(),
+        because: "the CLI prints it".into(),
+    });
+    f.campaign(vec![refused]);
+    f.coder_answers(&[("src/new.rs:1", proposed("nothing reads it, really"))]);
+    f.journal_names_head();
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => {
+            assert!(why.contains("the HQ refused its proposal"), "{why}");
+            assert!(why.contains("the CLI prints it"), "{why}");
+        }
+        other => panic!("a refused proposal is no outcome: {other:?}"),
+    }
+}
+
+/// Once the HQ has ruled, the ruling is what answers, whatever the coder's
+/// file still says: the note counts an equivalence, and no proposal.
+#[test]
+fn a_ratified_proposal_answers_as_the_hqs_ruling() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.campaign(vec![survivor(
+        1,
+        Some(Triage::Equivalent {
+            why: "only a log line reads it".into(),
+            carried_from: None,
+        }),
+    )]);
+    f.coder_answers(&[("src/new.rs:1", proposed("only a log line reads it"))]);
+    f.journal_names_head();
+    let outcome = f.gate_seven(Role::Coder);
+    assert_eq!(outcome.decision, Decision::Passed);
+    let note = outcome.note.unwrap();
+    assert!(note.contains("1 of 1 rode on `equivalent`"), "{note}");
+    assert!(!note.contains("the coder proposed"), "{note}");
+}
+
+/// The coder's own `equivalent` stays a red gate, and the refusal points at
+/// what the coder may write instead.
+#[test]
+fn the_coders_own_equivalent_is_still_red_and_points_at_the_proposal() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.campaign(vec![survivor(1, None), survivor(2, None)]);
+    f.coder_answers(&[
+        ("src/new.rs:1", proposed("only a log line reads it")),
+        (
+            "src/new.rs:2",
+            Triage::Equivalent {
+                why: "trust me".into(),
+                carried_from: None,
+            },
+        ),
+    ]);
+    f.journal_names_head();
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => {
+            assert!(why.contains("not the coder's to give"), "{why}");
+            assert!(why.contains("equivalent_proposed"), "{why}");
+        }
+        other => panic!("the coder's `equivalent` is never an outcome: {other:?}"),
+    }
+}
+
+/// At `standard`, a proposal counts in the share as a killed mutant, like a
+/// ruled equivalence: 3 survivors of 10 is 70%, and proposing one brings it
+/// to the threshold.
+#[test]
+fn at_standard_a_proposal_counts_in_the_share() {
+    let f = standard();
+    f.campaign_tried(untriaged(3), Some(10));
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => assert!(why.contains("7 of 10"), "{why}"),
+        other => panic!("70% is below 80%: {other:?}"),
+    }
+    f.coder_answers(&[("src/new.rs:1", proposed("only a log line reads it"))]);
+    let outcome = f.gate_seven(Role::Coder);
+    assert_eq!(outcome.decision, Decision::Passed);
+    let note = outcome.note.unwrap();
+    assert!(note.contains("8 of 10"), "{note}");
+    assert!(
+        note.contains("1 of 3 rode on an equivalence the coder proposed"),
+        "{note}"
+    );
+
+    // A blank one counts for nothing.
+    f.coder_answers(&[("src/new.rs:1", proposed(" "))]);
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => assert!(why.contains("7 of 10"), "{why}"),
+        other => panic!("a blank proposal kills nothing: {other:?}"),
+    }
 }

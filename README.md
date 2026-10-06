@@ -206,7 +206,7 @@ A mission declares how much verification asks of it, with `--rigor` on
 
 | | `prototype` | `standard` | `critical` (the default) |
 |---|---|---|---|
-| Gate 7, the mutation campaign | not played | passes when the share of tried mutants killed reaches `mutation_threshold` (80 unless `nunki.yaml` says otherwise) | every survivor needs an outcome |
+| Gate 7, the mutation campaign | not played | passes when the share of tried mutants killed reaches `mutation_threshold` (80 unless `nunki.yaml` says otherwise); a survivor with an outcome, a coder's proposal included, counts as killed | every survivor needs an outcome — killed, a bug, the HQ's equivalence, or the coder's proposal of one |
 | Security agent rounds | none | at most 1 | at most 3 |
 | Integration | none | as declared | as declared |
 
@@ -342,6 +342,35 @@ MISSION  (one branch off its base, one slot)
   the next attempt — not at the first, and never past the bound: a ruling
   asked on the last attempt is handed over as out of attempts by that retry,
   and only a further `retry` hands the attempts back whole.
+
+  A coder that believes a survivor equivalent need not stop for it: it may
+  **propose** the equivalence in `MUTANTS.triage.json`,
+  `{"kind": "equivalent_proposed", "why": "<one sentence>"}` — only for a
+  mutation that cannot change any observable behaviour, never for one that
+  is merely hard to test. Gate 7 counts a proposal as an outcome (at
+  `standard`, as a killed mutant), and its note counts proposals apart from
+  killed mutants, bugs and the HQ's rulings; a blank `why` is no outcome.
+  A survivor with a proposal is not open, so it cannot be awaited too. The
+  decision stays the HQ's: `nunki mission mutants <mission> --ratify
+  <survivor>` writes exactly the equivalence `--equivalent` writes, with the
+  coder's sentence unless `--because` replaces it, and it is that ruling, never
+  the proposal, that is carried to the next campaign; `--refuse <survivor>
+  --because <why>` removes the proposal, records the refusal and reopens the
+  survivor, and the next coder run reads why in `FOLLOWUP_HQ.md`.
+  `nunki push` refuses while any proposal of the current campaign is neither
+  ratified nor refused, naming each, and it plays gate 7's rule again on the
+  campaign as it stands — every survivor answered at `critical`, the share
+  reached at `standard` — so a survivor reopened after the gates is never
+  pushed. A `--refuse` on a verified mission sends it back to the coder as a
+  volet, with the refusal as its cause, and a survivor that already holds
+  the HQ's ruling is refused with a pointer to `--lift`. A refusal is
+  carried to the next campaign on the same tiers as a ruling, so the same
+  proposal written again is still no outcome. With no campaign on file at
+  `standard` or `critical`, push refuses: no campaign, no push. `--ratify`,
+  `--equivalent`, `--refuse` and `--lift` take the slot's lock and act on
+  every survivor carrying the id they name. `mission status` and
+  `mission wait` count the proposals that await the HQ, and the follow-up
+  lists them with their reasons when the final gates pass.
 
 - **Gates** — deterministic checks, each read from its own result. Gates 1 to
   4 (a clean tree, a branch ahead of its base, a resume block that names

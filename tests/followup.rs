@@ -66,6 +66,17 @@ fn every_record_the_hq_leaves_is_prose_and_not_a_code_block() {
     followup::security_capped(&file, 1, 1, &["0123456789ab the volet".to_string()]).unwrap();
     followup::security_capped_on_findings(&file, 3, 3, &["0123456789ab the fix".to_string()])
         .unwrap();
+    followup::proposal_refused(
+        &file,
+        "Someone",
+        "src/lib.rs:3: replace + with -",
+        &nunki::mutants::Refusal {
+            proposed: "only a log line reads it".into(),
+            because: "the CLI prints that line".into(),
+        },
+    )
+    .unwrap();
+    followup::proposals_await(&file, "m1", &[proposal("s1", "only a log line reads it")]).unwrap();
 
     let text = std::fs::read_to_string(&file).unwrap();
     assert_prose(&text, "a record");
@@ -79,6 +90,8 @@ fn every_record_the_hq_leaves_is_prose_and_not_a_code_block() {
         "left an instruction",
         "did not call the security agent again",
         "Not attacked by the security agent",
+        "refused an equivalence the coder proposed",
+        "equivalence(s) the coder proposed await the HQ",
     ] {
         assert!(text.contains(needle), "{needle} is missing:\n{text}");
     }
@@ -155,4 +168,85 @@ fn agent_text_is_written_into_the_follow_up_escaped_never_raw() {
     common::assert_printable(&text, "FOLLOWUP_HQ.md");
     assert!(text.contains("first line\n"), "{text}");
     assert_eq!(text.matches("\\u{1b}[2K").count(), 3, "{text}");
+}
+
+fn proposal(id: &str, why: &str) -> nunki::mutants::Proposal {
+    nunki::mutants::Proposal {
+        id: id.into(),
+        file: "src/lib.rs".into(),
+        line: 3,
+        why: why.into(),
+    }
+}
+
+/// When the final gates pass on proposals nobody ruled on, the HQ reads
+/// each with its reason, and the two verbs that rule — and nothing at all
+/// is written when there is none.
+#[test]
+fn the_proposals_awaiting_the_hq_are_listed_with_their_reasons() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("FOLLOWUP_HQ.md");
+    std::fs::write(&file, "").unwrap();
+
+    followup::proposals_await(&file, "m1", &[]).unwrap();
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "");
+
+    followup::proposals_await(
+        &file,
+        "m1",
+        &[
+            proposal("s1", "only a log line reads it"),
+            proposal("s2", "both arms return the same constant"),
+        ],
+    )
+    .unwrap();
+    let text = std::fs::read_to_string(&file).unwrap();
+    for part in [
+        "2 equivalence(s) the coder proposed await the HQ",
+        "- `s1` (src/lib.rs:3) — only a log line reads it",
+        "- `s2` (src/lib.rs:3) — both arms return the same constant",
+        "nunki mission mutants m1 --ratify <survivor>",
+        "--refuse <survivor> --because <why>",
+        "`nunki push` refuses",
+    ] {
+        assert!(text.contains(part), "{part:?} in:\n{text}");
+    }
+}
+
+/// One section per change: the final gates passing again on the same
+/// proposals writes nothing new; a changed list writes one more section;
+/// going back to an earlier list is a change too. A section written by
+/// someone else in between does not hide the last one.
+#[test]
+fn the_proposals_are_written_once_per_change_and_not_on_every_pass() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("FOLLOWUP_HQ.md");
+    std::fs::write(&file, "# Follow-up\n").unwrap();
+    let count = || {
+        std::fs::read_to_string(&file)
+            .unwrap()
+            .matches("the coder proposed await the HQ")
+            .count()
+    };
+    let a = [proposal("s1", "only a log line reads it")];
+    let b = [
+        proposal("s1", "only a log line reads it"),
+        proposal("s2", "same constant"),
+    ];
+
+    followup::proposals_await(&file, "m1", &a).unwrap();
+    followup::proposals_await(&file, "m1", &a).unwrap();
+    assert_eq!(count(), 1, "the same list twice is one section");
+
+    followup::said(&file, "nunki", "L1, attempt 2: something else").unwrap();
+    followup::proposals_await(&file, "m1", &a).unwrap();
+    assert_eq!(count(), 1, "a section in between hides nothing");
+
+    followup::proposals_await(&file, "m1", &b).unwrap();
+    assert_eq!(count(), 2, "a changed list is a new section");
+    followup::proposals_await(&file, "m1", &b).unwrap();
+    assert_eq!(count(), 2);
+
+    followup::proposals_await(&file, "m1", &a).unwrap();
+    assert_eq!(count(), 3, "back to an earlier list is a change too");
 }

@@ -2133,3 +2133,38 @@ fn a_database_the_host_never_filled_is_not_mounted_empty() {
 
     assert_eq!(plan.advisories, vec![]);
 }
+
+/// The proposal of an equivalence is explained where every role reads the
+/// triage outcomes: its shape, that it needs a reason, what it is for — a
+/// mutation that cannot change anything observable — and what it is never
+/// for. And a survivor proposed is never also awaited.
+#[test]
+fn the_prompt_explains_the_proposal_of_an_equivalence_and_when_not_to_make_it() {
+    let coder = role::prompt(Role::Coder);
+    for prompt in [
+        &coder,
+        &role::prompt(Role::Integrator),
+        &role::prompt(Role::Security),
+    ] {
+        assert!(
+            prompt.contains(
+                r#"{"<survivor id>": {"kind": "equivalent_proposed", "why": "<one sentence>"}}"#
+            ),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("cannot change any observable\nbehaviour"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("never for a survivor that is merely"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("it is not a ruling"), "{prompt}");
+        assert!(prompt.contains("blank `why`\nis no outcome"), "{prompt}");
+    }
+    assert!(
+        coder.contains("propose it, or await a ruling on it, not\nboth"),
+        "{coder}"
+    );
+}

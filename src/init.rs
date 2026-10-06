@@ -597,6 +597,11 @@ actually hold in this project.
   so nothing else is quoted. `nunki` checks every one is a survivor with no
   outcome — a line naming none is a failed attempt — and hands the mission
   over at once. It is not a way out of a hard lot.
+- A survivor the coder believes equivalent may instead be **proposed** so in
+  `MUTANTS.triage.json` (`\"kind\": \"equivalent_proposed\"`, with its reason in
+  `why`): only when its mutation cannot change any observable behaviour,
+  never because it is hard to test. The mission goes on; `nunki push` waits
+  for the HQ to ratify or refuse each one.
 
 ## Infrastructure an agent cannot reach
 

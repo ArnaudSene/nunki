@@ -3204,6 +3204,7 @@ impl World {
             line: 1,
             description: "replace 1 with 0".into(),
             outcome,
+            refused: None,
         };
         nunki::mutants::write(
             &self.mission(),
@@ -3344,4 +3345,37 @@ fn a_ruling_line_behind_a_red_gate_is_a_red_gate_and_not_a_ruling() {
     let followup = world.followup();
     assert!(followup.contains("the gates were red"), "{followup}");
     assert!(!followup.contains("awaits the HQ's ruling"), "{followup}");
+}
+
+/// A survivor the coder proposed equivalent has an outcome, so a ruling
+/// cannot be awaited on it too: the line naming it is a failed attempt. One
+/// whose proposal gives no reason is still open, and can be awaited.
+#[test]
+fn a_ruling_cannot_be_awaited_on_a_survivor_the_coder_proposed() {
+    let world = World::new(2);
+    world.commit("src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    world.campaign_with_survivors();
+    std::fs::write(
+        world.mission().join(nunki::mutants::TRIAGE_FILE),
+        r#"{"m1": {"kind": "equivalent_proposed", "why": "only a log line reads it"}}"#,
+    )
+    .unwrap();
+    world.coder_ran("Lot: L1 — awaits ruling: `m1` changes nothing observable");
+    assert_eq!(coding(&world.state()), (Work::Lot(0), 2));
+    assert!(world.followup().contains("`m1`"), "{}", world.followup());
+
+    let world = World::new(2);
+    world.commit("src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    world.campaign_with_survivors();
+    std::fs::write(
+        world.mission().join(nunki::mutants::TRIAGE_FILE),
+        r#"{"m1": {"kind": "equivalent_proposed", "why": " "}}"#,
+    )
+    .unwrap();
+    world.coder_ran("Lot: L1 — awaits ruling: `m1` changes nothing observable");
+    assert!(
+        matches!(world.state().flow.stage(), Stage::AwaitingHuman(_)),
+        "{:?}",
+        world.state().flow.stage()
+    );
 }

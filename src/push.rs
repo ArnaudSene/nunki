@@ -86,6 +86,36 @@ pub enum PushError {
     FetchingIntoCurrent(String),
     #[error("the repository has no remote named {0} — `git remote -v` says what it has")]
     NoRemote(String),
+    #[error(
+        "{count} equivalence(s) the coder proposed await the HQ's ruling: {listed}. A \
+         proposal is not a ruling, and nothing rests on one that nobody ruled: \
+         `nunki mission mutants {mission} --ratify <survivor>` makes it the HQ's \
+         equivalence, `nunki mission mutants {mission} --refuse <survivor> --because <why>` \
+         sends it back to the coder"
+    )]
+    ProposalsAwait {
+        mission: String,
+        count: usize,
+        listed: String,
+    },
+    #[error(
+        "gate 7's rule no longer holds on the campaign as it stands — {owed}. A survivor \
+         reopened after the gates needs a coder run: `nunki mission iterate {mission} \
+         --because <why>` sends one"
+    )]
+    MutantsOwed { mission: String, owed: String },
+    #[error(
+        "mission {mission} is at `{rigor}` rigor and {file} holds no mutation campaign — \
+         no campaign, no push: `nunki mission mutants {mission}` runs one, and `nunki \
+         verify {mission}` plays gate 7 on it"
+    )]
+    NoCampaign {
+        mission: String,
+        rigor: crate::mission::Rigor,
+        file: &'static str,
+    },
+    #[error(transparent)]
+    Mutants(#[from] crate::mutants::MutantsError),
     #[error(transparent)]
     Git(#[from] crate::git::GitError),
     #[error(transparent)]
@@ -229,6 +259,8 @@ pub fn push_to(
         not_attacked,
         lifted_by_nunki,
     } = verdicts_hold(&slot, &state, &head)?;
+    proposals_ruled(project, id)?;
+    nothing_owed(project, id, &header)?;
 
     let fetched = fetch(project, id)?;
     let remote = remote_url(project)?;
@@ -308,6 +340,75 @@ fn open_pull_request(
     match forge.open(&token, &repo, &request) {
         Ok(opened) => PullRequestState::Opened(opened),
         Err(e) => by_hand(e.to_string()),
+    }
+}
+
+/// Every equivalence the coder proposed on the current campaign has been
+/// ratified or refused by the HQ (SPEC 4.4, gate 7).
+///
+/// Gate 7 counts a proposal as an outcome so that the mission is not stopped
+/// for it; this is where it waits instead. The decision on an equivalence is
+/// the HQ's, and a branch whose triage rests on a sentence nobody ruled on is
+/// not pushed.
+fn proposals_ruled(project: &Project, id: &str) -> Result<(), PushError> {
+    let dir = crate::mission::dir::Paths::of(&project.hq_root, id).dir;
+    let waiting = crate::mutants::awaiting_ruling(&dir)?;
+    if waiting.is_empty() {
+        return Ok(());
+    }
+    Err(PushError::ProposalsAwait {
+        mission: id.to_string(),
+        count: waiting.len(),
+        listed: waiting
+            .iter()
+            .map(|p| {
+                format!(
+                    "`{}` ({})",
+                    crate::text::one_line(&p.id),
+                    crate::text::brief(&p.why, 120)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; "),
+    })
+}
+
+/// Gate 7's rule still holds on the campaign as it stands
+/// ([`crate::mutants::owed`]), with the threshold the gate used: the one
+/// frozen in the header, or the project's for a header framed before it.
+///
+/// Asked again here because `Verified` is not proof of it any more once the
+/// HQ has ruled after the gates: a refused proposal reopens its survivor,
+/// and a branch carrying a mutant nobody answered is not pushed (security
+/// round 1, MEDIUM).
+///
+/// And it fails closed: a mission whose rigor owes a campaign and whose
+/// `MUTANTS.json` is missing or empty is not pushed. Gate 7 never lets such
+/// a mission reach `Verified`, so the only way here is a file taken away
+/// after the gates — and "nothing on file" must not read as "nothing owed"
+/// (HQ review of the pull request, item 3).
+fn nothing_owed(
+    project: &Project,
+    id: &str,
+    header: &crate::mission::Header,
+) -> Result<(), PushError> {
+    let dir = crate::mission::dir::Paths::of(&project.hq_root, id).dir;
+    if header.rigor != crate::mission::Rigor::Prototype && crate::mutants::read(&dir)?.is_none() {
+        return Err(PushError::NoCampaign {
+            mission: id.to_string(),
+            rigor: header.rigor,
+            file: crate::mutants::FILE,
+        });
+    }
+    let threshold = header
+        .mutation_threshold
+        .unwrap_or(project.config.mutation_threshold);
+    match crate::mutants::owed_on_file(&dir, header.rigor, threshold)? {
+        None => Ok(()),
+        Some(owed) => Err(PushError::MutantsOwed {
+            mission: id.to_string(),
+            owed,
+        }),
     }
 }
 

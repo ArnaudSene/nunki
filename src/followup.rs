@@ -307,6 +307,108 @@ fn unattacked(commits: &[String]) -> String {
     out
 }
 
+/// The HQ refused an equivalence the coder proposed on `survivor`.
+///
+/// Here because this is the file the next coder run reads first: the
+/// survivor is open again, and a refusal it cannot read would send it back to
+/// propose the same sentence.
+pub fn proposal_refused(
+    file: &Path,
+    who: &str,
+    survivor: &str,
+    refusal: &crate::mutants::Refusal,
+) -> Result<(), FollowupError> {
+    append(
+        file,
+        &format!(
+            "## {date} — {who} refused an equivalence the coder proposed\n\n\
+             **Survivor:** `{survivor}`\n\n\
+             **Proposed:** {proposed}\n\n\
+             **Refused because:** {because}\n\n\
+             The survivor needs an outcome again: killed by a named test, or a bug\n\
+             frozen in one. A proposal written again on it is no outcome.\n",
+            date = today(),
+            survivor = crate::text::one_line(survivor),
+            proposed = crate::text::one_line(&refusal.proposed),
+            because = refusal.because.trim(),
+        ),
+    )
+}
+
+/// Gate 7 passed with equivalences the coder proposed that the HQ has not
+/// ruled on: each listed with its reason, for the HQ to ratify or refuse
+/// before `nunki push`, which refuses until it has.
+///
+/// Nothing is written when there are none.
+pub fn proposals_await(
+    file: &Path,
+    mission: &str,
+    proposals: &[crate::mutants::Proposal],
+) -> Result<(), FollowupError> {
+    if proposals.is_empty() {
+        return Ok(());
+    }
+    let listed = proposals
+        .iter()
+        .map(|p| {
+            format!(
+                "- `{}` ({}:{}) — {}",
+                crate::text::one_line(&p.id),
+                crate::text::one_line(&p.file),
+                p.line,
+                crate::text::one_line(&p.why)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let body = format!(
+        "Gate 7 counted them as outcomes, and the mission went on. They are\n\
+         not rulings, and `nunki push` refuses until each is ratified or refused:\n\n\
+         {listed}\n\n\
+         `nunki mission mutants {mission} --ratify <survivor>` ratifies one,\n\
+         `--refuse <survivor> --because <why>` refuses it.\n"
+    );
+    // One section per change, not one per pass of the final gates: a mission
+    // that passes them again on the same proposals has nothing new to say,
+    // and a file every role reads first fills with copies nobody needs (HQ
+    // review of the pull request, item 5).
+    let existing = std::fs::read_to_string(file).unwrap_or_default();
+    if last_proposals(&existing) == Some(crate::text::printable(&body).trim()) {
+        return Ok(());
+    }
+    append(
+        file,
+        &format!(
+            "## {date} — {count} {PROPOSALS_HEADING}\n\n{body}",
+            date = today(),
+            count = proposals.len(),
+        ),
+    )
+}
+
+/// How the heading of a [`proposals_await`] section ends.
+const PROPOSALS_HEADING: &str = "equivalence(s) the coder proposed await the HQ";
+
+/// The body of the last [`proposals_await`] section of `text`, trimmed: what
+/// follows its heading, up to the next heading or the end of the file.
+fn last_proposals(text: &str) -> Option<&str> {
+    let heading = text
+        .match_indices("## ")
+        .filter(|(at, _)| *at == 0 || text[..*at].ends_with('\n'))
+        .map(|(at, _)| at)
+        .filter(|at| {
+            text[*at..]
+                .lines()
+                .next()
+                .is_some_and(|line| line.ends_with(PROPOSALS_HEADING))
+        })
+        .last()?;
+    let rest = &text[heading..];
+    let body = &rest[rest.find('\n').map_or(rest.len(), |at| at + 1)..];
+    let end = body.find("\n## ").map_or(body.len(), |at| at + 1);
+    Some(body[..end].trim())
+}
+
 /// An instruction left for the next run.
 ///
 /// `say` and not a channel: there is no channel during a run (SPEC 4.3). What
