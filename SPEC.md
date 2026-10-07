@@ -1674,18 +1674,124 @@ dernier lot. La première rouge arrête tout.
    acceptée que de la main de l'humain ou du HQ, dans `MUTANTS.json`. Un
    `equivalent` venu du fichier de l'agent rend la porte rouge et est nommé.
 
-   **Un avis survit à la campagne suivante** quand la même mutation survit
-   encore : même fichier et même description (le texte avant et après la
-   mutation), jamais la ligne, que le moindre commit au-dessus déplace. Même
-   identifiant, ou paire fichier et description qui ne désigne qu'un seul
-   survivant avant comme après ; sinon l'avis est redemandé plutôt que
-   deviné. Sans ce report, un commit qui ajoute une ligne au-dessus d'un
-   survivant jugé équivalent suffit à faire oublier l'avis, et la mission
-   revient au HQ pour entendre la même chose. Un avis reporté porte
-   le commit de la campagne où il a été donné (`carried_from`), la porte 7
-   le compte à part, et `nunki mission mutants <id> --lift <survivant>` le
-   retire. Aucune issue n'est jamais lue dans le journal de la campagne : il
-   est écrit dans le conteneur de l'agent.
+   **Le codeur propose, le HQ tranche.** Le codeur peut écrire, dans
+   `MUTANTS.triage.json`, `{"kind": "equivalent_proposed", "why": "<une
+   phrase>"}` : une **proposition** d'équivalence, jamais un avis. La porte 7
+   la compte comme une issue au niveau `critical`, et dans la part de mutants
+   tués au niveau `standard`, pour que la mission continue ; sa note la
+   compte à part des mutants tués, des bugs et des avis. Une phrase vide
+   n'est pas une issue, ni une proposition sur un survivant dont le HQ a déjà
+   refusé la proposition. Un survivant qui porte une proposition valide n'est
+   plus « sans issue » : il ne peut pas faire l'objet d'une ligne
+   `awaits ruling`.
+
+   **Du fichier du codeur, `nunki` ne lit que ce que le codeur a le droit de
+   donner** : `killed`, `bug` et `equivalent_proposed`. Tout le reste —
+   `equivalent`, une proposition de `nunki`, une entrée illisible — n'est pas
+   une issue, ne masque jamais `MUTANTS.json`, et est nommé comme refusé dans
+   la note de la porte 7 et dans le refus de `nunki push`. Une entrée
+   illisible ne refuse qu'elle-même ; un fichier qui n'est pas un objet
+   d'entrées reste illisible en entier.
+
+   **Un test nommé est un nom** : des lettres, des chiffres et des tirets
+   bas, trois caractères au moins. Tout autre texte n'est pas une issue. Le
+   nom est cherché comme un mot entier, jamais comme un fragment — sans quoi
+   un nom vide ou d'une lettre se trouve dans n'importe quel fichier. Un
+   titre de test avec des espaces (JavaScript) n'est donc pas un nom.
+
+   **Le HQ répond à une proposition par deux verbes.**
+   `nunki mission mutants <id> --ratify <survivant> [--because <pourquoi>]`
+   écrit le même avis que `--equivalent`, avec la phrase de la proposition
+   sauf si `--because` la remplace. `--refuse <survivant> --because
+   <pourquoi>` retire la proposition, inscrit le refus sur le survivant dans
+   `MUTANTS.json`, le rouvre, et écrit la raison dans `FOLLOWUP_HQ.md`, que le
+   prochain run du codeur lit. Un avis donné plus tard efface le refus.
+   `--ratify --all` ratifie toutes les propositions en attente : il imprime
+   d'abord chacune avec sa source et sa phrase, puis tranche exactement la
+   liste imprimée, ou rien ; s'il s'arrête en route, il dit lesquelles il a
+   tranchées. Un avis contre un état de mission illisible est refusé : seul
+   un état absent veut dire « pas démarrée ».
+
+   **D'une campagne à la suivante, un avis devient une proposition.** Quand
+   la même mutation survit encore — même fichier et même description (le
+   texte avant et après la mutation), jamais la ligne, que le moindre commit
+   au-dessus déplace — l'avis du HQ n'est pas redemandé de zéro, mais il
+   n'est **jamais reporté comme avis** : il revient comme une proposition de
+   `nunki` (`proposed_by_nunki`), marquée reportée, avec sa phrase et le
+   commit de la campagne où il a été donné. La mission continue, et
+   `nunki push` attend que le HQ ratifie. Les seules équivalences du
+   `MUTANTS.json` d'une campagne sont donc celles que le HQ a tapées sur
+   cette campagne. La raison : rien ne prouve à `nunki` que le mutant
+   d'aujourd'hui est celui d'hier — une description identique peut désigner
+   un autre code — et un avis qui se reporte seul est une porte qui se vide
+   seule.
+
+   Deux niveaux de correspondance, qui regardent **toute** la campagne
+   précédente :
+   - *exact* — même identifiant, même fichier, même description : la
+     proposition est reportée telle quelle, un avis devient une proposition
+     reportée, un refus reste un refus ;
+   - *large* — même fichier et même description sous un autre identifiant :
+     ne vaut que si la paire désigne un seul survivant avant et un seul
+     maintenant, et que le code que la mutation remplace n'apparaît qu'une
+     fois dans son fichier. Sinon rien n'est proposé.
+
+   **Un refus est toujours reporté**, quelle que soit l'unicité : un nouvel
+   identifiant reçoit le refus donné sur n'importe quel survivant du même
+   fichier et de la même description, pour qu'une proposition refusée ne
+   redevienne pas une issue en changeant de ligne. La proposition du codeur,
+   elle, n'est jamais reportée : il la réécrit. Aucune issue n'est jamais lue
+   dans le journal de la campagne : il est écrit dans le conteneur de
+   l'agent.
+
+   **Le registre des équivalences du projet.** Un avis vaut pour le projet,
+   pas pour une mission : sans registre, la mission suivante qui touche le
+   même fichier retrouve le même mutant et repose la même question.
+   - *Où, et qui l'écrit.* `hq/equivalences.json`, dans le foyer du projet :
+     jamais dans le dépôt, jamais monté dans un conteneur. `--equivalent` et
+     `--ratify` y inscrivent l'avis ; `--lift` l'en retire. Une proposition
+     ou un refus n'y entre jamais.
+   - *L'entrée.* Fichier, description, l'empreinte de **toute l'étendue** du
+     code que la mutation remplace au commit de l'avis, la longueur de cette
+     étendue, la phrase, qui, la mission, le commit, la date. L'empreinte est
+     l'identifiant de blob git des lignes de l'étendue, chacune débarrassée
+     de ses blancs de bord, jointes par des retours à la ligne. L'étendue
+     vient de la liste de l'outil : le script de campagne la donne en
+     `end_line` à côté de `line` (0 quand il ne la connaît pas ; un outil qui
+     n'en donne pas vaut la seule ligne).
+   - *Inscrit seulement quand le mutant est identifié sans doute.* La
+     campagne de l'avis porte un seul survivant sur ce fichier et cette
+     description, l'étendue est connue, et son texte n'apparaît qu'une fois
+     dans le fichier. Sinon l'avis vaut pour sa mission, et le verbe dit
+     pourquoi il n'est pas entré au registre. Trancher de nouveau la même
+     mutation remplace son entrée.
+   - *Le registre propose, il ne tranche jamais.* Quand la campagne d'une
+     mission est enregistrée, un survivant sans issue et sans refus reçoit
+     une proposition `proposed_by_nunki` venue du registre quand quatre
+     choses tiennent : une seule entrée et un seul survivant sur ce fichier
+     et cette description, la même empreinte, et une étendue qui n'apparaît
+     qu'une fois dans son fichier. Elle porte la phrase du HQ et son origine
+     (mission, commit, date). Elle n'est pas reportée : la campagne suivante
+     redemande au registre. Ratifier une proposition du registre garde
+     l'origine de l'entrée et inscrit la ratification à côté.
+   - *Fermé par défaut.* Un registre illisible (un fichier vide compris) ne
+     propose rien, et `FOLLOWUP_HQ.md` le dit. Une étendue illisible ne
+     correspond à rien. La source est lue à travers des objets git que
+     `nunki` hache lui-même, objets de remplacement et greffes désactivés ;
+     un arbre qui nomme une entrée deux fois, ou hors de l'ordre de git, est
+     lu comme rien. Le registre est lu et écrit sous son propre verrou ; une
+     écriture est synchronisée puis renommée en place.
+   - *Lever.* `--lift <survivant>` retire un avis, ou la proposition que
+     `nunki` en a faite, du registre d'abord, puis de la mission. Si le
+     registre ne peut être verrouillé, lu ou écrit, il échoue et ne change
+     rien.
+   - *Lister.* `nunki mission mutants --registry`, sans mission, liste les
+     entrées et dit pour chacune si son code tient encore une fois à `HEAD`,
+     a changé, ou se répète.
+
+   `mission status`, `mission wait`, `nunki push` et la note de suivi
+   nomment les propositions par leur source : le codeur, le registre, ou le
+   report.
 
    La raison est celle qui a mis la batterie hors de portée de l'agent :
    laisser le noté remplir la seule case que personne ne peut
@@ -2394,6 +2500,15 @@ Ce que la boucle veut dire, et ce qu'elle ne veut pas dire.
   précédents : après une correction, l'intégrateur rejoue, puis la sécurité.
   `nunki push` refuse sans les deux verdicts sur le `HEAD` courant — tant
   qu'il reste un tour de sécurité (voir plus bas, tours épuisés).
+- **`nunki push` rejoue la porte 7 sur ce qu'il pousse.** Il refuse sans
+  campagne sur le `HEAD` (et nomme `nunki mission mutants <id>`, qui en lance
+  une), tant qu'un survivant de la campagne porte une proposition ni ratifiée
+  ni refusée — celle du codeur comme celle de `nunki` — en nommant chacune et
+  les deux commandes, et quand une issue lue dans le fichier du codeur est
+  refusée. Il cherche chaque test nommé **dans l'arbre du commit qu'il
+  pousse** ; la porte 7 le cherche dans l'arbre de travail qu'elle vient de
+  trouver propre. Une proposition ne bloque donc jamais la mission, elle
+  bloque le push : c'est là que le HQ répond.
 - **Rien ne se pousse en rouge.** Il n'existe pas de drapeau pour passer
   outre. Un constat de sécurité ne se ferme que corrigé, ou démontré faux
   positif en une phrase que le HQ contre-vérifie, ou **accepté comme risque
@@ -2489,8 +2604,9 @@ Ce que la boucle veut dire, et ce qu'elle ne veut pas dire.
   celle du HQ, ni celle du codeur) — une ligne qui n'en nomme aucun est une
   tentative échouée — puis rend la mission tout de suite,
   `AwaitingRuling { lot, what, attempt, survivors }`, sans consommer de
-  tentative. Le HQ tranche (`nunki mission mutants <id> --equivalent …
-  --because …`) puis reprend. Depuis cette remise, `retry` reprend le même
+  tentative. Un survivant qui porte déjà une proposition valide n'est pas
+  « sans issue » et ne peut pas être nommé. Le HQ tranche
+  (`nunki mission mutants <id> --equivalent … --because …`) puis reprend. Depuis cette remise, `retry` reprend le même
   travail **à la tentative suivante**, sans rendre de budget, ou, si la
   tentative qui demandait était la dernière, rend la mission comme
   `LotAttemptsExhausted` : aucune tentative ne dépasse la borne, et
