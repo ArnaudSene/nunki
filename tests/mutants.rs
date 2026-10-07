@@ -5795,3 +5795,61 @@ fn a_partial_campaign_is_read_back_with_its_chain_or_forgotten_when_it_broke() {
     }
     assert_eq!(mutants::read(&mission).unwrap(), Some(other));
 }
+
+/// A survivor of the partial campaign replaces a kept one only when it is
+/// the same mutant — same id, same file, same description. Sharing a file
+/// and a description, or a description alone, is another mutant, and both
+/// stay listed.
+#[test]
+fn a_new_survivor_sharing_only_part_of_a_kept_ones_identity_does_not_replace_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (tree, before, after) = before_and_after(dir.path());
+    let mission = dir.path().join("mission");
+    std::fs::create_dir_all(&mission).unwrap();
+    let mut kept = at("elsewhere", "src/other.rs", 2, None);
+    kept.description = "replace other -> u8 with 0".into();
+    mutants::write(&mission, &on_file_at(&before, vec![kept], Some(30))).unwrap();
+    let mut same_file = at("same-file", "src/other.rs", 2, None);
+    same_file.description = "replace other -> u8 with 0".into();
+    let mut same_words = at("same-words", "src/lib.rs", 1, None);
+    same_words.description = "replace other -> u8 with 0".into();
+    let log = format!(
+        "{}\n{}\n{{\"campaign\":\"done\",\"tried\":2,\"found\":2}}\n",
+        serde_json::to_string(&same_file).unwrap(),
+        serde_json::to_string(&same_words).unwrap()
+    );
+    let chain = Chain {
+        scope: Scope::Partial { since: before },
+        ..Chain::default()
+    };
+    mutants::record_finished_with_registry(
+        &mission,
+        &dir.path().join("hq"),
+        &tree,
+        "fp",
+        &after,
+        &log,
+        &chain,
+    )
+    .unwrap();
+    let campaign = mutants::read(&mission).unwrap().unwrap();
+    let mut ids: Vec<&str> = campaign.survivors.iter().map(|s| s.id.as_str()).collect();
+    ids.sort();
+    assert_eq!(ids, ["elsewhere", "same-file", "same-words"]);
+}
+
+/// A campaign alone owes in its own words: naming it as a campaign of a
+/// chain is for a chain of more than one.
+#[test]
+fn a_campaign_alone_owes_without_being_named_as_part_of_a_chain() {
+    use nunki::mission::Rigor;
+    let owed = mutants::owed(
+        &campaign_of(vec![one("m1", 1, "a")], Some(10)),
+        &Default::default(),
+        Rigor::Critical,
+        80,
+    )
+    .expect("m1 has no outcome");
+    assert!(owed.starts_with("1 survivor(s) have no outcome"), "{owed}");
+    assert!(!owed.contains("campaign at"), "{owed}");
+}

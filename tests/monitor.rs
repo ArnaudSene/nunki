@@ -845,3 +845,16 @@ fn the_log_says_each_campaign_full_or_partial_with_its_counts() {
          campaign 2 of 2: partial since aaa at bbb — tried 2"
     );
 }
+
+/// A full campaign with no reason recorded — the first of a mission — is
+/// logged without an empty pair of parentheses.
+#[test]
+fn a_full_campaign_without_a_reason_is_logged_without_one() {
+    use nunki::monitor::campaign_line;
+    use nunki::mutants::{Progress, Scope};
+    let started = campaign_line(&Progress::Started {
+        fingerprint: "abc1234".into(),
+        scope: Scope::Full { why: " ".into() },
+    });
+    assert_eq!(started, "mutation campaign started on abc1234, full");
+}
