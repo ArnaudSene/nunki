@@ -509,8 +509,10 @@ fn the_nunki_yaml_it_writes_names_the_rigor_and_the_threshold_with_their_default
     assert_eq!(uncommented.rigor, Some(nunki::mission::Rigor::Critical));
     assert_eq!(commented.mutation_threshold, 80);
     assert_eq!(uncommented.mutation_threshold, 80);
-    assert_eq!(commented.mutation_jobs, 1);
-    assert_eq!(uncommented.mutation_jobs, 1);
+    assert_eq!(commented.mutation_jobs, None);
+    assert_eq!(commented.jobs(), 1);
+    assert_eq!(uncommented.mutation_jobs, Some(1));
+    assert_eq!(uncommented.jobs(), 1);
 }
 
 /// The prose `nunki init` deposits must read as prose.

@@ -96,9 +96,10 @@ pub struct Config {
     /// `mutation.sh` in [`crate::mutants::JOBS_ENV`] (SPEC 4.4, gate 7). A
     /// whole number of at least 1, refused otherwise when this file is read:
     /// 0 would be a campaign that runs nothing. `1` is the Rust stack's
-    /// in-place run, one mutant at a time.
-    #[serde(default = "default_mutation_jobs", deserialize_with = "mutation_jobs")]
-    pub mutation_jobs: u32,
+    /// in-place run, one mutant at a time. Absent, [`Config::jobs`] reads
+    /// [`DEFAULT_MUTATION_JOBS`].
+    #[serde(default, deserialize_with = "mutation_jobs")]
+    pub mutation_jobs: Option<u32>,
     #[serde(default)]
     pub bounds: Bounds,
     /// Where the test credentials live, mounted read-only on a system
@@ -291,14 +292,20 @@ fn mutation_threshold<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Resu
 /// a project whose build leaves cores idle can raise it after measuring.
 pub const DEFAULT_MUTATION_JOBS: u32 = 1;
 
-fn default_mutation_jobs() -> u32 {
-    DEFAULT_MUTATION_JOBS
+impl Config {
+    /// How many mutants a campaign runs at once: `mutation_jobs`, or
+    /// [`DEFAULT_MUTATION_JOBS`] when `nunki.yaml` does not say.
+    pub fn jobs(&self) -> u32 {
+        self.mutation_jobs.unwrap_or(DEFAULT_MUTATION_JOBS)
+    }
 }
 
 /// `mutation_jobs`, refused unless it is a whole number of at least 1 — a
 /// fraction, a word and a negative number all name the rule, rather than
 /// the type serde expected.
-fn mutation_jobs<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
+fn mutation_jobs<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u32>, D::Error> {
     struct Jobs;
 
     impl Jobs {
@@ -339,7 +346,7 @@ fn mutation_jobs<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u3
         }
     }
 
-    deserializer.deserialize_any(Jobs)
+    deserializer.deserialize_any(Jobs).map(Some)
 }
 
 /// The same refusal for a mission header's frozen `mutation_threshold`,

@@ -2566,7 +2566,7 @@ pub fn campaign(
         &touched,
         &fork,
         &scope,
-        project.config.mutation_jobs,
+        project.config.jobs(),
     )?;
 
     let runs = dir.join("runs");

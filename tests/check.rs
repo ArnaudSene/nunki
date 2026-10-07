@@ -26,7 +26,7 @@ fn config() -> Config {
         permission_mode: "auto".to_string(),
         rigor: None,
         mutation_threshold: 80,
-        mutation_jobs: 1,
+        mutation_jobs: None,
         forge_protection: Default::default(),
     }
 }
@@ -364,13 +364,14 @@ fn mutation_jobs_other_than_a_whole_number_of_at_least_one_is_refused_when_the_c
     }
     for good in [1, 2, 64] {
         let project = open(&format!("harness: claude-code\nmutation_jobs: {good}\n")).unwrap();
-        assert_eq!(project.config.mutation_jobs, good);
+        assert_eq!(project.config.mutation_jobs, Some(good));
+        assert_eq!(project.config.jobs(), good);
     }
     let project = open("harness: claude-code\n").unwrap();
-    assert_eq!(
-        project.config.mutation_jobs,
-        nunki::project::DEFAULT_MUTATION_JOBS
-    );
+    assert_eq!(project.config.mutation_jobs, None);
+    assert_eq!(project.config.jobs(), nunki::project::DEFAULT_MUTATION_JOBS);
+    // The measured default: one mutant at a time, in place.
+    assert_eq!(nunki::project::DEFAULT_MUTATION_JOBS, 1);
 }
 
 /// The home is named after the repository's directory, so two repositories
