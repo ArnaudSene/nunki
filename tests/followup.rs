@@ -91,7 +91,7 @@ fn every_record_the_hq_leaves_is_prose_and_not_a_code_block() {
         "did not call the security agent again",
         "Not attacked by the security agent",
         "refused an equivalence the coder proposed",
-        "equivalence(s) the coder proposed await the HQ",
+        "equivalence proposal(s) await the HQ",
     ] {
         assert!(text.contains(needle), "{needle} is missing:\n{text}");
     }
@@ -176,6 +176,7 @@ fn proposal(id: &str, why: &str) -> nunki::mutants::Proposal {
         file: "src/lib.rs".into(),
         line: 3,
         why: why.into(),
+        from: None,
     }
 }
 
@@ -202,9 +203,9 @@ fn the_proposals_awaiting_the_hq_are_listed_with_their_reasons() {
     .unwrap();
     let text = std::fs::read_to_string(&file).unwrap();
     for part in [
-        "2 equivalence(s) the coder proposed await the HQ",
-        "- `s1` (src/lib.rs:3) — only a log line reads it",
-        "- `s2` (src/lib.rs:3) — both arms return the same constant",
+        "2 equivalence proposal(s) await the HQ",
+        "- `s1` (src/lib.rs:3, the coder's) — only a log line reads it",
+        "- `s2` (src/lib.rs:3, the coder's) — both arms return the same constant",
         "nunki mission mutants m1 --ratify <survivor>",
         "--refuse <survivor> --because <why>",
         "`nunki push` refuses",
@@ -225,7 +226,7 @@ fn the_proposals_are_written_once_per_change_and_not_on_every_pass() {
     let count = || {
         std::fs::read_to_string(&file)
             .unwrap()
-            .matches("the coder proposed await the HQ")
+            .matches("equivalence proposal(s) await the HQ")
             .count()
     };
     let a = [proposal("s1", "only a log line reads it")];

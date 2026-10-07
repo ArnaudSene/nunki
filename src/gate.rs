@@ -1736,21 +1736,11 @@ fn a_named_test_missing(
 /// empties the gate.
 fn equivalences(campaign: &crate::mutants::Campaign, answer: &Answers) -> Option<String> {
     use crate::mutants::Triage;
-    /// Where a ruling was given, as the note counts it.
-    enum Given {
-        Here,
-        Carried,
-        Registry,
-    }
-    let equivalent: Vec<Given> = campaign
+    let equivalent: Vec<Option<String>> = campaign
         .survivors
         .iter()
         .filter_map(|s| match answer.of(s) {
-            Some(Triage::Equivalent {
-                carried_from: None, ..
-            }) => Some(Given::Here),
-            Some(Triage::Equivalent { .. }) => Some(Given::Carried),
-            Some(Triage::EquivalentRegistered { .. }) => Some(Given::Registry),
+            Some(Triage::Equivalent { carried_from, .. }) => Some(carried_from),
             _ => None,
         })
         .collect();
@@ -1758,36 +1748,15 @@ fn equivalences(campaign: &crate::mutants::Campaign, answer: &Answers) -> Option
         return None;
     }
     // A carried ruling is named apart: it was given on code that has
-    // changed since, and the HQ may want to look at it again. One from the
-    // project's registry too: the HQ gave it on another mission, and did not
-    // rule on this one.
-    let carried = equivalent
-        .iter()
-        .filter(|g| matches!(g, Given::Carried))
-        .count();
-    let registry = equivalent
-        .iter()
-        .filter(|g| matches!(g, Given::Registry))
-        .count();
-    let apart: Vec<String> = [
-        (carried > 0).then(|| format!("{carried} of those were carried from an earlier campaign")),
-        (registry > 0).then(|| {
-            format!(
-                "{registry} of those come from the project's registry of equivalences, \
-                 ruled on another mission on a line that has not changed since"
-            )
-        }),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
-    let apart = if apart.is_empty() {
-        String::new()
-    } else {
+    // changed since, and the HQ may want to look at it again.
+    let carried = equivalent.iter().filter(|from| from.is_some()).count();
+    let apart = if carried > 0 {
         format!(
-            ", and {} — `nunki mission mutants --lift` takes one back",
-            apart.join(", and ")
+            ", and {carried} of those were carried from an earlier campaign — \
+             `nunki mission mutants --lift` takes one back"
         )
+    } else {
+        String::new()
     };
     Some(format!(
         "{} of {} rode on `equivalent`, which no machine can check — they \
@@ -1798,26 +1767,34 @@ fn equivalences(campaign: &crate::mutants::Campaign, answer: &Answers) -> Option
     ))
 }
 
-/// How many survivors rode on an equivalence the coder proposed and the HQ
-/// has not ruled on, when any did. Counted apart from the HQ's rulings,
-/// because it is not one: the gate lets the mission go on, and `nunki push`
-/// is where it waits.
+/// How many survivors rode on an equivalence proposed and not yet ruled on,
+/// when any did, and from whom — the coder, or `nunki` from a ruling it
+/// matched in the registry or by file and mutation. Counted apart from the
+/// HQ's rulings, because none is one: the gate lets the mission go on, and
+/// `nunki push` is where it waits (HQ review 2).
 fn proposals(campaign: &crate::mutants::Campaign, answer: &Answers) -> Option<String> {
-    let proposed = campaign
+    let proposed: Vec<crate::mutants::Proposal> = campaign
         .survivors
         .iter()
-        .filter(|s| {
-            matches!(
-                answer.of(s),
-                Some(crate::mutants::Triage::EquivalentProposed { .. })
-            )
+        .filter_map(|s| {
+            let answered = answer.of(s)?;
+            let (why, from) = answered.proposal()?;
+            Some(crate::mutants::Proposal {
+                id: s.id.clone(),
+                file: s.file.clone(),
+                line: s.line,
+                why: why.to_string(),
+                from: from.cloned(),
+            })
         })
-        .count();
-    (proposed > 0).then(|| {
+        .collect();
+    (!proposed.is_empty()).then(|| {
         format!(
-            "{proposed} of {} rode on an equivalence the coder proposed and the HQ has \
-             not ruled on — `nunki push` refuses until each is ratified or refused",
-            campaign.survivors.len()
+            "{} of {} rode on an equivalence proposed ({}) and not ruled on by the HQ — \
+             `nunki push` refuses until each is ratified or refused",
+            proposed.len(),
+            campaign.survivors.len(),
+            crate::mutants::by_source(&proposed)
         )
     })
 }

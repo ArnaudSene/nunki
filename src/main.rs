@@ -524,7 +524,7 @@ enum MissionCommand {
         /// `HEAD`. Needs no mission.
         #[arg(
             long,
-            conflicts_with_all = ["equivalent", "ratify", "refuse", "lift", "again", "slot", "because"]
+            conflicts_with_all = ["equivalent", "ratify", "all", "refuse", "lift", "again", "slot", "because"]
         )]
         registry: bool,
         /// Which slot runs it. Defaults to the one the mission started in.
@@ -543,15 +543,22 @@ enum MissionCommand {
         /// reads.
         #[arg(long = "because", value_name = "SENTENCE")]
         because: Option<String>,
-        /// Ratify the equivalence the coder proposed on a survivor: the HQ's
-        /// ruling, written exactly as `--equivalent` writes it, with the
-        /// coder's sentence as its reason unless `--because` replaces it.
+        /// Ratify the equivalence proposed on a survivor — by the coder, or
+        /// by `nunki` from a ruling it matched: the HQ's ruling, written
+        /// exactly as `--equivalent` writes it, with the proposal's sentence
+        /// as its reason unless `--because` replaces it. With `--all` and no
+        /// survivor, every pending proposal, each printed first with its
+        /// source and sentence.
         #[arg(
             long = "ratify",
             value_name = "SURVIVOR",
+            num_args = 0..=1,
             conflicts_with_all = ["equivalent", "lift", "refuse"]
         )]
-        ratify: Option<String>,
+        ratify: Option<Option<String>>,
+        /// With `--ratify`: every pending proposal of the mission.
+        #[arg(long, requires = "ratify", conflicts_with = "because")]
+        all: bool,
         /// Refuse the equivalence the coder proposed on a survivor, with
         /// `--because`: the proposal is removed, the refusal recorded, and the
         /// survivor needs an outcome again. The next coder run reads why in
@@ -2109,6 +2116,7 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             equivalent,
             because,
             ratify,
+            all,
             refuse,
             lift,
             again,
@@ -2137,6 +2145,23 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                 );
                 return ExitCode::FAILURE;
             }
+            let ratify = match (ratify, all) {
+                (Some(None), true) => {
+                    return ratify_all(project, &id);
+                }
+                (Some(None), false) => {
+                    eprintln!(
+                        "nunki: --ratify names a survivor, or takes --all for every pending \
+                         proposal"
+                    );
+                    return ExitCode::FAILURE;
+                }
+                (Some(Some(_)), true) => {
+                    eprintln!("nunki: --ratify --all names no survivor: it takes every one");
+                    return ExitCode::FAILURE;
+                }
+                (ratify, _) => ratify.flatten(),
+            };
             if let Some(survivor) = ratify {
                 return match nunki::findings::ratify_proposal(
                     project,
@@ -2553,7 +2578,7 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                         }
                     );
                     print_proposals(project, &id);
-                    print_registered(project, &id);
+                    print_registry(project);
                     // The lifts nobody typed: a verified mission otherwise
                     // reads as if a CLEAR or a human had verified it.
                     for lift in state.accepted.iter().filter(|a| a.by_nunki) {
@@ -2654,45 +2679,79 @@ fn say_registered(registered: &nunki::equivalences::Registered) {
     }
 }
 
-/// The survivors of the mission's campaign answered by the project's
-/// registry of equivalences — rulings the HQ gave on another mission, and
-/// did not give on this one — and a registry that cannot be read, which
-/// applies nothing.
-fn print_registered(project: &Project, id: &str) {
-    let dir = mission_dir::Paths::of(&project.hq_root, id).dir;
-    if let Err(e) = nunki::equivalences::read(&project.hq_root) {
-        println!("registry  could not be read: {e}");
-    }
-    match nunki::mutants::read(&dir) {
-        Ok(Some(campaign)) => {
-            if let Some(line) = nunki::mutants::registered(&campaign) {
-                println!("registry  {line}");
-            }
+/// `nunki mission mutants <id> --ratify --all`: every pending proposal,
+/// printed first with its source and sentence, then ratified — the list
+/// printed is the list ruled ([`nunki::findings::ratify_all`]).
+fn ratify_all(project: &Project, id: &str) -> ExitCode {
+    let listed = match nunki::findings::pending(project, id) {
+        Ok(listed) => listed,
+        Err(e) => {
+            eprintln!("nunki: {e}");
+            return ExitCode::FAILURE;
         }
-        Ok(None) => {}
-        Err(e) => println!("registry  the campaign could not be read: {e}"),
+    };
+    if listed.is_empty() {
+        println!("no proposal awaits the HQ's ruling on mission {id}");
+        return ExitCode::SUCCESS;
+    }
+    println!("ratifying {} proposal(s):", listed.len());
+    for p in &listed {
+        println!("          {}", proposal_line(p));
+    }
+    match nunki::findings::ratify_all(project, id, &listed) {
+        Ok(done) => {
+            for ratified in &done {
+                println!(
+                    "{} ruled equivalent — {}",
+                    nunki::text::one_line(&ratified.proposal.id),
+                    nunki::text::one_line(&ratified.proposal.why)
+                );
+                say_registered(&ratified.registered);
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("nunki: {e}");
+            ExitCode::FAILURE
+        }
     }
 }
 
-/// The equivalences the coder proposed that await the HQ, each with its
-/// reason: `nunki push` refuses until each is ratified or refused, and this
-/// is where the HQ finds them without opening two JSON files.
+/// A project registry of equivalences that cannot be read: no campaign is
+/// matched against it, and the HQ should know why it hears nothing from it.
+fn print_registry(project: &Project) {
+    if let Err(e) = nunki::equivalences::read(&project.hq_root) {
+        println!("registry  could not be read: {e}");
+    }
+}
+
+/// One proposal as the HQ reads it before ruling: the survivor, who
+/// proposed it, and the sentence.
+fn proposal_line(p: &nunki::mutants::Proposal) -> String {
+    format!(
+        "{} ({}) — {}",
+        nunki::text::one_line(&p.id),
+        p.source(),
+        nunki::text::one_line(&p.why)
+    )
+}
+
+/// The equivalence proposals that await the HQ — the coder's, and `nunki`'s
+/// from rulings it matched — each with its source and sentence: `nunki push`
+/// refuses until each is ratified or refused, and this is where the HQ finds
+/// them without opening two JSON files.
 fn print_proposals(project: &Project, id: &str) {
     let dir = mission_dir::Paths::of(&project.hq_root, id).dir;
     match nunki::mutants::awaiting_ruling(&dir) {
         Ok(waiting) => {
-            if let Some(line) = nunki::mutants::proposals_await(waiting.len()) {
+            if let Some(line) = nunki::mutants::proposals_await(&waiting) {
                 println!("proposals {line}");
                 for p in &waiting {
-                    println!(
-                        "          {} — {}",
-                        nunki::text::one_line(&p.id),
-                        nunki::text::one_line(&p.why)
-                    );
+                    println!("          {}", proposal_line(p));
                 }
                 println!(
-                    "          `nunki mission mutants {id} --ratify <survivor>` or \
-                     `--refuse <survivor> --because <why>`"
+                    "          `nunki mission mutants {id} --ratify <survivor>` (or \
+                     `--ratify --all`) or `--refuse <survivor> --because <why>`"
                 );
             }
         }

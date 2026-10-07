@@ -336,7 +336,7 @@ pub fn proposal_refused(
 }
 
 /// The project's registry of equivalences could not be read when a campaign
-/// was recorded, so no ruling was applied from it ([`crate::equivalences`]).
+/// was recorded, so nothing was proposed from it ([`crate::equivalences`]).
 ///
 /// Said here because the registry fails closed: the survivors it would have
 /// answered are open, and whoever reads gate 7 asking for them again should
@@ -348,7 +348,7 @@ pub fn registry_unread(file: &Path, why: &str) -> Result<(), FollowupError> {
             "## {date} — the registry of equivalences could not be read\n\n\
              {why}\n\n\
              The campaign was recorded without it: no ruling given on another\n\
-             mission was applied, and the survivors it would have answered need\n\
+             mission was proposed, and the survivors it would have matched need\n\
              an outcome here.\n",
             date = today(),
             why = why.trim(),
@@ -356,9 +356,10 @@ pub fn registry_unread(file: &Path, why: &str) -> Result<(), FollowupError> {
     )
 }
 
-/// Gate 7 passed with equivalences the coder proposed that the HQ has not
-/// ruled on: each listed with its reason, for the HQ to ratify or refuse
-/// before `nunki push`, which refuses until it has.
+/// Gate 7 passed with equivalence proposals the HQ has not ruled on — the
+/// coder's, and `nunki`'s from rulings it matched: each listed with its
+/// source and reason, for the HQ to ratify or refuse before `nunki push`,
+/// which refuses until it has.
 ///
 /// Nothing is written when there are none.
 pub fn proposals_await(
@@ -373,10 +374,11 @@ pub fn proposals_await(
         .iter()
         .map(|p| {
             format!(
-                "- `{}` ({}:{}) — {}",
+                "- `{}` ({}:{}, {}) — {}",
                 crate::text::one_line(&p.id),
                 crate::text::one_line(&p.file),
                 p.line,
+                p.source(),
                 crate::text::one_line(&p.why)
             )
         })
@@ -387,7 +389,8 @@ pub fn proposals_await(
          not rulings, and `nunki push` refuses until each is ratified or refused:\n\n\
          {listed}\n\n\
          `nunki mission mutants {mission} --ratify <survivor>` ratifies one,\n\
-         `--refuse <survivor> --because <why>` refuses it.\n"
+         `--ratify --all` every one, `--refuse <survivor> --because <why>`\n\
+         refuses one.\n"
     );
     // One section per change, not one per pass of the final gates: a mission
     // that passes them again on the same proposals has nothing new to say,
@@ -408,7 +411,7 @@ pub fn proposals_await(
 }
 
 /// How the heading of a [`proposals_await`] section ends.
-const PROPOSALS_HEADING: &str = "equivalence(s) the coder proposed await the HQ";
+const PROPOSALS_HEADING: &str = "equivalence proposal(s) await the HQ";
 
 /// The body of the last [`proposals_await`] section of `text`, trimmed: what
 /// follows its heading, up to the next heading or the end of the file.

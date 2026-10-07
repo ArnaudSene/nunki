@@ -87,11 +87,11 @@ pub enum PushError {
     #[error("the repository has no remote named {0} — `git remote -v` says what it has")]
     NoRemote(String),
     #[error(
-        "{count} equivalence(s) the coder proposed await the HQ's ruling: {listed}. A \
-         proposal is not a ruling, and nothing rests on one that nobody ruled: \
-         `nunki mission mutants {mission} --ratify <survivor>` makes it the HQ's \
-         equivalence, `nunki mission mutants {mission} --refuse <survivor> --because <why>` \
-         sends it back to the coder"
+        "{count} equivalence proposal(s) await the HQ's ruling: {listed}. A proposal — \
+         the coder's, or `nunki`'s from a ruling it matched — is not a ruling, and \
+         nothing rests on one that nobody ruled: `nunki mission mutants {mission} --ratify \
+         <survivor>` (or `--ratify --all`) makes it the HQ's equivalence, `nunki mission \
+         mutants {mission} --refuse <survivor> --because <why>` sends it back to the coder"
     )]
     ProposalsAwait {
         mission: String,
@@ -343,8 +343,9 @@ fn open_pull_request(
     }
 }
 
-/// Every equivalence the coder proposed on the current campaign has been
-/// ratified or refused by the HQ (SPEC 4.4, gate 7).
+/// Every equivalence proposed on the current campaign — by the coder, or by
+/// `nunki` from a ruling it matched — has been ratified or refused by the HQ
+/// (SPEC 4.4, gate 7).
 ///
 /// Gate 7 counts a proposal as an outcome so that the mission is not stopped
 /// for it; this is where it waits instead. The decision on an equivalence is
@@ -363,8 +364,9 @@ fn proposals_ruled(project: &Project, id: &str) -> Result<(), PushError> {
             .iter()
             .map(|p| {
                 format!(
-                    "`{}` ({})",
+                    "`{}` ({}: {})",
                     crate::text::one_line(&p.id),
+                    p.source(),
                     crate::text::brief(&p.why, 120)
                 )
             })

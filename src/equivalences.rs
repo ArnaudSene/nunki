@@ -15,19 +15,27 @@
 //! the mutant's file and description — what the mutation changes, never its
 //! line number, which the smallest commit above it moves — and a digest of
 //! every line of the code it replaced, its whole span as the tool lists it,
-//! whitespace at both ends of each line ignored. A later campaign applies it
+//! whitespace at both ends of each line ignored. A later campaign matches it
 //! while that code is unchanged, wherever it moved to, and stops the moment
 //! any line of it changes: the ruling was about other code.
 //!
+//! **The registry proposes, it never rules** (HQ review 2). Which mutant a
+//! ruling was about is a heuristic across campaigns, and three rounds of
+//! review each found a narrower way for one to land on a mutant the HQ never
+//! ruled on. A match therefore gives the survivor a proposal — the HQ's own
+//! sentence, from the mission and commit it was given on — which gate 7
+//! counts as a proposal and `nunki push` waits on until the HQ ratifies or
+//! refuses it. A wrong match costs one refusal, never a wrong ruling.
+//!
 //! **Only what is identified without a doubt** (HQ review of the pull
-//! request, the class rule). A ruling is entered, and later applied, only
+//! request, the class rule). A ruling is entered, and later matched, only
 //! when the span's text occurs exactly once in its file, and only when the
 //! campaign it was given on holds exactly one survivor on its file and
 //! description. The same code twice in one file, the same mutation twice in
 //! one campaign, a span the tool did not give: the HQ's ruling stands on its
 //! mission, and the registry says nothing about it.
 //!
-//! **Fail closed.** A registry that cannot be read applies nothing and says
+//! **Fail closed.** A registry that cannot be read proposes nothing and says
 //! so; a span that cannot be read — file gone, lines out of range — matches
 //! nothing; two survivors of a campaign, or two entries, sharing a file and
 //! description match nothing either.
@@ -95,7 +103,7 @@ pub struct Registry {
 #[derive(Debug, thiserror::Error)]
 pub enum RegistryError {
     #[error(
-        "{0} is not a registry of equivalences `nunki` can read: {1} — no ruling is applied \
+        "{0} is not a registry of equivalences `nunki` can read: {1} — nothing is proposed \
          from it until it is repaired or removed"
     )]
     Unreadable(PathBuf, String),
@@ -398,8 +406,10 @@ fn pair(file: &str, description: &str) -> (String, String) {
     (file.to_string(), description.to_string())
 }
 
-/// Give each survivor still without an outcome the registry's ruling on it,
-/// when there is exactly one and it is about the code the survivor sits on:
+/// Give each survivor still without an outcome a **proposal** of the
+/// registry's ruling on it — never the ruling (HQ review 2): `nunki push`
+/// waits for the HQ to ratify or refuse it. Only when there is exactly one
+/// entry and it is about the code the survivor sits on:
 /// the same file and description, and the same [`span_digest`] for the code
 /// its mutation replaces now, as `digest` reads it — [`identify`], in a
 /// campaign, which reads nothing for code that occurs more than once.
@@ -441,10 +451,13 @@ pub fn apply(
         if digest(survivor).as_deref() != Some(entry.line.as_str()) {
             continue;
         }
-        survivor.outcome = Some(Triage::EquivalentRegistered {
+        survivor.outcome = Some(Triage::ProposedByNunki {
             why: entry.why.clone(),
-            mission: entry.mission.clone(),
-            commit: entry.commit.clone(),
+            from: crate::mutants::ProposedFrom::Registry {
+                mission: entry.mission.clone(),
+                commit: entry.commit.clone(),
+                date: entry.date.clone(),
+            },
         });
         applied += 1;
     }
@@ -473,22 +486,23 @@ impl Registered {
     }
 }
 
-/// The registry's lock. Asked again for two seconds while another verb
-/// holds it — a ruling takes milliseconds — and then refused, with why.
+/// How many times the registry's lock is asked for before it is refused,
+/// [`LOCK_WAIT`] apart: two seconds, where a ruling takes milliseconds.
+const LOCK_TRIES: usize = 20;
+const LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// The registry's lock. Asked again while another verb holds it, and then
+/// refused, with why.
 fn lock(hq_root: &Path, verb: &str) -> Result<crate::state::SlotLock, String> {
     let locks = hq_root.join("locks");
     std::fs::create_dir_all(&locks).map_err(|e| format!("{}: {e}", locks.display()))?;
-    let mut tries = 0;
-    loop {
-        match crate::state::SlotLock::acquire(&locks, LOCK, verb) {
-            Ok(lock) => return Ok(lock),
-            Err(_) if tries < 20 => {
-                tries += 1;
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-            Err(e) => return Err(e.to_string()),
+    for _ in 0..LOCK_TRIES {
+        if let Ok(lock) = crate::state::SlotLock::acquire(&locks, LOCK, verb) {
+            return Ok(lock);
         }
+        std::thread::sleep(LOCK_WAIT);
     }
+    crate::state::SlotLock::acquire(&locks, LOCK, verb).map_err(|e| e.to_string())
 }
 
 /// Take the registry's lock, read it, change it with `change`, and write it
@@ -599,20 +613,24 @@ pub fn enter(ruling: &Ruling, campaign: &Campaign, id: &str) -> Registered {
     })
 }
 
-/// Where the ruling a survivor holds was first given: the mission and the
-/// campaign commit. `None` for a survivor holding no ruling.
+/// Where the ruling a survivor holds, or that `nunki` proposed from on this
+/// mission, was first given: the mission and the campaign commit. `None`
+/// otherwise — a proposal from the registry included: it was given only
+/// where the survivor's code reads as the entry's, so [`remove`] finds its
+/// entry by that code.
 fn origin<'a>(
     survivor: &'a Survivor,
     campaign: &'a Campaign,
     mission: &'a str,
 ) -> Option<(&'a str, &'a str)> {
     match &survivor.outcome {
-        Some(Triage::EquivalentRegistered {
-            mission, commit, ..
-        }) => Some((mission, commit)),
         Some(Triage::Equivalent { carried_from, .. }) => {
             Some((mission, carried_from.as_deref().unwrap_or(&campaign.head)))
         }
+        Some(Triage::ProposedByNunki {
+            from: crate::mutants::ProposedFrom::Carried { commit },
+            ..
+        }) => Some((mission, commit)),
         _ => None,
     }
 }

@@ -164,9 +164,10 @@ pub struct Spent {
 pub struct Context {
     pub watcher: Watcher,
     pub window: Option<Spent>,
-    /// How many equivalences the coder proposed await the HQ's ruling
-    /// ([`crate::mutants::awaiting_ruling`]), or why that could not be read.
-    pub proposals: Result<usize, String>,
+    /// The equivalence proposals that await the HQ's ruling — the coder's,
+    /// and `nunki`'s from rulings it matched
+    /// ([`crate::mutants::awaiting_ruling`]) — or why they could not be read.
+    pub proposals: Result<Vec<crate::mutants::Proposal>, String>,
 }
 
 /// The stage as the line names it.
@@ -194,13 +195,18 @@ pub fn status(id: &str, state: &MissionState, context: &Context) -> Option<Statu
     stopped(id, state, context).map(|stop| with_proposals(id, stop, &context.proposals))
 }
 
-/// A stop, saying how many equivalences the coder proposed await the HQ.
+/// A stop, saying how many equivalence proposals await the HQ, and from
+/// whom.
 ///
 /// A verified mission with one waits on the HQ and not on the human's push:
 /// `nunki push` would refuse, so the line names the two verbs that rule.
-fn with_proposals(id: &str, mut stop: Status, proposals: &Result<usize, String>) -> Status {
+fn with_proposals(
+    id: &str,
+    mut stop: Status,
+    proposals: &Result<Vec<crate::mutants::Proposal>, String>,
+) -> Status {
     let (said, waiting) = match proposals {
-        Ok(count) => match crate::mutants::proposals_await(*count) {
+        Ok(waiting) => match crate::mutants::proposals_await(waiting) {
             Some(said) => (said, true),
             None => return stop,
         },
@@ -214,8 +220,9 @@ fn with_proposals(id: &str, mut stop: Status, proposals: &Result<usize, String>)
         stop.awaits = Awaits {
             who: "the HQ".to_string(),
             what: format!(
-                "`nunki mission mutants {id} --ratify <survivor>`, or `--refuse <survivor> \
-                 --because <why>`, for each; then `nunki push {id} --yes`"
+                "`nunki mission mutants {id} --ratify <survivor>` (or `--ratify --all`), \
+                 or `--refuse <survivor> --because <why>`, for each; then `nunki push {id} \
+                 --yes`"
             ),
         };
     }
@@ -554,7 +561,6 @@ impl Reader for Hq<'_> {
         let window = self.window(&state);
         let proposals =
             crate::mutants::awaiting_ruling(&crate::mission::dir::Paths::of(hq_root, id).dir)
-                .map(|waiting| waiting.len())
                 .map_err(|e| e.to_string());
         Ok(Observed::Live {
             state: Box::new(state),

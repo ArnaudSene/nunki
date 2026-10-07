@@ -1451,8 +1451,8 @@ fn push_refuses_until_every_proposed_equivalence_is_ratified_or_refused() {
     }
     let said = err.to_string();
     for part in [
-        "`s1` (only a log line reads it)",
-        "`s2` (both arms return the same constant)",
+        "`s1` (the coder's: only a log line reads it)",
+        "`s2` (the coder's: both arms return the same constant)",
         "nunki mission mutants m1 --ratify <survivor>",
         "nunki mission mutants m1 --refuse <survivor> --because <why>",
     ] {
@@ -1562,9 +1562,12 @@ fn the_hq_rules_on_proposals_with_two_verbs_and_status_lists_them() {
         status.contains("proposals 2 equivalence proposal(s) await the HQ's ruling"),
         "{status}"
     );
-    assert!(status.contains("s1 — only a log line reads it"), "{status}");
     assert!(
-        status.contains("s2 — both arms return the same constant"),
+        status.contains("s1 (the coder's) — only a log line reads it"),
+        "{status}"
+    );
+    assert!(
+        status.contains("s2 (the coder's) — both arms return the same constant"),
         "{status}"
     );
 
@@ -1944,12 +1947,12 @@ fn refusing_a_ruled_survivor_on_a_verified_mission_sends_nothing_back() {
     assert_eq!(world.state().flow.volets(), 0);
 }
 
-/// `nunki mission status` lists the rulings the project's registry gave the
-/// campaign, and a ruling verb says on stderr when it left the registry as
+/// `nunki mission status` lists each proposal with its source, and a ruling
+/// verb says on stderr when it left the registry as
 /// it was: the mission's file changed, the next mission's will not. Both
 /// are only ever printed by the binary.
 #[test]
-fn the_binary_lists_registry_rulings_and_says_when_the_registry_is_left_alone() {
+fn the_binary_lists_proposals_by_source_and_says_when_the_registry_is_left_alone() {
     use nunki::mutants::{Campaign, Survivor, Triage};
     let world = World::opened_at(nunki::mission::Rigor::Critical);
     let id = "src.rs:1:5: replace one -> u8 with 0";
@@ -1993,11 +1996,21 @@ fn the_binary_lists_registry_rulings_and_says_when_the_registry_is_left_alone() 
 
     let (ok, stdout, stderr) = run(&["mission", "status", "m1"]);
     assert!(ok, "{stdout}{stderr}");
+    // An older file's registry ruling reads as what it is now: a proposal
+    // from the registry, awaiting the HQ (HQ review 2).
     assert!(
-        stdout.contains("registry  1 equivalence(s) applied from the project's registry"),
+        stdout.contains(
+            "proposals 1 equivalence proposal(s) await the HQ's ruling (1 from the registry)"
+        ),
         "{stdout}"
     );
-    assert!(stdout.contains("ruled on mission earlier"), "{stdout}");
+    assert!(
+        stdout.contains(&format!(
+            "{id} (nunki's, from the registry: ruled on mission earlier at fedcba987654) — \
+             nothing reads the value"
+        )),
+        "{stdout}"
+    );
 
     std::fs::write(
         nunki::equivalences::path(&world.project.hq_root),
@@ -2028,4 +2041,142 @@ fn the_binary_lists_registry_rulings_and_says_when_the_registry_is_left_alone() 
     );
     let (_, stdout, _) = run(&["mission", "status", "m1"]);
     assert!(stdout.contains("registry  could not be read"), "{stdout}");
+}
+
+/// What `nunki` proposes from a ruling it matched holds the push exactly as
+/// the coder's proposals do, and the refusal names each by source; `--ratify
+/// --all` prints every pending proposal with its source and sentence, writes
+/// the HQ's equivalence on each, and the push goes through (HQ review 2, D).
+#[test]
+fn push_waits_on_nunkis_proposals_and_ratify_all_rules_them() {
+    use nunki::mutants::{self, Campaign, ProposedFrom, Survivor, Triage};
+    let world = World::opened(no_integration(), Security::Gates);
+    let head = world.commit("src.rs", "pub fn one() -> u8 { 2 }\n", "the lot");
+    world.verified(&[(Role::Coder, None, head.clone())]);
+    let paths = nunki::mission::dir::Paths::of(&world.project.hq_root, "m1");
+    let survivor = |id: &str, outcome: Option<Triage>| Survivor {
+        id: id.into(),
+        file: "src.rs".into(),
+        line: 1,
+        end_line: None,
+        description: format!("replace {id}"),
+        outcome,
+        refused: None,
+    };
+    mutants::write(
+        &paths.dir,
+        &Campaign {
+            fingerprint: "f".into(),
+            head,
+            date: "2026-10-06T12:00:00Z".into(),
+            survivors: vec![
+                survivor("s1", None),
+                survivor(
+                    "s2",
+                    Some(Triage::ProposedByNunki {
+                        why: "ruled on another mission".into(),
+                        from: ProposedFrom::Registry {
+                            mission: "earlier".into(),
+                            commit: "0123456789abcdef".into(),
+                            date: "2026-10-01T00:00:00Z".into(),
+                        },
+                    }),
+                ),
+                survivor(
+                    "s3",
+                    Some(Triage::ProposedByNunki {
+                        why: "ruled on its twin".into(),
+                        from: ProposedFrom::Carried {
+                            commit: "fedcba9876543210".into(),
+                        },
+                    }),
+                ),
+            ],
+            tried: None,
+        },
+    )
+    .unwrap();
+    mutants::write_triage(
+        &paths.dir,
+        &[(
+            "s1".to_string(),
+            Triage::EquivalentProposed {
+                why: "only a log line reads it".into(),
+            },
+        )]
+        .into_iter()
+        .collect(),
+    )
+    .unwrap();
+
+    let err = push::push(&world.project, "m1", true).unwrap_err();
+    let said = err.to_string();
+    assert!(
+        matches!(err, PushError::ProposalsAwait { count: 3, .. }),
+        "{said}"
+    );
+    for part in [
+        "`s1` (the coder's: only a log line reads it)",
+        "`s2` (nunki's, from the registry: ruled on mission earlier at 0123456789ab: ruled on \
+         another mission)",
+        "`s3` (nunki's, carried by file and mutation: ruled at fedcba987654 on a survivor of \
+         another id: ruled on its twin)",
+        "--ratify --all",
+    ] {
+        assert!(said.contains(part), "{part:?} in {said}");
+    }
+    assert!(world.on_forge("mission/x").is_none());
+
+    let status = world.printed_by_the_binary(&["mission", "status", "m1"]);
+    assert!(
+        status.contains(
+            "3 equivalence proposal(s) await the HQ's ruling (1 from the coder, 1 from the \
+             registry, 1 carried by file and mutation)"
+        ),
+        "{status}"
+    );
+
+    // Asked without a survivor, or with one and --all, it refuses.
+    let said = world.printed_by_the_binary(&["mission", "mutants", "m1", "--ratify"]);
+    assert!(said.contains("takes --all"), "{said}");
+    let said =
+        world.printed_by_the_binary(&["mission", "mutants", "m1", "--ratify", "s1", "--all"]);
+    assert!(said.contains("names no survivor"), "{said}");
+    assert_eq!(mutants::awaiting_ruling(&paths.dir).unwrap().len(), 3);
+
+    let said = world.printed_by_the_binary(&["mission", "mutants", "m1", "--ratify", "--all"]);
+    let listed = said.find("s2 (nunki's, from the registry").expect(&said);
+    let ruled = said
+        .find("s2 ruled equivalent — ruled on another mission")
+        .expect(&said);
+    assert!(listed < ruled, "each is printed before it is ruled: {said}");
+    assert!(
+        said.contains("s1 (the coder's) — only a log line reads it"),
+        "{said}"
+    );
+    assert!(
+        said.contains("s3 ruled equivalent — ruled on its twin"),
+        "{said}"
+    );
+
+    let campaign = mutants::read(&paths.dir).unwrap().unwrap();
+    for (s, why) in campaign.survivors.iter().zip([
+        "only a log line reads it",
+        "ruled on another mission",
+        "ruled on its twin",
+    ]) {
+        assert_eq!(
+            s.outcome,
+            Some(Triage::Equivalent {
+                why: why.into(),
+                carried_from: None,
+            }),
+            "{}",
+            s.id
+        );
+    }
+    assert!(mutants::read_triage(&paths.dir).unwrap().is_empty());
+    assert!(mutants::awaiting_ruling(&paths.dir).unwrap().is_empty());
+    push::push(&world.project, "m1", true).unwrap();
+    assert!(world.on_forge("mission/x").is_some());
 }

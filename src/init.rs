@@ -1918,28 +1918,42 @@ def where(diff):
     added = ""
     at = None
     gone = []
+    # Each hunk counts its own lines from its own first line: the position,
+    # and the function's first line it is counted from, start again at every
+    # `@@` until the hunk holding the first removed line has been read. A
+    # removal in a later hunk makes the span unknown rather than mixing two
+    # counts.
+    hunks = 0
+    first = None
     for text in diff.splitlines():
         if text.startswith("--- "):
             path = text[4:].strip()
         elif text.startswith("@@"):
             started = True
+            hunks += 1
             within = 0
+            if at is None:
+                head = ""
         elif started:
-            if not head and text[:1] in (" ", "-"):
+            if at is None and not head and text[:1] in (" ", "-"):
                 head = text[1:]
-            if text.startswith("-") and not removed_raw:
-                removed_raw = text[1:]
-                removed = removed_raw.strip()
-                at = within + 1
-            elif text.startswith("+") and not added:
-                added = text[1:].strip()
             if text.startswith("-"):
-                gone.append(within + 1)
+                if at is None:
+                    removed_raw = text[1:]
+                    removed = removed_raw.strip()
+                    at = within + 1
+                    first = hunks
+                gone.append((hunks, within + 1))
+            elif text.startswith("+") and not added and first in (None, hunks):
+                added = text[1:].strip()
             if text[:1] in (" ", "-"):
                 within += 1
     # How many lines the mutation replaced: the removed lines, when they are
-    # one run; 0 when they are not, which says the span is not known.
-    span = len(gone) if gone and gone == list(range(gone[0], gone[0] + len(gone))) else 0
+    # one run in one hunk; 0 when they are not, which says the span is not
+    # known.
+    lines = [n for hunk, n in gone if hunk == first]
+    one_run = lines == list(range(at, at + len(lines))) if lines else False
+    span = len(lines) if one_run and len(lines) == len(gone) else 0
     if path is None or at is None:
         return path, None, removed, added, span
     return path, in_file(path, head, at, removed_raw), removed, added, span
@@ -2814,7 +2828,12 @@ for (const [file, entry] of Object.entries(report.files ?? {})) {
     // very same column.
     const id = [file, at.line, at.column, mutant.mutatorName, was].join(":");
     const what = `${mutant.status}: ${mutant.mutatorName} -> ${was}`;
-    const end_line = mutant.location?.end?.line ?? 0;
+    // A whole number from 1 up, or 0: anything else in the report is a span
+    // nobody knows, and says so rather than reaching nunki as text, a
+    // fraction or a negative, as the rust template does with its `case`.
+    // (No apostrophe in this script: it sits inside single quotes.)
+    const end = mutant.location?.end?.line;
+    const end_line = Number.isInteger(end) && end > 0 ? end : 0;
     process.stdout.write(JSON.stringify({ id, file, line: at.line, end_line, description: what }) + "\n");
   }
 }

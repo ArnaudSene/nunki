@@ -2965,3 +2965,121 @@ fn the_scripts_here_never_inherit_a_campaign_variable() {
         .any(|(key, value)| key == nunki::mutants::BASE_ENV && value.is_none());
     assert!(removed, "{} reaches the scripts", nunki::mutants::BASE_ENV);
 }
+
+// ---------------------------------------------------------------------------
+// Each template's span output: `end_line`, the last line of the code a
+// mutation replaces (HQ review 2, E). The tool is a stub; the template's own
+// code reading its output runs for real. The Python and Next.js templates
+// read it with their stack's interpreter, so their tests run where `python3`
+// or `node` is on the path — as on CI's macOS runners — and say they were
+// skipped where it is not, rather than pass on nothing.
+// ---------------------------------------------------------------------------
+
+/// Whether `program` runs here; when it does not, the reason the test is
+/// skipped is printed.
+#[cfg(unix)]
+fn present(program: &str, test: &str) -> bool {
+    let here = std::process::Command::new(program)
+        .arg("--version")
+        .output()
+        .is_ok();
+    if !here {
+        eprintln!("{test}: skipped — no `{program}` on the path, so its template code cannot run");
+    }
+    here
+}
+
+/// The survivors' spans a campaign printed, by id.
+#[cfg(unix)]
+fn spans(said: &str) -> std::collections::BTreeMap<String, Option<(u32, u32)>> {
+    nunki::mutants::parse(said)
+        .into_iter()
+        .map(|s| (s.id.clone(), s.span()))
+        .collect()
+}
+
+/// Python: the span is the run of lines mutmut's diff removes, placed in the
+/// file — one line, two lines, and a removal in a second hunk read from that
+/// hunk's own first line, not the first hunk's.
+#[cfg(unix)]
+#[test]
+fn the_python_campaign_carries_each_survivors_span_from_mutmuts_diff() {
+    if !present(
+        "python3",
+        "the_python_campaign_carries_each_survivors_span_from_mutmuts_diff",
+    ) {
+        return;
+    }
+    let thing = "def x_a(a, b):\n    return a > b\n\n\ndef x_b(n):\n    y = n + 1\n    return y\n";
+    let uv = r#"#!/bin/sh
+case "$*" in
+  *"mutmut results"*)
+    printf 'pkg.thing.x_a__mutmut_1: survived\npkg.thing.x_b__mutmut_2: survived\npkg.thing.x_b__mutmut_3: survived\n'
+    ;;
+  *"mutmut show pkg.thing.x_a__mutmut_1"*)
+    printf -- '--- src/pkg/thing.py\n+++ src/pkg/thing.py\n@@ -1,2 +1,2 @@\n def x_a(a, b):\n-    return a > b\n+    return a >= b\n'
+    ;;
+  *"mutmut show pkg.thing.x_b__mutmut_2"*)
+    printf -- '--- src/pkg/thing.py\n+++ src/pkg/thing.py\n@@ -1,3 +1,2 @@\n def x_b(n):\n-    y = n + 1\n-    return y\n+    return None\n'
+    ;;
+  *"mutmut show pkg.thing.x_b__mutmut_3"*)
+    printf -- '--- src/pkg/thing.py\n+++ src/pkg/thing.py\n@@ -1,2 +1,2 @@\n def x_a(a, b):\n     return a > b\n@@ -5,3 +5,3 @@\n def x_b(n):\n-    y = n + 1\n+    y = n - 1\n     return y\n'
+    ;;
+esac
+exit 0
+"#;
+    let (said, why, code) = campaign_in(
+        "python",
+        "src/pkg/thing.py",
+        &[("uv", uv)],
+        &[("src/pkg/thing.py", thing)],
+    );
+    assert_eq!(code, Some(0), "{said}\n{why}");
+    let spans = spans(&said);
+    assert_eq!(spans["pkg.thing.x_a__mutmut_1"], Some((2, 2)), "{said}");
+    assert_eq!(spans["pkg.thing.x_b__mutmut_2"], Some((6, 7)), "{said}");
+    assert_eq!(
+        spans["pkg.thing.x_b__mutmut_3"],
+        Some((6, 6)),
+        "a second hunk counts from its own first line: {said}"
+    );
+}
+
+/// Next.js: the span is the report's `location.end.line` when it is a whole
+/// number from 1 up, and 0 — unknown — when it is anything else, as the
+/// Rust template does with what jq reads.
+#[cfg(unix)]
+#[test]
+fn the_next_campaign_carries_each_survivors_span_and_sanitises_it() {
+    if !present(
+        "node",
+        "the_next_campaign_carries_each_survivors_span_and_sanitises_it",
+    ) {
+        return;
+    }
+    let pnpm = r#"#!/bin/sh
+case "$*" in
+  *"stryker run"*)
+    mkdir -p reports/mutation
+    printf '%s' '{"files":{"app/page.ts":{"mutants":[
+      {"status":"Survived","mutatorName":"A","replacement":"a","location":{"start":{"line":2,"column":1},"end":{"line":4,"column":2}}},
+      {"status":"Survived","mutatorName":"B","replacement":"b","location":{"start":{"line":5,"column":1},"end":{"line":"7","column":2}}},
+      {"status":"Survived","mutatorName":"C","replacement":"c","location":{"start":{"line":6,"column":1},"end":{"line":6.5,"column":2}}},
+      {"status":"Survived","mutatorName":"D","replacement":"d","location":{"start":{"line":7,"column":1},"end":{"line":-1,"column":2}}},
+      {"status":"Survived","mutatorName":"E","replacement":"e","location":{"start":{"line":8,"column":1}}}]}}}' > reports/mutation/mutation.json
+    ;;
+esac
+exit 0
+"#;
+    let (said, why) = campaign_of("next", "app/page.ts", &[("pnpm", pnpm)]);
+    assert!(nunki::mutants::completed(&said), "{said}\n{why}");
+    let ends: Vec<Option<u32>> = nunki::mutants::parse(&said)
+        .into_iter()
+        .map(|s| s.end_line)
+        .collect();
+    assert_eq!(
+        ends,
+        vec![Some(4), Some(0), Some(0), Some(0), Some(0)],
+        "{said}"
+    );
+}
