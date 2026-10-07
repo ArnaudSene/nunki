@@ -79,6 +79,12 @@ pub const SCRIPT: &str = "mutation.sh";
 /// `<campaign-id> <path>...`, keeps working unchanged.
 pub const BASE_ENV: &str = "NUNKI_BASE";
 
+/// The variable that hands a campaign how many mutants it may run at once:
+/// the project's `mutation_jobs` (`nunki.yaml`). An environment variable for
+/// the reason [`BASE_ENV`] is one: a project's own `mutation.sh` keeps
+/// working unchanged, and one that ignores it runs as it always has.
+pub const JOBS_ENV: &str = "NUNKI_MUTATION_JOBS";
+
 /// A mutant the campaign could not kill.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Survivor {
@@ -2553,7 +2559,15 @@ pub fn campaign(
         },
         |commit| git::run(&slot.tree, &["merge-base", "--is-ancestor", commit, "HEAD"]).is_ok(),
     );
-    let launched = launch_command(&slot.tree, &judged, &want, &touched, &fork, &scope)?;
+    let launched = launch_command(
+        &slot.tree,
+        &judged,
+        &want,
+        &touched,
+        &fork,
+        &scope,
+        project.config.mutation_jobs,
+    )?;
 
     let runs = dir.join("runs");
     std::fs::create_dir_all(&runs).map_err(|e| MutantsError::Io(runs.clone(), e))?;
@@ -2617,6 +2631,7 @@ pub fn launch_command(
     touched: &[String],
     fork: &str,
     scope: &Scope,
+    jobs: u32,
 ) -> Result<crate::harness::spawn::CommandSpec, MutantsError> {
     Ok(match scope.since() {
         Some(since) => command(
@@ -2624,13 +2639,15 @@ pub fn launch_command(
             campaign,
             &touched_since(tree, since, touched)?,
             since,
+            jobs,
         ),
-        None => command(judged, campaign, touched, fork),
+        None => command(judged, campaign, touched, fork, jobs),
     })
 }
 
 /// What a campaign runs in the container: each stack's `mutation.sh` on the
-/// touched paths, from the clean copy, with the fork point in [`BASE_ENV`].
+/// touched paths, from the clean copy, with the fork point in [`BASE_ENV`]
+/// and the project's `mutation_jobs` in [`JOBS_ENV`].
 ///
 /// `campaign` is the fingerprint, `fork` the commit the branch forked from.
 /// One stack runs its script directly, as it always has; several run through
@@ -2640,6 +2657,7 @@ pub fn command(
     campaign: &str,
     touched: &[String],
     fork: &str,
+    jobs: u32,
 ) -> crate::harness::spawn::CommandSpec {
     let (program, args) = match judged {
         [one] => {
@@ -2659,9 +2677,12 @@ pub fn command(
         program,
         args,
         cwd: PathBuf::from(crate::exec::PROOF_AT),
-        env: [(BASE_ENV.to_string(), fork.to_string())]
-            .into_iter()
-            .collect(),
+        env: [
+            (BASE_ENV.to_string(), fork.to_string()),
+            (JOBS_ENV.to_string(), jobs.to_string()),
+        ]
+        .into_iter()
+        .collect(),
     }
 }
 

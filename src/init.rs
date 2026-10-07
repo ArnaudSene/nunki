@@ -526,6 +526,13 @@ harness: claude-code
 # pass, a whole number from 1 to 100.
 # mutation_threshold: 80
 
+# How many mutants gate 7's campaign runs at once, a whole number of at least
+# 1. At 1 a Rust campaign runs in place, one mutant at a time; above it, each
+# job builds in a copy of the tree of its own. Measured on nunki's own
+# repository, more jobs were barely faster and, at one per core, turned
+# survivors into timeouts counted as killed: raise it only after measuring.
+# mutation_jobs: 1
+
 # What the harness does with a permission it would otherwise ask about.
 # Nobody is there to ask in an autonomous container, so the only question is
 # which way the silence falls. `auto` lets the harness's own safety checks
@@ -984,7 +991,9 @@ const MUTATION_RUST: &str = r#"#!/bin/sh
 # `--in-place` is not a detail: cargo-mutants only reuses a build cache in
 # place, and the copy this runs in has its own, warmed once per slot and kept.
 # Without it every campaign recompiles from cold, and SPEC section 7 counts
-# that hour.
+# that hour. It is what the campaign runs at one job, the default
+# (`mutation_jobs` in `nunki.yaml`, handed over in `NUNKI_MUTATION_JOBS`).
+# Above one, see `jobs` below.
 set -eu
 
 campaign="$1"
@@ -1051,6 +1060,41 @@ if [ -n "${NUNKI_BASE:-}" ]; then
   scope="--in-diff $diff"
 fi
 
+# How many mutants run at once. At 1 — the default, and what a campaign runs
+# without the variable — the command is today's, `--in-place` and one mutant
+# at a time. Above 1, cargo-mutants cannot run in place: each job builds in a
+# copy of the tree of its own, under `$TMPDIR`, from a cold cache, and the
+# copies are what it pays for the cores.
+#
+# Measured on nunki's own repository with cargo-mutants 27.1.0, 53 mutants,
+# 12 cores, every run from an emptied cache: in place 533 s (9.5 s a
+# mutant); 2 jobs 463 s (15.8 s a mutant, 4.8 GB on disk at the peak);
+# 4 jobs 492 s (32 s, 9.1 GB); 12 jobs 607 s (121 s, 27 GB). Building one
+# mutant already uses every core, so jobs mostly queue for them. And at 12
+# the answer changed: the two mutants that survive in place came back as
+# timeouts — counted tried and killed — because the test timeout is set from
+# a baseline run alone and the loaded machine overran it. Raise it only for
+# a crate whose build leaves cores idle, and measure it there first.
+#
+# `--copy-vcs true` because in place the tests run beside `.git`, and a
+# project's tests may read it: measured on that same repository, without it
+# the unmutated baseline fails in the copy and cargo-mutants exits 4 having
+# tried nothing.
+# A value that is not a whole number of at least 1 is refused here rather
+# than handed to the tool, and before any mutant is tried.
+jobs="${NUNKI_MUTATION_JOBS:-1}"
+case "$jobs" in
+  ''|*[!0-9]*|0*)
+    echo "nunki: NUNKI_MUTATION_JOBS is a whole number of at least 1, and $jobs is not" >&2
+    exit 1
+    ;;
+esac
+if [ "$jobs" -eq 1 ]; then
+  where="--in-place"
+else
+  where="--jobs $jobs --copy-vcs true"
+fi
+
 # A campaign that finds survivors exits non-zero — 2, measured on
 # cargo-mutants 27.1.0 — and that is a result, not a failure: `nunki` reads the
 # survivors rather than the status.
@@ -1079,7 +1123,7 @@ fi
 # command line is the whole of the campaign's configuration.
 # shellcheck disable=SC2086
 status=0
-cargo mutants --no-config --in-place --no-shuffle --exclude-re "replace main -> " --output "$out" $scope >&2 || status=$?
+cargo mutants --no-config $where --no-shuffle --exclude-re "replace main -> " --output "$out" $scope >&2 || status=$?
 
 # `--output DIR` writes into `DIR/mutants.out/`, not into `DIR` (measured on
 # 27.1.0). Reading the wrong path makes the whole campaign fail silently.
@@ -1827,6 +1871,26 @@ fi
 # database.
 export PYTEST_ADDOPTS="${PYTEST_ADDOPTS:+$PYTEST_ADDOPTS }-m \"not system\""
 
+# How many mutants run at once: the project's `mutation_jobs`, which `nunki`
+# hands over in `NUNKI_MUTATION_JOBS`, passed as mutmut's own
+# `--max-children` — the one option `mutmut run` takes (measured on 3.8.0).
+# It is safe: mutmut already runs its mutants in forked children, and the
+# setting only caps how many; not run against a real mutmut when it was
+# added, as none was at hand. Without the variable — a run by hand — nothing
+# is passed and mutmut keeps its own default, as it always has. A value that
+# is not a whole number of at least 1 is refused rather than handed to the
+# tool.
+children=""
+if [ -n "${NUNKI_MUTATION_JOBS:-}" ]; then
+  case "$NUNKI_MUTATION_JOBS" in
+    *[!0-9]*|0*)
+      echo "nunki: NUNKI_MUTATION_JOBS is a whole number of at least 1, and $NUNKI_MUTATION_JOBS is not" >&2
+      exit 1
+      ;;
+  esac
+  children="--max-children $NUNKI_MUTATION_JOBS"
+fi
+
 uv sync --frozen --all-groups >&2
 if ! uv run --frozen --no-sync mutmut --version >/dev/null 2>&1; then
   echo "nunki: this stack's campaign needs mutmut, which this project does not declare." >&2
@@ -1872,7 +1936,8 @@ rm -rf mutants
 # campaign died on the first file. Taken as a guard, it lets the script print
 # `{"campaign":"done"}` with no survivor — gate 7 green on nothing,
 # which is the one failure this contract exists to prevent.
-if ! uv run --frozen --no-sync mutmut run >&2; then
+# shellcheck disable=SC2086
+if ! uv run --frozen --no-sync mutmut run $children >&2; then
   echo "nunki: the campaign could not run, so no mutant was tested" >&2
   exit 1
 fi
@@ -2766,6 +2831,27 @@ if [ -z "$files" ]; then
   exit 0
 fi
 
+# How many mutants run at once: the project's `mutation_jobs`, which `nunki`
+# hands over in `NUNKI_MUTATION_JOBS`, passed as Stryker's own
+# `--concurrency`, the number of test runner processes it starts. It is safe:
+# Stryker already runs several when it is not told, each in a process of its
+# own, so the setting only says how many. Read from Stryker's documentation
+# and not run here — no Stryker was at hand when it was added; an option it
+# refused would make it exit non-zero, which the guard below reads as a
+# campaign that did not complete, never as a green one. Without the variable
+# — a run by hand — nothing is passed and Stryker keeps its default. A value
+# that is not a whole number of at least 1 is refused rather than handed on.
+concurrency=""
+if [ -n "${NUNKI_MUTATION_JOBS:-}" ]; then
+  case "$NUNKI_MUTATION_JOBS" in
+    *[!0-9]*|0*)
+      echo "nunki: NUNKI_MUTATION_JOBS is a whole number of at least 1, and $NUNKI_MUTATION_JOBS is not" >&2
+      exit 1
+      ;;
+  esac
+  concurrency="--concurrency $NUNKI_MUTATION_JOBS"
+fi
+
 pnpm install --frozen-lockfile >&2
 if ! pnpm exec stryker --version >/dev/null 2>&1; then
   echo "nunki: this stack's campaign needs @stryker-mutator/core, which this project does not declare." >&2
@@ -2808,7 +2894,7 @@ rm -f "$report"
 # never read as one that did, whatever report it left.
 # shellcheck disable=SC2086
 status=0
-pnpm exec stryker run $files --cleanTempDir always --reporters json >&2 || status=$?
+pnpm exec stryker run $files $concurrency --cleanTempDir always --reporters json >&2 || status=$?
 if [ "$status" -ne 0 ]; then
   echo "nunki: stryker exited $status, so the campaign did not complete and measured nothing" >&2
   exit 1

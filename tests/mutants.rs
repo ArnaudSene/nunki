@@ -312,6 +312,7 @@ fn context(dir: &Path) -> (nunki::project::Project, nunki::slot::Slot) {
             permission_mode: "auto".to_string(),
             rigor: None,
             mutation_threshold: 80,
+            mutation_jobs: 1,
             forge_protection: Default::default(),
         },
         dir.join("nunki"),
@@ -636,6 +637,7 @@ fn live_a_campaign_is_launched_watched_and_read_back() {
             permission_mode: "auto".to_string(),
             rigor: None,
             mutation_threshold: 80,
+            mutation_jobs: 1,
             forge_protection: Default::default(),
         },
         dir.path().join("nunki"),
@@ -1570,7 +1572,7 @@ fn a_campaign_is_told_the_commit_its_branch_forked_from() {
 
     let touched = nunki::gate::touched_since_base(tree, "dev").unwrap();
     let judged = nunki::run::judged(&project, "rust");
-    let one = mutants::command(&judged, "abc123", &touched, &fork);
+    let one = mutants::command(&judged, "abc123", &touched, &fork, 1);
     assert_eq!(
         one.env.get(mutants::BASE_ENV).map(String::as_str),
         Some(forked.as_str()),
@@ -1589,12 +1591,52 @@ fn a_campaign_is_told_the_commit_its_branch_forked_from() {
         scripts_at: "/work/stack-next".to_string(),
         advisories_at: "/nunki/advisories-next".to_string(),
     });
-    let several = mutants::command(&two, "abc123", &touched, &fork);
+    let several = mutants::command(&two, "abc123", &touched, &fork, 1);
     assert_eq!(several.program, "sh");
     assert_eq!(
         several.env.get(mutants::BASE_ENV).map(String::as_str),
         Some(forked.as_str())
     );
+}
+
+/// The project's `mutation_jobs` reaches the campaign the way the fork point
+/// does, in its environment: one stack's script, the shell several run
+/// through, and a partial campaign as well as a full one.
+#[test]
+fn a_campaign_is_told_how_many_mutants_it_may_run_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot) = context(dir.path());
+    let tree = &slot.tree;
+    let fork = git(tree, &["rev-parse", "dev"]);
+    write(tree, "src/lib.rs", "pub fn one() -> u8 { 2 }\n");
+    git(tree, &["commit", "-q", "-am", "L1"]);
+    let first = git(tree, &["rev-parse", "HEAD"]);
+    write(tree, "src/lib.rs", "pub fn one() -> u8 { 3 }\n");
+    git(tree, &["commit", "-q", "-am", "volet"]);
+    let touched = nunki::gate::touched_since_base(tree, "dev").unwrap();
+    let judged = nunki::run::judged(&project, "rust");
+    let jobs = |cmd: &nunki::harness::spawn::CommandSpec| cmd.env.get(mutants::JOBS_ENV).cloned();
+
+    for n in [1, 4, 12] {
+        let one = mutants::command(&judged, "abc123", &touched, &fork, n);
+        assert_eq!(jobs(&one), Some(n.to_string()), "{one:?}");
+    }
+    let mut two = judged.clone();
+    two.push(nunki::run::Judged {
+        stack: nunki::project::Stack::new("next", "frontend").unwrap(),
+        scripts_at: "/work/stack-next".to_string(),
+        advisories_at: "/nunki/advisories-next".to_string(),
+    });
+    let several = mutants::command(&two, "abc123", &touched, &fork, 3);
+    assert_eq!(several.program, "sh");
+    assert_eq!(jobs(&several), Some("3".to_string()));
+
+    let partial = Scope::Partial { since: first };
+    let full = Scope::Full { why: "x".into() };
+    for scope in [partial, full] {
+        let cmd = mutants::launch_command(tree, &judged, "fp", &touched, &fork, &scope, 5).unwrap();
+        assert_eq!(jobs(&cmd), Some("5".to_string()), "{scope:?}");
+    }
 }
 
 /// With the fork point, the shipped script answers for the lines the branch
@@ -5230,7 +5272,7 @@ fn a_partial_campaign_is_given_the_previous_head_as_its_base() {
     let partial = Scope::Partial {
         since: first.clone(),
     };
-    let cmd = mutants::launch_command(tree, &judged, "fp", &touched, &fork, &partial).unwrap();
+    let cmd = mutants::launch_command(tree, &judged, "fp", &touched, &fork, &partial, 1).unwrap();
     assert_eq!(
         cmd.env.get(mutants::BASE_ENV).map(String::as_str),
         Some(first.as_str())
@@ -5238,7 +5280,7 @@ fn a_partial_campaign_is_given_the_previous_head_as_its_base() {
     assert_eq!(cmd.args, ["fp", "src/lib.rs"]);
 
     let full = Scope::Full { why: "x".into() };
-    let cmd = mutants::launch_command(tree, &judged, "fp", &touched, &fork, &full).unwrap();
+    let cmd = mutants::launch_command(tree, &judged, "fp", &touched, &fork, &full, 1).unwrap();
     assert_eq!(
         cmd.env.get(mutants::BASE_ENV).map(String::as_str),
         Some(fork.as_str())

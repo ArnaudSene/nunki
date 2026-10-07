@@ -26,6 +26,7 @@ fn config() -> Config {
         permission_mode: "auto".to_string(),
         rigor: None,
         mutation_threshold: 80,
+        mutation_jobs: 1,
         forge_protection: Default::default(),
     }
 }
@@ -334,6 +335,42 @@ fn a_mutation_threshold_outside_one_to_a_hundred_is_refused_when_the_config_is_r
     let project = open("harness: claude-code\n").unwrap();
     assert_eq!(project.config.mutation_threshold, 80);
     assert_eq!(project.config.rigor, None);
+}
+
+/// `mutation_jobs` is a whole number of at least 1, refused otherwise when
+/// `nunki.yaml` is read, with the rule in the message: 0 would be a campaign
+/// that runs nothing, and a fraction or a word is not a number of jobs.
+/// Absent, it is the measured default.
+#[test]
+fn mutation_jobs_other_than_a_whole_number_of_at_least_one_is_refused_when_the_config_is_read() {
+    let open = |body: &str| {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        let home = common::project_home(&root, dir.path(), body);
+        Project::open_at(root, home)
+    };
+    for bad in ["0", "-2", "1.5", "four", "\"4\"", "4294967296", "[4]", "~"] {
+        let err = open(&format!("harness: claude-code\nmutation_jobs: {bad}\n")).unwrap_err();
+        assert!(matches!(err, ProjectError::Invalid(..)), "{bad}: {err}");
+        assert!(err.to_string().contains("nunki.yaml"), "{bad}: {err}");
+        assert!(
+            err.to_string()
+                .contains("mutation_jobs is a whole number of at least 1")
+                || err
+                    .to_string()
+                    .contains("mutation_jobs as a whole number of at least 1"),
+            "{bad}: {err}"
+        );
+    }
+    for good in [1, 2, 64] {
+        let project = open(&format!("harness: claude-code\nmutation_jobs: {good}\n")).unwrap();
+        assert_eq!(project.config.mutation_jobs, good);
+    }
+    let project = open("harness: claude-code\n").unwrap();
+    assert_eq!(
+        project.config.mutation_jobs,
+        nunki::project::DEFAULT_MUTATION_JOBS
+    );
 }
 
 /// The home is named after the repository's directory, so two repositories

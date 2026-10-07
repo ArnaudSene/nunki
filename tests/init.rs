@@ -33,10 +33,13 @@ fn fresh() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
 /// spawned here inherited it, took the campaign's base for its own, and three
 /// tests failed under the campaign and passed outside it, so the unmutated
 /// baseline failed and the campaign measured nothing (security round 1 on
-/// this mission). A test that wants the variable sets it after this.
+/// this mission). `NUNKI_MUTATION_JOBS` is removed for the same reason: a
+/// template test asserting the command a campaign runs without it would see the
+/// enclosing campaign's. A test that wants either variable sets it after this.
 fn sh() -> std::process::Command {
     let mut command = std::process::Command::new("sh");
     command.env_remove(nunki::mutants::BASE_ENV);
+    command.env_remove(nunki::mutants::JOBS_ENV);
     command
 }
 
@@ -493,17 +496,21 @@ fn the_nunki_yaml_it_writes_names_the_rigor_and_the_threshold_with_their_default
     let text = std::fs::read_to_string(home(&repo).join("nunki.yaml")).unwrap();
     assert!(text.contains("\n# rigor: critical\n"), "{text}");
     assert!(text.contains("\n# mutation_threshold: 80\n"), "{text}");
+    assert!(text.contains("\n# mutation_jobs: 1\n"), "{text}");
     let commented: nunki::project::Config = serde_yaml_ng::from_str(&text).unwrap();
     let uncommented: nunki::project::Config = serde_yaml_ng::from_str(
         &text
             .replace("\n# rigor:", "\nrigor:")
-            .replace("\n# mutation_threshold:", "\nmutation_threshold:"),
+            .replace("\n# mutation_threshold:", "\nmutation_threshold:")
+            .replace("\n# mutation_jobs:", "\nmutation_jobs:"),
     )
     .unwrap();
     assert_eq!(commented.rigor, None);
     assert_eq!(uncommented.rigor, Some(nunki::mission::Rigor::Critical));
     assert_eq!(commented.mutation_threshold, 80);
     assert_eq!(uncommented.mutation_threshold, 80);
+    assert_eq!(commented.mutation_jobs, 1);
+    assert_eq!(uncommented.mutation_jobs, 1);
 }
 
 /// The prose `nunki init` deposits must read as prose.
@@ -2594,6 +2601,18 @@ fn campaign_in(
     stub: &[(&str, &str)],
     files: &[(&str, &str)],
 ) -> (String, String, Option<i32>) {
+    campaign_with(stack, touched, stub, files, &[])
+}
+
+/// [`campaign_in`], with `env` set on the script as `nunki` sets it.
+#[cfg(unix)]
+fn campaign_with(
+    stack: &str,
+    touched: &str,
+    stub: &[(&str, &str)],
+    files: &[(&str, &str)],
+    env: &[(&str, &str)],
+) -> (String, String, Option<i32>) {
     let (dir, root, nunki) = fresh();
     init(&root, &nunki, &[stack.to_string()]).unwrap();
     let script = home(&root).join("stacks").join(stack).join("mutation.sh");
@@ -2610,6 +2629,7 @@ fn campaign_in(
         .arg("abc123")
         .arg(touched)
         .env("PATH", path)
+        .envs(env.iter().copied())
         .current_dir(&tree)
         .output()
         .expect("sh runs the campaign");
@@ -2953,6 +2973,201 @@ exit 0
     assert!(why.contains("stryker exited 1"), "{why}");
 }
 
+// ---------------------------------------------------------------------------
+// `mutation_jobs`, handed to every template in `NUNKI_MUTATION_JOBS`: each
+// passes it to its tool's own parallelism option, keeps today's command
+// without it, and refuses a value that is not a whole number of at least 1
+// before the tool runs.
+// ---------------------------------------------------------------------------
+
+/// What the stub tool was asked, from the line it writes on stderr.
+#[cfg(unix)]
+fn asked(why: &str) -> String {
+    why.lines()
+        .find_map(|l| l.strip_prefix("asked: "))
+        .unwrap_or_else(|| panic!("the tool never ran: {why}"))
+        .to_string()
+}
+
+/// The values every template refuses, and that never reach the tool.
+#[cfg(unix)]
+const BAD_JOBS: [&str; 5] = ["0", "-1", "1.5", "four", "04"];
+
+/// Rust: `1` is today's in-place run, argument for argument, and so is no
+/// variable at all; above 1 the campaign runs `--jobs N`, in copies, and
+/// keeps everything else. The terminal line and its counts are unchanged.
+#[cfg(unix)]
+#[test]
+fn the_rust_campaign_runs_in_place_at_one_job_and_in_parallel_above() {
+    let cargo = r#"#!/bin/sh
+echo "asked: $*" >&2
+out=""
+while [ $# -gt 0 ]; do
+  if [ "$1" = --output ]; then out=$2; fi
+  shift
+done
+o="$out/mutants.out"
+mkdir -p "$o"
+printf 'src/lib.rs:2:7: replace > with == in keep\n' > "$o/caught.txt"
+printf 'src/lib.rs:2:7: replace > with >= in keep\n' > "$o/missed.txt"
+: > "$o/timeout.txt"; : > "$o/unviable.txt"
+printf '[1,2]' > "$o/mutants.json"
+exit 2
+"#;
+    let run =
+        |env: &[(&str, &str)]| campaign_with("rust", "src/lib.rs", &[("cargo", cargo)], &[], env);
+    let today = "mutants --no-config --in-place --no-shuffle --exclude-re replace main ->  \
+                 --output target/mutants-abc123 --file src/lib.rs";
+
+    let (said, why, status) = run(&[]);
+    assert_eq!(status, Some(0), "{why}");
+    assert_eq!(asked(&why), today, "without the variable");
+    let (one, why, status) = run(&[(nunki::mutants::JOBS_ENV, "1")]);
+    assert_eq!(status, Some(0), "{why}");
+    assert_eq!(asked(&why), today, "at one job");
+    assert_eq!(one, said, "one job says what no variable says");
+
+    let (four, why, status) = run(&[(nunki::mutants::JOBS_ENV, "4")]);
+    assert_eq!(status, Some(0), "{why}");
+    assert_eq!(
+        asked(&why),
+        today.replace("--in-place", "--jobs 4 --copy-vcs true"),
+        "at four jobs"
+    );
+    // The same answer: what changes is how the tool runs, not what it says.
+    assert_eq!(four, said);
+    assert!(nunki::mutants::completed(&four), "{four}");
+    assert_eq!(nunki::mutants::tried(&four), Some(2), "{four}");
+    assert_eq!(nunki::mutants::found(&four), Some(2), "{four}");
+    assert_eq!(nunki::mutants::parse(&four).len(), 1, "{four}");
+
+    for bad in BAD_JOBS {
+        let (said, why, status) = run(&[(nunki::mutants::JOBS_ENV, bad)]);
+        assert!(!nunki::mutants::completed(&said), "{bad}: {said}");
+        assert_ne!(status, Some(0), "{bad}: {why}");
+        assert!(!why.contains("asked: "), "{bad} reached the tool: {why}");
+        assert!(
+            why.contains("NUNKI_MUTATION_JOBS is a whole number of at least 1"),
+            "{bad}: {why}"
+        );
+    }
+}
+
+/// Python: the value is mutmut's own `--max-children`; without the
+/// variable nothing is passed, and mutmut keeps its default, as today.
+#[cfg(unix)]
+#[test]
+fn the_python_campaign_hands_mutation_jobs_to_mutmut() {
+    let uv = r#"#!/bin/sh
+case "$*" in
+  *"mutmut run"*) echo "asked: $*" >&2 ;;
+esac
+exit 0
+"#;
+    let python = "#!/bin/sh\ncat > /dev/null\n";
+    let run = |env: &[(&str, &str)]| {
+        campaign_with(
+            "python",
+            "src/pkg/thing.py",
+            &[("uv", uv), ("python3", python)],
+            &[],
+            env,
+        )
+    };
+    let today = "run --frozen --no-sync mutmut run";
+
+    let (said, why, status) = run(&[]);
+    assert_eq!(status, Some(0), "{why}");
+    assert_eq!(asked(&why), today, "without the variable");
+    assert_eq!(
+        said.lines().last(),
+        Some(r#"{"campaign":"done"}"#),
+        "{said}"
+    );
+    for n in ["1", "6"] {
+        let (said, why, status) = run(&[(nunki::mutants::JOBS_ENV, n)]);
+        assert_eq!(status, Some(0), "{why}");
+        assert_eq!(asked(&why), format!("{today} --max-children {n}"));
+        assert_eq!(
+            said.lines().last(),
+            Some(r#"{"campaign":"done"}"#),
+            "{said}"
+        );
+    }
+    for bad in BAD_JOBS {
+        let (said, why, status) = run(&[(nunki::mutants::JOBS_ENV, bad)]);
+        assert!(!nunki::mutants::completed(&said), "{bad}: {said}");
+        assert_ne!(status, Some(0), "{bad}: {why}");
+        assert!(!why.contains("asked: "), "{bad} reached the tool: {why}");
+        assert!(
+            why.contains("NUNKI_MUTATION_JOBS is a whole number of at least 1"),
+            "{bad}: {why}"
+        );
+    }
+}
+
+/// Next.js: the value is Stryker's own `--concurrency`; without the
+/// variable nothing is passed, and Stryker keeps its default, as today.
+#[cfg(unix)]
+#[test]
+fn the_next_campaign_hands_mutation_jobs_to_stryker() {
+    let pnpm = r#"#!/bin/sh
+case "$*" in
+  *"stryker run"*)
+    echo "asked: $*" >&2
+    mkdir -p reports/mutation
+    printf '%s' '{"files":{"app/page.ts":{"mutants":[{"status":"Killed"}]}}}' > reports/mutation/mutation.json
+    ;;
+esac
+exit 0
+"#;
+    let run = |env: &[(&str, &str)]| {
+        campaign_with(
+            "next",
+            "app/page.ts",
+            &[("pnpm", pnpm), ("node", NODE)],
+            &[],
+            env,
+        )
+    };
+    let today = "exec stryker run --mutate app/page.ts --cleanTempDir always --reporters json";
+
+    let (said, why, status) = run(&[]);
+    assert_eq!(status, Some(0), "{why}");
+    assert_eq!(asked(&why), today, "without the variable");
+    assert_eq!(
+        said.lines().last(),
+        Some(r#"{"campaign":"done"}"#),
+        "{said}"
+    );
+    for n in ["1", "6"] {
+        let (said, why, status) = run(&[(nunki::mutants::JOBS_ENV, n)]);
+        assert_eq!(status, Some(0), "{why}");
+        assert_eq!(
+            asked(&why),
+            today.replace(
+                "--cleanTempDir",
+                &format!("--concurrency {n} --cleanTempDir")
+            )
+        );
+        assert_eq!(
+            said.lines().last(),
+            Some(r#"{"campaign":"done"}"#),
+            "{said}"
+        );
+    }
+    for bad in BAD_JOBS {
+        let (said, why, status) = run(&[(nunki::mutants::JOBS_ENV, bad)]);
+        assert!(!nunki::mutants::completed(&said), "{bad}: {said}");
+        assert_ne!(status, Some(0), "{bad}: {why}");
+        assert!(!why.contains("asked: "), "{bad} reached the tool: {why}");
+        assert!(
+            why.contains("NUNKI_MUTATION_JOBS is a whole number of at least 1"),
+            "{bad}: {why}"
+        );
+    }
+}
+
 /// The shell every test here spawns a script in carries no campaign
 /// variable, whatever this process carries: the battery is the same inside a
 /// campaign and outside it. Asked of the command itself, because this
@@ -2960,10 +3175,12 @@ exit 0
 /// that spawned one would prove nothing here.
 #[test]
 fn the_scripts_here_never_inherit_a_campaign_variable() {
-    let removed = sh()
-        .get_envs()
-        .any(|(key, value)| key == nunki::mutants::BASE_ENV && value.is_none());
-    assert!(removed, "{} reaches the scripts", nunki::mutants::BASE_ENV);
+    for variable in [nunki::mutants::BASE_ENV, nunki::mutants::JOBS_ENV] {
+        let removed = sh()
+            .get_envs()
+            .any(|(key, value)| key == variable && value.is_none());
+        assert!(removed, "{variable} reaches the scripts");
+    }
 }
 
 // ---------------------------------------------------------------------------

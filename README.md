@@ -257,6 +257,42 @@ that weakens a test can make that false, and the chain will not see it.
 `critical` never makes the assumption — its campaigns are always full — and
 `--again` forces a full campaign at any rigor.
 
+### Running mutants at once: `mutation_jobs`
+
+`mutation_jobs` in `nunki.yaml` — a whole number of at least 1, refused
+otherwise, `1` when absent — is how many mutants a campaign runs at once.
+`nunki` hands it to the stack's `mutation.sh` in `NUNKI_MUTATION_JOBS`, as it
+hands the base in `NUNKI_BASE`; the terminal line, the counts and what a
+campaign's status means are the same at any value.
+
+- **Rust:** at `1`, `cargo mutants --in-place`, one mutant at a time in the
+  clean copy and its warm cache, as before. Above, `--jobs N --copy-vcs
+  true`: each job builds in a copy of the tree of its own, from a cold
+  cache, with `.git` beside it as in place.
+- **Python:** mutmut's `--max-children N`. mutmut already runs its mutants
+  in forked children; the setting caps how many. Without the variable
+  nothing is passed and mutmut keeps its own default. Not run against a real
+  mutmut here: it is not in this image.
+- **Next.js:** Stryker's `--concurrency N`, the number of test runner
+  processes. Not run against a real Stryker yet; an option it refused would
+  fail the campaign, never pass it.
+
+The default is `1` because more was not worth it where it was measured — on
+this repository, 53 mutants, 12 cores, each run from an emptied cache:
+
+| run | wall | per mutant | peak disk | outcome |
+|---|---|---|---|---|
+| in place | 533 s | 9.5 s | 2.5 GB | 45 caught, 2 missed, 1 timeout |
+| 2 jobs | 463 s | 15.8 s | 4.8 GB | the same |
+| 4 jobs | 492 s | 32.4 s | 9.1 GB | the same |
+| 12 jobs | 607 s | 121 s | 26.8 GB | 41 caught, 0 missed, 7 timeouts |
+
+Building one mutant already keeps every core busy, so jobs queue for them.
+And a loaded machine overruns the test timeout cargo-mutants sets from an
+unloaded baseline: at 12 jobs both survivors came back as timeouts, which
+count as killed. Raise it for a project whose build leaves cores idle, and
+measure there first.
+
 The rigor is frozen in the header like the bounds, and `mission reframe`
 shows a change of it. Once the security rounds are spent, the agent is not
 called again. A spent cap never verifies a red verdict: if the last round

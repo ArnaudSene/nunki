@@ -50,6 +50,7 @@ fn repository(dir: &Path) -> Project {
             permission_mode: "auto".to_string(),
             rigor: None,
             mutation_threshold: 80,
+            mutation_jobs: 1,
             forge_protection: Default::default(),
         },
         dir.join("nunki"),
