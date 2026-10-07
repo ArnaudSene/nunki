@@ -1547,11 +1547,15 @@ fn mutation(subject: &Subject, threshold: Threshold) -> Result<Outcome, GateErro
         coders: &coders,
         foreign: &foreign,
     };
-    let parts = crate::mutants::parts(&campaign);
-    let mut outcome = match parts.as_slice() {
-        [_] => judged(subject, threshold, &campaign, answer)?,
-        chain => chain_judged(subject, threshold, chain, answer)?,
-    };
+    // Once, on the campaign on file: for a chain, the reconstruction one
+    // full campaign at `HEAD` would give (SPEC 4.4, the chain of campaigns).
+    let mut outcome = judged(subject, threshold, &campaign, answer)?;
+    if let Some(chained) = chained(&campaign) {
+        outcome.note = Some(match outcome.note {
+            Some(note) => format!("{chained}; {note}"),
+            None => chained,
+        });
+    }
     if let Some(refused) = crate::mutants::foreign_said(&foreign) {
         outcome.note = Some(match outcome.note {
             Some(note) => format!("{note}; {refused}"),
@@ -1561,40 +1565,30 @@ fn mutation(subject: &Subject, threshold: Threshold) -> Result<Outcome, GateErro
     Ok(outcome)
 }
 
-/// Gate 7 on a chain of campaigns (SPEC 4.4): each judged on **its own**
-/// mutants, at the mission's threshold, exactly as a campaign alone is
-/// ([`judged`]) — never on the chain's total, which would let an earlier
-/// campaign's kills carry a later one that tried few and killed fewer. Green
-/// when every campaign of the chain is; the first red one is the gate's
-/// answer, named.
-fn chain_judged(
-    subject: &Subject,
-    threshold: Threshold,
-    parts: &[crate::mutants::Part],
-    answer: &Answers,
-) -> Result<Outcome, GateError> {
-    let gate = Gate::Mutation;
-    let mut notes = Vec::new();
-    for part in parts {
-        let said = part.said();
-        let outcome = judged(subject, threshold, &part.campaign, answer)?;
-        if let Decision::Failed(why) = outcome.decision {
-            let mut red = Outcome::of(gate, Decision::Failed(format!("{said}: {why}")));
-            red.note = outcome.note.map(|note| format!("{said}: {note}"));
-            return Ok(red);
-        }
-        notes.push(match outcome.note {
-            Some(note) => format!("{said}: {note}"),
-            None => format!("{said}: passed"),
-        });
+/// What gate 7's note says of a campaign that continues a chain: that it
+/// was judged once, on the files as the chain's campaigns last measured
+/// them — how many this campaign measured, how many earlier ones did.
+/// Nothing for a campaign with nothing before it.
+fn chained(campaign: &crate::mutants::Campaign) -> Option<String> {
+    let earlier = campaign.chain.earlier.len();
+    if earlier == 0 {
+        return None;
     }
-    let mut outcome = Outcome::of(gate, Decision::Passed);
-    outcome.note = Some(format!(
-        "{} campaigns in this mission's chain, each judged on its own mutants — {}",
-        parts.len(),
-        notes.join("; ")
-    ));
-    Ok(outcome)
+    Some(match &campaign.files {
+        Some(files) => {
+            let here = files.values().filter(|m| m.on == campaign.head).count();
+            format!(
+                "judged once, as one campaign at this commit: {} file(s), {here} measured by \
+                 this campaign and {} kept from the {earlier} before it",
+                files.len(),
+                files.len() - here
+            )
+        }
+        None => format!(
+            "this campaign continues {earlier} before it, and its per-file counts could not \
+             be trusted, so it carries no count"
+        ),
+    })
 }
 
 /// Gate 7 on a campaign that answers for the code as it stands, by the

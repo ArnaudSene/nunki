@@ -971,8 +971,13 @@ const MUTATION_RUST: &str = r#"#!/bin/sh
 #
 # It prints **one JSON object per line** on stdout, one per surviving mutant:
 #   {"id":"…","file":"…","line":12,"end_line":14,"description":"…"}
+# then one per file the tool reached, with that file's counts:
+#   {"measured":"src/lib.rs","tried":12,"found":13}
 # and, last of all and exactly once, the line that says it got to the end:
-#   {"campaign":"done","tried":42,"found":45}
+#   {"campaign":"done","tried":42,"found":45,"by_file":true}
+# `by_file` says the files were counted, and their counts add up to the
+# totals: a later partial campaign is rebuilt from them, file by file
+# (SPEC 4.4, the chain). A file with no line has nothing tried in it.
 # `end_line` is the last line of the code the mutation replaces, from the
 # tool's own listing: a function body replaced whole spans every line of it,
 # and a ruling on it is about all of them. 0 when the listing does not name
@@ -1017,7 +1022,7 @@ if [ -z "$files" ]; then
   # happen. The terminal line is printed **before** leaving, because `nunki`
   # reads its absence as a campaign that was killed and asks for another:
   # a branch touching only tests or documentation would be asked for ever.
-  printf '{"campaign":"done","tried":0,"found":0}\n'
+  printf '{"campaign":"done","tried":0,"found":0,"by_file":true}\n'
   exit 0
 fi
 
@@ -1050,12 +1055,12 @@ mkdir -p "$out"
 # a campaign that cannot run, said as one, rather than a silent fall back to
 # every line of every file.
 #
-# `--no-renames`, as `nunki` reads the same diff to decide which earlier
-# survivors a partial campaign drops (SPEC 4.4, the chain): a file renamed is
-# a file removed — its survivors dropped — and a file added whole, every line
-# of it mutated again. With git's rename detection, a pure rename gave
-# cargo-mutants no hunk at all ("No mutants to filter", 27.1.0): the
-# survivors went and nothing was tried in their place.
+# `--no-renames`, as `nunki` compares files from one campaign to the next
+# (SPEC 4.4, the chain): a file renamed is a file removed — its survivors
+# and counts dropped — and a file added whole, every line of it mutated
+# again. With git's rename detection, a pure rename gave cargo-mutants no
+# hunk at all ("No mutants to filter", 27.1.0): the survivors went and
+# nothing was tried in their place.
 scope="$files"
 if [ -n "${NUNKI_BASE:-}" ]; then
   diff="$out/touched.diff"
@@ -1245,7 +1250,7 @@ if [ ! -f "$missed" ]; then
   # A crate that does not parse also leaves no `mutants.out`, but exits 1,
   # so only the status tells the two apart.
   if [ -n "${NUNKI_BASE:-}" ] && [ "$status" -eq 0 ]; then
-    printf '{"campaign":"done","tried":0,"found":0}\n'
+    printf '{"campaign":"done","tried":0,"found":0,"by_file":true}\n'
     exit 0
   fi
   echo "nunki: the campaign left no $missed" >&2
@@ -1327,6 +1332,38 @@ case "$listed" in
     ;;
 esac
 
+# Each file's counts, from the same outcome files and listing: a line of an
+# outcome file names its file before the first colon, and every entry of
+# `mutants.json` has a `file` (measured on 27.1.0). `found` per file only
+# when the listing could be read, as for the total. Added up, they are the
+# totals above, which is what `nunki` checks before trusting them.
+{
+  for outcome in caught missed timeout; do
+    if [ -f "$out/mutants.out/$outcome.txt" ]; then
+      sed -n 's/^\([^:]*\):.*/T \1/p' "$out/mutants.out/$outcome.txt"
+    fi
+  done
+  if [ -n "$found" ]; then
+    jq -r '.[].file' "$out/mutants.out/mutants.json" 2>/dev/null | sed 's/^/F /'
+    if [ -f "$out/mutants.out/unviable.txt" ]; then
+      sed -n 's/^\([^:]*\):.*/U \1/p' "$out/mutants.out/unviable.txt"
+    fi
+  fi
+} | awk -v listed="${found:+1}" '
+  { f = substr($0, 3); seen[f] = 1 }
+  $1 == "T" { t[f]++ }
+  $1 == "F" { n[f]++ }
+  $1 == "U" { u[f]++ }
+  END {
+    for (f in seen) {
+      e = f
+      gsub(/\\/, "\\\\", e)
+      gsub(/"/, "\\\"", e)
+      if (listed) printf "{\"measured\":\"%s\",\"tried\":%d,\"found\":%d}\n", e, t[f], n[f] - u[f]
+      else printf "{\"measured\":\"%s\",\"tried\":%d}\n", e, t[f]
+    }
+  }' | LC_ALL=C sort
+
 # The last thing it prints, and the only line that says the campaign got to
 # the end. Without it `nunki` cannot tell "no survivor" from "no answer": a
 # campaign killed halfway, one whose container went away and one that never
@@ -1338,9 +1375,9 @@ esac
 # own, and a shell that has been replaced cannot write `$?`. A truncated log
 # loses its last line, which is this one, so the three failures fail alike.
 if [ -n "$found" ]; then
-  printf '{"campaign":"done","tried":%s,"found":%s}\n' "$tried" "$found"
+  printf '{"campaign":"done","tried":%s,"found":%s,"by_file":true}\n' "$tried" "$found"
 else
-  printf '{"campaign":"done","tried":%s}\n' "$tried"
+  printf '{"campaign":"done","tried":%s,"by_file":true}\n' "$tried"
 fi
 "#;
 
@@ -1904,6 +1941,9 @@ const MUTATION_PYTHON: &str = r##"#!/bin/sh
 # `critical` does — an outcome for every survivor — which the survivors,
 # filtered to the touched files, can carry. A branch that touched nothing
 # mutable is the one exact count this script has, and says `tried` 0.
+# For the same reason it gives no per-file counts and never says `by_file`:
+# a campaign after one of this stack's is always full, never rebuilt from
+# counts nobody made (SPEC 4.4, the chain of campaigns).
 # `nunki` reads no other line as a result, so progress may go to stdout freely —
 # though this script keeps the tool's own chatter on stderr. A campaign that
 # stops before that last line has measured nothing, whatever else it printed.
@@ -2915,6 +2955,10 @@ const MUTATION_NEXT: &str = r##"#!/bin/sh
 # Without a count `nunki` judges gate 7 as `critical` does — an outcome for
 # every survivor. A branch that touched nothing mutable is the one exact
 # count this script has, and says `tried` 0.
+# For the same reason it gives no per-file counts and never says `by_file`:
+# Stryker's report does name each mutant's file, but over whole files, so a
+# campaign after one of this stack's is always full, never rebuilt from
+# counts that are not the branch's (SPEC 4.4, the chain of campaigns).
 # `nunki` reads no other line as a result, so progress may go to stdout freely —
 # though this script keeps the tool's own chatter on stderr. A campaign that
 # stops before that last line has measured nothing, whatever else it printed.

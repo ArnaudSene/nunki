@@ -80,9 +80,10 @@ fn every_record_the_hq_leaves_is_prose_and_not_a_code_block() {
     followup::campaigns(
         &file,
         &[
-            "full at aaaaaaaaaaaa — tried 9, killed 9, 0 survivor(s), 0 without an outcome".into(),
-            "partial since aaaaaaaaaaaa at bbbbbbbbbbbb — tried 2, killed 1, 1 survivor(s), \
-             1 without an outcome"
+            "full at aaaaaaaaaaaa — tried 9".into(),
+            "partial since aaaaaaaaaaaa at bbbbbbbbbbbb — tried 2".into(),
+            "judged as one campaign at bbbbbbbbbbbb over 2 file(s) — tried 9, killed 8, 1 \
+             survivor(s), 1 without an outcome"
                 .into(),
         ],
     )
@@ -284,6 +285,7 @@ fn a_chain_of_campaigns_is_said_once_per_change_and_a_single_campaign_never() {
     let two = [
         "full at aaaaaaaaaaaa — tried 9".to_string(),
         "partial since aaaaaaaaaaaa at bbbbbbbbbbbb — tried 2".to_string(),
+        "judged as one campaign at bbbbbbbbbbbb over 2 file(s) — tried 9, killed 9".to_string(),
     ];
     followup::campaigns(&file, &two).unwrap();
     followup::campaigns(&file, &two).unwrap();
@@ -303,8 +305,20 @@ fn a_chain_of_campaigns_is_said_once_per_change_and_a_single_campaign_never() {
         "{text}"
     );
 
+    assert!(
+        text.contains("Then judged as one campaign at bbbbbbbbbbbb over 2 file(s)"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("3. "),
+        "the judged line is no campaign: {text}"
+    );
+
     let mut three = two.to_vec();
-    three.push("partial since bbbbbbbbbbbb at cccccccccccc — tried 1".to_string());
+    three.insert(
+        2,
+        "partial since bbbbbbbbbbbb at cccccccccccc — tried 1".to_string(),
+    );
     followup::campaigns(&file, &three).unwrap();
     assert_eq!(count(), 2, "a longer chain is a new section");
 }

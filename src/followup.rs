@@ -420,9 +420,10 @@ fn last_proposals(text: &str) -> Option<&str> {
 }
 
 /// Gate 7 passed on a chain of campaigns (SPEC 4.4): each campaign in one
-/// line ([`crate::mutants::chain_said`]) — full or partial and from which
-/// commit, what it tried, killed and left — so the HQ reading the pull
-/// request's follow-up sees which lines were measured when.
+/// line ([`crate::mutants::chain_said`]) — full or partial, from which
+/// commit, what it itself tried — then the one campaign gate 7 judged, so
+/// the HQ reading the pull request's follow-up sees which files were
+/// measured when, and what passed.
 ///
 /// Nothing is written for a single campaign, whose counts gate 7's note
 /// already gives, nor when the last such section said the same.
@@ -430,17 +431,20 @@ pub fn campaigns(file: &Path, chain: &[String]) -> Result<(), FollowupError> {
     if chain.len() < 2 {
         return Ok(());
     }
-    let listed = chain
+    let (judged, campaigns) = chain.split_last().expect("two lines at least");
+    let listed = campaigns
         .iter()
         .enumerate()
         .map(|(n, said)| format!("{}. {}", n + 1, crate::text::one_line(said)))
         .collect::<Vec<_>>()
         .join("\n");
     let body = format!(
-        "Each was judged on its own mutants, and gate 7 passed on every one. A\n\
-         partial campaign mutated only the lines changed since the campaign\n\
-         before it, and kept that campaign's survivors whose code still stands:\n\n\
-         {listed}\n"
+        "A partial campaign measured again only the files whose content changed\n\
+         since the campaign before it, and kept the other files' counts and\n\
+         survivors as they were. Gate 7 judged them once, as one campaign:\n\n\
+         {listed}\n\n\
+         Then {}\n",
+        crate::text::one_line(judged)
     );
     let existing = std::fs::read_to_string(file).unwrap_or_default();
     if last_section(&existing, CAMPAIGNS_HEADING) == Some(crate::text::printable(&body).trim()) {
@@ -451,7 +455,7 @@ pub fn campaigns(file: &Path, chain: &[String]) -> Result<(), FollowupError> {
         &format!(
             "## {date} — {count} {CAMPAIGNS_HEADING}\n\n{body}",
             date = today(),
-            count = chain.len(),
+            count = campaigns.len(),
         ),
     )
 }

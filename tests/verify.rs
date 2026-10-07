@@ -3213,6 +3213,7 @@ impl World {
         nunki::mutants::write(
             &self.mission(),
             &Campaign {
+                files: None,
                 chain: Default::default(),
                 fingerprint: "f".into(),
                 head: self.head(),
@@ -3398,12 +3399,14 @@ fn green_final_gates_leave_each_campaign_of_the_chain_in_the_follow_up() {
     nunki::mutants::write(
         &paths.dir,
         &Campaign {
+            files: None,
             fingerprint: "f".into(),
             head: world.head(),
             date: "2026-10-07T12:00:00Z".into(),
             survivors: vec![],
             tried: Some(3),
             chain: Chain {
+                ran: None,
                 scope: Scope::Partial {
                     since: earlier.clone(),
                 },
@@ -3426,11 +3429,19 @@ fn green_final_gates_leave_each_campaign_of_the_chain_in_the_follow_up() {
         "{followup}"
     );
     assert!(
-        followup.contains("1. full at eeeeeeeeeeee — tried 30, killed 30"),
+        followup.contains("1. full at eeeeeeeeeeee — tried 30\n"),
         "{followup}"
     );
     assert!(
         followup.contains("2. partial since eeeeeeeeeeee at "),
         "{followup}"
+    );
+    assert!(
+        followup.contains("Then judged as one campaign at "),
+        "{followup}"
+    );
+    assert!(
+        !followup.contains("3. "),
+        "the judged line is no campaign: {followup}"
     );
 }

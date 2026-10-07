@@ -1116,6 +1116,7 @@ impl Fixture {
         nunki::mutants::write(
             self._dir.path(),
             &Campaign {
+                files: None,
                 chain: Default::default(),
                 fingerprint,
                 head: git(&self.tree, &["rev-parse", "HEAD"]),
@@ -3217,29 +3218,47 @@ fn gate_seven_takes_no_test_name_that_is_not_a_name() {
 
 impl Fixture {
     /// A partial campaign on the current content, continuing a full one at
-    /// an earlier commit that tried `earlier_tried`; `earlier_open` of the
-    /// survivors are that earlier campaign's, the rest the partial one's.
-    fn chained(&self, earlier_tried: u32, earlier_open: u32, tried: u32, open: u32) {
-        use nunki::mutants::{Chain, Link, Scope};
+    /// an earlier commit, as recorded: `src/kept.rs` unchanged since, its
+    /// count `kept_tried` and `kept_open` survivors as the earlier campaign
+    /// measured them; `src/new.rs` measured again, `tried` and `open`; the
+    /// campaign's `tried` their sum — or, `trusted` false, no count at all.
+    fn chained(&self, kept_tried: u32, kept_open: u32, tried: u32, open: u32, trusted: bool) {
+        use nunki::mutants::{Chain, Link, Measured, Scope};
         let touched = nunki::gate::touched_since_base(&self.tree, "dev").unwrap();
         let fingerprint = nunki::mutants::fingerprint(&self.tree, &touched).unwrap();
         let earlier = "e".repeat(40);
-        let mut survivors: Vec<Survivor> = (1..=earlier_open)
+        let head = git(&self.tree, &["rev-parse", "HEAD"]);
+        let mut survivors: Vec<Survivor> = (1..=kept_open)
             .map(|line| Survivor {
                 found_on: Some(earlier.clone()),
+                id: format!("src/kept.rs:{line}"),
+                file: "src/kept.rs".into(),
                 ..survivor(line, None)
             })
             .collect();
         survivors.extend((1..=open).map(|line| survivor(line + 100, None)));
+        let measured = |tried: u32, on: &str| Measured {
+            tried,
+            found: None,
+            on: on.to_string(),
+        };
+        let files: std::collections::BTreeMap<String, Measured> = [
+            ("src/kept.rs".to_string(), measured(kept_tried, &earlier)),
+            ("src/new.rs".to_string(), measured(tried, &head)),
+        ]
+        .into_iter()
+        .collect();
         nunki::mutants::write(
             self._dir.path(),
             &Campaign {
+                tried: trusted.then(|| nunki::mutants::tried_in(&files)).flatten(),
+                files: trusted.then_some(files),
                 fingerprint,
-                head: git(&self.tree, &["rev-parse", "HEAD"]),
+                head,
                 date: "2026-10-01T12:00:00Z".into(),
                 survivors,
-                tried: Some(tried),
                 chain: Chain {
+                    ran: Some(tried),
                     scope: Scope::Partial {
                         since: earlier.clone(),
                     },
@@ -3250,7 +3269,7 @@ impl Fixture {
                         scope: Scope::Full {
                             why: "the first campaign of this mission".into(),
                         },
-                        tried: Some(earlier_tried),
+                        tried: Some(kept_tried + 40),
                     }],
                 },
             },
@@ -3259,55 +3278,51 @@ impl Fixture {
     }
 }
 
-/// A partial campaign is judged on its own mutants: 7 of 10 is below 80%,
-/// and the gate is red — though the chain's total, 197 of 200, would pass.
+/// A chain is judged **once**, on its reconstruction (HQ review of
+/// c4f2533): the file kept from before counts as it was measured, the file
+/// measured again counts as now, and the share is over their sum. Here the
+/// kept file tried 50 and left 20 open, the measured one 60 and 10 open:
+/// each passes 80% on its own — what c4f2533 judged — and one full campaign
+/// would try 110 and leave 30 open, 72%: red.
 #[test]
-fn at_standard_a_partial_campaign_below_the_threshold_is_red_whatever_the_chains_total() {
+fn at_standard_a_chain_is_judged_once_on_its_reconstruction() {
     let f = standard();
-    f.chained(190, 0, 10, 3);
+    f.chained(50, 20, 60, 10, true);
     match f.gate_seven(Role::Coder).decision {
         Decision::Failed(why) => {
-            assert!(why.starts_with("the partial campaign at "), "{why}");
-            assert!(
-                why.contains("7 of 10 tried mutant(s) killed (70%)"),
-                "{why}"
-            );
+            assert!(why.contains("80 of 110 tried mutant(s) killed"), "{why}");
         }
-        other => panic!("a partial campaign at 70% is below 80%: {other:?}"),
+        other => panic!("80 of 110 is below 80%: {other:?}"),
     }
 }
 
-/// Every campaign of the chain must pass: an earlier one below the
-/// threshold is red, named, even when the one on file is perfect.
+/// At the threshold, green — and the note says how the campaign judged was
+/// rebuilt: which files this campaign measured, which were kept.
 #[test]
-fn at_standard_an_earlier_campaign_of_the_chain_below_the_threshold_is_red() {
+fn at_standard_a_chain_at_the_threshold_is_green_and_says_how_it_was_rebuilt() {
     let f = standard();
-    f.chained(10, 3, 50, 0);
-    match f.gate_seven(Role::Coder).decision {
-        Decision::Failed(why) => {
-            assert!(
-                why.starts_with("the full campaign at eeeeeeeeeeee"),
-                "{why}"
-            );
-            assert!(why.contains("7 of 10"), "{why}");
-        }
-        other => panic!("an earlier campaign at 70% is below 80%: {other:?}"),
-    }
-}
-
-/// Both campaigns at or above the threshold: green, and the note says each.
-#[test]
-fn at_standard_a_chain_whose_every_campaign_passes_is_green_and_says_each() {
-    let f = standard();
-    f.chained(10, 2, 10, 2);
+    f.chained(10, 2, 10, 2, true);
     let outcome = f.gate_seven(Role::Coder);
     assert_eq!(outcome.decision, Decision::Passed);
     let note = outcome.note.expect("a chain is said");
     assert!(
-        note.contains("2 campaigns in this mission's chain"),
+        note.contains(
+            "judged once, as one campaign at this commit: 2 file(s), 1 measured by this \
+             campaign and 1 kept from the 1 before it"
+        ),
         "{note}"
     );
-    assert!(note.contains("the full campaign at eeeeeeeeeeee"), "{note}");
-    assert!(note.contains("the partial campaign at "), "{note}");
-    assert!(note.contains("8 of 10 tried mutant(s) killed"), "{note}");
+    assert!(note.contains("16 of 20 tried mutant(s) killed"), "{note}");
+}
+
+/// A chain whose counts could not be trusted carries no count, and is
+/// judged as `critical` judges: every survivor needs an outcome.
+#[test]
+fn at_standard_a_chain_without_a_trusted_count_is_judged_as_critical() {
+    let f = standard();
+    f.chained(10, 0, 10, 1, false);
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => assert!(why.contains("1 survivor(s) have no outcome"), "{why}"),
+        other => panic!("an open survivor without a count is red: {other:?}"),
+    }
 }

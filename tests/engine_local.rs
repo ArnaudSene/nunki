@@ -481,6 +481,60 @@ fn a_campaign_over_several_stacks_speaks_for_the_project() {
     assert!(!out.stdout.contains("\"campaign\""), "{}", out.stdout);
 }
 
+/// Each stack's per-file counts pass through, their paths made the
+/// repository's, and the line says `by_file` only when every stack that ran
+/// did: then the project's counts add up and are trusted. One stack that
+/// counts no file leaves nothing a later partial campaign could be rebuilt
+/// from (SPEC 4.4, the chain of campaigns).
+#[test]
+fn a_campaign_over_several_stacks_counts_each_file_only_when_every_stack_does() {
+    let rust = "#!/bin/sh\n\
+                printf '%s\\n' '{\"measured\":\"src/lib.rs\",\"tried\":3,\"found\":3}'\n\
+                printf '%s\\n' '{\"campaign\":\"done\",\"tried\":3,\"found\":3,\"by_file\":true}'\n";
+    let next_counting = "#!/bin/sh\n\
+                         printf '%s\\n' '{\"measured\":\"app/page.ts\",\"tried\":2,\"found\":2}'\n\
+                         printf '%s\\n' '{\"campaign\":\"done\",\"tried\":2,\"found\":2,\"by_file\":true}'\n";
+    let s = several(&[
+        ("rust", "mutation.sh", rust),
+        ("next", "mutation.sh", next_counting),
+    ]);
+    let judged = nunki::run::judged(&s.project, "rust");
+    let touched = vec!["src/lib.rs".to_string(), "frontend/app/page.ts".to_string()];
+    let play = |s: &Several| {
+        let script = nunki::mutants::several_campaigns(&judged, "abc1234", &touched);
+        exec::run(
+            &s.project,
+            &s.w.slot,
+            s.engine.clone(),
+            &["sh".into(), "-c".into(), script],
+            On::Proof,
+        )
+        .unwrap()
+    };
+
+    let out = play(&s);
+    let files = nunki::mutants::by_file(&out.stdout, "h")
+        .unwrap_or_else(|| panic!("both stacks counted: {}", out.stdout));
+    assert_eq!(
+        files.keys().collect::<Vec<_>>(),
+        ["frontend/app/page.ts", "src/lib.rs"]
+    );
+    assert_eq!(files["frontend/app/page.ts"].tried, 2);
+    assert_eq!(nunki::mutants::tried(&out.stdout), Some(5));
+
+    // The next stack counts its total, and no file.
+    std::fs::write(
+        s.project.fragment("next").join("mutation.sh"),
+        "#!/bin/sh\nprintf '%s\\n' '{\"campaign\":\"done\",\"tried\":2,\"found\":2}'\n",
+    )
+    .unwrap();
+    let out = play(&s);
+    assert!(nunki::mutants::completed(&out.stdout), "{}", out.stdout);
+    assert_eq!(nunki::mutants::tried(&out.stdout), Some(5));
+    assert!(!out.stdout.contains("by_file"), "{}", out.stdout);
+    assert_eq!(nunki::mutants::by_file(&out.stdout, "h"), None);
+}
+
 /// Gate 8 runs every stack's `security.sh` in its directory, handed its own
 /// advisory database: each script here answers 69, "I could not look",
 /// unless it is where it should be and reads what it should.
@@ -570,12 +624,25 @@ impl Volet {
         nunki::mutants::write(
             &self.mission,
             &nunki::mutants::Campaign {
+                files: Some(
+                    [(
+                        "src/lib.rs".to_string(),
+                        nunki::mutants::Measured {
+                            tried: 12,
+                            found: Some(12),
+                            on: self.first.clone(),
+                        },
+                    )]
+                    .into_iter()
+                    .collect(),
+                ),
                 fingerprint: "the first lot's".into(),
                 head: self.first.clone(),
                 date: "2026-10-07T10:00:00Z".into(),
                 survivors: vec![],
                 tried: Some(12),
                 chain: nunki::mutants::Chain {
+                    ran: None,
                     scope: nunki::mutants::Scope::Full {
                         why: "the first campaign of this mission".into(),
                     },
@@ -784,32 +851,18 @@ fn a_campaign_after_one_resting_on_a_missing_test_is_launched_full() {
     }
 }
 
-/// The security reviewer's case (HQ ruling on security round 1): a full
-/// campaign left a survivor in `src/lib.rs`, with a proposal awaiting the
-/// HQ; the volet then only renames the file. Partial, the survivor and its
-/// proposal would be dropped as reached, and the rename given nothing to
-/// mutate. The next campaign is full instead, from the fork point over the
-/// file under its new name — every mutant in it tried again — and its record
-/// says why. Without the rename, the same chain continues partial: the
-/// refusal is the rename's, not the survivor's.
+/// The security reviewer's case, under the file-level chain (HQ review of
+/// c4f2533): a full campaign left a survivor in `src/lib.rs` with a proposal
+/// awaiting the HQ, and the volet only renames the file. The next campaign
+/// is partial and is handed the file under its new name, with the fork
+/// point as its base — every mutant in it tried again — and once recorded,
+/// the old file's survivor and its proposal are gone with it, its count
+/// replaced by the new file's. Never the survivor dropped with nothing
+/// tried in its place.
 #[test]
-fn after_a_survivors_file_is_renamed_the_next_campaign_is_full() {
+fn after_a_survivors_file_is_renamed_its_mutants_are_tried_again() {
     let v = volet();
     let tooling = v.tooling_now();
-    let on_file = |survivors| nunki::mutants::Campaign {
-        fingerprint: "the first lot's".into(),
-        head: v.first.clone(),
-        date: "2026-10-07T10:00:00Z".into(),
-        survivors,
-        tried: Some(12),
-        chain: nunki::mutants::Chain {
-            scope: nunki::mutants::Scope::Full {
-                why: "the first campaign of this mission".into(),
-            },
-            tooling: tooling.clone(),
-            earlier: vec![],
-        },
-    };
     let pending = nunki::mutants::Survivor {
         found_on: None,
         id: "src/lib.rs:2:7: replace > with >= in keep".into(),
@@ -825,96 +878,63 @@ fn after_a_survivors_file_is_renamed_the_next_campaign_is_full() {
         }),
         refused: None,
     };
-    let previous = on_file(vec![pending]);
-    // Gate 7 passes on it: the proposal is an outcome, awaiting the HQ.
-    assert_eq!(
-        nunki::mutants::owed(
-            &previous,
-            &Default::default(),
-            nunki::mission::Rigor::Standard,
-            80
-        ),
-        None
-    );
-
-    // The volet as it stands — a line changed — continues the chain.
+    v.first_campaign_ran_with(tooling);
+    let mut previous = nunki::mutants::read(&v.mission).unwrap().unwrap();
+    previous.survivors = vec![pending];
     nunki::mutants::write(&v.mission, &previous).unwrap();
-    v.launch(nunki::mission::Rigor::Standard);
-    assert!(
-        matches!(v.launched_as().scope, nunki::mutants::Scope::Partial { .. }),
-        "{:?}",
-        v.launched_as()
-    );
-    nunki::mutants::forget_running(&v.project.hq_root, &v.w.slot.name).unwrap();
 
-    // Then the file is renamed.
     git(&v.w.slot.tree, &["mv", "src/lib.rs", "src/moved.rs"]);
     git(&v.w.slot.tree, &["commit", "-q", "-m", "volet: a rename"]);
-    nunki::mutants::write(&v.mission, &previous).unwrap();
+    let head = git(&v.w.slot.tree, &["rev-parse", "HEAD"]);
     v.launch(nunki::mission::Rigor::Standard);
-    match v.launched_as().scope {
-        nunki::mutants::Scope::Full { why } => {
-            assert!(
-                why.contains("src/lib.rs was renamed to src/moved.rs"),
-                "{why}"
-            );
+    let chain = v.launched_as();
+    assert_eq!(
+        chain.scope,
+        nunki::mutants::Scope::Partial {
+            since: v.first.clone()
         }
-        partial => panic!("a rename continued the chain: {partial:?}"),
-    }
-    // And what a full campaign runs on: the renamed file, from the fork.
-    let touched = nunki::gate::touched_since_base(&v.w.slot.tree, "dev").unwrap();
-    assert!(touched.contains(&"src/moved.rs".to_string()), "{touched:?}");
-}
+    );
 
-/// The same, for a file the branch itself added and a volet renamed: it was
-/// not at the fork and is not at `HEAD`, and the rename is still seen.
-#[test]
-fn after_a_branch_added_file_with_a_survivor_is_renamed_the_next_campaign_is_full() {
-    let v = volet();
-    std::fs::write(
-        v.w.slot.tree.join("src/added.rs"),
-        "pub fn added(n: u8) -> bool {\n    n > 4\n}\n",
+    // What it runs: the file under its new name, from the fork point.
+    let tree = &v.w.slot.tree;
+    let fork = nunki::gate::fork_point(tree, "dev").unwrap();
+    let touched = nunki::gate::touched_since_base(tree, "dev").unwrap();
+    let cmd = nunki::mutants::launch_command(
+        tree,
+        &nunki::run::judged(&v.project, "rust"),
+        "fp",
+        &touched,
+        &fork,
+        &chain.scope,
+        1,
     )
     .unwrap();
-    git(&v.w.slot.tree, &["add", "-A"]);
-    git(&v.w.slot.tree, &["commit", "-q", "-m", "L2: a new file"]);
-    let at = git(&v.w.slot.tree, &["rev-parse", "HEAD"]);
-    let previous = nunki::mutants::Campaign {
-        fingerprint: "the second lot's".into(),
-        head: at,
-        date: "2026-10-07T11:00:00Z".into(),
-        survivors: vec![nunki::mutants::Survivor {
-            found_on: None,
-            id: "src/added.rs:2:7: replace > with >= in added".into(),
-            file: "src/added.rs".into(),
-            line: 2,
-            end_line: Some(2),
-            description: "replace > with >= in added".into(),
-            outcome: Some(nunki::mutants::Triage::Killed {
-                test: "keep".into(),
-            }),
-            refused: None,
-        }],
-        tried: Some(12),
-        chain: nunki::mutants::Chain {
-            scope: nunki::mutants::Scope::Full {
-                why: "the first campaign of this mission".into(),
-            },
-            tooling: v.tooling_now(),
-            earlier: vec![],
-        },
-    };
-    git(&v.w.slot.tree, &["mv", "src/added.rs", "src/renamed.rs"]);
-    git(&v.w.slot.tree, &["commit", "-q", "-m", "volet: a rename"]);
-    nunki::mutants::write(&v.mission, &previous).unwrap();
-    v.launch(nunki::mission::Rigor::Standard);
-    match v.launched_as().scope {
-        nunki::mutants::Scope::Full { why } => {
-            assert!(
-                why.contains("src/added.rs was renamed to src/renamed.rs"),
-                "{why}"
-            );
-        }
-        partial => panic!("a rename continued the chain: {partial:?}"),
-    }
+    assert!(cmd.args.contains(&"src/moved.rs".to_string()), "{cmd:?}");
+    assert_eq!(
+        cmd.env.get(nunki::mutants::BASE_ENV).map(String::as_str),
+        Some(fork.as_str())
+    );
+
+    // What it records: the renamed file measured again, the old one gone.
+    let log = "{\"measured\":\"src/moved.rs\",\"tried\":5,\"found\":5}\n\
+               {\"campaign\":\"done\",\"tried\":5,\"found\":5,\"by_file\":true}\n";
+    nunki::mutants::record_finished_with_registry(
+        &v.mission,
+        &v.project.hq_root,
+        tree,
+        "fp",
+        &head,
+        log,
+        &chain,
+    )
+    .unwrap();
+    let recorded = nunki::mutants::read(&v.mission).unwrap().unwrap();
+    assert!(
+        recorded.survivors.iter().all(|s| s.file != "src/lib.rs"),
+        "{recorded:?}"
+    );
+    let files = recorded.files.expect("the chain was rebuilt");
+    assert_eq!(files.keys().collect::<Vec<_>>(), ["src/moved.rs"]);
+    assert_eq!(files["src/moved.rs"].on, head);
+    assert_eq!(recorded.tried, Some(5));
 }

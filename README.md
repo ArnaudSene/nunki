@@ -223,44 +223,63 @@ files, so they give no count, and every survivor needs an outcome there.
 
 ### Gate 7's campaigns, full and partial
 
-A mission's campaigns form a chain. The first is **full**: every line the
-branch changed since its fork point. At `standard`, a later one — after a
-volet, say — is **partial**: it mutates only the lines changed since the
-previous campaign's `HEAD`, which it is handed as `NUNKI_BASE` in place of the
-fork point. It is partial only when all of these hold, and full otherwise,
-with the reason in `MUTANTS.json`:
+A mission's campaigns form a chain, and its unit is the **file**. The first
+campaign is **full**: every touched file, mutated where the branch changed it
+since its fork point. At `standard`, a later one — after a volet, say — is
+**partial**: the same campaign, restricted to the touched files whose content
+changed since the previous campaign's `HEAD`. Its base is still the fork
+point, so each of those files is measured exactly as a full campaign would
+measure it. Which files changed is git's answer on blobs (`git diff
+--name-only --no-renames`); no diff hunk is ever read. A file renamed is a
+file removed and a file added.
+
+A campaign is partial only when all of these hold, and full otherwise, with
+the reason in `MUTANTS.json`:
 
 - the mission is at `standard`;
 - a previous campaign of the mission is on file and gate 7 passes on it;
 - its `HEAD` is an ancestor of the current one;
-- the diff since it is one whose every dropped survivor the partial campaign
-  mutates again: no file git names as renamed, copied or changed in type,
-  no binary file, and a diff that could be read. nunki and the Rust
-  `mutation.sh` read that diff the same way, without rename detection, so a
-  renamed file is a file removed and a file added whole;
+- it counted each file, and those counts add up to its total (below);
+- the files changed since it could be listed;
 - the stack's `mutation.sh` and its tool's version are the ones it ran with —
   read through the script's `# nunki-tool-version: <command>` line, which
   every shipped `mutation.sh` carries; a script without it runs full
   campaigns only;
 - it was not asked with `nunki mission mutants --again`.
 
-Each campaign of the chain is judged **on its own mutants**, at the mission's
-threshold, and gate 7 is green when every one is: a partial campaign that
-tried ten mutants and killed seven is red at 80%, whatever the earlier ones
-killed. `nunki push` asks the same of the whole chain. The earlier campaigns'
-survivors whose code the later diff does not reach stay listed — at the line
-they now stand on — and keep what the HQ said on them the way any campaign
-does: a ruling comes back as a proposal marked carried, awaiting `--ratify`,
-and a refusal stays. Those the diff reaches, judged on the whole span the
-mutation replaces, are dropped: their code is mutated again. `mission
-status`, the monitor's log and the follow-up say each campaign — full or
-partial, from which commit, tried, killed, survivors.
+**Per-file counts.** Before its last line, `mutation.sh` prints one line per
+file with that file's counts, `{"measured":"src/lib.rs","tried":12,"found":13}`,
+and its last line says `"by_file":true`. nunki trusts them only when each
+file is named once and they add up to the totals. The Rust template gives
+them. The Python and Next.js ones measure whole files, give no count at all,
+and so never chain: every campaign of theirs is full.
+
+**How a chain is judged: once.** `MUTANTS.json` keeps, for each touched
+file, the counts of the latest campaign that measured it. A file unchanged
+since keeps its counts and its survivors exactly as they were — same file,
+same lines — and what the HQ said on them comes back the way it does between
+any two campaigns: a ruling as a proposal marked carried, awaiting
+`--ratify`, and a refusal as a refusal. A file changed, removed or renamed
+takes its old counts and survivors with it; what the new campaign found in
+it replaces them. Gate 7, and `nunki push` after it, judge that
+reconstruction once, at the mission's threshold: the sum of every file's
+tried, and the survivors left without an outcome. These are the numbers one
+full campaign at `HEAD` would give, under the assumption below. A volet that
+re-mutates well-killed code cannot pad the share: its new counts replace the
+old ones rather than adding to them.
+
+A partial campaign whose own counts cannot be trusted — none given, ones that
+do not add up, a count or a survivor in a file that did not change — is
+recorded with every survivor listed and no count. Gate 7 then judges it as
+`critical` does, and the next campaign is full. `mission status`, the
+monitor's log and the follow-up name each campaign (full or partial, from
+which commit, what it tried), then the one campaign gate 7 judged.
 
 **The known limit.** A partial campaign assumes that a mutant an earlier
-campaign killed, on a line nobody has changed since, is still killed. A volet
-that weakens a test can make that false, and the chain will not see it.
-`critical` never makes the assumption — its campaigns are always full — and
-`--again` forces a full campaign at any rigor.
+campaign killed, in a file nobody has changed since, is still killed. A
+volet that weakens a test can make that false, and the chain will not see
+it. `critical` never makes the assumption — its campaigns are always full —
+and `--again` forces a full campaign at any rigor.
 
 ### Running mutants at once: `mutation_jobs`
 

@@ -2679,6 +2679,59 @@ exit 2
     assert_eq!(nunki::mutants::found(&said), Some(5), "{said}\n{why}");
 }
 
+/// Rust: each file's counts too, from the same outcome files and listing —
+/// a line of an outcome file names its file before the first colon, and
+/// each entry of `mutants.json` has a `file` (measured on cargo-mutants
+/// 27.1.0) — adding up to the totals, so `nunki` can rebuild a later
+/// partial campaign from them (SPEC 4.4, the chain of campaigns). A
+/// listing that cannot be read gives `tried` per file and no `found`.
+#[cfg(unix)]
+#[test]
+fn the_rust_campaign_counts_each_file() {
+    let cargo = |listing: &str| {
+        format!(
+            "#!/bin/sh
+out=\"\"
+while [ $# -gt 0 ]; do
+  if [ \"$1\" = --output ]; then out=$2; fi
+  shift
+done
+o=\"$out/mutants.out\"
+mkdir -p \"$o\"
+printf 'src/lib.rs:2:5: replace keep -> bool with true\\nsrc/b.rs:2:7: replace * with + in b\\nsrc/lib.rs:2:7: replace > with < in keep\\n' > \"$o/caught.txt\"
+printf 'src/b.rs:2:7: replace * with / in b\\n' > \"$o/missed.txt\"
+printf 'src/lib.rs:9:1: replace spin with ()\\n' > \"$o/timeout.txt\"
+printf 'src/b.rs:5:5: replace make -> Opaque with Default::default()\\n' > \"$o/unviable.txt\"
+printf '%s' '{listing}' > \"$o/mutants.json\"
+exit 2
+"
+        )
+    };
+    let listing = r#"[{"file":"src/lib.rs"},{"file":"src/lib.rs"},{"file":"src/lib.rs"},{"file":"src/lib.rs"},{"file":"src/b.rs"},{"file":"src/b.rs"},{"file":"src/b.rs"}]"#;
+    let (said, why) = campaign_of("rust", "src/lib.rs", &[("cargo", &cargo(listing))]);
+    let files = nunki::mutants::by_file(&said, "h").unwrap_or_else(|| panic!("{said}\n{why}"));
+    let count = |f: &str| (files[f].tried, files[f].found);
+    assert_eq!(count("src/lib.rs"), (3, Some(4)), "{said}");
+    assert_eq!(count("src/b.rs"), (2, Some(2)), "{said}");
+    assert_eq!(files.len(), 2);
+    assert_eq!(nunki::mutants::tried(&said), Some(5));
+
+    // The listing unreadable: no `found` anywhere, the counts still trusted.
+    let (said, why) = campaign_of("rust", "src/lib.rs", &[("cargo", &cargo("not json"))]);
+    let files = nunki::mutants::by_file(&said, "h").unwrap_or_else(|| panic!("{said}\n{why}"));
+    assert_eq!(files["src/lib.rs"].found, None, "{said}");
+    assert_eq!(files["src/lib.rs"].tried, 3, "{said}");
+    assert_eq!(nunki::mutants::found(&said), None);
+
+    // Nothing this branch touched is mutable: counted, and nothing in it.
+    let (said, why) = campaign_of("rust", "README.md", &[("cargo", "#!/bin/sh\nexit 9\n")]);
+    assert_eq!(
+        nunki::mutants::by_file(&said, "h"),
+        Some(Default::default()),
+        "{said}\n{why}"
+    );
+}
+
 /// Python: the survivors, filtered to the touched files, and **no count**.
 /// mutmut mutates whole files under `source_paths`, so any `tried` would be
 /// a share over whole files, where a well-tested file hides the branch's
@@ -3568,17 +3621,15 @@ exit 0
     assert!(!why.contains("\"mutants\""), "mutants/ was left: {why}");
 }
 
-/// What `nunki` judges reached by a later diff and what the Rust campaign is
-/// handed to mutate again are the same diff, read the same way (HQ ruling
-/// on security round 1). Here, across a `git mv`: the template's own diff,
-/// as the stub `cargo` is handed it, and [`nunki::mutants::Changes::between`]
-/// agree on every survivor — in the old file and in the new — and the code
-/// the survivors stood on is in what the campaign mutates. With git's
-/// rename detection in either one, they part: a pure rename gave the tool no
-/// hunk, and the survivors were dropped with nothing tried in their place.
+/// A file renamed is, for `nunki` and for the Rust campaign alike, a file
+/// removed and a file added whole (SPEC 4.4, the chain of campaigns): `nunki`
+/// drops the old path's survivors and counts, and the template hands the
+/// tool every line of the new one. With git's rename detection in the
+/// template, a pure rename gave the tool no hunk, and the survivors were
+/// dropped with nothing tried in their place (security round 1).
 #[test]
 #[cfg(unix)]
-fn a_renamed_file_is_dropped_and_mutated_again_by_the_same_diff() {
+fn a_renamed_file_is_dropped_and_mutated_again_whole() {
     let (_dir, root, _nunki) = fresh();
     let home = home(&root);
     init(&root, &home, &["rust".to_string()]).unwrap();
@@ -3632,44 +3683,20 @@ exit 0
     assert!(out.status.success(), "{out:?}");
     let handed = std::fs::read_to_string(&asked).expect("the tool was handed a diff");
 
-    let theirs = nunki::mutants::Changes::parse(&handed);
-    let ours = nunki::mutants::Changes::between(&tree, &first, "HEAD").unwrap();
-    let survivor = |file: &str, line: u32| nunki::mutants::Survivor {
-        found_on: None,
-        id: format!("{file}:{line}"),
-        file: file.into(),
-        line,
-        end_line: Some(line),
-        description: "replace > with >=".into(),
-        outcome: None,
-        refused: None,
-    };
-    for s in [
-        survivor("src/lib.rs", 1),
-        survivor("src/lib.rs", 3),
-        survivor("src/moved.rs", 1),
-    ] {
-        assert_eq!(
-            ours.kept(&s),
-            theirs.kept(&s),
-            "nunki and the campaign read {}:{} differently\n{handed}",
-            s.file,
-            s.line
-        );
-        if s.file == "src/lib.rs" {
-            assert_eq!(
-                ours.kept(&s),
-                None,
-                "{}:{} survived the rename",
-                s.file,
-                s.line
-            );
-        }
-    }
-    // What was dropped is mutated again: the whole file, under its new name.
+    // `nunki` reads the rename as the old path removed and the new one
+    // added: the old file's survivors and counts are dropped, and the new
+    // file is the campaign's to measure.
+    let changed = nunki::mutants::changed_between(&tree, &first, "HEAD").unwrap();
+    assert!(changed.contains("src/lib.rs"), "{changed:?}");
+    assert!(changed.contains("src/moved.rs"), "{changed:?}");
+    // And the campaign measures it whole: every line of the file under its
+    // new name is in the diff the tool is handed, as added.
     assert!(handed.contains("+++ b/src/moved.rs"), "{handed}");
-    assert!(
-        handed.contains("+pub fn keep(a: i32) -> bool { a > 2 }"),
-        "{handed}"
-    );
+    let moved = std::fs::read_to_string(tree.join("src/moved.rs")).unwrap();
+    for line in moved.lines().filter(|l| !l.is_empty()) {
+        assert!(
+            handed.contains(&format!("+{line}\n")),
+            "{line:?} not mutated:\n{handed}"
+        );
+    }
 }
