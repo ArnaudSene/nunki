@@ -104,7 +104,7 @@ fn alive() -> Context {
     Context {
         watcher: Watcher::Alive,
         window: None,
-        proposals: Ok(0),
+        proposals: Ok(Vec::new()),
     }
 }
 
@@ -340,7 +340,7 @@ fn a_spent_window_returns_12_with_its_reset() {
             window: "five-hour window".into(),
             until: 0,
         }),
-        proposals: Ok(0),
+        proposals: Ok(Vec::new()),
     };
     let said = status("m1", &coding(), &context).unwrap();
     assert_eq!((said.stop, said.code), (Stop::WindowSpent, 12));
@@ -362,7 +362,7 @@ fn a_gate_that_could_not_be_played_returns_13_naming_the_gate_and_the_reason() {
                 .into(),
         },
         window: None,
-        proposals: Ok(0),
+        proposals: Ok(Vec::new()),
     };
     let state = state_of(flow(Security::Gates, vec![finished(true)]));
     let said = status("m1", &state, &context).unwrap();
@@ -383,7 +383,7 @@ fn a_dead_monitor_during_a_running_stage_returns_14() {
     let context = Context {
         watcher: Watcher::Gone,
         window: None,
-        proposals: Ok(0),
+        proposals: Ok(Vec::new()),
     };
     let said = status("m1", &coding(), &context).unwrap();
     assert_eq!((said.stop, said.code), (Stop::MonitorGone, 14));
@@ -414,7 +414,7 @@ fn where_the_flow_stands_comes_before_the_monitor() {
         let context = Context {
             watcher,
             window: None,
-            proposals: Ok(0),
+            proposals: Ok(Vec::new()),
         };
         assert_eq!(
             status("m1", &verified(), &context).map(|s| s.stop),
@@ -911,7 +911,7 @@ fn agent_text_reaches_waits_line_escaped_never_raw() {
             why: hostile.clone(),
         },
         window: None,
-        proposals: Ok(0),
+        proposals: Ok(Vec::new()),
     };
     lines.push((
         "the monitor's word",
@@ -923,7 +923,7 @@ fn agent_text_reaches_waits_line_escaped_never_raw() {
     let gone = Context {
         watcher: Watcher::Gone,
         window: None,
-        proposals: Ok(0),
+        proposals: Ok(Vec::new()),
     };
     lines.push((
         "a lot's label",
@@ -1014,13 +1014,31 @@ fn the_hq_reads_a_spent_window_from_the_accounts_measure() {
     );
 }
 
-/// A verified mission with equivalences the coder proposed and nobody ruled
-/// on waits on the HQ, not on the human's push — `nunki push` would refuse —
-/// and the line says how many, and the two verbs that rule.
+/// `n` pending proposals: the first the coder's, the others `nunki`'s from
+/// the registry.
+fn proposed(n: usize) -> Vec<nunki::mutants::Proposal> {
+    (0..n)
+        .map(|i| nunki::mutants::Proposal {
+            id: format!("s{i}"),
+            file: "src/lib.rs".into(),
+            line: 3,
+            why: "nothing reads it".into(),
+            from: (i > 0).then(|| nunki::mutants::ProposedFrom::Registry {
+                mission: "earlier".into(),
+                commit: "abc".into(),
+                date: String::new(),
+            }),
+        })
+        .collect()
+}
+
+/// A verified mission with equivalence proposals nobody ruled on waits on
+/// the HQ, not on the human's push — `nunki push` would refuse — and the
+/// line says how many, from whom, and the verbs that rule.
 #[test]
 fn a_verified_mission_with_proposals_awaits_the_hq_and_says_how_many() {
     let context = Context {
-        proposals: Ok(2),
+        proposals: Ok(proposed(2)),
         ..alive()
     };
     let said = status("m1", &verified(), &context).unwrap();
@@ -1028,8 +1046,9 @@ fn a_verified_mission_with_proposals_awaits_the_hq_and_says_how_many() {
     assert_says(
         &said,
         &[
-            "every declared stage is green; 2 equivalence proposal(s) await the HQ's ruling",
-            "awaits the HQ: `nunki mission mutants m1 --ratify <survivor>`",
+            "every declared stage is green; 2 equivalence proposal(s) await the HQ's ruling \
+             (1 from the coder, 1 from the registry)",
+            "awaits the HQ: `nunki mission mutants m1 --ratify <survivor>` (or `--ratify --all`)",
             "--refuse <survivor> --because <why>",
             "then `nunki push m1 --yes`",
         ],
@@ -1046,7 +1065,7 @@ fn a_verified_mission_with_proposals_awaits_the_hq_and_says_how_many() {
 #[test]
 fn the_proposals_are_counted_on_every_stop_and_an_unreadable_count_is_said() {
     let context = Context {
-        proposals: Ok(1),
+        proposals: Ok(proposed(1)),
         watcher: Watcher::Gone,
         ..alive()
     };
@@ -1084,7 +1103,7 @@ fn the_hq_reads_the_proposals_from_the_mission_folder() {
     let mission = nunki::mission::dir::Paths::of(&project.hq_root, "m1").dir;
     std::fs::create_dir_all(&mission).unwrap();
     let observe = || match nunki::wait::Hq::new(&project).observe("m1").unwrap() {
-        Observed::Live { context, .. } => context.proposals,
+        Observed::Live { context, .. } => context.proposals.map(|p| p.len()),
         other => panic!("{other:?}"),
     };
     assert_eq!(observe(), Ok(0), "no campaign, no proposal");

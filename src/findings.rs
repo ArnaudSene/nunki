@@ -69,6 +69,38 @@ pub enum FindingsError {
     Followup(#[from] crate::followup::FollowupError),
     #[error(transparent)]
     Mutants(#[from] crate::mutants::MutantsError),
+    #[error(
+        "the registry of equivalences could not be changed — {0}. Nothing was lifted, on \
+         the mission or in the registry: a ruling lifted from the mission and left in the \
+         registry would answer the next mission still"
+    )]
+    RegistryUnchanged(String),
+    #[error(
+        "--ratify --all stopped at `{at}`: {why}. The HQ's ruling is written on {}{}; \
+         nothing after it was touched — list what is pending again with `nunki mission \
+         status`",
+        if ruled.is_empty() { "no survivor before it".to_string() } else {
+            format!(
+                "{} before it",
+                ruled.iter().map(|r| format!("`{r}`")).collect::<Vec<_>>().join(", ")
+            )
+        },
+        if *at_written { format!(", and on `{at}` itself, before it failed") } else { String::new() }
+    )]
+    RatifiedPart {
+        at: String,
+        ruled: Vec<String>,
+        /// The HQ's file already holds the ruling on `at`: what failed came
+        /// after it was written.
+        at_written: bool,
+        why: String,
+    },
+    #[error(
+        "--ratify --all lists two proposals on `{0}` with different sentences, and one ruling \
+         answers every survivor of an id: nothing was ratified — rule on it with `nunki \
+         mission mutants <id> --ratify {0} --because <why>`"
+    )]
+    TwoSentences(String),
 }
 
 /// Record a human's acceptance, and — for [`Lift::Verdict`] — conclude.
@@ -267,7 +299,7 @@ pub fn refuse_proposal(
     let paths = Paths::of(&project.hq_root, id);
     let who = crate::human::me(&project.nunki_home(), Some(&project.root)).addressed();
     let store = Store::open(&project.hq_root)?;
-    let Ok(mut state) = store.load(id) else {
+    let Some(mut state) = started(&store, id)? else {
         crate::mutants::refuse_and_say(&paths, &who, survivor, because)?;
         return Ok(Refused { sent_back: None });
     };
@@ -300,56 +332,349 @@ pub fn refuse_proposal(
 /// triage, which `verify` and a campaign's read-back write too, and two
 /// writers on one file lose one of them (HQ review of the pull request,
 /// item 4). A mission that has not started has no slot and nothing else
-/// writing its files: the ruling runs as it is.
+/// writing its files: the ruling runs as it is. A state that cannot be read
+/// is not a mission that has not started: it is an error, and no ruling is
+/// written ([`started`]).
+///
+/// `ruling` is also handed a repository holding the campaign's commit, for
+/// the project's registry of equivalences to read the survivor's line in:
+/// the mission's slot, where the campaign ran, or the project's repository
+/// for a mission with no slot — where a line that cannot be read enters
+/// nothing.
 fn under_slot_lock<T>(
     project: &Project,
     id: &str,
     verb: &str,
-    ruling: impl FnOnce(&Paths) -> Result<T, crate::mutants::MutantsError>,
+    ruling: impl FnOnce(&Paths, &std::path::Path) -> Result<T, FindingsError>,
 ) -> Result<T, FindingsError> {
     let paths = Paths::of(&project.hq_root, id);
     let store = Store::open(&project.hq_root)?;
-    let _lock = match store.load(id) {
-        Ok(state) => Some(SlotLock::acquire(
-            &project.hq_root.join("locks"),
-            &state.slot,
-            verb,
-        )?),
-        Err(_) => None,
+    let (_lock, tree) = match started(&store, id)? {
+        Some(state) => (
+            Some(SlotLock::acquire(
+                &project.hq_root.join("locks"),
+                &state.slot,
+                verb,
+            )?),
+            crate::slot::find(project, &state.slot)
+                .map(|s| s.tree)
+                .unwrap_or_else(|_| project.root.clone()),
+        ),
+        None => (None, project.root.clone()),
     };
-    Ok(ruling(&paths)?)
+    ruling(&paths, &tree)
+}
+
+/// Mission `id`'s state, or `None` when it has not started — and only then.
+///
+/// The HQ's rulings run without the slot's lock on a mission that has not
+/// started, since nothing else writes its files. Any other reason the state
+/// cannot be read — a file that does not parse, one that cannot be opened —
+/// says nothing about whether a run, a `verify` or a campaign's read-back is
+/// writing `MUTANTS.json` right now. Read as "not started", it would let a
+/// ruling be written without the lock beside such a writer, and one of the
+/// two writes would be lost: so it is an error, and nothing is written.
+fn started(store: &Store, id: &str) -> Result<Option<MissionState>, FindingsError> {
+    match store.load(id) {
+        Ok(state) => Ok(Some(state)),
+        Err(crate::state::StateError::Missing(_)) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// The registry's view of a ruling the HQ gives on mission `id`.
+fn registry_ruling<'a>(
+    project: &'a Project,
+    id: &'a str,
+    tree: &'a std::path::Path,
+    by: &'a str,
+) -> crate::equivalences::Ruling<'a> {
+    crate::equivalences::Ruling {
+        hq_root: &project.hq_root,
+        tree,
+        mission: id,
+        by,
+    }
+}
+
+/// Who the HQ's verbs say ruled.
+fn who(project: &Project) -> String {
+    crate::human::me(&project.nunki_home(), Some(&project.root)).addressed()
+}
+
+/// [`crate::mutants::read`], for a ruling that has just written it.
+fn campaign_of(paths: &Paths) -> Result<crate::mutants::Campaign, crate::mutants::MutantsError> {
+    crate::mutants::read(&paths.dir)?.ok_or_else(|| {
+        crate::mutants::MutantsError::Unreadable(
+            paths.mutants.clone(),
+            "there is no campaign to rule on — `nunki mission mutants` runs one".to_string(),
+        )
+    })
 }
 
 /// `nunki mission mutants --ratify`: [`crate::mutants::ratify`], under the
-/// slot's lock. Returns the reason the ruling was written with.
+/// slot's lock, and the ruling entered in the project's registry of
+/// equivalences. Returns the reason the ruling was written with, and what
+/// became of the registry.
 pub fn ratify_proposal(
     project: &Project,
     id: &str,
     survivor: &str,
     because: Option<&str>,
-) -> Result<String, FindingsError> {
-    under_slot_lock(project, id, "mission mutants --ratify", |paths| {
-        crate::mutants::ratify(&paths.dir, survivor, because)
+) -> Result<(String, crate::equivalences::Registered), FindingsError> {
+    let by = who(project);
+    under_slot_lock(project, id, "mission mutants --ratify", |paths, tree| {
+        let origin = registry_origin(paths, survivor)?;
+        let why = crate::mutants::ratify(&paths.dir, survivor, because)?;
+        let registered = register_ratified(
+            &registry_ruling(project, id, tree, &by),
+            &campaign_of(paths)?,
+            survivor,
+            origin.as_ref(),
+        );
+        Ok((why, registered))
     })
 }
 
+/// The mission and commit of the registry entry behind the proposal
+/// survivor `id` holds, when it holds one from the registry.
+fn registry_origin(paths: &Paths, id: &str) -> Result<Option<(String, String)>, FindingsError> {
+    Ok(crate::mutants::read(&paths.dir)?.and_then(|c| {
+        c.survivors
+            .into_iter()
+            .find(|s| s.id == id)
+            .and_then(|s| match s.outcome {
+                Some(crate::mutants::Triage::ProposedByNunki {
+                    from:
+                        crate::mutants::ProposedFrom::Registry {
+                            mission, commit, ..
+                        },
+                    ..
+                }) => Some((mission, commit)),
+                _ => None,
+            })
+    }))
+}
+
+/// What a ratification leaves in the registry: a proposal from the registry
+/// is recorded on its own entry, which keeps its origin
+/// ([`crate::equivalences::ratified`]); any other is entered as the HQ's
+/// ruling on this mission ([`crate::equivalences::enter`]).
+fn register_ratified(
+    ruling: &crate::equivalences::Ruling,
+    campaign: &crate::mutants::Campaign,
+    survivor: &str,
+    origin: Option<&(String, String)>,
+) -> crate::equivalences::Registered {
+    match origin {
+        Some((mission, commit)) => {
+            crate::equivalences::ratified(ruling, campaign, survivor, (mission, commit))
+        }
+        None => crate::equivalences::enter(ruling, campaign, survivor),
+    }
+}
+
+/// What `--ratify --all` did with one proposal: the proposal as it stood,
+/// and what became of the registry once it was the HQ's ruling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ratified {
+    pub proposal: crate::mutants::Proposal,
+    pub registered: crate::equivalences::Registered,
+}
+
+/// The proposals pending on mission `id` — the coder's, and `nunki`'s —
+/// that `--ratify --all` would ratify, for the verb to print before it does.
+pub fn pending(
+    project: &Project,
+    id: &str,
+) -> Result<Vec<crate::mutants::Proposal>, FindingsError> {
+    Ok(crate::mutants::awaiting_ruling(
+        &Paths::of(&project.hq_root, id).dir,
+    )?)
+}
+
+/// `nunki mission mutants --ratify --all`: every one of `listed` — the
+/// proposals the verb printed, read by [`pending`] — ratified as
+/// [`ratify_proposal`] ratifies one, under one hold of the slot's lock, each
+/// with **the sentence it printed**, passed explicitly. A proposal that is
+/// not pending any more as it was listed — refused, ratified, or its
+/// sentence changed in between — fails the verb before anything is
+/// written, so what was printed is what was ruled. One that fails midway
+/// stops it, and the error says what was written before it
+/// ([`ratify_in_turn`]).
+pub fn ratify_all(
+    project: &Project,
+    id: &str,
+    listed: &[crate::mutants::Proposal],
+) -> Result<Vec<Ratified>, FindingsError> {
+    let by = who(project);
+    under_slot_lock(
+        project,
+        id,
+        "mission mutants --ratify --all",
+        |paths, tree| {
+            let now = crate::mutants::awaiting_ruling(&paths.dir)?;
+            if let Some(gone) = listed.iter().find(|p| !now.contains(p)) {
+                return Err(crate::mutants::MutantsError::NoProposal(format!(
+                    "the proposal on {:?} changed since it was listed, so nothing was ratified \
+                 — list them again",
+                    gone.id
+                ))
+                .into());
+            }
+            ratify_in_turn(
+                listed,
+                |proposal| {
+                    let origin = registry_origin(paths, &proposal.id)?;
+                    crate::mutants::ratify(&paths.dir, &proposal.id, Some(&proposal.why))?;
+                    Ok(register_ratified(
+                        &registry_ruling(project, id, tree, &by),
+                        &campaign_of(paths)?,
+                        &proposal.id,
+                        origin.as_ref(),
+                    ))
+                },
+                |proposal| holds_ruling(paths, proposal),
+            )
+        },
+    )
+}
+
+/// Whether the HQ's file holds the ruling `proposal` would have written: an
+/// `equivalent` on its survivor, with its sentence.
+fn holds_ruling(paths: &Paths, proposal: &crate::mutants::Proposal) -> bool {
+    crate::mutants::read(&paths.dir)
+        .ok()
+        .flatten()
+        .is_some_and(|c| {
+            c.survivors.iter().any(|s| {
+                s.id == proposal.id
+                    && matches!(&s.outcome, Some(crate::mutants::Triage::Equivalent { why, .. }) if *why == proposal.why)
+            })
+        })
+}
+
+/// Ratify each of `listed` in turn with `one`, each with the sentence it
+/// printed.
+///
+/// One ruling answers every survivor of an id, so a second proposal under
+/// an id is ruled with the first — when it says the same; two proposals
+/// under one id with different sentences refuse the pair, and nothing is
+/// written (HQ review 4).
+///
+/// When `one` fails, it stops there, and the error says it truthfully: the
+/// survivors ruled before it, whether the HQ's file already holds the ruling
+/// on the one it was on (`holds`), and that nothing after it was touched
+/// (HQ reviews 3 and 4).
+pub fn ratify_in_turn(
+    listed: &[crate::mutants::Proposal],
+    mut one: impl FnMut(
+        &crate::mutants::Proposal,
+    ) -> Result<crate::equivalences::Registered, FindingsError>,
+    holds: impl Fn(&crate::mutants::Proposal) -> bool,
+) -> Result<Vec<Ratified>, FindingsError> {
+    for (i, a) in listed.iter().enumerate() {
+        if let Some(b) = listed[i + 1..]
+            .iter()
+            .find(|b| b.id == a.id && b.why != a.why)
+        {
+            return Err(FindingsError::TwoSentences(b.id.clone()));
+        }
+    }
+    let mut done: Vec<Ratified> = Vec::new();
+    for proposal in listed {
+        if done.iter().any(|d| d.proposal.id == proposal.id) {
+            continue;
+        }
+        match one(proposal) {
+            Ok(registered) => done.push(Ratified {
+                proposal: proposal.clone(),
+                registered,
+            }),
+            Err(e) => {
+                return Err(FindingsError::RatifiedPart {
+                    at: proposal.id.clone(),
+                    ruled: done.iter().map(|d| d.proposal.id.clone()).collect(),
+                    at_written: holds(proposal),
+                    why: e.to_string(),
+                });
+            }
+        }
+    }
+    Ok(done)
+}
+
 /// `nunki mission mutants --equivalent`: [`crate::mutants::rule_equivalent`],
-/// under the slot's lock.
+/// under the slot's lock, and the ruling entered in the project's registry
+/// of equivalences. Returns what became of the registry.
 pub fn rule_equivalent(
     project: &Project,
     id: &str,
     survivor: &str,
     why: &str,
-) -> Result<(), FindingsError> {
-    under_slot_lock(project, id, "mission mutants --equivalent", |paths| {
-        crate::mutants::rule_equivalent(&paths.dir, survivor, why)
-    })
+) -> Result<crate::equivalences::Registered, FindingsError> {
+    let by = who(project);
+    under_slot_lock(
+        project,
+        id,
+        "mission mutants --equivalent",
+        |paths, tree| {
+            crate::mutants::rule_equivalent(&paths.dir, survivor, why)?;
+            Ok(crate::equivalences::enter(
+                &registry_ruling(project, id, tree, &by),
+                &campaign_of(paths)?,
+                survivor,
+            ))
+        },
+    )
 }
 
-/// `nunki mission mutants --lift`: [`crate::mutants::lift_equivalent`],
-/// under the slot's lock.
-pub fn lift_equivalent(project: &Project, id: &str, survivor: &str) -> Result<(), FindingsError> {
-    under_slot_lock(project, id, "mission mutants --lift", |paths| {
-        crate::mutants::lift_equivalent(&paths.dir, survivor)
+/// `nunki mission mutants --lift`: the ruling taken out of the project's
+/// registry of equivalences — whichever mission gave it — so that the next
+/// mission is asked again, and then out of the mission's file
+/// ([`crate::mutants::lift_equivalent`]), under the slot's lock. Returns how
+/// many registry entries went.
+///
+/// **The registry first, and failing closed** (HQ review, item 4): when it
+/// cannot be locked, read or written, the verb fails and the mission's file
+/// is left as it was. The other order lifted the ruling from the mission and
+/// left it in the registry, answering every later mission still, behind a
+/// verb that had said "lifted". And a registry entry is taken out even when
+/// the mission's file no longer holds the ruling — lifted there before, by a
+/// verb whose registry half failed — so that it can always be cleaned.
+pub fn lift_equivalent(
+    project: &Project,
+    id: &str,
+    survivor: &str,
+) -> Result<crate::equivalences::Registered, FindingsError> {
+    let by = who(project);
+    under_slot_lock(project, id, "mission mutants --lift", |paths, tree| {
+        // No campaign: the mission's own verb says so, and writes nothing.
+        // A campaign without that survivor gives `remove` nothing to take,
+        // and the mission's verb names it below.
+        let Some(campaign) = crate::mutants::read(&paths.dir)? else {
+            crate::mutants::lift_equivalent(&paths.dir, survivor)?;
+            return Ok(crate::equivalences::Registered::Done(0));
+        };
+        let removed = match crate::equivalences::remove(
+            &registry_ruling(project, id, tree, &by),
+            &campaign,
+            survivor,
+        ) {
+            crate::equivalences::Registered::Done(n) => n,
+            crate::equivalences::Registered::Not(why) => {
+                return Err(FindingsError::RegistryUnchanged(why));
+            }
+        };
+        let holds = campaign
+            .survivors
+            .iter()
+            .any(|s| s.id == survivor && crate::mutants::liftable(s.outcome.as_ref()));
+        // Nothing held here and nothing in the registry: the mission's verb
+        // refuses, naming the survivor.
+        if holds || removed == 0 {
+            crate::mutants::lift_equivalent(&paths.dir, survivor)?;
+        }
+        Ok(crate::equivalences::Registered::Done(removed))
     })
 }

@@ -3202,6 +3202,7 @@ impl World {
             id: id.into(),
             file: "src/lib.rs".into(),
             line: 1,
+            end_line: None,
             description: "replace 1 with 0".into(),
             outcome,
             refused: None,

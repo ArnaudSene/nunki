@@ -363,14 +363,95 @@ MISSION  (one branch off its base, one slot)
   reached at `standard` — so a survivor reopened after the gates is never
   pushed. A `--refuse` on a verified mission sends it back to the coder as a
   volet, with the refusal as its cause, and a survivor that already holds
-  the HQ's ruling is refused with a pointer to `--lift`. A refusal is
-  carried to the next campaign on the same tiers as a ruling, so the same
-  proposal written again is still no outcome. With no campaign on file at
-  `standard` or `critical`, push refuses: no campaign, no push. `--ratify`,
-  `--equivalent`, `--refuse` and `--lift` take the slot's lock and act on
-  every survivor carrying the id they name. `mission status` and
-  `mission wait` count the proposals that await the HQ, and the follow-up
-  lists them with their reasons when the final gates pass.
+  the HQ's ruling is refused with a pointer to `--lift`.
+
+  **Between campaigns of one mission, `carry` never rules.** Which mutant a
+  ruling was about is a heuristic across campaigns — an id is a position,
+  and other code, even identical code, can land on it — so a ruling is only
+  ever carried as a **proposal** from `nunki`, marked as carried, with its
+  sentence and the commit it was given on, for the HQ to ratify or refuse
+  (`--ratify --all` takes them all). The only equivalences in a campaign's
+  `MUTANTS.json` are the ones the HQ typed on that campaign. `carry` looks
+  at the whole previous campaign: the same id, file and description, or
+  else — when that pair names exactly one survivor before and one now, and
+  the code the mutation replaces occurs once in its file — the same file
+  and description under another id. **A refusal is always carried**:
+  a new id gets the refusal the HQ gave on any survivor of the same file and
+  description, whatever the uniqueness, so a refused proposal written again is
+  never an outcome. With no campaign on
+  file at `standard` or `critical`, push refuses: no campaign, no push, and it
+  names `nunki mission mutants <mission>`, the verb that writes one.
+  `--ratify`, `--equivalent`, `--refuse` and `--lift` take the slot's lock
+  and act on every survivor carrying the id they name; a mission whose state
+  cannot be read is refused, and only one that has not started is ruled on
+  without the lock. `mission status` and `mission wait` count the proposals
+  that await the HQ by source — the coder, the registry, carried by file and
+  mutation — `mission status` and `nunki push` name each with its source and
+  sentence, and the follow-up lists them when the final gates pass.
+  `--ratify --all` ratifies every pending proposal, whatever its source,
+  printing each with its source and sentence first, and rules each with the
+  sentence it printed; a proposal refused, ruled or reworded between the
+  listing and the ruling fails the verb, and nothing is written. One that
+  fails midway stops it, and it says which survivors it had ruled before.
+  Ratifying a proposal from the registry keeps the entry's origin — its
+  mission, commit, date and sentence — and records the ratification beside
+  it.
+
+  **From `MUTANTS.triage.json`, `nunki` reads only what the coder may give**:
+  `killed`, `bug` and `equivalent_proposed`. Anything else written there —
+  `equivalent`, `equivalent_registered`, `proposed_by_nunki`, or an entry it
+  cannot read — is no outcome, never shadows what `MUTANTS.json` holds, and
+  is named as refused in gate 7's note and in `nunki push`'s refusal.
+  A named test is a name: letters, digits and underscores, three at least
+  — a blank name, or one of a letter or two, answers nothing — and it is
+  looked for as a whole word. `nunki push` asks, as gate 7 does, that every
+  test an outcome names exists, in the tree of the commit it pushes, so
+  text added uncommitted in the slot never counts.
+
+  A ruling is given **once per project, for as long as its code stands**.
+  `--equivalent` and `--ratify` also enter it in the project's registry of
+  equivalences, `hq/equivalences.json` in the project's home — never in the
+  repository, never mounted in an agent's container, and written by those
+  verbs and `--lift` only: a proposal never enters it, and a refusal is not
+  an equivalence. An entry holds the mutant's file and description (never
+  its line number), the git blob id of the code the mutation replaces — every
+  line of its span, as the tool's own listing gives it (`end_line` in the
+  campaign's output; cargo-mutants' `mutants.json`), each trimmed at both
+  ends and joined by newlines, so that `printf '%s' '<line>' | git
+  hash-object --stdin` reproduces a one-line span — its number of lines, the
+  sentence, who ruled, the mission, the commit and the date.
+
+  **Only what is identified without a doubt.** A ruling is entered only when
+  the campaign it is given on holds exactly one survivor on its file and
+  description, the span is known, and its text occurs exactly once in the
+  file at the campaign's commit; otherwise the ruling stands on its mission,
+  and the verb says on stderr why the registry was left alone.
+
+  **The registry proposes, it never rules.** When any mission's campaign is
+  recorded, a survivor with no outcome and no refusal whose file and
+  description match exactly one entry and one survivor, and whose span now
+  has the same digest and occurs exactly once in the file, receives a
+  **proposal**: `proposed_by_nunki` in `MUTANTS.json`, carrying the HQ's
+  sentence and the mission, commit and date it was ruled on. Code that only
+  moved still matches; code any line of which changed matches nothing. Gate 7
+  counts it as a proposal (an outcome at `critical`, in the share at
+  `standard`), the mission goes on, and `nunki push` refuses until the HQ
+  ratifies or refuses it, exactly as for a coder's proposal: a wrong match
+  costs one refusal, never a wrong ruling. The coder cannot write one. A
+  `MUTANTS.json` an older `nunki` wrote with `equivalent_registered` reads as
+  a proposal from the registry. A registry proposal is never carried between
+  campaigns: each campaign asks the registry again. Ruling again on a
+  mutation replaces its entry. The registry is read under its lock; one that
+  cannot be read — a zero-length file included — proposes nothing, and
+  `FOLLOWUP_HQ.md` says so; a span that cannot be read matches nothing. The
+  source is read through objects `nunki` hashes itself, with replace refs and
+  grafts off, and a tree that names an entry twice or out of git's order is
+  read as nothing. `--lift` on any mission takes a ruling — or `nunki`'s
+  proposal of one — out of the registry first and then out of the mission:
+  when the registry cannot be locked, read or written, it fails and changes
+  nothing, and it still cleans a registry entry its mission no longer holds.
+  `nunki mission mutants --registry` lists the entries, each with whether its
+  code still stands at the repository's `HEAD` — once, changed, or repeated.
 
 - **Gates** — deterministic checks, each read from its own result. Gates 1 to
   4 (a clean tree, a branch ahead of its base, a resume block that names

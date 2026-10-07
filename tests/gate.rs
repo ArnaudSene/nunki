@@ -1265,6 +1265,7 @@ fn survivor(line: u32, outcome: Option<Triage>) -> Survivor {
         id: format!("src/new.rs:{line}"),
         file: "src/new.rs".into(),
         line,
+        end_line: None,
         description: "replace two with 0".into(),
         outcome,
         refused: None,
@@ -1510,6 +1511,102 @@ fn a_carried_equivalence_is_named_apart_from_one_given_on_this_campaign() {
     assert!(note.contains("2 of 2"), "{note}");
     assert!(note.contains("1 of those were carried"), "{note}");
     assert!(note.contains("--lift"), "{note}");
+}
+
+/// What `nunki` proposes from a ruling it matched — in the registry, or by
+/// file and mutation — is counted as a proposal, by source, and never as
+/// one of the HQ's rulings (HQ review 2). A file an older `nunki` wrote, with
+/// a ruling it applied from the registry, reads as a proposal from it.
+#[test]
+fn a_proposal_from_the_registry_or_carried_is_counted_as_a_proposal() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.campaign(vec![
+        survivor(
+            1,
+            Some(Triage::EquivalentRegistered {
+                why: "no caller can reach that branch".into(),
+                mission: "earlier".into(),
+                commit: "def5678".into(),
+            }),
+        ),
+        survivor(
+            2,
+            Some(Triage::ProposedByNunki {
+                why: "the constant is never read".into(),
+                from: nunki::mutants::ProposedFrom::Carried {
+                    commit: "abc1234".into(),
+                },
+            }),
+        ),
+        survivor(
+            3,
+            Some(Triage::Equivalent {
+                why: "the value is overwritten before use".into(),
+                carried_from: None,
+            }),
+        ),
+    ]);
+    f.journal_names_head();
+    let outcome = f.gate_seven(Role::Coder);
+    assert_eq!(outcome.decision, Decision::Passed);
+    let note = outcome
+        .note
+        .expect("a green gate that owes the reader a number");
+    assert!(note.contains("1 of 3 rode on `equivalent`"), "{note}");
+    assert!(
+        note.contains(
+            "2 of 3 rode on an equivalence proposed (1 from the registry, 1 carried by file \
+             and mutation)"
+        ),
+        "{note}"
+    );
+    assert!(note.contains("`nunki push` refuses"), "{note}");
+}
+
+/// Nor can it write what `nunki` proposes.
+#[test]
+fn a_proposal_by_nunki_written_by_the_coder_is_refused() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.campaign(vec![survivor(1, None)]);
+    f.coder_answers(&[(
+        "src/new.rs:1",
+        Triage::ProposedByNunki {
+            why: "trust me".into(),
+            from: nunki::mutants::ProposedFrom::Carried {
+                commit: "def5678".into(),
+            },
+        },
+    )]);
+    f.journal_names_head();
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => assert!(why.contains("proposed_by_nunki"), "{why}"),
+        other => panic!("the coder gave nunki's outcome: {other:?}"),
+    }
+}
+
+/// The coder cannot answer a survivor with a ruling from the registry: it
+/// is the HQ's, like the `equivalent` it stands for, and one written in the
+/// coder's file turns the gate red by name.
+#[test]
+fn a_registry_ruling_written_by_the_coder_is_refused() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.campaign(vec![survivor(1, None)]);
+    f.coder_answers(&[(
+        "src/new.rs:1",
+        Triage::EquivalentRegistered {
+            why: "trust me".into(),
+            mission: "earlier".into(),
+            commit: "def5678".into(),
+        },
+    )]);
+    f.journal_names_head();
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => assert!(why.contains("equivalent_registered"), "{why}"),
+        other => panic!("the coder gave the HQ's outcome: {other:?}"),
+    }
 }
 
 #[test]
@@ -2651,10 +2748,19 @@ fn at_standard_a_named_test_must_exist_and_the_coder_may_not_rule() {
             carried_from: None,
         },
     )]);
-    match f.gate_seven(Role::Coder).decision {
-        Decision::Failed(why) => assert!(why.contains("not the coder's to give"), "{why}"),
-        other => panic!("standard does not change who rules: {other:?}"),
-    }
+    // The coder's `equivalent` is no outcome (HQ review 3): the survivor
+    // counts as not killed, the share of 99% passes on its own, and the note
+    // names the entry refused.
+    let outcome = f.gate_seven(Role::Coder);
+    assert_eq!(outcome.decision, Decision::Passed);
+    let note = outcome.note.unwrap();
+    assert!(note.contains("99 of 100"), "{note}");
+    assert!(
+        note.contains("1 survivor(s) left without an outcome"),
+        "{note}"
+    );
+    assert!(note.contains("not the coder's to give"), "{note}");
+    assert!(note.contains("refused and read as no outcome"), "{note}");
 }
 
 /// A campaign that does not say how many it tried — an older script, an
@@ -2920,7 +3026,7 @@ fn a_critical_mission_with_two_proposals_passes_gate_seven_and_counts_them_apart
     assert_eq!(outcome.decision, Decision::Passed);
     let note = outcome.note.expect("proposals are counted out loud");
     assert!(
-        note.contains("2 of 4 rode on an equivalence the coder proposed"),
+        note.contains("2 of 4 rode on an equivalence proposed (2 from the coder)"),
         "{note}"
     );
     assert!(note.contains("`nunki push` refuses"), "{note}");
@@ -3040,7 +3146,7 @@ fn at_standard_a_proposal_counts_in_the_share() {
     let note = outcome.note.unwrap();
     assert!(note.contains("8 of 10"), "{note}");
     assert!(
-        note.contains("1 of 3 rode on an equivalence the coder proposed"),
+        note.contains("1 of 3 rode on an equivalence proposed (1 from the coder)"),
         "{note}"
     );
 
@@ -3050,4 +3156,50 @@ fn at_standard_a_proposal_counts_in_the_share() {
         Decision::Failed(why) => assert!(why.contains("7 of 10"), "{why}"),
         other => panic!("a blank proposal kills nothing: {other:?}"),
     }
+}
+
+/// A named test is a name (HQ review 4): blank, a space, or a word of two
+/// letters answers nothing, and says why beside the survivor; a part of a
+/// real name is not that name; the real name, as a whole word, answers.
+#[test]
+fn gate_seven_takes_no_test_name_that_is_not_a_name() {
+    let f = Fixture::new();
+    commit(
+        &f.tree,
+        "src/new.rs",
+        "pub fn two() -> u8 { 2 }\n#[test]\nfn two_is_two() {}\n",
+        "L1",
+    );
+    f.campaign(vec![survivor(1, None)]);
+    f.journal_names_head();
+    for name in ["", " ", "fn", "u8"] {
+        f.coder_answers(&[("src/new.rs:1", Triage::Killed { test: name.into() })]);
+        match f.gate_seven(Role::Coder).decision {
+            Decision::Failed(why) => {
+                assert!(
+                    why.contains("1 survivor(s) have no outcome"),
+                    "{name:?}: {why}"
+                );
+                assert!(why.contains("is not a test name"), "{name:?}: {why}");
+            }
+            other => panic!("{name:?} answered a survivor: {other:?}"),
+        }
+    }
+    f.coder_answers(&[(
+        "src/new.rs:1",
+        Triage::Killed {
+            test: "two_is".into(),
+        },
+    )]);
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => assert!(why.contains("names the test \"two_is\""), "{why}"),
+        other => panic!("a part of a name was taken for it: {other:?}"),
+    }
+    f.coder_answers(&[(
+        "src/new.rs:1",
+        Triage::Killed {
+            test: "two_is_two".into(),
+        },
+    )]);
+    assert_eq!(f.gate_seven(Role::Coder).decision, Decision::Passed);
 }

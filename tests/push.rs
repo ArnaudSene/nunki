@@ -1393,7 +1393,7 @@ fn push_refuses_until_every_proposed_equivalence_is_ratified_or_refused() {
         },
         Security::Gates,
     );
-    let head = world.commit("src.rs", "pub fn one() -> u8 { 2 }\n", "the lot");
+    let head = world.commit("src.rs", WITH_TESTS, "the lot");
     world.verified(&[(Role::Coder, None, head.clone())]);
 
     let dir = nunki::mission::dir::Paths::of(&world.project.hq_root, "m1").dir;
@@ -1401,6 +1401,7 @@ fn push_refuses_until_every_proposed_equivalence_is_ratified_or_refused() {
         id: id.into(),
         file: "src.rs".into(),
         line: 1,
+        end_line: None,
         description: "replace 2 with 0".into(),
         outcome: None,
         refused: None,
@@ -1450,8 +1451,8 @@ fn push_refuses_until_every_proposed_equivalence_is_ratified_or_refused() {
     }
     let said = err.to_string();
     for part in [
-        "`s1` (only a log line reads it)",
-        "`s2` (both arms return the same constant)",
+        "`s1` (the coder's: only a log line reads it)",
+        "`s2` (the coder's: both arms return the same constant)",
         "nunki mission mutants m1 --ratify <survivor>",
         "nunki mission mutants m1 --refuse <survivor> --because <why>",
     ] {
@@ -1523,6 +1524,7 @@ fn the_hq_rules_on_proposals_with_two_verbs_and_status_lists_them() {
         id: id.into(),
         file: "src.rs".into(),
         line: 1,
+        end_line: None,
         description: "replace 2 with 0".into(),
         outcome: None,
         refused: None,
@@ -1560,9 +1562,12 @@ fn the_hq_rules_on_proposals_with_two_verbs_and_status_lists_them() {
         status.contains("proposals 2 equivalence proposal(s) await the HQ's ruling"),
         "{status}"
     );
-    assert!(status.contains("s1 — only a log line reads it"), "{status}");
     assert!(
-        status.contains("s2 — both arms return the same constant"),
+        status.contains("s1 (the coder's) — only a log line reads it"),
+        "{status}"
+    );
+    assert!(
+        status.contains("s2 (the coder's) — both arms return the same constant"),
         "{status}"
     );
 
@@ -1611,6 +1616,7 @@ fn at_standard_push_refuses_a_share_below_the_threshold_gate_seven_used() {
         id: format!("s{line}"),
         file: "src.rs".into(),
         line,
+        end_line: None,
         description: "replace 2 with 0".into(),
         outcome: None,
         refused: None,
@@ -1676,6 +1682,7 @@ fn refusing_a_proposal_on_a_verified_mission_sends_it_back_to_the_coder() {
                     id: "s1".into(),
                     file: "src.rs".into(),
                     line: 1,
+                    end_line: None,
                     description: "replace 2 with 0".into(),
                     outcome: None,
                     refused: None,
@@ -1757,7 +1764,7 @@ fn verified_with(rigor: nunki::mission::Rigor, survivors: &[&str]) -> (World, Pa
     let mut state = world.state();
     state.flow = Flow::new(h).unwrap();
     world.store().save(&state).unwrap();
-    let head = world.commit("src.rs", "pub fn one() -> u8 { 2 }\n", "the lot");
+    let head = world.commit("src.rs", WITH_TESTS, "the lot");
     world.verified(&[(Role::Coder, None, head.clone())]);
     let dir = nunki::mission::dir::Paths::of(&world.project.hq_root, "m1").dir;
     mutants::write(
@@ -1772,6 +1779,7 @@ fn verified_with(rigor: nunki::mission::Rigor, survivors: &[&str]) -> (World, Pa
                     id: (*id).into(),
                     file: "src.rs".into(),
                     line: 1,
+                    end_line: None,
                     description: "replace 2 with 0".into(),
                     outcome: None,
                     refused: None,
@@ -1847,6 +1855,10 @@ fn push_fails_closed_when_the_campaign_is_missing_or_empty() {
             let said = err.to_string();
             assert!(said.contains("no campaign, no push"), "{said}");
             assert!(said.contains(&format!("`{rigor}`")), "{said}");
+            // The verb that writes a campaign, and not `nunki verify`, which
+            // replays no gate on a verified mission.
+            assert!(said.contains("`nunki mission mutants m1`"), "{said}");
+            assert!(!said.contains("nunki verify"), "{said}");
             assert!(world.on_forge("mission/x").is_none());
         }
     }
@@ -1933,4 +1945,395 @@ fn refusing_a_ruled_survivor_on_a_verified_mission_sends_nothing_back() {
     assert!(err.to_string().contains("--lift s1"), "{err}");
     assert_eq!(world.stage(), Stage::Verified);
     assert_eq!(world.state().flow.volets(), 0);
+}
+
+/// `nunki mission status` lists each proposal with its source, and a ruling
+/// verb says on stderr when it left the registry as
+/// it was: the mission's file changed, the next mission's will not. Both
+/// are only ever printed by the binary.
+#[test]
+fn the_binary_lists_proposals_by_source_and_says_when_the_registry_is_left_alone() {
+    use nunki::mutants::{Campaign, Survivor, Triage};
+    let world = World::opened_at(nunki::mission::Rigor::Critical);
+    let id = "src.rs:1:5: replace one -> u8 with 0";
+    nunki::mutants::write(
+        &nunki::mission::dir::Paths::of(&world.project.hq_root, "m1").dir,
+        &Campaign {
+            fingerprint: "f".into(),
+            head: "0123456789abcdef0123456789abcdef01234567".into(),
+            date: "2026-10-06T12:00:00Z".into(),
+            survivors: vec![Survivor {
+                id: id.into(),
+                file: "src.rs".into(),
+                line: 1,
+                end_line: None,
+                description: "replace one -> u8 with 0".into(),
+                outcome: Some(Triage::EquivalentRegistered {
+                    why: "nothing reads the value".into(),
+                    mission: "earlier".into(),
+                    commit: "fedcba9876543210fedcba9876543210fedcba98".into(),
+                }),
+                refused: None,
+            }],
+            tried: Some(1),
+        },
+    )
+    .unwrap();
+    let run = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_nunki"))
+            .arg("-C")
+            .arg(&world.project.root)
+            .args(args)
+            .env("HOME", &world.home)
+            .output()
+            .unwrap();
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+
+    let (ok, stdout, stderr) = run(&["mission", "status", "m1"]);
+    assert!(ok, "{stdout}{stderr}");
+    // An older file's registry ruling reads as what it is now: a proposal
+    // from the registry, awaiting the HQ (HQ review 2).
+    assert!(
+        stdout.contains(
+            "proposals 1 equivalence proposal(s) await the HQ's ruling (1 from the registry)"
+        ),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(&format!(
+            "{id} (nunki's, from the registry: ruled on mission earlier at fedcba987654) — \
+             nothing reads the value"
+        )),
+        "{stdout}"
+    );
+
+    std::fs::write(
+        nunki::equivalences::path(&world.project.hq_root),
+        "{ not a registry",
+    )
+    .unwrap();
+    // A lift the registry cannot take fails, and changes nothing (HQ review,
+    // item 4).
+    let (ok, stdout, stderr) = run(&["mission", "mutants", "m1", "--lift", id]);
+    assert!(!ok, "{stdout}{stderr}");
+    assert!(stderr.contains("Nothing was lifted"), "{stderr}");
+    assert!(stderr.contains("equivalences.json"), "{stderr}");
+    // A ruling stands on its mission, and says on stderr that the registry
+    // was left alone.
+    let (ok, stdout, stderr) = run(&[
+        "mission",
+        "mutants",
+        "m1",
+        "--equivalent",
+        id,
+        "--because",
+        "nothing reads it",
+    ]);
+    assert!(ok, "the ruling is the mission's: {stdout}{stderr}");
+    assert!(
+        stderr.contains("the registry of equivalences is unchanged"),
+        "{stderr}"
+    );
+    let (_, stdout, _) = run(&["mission", "status", "m1"]);
+    assert!(stdout.contains("registry  could not be read"), "{stdout}");
+}
+
+/// What `nunki` proposes from a ruling it matched holds the push exactly as
+/// the coder's proposals do, and the refusal names each by source; `--ratify
+/// --all` prints every pending proposal with its source and sentence, writes
+/// the HQ's equivalence on each, and the push goes through (HQ review 2, D).
+#[test]
+fn push_waits_on_nunkis_proposals_and_ratify_all_rules_them() {
+    use nunki::mutants::{self, Campaign, ProposedFrom, Survivor, Triage};
+    let world = World::opened(no_integration(), Security::Gates);
+    let head = world.commit("src.rs", "pub fn one() -> u8 { 2 }\n", "the lot");
+    world.verified(&[(Role::Coder, None, head.clone())]);
+    let paths = nunki::mission::dir::Paths::of(&world.project.hq_root, "m1");
+    let survivor = |id: &str, outcome: Option<Triage>| Survivor {
+        id: id.into(),
+        file: "src.rs".into(),
+        line: 1,
+        end_line: None,
+        description: format!("replace {id}"),
+        outcome,
+        refused: None,
+    };
+    mutants::write(
+        &paths.dir,
+        &Campaign {
+            fingerprint: "f".into(),
+            head,
+            date: "2026-10-06T12:00:00Z".into(),
+            survivors: vec![
+                survivor("s1", None),
+                survivor(
+                    "s2",
+                    Some(Triage::ProposedByNunki {
+                        why: "ruled on another mission".into(),
+                        from: ProposedFrom::Registry {
+                            mission: "earlier".into(),
+                            commit: "0123456789abcdef".into(),
+                            date: "2026-10-01T00:00:00Z".into(),
+                        },
+                    }),
+                ),
+                survivor(
+                    "s3",
+                    Some(Triage::ProposedByNunki {
+                        why: "ruled on its twin".into(),
+                        from: ProposedFrom::Carried {
+                            commit: "fedcba9876543210".into(),
+                        },
+                    }),
+                ),
+            ],
+            tried: None,
+        },
+    )
+    .unwrap();
+    mutants::write_triage(
+        &paths.dir,
+        &[(
+            "s1".to_string(),
+            Triage::EquivalentProposed {
+                why: "only a log line reads it".into(),
+            },
+        )]
+        .into_iter()
+        .collect(),
+    )
+    .unwrap();
+
+    let err = push::push(&world.project, "m1", true).unwrap_err();
+    let said = err.to_string();
+    assert!(
+        matches!(err, PushError::ProposalsAwait { count: 3, .. }),
+        "{said}"
+    );
+    for part in [
+        "`s1` (the coder's: only a log line reads it)",
+        "`s2` (nunki's, from the registry: ruled on mission earlier at 0123456789ab: ruled on \
+         another mission)",
+        "`s3` (nunki's, carried by file and mutation: ruled at fedcba987654 on a survivor of \
+         another id: ruled on its twin)",
+        "--ratify --all",
+    ] {
+        assert!(said.contains(part), "{part:?} in {said}");
+    }
+    assert!(world.on_forge("mission/x").is_none());
+
+    let status = world.printed_by_the_binary(&["mission", "status", "m1"]);
+    assert!(
+        status.contains(
+            "3 equivalence proposal(s) await the HQ's ruling (1 from the coder, 1 from the \
+             registry, 1 carried by file and mutation)"
+        ),
+        "{status}"
+    );
+
+    // Asked without a survivor, or with one and --all, it refuses.
+    let said = world.printed_by_the_binary(&["mission", "mutants", "m1", "--ratify"]);
+    assert!(said.contains("takes --all"), "{said}");
+    let said =
+        world.printed_by_the_binary(&["mission", "mutants", "m1", "--ratify", "s1", "--all"]);
+    assert!(said.contains("names no survivor"), "{said}");
+    assert_eq!(mutants::awaiting_ruling(&paths.dir).unwrap().len(), 3);
+
+    let said = world.printed_by_the_binary(&["mission", "mutants", "m1", "--ratify", "--all"]);
+    let listed = said.find("s2 (nunki's, from the registry").expect(&said);
+    let ruled = said
+        .find("s2 ruled equivalent — ruled on another mission")
+        .expect(&said);
+    assert!(listed < ruled, "each is printed before it is ruled: {said}");
+    assert!(
+        said.contains("s1 (the coder's) — only a log line reads it"),
+        "{said}"
+    );
+    assert!(
+        said.contains("s3 ruled equivalent — ruled on its twin"),
+        "{said}"
+    );
+
+    let campaign = mutants::read(&paths.dir).unwrap().unwrap();
+    for (s, why) in campaign.survivors.iter().zip([
+        "only a log line reads it",
+        "ruled on another mission",
+        "ruled on its twin",
+    ]) {
+        assert_eq!(
+            s.outcome,
+            Some(Triage::Equivalent {
+                why: why.into(),
+                carried_from: None,
+            }),
+            "{}",
+            s.id
+        );
+    }
+    assert!(mutants::read_triage(&paths.dir).unwrap().is_empty());
+    assert!(mutants::awaiting_ruling(&paths.dir).unwrap().is_empty());
+    push::push(&world.project, "m1", true).unwrap();
+    assert!(world.on_forge("mission/x").is_some());
+}
+
+/// The lot's source, holding the tests the outcomes in these worlds name:
+/// push asks, as gate 7 does, that a named test exists (HQ review 3).
+const WITH_TESTS: &str = "pub fn one() -> u8 { 2 }\n\
+                          #[test]\nfn one_is_two() {}\n\
+                          #[test]\nfn two_is_printed() {}\n";
+
+/// The coder's file is read only for the outcomes the coder may give (HQ
+/// review 3). A verified `critical` mission whose triage entry is rewritten
+/// after the gates to `equivalent`, then to `equivalent_registered`, holds
+/// no outcome for that survivor: push refuses, and names the entry refused.
+#[test]
+fn push_refuses_a_triage_rewritten_to_a_ruling() {
+    let (world, dir, _) = verified_with(nunki::mission::Rigor::Critical, &["s1"]);
+    for forged in [
+        r#"{"s1": {"kind": "equivalent", "why": "trust me"}}"#,
+        r#"{"s1": {"kind": "equivalent_registered", "why": "trust me", "mission": "m", "commit": "c"}}"#,
+    ] {
+        std::fs::write(dir.join(nunki::mutants::TRIAGE_FILE), forged).unwrap();
+        match push::push(&world.project, "m1", true) {
+            Err(PushError::MutantsOwed { owed, .. }) => {
+                assert!(owed.contains("1 survivor(s) have no outcome"), "{owed}");
+                assert!(owed.contains("not the coder's to give"), "{owed}");
+                assert!(owed.contains("refused and read as no outcome"), "{owed}");
+            }
+            other => panic!("{forged}: a ruling forged by the coder was read: {other:?}"),
+        }
+        assert!(world.on_forge("mission/x").is_none());
+    }
+}
+
+/// Push asks what gate 7 asks of a named test: that the tree holds it. A
+/// `killed` naming a test nobody wrote, written after the gates, holds the
+/// push with the gate's own words (HQ review 3).
+#[test]
+fn push_refuses_a_killed_naming_a_test_that_does_not_exist() {
+    let (world, dir, head) = verified_with(nunki::mission::Rigor::Critical, &["s1"]);
+    let killed_by = |test: &str| {
+        nunki::mutants::write_triage(
+            &dir,
+            &[(
+                "s1".to_string(),
+                nunki::mutants::Triage::Killed { test: test.into() },
+            )]
+            .into_iter()
+            .collect(),
+        )
+        .unwrap();
+    };
+    killed_by("a_test_nobody_wrote");
+    match push::push(&world.project, "m1", true) {
+        Err(PushError::MutantsOwed { owed, .. }) => assert!(
+            owed.contains(
+                "names the test \"a_test_nobody_wrote\", and nothing in the tree is called that"
+            ),
+            "{owed}"
+        ),
+        other => panic!("a test nobody wrote was taken: {other:?}"),
+    }
+    assert!(world.on_forge("mission/x").is_none());
+
+    killed_by("one_is_two");
+    push::push(&world.project, "m1", true).unwrap();
+    assert_eq!(world.on_forge("mission/x").as_deref(), Some(head.as_str()));
+}
+
+/// Push looks for a named test in the commit it pushes, never in the slot's
+/// working tree: a name present only as an uncommitted edit of a tracked
+/// file is refused (HQ review 4).
+#[test]
+fn push_refuses_a_test_named_only_in_an_uncommitted_edit() {
+    let (world, dir, head) = verified_with(nunki::mission::Rigor::Critical, &["s1"]);
+    nunki::mutants::write_triage(
+        &dir,
+        &[(
+            "s1".to_string(),
+            nunki::mutants::Triage::Killed {
+                test: "only_in_the_working_tree".into(),
+            },
+        )]
+        .into_iter()
+        .collect(),
+    )
+    .unwrap();
+    let source = world.tree.join("src.rs");
+    let committed = std::fs::read_to_string(&source).unwrap();
+    std::fs::write(
+        &source,
+        format!("{committed}#[test]\nfn only_in_the_working_tree() {{}}\n"),
+    )
+    .unwrap();
+    match push::push(&world.project, "m1", true) {
+        Err(PushError::MutantsOwed { owed, .. }) => assert!(
+            owed.contains("names the test \"only_in_the_working_tree\""),
+            "{owed}"
+        ),
+        other => panic!("an uncommitted edit stood for the pushed commit: {other:?}"),
+    }
+    assert!(world.on_forge("mission/x").is_none());
+    std::fs::write(&source, committed).unwrap();
+    let _ = head;
+}
+
+/// A named test is a name (HQ review 4): blank, a space, or a word of two
+/// letters answers nothing at push — each is matched by nearly any line —
+/// and a real test name, as a whole word, still does.
+#[test]
+fn push_takes_no_test_name_that_is_not_a_name() {
+    let (world, dir, head) = verified_with(nunki::mission::Rigor::Critical, &["s1"]);
+    let killed_by = |test: &str| {
+        nunki::mutants::write_triage(
+            &dir,
+            &[(
+                "s1".to_string(),
+                nunki::mutants::Triage::Killed { test: test.into() },
+            )]
+            .into_iter()
+            .collect(),
+        )
+        .unwrap();
+    };
+    for name in ["", " ", "fn", "u8", "one_is", "one-is-two"] {
+        killed_by(name);
+        match push::push(&world.project, "m1", true) {
+            Err(PushError::MutantsOwed { owed, .. }) => assert!(
+                owed.contains("1 survivor(s) have no outcome") || owed.contains("names the test"),
+                "{name:?}: {owed}"
+            ),
+            other => panic!("{name:?} was taken for a test: {other:?}"),
+        }
+    }
+    assert!(world.on_forge("mission/x").is_none());
+    killed_by("one_is_two");
+    push::push(&world.project, "m1", true).unwrap();
+    assert_eq!(world.on_forge("mission/x").as_deref(), Some(head.as_str()));
+}
+
+/// A prototype owes no campaign, so push asks nothing of the tests one
+/// names: gate 7 does not either.
+#[test]
+fn a_prototype_is_pushed_whatever_test_its_triage_names() {
+    let (world, dir, head) = verified_with(nunki::mission::Rigor::Prototype, &["s1"]);
+    nunki::mutants::write_triage(
+        &dir,
+        &[(
+            "s1".to_string(),
+            nunki::mutants::Triage::Killed {
+                test: "a_test_nobody_wrote".into(),
+            },
+        )]
+        .into_iter()
+        .collect(),
+    )
+    .unwrap();
+    push::push(&world.project, "m1", true).unwrap();
+    assert_eq!(world.on_forge("mission/x").as_deref(), Some(head.as_str()));
 }

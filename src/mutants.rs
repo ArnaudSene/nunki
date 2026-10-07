@@ -80,6 +80,14 @@ pub struct Survivor {
     pub id: String,
     pub file: String,
     pub line: u32,
+    /// The last line of the code the mutation replaces, from the tool's own
+    /// listing: a function body replaced whole spans every line of it.
+    /// Absent for a tool that gives no span, which is then the single
+    /// [`Self::line`]; a value before `line` — what a stack's script prints
+    /// when the tool's listing did not name the mutant once — is a span
+    /// nobody knows ([`Survivor::span`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_line: Option<u32>,
     /// What the mutation did, in the tool's words.
     #[serde(default)]
     pub description: String,
@@ -91,6 +99,19 @@ pub struct Survivor {
     /// the HQ has already said no, and the survivor is open again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refused: Option<Refusal>,
+}
+
+impl Survivor {
+    /// The first and last line of the code the mutation replaces: the one
+    /// line when the tool gives no span, and `None` when the span is not
+    /// known — an end before the start, which no ruling may be tied to.
+    pub fn span(&self) -> Option<(u32, u32)> {
+        match self.end_line {
+            None => Some((self.line, self.line)),
+            Some(end) if end >= self.line => Some((self.line, end)),
+            Some(_) => None,
+        }
+    }
 }
 
 /// The HQ said no to an equivalence the coder proposed, and why.
@@ -137,6 +158,73 @@ pub enum Triage {
     /// in [`FILE`] as `equivalent` — only [`ratify`], the HQ's verb, turns it
     /// into one. A blank `why` is no outcome at all ([`answer`]).
     EquivalentProposed { why: String },
+    /// An equivalence `nunki` proposes, because it matched the survivor to a
+    /// ruling the HQ gave elsewhere — on another mission, through the
+    /// project's registry ([`crate::equivalences`]), or on another survivor
+    /// of this mission, by file and description alone ([`carry`]). **Never a
+    /// ruling** (HQ review 2): which mutant a ruling was about is a heuristic
+    /// across campaigns, and three rounds of review each found a narrower way
+    /// for one to land on a mutant the HQ never ruled on. So a match only
+    /// proposes, exactly as the coder does: gate 7 counts it as a proposal,
+    /// the mission goes on, and `nunki push` refuses until the HQ ratifies
+    /// or refuses it. A wrong match costs one refusal, never a wrong ruling.
+    ///
+    /// Written in [`FILE`] by `nunki` alone, and never the coder's to give.
+    ProposedByNunki {
+        /// The HQ's own sentence, from the ruling matched.
+        why: String,
+        /// Where the ruling it matched was given.
+        from: ProposedFrom,
+    },
+    /// What an older `nunki` wrote for a ruling it applied from the registry.
+    /// Only ever read, and read as what it is now: a proposal from the
+    /// registry ([`read`] turns it into [`Triage::ProposedByNunki`]).
+    EquivalentRegistered {
+        why: String,
+        mission: String,
+        commit: String,
+    },
+}
+
+/// Where the ruling behind a [`Triage::ProposedByNunki`] was given.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum ProposedFrom {
+    /// The project's registry of equivalences: a ruling given on another
+    /// mission, on code that reads the same.
+    Registry {
+        mission: String,
+        commit: String,
+        /// When it was given; empty for an entry an older file carried.
+        #[serde(default)]
+        date: String,
+    },
+    /// A ruling given on this mission, on a survivor of the previous
+    /// campaign with the same file and description but another id — the
+    /// looser tier of [`carry`].
+    Carried {
+        /// The commit of the campaign the ruling was given on.
+        commit: String,
+    },
+}
+
+impl ProposedFrom {
+    /// How a listing names this source.
+    pub fn said(&self) -> String {
+        match self {
+            ProposedFrom::Registry {
+                mission, commit, ..
+            } => format!(
+                "from the registry: ruled on mission {} at {}",
+                crate::text::one_line(mission),
+                crate::text::one_line(commit.get(..12).unwrap_or(commit))
+            ),
+            ProposedFrom::Carried { commit } => format!(
+                "carried by file and mutation: ruled at {} on a survivor of another id",
+                crate::text::one_line(commit.get(..12).unwrap_or(commit))
+            ),
+        }
+    }
 }
 
 impl Triage {
@@ -146,7 +234,9 @@ impl Triage {
     pub fn is_the_coders_to_give(&self) -> bool {
         match self {
             Triage::Killed { .. } | Triage::Bug { .. } | Triage::EquivalentProposed { .. } => true,
-            Triage::Equivalent { .. } => false,
+            Triage::Equivalent { .. }
+            | Triage::ProposedByNunki { .. }
+            | Triage::EquivalentRegistered { .. } => false,
         }
     }
 
@@ -157,6 +247,25 @@ impl Triage {
             Triage::Equivalent { .. } => "equivalent",
             Triage::Bug { .. } => "bug",
             Triage::EquivalentProposed { .. } => "equivalent_proposed",
+            Triage::ProposedByNunki { .. } => "proposed_by_nunki",
+            Triage::EquivalentRegistered { .. } => "equivalent_registered",
+        }
+    }
+
+    /// Whether this is the HQ's `equivalent` ruling: what `--refuse` will not
+    /// undo and `--lift` takes back. A proposal — the coder's or `nunki`'s —
+    /// never is.
+    pub fn is_a_ruling(&self) -> bool {
+        matches!(self, Triage::Equivalent { .. })
+    }
+
+    /// Whether this is a proposal awaiting the HQ, and from whom: `None`
+    /// inside for the coder's own.
+    pub fn proposal(&self) -> Option<(&str, Option<&ProposedFrom>)> {
+        match self {
+            Triage::EquivalentProposed { why } => Some((why, None)),
+            Triage::ProposedByNunki { why, from } => Some((why, Some(from))),
+            _ => None,
         }
     }
 
@@ -164,7 +273,10 @@ impl Triage {
     pub fn test(&self) -> Option<&str> {
         match self {
             Triage::Killed { test } | Triage::Bug { test } => Some(test),
-            Triage::Equivalent { .. } | Triage::EquivalentProposed { .. } => None,
+            Triage::Equivalent { .. }
+            | Triage::EquivalentProposed { .. }
+            | Triage::ProposedByNunki { .. }
+            | Triage::EquivalentRegistered { .. } => None,
         }
     }
 }
@@ -305,15 +417,133 @@ pub fn read(dir: &Path) -> Result<Option<Campaign>, MutantsError> {
     if text.trim().is_empty() {
         return Ok(None);
     }
-    serde_json::from_str(&text)
-        .map(Some)
-        .map_err(|e| MutantsError::Unreadable(file, e.to_string()))
+    let mut campaign: Campaign =
+        serde_json::from_str(&text).map_err(|e| MutantsError::Unreadable(file, e.to_string()))?;
+    for survivor in &mut campaign.survivors {
+        survivor.outcome = survivor.outcome.take().map(as_now);
+    }
+    Ok(Some(campaign))
+}
+
+/// An outcome an older file holds, as it reads now: a ruling an older
+/// `nunki` applied from the registry is a proposal from the registry (HQ
+/// review 2). Everything else as it is.
+fn as_now(outcome: Triage) -> Triage {
+    match outcome {
+        Triage::EquivalentRegistered {
+            why,
+            mission,
+            commit,
+        } => Triage::ProposedByNunki {
+            why,
+            from: ProposedFrom::Registry {
+                mission,
+                commit,
+                date: String::new(),
+            },
+        },
+        other => other,
+    }
 }
 
 /// The coder's answers, by survivor id. Absent until it writes one, and an
 /// unreadable one is an error rather than an empty triage: a file the coder
 /// wrote and `nunki` cannot parse must be said, not silently ignored.
+///
+/// **Only the outcomes the coder may give are ever read from it** —
+/// `killed`, `bug`, `equivalent_proposed` (HQ review 3, the class rule) —
+/// and [`answer`] is where: every reader of an outcome goes through it, and
+/// it reads nothing else from this map. Anything else found there —
+/// `equivalent`, `equivalent_registered`, `proposed_by_nunki` — is no
+/// outcome and never shadows what [`FILE`] holds; an entry that does not
+/// parse, a kind nobody knows among them, is left out here and refuses
+/// nothing but itself. [`foreign`] names them all, for gate 7 and `nunki
+/// push` to say.
 pub fn read_triage(dir: &Path) -> Result<BTreeMap<String, Triage>, MutantsError> {
+    triage_entries(dir).map(|(read, _)| read)
+}
+
+/// An entry of the coder's file that `nunki` does not read: an outcome
+/// that is not the coder's to give, or one it cannot make out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Foreign {
+    pub id: String,
+    /// The kind it claims, as written.
+    pub kind: String,
+    /// Why it is not read: not the coder's to give, or not readable.
+    pub why: String,
+}
+
+/// The entries of the coder's file `nunki` does not read ([`read_triage`]).
+pub fn foreign(dir: &Path) -> Result<Vec<Foreign>, MutantsError> {
+    let (read, unreadable) = triage_entries(dir)?;
+    let mut foreign: Vec<Foreign> = read
+        .into_iter()
+        .filter(|(_, outcome)| !outcome.is_the_coders_to_give())
+        .map(|(id, outcome)| Foreign {
+            id,
+            kind: outcome.kind().to_string(),
+            why: "is not the coder's to give".to_string(),
+        })
+        .collect();
+    foreign.extend(unreadable);
+    Ok(foreign)
+}
+
+/// What gate 7 and `nunki push` say of [`foreign`] entries — nothing when
+/// there are none.
+pub fn foreign_said(foreign: &[Foreign]) -> Option<String> {
+    (!foreign.is_empty()).then(|| {
+        let listed = foreign
+            .iter()
+            .map(|f| {
+                format!(
+                    "{} (`{}`, which {})",
+                    crate::text::one_line(&f.id),
+                    crate::text::one_line(&f.kind),
+                    crate::text::one_line(&f.why)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "{TRIAGE_FILE} answers {listed}, so each is refused and read as no outcome: \
+             rulings and `nunki`'s own proposals live in {FILE}, and the coder proposes \
+             with `equivalent_proposed` and its reason"
+        )
+    })
+}
+
+/// The coder's file, split into the entries that parse as an outcome and
+/// those that do not. A file that is not a JSON object of entries is an
+/// error — said, never read as empty; an entry within it that does not
+/// parse is only foreign.
+fn triage_entries(dir: &Path) -> Result<(BTreeMap<String, Triage>, Vec<Foreign>), MutantsError> {
+    let mut read = BTreeMap::new();
+    let mut foreign = Vec::new();
+    for (id, value) in triage_raw(dir)? {
+        match serde_json::from_value::<Triage>(value.clone()) {
+            Ok(outcome) => {
+                read.insert(id, outcome);
+            }
+            Err(e) => foreign.push(Foreign {
+                id,
+                kind: value
+                    .get("kind")
+                    .and_then(|k| k.as_str())
+                    .map_or_else(|| "unreadable".to_string(), str::to_string),
+                why: format!("cannot be read: {e}"),
+            }),
+        }
+    }
+    Ok((read, foreign))
+}
+
+/// The coder's file as the coder wrote it, entry by entry: empty when it is
+/// absent or blank, an error naming it when it cannot be read or is not a
+/// JSON object of entries — never read as empty. The one reader of the
+/// file, for [`triage_entries`] and [`remove_triage_entry`] alike.
+fn triage_raw(dir: &Path) -> Result<BTreeMap<String, serde_json::Value>, MutantsError> {
     let file = dir.join(TRIAGE_FILE);
     let text = match std::fs::read_to_string(&file) {
         Ok(t) => t,
@@ -324,6 +554,18 @@ pub fn read_triage(dir: &Path) -> Result<BTreeMap<String, Triage>, MutantsError>
         return Ok(BTreeMap::new());
     }
     serde_json::from_str(&text).map_err(|e| MutantsError::Unreadable(file, e.to_string()))
+}
+
+/// Take survivor `id`'s entry out of the coder's file, leaving every other
+/// entry as the coder wrote it — those `nunki` does not read included.
+fn remove_triage_entry(dir: &Path, id: &str) -> Result<(), MutantsError> {
+    let mut entries = triage_raw(dir)?;
+    if entries.remove(id).is_none() {
+        return Ok(());
+    }
+    let file = dir.join(TRIAGE_FILE);
+    let body = serde_json::to_string_pretty(&entries).expect("a triage serialises");
+    std::fs::write(&file, format!("{body}\n")).map_err(|e| MutantsError::Io(file, e))
 }
 
 /// The ids of the survivors still waiting for an outcome: in the mission's
@@ -349,15 +591,20 @@ pub fn open(dir: &Path) -> Result<Vec<String>, MutantsError> {
 
 /// The outcome a survivor holds, from the two files together.
 ///
-/// The coder's two outcomes that rest on a test come first, then the HQ's
-/// own ruling, then the coder's proposal — so a ratified proposal answers as
-/// the HQ's `equivalent`, whatever the coder's file still says. A proposal is
+/// The coder's two outcomes that rest on a test come first, then what the
+/// HQ's file holds — its own ruling, or `nunki`'s proposal — then the coder's
+/// proposal — so a ratified proposal answers as the HQ's `equivalent`,
+/// whatever the coder's file still says. A proposal is
 /// an outcome only when it says why ([`crate::text::blank`] says it does
-/// not) and the HQ has not refused it on this survivor. Anything else the
-/// coder wrote — an `equivalent` of its own — is returned as it is, for
-/// gate 7 to refuse by name.
+/// not) and the HQ has not refused it on this survivor. Anything else in the
+/// coder's map — an `equivalent` of its own, `nunki`'s proposal — is no
+/// outcome, and the HQ's file answers ([`read_triage`]).
 pub fn answer(survivor: &Survivor, coders: &BTreeMap<String, Triage>) -> Option<Triage> {
-    match coders.get(&survivor.id) {
+    // Only what the coder may give, whoever built the map: anything else
+    // would shadow the HQ's file (HQ review 3).
+    match coders.get(&survivor.id).filter(|outcome| {
+        outcome.is_the_coders_to_give() && outcome.test().is_none_or(is_test_name)
+    }) {
         Some(Triage::EquivalentProposed { why }) => survivor.outcome.clone().or_else(|| {
             (!crate::text::blank(why) && survivor.refused.is_none())
                 .then(|| Triage::EquivalentProposed { why: why.clone() })
@@ -365,6 +612,17 @@ pub fn answer(survivor: &Survivor, coders: &BTreeMap<String, Triage>) -> Option<
         Some(other) => Some(other.clone()),
         None => survivor.outcome.clone(),
     }
+}
+
+/// Whether `name` can be what an outcome names as its test: an identifier
+/// — letters, digits and underscores — of three characters at least (HQ
+/// review 4). A blank name, or one of a letter or two, is matched by
+/// nearly any line of a tree, and would answer a survivor with nothing; a
+/// name with spaces or punctuation is not one a test is called by. Gate 7
+/// and `nunki push` then look for it as a whole word
+/// ([`crate::gate::named_test_missing`]).
+pub fn is_test_name(name: &str) -> bool {
+    name.chars().count() >= 3 && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Why a survivor the coder answered still has no outcome, when that is the
@@ -376,6 +634,13 @@ pub fn not_an_outcome(survivor: &Survivor, coders: &BTreeMap<String, Triage>) ->
         return None;
     }
     match coders.get(&survivor.id) {
+        Some(outcome @ (Triage::Killed { test } | Triage::Bug { test })) if !is_test_name(test) => {
+            Some(format!(
+                "its `{}` names {test:?}, which is not a test name: letters, digits and \
+                 underscores, three at least",
+                outcome.kind()
+            ))
+        }
         Some(Triage::EquivalentProposed { why }) if crate::text::blank(why) => {
             Some("its proposal gives no reason, and a proposal is one sentence".to_string())
         }
@@ -389,15 +654,53 @@ pub fn not_an_outcome(survivor: &Survivor, coders: &BTreeMap<String, Triage>) ->
     }
 }
 
-/// An equivalence the coder proposed and the HQ has neither ratified nor
-/// refused.
+/// An equivalence proposed — by the coder, or by `nunki` from a ruling it
+/// matched — that the HQ has neither ratified nor refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Proposal {
     pub id: String,
     pub file: String,
     pub line: u32,
-    /// The coder's sentence.
+    /// The proposal's sentence: the coder's, or the HQ's own from the ruling
+    /// matched.
     pub why: String,
+    /// Where it comes from: `None` for the coder.
+    pub from: Option<ProposedFrom>,
+}
+
+impl Proposal {
+    /// Who proposed it, as `mission status`, `mission wait`, `nunki push`
+    /// and the follow-up name it.
+    pub fn source(&self) -> String {
+        match &self.from {
+            None => "the coder's".to_string(),
+            Some(from) => format!("nunki's, {}", from.said()),
+        }
+    }
+}
+
+/// How many of `proposals` come from each source, as one phrase: "2 from
+/// the coder, 1 from the registry".
+pub fn by_source(proposals: &[Proposal]) -> String {
+    let count = |which: fn(&Option<ProposedFrom>) -> bool| {
+        proposals.iter().filter(|p| which(&p.from)).count()
+    };
+    [
+        (count(|f| f.is_none()), "from the coder"),
+        (
+            count(|f| matches!(f, Some(ProposedFrom::Registry { .. }))),
+            "from the registry",
+        ),
+        (
+            count(|f| matches!(f, Some(ProposedFrom::Carried { .. }))),
+            "carried by file and mutation",
+        ),
+    ]
+    .into_iter()
+    .filter(|(n, _)| *n > 0)
+    .map(|(n, what)| format!("{n} {what}"))
+    .collect::<Vec<_>>()
+    .join(", ")
 }
 
 /// Whether `killed` of `tried` reaches `threshold` percent, compared in
@@ -479,13 +782,15 @@ pub fn owed_on_file(
     Ok(owed(&campaign, &read_triage(dir)?, rigor, threshold))
 }
 
-/// How `mission status` and `mission wait` say that `count` proposals await
-/// the HQ — nothing when none does.
-pub fn proposals_await(count: usize) -> Option<String> {
-    (count > 0).then(|| {
+/// How `mission status` and `mission wait` say that `proposals` await the
+/// HQ, by source — nothing when none does.
+pub fn proposals_await(proposals: &[Proposal]) -> Option<String> {
+    (!proposals.is_empty()).then(|| {
         format!(
-            "{count} equivalence proposal(s) await the HQ's ruling, and `nunki push` \
-             refuses until each is ratified or refused"
+            "{} equivalence proposal(s) await the HQ's ruling ({}), and `nunki push` \
+             refuses until each is ratified or refused",
+            proposals.len(),
+            by_source(proposals)
         )
     })
 }
@@ -502,14 +807,16 @@ pub fn awaiting_ruling(dir: &Path) -> Result<Vec<Proposal>, MutantsError> {
     Ok(campaign
         .survivors
         .iter()
-        .filter_map(|s| match answer(s, &coders) {
-            Some(Triage::EquivalentProposed { why }) => Some(Proposal {
+        .filter_map(|s| {
+            let answered = answer(s, &coders)?;
+            let (why, from) = answered.proposal()?;
+            Some(Proposal {
                 id: s.id.clone(),
                 file: s.file.clone(),
                 line: s.line,
-                why,
-            }),
-            _ => None,
+                why: why.to_string(),
+                from: from.cloned(),
+            })
         })
         .collect())
 }
@@ -736,17 +1043,99 @@ pub fn parse(text: &str) -> Vec<Survivor> {
 /// with the file it lived in, sending the mission back to the HQ to be told
 /// the same thing again.
 ///
-/// Returns how many survivors the new campaign holds.
+/// Returns how many survivors the new campaign holds. The project's
+/// registry is not asked: [`record_finished_with_registry`] is what a
+/// campaign read back in its slot records through.
 pub fn record_finished(
     dir: &Path,
     fingerprint: &str,
     head: &str,
     text: &str,
 ) -> Result<usize, MutantsError> {
+    record(dir, fingerprint, head, text, |_| true, |_| {})
+}
+
+/// What [`record_finished_with_registry`] did with the project's registry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Recorded {
+    /// How many survivors the new campaign holds.
+    pub survivors: usize,
+    /// How many of them received a proposal from the registry.
+    pub from_registry: usize,
+    /// Why the registry could not be read, when it could not: nothing was
+    /// proposed from it, and `FOLLOWUP_HQ.md` says so.
+    pub registry_unread: Option<String>,
+}
+
+/// [`record_finished`], and then the project's registry of equivalences
+/// ([`crate::equivalences`]) matched against every survivor still without
+/// an outcome — a match **proposes**, never rules (HQ review 2) — reading
+/// each survivor's code at `head` in the repository at `tree`: the slot,
+/// which holds the campaign's commit.
+///
+/// After [`carry`], so that a ruling given on this mission keeps its own
+/// origin. **Fails closed**: a registry that cannot be read applies nothing,
+/// and the reason is appended to the mission's `FOLLOWUP_HQ.md`, the file the
+/// HQ reads, rather than lost in a log. The registry is read under its lock
+/// ([`crate::equivalences::read_locked`]).
+///
+/// With the source at hand, the class rule filters [`carry`]'s proposals
+/// too: its looser tier — the same file and description under another id —
+/// proposes nothing unless the code its mutation replaces occurs once in the
+/// file ([`crate::equivalences::identify`]). A refusal is carried whatever
+/// that says.
+pub fn record_finished_with_registry(
+    dir: &Path,
+    hq_root: &Path,
+    tree: &Path,
+    fingerprint: &str,
+    head: &str,
+    text: &str,
+) -> Result<Recorded, MutantsError> {
+    let registry = crate::equivalences::read_locked(hq_root);
+    let identified = |s: &Survivor| crate::equivalences::identify(tree, head, s).ok();
+    let mut from_registry = 0;
+    let survivors = record(
+        dir,
+        fingerprint,
+        head,
+        text,
+        |s| identified(s).is_some(),
+        |survivors| {
+            if let Ok(registry) = &registry {
+                from_registry = crate::equivalences::apply(registry, survivors, identified);
+            }
+        },
+    )?;
+    let registry_unread = match registry {
+        Ok(_) => None,
+        Err(why) => {
+            crate::followup::registry_unread(&dir.join(crate::mission::dir::FOLLOWUP_FILE), &why)?;
+            Some(why)
+        }
+    };
+    Ok(Recorded {
+        survivors,
+        from_registry,
+        registry_unread,
+    })
+}
+
+/// Parse, carry ([`carry`] with `identified`), let `then` add
+/// what it has, write.
+fn record(
+    dir: &Path,
+    fingerprint: &str,
+    head: &str,
+    text: &str,
+    identified: impl Fn(&Survivor) -> bool,
+    then: impl FnOnce(&mut [Survivor]),
+) -> Result<usize, MutantsError> {
     let mut survivors = parse(text);
     if let Some(previous) = read(dir)? {
-        carry(&previous, &mut survivors);
+        carry(&previous, &mut survivors, identified);
     }
+    then(&mut survivors);
     let count = survivors.len();
     write(
         dir,
@@ -761,40 +1150,52 @@ pub fn record_finished(
     Ok(count)
 }
 
-/// Give each new survivor the `equivalent` ruling its twin held in the
-/// previous campaign, when the twin can be told apart without a doubt — and
-/// likewise the HQ's refusal of a proposal on it.
+/// Give each new survivor what the HQ said on its twin in the previous
+/// campaign: its ruling, as a **proposal**; or its refusal.
+///
+/// **Carry never rules** (HQ review 4). Which mutant a ruling was about is
+/// a heuristic across campaigns on both tiers — an id is a position, and
+/// other code, even identical code, can land on it. So between campaigns a
+/// ruling is only ever carried as a [`Triage::ProposedByNunki`] proposal
+/// marked as carried, with its sentence and the commit it was given on, for
+/// the HQ to ratify (`--ratify --all` takes them all). The only
+/// equivalences in a campaign's [`FILE`] are the ones the HQ typed on that
+/// campaign.
 ///
 /// **The line is never part of the match**: it is exactly what a commit
 /// above the mutant moves. The mutation itself — its file and what it
-/// changed, the `description` — is what the ruling was about. Two tiers:
+/// changed, the `description` — is what the ruling was about. Two tiers,
+/// each over **every** survivor of the previous campaign, whatever it held:
 ///
-/// - the same id, file and description: the same mutant;
-/// - otherwise the same file and description, when that pair names exactly
-///   one ruled survivor before and exactly one survivor now. The same
-///   `x = False -> x = None` twice in one file is two mutants the ruling may
-///   not speak for alike, and it is ruled again rather than guessed.
+/// - **the same id, file and description**: the same mutant, by the tool's
+///   own name for it. Tried first, and when it finds one, it decides: the
+///   twin's ruling is proposed, a proposal this tier made on it is carried
+///   as that proposal, its refusal as a refusal — or nothing, for a twin
+///   that held none of them. A proposal from the registry is not carried:
+///   the registry is asked again;
+/// - otherwise **the same file and description**, when that pair names
+///   exactly one survivor of the whole previous campaign and exactly one
+///   now, and `identified` says the survivor is told apart by its source —
+///   the code its mutation replaces occurs once in its file: the same.
 ///
-/// A refusal is carried on the same two tiers, among the refused survivors:
-/// without it, the same proposal written again on the same mutation after a
-/// new campaign would count as an outcome again, though the HQ has said no
-/// to it — and the prompt and the follow-up both tell the coder it does not
-/// (HQ review of the pull request, item 1). A proposal is never carried.
+/// **A refusal is always carried** (HQ review 2, C): when no survivor of
+/// the same id stood before, a refusal the HQ gave on any survivor of the
+/// same file and description reaches the new one, whatever the uniqueness
+/// of either. Carrying one too many reopens a survivor the coder must then
+/// kill, freeze or have ruled; carrying one too few lets a proposal the HQ
+/// said no to count as an outcome again. A refused survivor is given no
+/// proposal.
 ///
-/// A changed description — including a status that moved from `survived` to
-/// `no tests` — is a different mutant, and nothing is carried. No id is
-/// parsed: which tool named it is the stack's business, not `nunki`'s.
-pub fn carry(previous: &Campaign, survivors: &mut [Survivor]) {
-    let ruled: Vec<&Survivor> = previous
-        .survivors
-        .iter()
-        .filter(|s| matches!(s.outcome, Some(Triage::Equivalent { .. })))
-        .collect();
-    let refused: Vec<&Survivor> = previous
-        .survivors
-        .iter()
-        .filter(|s| s.refused.is_some())
-        .collect();
+/// The coder's own proposals are not carried here: they live in its own
+/// file, by id. A changed description — including a status that moved from
+/// `survived` to `no tests` — is a different mutant, and nothing is carried.
+/// No id is parsed: which tool named it is the stack's business, not
+/// `nunki`'s.
+pub fn carry(
+    previous: &Campaign,
+    survivors: &mut [Survivor],
+    identified: impl Fn(&Survivor) -> bool,
+) {
     let from = |old: &Survivor| match &old.outcome {
         Some(Triage::Equivalent {
             carried_from: Some(first),
@@ -802,50 +1203,67 @@ pub fn carry(previous: &Campaign, survivors: &mut [Survivor]) {
         }) => first.clone(),
         _ => previous.head.clone(),
     };
+    // What a twin's outcome becomes in the new campaign: a ruling, a
+    // proposal of it; a proposal this function made, itself.
+    let proposed = |old: &Survivor| match &old.outcome {
+        Some(Triage::Equivalent { why, .. }) => Some(Triage::ProposedByNunki {
+            why: why.clone(),
+            from: ProposedFrom::Carried { commit: from(old) },
+        }),
+        Some(made) if carried(made) => Some(made.clone()),
+        _ => None,
+    };
     let mut now: BTreeMap<(String, String), usize> = BTreeMap::new();
     for s in survivors.iter() {
         *now.entry(pair(s)).or_default() += 1;
     }
     for survivor in survivors.iter_mut() {
-        if let Some(old) = twin(&ruled, survivor, &now)
-            && let Some(Triage::Equivalent { why, .. }) = &old.outcome
-        {
-            survivor.outcome = Some(Triage::Equivalent {
-                why: why.clone(),
-                carried_from: Some(from(old)),
-            });
-        } else if let Some(old) = twin(&refused, survivor, &now) {
+        if let Some(old) = previous.survivors.iter().find(|old| {
+            old.id == survivor.id
+                && old.file == survivor.file
+                && old.description == survivor.description
+        }) {
+            survivor.outcome = proposed(old);
             survivor.refused = old.refused.clone();
+            continue;
         }
+        let same: Vec<&Survivor> = previous
+            .survivors
+            .iter()
+            .filter(|old| pair(old) == pair(survivor))
+            .collect();
+        if let Some(refused) = same.iter().find_map(|old| old.refused.clone()) {
+            survivor.refused = Some(refused);
+            continue;
+        }
+        let [old] = same.as_slice() else {
+            continue;
+        };
+        if now.get(&pair(survivor)) != Some(&1) || !identified(survivor) {
+            continue;
+        }
+        survivor.outcome = proposed(old);
     }
+}
+
+/// Whether `outcome` is a proposal [`carry`] made, which it carries again
+/// while the HQ has not ruled on it. One from the registry is not: the
+/// registry is asked again by the next campaign, against the code as it
+/// stands then, and an entry lifted since proposes nothing more.
+fn carried(outcome: &Triage) -> bool {
+    matches!(
+        outcome,
+        Triage::ProposedByNunki {
+            from: ProposedFrom::Carried { .. },
+            ..
+        }
+    )
 }
 
 /// What [`carry`] matches a mutation on when the id has changed: its file
 /// and what it changed, never its line.
 fn pair(s: &Survivor) -> (String, String) {
     (s.file.clone(), s.description.clone())
-}
-
-/// The survivor of `before` that `survivor` is, on [`carry`]'s two tiers:
-/// the same id, file and description; or else the only one of `before` with
-/// its file and description, when that pair also names one survivor `now`.
-fn twin<'a>(
-    before: &[&'a Survivor],
-    survivor: &Survivor,
-    now: &BTreeMap<(String, String), usize>,
-) -> Option<&'a Survivor> {
-    let exact = before.iter().find(|old| {
-        old.id == survivor.id
-            && old.file == survivor.file
-            && old.description == survivor.description
-    });
-    exact.copied().or_else(|| {
-        let same: Vec<&&Survivor> = before
-            .iter()
-            .filter(|old| pair(old) == pair(survivor))
-            .collect();
-        (same.len() == 1 && now.get(&pair(survivor)) == Some(&1)).then(|| *same[0])
-    })
 }
 
 /// Record the HQ's own ruling on a survivor: this mutant changes nothing
@@ -901,36 +1319,45 @@ fn called<'a>(
     Ok(found)
 }
 
-/// The coder's file, and its valid proposal on survivor `id` — or an error
-/// that says why there is none to rule on.
-fn proposal_on(dir: &Path, id: &str) -> Result<(BTreeMap<String, Triage>, String), MutantsError> {
+/// The sentence of the proposal pending on survivor `id` — the coder's, or
+/// `nunki`'s from a ruling it matched — or an error that says why there is
+/// none to rule on.
+fn proposal_on(dir: &Path, id: &str) -> Result<String, MutantsError> {
     let coders = read_triage(dir)?;
-    let why = match coders.get(id) {
-        Some(Triage::EquivalentProposed { why }) if !crate::text::blank(why) => why.clone(),
-        Some(Triage::EquivalentProposed { .. }) => {
-            return Err(MutantsError::NoProposal(format!(
-                "the coder's proposal on {id:?} gives no reason, so it is no proposal — \
+    let pending = read(dir)?
+        .into_iter()
+        .flat_map(|c| c.survivors)
+        .filter(|s| s.id == id)
+        .find_map(|s| {
+            answer(&s, &coders).and_then(|a| a.proposal().map(|(why, _)| why.to_string()))
+        });
+    if let Some(why) = pending {
+        return Ok(why);
+    }
+    match coders.get(id) {
+        // Written again after the HQ refused it: no outcome for gate 7, but
+        // the HQ may still change its mind and rule on it.
+        Some(Triage::EquivalentProposed { why }) if !crate::text::blank(why) => Ok(why.clone()),
+        // What is left of a proposal here is a blank one.
+        Some(Triage::EquivalentProposed { .. }) => Err(MutantsError::NoProposal(format!(
+            "the coder's proposal on {id:?} gives no reason, so it is no proposal — \
                  `--equivalent {id} --because <why>` rules on the survivor yourself"
-            )));
-        }
-        _ => {
-            return Err(MutantsError::NoProposal(format!(
-                "{TRIAGE_FILE} proposes no equivalence on {id:?}"
-            )));
-        }
-    };
-    Ok((coders, why))
+        ))),
+        _ => Err(MutantsError::NoProposal(format!(
+            "{TRIAGE_FILE} proposes no equivalence on {id:?}, and `nunki` proposes none"
+        ))),
+    }
 }
 
-/// The HQ ratifies the coder's proposal on survivor `id`: exactly the
-/// `equivalent` [`rule_equivalent`] writes, with the coder's sentence as its
-/// reason unless `because` replaces it. The proposal is taken out of the
-/// coder's file, since it is now a ruling — and from here on it is the
-/// ruling, never the proposal, that [`carry`] takes to the next campaign.
+/// The HQ ratifies the proposal pending on survivor `id` — the coder's, or
+/// `nunki`'s: exactly the `equivalent` [`rule_equivalent`] writes, with the
+/// proposal's sentence as its reason unless `because` replaces it. The proposal is taken out of the
+/// coder's file, since it is now a ruling — and [`carry`] proposes it again
+/// to the next campaign, for the HQ to ratify there.
 ///
 /// Returns the reason the ruling was written with.
 pub fn ratify(dir: &Path, id: &str, because: Option<&str>) -> Result<String, MutantsError> {
-    let (mut coders, proposed) = proposal_on(dir, id)?;
+    let proposed = proposal_on(dir, id)?;
     let why = match because {
         Some(because) if crate::text::blank(because) => {
             return Err(MutantsError::NoProposal(
@@ -942,15 +1369,15 @@ pub fn ratify(dir: &Path, id: &str, because: Option<&str>) -> Result<String, Mut
         None => proposed,
     };
     rule_equivalent(dir, id, &why)?;
-    coders.remove(id);
-    write_triage(dir, &coders)?;
+    remove_triage_entry(dir, id)?;
     Ok(why)
 }
 
-/// The HQ refuses the coder's proposal on survivor `id`, because of
-/// `because`: the proposal is taken out of the coder's file, the refusal is
-/// recorded on the survivor in [`FILE`], and the survivor is open again — a
-/// proposal written again on it is no outcome ([`answer`]).
+/// The HQ refuses the proposal pending on survivor `id` — the coder's, or
+/// `nunki`'s — because of `because`: the proposal is taken out of whichever
+/// file held it, the refusal is recorded on the survivor in [`FILE`], and the
+/// survivor is open again — a proposal written again on it is no outcome
+/// ([`answer`]), and [`carry`] takes the refusal to every later campaign.
 ///
 /// Returns the refusal, for the follow-up the next coder run reads.
 pub fn refuse(dir: &Path, id: &str, because: &str) -> Result<Refusal, MutantsError> {
@@ -961,17 +1388,12 @@ pub fn refuse(dir: &Path, id: &str, because: &str) -> Result<Refusal, MutantsErr
                 .to_string(),
         ));
     }
-    let (mut coders, proposed) = proposal_on(dir, id)?;
     let mut campaign = read(dir)?.ok_or_else(|| {
         MutantsError::Unreadable(
             dir.join(FILE),
             "there is no campaign to rule on — `nunki mission mutants` runs one".to_string(),
         )
     })?;
-    let refusal = Refusal {
-        proposed,
-        because: because.to_string(),
-    };
     let found = called(&mut campaign, dir, id)?;
     // The HQ already ruled on it: its ruling answers the survivor whatever
     // the coder's file says, so a refusal would change nothing and send a
@@ -979,19 +1401,26 @@ pub fn refuse(dir: &Path, id: &str, because: &str) -> Result<Refusal, MutantsErr
     // back is `--lift`'s (HQ review of the pull request, item 5).
     if found
         .iter()
-        .any(|s| matches!(s.outcome, Some(Triage::Equivalent { .. })))
+        .any(|s| s.outcome.as_ref().is_some_and(Triage::is_a_ruling))
     {
         return Err(MutantsError::NoProposal(format!(
             "{id:?} holds the HQ's own `equivalent` ruling, and a refusal cannot undo a \
              ruling — `nunki mission mutants <id> --lift {id}` takes it back first"
         )));
     }
+    let proposed = proposal_on(dir, id)?;
+    let refusal = Refusal {
+        proposed,
+        because: because.to_string(),
+    };
     for found in found {
         found.refused = Some(refusal.clone());
+        if matches!(found.outcome, Some(Triage::ProposedByNunki { .. })) {
+            found.outcome = None;
+        }
     }
     write(dir, &campaign)?;
-    coders.remove(id);
-    write_triage(dir, &coders)?;
+    remove_triage_entry(dir, id)?;
     Ok(refusal)
 }
 
@@ -1015,8 +1444,12 @@ pub fn refuse_and_say(
 /// The way back from a ruling that was wrong, or that a changed neighbour
 /// made wrong. Rulings are carried from one campaign to the next
 /// ([`carry`]), so without this a mistaken one would outlive every replay.
-/// Only an `equivalent` is lifted: the coder's two outcomes live in its own
-/// file, and this one never held them.
+/// Only an `equivalent` is lifted — and with it a proposal `nunki` made from
+/// a ruling it matched, whose ruling is what is being taken back: the
+/// coder's outcomes live in its own file, and this one never held them.
+/// Taking it out of the registry too is the caller's
+/// ([`crate::equivalences::remove`]), from the campaign as it stood before
+/// the lift.
 pub fn lift_equivalent(dir: &Path, id: &str) -> Result<(), MutantsError> {
     let mut campaign = read(dir)?.ok_or_else(|| {
         MutantsError::Unreadable(
@@ -1025,21 +1458,27 @@ pub fn lift_equivalent(dir: &Path, id: &str) -> Result<(), MutantsError> {
         )
     })?;
     let found = called(&mut campaign, dir, id)?;
-    if !found
-        .iter()
-        .any(|s| matches!(s.outcome, Some(Triage::Equivalent { .. })))
-    {
+    if !found.iter().any(|s| liftable(s.outcome.as_ref())) {
         return Err(MutantsError::Unreadable(
             dir.join(FILE),
             format!("{id:?} holds no `equivalent` ruling to lift"),
         ));
     }
     for survivor in found {
-        if matches!(survivor.outcome, Some(Triage::Equivalent { .. })) {
+        if liftable(survivor.outcome.as_ref()) {
             survivor.outcome = None;
         }
     }
     write(dir, &campaign)
+}
+
+/// What `--lift` takes off a survivor: the HQ's ruling, or `nunki`'s
+/// proposal of one.
+pub fn liftable(outcome: Option<&Triage>) -> bool {
+    matches!(
+        outcome,
+        Some(Triage::Equivalent { .. } | Triage::ProposedByNunki { .. })
+    )
 }
 
 /// Whether a campaign already on file is enough.
@@ -1234,7 +1673,15 @@ pub fn read_back(
             let progress = match settle_unmeasured(&running.log, &text)? {
                 Some(why) => Progress::CouldNotRun(why),
                 None => Progress::Finished {
-                    survivors: record_finished(dir, &running.fingerprint, &running.head, &text)?,
+                    survivors: record_finished_with_registry(
+                        dir,
+                        &project.hq_root,
+                        &slot.tree,
+                        &running.fingerprint,
+                        &running.head,
+                        &text,
+                    )?
+                    .survivors,
                 },
             };
             forget_running(&project.hq_root, &slot.name)?;
