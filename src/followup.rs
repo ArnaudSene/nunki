@@ -426,12 +426,13 @@ fn last_proposals(text: &str) -> Option<&str> {
 /// measured when, and what passed.
 ///
 /// Nothing is written for a single campaign, whose counts gate 7's note
-/// already gives, nor when the last such section said the same.
+/// already gives — a chain is two campaigns at least, and the judged line
+/// after them — nor when the last such section said the same.
 pub fn campaigns(file: &Path, chain: &[String]) -> Result<(), FollowupError> {
-    if chain.len() < 2 {
+    if chain.len() < 3 {
         return Ok(());
     }
-    let (judged, campaigns) = chain.split_last().expect("two lines at least");
+    let (judged, campaigns) = chain.split_last().expect("three lines at least");
     let listed = campaigns
         .iter()
         .enumerate()

@@ -2679,16 +2679,15 @@ exit 2
     assert_eq!(nunki::mutants::found(&said), Some(5), "{said}\n{why}");
 }
 
-/// Rust: each file's counts too, from the same outcome files and listing —
-/// a line of an outcome file names its file before the first colon, and
-/// each entry of `mutants.json` has a `file` (measured on cargo-mutants
-/// 27.1.0) — adding up to the totals, so `nunki` can rebuild a later
-/// partial campaign from them (SPEC 4.4, the chain of campaigns). A
-/// listing that cannot be read gives `tried` per file and no `found`.
+/// Rust: each file's counts too, keyed by the file `mutants.json` gives
+/// each mutant — an outcome line is the mutant's `name` there (measured on
+/// cargo-mutants 27.1.0) — adding up to the totals, so `nunki` can rebuild
+/// a later partial campaign from them (SPEC 4.4, the chain of campaigns).
+/// An outcome the listing does not name, or no listing, gives none.
 #[cfg(unix)]
 #[test]
 fn the_rust_campaign_counts_each_file() {
-    let cargo = |listing: &str| {
+    let cargo = |listing: &str, extra_missed: &str| {
         format!(
             "#!/bin/sh
 out=\"\"
@@ -2699,7 +2698,7 @@ done
 o=\"$out/mutants.out\"
 mkdir -p \"$o\"
 printf 'src/lib.rs:2:5: replace keep -> bool with true\\nsrc/b.rs:2:7: replace * with + in b\\nsrc/lib.rs:2:7: replace > with < in keep\\n' > \"$o/caught.txt\"
-printf 'src/b.rs:2:7: replace * with / in b\\n' > \"$o/missed.txt\"
+printf 'src/b.rs:2:7: replace * with / in b\\nsrc/co:lon.rs:1:1: replace c -> u8 with 0\\n{extra_missed}' > \"$o/missed.txt\"
 printf 'src/lib.rs:9:1: replace spin with ()\\n' > \"$o/timeout.txt\"
 printf 'src/b.rs:5:5: replace make -> Opaque with Default::default()\\n' > \"$o/unviable.txt\"
 printf '%s' '{listing}' > \"$o/mutants.json\"
@@ -2707,21 +2706,57 @@ exit 2
 "
         )
     };
-    let listing = r#"[{"file":"src/lib.rs"},{"file":"src/lib.rs"},{"file":"src/lib.rs"},{"file":"src/lib.rs"},{"file":"src/b.rs"},{"file":"src/b.rs"},{"file":"src/b.rs"}]"#;
-    let (said, why) = campaign_of("rust", "src/lib.rs", &[("cargo", &cargo(listing))]);
+    let entry = |name: &str, file: &str| format!(r#"{{"name":"{name}","file":"{file}"}}"#);
+    let listing = format!(
+        "[{}]",
+        [
+            entry(
+                "src/lib.rs:2:5: replace keep -> bool with true",
+                "src/lib.rs"
+            ),
+            entry("src/lib.rs:2:7: replace > with < in keep", "src/lib.rs"),
+            entry("src/lib.rs:9:1: replace spin with ()", "src/lib.rs"),
+            entry("src/lib.rs:4:1: replace never tried", "src/lib.rs"),
+            entry("src/b.rs:2:7: replace * with + in b", "src/b.rs"),
+            entry("src/b.rs:2:7: replace * with / in b", "src/b.rs"),
+            entry(
+                "src/b.rs:5:5: replace make -> Opaque with Default::default()",
+                "src/b.rs"
+            ),
+            entry("src/co:lon.rs:1:1: replace c -> u8 with 0", "src/co:lon.rs"),
+        ]
+        .join(",")
+    );
+    let (said, why) = campaign_of("rust", "src/lib.rs", &[("cargo", &cargo(&listing, ""))]);
     let files = nunki::mutants::by_file(&said, "h").unwrap_or_else(|| panic!("{said}\n{why}"));
     let count = |f: &str| (files[f].tried, files[f].found);
     assert_eq!(count("src/lib.rs"), (3, Some(4)), "{said}");
     assert_eq!(count("src/b.rs"), (2, Some(2)), "{said}");
-    assert_eq!(files.len(), 2);
-    assert_eq!(nunki::mutants::tried(&said), Some(5));
+    // A colon in the path: keyed by the listing's file, both counts alike,
+    // never by the text before the first colon (HQ review of 00f8e51).
+    assert_eq!(count("src/co:lon.rs"), (1, Some(1)), "{said}");
+    assert_eq!(files.len(), 3, "{said}");
+    assert_eq!(nunki::mutants::tried(&said), Some(6));
 
-    // The listing unreadable: no `found` anywhere, the counts still trusted.
-    let (said, why) = campaign_of("rust", "src/lib.rs", &[("cargo", &cargo("not json"))]);
-    let files = nunki::mutants::by_file(&said, "h").unwrap_or_else(|| panic!("{said}\n{why}"));
-    assert_eq!(files["src/lib.rs"].found, None, "{said}");
-    assert_eq!(files["src/lib.rs"].tried, 3, "{said}");
-    assert_eq!(nunki::mutants::found(&said), None);
+    // An outcome the listing does not name: no file to key it by, so no
+    // per-file count at all, and the totals still said.
+    let (said, why) = campaign_of(
+        "rust",
+        "src/lib.rs",
+        &[(
+            "cargo",
+            &cargo(&listing, "src/lib.rs:7:7: replace unlisted\\n"),
+        )],
+    );
+    assert!(nunki::mutants::completed(&said), "{said}\n{why}");
+    assert_eq!(nunki::mutants::tried(&said), Some(7));
+    assert!(!said.contains("measured"), "{said}");
+    assert_eq!(nunki::mutants::by_file(&said, "h"), None, "{said}");
+
+    // The listing unreadable: no file for any mutant, so no per-file count.
+    let (said, why) = campaign_of("rust", "src/lib.rs", &[("cargo", &cargo("not json", ""))]);
+    assert!(nunki::mutants::completed(&said), "{said}\n{why}");
+    assert_eq!(nunki::mutants::by_file(&said, "h"), None, "{said}");
 
     // Nothing this branch touched is mutable: counted, and nothing in it.
     let (said, why) = campaign_of("rust", "README.md", &[("cargo", "#!/bin/sh\nexit 9\n")]);

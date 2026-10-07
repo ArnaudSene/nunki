@@ -1332,37 +1332,50 @@ case "$listed" in
     ;;
 esac
 
-# Each file's counts, from the same outcome files and listing: a line of an
-# outcome file names its file before the first colon, and every entry of
-# `mutants.json` has a `file` (measured on 27.1.0). `found` per file only
-# when the listing could be read, as for the total. Added up, they are the
-# totals above, which is what `nunki` checks before trusting them.
-{
-  for outcome in caught missed timeout; do
-    if [ -f "$out/mutants.out/$outcome.txt" ]; then
-      sed -n 's/^\([^:]*\):.*/T \1/p' "$out/mutants.out/$outcome.txt"
-    fi
-  done
-  if [ -n "$found" ]; then
-    jq -r '.[].file' "$out/mutants.out/mutants.json" 2>/dev/null | sed 's/^/F /'
+# Each file's counts, keyed by the file `mutants.json` gives each mutant —
+# for `tried` as for `found`. A line of an outcome file is the mutant's
+# `name` in that listing (the same lookup as the survivors' spans above),
+# so its file is read from the listing and never cut out of the line: a
+# path with a colon in it would be cut short (HQ review of 00f8e51), and
+# `nunki` trusts a count only under a path it handed this campaign. A line
+# the listing does not name, or no listing at all, and there are no
+# per-file counts: no `by_file`, and the next campaign is full. Added up,
+# they are the totals above, which `nunki` checks too.
+byfile=""
+if [ -n "$found" ]; then
+  if counts=$({
+    jq -r '.[] | "N\t\(.name)\t\(.file)"' "$out/mutants.out/mutants.json"
+    for outcome in caught missed timeout; do
+      if [ -f "$out/mutants.out/$outcome.txt" ]; then
+        sed 's/^/T\t/' "$out/mutants.out/$outcome.txt"
+      fi
+    done
     if [ -f "$out/mutants.out/unviable.txt" ]; then
-      sed -n 's/^\([^:]*\):.*/U \1/p' "$out/mutants.out/unviable.txt"
+      sed 's/^/U\t/' "$out/mutants.out/unviable.txt"
     fi
+  } | awk -F '\t' '
+    $1 == "N" { file[$2] = $3; seen[$3] = 1; n[$3]++; next }
+    $2 == "" { next }
+    !($2 in file) { bad = 1; next }
+    $1 == "T" { t[file[$2]]++ }
+    $1 == "U" { u[file[$2]]++ }
+    END {
+      if (bad) exit 1
+      for (f in seen) {
+        e = f
+        gsub(/\\/, "\\\\", e)
+        gsub(/"/, "\\\"", e)
+        printf "{\"measured\":\"%s\",\"tried\":%d,\"found\":%d}\n", e, t[f], n[f] - u[f]
+      }
+    }'); then
+    # Sorted here, not in the pipe: there the status would be sort's, and
+    # awk's refusal would be lost.
+    if [ -n "$counts" ]; then
+      printf '%s\n' "$counts" | LC_ALL=C sort
+    fi
+    byfile=',"by_file":true'
   fi
-} | awk -v listed="${found:+1}" '
-  { f = substr($0, 3); seen[f] = 1 }
-  $1 == "T" { t[f]++ }
-  $1 == "F" { n[f]++ }
-  $1 == "U" { u[f]++ }
-  END {
-    for (f in seen) {
-      e = f
-      gsub(/\\/, "\\\\", e)
-      gsub(/"/, "\\\"", e)
-      if (listed) printf "{\"measured\":\"%s\",\"tried\":%d,\"found\":%d}\n", e, t[f], n[f] - u[f]
-      else printf "{\"measured\":\"%s\",\"tried\":%d}\n", e, t[f]
-    }
-  }' | LC_ALL=C sort
+fi
 
 # The last thing it prints, and the only line that says the campaign got to
 # the end. Without it `nunki` cannot tell "no survivor" from "no answer": a
@@ -1375,9 +1388,9 @@ esac
 # own, and a shell that has been replaced cannot write `$?`. A truncated log
 # loses its last line, which is this one, so the three failures fail alike.
 if [ -n "$found" ]; then
-  printf '{"campaign":"done","tried":%s,"found":%s,"by_file":true}\n' "$tried" "$found"
+  printf '{"campaign":"done","tried":%s,"found":%s%s}\n' "$tried" "$found" "$byfile"
 else
-  printf '{"campaign":"done","tried":%s,"by_file":true}\n' "$tried"
+  printf '{"campaign":"done","tried":%s}\n' "$tried"
 fi
 "#;
 

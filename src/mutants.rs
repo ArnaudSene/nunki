@@ -364,7 +364,7 @@ pub struct Measured {
 /// changed, removed or renamed is measured again whole, or is gone. Gate 7
 /// judges **once**, on that reconstruction ([`Campaign::files`]): what one
 /// full campaign at `HEAD` would give, under the README's assumption that a
-/// mutant killed in an unchanged file is still killed.
+/// mutant measured in an unchanged file still exists and is still killed.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Chain {
     #[serde(default)]
@@ -387,6 +387,19 @@ pub struct Chain {
     /// full campaign, whose own count is the whole.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ran: Option<u32>,
+    /// The commit the branch forked from when the campaign ran — its
+    /// `NUNKI_BASE`. A later campaign continues this one only from the same
+    /// fork point: a file's counts are the mutants of what the branch
+    /// changed in it since the fork, and a fork point that moved (the base
+    /// merged in, a hunk cherry-picked onto it) moves them, file unchanged
+    /// or not. Absent from a record written before it was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork: Option<String>,
+    /// The paths the campaign was handed, as the repository names them: the
+    /// only keys its per-file counts may have ([`trusted_files`]). Absent
+    /// from a record written before it was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handed: Option<Vec<String>>,
 }
 
 /// Which files a campaign covered.
@@ -881,7 +894,7 @@ pub fn share_reached(killed: u64, tried: u64, threshold: u64) -> bool {
 /// file's latest count, its survivors those of the files unchanged since the
 /// previous campaign and the new campaign's — what one full campaign at
 /// `HEAD` would be judged on. Never each campaign on its own: a volet that
-/// re-mutates well-killed lines would otherwise pad its own share.
+/// measures a well-killed file again would otherwise pad its own share.
 pub fn owed(
     campaign: &Campaign,
     coders: &BTreeMap<String, Triage>,
@@ -1480,7 +1493,7 @@ fn record(
     let mut chain = chain.clone();
     chain.earlier = Vec::new();
     chain.ran = None;
-    let mut files = by_file(text, head);
+    let mut files = trusted_files(text, head, chain.handed.as_deref());
     let mut counted = tried(text);
     if let Some(since) = chain.scope.since() {
         let previous = previous
@@ -1976,27 +1989,34 @@ pub enum Replay {
 ///   judges the whole chain it closes ([`owed`]);
 /// - its `HEAD` is an ancestor of the current one (`is_ancestor`): a history
 ///   rewritten under it leaves no diff to continue from;
+/// - it ran from the same fork point as this one will (`fork`,
+///   [`Chain::fork`]): a moved fork point moves what the branch changed in
+///   every file, unchanged files included;
 /// - it counted each file ([`Campaign::files`]), and those counts add up to
 ///   its total: a partial campaign is rebuilt from them, and a script that
 ///   gives none — the Python and Next.js ones, a project's own — or gave
 ///   ones that do not add up leaves nothing to rebuild from;
-/// - the files that changed since it could be listed (`compare`, which says
-///   why when they could not): what is not compared is measured again;
+/// - its counts can be carried (`carried`, which says why when they cannot,
+///   [`uncarried`]): the files changed since it could be listed, and every
+///   file it counted that did not change is one the branch touches at
+///   `HEAD`, there to be counted;
 /// - it ran with the same `mutation.sh` and tool as this one will: both
 ///   digests known ([`tooling`]) and equal.
 ///
 /// **Fails closed**: a condition that cannot be checked is one that does not
-/// hold. A partial campaign assumes that a mutant killed earlier in a file
-/// nobody changed is still killed, and the README says so; `--again` and
-/// `critical` do not assume it.
+/// hold. A partial campaign assumes that a mutant measured earlier in a file
+/// nobody changed still exists and is still killed, and the README says so;
+/// `--again` and `critical` do not assume it.
+#[allow(clippy::too_many_arguments)]
 pub fn scope(
     rigor: crate::mission::Rigor,
     replay: Replay,
     previous: Option<&Campaign>,
     tooling: Option<&str>,
+    fork: &str,
     owed: impl Fn(&Campaign) -> Option<String>,
     is_ancestor: impl Fn(&str) -> bool,
-    compare: impl Fn(&Campaign) -> Option<String>,
+    carried: impl Fn(&Campaign) -> Option<String>,
 ) -> Scope {
     let full = |why: String| Scope::Full { why };
     if rigor != crate::mission::Rigor::Standard {
@@ -2022,6 +2042,22 @@ pub fn scope(
             "the previous campaign's commit {at} is not an ancestor of HEAD"
         ));
     }
+    match previous.chain.fork.as_deref() {
+        Some(then) if then == fork => {}
+        Some(then) => {
+            return full(format!(
+                "the branch's fork point moved since the previous campaign, at {at}: from {} \
+                 to {}",
+                crate::text::one_line(short(then)),
+                crate::text::one_line(short(fork))
+            ));
+        }
+        None => {
+            return full(format!(
+                "the previous campaign, at {at}, recorded no fork point"
+            ));
+        }
+    }
     let Some(files) = &previous.files else {
         return full(format!(
             "the previous campaign, at {at}, did not count each file — its stack's \
@@ -2034,9 +2070,9 @@ pub fn scope(
             "the previous campaign's per-file counts, at {at}, do not add up to its total"
         ));
     }
-    if let Some(why) = compare(previous) {
+    if let Some(why) = carried(previous) {
         return full(format!(
-            "the files changed since the previous campaign, at {at}, could not be listed: {}",
+            "the previous campaign's counts, at {at}, cannot be carried: {}",
             crate::text::one_line(&why)
         ));
     }
@@ -2135,6 +2171,59 @@ pub fn tooling(
         Some(manifest) => Ok(Some(hash_object(&slot.tree, &manifest)?)),
         None => Ok(None),
     }
+}
+
+/// Why the counts of `previous` cannot be carried into a partial campaign,
+/// or `None` when they can (HQ review of 00f8e51): the files changed since
+/// it must be listable, and every file it counted that did not change —
+/// a count the partial campaign would keep as it is — must be one the
+/// branch `touched` at `HEAD`, present there. A key that names no such file
+/// — a path a script mis-cut, a file gone without a change nunki saw —
+/// would stay in the chain for ever, counted and never measured again.
+pub fn uncarried(tree: &Path, previous: &Campaign, touched: &[String]) -> Option<String> {
+    let changed = match changed_between(tree, &previous.head, "HEAD") {
+        Ok(changed) => changed,
+        Err(e) => {
+            return Some(format!(
+                "the files changed since it could not be listed ({e})"
+            ));
+        }
+    };
+    let present = match files_at(tree, "HEAD") {
+        Ok(present) => present,
+        Err(e) => return Some(format!("the files at HEAD could not be listed ({e})")),
+    };
+    previous
+        .files
+        .as_ref()?
+        .keys()
+        .filter(|key| !changed.contains(*key))
+        .find(|key| !touched.contains(key) || !present.contains(*key))
+        .map(|key| format!("{key}, which it counted, is no file the branch touches at HEAD"))
+}
+
+/// Every file in `commit`'s tree, by path.
+fn files_at(tree: &Path, commit: &str) -> Result<BTreeSet<String>, MutantsError> {
+    let names = git::run(tree, &["ls-tree", "-r", "--name-only", "-z", commit])?;
+    Ok(names
+        .split('\0')
+        .filter(|p| !p.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+/// A campaign's per-file counts ([`by_file`]), trusted only when every key
+/// is exactly one of the paths it was `handed` (HQ review of 00f8e51): a
+/// key that is not names no file nunki gave it — a path a script cut at a
+/// colon, say — and a chain rebuilt from it would carry a count no file
+/// answers for. `None` when it was handed nothing nunki recorded.
+pub fn trusted_files(
+    text: &str,
+    on: &str,
+    handed: Option<&[String]>,
+) -> Option<BTreeMap<String, Measured>> {
+    let handed = handed?;
+    by_file(text, on).filter(|files| files.keys().all(|key| handed.contains(key)))
 }
 
 /// The paths a partial campaign since `since` hands its stack: those the
@@ -2535,26 +2624,16 @@ pub fn campaign(
         asked.replay,
         read(dir)?.as_ref(),
         tooling.as_deref(),
+        &fork,
         |previous| {
             owed(previous, &coders, asked.rigor, asked.threshold)
                 .or_else(|| crate::gate::named_test_missing(&slot.tree, None, previous, &coders))
         },
         |commit| git::run(&slot.tree, &["merge-base", "--is-ancestor", commit, "HEAD"]).is_ok(),
-        |previous| {
-            changed_between(&slot.tree, &previous.head, "HEAD")
-                .err()
-                .map(|e| e.to_string())
-        },
+        |previous| uncarried(&slot.tree, previous, &touched),
     );
-    let launched = launch_command(
-        &slot.tree,
-        &judged,
-        &want,
-        &touched,
-        &fork,
-        &scope,
-        project.config.jobs(),
-    )?;
+    let paths = handed(&slot.tree, &touched, &scope)?;
+    let launched = command(&judged, &want, &paths, &fork, project.config.jobs());
 
     let runs = dir.join("runs");
     std::fs::create_dir_all(&runs).map_err(|e| MutantsError::Io(runs.clone(), e))?;
@@ -2598,6 +2677,8 @@ pub fn campaign(
                 tooling,
                 earlier: Vec::new(),
                 ran: None,
+                fork: Some(fork.clone()),
+                handed: Some(paths),
             },
         },
     )?;
@@ -2622,11 +2703,18 @@ pub fn launch_command(
     scope: &Scope,
     jobs: u32,
 ) -> Result<crate::harness::spawn::CommandSpec, MutantsError> {
-    let paths = match scope.since() {
-        Some(since) => touched_since(tree, since, touched)?,
-        None => touched.to_vec(),
-    };
+    let paths = handed(tree, touched, scope)?;
     Ok(command(judged, campaign, &paths, fork, jobs))
+}
+
+/// The paths a campaign of `scope` is handed: every touched path for a full
+/// one; for a partial one, those whose content changed since the previous
+/// campaign's `HEAD` ([`touched_since`]).
+pub fn handed(tree: &Path, touched: &[String], scope: &Scope) -> Result<Vec<String>, MutantsError> {
+    match scope.since() {
+        Some(since) => touched_since(tree, since, touched),
+        None => Ok(touched.to_vec()),
+    }
 }
 
 /// What a campaign runs in the container: each stack's `mutation.sh` on the

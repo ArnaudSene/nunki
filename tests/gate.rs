@@ -3259,6 +3259,8 @@ impl Fixture {
                 date: "2026-10-01T12:00:00Z".into(),
                 survivors,
                 chain: Chain {
+                    fork: None,
+                    handed: None,
                     ran: Some(tried),
                     scope: Scope::Partial {
                         since: earlier.clone(),

@@ -239,8 +239,11 @@ the reason in `MUTANTS.json`:
 - the mission is at `standard`;
 - a previous campaign of the mission is on file and gate 7 passes on it;
 - its `HEAD` is an ancestor of the current one;
+- it ran from the same fork point: a base merged in, or a hunk the base
+  cherry-picked, moves what the branch changed in every file;
 - it counted each file, and those counts add up to its total (below);
-- the files changed since it could be listed;
+- the files changed since it could be listed, and every file it counted
+  that did not change is one the branch touches at `HEAD`, present there;
 - the stack's `mutation.sh` and its tool's version are the ones it ran with —
   read through the script's `# nunki-tool-version: <command>` line, which
   every shipped `mutation.sh` carries; a script without it runs full
@@ -250,9 +253,11 @@ the reason in `MUTANTS.json`:
 **Per-file counts.** Before its last line, `mutation.sh` prints one line per
 file with that file's counts, `{"measured":"src/lib.rs","tried":12,"found":13}`,
 and its last line says `"by_file":true`. nunki trusts them only when each
-file is named once and they add up to the totals. The Rust template gives
-them. The Python and Next.js ones measure whole files, give no count at all,
-and so never chain: every campaign of theirs is full.
+file is named once, every one is a path nunki handed that campaign, and
+they add up to the totals. The Rust template gives them, keyed by the file
+cargo-mutants' own listing names for each mutant. The Python and Next.js
+ones measure whole files, give no count at all, and so never chain: every
+campaign of theirs is full.
 
 **How a chain is judged: once.** `MUTANTS.json` keeps, for each touched
 file, the counts of the latest campaign that measured it. A file unchanged
@@ -275,11 +280,13 @@ recorded with every survivor listed and no count. Gate 7 then judges it as
 monitor's log and the follow-up name each campaign (full or partial, from
 which commit, what it tried), then the one campaign gate 7 judged.
 
-**The known limit.** A partial campaign assumes that a mutant an earlier
-campaign killed, in a file nobody has changed since, is still killed. A
-volet that weakens a test can make that false, and the chain will not see
-it. `critical` never makes the assumption — its campaigns are always full —
-and `--again` forces a full campaign at any rigor.
+**The known limit.** A partial campaign assumes that a mutant measured
+earlier in a file nobody has changed since still exists, and is still
+killed. A volet that weakens a test can make the second false; one that
+stops compiling an unchanged file — its `mod` line removed — makes the
+first false, and that file keeps its counts. The chain will not see
+either. `critical` never makes the assumption — its campaigns are always
+full — and `--again` forces a full campaign at any rigor.
 
 ### Running mutants at once: `mutation_jobs`
 

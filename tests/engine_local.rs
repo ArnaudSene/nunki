@@ -642,6 +642,8 @@ impl Volet {
                 survivors: vec![],
                 tried: Some(12),
                 chain: nunki::mutants::Chain {
+                    fork: Some(nunki::gate::fork_point(&self.w.slot.tree, "dev").unwrap()),
+                    handed: Some(vec!["src/lib.rs".into()]),
                     ran: None,
                     scope: nunki::mutants::Scope::Full {
                         why: "the first campaign of this mission".into(),
@@ -937,4 +939,75 @@ fn after_a_survivors_file_is_renamed_its_mutants_are_tried_again() {
     assert_eq!(files.keys().collect::<Vec<_>>(), ["src/moved.rs"]);
     assert_eq!(files["src/moved.rs"].on, head);
     assert_eq!(recorded.tried, Some(5));
+}
+
+/// HQ review of 00f8e51: a partial campaign requires the fork point the
+/// previous one ran from. Here the base cherry-picks a hunk of the branch
+/// and the branch merges the base: the fork point moves, and with it what
+/// the branch changed in every file — the cherry-picked hunk is the base's
+/// now — so the next campaign is full, and says why. Without the merge, the
+/// same chain continues partial.
+#[test]
+fn after_the_branch_merges_a_base_that_moved_the_next_campaign_is_full() {
+    let v = volet();
+    let tree = &v.w.slot.tree;
+    std::fs::write(tree.join("src/two.rs"), "pub fn two() -> u8 {\n    2\n}\n").unwrap();
+    git(tree, &["add", "-A"]);
+    git(tree, &["commit", "-q", "-m", "a second file"]);
+    let picked = git(tree, &["rev-parse", "HEAD"]);
+    v.first_campaign_ran_with(v.tooling_now());
+    v.launch(nunki::mission::Rigor::Standard);
+    assert!(
+        matches!(v.launched_as().scope, nunki::mutants::Scope::Partial { .. }),
+        "{:?}",
+        v.launched_as()
+    );
+    nunki::mutants::forget_running(&v.project.hq_root, &v.w.slot.name).unwrap();
+
+    let before = nunki::gate::fork_point(tree, "dev").unwrap();
+    git(tree, &["checkout", "-q", "dev"]);
+    git(tree, &["cherry-pick", &picked]);
+    git(tree, &["checkout", "-q", "mission/x"]);
+    git(tree, &["merge", "-q", "--no-edit", "dev"]);
+    let after = nunki::gate::fork_point(tree, "dev").unwrap();
+    assert_ne!(before, after, "the fork point moved");
+
+    v.launch(nunki::mission::Rigor::Standard);
+    match v.launched_as().scope {
+        nunki::mutants::Scope::Full { why } => {
+            assert!(why.contains("fork point moved"), "{why}");
+            assert!(why.contains(&after[..12]), "{why}");
+        }
+        partial => panic!("a moved fork point continued the chain: {partial:?}"),
+    }
+    assert_eq!(v.launched_as().fork.as_deref(), Some(after.as_str()));
+}
+
+/// A previous campaign that counted a path no file answers to — the
+/// reviewer's `src/co`, from a template that cut a path at its colon — is
+/// not carried: launched, the next campaign is full and names it.
+#[test]
+fn a_campaign_after_one_that_counted_no_such_file_is_launched_full() {
+    let v = volet();
+    v.first_campaign_ran_with(v.tooling_now());
+    let mut previous = nunki::mutants::read(&v.mission).unwrap().unwrap();
+    let files = previous.files.as_mut().unwrap();
+    files.insert(
+        "src/co".into(),
+        nunki::mutants::Measured {
+            tried: 3,
+            found: Some(3),
+            on: v.first.clone(),
+        },
+    );
+    previous.tried = Some(15);
+    nunki::mutants::write(&v.mission, &previous).unwrap();
+
+    v.launch(nunki::mission::Rigor::Standard);
+    match v.launched_as().scope {
+        nunki::mutants::Scope::Full { why } => {
+            assert!(why.contains("cannot be carried: src/co"), "{why}")
+        }
+        partial => panic!("a count no file answers to was carried: {partial:?}"),
+    }
 }

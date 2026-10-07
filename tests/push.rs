@@ -2407,6 +2407,8 @@ fn push_judges_the_chain_once_on_its_reconstruction() {
         survivors: (1..=open).map(survivor).collect(),
         tried: Some(110),
         chain: Chain {
+            fork: None,
+            handed: None,
             ran: Some(60),
             scope: Scope::Partial {
                 since: earlier.clone(),
@@ -2454,6 +2456,8 @@ fn status_says_each_campaign_of_the_chain_with_its_counts() {
             survivors: vec![],
             tried: Some(24),
             chain: Chain {
+                fork: None,
+                handed: None,
                 ran: Some(4),
                 scope: Scope::Partial {
                     since: earlier.clone(),

@@ -5095,6 +5095,9 @@ fn lifting_an_older_carried_ruling_takes_its_entry_out_by_origin() {
 use mutants::{Chain, Measured, Replay, Scope};
 use nunki::mission::Rigor;
 
+/// The fork point the campaigns of these tests ran from.
+const FORK: &str = "ffffffffffffffffffffffffffffffffffffffff";
+
 /// A campaign on file at `head`, full, with what it ran with, and its count
 /// all in `src/lib.rs` when it has one.
 fn on_file_at(head: &str, survivors: Vec<Survivor>, tried: Option<u32>) -> Campaign {
@@ -5106,6 +5109,8 @@ fn on_file_at(head: &str, survivors: Vec<Survivor>, tried: Option<u32>) -> Campa
         survivors,
         tried,
         chain: Chain {
+            fork: Some(FORK.into()),
+            handed: None,
             ran: None,
             scope: Scope::Full {
                 why: "the first campaign of this mission".into(),
@@ -5149,6 +5154,7 @@ fn scope_with(
         replay,
         previous.as_ref(),
         tooling,
+        FORK,
         |_| owes.then(|| "3 of 10 tried mutant(s) killed".to_string()),
         |_| ancestor,
         |_| compare.clone(),
@@ -5197,6 +5203,16 @@ fn each_refusal_gives_a_full_campaign_with_its_reason_recorded() {
             scope_with(|_, _, _, _, _, ancestor, _| *ancestor = false),
         ),
         (
+            "the branch's fork point moved since the previous campaign",
+            scope_with(|_, _, previous, _, _, _, _| {
+                previous.as_mut().unwrap().chain.fork = Some("e".repeat(40));
+            }),
+        ),
+        (
+            "recorded no fork point",
+            scope_with(|_, _, previous, _, _, _, _| previous.as_mut().unwrap().chain.fork = None),
+        ),
+        (
             "did not count each file",
             scope_with(|_, _, previous, _, _, _, _| previous.as_mut().unwrap().files = None),
         ),
@@ -5207,7 +5223,7 @@ fn each_refusal_gives_a_full_campaign_with_its_reason_recorded() {
             }),
         ),
         (
-            "could not be listed: fatal: bad object",
+            "cannot be carried: fatal: bad object",
             scope_with(|_, _, _, _, _, _, compare| *compare = Some("fatal: bad object".into())),
         ),
         (
@@ -5247,6 +5263,7 @@ fn a_previous_campaign_below_the_threshold_gives_a_full_campaign() {
         Replay::WhenChanged,
         Some(&previous),
         Some("tools-1"),
+        FORK,
         owed,
         |_| true,
         |_| None,
@@ -5272,6 +5289,7 @@ fn a_previous_campaign_below_the_threshold_gives_a_full_campaign() {
         Replay::WhenChanged,
         Some(&previous),
         Some("tools-1"),
+        FORK,
         |c: &Campaign| mutants::owed(c, &answered, Rigor::Standard, 80),
         |_| true,
         |_| None,
@@ -5477,12 +5495,13 @@ fn an_old_campaign_file_reads_as_a_full_campaign_alone() {
             ..campaign.clone()
         }),
         Some("tools-1"),
+        FORK,
         |_| None,
         |_| true,
         |_| None,
     );
     assert!(
-        matches!(&next, Scope::Full { why } if why.contains("did not count each file")),
+        matches!(&next, Scope::Full { why } if why.contains("recorded no fork point")),
         "{next:?}"
     );
 
@@ -5540,6 +5559,8 @@ fn a_partial_campaign_is_read_back_with_its_chain_or_forgotten_when_it_broke() {
             &slot.name,
             &mutants::Running {
                 chain: Chain {
+                    fork: Some(FORK.into()),
+                    handed: Some(vec!["src/lib.rs".into()]),
                     ran: None,
                     scope: Scope::Partial {
                         since: first.clone(),
@@ -5710,11 +5731,18 @@ fn recorded_partial(
     let mission = dir.join("mission");
     std::fs::create_dir_all(&mission).unwrap();
     mutants::write(&mission, previous).unwrap();
+    // Handed what a launch hands it: the files changed since.
+    let handed = mutants::changed_between(tree, since, head)
+        .unwrap()
+        .into_iter()
+        .collect();
     let chain = Chain {
         scope: Scope::Partial {
             since: since.into(),
         },
         tooling: Some("tools-1".into()),
+        fork: Some(FORK.into()),
+        handed: Some(handed),
         ..Chain::default()
     };
     mutants::record_finished_with_registry(
@@ -6184,4 +6212,132 @@ fn per_file_counts_are_read_only_when_they_add_up() {
     ] {
         assert_eq!(read(&bad), None, "{bad}");
     }
+}
+
+/// HQ review of 00f8e51: a per-file count is trusted only under a path the
+/// campaign was handed. The reviewer's case: a template that keyed `tried`
+/// by the text before the first colon counted `src/co:lon.rs` as `src/co`,
+/// and `src/co` stayed in the chain for ever. Its counts add up — so
+/// `by_file` alone takes them — and they are not trusted: the campaign is
+/// recorded without them, and the next one is full.
+#[test]
+fn a_count_under_a_path_the_campaign_was_not_handed_makes_the_next_campaign_full() {
+    let log = "{\"measured\":\"src/co\",\"tried\":3,\"found\":0}\n\
+               {\"measured\":\"src/co:lon.rs\",\"tried\":0,\"found\":3}\n\
+               {\"campaign\":\"done\",\"tried\":3,\"found\":3,\"by_file\":true}\n";
+    assert!(mutants::by_file(log, "h").is_some(), "the counts add up");
+    let handed = vec!["src/co:lon.rs".to_string()];
+    assert_eq!(mutants::trusted_files(log, "h", Some(&handed)), None);
+    assert_eq!(
+        mutants::trusted_files(log, "h", None),
+        None,
+        "handed unknown"
+    );
+    let fine = "{\"measured\":\"src/co:lon.rs\",\"tried\":3,\"found\":3}\n\
+                {\"campaign\":\"done\",\"tried\":3,\"found\":3,\"by_file\":true}\n";
+    assert!(mutants::trusted_files(fine, "h", Some(&handed)).is_some());
+
+    // Recorded so, and the next campaign full.
+    let dir = tempfile::tempdir().unwrap();
+    let mission = dir.path().join("mission");
+    std::fs::create_dir_all(&mission).unwrap();
+    let chain = Chain {
+        tooling: Some("tools-1".into()),
+        fork: Some(FORK.into()),
+        handed: Some(handed),
+        ..Chain::default()
+    };
+    let tree = repo(dir.path());
+    let head = git(&tree, &["rev-parse", "HEAD"]);
+    mutants::record_finished_with_registry(
+        &mission,
+        &dir.path().join("hq"),
+        &tree,
+        "fp",
+        &head,
+        log,
+        &chain,
+    )
+    .unwrap();
+    let campaign = mutants::read(&mission).unwrap().unwrap();
+    assert_eq!(campaign.files, None);
+    assert_eq!(campaign.tried, Some(3), "the total stands, judged as ever");
+    let next = mutants::scope(
+        Rigor::Standard,
+        Replay::WhenChanged,
+        Some(&campaign),
+        Some("tools-1"),
+        FORK,
+        |_| None,
+        |_| true,
+        |_| None,
+    );
+    assert!(
+        matches!(&next, Scope::Full { why } if why.contains("did not count each file")),
+        "{next:?}"
+    );
+}
+
+/// HQ review of 00f8e51: a count kept from the previous campaign must name
+/// a file the branch touches at `HEAD`, present there. A key that names no
+/// such file — `src/co`, which never existed, or a file the branch no
+/// longer touches — makes the campaign full, and says which.
+#[test]
+fn a_kept_count_that_names_no_touched_file_makes_the_campaign_full() {
+    let dir = tempfile::tempdir().unwrap();
+    let (tree, first, _second) = two_commits(
+        dir.path(),
+        &[("src/a.rs", A), ("src/b.rs", B)],
+        &[(
+            "src/a.rs",
+            Some("pub fn a(n: u8) -> bool {\n    n > 5\n}\n"),
+        )],
+    );
+    let touched = vec!["src/a.rs".to_string(), "src/b.rs".to_string()];
+    let carried = |files: &[(&str, u32)], touched: &[String]| {
+        mutants::uncarried(&tree, &on_file_with(&first, vec![], files), touched)
+    };
+    // Every kept key a touched file at HEAD: carried.
+    assert_eq!(carried(&[("src/a.rs", 5), ("src/b.rs", 4)], &touched), None);
+    // A changed file's key is not kept, so it is not asked about.
+    assert_eq!(carried(&[("src/a.rs", 5)], &touched[1..]), None);
+    // A key no file answers to.
+    let why = carried(&[("src/b.rs", 4), ("src/co", 3)], &touched).expect("not carried");
+    assert!(why.contains("src/co, which it counted"), "{why}");
+    // A key the touched list names — it lists every path the branch's
+    // commits name, removed ones included — but no file at HEAD.
+    let with_co: Vec<String> = touched
+        .iter()
+        .cloned()
+        .chain(["src/co".to_string()])
+        .collect();
+    let why = carried(&[("src/b.rs", 4), ("src/co", 3)], &with_co).expect("not carried");
+    assert!(why.contains("src/co, which it counted"), "{why}");
+    // A file present and unchanged, which the branch no longer touches.
+    let why = carried(&[("src/b.rs", 4)], &touched[..1]).expect("not carried");
+    assert!(why.contains("src/b.rs, which it counted"), "{why}");
+    // A previous commit nobody can diff against.
+    let gone = Campaign {
+        head: "0123456789abcdef0123456789abcdef01234567".into(),
+        ..on_file_with(&first, vec![], &[("src/b.rs", 4)])
+    };
+    let why = mutants::uncarried(&tree, &gone, &touched).expect("not carried");
+    assert!(why.contains("could not be listed"), "{why}");
+
+    // And through `scope`, a full campaign with the reason.
+    let previous = on_file_with(&first, vec![], &[("src/b.rs", 4), ("src/co", 3)]);
+    let next = mutants::scope(
+        Rigor::Standard,
+        Replay::WhenChanged,
+        Some(&previous),
+        Some("tools-1"),
+        FORK,
+        |_| None,
+        |_| true,
+        |p| mutants::uncarried(&tree, p, &touched),
+    );
+    assert!(
+        matches!(&next, Scope::Full { why } if why.contains("cannot be carried: src/co")),
+        "{next:?}"
+    );
 }

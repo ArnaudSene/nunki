@@ -3406,6 +3406,8 @@ fn green_final_gates_leave_each_campaign_of_the_chain_in_the_follow_up() {
             survivors: vec![],
             tried: Some(3),
             chain: Chain {
+                fork: None,
+                handed: None,
                 ran: None,
                 scope: Scope::Partial {
                     since: earlier.clone(),

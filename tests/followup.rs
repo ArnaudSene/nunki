@@ -280,6 +280,15 @@ fn a_chain_of_campaigns_is_said_once_per_change_and_a_single_campaign_never() {
     };
     followup::campaigns(&file, &["full at aaaaaaaaaaaa — tried 9".to_string()]).unwrap();
     followup::campaigns(&file, &[]).unwrap();
+    // One campaign and a judged line is still one campaign.
+    followup::campaigns(
+        &file,
+        &[
+            "full at aaaaaaaaaaaa — tried 9".to_string(),
+            "judged as one campaign at aaaaaaaaaaaa — tried 9, killed 9".to_string(),
+        ],
+    )
+    .unwrap();
     assert_eq!(count(), 0, "one campaign is no chain");
 
     let two = [
