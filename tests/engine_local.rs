@@ -783,3 +783,138 @@ fn a_campaign_after_one_resting_on_a_missing_test_is_launched_full() {
         partial => panic!("a campaign resting on a missing test was continued: {partial:?}"),
     }
 }
+
+/// The security reviewer's case (HQ ruling on security round 1): a full
+/// campaign left a survivor in `src/lib.rs`, with a proposal awaiting the
+/// HQ; the volet then only renames the file. Partial, the survivor and its
+/// proposal would be dropped as reached, and the rename given nothing to
+/// mutate. The next campaign is full instead, from the fork point over the
+/// file under its new name — every mutant in it tried again — and its record
+/// says why. Without the rename, the same chain continues partial: the
+/// refusal is the rename's, not the survivor's.
+#[test]
+fn after_a_survivors_file_is_renamed_the_next_campaign_is_full() {
+    let v = volet();
+    let tooling = v.tooling_now();
+    let on_file = |survivors| nunki::mutants::Campaign {
+        fingerprint: "the first lot's".into(),
+        head: v.first.clone(),
+        date: "2026-10-07T10:00:00Z".into(),
+        survivors,
+        tried: Some(12),
+        chain: nunki::mutants::Chain {
+            scope: nunki::mutants::Scope::Full {
+                why: "the first campaign of this mission".into(),
+            },
+            tooling: tooling.clone(),
+            earlier: vec![],
+        },
+    };
+    let pending = nunki::mutants::Survivor {
+        found_on: None,
+        id: "src/lib.rs:2:7: replace > with >= in keep".into(),
+        file: "src/lib.rs".into(),
+        line: 2,
+        end_line: Some(2),
+        description: "replace > with >= in keep".into(),
+        outcome: Some(nunki::mutants::Triage::ProposedByNunki {
+            why: "the same mutation the HQ ruled on before".into(),
+            from: nunki::mutants::ProposedFrom::Carried {
+                commit: v.first.clone(),
+            },
+        }),
+        refused: None,
+    };
+    let previous = on_file(vec![pending]);
+    // Gate 7 passes on it: the proposal is an outcome, awaiting the HQ.
+    assert_eq!(
+        nunki::mutants::owed(
+            &previous,
+            &Default::default(),
+            nunki::mission::Rigor::Standard,
+            80
+        ),
+        None
+    );
+
+    // The volet as it stands — a line changed — continues the chain.
+    nunki::mutants::write(&v.mission, &previous).unwrap();
+    v.launch(nunki::mission::Rigor::Standard);
+    assert!(
+        matches!(v.launched_as().scope, nunki::mutants::Scope::Partial { .. }),
+        "{:?}",
+        v.launched_as()
+    );
+    nunki::mutants::forget_running(&v.project.hq_root, &v.w.slot.name).unwrap();
+
+    // Then the file is renamed.
+    git(&v.w.slot.tree, &["mv", "src/lib.rs", "src/moved.rs"]);
+    git(&v.w.slot.tree, &["commit", "-q", "-m", "volet: a rename"]);
+    nunki::mutants::write(&v.mission, &previous).unwrap();
+    v.launch(nunki::mission::Rigor::Standard);
+    match v.launched_as().scope {
+        nunki::mutants::Scope::Full { why } => {
+            assert!(
+                why.contains("src/lib.rs was renamed to src/moved.rs"),
+                "{why}"
+            );
+        }
+        partial => panic!("a rename continued the chain: {partial:?}"),
+    }
+    // And what a full campaign runs on: the renamed file, from the fork.
+    let touched = nunki::gate::touched_since_base(&v.w.slot.tree, "dev").unwrap();
+    assert!(touched.contains(&"src/moved.rs".to_string()), "{touched:?}");
+}
+
+/// The same, for a file the branch itself added and a volet renamed: it was
+/// not at the fork and is not at `HEAD`, and the rename is still seen.
+#[test]
+fn after_a_branch_added_file_with_a_survivor_is_renamed_the_next_campaign_is_full() {
+    let v = volet();
+    std::fs::write(
+        v.w.slot.tree.join("src/added.rs"),
+        "pub fn added(n: u8) -> bool {\n    n > 4\n}\n",
+    )
+    .unwrap();
+    git(&v.w.slot.tree, &["add", "-A"]);
+    git(&v.w.slot.tree, &["commit", "-q", "-m", "L2: a new file"]);
+    let at = git(&v.w.slot.tree, &["rev-parse", "HEAD"]);
+    let previous = nunki::mutants::Campaign {
+        fingerprint: "the second lot's".into(),
+        head: at,
+        date: "2026-10-07T11:00:00Z".into(),
+        survivors: vec![nunki::mutants::Survivor {
+            found_on: None,
+            id: "src/added.rs:2:7: replace > with >= in added".into(),
+            file: "src/added.rs".into(),
+            line: 2,
+            end_line: Some(2),
+            description: "replace > with >= in added".into(),
+            outcome: Some(nunki::mutants::Triage::Killed {
+                test: "keep".into(),
+            }),
+            refused: None,
+        }],
+        tried: Some(12),
+        chain: nunki::mutants::Chain {
+            scope: nunki::mutants::Scope::Full {
+                why: "the first campaign of this mission".into(),
+            },
+            tooling: v.tooling_now(),
+            earlier: vec![],
+        },
+    };
+    git(&v.w.slot.tree, &["mv", "src/added.rs", "src/renamed.rs"]);
+    git(&v.w.slot.tree, &["commit", "-q", "-m", "volet: a rename"]);
+    nunki::mutants::write(&v.mission, &previous).unwrap();
+    v.launch(nunki::mission::Rigor::Standard);
+    match v.launched_as().scope {
+        nunki::mutants::Scope::Full { why } => {
+            assert!(
+                why.contains("src/added.rs was renamed to src/renamed.rs"),
+                "{why}"
+            );
+        }
+        partial => panic!("a rename continued the chain: {partial:?}"),
+    }
+}

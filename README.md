@@ -233,6 +233,11 @@ with the reason in `MUTANTS.json`:
 - the mission is at `standard`;
 - a previous campaign of the mission is on file and gate 7 passes on it;
 - its `HEAD` is an ancestor of the current one;
+- the diff since it is one whose every dropped survivor the partial campaign
+  mutates again: no file git names as renamed, copied or changed in type,
+  no binary file, and a diff that could be read. nunki and the Rust
+  `mutation.sh` read that diff the same way, without rename detection, so a
+  renamed file is a file removed and a file added whole;
 - the stack's `mutation.sh` and its tool's version are the ones it ran with —
   read through the script's `# nunki-tool-version: <command>` line, which
   every shipped `mutation.sh` carries; a script without it runs full

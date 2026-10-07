@@ -3567,3 +3567,109 @@ exit 0
     assert!(!why.contains("old copy still there"), "{why}");
     assert!(!why.contains("\"mutants\""), "mutants/ was left: {why}");
 }
+
+/// What `nunki` judges reached by a later diff and what the Rust campaign is
+/// handed to mutate again are the same diff, read the same way (HQ ruling
+/// on security round 1). Here, across a `git mv`: the template's own diff,
+/// as the stub `cargo` is handed it, and [`nunki::mutants::Changes::between`]
+/// agree on every survivor — in the old file and in the new — and the code
+/// the survivors stood on is in what the campaign mutates. With git's
+/// rename detection in either one, they part: a pure rename gave the tool no
+/// hunk, and the survivors were dropped with nothing tried in their place.
+#[test]
+#[cfg(unix)]
+fn a_renamed_file_is_dropped_and_mutated_again_by_the_same_diff() {
+    let (_dir, root, _nunki) = fresh();
+    let home = home(&root);
+    init(&root, &home, &["rust".to_string()]).unwrap();
+    let script = home
+        .join(nunki::project::STACKS_DIR)
+        .join("rust")
+        .join(nunki::mutants::SCRIPT);
+    let (tree, _base) = forked_tree(&root);
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&tree)
+            .args(["-c", "user.name=T", "-c", "user.email=t@t"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    // The previous campaign's commit, then a volet that only renames.
+    let first = git(&["rev-parse", "HEAD"]);
+    git(&["mv", "src/lib.rs", "src/moved.rs"]);
+    git(&["commit", "-q", "-m", "volet: a rename"]);
+
+    let asked = root.join("asked.diff");
+    let path = stub_cargo(
+        &root,
+        &format!(
+            "#!/bin/sh
+while [ $# -gt 0 ]; do
+  case \"$1\" in
+    --in-diff) cp \"$2\" {asked} ;;
+  esac
+  shift
+done
+exit 0
+",
+            asked = asked.display()
+        ),
+    );
+    let out = sh()
+        .arg(&script)
+        .arg("abc123")
+        .arg("src/lib.rs")
+        .arg("src/moved.rs")
+        .env("PATH", path)
+        .env(nunki::mutants::BASE_ENV, &first)
+        .current_dir(&tree)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let handed = std::fs::read_to_string(&asked).expect("the tool was handed a diff");
+
+    let theirs = nunki::mutants::Changes::parse(&handed);
+    let ours = nunki::mutants::Changes::between(&tree, &first, "HEAD").unwrap();
+    let survivor = |file: &str, line: u32| nunki::mutants::Survivor {
+        found_on: None,
+        id: format!("{file}:{line}"),
+        file: file.into(),
+        line,
+        end_line: Some(line),
+        description: "replace > with >=".into(),
+        outcome: None,
+        refused: None,
+    };
+    for s in [
+        survivor("src/lib.rs", 1),
+        survivor("src/lib.rs", 3),
+        survivor("src/moved.rs", 1),
+    ] {
+        assert_eq!(
+            ours.kept(&s),
+            theirs.kept(&s),
+            "nunki and the campaign read {}:{} differently\n{handed}",
+            s.file,
+            s.line
+        );
+        if s.file == "src/lib.rs" {
+            assert_eq!(
+                ours.kept(&s),
+                None,
+                "{}:{} survived the rename",
+                s.file,
+                s.line
+            );
+        }
+    }
+    // What was dropped is mutated again: the whole file, under its new name.
+    assert!(handed.contains("+++ b/src/moved.rs"), "{handed}");
+    assert!(
+        handed.contains("+pub fn keep(a: i32) -> bool { a > 2 }"),
+        "{handed}"
+    );
+}

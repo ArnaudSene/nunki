@@ -5118,12 +5118,14 @@ fn scope_with(
         &mut Option<&str>,
         &mut bool,
         &mut bool,
+        &mut Option<String>,
     ),
 ) -> Scope {
     let (mut rigor, mut replay) = (Rigor::Standard, Replay::WhenChanged);
     let mut previous = Some(on_file_at("aaaaaaaaaaaaaaaa", vec![], Some(10)));
     let mut tooling = Some("tools-1");
     let (mut owes, mut ancestor) = (false, true);
+    let mut unshown: Option<String> = None;
     change(
         &mut rigor,
         &mut replay,
@@ -5131,6 +5133,7 @@ fn scope_with(
         &mut tooling,
         &mut owes,
         &mut ancestor,
+        &mut unshown,
     );
     mutants::scope(
         rigor,
@@ -5139,6 +5142,7 @@ fn scope_with(
         tooling,
         |_| owes.then(|| "3 of 10 tried mutant(s) killed".to_string()),
         |_| ancestor,
+        |_| unshown.clone(),
     )
 }
 
@@ -5147,7 +5151,7 @@ fn scope_with(
 #[test]
 fn at_standard_a_campaign_after_a_passing_one_is_partial_from_its_head() {
     assert_eq!(
-        scope_with(|_, _, _, _, _, _| {}),
+        scope_with(|_, _, _, _, _, _, _| {}),
         Scope::Partial {
             since: "aaaaaaaaaaaaaaaa".into()
         }
@@ -5165,35 +5169,43 @@ fn each_refusal_gives_a_full_campaign_with_its_reason_recorded() {
     let cases: Vec<(&str, Scope)> = vec![
         (
             "`critical` mission",
-            scope_with(|rigor, _, _, _, _, _| *rigor = Rigor::Critical),
+            scope_with(|rigor, _, _, _, _, _, _| *rigor = Rigor::Critical),
         ),
         (
             "--again",
-            scope_with(|_, replay, _, _, _, _| *replay = Replay::Now),
+            scope_with(|_, replay, _, _, _, _, _| *replay = Replay::Now),
         ),
         (
             "the first campaign",
-            scope_with(|_, _, previous, _, _, _| *previous = None),
+            scope_with(|_, _, previous, _, _, _, _| *previous = None),
         ),
         (
             "gate 7 did not pass on the previous campaign",
-            scope_with(|_, _, _, _, owes, _| *owes = true),
+            scope_with(|_, _, _, _, owes, _, _| *owes = true),
         ),
         (
             "is not an ancestor of HEAD",
-            scope_with(|_, _, _, _, _, ancestor| *ancestor = false),
+            scope_with(|_, _, _, _, _, ancestor, _| *ancestor = false),
+        ),
+        (
+            "src/m.rs was renamed to src/n.rs",
+            scope_with(|_, _, _, _, _, _, unshown| {
+                *unshown = Some("src/m.rs was renamed to src/n.rs".into())
+            }),
         ),
         (
             "could not be read",
-            scope_with(|_, _, _, tooling, _, _| *tooling = None),
+            scope_with(|_, _, _, tooling, _, _, _| *tooling = None),
         ),
         (
             "recorded nothing of what it ran with",
-            scope_with(|_, _, previous, _, _, _| previous.as_mut().unwrap().chain.tooling = None),
+            scope_with(|_, _, previous, _, _, _, _| {
+                previous.as_mut().unwrap().chain.tooling = None
+            }),
         ),
         (
             "changed since the previous campaign",
-            scope_with(|_, _, _, tooling, _, _| *tooling = Some("tools-2")),
+            scope_with(|_, _, _, tooling, _, _, _| *tooling = Some("tools-2")),
         ),
     ];
     for (said, scope) in cases {
@@ -5201,7 +5213,7 @@ fn each_refusal_gives_a_full_campaign_with_its_reason_recorded() {
         assert!(why.contains(said), "{said:?} not in {why:?}");
     }
     // The reason of a failed previous campaign carries what it owes.
-    let why = full(scope_with(|_, _, _, _, owes, _| *owes = true));
+    let why = full(scope_with(|_, _, _, _, owes, _, _| *owes = true));
     assert!(why.contains("3 of 10 tried mutant(s) killed"), "{why}");
     assert!(why.contains("aaaaaaaaaaaa"), "{why}");
 }
@@ -5220,6 +5232,7 @@ fn a_previous_campaign_below_the_threshold_gives_a_full_campaign() {
         Some("tools-1"),
         owed,
         |_| true,
+        |_| None,
     );
     assert!(
         matches!(&scope, Scope::Full { why } if why.contains("7 of 10")),
@@ -5244,6 +5257,7 @@ fn a_previous_campaign_below_the_threshold_gives_a_full_campaign() {
         Some("tools-1"),
         |c: &Campaign| mutants::owed(c, &answered, Rigor::Standard, 80),
         |_| true,
+        |_| None,
     );
     assert!(matches!(scope, Scope::Partial { .. }), "{scope:?}");
 }
@@ -5894,4 +5908,144 @@ fn a_campaign_alone_owes_without_being_named_as_part_of_a_chain() {
     .expect("m1 has no outcome");
     assert!(owed.starts_with("1 survivor(s) have no outcome"), "{owed}");
     assert!(!owed.contains("campaign at"), "{owed}");
+}
+
+// ---------------------------------------------------------------------------
+// What a partial campaign drops, it re-mutates (HQ ruling on security round
+// 1): a diff it cannot vouch for makes the campaign full.
+// ---------------------------------------------------------------------------
+
+/// A repository at a first campaign's commit, with `src/m.rs` in it, and
+/// that commit's sha.
+fn at_a_first_campaign(dir: &Path) -> (PathBuf, String) {
+    let tree = repo(dir);
+    write(
+        &tree,
+        "src/m.rs",
+        "pub fn keep(n: u8) -> bool {\n    n > 4\n}\n\npub fn other() -> u8 {\n    7\n}\n",
+    );
+    write(&tree, "src/other.rs", "pub fn o() {}\n");
+    git(&tree, &["add", "-A"]);
+    git(&tree, &["commit", "-q", "-m", "L1"]);
+    let first = git(&tree, &["rev-parse", "HEAD"]);
+    (tree, first)
+}
+
+fn paths(list: &[&str]) -> Vec<String> {
+    list.iter().map(|p| p.to_string()).collect()
+}
+
+/// Added, removed and modified files are what the diff vouches for: a
+/// partial campaign may continue over them.
+#[test]
+fn a_diff_of_files_added_removed_or_modified_is_one_a_partial_campaign_can_show() {
+    let dir = tempfile::tempdir().unwrap();
+    let (tree, first) = at_a_first_campaign(dir.path());
+    write(
+        &tree,
+        "src/m.rs",
+        "pub fn keep(n: u8) -> bool {\n    n > 5\n}\n",
+    );
+    write(&tree, "src/new.rs", "pub fn n() {}\n");
+    git(&tree, &["rm", "-q", "src/other.rs"]);
+    git(&tree, &["add", "-A"]);
+    git(&tree, &["commit", "-q", "-m", "volet"]);
+    let all = paths(&["src/m.rs", "src/new.rs", "src/other.rs"]);
+    assert_eq!(mutants::unshown_since(&tree, &first, &all), None);
+    assert_eq!(mutants::unshown_since(&tree, &first, &[]), None);
+}
+
+/// A survivor's file renamed is named — when both its names are asked: given
+/// the new one alone, git sees an added file and nothing to pair it with.
+#[test]
+fn a_renamed_survivors_file_is_named_and_makes_the_campaign_full() {
+    let dir = tempfile::tempdir().unwrap();
+    let (tree, first) = at_a_first_campaign(dir.path());
+    git(&tree, &["mv", "src/m.rs", "src/n.rs"]);
+    git(&tree, &["commit", "-q", "-m", "volet: a rename"]);
+
+    let why = mutants::unshown_since(&tree, &first, &paths(&["src/m.rs", "src/n.rs"]));
+    assert_eq!(why.as_deref(), Some("src/m.rs was renamed to src/n.rs"));
+    // Asked over the new path alone: an added file, and nothing to pair.
+    assert_eq!(
+        mutants::unshown_since(&tree, &first, &paths(&["src/n.rs"])),
+        None
+    );
+}
+
+/// Copied, changed in type, binary, or a diff that cannot be read: each is
+/// named.
+#[test]
+fn a_copy_a_type_change_a_binary_or_an_unreadable_diff_is_named() {
+    let dir = tempfile::tempdir().unwrap();
+    let (tree, first) = at_a_first_campaign(dir.path());
+    std::fs::copy(tree.join("src/m.rs"), tree.join("src/copy.rs")).unwrap();
+    git(&tree, &["add", "-A"]);
+    git(&tree, &["commit", "-q", "-m", "a copy"]);
+    let why = mutants::unshown_since(&tree, &first, &paths(&["src/m.rs", "src/copy.rs"]));
+    assert_eq!(why.as_deref(), Some("src/m.rs was copied to src/copy.rs"));
+
+    let (tree, first) = at_a_first_campaign(&dir.path().join("t"));
+    std::fs::remove_file(tree.join("src/other.rs")).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("m.rs", tree.join("src/other.rs")).unwrap();
+    git(&tree, &["add", "-A"]);
+    git(&tree, &["commit", "-q", "-m", "a type change"]);
+    #[cfg(unix)]
+    assert_eq!(
+        mutants::unshown_since(&tree, &first, &paths(&["src/other.rs"])).as_deref(),
+        Some("src/other.rs changed type")
+    );
+
+    let (tree, first) = at_a_first_campaign(&dir.path().join("b"));
+    std::fs::write(tree.join("src/blob.bin"), [0u8, 159, 146, 150, 0, 1]).unwrap();
+    git(&tree, &["add", "-A"]);
+    git(&tree, &["commit", "-q", "-m", "a binary"]);
+    assert_eq!(
+        mutants::unshown_since(&tree, &first, &paths(&["src/blob.bin"])).as_deref(),
+        Some("src/blob.bin is binary, and its diff has no lines")
+    );
+
+    let why = mutants::unshown_since(
+        &tree,
+        "0123456789abcdef0123456789abcdef01234567",
+        &paths(&["src/m.rs"]),
+    )
+    .expect("an unreadable diff is named");
+    assert!(why.contains("could not be read"), "{why}");
+}
+
+/// The judgement on git's own `-z` output, every status it can give.
+#[test]
+fn only_an_added_removed_or_modified_file_is_vouched_for() {
+    assert_eq!(mutants::unshown_in("", ""), None);
+    assert_eq!(
+        mutants::unshown_in(
+            "M\0src/a.rs\0A\0src/b.rs\0D\0src/c.rs\0",
+            "1\t1\tsrc/a.rs\0"
+        ),
+        None
+    );
+    assert_eq!(
+        mutants::unshown_in("M\0src/a.rs\0R087\0src/b.rs\0src/c.rs\0", "").as_deref(),
+        Some("src/b.rs was renamed to src/c.rs")
+    );
+    assert_eq!(
+        mutants::unshown_in("C100\0src/b.rs\0src/c.rs\0", "").as_deref(),
+        Some("src/b.rs was copied to src/c.rs")
+    );
+    assert_eq!(
+        mutants::unshown_in("T\0src/b.rs\0", "").as_deref(),
+        Some("src/b.rs changed type")
+    );
+    for odd in ["U", "X", "B"] {
+        assert_eq!(
+            mutants::unshown_in(&format!("{odd}\0src/b.rs\0"), "").as_deref(),
+            Some(format!("git names src/b.rs as {odd:?}").as_str()),
+        );
+    }
+    assert_eq!(
+        mutants::unshown_in("M\0a.png\0", "3\t1\tsrc/a.rs\0-\t-\ta.png\0").as_deref(),
+        Some("a.png is binary, and its diff has no lines")
+    );
 }

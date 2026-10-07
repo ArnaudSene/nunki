@@ -2016,6 +2016,9 @@ pub enum Replay {
 ///   judges the whole chain it closes ([`owed`]);
 /// - its `HEAD` is an ancestor of the current one (`is_ancestor`): a history
 ///   rewritten under it leaves no diff to continue from;
+/// - the diff since it is one whose every dropped survivor the partial
+///   campaign re-mutates (`unshown`, [`unshown_since`]): no file renamed,
+///   copied, changed in type or binary, and a diff that could be read;
 /// - it ran with the same `mutation.sh` and tool as this one will: both
 ///   digests known ([`tooling`]) and equal.
 ///
@@ -2030,6 +2033,7 @@ pub fn scope(
     tooling: Option<&str>,
     owed: impl Fn(&Campaign) -> Option<String>,
     is_ancestor: impl Fn(&str) -> bool,
+    unshown: impl Fn(&Campaign) -> Option<String>,
 ) -> Scope {
     let full = |why: String| Scope::Full { why };
     if rigor != crate::mission::Rigor::Standard {
@@ -2053,6 +2057,13 @@ pub fn scope(
     if !is_ancestor(&previous.head) {
         return full(format!(
             "the previous campaign's commit {at} is not an ancestor of HEAD"
+        ));
+    }
+    if let Some(why) = unshown(previous) {
+        return full(format!(
+            "since the previous campaign, at {at}, {}: a partial campaign could not show \
+             it re-mutates every survivor it would drop",
+            crate::text::one_line(&why)
         ));
     }
     match (tooling, previous.chain.tooling.as_deref()) {
@@ -2150,6 +2161,80 @@ pub fn tooling(
         Some(manifest) => Ok(Some(hash_object(&slot.tree, &manifest)?)),
         None => Ok(None),
     }
+}
+
+/// Why a partial campaign since `since` could not show that it re-mutates
+/// what it drops, or `None` when it can (HQ ruling on security round 1).
+///
+/// A survivor of an earlier campaign is dropped when the diff since reaches
+/// its span ([`Changes::kept`]), and that is sound only if the partial
+/// campaign's own scope re-mutates that code. Both read the same diff, by
+/// the same rule — no rename detection — so a file renamed is a file
+/// removed and a file added whole. What that rule cannot vouch for, the
+/// campaign is full for:
+///
+/// - a file git names as renamed or copied, with its detection on (copies
+///   from unmodified files too: `--find-copies-harder`): the code
+///   survived under another name, and whether the new name is mutated whole
+///   rests on the stack's own diff;
+/// - a file whose type changed, or that git cannot pair or name;
+/// - a binary file: its diff has no lines, so nothing is reached or
+///   covered;
+/// - a diff that could not be read.
+///
+/// Asked over `paths`, because rename detection pairs only paths it is
+/// given: the caller passes the paths the branch touched — every path its
+/// commits name, so the old name of a renamed file is among them — and the
+/// files the previous campaigns' survivors are in, so that the question
+/// does not rest on how that first list is drawn.
+pub fn unshown_since(tree: &Path, since: &str, paths: &[String]) -> Option<String> {
+    if paths.is_empty() {
+        return None;
+    }
+    let diff = |options: &[&str]| -> Result<String, git::GitError> {
+        let mut args = vec!["-c", "core.quotePath=false", "diff", "-z"];
+        args.extend_from_slice(options);
+        args.extend([since, "HEAD", "--"]);
+        args.extend(paths.iter().map(String::as_str));
+        git::run(tree, &args)
+    };
+    let names = diff(&["--name-status", "--find-renames", "--find-copies-harder"]);
+    let counts = diff(&["--numstat", "--no-renames"]);
+    match (names, counts) {
+        (Ok(names), Ok(counts)) => unshown_in(&names, &counts),
+        (Err(e), _) | (_, Err(e)) => Some(format!(
+            "the diff since it could not be read ({})",
+            crate::text::one_line(&e.to_string())
+        )),
+    }
+}
+
+/// [`unshown_since`]'s judgement, on git's own `-z` output: `--name-status
+/// --find-renames --find-copies-harder` and `--numstat --no-renames`. Only a file
+/// added, removed or modified is one the diff vouches for; anything else
+/// in the first, or a binary file in the second, is named.
+pub fn unshown_in(name_status: &str, numstat: &str) -> Option<String> {
+    let mut fields = name_status.split('\0').filter(|f| !f.is_empty());
+    while let Some(status) = fields.next() {
+        let path = fields.next().unwrap_or("?");
+        match status.chars().next() {
+            Some('A' | 'D' | 'M') => {}
+            Some('R') => {
+                let to = fields.next().unwrap_or("?");
+                return Some(format!("{path} was renamed to {to}"));
+            }
+            Some('C') => {
+                let to = fields.next().unwrap_or("?");
+                return Some(format!("{path} was copied to {to}"));
+            }
+            Some('T') => return Some(format!("{path} changed type")),
+            _ => return Some(format!("git names {path} as {status:?}")),
+        }
+    }
+    numstat
+        .split('\0')
+        .find_map(|entry| entry.strip_prefix("-\t-\t"))
+        .map(|path| format!("{path} is binary, and its diff has no lines"))
 }
 
 /// The paths a partial campaign since `since` hands its stack: those the
@@ -2558,6 +2643,13 @@ pub fn campaign(
                 .or_else(|| crate::gate::named_test_missing(&slot.tree, None, previous, &coders))
         },
         |commit| git::run(&slot.tree, &["merge-base", "--is-ancestor", commit, "HEAD"]).is_ok(),
+        |previous| {
+            let mut paths = touched.clone();
+            paths.extend(previous.survivors.iter().map(|s| s.file.clone()));
+            paths.sort();
+            paths.dedup();
+            unshown_since(&slot.tree, &previous.head, &paths)
+        },
     );
     let launched = launch_command(
         &slot.tree,

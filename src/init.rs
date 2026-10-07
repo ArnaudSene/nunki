@@ -1049,11 +1049,18 @@ mkdir -p "$out"
 # stack lives below the repository's root. A base the copy does not hold is
 # a campaign that cannot run, said as one, rather than a silent fall back to
 # every line of every file.
+#
+# `--no-renames`, as `nunki` reads the same diff to decide which earlier
+# survivors a partial campaign drops (SPEC 4.4, the chain): a file renamed is
+# a file removed — its survivors dropped — and a file added whole, every line
+# of it mutated again. With git's rename detection, a pure rename gave
+# cargo-mutants no hunk at all ("No mutants to filter", 27.1.0): the
+# survivors went and nothing was tried in their place.
 scope="$files"
 if [ -n "${NUNKI_BASE:-}" ]; then
   diff="$out/touched.diff"
   # shellcheck disable=SC2086
-  if ! git diff --relative "$NUNKI_BASE" HEAD -- $paths > "$diff"; then
+  if ! git diff --relative --no-renames "$NUNKI_BASE" HEAD -- $paths > "$diff"; then
     echo "nunki: cannot diff against the base $NUNKI_BASE" >&2
     exit 1
   fi
