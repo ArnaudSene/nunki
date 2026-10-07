@@ -366,8 +366,11 @@ MISSION  (one branch off its base, one slot)
   the HQ's ruling is refused with a pointer to `--lift`.
 
   **Between campaigns of one mission**, `carry` looks at the whole previous
-  campaign. The same id, file and description is the same mutant: its
-  ruling is carried as a ruling, its refusal as a refusal. Under another id,
+  campaign. The same id, file and description is the same mutant — but an
+  id is a position, and other code can land on it: a ruling keeps the
+  digest of the code it was given on, and is carried as a ruling only while
+  that id's code reads the same; otherwise it becomes a proposal marked as
+  carried. A refusal under the same id is carried as a refusal. Under another id,
   the same file and description is a heuristic, so it **only ever proposes**:
   when that pair names exactly one survivor before and one now, and the code
   the mutation replaces occurs once in its file, the ruling becomes a
@@ -386,9 +389,21 @@ MISSION  (one branch off its base, one slot)
   mutation — `mission status` and `nunki push` name each with its source and
   sentence, and the follow-up lists them when the final gates pass.
   `--ratify --all` ratifies every pending proposal, whatever its source,
-  printing each with its source and sentence first; a proposal refused or
-  ruled between the listing and the ruling fails the verb, and nothing is
-  written.
+  printing each with its source and sentence first, and rules each with the
+  sentence it printed; a proposal refused, ruled or reworded between the
+  listing and the ruling fails the verb, and nothing is written. One that
+  fails midway stops it, and it says which survivors it had ruled before.
+  Ratifying a proposal from the registry keeps the entry's origin — its
+  mission, commit, date and sentence — and records the ratification beside
+  it.
+
+  **From `MUTANTS.triage.json`, `nunki` reads only what the coder may give**:
+  `killed`, `bug` and `equivalent_proposed`. Anything else written there —
+  `equivalent`, `equivalent_registered`, `proposed_by_nunki`, or an entry it
+  cannot read — is no outcome, never shadows what `MUTANTS.json` holds, and
+  is named as refused in gate 7's note and in `nunki push`'s refusal.
+  `nunki push` also asks, as gate 7 does, that every test an outcome names
+  exists in the tree.
 
   A ruling is given **once per project, for as long as its code stands**.
   `--equivalent` and `--ratify` also enter it in the project's registry of

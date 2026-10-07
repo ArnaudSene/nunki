@@ -1533,33 +1533,42 @@ fn mutation(subject: &Subject, threshold: Threshold) -> Result<Outcome, GateErro
 
     // Two sources, and which one a line came from is decided by the mount,
     // not by the line: the coder can only write its own file, and the
-    // outcome no machine can check is not in it (SPEC 4.1, 4.4).
+    // outcome no machine can check is not in it (SPEC 4.1, 4.4). From the
+    // coder's file only the outcomes it may give are read: anything else
+    // there is no outcome, never shadows the HQ's file, and is named in the
+    // note (HQ review 3).
     let coders = crate::mutants::read_triage(subject.mission_dir)
         .map_err(|e| GateError::Mutants(e.to_string()))?;
-    for (id, outcome) in &coders {
-        if !outcome.is_the_coders_to_give() {
-            return Ok(Outcome::of(
-                gate,
-                Decision::Failed(format!(
-                    "{} answers {id} with `{}`, and that outcome is not the coder's to \
-                     give: nothing can check it, so it is the HQ's — write it in {}. \
-                     The coder proposes one instead, with `equivalent_proposed` and its \
-                     reason, and the HQ rules on it",
-                    crate::mutants::TRIAGE_FILE,
-                    outcome.kind(),
-                    crate::mutants::FILE
-                )),
-            ));
-        }
-    }
+    let foreign = crate::mutants::foreign(subject.mission_dir)
+        .map_err(|e| GateError::Mutants(e.to_string()))?;
     // A proposal is an outcome here, so the mission goes on; whether the HQ
     // ruled on it is `nunki push`'s question, not this gate's.
-    let answer = &Answers { coders: &coders };
+    let answer = &Answers {
+        coders: &coders,
+        foreign: &foreign,
+    };
+    let mut outcome = judged(subject, threshold, &campaign, answer)?;
+    if let Some(refused) = crate::mutants::foreign_said(&foreign) {
+        outcome.note = Some(match outcome.note {
+            Some(note) => format!("{note}; {refused}"),
+            None => refused,
+        });
+    }
+    Ok(outcome)
+}
 
+/// Gate 7 on a campaign that answers for the code as it stands, by the
+/// mission's rigor.
+fn judged(
+    subject: &Subject,
+    threshold: Threshold,
+    campaign: &crate::mutants::Campaign,
+    answer: &Answers,
+) -> Result<Outcome, GateError> {
     if subject.header.rigor == Rigor::Standard {
         let why = match campaign.tried {
             Some(tried) if tried as usize >= campaign.survivors.len() => {
-                return share_killed(subject, &campaign, tried, threshold, answer);
+                return share_killed(subject, campaign, tried, threshold, answer);
             }
             Some(tried) => format!(
                 "the campaign says it tried {tried} mutant(s) and names {} survivor(s), \
@@ -1573,14 +1582,14 @@ fn mutation(subject: &Subject, threshold: Threshold) -> Result<Outcome, GateErro
                      outcome"
                 .to_string(),
         };
-        let mut outcome = every_survivor_answered(subject, &campaign, answer)?;
+        let mut outcome = every_survivor_answered(subject, campaign, answer)?;
         outcome.note = Some(match outcome.note {
             Some(note) => format!("{why}. {note}"),
             None => why,
         });
         return Ok(outcome);
     }
-    every_survivor_answered(subject, &campaign, answer)
+    every_survivor_answered(subject, campaign, answer)
 }
 
 /// Gate 7 as `critical` plays it: every survivor has an outcome, every test
@@ -1714,18 +1723,30 @@ fn a_named_test_missing(
     campaign: &crate::mutants::Campaign,
     answer: &Answers,
 ) -> Option<Decision> {
+    named_test_missing(subject.tree, campaign, answer.coders).map(Decision::Failed)
+}
+
+/// The first outcome of `campaign`, read with the coder's `coders`, that
+/// names a test nothing in the tree at `tree` is called, as gate 7 says it.
+/// Asked by gate 7 and asked again by `nunki push`, so the two cannot
+/// disagree on what a named test is.
+pub fn named_test_missing(
+    tree: &Path,
+    campaign: &crate::mutants::Campaign,
+    coders: &std::collections::BTreeMap<String, crate::mutants::Triage>,
+) -> Option<String> {
     for survivor in &campaign.survivors {
-        let Some(outcome) = answer.of(survivor) else {
+        let Some(outcome) = crate::mutants::answer(survivor, coders) else {
             continue;
         };
         if let Some(test) = outcome.test()
-            && git::run(subject.tree, &["grep", "--quiet", "-F", "--", test]).is_err()
+            && git::run(tree, &["grep", "--quiet", "-F", "--", test]).is_err()
         {
-            return Some(Decision::Failed(format!(
+            return Some(format!(
                 "{}:{} names the test {test:?}, and nothing in the tree is called \
                  that",
                 survivor.file, survivor.line
-            )));
+            ));
         }
     }
     None
@@ -1812,6 +1833,8 @@ fn rulings(campaign: &crate::mutants::Campaign, answer: &Answers) -> Option<Stri
 /// HQ's together ([`crate::mutants::answer`]).
 struct Answers<'a> {
     coders: &'a std::collections::BTreeMap<String, crate::mutants::Triage>,
+    /// The coder's entries `nunki` does not read, named beside the survivor.
+    foreign: &'a [crate::mutants::Foreign],
 }
 
 impl Answers<'_> {
@@ -1826,9 +1849,21 @@ impl Answers<'_> {
             .survivors
             .iter()
             .filter(|s| self.of(s).is_none())
-            .map(|s| match crate::mutants::not_an_outcome(s, self.coders) {
-                Some(why) => format!("{}:{} {} ({why})", s.file, s.line, s.id),
-                None => format!("{}:{} {}", s.file, s.line, s.id),
+            .map(|s| {
+                let foreign = self.foreign.iter().find(|f| f.id == s.id).map(|f| {
+                    format!(
+                        "{} answers it with `{}`, which {} and is not read — a ruling \
+                         goes in {}, and the coder proposes with `equivalent_proposed`",
+                        crate::mutants::TRIAGE_FILE,
+                        crate::text::one_line(&f.kind),
+                        crate::text::one_line(&f.why),
+                        crate::mutants::FILE
+                    )
+                });
+                match foreign.or_else(|| crate::mutants::not_an_outcome(s, self.coders)) {
+                    Some(why) => format!("{}:{} {} ({why})", s.file, s.line, s.id),
+                    None => format!("{}:{} {}", s.file, s.line, s.id),
+                }
             })
             .collect()
     }

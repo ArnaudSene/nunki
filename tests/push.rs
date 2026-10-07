@@ -1393,7 +1393,7 @@ fn push_refuses_until_every_proposed_equivalence_is_ratified_or_refused() {
         },
         Security::Gates,
     );
-    let head = world.commit("src.rs", "pub fn one() -> u8 { 2 }\n", "the lot");
+    let head = world.commit("src.rs", WITH_TESTS, "the lot");
     world.verified(&[(Role::Coder, None, head.clone())]);
 
     let dir = nunki::mission::dir::Paths::of(&world.project.hq_root, "m1").dir;
@@ -1764,7 +1764,7 @@ fn verified_with(rigor: nunki::mission::Rigor, survivors: &[&str]) -> (World, Pa
     let mut state = world.state();
     state.flow = Flow::new(h).unwrap();
     world.store().save(&state).unwrap();
-    let head = world.commit("src.rs", "pub fn one() -> u8 { 2 }\n", "the lot");
+    let head = world.commit("src.rs", WITH_TESTS, "the lot");
     world.verified(&[(Role::Coder, None, head.clone())]);
     let dir = nunki::mission::dir::Paths::of(&world.project.hq_root, "m1").dir;
     mutants::write(
@@ -2170,6 +2170,8 @@ fn push_waits_on_nunkis_proposals_and_ratify_all_rules_them() {
             Some(Triage::Equivalent {
                 why: why.into(),
                 carried_from: None,
+                // The code it was ruled on, kept for the next campaign's carry.
+                span: Some(nunki::equivalences::line_digest("pub fn one() -> u8 { 2 }")),
             }),
             "{}",
             s.id
@@ -2179,4 +2181,69 @@ fn push_waits_on_nunkis_proposals_and_ratify_all_rules_them() {
     assert!(mutants::awaiting_ruling(&paths.dir).unwrap().is_empty());
     push::push(&world.project, "m1", true).unwrap();
     assert!(world.on_forge("mission/x").is_some());
+}
+
+/// The lot's source, holding the tests the outcomes in these worlds name:
+/// push asks, as gate 7 does, that a named test exists (HQ review 3).
+const WITH_TESTS: &str = "pub fn one() -> u8 { 2 }\n\
+                          #[test]\nfn one_is_two() {}\n\
+                          #[test]\nfn two_is_printed() {}\n";
+
+/// The coder's file is read only for the outcomes the coder may give (HQ
+/// review 3). A verified `critical` mission whose triage entry is rewritten
+/// after the gates to `equivalent`, then to `equivalent_registered`, holds
+/// no outcome for that survivor: push refuses, and names the entry refused.
+#[test]
+fn push_refuses_a_triage_rewritten_to_a_ruling() {
+    let (world, dir, _) = verified_with(nunki::mission::Rigor::Critical, &["s1"]);
+    for forged in [
+        r#"{"s1": {"kind": "equivalent", "why": "trust me"}}"#,
+        r#"{"s1": {"kind": "equivalent_registered", "why": "trust me", "mission": "m", "commit": "c"}}"#,
+    ] {
+        std::fs::write(dir.join(nunki::mutants::TRIAGE_FILE), forged).unwrap();
+        match push::push(&world.project, "m1", true) {
+            Err(PushError::MutantsOwed { owed, .. }) => {
+                assert!(owed.contains("1 survivor(s) have no outcome"), "{owed}");
+                assert!(owed.contains("not the coder's to give"), "{owed}");
+                assert!(owed.contains("refused and read as no outcome"), "{owed}");
+            }
+            other => panic!("{forged}: a ruling forged by the coder was read: {other:?}"),
+        }
+        assert!(world.on_forge("mission/x").is_none());
+    }
+}
+
+/// Push asks what gate 7 asks of a named test: that the tree holds it. A
+/// `killed` naming a test nobody wrote, written after the gates, holds the
+/// push with the gate's own words (HQ review 3).
+#[test]
+fn push_refuses_a_killed_naming_a_test_that_does_not_exist() {
+    let (world, dir, head) = verified_with(nunki::mission::Rigor::Critical, &["s1"]);
+    let killed_by = |test: &str| {
+        nunki::mutants::write_triage(
+            &dir,
+            &[(
+                "s1".to_string(),
+                nunki::mutants::Triage::Killed { test: test.into() },
+            )]
+            .into_iter()
+            .collect(),
+        )
+        .unwrap();
+    };
+    killed_by("a_test_nobody_wrote");
+    match push::push(&world.project, "m1", true) {
+        Err(PushError::MutantsOwed { owed, .. }) => assert!(
+            owed.contains(
+                "names the test \"a_test_nobody_wrote\", and nothing in the tree is called that"
+            ),
+            "{owed}"
+        ),
+        other => panic!("a test nobody wrote was taken: {other:?}"),
+    }
+    assert!(world.on_forge("mission/x").is_none());
+
+    killed_by("one_is_two");
+    push::push(&world.project, "m1", true).unwrap();
+    assert_eq!(world.on_forge("mission/x").as_deref(), Some(head.as_str()));
 }

@@ -75,6 +75,19 @@ pub enum FindingsError {
          registry would answer the next mission still"
     )]
     RegistryUnchanged(String),
+    #[error(
+        "--ratify --all stopped at `{at}`: {why}. The HQ's ruling is written on {} before \
+         it; nothing after it was touched — list what is pending again with `nunki mission \
+         status`",
+        if ruled.is_empty() { "no survivor".to_string() } else {
+            ruled.iter().map(|r| format!("`{r}`")).collect::<Vec<_>>().join(", ")
+        }
+    )]
+    RatifiedPart {
+        at: String,
+        ruled: Vec<String>,
+        why: String,
+    },
 }
 
 /// Record a human's acceptance, and — for [`Lift::Verdict`] — conclude.
@@ -398,14 +411,54 @@ pub fn ratify_proposal(
 ) -> Result<(String, crate::equivalences::Registered), FindingsError> {
     let by = who(project);
     under_slot_lock(project, id, "mission mutants --ratify", |paths, tree| {
-        let why = crate::mutants::ratify(&paths.dir, survivor, because)?;
-        let registered = crate::equivalences::enter(
+        let origin = registry_origin(paths, survivor)?;
+        let why = crate::mutants::ratify_on(&paths.dir, survivor, because, span_in(tree))?;
+        let registered = register_ratified(
             &registry_ruling(project, id, tree, &by),
             &campaign_of(paths)?,
             survivor,
+            origin.as_ref(),
         );
         Ok((why, registered))
     })
+}
+
+/// The mission and commit of the registry entry behind the proposal
+/// survivor `id` holds, when it holds one from the registry.
+fn registry_origin(paths: &Paths, id: &str) -> Result<Option<(String, String)>, FindingsError> {
+    Ok(crate::mutants::read(&paths.dir)?.and_then(|c| {
+        c.survivors
+            .into_iter()
+            .find(|s| s.id == id)
+            .and_then(|s| match s.outcome {
+                Some(crate::mutants::Triage::ProposedByNunki {
+                    from:
+                        crate::mutants::ProposedFrom::Registry {
+                            mission, commit, ..
+                        },
+                    ..
+                }) => Some((mission, commit)),
+                _ => None,
+            })
+    }))
+}
+
+/// What a ratification leaves in the registry: a proposal from the registry
+/// is recorded on its own entry, which keeps its origin
+/// ([`crate::equivalences::ratified`]); any other is entered as the HQ's
+/// ruling on this mission ([`crate::equivalences::enter`]).
+fn register_ratified(
+    ruling: &crate::equivalences::Ruling,
+    campaign: &crate::mutants::Campaign,
+    survivor: &str,
+    origin: Option<&(String, String)>,
+) -> crate::equivalences::Registered {
+    match origin {
+        Some((mission, commit)) => {
+            crate::equivalences::ratified(ruling, campaign, survivor, (mission, commit))
+        }
+        None => crate::equivalences::enter(ruling, campaign, survivor),
+    }
 }
 
 /// What `--ratify --all` did with one proposal: the proposal as it stood,
@@ -430,9 +483,12 @@ pub fn pending(
 /// `nunki mission mutants --ratify --all`: every one of `listed` — the
 /// proposals the verb printed, read by [`pending`] — ratified as
 /// [`ratify_proposal`] ratifies one, under one hold of the slot's lock, each
-/// with its own sentence. A proposal that is no longer pending — refused or
-/// ratified in between — fails the verb before anything is written, so what
-/// was printed is what was ruled.
+/// with **the sentence it printed**, passed explicitly. A proposal that is
+/// not pending any more as it was listed — refused, ratified, or its
+/// sentence changed in between — fails the verb before anything is
+/// written, so what was printed is what was ruled. One that fails midway
+/// stops it, and the error says what was written before it
+/// ([`ratify_in_turn`]).
 pub fn ratify_all(
     project: &Project,
     id: &str,
@@ -453,27 +509,57 @@ pub fn ratify_all(
                 ))
                 .into());
             }
-            let mut done = Vec::new();
-            for proposal in listed {
-                // One ruling answers every survivor of an id: a second proposal
-                // under the same id was ruled with the first.
-                if done.iter().any(|d: &Ratified| d.proposal.id == proposal.id) {
-                    continue;
-                }
-                crate::mutants::ratify(&paths.dir, &proposal.id, None)?;
-                let registered = crate::equivalences::enter(
+            ratify_in_turn(listed, |proposal| {
+                let origin = registry_origin(paths, &proposal.id)?;
+                crate::mutants::ratify_on(
+                    &paths.dir,
+                    &proposal.id,
+                    Some(&proposal.why),
+                    span_in(tree),
+                )?;
+                Ok(register_ratified(
                     &registry_ruling(project, id, tree, &by),
                     &campaign_of(paths)?,
                     &proposal.id,
-                );
-                done.push(Ratified {
-                    proposal: proposal.clone(),
-                    registered,
-                });
-            }
-            Ok(done)
+                    origin.as_ref(),
+                ))
+            })
         },
     )
+}
+
+/// Ratify each of `listed` in turn with `one`, skipping a second proposal
+/// under an id already ruled — one ruling answers every survivor of an id.
+///
+/// When `one` fails, it stops there, and the error says it truthfully: the
+/// survivors ruled before it, and that nothing after it was touched
+/// (HQ review 3, item 3).
+pub fn ratify_in_turn(
+    listed: &[crate::mutants::Proposal],
+    mut one: impl FnMut(
+        &crate::mutants::Proposal,
+    ) -> Result<crate::equivalences::Registered, FindingsError>,
+) -> Result<Vec<Ratified>, FindingsError> {
+    let mut done: Vec<Ratified> = Vec::new();
+    for proposal in listed {
+        if done.iter().any(|d| d.proposal.id == proposal.id) {
+            continue;
+        }
+        match one(proposal) {
+            Ok(registered) => done.push(Ratified {
+                proposal: proposal.clone(),
+                registered,
+            }),
+            Err(e) => {
+                return Err(FindingsError::RatifiedPart {
+                    at: proposal.id.clone(),
+                    ruled: done.iter().map(|d| d.proposal.id.clone()).collect(),
+                    why: e.to_string(),
+                });
+            }
+        }
+    }
+    Ok(done)
 }
 
 /// `nunki mission mutants --equivalent`: [`crate::mutants::rule_equivalent`],
@@ -491,7 +577,7 @@ pub fn rule_equivalent(
         id,
         "mission mutants --equivalent",
         |paths, tree| {
-            crate::mutants::rule_equivalent(&paths.dir, survivor, why)?;
+            crate::mutants::rule_equivalent_on(&paths.dir, survivor, why, span_in(tree))?;
             Ok(crate::equivalences::enter(
                 &registry_ruling(project, id, tree, &by),
                 &campaign_of(paths)?,
@@ -549,4 +635,13 @@ pub fn lift_equivalent(
         }
         Ok(crate::equivalences::Registered::Done(removed))
     })
+}
+
+/// How a ruling given on this mission keeps the code it was given on: the
+/// digest of the survivor's span at the campaign's commit, read in `tree`
+/// ([`crate::mutants::rule_equivalent_on`]).
+fn span_in(
+    tree: &std::path::Path,
+) -> impl Fn(&str, &crate::mutants::Survivor) -> Option<String> + '_ {
+    move |head, survivor| crate::equivalences::span_at(tree, head, survivor)
 }

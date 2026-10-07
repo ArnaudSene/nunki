@@ -1377,6 +1377,7 @@ fn the_coder_may_not_call_a_survivor_equivalent() {
         Triage::Equivalent {
             why: "nothing reads it, honest".into(),
             carried_from: None,
+            span: None,
         },
     )]);
     f.journal_names_head();
@@ -1398,6 +1399,7 @@ fn the_coder_may_not_call_a_survivor_equivalent() {
         Some(Triage::Equivalent {
             why: "no caller can reach that branch".into(),
             carried_from: None,
+            span: None,
         }),
     )]);
     assert_eq!(f.gate_seven(Role::Coder).decision, Decision::Passed);
@@ -1459,6 +1461,7 @@ fn the_equivalences_are_counted_out_loud() {
             Some(Triage::Equivalent {
                 why: "no caller can reach that branch".into(),
                 carried_from: None,
+                span: None,
             }),
         ),
         survivor(
@@ -1466,6 +1469,7 @@ fn the_equivalences_are_counted_out_loud() {
             Some(Triage::Equivalent {
                 why: "the constant is never read".into(),
                 carried_from: None,
+                span: None,
             }),
         ),
     ]);
@@ -1492,6 +1496,7 @@ fn a_carried_equivalence_is_named_apart_from_one_given_on_this_campaign() {
             Some(Triage::Equivalent {
                 why: "no caller can reach that branch".into(),
                 carried_from: Some("def5678".into()),
+                span: None,
             }),
         ),
         survivor(
@@ -1499,6 +1504,7 @@ fn a_carried_equivalence_is_named_apart_from_one_given_on_this_campaign() {
             Some(Triage::Equivalent {
                 why: "the constant is never read".into(),
                 carried_from: None,
+                span: None,
             }),
         ),
     ]);
@@ -1544,6 +1550,7 @@ fn a_proposal_from_the_registry_or_carried_is_counted_as_a_proposal() {
             Some(Triage::Equivalent {
                 why: "the value is overwritten before use".into(),
                 carried_from: None,
+                span: None,
             }),
         ),
     ]);
@@ -2690,6 +2697,7 @@ fn at_standard_a_survivor_with_an_outcome_counts_as_killed() {
                 Some(Triage::Equivalent {
                     why: "no caller can reach that branch".into(),
                     carried_from: None,
+                    span: None,
                 }),
             ),
             survivor(3, None),
@@ -2746,12 +2754,22 @@ fn at_standard_a_named_test_must_exist_and_the_coder_may_not_rule() {
         Triage::Equivalent {
             why: "trust me".into(),
             carried_from: None,
+            span: None,
         },
     )]);
-    match f.gate_seven(Role::Coder).decision {
-        Decision::Failed(why) => assert!(why.contains("not the coder's to give"), "{why}"),
-        other => panic!("standard does not change who rules: {other:?}"),
-    }
+    // The coder's `equivalent` is no outcome (HQ review 3): the survivor
+    // counts as not killed, the share of 99% passes on its own, and the note
+    // names the entry refused.
+    let outcome = f.gate_seven(Role::Coder);
+    assert_eq!(outcome.decision, Decision::Passed);
+    let note = outcome.note.unwrap();
+    assert!(note.contains("99 of 100"), "{note}");
+    assert!(
+        note.contains("1 survivor(s) left without an outcome"),
+        "{note}"
+    );
+    assert!(note.contains("not the coder's to give"), "{note}");
+    assert!(note.contains("refused and read as no outcome"), "{note}");
 }
 
 /// A campaign that does not say how many it tried — an older script, an
@@ -2795,6 +2813,7 @@ fn at_standard_a_campaign_without_a_count_is_judged_as_critical() {
             Some(Triage::Equivalent {
                 why: "no caller can reach that branch".into(),
                 carried_from: None,
+                span: None,
             }),
         )],
         None,
@@ -2954,6 +2973,7 @@ fn an_equivalence_given_on_this_campaign_is_not_called_carried() {
         Some(Triage::Equivalent {
             why: "no caller can reach that branch".into(),
             carried_from: None,
+            span: None,
         }),
     )]);
     f.journal_names_head();
@@ -2996,6 +3016,7 @@ fn a_critical_mission_with_two_proposals_passes_gate_seven_and_counts_them_apart
             Some(Triage::Equivalent {
                 why: "no caller can reach that branch".into(),
                 carried_from: None,
+                span: None,
             }),
         ),
     ]);
@@ -3082,6 +3103,7 @@ fn a_ratified_proposal_answers_as_the_hqs_ruling() {
         Some(Triage::Equivalent {
             why: "only a log line reads it".into(),
             carried_from: None,
+            span: None,
         }),
     )]);
     f.coder_answers(&[("src/new.rs:1", proposed("only a log line reads it"))]);
@@ -3107,6 +3129,7 @@ fn the_coders_own_equivalent_is_still_red_and_points_at_the_proposal() {
             Triage::Equivalent {
                 why: "trust me".into(),
                 carried_from: None,
+                span: None,
             },
         ),
     ]);

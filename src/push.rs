@@ -260,7 +260,7 @@ pub fn push_to(
         lifted_by_nunki,
     } = verdicts_hold(&slot, &state, &head)?;
     proposals_ruled(project, id)?;
-    nothing_owed(project, id, &header)?;
+    nothing_owed(project, id, &header, &slot.tree)?;
 
     let fetched = fetch(project, id)?;
     let remote = remote_url(project)?;
@@ -389,10 +389,16 @@ fn proposals_ruled(project: &Project, id: &str) -> Result<(), PushError> {
 /// a mission reach `Verified`, so the only way here is a file taken away
 /// after the gates — and "nothing on file" must not read as "nothing owed"
 /// (HQ review of the pull request, item 3).
+///
+/// It reads the coder's file as gate 7 does — only the outcomes the coder
+/// may give, and every test one names must exist in the slot's tree — and
+/// its refusal names the entries it did not read (HQ review 3): a triage
+/// rewritten after the gates is judged as the gate would have judged it.
 fn nothing_owed(
     project: &Project,
     id: &str,
     header: &crate::mission::Header,
+    tree: &std::path::Path,
 ) -> Result<(), PushError> {
     let dir = crate::mission::dir::Paths::of(&project.hq_root, id).dir;
     if header.rigor != crate::mission::Rigor::Prototype && crate::mutants::read(&dir)?.is_none() {
@@ -405,11 +411,21 @@ fn nothing_owed(
     let threshold = header
         .mutation_threshold
         .unwrap_or(project.config.mutation_threshold);
-    match crate::mutants::owed_on_file(&dir, header.rigor, threshold)? {
+    let missing = match crate::mutants::read(&dir)? {
+        Some(campaign) if header.rigor != crate::mission::Rigor::Prototype => {
+            crate::gate::named_test_missing(tree, &campaign, &crate::mutants::read_triage(&dir)?)
+        }
+        _ => None,
+    };
+    let owed = crate::mutants::owed_on_file(&dir, header.rigor, threshold)?.or(missing);
+    match owed {
         None => Ok(()),
         Some(owed) => Err(PushError::MutantsOwed {
             mission: id.to_string(),
-            owed,
+            owed: match crate::mutants::foreign_said(&crate::mutants::foreign(&dir)?) {
+                Some(refused) => format!("{owed}; {refused}"),
+                None => owed,
+            },
         }),
     }
 }

@@ -87,6 +87,21 @@ pub struct Entry {
     /// The commit of the campaign it was ruled on.
     pub commit: String,
     pub date: String,
+    /// Each time the HQ ratified this entry's proposal on a later mission,
+    /// recorded beside the origin above, which stays the ruling's (HQ review
+    /// 3, item 5).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ratified: Vec<Ratification>,
+}
+
+/// The HQ ratified a registry entry's proposal on another mission.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ratification {
+    pub by: String,
+    pub mission: String,
+    /// The commit of the campaign it was ratified on.
+    pub commit: String,
+    pub date: String,
 }
 
 fn one_line() -> u32 {
@@ -395,7 +410,7 @@ pub fn identified(source: &str, start: u32, end: u32) -> Result<String, String> 
 /// [`span_digest`] of the code `survivor`'s mutation replaces at `commit`,
 /// whether or not it is unique — what a lift looks for, where taking out too
 /// much is the safe side.
-fn span_at(tree: &Path, commit: &str, survivor: &Survivor) -> Option<String> {
+pub fn span_at(tree: &Path, commit: &str, survivor: &Survivor) -> Option<String> {
     let (start, end) = survivor.span()?;
     let source = source_at(tree, commit, &survivor.file)?;
     span_of(&source, start, end).map(|span| span_digest(&span))
@@ -596,6 +611,7 @@ pub fn enter(ruling: &Ruling, campaign: &Campaign, id: &str) -> Registered {
             mission: ruling.mission.to_string(),
             commit: campaign.head.clone(),
             date: crate::state::now_rfc3339(),
+            ratified: Vec::new(),
         });
     }
     if fresh.is_empty() {
@@ -611,6 +627,51 @@ pub fn enter(ruling: &Ruling, campaign: &Campaign, id: &str) -> Registered {
         registry.entries.extend(fresh);
         Ok(n)
     })
+}
+
+/// The HQ ratified, on survivor `id` of `campaign`, the proposal the
+/// registry made from the entry given on `origin`'s mission and commit:
+/// that entry keeps its origin — mission, commit, date, sentence — and the
+/// ratification is recorded beside it (HQ review 3, item 5). When the entry
+/// is not there any more — lifted or replaced since — the ruling is entered
+/// as any other ([`enter`]).
+pub fn ratified(
+    ruling: &Ruling,
+    campaign: &Campaign,
+    id: &str,
+    origin: (&str, &str),
+) -> Registered {
+    let Some(survivor) = campaign.survivors.iter().find(|s| s.id == id) else {
+        return Registered::Done(0);
+    };
+    let (mission, commit) = origin;
+    let ratification = Ratification {
+        by: ruling.by.to_string(),
+        mission: ruling.mission.to_string(),
+        commit: campaign.head.clone(),
+        date: crate::state::now_rfc3339(),
+    };
+    let recorded = under_lock(
+        ruling.hq_root,
+        "mission mutants --ratify (registry)",
+        |registry| {
+            let mut n = 0;
+            for e in registry.entries.iter_mut().filter(|e| {
+                e.file == survivor.file
+                    && e.description == survivor.description
+                    && e.mission == mission
+                    && e.commit == commit
+            }) {
+                e.ratified.push(ratification.clone());
+                n += 1;
+            }
+            Ok(n)
+        },
+    );
+    match recorded {
+        Registered::Done(0) => enter(ruling, campaign, id),
+        other => other,
+    }
 }
 
 /// Where the ruling a survivor holds, or that `nunki` proposed from on this

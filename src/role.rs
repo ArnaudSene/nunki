@@ -51,7 +51,8 @@ the survivor's id, spelled exactly as `MUTANTS.json` spells it:
 `kind` is `killed` or `bug`, and the `test` it names has to exist in the tree:
 `nunki` goes looking for it. Calling a survivor equivalent is not yours to give:
 it is the one answer nobody can check, so it is decided for you, and an
-`equivalent` in your file makes the gate red.
+`equivalent` in your file is refused: it is read as no outcome, and the gate
+names it.
 
 You may **propose** it instead, with its reason in one sentence:
 
