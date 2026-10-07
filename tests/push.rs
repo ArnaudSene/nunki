@@ -2170,8 +2170,6 @@ fn push_waits_on_nunkis_proposals_and_ratify_all_rules_them() {
             Some(Triage::Equivalent {
                 why: why.into(),
                 carried_from: None,
-                // The code it was ruled on, kept for the next campaign's carry.
-                span: Some(nunki::equivalences::line_digest("pub fn one() -> u8 { 2 }")),
             }),
             "{}",
             s.id
@@ -2244,6 +2242,98 @@ fn push_refuses_a_killed_naming_a_test_that_does_not_exist() {
     assert!(world.on_forge("mission/x").is_none());
 
     killed_by("one_is_two");
+    push::push(&world.project, "m1", true).unwrap();
+    assert_eq!(world.on_forge("mission/x").as_deref(), Some(head.as_str()));
+}
+
+/// Push looks for a named test in the commit it pushes, never in the slot's
+/// working tree: a name present only as an uncommitted edit of a tracked
+/// file is refused (HQ review 4).
+#[test]
+fn push_refuses_a_test_named_only_in_an_uncommitted_edit() {
+    let (world, dir, head) = verified_with(nunki::mission::Rigor::Critical, &["s1"]);
+    nunki::mutants::write_triage(
+        &dir,
+        &[(
+            "s1".to_string(),
+            nunki::mutants::Triage::Killed {
+                test: "only_in_the_working_tree".into(),
+            },
+        )]
+        .into_iter()
+        .collect(),
+    )
+    .unwrap();
+    let source = world.tree.join("src.rs");
+    let committed = std::fs::read_to_string(&source).unwrap();
+    std::fs::write(
+        &source,
+        format!("{committed}#[test]\nfn only_in_the_working_tree() {{}}\n"),
+    )
+    .unwrap();
+    match push::push(&world.project, "m1", true) {
+        Err(PushError::MutantsOwed { owed, .. }) => assert!(
+            owed.contains("names the test \"only_in_the_working_tree\""),
+            "{owed}"
+        ),
+        other => panic!("an uncommitted edit stood for the pushed commit: {other:?}"),
+    }
+    assert!(world.on_forge("mission/x").is_none());
+    std::fs::write(&source, committed).unwrap();
+    let _ = head;
+}
+
+/// A named test is a name (HQ review 4): blank, a space, or a word of two
+/// letters answers nothing at push — each is matched by nearly any line —
+/// and a real test name, as a whole word, still does.
+#[test]
+fn push_takes_no_test_name_that_is_not_a_name() {
+    let (world, dir, head) = verified_with(nunki::mission::Rigor::Critical, &["s1"]);
+    let killed_by = |test: &str| {
+        nunki::mutants::write_triage(
+            &dir,
+            &[(
+                "s1".to_string(),
+                nunki::mutants::Triage::Killed { test: test.into() },
+            )]
+            .into_iter()
+            .collect(),
+        )
+        .unwrap();
+    };
+    for name in ["", " ", "fn", "u8", "one_is", "one-is-two"] {
+        killed_by(name);
+        match push::push(&world.project, "m1", true) {
+            Err(PushError::MutantsOwed { owed, .. }) => assert!(
+                owed.contains("1 survivor(s) have no outcome") || owed.contains("names the test"),
+                "{name:?}: {owed}"
+            ),
+            other => panic!("{name:?} was taken for a test: {other:?}"),
+        }
+    }
+    assert!(world.on_forge("mission/x").is_none());
+    killed_by("one_is_two");
+    push::push(&world.project, "m1", true).unwrap();
+    assert_eq!(world.on_forge("mission/x").as_deref(), Some(head.as_str()));
+}
+
+/// A prototype owes no campaign, so push asks nothing of the tests one
+/// names: gate 7 does not either.
+#[test]
+fn a_prototype_is_pushed_whatever_test_its_triage_names() {
+    let (world, dir, head) = verified_with(nunki::mission::Rigor::Prototype, &["s1"]);
+    nunki::mutants::write_triage(
+        &dir,
+        &[(
+            "s1".to_string(),
+            nunki::mutants::Triage::Killed {
+                test: "a_test_nobody_wrote".into(),
+            },
+        )]
+        .into_iter()
+        .collect(),
+    )
+    .unwrap();
     push::push(&world.project, "m1", true).unwrap();
     assert_eq!(world.on_forge("mission/x").as_deref(), Some(head.as_str()));
 }

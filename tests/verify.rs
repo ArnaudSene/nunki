@@ -3220,7 +3220,6 @@ impl World {
                         Some(Triage::Equivalent {
                             why: "ruled".into(),
                             carried_from: None,
-                            span: None,
                         }),
                     ),
                     survivor("m3", None),

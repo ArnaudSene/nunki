@@ -260,7 +260,7 @@ pub fn push_to(
         lifted_by_nunki,
     } = verdicts_hold(&slot, &state, &head)?;
     proposals_ruled(project, id)?;
-    nothing_owed(project, id, &header, &slot.tree)?;
+    nothing_owed(project, id, &header, &slot.tree, &head)?;
 
     let fetched = fetch(project, id)?;
     let remote = remote_url(project)?;
@@ -391,7 +391,8 @@ fn proposals_ruled(project: &Project, id: &str) -> Result<(), PushError> {
 /// (HQ review of the pull request, item 3).
 ///
 /// It reads the coder's file as gate 7 does — only the outcomes the coder
-/// may give, and every test one names must exist in the slot's tree — and
+/// may give, and every test one names must exist, as a whole word, in the
+/// tree of `head`, the commit being pushed — and
 /// its refusal names the entries it did not read (HQ review 3): a triage
 /// rewritten after the gates is judged as the gate would have judged it.
 fn nothing_owed(
@@ -399,6 +400,7 @@ fn nothing_owed(
     id: &str,
     header: &crate::mission::Header,
     tree: &std::path::Path,
+    head: &str,
 ) -> Result<(), PushError> {
     let dir = crate::mission::dir::Paths::of(&project.hq_root, id).dir;
     if header.rigor != crate::mission::Rigor::Prototype && crate::mutants::read(&dir)?.is_none() {
@@ -413,7 +415,12 @@ fn nothing_owed(
         .unwrap_or(project.config.mutation_threshold);
     let missing = match crate::mutants::read(&dir)? {
         Some(campaign) if header.rigor != crate::mission::Rigor::Prototype => {
-            crate::gate::named_test_missing(tree, &campaign, &crate::mutants::read_triage(&dir)?)
+            crate::gate::named_test_missing(
+                tree,
+                Some(head),
+                &campaign,
+                &crate::mutants::read_triage(&dir)?,
+            )
         }
         _ => None,
     };

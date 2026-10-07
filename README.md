@@ -365,17 +365,17 @@ MISSION  (one branch off its base, one slot)
   volet, with the refusal as its cause, and a survivor that already holds
   the HQ's ruling is refused with a pointer to `--lift`.
 
-  **Between campaigns of one mission**, `carry` looks at the whole previous
-  campaign. The same id, file and description is the same mutant — but an
-  id is a position, and other code can land on it: a ruling keeps the
-  digest of the code it was given on, and is carried as a ruling only while
-  that id's code reads the same; otherwise it becomes a proposal marked as
-  carried. A refusal under the same id is carried as a refusal. Under another id,
-  the same file and description is a heuristic, so it **only ever proposes**:
-  when that pair names exactly one survivor before and one now, and the code
-  the mutation replaces occurs once in its file, the ruling becomes a
-  proposal from `nunki`, marked as carried, for the HQ to ratify or refuse —
-  never an equivalence the HQ did not give. **A refusal is always carried**:
+  **Between campaigns of one mission, `carry` never rules.** Which mutant a
+  ruling was about is a heuristic across campaigns — an id is a position,
+  and other code, even identical code, can land on it — so a ruling is only
+  ever carried as a **proposal** from `nunki`, marked as carried, with its
+  sentence and the commit it was given on, for the HQ to ratify or refuse
+  (`--ratify --all` takes them all). The only equivalences in a campaign's
+  `MUTANTS.json` are the ones the HQ typed on that campaign. `carry` looks
+  at the whole previous campaign: the same id, file and description, or
+  else — when that pair names exactly one survivor before and one now, and
+  the code the mutation replaces occurs once in its file — the same file
+  and description under another id. **A refusal is always carried**:
   a new id gets the refusal the HQ gave on any survivor of the same file and
   description, whatever the uniqueness, so a refused proposal written again is
   never an outcome. With no campaign on
@@ -402,8 +402,11 @@ MISSION  (one branch off its base, one slot)
   `equivalent`, `equivalent_registered`, `proposed_by_nunki`, or an entry it
   cannot read — is no outcome, never shadows what `MUTANTS.json` holds, and
   is named as refused in gate 7's note and in `nunki push`'s refusal.
-  `nunki push` also asks, as gate 7 does, that every test an outcome names
-  exists in the tree.
+  A named test is a name: letters, digits and underscores, three at least
+  — a blank name, or one of a letter or two, answers nothing — and it is
+  looked for as a whole word. `nunki push` asks, as gate 7 does, that every
+  test an outcome names exists, in the tree of the commit it pushes, so
+  text added uncommitted in the slot never counts.
 
   A ruling is given **once per project, for as long as its code stands**.
   `--equivalent` and `--ratify` also enter it in the project's registry of

@@ -410,7 +410,7 @@ pub fn identified(source: &str, start: u32, end: u32) -> Result<String, String> 
 /// [`span_digest`] of the code `survivor`'s mutation replaces at `commit`,
 /// whether or not it is unique — what a lift looks for, where taking out too
 /// much is the safe side.
-pub fn span_at(tree: &Path, commit: &str, survivor: &Survivor) -> Option<String> {
+fn span_at(tree: &Path, commit: &str, survivor: &Survivor) -> Option<String> {
     let (start, end) = survivor.span()?;
     let source = source_at(tree, commit, &survivor.file)?;
     span_of(&source, start, end).map(|span| span_digest(&span))

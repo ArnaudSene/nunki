@@ -1723,15 +1723,22 @@ fn a_named_test_missing(
     campaign: &crate::mutants::Campaign,
     answer: &Answers,
 ) -> Option<Decision> {
-    named_test_missing(subject.tree, campaign, answer.coders).map(Decision::Failed)
+    named_test_missing(subject.tree, None, campaign, answer.coders).map(Decision::Failed)
 }
 
 /// The first outcome of `campaign`, read with the coder's `coders`, that
-/// names a test nothing in the tree at `tree` is called, as gate 7 says it.
-/// Asked by gate 7 and asked again by `nunki push`, so the two cannot
-/// disagree on what a named test is.
+/// names a test nothing in the tree is called, as gate 7 says it. Asked by
+/// gate 7 and asked again by `nunki push`, so the two cannot disagree on
+/// what a named test is.
+///
+/// The name is looked for as a whole word ([`crate::mutants::is_test_name`]
+/// keeps it one). In the repository at `tree`: in `commit`'s tree when one
+/// is given — the commit `nunki push` pushes, so text added uncommitted in
+/// the slot cannot satisfy it (HQ review 4) — or in the working tree, which
+/// gate 1 has just found clean.
 pub fn named_test_missing(
     tree: &Path,
+    commit: Option<&str>,
     campaign: &crate::mutants::Campaign,
     coders: &std::collections::BTreeMap<String, crate::mutants::Triage>,
 ) -> Option<String> {
@@ -1739,9 +1746,13 @@ pub fn named_test_missing(
         let Some(outcome) = crate::mutants::answer(survivor, coders) else {
             continue;
         };
-        if let Some(test) = outcome.test()
-            && git::run(tree, &["grep", "--quiet", "-F", "--", test]).is_err()
-        {
+        let Some(test) = outcome.test() else {
+            continue;
+        };
+        let mut grep = vec!["grep", "--quiet", "-F", "-w", "-e", test];
+        grep.extend(commit);
+        grep.push("--");
+        if git::run(tree, &grep).is_err() {
             return Some(format!(
                 "{}:{} names the test {test:?}, and nothing in the tree is called \
                  that",

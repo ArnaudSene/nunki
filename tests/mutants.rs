@@ -522,7 +522,6 @@ fn a_campaign_round_trips_through_the_mission_folder() {
             outcome: Some(Triage::Equivalent {
                 why: "the branch is unreachable from any caller".into(),
                 carried_from: None,
-                span: None,
             }),
             refused: None,
         }],
@@ -552,7 +551,6 @@ fn only_two_of_the_three_outcomes_rest_on_a_test() {
         Triage::Equivalent {
             why: "x".into(),
             carried_from: None,
-            span: None,
         }
         .test(),
         None
@@ -827,7 +825,6 @@ fn an_equivalence_is_ruled_by_a_verb_and_lands_in_the_hqs_own_file() {
         Some(Triage::Equivalent {
             why: "no caller reaches it".into(),
             carried_from: None,
-            span: None,
         })
     );
     // And it landed in the HQ's file, not in the agent's.
@@ -850,7 +847,6 @@ fn ruled(mut survivor: Survivor, why: &str) -> Survivor {
     survivor.outcome = Some(Triage::Equivalent {
         why: why.into(),
         carried_from: None,
-        span: None,
     });
     survivor
 }
@@ -881,7 +877,8 @@ fn log_of(survivors: &[Survivor]) -> String {
 const F_TO_UPPER: &str = "survived: number = format(cell, \"f\") -> number = format(cell, \"F\")";
 
 /// A commit above a ruled survivor moves its line and nothing else. The line
-/// is what a commit moves; the mutation is what was ruled on.
+/// is what a commit moves; the mutation is what was ruled on — and the next
+/// campaign proposes the ruling, never gives it (HQ review 4).
 #[test]
 fn a_ruling_follows_its_mutant_to_the_next_campaign_when_only_the_line_moved() {
     let dir = tempfile::tempdir().unwrap();
@@ -905,10 +902,11 @@ fn a_ruling_follows_its_mutant_to_the_next_campaign_when_only_the_line_moved() {
     assert_eq!(campaign.survivors[0].line, 123);
     assert_eq!(
         campaign.survivors[0].outcome,
-        Some(Triage::Equivalent {
+        Some(Triage::ProposedByNunki {
             why: "'f' and 'F' agree on finite decimals".into(),
-            carried_from: Some("def5678".into()),
-            span: None,
+            from: mutants::ProposedFrom::Carried {
+                commit: "def5678".into()
+            },
         })
     );
 }
@@ -1025,7 +1023,7 @@ fn a_ruling_does_not_follow_a_mutation_it_cannot_tell_apart() {
     assert_eq!(campaign.survivors[1].outcome, None);
 }
 
-/// A ruling carried twice still names the campaign it was first given on.
+/// A ruling proposed twice still names the campaign it was first given on.
 #[test]
 fn a_ruling_carried_again_keeps_the_campaign_it_was_given_on() {
     let dir = tempfile::tempdir().unwrap();
@@ -1053,7 +1051,10 @@ fn a_ruling_carried_again_keeps_the_campaign_it_was_given_on() {
     let campaign = mutants::read(dir.path()).unwrap().unwrap();
     assert!(matches!(
         &campaign.survivors[0].outcome,
-        Some(Triage::Equivalent { carried_from: Some(first), .. }) if first == "def5678"
+        Some(Triage::ProposedByNunki {
+            from: mutants::ProposedFrom::Carried { commit },
+            ..
+        }) if commit == "def5678"
     ));
 }
 
@@ -1080,7 +1081,6 @@ fn where_a_ruling_came_from_round_trips_and_older_files_still_read() {
     let carried = Triage::Equivalent {
         why: "same output".into(),
         carried_from: Some("def5678".into()),
-        span: None,
     };
     let text = serde_json::to_string(&carried).unwrap();
     assert_eq!(serde_json::from_str::<Triage>(&text).unwrap(), carried);
@@ -1091,14 +1091,12 @@ fn where_a_ruling_came_from_round_trips_and_older_files_still_read() {
         Triage::Equivalent {
             why: "same output".into(),
             carried_from: None,
-            span: None,
         }
     );
     // And a ruling given on this campaign writes no empty field.
     let fresh = serde_json::to_string(&Triage::Equivalent {
         why: "same output".into(),
         carried_from: None,
-        span: None,
     })
     .unwrap();
     assert!(!fresh.contains("carried_from"), "{fresh}");
@@ -1153,7 +1151,6 @@ fn only_the_two_outcomes_that_rest_on_a_test_are_the_coders_to_give() {
         !Triage::Equivalent {
             why: "x".into(),
             carried_from: None,
-            span: None,
         }
         .is_the_coders_to_give()
     );
@@ -1161,7 +1158,6 @@ fn only_the_two_outcomes_that_rest_on_a_test_are_the_coders_to_give() {
         Triage::Equivalent {
             why: "x".into(),
             carried_from: None,
-            span: None,
         }
         .kind(),
         "equivalent"
@@ -2276,7 +2272,6 @@ fn ratifying_writes_the_same_equivalence_equivalent_writes() {
         Some(Triage::Equivalent {
             why: "the HQ's own words".into(),
             carried_from: None,
-            span: None,
         })
     );
     assert!(
@@ -2305,10 +2300,11 @@ fn ratifying_needs_a_proposal_with_a_reason() {
     assert!(campaign.survivors.iter().all(|s| s.outcome.is_none()));
 }
 
-/// A ratified proposal is carried to the next campaign as a ruling; a
-/// proposal never is — nothing it says lands in the HQ's file.
+/// A ratified proposal is proposed again to the next campaign, from the
+/// HQ's ruling (HQ review 4: carry never rules); a coder's proposal is
+/// never carried — nothing it says lands in the HQ's file.
 #[test]
-fn a_ratified_proposal_is_carried_as_a_ruling_and_a_proposal_never_is() {
+fn a_ratified_proposal_is_proposed_again_and_a_coders_proposal_never_carried() {
     let dir = tempfile::tempdir().unwrap();
     let before = vec![one("m1", 1, "a"), one("m2", 2, "b")];
     ruled_before(dir.path(), before.clone());
@@ -2335,16 +2331,22 @@ fn a_ratified_proposal_is_carried_as_a_ruling_and_a_proposal_never_is() {
     );
     assert_eq!(
         campaign.survivors[1].outcome,
-        Some(Triage::Equivalent {
+        Some(Triage::ProposedByNunki {
             why: "same constant".into(),
-            carried_from: Some("def5678".into()),
-            span: None,
+            from: mutants::ProposedFrom::Carried {
+                commit: "def5678".into()
+            },
         })
     );
-    // The proposal is still the coder's, in the coder's file: still awaiting.
+    // The coder's proposal is still in the coder's file: both await.
     let waiting = mutants::awaiting_ruling(dir.path()).unwrap();
-    assert_eq!(waiting.len(), 1);
-    assert_eq!(waiting[0].id, "m1");
+    assert_eq!(
+        waiting
+            .iter()
+            .map(|p| (p.id.as_str(), p.from.is_some()))
+            .collect::<Vec<_>>(),
+        vec![("m1", false), ("m2", true)]
+    );
 }
 
 /// `--refuse` takes the proposal out of the coder's file, records the
@@ -2626,7 +2628,6 @@ fn ratify_refuse_and_lift_act_on_every_survivor_sharing_the_id() {
             Some(Triage::Equivalent {
                 why: "only a log line reads it".into(),
                 carried_from: None,
-                span: None,
             }),
             "{s:?}"
         );
@@ -2739,8 +2740,8 @@ fn a_refusal_follows_its_mutant_to_the_next_campaign_like_a_ruling() {
     );
 }
 
-/// A ruling and a refusal never both land: a survivor whose twin was ruled
-/// is carried the ruling, and the refusal list is not read for it.
+/// A proposal and a refusal never both land: a survivor whose twin was
+/// ruled is proposed the ruling, and the refusal list is not read for it.
 #[test]
 fn a_carried_ruling_is_not_also_carried_a_refusal() {
     let dir = tempfile::tempdir().unwrap();
@@ -2757,7 +2758,7 @@ fn a_carried_ruling_is_not_also_carried_a_refusal() {
     assert!(
         matches!(
             campaign.survivors[0].outcome,
-            Some(Triage::Equivalent { .. })
+            Some(Triage::ProposedByNunki { .. })
         ),
         "{:?}",
         campaign.survivors[0]
@@ -3753,7 +3754,6 @@ fn only_the_hqs_rulings_are_rulings() {
             Triage::Equivalent {
                 why: "w".into(),
                 carried_from: None,
-                span: None,
             },
             true,
         ),
@@ -4592,38 +4592,85 @@ fn ratify_all_stopping_midway_says_what_was_written() {
     };
     let listed = [proposal("one"), proposal("two"), proposal("three")];
     let mut tried = Vec::new();
-    let err = nunki::findings::ratify_in_turn(&listed, |p| {
-        tried.push(p.id.clone());
-        if p.id == "two" {
-            Err(nunki::findings::FindingsError::NoHuman)
-        } else {
-            Ok(Registered::Done(1))
-        }
-    })
+    let err = nunki::findings::ratify_in_turn(
+        &listed,
+        |p| {
+            tried.push(p.id.clone());
+            if p.id == "two" {
+                Err(nunki::findings::FindingsError::NoHuman)
+            } else {
+                Ok(Registered::Done(1))
+            }
+        },
+        |_| false,
+    )
     .unwrap_err();
     assert_eq!(tried, vec!["one", "two"], "nothing after it is touched");
     let said = err.to_string();
     assert!(said.contains("stopped at `two`"), "{said}");
     assert!(said.contains("written on `one` before it"), "{said}");
+    assert!(!said.contains("on `two` itself"), "{said}");
     assert!(said.contains("nothing after it was touched"), "{said}");
 
-    let err =
-        nunki::findings::ratify_in_turn(&listed, |_| Err(nunki::findings::FindingsError::NoHuman))
-            .unwrap_err();
+    // The HQ's file already holds the ruling on the one it stopped at: what
+    // failed came after it was written, and it says so (HQ review 4).
+    let err = nunki::findings::ratify_in_turn(
+        &listed,
+        |p| {
+            if p.id == "two" {
+                Err(nunki::findings::FindingsError::NoHuman)
+            } else {
+                Ok(Registered::Done(1))
+            }
+        },
+        |p| p.id == "two",
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("and on `two` itself, before it failed"),
+        "{err}"
+    );
+
+    let err = nunki::findings::ratify_in_turn(
+        &listed,
+        |_| Err(nunki::findings::FindingsError::NoHuman),
+        |_| false,
+    )
+    .unwrap_err();
     assert!(
         err.to_string().contains("written on no survivor before it"),
         "{err}"
     );
 
-    // A second proposal under an id already ruled is not ruled twice.
+    // A second proposal under an id already ruled, with the same sentence,
+    // is not ruled twice.
     let twice = [proposal("one"), proposal("one")];
-    let done = nunki::findings::ratify_in_turn(&twice, |_| Ok(Registered::Done(1))).unwrap();
+    let done =
+        nunki::findings::ratify_in_turn(&twice, |_| Ok(Registered::Done(1)), |_| false).unwrap();
     assert_eq!(done.len(), 1);
+
+    // With different sentences, the pair is refused and nothing is ruled
+    // (HQ review 4): one ruling answers every survivor of an id.
+    let mut other = proposal("one");
+    other.why = "another sentence".into();
+    let pair = [proposal("one"), other];
+    let mut touched = false;
+    let err = nunki::findings::ratify_in_turn(
+        &pair,
+        |_| {
+            touched = true;
+            Ok(Registered::Done(1))
+        },
+        |_| false,
+    )
+    .unwrap_err();
+    assert!(!touched, "nothing was ruled");
+    assert!(err.to_string().contains("two proposals on `one`"), "{err}");
 }
 
-/// Exact-tier carry checks the code: other code shifted onto the ruled
-/// position — same id — gets a proposal, never the ruling (HQ review 3,
-/// item 4).
+/// Carry never rules (HQ review 4): other code shifted onto the ruled
+/// position — same id — gets a proposal, never the ruling.
 #[test]
 fn a_twin_shifted_onto_the_ruled_id_is_proposed_the_ruling() {
     const BEFORE: &str =
@@ -4633,11 +4680,6 @@ fn a_twin_shifted_onto_the_ruled_id_is_proposed_the_ruling() {
     let at = named("src/lib.rs:2:15: replace > with < in keep", 2, KEEP);
     campaign_on(&project, "a", std::slice::from_ref(&at));
     nunki::findings::rule_equivalent(&project, "a", &at.id, "x is unused").unwrap();
-    let ruled = mutants::read(&mission_dir(&project, "a")).unwrap().unwrap();
-    assert!(matches!(
-        &ruled.survivors[0].outcome,
-        Some(Triage::Equivalent { span: Some(s), .. }) if *s == equivalences::line_digest("let x = a > b;")
-    ));
 
     // The ruled line goes; the next one lands on its line and column.
     commit_lib(
@@ -4655,30 +4697,63 @@ fn a_twin_shifted_onto_the_ruled_id_is_proposed_the_ruling() {
     ));
 }
 
-/// The ruled line edited in place, same id: proposed, never carried. And
-/// unchanged, the ruling is carried with its code.
+/// The reviewer's case (HQ review 4): `let x = a > b; log(x); let x = a > b;
+/// x`, ruled on line 2; the first assignment and the log are deleted, so the
+/// identical twin lands on the ruled id. Same id, same text: still a
+/// proposal, never the ruling.
 #[test]
-fn a_ruled_line_edited_in_place_is_proposed_and_an_unchanged_one_carried() {
+fn an_identical_twin_shifted_onto_the_ruled_id_is_proposed_the_ruling() {
+    const BEFORE: &str = "pub fn keep(a: u8, b: u8) -> bool {\n    let x = a > b;\n    log(x);\n    let x = a > b;\n    x\n}\n";
+    let dir = tempfile::tempdir().unwrap();
+    let project = registry_project(dir.path(), BEFORE);
+    let at = named("src/lib.rs:2:15: replace > with < in keep", 2, KEEP);
+    let twin = named("src/lib.rs:4:15: replace > with < in keep", 4, KEEP);
+    campaign_on(&project, "a", &[at.clone(), twin]);
+    nunki::findings::rule_equivalent(&project, "a", &at.id, "x is unused").unwrap();
+    commit_lib(
+        &project,
+        "pub fn keep(a: u8, b: u8) -> bool {\n    let x = a > b;\n    x\n}\n",
+    );
+    let (campaign, _) = campaign_on(&project, "a", &[at]);
+    assert!(no_equivalence(&campaign));
+    assert_eq!(
+        campaign.survivors[0].outcome,
+        Some(Triage::ProposedByNunki {
+            why: "x is unused".into(),
+            from: mutants::ProposedFrom::Carried {
+                commit: git(&project.root, &["rev-parse", "HEAD~1"]),
+            },
+        })
+    );
+}
+
+/// Even unchanged, the same id is given a carried proposal of the ruling —
+/// with its sentence and the commit it was given on — never the ruling:
+/// the only equivalences in a campaign are the HQ's own on it (HQ review 4).
+/// Plain `record_finished`, with no source to read, proposes too.
+#[test]
+fn an_unchanged_survivor_with_the_same_id_is_proposed_the_ruling() {
     let dir = tempfile::tempdir().unwrap();
     let project = registry_project(dir.path(), BODY);
     let id = ruled_on_a(&project);
+    let ruled_at = git(&project.root, &["rev-parse", "HEAD"]);
     let mut same = on_lib(2);
     same.id = id.clone();
-
-    // Unchanged: the ruling, with its code.
-    commit_lib(&project, &format!("{BODY}// below\n"));
     let (campaign, _) = campaign_on(&project, "a", std::slice::from_ref(&same));
-    assert_eq!(
-        campaign.survivors[0].outcome,
-        Some(Triage::Equivalent {
-            why: "nothing reads the value".into(),
-            carried_from: Some(campaign_head_before(&project)),
-            span: Some(equivalences::line_digest("1")),
-        })
-    );
-    // Edited in place.
-    commit_lib(&project, "pub fn one() -> u8 {\n    1 + 0\n}\n");
-    let (campaign, _) = campaign_on(&project, "a", &[same]);
+    let carried = Some(Triage::ProposedByNunki {
+        why: "nothing reads the value".into(),
+        from: mutants::ProposedFrom::Carried { commit: ruled_at },
+    });
+    assert_eq!(campaign.survivors[0].outcome, carried);
+    let a = mission_dir(&project, "a");
+    assert_eq!(mutants::awaiting_ruling(&a).unwrap().len(), 1);
+
+    // Ratified, it is the HQ's ruling on this campaign — and the next
+    // campaign proposes it again.
+    nunki::findings::ratify_proposal(&project, "a", &id, None).unwrap();
+    assert!(!no_equivalence(&mutants::read(&a).unwrap().unwrap()));
+    mutants::record_finished(&a, "fp", "h2", &log_of(&[same])).unwrap();
+    let campaign = mutants::read(&a).unwrap().unwrap();
     assert!(no_equivalence(&campaign));
     assert!(matches!(
         campaign.survivors[0].outcome,
@@ -4686,34 +4761,6 @@ fn a_ruled_line_edited_in_place_is_proposed_and_an_unchanged_one_carried() {
             from: mutants::ProposedFrom::Carried { .. },
             ..
         })
-    ));
-}
-
-/// The commit mission A's first ruling was given on: two commits back.
-fn campaign_head_before(project: &nunki::project::Project) -> String {
-    git(&project.root, &["rev-parse", "HEAD~1"])
-}
-
-/// A ruling an older `nunki` kept no code for is proposed, not carried,
-/// once the code can be read: nothing says it is the same code.
-#[test]
-fn a_ruling_kept_with_no_code_is_proposed_by_the_next_campaign() {
-    let dir = tempfile::tempdir().unwrap();
-    let project = registry_project(dir.path(), BODY);
-    let (campaign, _) = campaign_on(&project, "a", &[on_lib(2)]);
-    let id = campaign.survivors[0].id.clone();
-    let a = mission_dir(&project, "a");
-    mutants::rule_equivalent(&a, &id, "nothing reads it").unwrap();
-    let (campaign, _) = campaign_on(&project, "a", &[on_lib(2)]);
-    assert!(no_equivalence(&campaign));
-    // Without a source to read, as before: carried.
-    let mut plain = on_lib(2);
-    plain.outcome = None;
-    mutants::rule_equivalent(&a, &id, "nothing reads it").unwrap();
-    mutants::record_finished(&a, "fp", "h", &log_of(&[plain])).unwrap();
-    assert!(matches!(
-        mutants::read(&a).unwrap().unwrap().survivors[0].outcome,
-        Some(Triage::Equivalent { .. })
     ));
 }
 
@@ -4809,4 +4856,144 @@ fn a_carried_proposal_is_carried_again_and_a_registry_one_never() {
     equivalences::write(&project.hq_root, &equivalences::Registry::default()).unwrap();
     let (campaign, _) = campaign_on(&project, "b", &[on_lib(6)]);
     assert_eq!(campaign.survivors[0].outcome, None);
+}
+
+/// `--ratify --all` that fails after the HQ's file was written — the
+/// coder's file could not be rewritten — says the ruling on that survivor
+/// is written, rather than leaving the HQ to believe nothing was (HQ review
+/// 4).
+#[cfg(unix)]
+#[test]
+fn ratify_all_says_a_ruling_written_before_its_failure() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let project = registry_project(dir.path(), BODY);
+    let (campaign, _) = campaign_on(&project, "a", &[on_lib(2)]);
+    let id = campaign.survivors[0].id.clone();
+    let a = mission_dir(&project, "a");
+    proposes(&a, &[(&id, "nothing reads it")]);
+    let triage = a.join(mutants::TRIAGE_FILE);
+    std::fs::set_permissions(&triage, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+    let listed = nunki::findings::pending(&project, "a").unwrap();
+    let err = nunki::findings::ratify_all(&project, "a", &listed).unwrap_err();
+    std::fs::set_permissions(&triage, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let said = err.to_string();
+    assert!(said.contains(&format!("stopped at `{id}`")), "{said}");
+    assert!(
+        said.contains(&format!("on `{id}` itself, before it failed")),
+        "{said}"
+    );
+    assert!(!no_equivalence(&mutants::read(&a).unwrap().unwrap()));
+}
+
+/// What a test name may be: letters, digits and underscores, three at least.
+#[test]
+fn a_test_name_is_an_identifier_of_three_characters_at_least() {
+    for name in ["abc", "a_b", "one_is_two", "test_42", "___"] {
+        assert!(mutants::is_test_name(name), "{name:?}");
+    }
+    for name in ["", " ", "ab", "u8", "fn", "a-b", "a b", "été", "two::is"] {
+        assert!(!mutants::is_test_name(name), "{name:?}");
+    }
+}
+
+// The 07:38 campaign's survivors on c48b3e6.
+
+/// A coder's file that is there and cannot be read — here a directory — is
+/// an error, never an empty triage, for every reader of it.
+#[test]
+fn a_coders_file_that_cannot_be_opened_is_not_an_empty_one() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(mutants::TRIAGE_FILE)).unwrap();
+    let err = mutants::read_triage(dir.path()).unwrap_err();
+    assert!(err.to_string().contains(mutants::TRIAGE_FILE), "{err}");
+    assert!(mutants::foreign(dir.path()).is_err());
+}
+
+/// A ratification is recorded on its own entry only: not on one of the
+/// same mutation given on another commit or another mission, nor on another
+/// mutation or another file given where it was.
+#[test]
+fn a_ratification_is_recorded_on_its_own_entry_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = registry_project(dir.path(), BODY);
+    ruled_on_a(&project);
+    let mut registry = equivalences::read(&project.hq_root).unwrap();
+    let own = registry.entries[0].clone();
+    let variant = |change: &dyn Fn(&mut equivalences::Entry)| {
+        let mut e = own.clone();
+        change(&mut e);
+        e
+    };
+    registry.entries.extend([
+        variant(&|e| e.commit = "0000000000000000000000000000000000000000".into()),
+        variant(&|e| e.mission = "z".into()),
+        variant(&|e| e.description = "another mutation".into()),
+        variant(&|e| e.file = "src/other.rs".into()),
+    ]);
+    equivalences::write(&project.hq_root, &registry).unwrap();
+
+    let ruling = equivalences::Ruling {
+        hq_root: &project.hq_root,
+        tree: &project.root,
+        mission: "b",
+        by: "the HQ",
+    };
+    let (campaign, _) = campaign_on(&project, "b", &[on_lib(2)]);
+    let registered = equivalences::ratified(
+        &ruling,
+        &campaign,
+        &campaign.survivors[0].id,
+        (&own.mission, &own.commit),
+    );
+    assert_eq!(registered, Registered::Done(1));
+    let after = equivalences::read(&project.hq_root).unwrap().entries;
+    assert_eq!(after[0].ratified.len(), 1, "its own entry");
+    assert!(
+        after[1..].iter().all(|e| e.ratified.is_empty()),
+        "{:?}",
+        after
+    );
+}
+
+/// `--lift` on a ruling an older `nunki` carried — kept with the commit it
+/// was first given on — takes its registry entry out by that origin, though
+/// the code has changed since.
+#[test]
+fn lifting_an_older_carried_ruling_takes_its_entry_out_by_origin() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = registry_project(dir.path(), BODY);
+    let id = ruled_on_a(&project);
+    let ruled_at = git(&project.root, &["rev-parse", "HEAD"]);
+    commit_lib(&project, "pub fn one() -> u8 {\n    1 + 0\n}\n");
+    let head = git(&project.root, &["rev-parse", "HEAD"]);
+    let a = mission_dir(&project, "a");
+    let mut carried = on_lib(2);
+    carried.id = id.clone();
+    carried.outcome = Some(Triage::Equivalent {
+        why: "nothing reads the value".into(),
+        carried_from: Some(ruled_at),
+    });
+    mutants::write(
+        &a,
+        &Campaign {
+            fingerprint: "f".into(),
+            head,
+            date: "d".into(),
+            survivors: vec![carried],
+            tried: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        nunki::findings::lift_equivalent(&project, "a", &id).unwrap(),
+        Registered::Done(1)
+    );
+    assert!(
+        equivalences::read(&project.hq_root)
+            .unwrap()
+            .entries
+            .is_empty()
+    );
 }

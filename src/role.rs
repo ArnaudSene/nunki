@@ -48,8 +48,10 @@ the survivor's id, spelled exactly as `MUTANTS.json` spells it:
 
     {\"<survivor id>\": {\"kind\": \"killed\", \"test\": \"<the test's name>\"}}
 
-`kind` is `killed` or `bug`, and the `test` it names has to exist in the tree:
-`nunki` goes looking for it. Calling a survivor equivalent is not yours to give:
+`kind` is `killed` or `bug`, and the `test` it names has to exist in the tree,
+committed: `nunki` goes looking for it, as a whole word. It is a name —
+letters, digits and underscores, three at least — and anything else is no
+outcome. Calling a survivor equivalent is not yours to give:
 it is the one answer nobody can check, so it is decided for you, and an
 `equivalent` in your file is refused: it is read as no outcome, and the gate
 names it.
