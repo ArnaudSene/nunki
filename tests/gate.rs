@@ -1114,6 +1114,7 @@ impl Fixture {
         nunki::mutants::write(
             self._dir.path(),
             &Campaign {
+                chain: Default::default(),
                 fingerprint,
                 head: git(&self.tree, &["rev-parse", "HEAD"]),
                 date: "2026-09-10T12:00:00Z".into(),
@@ -1262,6 +1263,7 @@ impl Fixture {
 
 fn survivor(line: u32, outcome: Option<Triage>) -> Survivor {
     Survivor {
+        found_on: None,
         id: format!("src/new.rs:{line}"),
         file: "src/new.rs".into(),
         line,
@@ -2157,6 +2159,7 @@ fn the_gates_that_run_in_the_copy_stand_down_while_a_campaign_rewrites_it() {
         &project.hq_root,
         &slot.name,
         &nunki::mutants::Running {
+            chain: Default::default(),
             fingerprint: "a62d271".into(),
             head: git(&f.tree, &["rev-parse", "HEAD"]),
             started_at: "2026-09-18T20:56:38Z".into(),
@@ -2209,6 +2212,7 @@ fn gate_seven_waits_for_a_campaign_in_flight_and_never_reads_its_progress_as_a_f
         &project.hq_root,
         &slot.name,
         &nunki::mutants::Running {
+            chain: Default::default(),
             fingerprint: "886307b".into(),
             head: git(&f.tree, &["rev-parse", "HEAD"]),
             started_at: "2026-09-25T04:57:48Z".into(),
@@ -3202,4 +3206,106 @@ fn gate_seven_takes_no_test_name_that_is_not_a_name() {
         },
     )]);
     assert_eq!(f.gate_seven(Role::Coder).decision, Decision::Passed);
+}
+
+// ---------------------------------------------------------------------------
+// Gate 7 on a chain of campaigns: at `standard`, each judged on its own
+// mutants (SPEC 4.4).
+// ---------------------------------------------------------------------------
+
+impl Fixture {
+    /// A partial campaign on the current content, continuing a full one at
+    /// an earlier commit that tried `earlier_tried`; `earlier_open` of the
+    /// survivors are that earlier campaign's, the rest the partial one's.
+    fn chained(&self, earlier_tried: u32, earlier_open: u32, tried: u32, open: u32) {
+        use nunki::mutants::{Chain, Link, Scope};
+        let touched = nunki::gate::touched_since_base(&self.tree, "dev").unwrap();
+        let fingerprint = nunki::mutants::fingerprint(&self.tree, &touched).unwrap();
+        let earlier = "e".repeat(40);
+        let mut survivors: Vec<Survivor> = (1..=earlier_open)
+            .map(|line| Survivor {
+                found_on: Some(earlier.clone()),
+                ..survivor(line, None)
+            })
+            .collect();
+        survivors.extend((1..=open).map(|line| survivor(line + 100, None)));
+        nunki::mutants::write(
+            self._dir.path(),
+            &Campaign {
+                fingerprint,
+                head: git(&self.tree, &["rev-parse", "HEAD"]),
+                date: "2026-10-01T12:00:00Z".into(),
+                survivors,
+                tried: Some(tried),
+                chain: Chain {
+                    scope: Scope::Partial {
+                        since: earlier.clone(),
+                    },
+                    tooling: Some("tools".into()),
+                    earlier: vec![Link {
+                        head: earlier,
+                        date: "2026-10-01T10:00:00Z".into(),
+                        scope: Scope::Full {
+                            why: "the first campaign of this mission".into(),
+                        },
+                        tried: Some(earlier_tried),
+                    }],
+                },
+            },
+        )
+        .unwrap();
+    }
+}
+
+/// A partial campaign is judged on its own mutants: 7 of 10 is below 80%,
+/// and the gate is red — though the chain's total, 197 of 200, would pass.
+#[test]
+fn at_standard_a_partial_campaign_below_the_threshold_is_red_whatever_the_chains_total() {
+    let f = standard();
+    f.chained(190, 0, 10, 3);
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => {
+            assert!(why.starts_with("the partial campaign at "), "{why}");
+            assert!(
+                why.contains("7 of 10 tried mutant(s) killed (70%)"),
+                "{why}"
+            );
+        }
+        other => panic!("a partial campaign at 70% is below 80%: {other:?}"),
+    }
+}
+
+/// Every campaign of the chain must pass: an earlier one below the
+/// threshold is red, named, even when the one on file is perfect.
+#[test]
+fn at_standard_an_earlier_campaign_of_the_chain_below_the_threshold_is_red() {
+    let f = standard();
+    f.chained(10, 3, 50, 0);
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => {
+            assert!(
+                why.starts_with("the full campaign at eeeeeeeeeeee"),
+                "{why}"
+            );
+            assert!(why.contains("7 of 10"), "{why}");
+        }
+        other => panic!("an earlier campaign at 70% is below 80%: {other:?}"),
+    }
+}
+
+/// Both campaigns at or above the threshold: green, and the note says each.
+#[test]
+fn at_standard_a_chain_whose_every_campaign_passes_is_green_and_says_each() {
+    let f = standard();
+    f.chained(10, 2, 10, 2);
+    let outcome = f.gate_seven(Role::Coder);
+    assert_eq!(outcome.decision, Decision::Passed);
+    let note = outcome.note.expect("a chain is said");
+    assert!(
+        note.contains("2 campaigns in this mission's chain"),
+        "{note}"
+    );
+    assert!(note.contains("the full campaign at eeeeeeeeeeee"), "{note}");
+    assert!(note.contains("the partial campaign at "), "{note}");
+    assert!(note.contains("8 of 10 tried mutant(s) killed"), "{note}");
 }

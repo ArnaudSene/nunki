@@ -221,6 +221,42 @@ Python and Next.js projects judge `standard` as `critical` until their
 campaigns count changed lines: mutmut and Stryker are run over whole touched
 files, so they give no count, and every survivor needs an outcome there.
 
+### Gate 7's campaigns, full and partial
+
+A mission's campaigns form a chain. The first is **full**: every line the
+branch changed since its fork point. At `standard`, a later one — after a
+volet, say — is **partial**: it mutates only the lines changed since the
+previous campaign's `HEAD`, which it is handed as `NUNKI_BASE` in place of the
+fork point. It is partial only when all of these hold, and full otherwise,
+with the reason in `MUTANTS.json`:
+
+- the mission is at `standard`;
+- a previous campaign of the mission is on file and gate 7 passes on it;
+- its `HEAD` is an ancestor of the current one;
+- the stack's `mutation.sh` and its tool's version are the ones it ran with —
+  read through the script's `# nunki-tool-version: <command>` line, which
+  every shipped `mutation.sh` carries; a script without it runs full
+  campaigns only;
+- it was not asked with `nunki mission mutants --again`.
+
+Each campaign of the chain is judged **on its own mutants**, at the mission's
+threshold, and gate 7 is green when every one is: a partial campaign that
+tried ten mutants and killed seven is red at 80%, whatever the earlier ones
+killed. `nunki push` asks the same of the whole chain. The earlier campaigns'
+survivors whose code the later diff does not reach stay listed — at the line
+they now stand on — and keep what the HQ said on them the way any campaign
+does: a ruling comes back as a proposal marked carried, awaiting `--ratify`,
+and a refusal stays. Those the diff reaches, judged on the whole span the
+mutation replaces, are dropped: their code is mutated again. `mission
+status`, the monitor's log and the follow-up say each campaign — full or
+partial, from which commit, tried, killed, survivors.
+
+**The known limit.** A partial campaign assumes that a mutant an earlier
+campaign killed, on a line nobody has changed since, is still killed. A volet
+that weakens a test can make that false, and the chain will not see it.
+`critical` never makes the assumption — its campaigns are always full — and
+`--again` forces a full campaign at any rigor.
+
 The rigor is frozen in the header like the bounds, and `mission reframe`
 shows a change of it. Once the security rounds are spent, the agent is not
 called again. A spent cap never verifies a red verdict: if the last round

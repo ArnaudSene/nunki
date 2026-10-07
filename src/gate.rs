@@ -1547,13 +1547,53 @@ fn mutation(subject: &Subject, threshold: Threshold) -> Result<Outcome, GateErro
         coders: &coders,
         foreign: &foreign,
     };
-    let mut outcome = judged(subject, threshold, &campaign, answer)?;
+    let parts = crate::mutants::parts(&campaign);
+    let mut outcome = match parts.as_slice() {
+        [_] => judged(subject, threshold, &campaign, answer)?,
+        chain => chain_judged(subject, threshold, chain, answer)?,
+    };
     if let Some(refused) = crate::mutants::foreign_said(&foreign) {
         outcome.note = Some(match outcome.note {
             Some(note) => format!("{note}; {refused}"),
             None => refused,
         });
     }
+    Ok(outcome)
+}
+
+/// Gate 7 on a chain of campaigns (SPEC 4.4): each judged on **its own**
+/// mutants, at the mission's threshold, exactly as a campaign alone is
+/// ([`judged`]) — never on the chain's total, which would let an earlier
+/// campaign's kills carry a later one that tried few and killed fewer. Green
+/// when every campaign of the chain is; the first red one is the gate's
+/// answer, named.
+fn chain_judged(
+    subject: &Subject,
+    threshold: Threshold,
+    parts: &[crate::mutants::Part],
+    answer: &Answers,
+) -> Result<Outcome, GateError> {
+    let gate = Gate::Mutation;
+    let mut notes = Vec::new();
+    for part in parts {
+        let said = part.said();
+        let outcome = judged(subject, threshold, &part.campaign, answer)?;
+        if let Decision::Failed(why) = outcome.decision {
+            let mut red = Outcome::of(gate, Decision::Failed(format!("{said}: {why}")));
+            red.note = outcome.note.map(|note| format!("{said}: {note}"));
+            return Ok(red);
+        }
+        notes.push(match outcome.note {
+            Some(note) => format!("{said}: {note}"),
+            None => format!("{said}: passed"),
+        });
+    }
+    let mut outcome = Outcome::of(gate, Decision::Passed);
+    outcome.note = Some(format!(
+        "{} campaigns in this mission's chain, each judged on its own mutants — {}",
+        parts.len(),
+        notes.join("; ")
+    ));
     Ok(outcome)
 }
 

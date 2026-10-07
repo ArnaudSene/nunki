@@ -191,6 +191,7 @@ fn a_campaign_in_flight_keeps_the_copy_it_is_rewriting() {
         &w.project.hq_root,
         &w.slot.name,
         &nunki::mutants::Running {
+            chain: Default::default(),
             fingerprint: "abc1234".into(),
             head: git(&w.slot.tree, &["rev-parse", "HEAD"]),
             started_at: "2026-09-19T12:00:00Z".into(),
@@ -501,4 +502,283 @@ fn every_stack_audits_itself_against_its_own_database() {
         decision_of(&s, nunki::gate::Gate::MechanicalSecurity),
         nunki::gate::Decision::Passed
     );
+}
+
+/// A mission branch with a first lot and a volet after it, its stack's
+/// `mutation.sh` a stand-in that names its tool's version, and an engine
+/// that really runs in the slot (SPEC 4.4, the chain of campaigns).
+struct Volet {
+    w: World,
+    project: Project,
+    engine: std::sync::Arc<LocalEngine>,
+    mission: PathBuf,
+    /// The commit the first campaign ran on.
+    first: String,
+}
+
+const STAND_IN: &str = "#!/bin/sh\n# nunki-tool-version: echo stand-in 1.0\n\
+                        printf '%s\\n' '{\"campaign\":\"done\",\"tried\":0,\"found\":0}'\n";
+
+fn volet() -> Volet {
+    let w = world();
+    git(&w.slot.tree, &["checkout", "-q", "-b", "mission/x"]);
+    std::fs::write(
+        w.slot.tree.join("src/lib.rs"),
+        "pub fn keep(n: u8) -> bool {\n    n > 4\n}\n",
+    )
+    .unwrap();
+    git(&w.slot.tree, &["commit", "-q", "-am", "L1"]);
+    let first = git(&w.slot.tree, &["rev-parse", "HEAD"]);
+    std::fs::write(
+        w.slot.tree.join("src/lib.rs"),
+        "pub fn keep(n: u8) -> bool {\n    n > 5\n}\n",
+    )
+    .unwrap();
+    git(&w.slot.tree, &["commit", "-q", "-am", "volet"]);
+
+    let project = w.project.clone();
+    let fragment = project.fragment("rust");
+    std::fs::create_dir_all(&fragment).unwrap();
+    let script = fragment.join(nunki::mutants::SCRIPT);
+    std::fs::write(&script, STAND_IN).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let run = w.proof.with_file_name("run");
+    let engine = std::sync::Arc::new(LocalEngine::new(&[
+        (nunki::exec::PROOF_AT, w.proof.as_path()),
+        (nunki::run::TREE_AT, w.slot.tree.as_path()),
+        (nunki::engine::spawn::RUN_DIR, run.as_path()),
+        (nunki::run::STACK_AT, fragment.as_path()),
+    ]));
+    engine.up(Path::new("profile"), "local").unwrap();
+    let mission = w.proof.with_file_name("mission");
+    std::fs::create_dir_all(&mission).unwrap();
+    Volet {
+        w,
+        project,
+        engine,
+        mission,
+        first,
+    }
+}
+
+impl Volet {
+    /// The first campaign, on file: full, at `first`, gate 7 green on it,
+    /// and run with `tooling`.
+    fn first_campaign_ran_with(&self, tooling: Option<String>) {
+        nunki::mutants::write(
+            &self.mission,
+            &nunki::mutants::Campaign {
+                fingerprint: "the first lot's".into(),
+                head: self.first.clone(),
+                date: "2026-10-07T10:00:00Z".into(),
+                survivors: vec![],
+                tried: Some(12),
+                chain: nunki::mutants::Chain {
+                    scope: nunki::mutants::Scope::Full {
+                        why: "the first campaign of this mission".into(),
+                    },
+                    tooling,
+                    earlier: vec![],
+                },
+            },
+        )
+        .unwrap();
+    }
+
+    /// What the slot's stack runs with now, read the way a launch reads it.
+    fn tooling_now(&self) -> Option<String> {
+        nunki::mutants::tooling(
+            &self.project,
+            &self.w.slot,
+            self.engine.clone(),
+            &nunki::run::judged(&self.project, "rust"),
+        )
+        .unwrap()
+    }
+
+    fn launch(&self, rigor: nunki::mission::Rigor) -> nunki::mutants::Progress {
+        nunki::mutants::campaign(
+            &self.project,
+            &self.w.slot,
+            self.engine.clone(),
+            &self.mission,
+            "rust",
+            &nunki::mutants::Asked {
+                base: "dev",
+                deadline_minutes: 45,
+                replay: nunki::mutants::Replay::WhenChanged,
+                rigor,
+                threshold: 80,
+            },
+        )
+        .unwrap()
+    }
+
+    fn launched_as(&self) -> nunki::mutants::Chain {
+        nunki::mutants::read_running(&self.project.hq_root, &self.w.slot.name)
+            .unwrap()
+            .expect("the campaign is filed as in flight")
+            .chain
+    }
+}
+
+/// At standard, after a passing campaign run with the same script and tool,
+/// a volet's campaign is launched partial from that campaign's `HEAD`, and
+/// filed so: what it is recorded with once it ends.
+#[test]
+fn at_standard_a_volets_campaign_is_launched_partial_from_the_previous_head() {
+    let v = volet();
+    let tooling = v.tooling_now();
+    assert!(tooling.is_some(), "the stand-in names its version");
+    v.first_campaign_ran_with(tooling.clone());
+
+    let progress = v.launch(nunki::mission::Rigor::Standard);
+    let partial = nunki::mutants::Scope::Partial {
+        since: v.first.clone(),
+    };
+    match progress {
+        nunki::mutants::Progress::Started { scope, .. } => assert_eq!(scope, partial),
+        other => panic!("the campaign was not launched: {other:?}"),
+    }
+    let chain = v.launched_as();
+    assert_eq!(chain.scope, partial);
+    assert_eq!(chain.tooling, tooling);
+}
+
+/// The same volet with a script edited since the first campaign: full, and
+/// the record says why.
+#[test]
+fn a_campaign_after_its_script_changed_is_launched_full() {
+    let v = volet();
+    v.first_campaign_ran_with(v.tooling_now());
+    std::fs::write(
+        v.project.fragment("rust").join(nunki::mutants::SCRIPT),
+        format!("{STAND_IN}# edited since\n"),
+    )
+    .unwrap();
+
+    v.launch(nunki::mission::Rigor::Standard);
+    match v.launched_as().scope {
+        nunki::mutants::Scope::Full { why } => {
+            assert!(
+                why.contains("mutation.sh or its tool's version changed"),
+                "{why}"
+            )
+        }
+        partial => panic!("an edited script continued the chain: {partial:?}"),
+    }
+}
+
+/// At critical, the same volet's campaign is full, as it always was.
+#[test]
+fn at_critical_a_volets_campaign_is_launched_full() {
+    let v = volet();
+    v.first_campaign_ran_with(v.tooling_now());
+    v.launch(nunki::mission::Rigor::Critical);
+    let chain = v.launched_as();
+    assert!(
+        matches!(&chain.scope, nunki::mutants::Scope::Full { why } if why.contains("critical")),
+        "{chain:?}"
+    );
+}
+
+/// The previous campaign's commit rewritten out of the branch: no diff to
+/// continue from, and the campaign is full.
+#[test]
+fn a_campaign_whose_previous_head_left_the_branch_is_launched_full() {
+    let mut v = volet();
+    let tooling = v.tooling_now();
+    // The first lot amended: its campaign's commit is no ancestor any more.
+    git(
+        &v.w.slot.tree,
+        &["checkout", "-q", "-b", "elsewhere", &v.first],
+    );
+    git(
+        &v.w.slot.tree,
+        &["commit", "-q", "--amend", "-m", "L1, rewritten"],
+    );
+    v.first = git(&v.w.slot.tree, &["rev-parse", "HEAD"]);
+    git(&v.w.slot.tree, &["checkout", "-q", "mission/x"]);
+    v.first_campaign_ran_with(tooling);
+
+    v.launch(nunki::mission::Rigor::Standard);
+    match v.launched_as().scope {
+        nunki::mutants::Scope::Full { why } => {
+            assert!(why.contains("not an ancestor"), "{why}")
+        }
+        partial => panic!("a commit off the branch continued the chain: {partial:?}"),
+    }
+}
+
+/// The previous campaign left below the threshold: gate 7 did not pass on
+/// it, and the campaign is full.
+#[test]
+fn a_campaign_after_one_gate_seven_did_not_pass_is_launched_full() {
+    let v = volet();
+    v.first_campaign_ran_with(v.tooling_now());
+    let mut first = nunki::mutants::read(&v.mission).unwrap().unwrap();
+    first.survivors = (1..=3)
+        .map(|line| nunki::mutants::Survivor {
+            id: format!("s{line}"),
+            file: "src/lib.rs".into(),
+            line,
+            end_line: None,
+            description: "replace > with <".into(),
+            outcome: None,
+            refused: None,
+            found_on: None,
+        })
+        .collect();
+    first.tried = Some(10);
+    nunki::mutants::write(&v.mission, &first).unwrap();
+
+    v.launch(nunki::mission::Rigor::Standard);
+    match v.launched_as().scope {
+        nunki::mutants::Scope::Full { why } => {
+            assert!(why.contains("gate 7 did not pass"), "{why}");
+            assert!(why.contains("7 of 10"), "{why}");
+        }
+        partial => panic!("a red campaign was continued: {partial:?}"),
+    }
+}
+
+/// The previous campaign's share rests on a test nothing in the tree is
+/// called: gate 7 would not pass on it, and the campaign is full.
+#[test]
+fn a_campaign_after_one_resting_on_a_missing_test_is_launched_full() {
+    let v = volet();
+    v.first_campaign_ran_with(v.tooling_now());
+    let mut first = nunki::mutants::read(&v.mission).unwrap().unwrap();
+    first.survivors = vec![nunki::mutants::Survivor {
+        id: "s1".into(),
+        file: "src/lib.rs".into(),
+        line: 2,
+        end_line: None,
+        description: "replace > with <".into(),
+        outcome: None,
+        refused: None,
+        found_on: None,
+    }];
+    nunki::mutants::write(&v.mission, &first).unwrap();
+    nunki::mutants::write_triage(
+        &v.mission,
+        &[(
+            "s1".to_string(),
+            nunki::mutants::Triage::Killed {
+                test: "a_test_nobody_wrote".into(),
+            },
+        )]
+        .into_iter()
+        .collect(),
+    )
+    .unwrap();
+
+    v.launch(nunki::mission::Rigor::Standard);
+    match v.launched_as().scope {
+        nunki::mutants::Scope::Full { why } => {
+            assert!(why.contains("a_test_nobody_wrote"), "{why}")
+        }
+        partial => panic!("a campaign resting on a missing test was continued: {partial:?}"),
+    }
 }

@@ -2321,14 +2321,20 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                 engine,
                 &paths.dir,
                 &stack,
-                // The base's name: `campaign` works out what this branch
-                // brought, through the same call gate 7 makes.
-                &header.base,
-                header.bounds.mutation_minutes,
-                if again {
-                    nunki::mutants::Replay::Now
-                } else {
-                    nunki::mutants::Replay::WhenChanged
+                &nunki::mutants::Asked {
+                    // The base's name: `campaign` works out what this branch
+                    // brought, through the same call gate 7 makes.
+                    base: &header.base,
+                    deadline_minutes: header.bounds.mutation_minutes,
+                    replay: if again {
+                        nunki::mutants::Replay::Now
+                    } else {
+                        nunki::mutants::Replay::WhenChanged
+                    },
+                    rigor: header.rigor,
+                    threshold: header
+                        .mutation_threshold
+                        .unwrap_or(project.config.mutation_threshold),
                 },
             ) {
                 Ok(progress) => {
@@ -2339,15 +2345,24 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                              {survivors} survivor(s); it replays only when the touched \
                              files change, or when you say `--again`"
                         ),
-                        Progress::Started { fingerprint } => println!(
-                            "campaign {} started; `nunki mission mutants {id}` follows it",
-                            &fingerprint[..7.min(fingerprint.len())]
+                        Progress::Started { fingerprint, scope } => println!(
+                            "campaign {} started, {}{}; `nunki mission mutants {id}` follows it",
+                            &fingerprint[..7.min(fingerprint.len())],
+                            scope.said(),
+                            match &scope {
+                                nunki::mutants::Scope::Full { why } if !why.trim().is_empty() =>
+                                    format!(" ({})", nunki::text::one_line(why)),
+                                _ => String::new(),
+                            }
                         ),
                         Progress::Running { started_at, lines } => {
                             println!("running since {started_at} — {lines} line(s) so far")
                         }
-                        Progress::Finished { survivors } => {
-                            println!("{}", nunki::mutants::ended(survivors))
+                        Progress::Finished { survivors, chain } => {
+                            println!("{}", nunki::mutants::ended(survivors));
+                            for said in &chain {
+                                println!("campaign  {said}");
+                            }
                         }
                         Progress::Overrun { minutes } => {
                             eprintln!(
@@ -2536,6 +2551,17 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                     project.config.mutation_threshold
                 ),
                 (rigor, _) => println!("rigor     {rigor}"),
+            }
+            // Each campaign of the chain, full or partial, with its counts:
+            // gate 7 judges them one by one, and so does this listing.
+            match nunki::mutants::chain_on_file(&mission_dir::Paths::of(&project.hq_root, &id).dir)
+            {
+                Ok(chain) => {
+                    for said in &chain {
+                        println!("campaign  {said}");
+                    }
+                }
+                Err(e) => println!("campaign  could not be read: {e}"),
             }
             for lot in &header.lots {
                 println!("lot       {} — {}", lot.id, lot.title);

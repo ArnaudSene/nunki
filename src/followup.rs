@@ -416,7 +416,54 @@ const PROPOSALS_HEADING: &str = "equivalence proposal(s) await the HQ";
 /// The body of the last [`proposals_await`] section of `text`, trimmed: what
 /// follows its heading, up to the next heading or the end of the file.
 fn last_proposals(text: &str) -> Option<&str> {
-    let heading = text
+    last_section(text, PROPOSALS_HEADING)
+}
+
+/// Gate 7 passed on a chain of campaigns (SPEC 4.4): each campaign in one
+/// line ([`crate::mutants::chain_said`]) — full or partial and from which
+/// commit, what it tried, killed and left — so the HQ reading the pull
+/// request's follow-up sees which lines were measured when.
+///
+/// Nothing is written for a single campaign, whose counts gate 7's note
+/// already gives, nor when the last such section said the same.
+pub fn campaigns(file: &Path, chain: &[String]) -> Result<(), FollowupError> {
+    if chain.len() < 2 {
+        return Ok(());
+    }
+    let listed = chain
+        .iter()
+        .enumerate()
+        .map(|(n, said)| format!("{}. {}", n + 1, crate::text::one_line(said)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let body = format!(
+        "Each was judged on its own mutants, and gate 7 passed on every one. A\n\
+         partial campaign mutated only the lines changed since the campaign\n\
+         before it, and kept that campaign's survivors whose code still stands:\n\n\
+         {listed}\n"
+    );
+    let existing = std::fs::read_to_string(file).unwrap_or_default();
+    if last_section(&existing, CAMPAIGNS_HEADING) == Some(crate::text::printable(&body).trim()) {
+        return Ok(());
+    }
+    append(
+        file,
+        &format!(
+            "## {date} — {count} {CAMPAIGNS_HEADING}\n\n{body}",
+            date = today(),
+            count = chain.len(),
+        ),
+    )
+}
+
+/// How the heading of a [`campaigns`] section ends.
+const CAMPAIGNS_HEADING: &str = "mutation campaigns in this mission's chain";
+
+/// The body of the last section of `text` whose heading ends with
+/// `heading`, trimmed: what follows the heading, up to the next heading or
+/// the end of the file.
+fn last_section<'a>(text: &'a str, heading: &str) -> Option<&'a str> {
+    let at = text
         .match_indices("## ")
         .filter(|(at, _)| *at == 0 || text[..*at].ends_with('\n'))
         .map(|(at, _)| at)
@@ -424,10 +471,10 @@ fn last_proposals(text: &str) -> Option<&str> {
             text[*at..]
                 .lines()
                 .next()
-                .is_some_and(|line| line.ends_with(PROPOSALS_HEADING))
+                .is_some_and(|line| line.ends_with(heading))
         })
         .last()?;
-    let rest = &text[heading..];
+    let rest = &text[at..];
     let body = &rest[rest.find('\n').map_or(rest.len(), |at| at + 1)..];
     let end = body.find("\n## ").map_or(body.len(), |at| at + 1);
     Some(body[..end].trim())

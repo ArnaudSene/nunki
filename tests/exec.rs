@@ -68,6 +68,7 @@ fn nothing_touches_the_copy_a_campaign_is_rewriting() {
         &project.hq_root,
         &slot.name,
         &nunki::mutants::Running {
+            chain: Default::default(),
             fingerprint: "abc1234".into(),
             head: "def5678".into(),
             started_at: "2026-09-18T22:52:37Z".into(),

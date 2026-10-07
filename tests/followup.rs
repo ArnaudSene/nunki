@@ -77,6 +77,16 @@ fn every_record_the_hq_leaves_is_prose_and_not_a_code_block() {
     )
     .unwrap();
     followup::proposals_await(&file, "m1", &[proposal("s1", "only a log line reads it")]).unwrap();
+    followup::campaigns(
+        &file,
+        &[
+            "full at aaaaaaaaaaaa — tried 9, killed 9, 0 survivor(s), 0 without an outcome".into(),
+            "partial since aaaaaaaaaaaa at bbbbbbbbbbbb — tried 2, killed 1, 1 survivor(s), \
+             1 without an outcome"
+                .into(),
+        ],
+    )
+    .unwrap();
 
     let text = std::fs::read_to_string(&file).unwrap();
     assert_prose(&text, "a record");
@@ -92,6 +102,7 @@ fn every_record_the_hq_leaves_is_prose_and_not_a_code_block() {
         "Not attacked by the security agent",
         "refused an equivalence the coder proposed",
         "equivalence proposal(s) await the HQ",
+        "mutation campaigns in this mission's chain",
     ] {
         assert!(text.contains(needle), "{needle} is missing:\n{text}");
     }
@@ -250,4 +261,50 @@ fn the_proposals_are_written_once_per_change_and_not_on_every_pass() {
 
     followup::proposals_await(&file, "m1", &a).unwrap();
     assert_eq!(count(), 3, "back to an earlier list is a change too");
+}
+
+/// Each campaign of a chain gate 7 passed on is said in the follow-up, in
+/// its own line; a single campaign, which gate 7's note already counts, is
+/// not; and the same chain twice is one section.
+#[test]
+fn a_chain_of_campaigns_is_said_once_per_change_and_a_single_campaign_never() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("FOLLOWUP_HQ.md");
+    std::fs::write(&file, "# Follow-up\n").unwrap();
+    let count = || {
+        std::fs::read_to_string(&file)
+            .unwrap()
+            .matches("mutation campaigns in this mission's chain")
+            .count()
+    };
+    followup::campaigns(&file, &["full at aaaaaaaaaaaa — tried 9".to_string()]).unwrap();
+    followup::campaigns(&file, &[]).unwrap();
+    assert_eq!(count(), 0, "one campaign is no chain");
+
+    let two = [
+        "full at aaaaaaaaaaaa — tried 9".to_string(),
+        "partial since aaaaaaaaaaaa at bbbbbbbbbbbb — tried 2".to_string(),
+    ];
+    followup::campaigns(&file, &two).unwrap();
+    followup::campaigns(&file, &two).unwrap();
+    assert_eq!(count(), 1, "the same chain twice is one section");
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(text.contains("## "), "{text}");
+    assert!(
+        text.contains("2 mutation campaigns in this mission's chain"),
+        "{text}"
+    );
+    assert!(
+        text.contains("1. full at aaaaaaaaaaaa — tried 9\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("2. partial since aaaaaaaaaaaa at bbbbbbbbbbbb — tried 2\n"),
+        "{text}"
+    );
+
+    let mut three = two.to_vec();
+    three.push("partial since bbbbbbbbbbbb at cccccccccccc — tried 1".to_string());
+    followup::campaigns(&file, &three).unwrap();
+    assert_eq!(count(), 2, "a longer chain is a new section");
 }

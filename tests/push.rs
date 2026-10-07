@@ -159,6 +159,7 @@ impl World {
         nunki::mutants::write(
             &nunki::mission::dir::Paths::of(&hq_root, "m1").dir,
             &nunki::mutants::Campaign {
+                chain: Default::default(),
                 fingerprint: "f".into(),
                 head: String::new(),
                 date: "2026-10-06T12:00:00Z".into(),
@@ -1398,6 +1399,7 @@ fn push_refuses_until_every_proposed_equivalence_is_ratified_or_refused() {
 
     let dir = nunki::mission::dir::Paths::of(&world.project.hq_root, "m1").dir;
     let survivor = |id: &str| Survivor {
+        found_on: None,
         id: id.into(),
         file: "src.rs".into(),
         line: 1,
@@ -1409,6 +1411,7 @@ fn push_refuses_until_every_proposed_equivalence_is_ratified_or_refused() {
     mutants::write(
         &dir,
         &Campaign {
+            chain: Default::default(),
             fingerprint: "f".into(),
             head: head.clone(),
             date: "2026-10-06T12:00:00Z".into(),
@@ -1521,6 +1524,7 @@ fn the_hq_rules_on_proposals_with_two_verbs_and_status_lists_them() {
     let head = world.commit("src.rs", "pub fn one() -> u8 { 2 }\n", "the lot");
     let paths = nunki::mission::dir::Paths::of(&world.project.hq_root, "m1");
     let survivor = |id: &str| Survivor {
+        found_on: None,
         id: id.into(),
         file: "src.rs".into(),
         line: 1,
@@ -1532,6 +1536,7 @@ fn the_hq_rules_on_proposals_with_two_verbs_and_status_lists_them() {
     mutants::write(
         &paths.dir,
         &Campaign {
+            chain: Default::default(),
             fingerprint: "f".into(),
             head,
             date: "2026-10-06T12:00:00Z".into(),
@@ -1613,6 +1618,7 @@ fn at_standard_push_refuses_a_share_below_the_threshold_gate_seven_used() {
 
     let dir = nunki::mission::dir::Paths::of(&world.project.hq_root, "m1").dir;
     let survivor = |line: u32| Survivor {
+        found_on: None,
         id: format!("s{line}"),
         file: "src.rs".into(),
         line,
@@ -1624,6 +1630,7 @@ fn at_standard_push_refuses_a_share_below_the_threshold_gate_seven_used() {
     mutants::write(
         &dir,
         &Campaign {
+            chain: Default::default(),
             fingerprint: "f".into(),
             head: head.clone(),
             date: "2026-10-06T12:00:00Z".into(),
@@ -1675,10 +1682,12 @@ fn refusing_a_proposal_on_a_verified_mission_sends_it_back_to_the_coder() {
         mutants::write(
             &paths.dir,
             &Campaign {
+                chain: Default::default(),
                 fingerprint: "f".into(),
                 head: head.clone(),
                 date: "2026-10-06T12:00:00Z".into(),
                 survivors: vec![Survivor {
+                    found_on: None,
                     id: "s1".into(),
                     file: "src.rs".into(),
                     line: 1,
@@ -1770,12 +1779,14 @@ fn verified_with(rigor: nunki::mission::Rigor, survivors: &[&str]) -> (World, Pa
     mutants::write(
         &dir,
         &Campaign {
+            chain: Default::default(),
             fingerprint: "f".into(),
             head: head.clone(),
             date: "2026-10-06T12:00:00Z".into(),
             survivors: survivors
                 .iter()
                 .map(|id| Survivor {
+                    found_on: None,
                     id: (*id).into(),
                     file: "src.rs".into(),
                     line: 1,
@@ -1959,10 +1970,12 @@ fn the_binary_lists_proposals_by_source_and_says_when_the_registry_is_left_alone
     nunki::mutants::write(
         &nunki::mission::dir::Paths::of(&world.project.hq_root, "m1").dir,
         &Campaign {
+            chain: Default::default(),
             fingerprint: "f".into(),
             head: "0123456789abcdef0123456789abcdef01234567".into(),
             date: "2026-10-06T12:00:00Z".into(),
             survivors: vec![Survivor {
+                found_on: None,
                 id: id.into(),
                 file: "src.rs".into(),
                 line: 1,
@@ -2055,6 +2068,7 @@ fn push_waits_on_nunkis_proposals_and_ratify_all_rules_them() {
     world.verified(&[(Role::Coder, None, head.clone())]);
     let paths = nunki::mission::dir::Paths::of(&world.project.hq_root, "m1");
     let survivor = |id: &str, outcome: Option<Triage>| Survivor {
+        found_on: None,
         id: id.into(),
         file: "src.rs".into(),
         line: 1,
@@ -2066,6 +2080,7 @@ fn push_waits_on_nunkis_proposals_and_ratify_all_rules_them() {
     mutants::write(
         &paths.dir,
         &Campaign {
+            chain: Default::default(),
             fingerprint: "f".into(),
             head,
             date: "2026-10-06T12:00:00Z".into(),
@@ -2336,4 +2351,113 @@ fn a_prototype_is_pushed_whatever_test_its_triage_names() {
     .unwrap();
     push::push(&world.project, "m1", true).unwrap();
     assert_eq!(world.on_forge("mission/x").as_deref(), Some(head.as_str()));
+}
+
+/// Push re-checks the whole chain of campaigns, as gate 7 does: an earlier
+/// campaign below the threshold on its own mutants is refused even when the
+/// one on file is perfect and the chain's total would pass.
+#[test]
+fn push_refuses_when_any_campaign_of_the_chain_is_red() {
+    use nunki::mutants::{self, Campaign, Chain, Link, Scope, Survivor};
+    let world = World::at(nunki::mission::Rigor::Standard);
+    let head = world.coded("pub fn one() -> u8 { 2 }\n", "the lot");
+    world.security(Verdict::Clear, "2026-10-06T12:00:00Z");
+    assert_eq!(world.stage(), Stage::Verified);
+
+    let dir = nunki::mission::dir::Paths::of(&world.project.hq_root, "m1").dir;
+    let earlier = "e".repeat(40);
+    let survivor = |line: u32| Survivor {
+        found_on: Some(earlier.clone()),
+        id: format!("s{line}"),
+        file: "src.rs".into(),
+        line,
+        end_line: None,
+        description: "replace 2 with 0".into(),
+        outcome: None,
+        refused: None,
+    };
+    let chain = |earlier_tried: u32| Campaign {
+        fingerprint: "f".into(),
+        head: head.clone(),
+        date: "2026-10-06T12:00:00Z".into(),
+        survivors: (1..=3).map(survivor).collect(),
+        tried: Some(100),
+        chain: Chain {
+            scope: Scope::Partial {
+                since: earlier.clone(),
+            },
+            tooling: Some("tools".into()),
+            earlier: vec![Link {
+                head: earlier.clone(),
+                date: "2026-10-05T12:00:00Z".into(),
+                scope: Scope::Full { why: String::new() },
+                tried: Some(earlier_tried),
+            }],
+        },
+    };
+    // 7 of 10 on the earlier campaign; 107 of 110 over the chain.
+    mutants::write(&dir, &chain(10)).unwrap();
+    match push::push(&world.project, "m1", true).unwrap_err() {
+        PushError::MutantsOwed { owed, .. } => {
+            assert!(owed.contains("the full campaign at eeeeeeeeeeee"), "{owed}");
+            assert!(owed.contains("7 of 10 tried mutant(s) killed"), "{owed}");
+        }
+        other => panic!("an earlier campaign at 70% is below 80%: {other}"),
+    }
+    assert!(world.on_forge("mission/x").is_none());
+
+    // At 97 of 100 the earlier campaign passes too, and so does the push.
+    mutants::write(&dir, &chain(100)).unwrap();
+    push::push(&world.project, "m1", true).unwrap();
+}
+
+/// `mission status` says each campaign of the chain, full or partial, from
+/// which commit, with what it tried, killed and left.
+#[test]
+fn status_says_each_campaign_of_the_chain_with_its_counts() {
+    use nunki::mutants::{self, Campaign, Chain, Link, Scope};
+    let world = World::opened_at(nunki::mission::Rigor::Standard);
+    let head = world.coded("pub fn one() -> u8 { 2 }\n", "the lot");
+    let dir = nunki::mission::dir::Paths::of(&world.project.hq_root, "m1").dir;
+    let earlier = "e".repeat(40);
+    mutants::write(
+        &dir,
+        &Campaign {
+            fingerprint: "f".into(),
+            head: head.clone(),
+            date: "2026-10-06T12:00:00Z".into(),
+            survivors: vec![],
+            tried: Some(4),
+            chain: Chain {
+                scope: Scope::Partial {
+                    since: earlier.clone(),
+                },
+                tooling: Some("tools".into()),
+                earlier: vec![Link {
+                    head: earlier,
+                    date: "2026-10-05T12:00:00Z".into(),
+                    scope: Scope::Full {
+                        why: "the first campaign of this mission".into(),
+                    },
+                    tried: Some(20),
+                }],
+            },
+        },
+    )
+    .unwrap();
+    let status = world.printed_by_the_binary(&["mission", "status", "m1"]);
+    assert!(
+        status.contains(
+            "campaign  full at eeeeeeeeeeee (the first campaign of this mission) — tried 20, \
+             killed 20, 0 survivor(s), 0 without an outcome"
+        ),
+        "{status}"
+    );
+    assert!(
+        status.contains(&format!(
+            "campaign  partial since eeeeeeeeeeee at {} — tried 4, killed 4",
+            &head[..12]
+        )),
+        "{status}"
+    );
 }

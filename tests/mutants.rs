@@ -145,6 +145,7 @@ fn a_campaign_found_stopped_writes_no_result() {
         &project.hq_root,
         &slot.name,
         &mutants::Running {
+            chain: Default::default(),
             fingerprint: "abc1234".into(),
             head: git(&tree, &["rev-parse", "HEAD"]),
             started_at: "2026-09-19T02:00:00Z".into(),
@@ -173,9 +174,13 @@ fn a_campaign_found_stopped_writes_no_result() {
         engine,
         &mission,
         "rust",
-        "dev",
-        45,
-        mutants::Replay::WhenChanged,
+        &mutants::Asked {
+            base: "dev",
+            deadline_minutes: 45,
+            replay: mutants::Replay::WhenChanged,
+            rigor: nunki::mission::Rigor::Critical,
+            threshold: 80,
+        },
     )
     .unwrap();
 
@@ -231,6 +236,7 @@ fn a_campaign_that_stopped_and_said_why_goes_back_to_the_branch() {
         &project.hq_root,
         &slot.name,
         &mutants::Running {
+            chain: Default::default(),
             fingerprint: "abc1234".into(),
             head: git(&tree, &["rev-parse", "HEAD"]),
             started_at: "2026-09-19T02:00:00Z".into(),
@@ -259,9 +265,13 @@ fn a_campaign_that_stopped_and_said_why_goes_back_to_the_branch() {
         engine,
         &mission,
         "rust",
-        "dev",
-        45,
-        mutants::Replay::WhenChanged,
+        &mutants::Asked {
+            base: "dev",
+            deadline_minutes: 45,
+            replay: mutants::Replay::WhenChanged,
+            rigor: nunki::mission::Rigor::Critical,
+            threshold: 80,
+        },
     )
     .unwrap();
 
@@ -337,6 +347,7 @@ fn a_launch_ends_the_campaign_it_would_have_killed_anyway() {
             &project.hq_root,
             &slot.name,
             &mutants::Running {
+                chain: Default::default(),
                 fingerprint: "abc1234".into(),
                 head: "def5678".into(),
                 started_at: "2026-09-18T22:52:37Z".into(),
@@ -439,6 +450,7 @@ fn ending_a_campaign_records_no_result() {
         &project.hq_root,
         &slot.name,
         &mutants::Running {
+            chain: Default::default(),
             fingerprint: "abc1234".into(),
             head: "def5678".into(),
             started_at: "2026-09-18T22:52:37Z".into(),
@@ -509,11 +521,13 @@ fn a_campaign_round_trips_through_the_mission_folder() {
     let dir = tempfile::tempdir().unwrap();
     assert_eq!(mutants::read(dir.path()).unwrap(), None);
     let campaign = Campaign {
+        chain: Default::default(),
         fingerprint: "abc1234".into(),
         head: "def5678".into(),
         tried: None,
         date: "2026-09-10T12:00:00Z".into(),
         survivors: vec![Survivor {
+            found_on: None,
             id: "src/lib.rs:3".into(),
             file: "src/lib.rs".into(),
             line: 3,
@@ -689,15 +703,19 @@ fn live_a_campaign_is_launched_watched_and_read_back() {
             engine.clone(),
             &mission,
             "rust",
-            "dev",
-            45,
-            mutants::Replay::WhenChanged,
+            &mutants::Asked {
+                base: "dev",
+                deadline_minutes: 45,
+                replay: mutants::Replay::WhenChanged,
+                rigor: nunki::mission::Rigor::Critical,
+                threshold: 80,
+            },
         )
         .unwrap()
     };
 
     match go() {
-        Progress::Started { fingerprint } => println!("started {fingerprint}"),
+        Progress::Started { fingerprint, .. } => println!("started {fingerprint}"),
         other => panic!("expected a launch, got {other:?}"),
     }
     // While it runs, the record is beside the campaign — never in the mission
@@ -722,7 +740,7 @@ fn live_a_campaign_is_launched_watched_and_read_back() {
         }
     }
     match finished.expect("the campaign ended") {
-        Progress::Finished { survivors } => assert_eq!(survivors, 2),
+        Progress::Finished { survivors, .. } => assert_eq!(survivors, 2),
         other => panic!("expected a finished campaign, got {other:?}"),
     }
     assert!(
@@ -775,7 +793,7 @@ fn live_a_campaign_is_launched_watched_and_read_back() {
         }
     };
     match again {
-        Progress::Finished { survivors } => assert_eq!(
+        Progress::Finished { survivors, .. } => assert_eq!(
             survivors, 2,
             "the same two, and not four: the log is this campaign's alone"
         ),
@@ -798,11 +816,13 @@ fn an_equivalence_is_ruled_by_a_verb_and_lands_in_the_hqs_own_file() {
     mutants::write(
         dir.path(),
         &Campaign {
+            chain: Default::default(),
             fingerprint: "abc1234".into(),
             head: "def5678".into(),
             tried: None,
             date: "2026-09-10T12:00:00Z".into(),
             survivors: vec![Survivor {
+                found_on: None,
                 id: "src/lib.rs:3".into(),
                 file: "src/lib.rs".into(),
                 line: 3,
@@ -833,6 +853,7 @@ fn an_equivalence_is_ruled_by_a_verb_and_lands_in_the_hqs_own_file() {
 
 fn one(id: &str, line: u32, description: &str) -> Survivor {
     Survivor {
+        found_on: None,
         id: id.into(),
         file: "src/cells.py".into(),
         line,
@@ -855,6 +876,7 @@ fn ruled_before(dir: &std::path::Path, survivors: Vec<Survivor>) {
     mutants::write(
         dir,
         &Campaign {
+            chain: Default::default(),
             fingerprint: "old0000".into(),
             head: "def5678".into(),
             date: "2026-09-10T12:00:00Z".into(),
@@ -1439,6 +1461,7 @@ fn what_a_campaign_says_is_a_sentence_and_not_a_layout() {
 fn on_file(dir: &std::path::Path, fingerprint: &str, survivors: usize) {
     let survivors = (0..survivors)
         .map(|i| mutants::Survivor {
+            found_on: None,
             id: format!("src/lib.rs:{i}:1: replace a with b"),
             file: "src/lib.rs".into(),
             line: i as u32 + 1,
@@ -1451,6 +1474,7 @@ fn on_file(dir: &std::path::Path, fingerprint: &str, survivors: usize) {
     mutants::write(
         dir,
         &mutants::Campaign {
+            chain: Default::default(),
             fingerprint: fingerprint.into(),
             head: "0".repeat(40),
             date: "2026-09-17T00:00:00Z".into(),
@@ -1931,6 +1955,7 @@ fn a_finished_campaign_that_tried_nothing_of_what_it_found_is_not_recorded() {
         &project.hq_root,
         &slot.name,
         &mutants::Running {
+            chain: Default::default(),
             fingerprint: "abc1234".into(),
             head: git(&tree, &["rev-parse", "HEAD"]),
             started_at: "2026-09-19T02:00:00Z".into(),
@@ -1957,9 +1982,13 @@ fn a_finished_campaign_that_tried_nothing_of_what_it_found_is_not_recorded() {
         engine,
         &mission,
         "rust",
-        "dev",
-        45,
-        mutants::Replay::WhenChanged,
+        &mutants::Asked {
+            base: "dev",
+            deadline_minutes: 45,
+            replay: mutants::Replay::WhenChanged,
+            rigor: nunki::mission::Rigor::Critical,
+            threshold: 80,
+        },
     )
     .unwrap();
 
@@ -2035,6 +2064,7 @@ fn a_campaign_that_said_it_finished_twice_leaves_its_reason_and_no_result() {
         &project.hq_root,
         &slot.name,
         &mutants::Running {
+            chain: Default::default(),
             fingerprint: "abc1234".into(),
             head: git(&tree, &["rev-parse", "HEAD"]),
             started_at: "2026-09-19T02:00:00Z".into(),
@@ -2061,9 +2091,13 @@ fn a_campaign_that_said_it_finished_twice_leaves_its_reason_and_no_result() {
         engine,
         &mission,
         "rust",
-        "dev",
-        45,
-        mutants::Replay::WhenChanged,
+        &mutants::Asked {
+            base: "dev",
+            deadline_minutes: 45,
+            replay: mutants::Replay::WhenChanged,
+            rigor: nunki::mission::Rigor::Critical,
+            threshold: 80,
+        },
     )
     .unwrap();
 
@@ -2318,6 +2352,7 @@ fn a_ratified_proposal_is_proposed_again_and_a_coders_proposal_never_carried() {
     let moved: Vec<Survivor> = before
         .iter()
         .map(|s| Survivor {
+            found_on: None,
             line: s.line + 5,
             end_line: None,
             ..s.clone()
@@ -2459,6 +2494,7 @@ fn a_refusal_written_in_the_campaigns_log_is_never_taken() {
 
 fn campaign_of(survivors: Vec<Survivor>, tried: Option<u32>) -> Campaign {
     Campaign {
+        chain: Default::default(),
         fingerprint: "f".into(),
         head: "h".into(),
         date: "d".into(),
@@ -2821,6 +2857,7 @@ fn mission_dir(project: &nunki::project::Project, id: &str) -> PathBuf {
 /// The survivor a campaign names on `line` of `src/lib.rs`.
 fn on_lib(line: u32) -> Survivor {
     Survivor {
+        found_on: None,
         id: format!("src/lib.rs:{line}:5: {LIFTED}"),
         file: "src/lib.rs".into(),
         line,
@@ -2847,6 +2884,7 @@ fn campaign_on(
         &format!("fp-{head}"),
         &head,
         &log_of(survivors),
+        &mutants::Chain::default(),
     )
     .unwrap();
     (mutants::read(&dir).unwrap().unwrap(), recorded)
@@ -3790,6 +3828,7 @@ const TWICE: &str = "pub fn one() -> u8 {\n    1\n}\npub fn uno() -> u8 {\n    1
 /// A survivor of `src/lib.rs` on lines `line` to `end`, mutated by `what`.
 fn spanning(line: u32, end: u32, what: &str) -> Survivor {
     Survivor {
+        found_on: None,
         id: format!("src/lib.rs:{line}:5: {what}"),
         file: "src/lib.rs".into(),
         line,
@@ -4189,6 +4228,7 @@ fn a_campaign_reads_the_registry_under_its_lock() {
 /// The survivor `id` of `src/lib.rs` on `line`, mutated by `what`.
 fn named(id: &str, line: u32, what: &str) -> Survivor {
     Survivor {
+        found_on: None,
         id: id.into(),
         file: "src/lib.rs".into(),
         line,
@@ -4978,6 +5018,7 @@ fn lifting_an_older_carried_ruling_takes_its_entry_out_by_origin() {
     mutants::write(
         &a,
         &Campaign {
+            chain: Default::default(),
             fingerprint: "f".into(),
             head,
             date: "d".into(),
@@ -4996,4 +5037,761 @@ fn lifting_an_older_carried_ruling_takes_its_entry_out_by_origin() {
             .entries
             .is_empty()
     );
+}
+
+// ---------------------------------------------------------------------------
+// The chain of campaigns: at `standard`, a later campaign covers what changed
+// since the previous one (SPEC 4.4, gate 7).
+// ---------------------------------------------------------------------------
+
+use mutants::{Chain, Changes, Link, Replay, Scope};
+use nunki::mission::Rigor;
+
+/// A campaign on file at `head`, full, with what it ran with.
+fn on_file_at(head: &str, survivors: Vec<Survivor>, tried: Option<u32>) -> Campaign {
+    Campaign {
+        fingerprint: format!("fp-{head}"),
+        head: head.into(),
+        date: "2026-10-01T10:00:00Z".into(),
+        survivors,
+        tried,
+        chain: Chain {
+            scope: Scope::Full {
+                why: "the first campaign of this mission".into(),
+            },
+            tooling: Some("tools-1".into()),
+            earlier: vec![],
+        },
+    }
+}
+
+/// What [`mutants::scope`] answers at `standard` on a previous campaign
+/// that passed, is an ancestor and ran with the same tooling — unless
+/// `change` makes one condition false.
+fn scope_with(
+    change: impl FnOnce(
+        &mut Rigor,
+        &mut Replay,
+        &mut Option<Campaign>,
+        &mut Option<&str>,
+        &mut bool,
+        &mut bool,
+    ),
+) -> Scope {
+    let (mut rigor, mut replay) = (Rigor::Standard, Replay::WhenChanged);
+    let mut previous = Some(on_file_at("aaaaaaaaaaaaaaaa", vec![], Some(10)));
+    let mut tooling = Some("tools-1");
+    let (mut owes, mut ancestor) = (false, true);
+    change(
+        &mut rigor,
+        &mut replay,
+        &mut previous,
+        &mut tooling,
+        &mut owes,
+        &mut ancestor,
+    );
+    mutants::scope(
+        rigor,
+        replay,
+        previous.as_ref(),
+        tooling,
+        |_| owes.then(|| "3 of 10 tried mutant(s) killed".to_string()),
+        |_| ancestor,
+    )
+}
+
+/// At standard, after a passing campaign, the next one is partial and
+/// continues from that campaign's `HEAD`.
+#[test]
+fn at_standard_a_campaign_after_a_passing_one_is_partial_from_its_head() {
+    assert_eq!(
+        scope_with(|_, _, _, _, _, _| {}),
+        Scope::Partial {
+            since: "aaaaaaaaaaaaaaaa".into()
+        }
+    );
+}
+
+/// Every condition the chain rests on, made false one at a time: each gives
+/// a full campaign, and its record says why.
+#[test]
+fn each_refusal_gives_a_full_campaign_with_its_reason_recorded() {
+    let full = |scope: Scope| match scope {
+        Scope::Full { why } => why,
+        partial => panic!("a refusal gave a partial campaign: {partial:?}"),
+    };
+    let cases: Vec<(&str, Scope)> = vec![
+        (
+            "`critical` mission",
+            scope_with(|rigor, _, _, _, _, _| *rigor = Rigor::Critical),
+        ),
+        (
+            "--again",
+            scope_with(|_, replay, _, _, _, _| *replay = Replay::Now),
+        ),
+        (
+            "the first campaign",
+            scope_with(|_, _, previous, _, _, _| *previous = None),
+        ),
+        (
+            "gate 7 did not pass on the previous campaign",
+            scope_with(|_, _, _, _, owes, _| *owes = true),
+        ),
+        (
+            "is not an ancestor of HEAD",
+            scope_with(|_, _, _, _, _, ancestor| *ancestor = false),
+        ),
+        (
+            "could not be read",
+            scope_with(|_, _, _, tooling, _, _| *tooling = None),
+        ),
+        (
+            "recorded nothing of what it ran with",
+            scope_with(|_, _, previous, _, _, _| previous.as_mut().unwrap().chain.tooling = None),
+        ),
+        (
+            "changed since the previous campaign",
+            scope_with(|_, _, _, tooling, _, _| *tooling = Some("tools-2")),
+        ),
+    ];
+    for (said, scope) in cases {
+        let why = full(scope);
+        assert!(why.contains(said), "{said:?} not in {why:?}");
+    }
+    // The reason of a failed previous campaign carries what it owes.
+    let why = full(scope_with(|_, _, _, _, owes, _| *owes = true));
+    assert!(why.contains("3 of 10 tried mutant(s) killed"), "{why}");
+    assert!(why.contains("aaaaaaaaaaaa"), "{why}");
+}
+
+/// The previous campaign's failure is gate 7's own rule, asked through
+/// [`mutants::owed`]: below the threshold, the next campaign is full.
+#[test]
+fn a_previous_campaign_below_the_threshold_gives_a_full_campaign() {
+    let three_open = vec![one("m1", 1, "a"), one("m2", 2, "b"), one("m3", 3, "c")];
+    let previous = on_file_at("aaaaaaaaaaaaaaaa", three_open, Some(10));
+    let owed = |c: &Campaign| mutants::owed(c, &Default::default(), Rigor::Standard, 80);
+    let scope = mutants::scope(
+        Rigor::Standard,
+        Replay::WhenChanged,
+        Some(&previous),
+        Some("tools-1"),
+        owed,
+        |_| true,
+    );
+    assert!(
+        matches!(&scope, Scope::Full { why } if why.contains("7 of 10")),
+        "{scope:?}"
+    );
+    // And with two of them answered it passed, so the next is partial.
+    let answered: std::collections::BTreeMap<String, Triage> = ["m1", "m2"]
+        .iter()
+        .map(|id| {
+            (
+                id.to_string(),
+                Triage::Killed {
+                    test: "the_test".into(),
+                },
+            )
+        })
+        .collect();
+    let scope = mutants::scope(
+        Rigor::Standard,
+        Replay::WhenChanged,
+        Some(&previous),
+        Some("tools-1"),
+        |c: &Campaign| mutants::owed(c, &answered, Rigor::Standard, 80),
+        |_| true,
+    );
+    assert!(matches!(scope, Scope::Partial { .. }), "{scope:?}");
+}
+
+/// A partial campaign is handed the previous campaign's `HEAD` as its base,
+/// and only the touched paths that changed since; a full one the fork point
+/// and every touched path.
+#[test]
+fn a_partial_campaign_is_given_the_previous_head_as_its_base() {
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot) = context(dir.path());
+    let tree = &slot.tree;
+    let fork = git(tree, &["rev-parse", "dev"]);
+    write(tree, "src/lib.rs", "pub fn one() -> u8 { 2 }\n");
+    write(tree, "src/other.rs", "pub fn other() {}\n");
+    git(tree, &["add", "-A"]);
+    git(tree, &["commit", "-q", "-m", "L1"]);
+    let first = git(tree, &["rev-parse", "HEAD"]);
+    write(tree, "src/lib.rs", "pub fn one() -> u8 { 3 }\n");
+    git(tree, &["commit", "-q", "-am", "volet"]);
+
+    let touched = nunki::gate::touched_since_base(tree, "dev").unwrap();
+    assert_eq!(touched, ["src/lib.rs", "src/other.rs"]);
+    let judged = nunki::run::judged(&project, "rust");
+
+    let partial = Scope::Partial {
+        since: first.clone(),
+    };
+    let cmd = mutants::launch_command(tree, &judged, "fp", &touched, &fork, &partial).unwrap();
+    assert_eq!(
+        cmd.env.get(mutants::BASE_ENV).map(String::as_str),
+        Some(first.as_str())
+    );
+    assert_eq!(cmd.args, ["fp", "src/lib.rs"]);
+
+    let full = Scope::Full { why: "x".into() };
+    let cmd = mutants::launch_command(tree, &judged, "fp", &touched, &fork, &full).unwrap();
+    assert_eq!(
+        cmd.env.get(mutants::BASE_ENV).map(String::as_str),
+        Some(fork.as_str())
+    );
+    assert_eq!(cmd.args, ["fp", "src/lib.rs", "src/other.rs"]);
+}
+
+/// The tool's version is read by the command the script names, and what a
+/// campaign ran with is unknown when any stack's version is.
+#[test]
+fn what_a_campaign_runs_with_is_its_script_and_its_tools_version() {
+    let script = "#!/bin/sh\n# comment\n# nunki-tool-version: cargo mutants --version\nexit 0\n";
+    assert_eq!(
+        mutants::tool_version_command(script),
+        Some("cargo mutants --version")
+    );
+    assert_eq!(mutants::tool_version_command("#!/bin/sh\nexit 0\n"), None);
+    assert_eq!(
+        mutants::tool_version_command("# nunki-tool-version:   \n"),
+        None
+    );
+
+    let entry = |script: &str, version: Option<&str>| {
+        vec![(
+            "rust".to_string(),
+            script.to_string(),
+            version.map(str::to_string),
+        )]
+    };
+    let base = mutants::tooling_manifest(&entry(script, Some("cargo-mutants 27.1.0\n")));
+    assert!(base.is_some());
+    assert_eq!(mutants::tooling_manifest(&entry(script, None)), None);
+    assert_eq!(mutants::tooling_manifest(&entry(script, Some(" \n"))), None);
+    assert_ne!(
+        mutants::tooling_manifest(&entry(script, Some("cargo-mutants 27.2.0"))),
+        base,
+        "a new tool version is a change"
+    );
+    assert_ne!(
+        mutants::tooling_manifest(&entry(
+            &format!("{script}# edited\n"),
+            Some("cargo-mutants 27.1.0")
+        )),
+        base,
+        "an edited script is a change"
+    );
+    // Every stack's version must be known.
+    let mut two = entry(script, Some("cargo-mutants 27.1.0"));
+    two.push(("next".into(), "#!/bin/sh\n".into(), None));
+    assert_eq!(mutants::tooling_manifest(&two), None);
+}
+
+/// Every shipped `mutation.sh` names how to read its tool's version, so a
+/// project on today's fragments can chain its campaigns.
+#[test]
+fn every_shipped_mutation_script_names_its_tools_version_command() {
+    for stack in nunki::init::KNOWN_STACKS {
+        let script = nunki::init::fragment(stack)
+            .into_iter()
+            .find(|(name, _, _)| *name == mutants::SCRIPT)
+            .map(|(_, body, _)| body)
+            .expect("each stack ships a mutation.sh");
+        assert!(
+            mutants::tool_version_command(&script).is_some(),
+            "{stack}'s mutation.sh names no tool version command"
+        );
+    }
+}
+
+const BEFORE: &str =
+    "pub fn a() -> u8 {\n    1\n}\npub fn b() -> u8 {\n    2\n}\npub fn c() -> u8 {\n    3\n}\n";
+/// A line added on top, `b`'s body changed, a line inserted inside `c`.
+const AFTER: &str = "// header\npub fn a() -> u8 {\n    1\n}\npub fn b() -> u8 {\n    20\n}\npub fn c() -> u8 {\n    // note\n    3\n}\n";
+
+fn at(id: &str, file: &str, line: u32, end_line: Option<u32>) -> Survivor {
+    Survivor {
+        id: id.into(),
+        file: file.into(),
+        line,
+        end_line,
+        description: format!("mutation {id}"),
+        outcome: None,
+        refused: None,
+        found_on: None,
+    }
+}
+
+/// Two commits of a repository: `BEFORE`, then `AFTER`, with an untouched
+/// file beside.
+fn before_and_after(dir: &Path) -> (PathBuf, String, String) {
+    let tree = repo(dir);
+    write(&tree, "src/lib.rs", BEFORE);
+    write(&tree, "src/other.rs", "pub fn other() -> u8 {\n    9\n}\n");
+    git(&tree, &["add", "-A"]);
+    git(&tree, &["commit", "-q", "-m", "before"]);
+    let before = git(&tree, &["rev-parse", "HEAD"]);
+    write(&tree, "src/lib.rs", AFTER);
+    git(&tree, &["commit", "-q", "-am", "after"]);
+    let after = git(&tree, &["rev-parse", "HEAD"]);
+    (tree, before, after)
+}
+
+/// The survivors the change reaches are dropped — judged on the whole span,
+/// a span nobody knows reached — and the others kept, at the lines they now
+/// stand on, naming the campaign that found them.
+#[test]
+fn survivors_the_volet_reached_are_dropped_and_the_others_kept_where_they_stand() {
+    let dir = tempfile::tempdir().unwrap();
+    let (tree, before, after) = before_and_after(dir.path());
+    let previous = on_file_at(
+        &before,
+        vec![
+            Survivor {
+                outcome: Some(Triage::Equivalent {
+                    why: "ruled".into(),
+                    carried_from: None,
+                }),
+                refused: Some(mutants::Refusal {
+                    proposed: "p".into(),
+                    because: "b".into(),
+                }),
+                ..at("in-a", "src/lib.rs", 2, None)
+            },
+            at("changed", "src/lib.rs", 5, None),
+            at("body-of-b", "src/lib.rs", 4, Some(6)),
+            at("in-c", "src/lib.rs", 8, Some(8)),
+            at("body-of-c", "src/lib.rs", 7, Some(9)),
+            at("unknown-span", "src/lib.rs", 8, Some(0)),
+            at("elsewhere", "src/other.rs", 2, None),
+        ],
+        Some(30),
+    );
+    let changes = Changes::between(&tree, &before, &after).unwrap();
+    let (earlier, kept) = mutants::continued(&previous, &changes);
+    // What the HQ said comes back through `carry` alone, never kept as it was.
+    assert!(
+        kept.iter()
+            .all(|s| s.outcome.is_none() && s.refused.is_none())
+    );
+
+    let kept: Vec<(&str, u32, Option<u32>, Option<&str>)> = kept
+        .iter()
+        .map(|s| (s.id.as_str(), s.line, s.end_line, s.found_on.as_deref()))
+        .collect();
+    assert_eq!(
+        kept,
+        [
+            // One line added above: moved down by one.
+            ("in-a", 3, None, Some(before.as_str())),
+            // Two lines added above (the header, the note before it).
+            ("in-c", 10, Some(10), Some(before.as_str())),
+            // Another file, untouched: where it was.
+            ("elsewhere", 2, None, Some(before.as_str())),
+        ]
+    );
+    assert_eq!(
+        earlier,
+        [Link {
+            head: before.clone(),
+            date: previous.date.clone(),
+            scope: previous.chain.scope.clone(),
+            tried: Some(30),
+        }]
+    );
+}
+
+/// An insertion just above or just below a span leaves it standing; inside
+/// it, between two of its lines, it reaches it.
+#[test]
+fn an_insertion_reaches_a_span_only_from_inside() {
+    let diff = "diff --git a/f.rs b/f.rs\n--- a/f.rs\n+++ b/f.rs\n@@ -4,0 +5 @@\n+x\n";
+    let changes = Changes::parse(diff);
+    let kept = |line, end| changes.kept(&at("s", "f.rs", line, Some(end)));
+    assert_eq!(kept(5, 6), Some((6, Some(7))), "inserted just above");
+    assert_eq!(kept(2, 4), Some((2, Some(4))), "inserted just below");
+    assert_eq!(kept(4, 5), None, "inserted between its lines");
+    assert_eq!(
+        kept(4, 4),
+        Some((4, Some(4))),
+        "a one-line span has no inside"
+    );
+    // A replacement reaches what it overlaps, and nothing next to it.
+    let changes = Changes::parse("--- a/f.rs\n+++ b/f.rs\n@@ -4,2 +4,3 @@\n");
+    let kept = |line, end| changes.kept(&at("s", "f.rs", line, Some(end)));
+    assert_eq!(kept(5, 7), None);
+    assert_eq!(kept(1, 4), None);
+    assert_eq!(kept(1, 3), Some((1, Some(3))));
+    assert_eq!(kept(6, 8), Some((7, Some(9))));
+    // A file removed is reached whole; a file added holds no old survivor.
+    let changes = Changes::parse("--- a/f.rs\n+++ /dev/null\n@@ -1,9 +0,0 @@\n");
+    assert_eq!(changes.kept(&at("s", "f.rs", 3, None)), None);
+}
+
+/// A partial campaign recorded: the chain continued, the kept survivors
+/// beside its own, and what the HQ said on them back only as carry gives it
+/// — a ruling as a proposal marked carried, a refusal as a refusal.
+#[test]
+fn a_partial_campaign_keeps_what_the_hq_said_only_as_carry_gives_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (tree, before, after) = before_and_after(dir.path());
+    let mission = dir.path().join("mission");
+    std::fs::create_dir_all(&mission).unwrap();
+    let hq = dir.path().join("hq");
+
+    let mut ruled = at("in-a", "src/lib.rs", 2, None);
+    ruled.outcome = Some(Triage::Equivalent {
+        why: "nothing reads it".into(),
+        carried_from: None,
+    });
+    let mut refused = at("elsewhere", "src/other.rs", 2, None);
+    refused.refused = Some(mutants::Refusal {
+        proposed: "same".into(),
+        because: "a test can see it".into(),
+    });
+    mutants::write(
+        &mission,
+        &on_file_at(
+            &before,
+            vec![ruled, refused, at("changed", "src/lib.rs", 5, None)],
+            Some(30),
+        ),
+    )
+    .unwrap();
+
+    let found = at("new-one", "src/lib.rs", 6, None);
+    let log = format!(
+        "{}\n{{\"campaign\":\"done\",\"tried\":4,\"found\":4}}\n",
+        serde_json::to_string(&found).unwrap()
+    );
+    let chain = Chain {
+        scope: Scope::Partial {
+            since: before.clone(),
+        },
+        tooling: Some("tools-1".into()),
+        earlier: vec![],
+    };
+    mutants::record_finished_with_registry(&mission, &hq, &tree, "fp-after", &after, &log, &chain)
+        .unwrap();
+    let campaign = mutants::read(&mission).unwrap().unwrap();
+
+    assert_eq!(campaign.tried, Some(4));
+    assert_eq!(campaign.chain.scope, chain.scope);
+    assert_eq!(campaign.chain.earlier.len(), 1);
+    assert_eq!(campaign.chain.earlier[0].head, before);
+    assert_eq!(campaign.chain.earlier[0].tried, Some(30));
+    let by_id = |id: &str| campaign.survivors.iter().find(|s| s.id == id);
+    assert!(by_id("changed").is_none(), "reached by the volet: dropped");
+    assert_eq!(by_id("new-one").unwrap().found_on, None);
+    let kept = by_id("in-a").unwrap();
+    assert_eq!(kept.found_on.as_deref(), Some(before.as_str()));
+    assert_eq!(
+        kept.outcome,
+        Some(Triage::ProposedByNunki {
+            why: "nothing reads it".into(),
+            from: mutants::ProposedFrom::Carried {
+                commit: before.clone()
+            },
+        }),
+        "a ruling comes back as a carried proposal, never as a ruling"
+    );
+    let kept = by_id("elsewhere").unwrap();
+    assert_eq!(kept.refused.as_ref().unwrap().because, "a test can see it");
+    assert_eq!(kept.outcome, None);
+    assert!(
+        campaign
+            .survivors
+            .iter()
+            .all(|s| !matches!(s.outcome, Some(Triage::Equivalent { .. }))),
+        "nothing is ruled by the chain itself"
+    );
+}
+
+/// A survivor the partial campaign found again is listed once, as its own.
+#[test]
+fn a_survivor_found_again_is_listed_once_as_the_new_campaigns() {
+    let dir = tempfile::tempdir().unwrap();
+    let (tree, before, after) = before_and_after(dir.path());
+    let mission = dir.path().join("mission");
+    std::fs::create_dir_all(&mission).unwrap();
+    mutants::write(
+        &mission,
+        &on_file_at(
+            &before,
+            vec![at("elsewhere", "src/other.rs", 2, None)],
+            Some(30),
+        ),
+    )
+    .unwrap();
+    let again = at("elsewhere", "src/other.rs", 2, None);
+    let log = format!(
+        "{}\n{{\"campaign\":\"done\",\"tried\":1,\"found\":1}}\n",
+        serde_json::to_string(&again).unwrap()
+    );
+    let chain = Chain {
+        scope: Scope::Partial { since: before },
+        ..Chain::default()
+    };
+    mutants::record_finished_with_registry(
+        &mission,
+        &dir.path().join("hq"),
+        &tree,
+        "fp",
+        &after,
+        &log,
+        &chain,
+    )
+    .unwrap();
+    let campaign = mutants::read(&mission).unwrap().unwrap();
+    assert_eq!(campaign.survivors.len(), 1);
+    assert_eq!(campaign.survivors[0].found_on, None);
+}
+
+/// A partial campaign that does not continue the campaign on file answers
+/// only for what changed since, and is not recorded alone.
+#[test]
+fn a_partial_campaign_whose_chain_broke_is_not_recorded() {
+    let dir = tempfile::tempdir().unwrap();
+    let (tree, before, after) = before_and_after(dir.path());
+    let mission = dir.path().join("mission");
+    std::fs::create_dir_all(&mission).unwrap();
+    let on_file = on_file_at(&after, vec![], Some(3));
+    mutants::write(&mission, &on_file).unwrap();
+    let chain = Chain {
+        scope: Scope::Partial { since: before },
+        ..Chain::default()
+    };
+    let err = mutants::record_finished_with_registry(
+        &mission,
+        &dir.path().join("hq"),
+        &tree,
+        "fp",
+        &after,
+        "{\"campaign\":\"done\",\"tried\":0,\"found\":0}\n",
+        &chain,
+    )
+    .unwrap_err();
+    assert!(matches!(err, mutants::MutantsError::Broken(_)), "{err}");
+    assert_eq!(mutants::read(&mission).unwrap(), Some(on_file));
+}
+
+/// A chain of two: an earlier full campaign and the partial one on file,
+/// with `open` survivors of the partial one left without an outcome.
+fn chain_of(earlier_tried: u32, earlier_open: u32, tried: u32, open: u32) -> Campaign {
+    let mut survivors: Vec<Survivor> = (0..earlier_open)
+        .map(|n| {
+            let mut s = at(&format!("old-{n}"), "src/lib.rs", n + 1, None);
+            s.found_on = Some("aaaaaaaaaaaaaaaa".into());
+            s
+        })
+        .collect();
+    survivors.extend((0..open).map(|n| at(&format!("new-{n}"), "src/lib.rs", n + 100, None)));
+    Campaign {
+        fingerprint: "fp".into(),
+        head: "bbbbbbbbbbbbbbbb".into(),
+        date: "d".into(),
+        survivors,
+        tried: Some(tried),
+        chain: Chain {
+            scope: Scope::Partial {
+                since: "aaaaaaaaaaaaaaaa".into(),
+            },
+            tooling: Some("tools-1".into()),
+            earlier: vec![Link {
+                head: "aaaaaaaaaaaaaaaa".into(),
+                date: "d".into(),
+                scope: Scope::Full { why: String::new() },
+                tried: Some(earlier_tried),
+            }],
+        },
+    }
+}
+
+/// Every campaign of the chain on its own mutants: a partial campaign below
+/// the threshold owes, though the chain's total would pass; an earlier one
+/// that owes is named; both passing, nothing is owed.
+#[test]
+fn what_a_chain_owes_is_judged_campaign_by_campaign() {
+    let none = Default::default();
+    // 7 of 10 on the partial one: red, though 197 of 200 overall would pass.
+    let owed = mutants::owed(&chain_of(190, 0, 10, 3), &none, Rigor::Standard, 80)
+        .expect("a partial campaign below the threshold owes");
+    assert!(
+        owed.contains("the partial campaign at bbbbbbbbbbbb"),
+        "{owed}"
+    );
+    assert!(owed.contains("7 of 10"), "{owed}");
+    // The earlier one below it, the later one perfect.
+    let owed = mutants::owed(&chain_of(10, 3, 50, 0), &none, Rigor::Standard, 80)
+        .expect("an earlier campaign below the threshold owes");
+    assert!(owed.contains("the full campaign at aaaaaaaaaaaa"), "{owed}");
+    assert!(!owed.contains("bbbbbbbbbbbb"), "{owed}");
+    assert_eq!(
+        mutants::owed(&chain_of(10, 2, 10, 2), &none, Rigor::Standard, 80),
+        None
+    );
+}
+
+/// Each campaign of the chain is said in a line: full or partial, from
+/// which commit, what it tried, killed and left.
+#[test]
+fn each_campaign_of_the_chain_is_said_with_its_own_counts() {
+    let said = mutants::chain_said(&chain_of(190, 1, 10, 3), &Default::default());
+    assert_eq!(
+        said,
+        [
+            "full at aaaaaaaaaaaa — tried 190, killed 189, 1 survivor(s), 1 without an outcome",
+            "partial since aaaaaaaaaaaa at bbbbbbbbbbbb — tried 10, killed 7, 3 survivor(s), \
+             3 without an outcome",
+        ]
+    );
+}
+
+/// A survivor naming a campaign the chain does not hold is listed, so it is
+/// owed somewhere: with the campaign on file.
+#[test]
+fn a_survivor_of_no_known_campaign_is_judged_with_the_current_one() {
+    let mut campaign = chain_of(10, 0, 10, 0);
+    let mut stray = at("stray", "src/lib.rs", 1, None);
+    stray.found_on = Some("cccccccccccc".into());
+    campaign.survivors.push(stray);
+    let parts = mutants::parts(&campaign);
+    assert_eq!(parts.len(), 2);
+    assert!(parts[0].campaign.survivors.is_empty());
+    assert!(parts[1].current);
+    assert_eq!(parts[1].campaign.survivors.len(), 1);
+}
+
+/// A campaign file written before the chain existed, and an in-flight
+/// record likewise, read as a full campaign with nothing before it.
+#[test]
+fn an_old_campaign_file_reads_as_a_full_campaign_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join(mutants::FILE),
+        "{\"fingerprint\":\"f\",\"head\":\"h\",\"date\":\"d\",\"tried\":3,\"survivors\":[\
+         {\"id\":\"a\",\"file\":\"src/lib.rs\",\"line\":1}]}\n",
+    )
+    .unwrap();
+    let campaign = mutants::read(dir.path()).unwrap().unwrap();
+    assert_eq!(campaign.chain, Chain::default());
+    assert_eq!(campaign.chain.scope, Scope::Full { why: String::new() });
+    assert_eq!(campaign.survivors[0].found_on, None);
+    let parts = mutants::parts(&campaign);
+    assert_eq!(parts.len(), 1);
+    assert_eq!(parts[0].campaign.survivors.len(), 1);
+
+    let running: mutants::Running = serde_json::from_str(
+        "{\"fingerprint\":\"f\",\"head\":\"h\",\"started_at\":\"s\",\"container\":\"c\",\
+         \"pid\":1,\"log\":\"/l\",\"deadline_minutes\":5}",
+    )
+    .unwrap();
+    assert_eq!(running.chain.scope, Scope::Full { why: String::new() });
+}
+
+/// What a campaign's log claims of the chain is never read: which campaign
+/// found a survivor is `nunki`'s to record.
+#[test]
+fn a_log_cannot_say_an_earlier_campaign_found_a_survivor() {
+    let survivors =
+        mutants::parse("{\"id\":\"a\",\"file\":\"f\",\"line\":1,\"found_on\":\"aaaaaaaaaaaa\"}\n");
+    assert_eq!(survivors[0].found_on, None);
+}
+
+/// A finished partial campaign read back in its slot: what the monitor and
+/// `nunki mission mutants` print, chain and all — and one whose chain broke
+/// under it is forgotten and said, never asked about again and never
+/// recorded alone.
+#[test]
+fn a_partial_campaign_is_read_back_with_its_chain_or_forgotten_when_it_broke() {
+    use nunki::engine::{ExecOutput, fake::FakeEngine};
+
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot) = context(dir.path());
+    let tree = slot.tree.clone();
+    write(&tree, "src/lib.rs", "pub fn one() -> u8 { 2 }\n");
+    git(&tree, &["commit", "-q", "-am", "L1"]);
+    let first = git(&tree, &["rev-parse", "HEAD"]);
+    write(&tree, "src/lib.rs", "pub fn one() -> u8 { 3 }\n");
+    git(&tree, &["commit", "-q", "-am", "volet"]);
+    let head = git(&tree, &["rev-parse", "HEAD"]);
+    let profile = nunki::run::profile_path(&project, &slot.name);
+    std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+    std::fs::write(&profile, "services: {}\n").unwrap();
+    let mission = dir.path().join("mission");
+    std::fs::create_dir_all(&mission).unwrap();
+    let log = mission.join("mutants.log");
+
+    let read_back = |on_file: &Campaign| {
+        mutants::write(&mission, on_file).unwrap();
+        std::fs::write(&log, "{\"campaign\":\"done\",\"tried\":2,\"found\":2}\n").unwrap();
+        mutants::write_running(
+            &project.hq_root,
+            &slot.name,
+            &mutants::Running {
+                chain: Chain {
+                    scope: Scope::Partial {
+                        since: first.clone(),
+                    },
+                    tooling: Some("tools-1".into()),
+                    earlier: vec![],
+                },
+                fingerprint: "abc1234".into(),
+                head: head.clone(),
+                started_at: "2026-09-19T02:00:00Z".into(),
+                container: "cafe1234".into(),
+                pid: Some(41),
+                log: log.clone(),
+                deadline_minutes: 45,
+            },
+        )
+        .unwrap();
+        let engine: std::sync::Arc<dyn nunki::engine::Engine> = std::sync::Arc::new(
+            FakeEngine::default()
+                .with_liveness("cafe1234", nunki::engine::Liveness::Running)
+                .with_exec(ExecOutput {
+                    status: 0,
+                    stdout: "nunki-run-ended\n".into(),
+                    stderr: String::new(),
+                }),
+        );
+        let progress = mutants::read_back(&project, &slot, engine, &mission)
+            .unwrap()
+            .expect("a campaign is filed");
+        assert!(
+            mutants::read_running(&project.hq_root, &slot.name)
+                .unwrap()
+                .is_none(),
+            "an ended campaign is forgotten"
+        );
+        progress
+    };
+
+    // Continuing the campaign on file: recorded, and said campaign by campaign.
+    match read_back(&on_file_at(&first, vec![], Some(12))) {
+        mutants::Progress::Finished { survivors, chain } => {
+            assert_eq!(survivors, 0);
+            assert_eq!(chain.len(), 2, "{chain:?}");
+            assert!(chain[0].starts_with("full at "), "{chain:?}");
+            assert!(chain[0].contains("tried 12, killed 12"), "{chain:?}");
+            assert!(chain[1].starts_with("partial since "), "{chain:?}");
+            assert!(chain[1].contains("tried 2, killed 2"), "{chain:?}");
+        }
+        other => panic!("a finished partial campaign was read as {other:?}"),
+    }
+
+    // The campaign on file is another: lost, said, and nothing written.
+    let other = on_file_at(&head, vec![], Some(5));
+    match read_back(&other) {
+        mutants::Progress::Lost(why) => {
+            assert!(why.contains("is not recorded alone"), "{why}");
+            assert!(why.contains("--again"), "{why}");
+        }
+        other => panic!("a broken chain was read as {other:?}"),
+    }
+    assert_eq!(mutants::read(&mission).unwrap(), Some(other));
 }

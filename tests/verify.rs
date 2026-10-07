@@ -2864,6 +2864,7 @@ fn a_battery_red_under_a_running_campaign_opens_no_volet() {
         &world.project.hq_root,
         "one",
         &nunki::mutants::Running {
+            chain: Default::default(),
             fingerprint: "a62d271".into(),
             head: git(&world.tree, &["rev-parse", "HEAD"]),
             started_at: "2026-09-18T20:56:38Z".into(),
@@ -3199,6 +3200,7 @@ impl World {
     fn campaign_with_survivors(&self) {
         use nunki::mutants::{Campaign, Survivor, Triage};
         let survivor = |id: &str, outcome: Option<Triage>| Survivor {
+            found_on: None,
             id: id.into(),
             file: "src/lib.rs".into(),
             line: 1,
@@ -3210,6 +3212,7 @@ impl World {
         nunki::mutants::write(
             &self.mission(),
             &Campaign {
+                chain: Default::default(),
                 fingerprint: "f".into(),
                 head: self.head(),
                 date: "2026-10-05T12:00:00Z".into(),
@@ -3378,5 +3381,55 @@ fn a_ruling_cannot_be_awaited_on_a_survivor_the_coder_proposed() {
         matches!(world.state().flow.stage(), Stage::AwaitingHuman(_)),
         "{:?}",
         world.state().flow.stage()
+    );
+}
+
+/// When the coder's final gates are green, the follow-up says each campaign
+/// gate 7 judged when there were several — full or partial, from which
+/// commit, with its counts — beside the proposals awaiting the HQ.
+#[test]
+fn green_final_gates_leave_each_campaign_of_the_chain_in_the_follow_up() {
+    use nunki::mutants::{Campaign, Chain, Link, Scope};
+    let world = World::new(2);
+    let paths = nunki::mission::dir::Paths::of(&world.project.hq_root, "m1");
+    std::fs::write(&paths.followup, "# Follow-up\n").unwrap();
+    let earlier = "e".repeat(40);
+    nunki::mutants::write(
+        &paths.dir,
+        &Campaign {
+            fingerprint: "f".into(),
+            head: world.head(),
+            date: "2026-10-07T12:00:00Z".into(),
+            survivors: vec![],
+            tried: Some(3),
+            chain: Chain {
+                scope: Scope::Partial {
+                    since: earlier.clone(),
+                },
+                tooling: Some("tools".into()),
+                earlier: vec![Link {
+                    head: earlier,
+                    date: "2026-10-07T10:00:00Z".into(),
+                    scope: Scope::Full { why: String::new() },
+                    tried: Some(30),
+                }],
+            },
+        },
+    )
+    .unwrap();
+
+    verify::gate_seven_said(&paths, "m1").unwrap();
+    let followup = world.followup();
+    assert!(
+        followup.contains("2 mutation campaigns in this mission's chain"),
+        "{followup}"
+    );
+    assert!(
+        followup.contains("1. full at eeeeeeeeeeee — tried 30, killed 30"),
+        "{followup}"
+    );
+    assert!(
+        followup.contains("2. partial since eeeeeeeeeeee at "),
+        "{followup}"
     );
 }

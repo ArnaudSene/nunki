@@ -948,6 +948,13 @@ const MUTATION_RUST: &str = r#"#!/bin/sh
 # copy of HEAD inside the slot's container. The id comes first so the campaign
 # is identifiable from its own command line; this script does not need it.
 #
+# The next line tells `nunki` how to read the tool's version (SPEC 4.4, the
+# chain of campaigns). A later campaign of a `standard` mission covers only
+# what changed since the previous one, and only when this script and that
+# version are what the previous one ran with; without the line, every
+# campaign is full.
+# nunki-tool-version: cargo mutants --version
+#
 # The campaign answers for the lines this branch **changed**, not for every
 # line of the files it touched (SPEC 4.4). `nunki` sets `NUNKI_BASE` to the
 # commit the branch forked from, and cargo-mutants' `--in-diff` keeps only the
@@ -1718,6 +1725,13 @@ const MUTATION_PYTHON: &str = r##"#!/bin/sh
 # `nunki` calls this as `mutation.sh <campaign-id> <path>...`, from the clean
 # copy of HEAD inside the slot's container. The id comes first so the campaign
 # is identifiable from its own command line; this script does not need it.
+#
+# The next line tells `nunki` how to read the tool's version (SPEC 4.4, the
+# chain of campaigns). A later campaign of a `standard` mission covers only
+# what changed since the previous one, and only when this script and that
+# version are what the previous one ran with; without the line, every
+# campaign is full.
+# nunki-tool-version: uv run --frozen --no-sync python -c "import importlib.metadata as m; print('mutmut', m.version('mutmut'))"
 #
 # It prints **one JSON object per line** on stdout, one per surviving mutant:
 #   {"id":"…","file":"…","line":12,"end_line":12,"description":"…"}
@@ -2694,6 +2708,13 @@ const MUTATION_NEXT: &str = r##"#!/bin/sh
 # `nunki` calls this as `mutation.sh <campaign-id> <path>...`, from the clean
 # copy of HEAD inside the slot's container. The id comes first so the campaign
 # is identifiable from its own command line; this script does not need it.
+#
+# The next line tells `nunki` how to read the tool's version (SPEC 4.4, the
+# chain of campaigns). A later campaign of a `standard` mission covers only
+# what changed since the previous one, and only when this script and that
+# version are what the previous one ran with; without the line, every
+# campaign is full.
+# nunki-tool-version: pnpm exec stryker --version
 #
 # It prints **one JSON object per line** on stdout, one per surviving mutant:
 #   {"id":"…","file":"…","line":12,"end_line":12,"description":"…"}
