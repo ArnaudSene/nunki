@@ -268,7 +268,8 @@ campaign's status means are the same at any value.
 - **Rust:** at `1`, `cargo mutants --in-place`, one mutant at a time in the
   clean copy and its warm cache, as before. Above, `--jobs N --copy-vcs
   true`: each job builds in a copy of the tree of its own, from a cold
-  cache, with `.git` beside it as in place.
+  cache, with `.git` beside it as in place, under
+  `$TMPDIR/nunki-campaign-copies`, removed when the campaign ends.
 - **Python:** mutmut's `--max-children N`. mutmut already runs its mutants
   in forked children; the setting caps how many. Without the variable
   nothing is passed and mutmut keeps its own default. Not run against a real
@@ -292,6 +293,43 @@ And a loaded machine overruns the test timeout cargo-mutants sets from an
 unloaded baseline: at 12 jobs both survivors came back as timeouts, which
 count as killed. Raise it for a project whose build leaves cores idle, and
 measure there first.
+
+### What a campaign leaves behind
+
+A campaign leaves the build cache as it found it. Every mutant builds the
+crate from its mutated source, and nothing used to remove what it built: a
+slot after about thirty campaigns held 6.8 million files in its copy's
+`target/debug/deps`, cargo scanned them at every build, and a mutant went
+from 7 s to 70 s.
+
+- **Rust:** `mutation.sh` records the cache's file list before cargo-mutants
+  runs, and when the campaign ends — complete, failed, or stopped by `nunki`
+  past its deadline — removes every file not on that list, and every listed
+  file written since. The first is most of it: each rebuild hard-links its
+  unchanged units' `.dwo` files under new names, which keep their old
+  times, so a time marker alone would miss them. The second is the crate's
+  own artefacts, which a mutant rewrites under the baseline's names. The
+  dependencies stay, and the next build recompiles the crate once. A
+  campaign killed outright leaves its list, and the next one cleans up
+  first. Above one job, the copies go to `$TMPDIR/nunki-campaign-copies`,
+  outside the tree, and are removed the same way. Measured against the real
+  cargo-mutants on this repository, in place, at two jobs and stopped
+  mid-run: no file the campaign added was left.
+- **Python:** what mutmut leaves per mutant is all in `mutants/`, cleared
+  before the run and when the script exits.
+- **Next.js:** Stryker's sandbox, `.stryker-tmp/`, is removed by
+  `--cleanTempDir always`, and cleared before the run for when Stryker was
+  killed.
+
+`nunki check --slot <name>` measures the copy's `target/` in the slot's
+container, when it is up — it lifts nothing for this — and goes amber
+(`!!`) past 250,000 files or 50 GiB: a sign the stack's `mutation.sh` is an
+older one, or a project's own, that does not clean. Amber is not red, and
+`nunki check` still exits as held. The thresholds are measured: a cache
+built once for this repository's tests holds about 11,000 files, and one
+uncleaned campaign of 23 mutants added 67,450. A cache past them is not
+emptied by a newer `mutation.sh`; empty the copy's `target/` once, from
+inside the slot.
 
 The rigor is frozen in the header like the bounds, and `mission reframe`
 shows a change of it. Once the security rounds are spent, the agent is not

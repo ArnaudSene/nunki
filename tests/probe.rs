@@ -166,6 +166,7 @@ fn live_a_fresh_project_ends_with_a_perimeter_that_holds() {
                 format!("RED  {d}")
             }
             nunki::check::Verdict::NotChecked(d) => format!("--   {d}"),
+            nunki::check::Verdict::Amber(d) => format!("!!   {d}"),
         };
         println!("{mark:<28} {}", check.what);
     }
@@ -526,6 +527,7 @@ fn live_a_system_profile_reaches_what_the_mission_declares_and_nothing_else() {
                 format!("RED  {d}")
             }
             nunki::check::Verdict::NotChecked(d) => format!("--   {d}"),
+            nunki::check::Verdict::Amber(d) => format!("!!   {d}"),
         };
         println!("{mark:<28} {}", check.what);
     }

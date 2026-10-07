@@ -1608,17 +1608,22 @@ fn probes(project: &Project, which: Option<&str>) -> Vec<check::Check> {
     let engine: std::sync::Arc<dyn nunki::engine::Engine> =
         std::sync::Arc::new(nunki::engine::docker::Docker::real());
 
-    match probe::mission_profile(project, &slot, &stack, engine, &engine_bin) {
-        Ok(checks) => checks,
-        Err(e) => vec![check::Check {
-            what: "the perimeter holds from inside the mission profile".to_string(),
-            verdict: match e {
-                // Missing images are something to do, not something broken.
-                probe::ProbeError::NoImages(..) => check::Verdict::NotChecked(e.to_string()),
-                _ => check::Verdict::Red(e.to_string()),
-            },
-        }],
-    }
+    let mut checks =
+        match probe::mission_profile(project, &slot, &stack, engine.clone(), &engine_bin) {
+            Ok(checks) => checks,
+            Err(e) => vec![check::Check {
+                what: "the perimeter holds from inside the mission profile".to_string(),
+                verdict: match e {
+                    // Missing images are something to do, not something broken.
+                    probe::ProbeError::NoImages(..) => check::Verdict::NotChecked(e.to_string()),
+                    _ => check::Verdict::Red(e.to_string()),
+                },
+            }],
+        };
+    // The campaign copy's build cache (SPEC 4.4, gate 7): amber when it is
+    // no longer being cleaned.
+    checks.push(check::campaign_cache(project, &slot, engine));
+    checks
 }
 
 /// Follow a run until it ends, printing only what changed.

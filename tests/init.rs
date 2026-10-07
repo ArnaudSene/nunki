@@ -3302,3 +3302,268 @@ exit 0
         "{said}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// A campaign leaves the build cache as it found it (SPEC 4.4, gate 7): what
+// its mutants built is removed however it ends, and so are the copies the
+// tool builds in above one job.
+// ---------------------------------------------------------------------------
+
+/// A stand-in `cargo mutants` that builds like one: it adds "mutant
+/// artefacts" to the cache — in `deps`, in a fresh incremental session, in a
+/// fingerprint of its own, and over the crate's own library, whose name a
+/// mutant shares with the baseline — a new name hard-linked to an old file,
+/// as rustc relinks unchanged units, and a copy under `$TMPDIR` above one
+/// job. Then it ends the way `STUB_END` says.
+#[cfg(unix)]
+const CARGO_THAT_BUILDS: &str = r#"#!/bin/sh
+out=""
+jobs=""
+while [ $# -gt 0 ]; do
+  if [ "$1" = --output ]; then out=$2; fi
+  if [ "$1" = --jobs ]; then jobs=$2; fi
+  shift
+done
+mkdir -p target/debug/deps target/debug/incremental/crate-1/s-new target/debug/.fingerprint/crate-new
+echo mutant > target/debug/deps/crate-mutant.rcgu.o
+echo mutant > target/debug/deps/libcrate-0001.rlib
+echo mutant > target/debug/incremental/crate-1/s-new/a.o
+echo mutant > target/debug/.fingerprint/crate-new/lib-crate
+# What a real rebuild leaves most of: an unchanged unit hard-linked under a
+# new name, which keeps the old file's time.
+ln target/debug/deps/libdep-1.rlib target/debug/deps/dep-relinked.rcgu.dwo
+if [ -n "$jobs" ]; then
+  mkdir -p "$TMPDIR/cargo-mutants-tree-x/target"
+  echo copy > "$TMPDIR/cargo-mutants-tree-x/target/big"
+fi
+o="$out/mutants.out"
+case "$STUB_END" in
+  caught|missed|baseline)
+    mkdir -p "$o"
+    : > "$o/caught.txt"; : > "$o/missed.txt"; : > "$o/timeout.txt"; : > "$o/unviable.txt"
+    printf '[1]' > "$o/mutants.json"
+    ;;
+esac
+case "$STUB_END" in
+  caught) echo 'src/lib.rs:1:1: replace a' > "$o/caught.txt"; exit 0 ;;
+  missed) echo 'src/lib.rs:1:1: replace a' > "$o/missed.txt"; exit 2 ;;
+  baseline) exit 4 ;;
+  crash) exit 1 ;;
+  stopped) kill -TERM "$PPID"; exec sleep 30 ;;
+esac
+"#;
+
+/// Every file under `dir`, relative to it, with its content, and every
+/// directory, the way a test compares a cache before and after.
+#[cfg(unix)]
+fn cache_of(dir: &Path) -> std::collections::BTreeMap<String, Option<String>> {
+    fn walk(root: &Path, at: &Path, into: &mut std::collections::BTreeMap<String, Option<String>>) {
+        for entry in std::fs::read_dir(at).unwrap().flatten() {
+            let path = entry.path();
+            let name = path.strip_prefix(root).unwrap().display().to_string();
+            if path.is_dir() {
+                into.insert(format!("{name}/"), None);
+                walk(root, &path, into);
+            } else {
+                into.insert(
+                    name,
+                    Some(std::fs::read_to_string(&path).unwrap_or_default()),
+                );
+            }
+        }
+    }
+    let mut into = std::collections::BTreeMap::new();
+    if dir.is_dir() {
+        walk(dir, dir, &mut into);
+    }
+    into
+}
+
+/// Write `body` at `path` with a modification time `minutes` ago.
+#[cfg(unix)]
+fn aged(path: &Path, body: &str, minutes: u64) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, body).unwrap();
+    let then = std::time::SystemTime::now() - std::time::Duration::from_secs(60 * minutes);
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(then)
+        .unwrap();
+}
+
+/// The Rust campaign, run against [`CARGO_THAT_BUILDS`] in a tree whose
+/// cache was built an hour ago — and which an earlier campaign, killed
+/// outright, left with its file list, a mutant's artefact, its answer and a
+/// copy. Each way a campaign ends, at one job and at three: afterwards the
+/// cache holds what was built before the campaign and nothing else; only the
+/// crate's own library, which a mutant overwrote under the same name, is
+/// gone, to be rebuilt once. The campaign's own output stays.
+#[cfg(unix)]
+#[test]
+fn a_rust_campaign_leaves_the_build_cache_as_it_found_it_however_it_ends() {
+    for jobs in ["1", "3"] {
+        for end in ["caught", "missed", "baseline", "crash", "stopped"] {
+            let (dir, root, nunki) = fresh();
+            init(&root, &nunki, &["rust".to_string()]).unwrap();
+            let script = home(&root).join("stacks/rust/mutation.sh");
+            let tree = dir.path().join("tree");
+            let target = tree.join("target");
+            aged(&tree.join("src/lib.rs"), "pub fn a() {}\n", 90);
+            aged(&target.join("debug/deps/libdep-1.rlib"), "dep", 60);
+            aged(&target.join("debug/deps/libcrate-0001.rlib"), "crate", 60);
+            aged(&target.join("debug/.fingerprint/dep-1/lib-dep"), "fp", 60);
+            aged(&target.join("release/keep"), "release", 60);
+            let built = cache_of(&target);
+            // What a campaign killed outright left behind: the list it
+            // recorded, a mutant's artefact, an answer and a copy.
+            // An earlier campaign's answer, there before it: on its list.
+            aged(
+                &target.join("mutants-earlier/mutants.out/missed.txt"),
+                "x",
+                50,
+            );
+            let mut listed: Vec<String> = built
+                .iter()
+                .filter(|(_, body)| body.is_some())
+                .map(|(name, _)| format!("target/{name}\n"))
+                .collect();
+            listed.push("target/mutants-earlier/mutants.out/missed.txt\n".to_string());
+            listed.sort();
+            aged(&target.join("nunki-campaign.list"), &listed.concat(), 30);
+            aged(&target.join("debug/deps/killed-mutant.o"), "mutant", 20);
+
+            let path = stubs(
+                &dir.path().join("stub-bin"),
+                &[("cargo", CARGO_THAT_BUILDS)],
+            );
+            // Where copies would go if the script did not say: the
+            // system's temporary directory, which nothing cleans.
+            let system_tmp = dir.path().join("system-tmp");
+            aged(
+                &system_tmp.join("nunki-campaign-copies/cargo-mutants-tree-y/big"),
+                "copy",
+                20,
+            );
+            let started = std::time::Instant::now();
+            let out = sh()
+                .arg(&script)
+                .arg("abc123")
+                .arg("src/lib.rs")
+                .env("PATH", path)
+                .env("STUB_END", end)
+                .env(nunki::mutants::JOBS_ENV, jobs)
+                .env("TMPDIR", &system_tmp)
+                .current_dir(&tree)
+                .output()
+                .expect("sh runs the campaign");
+            let took = started.elapsed();
+            let said = String::from_utf8_lossy(&out.stdout);
+            let why = String::from_utf8_lossy(&out.stderr);
+            let case = format!("{end} at {jobs} job(s)");
+
+            match end {
+                "caught" | "missed" => {
+                    assert!(nunki::mutants::completed(&said), "{case}: {said}\n{why}");
+                    assert_eq!(
+                        nunki::mutants::parse(&said).len(),
+                        usize::from(end == "missed"),
+                        "{case}: {said}"
+                    );
+                }
+                _ => assert!(!nunki::mutants::completed(&said), "{case}: {said}\n{why}"),
+            }
+            if end == "stopped" {
+                assert_eq!(out.status.code(), Some(143), "{case}: {why}");
+                // At once, and not when the tool happens to finish: the
+                // stand-in would have run on for thirty seconds.
+                assert!(
+                    took < std::time::Duration::from_secs(20),
+                    "{case}: the stop waited for the tool ({took:?})"
+                );
+            }
+            assert!(
+                cache_of(&system_tmp).is_empty(),
+                "{case}: a copy was left behind: {:?}",
+                cache_of(&system_tmp)
+            );
+
+            let mut left = cache_of(&target);
+            let own: Vec<String> = left
+                .keys()
+                .filter(|k| k.starts_with("mutants-abc123/"))
+                .cloned()
+                .collect();
+            if end != "crash" && end != "stopped" {
+                assert!(
+                    own.iter().any(|k| k.ends_with("mutants.json")),
+                    "{case}: the campaign's own output went: {own:?}"
+                );
+            }
+            for k in own {
+                left.remove(&k);
+            }
+            let mut expected = built.clone();
+            expected.remove("debug/deps/libcrate-0001.rlib");
+            assert_eq!(left, expected, "{case}: the cache is not as it was\n{why}");
+        }
+    }
+}
+
+/// Next.js: the sandbox a killed Stryker left, `.stryker-tmp/`, is cleared
+/// before the next run — the one thing Stryker leaves behind that
+/// `--cleanTempDir always` cannot remove, since a killed process runs nothing.
+#[cfg(unix)]
+#[test]
+fn a_next_campaign_clears_the_sandbox_a_killed_one_left() {
+    let pnpm = r#"#!/bin/sh
+case "$*" in
+  *"stryker run"*)
+    if [ -e .stryker-tmp ]; then echo "sandbox still there" >&2; fi
+    mkdir -p reports/mutation
+    printf '%s' '{"files":{"app/page.ts":{"mutants":[{"status":"Killed"}]}}}' > reports/mutation/mutation.json
+    ;;
+esac
+exit 0
+"#;
+    let (said, why, status) = campaign_in(
+        "next",
+        "app/page.ts",
+        &[("pnpm", pnpm), ("node", NODE)],
+        &[(".stryker-tmp/sandbox-1234/app/page.ts", "a mutant\n")],
+    );
+    assert_eq!(status, Some(0), "{why}");
+    assert!(nunki::mutants::completed(&said), "{said}\n{why}");
+    assert!(!why.contains("sandbox still there"), "{why}");
+    assert!(!why.contains(".stryker-tmp"), "the sandbox was left: {why}");
+}
+
+/// Python: what mutmut leaves per mutant lives in `mutants/` — the copy of
+/// the tree its mutants are written into, with their results — and a killed
+/// campaign leaves it all. It is cleared before mutmut runs, not only when
+/// the script exits: mutmut would otherwise start from the dead campaign's
+/// copy.
+#[cfg(unix)]
+#[test]
+fn a_python_campaign_clears_what_a_killed_one_left_before_it_runs() {
+    let uv = r#"#!/bin/sh
+case "$*" in
+  *"mutmut run"*)
+    if [ -e mutants/left-by-the-killed-one.py ]; then echo "old copy still there" >&2; fi
+    ;;
+esac
+exit 0
+"#;
+    let python = "#!/bin/sh\ncat > /dev/null\n";
+    let (said, why, status) = campaign_in(
+        "python",
+        "src/pkg/thing.py",
+        &[("uv", uv), ("python3", python)],
+        &[("mutants/left-by-the-killed-one.py", "a mutant\n")],
+    );
+    assert_eq!(status, Some(0), "{why}");
+    assert!(nunki::mutants::completed(&said), "{said}\n{why}");
+    assert!(!why.contains("old copy still there"), "{why}");
+    assert!(!why.contains("\"mutants\""), "mutants/ was left: {why}");
+}

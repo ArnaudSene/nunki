@@ -1095,6 +1095,106 @@ else
   where="--jobs $jobs --copy-vcs true"
 fi
 
+# The campaign leaves the build cache as it found it.
+#
+# Every mutant builds the crate from its mutated source, and what it builds
+# stays in `target/` — measured on a slot after about thirty campaigns,
+# 6.8 million files in `target/debug/deps` and several hundred gigabytes.
+# Cargo scans that directory at every build, so a mutant went from 7 s to
+# 70 s, campaign after campaign, and the disk filled.
+#
+# So the cache's file list is recorded before the tool runs, and when the
+# campaign ends — whether it completes, fails, or is told to stop — two
+# things in `target/` are removed:
+#
+# - every file whose name is not on the list. Most of what a mutant leaves
+#   is new names with **old** times: measured on cargo-mutants 27.1.0 and
+#   this crate, each rebuild hard-links its unchanged codegen units' `.dwo`
+#   files into `deps` under new names, and a hard link keeps the time of the
+#   file it links — from before the campaign. With a marker's time alone,
+#   a cache of 11,010 files held 68,655 after a campaign of 23 mutants;
+# - every file on the list written since: a mutant rebuilds the crate under
+#   the file names the baseline used, so the crate's own library and test
+#   binaries hold a mutant's build at the end. They cannot be told apart
+#   from the baseline's, and go with it.
+#
+# What stays is what was there before and untouched: the dependencies,
+# and whatever the battery built. The next build recompiles the crate
+# itself once, and nothing else.
+#
+# A campaign that is killed outright (SIGKILL, its container gone) runs no
+# trap, so the list outlives it. The next campaign finds it and cleans up
+# first; whatever the battery built since is removed with it, and rebuilt
+# once.
+#
+# The campaign's own output, `$out`, stays: `nunki` reads it, and it is
+# small. Older `target/mutants-*` directories, earlier campaigns' answers,
+# go.
+#
+# Above one job, each job builds in a copy of the tree under `$TMPDIR`, which
+# cargo-mutants removes when it finishes and leaves behind when it is killed.
+# They go to one directory of their own there, `nunki-campaign-copies`,
+# removed when the campaign ends and, after a kill, by the next one. Outside
+# the tree and not in `target/`: the project's tests run in those copies
+# with the same `$TMPDIR`, and measured on this repository with the copies
+# under `target/`, two tests failed in the unmutated baseline — their
+# temporary directories had landed inside a git repository.
+list="target/nunki-campaign.list"
+copies="${TMPDIR:-/tmp}/nunki-campaign-copies"
+cache() {
+  find target \( -path "$out" -o -name 'nunki-campaign.*' \) -prune \
+    -o ! -type d "$@" -print
+}
+clean() (
+  set +e
+  if [ -f "$list" ]; then
+    cache | LC_ALL=C sort > "$list.now"
+    LC_ALL=C comm -13 "$list" "$list.now" | tr '\n' '\0' | xargs -0 rm -f
+    cache -newer "$list" | tr '\n' '\0' | xargs -0 rm -f
+    find target -mindepth 1 -depth -type d -empty -newer "$list" \
+      ! -path "$out" ! -path "$out/*" -exec rmdir {} \;
+    rm -f "$list" "$list.now"
+  fi
+  rm -rf "$copies"
+  for old in target/mutants-*; do
+    [ "$old" = "$out" ] || rm -rf "$old"
+  done
+)
+# What a killed campaign left, before this one records anything.
+clean
+mkdir -p target
+cache | LC_ALL=C sort > "$list.new"
+mv "$list.new" "$list"
+# File times move in steps of the kernel's coarse clock, a few milliseconds,
+# and `-newer` is strict: a file written within the list's own step is not
+# newer than it, and would be kept. So the tool starts only once the clock
+# has moved past the list. Seen without it: a stand-in that writes at once
+# kept one of its artefacts, once in about three hundred campaigns.
+tick="target/nunki-campaign.tick"
+touch "$tick"
+until [ -n "$(find "$tick" -newer "$list")" ]; do touch "$tick"; done
+rm -f "$tick"
+if [ "$jobs" -gt 1 ]; then
+  mkdir -p "$copies"
+  export TMPDIR="$copies"
+fi
+
+# Told to stop — `nunki` sends SIGTERM to this script past the deadline —
+# the tool is stopped too, and only then is the cache cleaned. The tool runs
+# in the background so the signal is handled at once: a shell waiting on a
+# foreground child runs its trap only when the child is done, and a shell
+# without a trap dies and leaves the tool running in the copy, orphaned.
+child=""
+stop() {
+  if [ -n "$child" ]; then
+    kill -TERM "$child" 2>/dev/null
+    wait "$child" 2>/dev/null
+  fi
+  exit 143
+}
+trap 'rc=$?; clean; exit $rc' EXIT
+trap stop INT TERM HUP
+
 # A campaign that finds survivors exits non-zero — 2, measured on
 # cargo-mutants 27.1.0 — and that is a result, not a failure: `nunki` reads the
 # survivors rather than the status.
@@ -1123,7 +1223,10 @@ fi
 # command line is the whole of the campaign's configuration.
 # shellcheck disable=SC2086
 status=0
-cargo mutants --no-config $where --no-shuffle --exclude-re "replace main -> " --output "$out" $scope >&2 || status=$?
+cargo mutants --no-config $where --no-shuffle --exclude-re "replace main -> " --output "$out" $scope >&2 &
+child=$!
+wait "$child" || status=$?
+child=""
 
 # `--output DIR` writes into `DIR/mutants.out/`, not into `DIR` (measured on
 # 27.1.0). Reading the wrong path makes the whole campaign fail silently.
@@ -1819,6 +1922,13 @@ shift
 # often is, the deadline being 45 minutes. What covers that is the `rm -rf`
 # further down, which clears the previous campaign's copy before this one
 # runs, and the battery excluding the directory for the same reason.
+#
+# It is also everything mutmut leaves per mutant (SPEC 4.4, the build cache
+# a campaign leaves as it found it): each mutant lives in that copy's
+# sources, its result in the copy's `.meta` files, and pytest's caches for it
+# under the copy too, since mutmut runs the tests from there. Nothing goes
+# into the project's own tree or `.venv`, which `uv sync --frozen` keeps to
+# the lockfile. Clearing `mutants/` is the whole of the cleaning.
 trap 'rm -rf mutants' EXIT
 
 # Only Python sources are worth mutating; the touched list holds whatever the
@@ -2878,6 +2988,17 @@ process.stdout.write(where);
 # writing anything leaves the previous campaign's, on code that has changed
 # since — and a replay of the same fingerprint reaches exactly that path.
 rm -f "$report"
+
+# What Stryker leaves behind (SPEC 4.4, the build cache a campaign leaves as
+# it found it): its sandbox, `.stryker-tmp/`, a copy of the project its
+# mutants run in, which `--cleanTempDir always` below removes when Stryker
+# ends, failure included, and which is left only when Stryker is killed — so
+# it is cleared here first, for that case. Per mutant, it writes nothing else
+# that outlives a run: by its documentation every mutant is compiled into
+# the one sandbox and switched on at run time, and the report, one file, is
+# removed once read. Not run against a real Stryker: none is in the image
+# this was written in.
+rm -rf .stryker-tmp
 
 # `--cleanTempDir always` and not the default: the sandbox is then removed
 # even when the run fails, so a killed campaign leaves no copy of the project

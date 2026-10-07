@@ -22,6 +22,10 @@ pub enum Verdict {
     Red(String),
     /// Could not be established, and why. Never counted as a pass.
     NotChecked(String),
+    /// Held, but drifting toward a state that will cost: something to look
+    /// at, with what to do. Not red — nothing is breached — and never
+    /// counted as green either.
+    Amber(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +69,7 @@ impl Report {
                 Verdict::Green(d) => ("ok  ", d),
                 Verdict::Red(d) => ("RED ", d),
                 Verdict::NotChecked(d) => ("--  ", d),
+                Verdict::Amber(d) => ("!!  ", d),
             };
             out.push_str(&format!("{mark}{}\n      {detail}\n", check.what));
         }
@@ -74,6 +79,11 @@ impl Report {
             .filter(|c| matches!(c.verdict, Verdict::Red(_)))
             .count();
         let unchecked = self.unchecked();
+        let amber = self
+            .checks
+            .iter()
+            .filter(|c| matches!(c.verdict, Verdict::Amber(_)))
+            .count();
         out.push('\n');
         out.push_str(&match (red, unchecked) {
             (0, 0) => "everything checked is held.".to_string(),
@@ -81,6 +91,9 @@ impl Report {
             (r, 0) => format!("{r} restriction(s) not held."),
             (r, n) => format!("{r} restriction(s) not held; {n} could not be checked."),
         });
+        if amber > 0 {
+            out.push_str(&format!(" {amber} to look at (!!)."));
+        }
         out.push('\n');
         out
     }
@@ -840,5 +853,128 @@ pub fn forge_protection(project: &Project, api: &str, report: &mut Report) {
             Err(e) => Verdict::NotChecked(format!("the forge did not say: {e}")),
         };
         report.add(format!("{branch} is protected on the forge"), verdict);
+    }
+}
+
+/// Above this many files, the campaign copy's `target/` is no longer being
+/// cleaned (SPEC 4.4, gate 7).
+///
+/// Measured on nunki's own repository, cargo-mutants 27.1.0: a cache built
+/// once for the tests holds about 11,000 files, and one campaign of 23
+/// mutants that nothing cleaned added 67,450 more — about 2,900 a mutant,
+/// mostly `.dwo` files hard-linked under new names. A full campaign of 172
+/// mutants left uncleaned would add about 500,000; the slot that prompted
+/// this held 6.8 million, with each mutant 70 s instead of 7. 250,000 is
+/// twenty times a healthy cache of this size, crossed by the first full
+/// campaign that leaves its artefacts, and far below where it hurts.
+pub const CACHE_FILES_AMBER: u64 = 250_000;
+
+/// Above this many GiB, likewise. Hard links make size the weaker signal —
+/// the 67,450 files above weighed 370 MB — so this is for what links do not
+/// explain: a copy of the tree left behind, an output nobody removes. The
+/// healthy cache above is 1.9 GB; the slot that prompted this held several
+/// hundred.
+pub const CACHE_GIB_AMBER: u64 = 50;
+
+/// What runs in the slot's agent container to measure the clean copy's
+/// cache: `none` when there is no `target/`, else its file count and its size
+/// in KiB. Read from the volume as it stands — no refresh, nothing lifted.
+pub fn cache_probe() -> String {
+    format!(
+        "d={}/target\n\
+         if [ ! -d \"$d\" ]; then echo none; exit 0; fi\n\
+         files=$(find \"$d\" -type f | wc -l | tr -d ' ')\n\
+         kib=$(du -sk \"$d\" | cut -f1)\n\
+         echo \"$files $kib\"\n",
+        crate::exec::PROOF_AT
+    )
+}
+
+/// The line `nunki check --slot` gives the campaign copy's build cache: amber
+/// past [`CACHE_FILES_AMBER`] files or [`CACHE_GIB_AMBER`] GiB, a sign that
+/// the stack's `mutation.sh` does not clean what its mutants build — an older
+/// one, or a project's own. Measured in the slot's agent container when it is
+/// up; never lifted for this, so a slot that is down is not checked.
+pub fn campaign_cache(
+    project: &Project,
+    slot: &crate::slot::Slot,
+    engine: std::sync::Arc<dyn crate::engine::Engine>,
+) -> Check {
+    let what = "the campaign copy's build cache is being cleaned".to_string();
+    let not_checked = |why: String| Check {
+        what: what.clone(),
+        verdict: Verdict::NotChecked(why),
+    };
+    let file = crate::run::profile_path(project, &slot.name);
+    if !file.is_file() {
+        return not_checked(format!(
+            "slot {} has no profile, so there is no copy to measure",
+            slot.name
+        ));
+    }
+    let compose_project = match crate::compose::project_name(&project.session(), &slot.name) {
+        Ok(p) => p,
+        Err(e) => return not_checked(e.to_string()),
+    };
+    match engine.container_of(&file, &compose_project, crate::compose::AGENT_SERVICE) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return not_checked(format!(
+                "slot {}'s profile is down, and this check does not lift it",
+                slot.name
+            ));
+        }
+        Err(e) => return not_checked(e.to_string()),
+    }
+    let said = engine.exec(
+        &file,
+        &compose_project,
+        crate::compose::AGENT_SERVICE,
+        &["sh".to_string(), "-c".to_string(), cache_probe()],
+    );
+    Check {
+        what,
+        verdict: cache_verdict(said),
+    }
+}
+
+/// What the cache's measurement says: [`cache_probe`]'s answer, judged.
+pub fn cache_verdict(
+    said: Result<crate::engine::ExecOutput, crate::engine::EngineError>,
+) -> Verdict {
+    let out = match said {
+        Ok(out) if out.ok() => out,
+        Ok(out) => {
+            return Verdict::NotChecked(format!(
+                "the measurement failed ({}): {}",
+                out.status,
+                out.stderr.trim()
+            ));
+        }
+        Err(e) => return Verdict::NotChecked(format!("the measurement failed: {e}")),
+    };
+    let text = out.stdout.trim();
+    if text == "none" {
+        return Verdict::Green("the copy has no build cache yet".to_string());
+    }
+    let mut numbers = text.split_whitespace().map(str::parse::<u64>);
+    let (Some(Ok(files)), Some(Ok(kib)), None) = (numbers.next(), numbers.next(), numbers.next())
+    else {
+        return Verdict::NotChecked(format!("the measurement said {text:?}, not two numbers"));
+    };
+    let gib = kib / (1024 * 1024);
+    let found = format!(
+        "{files} files, {gib} GiB in {}/target",
+        crate::exec::PROOF_AT
+    );
+    if files > CACHE_FILES_AMBER || gib > CACHE_GIB_AMBER {
+        Verdict::Amber(format!(
+            "{found}, past {CACHE_FILES_AMBER} files or {CACHE_GIB_AMBER} GiB: what the \
+             mutants built is not being removed, and every build scans it. `nunki init` \
+             writes a `mutation.sh` that cleans up after itself; then empty the copy's \
+             `target/` once, from inside the slot"
+        ))
+    } else {
+        Verdict::Green(found)
     }
 }
