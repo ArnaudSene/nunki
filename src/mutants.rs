@@ -1175,23 +1175,20 @@ pub fn by_file(text: &str, on: &str) -> Option<BTreeMap<String, Measured>> {
     if line.tried.map(u64::from) != Some(tried) {
         return None;
     }
+    // `found` adds up only when every file gives one (an empty set adds up
+    // to 0). With no `found` anywhere — neither in total nor for any file —
+    // there is nothing to compare. Anything else — a `found` for some files
+    // and not others, per file and not in total, or the reverse — is a
+    // script that does not say the same thing twice.
     let found: Option<u64> = files
         .values()
         .map(|m: &Measured| m.found.map(u64::from))
         .sum();
-    if found.is_none() && files.values().any(|m| m.found.is_some()) {
-        return None;
-    }
     match (line.found, found) {
-        (Some(total), Some(sum)) if u64::from(total) == sum => {}
-        (Some(_), Some(_)) => return None,
-        // A `found` for every file and none in total, or the reverse, is a
-        // script that does not say the same thing twice.
-        (None, Some(_)) if !files.is_empty() => return None,
-        (Some(total), None) if total > 0 || !files.is_empty() => return None,
-        _ => {}
+        (Some(total), Some(sum)) if u64::from(total) == sum => Some(files),
+        (None, _) if files.values().all(|m| m.found.is_none()) => Some(files),
+        _ => None,
     }
-    Some(files)
 }
 
 /// What a set of per-file counts adds up to.
@@ -1550,7 +1547,9 @@ fn broken(since: &str, previous: Option<&Campaign>) -> String {
 /// What a partial campaign takes from the campaign it continues, given the
 /// files `changed` since it: the chain so far with that campaign appended;
 /// the survivors of the files that did not change, as they stood, each
-/// naming the campaign that found it and with nothing the HQ said on it;
+/// naming the campaign that found it — what the HQ said on it is then
+/// [`carry`]'s to decide, which finds each kept survivor's own twin and
+/// sets its outcome and refusal from it;
 /// and those files' counts — `None` when the campaign on file kept none, in
 /// which case nothing can be rebuilt.
 ///
@@ -1573,8 +1572,6 @@ pub fn continued(
         .iter()
         .filter(|s| !changed.contains(&s.file))
         .map(|s| Survivor {
-            outcome: None,
-            refused: None,
             found_on: s.found_on.clone().or_else(|| Some(previous.head.clone())),
             ..s.clone()
         })

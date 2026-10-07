@@ -6147,6 +6147,11 @@ fn per_file_counts_are_read_only_when_they_add_up() {
         read("{\"campaign\":\"done\",\"tried\":0,\"found\":0,\"by_file\":true}\n"),
         Some(Default::default())
     );
+    // Nothing mutable, and no `found` said at all.
+    assert_eq!(
+        read("{\"campaign\":\"done\",\"tried\":0,\"by_file\":true}\n"),
+        Some(Default::default())
+    );
     // Without `found` anywhere.
     assert!(read(
         "{\"measured\":\"src/a.rs\",\"tried\":3}\n{\"campaign\":\"done\",\"tried\":3,\"by_file\":true}\n"

@@ -3245,6 +3245,7 @@ impl Fixture {
         let files: std::collections::BTreeMap<String, Measured> = [
             ("src/kept.rs".to_string(), measured(kept_tried, &earlier)),
             ("src/new.rs".to_string(), measured(tried, &head)),
+            ("src/also.rs".to_string(), measured(0, &head)),
         ]
         .into_iter()
         .collect();
@@ -3307,7 +3308,7 @@ fn at_standard_a_chain_at_the_threshold_is_green_and_says_how_it_was_rebuilt() {
     let note = outcome.note.expect("a chain is said");
     assert!(
         note.contains(
-            "judged once, as one campaign at this commit: 2 file(s), 1 measured by this \
+            "judged once, as one campaign at this commit: 3 file(s), 2 measured by this \
              campaign and 1 kept from the 1 before it"
         ),
         "{note}"
