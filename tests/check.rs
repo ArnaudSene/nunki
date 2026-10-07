@@ -1269,6 +1269,9 @@ fn an_amber_line_is_shown_and_counted_but_never_red() {
         what: "something".to_string(),
         verdict: Verdict::Green("fine".to_string()),
     });
+    // Nothing amber, nothing said about it.
+    let plain = report.render();
+    assert!(!plain.contains("to look at"), "{plain}");
     report.checks.push(nunki::check::Check {
         what: "the cache".to_string(),
         verdict: Verdict::Amber("growing".to_string()),
@@ -1281,4 +1284,27 @@ fn an_amber_line_is_shown_and_counted_but_never_red() {
         text.contains("everything checked is held. 1 to look at (!!)."),
         "{text}"
     );
+}
+
+/// Without `--slot`, the verb names the container probes as not run, rather
+/// than leaving them out.
+#[test]
+fn without_a_slot_the_verb_names_its_container_probes_as_not_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    common::project_home(&root, dir.path(), "harness: claude-code\n");
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_nunki"))
+        .env("HOME", dir.path())
+        .args(["-C"])
+        .arg(&root)
+        .arg("check")
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("--  the perimeter holds from inside the mission profile\n"),
+        "{text}"
+    );
+    assert!(text.contains("no slot named"), "{text}");
 }
