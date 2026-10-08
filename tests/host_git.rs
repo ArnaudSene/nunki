@@ -2308,3 +2308,26 @@ fn a_fifo_at_a_tracked_path_is_a_change_and_never_waited_on() {
         .expect("the host waited on the agent's FIFO");
     assert_eq!(status.unwrap(), " T .gitattributes");
 }
+
+/// A tracked path the host cannot look at — a directory on the way it may
+/// not search — is an error naming it, never taken for a deleted file: what
+/// nunki cannot read, it does not judge.
+#[test]
+fn a_tracked_path_the_host_cannot_look_at_is_an_error_not_a_deletion() {
+    for (dir, tracked) in [("d", "d/inner.rs"), ("d", "d/e/inner.rs")] {
+        let w = world();
+        write(&w.tree, tracked, "inner\n");
+        git(&w.tree, &["add", "-A"]);
+        git(&w.tree, &["commit", "-q", "-m", "a directory"]);
+        let locked = w.tree.join(dir);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let status = nunki::git::SlotGit::open(&w.tree).and_then(|r| r.status());
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let err = status.unwrap_err().to_string();
+        assert!(err.contains("Permission denied"), "{tracked}: {err}");
+        assert!(
+            err.contains(&w.tree.join(dir).display().to_string()),
+            "{err}"
+        );
+    }
+}
