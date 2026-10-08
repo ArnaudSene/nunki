@@ -924,6 +924,7 @@ fn live_the_battery_is_the_stacks_mounted_one_and_an_absent_one_is_red() {
     git(&tree, &["commit", "-q", "-m", "base"]);
     git(&tree, &["branch", "-q", "dev"]);
     git(&tree, &["checkout", "-q", "-b", "mission/x"]);
+    record_base(&tree);
 
     let project = nunki::project::Project::at(
         dir.path().join("repo"),
