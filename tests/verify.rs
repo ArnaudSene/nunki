@@ -96,6 +96,7 @@ impl World {
         git(&tree, &["add", "-A"]);
         git(&tree, &["commit", "-q", "-m", "base"]);
         git(&tree, &["checkout", "-q", "-b", "mission/x"]);
+        record_base(&tree);
 
         let project = Project::at(
             dir.path().join("repo"),
@@ -3446,4 +3447,27 @@ fn green_final_gates_leave_each_campaign_of_the_chain_in_the_follow_up() {
         !followup.contains("3. "),
         "the judged line is no campaign: {followup}"
     );
+}
+
+/// What `run::branch` does at launch: the host records the mission's base
+/// from the project's repository (`refs/nunki/origin/*` in the slot's
+/// mirror), and the gates judge against that record alone. A bare copy of
+/// the slot, taken now, before any agent commit, stands in for the project.
+fn record_base(tree: &Path) {
+    let name = tree.file_name().unwrap().to_string_lossy().into_owned();
+    let project = tree.with_file_name(format!("{name}-project.git"));
+    git(
+        tree.parent().unwrap(),
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            tree.to_str().unwrap(),
+            project.to_str().unwrap(),
+        ],
+    );
+    nunki::git::SlotGit::open(tree)
+        .unwrap()
+        .fetch_origin(&project)
+        .unwrap();
 }

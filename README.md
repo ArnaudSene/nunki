@@ -14,6 +14,36 @@ interchangeable executor behind an adapter).
 French). [`AGENTS.md`](AGENTS.md) holds the rules for anyone working in this
 repository.
 
+**The security model, in one paragraph.** An agent runs in a container with
+no capability, under your uid, behind a firewall sidecar it cannot reach; it
+sees its slot's tree and its mission folder, nothing else. What it writes in
+the slot — code, but also the slot's `.git`: configuration, hooks, refs — is
+never executed or believed on your machine. `nunki` runs no git inside a slot:
+every git it needs about one runs in a **mirror** beside the slot, outside
+every mount, that only the host writes. The slot's commits reach the mirror
+through a fetch that hashes every object, its refs are read from their files,
+and no configuration of the slot's is ever read — so a `core.fsmonitor`, a
+hook, a filter or a pager planted there has nothing to run it. Nor does a
+git of the host's ever start inside the slot's tree: **slots do not support
+submodules**. A commit holding a gitlink is refused, with nothing run, by
+every operation that would take the tree as work tree (gate 1, `slot reset`,
+the launch's checkout), and those few run with submodule descent switched
+off as well. A slot whose object store borrows another repository's
+(`objects/info/alternates`), or holds anything but plain files and
+directories, is refused before it is read. Whether a
+slot's tree is clean is `nunki`'s own comparison with `HEAD`, byte for byte,
+never what the slot's index says nor what its `.gitattributes` would make of
+a file — so a project that relies on conversion at checkout (`text`,
+`eol`, `ident`) reads as not clean. The gates measure a branch from the base
+`nunki` recorded itself from your repository, never from a ref the slot
+holds. `mission fetch` and `nunki push` take the mission's branch alone, and
+only when it is the very commit the gates and verdicts judged: never a tag
+the agent made, nor a commit added after. `nunki check` names any key a
+slot's `.git/config` carries that git would execute, and any gitlink its
+`HEAD` holds. What `nunki`
+writes back into a slot (a branch, its checkout) it writes as files. Nothing
+reaches the forge but `nunki push`, on your explicit word.
+
 ## Install
 
 What you need:

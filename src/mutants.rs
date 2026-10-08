@@ -521,13 +521,15 @@ pub fn running_path(hq_root: &Path, slot: &str) -> PathBuf {
 /// rather than an error. The digest is `git hash-object`, so it needs no
 /// crate and a human can reproduce it by hand.
 pub fn fingerprint(tree: &Path, touched: &[String]) -> Result<String, MutantsError> {
+    let repo = git::SlotGit::open(tree)?;
     let mut lines: Vec<String> = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     for path in touched {
         if !seen.insert(path.clone()) {
             continue;
         }
-        let blob = git::run(tree, &["rev-parse", &format!("HEAD:{path}")])
+        let blob = repo
+            .run(&["rev-parse", &format!("HEAD:{path}")])
             .unwrap_or_else(|_| "absent".to_string());
         lines.push(format!("{blob} {path}"));
     }
@@ -537,37 +539,10 @@ pub fn fingerprint(tree: &Path, touched: &[String]) -> Result<String, MutantsErr
 }
 
 /// `git hash-object --stdin` — git is already here, and this keeps the digest
-/// something a human can check with one command.
+/// something a human can check with one command. Run in the slot's host
+/// mirror, like every git on a slot (`git::SlotGit`).
 fn hash_object(tree: &Path, text: &str) -> Result<String, git::GitError> {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
-    let mut child = Command::new("git")
-        .arg("-C")
-        .arg(tree)
-        .args(["hash-object", "--stdin"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| git::GitError::Missing(e.to_string()))?;
-    child
-        .stdin
-        .take()
-        .expect("stdin was piped")
-        .write_all(text.as_bytes())
-        .map_err(|e| git::GitError::Missing(e.to_string()))?;
-    let out = child
-        .wait_with_output()
-        .map_err(|e| git::GitError::Missing(e.to_string()))?;
-    if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
-    } else {
-        Err(git::GitError::Failed {
-            verb: "hash-object".to_string(),
-            at: tree.display().to_string(),
-            stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
-        })
-    }
+    git::SlotGit::open(tree)?.run_with_input(&["hash-object", "--stdin"], text.as_bytes())
 }
 
 /// Read the campaign a mission holds, if it holds one.
@@ -1607,7 +1582,7 @@ pub fn changed_between(
     from: &str,
     to: &str,
 ) -> Result<BTreeSet<String>, MutantsError> {
-    let names = git::run(
+    let names = git::on_slot(
         tree,
         &["diff", "--name-only", "--no-renames", "-z", from, to],
     )?;
@@ -2204,7 +2179,7 @@ pub fn uncarried(tree: &Path, previous: &Campaign, touched: &[String]) -> Option
 
 /// Every file in `commit`'s tree, by path.
 fn files_at(tree: &Path, commit: &str) -> Result<BTreeSet<String>, MutantsError> {
-    let names = git::run(tree, &["ls-tree", "-r", "--name-only", "-z", commit])?;
+    let names = git::on_slot(tree, &["ls-tree", "-r", "--name-only", "-z", commit])?;
     Ok(names
         .split('\0')
         .filter(|p| !p.is_empty())
@@ -2550,7 +2525,7 @@ pub fn campaign(
 ) -> Result<Progress, MutantsError> {
     use crate::harness::spawn::Spawner;
 
-    let head = git::head(&slot.tree)?;
+    let head = git::slot_head(&slot.tree)?;
     // The base's **name**, and the paths worked out here — not handed in.
     //
     // Gate 7 judges a campaign by the fingerprint of what it ran on, so the
@@ -2629,7 +2604,7 @@ pub fn campaign(
             owed(previous, &coders, asked.rigor, asked.threshold)
                 .or_else(|| crate::gate::named_test_missing(&slot.tree, None, previous, &coders))
         },
-        |commit| git::run(&slot.tree, &["merge-base", "--is-ancestor", commit, "HEAD"]).is_ok(),
+        |commit| git::on_slot(&slot.tree, &["merge-base", "--is-ancestor", commit, "HEAD"]).is_ok(),
         |previous| uncarried(&slot.tree, previous, &touched),
     );
     let paths = handed(&slot.tree, &touched, &scope)?;

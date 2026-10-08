@@ -34,6 +34,19 @@ use crate::state::{MissionState, Store, lock::SlotLock};
 
 #[derive(Debug, thiserror::Error)]
 pub enum PushError {
+    /// What would be published is not the commit the gates and verdicts
+    /// judged (security round 3).
+    #[error(
+        "{at}, the branch {branch} is at {tip}, but the commit the gates and verdicts judged \
+         is {judged}: nunki publishes only the judged commit, and {done}"
+    )]
+    NotJudged {
+        branch: String,
+        at: &'static str,
+        tip: String,
+        judged: String,
+        done: &'static str,
+    },
     #[error("mission {0} has not started — there is nothing to push")]
     NotStarted(String),
     #[error(
@@ -143,6 +156,19 @@ pub fn fetch(project: &Project, id: &str) -> Result<Fetched, PushError> {
         .load(id)
         .map_err(|_| PushError::NotStarted(id.to_string()))?;
     let slot = crate::slot::find(project, &state.slot)?;
+    let judged = crate::git::slot_head(&slot.tree)?;
+    fetch_judged(project, id, &judged)
+}
+
+/// [`fetch`], of the commit `judged` and of nothing else: refused, with
+/// nothing fetched, when the slot's mission branch is not that commit — a
+/// branch moved on past what the gates saw, or a `HEAD` detached from it.
+pub fn fetch_judged(project: &Project, id: &str, judged: &str) -> Result<Fetched, PushError> {
+    let store = Store::open(&project.hq_root)?;
+    let state = store
+        .load(id)
+        .map_err(|_| PushError::NotStarted(id.to_string()))?;
+    let slot = crate::slot::find(project, &state.slot)?;
     let branch = state.flow.header().branch.clone();
 
     // Git refuses to fetch into the branch that is checked out, and says so
@@ -151,28 +177,76 @@ pub fn fetch(project: &Project, id: &str) -> Result<Fetched, PushError> {
         return Err(PushError::FetchingIntoCurrent(branch));
     }
 
+    // Named in full everywhere: a tag of the same name would win over the
+    // branch for a short name.
+    let full = format!("refs/heads/{branch}");
     let before = crate::git::run(
         &project.root,
-        &["rev-parse", "--verify", "--quiet", &branch],
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{full}^{{commit}}"),
+        ],
     )
     .ok()
     .filter(|s| !s.is_empty());
     // No `+`: a non-fast-forward is refused rather than forced. What is in
     // the repository was put there by a human or by an earlier fetch, and
     // overwriting it is not this verb's to do.
+    // From the slot's host mirror, never from the slot: a fetch from a
+    // path runs `upload-pack` there, under that repository's configuration,
+    // and the slot's is its agent's (`git::SlotGit`).
+    //
+    // Exactly the mission's branch crosses, and nothing else: `--no-tags`,
+    // or git would follow every tag of the mirror that points into the
+    // fetched history, and a tag the agent named `dev` would shadow the
+    // human's `dev` (security round 2).
+    let mirror = crate::git::SlotGit::open(&slot.tree)?;
+    // The branch the mirror holds — what the fetch would bring — is the
+    // judged commit, or nothing crosses.
+    let tip = mirror
+        .run(&["rev-parse", "--verify", &format!("{full}^{{commit}}")])
+        .unwrap_or_else(|_| "nothing".into());
+    if tip != judged {
+        return Err(PushError::NotJudged {
+            branch,
+            at: "in the slot",
+            tip,
+            judged: judged.to_string(),
+            done: "nothing was fetched",
+        });
+    }
     crate::git::run(
         &project.root,
         &[
             "fetch",
-            &slot.tree.display().to_string(),
-            &format!("{branch}:{branch}"),
+            "--no-tags",
+            &mirror.mirror().display().to_string(),
+            &format!("{full}:{full}"),
         ],
     )?;
-    let after = crate::git::head_of(&project.root, &branch)?;
+    let after = crate::git::head_of(&project.root, &full)?;
     Ok(Fetched {
         branch,
         head: after,
         was: before,
+    })
+}
+
+/// The second check of [`push_to`]: the branch the fetch left in the
+/// project is the judged commit, or nothing is pushed. The first, before the
+/// fetch, is [`fetch_judged`]'s; this one holds even if that one is wrong.
+fn is_judged(fetched: &Fetched, judged: &str) -> Result<(), PushError> {
+    if fetched.head == judged {
+        return Ok(());
+    }
+    Err(PushError::NotJudged {
+        branch: fetched.branch.clone(),
+        at: "in the project, after the fetch",
+        tip: fetched.head.clone(),
+        judged: judged.to_string(),
+        done: "nothing was pushed",
     })
 }
 
@@ -253,7 +327,7 @@ pub fn push_to(
     }
 
     let slot = crate::slot::find(project, &state.slot)?;
-    let head = crate::git::head(&slot.tree)?;
+    let head = crate::git::slot_head(&slot.tree)?;
     let header = state.flow.header().clone();
     let Held {
         not_attacked,
@@ -262,7 +336,11 @@ pub fn push_to(
     proposals_ruled(project, id)?;
     nothing_owed(project, id, &header, &slot.tree, &head)?;
 
-    let fetched = fetch(project, id)?;
+    // Exactly the judged commit, by id: refused before the fetch when the
+    // slot's branch is not it, and checked again on the project's side before
+    // anything is pushed.
+    let fetched = fetch_judged(project, id, &head)?;
+    is_judged(&fetched, &head)?;
     let remote = remote_url(project)?;
     crate::git::run(&project.root, &["push", REMOTE, &fetched.branch])?;
 
@@ -593,7 +671,7 @@ fn lifted_after<'s>(
 /// Whether `older` is `newer` or one of its ancestors. Anything git cannot
 /// answer — an unknown commit — is a no.
 fn is_ancestor(tree: &std::path::Path, older: &str, newer: &str) -> bool {
-    crate::git::run(tree, &["merge-base", "--is-ancestor", older, newer]).is_ok()
+    crate::git::on_slot(tree, &["merge-base", "--is-ancestor", older, newer]).is_ok()
 }
 
 /// The commits after `since` up to `head`, oldest first, each as
@@ -605,7 +683,7 @@ pub fn not_attacked(
     since: &str,
     head: &str,
 ) -> Result<Vec<String>, crate::git::GitError> {
-    let out = crate::git::run(
+    let out = crate::git::on_slot(
         tree,
         &[
             "log",
@@ -658,7 +736,7 @@ fn only_wiring_since(
     }
     // An ancestor, or the question means nothing: two commits on different
     // branches have a difference that is not "what was added".
-    if crate::git::run(&slot.tree, &["merge-base", "--is-ancestor", coder, head]).is_err() {
+    if crate::git::on_slot(&slot.tree, &["merge-base", "--is-ancestor", coder, head]).is_err() {
         return Err(PushError::NotAnAncestor(
             coder.to_string(),
             head.to_string(),
@@ -684,7 +762,7 @@ fn only_wiring_since(
     if outside.is_empty() {
         return Ok(());
     }
-    let commits = crate::git::run(
+    let commits = crate::git::on_slot(
         &slot.tree,
         &["rev-list", "--count", &format!("{coder}..{head}")],
     )?
@@ -712,4 +790,25 @@ fn only_wiring_since(
 fn remote_url(project: &Project) -> Result<String, PushError> {
     crate::git::run(&project.root, &["remote", "get-url", REMOTE])
         .map_err(|_| PushError::NoRemote(REMOTE.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A project-side tip that is not the judged commit is refused, naming
+    /// both, whatever the check before the fetch let through.
+    #[test]
+    fn a_fetched_tip_that_is_not_the_judged_commit_is_never_pushed() {
+        let fetched = |head: &str| Fetched {
+            branch: "mission/x".into(),
+            head: head.into(),
+            was: None,
+        };
+        assert!(is_judged(&fetched("aaa"), "aaa").is_ok());
+        let err = is_judged(&fetched("bbb"), "aaa").unwrap_err().to_string();
+        assert!(err.contains("at bbb"), "{err}");
+        assert!(err.contains("judged is aaa"), "{err}");
+        assert!(err.contains("nothing was pushed"), "{err}");
+    }
 }

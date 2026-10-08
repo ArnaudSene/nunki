@@ -465,7 +465,7 @@ pub fn verify_as(
             // The final verification: every gate, including the deliverable,
             // the battery and the mutation campaign.
             Stage::Gates => {
-                let head = crate::git::head(&slot.tree)?;
+                let head = crate::git::slot_head(&slot.tree)?;
                 let report = gate::at_verification(&subject, &verification)?;
                 let verdict = report.verdict();
                 steps.push(Step::Gates {
@@ -539,7 +539,7 @@ pub fn verify_as(
                             return Ok(steps);
                         }
                         Ended::With(outcome, usage, windows) => {
-                            let head = crate::git::head(&slot.tree)?;
+                            let head = crate::git::slot_head(&slot.tree)?;
                             let spared = tally(
                                 project,
                                 &mut state,
@@ -710,7 +710,7 @@ pub fn verify_as(
                             return Ok(steps);
                         }
                         Ended::With(outcome, usage, windows) => {
-                            let head = crate::git::head(&slot.tree)?;
+                            let head = crate::git::slot_head(&slot.tree)?;
                             let spared = tally(
                                 project,
                                 &mut state,
@@ -810,7 +810,7 @@ pub fn verify_as(
                         max: cap.max,
                     });
                 }
-                let head = crate::git::head(&slot.tree)?;
+                let head = crate::git::slot_head(&slot.tree)?;
                 steps.push(Step::Findings {
                     report,
                     lifted: state
@@ -865,7 +865,7 @@ fn last_round_since(
     let Some(last) = state.concluded(Role::Security) else {
         return Ok(Vec::new());
     };
-    let head = crate::git::head(tree)?;
+    let head = crate::git::slot_head(tree)?;
     Ok(crate::push::not_attacked(tree, &last.head, &head)?)
 }
 

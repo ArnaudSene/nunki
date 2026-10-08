@@ -220,11 +220,50 @@ pub fn span_digest(lines: &[&str]) -> String {
 /// down the path, the blob — is hashed here and compared with the id it was
 /// asked by. A loose object rewritten on disk reads as nothing, not as what
 /// it was made to say. `commit` is resolved under the same switches: the
-/// campaign's full id comes back as itself, and `HEAD` — for `--registry`,
-/// in the human's repository — as the commit it names.
+/// campaign's full id comes back as itself, and `HEAD` as the commit it
+/// names.
+///
+/// It is read through the slot's host mirror ([`crate::git::SlotGit`]): no
+/// git runs in the slot, and nothing of its configuration is read. A slot
+/// the mirror cannot be brought up to reads as nothing too. [`standing`]
+/// reads the human's own repository the same way, without a mirror.
 pub fn source_at(tree: &Path, commit: &str, file: &str) -> Option<String> {
-    let commit = resolved(tree, commit)?;
-    let body = object(tree, "commit", &commit)?;
+    let slot = crate::git::SlotGit::open(tree).ok()?;
+    source_in(&Reader::Slot(&slot), commit, file)
+}
+
+/// Where [`source_at`] and [`standing`] read objects: a slot, through its
+/// host mirror, or the human's own repository, run as it is.
+enum Reader<'a> {
+    Slot(&'a crate::git::SlotGit),
+    Own(&'a Path),
+}
+
+impl Reader<'_> {
+    /// Git's stdout when it succeeded, with replace objects and grafts
+    /// switched off.
+    fn output(&self, args: &[&str]) -> Option<Vec<u8>> {
+        match self {
+            Reader::Slot(slot) => slot.bytes(args),
+            Reader::Own(tree) => {
+                let out = Command::new("git")
+                    .env("LC_ALL", "C")
+                    .env("GIT_NO_REPLACE_OBJECTS", "1")
+                    .env("GIT_GRAFT_FILE", "/dev/null")
+                    .arg("-C")
+                    .arg(tree)
+                    .args(args)
+                    .output()
+                    .ok()?;
+                out.status.success().then_some(out.stdout)
+            }
+        }
+    }
+}
+
+fn source_in(repo: &Reader, commit: &str, file: &str) -> Option<String> {
+    let commit = resolved(repo, commit)?;
+    let body = object(repo, "commit", &commit)?;
     let mut at = String::from_utf8(body)
         .ok()?
         .lines()
@@ -233,13 +272,13 @@ pub fn source_at(tree: &Path, commit: &str, file: &str) -> Option<String> {
         .to_string();
     let parts: Vec<&str> = file.split('/').collect();
     for (i, name) in parts.iter().enumerate() {
-        let listing = object(tree, "tree", &at)?;
+        let listing = object(repo, "tree", &at)?;
         let (mode, oid) = entry(&listing, name, at.len() / 2)?;
         let last = i + 1 == parts.len();
         match (last, mode.as_str()) {
             (false, "40000") => at = oid,
             (true, "100644" | "100755") => {
-                return String::from_utf8(object(tree, "blob", &oid)?).ok();
+                return String::from_utf8(object(repo, "blob", &oid)?).ok();
             }
             _ => return None,
         }
@@ -247,45 +286,29 @@ pub fn source_at(tree: &Path, commit: &str, file: &str) -> Option<String> {
     None
 }
 
-/// `git` in `tree`, with replace objects and grafts switched off.
-fn git_untrusted(tree: &Path) -> Command {
-    let mut git = Command::new("git");
-    git.env("LC_ALL", "C")
-        .env("GIT_NO_REPLACE_OBJECTS", "1")
-        .env("GIT_GRAFT_FILE", "/dev/null")
-        .arg("-C")
-        .arg(tree);
-    git
-}
-
 /// `name` as a full commit id, resolved with replace objects off: a full id
 /// comes back as itself, `HEAD` as the commit it names.
-fn resolved(tree: &Path, name: &str) -> Option<String> {
-    let out = git_untrusted(tree)
-        .args([
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            "--end-of-options",
-            &format!("{name}^{{commit}}"),
-        ])
-        .output()
-        .ok()?;
-    let oid = String::from_utf8(out.stdout).ok()?.trim().to_string();
-    out.status.success().then_some(oid)
+fn resolved(repo: &Reader, name: &str) -> Option<String> {
+    if let Reader::Slot(slot) = repo {
+        // A campaign's commit an amend left behind is still the slot's, and
+        // read through the mirror like the rest: fetched by its id.
+        let _ = slot.fetch_commit(name);
+    }
+    let out = repo.output(&[
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        "--end-of-options",
+        &format!("{name}^{{commit}}"),
+    ])?;
+    Some(String::from_utf8(out).ok()?.trim().to_string())
 }
 
 /// The content of object `oid` of type `kind`, only when it hashes to `oid`
 /// — which nothing but a full id of that very content can.
-fn object(tree: &Path, kind: &str, oid: &str) -> Option<Vec<u8>> {
-    let out = git_untrusted(tree)
-        .args(["cat-file", kind, oid])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    (object_id(kind, &out.stdout, oid.len()) == oid).then_some(out.stdout)
+fn object(repo: &Reader, kind: &str, oid: &str) -> Option<Vec<u8>> {
+    let out = repo.output(&["cat-file", kind, oid])?;
+    (object_id(kind, &out, oid.len()) == oid).then_some(out)
 }
 
 /// Git's id of an object of type `kind` holding `content`, in the hash the
@@ -769,7 +792,8 @@ impl Standing {
 /// Where `entry`'s code is in the repository at `tree`, at `HEAD`: any run
 /// of its many lines counts, since code that moved still matches.
 pub fn standing(tree: &Path, entry: &Entry) -> Standing {
-    let Some(source) = source_at(tree, "HEAD", &entry.file) else {
+    // The human's own repository (`--registry`), read as it is: no slot.
+    let Some(source) = source_in(&Reader::Own(tree), "HEAD", &entry.file) else {
         return Standing::Gone;
     };
     let lines: Vec<&str> = source.lines().collect();

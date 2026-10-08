@@ -84,6 +84,7 @@ fn world() -> World {
     .unwrap();
     git(&tree, &["add", "-A"]);
     git(&tree, &["commit", "-q", "-m", "the code as it stands"]);
+    record_base(&tree);
 
     let proof = dir.path().join("proof");
     std::fs::create_dir_all(&proof).unwrap();
@@ -967,6 +968,17 @@ fn after_the_branch_merges_a_base_that_moved_the_next_campaign_is_full() {
     let before = nunki::gate::fork_point(tree, "dev").unwrap();
     git(tree, &["checkout", "-q", "dev"]);
     git(tree, &["cherry-pick", &picked]);
+    // The project's base moves, and the host records it again, as a launch
+    // does: the gates read the base from that record alone.
+    let project = tree.with_file_name(format!(
+        "{}-project.git",
+        tree.file_name().unwrap().to_string_lossy()
+    ));
+    git(tree, &["push", "-q", project.to_str().unwrap(), "dev"]);
+    nunki::git::SlotGit::open(tree)
+        .unwrap()
+        .fetch_origin(&project)
+        .unwrap();
     git(tree, &["checkout", "-q", "mission/x"]);
     git(tree, &["merge", "-q", "--no-edit", "dev"]);
     let after = nunki::gate::fork_point(tree, "dev").unwrap();
@@ -1010,4 +1022,27 @@ fn a_campaign_after_one_that_counted_no_such_file_is_launched_full() {
         }
         partial => panic!("a count no file answers to was carried: {partial:?}"),
     }
+}
+
+/// What `run::branch` does at launch: the host records the mission's base
+/// from the project's repository (`refs/nunki/origin/*` in the slot's
+/// mirror), and the gates judge against that record alone. A bare copy of
+/// the slot, taken now, before any agent commit, stands in for the project.
+fn record_base(tree: &Path) {
+    let name = tree.file_name().unwrap().to_string_lossy().into_owned();
+    let project = tree.with_file_name(format!("{name}-project.git"));
+    git(
+        tree.parent().unwrap(),
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            tree.to_str().unwrap(),
+            project.to_str().unwrap(),
+        ],
+    );
+    nunki::git::SlotGit::open(tree)
+        .unwrap()
+        .fetch_origin(&project)
+        .unwrap();
 }

@@ -281,6 +281,16 @@ pub enum GateError {
     Mutants(String),
     #[error("the mechanical security report could not be read: {0}")]
     Security(String),
+    /// The host has no record of the mission's base for this slot. The
+    /// gates judge against that record alone, never against a ref the slot
+    /// holds, which its agent writes.
+    #[error(
+        "the host has no record of the base {base:?} for the slot at {tree}: nunki judges a \
+         branch only against the base it fetched itself from the project's repository \
+         when it put the slot on its mission branch, never against a ref the slot holds. \
+         Launch the mission again (`nunki mission start`) to record it"
+    )]
+    NoBaseRecord { base: String, tree: String },
     #[error("{pattern:?} is not a usable path pattern: {source}")]
     BadPattern {
         pattern: String,
@@ -351,7 +361,7 @@ enum Phase {
 }
 
 fn play(subject: &Subject, verification: &Verification, phase: Phase) -> Result<Report, GateError> {
-    let head = git::head(subject.tree)?;
+    let head = git::slot_head(subject.tree)?;
     // Asked once, here, and not inside the two gates that would have to
     // answer it: the gates stand down together or not at all, and the flow
     // needs to know **that** is why they did.
@@ -413,7 +423,7 @@ fn clean_tree(subject: &Subject) -> Result<Decision, GateError> {
     if subject.role == Role::Security {
         return Ok(Decision::NotApplicable(READ_ONLY_TREE.into()));
     }
-    let dirty = git::run(subject.tree, &["status", "--porcelain"])?;
+    let dirty = git::SlotGit::open(subject.tree)?.status()?;
     if dirty.is_empty() {
         return Ok(Decision::Passed);
     }
@@ -429,58 +439,63 @@ fn branch_ahead(subject: &Subject) -> Result<Decision, GateError> {
     if subject.role == Role::Security {
         return Ok(Decision::NotApplicable(READ_ONLY_TREE.into()));
     }
-    let branch = git::current_branch(subject.tree)?;
+    let branch = git::SlotGit::open(subject.tree)?.current_branch()?;
     if subject.protected_branches.contains(&branch) {
         return Ok(Decision::Failed(format!(
             "the slot is on {branch:?}, which the project protects"
         )));
     }
+    // On the mission's branch, or nothing is judged: what nunki publishes is
+    // that branch, and a `HEAD` detached from it, or on another branch, would
+    // have the gates judge one commit while another is pushed (security
+    // round 3).
+    let mission = &subject.header.branch;
+    if &branch != mission {
+        let found = if branch == "HEAD" {
+            format!("detached at {}", git::slot_head(subject.tree)?)
+        } else {
+            format!("on {branch:?}")
+        };
+        return Ok(Decision::Failed(format!(
+            "the slot's HEAD is {found}, not on the mission's branch {mission:?}"
+        )));
+    }
     let base = base_ref(subject.tree, &subject.header.base)?;
-    let ahead = git::run(
+    let ahead = git::on_slot(
         subject.tree,
         &["rev-list", "--count", &format!("{base}..HEAD")],
     )?;
     if ahead.trim() == "0" {
         return Ok(Decision::Failed(format!(
-            "{branch:?} has no commit that {base:?} does not already have"
+            "{branch:?} has no commit that its base {:?} ({base}) does not already have",
+            subject.header.base
         )));
     }
     Ok(Decision::Passed)
 }
 
-/// The base as this clone knows it, and **the remote-tracking one first**.
+/// The mission's base, as **the host** recorded it: the commit the project's
+/// repository had on `base` when `run::branch` last fetched it into the
+/// slot's mirror (`refs/nunki/origin/<base>`, [`git::SlotGit::origin_branch`]).
 ///
-/// A slot is a clone whose `origin` is the project on this machine, and
-/// `run::branch` starts every mission branch from `origin/<base>` after
-/// fetching it. The clone's own `<base>` is written once, when the slot is
-/// made, and nothing moves it again — so from the second mission onwards the
-/// two disagree, and reading the local one reads the base the branch did
-/// not come from.
+/// Never a ref mirrored out of the slot. The slot's `origin/<base>` and its
+/// `<base>` are files its agent writes: an agent that moved either onto a
+/// commit of its own would have the gates measure the branch from there, and
+/// a protected path changed before that commit would vanish from gate 4,
+/// from the campaign's set and from gate 8's range (security round 3). No
+/// fallback either: without the host's record, the gates fail and say so.
 ///
-/// With a branch that has touched nothing, `dev...HEAD` then names every file
-/// the previous mission merged, while `origin/dev...HEAD` names none. Gate 4
-/// would fail a coder for a perimeter it had not left, on its first lot, and
-/// gate 8's fork point would be one merge too early.
-///
-/// The local branch stays as the fallback: a clone whose origin does not
-/// carry the base still has to be judged against something, and that is the
-/// only candidate left. It is the same order `run::branch` uses.
+/// A commit id, which is also why the local `<base>` written once at clone
+/// time and the `origin/<base>` refreshed at each launch can no longer be
+/// confused: the host's record is the one `run::branch` started from.
 fn base_ref(tree: &Path, base: &str) -> Result<Rev, GateError> {
-    let remote = format!("origin/{base}");
-    if git::run(
-        tree,
-        &[
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            &format!("refs/remotes/{remote}"),
-        ],
-    )
-    .is_ok()
-    {
-        return Ok(Rev(remote));
+    match git::SlotGit::open(tree)?.origin_branch(base) {
+        Some(commit) => Ok(Rev(commit)),
+        None => Err(GateError::NoBaseRecord {
+            base: base.to_string(),
+            tree: tree.display().to_string(),
+        }),
     }
-    Ok(Rev(base.to_string()))
 }
 
 /// The commit this branch forked from its base, as the gates that compare
@@ -494,7 +509,7 @@ fn base_ref(tree: &Path, base: &str) -> Result<Rev, GateError> {
 pub fn fork_point(tree: &Path, base: &str) -> Result<String, GateError> {
     let named = base_ref(tree, base)?;
     Ok(
-        crate::git::run(tree, &["merge-base", "HEAD", &named.to_string()])?
+        crate::git::on_slot(tree, &["merge-base", "HEAD", &named.to_string()])?
             .trim()
             .to_string(),
     )
@@ -682,8 +697,8 @@ struct Touched {
 }
 
 fn touched(tree: &Path, base: &Rev) -> Result<Touched, GateError> {
-    let diff = git::run(tree, &["diff", "--name-only", &format!("{base}...HEAD")])?;
-    let commits: Vec<String> = git::run(tree, &["rev-list", &format!("{base}..HEAD")])?
+    let diff = git::on_slot(tree, &["diff", "--name-only", &format!("{base}...HEAD")])?;
+    let commits: Vec<String> = git::on_slot(tree, &["rev-list", &format!("{base}..HEAD")])?
         .lines()
         .map(str::to_string)
         .collect();
@@ -695,7 +710,7 @@ fn touched(tree: &Path, base: &Rev) -> Result<Touched, GateError> {
         .map(|p| (p.to_string(), "the diff against the base".to_string()))
         .collect();
     for commit in &commits {
-        let in_commit = git::run(
+        let in_commit = git::on_slot(
             tree,
             &["diff-tree", "--no-commit-id", "--name-only", "-r", commit],
         )?;
@@ -769,7 +784,7 @@ fn coder_perimeter(
         // question is about the base, not about the slot's tree, where the
         // agent may have just created or deleted it.
         if if_exists.is_match(path)
-            && git::run(tree, &["cat-file", "-e", &format!("{base}:{path}")]).is_ok()
+            && git::on_slot(tree, &["cat-file", "-e", &format!("{base}:{path}")]).is_ok()
         {
             return Ok(Decision::Failed(format!(
                 "{path} already exists on {base} and is protected there, and {where_} touches it"
@@ -1768,14 +1783,21 @@ fn a_named_test_missing(
 /// The name is looked for as a whole word ([`crate::mutants::is_test_name`]
 /// keeps it one). In the repository at `tree`: in `commit`'s tree when one
 /// is given — the commit `nunki push` pushes, so text added uncommitted in
-/// the slot cannot satisfy it (HQ review 4) — or in the working tree, which
-/// gate 1 has just found clean.
+/// the slot cannot satisfy it (HQ review 4) — or in `HEAD`'s, which is the
+/// working tree when gate 1 has just found it clean. Never in the working
+/// tree itself: no git runs with a slot's tree as work tree for this.
 pub fn named_test_missing(
     tree: &Path,
     commit: Option<&str>,
     campaign: &crate::mutants::Campaign,
     coders: &std::collections::BTreeMap<String, crate::mutants::Triage>,
 ) -> Option<String> {
+    // The slot through its host mirror. A slot that cannot be read is said,
+    // never taken for a test that is not there.
+    let repo = match git::SlotGit::open(tree) {
+        Ok(repo) => repo,
+        Err(e) => return Some(e.to_string()),
+    };
     for survivor in &campaign.survivors {
         let Some(outcome) = crate::mutants::answer(survivor, coders) else {
             continue;
@@ -1783,10 +1805,19 @@ pub fn named_test_missing(
         let Some(test) = outcome.test() else {
             continue;
         };
-        let mut grep = vec!["grep", "--quiet", "-F", "-w", "-e", test];
-        grep.extend(commit);
-        grep.push("--");
-        if git::run(tree, &grep).is_err() {
+        // The commit given, or `HEAD`: read in the mirror, never in the
+        // working tree, so no git runs with the slot's tree as work tree.
+        let grep = [
+            "grep",
+            "--quiet",
+            "-F",
+            "-w",
+            "-e",
+            test,
+            commit.unwrap_or("HEAD"),
+            "--",
+        ];
+        if repo.run(&grep).is_err() {
             return Some(format!(
                 "{}:{} names the test {test:?}, and nothing in the tree is called \
                  that",
