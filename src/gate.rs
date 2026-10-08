@@ -1547,7 +1547,15 @@ fn mutation(subject: &Subject, threshold: Threshold) -> Result<Outcome, GateErro
         coders: &coders,
         foreign: &foreign,
     };
+    // Once, on the campaign on file: for a chain, the reconstruction one
+    // full campaign at `HEAD` would give (SPEC 4.4, the chain of campaigns).
     let mut outcome = judged(subject, threshold, &campaign, answer)?;
+    if let Some(chained) = chained(&campaign) {
+        outcome.note = Some(match outcome.note {
+            Some(note) => format!("{chained}; {note}"),
+            None => chained,
+        });
+    }
     if let Some(refused) = crate::mutants::foreign_said(&foreign) {
         outcome.note = Some(match outcome.note {
             Some(note) => format!("{note}; {refused}"),
@@ -1555,6 +1563,32 @@ fn mutation(subject: &Subject, threshold: Threshold) -> Result<Outcome, GateErro
         });
     }
     Ok(outcome)
+}
+
+/// What gate 7's note says of a campaign that continues a chain: that it
+/// was judged once, on the files as the chain's campaigns last measured
+/// them — how many this campaign measured, how many earlier ones did.
+/// Nothing for a campaign with nothing before it.
+fn chained(campaign: &crate::mutants::Campaign) -> Option<String> {
+    let earlier = campaign.chain.earlier.len();
+    if earlier == 0 {
+        return None;
+    }
+    Some(match &campaign.files {
+        Some(files) => {
+            let here = files.values().filter(|m| m.on == campaign.head).count();
+            format!(
+                "judged once, as one campaign at this commit: {} file(s), {here} measured by \
+                 this campaign and {} kept from the {earlier} before it",
+                files.len(),
+                files.len() - here
+            )
+        }
+        None => format!(
+            "this campaign continues {earlier} before it, and its per-file counts could not \
+             be trusted, so it carries no count"
+        ),
+    })
 }
 
 /// Gate 7 on a campaign that answers for the code as it stands, by the

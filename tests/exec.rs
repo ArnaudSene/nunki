@@ -68,6 +68,7 @@ fn nothing_touches_the_copy_a_campaign_is_rewriting() {
         &project.hq_root,
         &slot.name,
         &nunki::mutants::Running {
+            chain: Default::default(),
             fingerprint: "abc1234".into(),
             head: "def5678".into(),
             started_at: "2026-09-18T22:52:37Z".into(),
@@ -196,6 +197,7 @@ fn project(root: &Path) -> Project {
             permission_mode: "auto".to_string(),
             rigor: None,
             mutation_threshold: 80,
+            mutation_jobs: None,
             forge_protection: Default::default(),
         },
         root.join("nunki"),

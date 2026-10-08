@@ -221,6 +221,147 @@ Python and Next.js projects judge `standard` as `critical` until their
 campaigns count changed lines: mutmut and Stryker are run over whole touched
 files, so they give no count, and every survivor needs an outcome there.
 
+### Gate 7's campaigns, full and partial
+
+A mission's campaigns form a chain, and its unit is the **file**. The first
+campaign is **full**: every touched file, mutated where the branch changed it
+since its fork point. At `standard`, a later one — after a volet, say — is
+**partial**: the same campaign, restricted to the touched files whose content
+changed since the previous campaign's `HEAD`. Its base is still the fork
+point, so each of those files is measured exactly as a full campaign would
+measure it. Which files changed is git's answer on blobs (`git diff
+--name-only --no-renames`); no diff hunk is ever read. A file renamed is a
+file removed and a file added.
+
+A campaign is partial only when all of these hold, and full otherwise, with
+the reason in `MUTANTS.json`:
+
+- the mission is at `standard`;
+- a previous campaign of the mission is on file and gate 7 passes on it;
+- its `HEAD` is an ancestor of the current one;
+- it ran from the same fork point: a base merged in, or a hunk the base
+  cherry-picked, moves what the branch changed in every file;
+- it counted each file, and those counts add up to its total (below);
+- the files changed since it could be listed, and every file it counted
+  that did not change is one the branch touches at `HEAD`, present there;
+- the stack's `mutation.sh` and its tool's version are the ones it ran with —
+  read through the script's `# nunki-tool-version: <command>` line, which
+  every shipped `mutation.sh` carries; a script without it runs full
+  campaigns only;
+- it was not asked with `nunki mission mutants --again`.
+
+**Per-file counts.** Before its last line, `mutation.sh` prints one line per
+file with that file's counts, `{"measured":"src/lib.rs","tried":12,"found":13}`,
+and its last line says `"by_file":true`. nunki trusts them only when each
+file is named once, every one is a path nunki handed that campaign, and
+they add up to the totals. The Rust template gives them, keyed by the file
+cargo-mutants' own listing names for each mutant. The Python and Next.js
+ones measure whole files, give no count at all, and so never chain: every
+campaign of theirs is full.
+
+**How a chain is judged: once.** `MUTANTS.json` keeps, for each touched
+file, the counts of the latest campaign that measured it. A file unchanged
+since keeps its counts and its survivors exactly as they were — same file,
+same lines — and what the HQ said on them comes back the way it does between
+any two campaigns: a ruling as a proposal marked carried, awaiting
+`--ratify`, and a refusal as a refusal. A file changed, removed or renamed
+takes its old counts and survivors with it; what the new campaign found in
+it replaces them. Gate 7, and `nunki push` after it, judge that
+reconstruction once, at the mission's threshold: the sum of every file's
+tried, and the survivors left without an outcome. These are the numbers one
+full campaign at `HEAD` would give, under the assumption below. A volet that
+re-mutates well-killed code cannot pad the share: its new counts replace the
+old ones rather than adding to them.
+
+A partial campaign whose own counts cannot be trusted — none given, ones that
+do not add up, a count or a survivor in a file that did not change — is
+recorded with every survivor listed and no count. Gate 7 then judges it as
+`critical` does, and the next campaign is full. `mission status`, the
+monitor's log and the follow-up name each campaign (full or partial, from
+which commit, what it tried), then the one campaign gate 7 judged.
+
+**The known limit.** A partial campaign assumes that a mutant measured
+earlier in a file nobody has changed since still exists, and is still
+killed. A volet that weakens a test can make the second false; one that
+stops compiling an unchanged file — its `mod` line removed — makes the
+first false, and that file keeps its counts. The chain will not see
+either. `critical` never makes the assumption — its campaigns are always
+full — and `--again` forces a full campaign at any rigor.
+
+### Running mutants at once: `mutation_jobs`
+
+`mutation_jobs` in `nunki.yaml` — a whole number of at least 1, refused
+otherwise, `1` when absent — is how many mutants a campaign runs at once.
+`nunki` hands it to the stack's `mutation.sh` in `NUNKI_MUTATION_JOBS`, as it
+hands the base in `NUNKI_BASE`; the terminal line, the counts and what a
+campaign's status means are the same at any value.
+
+- **Rust:** at `1`, `cargo mutants --in-place`, one mutant at a time in the
+  clean copy and its warm cache, as before. Above, `--jobs N --copy-vcs
+  true`: each job builds in a copy of the tree of its own, from a cold
+  cache, with `.git` beside it as in place, under
+  `$TMPDIR/nunki-campaign-copies`, removed when the campaign ends.
+- **Python:** mutmut's `--max-children N`. mutmut already runs its mutants
+  in forked children; the setting caps how many. Without the variable
+  nothing is passed and mutmut keeps its own default. Not run against a real
+  mutmut here: it is not in this image.
+- **Next.js:** Stryker's `--concurrency N`, the number of test runner
+  processes. Not run against a real Stryker yet; an option it refused would
+  fail the campaign, never pass it.
+
+The default is `1` because more was not worth it where it was measured — on
+this repository, 53 mutants, 12 cores, each run from an emptied cache:
+
+| run | wall | per mutant | peak disk | outcome |
+|---|---|---|---|---|
+| in place | 533 s | 9.5 s | 2.5 GB | 45 caught, 2 missed, 1 timeout |
+| 2 jobs | 463 s | 15.8 s | 4.8 GB | the same |
+| 4 jobs | 492 s | 32.4 s | 9.1 GB | the same |
+| 12 jobs | 607 s | 121 s | 26.8 GB | 41 caught, 0 missed, 7 timeouts |
+
+Building one mutant already keeps every core busy, so jobs queue for them.
+And a loaded machine overruns the test timeout cargo-mutants sets from an
+unloaded baseline: at 12 jobs both survivors came back as timeouts, which
+count as killed. Raise it for a project whose build leaves cores idle, and
+measure there first.
+
+### What a campaign leaves behind
+
+A campaign leaves the build cache as it found it. Every mutant builds the
+crate from its mutated source, and nothing used to remove what it built: a
+slot after about thirty campaigns held 6.8 million files in its copy's
+`target/debug/deps`, cargo scanned them at every build, and a mutant went
+from 7 s to 70 s.
+
+- **Rust:** `mutation.sh` records the cache's file list before cargo-mutants
+  runs, and when the campaign ends — complete, failed, or stopped by `nunki`
+  past its deadline — removes every file not on that list, and every listed
+  file written since. The first is most of it: each rebuild hard-links its
+  unchanged units' `.dwo` files under new names, which keep their old
+  times, so a time marker alone would miss them. The second is the crate's
+  own artefacts, which a mutant rewrites under the baseline's names. The
+  dependencies stay, and the next build recompiles the crate once. A
+  campaign killed outright leaves its list, and the next one cleans up
+  first. Above one job, the copies go to `$TMPDIR/nunki-campaign-copies`,
+  outside the tree, and are removed the same way. Measured against the real
+  cargo-mutants on this repository, in place, at two jobs and stopped
+  mid-run: no file the campaign added was left.
+- **Python:** what mutmut leaves per mutant is all in `mutants/`, cleared
+  before the run and when the script exits.
+- **Next.js:** Stryker's sandbox, `.stryker-tmp/`, is removed by
+  `--cleanTempDir always`, and cleared before the run for when Stryker was
+  killed.
+
+`nunki check --slot <name>` measures the copy's `target/` in the slot's
+container, when it is up — it lifts nothing for this — and goes amber
+(`!!`) past 250,000 files or 50 GiB: a sign the stack's `mutation.sh` is an
+older one, or a project's own, that does not clean. Amber is not red, and
+`nunki check` still exits as held. The thresholds are measured: a cache
+built once for this repository's tests holds about 11,000 files, and one
+uncleaned campaign of 23 mutants added 67,450. A cache past them is not
+emptied by a newer `mutation.sh`; empty the copy's `target/` once, from
+inside the slot.
+
 The rigor is frozen in the header like the bounds, and `mission reframe`
 shows a change of it. Once the security rounds are spent, the agent is not
 called again. A spent cap never verifies a red verdict: if the last round

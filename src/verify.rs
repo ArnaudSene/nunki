@@ -514,14 +514,7 @@ pub fn verify_as(
                         // that commit: everything after it must be the
                         // integrator's wiring and nothing else.
                         state.conclude(Role::Coder, None, &head);
-                        // Gate 7 counted the coder's proposals as outcomes;
-                        // the HQ reads them here, with their reasons, long
-                        // before `nunki push` refuses on them.
-                        crate::followup::proposals_await(
-                            &paths.followup,
-                            id,
-                            &crate::mutants::awaiting_ruling(&paths.dir)?,
-                        )?;
+                        gate_seven_said(&paths, id)?;
                         Event::GatesPassed
                     }
                 };
@@ -1509,14 +1502,22 @@ pub fn campaign(
         engine,
         &Paths::of(&project.hq_root, id).dir,
         &crate::run::stack_of(project),
-        // The base's name: `campaign` works out what this branch brought,
-        // through the same call gate 7 makes.
-        &header.base,
-        header.bounds.mutation_minutes,
-        // The monitor never asks again by itself: replaying costs an hour,
-        // and "ask again" is a human saying something changed that the
-        // fingerprint cannot see.
-        crate::mutants::Replay::WhenChanged,
+        &crate::mutants::Asked {
+            // The base's name: `campaign` works out what this branch brought,
+            // through the same call gate 7 makes.
+            base: &header.base,
+            deadline_minutes: header.bounds.mutation_minutes,
+            // The monitor never asks again by itself: replaying costs an
+            // hour, and "ask again" is a human saying something changed that
+            // the fingerprint cannot see.
+            replay: crate::mutants::Replay::WhenChanged,
+            rigor: header.rigor,
+            // The threshold gate 7 judges with: frozen in the header, or the
+            // project's for a header framed before it was frozen.
+            threshold: header
+                .mutation_threshold
+                .unwrap_or(project.config.mutation_threshold),
+        },
     )?)
 }
 
@@ -1542,6 +1543,21 @@ pub fn harness_spawner(
         crate::compose::AGENT_SERVICE,
     )
     .identified_by(session)
+}
+
+/// What the coder's green final gates leave in `FOLLOWUP_HQ.md` for the HQ
+/// (SPEC 4.4, gate 7): the equivalences proposed and not yet ruled on, with
+/// their reasons, long before `nunki push` refuses on them; and, when gate 7
+/// judged several campaigns, each of them — full or partial, from which
+/// commit, with its counts.
+pub fn gate_seven_said(paths: &Paths, id: &str) -> Result<(), VerifyError> {
+    crate::followup::proposals_await(
+        &paths.followup,
+        id,
+        &crate::mutants::awaiting_ruling(&paths.dir)?,
+    )?;
+    crate::followup::campaigns(&paths.followup, &crate::mutants::chain_on_file(&paths.dir)?)?;
+    Ok(())
 }
 
 #[cfg(test)]

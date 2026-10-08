@@ -572,14 +572,32 @@ pub fn campaign_line(progress: &crate::mutants::Progress) -> String {
         Progress::Fresh { survivors } => {
             format!("mutation campaign already fresh: {survivors} survivor(s)")
         }
-        Progress::Started { fingerprint } => {
-            format!("mutation campaign started on {fingerprint}")
+        Progress::Started { fingerprint, scope } => {
+            let why = match scope {
+                crate::mutants::Scope::Full { why } if !crate::text::blank(why) => {
+                    format!(" ({})", one_line(why))
+                }
+                _ => String::new(),
+            };
+            format!(
+                "mutation campaign started on {fingerprint}, {}{why}",
+                scope.said()
+            )
         }
         Progress::Running { started_at, .. } => {
             format!("mutation campaign running since {started_at}")
         }
-        Progress::Finished { survivors } => {
-            format!("mutation campaign ended: {survivors} survivor(s)")
+        Progress::Finished { survivors, chain } => {
+            let mut line = format!("mutation campaign ended: {survivors} survivor(s)");
+            for (n, said) in chain.iter().enumerate() {
+                line.push_str(&format!(
+                    "{} campaign {} of {}: {said}",
+                    if n == 0 { " —" } else { ";" },
+                    n + 1,
+                    chain.len()
+                ));
+            }
+            line
         }
         Progress::Overrun { minutes } => {
             format!("mutation campaign stopped past its {minutes}-minute deadline")

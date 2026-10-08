@@ -526,6 +526,13 @@ harness: claude-code
 # pass, a whole number from 1 to 100.
 # mutation_threshold: 80
 
+# How many mutants gate 7's campaign runs at once, a whole number of at least
+# 1. At 1 a Rust campaign runs in place, one mutant at a time; above it, each
+# job builds in a copy of the tree of its own. Measured on nunki's own
+# repository, more jobs were barely faster and, at one per core, turned
+# survivors into timeouts counted as killed: raise it only after measuring.
+# mutation_jobs: 1
+
 # What the harness does with a permission it would otherwise ask about.
 # Nobody is there to ask in an autonomous container, so the only question is
 # which way the silence falls. `auto` lets the harness's own safety checks
@@ -948,6 +955,13 @@ const MUTATION_RUST: &str = r#"#!/bin/sh
 # copy of HEAD inside the slot's container. The id comes first so the campaign
 # is identifiable from its own command line; this script does not need it.
 #
+# The next line tells `nunki` how to read the tool's version (SPEC 4.4, the
+# chain of campaigns). A later campaign of a `standard` mission covers only
+# what changed since the previous one, and only when this script and that
+# version are what the previous one ran with; without the line, every
+# campaign is full.
+# nunki-tool-version: cargo mutants --version
+#
 # The campaign answers for the lines this branch **changed**, not for every
 # line of the files it touched (SPEC 4.4). `nunki` sets `NUNKI_BASE` to the
 # commit the branch forked from, and cargo-mutants' `--in-diff` keeps only the
@@ -957,8 +971,13 @@ const MUTATION_RUST: &str = r#"#!/bin/sh
 #
 # It prints **one JSON object per line** on stdout, one per surviving mutant:
 #   {"id":"…","file":"…","line":12,"end_line":14,"description":"…"}
+# then one per file the tool reached, with that file's counts:
+#   {"measured":"src/lib.rs","tried":12,"found":13}
 # and, last of all and exactly once, the line that says it got to the end:
-#   {"campaign":"done","tried":42,"found":45}
+#   {"campaign":"done","tried":42,"found":45,"by_file":true}
+# `by_file` says the files were counted, and their counts add up to the
+# totals: a later partial campaign is rebuilt from them, file by file
+# (SPEC 4.4, the chain). A file with no line has nothing tried in it.
 # `end_line` is the last line of the code the mutation replaces, from the
 # tool's own listing: a function body replaced whole spans every line of it,
 # and a ruling on it is about all of them. 0 when the listing does not name
@@ -977,7 +996,9 @@ const MUTATION_RUST: &str = r#"#!/bin/sh
 # `--in-place` is not a detail: cargo-mutants only reuses a build cache in
 # place, and the copy this runs in has its own, warmed once per slot and kept.
 # Without it every campaign recompiles from cold, and SPEC section 7 counts
-# that hour.
+# that hour. It is what the campaign runs at one job, the default
+# (`mutation_jobs` in `nunki.yaml`, handed over in `NUNKI_MUTATION_JOBS`).
+# Above one, see `jobs` below.
 set -eu
 
 campaign="$1"
@@ -1001,7 +1022,7 @@ if [ -z "$files" ]; then
   # happen. The terminal line is printed **before** leaving, because `nunki`
   # reads its absence as a campaign that was killed and asks for another:
   # a branch touching only tests or documentation would be asked for ever.
-  printf '{"campaign":"done","tried":0,"found":0}\n'
+  printf '{"campaign":"done","tried":0,"found":0,"by_file":true}\n'
   exit 0
 fi
 
@@ -1033,16 +1054,158 @@ mkdir -p "$out"
 # stack lives below the repository's root. A base the copy does not hold is
 # a campaign that cannot run, said as one, rather than a silent fall back to
 # every line of every file.
+#
+# `--no-renames`, as `nunki` compares files from one campaign to the next
+# (SPEC 4.4, the chain): a file renamed is a file removed — its survivors
+# and counts dropped — and a file added whole, every line of it mutated
+# again. With git's rename detection, a pure rename gave cargo-mutants no
+# hunk at all ("No mutants to filter", 27.1.0): the survivors went and
+# nothing was tried in their place.
 scope="$files"
 if [ -n "${NUNKI_BASE:-}" ]; then
   diff="$out/touched.diff"
   # shellcheck disable=SC2086
-  if ! git diff --relative "$NUNKI_BASE" HEAD -- $paths > "$diff"; then
+  if ! git diff --relative --no-renames "$NUNKI_BASE" HEAD -- $paths > "$diff"; then
     echo "nunki: cannot diff against the base $NUNKI_BASE" >&2
     exit 1
   fi
   scope="--in-diff $diff"
 fi
+
+# How many mutants run at once. At 1 — the default, and what a campaign runs
+# without the variable — the command is today's, `--in-place` and one mutant
+# at a time. Above 1, cargo-mutants cannot run in place: each job builds in a
+# copy of the tree of its own, under `$TMPDIR`, from a cold cache, and the
+# copies are what it pays for the cores.
+#
+# Measured on nunki's own repository with cargo-mutants 27.1.0, 53 mutants,
+# 12 cores, every run from an emptied cache: in place 533 s (9.5 s a
+# mutant); 2 jobs 463 s (15.8 s a mutant, 4.8 GB on disk at the peak);
+# 4 jobs 492 s (32 s, 9.1 GB); 12 jobs 607 s (121 s, 27 GB). Building one
+# mutant already uses every core, so jobs mostly queue for them. And at 12
+# the answer changed: the two mutants that survive in place came back as
+# timeouts — counted tried and killed — because the test timeout is set from
+# a baseline run alone and the loaded machine overran it. Raise it only for
+# a crate whose build leaves cores idle, and measure it there first.
+#
+# `--copy-vcs true` because in place the tests run beside `.git`, and a
+# project's tests may read it: measured on that same repository, without it
+# the unmutated baseline fails in the copy and cargo-mutants exits 4 having
+# tried nothing.
+# A value that is not a whole number of at least 1 is refused here rather
+# than handed to the tool, and before any mutant is tried.
+jobs="${NUNKI_MUTATION_JOBS:-1}"
+case "$jobs" in
+  ''|*[!0-9]*|0*)
+    echo "nunki: NUNKI_MUTATION_JOBS is a whole number of at least 1, and $jobs is not" >&2
+    exit 1
+    ;;
+esac
+if [ "$jobs" -eq 1 ]; then
+  where="--in-place"
+else
+  where="--jobs $jobs --copy-vcs true"
+fi
+
+# The campaign leaves the build cache as it found it.
+#
+# Every mutant builds the crate from its mutated source, and what it builds
+# stays in `target/` — measured on a slot after about thirty campaigns,
+# 6.8 million files in `target/debug/deps` and several hundred gigabytes.
+# Cargo scans that directory at every build, so a mutant went from 7 s to
+# 70 s, campaign after campaign, and the disk filled.
+#
+# So the cache's file list is recorded before the tool runs, and when the
+# campaign ends — whether it completes, fails, or is told to stop — two
+# things in `target/` are removed:
+#
+# - every file whose name is not on the list. Most of what a mutant leaves
+#   is new names with **old** times: measured on cargo-mutants 27.1.0 and
+#   this crate, each rebuild hard-links its unchanged codegen units' `.dwo`
+#   files into `deps` under new names, and a hard link keeps the time of the
+#   file it links — from before the campaign. With a marker's time alone,
+#   a cache of 11,010 files held 68,655 after a campaign of 23 mutants;
+# - every file on the list written since: a mutant rebuilds the crate under
+#   the file names the baseline used, so the crate's own library and test
+#   binaries hold a mutant's build at the end. They cannot be told apart
+#   from the baseline's, and go with it.
+#
+# What stays is what was there before and untouched: the dependencies,
+# and whatever the battery built. The next build recompiles the crate
+# itself once, and nothing else.
+#
+# A campaign that is killed outright (SIGKILL, its container gone) runs no
+# trap, so the list outlives it. The next campaign finds it and cleans up
+# first; whatever the battery built since is removed with it, and rebuilt
+# once.
+#
+# The campaign's own output, `$out`, stays: `nunki` reads it, and it is
+# small. Older `target/mutants-*` directories, earlier campaigns' answers,
+# go.
+#
+# Above one job, each job builds in a copy of the tree under `$TMPDIR`, which
+# cargo-mutants removes when it finishes and leaves behind when it is killed.
+# They go to one directory of their own there, `nunki-campaign-copies`,
+# removed when the campaign ends and, after a kill, by the next one. Outside
+# the tree and not in `target/`: the project's tests run in those copies
+# with the same `$TMPDIR`, and measured on this repository with the copies
+# under `target/`, two tests failed in the unmutated baseline — their
+# temporary directories had landed inside a git repository.
+list="target/nunki-campaign.list"
+copies="${TMPDIR:-/tmp}/nunki-campaign-copies"
+cache() {
+  find target \( -path "$out" -o -name 'nunki-campaign.*' \) -prune \
+    -o ! -type d "$@" -print
+}
+clean() (
+  set +e
+  if [ -f "$list" ]; then
+    cache | LC_ALL=C sort > "$list.now"
+    LC_ALL=C comm -13 "$list" "$list.now" | tr '\n' '\0' | xargs -0 rm -f
+    cache -newer "$list" | tr '\n' '\0' | xargs -0 rm -f
+    find target -mindepth 1 -depth -type d -empty -newer "$list" \
+      ! -path "$out" ! -path "$out/*" -exec rmdir {} \;
+    rm -f "$list" "$list.now"
+  fi
+  rm -rf "$copies"
+  for old in target/mutants-*; do
+    [ "$old" = "$out" ] || rm -rf "$old"
+  done
+)
+# What a killed campaign left, before this one records anything.
+clean
+mkdir -p target
+cache | LC_ALL=C sort > "$list.new"
+mv "$list.new" "$list"
+# File times move in steps of the kernel's coarse clock, a few milliseconds,
+# and `-newer` is strict: a file written within the list's own step is not
+# newer than it, and would be kept. So the tool starts only once the clock
+# has moved past the list. Seen without it: a stand-in that writes at once
+# kept one of its artefacts, once in about three hundred campaigns.
+tick="target/nunki-campaign.tick"
+touch "$tick"
+until [ -n "$(find "$tick" -newer "$list")" ]; do touch "$tick"; done
+rm -f "$tick"
+if [ "$jobs" -gt 1 ]; then
+  mkdir -p "$copies"
+  export TMPDIR="$copies"
+fi
+
+# Told to stop — `nunki` sends SIGTERM to this script past the deadline —
+# the tool is stopped too, and only then is the cache cleaned. The tool runs
+# in the background so the signal is handled at once: a shell waiting on a
+# foreground child runs its trap only when the child is done, and a shell
+# without a trap dies and leaves the tool running in the copy, orphaned.
+child=""
+stop() {
+  if [ -n "$child" ]; then
+    kill -TERM "$child" 2>/dev/null
+    wait "$child" 2>/dev/null
+  fi
+  exit 143
+}
+trap 'rc=$?; clean; exit $rc' EXIT
+trap stop INT TERM HUP
 
 # A campaign that finds survivors exits non-zero — 2, measured on
 # cargo-mutants 27.1.0 — and that is a result, not a failure: `nunki` reads the
@@ -1072,7 +1235,10 @@ fi
 # command line is the whole of the campaign's configuration.
 # shellcheck disable=SC2086
 status=0
-cargo mutants --no-config --in-place --no-shuffle --exclude-re "replace main -> " --output "$out" $scope >&2 || status=$?
+cargo mutants --no-config $where --no-shuffle --exclude-re "replace main -> " --output "$out" $scope >&2 &
+child=$!
+wait "$child" || status=$?
+child=""
 
 # `--output DIR` writes into `DIR/mutants.out/`, not into `DIR` (measured on
 # 27.1.0). Reading the wrong path makes the whole campaign fail silently.
@@ -1084,7 +1250,7 @@ if [ ! -f "$missed" ]; then
   # A crate that does not parse also leaves no `mutants.out`, but exits 1,
   # so only the status tells the two apart.
   if [ -n "${NUNKI_BASE:-}" ] && [ "$status" -eq 0 ]; then
-    printf '{"campaign":"done","tried":0,"found":0}\n'
+    printf '{"campaign":"done","tried":0,"found":0,"by_file":true}\n'
     exit 0
   fi
   echo "nunki: the campaign left no $missed" >&2
@@ -1166,6 +1332,51 @@ case "$listed" in
     ;;
 esac
 
+# Each file's counts, keyed by the file `mutants.json` gives each mutant —
+# for `tried` as for `found`. A line of an outcome file is the mutant's
+# `name` in that listing (the same lookup as the survivors' spans above),
+# so its file is read from the listing and never cut out of the line: a
+# path with a colon in it would be cut short (HQ review of 00f8e51), and
+# `nunki` trusts a count only under a path it handed this campaign. A line
+# the listing does not name, or no listing at all, and there are no
+# per-file counts: no `by_file`, and the next campaign is full. Added up,
+# they are the totals above, which `nunki` checks too.
+byfile=""
+if [ -n "$found" ]; then
+  if counts=$({
+    jq -r '.[] | "N\t\(.name)\t\(.file)"' "$out/mutants.out/mutants.json"
+    for outcome in caught missed timeout; do
+      if [ -f "$out/mutants.out/$outcome.txt" ]; then
+        sed 's/^/T\t/' "$out/mutants.out/$outcome.txt"
+      fi
+    done
+    if [ -f "$out/mutants.out/unviable.txt" ]; then
+      sed 's/^/U\t/' "$out/mutants.out/unviable.txt"
+    fi
+  } | awk -F '\t' '
+    $1 == "N" { file[$2] = $3; seen[$3] = 1; n[$3]++; next }
+    $2 == "" { next }
+    !($2 in file) { bad = 1; next }
+    $1 == "T" { t[file[$2]]++ }
+    $1 == "U" { u[file[$2]]++ }
+    END {
+      if (bad) exit 1
+      for (f in seen) {
+        e = f
+        gsub(/\\/, "\\\\", e)
+        gsub(/"/, "\\\"", e)
+        printf "{\"measured\":\"%s\",\"tried\":%d,\"found\":%d}\n", e, t[f], n[f] - u[f]
+      }
+    }'); then
+    # Sorted here, not in the pipe: there the status would be sort's, and
+    # awk's refusal would be lost.
+    if [ -n "$counts" ]; then
+      printf '%s\n' "$counts" | LC_ALL=C sort
+    fi
+    byfile=',"by_file":true'
+  fi
+fi
+
 # The last thing it prints, and the only line that says the campaign got to
 # the end. Without it `nunki` cannot tell "no survivor" from "no answer": a
 # campaign killed halfway, one whose container went away and one that never
@@ -1177,7 +1388,7 @@ esac
 # own, and a shell that has been replaced cannot write `$?`. A truncated log
 # loses its last line, which is this one, so the three failures fail alike.
 if [ -n "$found" ]; then
-  printf '{"campaign":"done","tried":%s,"found":%s}\n' "$tried" "$found"
+  printf '{"campaign":"done","tried":%s,"found":%s%s}\n' "$tried" "$found" "$byfile"
 else
   printf '{"campaign":"done","tried":%s}\n' "$tried"
 fi
@@ -1719,6 +1930,13 @@ const MUTATION_PYTHON: &str = r##"#!/bin/sh
 # copy of HEAD inside the slot's container. The id comes first so the campaign
 # is identifiable from its own command line; this script does not need it.
 #
+# The next line tells `nunki` how to read the tool's version (SPEC 4.4, the
+# chain of campaigns). A later campaign of a `standard` mission covers only
+# what changed since the previous one, and only when this script and that
+# version are what the previous one ran with; without the line, every
+# campaign is full.
+# nunki-tool-version: uv run --frozen --no-sync python -c "import importlib.metadata as m; print('mutmut', m.version('mutmut'))"
+#
 # It prints **one JSON object per line** on stdout, one per surviving mutant:
 #   {"id":"…","file":"…","line":12,"end_line":12,"description":"…"}
 # `end_line` is the last line of the code the mutation replaces: the diff
@@ -1736,6 +1954,9 @@ const MUTATION_PYTHON: &str = r##"#!/bin/sh
 # `critical` does — an outcome for every survivor — which the survivors,
 # filtered to the touched files, can carry. A branch that touched nothing
 # mutable is the one exact count this script has, and says `tried` 0.
+# For the same reason it gives no per-file counts and never says `by_file`:
+# a campaign after one of this stack's is always full, never rebuilt from
+# counts nobody made (SPEC 4.4, the chain of campaigns).
 # `nunki` reads no other line as a result, so progress may go to stdout freely —
 # though this script keeps the tool's own chatter on stderr. A campaign that
 # stops before that last line has measured nothing, whatever else it printed.
@@ -1761,6 +1982,13 @@ shift
 # often is, the deadline being 45 minutes. What covers that is the `rm -rf`
 # further down, which clears the previous campaign's copy before this one
 # runs, and the battery excluding the directory for the same reason.
+#
+# It is also everything mutmut leaves per mutant (SPEC 4.4, the build cache
+# a campaign leaves as it found it): each mutant lives in that copy's
+# sources, its result in the copy's `.meta` files, and pytest's caches for it
+# under the copy too, since mutmut runs the tests from there. Nothing goes
+# into the project's own tree or `.venv`, which `uv sync --frozen` keeps to
+# the lockfile. Clearing `mutants/` is the whole of the cleaning.
 trap 'rm -rf mutants' EXIT
 
 # Only Python sources are worth mutating; the touched list holds whatever the
@@ -1813,6 +2041,26 @@ fi
 # database.
 export PYTEST_ADDOPTS="${PYTEST_ADDOPTS:+$PYTEST_ADDOPTS }-m \"not system\""
 
+# How many mutants run at once: the project's `mutation_jobs`, which `nunki`
+# hands over in `NUNKI_MUTATION_JOBS`, passed as mutmut's own
+# `--max-children` — the one option `mutmut run` takes (measured on 3.8.0).
+# It is safe: mutmut already runs its mutants in forked children, and the
+# setting only caps how many; not run against a real mutmut when it was
+# added, as none was at hand. Without the variable — a run by hand — nothing
+# is passed and mutmut keeps its own default, as it always has. A value that
+# is not a whole number of at least 1 is refused rather than handed to the
+# tool.
+children=""
+if [ -n "${NUNKI_MUTATION_JOBS:-}" ]; then
+  case "$NUNKI_MUTATION_JOBS" in
+    *[!0-9]*|0*)
+      echo "nunki: NUNKI_MUTATION_JOBS is a whole number of at least 1, and $NUNKI_MUTATION_JOBS is not" >&2
+      exit 1
+      ;;
+  esac
+  children="--max-children $NUNKI_MUTATION_JOBS"
+fi
+
 uv sync --frozen --all-groups >&2
 if ! uv run --frozen --no-sync mutmut --version >/dev/null 2>&1; then
   echo "nunki: this stack's campaign needs mutmut, which this project does not declare." >&2
@@ -1858,7 +2106,8 @@ rm -rf mutants
 # campaign died on the first file. Taken as a guard, it lets the script print
 # `{"campaign":"done"}` with no survivor — gate 7 green on nothing,
 # which is the one failure this contract exists to prevent.
-if ! uv run --frozen --no-sync mutmut run >&2; then
+# shellcheck disable=SC2086
+if ! uv run --frozen --no-sync mutmut run $children >&2; then
   echo "nunki: the campaign could not run, so no mutant was tested" >&2
   exit 1
 fi
@@ -2695,6 +2944,13 @@ const MUTATION_NEXT: &str = r##"#!/bin/sh
 # copy of HEAD inside the slot's container. The id comes first so the campaign
 # is identifiable from its own command line; this script does not need it.
 #
+# The next line tells `nunki` how to read the tool's version (SPEC 4.4, the
+# chain of campaigns). A later campaign of a `standard` mission covers only
+# what changed since the previous one, and only when this script and that
+# version are what the previous one ran with; without the line, every
+# campaign is full.
+# nunki-tool-version: pnpm exec stryker --version
+#
 # It prints **one JSON object per line** on stdout, one per surviving mutant:
 #   {"id":"…","file":"…","line":12,"end_line":12,"description":"…"}
 # `end_line` is the last line of the code the mutation replaces, from the
@@ -2712,6 +2968,10 @@ const MUTATION_NEXT: &str = r##"#!/bin/sh
 # Without a count `nunki` judges gate 7 as `critical` does — an outcome for
 # every survivor. A branch that touched nothing mutable is the one exact
 # count this script has, and says `tried` 0.
+# For the same reason it gives no per-file counts and never says `by_file`:
+# Stryker's report does name each mutant's file, but over whole files, so a
+# campaign after one of this stack's is always full, never rebuilt from
+# counts that are not the branch's (SPEC 4.4, the chain of campaigns).
 # `nunki` reads no other line as a result, so progress may go to stdout freely —
 # though this script keeps the tool's own chatter on stderr. A campaign that
 # stops before that last line has measured nothing, whatever else it printed.
@@ -2745,6 +3005,27 @@ if [ -z "$files" ]; then
   exit 0
 fi
 
+# How many mutants run at once: the project's `mutation_jobs`, which `nunki`
+# hands over in `NUNKI_MUTATION_JOBS`, passed as Stryker's own
+# `--concurrency`, the number of test runner processes it starts. It is safe:
+# Stryker already runs several when it is not told, each in a process of its
+# own, so the setting only says how many. Read from Stryker's documentation
+# and not run here — no Stryker was at hand when it was added; an option it
+# refused would make it exit non-zero, which the guard below reads as a
+# campaign that did not complete, never as a green one. Without the variable
+# — a run by hand — nothing is passed and Stryker keeps its default. A value
+# that is not a whole number of at least 1 is refused rather than handed on.
+concurrency=""
+if [ -n "${NUNKI_MUTATION_JOBS:-}" ]; then
+  case "$NUNKI_MUTATION_JOBS" in
+    *[!0-9]*|0*)
+      echo "nunki: NUNKI_MUTATION_JOBS is a whole number of at least 1, and $NUNKI_MUTATION_JOBS is not" >&2
+      exit 1
+      ;;
+  esac
+  concurrency="--concurrency $NUNKI_MUTATION_JOBS"
+fi
+
 pnpm install --frozen-lockfile >&2
 if ! pnpm exec stryker --version >/dev/null 2>&1; then
   echo "nunki: this stack's campaign needs @stryker-mutator/core, which this project does not declare." >&2
@@ -2772,6 +3053,17 @@ process.stdout.write(where);
 # since — and a replay of the same fingerprint reaches exactly that path.
 rm -f "$report"
 
+# What Stryker leaves behind (SPEC 4.4, the build cache a campaign leaves as
+# it found it): its sandbox, `.stryker-tmp/`, a copy of the project its
+# mutants run in, which `--cleanTempDir always` below removes when Stryker
+# ends, failure included, and which is left only when Stryker is killed — so
+# it is cleared here first, for that case. Per mutant, it writes nothing else
+# that outlives a run: by its documentation every mutant is compiled into
+# the one sandbox and switched on at run time, and the report, one file, is
+# removed once read. Not run against a real Stryker: none is in the image
+# this was written in.
+rm -rf .stryker-tmp
+
 # `--cleanTempDir always` and not the default: the sandbox is then removed
 # even when the run fails, so a killed campaign leaves no copy of the project
 # beside the tree for the next battery to walk into.
@@ -2787,7 +3079,7 @@ rm -f "$report"
 # never read as one that did, whatever report it left.
 # shellcheck disable=SC2086
 status=0
-pnpm exec stryker run $files --cleanTempDir always --reporters json >&2 || status=$?
+pnpm exec stryker run $files $concurrency --cleanTempDir always --reporters json >&2 || status=$?
 if [ "$status" -ne 0 ]; then
   echo "nunki: stryker exited $status, so the campaign did not complete and measured nothing" >&2
   exit 1

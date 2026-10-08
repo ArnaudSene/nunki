@@ -26,6 +26,7 @@ fn config() -> Config {
         permission_mode: "auto".to_string(),
         rigor: None,
         mutation_threshold: 80,
+        mutation_jobs: None,
         forge_protection: Default::default(),
     }
 }
@@ -334,6 +335,43 @@ fn a_mutation_threshold_outside_one_to_a_hundred_is_refused_when_the_config_is_r
     let project = open("harness: claude-code\n").unwrap();
     assert_eq!(project.config.mutation_threshold, 80);
     assert_eq!(project.config.rigor, None);
+}
+
+/// `mutation_jobs` is a whole number of at least 1, refused otherwise when
+/// `nunki.yaml` is read, with the rule in the message: 0 would be a campaign
+/// that runs nothing, and a fraction or a word is not a number of jobs.
+/// Absent, it is the measured default.
+#[test]
+fn mutation_jobs_other_than_a_whole_number_of_at_least_one_is_refused_when_the_config_is_read() {
+    let open = |body: &str| {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        let home = common::project_home(&root, dir.path(), body);
+        Project::open_at(root, home)
+    };
+    for bad in ["0", "-2", "1.5", "four", "\"4\"", "4294967296", "[4]", "~"] {
+        let err = open(&format!("harness: claude-code\nmutation_jobs: {bad}\n")).unwrap_err();
+        assert!(matches!(err, ProjectError::Invalid(..)), "{bad}: {err}");
+        assert!(err.to_string().contains("nunki.yaml"), "{bad}: {err}");
+        assert!(
+            err.to_string()
+                .contains("mutation_jobs is a whole number of at least 1")
+                || err
+                    .to_string()
+                    .contains("mutation_jobs as a whole number of at least 1"),
+            "{bad}: {err}"
+        );
+    }
+    for good in [1, 2, 64] {
+        let project = open(&format!("harness: claude-code\nmutation_jobs: {good}\n")).unwrap();
+        assert_eq!(project.config.mutation_jobs, Some(good));
+        assert_eq!(project.config.jobs(), good);
+    }
+    let project = open("harness: claude-code\n").unwrap();
+    assert_eq!(project.config.mutation_jobs, None);
+    assert_eq!(project.config.jobs(), nunki::project::DEFAULT_MUTATION_JOBS);
+    // The measured default: one mutant at a time, in place.
+    assert_eq!(nunki::project::DEFAULT_MUTATION_JOBS, 1);
 }
 
 /// The home is named after the repository's directory, so two repositories
@@ -1018,4 +1056,255 @@ fn no_image_and_no_answer_are_not_checked_and_said_apart() {
             other => panic!("{answer}: {other:?}"),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// The campaign copy's build cache (SPEC 4.4, gate 7): `nunki check --slot`
+// says when what the mutants build is no longer being removed.
+// ---------------------------------------------------------------------------
+
+fn measured(stdout: &str) -> Result<nunki::engine::ExecOutput, nunki::engine::EngineError> {
+    Ok(nunki::engine::ExecOutput {
+        status: 0,
+        stdout: stdout.to_string(),
+        stderr: String::new(),
+    })
+}
+
+const GIB: u64 = 1024 * 1024;
+
+/// Green up to the thresholds, amber past either of them — the file count
+/// or the size — and the edges are the thresholds' own: at the limit is
+/// still clean.
+#[test]
+fn a_campaign_cache_past_its_file_count_or_its_size_is_amber() {
+    use nunki::check::{CACHE_FILES_AMBER, CACHE_GIB_AMBER, cache_verdict};
+    let healthy = cache_verdict(measured("11010 1923304\n"));
+    assert!(
+        matches!(&healthy, Verdict::Green(d) if d.contains("11010 files")),
+        "{healthy:?}"
+    );
+
+    let at_files = format!("{CACHE_FILES_AMBER} 1000\n");
+    assert!(matches!(
+        cache_verdict(measured(&at_files)),
+        Verdict::Green(_)
+    ));
+    let past_files = format!("{} 1000\n", CACHE_FILES_AMBER + 1);
+    match cache_verdict(measured(&past_files)) {
+        Verdict::Amber(d) => {
+            assert!(
+                d.contains(&format!("{} files", CACHE_FILES_AMBER + 1)),
+                "{d}"
+            );
+            assert!(d.contains("mutation.sh"), "it says what to do: {d}");
+        }
+        other => panic!("{other:?}"),
+    }
+
+    let at_size = format!("10 {}\n", (CACHE_GIB_AMBER + 1) * GIB - 1);
+    assert!(matches!(
+        cache_verdict(measured(&at_size)),
+        Verdict::Green(_)
+    ));
+    let past_size = format!("10 {}\n", (CACHE_GIB_AMBER + 1) * GIB);
+    assert!(
+        matches!(cache_verdict(measured(&past_size)), Verdict::Amber(_)),
+        "{past_size}"
+    );
+
+    // The measured thresholds, pinned: a change to either is a decision.
+    assert_eq!(CACHE_FILES_AMBER, 250_000);
+    assert_eq!(CACHE_GIB_AMBER, 50);
+}
+
+/// A copy with no `target/` yet is clean; a measurement that failed or said
+/// something else is not checked, never green.
+#[test]
+fn a_campaign_cache_nobody_could_measure_is_not_checked() {
+    use nunki::check::cache_verdict;
+    assert!(matches!(
+        cache_verdict(measured("none\n")),
+        Verdict::Green(_)
+    ));
+    for text in ["", "12", "12 x", "12 34 56", "lots"] {
+        assert!(
+            matches!(cache_verdict(measured(text)), Verdict::NotChecked(_)),
+            "{text:?}"
+        );
+    }
+    let failed = cache_verdict(Ok(nunki::engine::ExecOutput {
+        status: 1,
+        stdout: "11010 1923304\n".into(),
+        stderr: "du: cannot read".into(),
+    }));
+    assert!(
+        matches!(&failed, Verdict::NotChecked(d) if d.contains("du: cannot read")),
+        "{failed:?}"
+    );
+    let engine = cache_verdict(Err(nunki::engine::EngineError::Unreadable("gone".into())));
+    assert!(matches!(engine, Verdict::NotChecked(_)), "{engine:?}");
+}
+
+/// The probe itself, run here on a directory standing in for the copy: it
+/// counts the files and sizes `target/`, and says `none` without one.
+#[cfg(unix)]
+#[test]
+fn the_cache_probe_counts_the_copys_files_and_its_size() {
+    let dir = tempfile::tempdir().unwrap();
+    let copy = dir.path().join("proof");
+    std::fs::create_dir_all(&copy).unwrap();
+    let probe = || {
+        let script =
+            nunki::check::cache_probe().replace(nunki::exec::PROOF_AT, &copy.display().to_string());
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    assert_eq!(probe(), "none");
+
+    for (i, name) in [
+        "debug/deps/a.rlib",
+        "debug/deps/b.dwo",
+        "debug/build/x/out",
+        "CACHEDIR.TAG",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let at = copy.join("target").join(name);
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::fs::write(at, vec![b'x'; 4096 * (i + 1)]).unwrap();
+    }
+    let said = probe();
+    let (files, kib) = said.split_once(' ').expect("two numbers");
+    assert_eq!(files, "4", "{said}");
+    let kib: u64 = kib.parse().unwrap();
+    assert!(kib >= 40, "4 + 8 + 12 + 16 KiB at least: {said}");
+    assert!(matches!(
+        nunki::check::cache_verdict(measured(&said)),
+        Verdict::Green(_)
+    ));
+}
+
+/// Measured in the slot's agent container when it is up, from the copy as
+/// it stands; never lifted for this — a slot that is down, or has no
+/// profile, is not checked.
+#[test]
+fn the_campaign_cache_is_measured_in_the_slots_container_and_never_lifts_it() {
+    use nunki::engine::fake::{Call, FakeEngine};
+    use std::sync::Arc;
+    let dir = tempfile::tempdir().unwrap();
+    let project = sound(dir.path());
+    let slot = nunki::slot::Slot {
+        name: "one".into(),
+        tree: dir.path().join("tree"),
+    };
+
+    let none = Arc::new(FakeEngine::default());
+    let check = nunki::check::campaign_cache(&project, &slot, none.clone());
+    assert!(
+        matches!(&check.verdict, Verdict::NotChecked(d) if d.contains("no profile")),
+        "{check:?}"
+    );
+
+    let profile = nunki::run::profile_path(&project, &slot.name);
+    std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+    std::fs::write(&profile, "services: {}\n").unwrap();
+    let down = Arc::new(FakeEngine::default());
+    let check = nunki::check::campaign_cache(&project, &slot, down.clone());
+    assert!(
+        matches!(&check.verdict, Verdict::NotChecked(d) if d.contains("down")),
+        "{check:?}"
+    );
+    assert!(
+        !down
+            .calls()
+            .iter()
+            .any(|c| matches!(c, Call::Up(_) | Call::Exec(..))),
+        "{:?}",
+        down.calls()
+    );
+
+    let up = Arc::new(
+        FakeEngine::default()
+            .with_container(nunki::compose::AGENT_SERVICE, "cafe1234")
+            .with_exec(nunki::engine::ExecOutput {
+                status: 0,
+                stdout: "6800000 400000000\n".into(),
+                stderr: String::new(),
+            }),
+    );
+    let check = nunki::check::campaign_cache(&project, &slot, up.clone());
+    assert!(matches!(check.verdict, Verdict::Amber(_)), "{check:?}");
+    let asked: Vec<Vec<String>> = up
+        .calls()
+        .into_iter()
+        .filter_map(|c| match c {
+            Call::Exec(_, service, argv) if service == nunki::compose::AGENT_SERVICE => Some(argv),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        asked,
+        vec![vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            nunki::check::cache_probe()
+        ]]
+    );
+    assert!(!up.calls().iter().any(|c| matches!(c, Call::Up(_))));
+}
+
+/// Amber is shown, counted, and never red: `nunki check` still exits as
+/// held, and the summary says there is something to look at.
+#[test]
+fn an_amber_line_is_shown_and_counted_but_never_red() {
+    let mut report = Report::default();
+    report.checks.push(nunki::check::Check {
+        what: "something".to_string(),
+        verdict: Verdict::Green("fine".to_string()),
+    });
+    // Nothing amber, nothing said about it.
+    let plain = report.render();
+    assert!(!plain.contains("to look at"), "{plain}");
+    report.checks.push(nunki::check::Check {
+        what: "the cache".to_string(),
+        verdict: Verdict::Amber("growing".to_string()),
+    });
+    assert!(!report.is_red());
+    assert_eq!(report.unchecked(), 0);
+    let text = report.render();
+    assert!(text.contains("!!  the cache\n      growing\n"), "{text}");
+    assert!(
+        text.contains("everything checked is held. 1 to look at (!!)."),
+        "{text}"
+    );
+}
+
+/// Without `--slot`, the verb names the container probes as not run, rather
+/// than leaving them out.
+#[test]
+fn without_a_slot_the_verb_names_its_container_probes_as_not_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    common::project_home(&root, dir.path(), "harness: claude-code\n");
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_nunki"))
+        .env("HOME", dir.path())
+        .args(["-C"])
+        .arg(&root)
+        .arg("check")
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("--  the perimeter holds from inside the mission profile\n"),
+        "{text}"
+    );
+    assert!(text.contains("no slot named"), "{text}");
 }

@@ -58,6 +58,7 @@ fn project(dir: &Path) -> Project {
             permission_mode: "auto".to_string(),
             rigor: None,
             mutation_threshold: 80,
+            mutation_jobs: None,
             forge_protection: Default::default(),
         },
         dir.join("nunki"),
@@ -460,13 +461,17 @@ fn a_campaign_that_overran_or_vanished_stops_the_monitor_and_the_rest_does_not()
     for progress in [
         Progress::Started {
             fingerprint: "abc1234".into(),
+            scope: Default::default(),
         },
         Progress::Running {
             started_at: "2026-09-16T05:00:00Z".into(),
             lines: 12,
         },
         Progress::Fresh { survivors: 0 },
-        Progress::Finished { survivors: 3 },
+        Progress::Finished {
+            survivors: 3,
+            chain: vec![],
+        },
     ] {
         assert_eq!(
             after_campaign(&progress),
@@ -577,7 +582,10 @@ fn a_running_campaign_is_said_once_whatever_it_has_written() {
     };
     assert_eq!(campaign_line(&running(3)), campaign_line(&running(300)));
     assert_eq!(
-        campaign_line(&Progress::Finished { survivors: 2 }),
+        campaign_line(&Progress::Finished {
+            survivors: 2,
+            chain: vec![]
+        }),
         "mutation campaign ended: 2 survivor(s)"
     );
 }
@@ -796,4 +804,58 @@ fn a_tick_that_outlasts_its_minute_goes_on_without_a_pause() {
     let log = String::from_utf8(log).unwrap();
     assert!(why.starts_with("verify failed"), "{why}\n{log}");
     assert_eq!(clock.slept, Vec::<u64>::new(), "{log}");
+}
+
+/// The monitor's log says whether a campaign started full or partial, and
+/// from which commit; and once it ended, each campaign of the chain with
+/// its counts.
+#[test]
+fn the_log_says_each_campaign_full_or_partial_with_its_counts() {
+    use nunki::monitor::campaign_line;
+    use nunki::mutants::{Progress, Scope};
+    let started = campaign_line(&Progress::Started {
+        fingerprint: "abc1234".into(),
+        scope: Scope::Partial {
+            since: "0123456789abcdef".into(),
+        },
+    });
+    assert_eq!(
+        started,
+        "mutation campaign started on abc1234, partial since 0123456789ab"
+    );
+    let started = campaign_line(&Progress::Started {
+        fingerprint: "abc1234".into(),
+        scope: Scope::Full {
+            why: "asked `--again`, which is a full campaign".into(),
+        },
+    });
+    assert_eq!(
+        started,
+        "mutation campaign started on abc1234, full (asked `--again`, which is a full campaign)"
+    );
+    let ended = campaign_line(&Progress::Finished {
+        survivors: 1,
+        chain: vec![
+            "full at aaa — tried 9".into(),
+            "partial since aaa at bbb — tried 2".into(),
+        ],
+    });
+    assert_eq!(
+        ended,
+        "mutation campaign ended: 1 survivor(s) — campaign 1 of 2: full at aaa — tried 9; \
+         campaign 2 of 2: partial since aaa at bbb — tried 2"
+    );
+}
+
+/// A full campaign with no reason recorded — the first of a mission — is
+/// logged without an empty pair of parentheses.
+#[test]
+fn a_full_campaign_without_a_reason_is_logged_without_one() {
+    use nunki::monitor::campaign_line;
+    use nunki::mutants::{Progress, Scope};
+    let started = campaign_line(&Progress::Started {
+        fingerprint: "abc1234".into(),
+        scope: Scope::Full { why: " ".into() },
+    });
+    assert_eq!(started, "mutation campaign started on abc1234, full");
 }

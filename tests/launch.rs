@@ -26,6 +26,7 @@ fn config() -> Config {
         permission_mode: "auto".to_string(),
         rigor: None,
         mutation_threshold: 80,
+        mutation_jobs: None,
         forge_protection: Default::default(),
     }
 }

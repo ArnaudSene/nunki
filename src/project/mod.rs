@@ -92,6 +92,14 @@ pub struct Config {
         deserialize_with = "mutation_threshold"
     )]
     pub mutation_threshold: u32,
+    /// How many mutants a campaign runs at once, handed to the stack's
+    /// `mutation.sh` in [`crate::mutants::JOBS_ENV`] (SPEC 4.4, gate 7). A
+    /// whole number of at least 1, refused otherwise when this file is read:
+    /// 0 would be a campaign that runs nothing. `1` is the Rust stack's
+    /// in-place run, one mutant at a time. Absent, [`Config::jobs`] reads
+    /// [`DEFAULT_MUTATION_JOBS`].
+    #[serde(default, deserialize_with = "mutation_jobs")]
+    pub mutation_jobs: Option<u32>,
     #[serde(default)]
     pub bounds: Bounds,
     /// Where the test credentials live, mounted read-only on a system
@@ -269,6 +277,76 @@ fn mutation_threshold<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Resu
             "mutation_threshold is a whole percentage from 1 to 100, and {value} is not"
         )))
     }
+}
+
+/// What `mutation_jobs` is when `nunki.yaml` does not say: one mutant at a
+/// time, the Rust stack's in-place run.
+///
+/// Chosen from a measurement and not from the core count. On nunki's own
+/// repository, 53 mutants on 12 cores from an emptied cache: in place
+/// 533 s; 2 jobs 463 s at twice the disk; 4 jobs 492 s; 12 jobs 607 s at
+/// 27 GB, and the two survivors came back as timeouts, which count as
+/// killed. Building a mutant already uses every core, so more jobs queue for
+/// them, and a loaded machine overruns a test timeout set from an unloaded
+/// baseline. A 13% gain at 2 jobs does not pay for the copies and that risk;
+/// a project whose build leaves cores idle can raise it after measuring.
+pub const DEFAULT_MUTATION_JOBS: u32 = 1;
+
+impl Config {
+    /// How many mutants a campaign runs at once: `mutation_jobs`, or
+    /// [`DEFAULT_MUTATION_JOBS`] when `nunki.yaml` does not say.
+    pub fn jobs(&self) -> u32 {
+        self.mutation_jobs.unwrap_or(DEFAULT_MUTATION_JOBS)
+    }
+}
+
+/// `mutation_jobs`, refused unless it is a whole number of at least 1 — a
+/// fraction, a word and a negative number all name the rule, rather than
+/// the type serde expected.
+fn mutation_jobs<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u32>, D::Error> {
+    struct Jobs;
+
+    impl Jobs {
+        fn refuse<E: serde::de::Error>(value: impl std::fmt::Display) -> E {
+            E::custom(format!(
+                "mutation_jobs is a whole number of at least 1, and {value} is not"
+            ))
+        }
+    }
+
+    impl serde::de::Visitor<'_> for Jobs {
+        type Value = u32;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("mutation_jobs as a whole number of at least 1")
+        }
+
+        fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<u32, E> {
+            match u32::try_from(value) {
+                Ok(jobs) if jobs >= 1 => Ok(jobs),
+                _ => Err(Self::refuse(value)),
+            }
+        }
+
+        fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<u32, E> {
+            match u64::try_from(value) {
+                Ok(value) => self.visit_u64(value),
+                Err(_) => Err(Self::refuse(value)),
+            }
+        }
+
+        fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<u32, E> {
+            Err(Self::refuse(value))
+        }
+
+        fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<u32, E> {
+            Err(Self::refuse(format!("{value:?}")))
+        }
+    }
+
+    deserializer.deserialize_any(Jobs).map(Some)
 }
 
 /// The same refusal for a mission header's frozen `mutation_threshold`,
