@@ -899,6 +899,8 @@ fn host_git() -> Command {
     git
 }
 
+/// The file git is pointed at for a global configuration: one that holds
+/// nothing, whatever a git version makes of an empty or unopenable path.
 fn null_device() -> &'static str {
     if cfg!(windows) { "NUL" } else { "/dev/null" }
 }
@@ -1063,23 +1065,22 @@ fn read_refs(tree: &Path, gitdir: &Path) -> Result<Refs, GitError> {
 
     let mut refs = BTreeMap::new();
     let packed = gitdir.join("packed-refs");
-    match std::fs::symlink_metadata(&packed) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        _ => {
-            let text = regular_file(&packed).map_err(&unreadable)?;
-            for line in text.lines() {
-                if line.starts_with('#') || line.starts_with('^') || line.trim().is_empty() {
-                    continue;
-                }
-                let Some((id, name)) = line.split_once(' ') else {
-                    return Err(unreadable(format!("packed-refs holds {line:?}")));
-                };
-                if !is_id(id) {
-                    return Err(unreadable(format!("packed-refs holds {line:?}")));
-                }
-                if MIRRORED.iter().any(|ns| name.starts_with(ns)) {
-                    refs.insert(name.to_string(), id.to_string());
-                }
+    // Absent only when lstat says so: any other answer is read, and the
+    // read says what is wrong rather than a slot looking packless.
+    if !absent(&std::fs::symlink_metadata(&packed)) {
+        let text = regular_file(&packed).map_err(&unreadable)?;
+        for line in text.lines() {
+            if line.starts_with('#') || line.starts_with('^') || line.trim().is_empty() {
+                continue;
+            }
+            let Some((id, name)) = line.split_once(' ') else {
+                return Err(unreadable(format!("packed-refs holds {line:?}")));
+            };
+            if !is_id(id) {
+                return Err(unreadable(format!("packed-refs holds {line:?}")));
+            }
+            if MIRRORED.iter().any(|ns| name.starts_with(ns)) {
+                refs.insert(name.to_string(), id.to_string());
             }
         }
     }
@@ -1172,6 +1173,13 @@ fn regular_file(path: &Path) -> Result<String, String> {
     std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
+/// Whether a look at a file of a slot's `.git` found it absent: only a
+/// `NotFound` says so. Any other failure is no proof of absence, and the
+/// file is read so that the read reports it.
+fn absent<T>(looked: &std::io::Result<T>) -> bool {
+    matches!(looked, Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+}
+
 /// A full object id, as git writes one: SHA-1 or SHA-256.
 fn is_id(text: &str) -> bool {
     (text.len() == 40 || text.len() == 64)
@@ -1234,6 +1242,44 @@ mod tests {
             order,
             [PathBuf::from("pack-a.pack"), PathBuf::from("pack-a.idx")]
         );
+    }
+
+    /// Every host git reads its global configuration from the null device,
+    /// and no system configuration: not an empty path whose meaning is git's
+    /// to choose, nor a file somewhere a slot could write.
+    #[test]
+    fn the_host_git_reads_the_null_device_as_its_global_configuration() {
+        let git = host_git();
+        let env: Vec<_> = git.get_envs().collect();
+        let device = if cfg!(windows) { "NUL" } else { "/dev/null" };
+        assert!(
+            env.contains(&(
+                std::ffi::OsStr::new("GIT_CONFIG_GLOBAL"),
+                Some(std::ffi::OsStr::new(device))
+            )),
+            "{env:?}"
+        );
+        assert!(
+            env.contains(&(
+                std::ffi::OsStr::new("GIT_CONFIG_NOSYSTEM"),
+                Some(std::ffi::OsStr::new("1"))
+            )),
+            "{env:?}"
+        );
+    }
+
+    /// Only `NotFound` makes a file of a slot's `.git` absent; any other
+    /// failure to look at it is read, and reported, rather than taken for a
+    /// file the slot does not have.
+    #[test]
+    fn only_not_found_makes_a_file_absent() {
+        use std::io::{Error, ErrorKind};
+        assert!(absent::<()>(&Err(Error::from(ErrorKind::NotFound))));
+        assert!(!absent::<()>(&Err(Error::from(
+            ErrorKind::PermissionDenied
+        ))));
+        assert!(!absent::<()>(&Err(Error::from(ErrorKind::InvalidInput))));
+        assert!(!absent(&Ok(())));
     }
 
     /// A lock exactly as old as the limit is still its holder's, and a wait
