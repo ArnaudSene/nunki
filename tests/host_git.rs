@@ -138,6 +138,12 @@ fn world() -> World {
         ],
     );
     git(&tree, &["checkout", "-q", "-b", "mission/x"]);
+    // What `run::branch` does at launch: the host records the base from
+    // the project's repository, and the gates judge against it alone.
+    nunki::git::SlotGit::open(&tree)
+        .unwrap()
+        .fetch_origin(&root)
+        .unwrap();
     // The agent's commit carries what a plant in the tree needs: attributes
     // that wire every file to a filter and a diff driver, and an ignored
     // file for `include.path` to point at.
@@ -2330,4 +2336,102 @@ fn a_tracked_path_the_host_cannot_look_at_is_an_error_not_a_deletion() {
             "{err}"
         );
     }
+}
+
+/// Gate 4 as the coder's gates play it, with `AGENTS.md` and every CI
+/// workflow protected.
+fn perimeter_gate(w: &World) -> nunki::gate::Decision {
+    let slot = w.slot();
+    let paths = w.paths();
+    let protected = ProtectedPaths {
+        refuse: vec!["AGENTS.md".into(), ".github/workflows/**".into()],
+        refuse_if_exists: vec![],
+    };
+    nunki::gate::after_run(
+        &nunki::gate::Subject {
+            role: Role::Coder,
+            tree: &slot.tree,
+            journal: &paths.journal,
+            pr: &paths.pr,
+            verdict: &paths.verdict,
+            mission_dir: &paths.dir,
+            header: &w.header,
+            protected_branches: &w.project.config.protected_branches,
+            protected_paths: &protected,
+            coder_head: None,
+        },
+        &nunki::gate::Verification {
+            project: &w.project,
+            slot: &slot,
+            engine: std::sync::Arc::new(nunki::engine::fake::FakeEngine::default()),
+            stack: "rust",
+        },
+    )
+    .unwrap()
+    .outcomes
+    .into_iter()
+    .find(|o| o.gate == nunki::gate::Gate::Perimeter)
+    .unwrap()
+    .decision
+}
+
+/// The reviewer's plant: the agent commits a change to a protected path,
+/// points the slot's `origin/dev` — or its own `dev` — at that commit, then
+/// commits something innocent. The gates measure the branch from the host's
+/// record of the base, never from a ref the slot holds: the fork point is
+/// the true base, the touched set names the protected path, and gate 4 is
+/// red.
+#[test]
+fn the_base_is_the_hosts_record_and_never_a_ref_the_slot_moved() {
+    for (protected_path, moved) in [
+        ("AGENTS.md", "refs/remotes/origin/dev"),
+        (".github/workflows/ci.yml", "refs/remotes/origin/dev"),
+        ("AGENTS.md", "refs/heads/dev"),
+    ] {
+        let w = world();
+        let truth = git(&w.project.root, &["rev-parse", "refs/heads/dev"]);
+        write(&w.tree, protected_path, "the agent's\n");
+        git(&w.tree, &["add", "-A"]);
+        git(&w.tree, &["commit", "-q", "-m", "a protected path"]);
+        let planted = git(&w.tree, &["rev-parse", "HEAD"]);
+        write(&w.tree, &format!(".git/{moved}"), &format!("{planted}\n"));
+        write(&w.tree, "src/new.rs", "pub fn new() {}\n");
+        git(&w.tree, &["add", "-A"]);
+        git(&w.tree, &["commit", "-q", "-m", "something innocent"]);
+        assert_eq!(git(&w.tree, &["rev-parse", moved]), planted);
+
+        assert_eq!(
+            nunki::gate::fork_point(&w.tree, "dev").unwrap(),
+            truth,
+            "{moved}"
+        );
+        let touched = nunki::gate::touched_since_base(&w.tree, "dev").unwrap();
+        assert!(
+            touched.contains(&protected_path.to_string()),
+            "{moved}: {touched:?}"
+        );
+        match perimeter_gate(&w) {
+            nunki::gate::Decision::Failed(said) => {
+                assert!(said.contains(protected_path), "{said}")
+            }
+            other => panic!("{protected_path} via {moved}: gate 4 said {other:?}"),
+        }
+    }
+}
+
+/// Without the host's record of the base, the gates fail and say so: they
+/// never fall back to a ref the slot holds.
+#[test]
+fn without_the_hosts_record_of_the_base_the_gates_say_so() {
+    let w = world();
+    let mirror = nunki::git::mirror_of(&w.tree);
+    git(&mirror, &["update-ref", "-d", "refs/nunki/origin/dev"]);
+    let err = nunki::gate::fork_point(&w.tree, "dev")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("the host has no record of the base \"dev\""),
+        "{err}"
+    );
+    assert!(nunki::gate::touched_since_base(&w.tree, "dev").is_err());
 }

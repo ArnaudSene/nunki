@@ -281,6 +281,16 @@ pub enum GateError {
     Mutants(String),
     #[error("the mechanical security report could not be read: {0}")]
     Security(String),
+    /// The host has no record of the mission's base for this slot. The
+    /// gates judge against that record alone, never against a ref the slot
+    /// holds, which its agent writes.
+    #[error(
+        "the host has no record of the base {base:?} for the slot at {tree}: nunki judges a \
+         branch only against the base it fetched itself from the project's repository \
+         when it put the slot on its mission branch, never against a ref the slot holds. \
+         Launch the mission again (`nunki mission start`) to record it"
+    )]
+    NoBaseRecord { base: String, tree: String },
     #[error("{pattern:?} is not a usable path pattern: {source}")]
     BadPattern {
         pattern: String,
@@ -435,6 +445,21 @@ fn branch_ahead(subject: &Subject) -> Result<Decision, GateError> {
             "the slot is on {branch:?}, which the project protects"
         )));
     }
+    // On the mission's branch, or nothing is judged: what nunki publishes is
+    // that branch, and a `HEAD` detached from it, or on another branch, would
+    // have the gates judge one commit while another is pushed (security
+    // round 3).
+    let mission = &subject.header.branch;
+    if &branch != mission {
+        let found = if branch == "HEAD" {
+            format!("detached at {}", git::slot_head(subject.tree)?)
+        } else {
+            format!("on {branch:?}")
+        };
+        return Ok(Decision::Failed(format!(
+            "the slot's HEAD is {found}, not on the mission's branch {mission:?}"
+        )));
+    }
     let base = base_ref(subject.tree, &subject.header.base)?;
     let ahead = git::on_slot(
         subject.tree,
@@ -442,35 +467,35 @@ fn branch_ahead(subject: &Subject) -> Result<Decision, GateError> {
     )?;
     if ahead.trim() == "0" {
         return Ok(Decision::Failed(format!(
-            "{branch:?} has no commit that {base:?} does not already have"
+            "{branch:?} has no commit that its base {:?} ({base}) does not already have",
+            subject.header.base
         )));
     }
     Ok(Decision::Passed)
 }
 
-/// The base as this clone knows it, and **the remote-tracking one first**.
+/// The mission's base, as **the host** recorded it: the commit the project's
+/// repository had on `base` when `run::branch` last fetched it into the
+/// slot's mirror (`refs/nunki/origin/<base>`, [`git::SlotGit::origin_branch`]).
 ///
-/// A slot is a clone whose `origin` is the project on this machine, and
-/// `run::branch` starts every mission branch from `origin/<base>` after
-/// fetching it. The clone's own `<base>` is written once, when the slot is
-/// made, and nothing moves it again — so from the second mission onwards the
-/// two disagree, and reading the local one reads the base the branch did
-/// not come from.
+/// Never a ref mirrored out of the slot. The slot's `origin/<base>` and its
+/// `<base>` are files its agent writes: an agent that moved either onto a
+/// commit of its own would have the gates measure the branch from there, and
+/// a protected path changed before that commit would vanish from gate 4,
+/// from the campaign's set and from gate 8's range (security round 3). No
+/// fallback either: without the host's record, the gates fail and say so.
 ///
-/// With a branch that has touched nothing, `dev...HEAD` then names every file
-/// the previous mission merged, while `origin/dev...HEAD` names none. Gate 4
-/// would fail a coder for a perimeter it had not left, on its first lot, and
-/// gate 8's fork point would be one merge too early.
-///
-/// The local branch stays as the fallback: a clone whose origin does not
-/// carry the base still has to be judged against something, and that is the
-/// only candidate left. It is the same order `run::branch` uses.
+/// A commit id, which is also why the local `<base>` written once at clone
+/// time and the `origin/<base>` refreshed at each launch can no longer be
+/// confused: the host's record is the one `run::branch` started from.
 fn base_ref(tree: &Path, base: &str) -> Result<Rev, GateError> {
-    let remote = format!("origin/{base}");
-    if git::SlotGit::open(tree)?.has(&format!("refs/remotes/{remote}")) {
-        return Ok(Rev(remote));
+    match git::SlotGit::open(tree)?.origin_branch(base) {
+        Some(commit) => Ok(Rev(commit)),
+        None => Err(GateError::NoBaseRecord {
+            base: base.to_string(),
+            tree: tree.display().to_string(),
+        }),
     }
-    Ok(Rev(base.to_string()))
 }
 
 /// The commit this branch forked from its base, as the gates that compare

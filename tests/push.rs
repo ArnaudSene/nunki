@@ -128,6 +128,12 @@ impl World {
             .status()
             .unwrap();
         git(&tree, &["checkout", "-q", "-b", "mission/x"]);
+        // What `run::branch` does at launch: the host records the base from
+        // the project's repository, and the gates judge against it alone.
+        nunki::git::SlotGit::open(&tree)
+            .unwrap()
+            .fetch_origin(&root)
+            .unwrap();
 
         let project = Project::at(
             root,
@@ -1224,8 +1230,13 @@ fn a_findings_report_is_printed_escaped_never_raw() {
 fn the_gates_are_printed_one_line_each_with_their_mark_and_why() {
     let world = World::opened_at(nunki::mission::Rigor::Standard);
     world.coded("pub fn one() -> u8 { 2 }\n", "the lot");
-    // The base the gates measure the branch against, in the slot.
-    git(&world.tree, &["branch", "-q", "dev", "HEAD~1"]);
+    // The base the gates measure the branch against: in the project, where
+    // the host records it from, never in the slot.
+    git(&world.project.root, &["branch", "-q", "-f", "dev", "HEAD"]);
+    nunki::git::SlotGit::open(&world.tree)
+        .unwrap()
+        .fetch_origin(&world.project.root)
+        .unwrap();
 
     let out = world.printed_by_the_binary(&["mission", "gates", "m1"]);
     for line in [
@@ -2496,5 +2507,41 @@ fn status_says_each_campaign_of_the_chain_with_its_counts() {
             &head[..12]
         )),
         "{status}"
+    );
+}
+
+/// The reviewer's case (security round 3), on a code-only mission: the
+/// gates judged commit X; the agent then commits Y on the mission branch,
+/// adding a CI workflow, and detaches `HEAD` at X. What nunki publishes is
+/// the judged commit and nothing else: `mission fetch` and `push` both
+/// refuse, naming both commits, and nothing reaches the project or the
+/// forge.
+#[test]
+fn only_the_judged_commit_is_fetched_or_pushed() {
+    let world = World::new(no_integration(), Security::Gates);
+    let judged = world.coded("pub fn one() -> u8 { 2 }\n", "the lot");
+    assert_eq!(world.stage(), Stage::Verified);
+    let added = world.commit(".github/workflows/ci.yml", "on: push\n", "ci");
+    git(&world.tree, &["checkout", "-q", "--detach", &judged]);
+    assert_eq!(nunki::git::slot_head(&world.tree).unwrap(), judged);
+
+    let err = push::fetch(&world.project, "m1").unwrap_err().to_string();
+    assert!(err.contains(&judged) && err.contains(&added), "{err}");
+    assert!(err.contains("nothing was fetched"), "{err}");
+
+    let err = push::push(&world.project, "m1", true)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains(&judged) && err.contains(&added), "{err}");
+    assert_eq!(world.on_forge("mission/x"), None);
+    let in_project = Command::new("git")
+        .arg("-C")
+        .arg(&world.project.root)
+        .args(["rev-parse", "--verify", "--quiet", "refs/heads/mission/x"])
+        .output()
+        .unwrap();
+    assert!(
+        !in_project.status.success(),
+        "the project received a commit"
     );
 }

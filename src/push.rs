@@ -34,6 +34,19 @@ use crate::state::{MissionState, Store, lock::SlotLock};
 
 #[derive(Debug, thiserror::Error)]
 pub enum PushError {
+    /// What would be published is not the commit the gates and verdicts
+    /// judged (security round 3).
+    #[error(
+        "{at}, the branch {branch} is at {tip}, but the commit the gates and verdicts judged \
+         is {judged}: nunki publishes only the judged commit, and {done}"
+    )]
+    NotJudged {
+        branch: String,
+        at: &'static str,
+        tip: String,
+        judged: String,
+        done: &'static str,
+    },
     #[error("mission {0} has not started — there is nothing to push")]
     NotStarted(String),
     #[error(
@@ -143,6 +156,19 @@ pub fn fetch(project: &Project, id: &str) -> Result<Fetched, PushError> {
         .load(id)
         .map_err(|_| PushError::NotStarted(id.to_string()))?;
     let slot = crate::slot::find(project, &state.slot)?;
+    let judged = crate::git::slot_head(&slot.tree)?;
+    fetch_judged(project, id, &judged)
+}
+
+/// [`fetch`], of the commit `judged` and of nothing else: refused, with
+/// nothing fetched, when the slot's mission branch is not that commit — a
+/// branch moved on past what the gates saw, or a `HEAD` detached from it.
+pub fn fetch_judged(project: &Project, id: &str, judged: &str) -> Result<Fetched, PushError> {
+    let store = Store::open(&project.hq_root)?;
+    let state = store
+        .load(id)
+        .map_err(|_| PushError::NotStarted(id.to_string()))?;
+    let slot = crate::slot::find(project, &state.slot)?;
     let branch = state.flow.header().branch.clone();
 
     // Git refuses to fetch into the branch that is checked out, and says so
@@ -177,6 +203,20 @@ pub fn fetch(project: &Project, id: &str) -> Result<Fetched, PushError> {
     // fetched history, and a tag the agent named `dev` would shadow the
     // human's `dev` (security round 2).
     let mirror = crate::git::SlotGit::open(&slot.tree)?;
+    // The branch the mirror holds — what the fetch would bring — is the
+    // judged commit, or nothing crosses.
+    let tip = mirror
+        .run(&["rev-parse", "--verify", &format!("{full}^{{commit}}")])
+        .unwrap_or_else(|_| "nothing".into());
+    if tip != judged {
+        return Err(PushError::NotJudged {
+            branch,
+            at: "in the slot",
+            tip,
+            judged: judged.to_string(),
+            done: "nothing was fetched",
+        });
+    }
     crate::git::run(
         &project.root,
         &[
@@ -191,6 +231,22 @@ pub fn fetch(project: &Project, id: &str) -> Result<Fetched, PushError> {
         branch,
         head: after,
         was: before,
+    })
+}
+
+/// The second check of [`push_to`]: the branch the fetch left in the
+/// project is the judged commit, or nothing is pushed. The first, before the
+/// fetch, is [`fetch_judged`]'s; this one holds even if that one is wrong.
+fn is_judged(fetched: &Fetched, judged: &str) -> Result<(), PushError> {
+    if fetched.head == judged {
+        return Ok(());
+    }
+    Err(PushError::NotJudged {
+        branch: fetched.branch.clone(),
+        at: "in the project, after the fetch",
+        tip: fetched.head.clone(),
+        judged: judged.to_string(),
+        done: "nothing was pushed",
     })
 }
 
@@ -280,7 +336,11 @@ pub fn push_to(
     proposals_ruled(project, id)?;
     nothing_owed(project, id, &header, &slot.tree, &head)?;
 
-    let fetched = fetch(project, id)?;
+    // Exactly the judged commit, by id: refused before the fetch when the
+    // slot's branch is not it, and checked again on the project's side before
+    // anything is pushed.
+    let fetched = fetch_judged(project, id, &head)?;
+    is_judged(&fetched, &head)?;
     let remote = remote_url(project)?;
     crate::git::run(&project.root, &["push", REMOTE, &fetched.branch])?;
 
@@ -730,4 +790,25 @@ fn only_wiring_since(
 fn remote_url(project: &Project) -> Result<String, PushError> {
     crate::git::run(&project.root, &["remote", "get-url", REMOTE])
         .map_err(|_| PushError::NoRemote(REMOTE.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A project-side tip that is not the judged commit is refused, naming
+    /// both, whatever the check before the fetch let through.
+    #[test]
+    fn a_fetched_tip_that_is_not_the_judged_commit_is_never_pushed() {
+        let fetched = |head: &str| Fetched {
+            branch: "mission/x".into(),
+            head: head.into(),
+            was: None,
+        };
+        assert!(is_judged(&fetched("aaa"), "aaa").is_ok());
+        let err = is_judged(&fetched("bbb"), "aaa").unwrap_err().to_string();
+        assert!(err.contains("at bbb"), "{err}");
+        assert!(err.contains("judged is aaa"), "{err}");
+        assert!(err.contains("nothing was pushed"), "{err}");
+    }
 }

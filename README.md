@@ -34,9 +34,13 @@ directories, is refused before it is read. Whether a
 slot's tree is clean is `nunki`'s own comparison with `HEAD`, byte for byte,
 never what the slot's index says nor what its `.gitattributes` would make of
 a file — so a project that relies on conversion at checkout (`text`,
-`eol`, `ident`) reads as not clean. `mission fetch` takes the
-mission's branch alone, never a tag the agent made, and `nunki check` names any key a slot's `.git/config`
-carries that git would execute, and any gitlink its `HEAD` holds. What `nunki`
+`eol`, `ident`) reads as not clean. The gates measure a branch from the base
+`nunki` recorded itself from your repository, never from a ref the slot
+holds. `mission fetch` and `nunki push` take the mission's branch alone, and
+only when it is the very commit the gates and verdicts judged: never a tag
+the agent made, nor a commit added after. `nunki check` names any key a
+slot's `.git/config` carries that git would execute, and any gitlink its
+`HEAD` holds. What `nunki`
 writes back into a slot (a branch, its checkout) it writes as files. Nothing
 reaches the forge but `nunki push`, on your explicit word.
 

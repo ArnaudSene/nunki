@@ -51,7 +51,31 @@ fn repo(dir: &Path) -> PathBuf {
     git(&tree, &["add", "-A"]);
     git(&tree, &["commit", "-q", "-m", "base"]);
     git(&tree, &["checkout", "-q", "-b", "mission/x"]);
+    record_base(&tree);
     tree
+}
+
+/// What `run::branch` does at launch: the host records the mission's base
+/// from the project's repository (`refs/nunki/origin/*` in the slot's
+/// mirror), and the gates judge against that record alone. A bare copy of
+/// the slot, taken now, before any agent commit, stands in for the project.
+fn record_base(tree: &Path) {
+    let name = tree.file_name().unwrap().to_string_lossy().into_owned();
+    let project = tree.with_file_name(format!("{name}-project.git"));
+    git(
+        tree.parent().unwrap(),
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            tree.to_str().unwrap(),
+            project.to_str().unwrap(),
+        ],
+    );
+    nunki::git::SlotGit::open(tree)
+        .unwrap()
+        .fetch_origin(&project)
+        .unwrap();
 }
 
 fn header() -> Header {
@@ -1687,6 +1711,10 @@ fn what_a_branch_brought_and_what_it_brought_since_a_commit_are_asked_differentl
     );
 
     git(&tree, &["fetch", "-q", "origin"]);
+    nunki::git::SlotGit::open(&tree)
+        .unwrap()
+        .fetch_origin(&origin)
+        .unwrap();
     git(&tree, &["checkout", "-q", "-b", "mission/x", "origin/dev"]);
     write(&tree, "src/first.rs", "pub fn three() -> u8 { 3 }\n");
     git(&tree, &["add", "-A"]);
@@ -2116,6 +2144,10 @@ fn the_gates_judge_against_the_base_the_branch_came_from() {
     // This mission's branch, from `origin/dev` as `run::branch` makes it, and
     // one commit of its own, well inside its perimeter.
     git(&tree, &["fetch", "-q", "origin"]);
+    nunki::git::SlotGit::open(&tree)
+        .unwrap()
+        .fetch_origin(&origin)
+        .unwrap();
     git(&tree, &["checkout", "-q", "-b", "mission/x", "origin/dev"]);
     write(&tree, "src/mine.rs", "pub fn three() -> u8 { 3 }\n");
     git(&tree, &["add", "-A"]);
@@ -2291,6 +2323,10 @@ fn what_a_branch_brought_has_one_reading() {
     );
 
     git(&tree, &["fetch", "-q", "origin"]);
+    nunki::git::SlotGit::open(&tree)
+        .unwrap()
+        .fetch_origin(&origin)
+        .unwrap();
     git(&tree, &["checkout", "-q", "-b", "mission/x", "origin/dev"]);
     write(&tree, "src/mine.rs", "pub fn three() -> u8 { 3 }\n");
     git(&tree, &["add", "-A"]);
@@ -3327,5 +3363,32 @@ fn at_standard_a_chain_without_a_trusted_count_is_judged_as_critical() {
     match f.gate_seven(Role::Coder).decision {
         Decision::Failed(why) => assert!(why.contains("1 survivor(s) have no outcome"), "{why}"),
         other => panic!("an open survivor without a count is red: {other:?}"),
+    }
+}
+
+/// Gate 2 judges a slot on the mission's branch only: a `HEAD` detached
+/// from it, or on another branch, is refused, naming what it found — what
+/// nunki publishes is that branch (security round 3).
+#[test]
+fn gate_two_refuses_a_head_that_is_not_on_the_missions_branch() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.journal_names_head();
+    assert_eq!(f.decision(Role::Coder, Gate::BranchAhead), Decision::Passed);
+
+    let head = git(&f.tree, &["rev-parse", "HEAD"]);
+    git(&f.tree, &["checkout", "-q", "--detach"]);
+    match f.decision(Role::Coder, Gate::BranchAhead) {
+        Decision::Failed(said) => {
+            assert!(said.contains(&format!("detached at {head}")), "{said}");
+            assert!(said.contains("\"mission/x\""), "{said}");
+        }
+        other => panic!("{other:?}"),
+    }
+
+    git(&f.tree, &["checkout", "-q", "-b", "elsewhere"]);
+    match f.decision(Role::Coder, Gate::BranchAhead) {
+        Decision::Failed(said) => assert!(said.contains("on \"elsewhere\""), "{said}"),
+        other => panic!("{other:?}"),
     }
 }
