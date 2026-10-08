@@ -184,6 +184,93 @@ pub fn slot_head(tree: &Path) -> Result<String, GitError> {
     SlotGit::open(tree)?.head()
 }
 
+/// The keys of the slot's `.git/config` that git would execute — or run
+/// something on behalf of — in a repository that honoured them: what an
+/// agent planted for the host to run, named so a human can be told.
+///
+/// **A report, never the protection.** The protection is that no git on the
+/// host reads a slot's configuration at all ([`SlotGit`]); this list only
+/// says what was found, and a key git adds tomorrow is still never run. The
+/// file is read as data by `git config --file --no-includes`, outside any
+/// repository: an `include.path` is named, never followed.
+pub fn executable_keys(tree: &Path) -> Result<Vec<String>, GitError> {
+    let file = tree.join(".git").join("config");
+    match std::fs::symlink_metadata(&file) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(GitError::Io(file, e)),
+        Ok(m) if !m.is_file() => {
+            return Err(GitError::Unreadable {
+                tree: tree.display().to_string(),
+                why: format!(
+                    "{} is not a regular file, and nunki follows no link in a slot's .git",
+                    file.display()
+                ),
+            });
+        }
+        Ok(_) => {}
+    }
+    let mut git = host_git();
+    // No repository: what `--file` names is all git reads.
+    git.env("GIT_DIR", mirror_of(tree).join("no-repository"))
+        .args(["config", "--no-includes", "--null", "--list", "--file"])
+        .arg(&file);
+    let listed = finish(git, &["config"], &tree.display().to_string(), None)?;
+    let mut keys: Vec<String> = listed
+        .split('\0')
+        .filter_map(|entry| entry.split('\n').next())
+        .filter(|key| executes(key))
+        .map(str::to_string)
+        .collect();
+    keys.sort();
+    keys.dedup();
+    Ok(keys)
+}
+
+/// Whether git runs what `key` (as `git config --list` spells it: section and
+/// name in lowercase) names, or reads another file because of it.
+fn executes(key: &str) -> bool {
+    const EXACT: &[&str] = &[
+        "core.fsmonitor",
+        "core.hookspath",
+        "core.pager",
+        "core.editor",
+        "core.sshcommand",
+        "core.askpass",
+        "core.gitproxy",
+        "core.alternaterefscommand",
+        "sequence.editor",
+        "diff.external",
+        "credential.helper",
+        "gpg.program",
+        "uploadpack.packobjectshook",
+        "include.path",
+        "web.browser",
+        "protocol.allow",
+    ];
+    if EXACT.contains(&key) {
+        return true;
+    }
+    let Some((section, rest)) = key.split_once('.') else {
+        return false;
+    };
+    // `section.<subsection>.name`: the subsection may itself hold dots.
+    let name = rest.rsplit('.').next().unwrap_or(rest);
+    let scoped = rest.contains('.');
+    match section {
+        "alias" | "pager" => true,
+        "includeif" => scoped && name == "path",
+        "filter" => scoped && matches!(name, "clean" | "smudge" | "process"),
+        "diff" => scoped && matches!(name, "textconv" | "command"),
+        "merge" => scoped && name == "driver",
+        "credential" => scoped && name == "helper",
+        "gpg" => scoped && name == "program",
+        "remote" => scoped && matches!(name, "uploadpack" | "receivepack"),
+        "difftool" | "mergetool" | "man" | "browser" => scoped && name == "cmd",
+        "protocol" => scoped && name == "allow",
+        _ => false,
+    }
+}
+
 /// Where the host keeps the mirror of the slot at `tree`: beside the slot,
 /// under `.nunki-git/`.
 ///
@@ -335,12 +422,10 @@ impl SlotGit {
     /// builds from `HEAD`: `status`, a `grep` of the tree. The slot's own
     /// index is never read.
     pub fn run_in_tree(&self, args: &[&str]) -> Result<String, GitError> {
-        let index = self.fresh_index()?;
+        let index = self.fresh_index(false)?;
         let mut git = self.git_in_tree(index.path());
         git.args(args);
-        let out = finish(git, args, &self.at(), None);
-        index.keep(&self.mirror);
-        out
+        finish(git, args, &self.at(), None)
     }
 
     /// The commit `HEAD` names.
@@ -370,27 +455,28 @@ impl SlotGit {
         self.run(&["rev-parse", "--verify", "--quiet", rev]).is_ok()
     }
 
-    /// An index of `HEAD` in a file of its own: the mirror's last one copied,
-    /// so that its stat information spares git hashing the whole tree, then
-    /// reset to `HEAD`, which keeps that information only where the entry is
-    /// unchanged and never refuses over what the tree holds.
-    fn fresh_index(&self) -> Result<Index, GitError> {
+    /// An index of `HEAD` in a file of its own, built afresh: it carries no
+    /// stat information, so git compares the tree's **content** with
+    /// `HEAD`'s. Stat information is never kept from one call to the next:
+    /// an agent that rewrites a file keeping its size, inode and time, within
+    /// the second git compares a change time to, would read as unchanged
+    /// against a kept index. `refresh` brings stat information up to the
+    /// tree as it is now, for a two-way merge, which refuses an entry it
+    /// cannot tell is unchanged.
+    fn fresh_index(&self, refresh: bool) -> Result<Index, GitError> {
         let index = Index::new(&self.mirror);
-        let kept = self.mirror.join("index");
-        if kept.is_file() {
-            std::fs::copy(&kept, index.path()).map_err(|e| GitError::Io(kept.clone(), e))?;
+        let args = ["read-tree", "HEAD"];
+        let mut git = self.git_in_tree(index.path());
+        git.args(args);
+        finish(git, &args, &self.at(), None)?;
+        if refresh {
+            // `-q` carries on past a modified file, which is an answer and
+            // not a failure.
+            let args = ["update-index", "-q", "--refresh"];
+            let mut git = self.git_in_tree(index.path());
+            git.args(args);
+            finish(git, &args, &self.at(), None)?;
         }
-        let args = ["read-tree", "--reset", "HEAD"];
-        let mut git = self.git_in_tree(index.path());
-        git.args(args);
-        finish(git, &args, &self.at(), None)?;
-        // Stat information brought up to the tree: a two-way merge refuses an
-        // entry it cannot tell is unchanged. `-q` carries on past a modified
-        // file, which is an answer and not a failure.
-        let args = ["update-index", "-q", "--refresh"];
-        let mut git = self.git_in_tree(index.path());
-        git.args(args);
-        finish(git, &args, &self.at(), None)?;
         Ok(index)
     }
 
@@ -399,7 +485,7 @@ impl SlotGit {
     /// played from the mirror. The slot's index is then rewritten from
     /// `nunki`'s, so that its own git sees what its tree now holds.
     pub fn reset_hard(&self) -> Result<(), GitError> {
-        let index = self.fresh_index()?;
+        let index = self.fresh_index(false)?;
         for args in [
             &["read-tree", "--reset", "-u", "HEAD"][..],
             &["clean", "-qxdff"][..],
@@ -409,7 +495,6 @@ impl SlotGit {
             finish(git, args, &self.at(), None)?;
         }
         self.give_index(&index)?;
-        index.keep(&self.mirror);
         Ok(())
     }
 
@@ -421,13 +506,12 @@ impl SlotGit {
             "--verify",
             &format!("refs/heads/{branch}^{{commit}}"),
         ])?;
-        let index = self.fresh_index()?;
+        let index = self.fresh_index(true)?;
         let args = ["read-tree", "-m", "-u", "HEAD", &target];
         let mut git = self.git_in_tree(index.path());
         git.args(args);
         finish(git, &args, &self.at(), None)?;
         self.give_index(&index)?;
-        index.keep(&self.mirror);
         self.write_into_slot("HEAD", format!("ref: refs/heads/{branch}\n").as_bytes())?;
         self.forget_sync()?;
         self.sync()
@@ -836,12 +920,6 @@ impl Index {
 
     fn path(&self) -> &Path {
         &self.0
-    }
-
-    /// Keep this index as the mirror's last one, for the next call's stat
-    /// information. Losing the race to another call loses nothing but time.
-    fn keep(self, mirror: &Path) {
-        let _ = std::fs::rename(&self.0, mirror.join("index"));
     }
 }
 

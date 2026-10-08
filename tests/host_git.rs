@@ -768,7 +768,7 @@ fn the_plants_git_already_ignores_are_ignored_by_a_plain_git_too() {
     assert_eq!(w.ran(), Vec::<String>::new());
 }
 
-/// A way to break a slot's `.git`, by name.
+/// A change made to a slot, by name: a way to break or to doctor it.
 type Break = (&'static str, fn(&World));
 
 /// A slot whose `.git` the host cannot read is an error that names the
@@ -1091,4 +1091,238 @@ fn a_slot_on_an_unborn_branch_is_an_error() {
     std::fs::write(w.tree.join(".git/HEAD"), "ref: refs/heads/nothing-yet\n").unwrap();
     assert!(nunki::git::slot_head(&w.tree).is_err());
     assert!(nunki::git::is_clean(&w.tree).is_err());
+}
+
+/// Gate 1 as the coder's gates play it.
+fn clean_tree_gate(w: &World) -> nunki::gate::Decision {
+    let slot = w.slot();
+    let paths = w.paths();
+    nunki::gate::after_run(
+        &nunki::gate::Subject {
+            role: Role::Coder,
+            tree: &slot.tree,
+            journal: &paths.journal,
+            pr: &paths.pr,
+            verdict: &paths.verdict,
+            mission_dir: &paths.dir,
+            header: &w.header,
+            protected_branches: &w.project.config.protected_branches,
+            protected_paths: &w.project.config.protected_paths,
+            coder_head: None,
+        },
+        &nunki::gate::Verification {
+            project: &w.project,
+            slot: &slot,
+            engine: std::sync::Arc::new(nunki::engine::fake::FakeEngine::default()),
+            stack: "rust",
+        },
+    )
+    .unwrap()
+    .outcomes
+    .into_iter()
+    .find(|o| o.gate == nunki::gate::Gate::CleanTree)
+    .unwrap()
+    .decision
+}
+
+/// A file's modification time, set back to a fixed past.
+fn age(path: &Path) {
+    let past = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000);
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(past)
+        .unwrap();
+}
+
+/// A slot's index, or its configuration, doctored so that the slot's own
+/// git sees nothing to commit, still leaves a tree that is "not clean": the
+/// question is answered by `nunki`'s comparison of the tree with `HEAD`, not
+/// by what the slot says (SPEC 4.4, gate 1).
+#[test]
+fn a_slot_index_doctored_to_hide_a_change_is_still_not_clean() {
+    let changed = "pub fn one() -> u8 {\n    7\n}\n";
+    let doctorings: &[Break] = &[
+        ("assume-unchanged", |w| {
+            write(&w.tree, "src.rs", "pub fn one() -> u8 {\n    7\n}\n");
+            git(&w.tree, &["update-index", "--assume-unchanged", "src.rs"]);
+        }),
+        ("skip-worktree", |w| {
+            write(&w.tree, "src.rs", "pub fn one() -> u8 {\n    7\n}\n");
+            git(&w.tree, &["update-index", "--skip-worktree", "src.rs"]);
+        }),
+        ("a stat the slot no longer checks", |w| {
+            let file = w.tree.join("src.rs");
+            age(&file);
+            git(&w.tree, &["update-index", "--refresh"]);
+            // nunki's own index is warm too: it must not trust it either.
+            assert!(nunki::git::is_clean(&w.tree).unwrap());
+            w.config("core.checkStat", "minimal");
+            w.config("core.trustctime", "false");
+            std::fs::write(&file, "pub fn one() -> u8 {\n    7\n}\n").unwrap();
+            age(&file);
+        }),
+        ("an untracked file excluded in .git/info", |w| {
+            write(&w.tree, ".git/info/exclude", "hidden.rs\n");
+            write(&w.tree, "hidden.rs", "pub fn hidden() {}\n");
+        }),
+        ("an untracked file excluded by core.excludesFile", |w| {
+            let list = w.dir.path().join("excluded");
+            std::fs::write(&list, "hidden.rs\n").unwrap();
+            w.config("core.excludesFile", &list.display().to_string());
+            write(&w.tree, "hidden.rs", "pub fn hidden() {}\n");
+        }),
+    ];
+    for (name, doctor) in doctorings {
+        let w = world();
+        doctor(&w);
+        // The control: the slot's own git is fooled.
+        assert_eq!(git(&w.tree, &["status", "--porcelain"]), "", "{name}");
+
+        assert!(!nunki::git::is_clean(&w.tree).unwrap(), "{name}");
+        assert!(
+            matches!(clean_tree_gate(&w), nunki::gate::Decision::Failed(_)),
+            "{name}"
+        );
+        if !name.contains("untracked") {
+            assert_eq!(
+                std::fs::read_to_string(w.tree.join("src.rs")).unwrap(),
+                changed
+            );
+        }
+    }
+}
+
+/// The `nunki check` line for slots.
+fn slots_line(w: &World) -> nunki::check::Verdict {
+    nunki::check::run(&w.project)
+        .checks
+        .into_iter()
+        .find(|c| c.what == "the host runs no git inside a slot")
+        .expect("check reports the line")
+        .verdict
+}
+
+/// `nunki check` says the host runs no git inside a slot: green on a slot
+/// nobody planted anything in, and, on one whose `.git/config` carries keys
+/// git would execute, a line that names each key and says nothing ran.
+#[test]
+fn check_is_green_on_a_fresh_slot_and_names_a_planted_key() {
+    let w = world();
+    match slots_line(&w) {
+        nunki::check::Verdict::Green(said) => {
+            assert!(said.contains("one at "), "{said}");
+            assert!(said.contains(".nunki-git"), "{said}");
+        }
+        other => panic!("a fresh slot: {other:?}"),
+    }
+
+    w.config("core.fsmonitor", &w.script("fsmonitor"));
+    w.config("filter.evil.clean", &w.script("filter-clean"));
+    w.config("include.path", "../evil.config");
+    match slots_line(&w) {
+        nunki::check::Verdict::Amber(said) => {
+            assert!(said.contains("slot one's .git/config"), "{said}");
+            assert!(
+                said.contains("core.fsmonitor, filter.evil.clean, include.path"),
+                "{said}"
+            );
+            assert!(said.contains("nunki ran none of them"), "{said}");
+        }
+        other => panic!("a planted slot: {other:?}"),
+    }
+    assert_eq!(w.ran(), Vec::<String>::new());
+}
+
+/// A slot the host cannot read is said by `check` too, and a project with no
+/// slot has nothing to hold yet.
+#[test]
+fn check_names_a_slot_the_host_cannot_read_and_holds_with_none() {
+    let w = world();
+    std::fs::write(w.tree.join(".git/HEAD"), "garbage\n").unwrap();
+    match slots_line(&w) {
+        nunki::check::Verdict::Amber(said) => {
+            assert!(said.contains("slot one:"), "{said}");
+            assert!(said.contains("cannot be read from the host"), "{said}");
+        }
+        other => panic!("a broken slot: {other:?}"),
+    }
+
+    nunki::slot::rm(&w.project, "one", true).unwrap();
+    assert!(matches!(
+        slots_line(&w),
+        nunki::check::Verdict::Green(said) if said.contains("no slot yet")
+    ));
+}
+
+/// Which keys of a slot's configuration are named as executable, and which
+/// are not: everything git runs, or reads another file for, and nothing it
+/// only reads as a value.
+#[test]
+fn the_keys_named_are_the_ones_git_would_execute() {
+    let w = world();
+    let executable = [
+        "alias.st",
+        "browser.x.cmd",
+        "core.alternaterefscommand",
+        "core.askpass",
+        "core.editor",
+        "core.fsmonitor",
+        "core.gitproxy",
+        "core.hookspath",
+        "core.pager",
+        "core.sshcommand",
+        "credential.helper",
+        "credential.https://example.com.helper",
+        "diff.e.command",
+        "diff.e.textconv",
+        "diff.external",
+        "difftool.x.cmd",
+        "filter.e.clean",
+        "filter.e.process",
+        "filter.e.smudge",
+        "gpg.program",
+        "gpg.ssh.program",
+        "include.path",
+        "includeif.gitdir:/x/.path",
+        "man.x.cmd",
+        "merge.e.driver",
+        "mergetool.x.cmd",
+        "pager.log",
+        "protocol.allow",
+        "protocol.ext.allow",
+        "remote.origin.receivepack",
+        "remote.origin.uploadpack",
+        "sequence.editor",
+        "uploadpack.packobjectshook",
+        "web.browser",
+    ];
+    let inert = [
+        "credential.username",
+        "diff.e.binary",
+        "diff.textconv",
+        "filter.clean",
+        "filter.e.required",
+        "gpg.format",
+        "includeif.path",
+        "merge.e.name",
+        "protocol.version",
+        "remote.origin.pushurl",
+        "uploadpack.allowfilter",
+        "user.name",
+        "x.y",
+    ];
+    for key in executable.iter().chain(inert.iter()) {
+        git(&w.tree, &["config", "--add", key, "v"]);
+    }
+    let mut expected: Vec<String> = executable.iter().map(|k| k.to_string()).collect();
+    expected.sort();
+    assert_eq!(nunki::git::executable_keys(&w.tree).unwrap(), expected);
+    // A fresh clone's configuration names nothing.
+    let fresh = world();
+    assert_eq!(
+        nunki::git::executable_keys(&fresh.tree).unwrap(),
+        Vec::<String>::new()
+    );
 }

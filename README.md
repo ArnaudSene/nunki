@@ -23,7 +23,10 @@ every git it needs about one runs in a **mirror** beside the slot, outside
 every mount, that only the host writes. The slot's commits reach the mirror
 through a fetch that hashes every object, its refs are read from their files,
 and no configuration of the slot's is ever read — so a `core.fsmonitor`, a
-hook, a filter or a pager planted there has nothing to run it. What `nunki`
+hook, a filter or a pager planted there has nothing to run it. Whether a
+slot's tree is clean is `nunki`'s own comparison with `HEAD`, never what the
+slot's index says, and `nunki check` names any key a slot's `.git/config`
+carries that git would execute. What `nunki`
 writes back into a slot (a branch, its checkout) it writes as files. Nothing
 reaches the forge but `nunki push`, on your explicit word.
 

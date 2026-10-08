@@ -3,8 +3,9 @@
 //! Two rules shape it. It is **red** when a restriction is not held, not
 //! when something is merely absent. And it **says what it could not check**:
 //! a check that quietly skips is worse than no check, because it reads as a
-//! pass. Everything in [`run`] is a pure function of the project on disk;
-//! probing containers is the caller's, and so is asking the forge
+//! pass. Everything in [`run`] is a function of the project on disk, and its
+//! one write is a slot's host mirror brought up to date
+//! ([`host_runs_no_git_in_slots`]); probing containers is the caller's, and so is asking the forge
 //! ([`forge_protection`]), the one check here that talks to the network.
 
 use std::collections::BTreeMap;
@@ -115,6 +116,7 @@ pub fn run(project: &Project) -> Report {
     coder_perimeter(project, &mut report);
     stack_versions(project, &mut report);
     fragments_follow(project, &mut report);
+    host_runs_no_git_in_slots(project, &mut report);
     report
 }
 
@@ -381,6 +383,59 @@ pub fn serves(
     };
     let drift = crate::versions::drift(&built, wanted);
     if drift.is_empty() { Ok(()) } else { Err(drift) }
+}
+
+/// The line SPEC 3.1 asks of every slot: the host runs no git inside it.
+///
+/// Green when every slot is read through its host mirror
+/// ([`crate::git::SlotGit`]) — which this brings up to date, the one thing
+/// it writes, and only in the mirror. Amber, naming the slot, for a slot the
+/// host cannot read, and for a slot whose `.git/config` carries a key git
+/// would execute: nothing was run, which is why it is not red, and an agent
+/// planted it, which is why it is said. The keys are named
+/// ([`crate::git::executable_keys`]); the protection never depended on
+/// that list.
+pub fn host_runs_no_git_in_slots(project: &Project, report: &mut Report) {
+    let what = "the host runs no git inside a slot";
+    let slots = crate::slot::list(project);
+    if slots.is_empty() {
+        report.add(
+            what,
+            Verdict::Green("no slot yet; every one is read through a host mirror".into()),
+        );
+        return;
+    }
+    let mut said = Vec::new();
+    let mut read = Vec::new();
+    for slot in &slots {
+        match crate::git::SlotGit::open(&slot.tree) {
+            Ok(repo) => read.push(format!("{} at {}", slot.name, repo.mirror().display())),
+            Err(e) => said.push(format!("slot {}: {e}", slot.name)),
+        }
+        match crate::git::executable_keys(&slot.tree) {
+            Ok(keys) if keys.is_empty() => {}
+            Ok(keys) => said.push(format!(
+                "slot {}'s .git/config carries {}, which git would execute; nunki ran \
+                 none of them, since no git on the host reads a slot's configuration. \
+                 Its agent wrote them: read what it did, and `nunki slot rm` the slot \
+                 rather than reuse it",
+                slot.name,
+                keys.join(", ")
+            )),
+            Err(e) => said.push(format!("slot {}: {e}", slot.name)),
+        }
+    }
+    report.add(
+        what,
+        if said.is_empty() {
+            Verdict::Green(format!(
+                "every slot is read through its host mirror: {}",
+                read.join("; ")
+            ))
+        } else {
+            Verdict::Amber(said.join("\n      "))
+        },
+    );
 }
 
 fn git_repository(project: &Project, report: &mut Report) {
