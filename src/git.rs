@@ -1295,11 +1295,18 @@ mod tests {
             .unwrap()
             .set_modified(hour_ago)
             .unwrap();
-        let started = Instant::now();
-        let lock =
-            MirrorLock::take_within(&mirror, Duration::from_secs(300), Duration::from_secs(10));
-        assert!(lock.is_ok(), "{:?}", lock.err());
-        assert!(started.elapsed() < Duration::from_secs(5));
+        // In a thread of its own, so that a lock never taken over fails this
+        // test rather than hanging it.
+        let (sent, answer) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let lock =
+                MirrorLock::take_within(&mirror, Duration::from_secs(300), Duration::from_secs(10));
+            let _ = sent.send(lock.map(drop).map_err(|e| e.to_string()));
+        });
+        let taken = answer
+            .recv_timeout(Duration::from_secs(5))
+            .expect("a stale lock was waited for rather than taken over");
+        assert_eq!(taken, Ok(()));
     }
 
     /// A lock nobody releases is an error once `wait` is spent — not a
