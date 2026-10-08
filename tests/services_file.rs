@@ -1242,3 +1242,427 @@ fn the_ports_line_names_the_services_and_says_why() {
          published port would collide between slots"
     );
 }
+
+// --- the fences, measured (L3) ----------------------------------------------------
+//
+// `#[ignore]`d: they build the firewall's image and lift containers, and
+// need a network. The HQ runs them by hand, after touching what they cover:
+//
+//     cargo test --test services_file -- --ignored --nocapture
+//
+// Each negative probe has a control beside it — the same attempt from a
+// container nunki did not fence — and a control that fails makes the test
+// fail as inconclusive rather than pass: a probe is worth nothing if it
+// would fail without the guard.
+
+mod live {
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Output};
+
+    use nunki::compose::services::{CAPABILITIES, Lifted, ServicesFile};
+    use nunki::compose::{AGENT_WRITABLE, NamedVolume, Plan, UserIds, generate, project_name};
+    use nunki::harness::Role;
+    use nunki::perimeter::{Sources, compute};
+
+    const FIREWALL_IMAGE: &str = "nunki/firewall:test";
+    const SESSION: &str = "22222222-3333-4444-8555-666666666666";
+    /// Where a TCP connection out is attempted: a public resolver's HTTPS.
+    const OUT: &str = "1.1.1.1 443";
+
+    fn docker(args: &[&str]) -> Output {
+        let engine = std::env::var("HQ_ENGINE").unwrap_or_else(|_| "docker".to_string());
+        Command::new(engine)
+            .args(args)
+            .output()
+            .expect("the engine is on the path")
+    }
+
+    fn compose(file: &Path, project: &str, args: &[&str]) -> Output {
+        let raw = std::env::var("HQ_COMPOSE").unwrap_or_else(|_| "docker compose".to_string());
+        let mut words = raw.split_whitespace();
+        Command::new(words.next().expect("HQ_COMPOSE names a program"))
+            .args(words)
+            .args(["-p", project, "-f"])
+            .arg(file)
+            .args(args)
+            .output()
+            .expect("the compose command is on the path")
+    }
+
+    fn said(out: &Output) -> String {
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    }
+
+    fn build_firewall() -> tempfile::TempDir {
+        let context = tempfile::tempdir().unwrap();
+        nunki::firewall::materialise(context.path()).unwrap();
+        let out = docker(&[
+            "build",
+            "-q",
+            "-t",
+            FIREWALL_IMAGE,
+            context.path().to_str().unwrap(),
+        ]);
+        assert!(
+            out.status.success(),
+            "the sidecar did not build: {}",
+            said(&out)
+        );
+        context
+    }
+
+    /// A lifted profile: the integrator's, declaring `declared`, lifting
+    /// `lifted`, with an agent that only sleeps.
+    struct Profile {
+        /// Held so the generated file outlives the profile.
+        _dir: tempfile::TempDir,
+        file: PathBuf,
+        project: String,
+    }
+
+    impl Profile {
+        fn generate(slot: &str, declared: &[&str], lifted: Lifted) -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let tree = dir.path().join("tree");
+            let mission = dir.path().join("mission");
+            std::fs::create_dir_all(&tree).unwrap();
+            std::fs::create_dir_all(&mission).unwrap();
+            for file in AGENT_WRITABLE {
+                std::fs::write(mission.join(file), "").unwrap();
+            }
+            let services: Vec<nunki::mission::Service> = declared
+                .iter()
+                .map(|name| nunki::mission::Service {
+                    name: name.to_string(),
+                    reach: vec![name.to_string()],
+                    shared: false,
+                })
+                .collect();
+            let perimeter = compute(
+                Role::Integrator,
+                &Sources {
+                    stack: &["example.com".to_string()],
+                    harness: &[],
+                    services: &services,
+                    forge: &["github.com".to_string()],
+                },
+            )
+            .unwrap();
+            let plan = Plan {
+                session: SESSION.into(),
+                slot: slot.to_string(),
+                role: Role::Integrator,
+                image: "alpine:3.20".to_string(),
+                firewall_image: FIREWALL_IMAGE.to_string(),
+                user: UserIds { uid: 501, gid: 20 },
+                tree,
+                tree_at: PathBuf::from("/work/tree"),
+                mission_dir: mission,
+                mission_dir_at: PathBuf::from("/work/mission"),
+                stack_scripts: Vec::new(),
+                credentials: Vec::new(),
+                advisories: vec![],
+                secrets: None,
+                volumes: Vec::<NamedVolume>::new(),
+                environment: BTreeMap::new(),
+                command: vec!["sleep".to_string(), "600".to_string()],
+                perimeter,
+                project_services: Some(lifted),
+                prober: None,
+            };
+            let docker = nunki::engine::docker::Docker::real();
+            let yaml = generate(&plan, nunki::engine::Engine::dialect(&docker)).unwrap();
+            let file = dir.path().join("system.yml");
+            std::fs::write(&file, yaml).unwrap();
+            let project = project_name(SESSION, slot).unwrap();
+            let profile = Self {
+                _dir: dir,
+                file,
+                project,
+            };
+            profile.down();
+            profile
+        }
+
+        /// The generated file with `edit` applied to it first: how the
+        /// capability measurement takes one capability away.
+        fn edit(&self, edit: impl Fn(&mut serde_yaml_ng::Value)) {
+            let mut doc: serde_yaml_ng::Value =
+                serde_yaml_ng::from_str(&std::fs::read_to_string(&self.file).unwrap()).unwrap();
+            edit(&mut doc);
+            std::fs::write(&self.file, serde_yaml_ng::to_string(&doc).unwrap()).unwrap();
+        }
+
+        fn up(&self) -> Output {
+            compose(&self.file, &self.project, &["up", "-d", "--wait"])
+        }
+
+        fn exec(&self, service: &str, script: &str) -> Output {
+            compose(
+                &self.file,
+                &self.project,
+                &["exec", "-T", service, "sh", "-c", script],
+            )
+        }
+
+        fn down(&self) {
+            compose(&self.file, &self.project, &["down", "-v", "--timeout", "1"]);
+        }
+    }
+
+    impl Drop for Profile {
+        fn drop(&mut self) {
+            self.down();
+        }
+    }
+
+    fn file(text: &str) -> ServicesFile {
+        ServicesFile::parse(text).expect("the services file parses")
+    }
+
+    /// The same attempt from a container nunki did not fence: it must
+    /// succeed, or the negative result beside it proves nothing.
+    fn control(image: &str, script: &str) {
+        let out = docker(&["run", "--rm", image, "sh", "-c", script]);
+        assert!(
+            out.status.success(),
+            "inconclusive: `{script}` fails from an unfenced {image} too, so a refusal from \
+             the fenced one proves nothing on this machine: {}",
+            said(&out)
+        );
+    }
+
+    #[test]
+    #[ignore = "builds an image and lifts containers; the HQ runs it by hand"]
+    fn live_a_lifted_service_cannot_open_a_connection_to_a_public_address() {
+        let _context = build_firewall();
+        let script = format!("nc -z -w3 {OUT}");
+        control("alpine:3.20", &script);
+
+        let profile = Profile::generate(
+            "svcout",
+            &["probe"],
+            Lifted::whole(file(
+                "services:\n  probe:\n    image: alpine:3.20\n    command: [sleep, \"600\"]\n",
+            )),
+        );
+        let up = profile.up();
+        assert!(
+            up.status.success(),
+            "the profile did not come up: {}",
+            said(&up)
+        );
+        let out = profile.exec("probe", &script);
+        assert!(
+            !out.status.success(),
+            "a lifted service reached {OUT}: {}",
+            said(&out)
+        );
+    }
+
+    #[test]
+    #[ignore = "builds an image and lifts containers; the HQ runs it by hand"]
+    fn live_a_program_run_through_the_database_cannot_reach_out() {
+        let _context = build_firewall();
+        let copy = "psql -U postgres -v ON_ERROR_STOP=1 -c \
+                    \"COPY (SELECT 1) TO PROGRAM 'nc -z -w3 1.1.1.1 443'\"";
+
+        // The control: the same superuser, the same COPY, from a Postgres
+        // nobody fenced.
+        let name = "nunki-live-unfenced-postgres";
+        let _ = docker(&["rm", "-f", name]);
+        let started = docker(&[
+            "run",
+            "-d",
+            "--name",
+            name,
+            "-e",
+            "POSTGRES_PASSWORD=live",
+            "postgres:16-alpine",
+        ]);
+        assert!(started.status.success(), "{}", said(&started));
+        let ready = (0..60).any(|_| {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            docker(&["exec", name, "pg_isready", "-U", "postgres"])
+                .status
+                .success()
+        });
+        let unfenced = docker(&["exec", name, "sh", "-c", copy]);
+        let _ = docker(&["rm", "-f", name]);
+        assert!(
+            ready,
+            "inconclusive: the unfenced Postgres never became ready"
+        );
+        assert!(
+            unfenced.status.success(),
+            "inconclusive: COPY TO PROGRAM fails from an unfenced Postgres too: {}",
+            said(&unfenced)
+        );
+
+        let profile = Profile::generate(
+            "svcpg",
+            &["db"],
+            Lifted::whole(file(
+                "services:\n  db:\n    image: postgres:16-alpine\n    environment:\n      \
+                 POSTGRES_PASSWORD: live\n    healthcheck:\n      \
+                 test: [\"CMD-SHELL\", \"pg_isready -U postgres\"]\n      interval: 2s\n      \
+                 retries: 30\n",
+            )),
+        );
+        let up = profile.up();
+        assert!(
+            up.status.success(),
+            "Postgres did not come up healthy with nunki's fences: {}",
+            said(&up)
+        );
+        let fenced = profile.exec("db", copy);
+        assert!(
+            !fenced.status.success(),
+            "a program run through the fenced database reached out: {}",
+            said(&fenced)
+        );
+    }
+
+    #[test]
+    #[ignore = "builds an image and lifts containers; the HQ runs it by hand"]
+    fn live_the_agent_still_reaches_the_declared_service_by_name() {
+        let _context = build_firewall();
+        let profile = Profile::generate(
+            "svcname",
+            &["db"],
+            Lifted::whole(file("services:\n  db:\n    image: nginx:alpine\n")),
+        );
+        let up = profile.up();
+        assert!(
+            up.status.success(),
+            "the profile did not come up: {}",
+            said(&up)
+        );
+        let out = profile.exec("agent", "nc -z -w3 db 80");
+        assert!(
+            out.status.success(),
+            "the agent no longer reaches the declared service: {}",
+            said(&out)
+        );
+        // And the way out the agent had is still the perimeter's: an
+        // off-list address stays refused.
+        let out = profile.exec("agent", &format!("nc -z -w3 {OUT}"));
+        assert!(!out.status.success(), "{}", said(&out));
+    }
+
+    #[test]
+    #[ignore = "builds an image and lifts containers; the HQ runs it by hand"]
+    fn live_an_undeclared_service_in_the_file_does_not_start() {
+        let _context = build_firewall();
+        let text = "services:\n  db:\n    image: nginx:alpine\n  \
+                    miner:\n    image: alpine:3.20\n    command: [sleep, \"600\"]\n";
+        let running = |profile: &Profile, service: &str| {
+            let out = docker(&[
+                "ps",
+                "-q",
+                "--filter",
+                &format!("label=com.docker.compose.project={}", profile.project),
+                "--filter",
+                &format!("label=com.docker.compose.service={service}"),
+            ]);
+            !String::from_utf8_lossy(&out.stdout).trim().is_empty()
+        };
+
+        // The control: lifted whole, the same file starts it.
+        let whole = Profile::generate("svcwhole", &["db"], Lifted::whole(file(text)));
+        assert!(whole.up().status.success());
+        assert!(
+            running(&whole, "miner"),
+            "inconclusive: the undeclared service does not start even when lifted"
+        );
+        drop(whole);
+
+        let declared = Profile::generate(
+            "svcdecl",
+            &["db"],
+            Lifted::declared(file(text), &["db".to_string()]),
+        );
+        let up = declared.up();
+        assert!(
+            up.status.success(),
+            "the profile did not come up: {}",
+            said(&up)
+        );
+        assert!(running(&declared, "db"));
+        assert!(
+            !running(&declared, "miner"),
+            "a service the mission does not declare was started"
+        );
+    }
+
+    /// The images in real use start, and pass their healthcheck, with
+    /// nunki's fixed set — and each capability of the set is one at least
+    /// one of them cannot do without. What it prints is the measurement
+    /// PR.md asks for.
+    #[test]
+    #[ignore = "builds an image and lifts containers; the HQ runs it by hand"]
+    fn live_the_capability_set_is_the_smallest_the_images_need() {
+        let _context = build_firewall();
+        let images = [
+            (
+                "postgres:16-alpine",
+                "services:\n  db:\n    image: postgres:16-alpine\n    environment:\n      \
+                 POSTGRES_PASSWORD: live\n    healthcheck:\n      \
+                 test: [\"CMD-SHELL\", \"pg_isready -U postgres\"]\n      interval: 2s\n      \
+                 retries: 30\n",
+            ),
+            (
+                "postgres:16",
+                "services:\n  db:\n    image: postgres:16\n    environment:\n      \
+                 POSTGRES_PASSWORD: live\n    healthcheck:\n      \
+                 test: [\"CMD-SHELL\", \"pg_isready -U postgres\"]\n      interval: 2s\n      \
+                 retries: 30\n",
+            ),
+            (
+                "questdb/questdb:8.2.1",
+                "services:\n  db:\n    image: questdb/questdb:8.2.1\n    healthcheck:\n      \
+                 test: [\"CMD-SHELL\", \"curl -fs http://localhost:9003/status || exit 1\"]\n      \
+                 interval: 2s\n      retries: 60\n",
+            ),
+        ];
+        let healthy = |slot: &str, text: &str, without: Option<&str>| {
+            let profile = Profile::generate(slot, &["db"], Lifted::whole(file(text)));
+            if let Some(cap) = without {
+                profile.edit(|doc| {
+                    let caps = doc["services"]["db"]["cap_add"].as_sequence_mut().unwrap();
+                    caps.retain(|c| c.as_str() != Some(cap));
+                });
+            }
+            profile.up().status.success()
+        };
+
+        let mut failures = Vec::new();
+        for (image, text) in &images {
+            let ok = healthy("svccaps", text, None);
+            println!(
+                "{image:<24} with the whole set          {}",
+                if ok { "healthy" } else { "NOT healthy" }
+            );
+            if !ok {
+                failures.push(format!("{image} is not healthy with {CAPABILITIES:?}"));
+            }
+        }
+        for cap in CAPABILITIES {
+            let needed_by: Vec<&str> = images
+                .iter()
+                .filter(|(_, text)| !healthy("svccaps", text, Some(cap)))
+                .map(|(image, _)| *image)
+                .collect();
+            println!("without {cap:<14} not healthy: {needed_by:?}");
+            if needed_by.is_empty() {
+                failures.push(format!("{cap} is needed by none of the images: drop it"));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+}

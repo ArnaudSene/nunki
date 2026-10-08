@@ -194,6 +194,27 @@ definition is not the approved one, such as an older version or a service
 the file no longer names. It removes their containers and never their
 volumes.
 
+**nunki fences what it lifts.** A system profile starts only the services
+the mission declares, and the ones they depend on. Every other service in
+the file stays down. Each lifted service gets a set of restrictions from
+nunki itself, and the file supplies none of them:
+
+- it joins one network, nunki's, which is declared `internal` and so has no
+  route out. The firewall joins that network too, so the agent reaches a
+  service by its name, through the firewall's rules.
+- no port is published. The launch says in one line which `ports` it
+  dropped.
+- every capability is dropped, and a fixed few are given back (`CHOWN`,
+  `DAC_OVERRIDE`, `FOWNER`, `SETGID`, `SETUID`), which is what the official
+  database images need to take their data directory and drop to their own
+  user.
+- it gets `no-new-privileges`, a 2 GB memory limit and a 1024-process
+  limit.
+
+The coder's profile starts no service. The ones already up keep running
+across the switch: nunki never removes them for being absent from a
+profile, and only takes down definitions nobody approved.
+
 ## A first mission
 
 ```sh
