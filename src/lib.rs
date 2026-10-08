@@ -40,6 +40,7 @@ pub mod role;
 pub mod run;
 pub mod secrets;
 pub mod security;
+pub mod services;
 pub mod sessions;
 pub mod slot;
 pub mod state;

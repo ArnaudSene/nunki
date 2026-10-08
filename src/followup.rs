@@ -161,6 +161,14 @@ pub enum Retaken<'a> {
         survivors: &'a [String],
         asked: u32,
     },
+    /// The services file rendered to `digest`, which no human had approved,
+    /// so nothing was started. No run was spent, so none is handed back: the
+    /// role resumes at the attempt it was on.
+    Services {
+        file: &'a str,
+        digest: &'a str,
+        attempt: u32,
+    },
 }
 
 /// The human took the mission back from a handover, and said what changed.
@@ -212,6 +220,16 @@ pub fn retried(file: &Path, who: &str, why: &str, taken: &Retaken) -> Result<(),
              `nunki mission retry` hands the attempts back whole. What the HQ ruled, or what \
              changed since:",
             quoted(survivors)
+        ),
+        Retaken::Services {
+            file,
+            digest,
+            attempt,
+        } => format!(
+            "It had stopped before a system profile was started: {file} rendered to {digest}, \
+             which no human had approved, so nothing was lifted and no run was spent. It \
+             resumes at attempt {attempt}; a rendering still not approved stops it there \
+             again. What changed since:"
         ),
     };
     append(

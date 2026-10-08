@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use nunki::gate::Gate;
 use nunki::harness::Role;
-use nunki::mission::flow::{Flow, Stage, Work};
+use nunki::mission::flow::{Flow, Handover, Stage, Work};
 use nunki::mission::{Bounds, Header, Integration, Lot, Security};
 use nunki::project::{Config, Project, ProtectedPaths};
 use nunki::state::{MissionState, Store};
@@ -3470,4 +3470,140 @@ fn record_base(tree: &Path) {
         .unwrap()
         .fetch_origin(&project)
         .unwrap();
+}
+
+/// A coder's edit to the services file starts nothing: the integration is
+/// due, the slot's HEAD renders to a digest no human approved, and the
+/// mission is handed back with that digest — no profile up, no run
+/// recorded, no attempt spent. Approved and retried, it goes past that
+/// point; a later edit needs a new approval.
+#[test]
+fn a_coders_edit_to_the_services_file_starts_nothing_and_hands_the_mission_back() {
+    use nunki::engine::fake::{Call, FakeEngine};
+    let mut world = World::shaped(1, integration());
+    world.project.config.services_file = Some("compose.yaml".into());
+    world.at_integration();
+    world.commit(
+        "compose.yaml",
+        "services:\n  db:\n    image: postgres:16\n",
+        "the coder adds a database",
+    );
+    let shown = nunki::services::read(&world.project, nunki::services::At::Slot(&world.tree))
+        .unwrap()
+        .unwrap();
+
+    let verify = |world: &World| {
+        let engine = Arc::new(FakeEngine::default());
+        let steps = verify::verify(&world.project, "m1", engine.clone(), "docker");
+        let calls = engine.calls.lock().unwrap().clone();
+        (steps, calls)
+    };
+    let (steps, calls) = verify(&world);
+    let steps = steps.unwrap();
+    assert!(
+        calls.iter().all(|c| !matches!(c, Call::Up(_))),
+        "nothing was started: {calls:?}"
+    );
+    let handover = Handover::ServicesNotApproved {
+        role: Role::Integrator,
+        attempt: 1,
+        file: "compose.yaml".into(),
+        digest: shown.digest.clone(),
+    };
+    assert_eq!(
+        world.state().flow.stage(),
+        &Stage::AwaitingHuman(handover.clone()),
+        "{steps:?}"
+    );
+    assert!(world.state().run.is_none(), "no run was recorded");
+    assert!(
+        matches!(steps.last(), Some(Step::AwaitingHuman(h)) if *h == handover),
+        "{steps:?}"
+    );
+    let followup = std::fs::read_to_string(world.mission().join("FOLLOWUP_HQ.md")).unwrap();
+    assert!(
+        followup.contains(&format!("nunki services --approve {}", shown.digest)),
+        "{followup}"
+    );
+
+    // The human reads it, approves it and takes the mission back: the
+    // integration is due again, at the same attempt, and the launch goes
+    // past the approval — to what this machine lacks, an account.
+    nunki::services::approve(&world.project, &shown.digest, std::slice::from_ref(&shown)).unwrap();
+    nunki::lifecycle::retry(&world.project, "m1", "approved the database").unwrap();
+    assert_eq!(
+        world.state().flow.stage(),
+        &Stage::Integration { attempt: 1 }
+    );
+    let followup = std::fs::read_to_string(world.mission().join("FOLLOWUP_HQ.md")).unwrap();
+    assert!(followup.contains("no run was spent"), "{followup}");
+    let (steps, _) = verify(&world);
+    match steps {
+        Err(VerifyError::Run(nunki::run::RunError::Services(e))) => {
+            panic!("an approved rendering was refused: {e}")
+        }
+        Err(_) => {}
+        Ok(steps) => assert!(
+            !steps.iter().any(|s| matches!(s, Step::AwaitingHuman(_))),
+            "{steps:?}"
+        ),
+    }
+    assert_eq!(
+        world.state().flow.stage(),
+        &Stage::Integration { attempt: 1 }
+    );
+
+    // A later edit is a new rendering, and needs a new approval.
+    world.commit(
+        "compose.yaml",
+        "services:\n  db:\n    image: postgres:16\n    command: [postgres, -c, fsync=off]\n",
+        "the coder tunes it",
+    );
+    let (steps, _) = verify(&world);
+    steps.unwrap();
+    assert!(
+        matches!(
+            world.state().flow.stage(),
+            Stage::AwaitingHuman(Handover::ServicesNotApproved { digest, .. }) if *digest != shown.digest
+        ),
+        "{:?}",
+        world.state().flow.stage()
+    );
+}
+
+/// The security agent's profile is a system profile too: the same refusal
+/// at its launch site, the same handover, with the role it was for.
+#[test]
+fn an_unapproved_services_file_hands_the_security_run_back_as_well() {
+    use nunki::engine::fake::{Call, FakeEngine};
+    let mut world = with_security_agent(1);
+    world.project.config.services_file = Some("compose.yaml".into());
+    world.commit(
+        "compose.yaml",
+        "services:\n  db:\n    image: postgres:16\n",
+        "a database",
+    );
+    world.at_security();
+    let engine = Arc::new(FakeEngine::default());
+    let steps = verify::verify(&world.project, "m1", engine.clone(), "docker").unwrap();
+    assert!(
+        matches!(
+            world.state().flow.stage(),
+            Stage::AwaitingHuman(Handover::ServicesNotApproved {
+                role: Role::Security,
+                attempt: 1,
+                ..
+            })
+        ),
+        "{steps:?}"
+    );
+    assert!(
+        engine
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|c| !matches!(c, Call::Up(_))),
+        "nothing was started"
+    );
 }

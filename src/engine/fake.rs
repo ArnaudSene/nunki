@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use super::{Dialect, Engine, EngineError, ExecOutput, Liveness, Netns};
+use super::{Container, Dialect, Engine, EngineError, ExecOutput, Liveness, Netns};
 
 /// What was asked of the engine, in order, for a test to assert on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,6 +18,8 @@ pub enum Call {
     Exec(String, String, Vec<String>),
     ContainerOf(String, String),
     Liveness(String),
+    Containers(String),
+    Remove(Vec<String>),
 }
 
 pub struct FakeEngine {
@@ -28,6 +30,7 @@ pub struct FakeEngine {
     exec_result: Mutex<ExecOutput>,
     exec_queue: Mutex<Vec<ExecOutput>>,
     fail_up: Mutex<Option<String>>,
+    lifted: Mutex<Vec<Container>>,
 }
 
 impl Default for FakeEngine {
@@ -48,6 +51,7 @@ impl Default for FakeEngine {
             }),
             exec_queue: Mutex::new(Vec::new()),
             fail_up: Mutex::new(None),
+            lifted: Mutex::new(Vec::new()),
         }
     }
 }
@@ -58,6 +62,13 @@ impl FakeEngine {
             .lock()
             .unwrap()
             .insert(service.to_string(), container.to_string());
+        self
+    }
+
+    /// A container already in the project before anything is asked: what a
+    /// previous profile left there.
+    pub fn with_lifted(self, container: Container) -> Self {
+        self.lifted.lock().unwrap().push(container);
         self
     }
 
@@ -220,6 +231,20 @@ impl Engine for FakeEngine {
             .get(container)
             .cloned()
             .unwrap_or(Liveness::Gone))
+    }
+
+    fn containers(&self, project: &str) -> Result<Vec<Container>, EngineError> {
+        self.record(Call::Containers(project.to_string()));
+        Ok(self.lifted.lock().unwrap().clone())
+    }
+
+    fn remove(&self, containers: &[String]) -> Result<(), EngineError> {
+        self.record(Call::Remove(containers.to_vec()));
+        self.lifted
+            .lock()
+            .unwrap()
+            .retain(|c| !containers.contains(&c.id));
+        Ok(())
     }
 }
 

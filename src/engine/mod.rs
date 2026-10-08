@@ -71,6 +71,19 @@ pub enum Liveness {
     Gone,
 }
 
+/// A container of a Compose project, as the engine lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Container {
+    pub id: String,
+    /// The service it backs.
+    pub service: String,
+    /// The digest nunki labelled it with when it lifted it from a services
+    /// file ([`crate::compose::services::LABEL`]), or `None` when it carries
+    /// none — a container nunki wrote itself, or one lifted before the label
+    /// existed.
+    pub digest: Option<String>,
+}
+
 /// The output of a command run in a container.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecOutput {
@@ -164,6 +177,14 @@ pub trait Engine: Send + Sync {
 
     /// Ask the engine about a container by name or id.
     fn liveness(&self, container: &str) -> Result<Liveness, EngineError>;
+
+    /// Every container of the Compose project `project`, running or not.
+    fn containers(&self, project: &str) -> Result<Vec<Container>, EngineError>;
+
+    /// Stop and remove containers by id, and **never** a volume: not a named
+    /// one, which holds what a profile switch must keep, and not an
+    /// anonymous one either, which an image's `VOLUME` makes on its own.
+    fn remove(&self, containers: &[String]) -> Result<(), EngineError>;
 
     /// The command line that would run `argv` in a service's container, as
     /// data. [`exec`](Engine::exec) runs it and waits; a caller that needs

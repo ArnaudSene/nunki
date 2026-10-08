@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 
-use super::{Dialect, Engine, EngineError, ExecOutput, Liveness, Netns};
+use super::{Container, Dialect, Engine, EngineError, ExecOutput, Liveness, Netns};
 use crate::harness::spawn::CommandSpec;
 
 /// The container id this engine answers with. Fixed: there is one.
@@ -210,6 +210,15 @@ impl Engine for LocalEngine {
             true => Liveness::Running,
             false => Liveness::Gone,
         })
+    }
+
+    /// One container, the agent's, and nothing a services file lifted.
+    fn containers(&self, _project: &str) -> Result<Vec<Container>, EngineError> {
+        Ok(Vec::new())
+    }
+
+    fn remove(&self, _containers: &[String]) -> Result<(), EngineError> {
+        Err(unsupported("remove"))
     }
 
     fn detached_command(

@@ -760,3 +760,413 @@ fn the_three_files_in_real_use_parse() {
         vec!["postgres", "questdb"]
     );
 }
+
+// --- trust is a digest a human approved (L2) ------------------------------------
+
+use std::path::{Path, PathBuf};
+
+use nunki::services::{ApprovalError, Approvals, Approved, At};
+
+fn git(at: &Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(at)
+        .args(args)
+        .output()
+        .expect("git is on the path");
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A repository and one slot of it, both holding `compose.yaml` in their
+/// one commit, and a project that declares it as its services file.
+struct World {
+    _dir: tempfile::TempDir,
+    project: nunki::project::Project,
+    slot: PathBuf,
+}
+
+const FIRST: &str = "services:\n  db:\n    image: postgres:16\n";
+const SECOND: &str = "services:\n  db:\n    image: postgres:17\n";
+
+impl World {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        let slot = dir.path().join("repo-slots").join("one");
+        for tree in [&root, &slot] {
+            std::fs::create_dir_all(tree).unwrap();
+            git(tree, &["init", "-q", "-b", "dev"]);
+            git(tree, &["config", "user.name", "Alex Martin"]);
+            git(tree, &["config", "user.email", "alex@example.com"]);
+            std::fs::write(tree.join("compose.yaml"), FIRST).unwrap();
+            git(tree, &["add", "-A"]);
+            git(tree, &["commit", "-q", "-m", "services"]);
+        }
+        let project = nunki::project::Project::at(
+            root,
+            nunki::project::Config {
+                root: None,
+                harness: "claude-code".into(),
+                forge: vec!["github.com".into()],
+                stacks: vec!["rust".into()],
+                protected_branches: vec!["main".into()],
+                protected_paths: Default::default(),
+                account: None,
+                model: None,
+                bounds: Default::default(),
+                credentials: None,
+                run: None,
+                services_file: Some("compose.yaml".into()),
+                permission_mode: "auto".to_string(),
+                rigor: None,
+                mutation_threshold: 80,
+                mutation_jobs: None,
+                forge_protection: Default::default(),
+            },
+            dir.path().join("nunki"),
+        );
+        Self {
+            _dir: dir,
+            project,
+            slot,
+        }
+    }
+
+    /// What a coder does: change the file in the slot and commit it.
+    fn coder_commits(&self, body: &str) {
+        std::fs::write(self.slot.join("compose.yaml"), body).unwrap();
+        git(&self.slot, &["commit", "-q", "-am", "the coder's edit"]);
+    }
+
+    /// The slot's HEAD, read and rendered: what `--show` prints.
+    fn shown(&self) -> nunki::services::Current {
+        nunki::services::read(&self.project, At::Slot(&self.slot))
+            .unwrap()
+            .unwrap()
+    }
+
+    fn approve(&self, digest: &str) -> Result<Approved, ApprovalError> {
+        let current = vec![self.shown()];
+        nunki::services::approve(&self.project, digest, &current)
+    }
+
+    fn approvals(&self) -> Approvals {
+        Approvals::load(&nunki::services::file(&self.project)).unwrap()
+    }
+
+    fn lifted(&self) -> Result<Option<ServicesFile>, ApprovalError> {
+        nunki::services::approved(&self.project, &self.slot)
+    }
+}
+
+#[test]
+fn a_rendering_nobody_approved_lifts_nothing_and_names_its_digest() {
+    let world = World::new();
+    let shown = world.shown();
+    assert_eq!(
+        shown.digest,
+        nunki::compose::services::digest(&shown.rendering)
+    );
+    assert!(shown.digest.starts_with("sha256:"), "{}", shown.digest);
+    match world.lifted() {
+        Err(ApprovalError::NotApproved { path, digest }) => {
+            assert_eq!(path, "compose.yaml");
+            assert_eq!(digest, shown.digest);
+        }
+        other => panic!("an unapproved rendering was let through: {other:?}"),
+    }
+    let said = world.lifted().unwrap_err().to_string();
+    assert!(
+        said.contains(&format!("nunki services --approve {}", shown.digest)),
+        "{said}"
+    );
+}
+
+#[test]
+fn an_approved_rendering_is_lifted() {
+    let world = World::new();
+    let digest = world.shown().digest;
+    assert!(matches!(world.approve(&digest), Ok(Approved::Now(_))));
+    let lifted = world
+        .lifted()
+        .unwrap()
+        .expect("a services file is declared");
+    assert_eq!(lifted.digest(), digest);
+    assert!(lifted.services.contains_key("db"));
+}
+
+#[test]
+fn approving_a_stale_digest_is_refused_and_records_nothing() {
+    let world = World::new();
+    let shown = world.shown().digest;
+    // Between `--show` and `--approve`, the coder changes the file.
+    world.coder_commits(SECOND);
+    match world.approve(&shown) {
+        Err(ApprovalError::Stale { digest, current }) => {
+            assert_eq!(digest, shown);
+            assert!(current.contains(&world.shown().digest), "{current}");
+        }
+        other => panic!("a digest of a file that changed was approved: {other:?}"),
+    }
+    assert!(world.approvals().approved.is_empty());
+    assert!(
+        !nunki::services::file(&world.project).exists(),
+        "a refused approval writes nothing"
+    );
+    let said = world.approve(&shown).unwrap_err().to_string();
+    assert!(said.contains("changed since it was shown"), "{said}");
+}
+
+#[test]
+fn a_coders_later_change_needs_a_new_approval() {
+    let world = World::new();
+    let first = world.shown().digest;
+    world.approve(&first).unwrap();
+    assert!(world.lifted().is_ok());
+
+    world.coder_commits(SECOND);
+    let second = world.shown().digest;
+    assert_ne!(first, second);
+    assert!(
+        matches!(world.lifted(), Err(ApprovalError::NotApproved { ref digest, .. }) if *digest == second),
+        "{:?}",
+        world.lifted()
+    );
+    world.approve(&second).unwrap();
+    assert_eq!(world.lifted().unwrap().unwrap().digest(), second);
+    // The first stays approved: a definition approved once serves every
+    // mission until it changes, and changing back needs nothing new.
+    assert_eq!(world.approvals().approved.len(), 2);
+}
+
+#[test]
+fn a_change_in_the_tree_that_is_not_committed_changes_nothing() {
+    let world = World::new();
+    let digest = world.shown().digest;
+    world.approve(&digest).unwrap();
+    std::fs::write(
+        world.slot.join("compose.yaml"),
+        "services:\n  db:\n    image: postgres:16\n    privileged: true\n",
+    )
+    .unwrap();
+    assert_eq!(world.shown().digest, digest);
+    assert_eq!(world.lifted().unwrap().unwrap().digest(), digest);
+}
+
+#[test]
+fn a_file_that_is_only_in_the_tree_is_not_on_the_commit() {
+    let world = World::new();
+    git(&world.slot, &["rm", "-q", "compose.yaml"]);
+    git(&world.slot, &["commit", "-q", "-m", "gone"]);
+    std::fs::write(world.slot.join("compose.yaml"), FIRST).unwrap();
+    assert!(matches!(
+        world.lifted(),
+        Err(ApprovalError::NotOnCommit { .. })
+    ));
+}
+
+#[test]
+fn a_symbolic_link_in_place_of_the_file_is_refused() {
+    let world = World::new();
+    git(&world.slot, &["rm", "-q", "compose.yaml"]);
+    std::os::unix::fs::symlink("/etc/passwd", world.slot.join("compose.yaml")).unwrap();
+    git(&world.slot, &["add", "-A"]);
+    git(&world.slot, &["commit", "-q", "-m", "a link"]);
+    assert!(
+        matches!(world.lifted(), Err(ApprovalError::NotAFile { ref mode, .. }) if mode == "120000"),
+        "{:?}",
+        world.lifted()
+    );
+}
+
+#[test]
+fn a_services_file_outside_the_repository_is_refused() {
+    let mut world = World::new();
+    for path in ["../compose.yaml", "/etc/compose.yaml", ""] {
+        world.project.config.services_file = Some(path.into());
+        assert!(
+            matches!(world.lifted(), Err(ApprovalError::Path(_))),
+            "{path}: {:?}",
+            world.lifted()
+        );
+    }
+    world.project.config.services_file = Some("./compose.yaml".into());
+    assert!(matches!(
+        world.lifted(),
+        Err(ApprovalError::NotApproved { .. })
+    ));
+}
+
+#[test]
+fn a_project_without_a_services_file_lifts_nothing_and_needs_no_approval() {
+    let mut world = World::new();
+    world.project.config.services_file = None;
+    assert!(world.lifted().unwrap().is_none());
+    assert!(matches!(
+        nunki::services::readings(&world.project, None, true),
+        Err(ApprovalError::NoServicesFile)
+    ));
+}
+
+#[test]
+fn an_approval_records_who_when_and_the_rendering() {
+    let world = World::new();
+    let shown = world.shown();
+    world.approve(&shown.digest).unwrap();
+    let approvals = world.approvals();
+    let approval = &approvals.approved[0];
+    assert_eq!(approval.digest, shown.digest);
+    assert_eq!(approval.rendering, shown.rendering);
+    assert_eq!(approval.by, "Alex Martin <alex@example.com>");
+    assert!(!approval.at.is_empty());
+    // Approving it again adds nothing.
+    assert!(matches!(
+        world.approve(&shown.digest),
+        Ok(Approved::Already(_))
+    ));
+    assert_eq!(world.approvals().approved.len(), 1);
+}
+
+#[test]
+fn a_list_of_approvals_nunki_cannot_read_approves_nothing() {
+    let world = World::new();
+    let file = nunki::services::file(&world.project);
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, "not json").unwrap();
+    assert!(matches!(world.lifted(), Err(ApprovalError::Corrupt(..))));
+}
+
+/// An existing project — a services file, and no approval yet — needs one
+/// command: the digest `--show` printed, approved. `--approve` without a
+/// mission looks at the repository and every slot.
+#[test]
+fn an_existing_project_gets_its_first_approval_with_one_command() {
+    let world = World::new();
+    assert!(!nunki::services::file(&world.project).exists());
+    let readings = nunki::services::readings(&world.project, None, true).unwrap();
+    let froms: Vec<&str> = readings.iter().map(|r| r.from.as_str()).collect();
+    assert_eq!(
+        froms,
+        vec!["the HEAD of the repository", "the HEAD of slot one"]
+    );
+    let current: Vec<_> = readings
+        .into_iter()
+        .filter_map(|r| r.current.ok())
+        .collect();
+    let digest = current[0].digest.clone();
+    assert!(matches!(
+        nunki::services::approve(&world.project, &digest, &current),
+        Ok(Approved::Now(_))
+    ));
+    assert!(world.lifted().unwrap().is_some());
+}
+
+#[test]
+fn show_prints_the_rendering_its_digest_and_whether_it_is_approved() {
+    let world = World::new();
+    std::fs::write(
+        world.slot.join("compose.yaml"),
+        "services:\n  db:\n    image: postgres:16\n    ports: [\"5432:5432\"]\n",
+    )
+    .unwrap();
+    git(&world.slot, &["commit", "-q", "-am", "ports"]);
+    let shown = world.shown();
+    let text = nunki::services::show(&shown, "slot \u{1b}[2Jone", &world.approvals());
+    assert!(
+        text.starts_with("compose.yaml on slot \\u{1b}[2Jone\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("digest {}\n", shown.digest)),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "not approved: `nunki services --approve {}`",
+            shown.digest
+        )),
+        "{text}"
+    );
+    assert!(text.contains("ports dropped from db"), "{text}");
+    assert!(
+        text.ends_with(&format!("---\n{}", shown.rendering)),
+        "{text}"
+    );
+
+    world.approve(&shown.digest).unwrap();
+    let text = nunki::services::show(&shown, "slot one", &world.approvals());
+    assert!(
+        text.contains("approved by Alex Martin <alex@example.com> at "),
+        "{text}"
+    );
+}
+
+#[test]
+fn check_reports_an_unapproved_file_as_a_red_line() {
+    let world = World::new();
+    let digest = world.shown().digest;
+    let checks = nunki::services::checks(&world.project, Some("one"), None);
+    assert_eq!(checks.len(), 1);
+    match &checks[0].verdict {
+        nunki::check::Verdict::Red(why) => assert!(why.contains(&digest), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    world.approve(&digest).unwrap();
+    let checks = nunki::services::checks(&world.project, Some("one"), None);
+    assert!(
+        matches!(&checks[0].verdict, nunki::check::Verdict::Green(why) if why.contains(&digest)),
+        "{checks:?}"
+    );
+    // A mission that has not started has no slot to read: said, not passed.
+    let checks = nunki::services::checks(&world.project, None, Some("m9"));
+    assert!(
+        matches!(&checks[0].verdict, nunki::check::Verdict::NotChecked(_)),
+        "{checks:?}"
+    );
+    assert!(nunki::services::checks(&world.project, None, None).is_empty());
+}
+
+// --- what was lifted before is taken down ---------------------------------------
+
+fn container(id: &str, service: &str, digest: Option<&str>) -> nunki::engine::Container {
+    nunki::engine::Container {
+        id: id.into(),
+        service: service.into(),
+        digest: digest.map(str::to_string),
+    }
+}
+
+#[test]
+fn a_system_profile_takes_down_every_definition_but_the_one_it_lifts() {
+    let mut approvals = Approvals::default();
+    for digest in ["sha256:old", "sha256:new"] {
+        approvals.approved.push(nunki::services::Approval {
+            digest: digest.into(),
+            by: "A".into(),
+            at: "t".into(),
+            rendering: String::new(),
+        });
+    }
+    let containers = [
+        container("c1", "db", Some("sha256:new")),
+        container("c2", "db", Some("sha256:old")),
+        container("c3", "cache", None),
+        container("c4", "firewall", None),
+        container("c5", "agent", None),
+        container("c6", "prober", None),
+        container("c7", "gone", Some("sha256:unknown")),
+    ];
+    assert_eq!(
+        nunki::services::stale(&containers, Some("sha256:new"), &approvals),
+        vec!["c2", "c3", "c7"]
+    );
+    // A mission profile lifts nothing and keeps what a human approved.
+    assert_eq!(
+        nunki::services::stale(&containers, None, &approvals),
+        vec!["c3", "c7"]
+    );
+}

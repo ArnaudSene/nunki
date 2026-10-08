@@ -343,9 +343,21 @@ fn the_projects_services_are_lifted_as_nunkis_rendering() {
          healthcheck:\n      test: [\"CMD\", \"pg_isready\"]\n",
     );
     let rendered: serde_yaml_ng::Value = serde_yaml_ng::from_str(&project.render()).unwrap();
+    let digest = project.digest();
     plan.project_services = Some(project);
     let yaml = generate(&plan, &dialect()).unwrap();
-    let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+    let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+    // nunki's own label says which rendering the container came from …
+    assert_eq!(
+        doc["services"]["db"]["labels"][nunki::compose::services::LABEL].as_str(),
+        Some(digest.as_str()),
+        "{yaml}"
+    );
+    // … and, but for it, the service is the rendering read back.
+    doc["services"]["db"]
+        .as_mapping_mut()
+        .unwrap()
+        .remove("labels");
     assert_eq!(doc["services"]["db"], rendered["services"]["db"], "{yaml}");
     assert_eq!(doc["services"]["db"]["image"].as_str(), Some("postgres:16"));
     assert_eq!(

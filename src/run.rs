@@ -226,13 +226,8 @@ pub enum RunError {
     Io(PathBuf, std::io::Error),
     #[error("the run could not be launched: {0}")]
     Launch(String),
-    #[error(
-        "nunki.yaml names {0} as the project's services file, and the slot's tree has no \
-         such file on this commit"
-    )]
-    NoServicesFile(PathBuf),
-    #[error("{0} is not a services file nunki lifts, so no service was started: {1}")]
-    BadServicesFile(PathBuf, crate::compose::services::ServicesError),
+    #[error(transparent)]
+    Services(#[from] crate::services::ApprovalError),
     #[error(transparent)]
     Application(#[from] crate::launch::LaunchError),
     #[error(
@@ -455,6 +450,15 @@ pub fn launch(l: &Launching) -> Result<Launched, RunError> {
     } = l;
     let role = *role;
 
+    // First of all, for a profile that lifts the project's services: a
+    // rendering no human approved starts nothing, and is said before an
+    // account, an image or a branch is so much as looked at. `plan` reads it
+    // again and is the guard; this is what keeps a refusal from being
+    // reported as a missing image (SPEC 4.2).
+    if Profile::of(role) == Profile::System {
+        crate::services::approved(project, &slot.tree)?;
+    }
+
     // Which subscription this mission spends. Checked before the machine:
     // what the project declares is cheap to check and belongs to the
     // mission, while a missing image belongs to this machine. Saying "build
@@ -538,7 +542,7 @@ pub fn launch(l: &Launching) -> Result<Launched, RunError> {
     };
     seed_writable(slot, &writable)?;
 
-    engine.up(&file, &compose_project)?;
+    lift(engine.as_ref(), project, &file, &compose_project, &plan)?;
     // And the ownership of that volume comes from the **image**, not from the
     // tree: an image built before the stack declared this directory yields a
     // root-owned volume, silently, and the first build inside the container
@@ -608,6 +612,37 @@ pub fn launch(l: &Launching) -> Result<Launched, RunError> {
         launch: declared,
         campaign_ended,
     })
+}
+
+/// Start the profile `plan` describes, written at `file` — and first take
+/// down what the project's file lifted before whose definition is not the
+/// approved one ([`crate::services::stale`]): an older approved version, one
+/// lifted before approvals existed, a service the file no longer names.
+/// Taken down by container, never with a volume, before anything is started
+/// beside it (SPEC 4.2). Returns what was taken down.
+///
+/// Public because it is the one thing a launch takes down on its own, and a
+/// test should be able to hold it, and its order, to account without an
+/// agent.
+pub fn lift(
+    engine: &dyn Engine,
+    project: &Project,
+    file: &Path,
+    compose_project: &str,
+    plan: &Plan,
+) -> Result<Vec<String>, RunError> {
+    let approvals = crate::services::Approvals::load(&crate::services::file(project))?;
+    let lifting = plan.project_services.as_ref().map(|s| s.digest());
+    let stale = crate::services::stale(
+        &engine.containers(compose_project)?,
+        lifting.as_deref(),
+        &approvals,
+    );
+    if !stale.is_empty() {
+        engine.remove(&stale)?;
+    }
+    engine.up(file, compose_project)?;
+    Ok(stale)
 }
 
 /// The session a run is launched in, and whether the harness resumes it: the
@@ -1099,30 +1134,20 @@ fn credentials(project: &Project) -> Result<Vec<(PathBuf, PathBuf)>, RunError> {
     Ok(files)
 }
 
-/// The project's own services file, read from the slot's tree into the
-/// closed model (SPEC 4.2).
+/// The project's own services, as a profile may lift them (SPEC 4.2).
 ///
-/// From the tree and not from the repository: the file is the project's, it
-/// travels with the commit, and the integrator may amend it in its wiring —
-/// the same rule as the launch script (SPEC 4.2). What `nunki.yaml` decides is
-/// **which** file; what the slot decides is what is in it, and the closed
-/// model decides what of it may be lifted at all. A file it refuses lifts
-/// nothing, and the profile is not started.
+/// Read from the commit the slot's `HEAD` names, through the host's mirror,
+/// and never from the tree: what a human approves is what is committed. The
+/// file is the project's and travels with the commit, so the integrator may
+/// still amend it in its wiring — and an amended file is a new rendering,
+/// which starts nothing until a human approves it. A file the closed model
+/// refuses, or whose rendering nobody approved, lifts nothing, and the
+/// profile is not started ([`crate::services::approved`]).
 fn project_compose(
     project: &Project,
     slot: &Slot,
 ) -> Result<Option<crate::compose::services::ServicesFile>, RunError> {
-    let Some(relative) = &project.config.services_file else {
-        return Ok(None);
-    };
-    let file = slot.tree.join(relative);
-    if !file.is_file() {
-        return Err(RunError::NoServicesFile(file));
-    }
-    let text = std::fs::read_to_string(&file).map_err(|e| RunError::Io(file.clone(), e))?;
-    crate::compose::services::ServicesFile::parse(&text)
-        .map(Some)
-        .map_err(|e| RunError::BadServicesFile(file, e))
+    Ok(crate::services::approved(project, &slot.tree)?)
 }
 
 /// A v4-shaped identifier. `nunki` imposes it rather than reading one back

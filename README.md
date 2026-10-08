@@ -160,6 +160,40 @@ fixed order, every string is quoted and written in ASCII, and every `$` is
 doubled so Compose substitutes nothing. A file nunki refuses starts no
 service, and the profile that needed it does not start either.
 
+**You approve that rendering, by its digest.** nunki reads the file from
+the commit the slot's `HEAD` names, never from the tree, so an edit that is
+not committed changes nothing. It lifts the services only if you approved
+the digest of that rendering:
+
+```sh
+nunki services --show [<mission>]   # the rendering, its digest, approved or not
+nunki services --approve <digest>   # approve it, if the file has not changed since
+```
+
+`--show` reads the repository's `HEAD`, or the slot of the mission you name.
+`--approve` approves a digest only while it is still the rendering of the
+file in the repository or one of the slots. If the file changed after you
+looked, the approval is refused. Approvals live in the project's HQ
+(`hq/services.json`, with who approved what and when, and the rendering
+itself). No container mounts that file. A definition you approved once
+serves every mission until it changes.
+
+When a change comes in — a coder's edit included — the system profile is
+not started. The mission is handed back to you with the file and the new
+digest; `nunki check --mission <id>` and `--slot <name>` show the same as a
+red line. Read the rendering, approve it, then
+`nunki mission retry <id> --because <what you approved>`. Nothing was spent
+in the meantime.
+
+A project that already had a services file before approvals existed needs
+nothing else. `nunki services --show` prints its digest, and one command,
+`nunki services --approve <that digest>`, is its first approval.
+
+Before a profile starts, nunki takes down the services of the slot whose
+definition is not the approved one, such as an older version or a service
+the file no longer names. It removes their containers and never their
+volumes.
+
 ## A first mission
 
 ```sh

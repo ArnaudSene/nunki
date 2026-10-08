@@ -37,6 +37,16 @@ pub const RESERVED_VOLUME_PREFIX: &str = "nunki-";
 /// The service names nunki writes itself in a generated file.
 pub const RESERVED_SERVICES: [&str; 3] = [FIREWALL_SERVICE, AGENT_SERVICE, PROBER_SERVICE];
 
+/// The label nunki puts on every container it lifts from a services file,
+/// carrying the digest of the rendering it was lifted from. What tells a
+/// container lifted from an approved definition from one that is not.
+pub const LABEL: &str = "nunki.services";
+
+/// The digest of a rendering, as it is shown, approved and labelled.
+pub fn digest(rendering: &str) -> String {
+    format!("sha256:{}", crate::init::sha256(rendering.as_bytes()))
+}
+
 /// The keys a service may hold, in the order they are rendered. `ports` is
 /// read and dropped, and is therefore not among them.
 pub const SERVICE_KEYS: [&str; 8] = [
@@ -211,6 +221,12 @@ impl ServicesFile {
     }
 
     /// The names of the services whose `ports` nunki dropped.
+    /// The digest of [`ServicesFile::render`]: what a human approves, and
+    /// what the label on every lifted container carries.
+    pub fn digest(&self) -> String {
+        digest(&self.render())
+    }
+
     pub fn dropped_ports(&self) -> Vec<&str> {
         self.services
             .iter()

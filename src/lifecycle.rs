@@ -317,6 +317,16 @@ pub fn retry(project: &Project, id: &str, why: &str) -> Result<MissionState, Lif
                 asked: *attempt,
             },
         },
+        crate::mission::flow::Handover::ServicesNotApproved {
+            file,
+            digest,
+            attempt,
+            ..
+        } => crate::followup::Retaken::Services {
+            file,
+            digest,
+            attempt: *attempt,
+        },
         _ => crate::followup::Retaken::Bound { was: &was },
     };
     crate::followup::retried(&paths.followup, &who, why.trim(), &taken)?;
@@ -352,6 +362,9 @@ fn what_stopped(handover: &crate::mission::flow::Handover) -> String {
             "{lot}, attempt {attempt}, awaited a ruling on {}",
             survivors.join(", ")
         ),
+        Handover::ServicesNotApproved { file, digest, .. } => {
+            format!("{file} rendered to {digest}, which no human had approved")
+        }
     }
 }
 

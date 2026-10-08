@@ -255,8 +255,24 @@ fn build(plan: &Plan, dialect: &Dialect) -> Result<Document, ComposeError> {
         // The rendering, read back: what the engine is given is the text a
         // human is shown, and not a second serialisation of the model that
         // could drift from it.
-        let lifted: Value = serde_yaml_ng::from_str(&project.render())
+        let rendering = project.render();
+        let mut lifted: Value = serde_yaml_ng::from_str(&rendering)
             .expect("nunki's own rendering is YAML it reads back");
+        // nunki's own key, not the file's: every lifted container says which
+        // rendering it came from, so the next launch can tell a container of
+        // an approved definition from one that is not (SPEC 4.2).
+        if let Some(Value::Mapping(declared)) = lifted.get_mut("services") {
+            for (_, service) in declared.iter_mut() {
+                if let Value::Mapping(service) = service {
+                    let mut labels = Mapping::new();
+                    labels.insert(
+                        Value::from(services::LABEL),
+                        Value::from(services::digest(&rendering)),
+                    );
+                    service.insert(Value::from("labels"), Value::Mapping(labels));
+                }
+            }
+        }
         for (block, into) in [("services", &mut services), ("volumes", &mut volumes)] {
             let Some(Value::Mapping(declared)) = lifted.get(block) else {
                 continue;

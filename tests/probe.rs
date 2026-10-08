@@ -243,6 +243,13 @@ fn with_services(dir: &Path) -> (Project, nunki::slot::Slot, nunki::mission::Hea
     .unwrap();
     let mut project = project(dir);
     project.config.services_file = Some("compose.yaml".into());
+    // Committed and approved: nunki reads the commit, and lifts only what
+    // a human approved.
+    commit_all(&tree);
+    let current = nunki::services::read(&project, nunki::services::At::Slot(&tree))
+        .unwrap()
+        .unwrap();
+    nunki::services::approve(&project, &current.digest, std::slice::from_ref(&current)).unwrap();
     let header = nunki::mission::Header {
         branch: "mission/x".into(),
         base: "dev".into(),
@@ -493,6 +500,13 @@ fn live_a_system_profile_reaches_what_the_mission_declares_and_nothing_else() {
     let engine_bin = std::env::var("HQ_ENGINE").unwrap_or_else(|_| "docker".to_string());
     image::build(&project, "rust", &engine_bin, image::Harness::Install).expect("the images build");
     let slot = nunki::slot::add(&project, "sys").expect("the slot is cloned");
+    // The human approves the rendering once, as `nunki services --approve`
+    // does: nothing unapproved is lifted.
+    let current = nunki::services::read(&project, nunki::services::At::Slot(&slot.tree))
+        .expect("the services file reads")
+        .expect("the project declares one");
+    nunki::services::approve(&project, &current.digest, std::slice::from_ref(&current))
+        .expect("the rendering is approved");
 
     let (_, _, header) = with_services(dir.path());
     nunki::mission::dir::create(&project.hq_root, "m1", &header, "probe it").unwrap();
@@ -651,5 +665,31 @@ fn a_system_profile_check_mounts_a_scratch_mission_folder() {
             paths.dir.join(file).is_file(),
             "{file} is there to be mounted"
         );
+    }
+}
+
+/// Make `tree` a git repository whose one commit holds what it holds.
+fn commit_all(tree: &Path) {
+    for args in [
+        &["init", "-q", "-b", "mission/x"][..],
+        &["add", "-A"][..],
+        &[
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "user.name=T",
+            "commit",
+            "-q",
+            "-m",
+            "first",
+        ][..],
+    ] {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(tree)
+            .args(args)
+            .output()
+            .expect("git is on the path");
+        assert!(out.status.success(), "git {args:?}: {out:?}");
     }
 }

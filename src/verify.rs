@@ -671,7 +671,7 @@ pub fn verify_as(
                             return Ok(steps);
                         }
                     };
-                let launched = crate::run::launch(&crate::run::Launching {
+                let launched = match crate::run::launch(&crate::run::Launching {
                     project,
                     slot: &slot,
                     engine: engine.clone(),
@@ -682,7 +682,15 @@ pub fn verify_as(
                     lot: "integration".to_string(),
                     attempt,
                     session: None,
-                })?;
+                }) {
+                    Err(crate::run::RunError::Services(
+                        crate::services::ApprovalError::NotApproved { path, digest },
+                    )) => {
+                        unapproved(&store, &mut state, &paths, id, path, digest, &mut steps)?;
+                        continue;
+                    }
+                    launched => launched?,
+                };
                 let application = describe(&launched);
                 state.run = Some(launched.run);
                 state.app = launched.app;
@@ -761,7 +769,7 @@ pub fn verify_as(
                     steps.push(step);
                     return Ok(steps);
                 }
-                let launched = crate::run::launch(&crate::run::Launching {
+                let launched = match crate::run::launch(&crate::run::Launching {
                     project,
                     slot: &slot,
                     engine: engine.clone(),
@@ -772,7 +780,15 @@ pub fn verify_as(
                     lot: "security".to_string(),
                     attempt,
                     session: None,
-                })?;
+                }) {
+                    Err(crate::run::RunError::Services(
+                        crate::services::ApprovalError::NotApproved { path, digest },
+                    )) => {
+                        unapproved(&store, &mut state, &paths, id, path, digest, &mut steps)?;
+                        continue;
+                    }
+                    launched => launched?,
+                };
                 let application = describe(&launched);
                 state.run = Some(launched.run);
                 state.app = launched.app;
@@ -853,6 +869,36 @@ pub fn verify_as(
             }
         }
     }
+}
+
+/// The system profile a role needed was not started: the services file on
+/// the slot's `HEAD` renders to `digest`, which no human approved. Said in
+/// the follow-up first, then the mission is handed over with a handover of
+/// its own (SPEC 4.5), and nothing was spent.
+fn unapproved(
+    store: &Store,
+    state: &mut MissionState,
+    paths: &Paths,
+    id: &str,
+    file: String,
+    digest: String,
+    steps: &mut Vec<Step>,
+) -> Result<(), VerifyError> {
+    crate::followup::said(
+        &paths.followup,
+        "nunki",
+        &format!(
+            "{file} on the slot's HEAD renders to {digest}, which no human has approved, so \
+             no system profile was started. `nunki services --show {id}` prints the \
+             rendering, `nunki services --approve {digest}` approves it, and `nunki mission \
+             retry {id}` resumes."
+        ),
+    )?;
+    store.apply(state, Event::ServicesUnapproved { file, digest })?;
+    steps.push(Step::Moved {
+        to: state.flow.stage().clone(),
+    });
+    Ok(())
 }
 
 /// The commits after the security agent's last concluded round, named as
