@@ -1242,10 +1242,10 @@ fn only_a_system_profile_mounts_the_test_credentials() {
     );
 }
 
-/// The project's own services are merged verbatim into the system profile —
-/// `include:` is unusable on one of the two engines (SPEC 4.2, engine table)
-/// — and into no mission profile: the coder's allowlist forbids it to talk
-/// to them.
+/// The project's own services are lifted into the system profile as nunki
+/// renders them — `include:` is unusable on one of the two engines (SPEC
+/// 4.2, engine table), and the file's bytes are never what is lifted — and
+/// into no mission profile: the coder's allowlist forbids it to talk to them.
 #[test]
 fn the_projects_services_are_merged_into_the_system_profile_only() {
     let dir = tempfile::tempdir().unwrap();
@@ -1255,7 +1255,8 @@ fn the_projects_services_are_merged_into_the_system_profile_only() {
     let slot = slot_at(dir.path());
     std::fs::write(
         slot.tree.join("compose.yaml"),
-        "services:\n  db:\n    image: postgres:16\n    volumes:\n      - dbdata:/var/lib/postgresql/data\nnetworks:\n  back: {}\nvolumes:\n  dbdata: null\n",
+        "services:\n  db:\n    image: postgres:16\n    environment:\n      PGPASSWORD: pa$$word\n    \
+         volumes:\n      - dbdata:/var/lib/postgresql/data\nvolumes:\n  dbdata: null\n",
     )
     .unwrap();
     let header = header_with(with_services());
@@ -1265,26 +1266,63 @@ fn the_projects_services_are_merged_into_the_system_profile_only() {
 
     let (_, doc) = profile_for(&project, &slot, &header, Role::Integrator);
     assert_eq!(doc["services"]["db"]["image"].as_str(), Some("postgres:16"));
-    // Verbatim: a key nunki does not know about survives, because re-typing the
-    // block would lose it.
     assert_eq!(
         doc["services"]["db"]["volumes"][0].as_str(),
         Some("dbdata:/var/lib/postgresql/data")
     );
-    // And the firewall attaches to the network the project declared — it is
-    // the one that can, the agent having `network_mode` instead.
+    // nunki's rendering, not the file's bytes: every `$` doubled again, so
+    // what Compose reads back is the literal the file wrote.
     assert_eq!(
-        doc["services"][nunki::compose::FIREWALL_SERVICE]["networks"][0].as_str(),
-        Some("back")
+        doc["services"]["db"]["environment"]["PGPASSWORD"].as_str(),
+        Some("pa$$$$word")
     );
-    // The volumes block travels with them: a service naming a volume the
-    // document does not declare makes the whole project invalid (measured).
+    // The volumes travel with them: a service naming a volume the document
+    // does not declare makes the whole project invalid (measured).
     assert!(
         doc["volumes"]
             .as_mapping()
             .unwrap()
             .contains_key(serde_yaml_ng::Value::from("dbdata")),
         "{doc:?}"
+    );
+}
+
+/// A services file the closed model refuses lifts nothing: the profile is
+/// not planned, and the error names the file and the key.
+#[test]
+fn a_services_file_the_model_refuses_plans_no_profile() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = project(dir.path()).config;
+    config.services_file = Some(std::path::PathBuf::from("compose.yaml"));
+    let project = Project::at(dir.path().join("repo"), config, dir.path().join("nunki"));
+    let slot = slot_at(dir.path());
+    std::fs::write(
+        slot.tree.join("compose.yaml"),
+        "services:\n  db:\n    image: postgres:16\n    privileged: true\n",
+    )
+    .unwrap();
+    let images = nunki::image::Images {
+        agent: "img/agent".into(),
+        firewall: "img/fw".into(),
+        prober: "img/probe".into(),
+    };
+    let paths = nunki::mission::dir::Paths::of(&project.hq_root, "m1");
+    let err = run::plan(
+        &project,
+        &slot,
+        "rust",
+        &images,
+        &paths,
+        "t",
+        &header_with(with_services()),
+        Role::Integrator,
+    )
+    .unwrap_err();
+    assert!(matches!(err, run::RunError::BadServicesFile(..)), "{err}");
+    let said = err.to_string();
+    assert!(
+        said.contains("compose.yaml") && said.contains("privileged"),
+        "{said}"
     );
 }
 

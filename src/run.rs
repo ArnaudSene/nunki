@@ -231,8 +231,8 @@ pub enum RunError {
          such file on this commit"
     )]
     NoServicesFile(PathBuf),
-    #[error("{0} is not a Compose file nunki can read: {1}")]
-    BadServicesFile(PathBuf, String),
+    #[error("{0} is not a services file nunki lifts, so no service was started: {1}")]
+    BadServicesFile(PathBuf, crate::compose::services::ServicesError),
     #[error(transparent)]
     Application(#[from] crate::launch::LaunchError),
     #[error(
@@ -895,12 +895,12 @@ pub fn plan(
         Profile::System => credentials(project)?,
     };
 
-    // The project's own services, merged verbatim into the system profile.
-    // Not into the mission one: the coder reaches no service, so lifting a
-    // database beside it would be lifting what its allowlist forbids it to
-    // talk to.
-    let (project_services, project_networks, project_volumes) = match profile {
-        Profile::Mission => (None, None, None),
+    // The project's own services, read into the closed model and lifted
+    // into the system profile as nunki renders them. Not into the mission
+    // one: the coder reaches no service, so lifting a database beside it
+    // would be lifting what its allowlist forbids it to talk to.
+    let project_services = match profile {
+        Profile::Mission => None,
         Profile::System => project_compose(project, slot)?,
     };
 
@@ -925,8 +925,7 @@ pub fn plan(
         command: vec!["sleep".to_string(), "infinity".to_string()],
         perimeter,
         project_services,
-        project_networks,
-        project_volumes,
+        prober: None,
     })
 }
 
@@ -1100,35 +1099,30 @@ fn credentials(project: &Project) -> Result<Vec<(PathBuf, PathBuf)>, RunError> {
     Ok(files)
 }
 
-/// The project's own `services:` and `networks:` blocks, read from the slot's
-/// tree.
+/// The project's own services file, read from the slot's tree into the
+/// closed model (SPEC 4.2).
 ///
 /// From the tree and not from the repository: the file is the project's, it
 /// travels with the commit, and the integrator may amend it in its wiring —
 /// the same rule as the launch script (SPEC 4.2). What `nunki.yaml` decides is
-/// **which** file; what the slot decides is what is in it.
-type ProjectBlocks = (
-    Option<serde_yaml_ng::Value>,
-    Option<serde_yaml_ng::Value>,
-    Option<serde_yaml_ng::Value>,
-);
-
-fn project_compose(project: &Project, slot: &Slot) -> Result<ProjectBlocks, RunError> {
+/// **which** file; what the slot decides is what is in it, and the closed
+/// model decides what of it may be lifted at all. A file it refuses lifts
+/// nothing, and the profile is not started.
+fn project_compose(
+    project: &Project,
+    slot: &Slot,
+) -> Result<Option<crate::compose::services::ServicesFile>, RunError> {
     let Some(relative) = &project.config.services_file else {
-        return Ok((None, None, None));
+        return Ok(None);
     };
     let file = slot.tree.join(relative);
     if !file.is_file() {
         return Err(RunError::NoServicesFile(file));
     }
     let text = std::fs::read_to_string(&file).map_err(|e| RunError::Io(file.clone(), e))?;
-    let document: serde_yaml_ng::Value = serde_yaml_ng::from_str(&text)
-        .map_err(|e| RunError::BadServicesFile(file.clone(), e.to_string()))?;
-    let pick = |key: &str| match &document {
-        serde_yaml_ng::Value::Mapping(map) => map.get(serde_yaml_ng::Value::from(key)).cloned(),
-        _ => None,
-    };
-    Ok((pick("services"), pick("networks"), pick("volumes")))
+    crate::compose::services::ServicesFile::parse(&text)
+        .map(Some)
+        .map_err(|e| RunError::BadServicesFile(file, e))
 }
 
 /// A v4-shaped identifier. `nunki` imposes it rather than reading one back

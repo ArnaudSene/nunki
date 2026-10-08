@@ -238,7 +238,7 @@ fn with_services(dir: &Path) -> (Project, nunki::slot::Slot, nunki::mission::Hea
     std::fs::write(
         tree.join("compose.yaml"),
         "services:\n  db:\n    image: nginx:alpine\n    volumes: [dbdata:/data]\n  \
-         cache:\n    image: nginx:alpine\nvolumes:\n  dbdata: {}\n",
+         cache:\n    image: nginx:alpine\nvolumes:\n  dbdata:\n",
     )
     .unwrap();
     let mut project = project(dir);
@@ -297,15 +297,19 @@ fn a_system_profile_check_lifts_under_a_slot_of_its_own() {
             volume.name
         );
     }
-    let Some(serde_yaml_ng::Value::Mapping(services)) = &plan.project_services else {
-        panic!("{:?}", plan.project_services);
+    let Some(project) = &plan.project_services else {
+        panic!("the project's services are not lifted");
     };
-    for name in ["db", "cache", nunki::probe::PROBER_SERVICE] {
+    for name in ["db", "cache"] {
         assert!(
-            services.contains_key(serde_yaml_ng::Value::from(name)),
-            "{name} is lifted: {services:?}"
+            project.services.contains_key(name),
+            "{name} is lifted: {project:?}"
         );
     }
+    // The prober travels in a field of its own: the project's closed model
+    // never has to allow a shared namespace or a user.
+    assert!(plan.prober.is_some(), "the check carries its prober");
+    assert!(!project.services.contains_key(nunki::probe::PROBER_SERVICE));
     assert_eq!(
         plan.command,
         vec!["sleep".to_string(), "600".to_string()],

@@ -128,6 +128,38 @@ nunki slot add one              # a clone at ../<project>-slots/one
 nunki check                     # what is held, and what could not be checked
 ```
 
+### The project's services
+
+A mission whose integration declares services needs them lifted beside the
+integrator. `services_file` in `nunki.yaml` names a file of the repository
+that declares them, in a closed subset of Compose. The file is written by
+whoever writes the tree, the coder included, so nunki does not hand it to
+the engine as it is. It reads it into a model of its own and refuses the
+**whole file** at the first thing outside it:
+
+- at the top level, `services` and `volumes`, and a `name`, which is ignored;
+- per service, `image`, `environment`, `command`, `entrypoint`, `healthcheck`
+  (`test`, `interval`, `timeout`, `retries`, `start_period`,
+  `start_interval`), `depends_on` (services of the same file, with a
+  `condition` or none), `working_dir` (an absolute path) and `volumes`;
+- `environment` is a mapping from a name to a non-empty quoted string. A
+  bare entry would be filled from your environment, so it is refused;
+- a mount names a volume declared in the file's own `volumes` block, by name
+  only (`dbdata:`, no value), at an absolute path, optionally `:ro`;
+- `ports` are read and dropped: a service is reached by its name.
+
+Everything else is refused, with the service and the key named:
+`privileged`, `network_mode`, a bind mount, `env_file`, `build`, `user`, a
+top-level `networks`, an `x-` field, and any key a later Compose adds. So is
+any YAML construct that resolves to something other than what is written:
+anchors, aliases, tags, merge keys (`<<`), duplicate keys, directives and a
+second document.
+
+What is lifted is not the file but nunki's rendering of it. Keys come in a
+fixed order, every string is quoted and written in ASCII, and every `$` is
+doubled so Compose substitutes nothing. A file nunki refuses starts no
+service, and the profile that needed it does not start either.
+
 ## A first mission
 
 ```sh

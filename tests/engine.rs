@@ -479,9 +479,13 @@ fn write_profile(dir: &Path, slot: &str, role: nunki::harness::Role, name: &str)
         perimeter,
         // Re-declared identically in both profiles, which is what makes the
         // switch a no-op for it (SPEC 4.2, measured).
-        project_services: Some(serde_yaml_ng::from_str("db:\n  image: nginx:alpine\n").unwrap()),
-        project_networks: None,
-        project_volumes: None,
+        project_services: Some(
+            nunki::compose::services::ServicesFile::parse(
+                "services:\n  db:\n    image: nginx:alpine\n",
+            )
+            .unwrap(),
+        ),
+        prober: None,
     };
 
     let path = dir.join(name);
