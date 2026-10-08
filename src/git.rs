@@ -560,15 +560,6 @@ impl SlotGit {
         out.status.success().then_some(out.stdout)
     }
 
-    /// Run a verb of [`WORK_TREE_VERBS`] against the slot's **working tree**,
-    /// with an index `nunki` builds from `HEAD`. The slot's own index is
-    /// never read; a verb not on the list, or a `HEAD` holding a gitlink, is
-    /// refused with nothing run.
-    pub fn run_in_tree(&self, args: &[&str]) -> Result<String, GitError> {
-        let index = self.fresh_index(false)?;
-        self.in_tree(&index, args)
-    }
-
     /// The commit `HEAD` names.
     pub fn head(&self) -> Result<String, GitError> {
         self.run(&["rev-parse", "--verify", "HEAD^{commit}"])
