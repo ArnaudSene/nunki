@@ -248,6 +248,11 @@ invariants : si l'un tombe, le système n'est plus sûr, quel que soit le reste.
 7. **Poser une question bloquante.** Une décision imprévue se prend dans le
    sens le plus conservateur, se consigne comme `ARBITRAGE-PROVISOIRE`, et se
    présente dans le journal à la fin du run.
+8. **Faire exécuter quoi que ce soit à l'hôte par le `.git` de son slot.**
+   Configuration, hooks, attributs, sous-modules, refs de remplacement,
+   greffes, alternates : rien de ce que l'agent écrit dans le `.git` ou
+   l'arbre de son slot n'est exécuté ni cru par un git que `nunki` lance sur
+   l'hôte.
 
 ### 3.2 Comment ces restrictions sont tenues — la règle d'agnosticité
 
@@ -265,6 +270,7 @@ section 3.1 doit exister quel que soit l'exécutant :
 | secrets | rien n'est monté dans un profil mission ; dans un profil système, seuls des fichiers d'identifiants **nommés par la mission** et **rangés dans un dossier réservé aux identifiants de test** (4.1) sont montables, en lecture seule ; un utilisateur sans droits dans le conteneur | **l'agent lit ce que l'application lit** : même utilisateur, même processus. Un identifiant de test monté est visible de l'agent, et le jeton du harnais est dans son environnement. C'est assumé : la garantie ne porte pas sur « l'agent ne lit pas », qu'aucun mécanisme agnostique ne tient, mais sur « rien de production n'entre dans un conteneur », que le dossier réservé rend mécanique ; un hook de harnais peut refuser la lecture plus tôt, en confort |
 | chemins protégés | la porte de périmètre, **par commit et à la fin de chaque run** (4.4), sur le diff base..HEAD ; la relecture du HQ | entre deux runs, un commit interdit existe déjà dans le clone ; il est refusé au run suivant, pas à l'écriture. Un hook de harnais peut refuser plus tôt (confort, 4.3) |
 | réseau | le **pare-feu du conteneur** (4.1 bis) : un **sidecar** qui possède l'espace réseau et détient seul les capacités, l'agent qui le rejoint sans aucune ; règles non posées = agent qui ne démarre pas ; le port 53 détourné vers un résolveur **filtrant** qui ne relaie jamais ; aucune plage privée ouverte ; liste blanche par rôle | rien ici ne protège du contenu qu'un domaine autorisé sert. Les adresses suivent les réponses DNS, donc un CDN qui bouge reste joignable ; `nunki check` sonde de l'intérieur |
+| exécuter du code sur l'hôte par la configuration git du slot | aucun git de `nunki` ne tourne dans un slot : un **miroir** à côté du slot, hors de tout montage, écrit par l'hôte seul, reçoit ses commits par un fetch qui hache chaque objet ; ses refs sont lues dans leurs fichiers, avec une borne de taille ; configuration système et globale coupées, aucune variable `GIT_*` héritée, objets de remplacement ignorés. Aucun git n'est lancé dans l'arbre du slot : un gitlink est refusé et la descente dans les sous-modules coupée ; un slot dont le magasin d'objets nomme des alternates, ou porte autre chose que des fichiers et des répertoires ordinaires, est refusé avant d'être lu | un humain qui lance `nunki` depuis l'intérieur d'un slot y lance `git rev-parse`, qui lit sans exécuter. Un fichier spécial (une FIFO) dans un dépôt imbriqué non suivi peut bloquer la porte 1 : c'est la disponibilité, pas l'exécution |
 | question bloquante | le mode sans interface (4.3) : ce qui aurait demandé est refusé ; le contrat de run et le journal | — |
 
 Un hook, un plugin ou un réglage de harnais peut **doubler** une de ces lignes
@@ -590,6 +596,39 @@ commits ne bougent jamais entre slots ; ils ne sortent du slot que par
 `nunki mission fetch`, vers le dépôt principal, au moment du push. « Un slot =
 un clone, un conteneur » devient « un slot = un clone, des volumes, un
 conteneur d'agent à la fois ».
+
+**Un slot est un clone et un miroir.** L'arbre du slot est monté dans le
+conteneur de l'agent, son `.git` compris : l'agent y commite, et il y écrit
+aussi, s'il le veut, une configuration, des hooks ou des refs. C'est pourquoi
+l'hôte ne lance jamais git dans un slot. Chaque slot a un **miroir**
+(`<projet>-slots/.nunki-git/<slot>`), jamais monté, que seul l'hôte écrit :
+tout git que `nunki` lance à propos d'un slot — portes, `slot reset`,
+`mission fetch`, l'aiguillage du lancement — lit ce miroir. Ce que `nunki`
+réécrit dans le slot (la branche, son extraction, `origin/*`, l'index), il
+l'écrit en fichiers. `slot rm` emporte le miroir.
+- *Pas de sous-modules dans un slot.* Un commit ou un index qui porte un
+  gitlink est refusé par toute opération qui prendrait l'arbre du slot pour
+  arbre de travail (porte 1, `slot reset`, l'aiguillage), avec un message qui
+  nomme le chemin et dit que rien n'a été lancé. Ces opérations forment une
+  liste fermée (`ls-files`, `read-tree`, `update-index`, `clean`) et tournent
+  sans descente dans les sous-modules.
+- *Ce qui sort du slot est ce qui a été jugé.* De son slot, `nunki` ne prend
+  que la branche de la mission (`refs/heads/<branche>`, `--no-tags`) : le
+  miroir ne tient aucune étiquette du slot. `mission fetch` et `nunki push`
+  ne rapportent et ne publient que le commit que les portes et les verdicts
+  ont jugé, par son id ; ils refusent quand la branche du slot n'est pas ce
+  commit, et `push` vérifie de nouveau la pointe côté projet avant de
+  pousser.
+- *La base est celle de l'hôte.* Le lancement rafraîchit `origin/<base>`
+  depuis le chemin du projet tel que `nunki` le connaît, jamais depuis le
+  `remote.origin.url` du slot, et l'hôte l'enregistre
+  (`refs/nunki/origin/<base>`). Les portes ne lisent la base que là.
+- `nunki check` porte une ligne, *l'hôte ne lance aucun git dans un slot*,
+  verte quand chaque slot se lit par son miroir, ambre quand un slot est
+  illisible depuis l'hôte, porte un gitlink, ou quand son `.git/config`
+  porte une clé que git exécuterait : elle nomme alors chaque clé et dit que
+  rien n'a été lancé. Ambre et non rouge, parce qu'aucune restriction n'est
+  rompue ; jamais vert, parce qu'un agent l'a posée.
 
 **Une mission part d'une base que le slot a rafraîchie.** Un slot est un
 clone, et un clone écrit son propre `dev` une fois : rien ne le rebouge
@@ -1428,8 +1467,18 @@ un avis introduit au premier lot ne doit pas être trouvé au cinquième. Les
 portes 5 à 7 sont jouées à la vérification finale, quand le codeur a fini son
 dernier lot. La première rouge arrête tout.
 
-1. arbre propre ;
-2. branche non protégée et en avance sur sa base — si la base a avancé
+1. arbre propre — jugé **octet par octet** par `nunki` : chaque fichier suivi
+   est haché sans filtre, attribut ni conversion et comparé à l'id de l'arbre
+   de `HEAD` résolu dans le miroir, mode et type compris, au travers d'un
+   index reconstruit à chaque appel et sans information `stat`. Ni l'index
+   du slot, ni son `info/exclude`, ni sa configuration, ni aucun
+   `.gitattributes` n'entrent dans la réponse ; un projet qui compte sur une
+   conversion à l'extraction (`text`, `eol`, `ident`) s'y lit « pas propre » ;
+2. branche non protégée et en avance sur sa base — le `HEAD` du slot est la
+   branche de la mission (un `HEAD` détaché ou sur une autre branche est
+   refusé), et la base, pour cette porte comme pour les portes 4, 7 et 8, est
+   celle que l'hôte a enregistrée (`refs/nunki/origin/<base>`), jamais une ref
+   du slot ; sans cet enregistrement, la porte échoue et le dit. Si la base a avancé
    pendant la vérification, la branche n'est **jamais rebasée par un agent** :
    `nunki push` pousse telle quelle et la pull request porte le conflit, que
    l'humain résout ;
@@ -1822,6 +1871,57 @@ dernier lot. La première rouge arrête tout.
    paramétré ; et elle **ne rejoue que si les fichiers touchés ont changé**
    depuis la dernière campagne verte sur cette mission. Son résultat est un
    fichier du dossier de mission que le HQ lit.
+
+   **Au niveau `standard`, les campagnes d'une mission forment une chaîne,
+   dont l'unité est le fichier.** La première est complète. Une suivante est
+   **partielle** : elle ne mute que les fichiers touchés dont le contenu a
+   changé depuis le `HEAD` de la précédente, avec toujours le point de
+   fourche dans `NUNKI_BASE` — dans ces fichiers, tout ce que la branche a
+   changé est muté de nouveau. Conditions, toutes requises : la campagne
+   précédente est enregistrée ; la porte 7 passe sur elle ; son `HEAD` est un
+   ancêtre de `HEAD` ; elle est partie du même point de fourche ; elle a
+   donné des comptes par fichier qui font son total, sous des chemins que
+   `nunki` lui avait confiés ; les fichiers changés ont pu être listés, et
+   chaque fichier compté qui n'a pas changé est touché et présent à `HEAD` ;
+   le `mutation.sh` de la stack et la version de son outil sont inchangés ;
+   `--again` n'a pas été demandé. Sinon la campagne est complète, et sa raison
+   est écrite dans `MUTANTS.json`. Au niveau `critical`, toutes sont
+   complètes.
+
+   `MUTANTS.json` garde, pour chaque fichier touché, les comptes de la
+   dernière campagne qui l'a mesuré. Un fichier inchangé garde ses comptes et
+   ses survivants, sous les règles de report ; un fichier changé, supprimé ou
+   renommé les tient de la nouvelle campagne seule. La porte 7 et
+   `nunki push` jugent cette reconstruction **une seule fois** : la part du
+   total essayé, telle qu'une campagne complète à `HEAD` la donnerait. Aucun
+   diff n'est lu ligne à ligne : deviner ce qu'un changement atteint a été
+   contourné trois fois, comparer des contenus de fichiers ne l'est pas. La
+   limite, écrite avec son remède (`--again`, ou le niveau `critical`) : un
+   mutant mesuré dans un fichier que personne n'a changé est supposé exister
+   encore et être encore tué.
+
+   **Le contrat de `mutation.sh` s'enrichit**, tout en restant facultatif
+   pour une stack qui ne veut pas de chaîne :
+   - une ligne `# nunki-tool-version: <commande>`, que `nunki` lance dans la
+     copie propre pour lire la version de l'outil (sans elle, chaque
+     campagne est complète) ;
+   - des lignes par fichier avant la ligne de fin,
+     `{"measured":"<chemin>","tried":N,"found":M}`, annoncées par
+     `"by_file":true` sur la ligne de fin, qui font ses totaux ;
+   - un diff contre `NUNKI_BASE` lu sans détection de renommage ;
+   - `NUNKI_MUTATION_JOBS`, la valeur de `mutation_jobs` (`nunki.yaml`, un
+     entier d'au moins 1, 1 par défaut) : combien de mutants la campagne peut
+     jouer à la fois. Mesuré sur `nunki` lui-même, deux jobs gagnent 13 % et
+     doublent le disque, et un job par cœur a changé la réponse (des
+     survivants devenus délais dépassés, comptés tués) : d'où 1 ;
+   - **le cache de build est laissé comme la campagne l'a trouvé.** Après une
+     campagne, terminée, échouée ou arrêtée par `nunki`, le cache tient ce
+     que le code non muté demande et rien de ce qu'un mutant a construit.
+     Mesuré : sans cela, une trentaine de campagnes laissaient 6,8 millions
+     de fichiers dans `target/debug/deps`, et un mutant passait de 7 à 70 s.
+     `nunki check --slot` porte une ligne sur ce cache, **ambre** au-delà de
+     250 000 fichiers ou de 50 Gio — un verdict montré et compté, jamais
+     rouge, jamais vert.
 
    **C'est `nunki` qui la lance, pas l'humain** : sinon le moniteur s'arrête
    pour un verbe qu'il aurait pu taper lui-même — pour la campagne que
