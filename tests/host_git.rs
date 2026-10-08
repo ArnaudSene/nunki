@@ -1312,6 +1312,14 @@ fn the_keys_named_are_the_ones_git_would_execute() {
         "uploadpack.allowfilter",
         "user.name",
         "x.y",
+        "credential.https://example.com.username",
+        "gpg.ssh.allowedsignersfile",
+        "difftool.cmd",
+        "difftool.x.path",
+        "mergetool.x.path",
+        "man.x.path",
+        "browser.x.path",
+        "protocol.ext.other",
     ];
     for key in executable.iter().chain(inert.iter()) {
         git(&w.tree, &["config", "--add", key, "v"]);
@@ -1325,4 +1333,277 @@ fn the_keys_named_are_the_ones_git_would_execute() {
         nunki::git::executable_keys(&fresh.tree).unwrap(),
         Vec::<String>::new()
     );
+}
+
+/// What `executable_keys` makes of a configuration it cannot read as one:
+/// none at all is nothing to name, and anything but a regular file — a
+/// `.git` that is a file, a config that is a link — is an error, never a
+/// file followed.
+#[test]
+fn a_config_that_is_not_a_plain_file_is_never_followed() {
+    let w = world();
+    std::fs::remove_file(w.tree.join(".git/config")).unwrap();
+    assert_eq!(
+        nunki::git::executable_keys(&w.tree).unwrap(),
+        Vec::<String>::new()
+    );
+
+    let elsewhere = w.dir.path().join("elsewhere.config");
+    std::fs::write(&elsewhere, "[core]\n\tfsmonitor = /x\n").unwrap();
+    std::os::unix::fs::symlink(&elsewhere, w.tree.join(".git/config")).unwrap();
+    let err = nunki::git::executable_keys(&w.tree).unwrap_err();
+    assert!(
+        matches!(err, nunki::git::GitError::Unreadable { .. }),
+        "{err:?}"
+    );
+
+    let w = world();
+    std::fs::rename(w.tree.join(".git"), w.dir.path().join("moved.git")).unwrap();
+    std::fs::write(w.tree.join(".git"), "gitdir: elsewhere\n").unwrap();
+    assert!(nunki::git::executable_keys(&w.tree).is_err());
+}
+
+/// The slot's files say what is wrong with them, each in its own words:
+/// the error a human reads names the fault, not git's reaction to it.
+#[test]
+fn a_slot_read_from_its_files_says_what_is_wrong() {
+    let fault = |break_it: &dyn Fn(&World), said: &str| {
+        let w = world();
+        break_it(&w);
+        let err = nunki::git::SlotGit::open(&w.tree).unwrap_err().to_string();
+        assert!(err.contains(said), "wanted {said:?}, got {err}");
+    };
+    let id = |w: &World| git(&w.tree, &["rev-parse", "HEAD"]);
+    fault(
+        &|w| {
+            std::fs::rename(w.tree.join(".git"), w.dir.path().join("moved.git")).unwrap();
+            std::fs::write(w.tree.join(".git"), "gitdir: elsewhere\n").unwrap();
+        },
+        "a slot is a plain clone",
+    );
+    fault(
+        &|w| std::fs::write(w.tree.join(".git/HEAD"), "ref: refs/remotes/origin/dev\n").unwrap(),
+        "which is not a branch",
+    );
+    fault(
+        &|w| std::fs::write(w.tree.join(".git/HEAD"), "garbage\n").unwrap(),
+        "which is no commit id",
+    );
+    fault(
+        &|w| {
+            std::fs::write(
+                w.tree.join(".git/refs/heads/mission/x"),
+                format!("{}\n", "z".repeat(40)),
+            )
+            .unwrap()
+        },
+        "which is no object id",
+    );
+    fault(
+        &|w| {
+            std::fs::write(
+                w.tree.join(".git/refs/heads/mission/x"),
+                format!("{}\n", &id(w)[..20]),
+            )
+            .unwrap()
+        },
+        "which is no object id",
+    );
+    fault(
+        &|w| std::fs::write(w.tree.join(".git/refs/heads/a b"), format!("{}\n", id(w))).unwrap(),
+        "a ref is named",
+    );
+    fault(
+        &|w| {
+            std::fs::write(
+                w.tree.join(".git/refs/heads/long"),
+                format!("{}\n", "a".repeat(64)),
+            )
+            .unwrap()
+        },
+        "mix SHA-1 and SHA-256",
+    );
+}
+
+/// A refs directory the host cannot list is an error, never a slot read as
+/// if it had no branch there.
+#[test]
+fn a_refs_directory_that_cannot_be_listed_is_an_error() {
+    let w = world();
+    let heads = w.tree.join(".git/refs/heads");
+    std::fs::set_permissions(&heads, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let opened = nunki::git::SlotGit::open(&w.tree);
+    std::fs::set_permissions(&heads, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let err = opened.unwrap_err().to_string();
+    assert!(err.contains("Permission denied"), "{err}");
+}
+
+/// An annotated tag, packed, leaves a peeled line in `packed-refs`: read as
+/// what it is, not as a ref.
+#[test]
+fn a_packed_annotated_tag_is_read_with_its_peeled_line() {
+    let w = world();
+    git(&w.tree, &["tag", "-a", "v1", "-m", "one"]);
+    git(&w.tree, &["pack-refs", "--all"]);
+    let packed = std::fs::read_to_string(w.tree.join(".git/packed-refs")).unwrap();
+    assert!(packed.lines().any(|l| l.starts_with('^')), "{packed}");
+    let repo = nunki::git::SlotGit::open(&w.tree).unwrap();
+    assert_eq!(
+        repo.run(&["rev-parse", "v1^{commit}"]).unwrap(),
+        git(&w.tree, &["rev-parse", "HEAD"])
+    );
+}
+
+/// A git that fails in the mirror says which slot it was about.
+#[test]
+fn a_failure_in_the_mirror_names_the_slot() {
+    let w = world();
+    let err = nunki::git::on_slot(&w.tree, &["rev-parse", "--verify", "no-such-thing"])
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains(&format!("{} (through its host mirror)", w.tree.display())),
+        "{err}"
+    );
+}
+
+/// What a new branch hands the slot is what the slot lacks, and nothing
+/// it already holds: one pack, with the base's new commit, tree and blob.
+#[test]
+fn a_new_branch_hands_the_slot_only_the_objects_it_lacks() {
+    let w = world();
+    write(
+        &w.project.root,
+        "src.rs",
+        "pub fn one() -> u8 {\n    9\n}\n",
+    );
+    git(&w.project.root, &["commit", "-qam", "the base moves"]);
+    let packs = w.tree.join(".git/objects/pack");
+    let before: Vec<PathBuf> = std::fs::read_dir(&packs)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .collect();
+    nunki::run::branch(&w.slot(), &w.project.root, "mission/other", "dev").unwrap();
+    let new: Vec<PathBuf> = std::fs::read_dir(&packs)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| !before.contains(p) && p.extension().is_some_and(|x| x == "idx"))
+        .collect();
+    assert_eq!(new.len(), 1, "{new:?}");
+    let out = Command::new("git")
+        .args(["show-index"])
+        .stdin(std::fs::File::open(&new[0]).unwrap())
+        .output()
+        .unwrap();
+    let objects = String::from_utf8_lossy(&out.stdout).lines().count();
+    assert_eq!(objects, 3, "the pack carries objects the slot already had");
+}
+
+/// The mirror forgets what it last synced before it fetches again: a sync
+/// that cannot clear its record fetches nothing.
+#[test]
+fn a_sync_that_cannot_clear_its_record_fetches_nothing() {
+    let w = world();
+    let mirror = nunki::git::SlotGit::open(&w.tree)
+        .unwrap()
+        .mirror()
+        .to_path_buf();
+    let before = git(&mirror, &["rev-parse", "refs/heads/mission/x"]);
+    let record = mirror.join("nunki-synced");
+    std::fs::remove_file(&record).unwrap();
+    std::fs::create_dir(&record).unwrap();
+    write(&w.tree, "src.rs", "pub fn one() -> u8 {\n    5\n}\n");
+    git(&w.tree, &["commit", "-qam", "more"]);
+
+    assert!(nunki::git::SlotGit::open(&w.tree).is_err());
+    assert_eq!(
+        git(&mirror, &["rev-parse", "refs/heads/mission/x"]),
+        before,
+        "the mirror fetched while its record still said otherwise"
+    );
+}
+
+/// A commit asked for by id is fetched only when the mirror lacks it, and
+/// a name that is not an id is never fetched at all.
+#[test]
+fn only_a_commit_the_mirror_lacks_is_fetched_by_its_id() {
+    let w = world();
+    let repo = nunki::git::SlotGit::open(&w.tree).unwrap();
+    let head = repo.head().unwrap();
+    repo.fetch_commit(&head).unwrap();
+    repo.fetch_commit("not-an-id").unwrap();
+    assert_eq!(
+        repo.run(&["for-each-ref", "refs/nunki/kept"]).unwrap(),
+        "",
+        "a commit the mirror had was fetched again"
+    );
+    // One no ref reaches is fetched, and kept.
+    let dangling = git(&w.tree, &["commit-tree", "HEAD^{tree}", "-m", "dangling"]);
+    repo.fetch_commit(&dangling).unwrap();
+    assert_eq!(
+        repo.run(&["rev-parse", &format!("refs/nunki/kept/{dangling}")])
+            .unwrap(),
+        dangling
+    );
+}
+
+/// A file in the tree shaped like a configuration — whatever its name —
+/// is never read as one by a git the host runs with the tree as work tree.
+#[test]
+fn a_config_file_in_the_tree_is_never_read() {
+    let w = world();
+    let body = format!("[core]\n\tfsmonitor = {}\n", w.script("tree-config"));
+    for name in ["xyzzy", ".gitconfig", "config", "NUL"] {
+        std::fs::write(w.tree.join(name), &body).unwrap();
+    }
+    assert!(!nunki::git::is_clean(&w.tree).unwrap());
+    assert_eq!(w.ran(), Vec::<String>::new());
+}
+
+/// Host-side readers of one slot may run at once, and each leaves nothing
+/// of its own behind in the mirror.
+#[test]
+fn readers_of_one_slot_run_at_once_and_leave_nothing_behind() {
+    let w = world();
+    assert!(nunki::git::is_clean(&w.tree).unwrap());
+    let readers: Vec<_> = (0..8)
+        .map(|_| {
+            let tree = w.tree.clone();
+            std::thread::spawn(move || {
+                (0..5)
+                    .map(|_| nunki::git::is_clean(&tree).map_err(|e| e.to_string()))
+                    .collect::<Vec<_>>()
+            })
+        })
+        .collect();
+    for reader in readers {
+        for answer in reader.join().unwrap() {
+            assert_eq!(answer, Ok(true));
+        }
+    }
+    let mirror = nunki::git::mirror_of(&w.tree);
+    let left: Vec<String> = std::fs::read_dir(&mirror)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("index") || n.starts_with("shim") || n.starts_with("pack-"))
+        .collect();
+    assert_eq!(left, Vec::<String>::new());
+}
+
+/// `slot rm` that cannot remove the mirror says so, rather than leaving it
+/// for the next slot of that name to start from.
+#[test]
+fn a_mirror_that_cannot_be_removed_fails_slot_rm() {
+    let w = world();
+    let mirror = nunki::git::SlotGit::open(&w.tree)
+        .unwrap()
+        .mirror()
+        .to_path_buf();
+    std::fs::set_permissions(&mirror, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let removed = nunki::slot::rm(&w.project, "one", true);
+    std::fs::set_permissions(&mirror, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(removed.is_err());
 }

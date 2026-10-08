@@ -631,15 +631,12 @@ impl SlotGit {
                 &["pack-objects", "--revs", "--quiet", &base],
                 revs.as_bytes(),
             )?;
-            let mut files: Vec<PathBuf> = std::fs::read_dir(&staging)
+            let files: Vec<PathBuf> = std::fs::read_dir(&staging)
                 .map_err(|e| GitError::Io(staging.clone(), e))?
                 .flatten()
                 .map(|e| e.path())
                 .collect();
-            // The pack before its index: git finds a pack by its index, and
-            // must never find one whose pack is not there yet.
-            files.sort_by_key(|p| p.extension().is_some_and(|x| x == "idx"));
-            for file in files {
+            for file in in_writing_order(files) {
                 let Some(name) = file.file_name().and_then(|n| n.to_str()) else {
                     continue;
                 };
@@ -690,10 +687,12 @@ impl SlotGit {
                         dir.display()
                     )));
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Missing, or not even looked at: `mkdir` makes a directory or
+                // fails, and never follows a link, so its own error is the one
+                // worth reporting.
+                Err(_) => {
                     std::fs::create_dir(&dir).map_err(|e| GitError::Io(dir.clone(), e))?;
                 }
-                Err(e) => return Err(GitError::Io(dir.clone(), e)),
             }
         }
         let last = parts[parts.len() - 1];
@@ -864,6 +863,14 @@ impl SlotGit {
     }
 }
 
+/// The files of a pack in the order they are handed to a slot: the pack
+/// before its index. git finds a pack by its index, and must never find one
+/// whose pack is not there yet.
+fn in_writing_order(mut files: Vec<PathBuf>) -> Vec<PathBuf> {
+    files.sort_by_key(|p| p.extension().is_some_and(|x| x == "idx"));
+    files
+}
+
 /// `git init --bare` with no template: no sample hook, nothing but what git
 /// needs.
 fn init_bare(dir: &Path, format: &str) -> Result<(), GitError> {
@@ -939,6 +946,16 @@ impl MirrorLock {
     const WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 
     fn take(mirror: &Path) -> Result<Self, GitError> {
+        Self::take_within(mirror, Self::STALE, Self::WAIT)
+    }
+
+    /// [`MirrorLock::take`], with a lock older than `stale` taken for a
+    /// crashed process's, and `wait` the longest it waits for a live one.
+    fn take_within(
+        mirror: &Path,
+        stale: std::time::Duration,
+        wait: std::time::Duration,
+    ) -> Result<Self, GitError> {
         // Beside the mirror rather than in it: a mirror made again is
         // removed whole, under this lock.
         let mut name = mirror.file_name().unwrap_or_default().to_os_string();
@@ -960,12 +977,12 @@ impl MirrorLock {
                         .and_then(|m| m.modified())
                         .ok()
                         .and_then(|t| t.elapsed().ok())
-                        .is_some_and(|age| age > Self::STALE);
+                        .is_some_and(|age| beyond(age, stale));
                     if stale {
                         let _ = std::fs::remove_file(&file);
                         continue;
                     }
-                    if started.elapsed() > Self::WAIT {
+                    if beyond(started.elapsed(), wait) {
                         return Err(GitError::Io(file, e));
                     }
                     std::thread::sleep(std::time::Duration::from_millis(20));
@@ -974,6 +991,12 @@ impl MirrorLock {
             }
         }
     }
+}
+
+/// Whether `spent` has gone past `limit`: a lock exactly `limit` old is not
+/// yet stale, and a wait exactly `limit` long is not yet spent.
+fn beyond(spent: std::time::Duration, limit: std::time::Duration) -> bool {
+    spent > limit
 }
 
 impl Drop for MirrorLock {
@@ -1155,4 +1178,174 @@ fn is_id(text: &str) -> bool {
         && text
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn slot_in(dir: &Path) -> SlotGit {
+        let tree = dir.join("slot");
+        std::fs::create_dir_all(tree.join(".git")).unwrap();
+        SlotGit {
+            gitdir: tree.join(".git"),
+            mirror: mirror_of(&tree),
+            tree,
+        }
+    }
+
+    /// A path that leaves `.git`, or names nothing, is refused before
+    /// anything is written: an empty component, `.` and `..` each.
+    #[test]
+    fn a_write_into_a_slot_refuses_a_path_that_is_not_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let slot = slot_in(dir.path());
+        for bad in ["refs//x", "./x", "refs/./x", "../x", "refs/../../x", ""] {
+            let err = slot.write_into_slot(bad, b"x").unwrap_err();
+            assert!(
+                err.to_string().contains("is no path inside .git"),
+                "{bad}: {err}"
+            );
+        }
+        assert!(!dir.path().join("x").exists());
+        slot.write_into_slot("refs/heads/ok", b"x").unwrap();
+        assert_eq!(
+            std::fs::read(slot.gitdir.join("refs/heads/ok")).unwrap(),
+            b"x"
+        );
+    }
+
+    #[test]
+    fn a_pack_is_handed_over_before_its_index() {
+        let order = in_writing_order(vec![
+            PathBuf::from("pack-a.idx"),
+            PathBuf::from("pack-a.pack"),
+        ]);
+        assert_eq!(
+            order,
+            [PathBuf::from("pack-a.pack"), PathBuf::from("pack-a.idx")]
+        );
+        let order = in_writing_order(vec![
+            PathBuf::from("pack-a.pack"),
+            PathBuf::from("pack-a.idx"),
+        ]);
+        assert_eq!(
+            order,
+            [PathBuf::from("pack-a.pack"), PathBuf::from("pack-a.idx")]
+        );
+    }
+
+    /// A lock exactly as old as the limit is still its holder's, and a wait
+    /// exactly as long as the limit is not yet given up: only beyond it.
+    #[test]
+    fn a_limit_is_reached_only_beyond_it() {
+        let limit = Duration::from_secs(300);
+        assert!(!beyond(limit, limit));
+        assert!(!beyond(limit - Duration::from_nanos(1), limit));
+        assert!(beyond(limit + Duration::from_nanos(1), limit));
+    }
+
+    fn lock_file(mirror: &Path) -> PathBuf {
+        mirror.with_file_name(format!(
+            "{}.lock",
+            mirror.file_name().unwrap().to_string_lossy()
+        ))
+    }
+
+    /// A lock somebody holds is waited for, and taken once it is released:
+    /// neither stolen while fresh nor refused at once.
+    #[test]
+    fn a_held_mirror_lock_is_waited_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let mirror = dir.path().join(MIRRORS).join("one");
+        std::fs::create_dir_all(mirror.parent().unwrap()).unwrap();
+        let file = lock_file(&mirror);
+        std::fs::write(&file, "").unwrap();
+        let released = file.clone();
+        let other = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            std::fs::remove_file(released).unwrap();
+        });
+        let started = Instant::now();
+        let lock =
+            MirrorLock::take_within(&mirror, Duration::from_secs(300), Duration::from_secs(20));
+        other.join().unwrap();
+        assert!(lock.is_ok(), "{:?}", lock.err());
+        assert!(
+            started.elapsed() >= Duration::from_millis(250),
+            "a fresh lock was taken without waiting for its holder"
+        );
+        drop(lock);
+        assert!(!file.exists(), "the lock is released when dropped");
+    }
+
+    /// A lock older than `stale` is a crashed process's, and taken at once.
+    #[test]
+    fn a_stale_mirror_lock_is_taken_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let mirror = dir.path().join(MIRRORS).join("one");
+        std::fs::create_dir_all(mirror.parent().unwrap()).unwrap();
+        let file = lock_file(&mirror);
+        std::fs::write(&file, "").unwrap();
+        let hour_ago = std::time::SystemTime::now() - Duration::from_secs(3600);
+        std::fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(hour_ago)
+            .unwrap();
+        let started = Instant::now();
+        let lock =
+            MirrorLock::take_within(&mirror, Duration::from_secs(300), Duration::from_secs(10));
+        assert!(lock.is_ok(), "{:?}", lock.err());
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    /// A lock nobody releases is an error once `wait` is spent — not a
+    /// wait without end.
+    #[test]
+    fn a_mirror_lock_never_released_is_an_error_after_the_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        let mirror = dir.path().join(MIRRORS).join("one");
+        std::fs::create_dir_all(mirror.parent().unwrap()).unwrap();
+        std::fs::write(lock_file(&mirror), "").unwrap();
+        // In a thread of its own, so that a wait without end fails this test
+        // rather than hanging it.
+        let (sent, answer) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let started = Instant::now();
+            let lock = MirrorLock::take_within(
+                &mirror,
+                Duration::from_secs(300),
+                Duration::from_millis(200),
+            );
+            let _ = sent.send((lock.is_err(), started.elapsed()));
+        });
+        let (refused, spent) = answer
+            .recv_timeout(Duration::from_secs(5))
+            .expect("a lock never released is waited for without end");
+        assert!(refused);
+        assert!(spent >= Duration::from_millis(200), "{spent:?}");
+    }
+
+    /// A lock that cannot be created for another reason than its being
+    /// held is an error at once, not a wait.
+    #[test]
+    fn a_mirror_lock_that_cannot_be_written_is_an_error_at_once() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let mirrors = dir.path().join(MIRRORS);
+        std::fs::create_dir_all(&mirrors).unwrap();
+        std::fs::set_permissions(&mirrors, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let started = Instant::now();
+        let lock = MirrorLock::take_within(
+            &mirrors.join("one"),
+            Duration::from_secs(300),
+            Duration::from_secs(10),
+        );
+        std::fs::set_permissions(&mirrors, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(lock.is_err());
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
 }
