@@ -22,6 +22,10 @@ pub struct Document {
     pub services: Mapping,
     #[serde(skip_serializing_if = "Mapping::is_empty")]
     pub volumes: Mapping,
+    /// nunki's internal network for the project's services, when there are
+    /// any. Never the project's: a services file declares no network.
+    #[serde(skip_serializing_if = "Mapping::is_empty")]
+    pub networks: Mapping,
 }
 
 /// A service `nunki` writes itself.

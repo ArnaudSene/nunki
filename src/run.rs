@@ -377,6 +377,10 @@ pub struct Launched {
     /// A mutation campaign this launch ended, and since when it had been
     /// running. `None` when there was none, which is the normal case.
     pub campaign_ended: Option<String>,
+    /// The lifted services whose `ports` nunki dropped from the file, for
+    /// the launch to say so in one line: the agent reaches a service by its
+    /// name, and a published port would collide between slots.
+    pub ports_dropped: Vec<String>,
 }
 
 /// End the mutation campaign this launch is about to kill, and say since
@@ -503,6 +507,7 @@ pub fn launch(l: &Launching) -> Result<Launched, RunError> {
     std::fs::write(&prompt, role::prompt(role)).map_err(|e| RunError::Io(prompt.clone(), e))?;
 
     let plan = plan(project, slot, &stack, &images, paths, &token, header, role)?;
+    let ports_dropped = ports_dropped(&plan);
     // The perimeter the firewall is about to enforce, written where the agent
     // reads: an autonomous agent cannot ask why a name does not resolve.
     std::fs::write(&paths.allowlist, allowlist(role, &plan.perimeter))
@@ -611,6 +616,7 @@ pub fn launch(l: &Launching) -> Result<Launched, RunError> {
         app,
         launch: declared,
         campaign_ended,
+        ports_dropped,
     })
 }
 
@@ -632,10 +638,9 @@ pub fn lift(
     plan: &Plan,
 ) -> Result<Vec<String>, RunError> {
     let approvals = crate::services::Approvals::load(&crate::services::file(project))?;
-    let lifting = plan.project_services.as_ref().map(|s| s.digest());
     let stale = crate::services::stale(
         &engine.containers(compose_project)?,
-        lifting.as_deref(),
+        plan.project_services.as_ref(),
         &approvals,
     );
     if !stale.is_empty() {
@@ -643,6 +648,21 @@ pub fn lift(
     }
     engine.up(file, compose_project)?;
     Ok(stale)
+}
+
+/// The services of `plan` whose `ports` nunki dropped: what the launch says
+/// in one line, since nothing the file publishes is published.
+pub fn ports_dropped(plan: &Plan) -> Vec<String> {
+    plan.project_services
+        .as_ref()
+        .map(|l| {
+            l.services
+                .dropped_ports()
+                .into_iter()
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The session a run is launched in, and whether the harness resumes it: the
@@ -931,12 +951,19 @@ pub fn plan(
     };
 
     // The project's own services, read into the closed model and lifted
-    // into the system profile as nunki renders them. Not into the mission
-    // one: the coder reaches no service, so lifting a database beside it
-    // would be lifting what its allowlist forbids it to talk to.
+    // into the system profile as nunki renders them — those the frozen
+    // header declares, and those they depend on; the others are not
+    // started. Not into the mission profile: the coder reaches no service,
+    // so lifting a database beside it would be lifting what its allowlist
+    // forbids it to talk to, and re-declaring them there would need the file
+    // approved while the coder may be the one changing it. They stay up
+    // across the switch all the same: nunki never removes orphans, and the
+    // takedown keeps what a human approved ([`crate::services::stale`]).
     let project_services = match profile {
         Profile::Mission => None,
-        Profile::System => project_compose(project, slot)?,
+        Profile::System => project_compose(project, slot)?.map(|file| {
+            crate::compose::services::Lifted::declared(file, &declared_services(header))
+        }),
     };
 
     Ok(Plan {
@@ -1148,6 +1175,16 @@ fn project_compose(
     slot: &Slot,
 ) -> Result<Option<crate::compose::services::ServicesFile>, RunError> {
     Ok(crate::services::approved(project, &slot.tree)?)
+}
+
+/// The services a mission's frozen header declares, by name.
+fn declared_services(header: &crate::mission::Header) -> Vec<String> {
+    match &header.integration {
+        crate::mission::Integration::Services { services, .. } => {
+            services.iter().map(|s| s.name.clone()).collect()
+        }
+        crate::mission::Integration::None { .. } => Vec::new(),
+    }
 }
 
 /// A v4-shaped identifier. `nunki` imposes it rather than reading one back

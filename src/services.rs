@@ -21,7 +21,7 @@ use std::path::{Component, Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::check::{Check, Verdict};
-use crate::compose::services::{RESERVED_SERVICES, ServicesError, ServicesFile, digest};
+use crate::compose::services::{Lifted, RESERVED_SERVICES, ServicesError, ServicesFile, digest};
 use crate::engine::Container;
 use crate::git::GitError;
 use crate::project::Project;
@@ -280,10 +280,8 @@ pub fn show(current: &Current, from: &str, approvals: &Approvals) -> String {
     );
     let dropped = current.services.dropped_ports();
     if !dropped.is_empty() {
-        out.push_str(&format!(
-            "ports dropped from {}: a service is reached by its name\n",
-            dropped.join(", ")
-        ));
+        out.push_str(&ports_dropped(&dropped));
+        out.push('\n');
     }
     out.push_str("---\n");
     out.push_str(&crate::text::printable(&current.rendering));
@@ -292,30 +290,33 @@ pub fn show(current: &Current, from: &str, approvals: &Approvals) -> String {
 
 /// The containers to take down before a profile is started: every
 /// container of the slot's Compose project backing a service nunki did not
-/// write itself, whose definition is not the approved one.
+/// write itself, whose definition is not the approved one or which the
+/// profile does not lift.
 ///
-/// `lifting` is the digest the profile lifts. A system profile lifts one,
-/// and every other definition goes — an older approved one, an unlabelled
-/// one lifted before approvals existed, a service the file no longer names.
-/// A mission profile lifts none, and leaves up what a human approved: its
-/// services are kept between profiles (SPEC 4.2).
+/// `lifting` is what the profile lifts. A system profile lifts the services
+/// its mission declares, under one approved digest, and every other
+/// container goes — an older approved definition, an unlabelled one lifted
+/// before approvals existed, a service the file no longer names, one the
+/// mission does not declare. A mission profile lifts none, and leaves up
+/// what a human approved: the services stay up between profiles (SPEC 4.2).
 pub fn stale(
     containers: &[Container],
-    lifting: Option<&str>,
+    lifting: Option<&Lifted>,
     approvals: &Approvals,
 ) -> Vec<String> {
     containers
         .iter()
         .filter(|c| !RESERVED_SERVICES.contains(&c.service.as_str()))
         .filter(|c| match (lifting, c.digest.as_deref()) {
-            (Some(lifted), Some(label)) => label != lifted,
+            (Some(lifted), Some(label)) => {
+                label != lifted.approved || !lifted.services.services.contains_key(&c.service)
+            }
             (None, Some(label)) => approvals.find(label).is_none(),
             (_, None) => true,
         })
         .map(|c| c.id.clone())
         .collect()
 }
-
 /// `nunki check`'s line on the services file of `at`: green when it is
 /// approved or there is none, red otherwise, saying why.
 pub fn check(project: &Project, at: At, whose: &str) -> Check {
@@ -439,4 +440,18 @@ pub fn checks(project: &Project, slot: Option<&str>, mission: Option<&str>) -> V
         named(slot, format!("the HEAD of mission {id}'s slot"));
     }
     checks
+}
+
+/// The one line that says a launch, or a rendering, dropped the `ports` of
+/// `services`, and why.
+pub fn ports_dropped<S: AsRef<str>>(services: &[S]) -> String {
+    format!(
+        "ports dropped from {}: the agent reaches a service by its name, and a published \
+         port would collide between slots",
+        services
+            .iter()
+            .map(|s| s.as_ref())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
 }

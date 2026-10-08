@@ -1260,6 +1260,9 @@ fn main() -> ExitCode {
                                      another once this run is read back"
                                 );
                             }
+                            nunki::verify::Step::PortsDropped { services } => {
+                                println!("ports     {}", nunki::services::ports_dropped(services));
+                            }
                             nunki::verify::Step::Launched { role, application } => {
                                 owed = true;
                                 println!("launched  a {role:?} run — {application}");

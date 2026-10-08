@@ -74,6 +74,10 @@ pub enum Step {
         /// agent, how the application was started for it, or why it was not.
         application: String,
     },
+    /// The launch dropped the `ports` of these lifted services: the agent
+    /// reaches a service by its name, and a published port would collide
+    /// between slots. Said in one line, before the launch it belongs to.
+    PortsDropped { services: Vec<String> },
     /// A launch ended a mutation campaign that was still running: the switch
     /// it performs recreates the container the campaign lives in, so the
     /// campaign dies either way. Said rather than not — a slot that went
@@ -692,12 +696,18 @@ pub fn verify_as(
                     launched => launched?,
                 };
                 let application = describe(&launched);
+                let launched_ports = launched.ports_dropped.clone();
                 state.run = Some(launched.run);
                 state.app = launched.app;
                 store.save(&state)?;
                 // Before the launch is announced, because it happened first.
                 if let Some(since) = launched.campaign_ended {
                     steps.push(Step::CampaignEnded { since });
+                }
+                if !launched_ports.is_empty() {
+                    steps.push(Step::PortsDropped {
+                        services: launched_ports,
+                    });
                 }
                 steps.push(Step::Launched {
                     role: Role::Integrator,
@@ -790,12 +800,18 @@ pub fn verify_as(
                     launched => launched?,
                 };
                 let application = describe(&launched);
+                let launched_ports = launched.ports_dropped.clone();
                 state.run = Some(launched.run);
                 state.app = launched.app;
                 store.save(&state)?;
                 // Before the launch is announced, because it happened first.
                 if let Some(since) = launched.campaign_ended {
                     steps.push(Step::CampaignEnded { since });
+                }
+                if !launched_ports.is_empty() {
+                    steps.push(Step::PortsDropped {
+                        services: launched_ports,
+                    });
                 }
                 steps.push(Step::Launched {
                     role: Role::Security,

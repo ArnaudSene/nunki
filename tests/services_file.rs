@@ -1151,6 +1151,10 @@ fn a_system_profile_takes_down_every_definition_but_the_one_it_lifts() {
             rendering: String::new(),
         });
     }
+    let file =
+        parse("services:\n  db:\n    image: postgres:16\n  cache:\n    image: redis\n").unwrap();
+    let mut lifting = nunki::compose::services::Lifted::declared(file, &["db".to_string()]);
+    lifting.approved = "sha256:new".into();
     let containers = [
         container("c1", "db", Some("sha256:new")),
         container("c2", "db", Some("sha256:old")),
@@ -1159,14 +1163,82 @@ fn a_system_profile_takes_down_every_definition_but_the_one_it_lifts() {
         container("c5", "agent", None),
         container("c6", "prober", None),
         container("c7", "gone", Some("sha256:unknown")),
+        // Approved, but not what this mission declares: not lifted, so not
+        // left up beside it either.
+        container("c8", "cache", Some("sha256:new")),
     ];
     assert_eq!(
-        nunki::services::stale(&containers, Some("sha256:new"), &approvals),
-        vec!["c2", "c3", "c7"]
+        nunki::services::stale(&containers, Some(&lifting), &approvals),
+        vec!["c2", "c3", "c7", "c8"]
     );
     // A mission profile lifts nothing and keeps what a human approved.
     assert_eq!(
         nunki::services::stale(&containers, None, &approvals),
         vec!["c3", "c7"]
+    );
+}
+
+// --- only what the mission declares (L3) ----------------------------------------
+
+const THREE: &str = "services:\n  app:\n    image: app\n    depends_on: [db]\n    \
+                     volumes: [\"appdata:/a\"]\n  db:\n    image: postgres:16\n    \
+                     depends_on:\n      cache: {condition: service_healthy}\n    \
+                     volumes: [\"dbdata:/d\"]\n  cache:\n    image: redis\n  \
+                     miner:\n    image: coin\n    volumes: [\"loot:/l\"]\n\
+                     volumes:\n  appdata:\n  dbdata:\n  loot:\n";
+
+#[test]
+fn a_profile_lifts_what_the_mission_declares_and_what_it_depends_on() {
+    use nunki::compose::services::Lifted;
+    let file = parse(THREE).unwrap();
+    let whole = file.digest();
+    let lifted = Lifted::declared(file, &["app".to_string()]);
+    assert_eq!(
+        lifted.services.services.keys().collect::<Vec<_>>(),
+        vec!["app", "cache", "db"],
+        "app, what it depends on, and what that depends on"
+    );
+    assert_eq!(lifted.held_back, vec!["miner".to_string()]);
+    assert_eq!(
+        lifted.services.volumes.iter().collect::<Vec<_>>(),
+        vec!["appdata", "dbdata"],
+        "a volume only a held-back service mounts is not made"
+    );
+    // The label is the approved digest — the whole file's — and not the
+    // digest of the part lifted, which nobody approved as such.
+    assert_eq!(lifted.approved, whole);
+    assert_ne!(lifted.services.digest(), whole);
+}
+
+#[test]
+fn a_declared_name_the_file_does_not_hold_lifts_nothing() {
+    use nunki::compose::services::Lifted;
+    // A provider of another kind — a third party's test tier — is declared
+    // by name too, and is nobody's container.
+    let lifted = Lifted::declared(parse(THREE).unwrap(), &["stripe".to_string()]);
+    assert!(lifted.services.services.is_empty());
+    assert!(lifted.services.volumes.is_empty());
+    assert_eq!(lifted.held_back.len(), 4);
+    let none = Lifted::declared(parse(THREE).unwrap(), &[]);
+    assert!(none.services.services.is_empty());
+}
+
+#[test]
+fn the_whole_file_is_lifted_when_asked_for_whole() {
+    use nunki::compose::services::Lifted;
+    let file = parse(THREE).unwrap();
+    let lifted = Lifted::whole(file.clone());
+    assert_eq!(lifted.services, file);
+    assert_eq!(lifted.approved, file.digest());
+    assert!(lifted.held_back.is_empty());
+}
+
+#[test]
+fn the_ports_line_names_the_services_and_says_why() {
+    let line = nunki::services::ports_dropped(&["db", "questdb"]);
+    assert_eq!(
+        line,
+        "ports dropped from db, questdb: the agent reaches a service by its name, and a \
+         published port would collide between slots"
     );
 }

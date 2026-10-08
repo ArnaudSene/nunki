@@ -344,7 +344,7 @@ fn the_projects_services_are_lifted_as_nunkis_rendering() {
     );
     let rendered: serde_yaml_ng::Value = serde_yaml_ng::from_str(&project.render()).unwrap();
     let digest = project.digest();
-    plan.project_services = Some(project);
+    plan.project_services = Some(nunki::compose::services::Lifted::whole(project));
     let yaml = generate(&plan, &dialect()).unwrap();
     let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
     // nunki's own label says which rendering the container came from …
@@ -353,11 +353,12 @@ fn the_projects_services_are_lifted_as_nunkis_rendering() {
         Some(digest.as_str()),
         "{yaml}"
     );
-    // … and, but for it, the service is the rendering read back.
-    doc["services"]["db"]
-        .as_mapping_mut()
-        .unwrap()
-        .remove("labels");
+    // … and, but for nunki's own keys, the service is the rendering read
+    // back.
+    let db = doc["services"]["db"].as_mapping_mut().unwrap();
+    for key in FENCE_KEYS {
+        db.remove(key);
+    }
     assert_eq!(doc["services"]["db"], rendered["services"]["db"], "{yaml}");
     assert_eq!(doc["services"]["db"]["image"].as_str(), Some("postgres:16"));
     assert_eq!(
@@ -387,7 +388,7 @@ fn a_project_service_may_not_take_a_name_hq_reserves() {
                 ..Default::default()
             },
         );
-        plan.project_services = Some(project);
+        plan.project_services = Some(nunki::compose::services::Lifted::whole(project));
         assert!(
             matches!(generate(&plan, &dialect()).unwrap_err(), ComposeError::ReservedService(name) if name == reserved),
             "{reserved} should be refused"
@@ -506,8 +507,9 @@ fn a_real_compose_accepts_every_generated_profile() {
     for role in [Role::Coder, Role::Integrator, Role::Security] {
         let mut plan = plan(role);
         if role != Role::Coder {
-            plan.project_services =
-                Some(services_file("services:\n  db:\n    image: postgres:16\n"));
+            plan.project_services = Some(nunki::compose::services::Lifted::whole(services_file(
+                "services:\n  db:\n    image: postgres:16\n",
+            )));
         }
         let file = dir.path().join(format!("{role:?}.yml"));
         std::fs::write(&file, generate(&plan, &dialect()).unwrap()).unwrap();
@@ -612,10 +614,10 @@ fn dialect() -> nunki::engine::Dialect {
 #[test]
 fn the_projects_volumes_are_declared_beside_hqs() {
     let mut plan = plan(Role::Integrator);
-    plan.project_services = Some(services_file(
+    plan.project_services = Some(nunki::compose::services::Lifted::whole(services_file(
         "services:\n  db:\n    image: postgres:16\n    volumes:\n      - dbdata:/data\n\
          volumes:\n  dbdata:\n",
-    ));
+    )));
 
     let yaml = generate(&plan, &dialect()).unwrap();
     let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
@@ -643,10 +645,109 @@ fn the_projects_volumes_are_declared_beside_hqs() {
 fn a_project_volume_may_not_take_a_slots_own_name() {
     let mut mounted = plan(Role::Integrator);
     let mut project = nunki::compose::services::ServicesFile::default();
+    project.services.insert(
+        "db".to_string(),
+        nunki::compose::services::ProjectService {
+            image: "postgres:16".to_string(),
+            ..Default::default()
+        },
+    );
     project.volumes.insert("nunki-demo-1-harness".to_string());
-    mounted.project_services = Some(project);
+    mounted.project_services = Some(nunki::compose::services::Lifted::whole(project));
     assert!(matches!(
         generate(&mounted, &dialect()),
         Err(ComposeError::ReservedVolume(name)) if name == "nunki-demo-1-harness"
     ));
+}
+
+/// The keys nunki writes on every lifted service, after the rendering.
+const FENCE_KEYS: [&str; 7] = [
+    "labels",
+    "networks",
+    "cap_drop",
+    "cap_add",
+    "security_opt",
+    "mem_limit",
+    "pids_limit",
+];
+
+/// Every lifted service is fenced by nunki, whatever the file says: its
+/// own internal network and no other, every capability dropped and a fixed
+/// few given back, no new privilege, a memory and a process bound — and no
+/// published port. The firewall joins that network beside the default one,
+/// which is how the agent, in its namespace, still reaches the service.
+#[test]
+fn the_lifted_services_are_fenced_by_nunki() {
+    use nunki::compose::services::{CAPABILITIES, Lifted, MEMORY, NETWORK, PROCESSES};
+    let mut plan = plan(Role::Integrator);
+    plan.project_services = Some(Lifted::whole(services_file(
+        "services:\n  db:\n    image: postgres:16\n    ports: [\"5432:5432\"]\n  \
+         cache:\n    image: redis:7\n    ports: [\"127.0.0.1::6379\"]\n",
+    )));
+    let yaml = generate(&plan, &dialect()).unwrap();
+    let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+    let strings = |v: &serde_yaml_ng::Value| -> Vec<String> {
+        v.as_sequence()
+            .unwrap_or_else(|| panic!("a list: {v:?}\n{yaml}"))
+            .iter()
+            .map(|s| s.as_str().unwrap().to_string())
+            .collect()
+    };
+    for name in ["db", "cache"] {
+        let service = &doc["services"][name];
+        assert_eq!(strings(&service["networks"]), vec![NETWORK], "{yaml}");
+        assert_eq!(strings(&service["cap_drop"]), vec!["ALL"], "{yaml}");
+        assert_eq!(
+            strings(&service["cap_add"]),
+            CAPABILITIES.to_vec(),
+            "{yaml}"
+        );
+        assert_eq!(
+            strings(&service["security_opt"]),
+            vec!["no-new-privileges:true"],
+            "{yaml}"
+        );
+        assert_eq!(service["mem_limit"].as_str(), Some(MEMORY), "{yaml}");
+        assert_eq!(
+            service["pids_limit"].as_u64(),
+            Some(u64::from(PROCESSES)),
+            "{yaml}"
+        );
+        assert!(service["ports"].is_null(), "no port is published: {yaml}");
+        assert!(service["network_mode"].is_null(), "{yaml}");
+    }
+    assert!(!yaml.contains("5432") && !yaml.contains("6379"), "{yaml}");
+    assert_eq!(
+        doc["networks"][NETWORK]["internal"].as_bool(),
+        Some(true),
+        "{yaml}"
+    );
+    assert_eq!(doc["networks"].as_mapping().unwrap().len(), 1, "{yaml}");
+    assert_eq!(
+        strings(&doc["services"][FIREWALL_SERVICE]["networks"]),
+        vec!["default", NETWORK],
+        "the firewall keeps its way out and joins the services: {yaml}"
+    );
+    assert!(
+        doc["services"][AGENT_SERVICE]["networks"].is_null(),
+        "the agent has the firewall's namespace and no network of its own"
+    );
+}
+
+/// No service lifted, no network: a profile without the project's services
+/// is the profile it always was.
+#[test]
+fn a_profile_lifting_no_service_has_no_services_network() {
+    use nunki::compose::services::{Lifted, ServicesFile};
+    for project in [None, Some(Lifted::whole(ServicesFile::default()))] {
+        let mut plan = plan(Role::Integrator);
+        plan.project_services = project;
+        let yaml = generate(&plan, &dialect()).unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        assert!(doc["networks"].is_null(), "{yaml}");
+        assert!(
+            doc["services"][FIREWALL_SERVICE]["networks"].is_null(),
+            "{yaml}"
+        );
+    }
 }

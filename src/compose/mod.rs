@@ -128,7 +128,7 @@ pub struct Plan {
     /// "db" refers to undefined volume dbdata: invalid compose project` on
     /// Compose v5.1.2 — and they hold what a profile switch must not take
     /// with it (SPEC 4.2).
-    pub project_services: Option<services::ServicesFile>,
+    pub project_services: Option<services::Lifted>,
     /// nunki's own prober, for `nunki check`. A service nunki writes itself,
     /// so it travels apart from the project's and the closed model never has
     /// to allow what it holds — a shared namespace, a user, a dropped
@@ -239,8 +239,16 @@ fn build(plan: &Plan, dialect: &Dialect) -> Result<Document, ComposeError> {
         absolute("a credential file", host)?;
     }
 
+    let lifted = plan
+        .project_services
+        .as_ref()
+        .filter(|l| !l.services.services.is_empty());
+
     let mut services = Mapping::new();
-    services.insert(Value::from(FIREWALL_SERVICE), firewall(plan).to_value());
+    services.insert(
+        Value::from(FIREWALL_SERVICE),
+        firewall(plan, lifted.is_some()).to_value(),
+    );
     services.insert(Value::from(AGENT_SERVICE), agent(plan, dialect)?.to_value());
     if let Some(prober) = &plan.prober {
         services.insert(Value::from(PROBER_SERVICE), prober.to_value());
@@ -251,30 +259,22 @@ fn build(plan: &Plan, dialect: &Dialect) -> Result<Document, ComposeError> {
         volumes.insert(Value::from(volume.name.clone()), Value::Null);
     }
 
-    if let Some(project) = &plan.project_services {
+    let mut networks = Mapping::new();
+    if let Some(project) = lifted {
         // The rendering, read back: what the engine is given is the text a
         // human is shown, and not a second serialisation of the model that
         // could drift from it.
-        let rendering = project.render();
-        let mut lifted: Value = serde_yaml_ng::from_str(&rendering)
+        let mut rendered: Value = serde_yaml_ng::from_str(&project.services.render())
             .expect("nunki's own rendering is YAML it reads back");
-        // nunki's own key, not the file's: every lifted container says which
-        // rendering it came from, so the next launch can tell a container of
-        // an approved definition from one that is not (SPEC 4.2).
-        if let Some(Value::Mapping(declared)) = lifted.get_mut("services") {
+        if let Some(Value::Mapping(declared)) = rendered.get_mut("services") {
             for (_, service) in declared.iter_mut() {
                 if let Value::Mapping(service) = service {
-                    let mut labels = Mapping::new();
-                    labels.insert(
-                        Value::from(services::LABEL),
-                        Value::from(services::digest(&rendering)),
-                    );
-                    service.insert(Value::from("labels"), Value::Mapping(labels));
+                    fence(service, &project.approved);
                 }
             }
         }
         for (block, into) in [("services", &mut services), ("volumes", &mut volumes)] {
-            let Some(Value::Mapping(declared)) = lifted.get(block) else {
+            let Some(Value::Mapping(declared)) = rendered.get(block) else {
                 continue;
             };
             for (key, value) in declared {
@@ -291,18 +291,47 @@ fn build(plan: &Plan, dialect: &Dialect) -> Result<Document, ComposeError> {
                 into.insert(key.clone(), value.clone());
             }
         }
+        let mut internal = Mapping::new();
+        internal.insert(Value::from("internal"), Value::from(true));
+        networks.insert(Value::from(services::NETWORK), Value::Mapping(internal));
     }
 
     Ok(Document {
         name: project_name(&plan.session, &plan.slot)?,
         services,
         volumes,
+        networks,
     })
+}
+
+/// nunki's own keys on a lifted service, written after the rendering and
+/// never taken from the file, which may hold none of them (SPEC 4.1 bis):
+///
+/// - the label carrying the approved digest, so the next launch can tell a
+///   container of an approved definition from one that is not (SPEC 4.2);
+/// - nunki's internal network and no other, so the service reaches nothing
+///   but what is on it, and publishes nothing;
+/// - every capability dropped and a fixed few given back, no new privilege,
+///   and a bound on memory and on processes.
+fn fence(service: &mut Mapping, approved: &str) {
+    let strings = |items: &[&str]| Value::Sequence(items.iter().map(|s| Value::from(*s)).collect());
+    let mut labels = Mapping::new();
+    labels.insert(Value::from(services::LABEL), Value::from(approved));
+    service.insert(Value::from("labels"), Value::Mapping(labels));
+    service.insert(Value::from("networks"), strings(&[services::NETWORK]));
+    service.insert(Value::from("cap_drop"), strings(&["ALL"]));
+    service.insert(Value::from("cap_add"), strings(&services::CAPABILITIES));
+    service.insert(
+        Value::from("security_opt"),
+        strings(&["no-new-privileges:true"]),
+    );
+    service.insert(Value::from("mem_limit"), Value::from(services::MEMORY));
+    service.insert(Value::from("pids_limit"), Value::from(services::PROCESSES));
 }
 
 /// The sidecar: the only container with power, and the one that owns the
 /// network namespace (SPEC 4.1 bis, rules 1 and 3).
-fn firewall(plan: &Plan) -> Service {
+fn firewall(plan: &Plan, fenced: bool) -> Service {
     let mut environment = BTreeMap::new();
     environment.insert(
         "HQ_ALLOW_DOMAINS".to_string(),
@@ -338,6 +367,15 @@ fn firewall(plan: &Plan) -> Service {
             "SETGID".to_string(),
         ],
         security_opt: vec!["no-new-privileges:true".to_string()],
+        // The default network for the way out it fences, and nunki's
+        // internal one for the project's services, which reach nothing
+        // else: the agent, in this namespace, reaches them through the
+        // perimeter (SPEC 4.1 bis). Only when there is a service to reach.
+        networks: if fenced {
+            vec!["default".to_string(), services::NETWORK.to_string()]
+        } else {
+            Vec::new()
+        },
         healthcheck: Some(Healthcheck {
             test: vec!["CMD".to_string(), "/usr/local/bin/fw-ready".to_string()],
             interval: "1s".to_string(),

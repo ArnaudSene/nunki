@@ -478,14 +478,14 @@ fn live_the_services_survive_a_switch_and_the_application_starts_in_the_profile(
             // The top-level volume matters as much: without it the whole
             // project is invalid — `service "db" refers to undefined volume
             // dbdata` (measured).
-            project_services: Some(
+            project_services: Some(nunki::compose::services::Lifted::whole(
                 nunki::compose::services::ServicesFile::parse(
                     "services:\n  db:\n    image: alpine:3.20\n    \
                      command: [\"sleep\", \"600\"]\n    volumes:\n      - dbdata:/state\n\
                      volumes:\n  dbdata:\n",
                 )
                 .unwrap(),
-            ),
+            )),
             prober: None,
         }
     };

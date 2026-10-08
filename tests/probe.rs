@@ -307,16 +307,23 @@ fn a_system_profile_check_lifts_under_a_slot_of_its_own() {
     let Some(project) = &plan.project_services else {
         panic!("the project's services are not lifted");
     };
-    for name in ["db", "cache"] {
-        assert!(
-            project.services.contains_key(name),
-            "{name} is lifted: {project:?}"
-        );
-    }
+    // What the mission declares is lifted; the file's other service is held
+    // back, never started (SPEC 4.2).
+    assert!(
+        project.services.services.contains_key("db"),
+        "db is lifted: {project:?}"
+    );
+    assert!(!project.services.services.contains_key("cache"));
+    assert_eq!(project.held_back, vec!["cache".to_string()]);
     // The prober travels in a field of its own: the project's closed model
     // never has to allow a shared namespace or a user.
     assert!(plan.prober.is_some(), "the check carries its prober");
-    assert!(!project.services.contains_key(nunki::probe::PROBER_SERVICE));
+    assert!(
+        !project
+            .services
+            .services
+            .contains_key(nunki::probe::PROBER_SERVICE)
+    );
     assert_eq!(
         plan.command,
         vec!["sleep".to_string(), "600".to_string()],

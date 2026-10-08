@@ -292,12 +292,9 @@ pub fn system_plan(
 /// What is tried from inside a system profile: the mission profile's
 /// battery, plus the two things only a system profile has.
 ///
-/// Each service the mission declares must resolve. Each service the
-/// **project** lifts but the mission does not declare must not: the
-/// project's services file is lifted whole, so an undeclared database is on
-/// the same network, and the fence is the only thing between it and the
-/// agent. That probe would succeed without the firewall — Compose's own
-/// resolver answers every service name — which is what makes it one.
+/// Each service the mission declares must resolve. Each service of the
+/// project's file the mission does not declare must not: it is held back,
+/// never started, and a name that resolved would be a service that was.
 pub fn system_probes(plan: &Plan, header: &crate::mission::Header) -> Vec<crate::perimeter::Probe> {
     use crate::perimeter::Probe;
 
@@ -332,16 +329,12 @@ pub fn system_probes(plan: &Plan, header: &crate::mission::Header) -> Vec<crate:
         });
     }
     if let Some(project) = &plan.project_services {
-        for name in project.services.keys() {
-            if !declared.contains(name) {
-                probes.push(Probe {
-                    what: format!(
-                        "{name}, a project service the mission does not declare, resolves"
-                    ),
-                    expected: false,
-                    script: resolves(name),
-                });
-            }
+        for name in &project.held_back {
+            probes.push(Probe {
+                what: format!("{name}, a project service the mission does not declare, resolves"),
+                expected: false,
+                script: resolves(name),
+            });
         }
     }
     probes

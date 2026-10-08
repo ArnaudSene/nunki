@@ -47,6 +47,95 @@ pub fn digest(rendering: &str) -> String {
     format!("sha256:{}", crate::init::sha256(rendering.as_bytes()))
 }
 
+/// The network every lifted service joins, and the only one: nunki's, and
+/// declared `internal: true`, so the engine gives it no route out. The
+/// firewall attaches to it beside the default network, which is how the
+/// agent — in the firewall's namespace — reaches a service through its
+/// perimeter, and how nothing else does (SPEC 4.1 bis).
+pub const NETWORK: &str = "nunki-services";
+
+/// The capabilities a lifted service gets back, after all of them are
+/// dropped. Fixed, nunki's, never the file's: what the official database
+/// images' entrypoints need to take their data directory and drop from root
+/// to their own user — own it (`CHOWN`, `FOWNER`), read it whatever its
+/// mode (`DAC_OVERRIDE`), and change user (`SETUID`, `SETGID`).
+///
+/// **Not measured in the run that wrote it**, which had no container engine:
+/// the set the mission named as expected. `live_the_capability_set_is_the_
+/// smallest_the_images_need` in `tests/services_file.rs` measures it, image
+/// by image and capability by capability.
+pub const CAPABILITIES: [&str; 5] = ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"];
+
+/// The memory a lifted service may use: a bound, so a service cannot take
+/// the human's machine with it. Enough for a database and a JVM under test.
+pub const MEMORY: &str = "2g";
+
+/// The processes a lifted service may hold: a bound on a fork bomb. A JVM
+/// counts its threads here, and QuestDB starts a few hundred.
+pub const PROCESSES: u32 = 1024;
+
+/// What a profile lifts from an approved services file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Lifted {
+    /// The services lifted, and the volumes they mount.
+    pub services: ServicesFile,
+    /// The digest of the whole approved rendering: what every lifted
+    /// container is labelled with, so the next launch can tell an approved
+    /// definition from one that is not.
+    pub approved: String,
+    /// The file's services this profile does not start.
+    pub held_back: Vec<String>,
+}
+
+impl Lifted {
+    /// Every service of `file`.
+    pub fn whole(file: ServicesFile) -> Self {
+        Self {
+            approved: file.digest(),
+            services: file,
+            held_back: Vec::new(),
+        }
+    }
+
+    /// The services of `file` a mission declares by name, and those they
+    /// depend on, however deep; the others are held back, and so are the
+    /// volumes only they mount. A declared name the file does not hold is a
+    /// provider of another kind — a third party's test tier — and lifts
+    /// nothing.
+    pub fn declared(file: ServicesFile, declared: &[String]) -> Self {
+        let approved = file.digest();
+        let mut wanted: BTreeSet<String> = BTreeSet::new();
+        let mut queue: Vec<String> = declared
+            .iter()
+            .filter(|name| file.services.contains_key(*name))
+            .cloned()
+            .collect();
+        while let Some(name) = queue.pop() {
+            if wanted.insert(name.clone()) {
+                queue.extend(file.services[&name].depends_on.keys().cloned());
+            }
+        }
+        let (services, held): (BTreeMap<_, _>, BTreeMap<_, _>) = file
+            .services
+            .into_iter()
+            .partition(|(name, _)| wanted.contains(name));
+        let volumes = file
+            .volumes
+            .into_iter()
+            .filter(|volume| {
+                services
+                    .values()
+                    .any(|s: &ProjectService| s.volumes.iter().any(|m| m.volume == *volume))
+            })
+            .collect();
+        Self {
+            services: ServicesFile { services, volumes },
+            approved,
+            held_back: held.into_keys().collect(),
+        }
+    }
+}
+
 /// The keys a service may hold, in the order they are rendered. `ports` is
 /// read and dropped, and is therefore not among them.
 pub const SERVICE_KEYS: [&str; 8] = [

@@ -2266,7 +2266,7 @@ fn a_launch_takes_down_what_was_lifted_from_a_definition_nobody_approved() {
     approve_head(&project, &slot);
     let header = header_with(with_services());
     let (plan, _) = profile_for(&project, &slot, &header, Role::Integrator);
-    let lifting = plan.project_services.as_ref().unwrap().digest();
+    let lifting = plan.project_services.as_ref().unwrap().approved.clone();
 
     let lifted = |id: &str, service: &str, digest: Option<&str>| nunki::engine::Container {
         id: id.into(),
@@ -2350,5 +2350,45 @@ fn a_mission_profile_keeps_what_a_human_approved_and_nothing_else() {
     assert_eq!(
         run::lift(&engine, &project, Path::new("/p.yml"), "p", &plan).unwrap(),
         vec!["gone"]
+    );
+}
+
+/// A system profile lifts the services its frozen header declares, and
+/// those they depend on; the file's others are not started, and the probes
+/// know them as held back (SPEC 4.2).
+#[test]
+fn a_system_profile_lifts_only_the_services_the_mission_declares() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = with_services_file(dir.path());
+    let slot = committed_slot(
+        dir.path(),
+        &[(
+            "compose.yaml",
+            "services:\n  db:\n    image: postgres:16\n    ports: [\"5432:5432\"]\n  \
+             miner:\n    image: coin\n",
+        )],
+    );
+    approve_head(&project, &slot);
+    let header = header_with(with_services());
+    let (plan, doc) = profile_for(&project, &slot, &header, Role::Integrator);
+    assert!(doc["services"]["db"].is_mapping(), "{doc:?}");
+    assert!(doc["services"]["miner"].is_null(), "{doc:?}");
+    let lifted = plan.project_services.as_ref().unwrap();
+    assert_eq!(lifted.held_back, vec!["miner".to_string()]);
+    assert_eq!(lifted.services.dropped_ports(), vec!["db"]);
+    // What the launch says in one line: the ports it did not publish.
+    assert_eq!(run::ports_dropped(&plan), vec!["db".to_string()]);
+    let (coder, _) = profile_for(&project, &slot, &header, Role::Coder);
+    assert!(run::ports_dropped(&coder).is_empty());
+    assert_eq!(
+        doc["services"]["db"]["labels"][nunki::compose::services::LABEL].as_str(),
+        Some(
+            nunki::services::read(&project, nunki::services::At::Slot(&slot.tree))
+                .unwrap()
+                .unwrap()
+                .digest
+                .as_str()
+        ),
+        "labelled with the digest a human approved"
     );
 }
