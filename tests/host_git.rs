@@ -1626,6 +1626,19 @@ fn a_mirror_that_cannot_be_removed_fails_slot_rm() {
     assert!(removed.is_err());
 }
 
+/// A slot whose mirror was never made, or is gone already, is still
+/// removed: no mirror to remove is nothing to fail on.
+#[test]
+fn a_slot_whose_mirror_does_not_exist_is_removed() {
+    let w = world();
+    let mirror = nunki::git::mirror_of(&w.tree);
+    std::fs::remove_dir_all(&mirror).unwrap();
+    assert!(!mirror.exists());
+    nunki::slot::rm(&w.project, "one", true).unwrap();
+    assert!(!w.tree.exists());
+    assert!(!mirror.exists());
+}
+
 /// A repository at `at`, in the slot's tree, with one commit of its own.
 fn nested_repository(at: &Path) {
     std::fs::create_dir_all(at).unwrap();
