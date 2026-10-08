@@ -969,7 +969,7 @@ fn no_plain_git_runs_on_a_slot() {
         ("src/push.rs", "crate::git::run("),
         (
             "src/push.rs",
-            "let after = crate::git::head_of(&project.root, &branch)?;",
+            "let after = crate::git::head_of(&project.root, &full)?;",
         ),
         (
             "src/push.rs",
@@ -1449,7 +1449,8 @@ fn a_refs_directory_that_cannot_be_listed_is_an_error() {
 }
 
 /// An annotated tag, packed, leaves a peeled line in `packed-refs`: read as
-/// what it is, not as a ref.
+/// what it is, not as a ref, so the branches packed beside it are read. The
+/// tag itself is not mirrored: no tag of a slot's is.
 #[test]
 fn a_packed_annotated_tag_is_read_with_its_peeled_line() {
     let w = world();
@@ -1459,9 +1460,10 @@ fn a_packed_annotated_tag_is_read_with_its_peeled_line() {
     assert!(packed.lines().any(|l| l.starts_with('^')), "{packed}");
     let repo = nunki::git::SlotGit::open(&w.tree).unwrap();
     assert_eq!(
-        repo.run(&["rev-parse", "v1^{commit}"]).unwrap(),
+        repo.run(&["rev-parse", "refs/heads/mission/x"]).unwrap(),
         git(&w.tree, &["rev-parse", "HEAD"])
     );
+    assert!(!repo.has("refs/tags/v1"));
 }
 
 /// A git that fails in the mirror says which slot it was about.
@@ -2059,4 +2061,250 @@ fn a_slot_with_a_gitlink_is_removed_by_force_and_runs_nothing() {
     nunki::slot::rm(&w.project, "one", true).unwrap();
     assert!(!w.tree.exists());
     assert_eq!(w.ran(), Vec::<String>::new());
+}
+
+/// Every ref of the project's repository, as `<name> <id>`.
+fn refs_of(at: &Path) -> Vec<String> {
+    git(at, &["for-each-ref", "--format=%(refname) %(objectname)"])
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+/// From a slot, nunki takes exactly the mission's branch. The agent tags
+/// its commit `dev`, lightweight, and `v9.9.9`, annotated: `mission fetch`
+/// brings neither into the project, `dev` there is still the branch, and
+/// the project's refs change by exactly `refs/heads/mission/x`. The mirror
+/// holds no tag of the slot's, and drops one an earlier mirror kept.
+#[test]
+fn mission_fetch_takes_the_branch_and_no_tag_of_the_slots() {
+    let w = world();
+    let dev = git(&w.project.root, &["rev-parse", "refs/heads/dev"]);
+    git(&w.tree, &["tag", "dev"]);
+    git(
+        &w.tree,
+        &["tag", "-a", "v9.9.9", "-m", "a release the agent named"],
+    );
+    let before = refs_of(&w.project.root);
+
+    let fetched = nunki::push::fetch(&w.project, "m1").unwrap();
+    let head = git(&w.tree, &["rev-parse", "HEAD"]);
+    assert_eq!(fetched.head, head);
+    let mut expected = before.clone();
+    expected.push(format!("refs/heads/mission/x {head}"));
+    expected.sort();
+    let mut after = refs_of(&w.project.root);
+    after.sort();
+    assert_eq!(
+        after, expected,
+        "the project's refs changed by more than the branch"
+    );
+    assert_eq!(git(&w.project.root, &["rev-parse", "dev"]), dev);
+    let mirror = nunki::git::mirror_of(&w.tree);
+    assert_eq!(git(&mirror, &["for-each-ref", "refs/tags"]), "");
+
+    // A tag in the mirror itself, as a mirror made by an earlier nunki kept
+    // the slot's: the fetch still follows none.
+    git(&mirror, &["tag", "kept", &head]);
+    git(
+        &mirror,
+        &["tag", "-a", "kept-annotated", "-m", "kept", &head],
+    );
+    git(&w.project.root, &["branch", "-D", "mission/x"]);
+    nunki::push::fetch(&w.project, "m1").unwrap();
+    let mut after = refs_of(&w.project.root);
+    after.sort();
+    assert_eq!(
+        after, expected,
+        "a tag of the mirror's crossed into the project"
+    );
+
+    // The next sync drops them.
+    write(&w.tree, "src.rs", "pub fn one() -> u8 {\n    3\n}\n");
+    git(&w.tree, &["commit", "-qam", "more"]);
+    nunki::git::SlotGit::open(&w.tree).unwrap();
+    assert_eq!(git(&mirror, &["for-each-ref", "refs/tags"]), "");
+}
+
+/// A world whose commit carries `attributes` as `.gitattributes` and `body`
+/// as `lib.rs`, written on disk as committed.
+fn world_with(attributes: &str, body: &str) -> World {
+    let w = world();
+    write(&w.tree, ".gitattributes", attributes);
+    write(&w.tree, "lib.rs", body);
+    git(&w.tree, &["add", "-A"]);
+    git(&w.tree, &["commit", "-q", "-m", "attributes"]);
+    assert!(nunki::git::is_clean(&w.tree).unwrap(), "{attributes}");
+    w
+}
+
+/// Not clean, by `is_clean` and by gate 1, which names `line`.
+fn not_clean(w: &World, line: &str) {
+    assert!(!nunki::git::is_clean(&w.tree).unwrap(), "{line}");
+    match clean_tree_gate(w) {
+        nunki::gate::Decision::Failed(said) => assert!(said.contains(line), "{said}"),
+        other => panic!("{line}: {other:?}"),
+    }
+}
+
+/// `nunki` compares bytes: a tracked file whose content on disk differs
+/// from `HEAD`'s blob is not clean, whatever the tree's `.gitattributes`
+/// would make of it. Each case is shown first to be one a comparison
+/// through the attributes calls unchanged: the slot's own git hashes the
+/// edited file to `HEAD`'s very id.
+#[test]
+fn a_tree_is_compared_with_its_commit_byte_for_byte() {
+    let through_attributes = |w: &World, extra: &[&str]| {
+        let mut args: Vec<&str> = extra.to_vec();
+        args.extend(["hash-object", "lib.rs"]);
+        git(&w.tree, &args)
+    };
+
+    // The reviewer's case: `ident`, and code between `$Id:` and `$`.
+    let w = world_with("* ident\n", "fn main() {} // $Id$\n");
+    write(&w.tree, "lib.rs", "fn main() {} // $Id: evil(); $\n");
+    assert_eq!(
+        through_attributes(&w, &[]),
+        git(&w.tree, &["rev-parse", "HEAD:lib.rs"])
+    );
+    not_clean(&w, " M lib.rs");
+
+    // Line endings: `text` normalises CRLF away.
+    let w = world_with("* text\n", "one\ntwo\n");
+    write(&w.tree, "lib.rs", "one\r\ntwo\r\n");
+    assert_eq!(
+        through_attributes(&w, &[]),
+        git(&w.tree, &["rev-parse", "HEAD:lib.rs"])
+    );
+    not_clean(&w, " M lib.rs");
+
+    // A filter driver that cleans the change away.
+    let w = world_with("* filter=evil\n", "one\n");
+    write(&w.tree, "lib.rs", "one\nevil();\n");
+    assert_eq!(
+        through_attributes(&w, &["-c", "filter.evil.clean=sed /evil/d"]),
+        git(&w.tree, &["rev-parse", "HEAD:lib.rs"])
+    );
+    not_clean(&w, " M lib.rs");
+}
+
+/// Mode and type count as much as content: an executable bit, a file
+/// turned into a link, a link pointed elsewhere, a directory on the way
+/// replaced by a link to an identical copy, a file gone.
+#[test]
+fn a_tree_differs_from_its_commit_by_mode_and_type_too() {
+    let fresh = || {
+        let w = world();
+        std::fs::create_dir_all(w.tree.join("d")).unwrap();
+        write(&w.tree, "d/inner.rs", "inner\n");
+        std::os::unix::fs::symlink("src.rs", w.tree.join("link")).unwrap();
+        git(&w.tree, &["add", "-A"]);
+        git(&w.tree, &["commit", "-q", "-m", "a link and a directory"]);
+        assert!(nunki::git::is_clean(&w.tree).unwrap());
+        w
+    };
+
+    let w = fresh();
+    std::fs::set_permissions(
+        w.tree.join("src.rs"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    not_clean(&w, " M src.rs");
+
+    let w = fresh();
+    std::fs::remove_file(w.tree.join("src.rs")).unwrap();
+    std::os::unix::fs::symlink("link", w.tree.join("src.rs")).unwrap();
+    not_clean(&w, " T src.rs");
+
+    let w = fresh();
+    std::fs::remove_file(w.tree.join("link")).unwrap();
+    std::os::unix::fs::symlink(".gitignore", w.tree.join("link")).unwrap();
+    not_clean(&w, " M link");
+
+    let w = fresh();
+    std::fs::remove_file(w.tree.join("link")).unwrap();
+    write(&w.tree, "link", "src.rs");
+    not_clean(&w, " T link");
+
+    let w = fresh();
+    let copy = w.dir.path().join("copy");
+    std::fs::rename(w.tree.join("d"), &copy).unwrap();
+    std::os::unix::fs::symlink(&copy, w.tree.join("d")).unwrap();
+    not_clean(&w, " T d/inner.rs");
+
+    let w = fresh();
+    std::fs::remove_dir_all(w.tree.join("d")).unwrap();
+    not_clean(&w, " D d/inner.rs");
+
+    let w = fresh();
+    std::fs::remove_file(w.tree.join("src.rs")).unwrap();
+    not_clean(&w, " D src.rs");
+
+    let w = fresh();
+    write(&w.tree, "new.rs", "new\n");
+    not_clean(&w, "?? new.rs");
+}
+
+/// A ref file the agent made huge is refused, naming it, rather than read
+/// whole into the host's memory: a sparse 3 GiB `HEAD`, a `packed-refs`
+/// past its bound, a loose ref past its own.
+#[test]
+fn a_ref_file_too_large_is_refused_and_never_read_whole() {
+    for (at, size) in [
+        (".git/HEAD", 3u64 << 30),
+        (".git/packed-refs", (64 << 20) + 1),
+        (".git/refs/heads/huge", 4097),
+    ] {
+        let w = world();
+        let file = w.tree.join(at);
+        let handle = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&file)
+            .unwrap();
+        handle.set_len(size).unwrap();
+        let started = std::time::Instant::now();
+        let err = nunki::git::SlotGit::open(&w.tree).unwrap_err().to_string();
+        assert!(err.contains(&file.display().to_string()), "{at}: {err}");
+        assert!(
+            err.contains("bytes, more than any such file"),
+            "{at}: {err}"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "{at}"
+        );
+    }
+}
+
+/// The reviewer's FIFO at `.gitattributes`: no git reads a tracked file's
+/// content with the tree as work tree any more, so it is a change of type,
+/// said at once, and never opened.
+#[test]
+fn a_fifo_at_a_tracked_path_is_a_change_and_never_waited_on() {
+    let w = world();
+    let fifo = w.tree.join(".gitattributes");
+    std::fs::remove_file(&fifo).unwrap();
+    assert!(
+        Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let tree = w.tree.clone();
+    let (sent, answer) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sent.send(
+            nunki::git::SlotGit::open(&tree)
+                .and_then(|r| r.status())
+                .map_err(|e| e.to_string()),
+        );
+    });
+    let status = answer
+        .recv_timeout(std::time::Duration::from_secs(20))
+        .expect("the host waited on the agent's FIFO");
+    assert_eq!(status.unwrap(), " T .gitattributes");
 }

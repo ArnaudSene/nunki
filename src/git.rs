@@ -32,7 +32,14 @@
 //!   of the commit — runs in the mirror. The few verbs that need the working
 //!   tree ([`WORK_TREE_VERBS`], one closed list) run with the mirror as git
 //!   directory, the slot's tree as work tree, and an index `nunki` builds
-//!   from `HEAD` itself;
+//!   from `HEAD` itself. Whether the tree is its `HEAD` is `nunki`'s own
+//!   comparison of bytes, modes and types ([`SlotGit::status`]): no git
+//!   reads a tracked file's content through the tree's attributes;
+//! - from a slot, `nunki` takes exactly the refs it names: its branches and
+//!   remote-tracking branches, never its tags, and every fetch out of the
+//!   mirror names its branch and follows no tag;
+//! - the files of a slot's `.git` that `nunki` reads itself are refused
+//!   past a size no such git file reaches;
 //! - **no git is ever started inside the slot's tree**. A gitlink makes git
 //!   descend into a submodule with a git of its own, which would read the
 //!   agent's configuration and hooks there. So, two layers: a commit or index
@@ -317,13 +324,15 @@ pub const MIRRORS: &str = ".nunki-git";
 /// The verbs `nunki` runs with a slot's tree as work tree — **the closed
 /// list**: every other git about a slot runs in the mirror alone.
 ///
-/// - `status`: is the tree its `HEAD` (gate 1, `is_clean`, `slot rm`);
+/// - `ls-files`: which files of the tree are untracked and not ignored (gate
+///   1, `is_clean`, `slot rm`) — the files `HEAD` tracks are compared by
+///   `nunki` itself, byte for byte ([`SlotGit::status`]);
 /// - `read-tree` and `clean`: put the tree back to `HEAD` (`slot reset`), or
 ///   onto a branch (the launch's checkout);
 /// - `update-index`: the stat refresh that checkout's two-way merge needs.
 ///
 /// A verb added here is a decision, and the unit tests pin this list.
-pub const WORK_TREE_VERBS: &[&str] = &["status", "read-tree", "update-index", "clean"];
+pub const WORK_TREE_VERBS: &[&str] = &["ls-files", "read-tree", "update-index", "clean"];
 
 /// The configuration that keeps a git from descending into a submodule:
 /// set in every mirror's own configuration, and again on the command line
@@ -333,9 +342,14 @@ const NO_DESCENT: &[(&str, &str)] = &[
     ("submodule.recurse", "false"),
 ];
 
-/// The `status` gate 1 and `is_clean` read: descent into a submodule is off
-/// on its own command line as well.
-const STATUS: &[&str] = &["status", "--porcelain", "--ignore-submodules=all"];
+/// The untracked files that are not ignored, by path, as gate 1 and
+/// `is_clean` read them. The rules are the tree's `.gitignore` files and the
+/// mirror's: never the slot's `info/exclude`, nor a global excludes file.
+const UNTRACKED: &[&str] = &["ls-files", "--others", "--exclude-standard", "-z"];
+
+/// How many paths one `hash-object` is handed at once: far below any limit
+/// on a command line's length.
+const HASHED_AT_ONCE: usize = 256;
 
 /// Switch submodule descent off on `git`'s command line ([`NO_DESCENT`]).
 fn no_descent(git: &mut Command) {
@@ -565,10 +579,144 @@ impl SlotGit {
         self.run(&["rev-parse", "--abbrev-ref", "HEAD"])
     }
 
-    /// What differs between the slot's tree and its `HEAD`, as
-    /// `git status --porcelain` says it, against `nunki`'s index.
+    /// What differs between the slot's tree and its `HEAD`, one line per
+    /// path in `git status --porcelain`'s shape: ` M` content or mode, ` T`
+    /// type, ` D` gone, `??` untracked and not ignored.
+    ///
+    /// **`nunki` compares bytes** (SPEC 4.4, gate 1). A tracked file's
+    /// content on disk is hashed with no filter, no attribute and no
+    /// conversion (`hash-object --no-filters`, in the mirror) and compared
+    /// with the id in `HEAD`'s tree; its mode and type too. Nothing in the
+    /// tree — a `.gitattributes` naming `ident`, `text`, `eol` or a filter —
+    /// changes that comparison, and no git reads a tracked file's content
+    /// with the tree as work tree. A path reached through a link, or
+    /// through anything but directories, is a change.
     pub fn status(&self) -> Result<String, GitError> {
-        self.run_in_tree(STATUS)
+        let index = self.fresh_index(false)?;
+        // The structural refusal first: nothing is read in a tree whose
+        // commit holds a gitlink.
+        self.refuse_gitlinks(&index)?;
+        let mut lines = self.tracked_changes()?;
+        let untracked = self.in_tree(&index, UNTRACKED)?;
+        lines.extend(
+            untracked
+                .split('\0')
+                .filter(|p| !p.is_empty())
+                .map(|p| format!("?? {p}")),
+        );
+        Ok(lines.join("\n"))
+    }
+
+    /// The tracked paths whose bytes, mode or type on disk are not `HEAD`'s.
+    fn tracked_changes(&self) -> Result<Vec<String>, GitError> {
+        let listed = self.run(&["ls-tree", "-r", "-z", "--full-tree", "HEAD"])?;
+        let mut changed = Vec::new();
+        let mut to_hash: Vec<(String, String)> = Vec::new();
+        let mut dirs: std::collections::BTreeSet<PathBuf> = Default::default();
+        for entry in listed.split('\0').filter(|e| !e.is_empty()) {
+            let Some((meta, path)) = entry.split_once('\t') else {
+                continue;
+            };
+            let mut fields = meta.split(' ');
+            let (Some(mode), Some(_), Some(id)) = (fields.next(), fields.next(), fields.next())
+            else {
+                continue;
+            };
+            let full = self.tree.join(path);
+            if let Some(how) = self.not_reached(path, &mut dirs)? {
+                changed.push(format!(" {how} {path}"));
+                continue;
+            }
+            let on_disk = match std::fs::symlink_metadata(&full) {
+                Ok(m) => m,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    changed.push(format!(" D {path}"));
+                    continue;
+                }
+                Err(e) => return Err(GitError::Io(full, e)),
+            };
+            match mode {
+                "100644" | "100755" if on_disk.is_file() => {
+                    use std::os::unix::fs::PermissionsExt as _;
+                    let executable = on_disk.permissions().mode() & 0o100 != 0;
+                    if executable != (mode == "100755") {
+                        changed.push(format!(" M {path}"));
+                    } else {
+                        to_hash.push((path.to_string(), id.to_string()));
+                    }
+                }
+                "120000" if on_disk.is_symlink() => {
+                    use std::os::unix::ffi::OsStrExt as _;
+                    let target =
+                        std::fs::read_link(&full).map_err(|e| GitError::Io(full.clone(), e))?;
+                    let hashed = self.run_with_input(
+                        &["hash-object", "--no-filters", "--stdin"],
+                        target.as_os_str().as_bytes(),
+                    )?;
+                    if hashed != id {
+                        changed.push(format!(" M {path}"));
+                    }
+                }
+                _ => changed.push(format!(" T {path}")),
+            }
+        }
+        for chunk in to_hash.chunks(HASHED_AT_ONCE) {
+            let mut args = vec![
+                "hash-object".to_string(),
+                "--no-filters".into(),
+                "--".into(),
+            ];
+            args.extend(
+                chunk
+                    .iter()
+                    .map(|(p, _)| self.tree.join(p).display().to_string()),
+            );
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            let hashed = self.run(&args)?;
+            let ids: Vec<&str> = hashed.lines().collect();
+            if ids.len() != chunk.len() {
+                return Err(GitError::Failed {
+                    verb: "hash-object".into(),
+                    at: self.at(),
+                    stderr: format!("{} ids for {} files", ids.len(), chunk.len()),
+                });
+            }
+            for ((path, id), hashed) in chunk.iter().zip(ids) {
+                if hashed != id {
+                    changed.push(format!(" M {path}"));
+                }
+            }
+        }
+        changed.sort();
+        Ok(changed)
+    }
+
+    /// How the tracked `path` cannot be reached in the tree through plain
+    /// directories: ` D` when a directory on the way is gone, ` T` when it
+    /// is a link or anything but a directory. `None` when it can. `dirs`
+    /// holds the directories already found plain.
+    fn not_reached(
+        &self,
+        path: &str,
+        dirs: &mut std::collections::BTreeSet<PathBuf>,
+    ) -> Result<Option<&'static str>, GitError> {
+        let mut dir = self.tree.clone();
+        let parts: Vec<&str> = path.split('/').collect();
+        for part in &parts[..parts.len() - 1] {
+            dir.push(part);
+            if dirs.contains(&dir) {
+                continue;
+            }
+            match std::fs::symlink_metadata(&dir) {
+                Ok(m) if m.is_dir() => {
+                    dirs.insert(dir.clone());
+                }
+                Ok(_) => return Ok(Some("T")),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Some("D")),
+                Err(e) => return Err(GitError::Io(dir, e)),
+            }
+        }
+        Ok(None)
     }
 
     /// Whether the slot's tree holds exactly its `HEAD`, untracked files
@@ -736,7 +884,6 @@ impl SlotGit {
             "--format=%(objectname)",
             "refs/heads",
             "refs/remotes",
-            "refs/tags",
         ])?;
         for id in mirrored.lines().filter(|l| !l.is_empty()) {
             revs.push_str(&format!("^{id}\n"));
@@ -863,12 +1010,30 @@ impl SlotGit {
         let fetched = self.fetch_through(&shim, &refs);
         let _ = std::fs::remove_dir_all(&shim);
         fetched?;
+        self.drop_tags()?;
 
         match &refs.head {
             Head::Branch(name) => self.run(&["symbolic-ref", "HEAD", name])?,
             Head::Detached(id) => self.run(&["update-ref", "--no-deref", "HEAD", id])?,
         };
         std::fs::write(&record, said).map_err(|e| GitError::Io(record, e))
+    }
+
+    /// Delete every tag the mirror holds. None comes from a slot any more;
+    /// a mirror made by an earlier nunki may still hold the slot's, and a
+    /// fetch out of the mirror must find none to follow.
+    fn drop_tags(&self) -> Result<(), GitError> {
+        let tags = self.run(&["for-each-ref", "--format=%(refname)", "refs/tags"])?;
+        let commands: String = tags
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|name| format!("delete {name}\n"))
+            .collect();
+        if commands.is_empty() {
+            return Ok(());
+        }
+        self.run_with_input(&["update-ref", "--stdin"], commands.as_bytes())
+            .map(|_| ())
     }
 
     /// A mirror whose objects are in `format`: made when there is none, and
@@ -918,7 +1083,6 @@ impl SlotGit {
                 "--prune",
                 "+refs/heads/*:refs/heads/*",
                 "+refs/remotes/*:refs/remotes/*",
-                "+refs/tags/*:refs/tags/*",
                 "+refs/slot-head/*:refs/slot-head/*",
             ],
         )
@@ -1212,8 +1376,10 @@ impl Refs {
 }
 
 /// The namespaces of a slot's refs the mirror holds. `refs/replace/` is not
-/// among them, and never will be.
-const MIRRORED: [&str; 3] = ["refs/heads/", "refs/remotes/", "refs/tags/"];
+/// among them, and never will be; nor is `refs/tags/`: a tag the agent
+/// named after a branch would shadow it wherever it went, and nunki takes
+/// from a slot exactly the refs it names (security round 2).
+const MIRRORED: [&str; 2] = ["refs/heads/", "refs/remotes/"];
 
 /// Read a slot's refs from its files, the way git stores them in a clone:
 /// `HEAD`, `packed-refs`, then the loose refs, which win.
@@ -1223,7 +1389,7 @@ fn read_refs(tree: &Path, gitdir: &Path) -> Result<Refs, GitError> {
         why,
     };
     let head_file = gitdir.join("HEAD");
-    let head = regular_file(&head_file).map_err(&unreadable)?;
+    let head = regular_file(&head_file, REF_FILE_LIMIT).map_err(&unreadable)?;
     let head = head.trim();
     let head = match head.strip_prefix("ref:") {
         Some(name) if name.trim().starts_with("refs/heads/") => {
@@ -1248,7 +1414,7 @@ fn read_refs(tree: &Path, gitdir: &Path) -> Result<Refs, GitError> {
     // Absent only when lstat says so: any other answer is read, and the
     // read says what is wrong rather than a slot looking packless.
     if !absent(&std::fs::symlink_metadata(&packed)) {
-        let text = regular_file(&packed).map_err(&unreadable)?;
+        let text = regular_file(&packed, PACKED_REFS_LIMIT).map_err(&unreadable)?;
         for line in text.lines() {
             if line.starts_with('#') || line.starts_with('^') || line.trim().is_empty() {
                 continue;
@@ -1323,7 +1489,7 @@ fn loose(
         if name.ends_with(".lock") {
             continue;
         }
-        let text = regular_file(&path)?;
+        let text = regular_file(&path, REF_FILE_LIMIT)?;
         let text = text.trim();
         if text.starts_with("ref:") {
             // A symbolic ref — `origin/HEAD`, as a clone writes it. What it
@@ -1341,16 +1507,42 @@ fn loose(
     Ok(())
 }
 
-/// The content of `path`, refused when it is anything but a regular file.
-fn regular_file(path: &Path) -> Result<String, String> {
-    let meta = std::fs::symlink_metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+/// The most a slot's `HEAD`, or one of its loose refs, may hold: an id or a
+/// `ref: <name>` line, with room to spare.
+const REF_FILE_LIMIT: u64 = 4096;
+
+/// The most a slot's `packed-refs` may hold: a line of about a hundred bytes
+/// per ref, for hundreds of thousands of refs.
+const PACKED_REFS_LIMIT: u64 = 64 << 20;
+
+/// The content of `path`, refused when it is anything but a regular file,
+/// or when it holds more than `limit` bytes: the agent writes these files,
+/// and the host reads them whole.
+fn regular_file(path: &Path, limit: u64) -> Result<String, String> {
+    use std::io::Read as _;
+    let said = |e: std::io::Error| format!("{}: {e}", path.display());
+    let meta = std::fs::symlink_metadata(path).map_err(said)?;
     if !meta.is_file() {
         return Err(format!(
             "{} is not a regular file, and nunki follows no link in a slot's .git",
             path.display()
         ));
     }
-    std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))
+    // Never more than `limit` and one byte read, however large the file is
+    // or grows to.
+    let mut text = String::new();
+    std::fs::File::open(path)
+        .map_err(said)?
+        .take(limit + 1)
+        .read_to_string(&mut text)
+        .map_err(said)?;
+    if text.len() as u64 > limit {
+        return Err(format!(
+            "{} holds more than {limit} bytes, more than any such file of git's",
+            path.display()
+        ));
+    }
+    Ok(text)
 }
 
 /// Whether a look at a file of a slot's `.git` found it absent: only a
@@ -1462,14 +1654,18 @@ mod tests {
 
     /// The second layer alone: with the structural refusal out of the way,
     /// every work-tree verb `nunki` runs, as it runs it, starts nothing in
-    /// the submodule — submodule descent is off.
+    /// the submodule — submodule descent is off. A plain `status`, which
+    /// `nunki` no longer runs but which is the verb that does descend (a
+    /// plain git in this slot runs both markers), is played too: it is what
+    /// shows the configuration holds, should a descending verb ever be added.
     #[test]
     fn with_descent_off_no_work_tree_verb_starts_a_git_in_a_submodule() {
         let dir = tempfile::tempdir().unwrap();
         let (tree, markers) = slot_with_a_submodule(dir.path());
         let slot = SlotGit::open(&tree).unwrap();
         for args in [
-            STATUS,
+            &["status", "--porcelain"][..],
+            UNTRACKED,
             &["update-index", "-q", "--refresh"][..],
             &["read-tree", "-m", "-u", "HEAD", "HEAD"][..],
             &["read-tree", "--reset", "-u", "HEAD"][..],
@@ -1511,7 +1707,7 @@ mod tests {
     fn only_the_listed_verbs_run_with_a_slots_tree_as_work_tree() {
         assert_eq!(
             WORK_TREE_VERBS,
-            ["status", "read-tree", "update-index", "clean"]
+            ["ls-files", "read-tree", "update-index", "clean"]
         );
         let dir = tempfile::tempdir().unwrap();
         let tree = dir.path().join("slots").join("one");
@@ -1520,11 +1716,19 @@ mod tests {
         plain_git(&tree, &["commit", "-q", "--allow-empty", "-m", "a"]);
         let slot = SlotGit::open(&tree).unwrap();
         let index = slot.fresh_index(false).unwrap();
-        for verb in ["grep", "checkout", "reset", "diff", "submodule", ""] {
+        for verb in [
+            "status",
+            "grep",
+            "checkout",
+            "reset",
+            "diff",
+            "submodule",
+            "",
+        ] {
             let err = slot.in_tree(&index, &[verb]).unwrap_err();
             assert!(err.to_string().contains("nunki runs no"), "{verb}: {err}");
         }
-        assert_eq!(slot.in_tree(&index, STATUS).unwrap(), "");
+        assert_eq!(slot.in_tree(&index, UNTRACKED).unwrap(), "");
     }
 
     /// Descent is off in the mirror's own configuration too, and on every
@@ -1538,7 +1742,6 @@ mod tests {
                 ("submodule.recurse", "false")
             ]
         );
-        assert!(STATUS.contains(&"--ignore-submodules=all"));
         let dir = tempfile::tempdir().unwrap();
         let (tree, _) = slot_with_a_submodule(dir.path());
         let slot = SlotGit::open(&tree).unwrap();
@@ -1617,6 +1820,19 @@ mod tests {
             why.contains("objects is neither a file nor a directory"),
             "{why}"
         );
+    }
+
+    /// A file of a slot's `.git` is read up to its limit and refused beyond
+    /// it, naming the file — exactly at the limit is read whole.
+    #[test]
+    fn a_file_of_a_slots_git_is_refused_beyond_its_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("HEAD");
+        std::fs::write(&file, "x".repeat(16)).unwrap();
+        assert_eq!(regular_file(&file, 16).unwrap(), "x".repeat(16));
+        let why = regular_file(&file, 15).unwrap_err();
+        assert!(why.contains(&file.display().to_string()), "{why}");
+        assert!(why.contains("more than 15 bytes"), "{why}");
     }
 
     /// A link on the way to where `nunki` writes in a slot's `.git` is

@@ -31,8 +31,11 @@ the launch's checkout), and those few run with submodule descent switched
 off as well. A slot whose object store borrows another repository's
 (`objects/info/alternates`), or holds anything but plain files and
 directories, is refused before it is read. Whether a
-slot's tree is clean is `nunki`'s own comparison with `HEAD`, never what the
-slot's index says, and `nunki check` names any key a slot's `.git/config`
+slot's tree is clean is `nunki`'s own comparison with `HEAD`, byte for byte,
+never what the slot's index says nor what its `.gitattributes` would make of
+a file — so a project that relies on conversion at checkout (`text`,
+`eol`, `ident`) reads as not clean. `mission fetch` takes the
+mission's branch alone, never a tag the agent made, and `nunki check` names any key a slot's `.git/config`
 carries that git would execute, and any gitlink its `HEAD` holds. What `nunki`
 writes back into a slot (a branch, its checkout) it writes as files. Nothing
 reaches the forge but `nunki push`, on your explicit word.

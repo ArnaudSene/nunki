@@ -151,9 +151,17 @@ pub fn fetch(project: &Project, id: &str) -> Result<Fetched, PushError> {
         return Err(PushError::FetchingIntoCurrent(branch));
     }
 
+    // Named in full everywhere: a tag of the same name would win over the
+    // branch for a short name.
+    let full = format!("refs/heads/{branch}");
     let before = crate::git::run(
         &project.root,
-        &["rev-parse", "--verify", "--quiet", &branch],
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{full}^{{commit}}"),
+        ],
     )
     .ok()
     .filter(|s| !s.is_empty());
@@ -163,16 +171,22 @@ pub fn fetch(project: &Project, id: &str) -> Result<Fetched, PushError> {
     // From the slot's host mirror, never from the slot: a fetch from a
     // path runs `upload-pack` there, under that repository's configuration,
     // and the slot's is its agent's (`git::SlotGit`).
+    //
+    // Exactly the mission's branch crosses, and nothing else: `--no-tags`,
+    // or git would follow every tag of the mirror that points into the
+    // fetched history, and a tag the agent named `dev` would shadow the
+    // human's `dev` (security round 2).
     let mirror = crate::git::SlotGit::open(&slot.tree)?;
     crate::git::run(
         &project.root,
         &[
             "fetch",
+            "--no-tags",
             &mirror.mirror().display().to_string(),
-            &format!("{branch}:{branch}"),
+            &format!("{full}:{full}"),
         ],
     )?;
-    let after = crate::git::head_of(&project.root, &branch)?;
+    let after = crate::git::head_of(&project.root, &full)?;
     Ok(Fetched {
         branch,
         head: after,
