@@ -127,7 +127,7 @@ pub fn accept(
     on_findings(id, &state)?;
 
     let slot = crate::slot::find(project, &state.slot)?;
-    let head = crate::git::head(&slot.tree)?;
+    let head = crate::git::slot_head(&slot.tree)?;
     let paths = Paths::of(&project.hq_root, id);
 
     match &lift {

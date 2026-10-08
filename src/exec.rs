@@ -85,7 +85,7 @@ pub fn run(
     let at = match on {
         On::Proof => {
             refuse_under_a_campaign(project, slot)?;
-            let head = git::head(&slot.tree)?;
+            let head = git::slot_head(&slot.tree)?;
             refresh_at(&engine, &file, &compose_project, &head)?;
             PROOF_AT.to_string()
         }
@@ -158,7 +158,7 @@ pub fn refresh(project: &Project, slot: &Slot, engine: Arc<dyn Engine>) -> Resul
     refuse_under_a_campaign(project, slot)?;
     let compose_project = crate::compose::project_name(&project.session(), &slot.name)?;
     lift_if_down(&engine, &file, &compose_project)?;
-    let head = git::head(&slot.tree)?;
+    let head = git::slot_head(&slot.tree)?;
     refresh_at(&engine, &file, &compose_project, &head)
 }
 

@@ -1707,13 +1707,13 @@ fn a_second_mission_branches_from_a_base_the_slot_refreshed() {
 
     // The first mission, then the base moves the way a merged pull request
     // moves it.
-    nunki::run::branch(&slot, "mission/first", "dev").unwrap();
+    nunki::run::branch(&slot, &origin, "mission/first", "dev").unwrap();
     std::fs::write(origin.join("f"), "two").unwrap();
     git(&origin, &["add", "-A"]);
     git(&origin, &["commit", "-qm", "what the first mission merged"]);
     let moved = git(&origin, &["rev-parse", "HEAD"]);
 
-    nunki::run::branch(&slot, "mission/second", "dev").unwrap();
+    nunki::run::branch(&slot, &origin, "mission/second", "dev").unwrap();
 
     assert_eq!(
         git(&tree, &["rev-parse", "HEAD"]),
@@ -1750,7 +1750,7 @@ fn a_branch_that_already_holds_work_is_checked_out_and_never_moved() {
         tree: tree.clone(),
     };
 
-    nunki::run::branch(&slot, "mission/x", "dev").unwrap();
+    nunki::run::branch(&slot, &origin, "mission/x", "dev").unwrap();
     std::fs::write(tree.join("w"), "the agent's work").unwrap();
     git(&tree, &["add", "-A"]);
     git(&tree, &["commit", "-qm", "the agent's work"]);
@@ -1758,7 +1758,7 @@ fn a_branch_that_already_holds_work_is_checked_out_and_never_moved() {
 
     // Someone leaves the slot somewhere else, and the next role launches.
     git(&tree, &["checkout", "-q", "dev"]);
-    nunki::run::branch(&slot, "mission/x", "dev").unwrap();
+    nunki::run::branch(&slot, &origin, "mission/x", "dev").unwrap();
 
     assert_eq!(
         git(&tree, &["rev-parse", "HEAD"]),

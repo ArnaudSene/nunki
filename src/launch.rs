@@ -165,7 +165,7 @@ pub fn resolve(
         return Err(LaunchError::Missing {
             where_from: declared.where_from(),
             path,
-            head: crate::git::head(&slot.tree)?,
+            head: crate::git::slot_head(&slot.tree)?,
         });
     }
     if !executable(&on_host) {

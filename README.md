@@ -14,6 +14,19 @@ interchangeable executor behind an adapter).
 French). [`AGENTS.md`](AGENTS.md) holds the rules for anyone working in this
 repository.
 
+**The security model, in one paragraph.** An agent runs in a container with
+no capability, under your uid, behind a firewall sidecar it cannot reach; it
+sees its slot's tree and its mission folder, nothing else. What it writes in
+the slot — code, but also the slot's `.git`: configuration, hooks, refs — is
+never executed or believed on your machine. `nunki` runs no git inside a slot:
+every git it needs about one runs in a **mirror** beside the slot, outside
+every mount, that only the host writes. The slot's commits reach the mirror
+through a fetch that hashes every object, its refs are read from their files,
+and no configuration of the slot's is ever read — so a `core.fsmonitor`, a
+hook, a filter or a pager planted there has nothing to run it. What `nunki`
+writes back into a slot (a branch, its checkout) it writes as files. Nothing
+reaches the forge but `nunki push`, on your explicit word.
+
 ## Install
 
 What you need:

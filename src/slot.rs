@@ -139,18 +139,20 @@ pub fn reset(
         if !missing.is_empty() {
             return Err(SlotError::Unfetched {
                 name: name.to_string(),
-                branch: git::current_branch(&slot.tree)?,
+                branch: git::SlotGit::open(&slot.tree)?.current_branch()?,
                 count: missing.len(),
                 repository: project.root.display().to_string(),
             });
         }
     }
 
-    let discarded = !git::is_clean(&slot.tree)?;
-    git::run(&slot.tree, &["reset", "--hard", "--quiet", "HEAD"])?;
-    // `-x` here, unlike the refresh of the proof copy: that one keeps the
-    // build cache on purpose, and this one exists to throw it away.
-    git::run(&slot.tree, &["clean", "-qxdff"])?;
+    // Played from the slot's host mirror, never by a git in the slot
+    // (`git::SlotGit`). `-x` in the clean, unlike the refresh of the proof
+    // copy: that one keeps the build cache on purpose, and this one exists to
+    // throw it away.
+    let repo = git::SlotGit::open(&slot.tree)?;
+    let discarded = !repo.is_clean()?;
+    repo.reset_hard()?;
 
     let mut volumes = Vec::new();
     for volume in volumes_of(project, &slot) {
@@ -217,13 +219,21 @@ pub fn rm(project: &Project, name: &str, force: bool) -> Result<Slot, SlotError>
         if !missing.is_empty() {
             return Err(SlotError::Unfetched {
                 name: name.to_string(),
-                branch: git::current_branch(&slot.tree)?,
+                branch: git::SlotGit::open(&slot.tree)?.current_branch()?,
                 count: missing.len(),
                 repository: project.root.display().to_string(),
             });
         }
     }
     std::fs::remove_dir_all(&slot.tree).map_err(|e| SlotError::Io(slot.tree.clone(), e))?;
+    // Its mirror goes with it: a slot of the same name made later would
+    // otherwise start from a mirror of this one.
+    let mirror = git::mirror_of(&slot.tree);
+    match std::fs::remove_dir_all(&mirror) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(SlotError::Io(mirror, e)),
+    }
     Ok(slot)
 }
 

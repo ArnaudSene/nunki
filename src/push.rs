@@ -160,11 +160,15 @@ pub fn fetch(project: &Project, id: &str) -> Result<Fetched, PushError> {
     // No `+`: a non-fast-forward is refused rather than forced. What is in
     // the repository was put there by a human or by an earlier fetch, and
     // overwriting it is not this verb's to do.
+    // From the slot's host mirror, never from the slot: a fetch from a
+    // path runs `upload-pack` there, under that repository's configuration,
+    // and the slot's is its agent's (`git::SlotGit`).
+    let mirror = crate::git::SlotGit::open(&slot.tree)?;
     crate::git::run(
         &project.root,
         &[
             "fetch",
-            &slot.tree.display().to_string(),
+            &mirror.mirror().display().to_string(),
             &format!("{branch}:{branch}"),
         ],
     )?;
@@ -253,7 +257,7 @@ pub fn push_to(
     }
 
     let slot = crate::slot::find(project, &state.slot)?;
-    let head = crate::git::head(&slot.tree)?;
+    let head = crate::git::slot_head(&slot.tree)?;
     let header = state.flow.header().clone();
     let Held {
         not_attacked,
@@ -593,7 +597,7 @@ fn lifted_after<'s>(
 /// Whether `older` is `newer` or one of its ancestors. Anything git cannot
 /// answer — an unknown commit — is a no.
 fn is_ancestor(tree: &std::path::Path, older: &str, newer: &str) -> bool {
-    crate::git::run(tree, &["merge-base", "--is-ancestor", older, newer]).is_ok()
+    crate::git::on_slot(tree, &["merge-base", "--is-ancestor", older, newer]).is_ok()
 }
 
 /// The commits after `since` up to `head`, oldest first, each as
@@ -605,7 +609,7 @@ pub fn not_attacked(
     since: &str,
     head: &str,
 ) -> Result<Vec<String>, crate::git::GitError> {
-    let out = crate::git::run(
+    let out = crate::git::on_slot(
         tree,
         &[
             "log",
@@ -658,7 +662,7 @@ fn only_wiring_since(
     }
     // An ancestor, or the question means nothing: two commits on different
     // branches have a difference that is not "what was added".
-    if crate::git::run(&slot.tree, &["merge-base", "--is-ancestor", coder, head]).is_err() {
+    if crate::git::on_slot(&slot.tree, &["merge-base", "--is-ancestor", coder, head]).is_err() {
         return Err(PushError::NotAnAncestor(
             coder.to_string(),
             head.to_string(),
@@ -684,7 +688,7 @@ fn only_wiring_since(
     if outside.is_empty() {
         return Ok(());
     }
-    let commits = crate::git::run(
+    let commits = crate::git::on_slot(
         &slot.tree,
         &["rev-list", "--count", &format!("{coder}..{head}")],
     )?

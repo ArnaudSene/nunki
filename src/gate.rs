@@ -351,7 +351,7 @@ enum Phase {
 }
 
 fn play(subject: &Subject, verification: &Verification, phase: Phase) -> Result<Report, GateError> {
-    let head = git::head(subject.tree)?;
+    let head = git::slot_head(subject.tree)?;
     // Asked once, here, and not inside the two gates that would have to
     // answer it: the gates stand down together or not at all, and the flow
     // needs to know **that** is why they did.
@@ -413,7 +413,7 @@ fn clean_tree(subject: &Subject) -> Result<Decision, GateError> {
     if subject.role == Role::Security {
         return Ok(Decision::NotApplicable(READ_ONLY_TREE.into()));
     }
-    let dirty = git::run(subject.tree, &["status", "--porcelain"])?;
+    let dirty = git::SlotGit::open(subject.tree)?.status()?;
     if dirty.is_empty() {
         return Ok(Decision::Passed);
     }
@@ -429,14 +429,14 @@ fn branch_ahead(subject: &Subject) -> Result<Decision, GateError> {
     if subject.role == Role::Security {
         return Ok(Decision::NotApplicable(READ_ONLY_TREE.into()));
     }
-    let branch = git::current_branch(subject.tree)?;
+    let branch = git::SlotGit::open(subject.tree)?.current_branch()?;
     if subject.protected_branches.contains(&branch) {
         return Ok(Decision::Failed(format!(
             "the slot is on {branch:?}, which the project protects"
         )));
     }
     let base = base_ref(subject.tree, &subject.header.base)?;
-    let ahead = git::run(
+    let ahead = git::on_slot(
         subject.tree,
         &["rev-list", "--count", &format!("{base}..HEAD")],
     )?;
@@ -467,17 +467,7 @@ fn branch_ahead(subject: &Subject) -> Result<Decision, GateError> {
 /// only candidate left. It is the same order `run::branch` uses.
 fn base_ref(tree: &Path, base: &str) -> Result<Rev, GateError> {
     let remote = format!("origin/{base}");
-    if git::run(
-        tree,
-        &[
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            &format!("refs/remotes/{remote}"),
-        ],
-    )
-    .is_ok()
-    {
+    if git::SlotGit::open(tree)?.has(&format!("refs/remotes/{remote}")) {
         return Ok(Rev(remote));
     }
     Ok(Rev(base.to_string()))
@@ -494,7 +484,7 @@ fn base_ref(tree: &Path, base: &str) -> Result<Rev, GateError> {
 pub fn fork_point(tree: &Path, base: &str) -> Result<String, GateError> {
     let named = base_ref(tree, base)?;
     Ok(
-        crate::git::run(tree, &["merge-base", "HEAD", &named.to_string()])?
+        crate::git::on_slot(tree, &["merge-base", "HEAD", &named.to_string()])?
             .trim()
             .to_string(),
     )
@@ -682,8 +672,8 @@ struct Touched {
 }
 
 fn touched(tree: &Path, base: &Rev) -> Result<Touched, GateError> {
-    let diff = git::run(tree, &["diff", "--name-only", &format!("{base}...HEAD")])?;
-    let commits: Vec<String> = git::run(tree, &["rev-list", &format!("{base}..HEAD")])?
+    let diff = git::on_slot(tree, &["diff", "--name-only", &format!("{base}...HEAD")])?;
+    let commits: Vec<String> = git::on_slot(tree, &["rev-list", &format!("{base}..HEAD")])?
         .lines()
         .map(str::to_string)
         .collect();
@@ -695,7 +685,7 @@ fn touched(tree: &Path, base: &Rev) -> Result<Touched, GateError> {
         .map(|p| (p.to_string(), "the diff against the base".to_string()))
         .collect();
     for commit in &commits {
-        let in_commit = git::run(
+        let in_commit = git::on_slot(
             tree,
             &["diff-tree", "--no-commit-id", "--name-only", "-r", commit],
         )?;
@@ -769,7 +759,7 @@ fn coder_perimeter(
         // question is about the base, not about the slot's tree, where the
         // agent may have just created or deleted it.
         if if_exists.is_match(path)
-            && git::run(tree, &["cat-file", "-e", &format!("{base}:{path}")]).is_ok()
+            && git::on_slot(tree, &["cat-file", "-e", &format!("{base}:{path}")]).is_ok()
         {
             return Ok(Decision::Failed(format!(
                 "{path} already exists on {base} and is protected there, and {where_} touches it"
@@ -1776,6 +1766,13 @@ pub fn named_test_missing(
     campaign: &crate::mutants::Campaign,
     coders: &std::collections::BTreeMap<String, crate::mutants::Triage>,
 ) -> Option<String> {
+    // The slot through its host mirror; the working tree with nunki's own
+    // index of `HEAD` (`git::SlotGit::run_in_tree`). A slot that cannot be
+    // read is said, never taken for a test that is not there.
+    let repo = match git::SlotGit::open(tree) {
+        Ok(repo) => repo,
+        Err(e) => return Some(e.to_string()),
+    };
     for survivor in &campaign.survivors {
         let Some(outcome) = crate::mutants::answer(survivor, coders) else {
             continue;
@@ -1786,7 +1783,11 @@ pub fn named_test_missing(
         let mut grep = vec!["grep", "--quiet", "-F", "-w", "-e", test];
         grep.extend(commit);
         grep.push("--");
-        if git::run(tree, &grep).is_err() {
+        let found = match commit {
+            Some(_) => repo.run(&grep),
+            None => repo.run_in_tree(&grep),
+        };
+        if found.is_err() {
             return Some(format!(
                 "{}:{} names the test {test:?}, and nothing in the tree is called \
                  that",
