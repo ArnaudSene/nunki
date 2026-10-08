@@ -25,11 +25,21 @@
 //!   refs are the slot's, read by `nunki` from the files themselves. The
 //!   fetch's `index-pack` hashes every object it receives, so a loose object
 //!   rewritten on disk, or an index that lies about a pack, fails the fetch
-//!   rather than entering the mirror;
-//! - every read — `log`, `diff`, `rev-parse`, `cat-file`, ancestry — runs in
-//!   the mirror. What needs the working tree runs with the mirror as git
+//!   rather than entering the mirror. A slot whose object store names an
+//!   alternate of its own, or holds anything but plain files and
+//!   directories, is refused before the shim borrows it;
+//! - every read — `log`, `diff`, `rev-parse`, `cat-file`, ancestry, a `grep`
+//!   of the commit — runs in the mirror. The few verbs that need the working
+//!   tree ([`WORK_TREE_VERBS`], one closed list) run with the mirror as git
 //!   directory, the slot's tree as work tree, and an index `nunki` builds
 //!   from `HEAD` itself;
+//! - **no git is ever started inside the slot's tree**. A gitlink makes git
+//!   descend into a submodule with a git of its own, which would read the
+//!   agent's configuration and hooks there. So, two layers: a commit or index
+//!   holding a gitlink is refused before any work-tree verb runs
+//!   ([`GitError::Gitlink`]), and every work-tree verb runs with submodule
+//!   descent switched off, on its command line and in the mirror's own
+//!   configuration;
 //! - what `nunki` writes back into a slot — a branch, its checkout, the
 //!   objects that branch needs — it writes as files, never by running git
 //!   there.
@@ -64,6 +74,17 @@ pub enum GitError {
          slot and will not; repair or recreate it (`nunki slot rm`, then `nunki slot add`)"
     )]
     Unreadable { tree: String, why: String },
+    /// A slot whose commit, or the index `nunki` built of it, holds a gitlink
+    /// (mode 160000): a submodule. `nunki` slots do not support them: a git
+    /// with the slot's tree as work tree would start another git in the
+    /// submodule's directory, whose configuration and hooks are the agent's.
+    #[error(
+        "the slot at {tree} holds a submodule (a gitlink) at {path:?}: nunki slots do not \
+         support submodules, and nunki ran no git in that slot's tree. Remove the gitlink \
+         from the commit, or recreate the slot (`nunki slot rm --force`, then \
+         `nunki slot add`)"
+    )]
+    Gitlink { tree: String, path: String },
     #[error("{0}: {1}")]
     Io(PathBuf, std::io::Error),
 }
@@ -293,6 +314,47 @@ pub fn mirror_of(tree: &Path) -> PathBuf {
 /// The directory, beside a project's slots, that holds their mirrors.
 pub const MIRRORS: &str = ".nunki-git";
 
+/// The verbs `nunki` runs with a slot's tree as work tree — **the closed
+/// list**: every other git about a slot runs in the mirror alone.
+///
+/// - `status`: is the tree its `HEAD` (gate 1, `is_clean`, `slot rm`);
+/// - `read-tree` and `clean`: put the tree back to `HEAD` (`slot reset`), or
+///   onto a branch (the launch's checkout);
+/// - `update-index`: the stat refresh that checkout's two-way merge needs.
+///
+/// A verb added here is a decision, and the unit tests pin this list.
+pub const WORK_TREE_VERBS: &[&str] = &["status", "read-tree", "update-index", "clean"];
+
+/// The configuration that keeps a git from descending into a submodule:
+/// set in every mirror's own configuration, and again on the command line
+/// of every work-tree verb, where it holds whatever the mirror says.
+const NO_DESCENT: &[(&str, &str)] = &[
+    ("diff.ignoreSubmodules", "all"),
+    ("submodule.recurse", "false"),
+];
+
+/// The `status` gate 1 and `is_clean` read: descent into a submodule is off
+/// on its own command line as well.
+const STATUS: &[&str] = &["status", "--porcelain", "--ignore-submodules=all"];
+
+/// Switch submodule descent off on `git`'s command line ([`NO_DESCENT`]).
+fn no_descent(git: &mut Command) {
+    for (key, value) in NO_DESCENT {
+        git.arg("-c").arg(format!("{key}={value}"));
+    }
+}
+
+/// The paths of the gitlinks (mode 160000) in what `ls-tree -r -z` or
+/// `ls-files --stage -z` printed: `<mode> <…>\t<path>`, entries ended by NUL.
+fn gitlinks_in(listed: &str) -> Vec<String> {
+    listed
+        .split('\0')
+        .filter(|entry| entry.starts_with("160000 "))
+        .filter_map(|entry| entry.split_once('\t'))
+        .map(|(_, path)| path.to_string())
+        .collect()
+}
+
 /// The ref namespace of the mirror that holds what the human's repository
 /// said its branches were, the last time a slot was refreshed from it.
 const ORIGIN_NS: &str = "refs/nunki/origin";
@@ -376,18 +438,84 @@ impl SlotGit {
         git
     }
 
-    /// A git with the mirror as git directory, the slot's tree as work tree,
-    /// and `index` as index.
-    fn git_in_tree(&self, index: &Path) -> Command {
+    /// A git that reads the mirror, with `index` as its index and no work
+    /// tree: what builds and reads `nunki`'s index.
+    fn git_with_index(&self, index: &Index) -> Command {
+        let mut git = self.git();
+        git.env("GIT_INDEX_FILE", index.path());
+        git
+    }
+
+    /// Run a verb of [`WORK_TREE_VERBS`] with the mirror as git directory,
+    /// the slot's tree as work tree, and `index` as index — **the one way**
+    /// `nunki` runs a git with a slot's tree as work tree.
+    ///
+    /// Refused, with nothing run, for a verb not on the list, and for an
+    /// index that holds a gitlink ([`SlotGit::refuse_gitlinks`]). What runs
+    /// runs with submodule descent switched off ([`no_descent`]).
+    fn in_tree(&self, index: &Index, args: &[&str]) -> Result<String, GitError> {
+        let verb = args.first().copied().unwrap_or_default();
+        if !WORK_TREE_VERBS.contains(&verb) {
+            return Err(GitError::Failed {
+                verb: verb.into(),
+                at: self.at(),
+                stderr: format!(
+                    "nunki runs no {verb:?} with a slot's tree as work tree; only {}",
+                    WORK_TREE_VERBS.join(", ")
+                ),
+            });
+        }
+        self.refuse_gitlinks(index)?;
+        let mut git = self.git_in_tree_unchecked(index);
+        git.args(args);
+        finish(git, args, &self.at(), None)
+    }
+
+    /// The command [`SlotGit::in_tree`] runs, without its structural check:
+    /// the second layer alone, kept apart so that it is proved alone.
+    fn git_in_tree_unchecked(&self, index: &Index) -> Command {
         let mut git = host_git();
-        git.env("GIT_INDEX_FILE", index)
+        git.env("GIT_INDEX_FILE", index.path())
             .current_dir(&self.tree)
             .arg("--git-dir")
             .arg(&self.mirror)
             .arg("--work-tree")
             .arg(&self.tree)
             .args(["-c", "core.bare=false"]);
+        no_descent(&mut git);
         git
+    }
+
+    /// Refuse an index of `nunki`'s that holds a gitlink, naming its path.
+    fn refuse_gitlinks(&self, index: &Index) -> Result<(), GitError> {
+        let args = ["ls-files", "--stage", "-z"];
+        let mut git = self.git_with_index(index);
+        git.args(args);
+        let listed = finish(git, &args, &self.at(), None)?;
+        self.refuse_gitlink_in(&listed)
+    }
+
+    /// Refuse the commit `rev` when its tree holds a gitlink, naming its
+    /// path.
+    fn refuse_gitlinks_at(&self, rev: &str) -> Result<(), GitError> {
+        let listed = self.run(&["ls-tree", "-r", "-z", "--full-tree", rev])?;
+        self.refuse_gitlink_in(&listed)
+    }
+
+    /// The gitlinks of `HEAD`, by path: what `nunki check` names.
+    pub fn gitlinks(&self) -> Result<Vec<String>, GitError> {
+        let listed = self.run(&["ls-tree", "-r", "-z", "--full-tree", "HEAD"])?;
+        Ok(gitlinks_in(&listed))
+    }
+
+    fn refuse_gitlink_in(&self, listed: &str) -> Result<(), GitError> {
+        match gitlinks_in(listed).into_iter().next() {
+            None => Ok(()),
+            Some(path) => Err(GitError::Gitlink {
+                tree: self.tree.display().to_string(),
+                path,
+            }),
+        }
     }
 
     fn at(&self) -> String {
@@ -418,14 +546,13 @@ impl SlotGit {
         out.status.success().then_some(out.stdout)
     }
 
-    /// Run git against the slot's **working tree**, with an index `nunki`
-    /// builds from `HEAD`: `status`, a `grep` of the tree. The slot's own
-    /// index is never read.
+    /// Run a verb of [`WORK_TREE_VERBS`] against the slot's **working tree**,
+    /// with an index `nunki` builds from `HEAD`. The slot's own index is
+    /// never read; a verb not on the list, or a `HEAD` holding a gitlink, is
+    /// refused with nothing run.
     pub fn run_in_tree(&self, args: &[&str]) -> Result<String, GitError> {
         let index = self.fresh_index(false)?;
-        let mut git = self.git_in_tree(index.path());
-        git.args(args);
-        finish(git, args, &self.at(), None)
+        self.in_tree(&index, args)
     }
 
     /// The commit `HEAD` names.
@@ -441,7 +568,7 @@ impl SlotGit {
     /// What differs between the slot's tree and its `HEAD`, as
     /// `git status --porcelain` says it, against `nunki`'s index.
     pub fn status(&self) -> Result<String, GitError> {
-        self.run_in_tree(&["status", "--porcelain"])
+        self.run_in_tree(STATUS)
     }
 
     /// Whether the slot's tree holds exactly its `HEAD`, untracked files
@@ -465,17 +592,16 @@ impl SlotGit {
     /// cannot tell is unchanged.
     fn fresh_index(&self, refresh: bool) -> Result<Index, GitError> {
         let index = Index::new(&self.mirror);
+        // Built from `HEAD` in the mirror alone: no work tree is needed to
+        // read a commit into an index.
         let args = ["read-tree", "HEAD"];
-        let mut git = self.git_in_tree(index.path());
+        let mut git = self.git_with_index(&index);
         git.args(args);
         finish(git, &args, &self.at(), None)?;
         if refresh {
             // `-q` carries on past a modified file, which is an answer and
             // not a failure.
-            let args = ["update-index", "-q", "--refresh"];
-            let mut git = self.git_in_tree(index.path());
-            git.args(args);
-            finish(git, &args, &self.at(), None)?;
+            self.in_tree(&index, &["update-index", "-q", "--refresh"])?;
         }
         Ok(index)
     }
@@ -490,9 +616,7 @@ impl SlotGit {
             &["read-tree", "--reset", "-u", "HEAD"][..],
             &["clean", "-qxdff"][..],
         ] {
-            let mut git = self.git_in_tree(index.path());
-            git.args(args);
-            finish(git, args, &self.at(), None)?;
+            self.in_tree(&index, args)?;
         }
         self.give_index(&index)?;
         Ok(())
@@ -506,11 +630,11 @@ impl SlotGit {
             "--verify",
             &format!("refs/heads/{branch}^{{commit}}"),
         ])?;
+        // The commit checked out is refused like the one left: the merge
+        // would bring its gitlinks into the tree.
+        self.refuse_gitlinks_at(&target)?;
         let index = self.fresh_index(true)?;
-        let args = ["read-tree", "-m", "-u", "HEAD", &target];
-        let mut git = self.git_in_tree(index.path());
-        git.args(args);
-        finish(git, &args, &self.at(), None)?;
+        self.in_tree(&index, &["read-tree", "-m", "-u", "HEAD", &target])?;
         self.give_index(&index)?;
         self.write_into_slot("HEAD", format!("ref: refs/heads/{branch}\n").as_bytes())?;
         self.forget_sync()?;
@@ -750,16 +874,22 @@ impl SlotGit {
     /// A mirror whose objects are in `format`: made when there is none, and
     /// made again when the slot's repository is no longer in the format it
     /// was mirrored in. Everything in it is the host's, and all of it comes
-    /// back from the slot.
+    /// back from the slot. Its configuration switches submodule descent off
+    /// ([`NO_DESCENT`]), set again on every sync so a mirror made before
+    /// carries it too.
     fn init_mirror(&self, format: &str) -> Result<(), GitError> {
-        if self.mirror.join("HEAD").is_file() {
-            if self.run(&["rev-parse", "--show-object-format"])? == format {
-                return Ok(());
-            }
+        let made = self.mirror.join("HEAD").is_file();
+        if made && self.run(&["rev-parse", "--show-object-format"])? != format {
             std::fs::remove_dir_all(&self.mirror)
                 .map_err(|e| GitError::Io(self.mirror.clone(), e))?;
         }
-        init_bare(&self.mirror, format)
+        if !self.mirror.join("HEAD").is_file() {
+            init_bare(&self.mirror, format)?;
+        }
+        for (key, value) in NO_DESCENT {
+            self.run(&["config", key, value])?;
+        }
+        Ok(())
     }
 
     /// Fetch into the mirror, from a shim at `shim` that borrows the slot's
@@ -818,6 +948,10 @@ impl SlotGit {
     /// A bare repository at `shim` whose objects are the slot's, borrowed:
     /// its configuration is `nunki`'s, its object store an alternate.
     fn make_shim(&self, shim: &Path, format: &str) -> Result<(), GitError> {
+        plain_object_store(&self.gitdir.join("objects")).map_err(|why| GitError::Unreadable {
+            tree: self.tree.display().to_string(),
+            why,
+        })?;
         init_bare(shim, format)?;
         let objects = std::fs::canonicalize(self.gitdir.join("objects")).map_err(|e| {
             GitError::Unreadable {
@@ -861,6 +995,52 @@ impl SlotGit {
         .args(refspecs);
         finish(git, &["fetch"], &self.at(), None).map(|_| ())
     }
+}
+
+/// Refuse a slot's object store that is not what a clone makes of one, before
+/// any git borrows it: why, naming the path, or nothing.
+///
+/// - an `objects/info/alternates` or `objects/info/http-alternates`: git
+///   would follow it, from the shim, into any repository on the host the
+///   agent names. A slot is cloned without one, so nothing legitimate has it;
+/// - anything in `objects/`, itself included, that is not a plain file or a
+///   directory: a FIFO would hang the git that opens it, and a link would
+///   lead it out of the slot's `.git`.
+///
+/// Refused, never filtered: a slot shaped otherwise is not read at all.
+fn plain_object_store(objects: &Path) -> Result<(), String> {
+    for name in ["alternates", "http-alternates"] {
+        let path = objects.join("info").join(name);
+        if !absent(&std::fs::symlink_metadata(&path)) {
+            return Err(format!(
+                "{} exists: a slot borrows no other repository's objects",
+                path.display()
+            ));
+        }
+    }
+    let mut stack = vec![objects.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        let meta =
+            std::fs::symlink_metadata(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        if meta.is_dir() {
+            let entries =
+                std::fs::read_dir(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            for entry in entries {
+                stack.push(
+                    entry
+                        .map_err(|e| format!("{}: {e}", path.display()))?
+                        .path(),
+                );
+            }
+        } else if !meta.is_file() {
+            return Err(format!(
+                "{} is neither a file nor a directory, and nunki opens nothing else in a \
+                 slot's object store",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The files of a pack in the order they are handed to a slot: the pack
@@ -1201,6 +1381,259 @@ mod tests {
             mirror: mirror_of(&tree),
             tree,
         }
+    }
+
+    /// A plain git for building a slot, scrubbed of the caller's `GIT_*`.
+    fn plain_git(at: &Path, args: &[&str]) -> String {
+        let mut git = host_git();
+        git.env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@example.com")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@example.com")
+            .arg("-C")
+            .arg(at)
+            .args(args);
+        let out = git.output().unwrap();
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// A slot whose commit holds a gitlink at `sub`, and whose tree holds at
+    /// `sub/.git` a repository that leaves `markers/fsmonitor` when its
+    /// `core.fsmonitor` runs, and `markers/hook` when its
+    /// `post-index-change` hook does.
+    fn slot_with_a_submodule(dir: &Path) -> (PathBuf, PathBuf) {
+        let markers = dir.join("markers");
+        std::fs::create_dir_all(&markers).unwrap();
+        let script = |name: &str| {
+            let path = dir.join(format!("{name}.sh"));
+            std::fs::write(
+                &path,
+                format!("#!/bin/sh\ntouch '{}'\n", markers.join(name).display()),
+            )
+            .unwrap();
+            std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+                .unwrap();
+            path
+        };
+        let tree = dir.join("slots").join("one");
+        std::fs::create_dir_all(&tree).unwrap();
+        plain_git(&tree, &["init", "-q", "-b", "mission/x"]);
+        std::fs::write(tree.join("f"), "x\n").unwrap();
+        plain_git(&tree, &["add", "f"]);
+        plain_git(&tree, &["commit", "-qm", "a"]);
+        let sub = tree.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        plain_git(&sub, &["init", "-q"]);
+        plain_git(&sub, &["commit", "-q", "--allow-empty", "-m", "s"]);
+        plain_git(&tree, &["add", "sub"]);
+        plain_git(&tree, &["commit", "-qm", "a gitlink"]);
+        let fsmonitor = script("fsmonitor");
+        plain_git(
+            &sub,
+            &["config", "core.fsmonitor", &fsmonitor.display().to_string()],
+        );
+        std::fs::copy(script("hook"), sub.join(".git/hooks/post-index-change")).unwrap();
+        (tree, markers)
+    }
+
+    fn ran(markers: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(markers)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// The control: a plain `git status` in that slot runs both.
+    #[test]
+    fn a_submodule_runs_its_own_configuration_for_a_plain_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tree, markers) = slot_with_a_submodule(dir.path());
+        plain_git(&tree, &["status", "--porcelain"]);
+        assert_eq!(ran(&markers), ["fsmonitor", "hook"]);
+    }
+
+    /// The second layer alone: with the structural refusal out of the way,
+    /// every work-tree verb `nunki` runs, as it runs it, starts nothing in
+    /// the submodule — submodule descent is off.
+    #[test]
+    fn with_descent_off_no_work_tree_verb_starts_a_git_in_a_submodule() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tree, markers) = slot_with_a_submodule(dir.path());
+        let slot = SlotGit::open(&tree).unwrap();
+        for args in [
+            STATUS,
+            &["update-index", "-q", "--refresh"][..],
+            &["read-tree", "-m", "-u", "HEAD", "HEAD"][..],
+            &["read-tree", "--reset", "-u", "HEAD"][..],
+            &["clean", "-qxdff"][..],
+        ] {
+            let index = slot.fresh_index(false).unwrap();
+            let mut git = slot.git_in_tree_unchecked(&index);
+            git.args(args);
+            let _ = git.output().unwrap();
+            assert_eq!(ran(&markers), Vec::<String>::new(), "{args:?}");
+        }
+    }
+
+    /// The first layer: a commit or an index holding a gitlink is refused,
+    /// naming its path, before any work-tree verb runs.
+    #[test]
+    fn a_gitlink_is_refused_before_any_work_tree_verb() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tree, markers) = slot_with_a_submodule(dir.path());
+        let slot = SlotGit::open(&tree).unwrap();
+        let index = slot.fresh_index(false).unwrap();
+        for verb in WORK_TREE_VERBS {
+            let err = slot.in_tree(&index, &[verb]).unwrap_err();
+            assert!(
+                matches!(&err, GitError::Gitlink { path, .. } if path == "sub"),
+                "{verb}: {err:?}"
+            );
+        }
+        let err = slot.refuse_gitlinks_at("HEAD").unwrap_err();
+        assert!(matches!(&err, GitError::Gitlink { path, .. } if path == "sub"));
+        assert!(slot.refuse_gitlinks_at("HEAD^").is_ok());
+        assert_eq!(slot.gitlinks().unwrap(), ["sub"]);
+        assert_eq!(ran(&markers), Vec::<String>::new());
+    }
+
+    /// The closed list: what `nunki` may run with a slot's tree as work
+    /// tree, and nothing else — a verb off the list is refused unrun.
+    #[test]
+    fn only_the_listed_verbs_run_with_a_slots_tree_as_work_tree() {
+        assert_eq!(
+            WORK_TREE_VERBS,
+            ["status", "read-tree", "update-index", "clean"]
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let tree = dir.path().join("slots").join("one");
+        std::fs::create_dir_all(&tree).unwrap();
+        plain_git(&tree, &["init", "-q", "-b", "mission/x"]);
+        plain_git(&tree, &["commit", "-q", "--allow-empty", "-m", "a"]);
+        let slot = SlotGit::open(&tree).unwrap();
+        let index = slot.fresh_index(false).unwrap();
+        for verb in ["grep", "checkout", "reset", "diff", "submodule", ""] {
+            let err = slot.in_tree(&index, &[verb]).unwrap_err();
+            assert!(err.to_string().contains("nunki runs no"), "{verb}: {err}");
+        }
+        assert_eq!(slot.in_tree(&index, STATUS).unwrap(), "");
+    }
+
+    /// Descent is off in the mirror's own configuration too, and on every
+    /// work-tree command line.
+    #[test]
+    fn descent_is_off_in_the_mirror_and_on_the_command_line() {
+        assert_eq!(
+            NO_DESCENT,
+            [
+                ("diff.ignoreSubmodules", "all"),
+                ("submodule.recurse", "false")
+            ]
+        );
+        assert!(STATUS.contains(&"--ignore-submodules=all"));
+        let dir = tempfile::tempdir().unwrap();
+        let (tree, _) = slot_with_a_submodule(dir.path());
+        let slot = SlotGit::open(&tree).unwrap();
+        for (key, value) in NO_DESCENT {
+            assert_eq!(slot.run(&["config", key]).unwrap(), *value);
+        }
+        let index = Index::new(&slot.mirror);
+        let git = slot.git_in_tree_unchecked(&index);
+        let args: Vec<String> = git
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        for (key, value) in NO_DESCENT {
+            assert!(args.contains(&format!("{key}={value}")), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn gitlinks_are_read_from_a_listing_by_their_mode() {
+        // As `ls-tree -r -z` and `ls-files --stage -z` print them.
+        let listed = [
+            "100644 blob aa\tf",
+            "160000 commit bb\tsub",
+            "040000 tree cc\td",
+            "160000 bb 0\ta b/c",
+            "",
+        ]
+        .join("\0");
+        assert_eq!(gitlinks_in(&listed), ["sub", "a b/c"]);
+        assert_eq!(gitlinks_in(""), Vec::<String>::new());
+    }
+
+    /// An object store the agent shaped otherwise than a clone does is
+    /// refused, naming the path: an alternate of its own, a FIFO, a link.
+    #[test]
+    fn an_object_store_not_shaped_like_a_clones_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let objects = dir.path().join("objects");
+        std::fs::create_dir_all(objects.join("info")).unwrap();
+        std::fs::create_dir_all(objects.join("pack")).unwrap();
+        std::fs::write(objects.join("pack").join("pack-a.pack"), "").unwrap();
+        assert_eq!(plain_object_store(&objects), Ok(()));
+
+        for name in ["alternates", "http-alternates"] {
+            let path = objects.join("info").join(name);
+            std::fs::write(&path, "/elsewhere\n").unwrap();
+            let why = plain_object_store(&objects).unwrap_err();
+            assert!(why.contains(&path.display().to_string()), "{why}");
+            std::fs::remove_file(&path).unwrap();
+        }
+
+        let fifo = objects.join("pack").join("pack-b.idx");
+        let made = Command::new("mkfifo").arg(&fifo).status().unwrap();
+        assert!(made.success());
+        let why = plain_object_store(&objects).unwrap_err();
+        assert!(
+            why.contains("pack-b.idx is neither a file nor a directory"),
+            "{why}"
+        );
+        std::fs::remove_file(&fifo).unwrap();
+
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, objects.join("ab")).unwrap();
+        let why = plain_object_store(&objects).unwrap_err();
+        assert!(
+            why.contains("ab is neither a file nor a directory"),
+            "{why}"
+        );
+        std::fs::remove_file(objects.join("ab")).unwrap();
+
+        std::fs::rename(&objects, dir.path().join("moved")).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("moved"), &objects).unwrap();
+        let why = plain_object_store(&objects).unwrap_err();
+        assert!(
+            why.contains("objects is neither a file nor a directory"),
+            "{why}"
+        );
+    }
+
+    /// A link on the way to where `nunki` writes in a slot's `.git` is
+    /// refused, and nothing lands where it points.
+    #[test]
+    fn a_write_into_a_slot_never_goes_through_a_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let slot = slot_in(dir.path());
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, slot.gitdir.join("objects")).unwrap();
+        let err = slot.write_into_slot("objects/pack/x", b"x").unwrap_err();
+        assert!(
+            err.to_string().contains("nunki writes nothing through it"),
+            "{err}"
+        );
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
     }
 
     /// A path that leaves `.git`, or names nothing, is refused before

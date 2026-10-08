@@ -10,7 +10,13 @@
 //! - then, with the plant in place, every host-side operation `nunki`
 //!   performs on a slot is played, and no marker exists and every read is
 //!   what it is in a slot without the plant;
-//! - a slot whose `.git` is broken fails with an error that says so, and
+//! - what an agent nests in its **tree** — a gitlink towards a repository
+//!   of its own, at any depth, through a `.git` file, behind a `.gitmodules`,
+//!   or an untracked repository — never has a git started inside it: a
+//!   gitlink is refused by every operation that would take the tree as work
+//!   tree, and no marker exists;
+//! - a slot whose `.git` is broken, whose object store borrows another
+//!   repository's, or holds a FIFO, fails with an error that says so, and
 //!   runs nothing;
 //! - the source is scanned for a plain git on a slot, so that a new one
 //!   cannot be added unnoticed.
@@ -880,9 +886,13 @@ fn a_link_in_the_slots_git_is_never_written_through() {
     std::os::unix::fs::symlink(outside.join("pack"), &pack).unwrap();
     let before = std::fs::read_dir(outside.join("pack")).unwrap().count();
 
+    // Refused when the slot is read, before anything could be written: a
+    // link in the object store is not what a clone makes. The writer's own
+    // refusal of a link is proved alone, in `git::tests`.
     let err = nunki::run::branch(&w.slot(), &w.project.root, "mission/other", "dev").unwrap_err();
     assert!(
-        err.to_string().contains("nunki writes nothing through it"),
+        err.to_string()
+            .contains("objects/pack is neither a file nor a directory"),
         "{err}"
     );
     assert_eq!(
@@ -1606,4 +1616,447 @@ fn a_mirror_that_cannot_be_removed_fails_slot_rm() {
     let removed = nunki::slot::rm(&w.project, "one", true);
     std::fs::set_permissions(&mirror, std::fs::Permissions::from_mode(0o755)).unwrap();
     assert!(removed.is_err());
+}
+
+/// A repository at `at`, in the slot's tree, with one commit of its own.
+fn nested_repository(at: &Path) {
+    std::fs::create_dir_all(at).unwrap();
+    git(at, &["init", "-q"]);
+    git(at, &["commit", "-q", "--allow-empty", "-m", "nested"]);
+}
+
+/// The agent's commit, with a gitlink at `path` towards `id`.
+fn commit_gitlink(w: &World, path: &str, id: &str) {
+    git(
+        &w.tree,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{id},{path}"),
+        ],
+    );
+    git(&w.tree, &["commit", "-q", "-m", "a submodule"]);
+}
+
+/// What an agent leaves in its slot's tree, rather than its `.git`, for a
+/// git with that tree as work tree to start inside it.
+struct Nested {
+    name: &'static str,
+    /// The path of the gitlink the plant commits, if it commits one.
+    gitlink: Option<&'static str>,
+    plant: fn(&World),
+}
+
+const NESTED: &[Nested] = &[
+    Nested {
+        name: "a gitlink whose repository names core.fsmonitor",
+        gitlink: Some("sub"),
+        plant: |w| {
+            let sub = w.tree.join("sub");
+            nested_repository(&sub);
+            commit_gitlink(w, "sub", &git(&sub, &["rev-parse", "HEAD"]));
+            git(
+                &sub,
+                &["config", "core.fsmonitor", &w.script("nested-fsmonitor")],
+            );
+        },
+    },
+    Nested {
+        name: "a gitlink whose repository holds only a post-index-change hook",
+        gitlink: Some("sub"),
+        plant: |w| {
+            let sub = w.tree.join("sub");
+            nested_repository(&sub);
+            // A tracked file whose stat information the submodule's index no
+            // longer matches: its own `status` rewrites that index, which is
+            // when git runs `post-index-change`.
+            write(&sub, "f", "x\n");
+            git(&sub, &["add", "f"]);
+            git(&sub, &["commit", "-q", "-m", "f"]);
+            commit_gitlink(w, "sub", &git(&sub, &["rev-parse", "HEAD"]));
+            let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+            std::fs::File::options()
+                .write(true)
+                .open(sub.join("f"))
+                .unwrap()
+                .set_modified(hour_ago)
+                .unwrap();
+            std::fs::copy(
+                w.script("nested-hook"),
+                sub.join(".git/hooks/post-index-change"),
+            )
+            .unwrap();
+        },
+    },
+    Nested {
+        name: "a gitlink at depth 2",
+        gitlink: Some("a/b"),
+        plant: |w| {
+            let sub = w.tree.join("a/b");
+            nested_repository(&sub);
+            commit_gitlink(w, "a/b", &git(&sub, &["rev-parse", "HEAD"]));
+            git(
+                &sub,
+                &["config", "core.fsmonitor", &w.script("depth-fsmonitor")],
+            );
+        },
+    },
+    Nested {
+        name: "a gitlink whose .git is a file pointing elsewhere",
+        gitlink: Some("sub"),
+        plant: |w| {
+            let elsewhere = w.dir.path().join("elsewhere.git");
+            nested_repository(&elsewhere);
+            let id = git(&elsewhere, &["rev-parse", "HEAD"]);
+            let gitdir = elsewhere.join(".git");
+            git(
+                &gitdir,
+                &["config", "core.fsmonitor", &w.script("gitfile-fsmonitor")],
+            );
+            std::fs::create_dir_all(w.tree.join("sub")).unwrap();
+            std::fs::write(
+                w.tree.join("sub/.git"),
+                format!("gitdir: {}\n", gitdir.display()),
+            )
+            .unwrap();
+            commit_gitlink(w, "sub", &id);
+        },
+    },
+    Nested {
+        name: "a .gitmodules whose update is a command",
+        gitlink: Some("sub"),
+        plant: |w| {
+            let sub = w.tree.join("sub");
+            nested_repository(&sub);
+            write(
+                &w.tree,
+                ".gitmodules",
+                &format!(
+                    "[submodule \"sub\"]\n\tpath = sub\n\turl = ./nowhere\n\tupdate = !{}\n",
+                    w.script("gitmodules-update")
+                ),
+            );
+            git(&w.tree, &["add", ".gitmodules"]);
+            commit_gitlink(w, "sub", &git(&sub, &["rev-parse", "HEAD"]));
+            git(
+                &sub,
+                &[
+                    "config",
+                    "core.fsmonitor",
+                    &w.script("gitmodules-fsmonitor"),
+                ],
+            );
+        },
+    },
+    Nested {
+        name: "an untracked nested repository",
+        gitlink: None,
+        plant: |w| {
+            let nested = w.tree.join("nested");
+            nested_repository(&nested);
+            git(
+                &nested,
+                &["config", "core.fsmonitor", &w.script("untracked-fsmonitor")],
+            );
+            std::fs::copy(
+                w.script("untracked-hook"),
+                nested.join(".git/hooks/post-index-change"),
+            )
+            .unwrap();
+        },
+    },
+];
+
+/// The control: what each nested plant does to a plain git in the slot,
+/// measured on git 2.39.5. A gitlink's repository runs for a plain `status`,
+/// whatever its `.git` is. The `.gitmodules` command is refused by git itself
+/// (an `update = !…` there is "invalid", and `status` dies on it), and an
+/// untracked repository is never entered by a plain `status` either: both
+/// said, not implied.
+#[test]
+fn every_nested_plant_is_what_it_says_for_a_plain_git() {
+    for plant in NESTED {
+        let w = world();
+        (plant.plant)(&w);
+        attempt(&w.tree, &["status", "--porcelain"]);
+        if plant.name == "a .gitmodules whose update is a command" {
+            attempt(&w.tree, &["submodule", "update", "--init"]);
+        }
+        let ran = w.ran();
+        match plant.name {
+            "an untracked nested repository" => assert_eq!(ran, Vec::<String>::new()),
+            "a .gitmodules whose update is a command" => {
+                // git refuses the command, and its `status` dies on it before
+                // it would enter the submodule: inert for a plain git too.
+                assert_eq!(ran, Vec::<String>::new());
+                let out = plain(&w.tree).args(["status"]).output().unwrap();
+                assert!(!out.status.success());
+                assert!(
+                    String::from_utf8_lossy(&out.stderr)
+                        .contains("invalid value for 'submodule.sub.update'")
+                );
+            }
+            _ => assert_eq!(ran.len(), 1, "{}: {ran:?}", plant.name),
+        }
+    }
+}
+
+/// Every host-side operation on a slot, played whatever it answers: the
+/// answer, or the error, by operation.
+fn play_anything(w: &World) -> Vec<(&'static str, Result<String, String>)> {
+    let slot = w.slot();
+    let paths = w.paths();
+    let said = |r: Result<String, String>| r;
+    let mut played = Vec::new();
+    played.push((
+        "gates",
+        nunki::gate::after_run(
+            &nunki::gate::Subject {
+                role: Role::Coder,
+                tree: &slot.tree,
+                journal: &paths.journal,
+                pr: &paths.pr,
+                verdict: &paths.verdict,
+                mission_dir: &paths.dir,
+                header: &w.header,
+                protected_branches: &w.project.config.protected_branches,
+                protected_paths: &w.project.config.protected_paths,
+                coder_head: None,
+            },
+            &nunki::gate::Verification {
+                project: &w.project,
+                slot: &slot,
+                engine: std::sync::Arc::new(nunki::engine::fake::FakeEngine::default()),
+                stack: "rust",
+            },
+        )
+        .map(|r| format!("{:?}", r.outcomes))
+        .map_err(|e| e.to_string()),
+    ));
+    played.push((
+        "is_clean",
+        nunki::git::is_clean(&slot.tree)
+            .map(|c| c.to_string())
+            .map_err(|e| e.to_string()),
+    ));
+    played.push((
+        "head",
+        said(nunki::git::slot_head(&slot.tree).map_err(|e| e.to_string())),
+    ));
+    let fork = nunki::gate::fork_point(&slot.tree, "dev").map_err(|e| e.to_string());
+    played.push(("fork", fork.clone()));
+    let touched = nunki::gate::touched_since_base(&slot.tree, "dev").map_err(|e| e.to_string());
+    played.push(("touched", touched.clone().map(|t| t.join(","))));
+    if let Ok(touched) = &touched {
+        played.push((
+            "fingerprint",
+            nunki::mutants::fingerprint(&slot.tree, touched).map_err(|e| e.to_string()),
+        ));
+    }
+    let head = nunki::git::slot_head(&slot.tree).unwrap_or_default();
+    if let Ok(fork) = &fork {
+        played.push((
+            "not_attacked",
+            nunki::push::not_attacked(&slot.tree, fork, &head)
+                .map(|n| format!("{n:?}"))
+                .map_err(|e| e.to_string()),
+        ));
+        played.push((
+            "changed",
+            nunki::mutants::changed_between(&slot.tree, fork, &head)
+                .map(|c| format!("{c:?}"))
+                .map_err(|e| e.to_string()),
+        ));
+    }
+    played.push((
+        "source",
+        Ok(format!(
+            "{:?} {:?}",
+            nunki::equivalences::source_at(&slot.tree, &head, "src.rs"),
+            nunki::equivalences::digest_at(&slot.tree, &head, "src.rs", 2)
+        )),
+    ));
+    played.push((
+        "unfetched",
+        nunki::git::commits_not_in(&slot.tree, &w.project.root)
+            .map(|c| format!("{c:?}"))
+            .map_err(|e| e.to_string()),
+    ));
+    played.push((
+        "fetch",
+        nunki::push::fetch(&w.project, "m1")
+            .map(|f| f.head)
+            .map_err(|e| e.to_string()),
+    ));
+    played.push((
+        "branch",
+        nunki::run::branch(&slot, &w.project.root, "mission/other", "dev")
+            .map(|_| String::new())
+            .map_err(|e| e.to_string()),
+    ));
+    played.push((
+        "back",
+        nunki::run::branch(&slot, &w.project.root, "mission/x", "dev")
+            .map(|_| String::new())
+            .map_err(|e| e.to_string()),
+    ));
+    played.push(("check", Ok(format!("{:?}", slots_line(w)))));
+    played.push((
+        "reset",
+        nunki::slot::reset(&w.project, "one", "true", true)
+            .map(|r| r.discarded.to_string())
+            .map_err(|e| e.to_string()),
+    ));
+    played.push((
+        "after_reset",
+        nunki::git::is_clean(&slot.tree)
+            .map(|c| c.to_string())
+            .map_err(|e| e.to_string()),
+    ));
+    played
+}
+
+/// The class, for what an agent leaves in its tree: no host git ever starts
+/// a git inside the slot's tree. A gitlink is refused by every operation that
+/// would take the tree as work tree, naming its path and saying nothing ran;
+/// every read of the commits still answers what they hold; `check` names
+/// it; and no marker exists, whatever the plant.
+#[test]
+fn nothing_an_agent_nests_in_its_tree_is_run_by_the_host() {
+    for plant in NESTED {
+        let w = world();
+        (plant.plant)(&w);
+        let truth_head = git(&w.tree, &["rev-parse", "HEAD"]);
+        let played = play_anything(&w);
+        assert_eq!(
+            w.ran(),
+            Vec::<String>::new(),
+            "with {}, the host ran what the slot nested: {played:#?}",
+            plant.name
+        );
+        let answer = |op: &str| {
+            played
+                .iter()
+                .find(|(name, _)| *name == op)
+                .unwrap_or_else(|| panic!("{op} was not played"))
+                .1
+                .clone()
+        };
+        assert_eq!(answer("head"), Ok(truth_head.clone()), "{}", plant.name);
+        assert_eq!(answer("fetch"), Ok(truth_head), "{}", plant.name);
+        match plant.gitlink {
+            Some(path) => {
+                let refused = format!("holds a submodule (a gitlink) at {path:?}");
+                for op in ["gates", "is_clean", "branch", "reset", "after_reset"] {
+                    let err = answer(op).expect_err(op);
+                    assert!(err.contains(&refused), "{}: {op}: {err}", plant.name);
+                    assert!(err.contains("nunki ran no git"), "{op}: {err}");
+                }
+                let check = answer("check").unwrap();
+                assert!(check.starts_with("Amber"), "{}: {check}", plant.name);
+                assert!(check.contains(&format!("a gitlink) at {path}")), "{check}");
+            }
+            None => {
+                assert_eq!(answer("is_clean"), Ok("false".into()));
+                assert!(answer("gates").unwrap().contains("nested/"));
+                assert_eq!(answer("reset"), Ok("true".into()));
+                assert_eq!(answer("after_reset"), Ok("true".into()));
+                assert!(!w.tree.join("nested").exists());
+            }
+        }
+    }
+}
+
+/// The reviewer's plant: the slot's object store names another repository
+/// of the host's as an alternate, and a ref of the slot names one of that
+/// repository's commits. Refused when the slot is read, naming the file, and
+/// nothing of that repository enters the mirror.
+#[test]
+fn a_slot_borrowing_another_repositorys_objects_is_refused() {
+    let w = world();
+    let mirror = nunki::git::SlotGit::open(&w.tree)
+        .unwrap()
+        .mirror()
+        .to_path_buf();
+    let other = w.dir.path().join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    git(&other, &["init", "-q"]);
+    write(&other, "secret", "host secret\n");
+    git(&other, &["add", "secret"]);
+    git(&other, &["commit", "-q", "-m", "secret"]);
+    let stolen = git(&other, &["rev-parse", "HEAD"]);
+    let blob = git(&other, &["rev-parse", "HEAD:secret"]);
+    for name in ["alternates", "http-alternates"] {
+        let file = w.tree.join(".git/objects/info").join(name);
+        std::fs::write(&file, format!("{}\n", other.join(".git/objects").display())).unwrap();
+        std::fs::write(w.tree.join(".git/refs/heads/stolen"), format!("{stolen}\n")).unwrap();
+        let err = nunki::git::SlotGit::open(&w.tree).unwrap_err().to_string();
+        assert!(err.contains(&file.display().to_string()), "{err}");
+        assert!(err.contains("nunki ran no git in that slot"), "{err}");
+        let held = Command::new("git")
+            .arg("--git-dir")
+            .arg(&mirror)
+            .args(["cat-file", "-e", &blob])
+            .status()
+            .unwrap();
+        assert!(
+            !held.success(),
+            "the mirror holds the other repository's blob"
+        );
+        std::fs::remove_file(&file).unwrap();
+    }
+}
+
+/// A FIFO where git would open a file of the slot's object store, or where
+/// nunki reads one of its refs, is refused, naming it — never opened, so
+/// never waited on.
+#[test]
+fn a_fifo_in_the_slots_git_is_refused_and_never_waited_on() {
+    for at in [
+        ".git/objects/pack/pack-0000000000000000000000000000000000000000.idx",
+        ".git/objects/info/alternates",
+        ".git/packed-refs",
+        ".git/refs/heads/fifo",
+    ] {
+        let w = world();
+        let fifo = w.tree.join(at);
+        let _ = std::fs::remove_file(&fifo);
+        assert!(
+            Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let tree = w.tree.clone();
+        let (sent, answer) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sent.send(
+                nunki::git::SlotGit::open(&tree)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string()),
+            );
+        });
+        let opened = answer
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .unwrap_or_else(|_| panic!("{at}: the host waited on the agent's FIFO"));
+        let err = opened.expect_err(at);
+        assert!(err.contains(&fifo.display().to_string()), "{at}: {err}");
+    }
+}
+
+/// A slot holding a gitlink is still removed by `slot rm --force`, which
+/// asks nothing of its tree; without `--force`, the refusal is the answer.
+#[test]
+fn a_slot_with_a_gitlink_is_removed_by_force_and_runs_nothing() {
+    let w = world();
+    (NESTED[0].plant)(&w);
+    let err = nunki::slot::rm(&w.project, "one", false)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("`nunki slot rm --force`"), "{err}");
+    nunki::slot::rm(&w.project, "one", true).unwrap();
+    assert!(!w.tree.exists());
+    assert_eq!(w.ran(), Vec::<String>::new());
 }

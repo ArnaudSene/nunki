@@ -390,8 +390,9 @@ pub fn serves(
 /// Green when every slot is read through its host mirror
 /// ([`crate::git::SlotGit`]) — which this brings up to date, the one thing
 /// it writes, and only in the mirror. Amber, naming the slot, for a slot the
-/// host cannot read, and for a slot whose `.git/config` carries a key git
-/// would execute: nothing was run, which is why it is not red, and an agent
+/// host cannot read, for a slot whose `HEAD` holds a gitlink (refused by
+/// every work-tree git, [`crate::git::GitError::Gitlink`]), and for a slot
+/// whose `.git/config` carries a key git would execute: nothing was run, which is why it is not red, and an agent
 /// planted it, which is why it is said. The keys are named
 /// ([`crate::git::executable_keys`]); the protection never depended on
 /// that list.
@@ -409,7 +410,21 @@ pub fn host_runs_no_git_in_slots(project: &Project, report: &mut Report) {
     let mut read = Vec::new();
     for slot in &slots {
         match crate::git::SlotGit::open(&slot.tree) {
-            Ok(repo) => read.push(format!("{} at {}", slot.name, repo.mirror().display())),
+            Ok(repo) => {
+                read.push(format!("{} at {}", slot.name, repo.mirror().display()));
+                match repo.gitlinks() {
+                    Ok(paths) if paths.is_empty() => {}
+                    Ok(paths) => said.push(format!(
+                        "slot {}'s HEAD holds a submodule (a gitlink) at {}: nunki slots do \
+                         not support submodules, and every host git that would take its tree \
+                         as work tree refuses it; nunki ran none. Its agent committed it: \
+                         read what it did, and `nunki slot rm` the slot rather than reuse it",
+                        slot.name,
+                        paths.join(", ")
+                    )),
+                    Err(e) => said.push(format!("slot {}: {e}", slot.name)),
+                }
+            }
             Err(e) => said.push(format!("slot {}: {e}", slot.name)),
         }
         match crate::git::executable_keys(&slot.tree) {

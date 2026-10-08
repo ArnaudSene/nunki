@@ -23,10 +23,17 @@ every git it needs about one runs in a **mirror** beside the slot, outside
 every mount, that only the host writes. The slot's commits reach the mirror
 through a fetch that hashes every object, its refs are read from their files,
 and no configuration of the slot's is ever read — so a `core.fsmonitor`, a
-hook, a filter or a pager planted there has nothing to run it. Whether a
+hook, a filter or a pager planted there has nothing to run it. Nor does a
+git of the host's ever start inside the slot's tree: **slots do not support
+submodules**. A commit holding a gitlink is refused, with nothing run, by
+every operation that would take the tree as work tree (gate 1, `slot reset`,
+the launch's checkout), and those few run with submodule descent switched
+off as well. A slot whose object store borrows another repository's
+(`objects/info/alternates`), or holds anything but plain files and
+directories, is refused before it is read. Whether a
 slot's tree is clean is `nunki`'s own comparison with `HEAD`, never what the
 slot's index says, and `nunki check` names any key a slot's `.git/config`
-carries that git would execute. What `nunki`
+carries that git would execute, and any gitlink its `HEAD` holds. What `nunki`
 writes back into a slot (a branch, its checkout) it writes as files. Nothing
 reaches the forge but `nunki push`, on your explicit word.
 

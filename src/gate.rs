@@ -1758,17 +1758,17 @@ fn a_named_test_missing(
 /// The name is looked for as a whole word ([`crate::mutants::is_test_name`]
 /// keeps it one). In the repository at `tree`: in `commit`'s tree when one
 /// is given — the commit `nunki push` pushes, so text added uncommitted in
-/// the slot cannot satisfy it (HQ review 4) — or in the working tree, which
-/// gate 1 has just found clean.
+/// the slot cannot satisfy it (HQ review 4) — or in `HEAD`'s, which is the
+/// working tree when gate 1 has just found it clean. Never in the working
+/// tree itself: no git runs with a slot's tree as work tree for this.
 pub fn named_test_missing(
     tree: &Path,
     commit: Option<&str>,
     campaign: &crate::mutants::Campaign,
     coders: &std::collections::BTreeMap<String, crate::mutants::Triage>,
 ) -> Option<String> {
-    // The slot through its host mirror; the working tree with nunki's own
-    // index of `HEAD` (`git::SlotGit::run_in_tree`). A slot that cannot be
-    // read is said, never taken for a test that is not there.
+    // The slot through its host mirror. A slot that cannot be read is said,
+    // never taken for a test that is not there.
     let repo = match git::SlotGit::open(tree) {
         Ok(repo) => repo,
         Err(e) => return Some(e.to_string()),
@@ -1780,14 +1780,19 @@ pub fn named_test_missing(
         let Some(test) = outcome.test() else {
             continue;
         };
-        let mut grep = vec!["grep", "--quiet", "-F", "-w", "-e", test];
-        grep.extend(commit);
-        grep.push("--");
-        let found = match commit {
-            Some(_) => repo.run(&grep),
-            None => repo.run_in_tree(&grep),
-        };
-        if found.is_err() {
+        // The commit given, or `HEAD`: read in the mirror, never in the
+        // working tree, so no git runs with the slot's tree as work tree.
+        let grep = [
+            "grep",
+            "--quiet",
+            "-F",
+            "-w",
+            "-e",
+            test,
+            commit.unwrap_or("HEAD"),
+            "--",
+        ];
+        if repo.run(&grep).is_err() {
             return Some(format!(
                 "{}:{} names the test {test:?}, and nothing in the tree is called \
                  that",
