@@ -168,6 +168,30 @@ fn a_bind_mount_in_long_syntax_is_refused() {
 }
 
 #[test]
+fn a_long_mount_of_another_type_is_refused_for_its_type() {
+    // The human who reads the refusal has to learn that the type is what is
+    // wrong, not be told the mount holds a key it may not hold.
+    for kind in ["bind", "tmpfs", "npipe", "[volume]"] {
+        let text = format!(
+            "{}volumes:\n  data:\n",
+            with_service_line(&format!(
+                "volumes: [{{type: {kind}, source: data, target: /data}}]"
+            ))
+        );
+        match parse(&text) {
+            Err(ServicesError::Mount { service, why, .. }) => {
+                assert_eq!(service, "db");
+                assert_eq!(
+                    why, "only a named volume is mounted, of type volume",
+                    "{text}"
+                );
+            }
+            other => panic!("{text}: {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn a_long_mount_carrying_options_is_refused() {
     refused_mount(&format!(
         "{}volumes:\n  data:\n",
@@ -317,6 +341,18 @@ fn a_volume_name_may_not_start_with_nunkis_prefix() {
     assert!(parse("services: {}\nvolumes:\n  nunkidata:\n").is_ok());
 }
 
+#[test]
+fn every_character_of_a_volume_name_is_checked_not_only_the_first() {
+    for name in ["data/../etc", "data:/host", "data x", "data$x"] {
+        assert_eq!(
+            parse(&format!("services: {{}}\nvolumes:\n  \"{name}\":\n")),
+            Err(ServicesError::VolumeName(name.to_string())),
+            "{name}"
+        );
+    }
+    assert!(parse("services: {}\nvolumes:\n  Data_1.v-2:\n").is_ok());
+}
+
 // --- the environment ------------------------------------------------------------
 
 #[test]
@@ -350,6 +386,22 @@ fn an_environment_value_is_a_literal_string() {
         parse(&with_service_line("environment:\n      \"A=B\": x")),
         Err(ServicesError::Environment { .. })
     ));
+}
+
+#[test]
+fn an_environment_name_may_start_with_an_underscore_but_not_a_digit() {
+    let names = |file: ServicesFile| -> Vec<String> {
+        file.services["db"].environment.keys().cloned().collect()
+    };
+    let file = parse(&with_service_line(
+        "environment:\n      _PRIVATE: x\n      PG_1: y",
+    ))
+    .unwrap();
+    assert_eq!(names(file), ["PG_1", "_PRIVATE"]);
+    match parse(&with_service_line("environment:\n      \"1PORT\": x")) {
+        Err(ServicesError::Environment { name, .. }) => assert_eq!(name, "1PORT"),
+        other => panic!("{other:?}"),
+    }
 }
 
 #[test]

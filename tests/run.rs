@@ -2297,6 +2297,19 @@ fn a_launch_takes_down_what_was_lifted_from_a_definition_nobody_approved() {
         ],
         "taken down first, then started"
     );
+    // What was taken down is gone, so the next launch takes nothing more
+    // down: what stayed is the approved definition and nunki's own.
+    assert!(
+        run::lift(
+            &engine,
+            &project,
+            Path::new("/hq/profiles/one.yml"),
+            "nunki-11111111-one",
+            &plan,
+        )
+        .unwrap()
+        .is_empty()
+    );
 
     // With nothing stale, nothing is asked to go.
     let quiet = FakeEngine::default().with_lifted(lifted("keep", "db", Some(&lifting)));
