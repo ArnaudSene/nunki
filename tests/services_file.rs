@@ -1465,6 +1465,55 @@ mod live {
         fn down(&self) {
             compose(&self.file, &self.project, &["down", "-v", "--timeout", "1"]);
         }
+
+        /// Up, with every anonymous volume made anew rather than taken
+        /// over from a previous container of the same service.
+        fn up_fresh(&self) -> Output {
+            compose(
+                &self.file,
+                &self.project,
+                &["up", "-d", "--wait", "--renew-anon-volumes"],
+            )
+        }
+
+        /// Down, and then every volume its containers mounted removed by
+        /// name — the image's anonymous ones included — so that nothing it
+        /// wrote is there for whatever is lifted next.
+        fn down_with_its_volumes(&self) {
+            let ids = docker(&[
+                "ps",
+                "-aq",
+                "--filter",
+                &format!("label=com.docker.compose.project={}", self.project),
+            ]);
+            let ids: Vec<String> = String::from_utf8_lossy(&ids.stdout)
+                .split_whitespace()
+                .map(String::from)
+                .collect();
+            let mut volumes = Vec::new();
+            if !ids.is_empty() {
+                let mut args = vec![
+                    "inspect",
+                    "-f",
+                    "{{range .Mounts}}{{if eq .Type \"volume\"}}{{.Name}} {{end}}{{end}}",
+                ];
+                args.extend(ids.iter().map(String::as_str));
+                let out = docker(&args);
+                volumes.extend(
+                    String::from_utf8_lossy(&out.stdout)
+                        .split_whitespace()
+                        .map(String::from),
+                );
+            }
+            self.down();
+            for volume in &volumes {
+                let _ = docker(&["volume", "rm", "-f", volume]);
+                assert!(
+                    !docker(&["volume", "inspect", volume]).status.success(),
+                    "the volume {volume} outlived its iteration"
+                );
+            }
+        }
     }
 
     impl Drop for Profile {
@@ -1784,6 +1833,15 @@ mod live {
     /// nunki's fixed set — and each capability of the set is one at least
     /// one of them cannot do without. What it prints is the measurement
     /// PR.md asks for.
+    ///
+    /// Every iteration measures a fresh start: its own Compose project,
+    /// anonymous volumes renewed on `up`, and taken down with every volume
+    /// its containers mounted before the next one. The first version lifted
+    /// every iteration under one slot, so the Postgres image's anonymous
+    /// data volume, initialised by the first, fully capable iteration, was
+    /// found ready by the later ones: it measured that state, not what an
+    /// entrypoint needs on a fresh data directory, and reported `FOWNER` as
+    /// needed by none (the HQ's correction, measured on fresh containers).
     #[test]
     #[ignore = "builds an image and lifts containers; the HQ runs it by hand"]
     fn live_the_capability_set_is_the_smallest_the_images_need() {
@@ -1813,20 +1871,25 @@ mod live {
                  interval: 2s\n      retries: 60\n",
             ),
         ];
-        let healthy = |slot: &str, text: &str, without: Option<&str>| {
-            let profile = Profile::generate(slot, &["db"], Lifted::whole(file(text)));
+        let iteration = std::cell::Cell::new(0);
+        let healthy = |text: &str, without: Option<&str>| {
+            iteration.set(iteration.get() + 1);
+            let slot = format!("svccaps{}", iteration.get());
+            let profile = Profile::generate(&slot, &["db"], Lifted::whole(file(text)));
             if let Some(cap) = without {
                 profile.edit(|doc| {
                     let caps = doc["services"]["db"]["cap_add"].as_sequence_mut().unwrap();
                     caps.retain(|c| c.as_str() != Some(cap));
                 });
             }
-            profile.up().status.success()
+            let ok = profile.up_fresh().status.success();
+            profile.down_with_its_volumes();
+            ok
         };
 
         let mut failures = Vec::new();
         for (image, text) in &images {
-            let ok = healthy("svccaps", text, None);
+            let ok = healthy(text, None);
             println!(
                 "{image:<24} with the whole set          {}",
                 if ok { "healthy" } else { "NOT healthy" }
@@ -1838,7 +1901,7 @@ mod live {
         for cap in CAPABILITIES {
             let needed_by: Vec<&str> = images
                 .iter()
-                .filter(|(_, text)| !healthy("svccaps", text, Some(cap)))
+                .filter(|(_, text)| !healthy(text, Some(cap)))
                 .map(|(image, _)| *image)
                 .collect();
             println!("without {cap:<14} not healthy: {needed_by:?}");

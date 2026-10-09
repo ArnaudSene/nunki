@@ -75,19 +75,21 @@ pub const NO_GATEWAY: (&str, &str) = ("com.docker.network.bridge.inhibit_ipv4", 
 
 /// The capabilities a lifted service gets back, after all of them are
 /// dropped. Fixed, nunki's, never the file's: what the official database
-/// images' entrypoints need to drop from root to their own user — read
-/// their data directory whatever its mode (`DAC_OVERRIDE`), and change user
-/// (`SETUID`, `SETGID`).
+/// images' entrypoints need to take a fresh data directory and drop from
+/// root to their own user — walk it whatever its mode (`DAC_OVERRIDE`),
+/// change the mode of a directory they do not own (`FOWNER`), and change
+/// user (`SETUID`, `SETGID`).
 ///
-/// Measured by the HQ on Docker Engine 29.4.0 with
-/// `live_the_capability_set_is_the_smallest_the_images_need`:
-/// `postgres:16-alpine`, `postgres:16` and `questdb/questdb:9.4.3`, healthy
-/// with the five the mission expected, then with each taken away in turn:
-/// `DAC_OVERRIDE` is needed by both Postgres images, `SETGID` and `SETUID`
-/// by all three, `CHOWN` and `FOWNER` by none, so those two are not given.
-/// The three together are measured by the same test, which the HQ runs
-/// again before the push.
-pub const CAPABILITIES: [&str; 3] = ["DAC_OVERRIDE", "SETGID", "SETUID"];
+/// Measured by the HQ on Docker Engine 29.4.0, on fresh containers with no
+/// volume carried over: `postgres:16` and `postgres:16-alpine` become ready
+/// with this set; without `FOWNER` their `chmod` of the data directory is
+/// refused, without `DAC_OVERRIDE` their `find` is refused and the
+/// container exits; `CHOWN` is not needed on a fresh data directory. An
+/// earlier measurement that called `FOWNER` unneeded had found a data
+/// directory initialised by a previous iteration.
+/// `live_the_capability_set_is_the_smallest_the_images_need` measures it,
+/// each iteration from a fresh start.
+pub const CAPABILITIES: [&str; 4] = ["DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"];
 
 /// The memory a lifted service may use: a bound, so a service cannot take
 /// the human's machine with it. Enough for a database and a JVM under test.

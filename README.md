@@ -210,9 +210,9 @@ nunki itself, and the file supplies none of them:
 - no port is published. The launch says in one line which `ports` it
   dropped.
 - every capability is dropped, and a fixed few are given back
-  (`DAC_OVERRIDE`, `SETGID`, `SETUID`), which is what the official database
-  images measured need to read their data directory and drop to their own
-  user.
+  (`DAC_OVERRIDE`, `FOWNER`, `SETGID`, `SETUID`), which is what the official
+  database images measured need to take a fresh data directory and drop to
+  their own user.
 - it gets `no-new-privileges`, a 2 GB memory limit and a 1024-process
   limit.
 - it has no CPU bound and no disk bound: a runaway service can slow the
