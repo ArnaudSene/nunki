@@ -1,0 +1,18 @@
+# What the image scan (.github/workflows/images.yml) lets through, and until
+# when. Read only by the step that fails the build: the listing above it
+# still shows every finding.
+#
+# An entry names one vulnerability in one file, says why, and expires. On
+# its expiry date it stops applying and the scan is red again, so nothing
+# here outlives the reason it was written for.
+vulnerabilities:
+  - id: CVE-2026-78667
+    paths:
+      - "usr/local/bin/osv-scanner"
+    statement: >-
+      osv-scanner 2.6.0, the latest release (2026-09-14), is built with Go
+      1.27.0; the fix is in Go 1.27.2, and no osv-scanner build carries it
+      yet. It is a denial of service in net/http, and osv-scanner only sends
+      requests to osv.dev from the agent's container. Remove this entry when
+      a newer osv-scanner is pinned in src/init.rs.
+    expired_at: 2026-11-08
