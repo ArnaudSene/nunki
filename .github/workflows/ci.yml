@@ -160,6 +160,17 @@ jobs:
             cargo test --all-features --test "$suite" -- --ignored --test-threads=1
             echo "::endgroup::"
           done
+          # The fences of the project's services: no way out, no host, no
+          # outside name, only what the mission declares. The capability
+          # measurement is left out: it lifts every image once per
+          # capability, from a fresh start (about 35 minutes), and it is a
+          # measurement the HQ runs when the set or its images change. The
+          # set itself is still exercised here: these tests lift Postgres
+          # and nginx with it, and a set too small turns them red.
+          echo "::group::services_file"
+          cargo test --all-features --test services_file -- --ignored --test-threads=1 \
+            --skip live_the_capability_set_is_the_smallest_the_images_need
+          echo "::endgroup::"
 
       - name: Leave nothing behind
         if: always()
