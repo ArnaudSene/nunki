@@ -3355,6 +3355,36 @@ fn at_standard_a_chain_at_the_threshold_is_green_and_says_how_it_was_rebuilt() {
     assert!(note.contains("16 of 20 tried mutant(s) killed"), "{note}");
 }
 
+/// At critical, a chain is judged as `critical` judges any campaign: no
+/// threshold, and every survivor listed needs an outcome — one kept from a
+/// file unchanged since an earlier campaign as much as one the latest found.
+/// Here 109 of 110 tried are killed, a share that passes any threshold, and
+/// the gate is red on the one kept survivor until it is answered.
+#[test]
+fn at_critical_a_survivor_kept_from_an_unchanged_file_still_needs_an_outcome() {
+    let mut f = standard();
+    f.header.rigor = Rigor::Critical;
+    f.chained(50, 1, 60, 0, true);
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => {
+            assert!(why.contains("1 survivor(s) have no outcome"), "{why}");
+            assert!(why.contains("src/kept.rs:1"), "{why}");
+            assert!(!why.contains("threshold of"), "no threshold: {why}");
+        }
+        other => panic!("a kept survivor without an outcome is red: {other:?}"),
+    }
+    f.coder_answers(&[(
+        "src/kept.rs:1",
+        Triage::Killed {
+            test: "the_thing_holds".into(),
+        },
+    )]);
+    let outcome = f.gate_seven(Role::Coder);
+    assert_eq!(outcome.decision, Decision::Passed);
+    let note = outcome.note.expect("a chain is said");
+    assert!(note.contains("judged once, as one campaign"), "{note}");
+}
+
 /// A chain whose counts could not be trusted carries no count, and is
 /// judged as `critical` judges: every survivor needs an outcome.
 #[test]
@@ -3391,5 +3421,115 @@ fn gate_two_refuses_a_head_that_is_not_on_the_missions_branch() {
     match f.decision(Role::Coder, Gate::BranchAhead) {
         Decision::Failed(said) => assert!(said.contains("on \"elsewhere\""), "{said}"),
         other => panic!("{other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The final full campaign of a `critical` mission (SPEC 4.4, 4.5).
+// ---------------------------------------------------------------------------
+
+impl Fixture {
+    /// Gate 7 as the final stage of a `critical` mission plays it.
+    fn final_campaign(&self) -> gate::Report {
+        let (project, slot) = self.context();
+        gate::final_campaign(
+            &Subject {
+                role: Role::Coder,
+                tree: &self.tree,
+                journal: &self.journal,
+                pr: &self.pr,
+                verdict: &self.verdict,
+                mission_dir: self._dir.path(),
+                header: &self.header,
+                protected_branches: &self.branches,
+                protected_paths: &self.protected,
+                coder_head: self.coder_head.as_deref(),
+            },
+            &gate::Verification {
+                project: &project,
+                slot: &slot,
+                engine: std::sync::Arc::new(nunki::engine::fake::FakeEngine::default()),
+                stack: "rust",
+            },
+        )
+        .unwrap()
+    }
+}
+
+/// A `critical` fixture with the lot and its tests committed.
+fn critical() -> Fixture {
+    let mut f = standard();
+    f.header.rigor = Rigor::Critical;
+    f
+}
+
+/// A partial campaign at `HEAD` that passes is not what a `critical` mission
+/// is verified on: the final stage owes the full one, and says why.
+#[test]
+fn a_partial_campaign_that_passes_at_head_owes_the_final_full_campaign() {
+    let f = critical();
+    f.chained(10, 0, 10, 0, true);
+    let report = f.final_campaign();
+    assert_eq!(report.outcomes.len(), 1, "gate 7 alone: {report:?}");
+    match report.verdict() {
+        nunki::gate::Verdict::CampaignOwed(why) => {
+            assert!(why.contains("is partial since eeeeeeeeeeee"), "{why}");
+            assert!(why.contains("the final full campaign is owed"), "{why}");
+        }
+        other => panic!("a partial campaign verified a critical mission: {other:?}"),
+    }
+}
+
+/// A full campaign at `HEAD` that passes is the final one, whatever made it
+/// full: no second full campaign on the same content.
+#[test]
+fn a_full_campaign_that_passes_at_head_is_the_final_one() {
+    let f = critical();
+    f.campaign(vec![]);
+    assert_eq!(f.final_campaign().verdict(), nunki::gate::Verdict::Green);
+}
+
+/// The final full campaign's survivors are red: they go back to the coder,
+/// as any campaign's survivors do.
+#[test]
+fn the_final_full_campaigns_survivors_are_red() {
+    let f = critical();
+    f.campaign(vec![survivor(1, None)]);
+    match f.final_campaign().verdict() {
+        nunki::gate::Verdict::Red(why) => {
+            assert!(why.contains("1 survivor(s) have no outcome"), "{why}")
+        }
+        other => panic!("an open survivor verified a critical mission: {other:?}"),
+    }
+}
+
+/// A partial campaign with a survivor left open is red too, not owed: the
+/// survivor is the coder's to answer before any full campaign is worth an
+/// hour.
+#[test]
+fn a_partial_campaign_with_an_open_survivor_is_red_rather_than_owed() {
+    let f = critical();
+    f.chained(10, 1, 10, 0, true);
+    assert!(
+        matches!(f.final_campaign().verdict(), nunki::gate::Verdict::Red(_)),
+        "{:?}",
+        f.final_campaign()
+    );
+}
+
+/// No campaign on file, or one on other content: the final stage owes one.
+#[test]
+fn the_final_stage_with_no_campaign_at_head_owes_one() {
+    let f = critical();
+    assert!(matches!(
+        f.final_campaign().verdict(),
+        nunki::gate::Verdict::CampaignOwed(_)
+    ));
+    f.campaign(vec![]);
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 3 }\n", "volet");
+    f.journal_names_head();
+    match f.final_campaign().verdict() {
+        nunki::gate::Verdict::CampaignOwed(why) => assert!(why.contains("other content"), "{why}"),
+        other => panic!("a campaign on other content verified the mission: {other:?}"),
     }
 }

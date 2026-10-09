@@ -111,6 +111,13 @@ impl World {
         std::fs::write(root.join("src.rs"), "pub fn one() -> u8 { 1 }\n").unwrap();
         git(&root, &["add", "-A"]);
         git(&root, &["commit", "-q", "-m", "base"]);
+        // The mission's base is `dev`, and a project home the binary opens
+        // starts on `main`: the base the host records for the slot has to
+        // exist, since `nunki push` at `critical` judges the campaign on
+        // the content the branch changed since it.
+        if opened {
+            git(&root, &["branch", "dev"]);
+        }
         git(
             &root,
             &["remote", "add", "origin", &forge.display().to_string()],
@@ -254,6 +261,13 @@ impl World {
         for event in events {
             store.apply(&mut state, event).unwrap();
         }
+        // At `critical`, the default, the final full campaign: the one on
+        // file is put on the content of `HEAD`, full, as the final stage
+        // leaves it, and its green gate verifies the mission.
+        if matches!(state.flow.stage(), Stage::FinalCampaign) {
+            self.campaign_on_head();
+            store.apply(&mut state, Event::GatesPassed).unwrap();
+        }
         assert!(
             matches!(state.flow.stage(), Stage::Verified),
             "{:?}",
@@ -263,6 +277,27 @@ impl World {
             state.conclude(*role, *verdict, head);
         }
         store.save(&state).unwrap();
+    }
+
+    /// The campaign on file, moved onto the content of `HEAD` as a full
+    /// campaign there, everything else in it kept.
+    fn campaign_on_head(&self) {
+        let dir = nunki::mission::dir::Paths::of(&self.project.hq_root, "m1").dir;
+        let mut campaign = nunki::mutants::read(&dir).unwrap().unwrap();
+        let touched = nunki::gate::touched_since_base(&self.tree, "dev").unwrap();
+        campaign.fingerprint = nunki::mutants::fingerprint(&self.tree, &touched).unwrap();
+        campaign.head = self.head();
+        campaign.chain.scope = nunki::mutants::Scope::Full {
+            why: "the first campaign of this mission".into(),
+        };
+        nunki::mutants::write(&dir, &campaign).unwrap();
+    }
+
+    /// The fingerprint of `HEAD`'s content, as gate 7 and `nunki push`
+    /// compute it.
+    fn fingerprint(&self) -> String {
+        let touched = nunki::gate::touched_since_base(&self.tree, "dev").unwrap();
+        nunki::mutants::fingerprint(&self.tree, &touched).unwrap()
     }
 
     fn on_forge(&self, branch: &str) -> Option<String> {
@@ -549,6 +584,8 @@ fn a_role_that_concludes_twice_leaves_one_answer_and_it_is_the_last() {
             .count(),
         1
     );
+    // And the volet's final full campaign, on its `HEAD`.
+    world.campaign_on_head();
     push::push(&world.project, "m1", true).unwrap();
     assert_eq!(world.on_forge("mission/x").as_deref(), Some(head.as_str()));
 }
@@ -778,9 +815,25 @@ impl World {
         stdout
     }
 
+    /// The flow moves on `event`. A step onto the final stage of a
+    /// `critical` mission is met as `verify` meets it when the campaign on
+    /// file passes: that campaign put on `HEAD`, full, and the mission
+    /// verified.
     fn event(&self, event: Event) {
         let mut state = self.state();
         self.store().apply(&mut state, event).unwrap();
+        self.final_stage_passes();
+    }
+
+    /// At the final stage of a `critical` mission, what `verify` does when
+    /// the campaign on file passes: that campaign put on `HEAD`, full, and
+    /// the mission verified. Anywhere else, nothing.
+    fn final_stage_passes(&self) {
+        let mut state = self.state();
+        if matches!(state.flow.stage(), Stage::FinalCampaign) {
+            self.campaign_on_head();
+            self.store().apply(&mut state, Event::GatesPassed).unwrap();
+        }
     }
 
     fn stage(&self) -> Stage {
@@ -1277,6 +1330,7 @@ impl World {
             &self.head(),
         )
         .unwrap();
+        self.final_stage_passes();
     }
 }
 
@@ -1426,7 +1480,7 @@ fn push_refuses_until_every_proposed_equivalence_is_ratified_or_refused() {
         &Campaign {
             files: None,
             chain: Default::default(),
-            fingerprint: "f".into(),
+            fingerprint: world.fingerprint(),
             head: head.clone(),
             date: "2026-10-06T12:00:00Z".into(),
             survivors: vec![survivor("s1"), survivor("s2"), survivor("s3")],
@@ -1552,7 +1606,7 @@ fn the_hq_rules_on_proposals_with_two_verbs_and_status_lists_them() {
         &Campaign {
             files: None,
             chain: Default::default(),
-            fingerprint: "f".into(),
+            fingerprint: world.fingerprint(),
             head,
             date: "2026-10-06T12:00:00Z".into(),
             survivors: vec![survivor("s1"), survivor("s2")],
@@ -1647,7 +1701,7 @@ fn at_standard_push_refuses_a_share_below_the_threshold_gate_seven_used() {
         &Campaign {
             files: None,
             chain: Default::default(),
-            fingerprint: "f".into(),
+            fingerprint: world.fingerprint(),
             head: head.clone(),
             date: "2026-10-06T12:00:00Z".into(),
             survivors: (1..=3).map(survivor).collect(),
@@ -1700,7 +1754,7 @@ fn refusing_a_proposal_on_a_verified_mission_sends_it_back_to_the_coder() {
             &Campaign {
                 files: None,
                 chain: Default::default(),
-                fingerprint: "f".into(),
+                fingerprint: world.fingerprint(),
                 head: head.clone(),
                 date: "2026-10-06T12:00:00Z".into(),
                 survivors: vec![Survivor {
@@ -1798,7 +1852,7 @@ fn verified_with(rigor: nunki::mission::Rigor, survivors: &[&str]) -> (World, Pa
         &Campaign {
             files: None,
             chain: Default::default(),
-            fingerprint: "f".into(),
+            fingerprint: world.fingerprint(),
             head: head.clone(),
             date: "2026-10-06T12:00:00Z".into(),
             survivors: survivors
@@ -1990,7 +2044,7 @@ fn the_binary_lists_proposals_by_source_and_says_when_the_registry_is_left_alone
         &Campaign {
             files: None,
             chain: Default::default(),
-            fingerprint: "f".into(),
+            fingerprint: world.fingerprint(),
             head: "0123456789abcdef0123456789abcdef01234567".into(),
             date: "2026-10-06T12:00:00Z".into(),
             survivors: vec![Survivor {
@@ -2101,7 +2155,7 @@ fn push_waits_on_nunkis_proposals_and_ratify_all_rules_them() {
         &Campaign {
             files: None,
             chain: Default::default(),
-            fingerprint: "f".into(),
+            fingerprint: world.fingerprint(),
             head,
             date: "2026-10-06T12:00:00Z".into(),
             survivors: vec![
@@ -2412,7 +2466,7 @@ fn push_judges_the_chain_once_on_its_reconstruction() {
             .into_iter()
             .collect(),
         ),
-        fingerprint: "f".into(),
+        fingerprint: world.fingerprint(),
         head: head.clone(),
         date: "2026-10-06T12:00:00Z".into(),
         survivors: (1..=open).map(survivor).collect(),
@@ -2461,7 +2515,7 @@ fn status_says_each_campaign_of_the_chain_with_its_counts() {
         &dir,
         &Campaign {
             files: None,
-            fingerprint: "f".into(),
+            fingerprint: world.fingerprint(),
             head: head.clone(),
             date: "2026-10-06T12:00:00Z".into(),
             survivors: vec![],
@@ -2544,4 +2598,82 @@ fn only_the_judged_commit_is_fetched_or_pushed() {
         !in_project.status.success(),
         "the project received a commit"
     );
+}
+
+// --- the final full campaign of a `critical` mission (SPEC 4.4, 4.5) -------
+
+impl World {
+    /// A mission with a security agent at `rigor`, coded, `CLEAR` on `HEAD`
+    /// and verified, its campaign on file then rewritten by `change`.
+    fn verified_then(
+        rigor: nunki::mission::Rigor,
+        change: impl FnOnce(&mut nunki::mutants::Campaign),
+    ) -> Self {
+        let world = World::at(rigor);
+        world.coded("pub fn one() -> u8 { 2 }\n", "the lot");
+        world.security(Verdict::Clear, T1);
+        if rigor != nunki::mission::Rigor::Critical {
+            world.campaign_on_head();
+        }
+        assert_eq!(world.stage(), Stage::Verified);
+        let dir = nunki::mission::dir::Paths::of(&world.project.hq_root, "m1").dir;
+        let mut campaign = nunki::mutants::read(&dir).unwrap().unwrap();
+        change(&mut campaign);
+        nunki::mutants::write(&dir, &campaign).unwrap();
+        world
+    }
+}
+
+/// Push at `critical` refuses a campaign at the pushed commit that is
+/// partial, however green, and names the verb that runs a full one.
+#[test]
+fn at_critical_push_refuses_a_partial_campaign_at_the_pushed_commit() {
+    let world = World::verified_then(nunki::mission::Rigor::Critical, |c| {
+        c.chain.scope = nunki::mutants::Scope::Partial {
+            since: "e".repeat(40),
+        };
+    });
+    let err = push::push(&world.project, "m1", true).unwrap_err();
+    assert!(matches!(err, PushError::NotFinal { .. }), "{err}");
+    let said = err.to_string();
+    assert!(said.contains("is partial since eeeeeeeeeeee"), "{said}");
+    assert!(
+        said.contains("`nunki mission mutants m1 --again`"),
+        "{said}"
+    );
+    assert!(world.on_forge("mission/x").is_none(), "nothing was pushed");
+}
+
+/// Nor does it take a full campaign that ran on other content than the
+/// pushed commit.
+#[test]
+fn at_critical_push_refuses_a_campaign_on_other_content() {
+    let world = World::verified_then(nunki::mission::Rigor::Critical, |c| {
+        c.fingerprint = "f".into();
+    });
+    let err = push::push(&world.project, "m1", true).unwrap_err();
+    assert!(matches!(err, PushError::NotFinal { .. }), "{err}");
+    assert!(err.to_string().contains("other content"), "{err}");
+    assert!(world.on_forge("mission/x").is_none(), "nothing was pushed");
+}
+
+/// A full campaign at the pushed commit that passes is pushed on.
+#[test]
+fn at_critical_push_takes_a_full_campaign_at_the_pushed_commit() {
+    let world = World::verified_then(nunki::mission::Rigor::Critical, |_| {});
+    let pushed = push::push(&world.project, "m1", true).unwrap();
+    assert_eq!(world.on_forge("mission/x"), Some(pushed.head));
+}
+
+/// At `standard`, the chain's partial campaign is what the push stands on,
+/// as before.
+#[test]
+fn at_standard_push_takes_a_partial_campaign() {
+    let world = World::verified_then(nunki::mission::Rigor::Standard, |c| {
+        c.chain.scope = nunki::mutants::Scope::Partial {
+            since: "e".repeat(40),
+        };
+        c.fingerprint = "f".into();
+    });
+    push::push(&world.project, "m1", true).unwrap();
 }

@@ -177,6 +177,11 @@ pub enum Stage {
     /// The security agent returned `FINDINGS`: the HQ iterates (back to the
     /// coder) or the human lifts the findings.
     Findings { report: String },
+    /// A `critical` mission whose every other stage is green: gate 7 is
+    /// played again, alone, and the mission is `Verified` only on a full
+    /// campaign at `HEAD` that passes (SPEC 4.4, 4.5). One the chain left
+    /// partial owes the final full campaign first.
+    FinalCampaign,
     /// Stopped; the human decides.
     AwaitingHuman(Handover),
     /// Every declared stage is green: ready for human validation and `nunki push`.
@@ -530,7 +535,7 @@ impl Flow {
             ) => {
                 self.security_rounds += 1;
                 self.last_findings = None;
-                Stage::Verified
+                self.verified_or_final()
             }
             (
                 Stage::SecurityAgent { .. },
@@ -551,7 +556,17 @@ impl Flow {
             // lifted it, and ask for the same lift on every volet (SPEC 4.5).
             (Stage::Findings { .. }, Event::HumanAccepted) => {
                 self.last_findings = None;
-                Stage::Verified
+                self.verified_or_final()
+            }
+            // --- the final full campaign, at `critical` ----------------
+            //
+            // Green on a full campaign at `HEAD`: verified. Red: its
+            // survivors go back to the coder as a red gate 7 at the final
+            // gates sends them — a volet, bounded like the others — and the
+            // full campaign is owed again before `Verified`.
+            (Stage::FinalCampaign, Event::GatesPassed) => Stage::Verified,
+            (Stage::FinalCampaign, Event::GatesFailed { reason }) => {
+                self.volet(format!("final campaign: {reason}"))
             }
             // A verified branch is not a pushed one: the HQ reads it first,
             // and what it refuses goes back as a volet, bounded like the
@@ -695,7 +710,7 @@ impl Flow {
     /// a retry — because the rule reads the verdict, not the way back.
     fn security_or_verified(&mut self) -> Stage {
         if !self.header.has_security_agent() {
-            return Stage::Verified;
+            return self.verified_or_final();
         }
         let max = self.max_security_rounds();
         if self.security_rounds >= max {
@@ -707,10 +722,22 @@ impl Flow {
                 Some(report) => Stage::Findings {
                     report: report.clone(),
                 },
-                None => Stage::Verified,
+                None => self.verified_or_final(),
             };
         }
         Stage::SecurityAgent { attempt: 1 }
+    }
+
+    /// Where a mission whose every other stage is green goes: `Verified`,
+    /// or at `critical` the final full campaign first (SPEC 4.4, 4.5), which
+    /// the flow cannot judge itself — whether the campaign on file is full
+    /// is the file's to say, and `verify` reads it there.
+    fn verified_or_final(&self) -> Stage {
+        if self.header.rigor == super::Rigor::Critical {
+            Stage::FinalCampaign
+        } else {
+            Stage::Verified
+        }
     }
 
     /// One more attempt on the same coder work, or the human once the bound

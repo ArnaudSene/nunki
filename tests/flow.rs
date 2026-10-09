@@ -63,6 +63,14 @@ fn verdict(v: Verdict) -> Event {
     }
 }
 
+/// At `critical`, every other stage green: the final full campaign is the
+/// last stage, and a green one verifies the mission (SPEC 4.4, 4.5).
+fn the_final_campaign_passes(flow: &mut Flow) {
+    assert_eq!(flow.stage(), &Stage::FinalCampaign);
+    flow.advance(Event::GatesPassed).unwrap();
+    assert_eq!(flow.stage(), &Stage::Verified);
+}
+
 /// Drive the coder through its planned lots and the final gates.
 fn code_through(flow: &mut Flow) {
     let n = flow.header().lots.len();
@@ -84,7 +92,7 @@ fn code_only_ends_verified_after_the_gates() {
     );
     code_through(&mut flow);
     flow.advance(Event::GatesPassed).unwrap();
-    assert_eq!(flow.stage(), &Stage::Verified);
+    the_final_campaign_passes(&mut flow);
     assert_eq!(flow.volets(), 0);
 }
 
@@ -95,7 +103,7 @@ fn code_and_security_skips_the_integrator() {
     flow.advance(Event::GatesPassed).unwrap();
     assert_eq!(flow.stage(), &Stage::SecurityAgent { attempt: 1 });
     flow.advance(verdict(Verdict::Clear)).unwrap();
-    assert_eq!(flow.stage(), &Stage::Verified);
+    the_final_campaign_passes(&mut flow);
 }
 
 #[test]
@@ -138,7 +146,7 @@ fn full_shape_iterates_and_replays_integration_after_findings() {
     assert_eq!(flow.stage(), &Stage::Integration { attempt: 1 });
     flow.advance(verdict(Verdict::Integrated)).unwrap();
     flow.advance(verdict(Verdict::Clear)).unwrap();
-    assert_eq!(flow.stage(), &Stage::Verified);
+    the_final_campaign_passes(&mut flow);
     assert_eq!(flow.volets(), 2);
 }
 
@@ -149,7 +157,7 @@ fn the_human_can_lift_findings_instead_of_iterating() {
     flow.advance(Event::GatesPassed).unwrap();
     flow.advance(verdict(Verdict::Findings)).unwrap();
     flow.advance(Event::HumanAccepted).unwrap();
-    assert_eq!(flow.stage(), &Stage::Verified);
+    the_final_campaign_passes(&mut flow);
 }
 
 #[test]
@@ -570,7 +578,7 @@ fn a_verified_mission_the_hq_sends_back_is_a_volet_with_its_reason() {
     let mut flow = Flow::new(header(none(), Security::Gates, Bounds::default())).unwrap();
     code_through(&mut flow);
     flow.advance(Event::GatesPassed).unwrap();
-    assert_eq!(flow.stage(), &Stage::Verified);
+    the_final_campaign_passes(&mut flow);
 
     flow.advance(Event::Reviewed {
         because: "revert the Playwright bump".into(),
@@ -586,7 +594,7 @@ fn a_verified_mission_the_hq_sends_back_is_a_volet_with_its_reason() {
     flow.advance(finished(true)).unwrap();
     assert_eq!(flow.stage(), &Stage::Gates);
     flow.advance(Event::GatesPassed).unwrap();
-    assert_eq!(flow.stage(), &Stage::Verified);
+    the_final_campaign_passes(&mut flow);
     assert_eq!(flow.volets(), 1);
 }
 
@@ -602,6 +610,7 @@ fn a_review_with_no_volet_left_hands_the_mission_back() {
     let mut flow = Flow::new(header(none(), Security::Gates, bounds)).unwrap();
     code_through(&mut flow);
     flow.advance(Event::GatesPassed).unwrap();
+    the_final_campaign_passes(&mut flow);
     flow.advance(Event::Reviewed {
         because: "one more thing".into(),
     })
@@ -784,7 +793,7 @@ fn at_critical_the_fourth_round_is_not_launched_and_the_third_findings_stand() {
 
     // Only the human's lift verifies it.
     flow.advance(Event::HumanAccepted).unwrap();
-    assert_eq!(flow.stage(), &Stage::Verified);
+    the_final_campaign_passes(&mut flow);
 }
 
 /// A report a human lifted is not held any more. A finding lifted, then a
@@ -833,6 +842,7 @@ fn findings_after_an_accept_are_held_again_and_come_back_at_the_cap() {
     flow.advance(Event::GatesPassed).unwrap();
     flow.advance(findings(1)).unwrap();
     flow.advance(Event::HumanAccepted).unwrap();
+    the_final_campaign_passes(&mut flow);
     flow.advance(Event::Reviewed {
         because: "rename it".into(),
     })
@@ -900,7 +910,7 @@ fn a_review_after_a_clear_at_the_cap_is_verified_with_the_cap_said() {
     flow.advance(finished(true)).unwrap();
     flow.advance(Event::GatesPassed).unwrap();
     flow.advance(verdict(Verdict::Clear)).unwrap();
-    assert_eq!(flow.stage(), &Stage::Verified);
+    the_final_campaign_passes(&mut flow);
     assert_eq!(flow.security_rounds(), 3);
     assert_eq!(flow.take_security_cap(), None);
     flow.advance(Event::Reviewed {
@@ -909,7 +919,7 @@ fn a_review_after_a_clear_at_the_cap_is_verified_with_the_cap_said() {
     .unwrap();
     flow.advance(finished(true)).unwrap();
     flow.advance(Event::GatesPassed).unwrap();
-    assert_eq!(flow.stage(), &Stage::Verified);
+    the_final_campaign_passes(&mut flow);
     assert_eq!(
         flow.take_security_cap(),
         Some(SecurityCap { rounds: 3, max: 3 })
@@ -1383,4 +1393,132 @@ fn an_unapproved_services_file_means_nothing_where_no_service_is_lifted() {
     code_through(&mut flow);
     assert_eq!(flow.stage(), &Stage::Gates);
     assert!(flow.advance(unapproved("sha256:aa")).is_err());
+}
+
+// ---------------------------------------------------------------------------
+// The final full campaign of a `critical` mission (SPEC 4.4, 4.5).
+// ---------------------------------------------------------------------------
+
+/// At `critical`, every way to `Verified` goes through the final full
+/// campaign first: green gates with no security agent, a `CLEAR`, a human's
+/// lift, and the rounds spent with nothing left to lift.
+#[test]
+fn at_critical_every_way_to_verified_goes_through_the_final_campaign() {
+    let mut gates_only = Flow::new(header(none(), Security::Gates, Bounds::default())).unwrap();
+    assert_eq!(gates_only.header().rigor, Rigor::Critical, "the default");
+    code_through(&mut gates_only);
+    gates_only.advance(Event::GatesPassed).unwrap();
+    assert_eq!(gates_only.stage(), &Stage::FinalCampaign);
+
+    let mut clear = at(Rigor::Critical, none());
+    code_through(&mut clear);
+    clear.advance(Event::GatesPassed).unwrap();
+    clear.advance(verdict(Verdict::Clear)).unwrap();
+    assert_eq!(clear.stage(), &Stage::FinalCampaign);
+
+    let mut lifted = at(Rigor::Critical, none());
+    code_through(&mut lifted);
+    lifted.advance(Event::GatesPassed).unwrap();
+    lifted.advance(findings(1)).unwrap();
+    lifted.advance(Event::HumanAccepted).unwrap();
+    assert_eq!(lifted.stage(), &Stage::FinalCampaign);
+
+    // Three CLEARs, each followed by a review: the fourth return finds the
+    // rounds spent and nothing to lift.
+    let mut capped = at(Rigor::Critical, none());
+    code_through(&mut capped);
+    for _ in 0..3 {
+        capped.advance(Event::GatesPassed).unwrap();
+        capped.advance(verdict(Verdict::Clear)).unwrap();
+        the_final_campaign_passes(&mut capped);
+        capped
+            .advance(Event::Reviewed {
+                because: "once more".into(),
+            })
+            .unwrap();
+        capped.advance(finished(true)).unwrap();
+    }
+    capped.advance(Event::GatesPassed).unwrap();
+    assert_eq!(capped.stage(), &Stage::FinalCampaign);
+    assert_eq!(
+        capped.take_security_cap(),
+        Some(SecurityCap { rounds: 3, max: 3 })
+    );
+}
+
+/// `standard` and `prototype` are unchanged: verified as soon as every other
+/// stage is green.
+#[test]
+fn at_standard_and_prototype_no_final_campaign_is_owed() {
+    let mut standard = at(Rigor::Standard, none());
+    code_through(&mut standard);
+    standard.advance(Event::GatesPassed).unwrap();
+    standard.advance(verdict(Verdict::Clear)).unwrap();
+    assert_eq!(standard.stage(), &Stage::Verified);
+
+    let mut h = header(none(), Security::Gates, Bounds::default());
+    h.rigor = Rigor::Prototype;
+    let mut prototype = Flow::new(h).unwrap();
+    code_through(&mut prototype);
+    prototype.advance(Event::GatesPassed).unwrap();
+    assert_eq!(prototype.stage(), &Stage::Verified);
+}
+
+/// The final full campaign's survivors go back to the coder as a volet that
+/// counts, saying so; after it, the gates, the security agent and the final
+/// full campaign are owed again before `Verified`.
+#[test]
+fn the_final_campaigns_survivors_return_to_the_coder_and_the_final_campaign_is_owed_again() {
+    let mut flow = at(Rigor::Critical, none());
+    code_through(&mut flow);
+    flow.advance(Event::GatesPassed).unwrap();
+    flow.advance(verdict(Verdict::Clear)).unwrap();
+    assert_eq!(flow.stage(), &Stage::FinalCampaign);
+    flow.advance(Event::GatesFailed {
+        reason: "gate 7 (mutation): 1 survivor(s) have no outcome".into(),
+    })
+    .unwrap();
+    match flow.stage() {
+        Stage::Coding {
+            work: Work::Volet { n: 1, cause },
+            attempt: 1,
+        } => {
+            assert!(cause.starts_with("final campaign: "), "{cause}");
+            assert!(cause.contains("1 survivor(s)"), "{cause}");
+        }
+        other => panic!("not a volet: {other:?}"),
+    }
+    assert_eq!(flow.volets(), 1);
+    flow.advance(finished(true)).unwrap();
+    assert_eq!(flow.stage(), &Stage::Gates);
+    flow.advance(Event::GatesPassed).unwrap();
+    assert_eq!(flow.stage(), &Stage::SecurityAgent { attempt: 1 });
+    flow.advance(verdict(Verdict::Clear)).unwrap();
+    the_final_campaign_passes(&mut flow);
+}
+
+/// The final stage takes nothing but its gate's word, or a human calling
+/// the mission off.
+#[test]
+fn the_final_stage_takes_only_its_gate_or_an_end() {
+    let mut flow = Flow::new(header(none(), Security::Gates, Bounds::default())).unwrap();
+    code_through(&mut flow);
+    flow.advance(Event::GatesPassed).unwrap();
+    assert_eq!(flow.stage(), &Stage::FinalCampaign);
+    for event in [
+        Event::Iterate,
+        Event::HumanAccepted,
+        finished(true),
+        verdict(Verdict::Clear),
+    ] {
+        assert!(flow.clone().advance(event.clone()).is_err(), "{event:?}");
+    }
+    flow.advance(Event::Ended {
+        reason: "not needed".into(),
+    })
+    .unwrap();
+    assert!(matches!(
+        flow.stage(),
+        Stage::AwaitingHuman(Handover::Abandoned { .. })
+    ));
 }

@@ -2183,6 +2183,15 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                 Ok(state) => {
                     println!("accepted  written to FOLLOWUP_HQ.md and to nunki's state");
                     println!("stage     {:?}", state.flow.stage());
+                    if matches!(
+                        state.flow.stage(),
+                        nunki::mission::flow::Stage::FinalCampaign
+                    ) {
+                        println!(
+                            "          `nunki verify {id}` plays the final full campaign a \
+                             `critical` mission is verified on"
+                        );
+                    }
                     println!(
                         "          VERDICT.json still says FINDINGS — that is the agent's \
                          answer, and it is not yours to edit"
@@ -2426,10 +2435,15 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                     // brought, through the same call gate 7 makes.
                     base: &header.base,
                     deadline_minutes: header.bounds.mutation_minutes,
+                    // Without `--again`, as the monitor would: at the final
+                    // stage of a `critical` mission, the final full campaign.
                     replay: if again {
                         nunki::mutants::Replay::Now
                     } else {
-                        nunki::mutants::Replay::WhenChanged
+                        nunki::state::Store::open(&project.hq_root)
+                            .and_then(|s| s.load(&id))
+                            .map(|state| nunki::verify::replay_at(state.flow.stage()))
+                            .unwrap_or(nunki::mutants::Replay::WhenChanged)
                     },
                     rigor: header.rigor,
                     threshold: header

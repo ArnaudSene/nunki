@@ -20,7 +20,8 @@
 //! byte the same, and re-running the campaign then spends an hour SPEC § 7 is
 //! counting.
 //!
-//! **And at `standard`, a replay covers what changed since the last one.**
+//! **And at `standard` and `critical`, a replay covers what changed since
+//! the last one.**
 //! A mission's campaigns form a [`Chain`]: the first is full, and a later one
 //! is partial — the touched files whose content changed since the previous
 //! campaign's `HEAD` — whenever [`scope`] finds every condition for it met.
@@ -1944,6 +1945,31 @@ pub enum Replay {
     /// already running is reported as running, and asking again does not
     /// start a second.
     Now,
+    /// The final full campaign a `critical` mission owes at `HEAD` before it
+    /// is `Verified` (SPEC 4.4, 4.5): always full, its record saying so
+    /// ([`FINAL`]). A full campaign already on file on the same content
+    /// answers it, whichever reason made it full: no second full campaign
+    /// on the same content.
+    Final,
+}
+
+/// The reason the record of the final full campaign gives for being full
+/// ([`Replay::Final`]).
+pub const FINAL: &str =
+    "the final campaign: a `critical` mission is verified on a full campaign at HEAD";
+
+/// Why `campaign`, on file at `HEAD`, cannot be the final one a `critical`
+/// mission is verified and pushed on, or `None` when it can: only a full
+/// campaign can, since a partial one assumes what it did not measure
+/// (SPEC 4.4, the chain of campaigns).
+pub fn not_final(campaign: &Campaign) -> Option<String> {
+    let since = campaign.chain.scope.since()?;
+    Some(format!(
+        "the campaign on file, at {}, is partial since {}: a `critical` mission is verified \
+         and pushed only on a full campaign at HEAD",
+        crate::text::one_line(short(&campaign.head)),
+        crate::text::one_line(short(since))
+    ))
 }
 
 /// Whether the next campaign may be partial, and when not, why (SPEC 4.4,
@@ -1954,10 +1980,12 @@ pub enum Replay {
 /// only when **every** condition holds, asked in this order; the first that
 /// does not makes the campaign full, and its reason is recorded:
 ///
-/// - the mission's rigor is `standard`: `critical` runs one full campaign
-///   over everything the branch changed, every time;
+/// - the mission's rigor chains its campaigns ([`chains`]): `standard` and
+///   `critical` do, and a `prototype`, which owes none, does not;
 /// - the human did not ask `--again`, which is a full campaign by
 ///   definition: it is asked for what the chain cannot see;
+/// - it is not the final campaign of a `critical` mission ([`Replay::Final`]),
+///   full by definition too;
 /// - a previous campaign of this mission is on file — only a completed one
 ///   ever is;
 /// - gate 7 passed on it: `owed` says what it still owes, as the gate
@@ -1981,7 +2009,7 @@ pub enum Replay {
 /// **Fails closed**: a condition that cannot be checked is one that does not
 /// hold. A partial campaign assumes that a mutant measured earlier in a file
 /// nobody changed still exists and is still killed, and the README says so;
-/// `--again` and `critical` do not assume it.
+/// `--again` does not assume it.
 #[allow(clippy::too_many_arguments)]
 pub fn scope(
     rigor: crate::mission::Rigor,
@@ -1994,13 +2022,16 @@ pub fn scope(
     carried: impl Fn(&Campaign) -> Option<String>,
 ) -> Scope {
     let full = |why: String| Scope::Full { why };
-    if rigor != crate::mission::Rigor::Standard {
+    if !chains(rigor) {
         return full(format!(
-            "a `{rigor}` mission's campaigns are all full: only `standard` chains them"
+            "a `{rigor}` mission's campaigns are all full: only `standard` and `critical` \
+             chain them"
         ));
     }
-    if replay == Replay::Now {
-        return full("asked `--again`, which is a full campaign".to_string());
+    match replay {
+        Replay::Now => return full("asked `--again`, which is a full campaign".to_string()),
+        Replay::Final => return full(FINAL.to_string()),
+        Replay::WhenChanged => {}
     }
     let Some(previous) = previous else {
         return full("the first campaign of this mission".to_string());
@@ -2068,6 +2099,17 @@ pub fn scope(
             since: previous.head.clone(),
         },
     }
+}
+
+/// Whether a mission at `rigor` chains its campaigns (SPEC 4.4, gate 7):
+/// `standard` and `critical` do, a later campaign partial whenever [`scope`]
+/// finds every condition met; a `prototype` owes no campaign to chain.
+///
+/// At `critical`, gate 7 judges the chain's reconstruction as it judges any
+/// campaign: every survivor listed — kept from an unchanged file or found by
+/// the latest campaign — needs an outcome, and no threshold applies.
+pub fn chains(rigor: crate::mission::Rigor) -> bool {
+    rigor != crate::mission::Rigor::Prototype
 }
 
 /// The line of a stack's `mutation.sh` that says how to read its tool's
@@ -2227,7 +2269,8 @@ pub fn touched_since(
 /// an hour (SPEC § 7), so one on the same content is not run again — unless a
 /// human says something changed that the fingerprint cannot see, since the
 /// fingerprint is over the touched files and not over `mutation.sh`, the
-/// tool's version, or an exclusion added since.
+/// tool's version, or an exclusion added since. The final campaign of a
+/// `critical` mission is answered only by a full one on this content.
 pub fn already_answered(
     dir: &Path,
     want: &str,
@@ -2240,6 +2283,11 @@ pub fn already_answered(
         return Ok(None);
     };
     if existing.fingerprint != want {
+        return Ok(None);
+    }
+    // The final one is a full campaign on this content, and a partial one
+    // on file here does not answer it.
+    if replay == Replay::Final && not_final(&existing).is_some() {
         return Ok(None);
     }
     Ok(Some(Progress::Fresh {
@@ -2493,7 +2541,8 @@ pub struct Asked<'a> {
     /// How long it is given before `nunki` calls it hung.
     pub deadline_minutes: u32,
     pub replay: Replay,
-    /// The mission's rigor: only `standard` chains its campaigns ([`scope`]).
+    /// The mission's rigor: only `standard` and `critical` chain their
+    /// campaigns ([`chains`], [`scope`]).
     pub rigor: crate::mission::Rigor,
     /// The share gate 7 asks for at `standard`: the one the previous
     /// campaign is judged against before a partial one continues it.
@@ -2589,9 +2638,10 @@ pub fn campaign(
 
     // Full or partial (SPEC 4.4, the chain). The previous campaign is judged
     // as gate 7 would judge it now, the tests its outcomes name included.
-    let tooling = match asked.rigor {
-        crate::mission::Rigor::Standard => tooling(project, slot, engine.clone(), &judged)?,
-        _ => None,
+    let tooling = if chains(asked.rigor) {
+        tooling(project, slot, engine.clone(), &judged)?
+    } else {
+        None
     };
     let coders = read_triage(dir)?;
     let scope = scope(

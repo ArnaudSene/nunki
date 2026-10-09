@@ -741,15 +741,127 @@ fn a_campaign_after_its_script_changed_is_launched_full() {
     }
 }
 
-/// At critical, the same volet's campaign is full, as it always was.
+/// At critical, after a full campaign that passed over two files, a volet
+/// touching one of them gets a campaign over that file only: partial from
+/// the first campaign's `HEAD`, run with what it ran with, handed nothing
+/// else (SPEC 4.4, the chain of campaigns).
 #[test]
-fn at_critical_a_volets_campaign_is_launched_full() {
+fn at_critical_a_volet_touching_one_file_gets_a_campaign_over_that_file_only() {
+    let mut v = volet();
+    let tree = v.w.slot.tree.clone();
+    std::fs::write(tree.join("src/two.rs"), "pub fn two() -> u8 {\n    2\n}\n").unwrap();
+    git(&tree, &["add", "-A"]);
+    git(&tree, &["commit", "-q", "-m", "a second file"]);
+    v.first = git(&tree, &["rev-parse", "HEAD"]);
+    let tooling = v.tooling_now();
+    v.first_campaign_ran_with(tooling.clone());
+    let mut first = nunki::mutants::read(&v.mission).unwrap().unwrap();
+    first.files.as_mut().unwrap().insert(
+        "src/two.rs".into(),
+        nunki::mutants::Measured {
+            tried: 8,
+            found: Some(8),
+            on: v.first.clone(),
+        },
+    );
+    first.tried = Some(20);
+    first.chain.handed = Some(vec!["src/lib.rs".into(), "src/two.rs".into()]);
+    nunki::mutants::write(&v.mission, &first).unwrap();
+
+    std::fs::write(
+        tree.join("src/lib.rs"),
+        "pub fn keep(n: u8) -> bool {\n    n > 6\n}\n",
+    )
+    .unwrap();
+    git(&tree, &["commit", "-q", "-am", "volet: one file"]);
+
+    let partial = nunki::mutants::Scope::Partial {
+        since: v.first.clone(),
+    };
+    match v.launch(nunki::mission::Rigor::Critical) {
+        nunki::mutants::Progress::Started { scope, .. } => assert_eq!(scope, partial),
+        other => panic!("the campaign was not launched: {other:?}"),
+    }
+    let chain = v.launched_as();
+    assert_eq!(chain.scope, partial);
+    assert_eq!(chain.handed, Some(vec!["src/lib.rs".to_string()]));
+    assert_eq!(chain.tooling, tooling);
+}
+
+/// At critical, the same volet asked `--again` is full, and says so.
+#[test]
+fn at_critical_a_volets_campaign_asked_again_is_launched_full() {
     let v = volet();
     v.first_campaign_ran_with(v.tooling_now());
-    v.launch(nunki::mission::Rigor::Critical);
+    nunki::mutants::campaign(
+        &v.project,
+        &v.w.slot,
+        v.engine.clone(),
+        &v.mission,
+        "rust",
+        &nunki::mutants::Asked {
+            base: "dev",
+            deadline_minutes: 45,
+            replay: nunki::mutants::Replay::Now,
+            rigor: nunki::mission::Rigor::Critical,
+            threshold: 80,
+        },
+    )
+    .unwrap();
     let chain = v.launched_as();
     assert!(
-        matches!(&chain.scope, nunki::mutants::Scope::Full { why } if why.contains("critical")),
+        matches!(&chain.scope, nunki::mutants::Scope::Full { why } if why.contains("--again")),
+        "{chain:?}"
+    );
+}
+
+/// The final full campaign of a `critical` mission, launched where the
+/// chain would have allowed a partial one: full, over every file the branch
+/// touched, its record saying it is the final one (SPEC 4.4, 4.5).
+#[test]
+fn the_final_campaign_is_launched_full_over_every_touched_file() {
+    let v = volet();
+    v.first_campaign_ran_with(v.tooling_now());
+    let progress = nunki::mutants::campaign(
+        &v.project,
+        &v.w.slot,
+        v.engine.clone(),
+        &v.mission,
+        "rust",
+        &nunki::mutants::Asked {
+            base: "dev",
+            deadline_minutes: 45,
+            replay: nunki::mutants::Replay::Final,
+            rigor: nunki::mission::Rigor::Critical,
+            threshold: 80,
+        },
+    )
+    .unwrap();
+    let full = nunki::mutants::Scope::Full {
+        why: nunki::mutants::FINAL.to_string(),
+    };
+    match progress {
+        nunki::mutants::Progress::Started { scope, .. } => assert_eq!(scope, full),
+        other => panic!("the final campaign was not launched: {other:?}"),
+    }
+    let chain = v.launched_as();
+    assert_eq!(chain.scope, full);
+    assert_eq!(
+        chain.handed,
+        Some(nunki::gate::touched_since_base(&v.w.slot.tree, "dev").unwrap())
+    );
+}
+
+/// At prototype, which owes no campaign to chain, one asked for anyway is
+/// full, and says why.
+#[test]
+fn at_prototype_a_volets_campaign_is_launched_full() {
+    let v = volet();
+    v.first_campaign_ran_with(v.tooling_now());
+    v.launch(nunki::mission::Rigor::Prototype);
+    let chain = v.launched_as();
+    assert!(
+        matches!(&chain.scope, nunki::mutants::Scope::Full { why } if why.contains("prototype")),
         "{chain:?}"
     );
 }

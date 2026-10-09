@@ -181,6 +181,7 @@ pub fn stage_name(flow: &Flow) -> String {
         Stage::Integration { attempt } => format!("integration, attempt {attempt}"),
         Stage::SecurityAgent { attempt } => format!("security agent, attempt {attempt}"),
         Stage::Findings { .. } => "findings".to_string(),
+        Stage::FinalCampaign => "final full campaign".to_string(),
         Stage::AwaitingHuman(_) => "awaiting human".to_string(),
         Stage::Verified => "verified".to_string(),
     }

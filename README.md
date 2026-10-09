@@ -330,6 +330,7 @@ A mission declares how much verification asks of it, with `--rigor` on
 | | `prototype` | `standard` | `critical` (the default) |
 |---|---|---|---|
 | Gate 7, the mutation campaign | not played | passes when the share of tried mutants killed reaches `mutation_threshold` (80 unless `nunki.yaml` says otherwise); a survivor with an outcome, a coder's proposal included, counts as killed | every survivor needs an outcome — killed, a bug, the HQ's equivalence, or the coder's proposal of one |
+| Gate 7's campaigns | none | the first full, a later one partial when the chain allows it | the same chain during the mission, then one full campaign at `HEAD` before `Verified` and `nunki push` |
 | Security agent rounds | none | at most 1 | at most 3 |
 | Integration | none | as declared | as declared |
 
@@ -348,18 +349,18 @@ files, so they give no count, and every survivor needs an outcome there.
 
 A mission's campaigns form a chain, and its unit is the **file**. The first
 campaign is **full**: every touched file, mutated where the branch changed it
-since its fork point. At `standard`, a later one — after a volet, say — is
-**partial**: the same campaign, restricted to the touched files whose content
-changed since the previous campaign's `HEAD`. Its base is still the fork
-point, so each of those files is measured exactly as a full campaign would
-measure it. Which files changed is git's answer on blobs (`git diff
---name-only --no-renames`); no diff hunk is ever read. A file renamed is a
-file removed and a file added.
+since its fork point. At `standard` and at `critical`, a later one — after
+a volet, say — is **partial**: the same campaign, restricted to the touched
+files whose content changed since the previous campaign's `HEAD`. Its base
+is still the fork point, so each of those files is measured exactly as a
+full campaign would measure it. Which files changed is git's answer on
+blobs (`git diff --name-only --no-renames`); no diff hunk is ever read. A
+file renamed is a file removed and a file added.
 
 A campaign is partial only when all of these hold, and full otherwise, with
 the reason in `MUTANTS.json`:
 
-- the mission is at `standard`;
+- the mission is at `standard` or `critical` (a `prototype` runs none);
 - a previous campaign of the mission is on file and gate 7 passes on it;
 - its `HEAD` is an ancestor of the current one;
 - it ran from the same fork point: a base merged in, or a hunk the base
@@ -390,8 +391,11 @@ any two campaigns: a ruling as a proposal marked carried, awaiting
 `--ratify`, and a refusal as a refusal. A file changed, removed or renamed
 takes its old counts and survivors with it; what the new campaign found in
 it replaces them. Gate 7, and `nunki push` after it, judge that
-reconstruction once, at the mission's threshold: the sum of every file's
-tried, and the survivors left without an outcome. These are the numbers one
+reconstruction once, as they judge any campaign of the mission's rigor: at
+`standard`, at its threshold — the sum of every file's tried, and the
+survivors left without an outcome; at `critical`, with no threshold — every
+survivor listed, kept from an unchanged file or found by the latest
+campaign, needs an outcome. These are the numbers one
 full campaign at `HEAD` would give, under the assumption below. A volet that
 re-mutates well-killed code cannot pad the share: its new counts replace the
 old ones rather than adding to them.
@@ -408,8 +412,32 @@ earlier in a file nobody has changed since still exists, and is still
 killed. A volet that weakens a test can make the second false; one that
 stops compiling an unchanged file — its `mod` line removed — makes the
 first false, and that file keeps its counts. The chain will not see
-either. `critical` never makes the assumption — its campaigns are always
-full — and `--again` forces a full campaign at any rigor.
+either. `critical` makes it during the mission as `standard` does, and
+never at the end (below); `--again` forces a full campaign at any rigor.
+
+**The final full campaign, at `critical`.** A `critical` mission is never
+verified, and never pushed, on anything but one full campaign at its final
+`HEAD`. When every other stage it owes is green — the gates, the integrator
+and the security verdict as its shape requires: `CLEAR`, a lift, or rounds
+spent with nothing left to lift — it stands at a last stage, the final full
+campaign, where gate 7 is played again alone:
+
+- the campaign on file at `HEAD` is full and passes: the mission is
+  `Verified`. A campaign that ran full anyway — the first one, or one a
+  changed tool or a moved fork point made full — counts, so no second full
+  campaign runs on the same content;
+- it is partial and passes: `nunki` launches a full campaign at `HEAD`,
+  watched like any campaign, whose record says it is the final one, and
+  looks again once it is read back;
+- it has survivors without an outcome: they go back to the coder as a volet,
+  as any campaign's do. The next campaign may be partial again, and the
+  final full campaign is owed again before `Verified`.
+
+`nunki push` at `critical` refuses unless the campaign on file was run on
+the content of the pushed commit, is full, and passes; its refusal names
+`nunki mission mutants <mission> --again`, which runs a full one.
+`nunki mission mutants <mission>` at that last stage runs the final
+campaign, as the monitor does.
 
 ### Running mutants at once: `mutation_jobs`
 
@@ -556,7 +584,8 @@ MISSION  (one branch off its base, one slot)
 
 - **Stage** — where the mission stands, one at a time: coding, final gates,
   integration, security, findings (the security agent's, for a human to
-  iterate on or lift), awaiting a human, verified. A stage the mission does
+  iterate on or lift), the final full campaign (`critical` only), awaiting a
+  human, verified. A stage the mission does
   not declare is absent by declaration, not skipped.
 - **Lot** — a planned unit of the coder's work, listed in the header (`L1`,
   `L2`…). Small, with its own proof, committed in commits that stand alone.

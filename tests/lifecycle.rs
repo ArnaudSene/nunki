@@ -249,6 +249,8 @@ fn archiving_moves_a_finished_mission_and_keeps_everything_in_it() {
             lot_done: true,
         },
         Event::GatesPassed,
+        // The final full campaign, green: `critical` is the default rigor.
+        Event::GatesPassed,
     ]);
     assert!(matches!(world.state().flow.stage(), Stage::Verified));
     std::fs::write(
@@ -322,6 +324,8 @@ fn archiving_twice_says_so() {
             lot_done: true,
         },
         Event::GatesPassed,
+        // The final full campaign, green: `critical` is the default rigor.
+        Event::GatesPassed,
     ]);
     lifecycle::archive(&world.project, "m1").unwrap();
 
@@ -351,6 +355,8 @@ fn archiving_twice_says_so() {
             outcome: nunki::harness::Outcome::Finished(Default::default()),
             lot_done: true,
         },
+        Event::GatesPassed,
+        // The final full campaign, green: `critical` is the default rigor.
         Event::GatesPassed,
     ]);
 
@@ -448,6 +454,8 @@ fn a_mission_that_is_already_over_is_not_ended_again() {
             outcome: nunki::harness::Outcome::Finished(Default::default()),
             lot_done: true,
         },
+        Event::GatesPassed,
+        // The final full campaign, green: `critical` is the default rigor.
         Event::GatesPassed,
     ]);
     assert!(matches!(world.state().flow.stage(), Stage::Verified));
