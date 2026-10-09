@@ -317,7 +317,25 @@ fn a_system_profile_check_lifts_under_a_slot_of_its_own() {
     assert_eq!(project.held_back, vec!["cache".to_string()]);
     // The prober travels in a field of its own: the project's closed model
     // never has to allow a shared namespace or a user.
-    assert!(plan.prober.is_some(), "the check carries its prober");
+    let prober = plan.prober.as_ref().expect("the check carries its prober");
+    // In the firewall's namespace, as the human, with nothing to spare: the
+    // probes are the agent's routes, tried from where the agent stands.
+    assert_eq!(prober.image, images.prober);
+    assert_eq!(
+        prober.user,
+        Some(format!("{}:{}", plan.user.uid, plan.user.gid))
+    );
+    assert_eq!(prober.network_mode.as_deref(), Some("service:firewall"));
+    assert_eq!(prober.cap_drop, vec!["ALL".to_string()]);
+    assert_eq!(
+        prober.security_opt,
+        vec!["no-new-privileges:true".to_string()]
+    );
+    assert_eq!(
+        prober.depends_on,
+        Some(nunki::compose::model::depends_on_healthy("firewall"))
+    );
+    assert_eq!(prober.command, vec!["sleep".to_string(), "600".to_string()]);
     assert!(
         !project
             .services

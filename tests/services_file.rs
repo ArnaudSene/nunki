@@ -1666,3 +1666,98 @@ mod live {
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 }
+
+// --- what the first campaign found untested ---------------------------------------
+
+#[test]
+fn an_empty_volumes_block_declares_no_volume() {
+    let file = parse("services: {}\nvolumes:\n").unwrap();
+    assert!(file.volumes.is_empty());
+}
+
+#[test]
+fn a_bare_environment_entry_is_refused_for_what_it_would_do() {
+    for line in [
+        "environment:\n      HOME:",
+        "environment:\n      HOME: \"\"",
+    ] {
+        match parse(&with_service_line(line)) {
+            Err(ServicesError::Environment { why, .. }) => {
+                assert!(why.contains("filled from the host's environment"), "{why}")
+            }
+            other => panic!("{line}: {other:?}"),
+        }
+    }
+    match parse(&with_service_line("environment:\n      PORT: 5432")) {
+        Err(ServicesError::Environment { why, .. }) => assert!(why.contains("quote it"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn every_condition_compose_knows_is_rendered_as_written() {
+    for condition in [
+        "service_started",
+        "service_healthy",
+        "service_completed_successfully",
+    ] {
+        let text = format!(
+            "services:\n  app:\n    image: x\n    depends_on:\n      db: {{condition: {condition}}}\n  \
+             db:\n    image: y\n"
+        );
+        let rendering = parse(&text).unwrap().render();
+        assert!(
+            rendering.contains(&format!("condition: \"{condition}\"")),
+            "{rendering}"
+        );
+    }
+}
+
+#[test]
+fn an_empty_command_is_rendered_as_an_empty_list() {
+    let file = parse(&with_service_line("entrypoint: []")).unwrap();
+    let rendering = file.render();
+    assert!(rendering.contains("    entrypoint: []\n"), "{rendering}");
+    let back: serde_yaml_ng::Value = serde_yaml_ng::from_str(&rendering).unwrap();
+    assert_eq!(
+        back["services"]["db"]["entrypoint"],
+        serde_yaml_ng::Value::Sequence(vec![]),
+        "an empty list, not a null: an entrypoint reset, not an absent one"
+    );
+}
+
+/// The repository's HEAD is read as such: what `--show` without a mission
+/// prints, and what `--approve` looks at first.
+#[test]
+fn the_repositorys_head_is_read_from_its_commit() {
+    let world = World::new();
+    let current = nunki::services::read(&world.project, At::Repository(&world.project.root))
+        .unwrap()
+        .expect("a services file is declared");
+    assert_eq!(current.path, "compose.yaml");
+    assert_eq!(
+        current.digest,
+        world.shown().digest,
+        "the same file as the slot's"
+    );
+    // From the commit, not the tree.
+    std::fs::write(world.project.root.join("compose.yaml"), SECOND).unwrap();
+    let again = nunki::services::read(&world.project, At::Repository(&world.project.root))
+        .unwrap()
+        .unwrap();
+    assert_eq!(again.digest, current.digest);
+}
+
+/// A list of approvals that is there and cannot be read approves nothing,
+/// and says why: it is not "no approval yet".
+#[test]
+fn a_list_of_approvals_that_cannot_be_read_is_an_error_and_not_an_empty_list() {
+    let world = World::new();
+    let file = nunki::services::file(&world.project);
+    std::fs::create_dir_all(&file).unwrap();
+    assert!(
+        matches!(world.lifted(), Err(ApprovalError::Unreadable(..))),
+        "{:?}",
+        world.lifted()
+    );
+}

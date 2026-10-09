@@ -586,17 +586,20 @@ fn plain_yaml(text: &str) -> Result<(), ServicesError> {
                         flow = flow.saturating_sub(1);
                         at_node = false;
                     }
-                    ',' if flow > 0 => {}
+                    // An empty entry of a flow mapping, `{a: , b: c}`: what
+                    // follows still starts a node. Outside brackets a `,`
+                    // cannot start a plain scalar, so the parser refuses the
+                    // line whatever this says.
+                    ',' => {}
                     _ => at_node = false,
                 }
             } else {
                 match c {
                     ':' => at_node = true,
                     ',' if flow > 0 => at_node = true,
-                    '[' | '{' if flow > 0 => {
-                        flow += 1;
-                        at_node = true;
-                    }
+                    // No `[` or `{` here: inside brackets one can only open
+                    // a node, which the branch above counts, and outside them
+                    // it is a plain scalar's text.
                     ']' | '}' if flow > 0 => flow -= 1,
                     _ => {}
                 }
@@ -1056,4 +1059,113 @@ fn variable_name(name: &str) -> bool {
         .next()
         .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
         && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+#[cfg(test)]
+mod tests {
+    //! The scan of [`plain_yaml`] and the walk of [`decoded`], branch by
+    //! branch. Through [`ServicesFile::parse`] most of them are masked: a
+    //! scan that missed an indicator on a line the parser then refuses for
+    //! another reason reads the same. Here each case is one the scan alone
+    //! decides, and each says which way.
+
+    use super::*;
+
+    fn feature(text: &str) -> Option<&'static str> {
+        match plain_yaml(text) {
+            Ok(()) => None,
+            Err(ServicesError::Feature { feature, .. }) => Some(feature),
+            Err(other) => panic!("the scan only refuses features: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_document_marker_is_three_characters_then_a_blank() {
+        // `--- ` and `---<tab>` open a document, and a node starts after them.
+        assert_eq!(feature("--- &a x\n"), Some("an anchor"));
+        assert_eq!(feature("---\t&a x\n"), Some("an anchor"));
+        // `---y` is a plain scalar, not a marker: what refuses this line is
+        // the anchor after its `:`, not a second document.
+        assert_eq!(feature("x: 1\n---y: &a 2\n"), Some("an anchor"));
+    }
+
+    #[test]
+    fn a_second_marker_is_a_second_document_even_with_nothing_between() {
+        assert_eq!(feature("---\n---\nk: v\n"), Some("a second document"));
+        assert_eq!(feature("---\nk: v\n"), None);
+    }
+
+    #[test]
+    fn an_escape_in_double_quotes_skips_one_character_and_no_more() {
+        // `"\\"` closes after the escaped backslash; the anchor after it is
+        // at a node.
+        assert_eq!(feature("k: [\"\\\\\", &a x]\n"), Some("an anchor"));
+        // And what is inside the quotes is text: `: &b` there starts nothing.
+        assert_eq!(feature("k: \"a: &b\"\n"), None);
+    }
+
+    #[test]
+    fn single_quotes_close_on_a_lone_quote_and_not_on_a_doubled_one() {
+        assert_eq!(feature("k: 'a: &b'\n"), None);
+        assert_eq!(feature("k: ['a', &b x]\n"), Some("an anchor"));
+        // `''` is a quote inside the string, so `: &c` is still text.
+        assert_eq!(feature("k: 'b'': &c'\n"), None);
+        // `'b'''` is the string `b'`, closed after the doubled quote.
+        assert_eq!(feature("k: ['b''', &c x]\n"), Some("an anchor"));
+    }
+
+    #[test]
+    fn a_dash_starts_an_entry_only_before_a_blank() {
+        assert_eq!(feature("k: -&a\n"), None);
+        assert_eq!(feature("k:\n  - &a x\n"), Some("an anchor"));
+        assert_eq!(feature("k:\n  -\t&a x\n"), Some("an anchor"));
+    }
+
+    #[test]
+    fn a_block_scalars_lines_end_where_its_owner_starts() {
+        // The owner of `|` is the key `a b`, at column 4 — not `b`, which a
+        // blank after `a` does not make an entry. Its text, at column 6, is
+        // text.
+        assert_eq!(feature("k:\n  - a b: |\n      &x\n"), None);
+    }
+
+    #[test]
+    fn a_bar_inside_brackets_is_not_a_block_scalar() {
+        assert_eq!(feature("k: [>, &a x]\n"), Some("an anchor"));
+    }
+
+    #[test]
+    fn a_colon_at_the_start_of_a_node_starts_another() {
+        assert_eq!(feature("? a\n: &b c\n"), Some("an anchor"));
+    }
+
+    #[test]
+    fn brackets_are_counted_open_and_closed() {
+        // Inside brackets, a `,` starts a node.
+        assert_eq!(feature("k: [a, &b c]\n"), Some("an anchor"));
+        assert_eq!(feature("k: {a: ,&c d}\n"), Some("an anchor"));
+        // Closed, at a node or after one, they count for nothing: in block
+        // context `a, &b` is one plain scalar.
+        assert_eq!(feature("k: []\nm: a, &b\n"), None);
+        assert_eq!(feature("k: [a]\nm: a, &b\n"), None);
+        assert_eq!(feature("k: [[a]]\nm: a, &b\n"), None);
+        // And text never opens one.
+        assert_eq!(feature("m: a[1], &b\n"), None);
+    }
+
+    #[test]
+    fn the_walk_refuses_a_tag_the_parser_kept_and_walks_into_lists() {
+        let tagged: Value = serde_yaml_ng::from_str("!custom 5").unwrap();
+        assert!(matches!(
+            decoded(&tagged, "here"),
+            Err(ServicesError::Tag { at }) if at == "here"
+        ));
+        let listed: Value = serde_yaml_ng::from_str("- a\n- {\"<<\": 1}\n").unwrap();
+        assert!(matches!(
+            decoded(&listed, "the file"),
+            Err(ServicesError::MergeKey { at }) if at == "the file[1]"
+        ));
+        let plain: Value = serde_yaml_ng::from_str("- a\n- {b: [c]}\n").unwrap();
+        assert!(decoded(&plain, "the file").is_ok());
+    }
 }

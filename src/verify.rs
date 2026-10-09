@@ -704,11 +704,7 @@ pub fn verify_as(
                 if let Some(since) = launched.campaign_ended {
                     steps.push(Step::CampaignEnded { since });
                 }
-                if !launched_ports.is_empty() {
-                    steps.push(Step::PortsDropped {
-                        services: launched_ports,
-                    });
-                }
+                steps.extend(ports_step(launched_ports));
                 steps.push(Step::Launched {
                     role: Role::Integrator,
                     application,
@@ -808,11 +804,7 @@ pub fn verify_as(
                 if let Some(since) = launched.campaign_ended {
                     steps.push(Step::CampaignEnded { since });
                 }
-                if !launched_ports.is_empty() {
-                    steps.push(Step::PortsDropped {
-                        services: launched_ports,
-                    });
-                }
+                steps.extend(ports_step(launched_ports));
                 steps.push(Step::Launched {
                     role: Role::Security,
                     application,
@@ -1622,6 +1614,12 @@ pub fn gate_seven_said(paths: &Paths, id: &str) -> Result<(), VerifyError> {
     Ok(())
 }
 
+/// The line a launch owes when it dropped some services' `ports`, and none
+/// when it dropped nothing.
+fn ports_step(services: Vec<String>) -> Option<Step> {
+    (!services.is_empty()).then_some(Step::PortsDropped { services })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1817,5 +1815,16 @@ mod tests {
         assert!(lift_on(Some(&low), &Stage::Verified).is_none());
         assert!(lift_on(Some(&low), &Stage::SecurityAgent { attempt: 1 }).is_none());
         assert!(lift_on(Some(&low), &findings()).is_some_and(|d| d.is_ok()));
+    }
+
+    #[test]
+    fn a_launch_says_which_ports_it_dropped_and_nothing_when_none() {
+        assert_eq!(
+            ports_step(vec!["db".to_string()]),
+            Some(Step::PortsDropped {
+                services: vec!["db".to_string()]
+            })
+        );
+        assert_eq!(ports_step(Vec::new()), None);
     }
 }
