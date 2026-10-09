@@ -74,22 +74,23 @@ pub const NETWORK: &str = "nunki-services";
 pub const NO_GATEWAY: (&str, &str) = ("com.docker.network.bridge.inhibit_ipv4", "true");
 
 /// The capabilities a lifted service gets back, after all of them are
-/// dropped. Fixed, nunki's, never the file's: what the official database
-/// images' entrypoints need to take a fresh data directory and drop from
-/// root to their own user — walk it whatever its mode (`DAC_OVERRIDE`),
-/// change the mode of a directory they do not own (`FOWNER`), and change
-/// user (`SETUID`, `SETGID`).
+/// dropped. Fixed, nunki's, never the file's: what the official images'
+/// entrypoints need to start from root and drop to their own user: change
+/// a file's owner (`CHOWN`, which nginx needs) and change user (`SETUID`,
+/// `SETGID`).
 ///
-/// Measured by the HQ on Docker Engine 29.4.0, on fresh containers with no
-/// volume carried over: `postgres:16` and `postgres:16-alpine` become ready
-/// with this set; without `FOWNER` their `chmod` of the data directory is
-/// refused, without `DAC_OVERRIDE` their `find` is refused and the
-/// container exits; `CHOWN` is not needed on a fresh data directory. An
-/// earlier measurement that called `FOWNER` unneeded had found a data
-/// directory initialised by a previous iteration.
-/// `live_the_capability_set_is_the_smallest_the_images_need` measures it,
-/// each iteration from a fresh start.
-pub const CAPABILITIES: [&str; 4] = ["DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"];
+/// Measured by the HQ on Docker Engine 29.4.0 with
+/// `live_the_capability_set_is_the_smallest_the_images_need`, each
+/// iteration from a fresh start: `postgres:16-alpine`, `postgres:16`,
+/// `questdb/questdb:9.4.3` and `nginx:alpine` are healthy with this set;
+/// without `CHOWN` nginx is not, without `SETGID` or `SETUID` none is.
+///
+/// Capabilities interact, so a set is minimal only relative to itself:
+/// Postgres needs `DAC_OVERRIDE` only when `FOWNER` is granted (its
+/// entrypoint's `chmod` then succeeds and a later step needs
+/// `DAC_OVERRIDE`; without `FOWNER` the `chmod` is refused and tolerated).
+/// The test removes each capability from this set, and checks exactly that.
+pub const CAPABILITIES: [&str; 3] = ["CHOWN", "SETGID", "SETUID"];
 
 /// The memory a lifted service may use: a bound, so a service cannot take
 /// the human's machine with it. Enough for a database and a JVM under test.

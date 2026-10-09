@@ -703,7 +703,7 @@ fn the_lifted_services_are_fenced_by_nunki() {
             // The set the HQ measured (Docker Engine 29.4.0): each one needed
             // by at least one of the images in real use. Named here and not
             // read from the constant, so a change to the set is seen.
-            vec!["DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"],
+            vec!["CHOWN", "SETGID", "SETUID"],
             "{yaml}"
         );
         assert_eq!(

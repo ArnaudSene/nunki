@@ -1840,8 +1840,10 @@ mod live {
     /// every iteration under one slot, so the Postgres image's anonymous
     /// data volume, initialised by the first, fully capable iteration, was
     /// found ready by the later ones: it measured that state, not what an
-    /// entrypoint needs on a fresh data directory, and reported `FOWNER` as
-    /// needed by none (the HQ's correction, measured on fresh containers).
+    /// entrypoint needs on a fresh data directory.
+    ///
+    /// Capabilities interact, so a set is minimal only relative to itself:
+    /// each one is removed from nunki's own set, never from another.
     #[test]
     #[ignore = "builds an image and lifts containers; the HQ runs it by hand"]
     fn live_the_capability_set_is_the_smallest_the_images_need() {
@@ -1869,6 +1871,14 @@ mod live {
                 "services:\n  db:\n    image: questdb/questdb:9.4.3\n    healthcheck:\n      \
                  test: [\"CMD\", \"bash\", \"-c\", \"</dev/tcp/127.0.0.1/9000\"]\n      \
                  interval: 2s\n      retries: 60\n",
+            ),
+            (
+                // The image nunki's own live tests lift as a declared
+                // service, so the set must serve it too.
+                "nginx:alpine",
+                "services:\n  db:\n    image: nginx:alpine\n    healthcheck:\n      \
+                 test: [\"CMD\", \"wget\", \"-q\", \"-O\", \"/dev/null\", \"http://127.0.0.1/\"]\n      \
+                 interval: 2s\n      retries: 30\n",
             ),
         ];
         let iteration = std::cell::Cell::new(0);
