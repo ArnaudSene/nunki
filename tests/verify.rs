@@ -735,6 +735,28 @@ impl World {
             .apply(&mut state, nunki::mission::flow::Event::GatesPassed)
             .unwrap();
         assert!(matches!(state.flow.stage(), Stage::Integration { .. }));
+        self.full_campaign_at_head();
+    }
+
+    /// A full campaign with no survivor on the content of `HEAD`, on file:
+    /// what the final stage of a `critical` mission — the default rigor —
+    /// is verified on (SPEC 4.4, 4.5), so that a test about another stage
+    /// does not stop at that one.
+    fn full_campaign_at_head(&self) {
+        let touched = nunki::gate::touched_since_base(&self.tree, "dev").unwrap();
+        nunki::mutants::write(
+            &self.mission(),
+            &nunki::mutants::Campaign {
+                files: None,
+                chain: Default::default(),
+                fingerprint: nunki::mutants::fingerprint(&self.tree, &touched).unwrap(),
+                head: self.head(),
+                date: "2026-10-09T12:00:00Z".into(),
+                survivors: vec![],
+                tried: Some(4),
+            },
+        )
+        .unwrap();
     }
 
     /// Record a run for the current stage, with a harness log that says how
@@ -1089,6 +1111,7 @@ impl World {
             "{:?}",
             state.flow.stage()
         );
+        self.full_campaign_at_head();
     }
 }
 
@@ -1268,11 +1291,12 @@ fn lifting_the_verdict_concludes_the_mission_and_leaves_the_verdict_red() {
         "the callback is behind the VPN and the host allowlist is closed",
     )
     .unwrap();
-    assert!(
-        matches!(state.flow.stage(), Stage::Verified),
-        "{:?}",
-        state.flow.stage()
-    );
+    // At `critical`, the default, the lift leads to the final full
+    // campaign, and the next `verify` verifies on the one at `HEAD`.
+    assert_eq!(state.flow.stage(), &Stage::FinalCampaign);
+    let steps = world.verify().unwrap();
+    assert!(matches!(steps.last(), Some(Step::Verified)), "{steps:?}");
+    let state = world.state();
     assert!(state.verdict_lifted_on(&world.head()));
 
     let verdict = std::fs::read_to_string(world.mission().join("VERDICT.json")).unwrap();
@@ -1647,6 +1671,7 @@ fn the_hq_sends_a_verified_mission_back_with_what_its_review_refuses() {
         "the callback is behind the VPN",
     )
     .unwrap();
+    world.verify().unwrap();
     assert!(matches!(world.state().flow.stage(), Stage::Verified));
 
     let err = nunki::findings::iterate(&world.project, "m1", Some("  ")).unwrap_err();
@@ -3606,4 +3631,158 @@ fn an_unapproved_services_file_hands_the_security_run_back_as_well() {
             .all(|c| !matches!(c, Call::Up(_))),
         "nothing was started"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The final full campaign of a `critical` mission (SPEC 4.4, 4.5).
+// ---------------------------------------------------------------------------
+
+impl World {
+    /// The campaign on file, made partial since an earlier commit and
+    /// carrying `survivors`, on the content of `HEAD`.
+    fn campaign_at_head(&self, scope: nunki::mutants::Scope, open: usize) {
+        self.full_campaign_at_head();
+        let mut campaign = nunki::mutants::read(&self.mission()).unwrap().unwrap();
+        campaign.chain.scope = scope;
+        campaign.survivors = (1..=open as u32)
+            .map(|line| nunki::mutants::Survivor {
+                found_on: None,
+                id: format!("src/new.rs:{line}"),
+                file: "src/new.rs".into(),
+                line,
+                end_line: None,
+                description: "replace two with 0".into(),
+                outcome: None,
+                refused: None,
+            })
+            .collect();
+        nunki::mutants::write(&self.mission(), &campaign).unwrap();
+    }
+
+    /// The security agent's `CLEAR` on `HEAD`, read back.
+    fn cleared(&self) -> Vec<Step> {
+        self.run_recorded(Some(41), FINISHED);
+        self.verdict("Security", "CLEAR", &self.head(), "nothing found");
+        self.verify().unwrap()
+    }
+}
+
+fn partial() -> nunki::mutants::Scope {
+    nunki::mutants::Scope::Partial {
+        since: "e".repeat(40),
+    }
+}
+
+/// A `critical` mission whose security verdict is `CLEAR` on a partial chain
+/// is not `Verified`: it stands at the final stage, which owes a full
+/// campaign, and the campaign the caller runs from there is the final one.
+/// Once a full campaign at `HEAD` passes, it is verified.
+#[test]
+fn a_clear_on_a_partial_chain_is_not_verified_until_a_full_campaign_at_head_passes() {
+    let world = with_security_agent(1);
+    world.at_security();
+    world.campaign_at_head(partial(), 0);
+
+    let steps = world.cleared();
+    match steps.last() {
+        Some(Step::CampaignOwed {
+            role: Role::Coder,
+            why,
+        }) => {
+            assert!(why.contains("is partial since eeeeeeeeeeee"), "{why}");
+        }
+        other => panic!("a partial chain verified a critical mission: {other:?}\n{steps:?}"),
+    }
+    let stage = world.state().flow.stage().clone();
+    assert_eq!(stage, Stage::FinalCampaign);
+    assert_eq!(verify::replay_at(&stage), nunki::mutants::Replay::Final);
+    // A second look, with nothing changed, still owes it.
+    assert!(matches!(
+        world.verify().unwrap().last(),
+        Some(Step::CampaignOwed { .. })
+    ));
+
+    // The final full campaign, recorded at `HEAD` with nothing surviving.
+    world.campaign_at_head(
+        nunki::mutants::Scope::Full {
+            why: nunki::mutants::FINAL.into(),
+        },
+        0,
+    );
+    let steps = world.verify().unwrap();
+    assert!(matches!(steps.last(), Some(Step::Verified)), "{steps:?}");
+}
+
+/// A first full campaign at `HEAD` that passes is the final one: no second
+/// full campaign is owed on the same commit.
+#[test]
+fn a_full_campaign_at_head_that_passes_needs_no_second_one() {
+    let world = with_security_agent(1);
+    world.at_security();
+    let steps = world.cleared();
+    assert!(
+        !steps.iter().any(|s| matches!(s, Step::CampaignOwed { .. })),
+        "{steps:?}"
+    );
+    assert!(matches!(steps.last(), Some(Step::Verified)), "{steps:?}");
+}
+
+/// The final full campaign's survivors go back to the coder, as any
+/// campaign's do: a volet, told why in the follow-up.
+#[test]
+fn the_final_full_campaigns_survivors_go_back_to_the_coder() {
+    let world = with_security_agent(1);
+    world.at_security();
+    world.campaign_at_head(nunki::mutants::Scope::Full { why: String::new() }, 1);
+    world.run_recorded(Some(41), FINISHED);
+    world.verdict("Security", "CLEAR", &world.head(), "nothing found");
+
+    // The coder's launch after it needs an account this world has not
+    // named; the volet is in the state before it is attempted.
+    let _ = world.verify();
+    match world.state().flow.stage() {
+        Stage::Coding {
+            work: Work::Volet { cause, .. },
+            ..
+        } => {
+            assert!(cause.starts_with("final campaign: "), "{cause}");
+            assert!(cause.contains("src/new.rs:1"), "{cause}");
+        }
+        other => panic!("the survivors did not go back to the coder: {other:?}"),
+    }
+    let followup = std::fs::read_to_string(world.mission().join("FOLLOWUP_HQ.md")).unwrap();
+    assert!(
+        followup.contains("the final full campaign was red on"),
+        "{followup}"
+    );
+}
+
+/// At `standard`, a `CLEAR` on a partial chain is verified as before.
+#[test]
+fn at_standard_a_clear_on_a_partial_chain_is_verified() {
+    let world = with_security_agent_at(nunki::mission::Rigor::Standard);
+    world.at_security();
+    world.campaign_at_head(partial(), 0);
+    let steps = world.cleared();
+    assert!(matches!(steps.last(), Some(Step::Verified)), "{steps:?}");
+}
+
+/// The campaign the caller runs is the final one at that stage only.
+#[test]
+fn only_the_final_stage_runs_the_final_campaign() {
+    assert_eq!(
+        verify::replay_at(&Stage::FinalCampaign),
+        nunki::mutants::Replay::Final
+    );
+    for stage in [
+        Stage::Gates,
+        Stage::Verified,
+        Stage::SecurityAgent { attempt: 1 },
+    ] {
+        assert_eq!(
+            verify::replay_at(&stage),
+            nunki::mutants::Replay::WhenChanged,
+            "{stage:?}"
+        );
+    }
 }

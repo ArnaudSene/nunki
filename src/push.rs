@@ -118,6 +118,12 @@ pub enum PushError {
     )]
     MutantsOwed { mission: String, owed: String },
     #[error(
+        "mission {mission} is at `critical` rigor, and {why} — a `critical` mission is \
+         pushed only on a full campaign at the pushed commit that passes: `nunki mission \
+         mutants {mission} --again` runs one"
+    )]
+    NotFinal { mission: String, why: String },
+    #[error(
         "mission {mission} is at `{rigor}` rigor and {file} holds no mutation campaign — \
          no campaign, no push: `nunki mission mutants {mission}` runs one, and the same \
          verb, once the campaign has finished, writes it; `nunki push` reads it then"
@@ -488,6 +494,15 @@ fn nothing_owed(
             file: crate::mutants::FILE,
         });
     }
+    if header.rigor == crate::mission::Rigor::Critical
+        && let Some(campaign) = crate::mutants::read(&dir)?
+        && let Some(why) = not_final_at(tree, &header.base, &campaign)?
+    {
+        return Err(PushError::NotFinal {
+            mission: id.to_string(),
+            why,
+        });
+    }
     let threshold = header
         .mutation_threshold
         .unwrap_or(project.config.mutation_threshold);
@@ -513,6 +528,27 @@ fn nothing_owed(
             },
         }),
     }
+}
+
+/// Why `campaign` is not the final one a `critical` mission is pushed on
+/// (SPEC 4.4, 4.5), or `None` when it is: it must have run on the content
+/// of `HEAD`, the commit being pushed — the same fingerprint gate 7 asks —
+/// and be full ([`crate::mutants::not_final`]).
+fn not_final_at(
+    tree: &std::path::Path,
+    base: &str,
+    campaign: &crate::mutants::Campaign,
+) -> Result<Option<String>, PushError> {
+    let touched = crate::gate::touched_since_base(tree, base)?;
+    let want = crate::mutants::fingerprint(tree, &touched)?;
+    if campaign.fingerprint != want {
+        return Ok(Some(format!(
+            "the campaign on file ran on other content than the pushed commit ({} against {})",
+            &campaign.fingerprint[..7.min(campaign.fingerprint.len())],
+            &want[..7.min(want.len())]
+        )));
+    }
+    Ok(crate::mutants::not_final(campaign))
 }
 
 /// What the verdicts a push stands on leave to say.

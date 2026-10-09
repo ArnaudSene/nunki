@@ -815,6 +815,43 @@ fn at_critical_a_volets_campaign_asked_again_is_launched_full() {
     );
 }
 
+/// The final full campaign of a `critical` mission, launched where the
+/// chain would have allowed a partial one: full, over every file the branch
+/// touched, its record saying it is the final one (SPEC 4.4, 4.5).
+#[test]
+fn the_final_campaign_is_launched_full_over_every_touched_file() {
+    let v = volet();
+    v.first_campaign_ran_with(v.tooling_now());
+    let progress = nunki::mutants::campaign(
+        &v.project,
+        &v.w.slot,
+        v.engine.clone(),
+        &v.mission,
+        "rust",
+        &nunki::mutants::Asked {
+            base: "dev",
+            deadline_minutes: 45,
+            replay: nunki::mutants::Replay::Final,
+            rigor: nunki::mission::Rigor::Critical,
+            threshold: 80,
+        },
+    )
+    .unwrap();
+    let full = nunki::mutants::Scope::Full {
+        why: nunki::mutants::FINAL.to_string(),
+    };
+    match progress {
+        nunki::mutants::Progress::Started { scope, .. } => assert_eq!(scope, full),
+        other => panic!("the final campaign was not launched: {other:?}"),
+    }
+    let chain = v.launched_as();
+    assert_eq!(chain.scope, full);
+    assert_eq!(
+        chain.handed,
+        Some(nunki::gate::touched_since_base(&v.w.slot.tree, "dev").unwrap())
+    );
+}
+
 /// At prototype, which owes no campaign to chain, one asked for anyway is
 /// full, and says why.
 #[test]

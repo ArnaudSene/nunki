@@ -384,21 +384,7 @@ fn play(subject: &Subject, verification: &Verification, phase: Phase) -> Result<
         // to, and that pair is what a campaign that could not run leaves.
         outcomes.push(match &campaign {
             Some(why) => Outcome::waiting(Gate::Mutation, why),
-            // The threshold frozen in the header; one framed before it was frozen
-            // reads the project's, as it always did.
-            None => mutation(
-                subject,
-                match subject.header.mutation_threshold {
-                    Some(percent) => Threshold {
-                        percent,
-                        framed: true,
-                    },
-                    None => Threshold {
-                        percent: verification.project.config.mutation_threshold,
-                        framed: false,
-                    },
-                },
-            )?,
+            None => mutation(subject, threshold(subject, verification))?,
         });
     }
     outcomes.push(match &campaign {
@@ -412,6 +398,61 @@ fn play(subject: &Subject, verification: &Verification, phase: Phase) -> Result<
         role: subject.role,
         head,
         outcomes,
+    })
+}
+
+/// The threshold frozen in the header; one framed before it was frozen
+/// reads the project's, as it always did.
+fn threshold(subject: &Subject, verification: &Verification) -> Threshold {
+    match subject.header.mutation_threshold {
+        Some(percent) => Threshold {
+            percent,
+            framed: true,
+        },
+        None => Threshold {
+            percent: verification.project.config.mutation_threshold,
+            framed: false,
+        },
+    }
+}
+
+/// Gate 7 alone, as the final stage of a `critical` mission plays it
+/// (SPEC 4.4, 4.5): every other stage owed is green, and the mission is
+/// `Verified` only on a **full** campaign at `HEAD` that passes.
+///
+/// Gate 7 as it is played at the final gates, with one answer more: a
+/// campaign on file at `HEAD` that passes and is partial leaves the gate
+/// unplayed, so the flow owes a campaign and the caller runs the final one
+/// ([`crate::mutants::Replay::Final`]). One that fails is red, partial or
+/// not: its survivors go back to the coder as any campaign's do, and the
+/// full one is owed again after them. A full campaign at `HEAD` that passes,
+/// whatever made it full, is the final one.
+pub fn final_campaign(subject: &Subject, verification: &Verification) -> Result<Report, GateError> {
+    let head = git::slot_head(subject.tree)?;
+    let outcome = match campaign_in_flight(verification) {
+        Some(why) => Outcome::waiting(Gate::Mutation, &why),
+        None => {
+            let outcome = mutation(subject, threshold(subject, verification))?;
+            let partial = match outcome.decision {
+                Decision::Passed => crate::mutants::read(subject.mission_dir)
+                    .map_err(|e| GateError::Mutants(e.to_string()))?
+                    .as_ref()
+                    .and_then(crate::mutants::not_final),
+                _ => None,
+            };
+            match partial {
+                Some(why) => Outcome::of(
+                    Gate::Mutation,
+                    Decision::Unplayed(format!("{why} — the final full campaign is owed")),
+                ),
+                None => outcome,
+            }
+        }
+    };
+    Ok(Report {
+        role: subject.role,
+        head,
+        outcomes: vec![outcome],
     })
 }
 

@@ -6470,3 +6470,74 @@ fn record_base(tree: &Path) {
         .fetch_origin(&project)
         .unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// The final full campaign of a `critical` mission (SPEC 4.4, 4.5).
+// ---------------------------------------------------------------------------
+
+/// The final campaign is full whatever the chain would allow, and its
+/// record says it is the final one.
+#[test]
+fn the_final_campaign_is_full_and_its_record_says_it_is_the_final_one() {
+    for rigor in [Rigor::Critical, Rigor::Standard] {
+        assert_eq!(
+            scope_with(|r, replay, _, _, _, _, _| {
+                *r = rigor;
+                *replay = Replay::Final;
+            }),
+            Scope::Full {
+                why: mutants::FINAL.to_string()
+            },
+            "{rigor}"
+        );
+    }
+    assert!(mutants::FINAL.contains("final"), "{}", mutants::FINAL);
+}
+
+/// A full campaign already on file on the same content answers the final
+/// one, whatever made it full; a partial one on the same content does not,
+/// and neither does one on other content.
+#[test]
+fn only_a_full_campaign_on_the_same_content_answers_the_final_one() {
+    let dir = tempfile::tempdir().unwrap();
+    on_file(dir.path(), "abc", 0);
+    assert_eq!(
+        mutants::already_answered(dir.path(), "abc", Replay::Final).unwrap(),
+        Some(mutants::Progress::Fresh { survivors: 0 })
+    );
+    assert_eq!(
+        mutants::already_answered(dir.path(), "def", Replay::Final).unwrap(),
+        None
+    );
+
+    let mut partial = mutants::read(dir.path()).unwrap().unwrap();
+    partial.chain.scope = Scope::Partial {
+        since: "e".repeat(40),
+    };
+    mutants::write(dir.path(), &partial).unwrap();
+    assert_eq!(
+        mutants::already_answered(dir.path(), "abc", Replay::Final).unwrap(),
+        None,
+        "a partial campaign was taken for the final one"
+    );
+    // While, asked only when the content changed, it is the campaign on file.
+    assert!(
+        mutants::already_answered(dir.path(), "abc", Replay::WhenChanged)
+            .unwrap()
+            .is_some()
+    );
+}
+
+/// What says a campaign cannot be the final one: partial, and from where.
+#[test]
+fn a_partial_campaign_is_not_the_final_one_and_says_since_when() {
+    let mut campaign = on_file_at("aaaaaaaaaaaaaaaa", vec![], Some(10));
+    assert_eq!(mutants::not_final(&campaign), None);
+    campaign.chain.scope = Scope::Partial {
+        since: "bbbbbbbbbbbbbbbb".into(),
+    };
+    let why = mutants::not_final(&campaign).expect("partial");
+    assert!(why.contains("at aaaaaaaaaaaa"), "{why}");
+    assert!(why.contains("partial since bbbbbbbbbbbb"), "{why}");
+    assert!(why.contains("full campaign at HEAD"), "{why}");
+}
