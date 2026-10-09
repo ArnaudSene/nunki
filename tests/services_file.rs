@@ -1804,9 +1804,12 @@ mod live {
                  retries: 30\n",
             ),
             (
-                "questdb/questdb:8.2.1",
-                "services:\n  db:\n    image: questdb/questdb:8.2.1\n    healthcheck:\n      \
-                 test: [\"CMD-SHELL\", \"curl -fs http://localhost:9003/status || exit 1\"]\n      \
+                // The version in real use, with the real file's healthcheck:
+                // the image carries no curl, so a check through it is never
+                // healthy (measured by the HQ on 8.2.1 and 9.4.3).
+                "questdb/questdb:9.4.3",
+                "services:\n  db:\n    image: questdb/questdb:9.4.3\n    healthcheck:\n      \
+                 test: [\"CMD\", \"bash\", \"-c\", \"</dev/tcp/127.0.0.1/9000\"]\n      \
                  interval: 2s\n      retries: 60\n",
             ),
         ];
