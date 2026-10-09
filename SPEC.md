@@ -271,6 +271,7 @@ section 3.1 doit exister quel que soit l'exécutant :
 | chemins protégés | la porte de périmètre, **par commit et à la fin de chaque run** (4.4), sur le diff base..HEAD ; la relecture du HQ | entre deux runs, un commit interdit existe déjà dans le clone ; il est refusé au run suivant, pas à l'écriture. Un hook de harnais peut refuser plus tôt (confort, 4.3) |
 | réseau | le **pare-feu du conteneur** (4.1 bis) : un **sidecar** qui possède l'espace réseau et détient seul les capacités, l'agent qui le rejoint sans aucune ; règles non posées = agent qui ne démarre pas ; le port 53 détourné vers un résolveur **filtrant** qui ne relaie jamais ; aucune plage privée ouverte ; liste blanche par rôle | rien ici ne protège du contenu qu'un domaine autorisé sert. Les adresses suivent les réponses DNS, donc un CDN qui bouge reste joignable ; `nunki check` sonde de l'intérieur |
 | exécuter du code sur l'hôte par la configuration git du slot | aucun git de `nunki` ne tourne dans un slot : un **miroir** à côté du slot, hors de tout montage, écrit par l'hôte seul, reçoit ses commits par un fetch qui hache chaque objet ; ses refs sont lues dans leurs fichiers, avec une borne de taille ; configuration système et globale coupées, aucune variable `GIT_*` héritée, objets de remplacement ignorés. Aucun git n'est lancé dans l'arbre du slot : un gitlink est refusé et la descente dans les sous-modules coupée ; un slot dont le magasin d'objets nomme des alternates, ou porte autre chose que des fichiers et des répertoires ordinaires, est refusé avant d'être lu | un humain qui lance `nunki` depuis l'intérieur d'un slot y lance `git rev-parse`, qui lit sans exécuter. Un fichier spécial (une FIFO) dans un dépôt imbriqué non suivi peut bloquer la porte 1 : c'est la disponibilité, pas l'exécution |
+| démarrer un conteneur avec le pouvoir du moteur par le fichier de services du projet | le fichier est lu dans le commit que nomme le `HEAD` du slot, par le miroir, jamais dans l'arbre ; il est relu dans un **modèle fermé** dont `nunki` émet son propre rendu (aucune clé hors modèle, aucune interpolation, aucune fonctionnalité YAML qui porte un sens au-delà du parseur) ; un profil ne lève ce rendu que si un humain en a approuvé l'empreinte (`nunki services --approve`, conservée dans `hq/services.json`, jamais monté) ; les services sont clôturés par `nunki` (4.1 bis) | un humain qui approuve sans lire le rendu ; un humain malveillant qui écrit dans le HQ |
 | question bloquante | le mode sans interface (4.3) : ce qui aurait demandé est refusé ; le contrat de run et le journal | — |
 
 Un hook, un plugin ou un réglage de harnais peut **doubler** une de ces lignes
@@ -411,7 +412,21 @@ domaines pendant une campagne exige de garder une capacité qu'une règle
    sur son propre uid, et que c'est cet uid qui distingue ses requêtes de
    celles de l'agent (mesuré : sans elles, « failed to change group-id to
    dip: Operation not permitted ») ; c'est lui, et non l'agent, qui
-   s'attache aux réseaux des services du projet. L'agent tourne **sans
+   s'attache au réseau des services du projet.
+
+   **Les services du projet sont clôturés par `nunki`, jamais par leur
+   fichier.** Chacun est sur un seul réseau que `nunki` déclare `internal`
+   et sans passerelle sur l'hôte (l'option du pilote Docker
+   `com.docker.network.bridge.inhibit_ipv4`, et `enable_ipv6: false`) —
+   mesuré : un réseau seulement `internal` laisse un service joindre un port
+   que l'hôte publie, par l'adresse de la passerelle. Le pare-feu le rejoint
+   à côté du réseau par défaut ; aucun port n'est publié. Toutes les
+   capacités sont retirées et un jeu fixe de trois est rendu (`CHOWN`,
+   `SETGID`, `SETUID`, mesuré comme le plus petit qui fait démarrer
+   Postgres, QuestDB et nginx), avec `no-new-privileges`, une borne de
+   mémoire et une borne de processus. Le pare-feu n'a pas de chaîne
+   `forward` : c'est `cap_drop` qui empêche un service de router par son
+   espace réseau. L'agent tourne **sans
    aucune capacité** (`cap_drop: [ALL]`, `no-new-privileges`), directement
    sous l'uid de l'hôte (`user:` dans le Compose généré, ce que le sidecar
    rend possible : plus d'entrypoint root à abandonner), sans `sudo`, sans
@@ -652,7 +667,26 @@ relance le livrable pour la sécurité une fois le conteneur de l'intégrateur
 arrêté. Trois règles, et une seule mécanique quelle que soit la forme de la mission :
 
 1. **Les services sont levés une fois par slot**, sous un nom de projet
-   Compose stable, et **jamais arrêtés entre deux profils**. L'état que
+   Compose stable, et **jamais arrêtés entre deux profils**. Seuls le sont
+   ceux que la mission déclare, et ce dont ils dépendent, **dans le rendu
+   qu'un humain a approuvé** : le fichier de services est lu dans le commit
+   que nomme le `HEAD` du slot, par le miroir, jamais dans l'arbre ; il est
+   relu dans un modèle fermé (par service : `image`, `environment` en
+   littéraux explicites, `command`, `entrypoint`, `healthcheck`,
+   `depends_on`, `working_dir`, des volumes nommés ; au niveau supérieur,
+   `services` et des noms de volumes, sans valeur) ; toute autre clé, un
+   `networks` de premier niveau, une ancre, une balise, une clé de fusion ou
+   une clé en double refusent le fichier entier, en le nommant. `nunki` émet
+   son propre rendu canonique, chaque `$` doublé pour que Compose
+   n'interpole rien ; c'est ce rendu qui est montré
+   (`nunki services --show`), haché, approuvé (`nunki services --approve
+   <empreinte>`, refusé si le rendu a changé depuis qu'il a été montré) et
+   levé. Un rendu que personne n'a approuvé ne lève aucun service et rend la
+   mission à l'humain. Les `ports` sont retirés du rendu : l'agent joint un
+   service par son nom, et un port publié entrerait en collision d'un slot
+   à l'autre. Avant de lever un profil, les conteneurs du projet dont la
+   définition n'est pas celle qui est approuvée sont arrêtés, jamais leurs
+   volumes ; l'étiquette de conteneur `nunki.services` est à `nunki`. L'état que
    l'intégrateur a posé — migrations jouées, fixtures — survit ; seul le
    conteneur d'agent change.
 2. **Lancer l'application n'est le travail d'aucun agent : c'est `nunki` qui la
@@ -797,7 +831,7 @@ profils exigent. L'adaptateur de moteur porte, et lui seul :
 | partage d'espace réseau pour le sidecar | l'agent rejoint le pare-feu : `network_mode: "service:<pare-feu>"` **sur le service d'agent** (voir le sens, plus bas) | seulement `container:<nom>`, nom généré à connaître avant |
 | mappage des utilisateurs en mode sans root | sans objet | `userns_mode: keep-id`, propre à Podman |
 | joindre l'hôte sur déclaration | `host.docker.internal` via `host-gateway` | `host.containers.internal` natif, `host-gateway` mal supporté |
-| inclusion des services du projet | `include:` fonctionne | `include:` plante — donc **`nunki` fusionne lui-même le YAML** des services du projet dans le Compose généré, sur les deux moteurs |
+| inclusion des services du projet | `include:` fonctionne | `include:` plante — donc **`nunki` émet lui-même le rendu** des services du projet, relu dans un modèle fermé et approuvé (4.2, règle 1), dans le Compose généré, sur les deux moteurs |
 | conditions de démarrage entre services | `service_healthy`, `service_completed_successfully` | la première buguée, la seconde absente |
 | profils Compose | fiables | bugués — donc **un fichier par profil** avec un nom de projet stable, jamais `profiles:` |
 | adresse du résolveur | dépend du **mode réseau**, pas de la plateforme | idem, autres adresses (aardvark, pasta, slirp) |
@@ -823,9 +857,12 @@ porte les ports, jamais l'agent.
 **redéclare les services du projet à l'identique** laisse leurs conteneurs
 intacts — même identifiant, même heure de démarrage (mesuré). Un fichier qui
 les **omet** ne les arrête pas non plus, mais Compose les signale comme
-« orphelins » à chaque commande. Donc la règle du générateur : **chaque
-fichier de profil redéclare les services du projet à l'identique**, et `nunki`
-ne passe jamais `--remove-orphans`. Arrêter le conteneur d'agent du profil
+« orphelins » à chaque commande. Donc la règle du générateur : **le profil
+système redéclare à l'identique les services que la mission déclare**, et
+`nunki` ne passe jamais `--remove-orphans` ; le profil mission n'en déclare
+aucun. Les services restent levés d'un profil à l'autre parce que `nunki`
+ne retire jamais d'orphelin et que l'arrêt avant levée garde les
+définitions approuvées. Arrêter le conteneur d'agent du profil
 précédent reste un geste explicite de l'adaptateur de moteur.
 
 Une bonne part de ces différences sont des bugs ouverts de `podman-compose`,
@@ -2711,6 +2748,12 @@ Ce que la boucle veut dire, et ce qu'elle ne veut pas dire.
   tentative qui demandait était la dernière, rend la mission comme
   `LotAttemptsExhausted` : aucune tentative ne dépasse la borne, et
   `FOLLOWUP_HQ.md` dit lequel des deux.
+- **Des services que personne n'a approuvés.** Là où un profil système est
+  dû (intégration, agent de sécurité), un fichier de services dont le rendu
+  n'est pas approuvé rend la mission à l'humain : la remise nomme le
+  fichier et l'empreinte, ne consomme aucune tentative, et `retry` reprend
+  le même rôle à la même tentative. `nunki check --slot` et `--mission` en
+  font une ligne rouge.
 - **Et la main rendue se reprend.** Hors décision attendue, les façons
   d'atteindre « rendue à l'humain » sont une borne qui s'épuise — les
   tentatives d'un lot, celles d'un rôle, les volets. `resume` lève une suspension, `iterate` et `accept`
