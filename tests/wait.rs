@@ -238,7 +238,7 @@ fn a_role_out_of_attempts_returns_11_naming_the_role() {
 }
 
 #[test]
-fn volets_used_up_return_11_with_their_causes() {
+fn volets_used_up_return_11_with_their_count_their_causes_and_the_grant() {
     let failed = |n: u32| Event::GatesFailed {
         reason: format!("gate 7 red, round {n}\nsee the report"),
     };
@@ -254,11 +254,23 @@ fn volets_used_up_return_11_with_their_causes() {
     assert_says(
         &said,
         &[
-            "4 return(s) to the coder were used: gate: gate 7 red, round 1 see the report; ",
+            "volets 3 / 3 — 3 return(s) to the coder were taken, and the last cause found \
+             none left: gate: gate 7 red, round 1 see the report; ",
             "gate: gate 7 red, round 4 see the report",
-            "awaits the human: `nunki mission retry m1",
+            "awaits the human: `nunki mission retry m1 --because <why>` grants one more volet",
         ],
     );
+
+    // Past the cap, the count says how many the HQ granted.
+    let mut flow = state.flow.clone();
+    flow.advance(Event::Retried {
+        because: "granted".into(),
+    })
+    .unwrap();
+    flow.advance(finished(true)).unwrap();
+    flow.advance(failed(5)).unwrap();
+    let said = stop_of(&state_of(flow));
+    assert_says(&said, &["volets 4 / 3 (1 granted by the HQ) — 4 return(s)"]);
 }
 
 #[test]

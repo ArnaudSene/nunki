@@ -749,3 +749,81 @@ fn taking_back_a_ruling_asked_on_the_last_attempt_hands_it_over_as_exhausted() {
         "{followup}"
     );
 }
+
+/// Drive `m1` to 3 / 3 volets and the cause that found none left.
+fn at_the_volet_cap(world: &World) {
+    let mut events = vec![Event::RunEnded {
+        outcome: nunki::harness::Outcome::Finished(Default::default()),
+        lot_done: true,
+    }];
+    for n in 1..=4 {
+        events.push(Event::GatesFailed {
+            reason: format!("red {n}"),
+        });
+        if n < 4 {
+            events.push(Event::RunEnded {
+                outcome: nunki::harness::Outcome::Finished(Default::default()),
+                lot_done: true,
+            });
+        }
+    }
+    world.at(&events);
+    assert!(
+        matches!(
+            world.state().flow.stage(),
+            Stage::AwaitingHuman(nunki::mission::flow::Handover::VoletsExhausted { .. })
+        ),
+        "{:?}",
+        world.state().flow.stage()
+    );
+}
+
+/// A retry on spent volets grants one, and the grant is written, dated, in
+/// `FOLLOWUP_HQ.md` with the new count and the HQ's reason on one line — so
+/// a reader sees every volet the mission went past its cap, and why.
+#[test]
+fn a_volet_granted_by_a_retry_is_written_with_its_count_and_its_reason() {
+    let world = World::new(1);
+    at_the_volet_cap(&world);
+
+    let state = lifecycle::retry(&world.project, "m1", "the gate read a stale log").unwrap();
+
+    assert!(
+        matches!(
+            state.flow.stage(),
+            Stage::Coding {
+                work: Work::Volet { n: 4, .. },
+                attempt: 1
+            }
+        ),
+        "{:?}",
+        state.flow.stage()
+    );
+    let followup =
+        std::fs::read_to_string(world.project.hq_root.join("missions/m1/FOLLOWUP_HQ.md")).unwrap();
+    assert!(
+        followup.contains("Volet 4 of 3, granted by the HQ: the gate read a stale log\n"),
+        "{followup}"
+    );
+    let heading = followup
+        .lines()
+        .find(|l| l.contains("took this mission back"))
+        .expect("the record has its heading");
+    let date: Vec<char> = heading.trim_start_matches("## ").chars().take(10).collect();
+    assert!(
+        date.len() == 10
+            && date.iter().enumerate().all(|(i, c)| match i {
+                4 | 7 => *c == '-',
+                _ => c.is_ascii_digit(),
+            }),
+        "the grant is not dated: {heading}"
+    );
+    // Said once: the reason is the grant's, not a second paragraph.
+    assert_eq!(
+        followup.matches("the gate read a stale log").count(),
+        1,
+        "{followup}"
+    );
+    // And never the old promise.
+    assert!(!followup.contains("handed back whole"), "{followup}");
+}

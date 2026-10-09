@@ -327,6 +327,18 @@ pub fn retry(project: &Project, id: &str, why: &str) -> Result<MissionState, Lif
             digest,
             attempt: *attempt,
         },
+        // The volet number is the one the retry opens, read from where it
+        // leads rather than worked out again here.
+        crate::mission::flow::Handover::VoletsExhausted { .. } => match &after {
+            Stage::Coding {
+                work: crate::mission::flow::Work::Volet { n, .. },
+                ..
+            } => crate::followup::Retaken::Volet {
+                n: *n,
+                cap: state.flow.header().bounds.max_volets,
+            },
+            _ => crate::followup::Retaken::Bound { was: &was },
+        },
         _ => crate::followup::Retaken::Bound { was: &was },
     };
     crate::followup::retried(&paths.followup, &who, why.trim(), &taken)?;
@@ -350,7 +362,10 @@ fn what_stopped(handover: &crate::mission::flow::Handover) -> String {
             format!("the {role:?} failed {attempts} attempt(s)")
         }
         Handover::VoletsExhausted { causes } => {
-            format!("{} return(s) to the coder were used", causes.len())
+            format!(
+                "{} return(s) to the coder were taken",
+                causes.len().saturating_sub(1)
+            )
         }
         Handover::Abandoned { reason } => format!("it was called off ({reason})"),
         Handover::AwaitingRuling {

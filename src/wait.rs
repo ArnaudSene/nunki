@@ -331,14 +331,15 @@ fn settled(id: &str, state: &MissionState) -> Option<Status> {
         }
         Stage::AwaitingHuman(handover) => {
             let (who, what) = handover.awaits(id);
-            return Some(Status::new(
-                id,
-                stage,
-                handover.detail(),
-                who,
-                what,
-                Stop::Handover,
-            ));
+            // The handover lists the causes; the count against the cap is
+            // the flow's, which knows the cap and what the HQ granted.
+            let detail = match handover {
+                crate::mission::flow::Handover::VoletsExhausted { .. } => {
+                    format!("volets {} — {}", flow.volets_said(), handover.detail())
+                }
+                _ => handover.detail(),
+            };
+            return Some(Status::new(id, stage, detail, who, what, Stop::Handover));
         }
         _ => {}
     }

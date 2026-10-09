@@ -389,8 +389,11 @@ enum MissionCommand {
     /// Take a mission back from a handover, and say what changed.
     ///
     /// Every handover is a bound running out — a lot's attempts, a role's, or
-    /// the returns to the coder. This hands the bounds back whole and puts
-    /// the mission on the work it stopped on. A lot that awaited your ruling
+    /// the returns to the coder. This puts the mission on the work it stopped
+    /// on, and hands a lot's or a role's attempts back whole. The returns to
+    /// the coder are counted over the mission's life: on spent volets it
+    /// grants one more, written with your reason in FOLLOWUP_HQ.md, and the
+    /// next red verdict hands the mission back again. A lot that awaited your ruling
     /// on survivors is no bound: it resumes at its next attempt, once you
     /// have ruled. A mission you called off yourself is not a handover, and
     /// is refused.
@@ -2021,9 +2024,13 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
         MissionCommand::Retry { id, why } => match nunki::lifecycle::retry(project, &id, &why) {
             Ok(state) => {
                 println!("retried   {:?}", state.flow.stage());
-                println!("          the bounds are handed back whole");
+                // What it handed back depends on the handover — attempts
+                // whole, one volet, nothing for a ruling — and the record
+                // says which; the count is said here whatever it was.
+                println!("volets    {}", state.flow.volets_said());
                 println!(
-                    "          written to FOLLOWUP_HQ.md; `nunki verify {id}` launches the run"
+                    "          what it hands back is written to FOLLOWUP_HQ.md; `nunki verify \
+                     {id}` launches the run"
                 );
                 start_monitor(project, &id);
                 ExitCode::SUCCESS
@@ -2707,6 +2714,7 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                     {
                         println!("handover  {}", handover.line(&id));
                     }
+                    println!("volets    {}", state.flow.volets_said());
                     println!(
                         "security rounds: {} / {}{}",
                         state.flow.security_rounds(),

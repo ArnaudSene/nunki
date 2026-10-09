@@ -91,9 +91,11 @@ impl Handover {
             Handover::RoleAttemptsExhausted { role, attempts } => {
                 format!("the {role:?} failed {attempts} attempt(s)")
             }
+            // The last cause is the one that found no volet left: it is
+            // listed, and not counted as a volet taken.
             Handover::VoletsExhausted { causes } => format!(
-                "{} return(s) to the coder were used: {}",
-                causes.len(),
+                "{} return(s) to the coder were taken, and the last cause found none left: {}",
+                causes.len().saturating_sub(1),
                 causes
                     .iter()
                     .map(|cause| brief(cause, CAUSE_CHARS))
@@ -133,9 +135,14 @@ impl Handover {
             Handover::LotAttemptsExhausted { .. } => {
                 ("the human", format!("read the journals, then {retry}"))
             }
-            Handover::RoleAttemptsExhausted { .. } | Handover::VoletsExhausted { .. } => {
-                ("the human", retry)
-            }
+            Handover::RoleAttemptsExhausted { .. } => ("the human", retry),
+            Handover::VoletsExhausted { .. } => (
+                "the human",
+                format!(
+                    "`nunki mission retry {mission} --because <why>` grants one more volet, \
+                     written in FOLLOWUP_HQ.md"
+                ),
+            ),
             Handover::Abandoned { .. } => (
                 "the human",
                 format!("`nunki mission archive {mission}` closes it"),
@@ -280,7 +287,13 @@ pub enum FlowError {
 pub struct Flow {
     header: Header,
     stage: Stage,
-    volets: u32,
+    /// The cause of every return to the coder over the mission's life, in
+    /// order — and, while the flow stands handed over on
+    /// [`Handover::VoletsExhausted`], last of all the cause that found no
+    /// volet left. It is the count ([`Flow::volets`]): there is no counter
+    /// beside it for a verb to reset, so a retry cannot hand the cap back
+    /// whole. State written while a `volets` counter stood beside it reads
+    /// the same way — that field is ignored, and the causes are counted.
     volet_causes: Vec<String>,
     /// Attempts used per coder work item, keyed by a stable label.
     attempts: HashMap<String, u32>,
@@ -339,7 +352,6 @@ impl Flow {
                 work: Work::Lot(0),
                 attempt: 1,
             },
-            volets: 0,
             volet_causes: Vec::new(),
             attempts: HashMap::new(),
             resume_with: None,
@@ -397,9 +409,31 @@ impl Flow {
         }
     }
 
-    /// Returns to the coder used so far.
+    /// Returns to the coder taken over the mission's life: the causes
+    /// recorded, less the one still waiting for a volet while the flow is
+    /// handed over on [`Handover::VoletsExhausted`].
     pub fn volets(&self) -> u32 {
-        self.volets
+        let recorded = u32::try_from(self.volet_causes.len()).unwrap_or(u32::MAX);
+        match self.stage {
+            Stage::AwaitingHuman(Handover::VoletsExhausted { .. }) => recorded.saturating_sub(1),
+            _ => recorded,
+        }
+    }
+
+    /// The volets taken past the cap: each one granted by the HQ, one
+    /// `retry` at a time.
+    pub fn volets_granted(&self) -> u32 {
+        self.volets().saturating_sub(self.header.bounds.max_volets)
+    }
+
+    /// `n / cap`, and past the cap how many the HQ granted — the count as
+    /// `mission status` and `mission wait` print it.
+    pub fn volets_said(&self) -> String {
+        let (taken, cap) = (self.volets(), self.header.bounds.max_volets);
+        match self.volets_granted() {
+            0 => format!("{taken} / {cap}"),
+            granted => format!("{taken} / {cap} ({granted} granted by the HQ)"),
+        }
     }
 
     /// Rounds the security agent has played: verdicts it concluded.
@@ -570,8 +604,8 @@ impl Flow {
             }
             // A verified branch is not a pushed one: the HQ reads it first,
             // and what it refuses goes back as a volet, bounded like the
-            // others. With none left, the handover says so and `retry` hands
-            // the budget back.
+            // others. With none left, the handover says so and `retry`
+            // grants one more.
             (Stage::Verified, Event::Reviewed { because }) => {
                 self.volet(format!("HQ review: {because}"))
             }
@@ -579,10 +613,12 @@ impl Flow {
             // --- the human takes it back -------------------------------
             //
             // A handover is the flow saying "a bound stopped me, and the
-            // decision is yours". `Retried` is that decision, and it hands
-            // the budget back whole: resetting the counter **is** the verb,
-            // not a side effect of it. Without that the mission would land
-            // in the same handover on the very next event.
+            // decision is yours". `Retried` is that decision. A lot's or a
+            // role's attempts it hands back whole — without that the mission
+            // would land in the same handover on the very next event. The
+            // volets it hands back one at a time: they are counted over the
+            // mission's life, so a retry past the cap is one volet the HQ
+            // grants, and the next red verdict hands the mission back again.
             //
             // `Abandoned` is not a bound. The human said stop, and a verb
             // that undid that would make `nunki mission end` something they
@@ -629,21 +665,34 @@ impl Flow {
                     }
                 }
             }
+            // The cause that found no volet left gets one, numbered by the
+            // mission's whole count: the causes recorded, that one included.
+            // Renumbered here rather than read from `resume_with`, where
+            // state written before the count was the causes' holds volet 1.
+            (Stage::AwaitingHuman(Handover::VoletsExhausted { .. }), Event::Retried { .. }) => {
+                let Some(Work::Volet { cause, .. }) = self.resume_with.clone() else {
+                    return Err(FlowError::NothingToResume);
+                };
+                self.resume_with = None;
+                Stage::Coding {
+                    work: Work::Volet {
+                        n: u32::try_from(self.volet_causes.len()).unwrap_or(u32::MAX),
+                        cause,
+                    },
+                    attempt: 1,
+                }
+            }
             (Stage::AwaitingHuman(_), Event::Retried { .. }) => {
                 let Some(work) = self.resume_with.clone() else {
                     return Err(FlowError::NothingToResume);
                 };
-                // A volet resumes on the budget it was given: 1 when the
-                // returns ran out, its own number when it was that volet's
-                // attempts that did.
+                // A lot's attempts, or a volet's: the work resumes as it was,
+                // and the volet count — the causes — is left alone.
                 //
                 // Nothing resets `attempts`: the bound is read from the
                 // stage's own `attempt`, which starts at 1 below, and the map
                 // is written but never read (measured — removing a reset here
                 // changed no test, because there is nothing to change).
-                if let Work::Volet { n, .. } = &work {
-                    self.volets = *n;
-                }
                 self.resume_with = None;
                 Stage::Coding { work, attempt: 1 }
             }
@@ -792,23 +841,24 @@ impl Flow {
     /// A red verdict: back to the coder, bounded by `max_volets`. The volet
     /// replays the gates and every declared stage after it (SPEC 4.5, "un
     /// verdict vaut pour un HEAD").
+    ///
+    /// Bounded over the mission's life: once `max_volets` are taken, every
+    /// further cause hands the mission back, so a volet past the cap is only
+    /// ever one that a `retry` granted.
     fn volet(&mut self, cause: String) -> Stage {
+        let taken = self.volets();
         self.volet_causes.push(cause.clone());
-        if self.volets >= self.header.bounds.max_volets {
-            // The cause that arrived with no budget left to open a volet for
-            // it: the one a retry has to start from, numbered 1 because a
-            // retry hands back the whole budget.
-            self.resume_with = Some(Work::Volet { n: 1, cause });
+        let n = taken.saturating_add(1);
+        if taken >= self.header.bounds.max_volets {
+            // The cause that arrived with no volet left to open for it: the
+            // one a retry starts from.
+            self.resume_with = Some(Work::Volet { n, cause });
             return Stage::AwaitingHuman(Handover::VoletsExhausted {
                 causes: self.volet_causes.clone(),
             });
         }
-        self.volets += 1;
         Stage::Coding {
-            work: Work::Volet {
-                n: self.volets,
-                cause,
-            },
+            work: Work::Volet { n, cause },
             attempt: 1,
         }
     }

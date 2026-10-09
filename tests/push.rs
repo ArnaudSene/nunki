@@ -2677,3 +2677,48 @@ fn at_standard_push_takes_a_partial_campaign() {
     });
     push::push(&world.project, "m1", true).unwrap();
 }
+
+/// `mission status` prints the volets taken against the cap, and past it how
+/// many the HQ granted; `mission retry` on spent volets grants exactly one
+/// and says the new count — through the real binary, on a mission handed
+/// over at 3 / 3.
+#[test]
+fn status_counts_the_volets_against_the_cap_and_a_retry_grants_one() {
+    let world = World::opened_at(nunki::mission::Rigor::Standard);
+    let store = world.store();
+    let mut state = world.state();
+    let mut events = vec![Event::RunEnded {
+        outcome: nunki::harness::Outcome::Finished(Default::default()),
+        lot_done: true,
+    }];
+    for n in 1..=4 {
+        events.push(Event::GatesFailed {
+            reason: format!("red {n}"),
+        });
+        if n < 4 {
+            events.push(Event::RunEnded {
+                outcome: nunki::harness::Outcome::Finished(Default::default()),
+                lot_done: true,
+            });
+        }
+    }
+    for event in events {
+        store.apply(&mut state, event).unwrap();
+    }
+
+    let status = world.printed_by_the_binary(&["mission", "status", "m1"]);
+    assert!(status.contains("volets    3 / 3\n"), "{status}");
+
+    let retried =
+        world.printed_by_the_binary(&["mission", "retry", "m1", "--because", "one more look"]);
+    assert!(
+        retried.contains("volets    4 / 3 (1 granted by the HQ)"),
+        "{retried}"
+    );
+    assert!(!retried.contains("handed back whole"), "{retried}");
+    let status = world.printed_by_the_binary(&["mission", "status", "m1"]);
+    assert!(
+        status.contains("volets    4 / 3 (1 granted by the HQ)\n"),
+        "{status}"
+    );
+}
