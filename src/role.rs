@@ -78,6 +78,14 @@ rule the survivor equivalent itself, or put it out of the campaign's reach.
 Writing nothing, or inventing an outcome of your own, only makes the gate red
 without saying why.
 
+Running the campaign is `nunki`'s work, not yours. **Never run a whole
+mutation campaign yourself**, over the branch or over a file: `nunki` runs
+one after your run, on a clean copy of your commit, and hands you its
+survivors. A campaign of your own costs an hour or more of your run and is
+then played again. To check that a test kills a survivor, run the stack's
+mutation tool on that one mutant or that one function only — minutes, not
+hours.
+
 Your commit messages say what changed and why it had to. They carry
 **no trailer naming a harness, a model or a tool** — no `Co-Authored-By`,
 no session link, nothing of the sort: the commit's author already says which
