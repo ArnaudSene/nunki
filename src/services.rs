@@ -16,12 +16,15 @@
 //! what is approved is what is committed, and an edit left uncommitted in
 //! the tree changes nothing.
 
+use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use crate::check::{Check, Verdict};
-use crate::compose::services::{Lifted, RESERVED_SERVICES, ServicesError, ServicesFile, digest};
+use crate::compose::services::{
+    LABEL, Lifted, RESERVED_SERVICES, ServicesError, ServicesFile, digest,
+};
 use crate::engine::Container;
 use crate::git::GitError;
 use crate::project::Project;
@@ -76,6 +79,15 @@ pub enum ApprovalError {
     Corrupt(PathBuf, String),
     #[error("{0} could not be written: {1}")]
     Unwritable(PathBuf, #[source] std::io::Error),
+    #[error("{0} is not a profile nunki wrote, so nothing was started: {1}")]
+    NotAProfile(PathBuf, String),
+    #[error(
+        "{path} would start the service {service:?} from a definition no human approved — \
+         a profile written before approvals, or from a rendering no longer approved — so \
+         nothing was started. The next launch writes the profile again from the approved \
+         services file; `nunki services --show` says what is approved"
+    )]
+    UnapprovedProfile { path: PathBuf, service: String },
 }
 
 /// Where this project's approvals live.
@@ -304,18 +316,87 @@ pub fn stale(
     lifting: Option<&Lifted>,
     approvals: &Approvals,
 ) -> Vec<String> {
+    let labels = lifting.map(|lifted| {
+        lifted
+            .services
+            .services
+            .keys()
+            .map(|name| (name.clone(), lifted.approved.clone()))
+            .collect()
+    });
+    stale_labelled(containers, labels.as_ref(), approvals)
+}
+
+/// [`stale`], for a profile known by the label each service it lifts
+/// carries — service name to digest — as [`labels_of_profile`] reads them
+/// back from a profile already written.
+pub fn stale_labelled(
+    containers: &[Container],
+    lifting: Option<&BTreeMap<String, String>>,
+    approvals: &Approvals,
+) -> Vec<String> {
     containers
         .iter()
         .filter(|c| !RESERVED_SERVICES.contains(&c.service.as_str()))
         .filter(|c| match (lifting, c.digest.as_deref()) {
             (Some(lifted), Some(label)) => {
-                label != lifted.approved || !lifted.services.services.contains_key(&c.service)
+                lifted.get(&c.service).map(String::as_str) != Some(label)
             }
             (None, Some(label)) => approvals.find(label).is_none(),
             (_, None) => true,
         })
         .map(|c| c.id.clone())
         .collect()
+}
+
+/// What the profile already written at `path` lifts from the project's
+/// file, read back from it: each service but nunki's own, with the digest
+/// its label carries. `None` when it lifts none — a mission profile, or a
+/// project without a services file.
+///
+/// Every one of them has to carry the label of a rendering a human
+/// approved, or the whole profile is refused: a profile written before
+/// approvals existed lifts its services unlabelled and unfenced, and one
+/// written from a rendering since withdrawn from the list is no longer
+/// approved. Read for the paths that lift a profile without writing it
+/// ([`crate::run::relift`]), so that none of them is a second way to lift.
+pub fn labels_of_profile(
+    path: &Path,
+    approvals: &Approvals,
+) -> Result<Option<BTreeMap<String, String>>, ApprovalError> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| ApprovalError::Unreadable(path.to_path_buf(), e))?;
+    let document: serde_yaml_ng::Value = serde_yaml_ng::from_str(&text)
+        .map_err(|e| ApprovalError::NotAProfile(path.to_path_buf(), e.to_string()))?;
+    let Some(services) = document.get("services").and_then(|s| s.as_mapping()) else {
+        return Err(ApprovalError::NotAProfile(
+            path.to_path_buf(),
+            "it has no services".to_string(),
+        ));
+    };
+    let mut labels = BTreeMap::new();
+    for (name, service) in services {
+        let name = name.as_str().unwrap_or_default();
+        if RESERVED_SERVICES.contains(&name) {
+            continue;
+        }
+        let label = service
+            .get("labels")
+            .and_then(|l| l.get(LABEL))
+            .and_then(|l| l.as_str());
+        match label {
+            Some(label) if approvals.find(label).is_some() => {
+                labels.insert(name.to_string(), label.to_string());
+            }
+            _ => {
+                return Err(ApprovalError::UnapprovedProfile {
+                    path: path.to_path_buf(),
+                    service: name.to_string(),
+                });
+            }
+        }
+    }
+    Ok((!labels.is_empty()).then_some(labels))
 }
 /// `nunki check`'s line on the services file of `at`: green when it is
 /// approved or there is none, red otherwise, saying why.

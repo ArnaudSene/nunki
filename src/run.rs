@@ -643,6 +643,42 @@ pub fn lift(
         plan.project_services.as_ref(),
         &approvals,
     );
+    take_down_and_up(engine, file, compose_project, stale)
+}
+
+/// Start again the profile a launch wrote at `file`, without writing it:
+/// what `nunki exec` and the gates do when the slot's containers are down.
+///
+/// It goes through what [`lift`] goes through, so it is not a second way to
+/// lift. Every project service of the profile must carry the label of a
+/// rendering a human approved, or nothing is started
+/// ([`crate::services::labels_of_profile`]): a profile written before
+/// approvals lifts its services unlabelled and unfenced. Then what the
+/// profile does not lift under that label is taken down, by container and
+/// never with a volume, before anything is started. Returns what was taken
+/// down.
+pub fn relift(
+    engine: &dyn Engine,
+    project: &Project,
+    file: &Path,
+    compose_project: &str,
+) -> Result<Vec<String>, RunError> {
+    let approvals = crate::services::Approvals::load(&crate::services::file(project))?;
+    let lifting = crate::services::labels_of_profile(file, &approvals)?;
+    let stale = crate::services::stale_labelled(
+        &engine.containers(compose_project)?,
+        lifting.as_ref(),
+        &approvals,
+    );
+    take_down_and_up(engine, file, compose_project, stale)
+}
+
+fn take_down_and_up(
+    engine: &dyn Engine,
+    file: &Path,
+    compose_project: &str,
+    stale: Vec<String>,
+) -> Result<Vec<String>, RunError> {
     if !stale.is_empty() {
         engine.remove(&stale)?;
     }

@@ -291,8 +291,16 @@ fn build(plan: &Plan, dialect: &Dialect) -> Result<Document, ComposeError> {
                 into.insert(key.clone(), value.clone());
             }
         }
+        // Internal, so the engine routes nothing out of it, and without a
+        // gateway, so the host is not on it either.
         let mut internal = Mapping::new();
         internal.insert(Value::from("internal"), Value::from(true));
+        let mut options = Mapping::new();
+        options.insert(
+            Value::from(services::NO_GATEWAY.0),
+            Value::from(services::NO_GATEWAY.1),
+        );
+        internal.insert(Value::from("driver_opts"), Value::Mapping(options));
         networks.insert(Value::from(services::NETWORK), Value::Mapping(internal));
     }
 

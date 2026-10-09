@@ -178,6 +178,170 @@ fn a_slot_whose_containers_are_down_is_lifted_before_its_copy_is_refreshed() {
     assert_eq!(ups(&up_already), 0, "{:?}", up_already.calls());
 }
 
+/// A profile nunki wrote for slot `one`, holding `services` beside its own
+/// two, and the slot it belongs to. Its containers are down, so the next
+/// `nunki exec` or gate lifts it again.
+fn written_profile(root: &Path, services: &str) -> (Project, Slot) {
+    let project = project(root);
+    let slot = Slot {
+        name: "one".into(),
+        tree: root.join("tree"),
+    };
+    let profile = nunki::run::profile_path(&project, &slot.name);
+    std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+    std::fs::write(
+        &profile,
+        format!(
+            "services:\n  agent:\n    image: nunki/agent\n  firewall:\n    image: \
+             nunki/firewall\n{services}"
+        ),
+    )
+    .unwrap();
+    std::fs::create_dir_all(&project.hq_root).unwrap();
+    std::fs::write(
+        nunki::services::file(&project),
+        r#"{"approved": [
+            {"digest": "sha256:approved", "by": "A", "at": "t", "rendering": ""},
+            {"digest": "sha256:older", "by": "A", "at": "t", "rendering": ""}
+        ]}"#,
+    )
+    .unwrap();
+    (project, slot)
+}
+
+fn container(id: &str, service: &str, digest: Option<&str>) -> nunki::engine::Container {
+    nunki::engine::Container {
+        id: id.into(),
+        service: service.into(),
+        digest: digest.map(str::to_string),
+    }
+}
+
+/// A profile written before approvals existed lifts the project's services
+/// unlabelled and unfenced. Its containers down, `nunki exec` and the gates
+/// lift it again — and that is a second way to lift, beside the launch,
+/// unless it goes through the same check: a profile one of whose services
+/// is not labelled with an approved rendering starts nothing.
+#[test]
+fn a_stale_profile_with_an_unapproved_service_is_not_lifted_again() {
+    use nunki::engine::fake::{Call, FakeEngine};
+    for (why, db) in [
+        (
+            "written before approvals",
+            "  db:\n    image: postgres:16\n    privileged: true\n",
+        ),
+        (
+            "labelled with a rendering nobody approved",
+            "  db:\n    image: postgres:16\n    labels:\n      nunki.services: sha256:nobody\n",
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let (project, slot) = written_profile(dir.path(), db);
+        let engine = Arc::new(FakeEngine::default());
+        let err = exec::refresh(&project, &slot, engine.clone()).unwrap_err();
+        let said = err.to_string();
+        assert!(
+            said.contains("\"db\"") && said.contains("no human approved"),
+            "{why}: {said}"
+        );
+        let calls = engine.calls();
+        assert!(
+            !calls
+                .iter()
+                .any(|c| matches!(c, Call::Up(_) | Call::Remove(_))),
+            "{why}: nothing is started, nor taken down: {calls:?}"
+        );
+        // Through `run` too, which is how the gates reach the copy.
+        let engine = Arc::new(FakeEngine::default());
+        assert!(exec::run(&project, &slot, engine.clone(), &["true".into()], On::Proof).is_err());
+        assert!(
+            !engine.calls().iter().any(|c| matches!(c, Call::Up(_))),
+            "{why}"
+        );
+    }
+}
+
+/// A profile whose services all carry an approved label is lifted again,
+/// and first what it does not lift under that label is taken down, as a
+/// launch does: an unlabelled container, an older approved definition, a
+/// service the profile does not start. What it lifts stays, and so do
+/// nunki's own.
+#[test]
+fn a_profile_lifted_again_takes_down_what_it_does_not_lift_first() {
+    use nunki::engine::fake::{Call, FakeEngine};
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot) = written_profile(
+        dir.path(),
+        "  db:\n    image: postgres:16\n    labels:\n      nunki.services: sha256:approved\n",
+    );
+    let engine = Arc::new(
+        FakeEngine::default()
+            .with_lifted(container("keep", "db", Some("sha256:approved")))
+            .with_lifted(container("unlabelled", "db", None))
+            .with_lifted(container("older", "db", Some("sha256:older")))
+            .with_lifted(container("miner", "miner", Some("sha256:approved")))
+            .with_lifted(container("fw", "firewall", None)),
+    );
+    let _ = exec::refresh(&project, &slot, engine.clone());
+    let calls = engine.calls();
+    let removed = calls
+        .iter()
+        .position(|c| *c == Call::Remove(vec!["unlabelled".into(), "older".into(), "miner".into()]))
+        .unwrap_or_else(|| panic!("not taken down as expected: {calls:?}"));
+    let up = calls
+        .iter()
+        .position(|c| matches!(c, Call::Up(_)))
+        .unwrap_or_else(|| panic!("not lifted: {calls:?}"));
+    assert!(removed < up, "taken down after the lift: {calls:?}");
+}
+
+/// A profile that lifts none of the project's services — a mission
+/// profile — leaves up what a human approved, as a launch of it does
+/// (SPEC 4.2: the services stay up between profiles), and takes down the
+/// rest.
+#[test]
+fn a_profile_lifting_no_service_lifted_again_keeps_what_was_approved() {
+    use nunki::engine::fake::{Call, FakeEngine};
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot) = written_profile(dir.path(), "");
+    let engine = Arc::new(
+        FakeEngine::default()
+            .with_lifted(container("keep", "db", Some("sha256:older")))
+            .with_lifted(container("unlabelled", "db", None)),
+    );
+    let _ = exec::refresh(&project, &slot, engine.clone());
+    let calls = engine.calls();
+    assert!(
+        calls.contains(&Call::Remove(vec!["unlabelled".into()])),
+        "{calls:?}"
+    );
+    assert!(calls.iter().any(|c| matches!(c, Call::Up(_))), "{calls:?}");
+}
+
+/// A profile nunki cannot read back as one starts nothing.
+#[test]
+fn a_profile_that_cannot_be_read_back_is_not_lifted_again() {
+    use nunki::engine::fake::{Call, FakeEngine};
+    for (text, wanted) in [
+        ("services: [agent]\n", "it has no services"),
+        ("name: one\n", "it has no services"),
+        ("services: {\n", "is not a profile nunki wrote"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let (project, slot) = written_profile(dir.path(), "");
+        std::fs::write(nunki::run::profile_path(&project, &slot.name), text).unwrap();
+        let engine = Arc::new(FakeEngine::default());
+        let said = exec::refresh(&project, &slot, engine.clone())
+            .unwrap_err()
+            .to_string();
+        assert!(said.contains(wanted), "{text:?}: {said}");
+        assert!(
+            !engine.calls().iter().any(|c| matches!(c, Call::Up(_))),
+            "{text:?}"
+        );
+    }
+}
+
 fn project(root: &Path) -> Project {
     Project::at(
         root.join("repo"),

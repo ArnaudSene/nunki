@@ -54,6 +54,19 @@ pub fn digest(rendering: &str) -> String {
 /// perimeter, and how nothing else does (SPEC 4.1 bis).
 pub const NETWORK: &str = "nunki-services";
 
+/// The driver option, with its value, that leaves [`NETWORK`] without a
+/// gateway address on the host.
+///
+/// `internal: true` takes away the route out, not the gateway: measured by
+/// the HQ on Docker Engine 29.4.0, a container with every capability dropped
+/// on an `--internal` network answers a ping from the bridge's gateway
+/// address and, through it, reaches a port the host publishes on `0.0.0.0`.
+/// With this option the bridge carries no IPv4 address: the host's published
+/// port is closed from the service, and a peer on the network is still
+/// reached by its name. A Docker bridge option; what Podman makes of it is
+/// not measured.
+pub const NO_GATEWAY: (&str, &str) = ("com.docker.network.bridge.inhibit_ipv4", "true");
+
 /// The capabilities a lifted service gets back, after all of them are
 /// dropped. Fixed, nunki's, never the file's: what the official database
 /// images' entrypoints need to take their data directory and drop from root

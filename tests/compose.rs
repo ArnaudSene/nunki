@@ -672,13 +672,14 @@ const FENCE_KEYS: [&str; 7] = [
 ];
 
 /// Every lifted service is fenced by nunki, whatever the file says: its
-/// own internal network and no other, every capability dropped and a fixed
-/// few given back, no new privilege, a memory and a process bound — and no
-/// published port. The firewall joins that network beside the default one,
-/// which is how the agent, in its namespace, still reaches the service.
+/// own internal network, with no gateway on the host, and no other, every
+/// capability dropped and a fixed few given back, no new privilege, a memory
+/// and a process bound — and no published port. The firewall joins that
+/// network beside the default one, which is how the agent, in its namespace,
+/// still reaches the service.
 #[test]
 fn the_lifted_services_are_fenced_by_nunki() {
-    use nunki::compose::services::{CAPABILITIES, Lifted, MEMORY, NETWORK, PROCESSES};
+    use nunki::compose::services::{CAPABILITIES, Lifted, MEMORY, NETWORK, NO_GATEWAY, PROCESSES};
     let mut plan = plan(Role::Integrator);
     plan.project_services = Some(Lifted::whole(services_file(
         "services:\n  db:\n    image: postgres:16\n    ports: [\"5432:5432\"]\n  \
@@ -721,6 +722,11 @@ fn the_lifted_services_are_fenced_by_nunki() {
         doc["networks"][NETWORK]["internal"].as_bool(),
         Some(true),
         "{yaml}"
+    );
+    assert_eq!(
+        doc["networks"][NETWORK]["driver_opts"][NO_GATEWAY.0].as_str(),
+        Some(NO_GATEWAY.1),
+        "the host has no address on the services' network: {yaml}"
     );
     assert_eq!(doc["networks"].as_mapping().unwrap().len(), 1, "{yaml}");
     assert_eq!(

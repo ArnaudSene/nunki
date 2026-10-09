@@ -1312,7 +1312,7 @@ mod live {
     use std::path::{Path, PathBuf};
     use std::process::{Command, Output};
 
-    use nunki::compose::services::{CAPABILITIES, Lifted, ServicesFile};
+    use nunki::compose::services::{CAPABILITIES, Lifted, NETWORK, NO_GATEWAY, ServicesFile};
     use nunki::compose::{AGENT_WRITABLE, NamedVolume, Plan, UserIds, generate, project_name};
     use nunki::harness::Role;
     use nunki::perimeter::{Sources, compute};
@@ -1605,6 +1605,134 @@ mod live {
         // off-list address stays refused.
         let out = profile.exec("agent", &format!("nc -z -w3 {OUT}"));
         assert!(!out.status.success(), "{}", said(&out));
+    }
+
+    /// The host is not on the services' network: a port a container
+    /// publishes on the host's `0.0.0.0` is closed from a lifted service,
+    /// whether it is tried through the services network's gateway or
+    /// through the default bridge's. The control is the same profile
+    /// without [`NO_GATEWAY`]: `internal: true` alone, which the HQ measured
+    /// reaching that port through the gateway.
+    #[test]
+    #[ignore = "builds an image and lifts containers; the HQ runs it by hand"]
+    fn live_a_lifted_service_cannot_reach_a_port_the_host_publishes() {
+        let _context = build_firewall();
+        const PORT: &str = "18080";
+        let name = "nunki-live-host-port";
+        let _ = docker(&["rm", "-f", name]);
+        let published = docker(&[
+            "run",
+            "-d",
+            "--name",
+            name,
+            "-p",
+            &format!("0.0.0.0:{PORT}:80"),
+            "nginx:alpine",
+        ]);
+        assert!(published.status.success(), "{}", said(&published));
+        struct Remove(&'static str);
+        impl Drop for Remove {
+            fn drop(&mut self) {
+                let _ = docker(&["rm", "-f", self.0]);
+            }
+        }
+        let _published = Remove(name);
+
+        let gateway = |network: &str| {
+            let out = docker(&[
+                "network",
+                "inspect",
+                network,
+                "-f",
+                "{{range .IPAM.Config}}{{.Gateway}} {{end}}",
+            ]);
+            String::from_utf8_lossy(&out.stdout)
+                .split_whitespace()
+                .filter(|a| a.contains('.'))
+                .map(String::from)
+                .collect::<Vec<_>>()
+        };
+        let text = "services:\n  web:\n    image: nginx:alpine\n  \
+                    probe:\n    image: alpine:3.20\n    command: [sleep, \"600\"]\n";
+        let reaches = |profile: &Profile, addresses: &[String]| {
+            addresses.iter().any(|address| {
+                profile
+                    .exec("probe", &format!("nc -z -w3 {address} {PORT}"))
+                    .status
+                    .success()
+            })
+        };
+
+        // The control: internal, with its gateway.
+        let open = Profile::generate("svchostc", &["web", "probe"], Lifted::whole(file(text)));
+        open.edit(|doc| {
+            let network = doc["networks"][NETWORK].as_mapping_mut().unwrap();
+            network.remove("driver_opts");
+        });
+        let up = open.up();
+        assert!(up.status.success(), "{}", said(&up));
+        let through = gateway(&format!("{}_{NETWORK}", open.project));
+        assert!(
+            reaches(&open, &through),
+            "inconclusive: the host's published port is closed through {through:?} even \
+             without {NO_GATEWAY:?}, so its being closed with it proves nothing here"
+        );
+        drop(open);
+
+        let fenced = Profile::generate("svchost", &["web", "probe"], Lifted::whole(file(text)));
+        let up = fenced.up();
+        assert!(
+            up.status.success(),
+            "the profile did not come up: {}",
+            said(&up)
+        );
+        let mut tried = gateway(&format!("{}_{NETWORK}", fenced.project));
+        tried.extend(gateway("bridge"));
+        tried.extend(through);
+        assert!(
+            !reaches(&fenced, &tried),
+            "a lifted service reached the host's port {PORT} through one of {tried:?}"
+        );
+        // And the network still carries what it is for.
+        let out = fenced.exec("agent", "nc -z -w3 web 80");
+        assert!(
+            out.status.success(),
+            "the agent no longer reaches the declared service by name: {}",
+            said(&out)
+        );
+    }
+
+    /// No name outside resolves from a lifted service: the engine's resolver
+    /// answers for the services' network and forwards nothing. Measured by
+    /// the HQ on Docker 29.4.0 as a SERVFAIL; this keeps measuring it.
+    #[test]
+    #[ignore = "builds an image and lifts containers; the HQ runs it by hand"]
+    fn live_a_lifted_service_cannot_resolve_a_name_outside() {
+        let _context = build_firewall();
+        // An answer, and not merely an exit code: busybox prints `Name:`
+        // only for a name it resolved.
+        let script = "nslookup example.com 2>&1 | grep -q '^Name:'";
+        control("alpine:3.20", script);
+
+        let profile = Profile::generate(
+            "svcdns",
+            &["probe"],
+            Lifted::whole(file(
+                "services:\n  probe:\n    image: alpine:3.20\n    command: [sleep, \"600\"]\n",
+            )),
+        );
+        let up = profile.up();
+        assert!(
+            up.status.success(),
+            "the profile did not come up: {}",
+            said(&up)
+        );
+        let out = profile.exec("probe", "nslookup example.com 2>&1");
+        assert!(
+            !profile.exec("probe", script).status.success(),
+            "a lifted service resolved a name outside: {}",
+            said(&out)
+        );
     }
 
     #[test]

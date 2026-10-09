@@ -192,7 +192,9 @@ nothing else. `nunki services --show` prints its digest, and one command,
 Before a profile starts, nunki takes down the services of the slot whose
 definition is not the approved one, such as an older version or a service
 the file no longer names. It removes their containers and never their
-volumes.
+volumes. `nunki exec` and the gates, when they find a slot down, lift the
+profile the last launch wrote through the same check, and start nothing
+if one of its services is not an approved definition.
 
 **nunki fences what it lifts.** A system profile starts only the services
 the mission declares, and the ones they depend on. Every other service in
@@ -200,7 +202,9 @@ the file stays down. Each lifted service gets a set of restrictions from
 nunki itself, and the file supplies none of them:
 
 - it joins one network, nunki's, which is declared `internal` and so has no
-  route out. The firewall joins that network too, so the agent reaches a
+  route out, and which has no gateway address on the host, so the host's
+  own ports are out of reach too (a Docker bridge option; not measured on
+  Podman). The firewall joins that network too, so the agent reaches a
   service by its name, through the firewall's rules.
 - no port is published. The launch says in one line which `ports` it
   dropped.
@@ -210,6 +214,8 @@ nunki itself, and the file supplies none of them:
   user.
 - it gets `no-new-privileges`, a 2 GB memory limit and a 1024-process
   limit.
+- it has no CPU bound and no disk bound: a runaway service can slow the
+  machine and fill its disk, not leave the fence.
 
 The coder's profile starts no service. The ones already up keep running
 across the switch: nunki never removes them for being absent from a

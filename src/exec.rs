@@ -65,6 +65,8 @@ pub enum ExecError {
     Git(#[from] git::GitError),
     #[error(transparent)]
     Compose(#[from] crate::compose::ComposeError),
+    #[error(transparent)]
+    Run(#[from] Box<crate::run::RunError>),
 }
 
 /// Run `argv` in the slot's agent container and give back what it said.
@@ -80,7 +82,7 @@ pub fn run(
         return Err(ExecError::NoProfile(slot.name.clone()));
     }
     let compose_project = crate::compose::project_name(&project.session(), &slot.name)?;
-    lift_if_down(&engine, &file, &compose_project)?;
+    lift_if_down(&engine, project, &file, &compose_project)?;
 
     let at = match on {
         On::Proof => {
@@ -157,7 +159,7 @@ pub fn refresh(project: &Project, slot: &Slot, engine: Arc<dyn Engine>) -> Resul
     }
     refuse_under_a_campaign(project, slot)?;
     let compose_project = crate::compose::project_name(&project.session(), &slot.name)?;
-    lift_if_down(&engine, &file, &compose_project)?;
+    lift_if_down(&engine, project, &file, &compose_project)?;
     let head = git::slot_head(&slot.tree)?;
     refresh_at(&engine, &file, &compose_project, &head)
 }
@@ -170,8 +172,14 @@ pub fn refresh(project: &Project, slot: &Slot, engine: Arc<dyn Engine>) -> Resul
 /// without it every gate played there is unplayed, and no run can change
 /// that: the run is only launched once the gates have been played. Lifting
 /// the profile the last launch wrote is what a launch would do.
+///
+/// And it is lifted the way a launch lifts it ([`crate::run::relift`]): only
+/// if every service it starts from the project's file is one a human
+/// approved, and after what it does not lift is taken down. A profile written
+/// before approvals is not started again here, unfenced.
 fn lift_if_down(
     engine: &Arc<dyn Engine>,
+    project: &Project,
     file: &std::path::Path,
     compose_project: &str,
 ) -> Result<(), ExecError> {
@@ -179,7 +187,7 @@ fn lift_if_down(
         .container_of(file, compose_project, AGENT_SERVICE)?
         .is_none()
     {
-        engine.up(file, compose_project)?;
+        crate::run::relift(engine.as_ref(), project, file, compose_project).map_err(Box::new)?;
     }
     Ok(())
 }
