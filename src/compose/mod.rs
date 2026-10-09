@@ -19,8 +19,13 @@
 //! 3. Every profile file **re-declares the project's services identically**,
 //!    under a project name stable for the slot, so switching profiles leaves
 //!    their containers untouched.
+//!
+//! The project's services are no longer merged verbatim: they arrive as the
+//! closed model of [`services`], and what lands in the file is that model's
+//! own rendering, read back — the very text a human approves.
 
 pub mod model;
+pub mod services;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -38,6 +43,8 @@ use model::{Document, Healthcheck, Service, depends_on_healthy};
 pub const FIREWALL_SERVICE: &str = "firewall";
 /// The agent's service name in every generated file.
 pub const AGENT_SERVICE: &str = "agent";
+/// The service `nunki check` runs its probes from, when a plan carries one.
+pub const PROBER_SERVICE: &str = "prober";
 /// The only files an agent may write in the mission folder (SPEC 4.1).
 ///
 /// `MUTANTS.triage.json` is the fourth, added with gate 7: the
@@ -106,25 +113,27 @@ pub struct Plan {
     pub environment: BTreeMap<String, String>,
     pub command: Vec<String>,
     pub perimeter: Perimeter,
-    /// The project's own `services:` block, merged verbatim: `include:` is
-    /// unusable on one of the two engines, and re-typing it would lose keys
-    /// (SPEC 4.2, engine table).
-    pub project_services: Option<Value>,
-    /// The project's own `networks:` block, merged verbatim. The firewall
-    /// attaches to every network it declares — it is the one that can, the
-    /// agent having `network_mode` instead (measured). A project that
-    /// declares none needs none: its services and the firewall both land on
-    /// the generated default network, and reach each other there (measured).
-    pub project_networks: Option<Value>,
-    /// The project's own `volumes:` block, merged verbatim beside nunki's.
+    /// The project's own services and volumes, read into the closed model of
+    /// [`services`] and lifted as its rendering, never as the file's bytes.
     ///
-    /// Not optional in practice: a service that names a volume the document
-    /// does not declare makes the whole project invalid — `service "db"
-    /// refers to undefined volume dbdata: invalid compose project` on Compose
-    /// v5.1.2. And it is exactly where a project keeps
-    /// what must survive a profile switch, so dropping the block would drop
-    /// the state SPEC 4.2's first rule exists to keep.
-    pub project_volumes: Option<Value>,
+    /// Re-typed on purpose, which reverses what this field used to say: the
+    /// file is in the slot's tree, the coder writes the tree, and a key
+    /// nunki did not type is power nobody approved. A key outside the model
+    /// refuses the file before it reaches a plan. The file declares no
+    /// network: its services and the firewall both land on the generated
+    /// default network, and reach each other there (measured).
+    ///
+    /// The volumes travel with the services: a service naming a volume the
+    /// document does not declare makes the whole project invalid — `service
+    /// "db" refers to undefined volume dbdata: invalid compose project` on
+    /// Compose v5.1.2 — and they hold what a profile switch must not take
+    /// with it (SPEC 4.2).
+    pub project_services: Option<services::Lifted>,
+    /// nunki's own prober, for `nunki check`. A service nunki writes itself,
+    /// so it travels apart from the project's and the closed model never has
+    /// to allow what it holds — a shared namespace, a user, a dropped
+    /// capability.
+    pub prober: Option<Service>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -135,12 +144,6 @@ pub enum ComposeError {
     SlotName(String),
     #[error("the project declares a service named {0:?}, which nunki reserves")]
     ReservedService(String),
-    #[error("the project's services must be a YAML mapping, found {0}")]
-    ProjectServicesShape(&'static str),
-    #[error("the project's networks must be a YAML mapping, found {0}")]
-    ProjectNetworksShape(&'static str),
-    #[error("the project's volumes must be a YAML mapping, found {0}")]
-    ProjectVolumesShape(&'static str),
     #[error("the project declares a volume named {0:?}, which nunki reserves for the slot")]
     ReservedVolume(String),
     #[error("{what} must be an absolute path, found {path:?}")]
@@ -236,66 +239,74 @@ fn build(plan: &Plan, dialect: &Dialect) -> Result<Document, ComposeError> {
         absolute("a credential file", host)?;
     }
 
-    let networks = match &plan.project_networks {
-        None | Some(Value::Null) => Mapping::new(),
-        Some(Value::Mapping(map)) => map.clone(),
-        Some(Value::Sequence(_)) => return Err(ComposeError::ProjectNetworksShape("a sequence")),
-        Some(_) => return Err(ComposeError::ProjectNetworksShape("a scalar")),
-    };
-    let attached: Vec<String> = networks
-        .keys()
-        .map(|k| k.as_str().unwrap_or_default().to_string())
-        .collect();
+    let lifted = plan
+        .project_services
+        .as_ref()
+        .filter(|l| !l.services.services.is_empty());
 
     let mut services = Mapping::new();
     services.insert(
         Value::from(FIREWALL_SERVICE),
-        firewall(plan, &attached).to_value(),
+        firewall(plan, lifted.is_some()).to_value(),
     );
     services.insert(Value::from(AGENT_SERVICE), agent(plan, dialect)?.to_value());
-
-    if let Some(project) = &plan.project_services {
-        let declared = match project {
-            Value::Mapping(map) => map,
-            Value::Null => return document(plan, services, networks),
-            Value::Sequence(_) => return Err(ComposeError::ProjectServicesShape("a sequence")),
-            _ => return Err(ComposeError::ProjectServicesShape("a scalar")),
-        };
-        for (key, value) in declared {
-            if key == FIREWALL_SERVICE || key == AGENT_SERVICE {
-                return Err(ComposeError::ReservedService(
-                    key.as_str().unwrap_or("?").to_string(),
-                ));
-            }
-            services.insert(key.clone(), value.clone());
-        }
+    if let Some(prober) = &plan.prober {
+        services.insert(Value::from(PROBER_SERVICE), prober.to_value());
     }
 
-    document(plan, services, networks)
-}
-
-fn document(plan: &Plan, services: Mapping, networks: Mapping) -> Result<Document, ComposeError> {
     let mut volumes = Mapping::new();
     for volume in &plan.volumes {
         volumes.insert(Value::from(volume.name.clone()), Value::Null);
     }
-    match &plan.project_volumes {
-        None | Some(Value::Null) => {}
-        Some(Value::Mapping(declared)) => {
-            for (key, value) in declared {
-                let name = key.as_str().unwrap_or_default();
-                // nunki's own volumes are named `nunki-<slot>-…`; a project taking
-                // one of those names would have the slot's build cache or
-                // the harness's sessions handed to a service.
-                if volumes.contains_key(key) || name.starts_with(&format!("nunki-{}-", plan.slot)) {
-                    return Err(ComposeError::ReservedVolume(name.to_string()));
+
+    let mut networks = Mapping::new();
+    if let Some(project) = lifted {
+        // The rendering, read back: what the engine is given is the text a
+        // human is shown, and not a second serialisation of the model that
+        // could drift from it.
+        let mut rendered: Value = serde_yaml_ng::from_str(&project.services.render())
+            .expect("nunki's own rendering is YAML it reads back");
+        if let Some(Value::Mapping(declared)) = rendered.get_mut("services") {
+            for (_, service) in declared.iter_mut() {
+                if let Value::Mapping(service) = service {
+                    fence(service, &project.approved);
                 }
-                volumes.insert(key.clone(), value.clone());
             }
         }
-        Some(Value::Sequence(_)) => return Err(ComposeError::ProjectVolumesShape("a sequence")),
-        Some(_) => return Err(ComposeError::ProjectVolumesShape("a scalar")),
+        for (block, into) in [("services", &mut services), ("volumes", &mut volumes)] {
+            let Some(Value::Mapping(declared)) = rendered.get(block) else {
+                continue;
+            };
+            for (key, value) in declared {
+                let name = key.as_str().unwrap_or_default();
+                // The model refuses these names already; this is the second
+                // guard, on the document itself, so a name nunki writes is
+                // never overwritten by one the project wrote.
+                if into.contains_key(key) {
+                    return Err(match block {
+                        "services" => ComposeError::ReservedService(name.to_string()),
+                        _ => ComposeError::ReservedVolume(name.to_string()),
+                    });
+                }
+                into.insert(key.clone(), value.clone());
+            }
+        }
+        // Internal, so the engine routes nothing out of it, and without a
+        // gateway, so the host is not on it either: no IPv4 address on the
+        // bridge, and no IPv6 at all, whatever the daemon's default. Every
+        // address family is turned off but nunki's own.
+        let mut internal = Mapping::new();
+        internal.insert(Value::from("internal"), Value::from(true));
+        let mut options = Mapping::new();
+        options.insert(
+            Value::from(services::NO_GATEWAY.0),
+            Value::from(services::NO_GATEWAY.1),
+        );
+        internal.insert(Value::from("driver_opts"), Value::Mapping(options));
+        internal.insert(Value::from("enable_ipv6"), Value::from(false));
+        networks.insert(Value::from(services::NETWORK), Value::Mapping(internal));
     }
+
     Ok(Document {
         name: project_name(&plan.session, &plan.slot)?,
         services,
@@ -304,9 +315,34 @@ fn document(plan: &Plan, services: Mapping, networks: Mapping) -> Result<Documen
     })
 }
 
+/// nunki's own keys on a lifted service, written after the rendering and
+/// never taken from the file, which may hold none of them (SPEC 4.1 bis):
+///
+/// - the label carrying the approved digest, so the next launch can tell a
+///   container of an approved definition from one that is not (SPEC 4.2);
+/// - nunki's internal network and no other, so the service reaches nothing
+///   but what is on it, and publishes nothing;
+/// - every capability dropped and a fixed few given back, no new privilege,
+///   and a bound on memory and on processes.
+fn fence(service: &mut Mapping, approved: &str) {
+    let strings = |items: &[&str]| Value::Sequence(items.iter().map(|s| Value::from(*s)).collect());
+    let mut labels = Mapping::new();
+    labels.insert(Value::from(services::LABEL), Value::from(approved));
+    service.insert(Value::from("labels"), Value::Mapping(labels));
+    service.insert(Value::from("networks"), strings(&[services::NETWORK]));
+    service.insert(Value::from("cap_drop"), strings(&["ALL"]));
+    service.insert(Value::from("cap_add"), strings(&services::CAPABILITIES));
+    service.insert(
+        Value::from("security_opt"),
+        strings(&["no-new-privileges:true"]),
+    );
+    service.insert(Value::from("mem_limit"), Value::from(services::MEMORY));
+    service.insert(Value::from("pids_limit"), Value::from(services::PROCESSES));
+}
+
 /// The sidecar: the only container with power, and the one that owns the
 /// network namespace (SPEC 4.1 bis, rules 1 and 3).
-fn firewall(plan: &Plan, attached: &[String]) -> Service {
+fn firewall(plan: &Plan, fenced: bool) -> Service {
     let mut environment = BTreeMap::new();
     environment.insert(
         "HQ_ALLOW_DOMAINS".to_string(),
@@ -342,7 +378,15 @@ fn firewall(plan: &Plan, attached: &[String]) -> Service {
             "SETGID".to_string(),
         ],
         security_opt: vec!["no-new-privileges:true".to_string()],
-        networks: attached.to_vec(),
+        // The default network for the way out it fences, and nunki's
+        // internal one for the project's services, which reach nothing
+        // else: the agent, in this namespace, reaches them through the
+        // perimeter (SPEC 4.1 bis). Only when there is a service to reach.
+        networks: if fenced {
+            vec!["default".to_string(), services::NETWORK.to_string()]
+        } else {
+            Vec::new()
+        },
         healthcheck: Some(Healthcheck {
             test: vec!["CMD".to_string(), "/usr/local/bin/fw-ready".to_string()],
             interval: "1s".to_string(),

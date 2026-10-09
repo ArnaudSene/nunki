@@ -129,11 +129,13 @@ fn live_the_firewall_holds() {
         perimeter,
         // A neighbour on the slot's own network, declared the way a project
         // declares its services. Nothing allows it: reaching it must fail.
-        project_services: Some(
-            serde_yaml_ng::from_str("neighbour:\n  image: nginx:alpine\n").unwrap(),
-        ),
-        project_networks: None,
-        project_volumes: None,
+        project_services: Some(nunki::compose::services::Lifted::whole(
+            nunki::compose::services::ServicesFile::parse(
+                "services:\n  neighbour:\n    image: nginx:alpine\n",
+            )
+            .unwrap(),
+        )),
+        prober: None,
     };
 
     let file = dir.path().join("mission.yml");
@@ -299,9 +301,13 @@ fn live_a_declared_service_is_reachable_and_nothing_else_is() {
         environment: BTreeMap::new(),
         command: vec!["sleep".to_string(), "600".to_string()],
         perimeter,
-        project_services: Some(serde_yaml_ng::from_str("db:\n  image: nginx:alpine\n").unwrap()),
-        project_networks: None,
-        project_volumes: None,
+        project_services: Some(nunki::compose::services::Lifted::whole(
+            nunki::compose::services::ServicesFile::parse(
+                "services:\n  db:\n    image: nginx:alpine\n",
+            )
+            .unwrap(),
+        )),
+        prober: None,
     };
 
     let file = dir.path().join("system.yml");

@@ -479,9 +479,13 @@ fn write_profile(dir: &Path, slot: &str, role: nunki::harness::Role, name: &str)
         perimeter,
         // Re-declared identically in both profiles, which is what makes the
         // switch a no-op for it (SPEC 4.2, measured).
-        project_services: Some(serde_yaml_ng::from_str("db:\n  image: nginx:alpine\n").unwrap()),
-        project_networks: None,
-        project_volumes: None,
+        project_services: Some(nunki::compose::services::Lifted::whole(
+            nunki::compose::services::ServicesFile::parse(
+                "services:\n  db:\n    image: nginx:alpine\n",
+            )
+            .unwrap(),
+        )),
+        prober: None,
     };
 
     let path = dir.join(name);
@@ -873,4 +877,81 @@ fn a_signal_is_sent_through_a_shell_and_not_as_a_binary() {
         }
         other => panic!("{other:?}"),
     }
+}
+
+/// The containers of a project are asked of the engine, running or not,
+/// with the label nunki puts on what it lifts — the containers this is for
+/// are the ones the current file no longer names, which `compose ps` would
+/// not list.
+#[test]
+fn the_containers_of_a_project_are_listed_with_nunkis_label() {
+    let (docker, cli) = recorded(vec![saying(
+        0,
+        "c1\tdb\tsha256:aa\nc2\tcache\t\n\nc3\tfirewall\t\n",
+        "",
+    )]);
+    let containers = docker.containers("nunki-demo").unwrap();
+    let line = &cli.lines()[0];
+    assert!(line.starts_with("docker ps -a "), "{line}");
+    assert!(
+        line.contains("--filter label=com.docker.compose.project=nunki-demo"),
+        "{line}"
+    );
+    assert!(line.contains("com.docker.compose.service"), "{line}");
+    assert!(line.contains(nunki::compose::services::LABEL), "{line}");
+    assert_eq!(
+        containers,
+        vec![
+            nunki::engine::Container {
+                id: "c1".into(),
+                service: "db".into(),
+                digest: Some("sha256:aa".into()),
+            },
+            nunki::engine::Container {
+                id: "c2".into(),
+                service: "cache".into(),
+                digest: None,
+            },
+            nunki::engine::Container {
+                id: "c3".into(),
+                service: "firewall".into(),
+                digest: None,
+            },
+        ]
+    );
+}
+
+/// A line nunki cannot read is said, not skipped: a container skipped here
+/// is one left running.
+#[test]
+fn a_container_line_nunki_cannot_read_is_an_error() {
+    for answer in ["c1\n", "\tdb\tsha256:aa\n", "c1\t\t\n"] {
+        let (docker, _) = recorded(vec![saying(0, answer, "")]);
+        assert!(
+            matches!(
+                docker.containers("p"),
+                Err(nunki::engine::EngineError::Unreadable(_))
+            ),
+            "{answer:?}"
+        );
+    }
+    let (docker, _) = recorded(vec![saying(1, "", "no engine")]);
+    assert!(docker.containers("p").is_err());
+}
+
+/// Taken down by id, stopped first, and never with a volume — not a named
+/// one, and not the anonymous one an image's `VOLUME` made.
+#[test]
+fn removing_containers_never_takes_a_volume_with_them() {
+    let (docker, cli) = recorded(vec![]);
+    docker.remove(&["c1".into(), "c2".into()]).unwrap();
+    let lines = cli.lines();
+    assert_eq!(lines, vec!["docker rm -f c1 c2".to_string()]);
+
+    let (docker, cli) = recorded(vec![]);
+    docker.remove(&[]).unwrap();
+    assert!(cli.lines().is_empty(), "nothing to remove runs nothing");
+
+    let (docker, _) = recorded(vec![saying(1, "", "busy")]);
+    assert!(docker.remove(&["c1".into()]).is_err());
 }

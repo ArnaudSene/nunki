@@ -252,6 +252,8 @@ pub fn after_verify(mission: &str, result: &Result<Vec<Step>, VerifyError>) -> N
                 // Said, not acted on: the launch that ended it is the step
                 // after, and that one goes on.
                 | Step::CampaignEnded { .. }
+                // Said before the launch it belongs to, which is the step after.
+                | Step::PortsDropped { .. }
                 // Always followed by `Verified` or `Findings`, which stop.
                 | Step::SecurityRoundsSpent { .. }
                 // A lift `nunki` made goes on as a human's would; one it

@@ -128,6 +128,99 @@ nunki slot add one              # a clone at ../<project>-slots/one
 nunki check                     # what is held, and what could not be checked
 ```
 
+### The project's services
+
+A mission whose integration declares services needs them lifted beside the
+integrator. `services_file` in `nunki.yaml` names a file of the repository
+that declares them, in a closed subset of Compose. The file is written by
+whoever writes the tree, the coder included, so nunki does not hand it to
+the engine as it is. It reads it into a model of its own and refuses the
+**whole file** at the first thing outside it:
+
+- at the top level, `services` and `volumes`, and a `name`, which is ignored;
+- per service, `image`, `environment`, `command`, `entrypoint`, `healthcheck`
+  (`test`, `interval`, `timeout`, `retries`, `start_period`,
+  `start_interval`), `depends_on` (services of the same file, with a
+  `condition` or none), `working_dir` (an absolute path) and `volumes`;
+- `environment` is a mapping from a name to a non-empty quoted string. A
+  bare entry would be filled from your environment, so it is refused;
+- a mount names a volume declared in the file's own `volumes` block, by name
+  only (`dbdata:`, no value), at an absolute path, optionally `:ro`;
+- `ports` are read and dropped: a service is reached by its name.
+
+Everything else is refused, with the service and the key named:
+`privileged`, `network_mode`, a bind mount, `env_file`, `build`, `user`, a
+top-level `networks`, an `x-` field, and any key a later Compose adds. So is
+any YAML construct that resolves to something other than what is written:
+anchors, aliases, tags, merge keys (`<<`), duplicate keys, directives and a
+second document.
+
+What is lifted is not the file but nunki's rendering of it. Keys come in a
+fixed order, every string is quoted and written in ASCII, and every `$` is
+doubled so Compose substitutes nothing. A file nunki refuses starts no
+service, and the profile that needed it does not start either.
+
+**You approve that rendering, by its digest.** nunki reads the file from
+the commit the slot's `HEAD` names, never from the tree, so an edit that is
+not committed changes nothing. It lifts the services only if you approved
+the digest of that rendering:
+
+```sh
+nunki services --show [<mission>]   # the rendering, its digest, approved or not
+nunki services --approve <digest>   # approve it, if the file has not changed since
+```
+
+`--show` reads the repository's `HEAD`, or the slot of the mission you name.
+`--approve` approves a digest only while it is still the rendering of the
+file in the repository or one of the slots. If the file changed after you
+looked, the approval is refused. Approvals live in the project's HQ
+(`hq/services.json`, with who approved what and when, and the rendering
+itself). No container mounts that file. A definition you approved once
+serves every mission until it changes.
+
+When a change comes in — a coder's edit included — the system profile is
+not started. The mission is handed back to you with the file and the new
+digest; `nunki check --mission <id>` and `--slot <name>` show the same as a
+red line. Read the rendering, approve it, then
+`nunki mission retry <id> --because <what you approved>`. Nothing was spent
+in the meantime.
+
+A project that already had a services file before approvals existed needs
+nothing else. `nunki services --show` prints its digest, and one command,
+`nunki services --approve <that digest>`, is its first approval.
+
+Before a profile starts, nunki takes down the services of the slot whose
+definition is not the approved one, such as an older version or a service
+the file no longer names. It removes their containers and never their
+volumes. `nunki exec` and the gates, when they find a slot down, lift the
+profile the last launch wrote through the same check, and start nothing
+if one of its services is not an approved definition.
+
+**nunki fences what it lifts.** A system profile starts only the services
+the mission declares, and the ones they depend on. Every other service in
+the file stays down. Each lifted service gets a set of restrictions from
+nunki itself, and the file supplies none of them:
+
+- it joins one network, nunki's, which is declared `internal` and so has no
+  route out, and which has no gateway address on the host, so the host's
+  own ports are out of reach too: no IPv4 address on its bridge (a Docker
+  bridge option; not measured on Podman), and IPv6 turned off on it. The
+  firewall joins that network too, so the agent reaches a service by its
+  name, through the firewall's rules.
+- no port is published. The launch says in one line which `ports` it
+  dropped.
+- every capability is dropped, and a fixed few are given back (`CHOWN`,
+  `SETGID`, `SETUID`), which is what the official images measured need to
+  start from root and drop to their own user.
+- it gets `no-new-privileges`, a 2 GB memory limit and a 1024-process
+  limit.
+- it has no CPU bound and no disk bound: a runaway service can slow the
+  machine and fill its disk, not leave the fence.
+
+The coder's profile starts no service. The ones already up keep running
+across the switch: nunki never removes them for being absent from a
+profile, and only takes down definitions nobody approved.
+
 ## A first mission
 
 ```sh

@@ -238,11 +238,18 @@ fn with_services(dir: &Path) -> (Project, nunki::slot::Slot, nunki::mission::Hea
     std::fs::write(
         tree.join("compose.yaml"),
         "services:\n  db:\n    image: nginx:alpine\n    volumes: [dbdata:/data]\n  \
-         cache:\n    image: nginx:alpine\nvolumes:\n  dbdata: {}\n",
+         cache:\n    image: nginx:alpine\nvolumes:\n  dbdata:\n",
     )
     .unwrap();
     let mut project = project(dir);
     project.config.services_file = Some("compose.yaml".into());
+    // Committed and approved: nunki reads the commit, and lifts only what
+    // a human approved.
+    commit_all(&tree);
+    let current = nunki::services::read(&project, nunki::services::At::Slot(&tree))
+        .unwrap()
+        .unwrap();
+    nunki::services::approve(&project, &current.digest, std::slice::from_ref(&current)).unwrap();
     let header = nunki::mission::Header {
         branch: "mission/x".into(),
         base: "dev".into(),
@@ -297,15 +304,44 @@ fn a_system_profile_check_lifts_under_a_slot_of_its_own() {
             volume.name
         );
     }
-    let Some(serde_yaml_ng::Value::Mapping(services)) = &plan.project_services else {
-        panic!("{:?}", plan.project_services);
+    let Some(project) = &plan.project_services else {
+        panic!("the project's services are not lifted");
     };
-    for name in ["db", "cache", nunki::probe::PROBER_SERVICE] {
-        assert!(
-            services.contains_key(serde_yaml_ng::Value::from(name)),
-            "{name} is lifted: {services:?}"
-        );
-    }
+    // What the mission declares is lifted; the file's other service is held
+    // back, never started (SPEC 4.2).
+    assert!(
+        project.services.services.contains_key("db"),
+        "db is lifted: {project:?}"
+    );
+    assert!(!project.services.services.contains_key("cache"));
+    assert_eq!(project.held_back, vec!["cache".to_string()]);
+    // The prober travels in a field of its own: the project's closed model
+    // never has to allow a shared namespace or a user.
+    let prober = plan.prober.as_ref().expect("the check carries its prober");
+    // In the firewall's namespace, as the human, with nothing to spare: the
+    // probes are the agent's routes, tried from where the agent stands.
+    assert_eq!(prober.image, images.prober);
+    assert_eq!(
+        prober.user,
+        Some(format!("{}:{}", plan.user.uid, plan.user.gid))
+    );
+    assert_eq!(prober.network_mode.as_deref(), Some("service:firewall"));
+    assert_eq!(prober.cap_drop, vec!["ALL".to_string()]);
+    assert_eq!(
+        prober.security_opt,
+        vec!["no-new-privileges:true".to_string()]
+    );
+    assert_eq!(
+        prober.depends_on,
+        Some(nunki::compose::model::depends_on_healthy("firewall"))
+    );
+    assert_eq!(prober.command, vec!["sleep".to_string(), "600".to_string()]);
+    assert!(
+        !project
+            .services
+            .services
+            .contains_key(nunki::probe::PROBER_SERVICE)
+    );
     assert_eq!(
         plan.command,
         vec!["sleep".to_string(), "600".to_string()],
@@ -489,6 +525,13 @@ fn live_a_system_profile_reaches_what_the_mission_declares_and_nothing_else() {
     let engine_bin = std::env::var("HQ_ENGINE").unwrap_or_else(|_| "docker".to_string());
     image::build(&project, "rust", &engine_bin, image::Harness::Install).expect("the images build");
     let slot = nunki::slot::add(&project, "sys").expect("the slot is cloned");
+    // The human approves the rendering once, as `nunki services --approve`
+    // does: nothing unapproved is lifted.
+    let current = nunki::services::read(&project, nunki::services::At::Slot(&slot.tree))
+        .expect("the services file reads")
+        .expect("the project declares one");
+    nunki::services::approve(&project, &current.digest, std::slice::from_ref(&current))
+        .expect("the rendering is approved");
 
     let (_, _, header) = with_services(dir.path());
     nunki::mission::dir::create(&project.hq_root, "m1", &header, "probe it").unwrap();
@@ -647,5 +690,31 @@ fn a_system_profile_check_mounts_a_scratch_mission_folder() {
             paths.dir.join(file).is_file(),
             "{file} is there to be mounted"
         );
+    }
+}
+
+/// Make `tree` a git repository whose one commit holds what it holds.
+fn commit_all(tree: &Path) {
+    for args in [
+        &["init", "-q", "-b", "mission/x"][..],
+        &["add", "-A"][..],
+        &[
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "user.name=T",
+            "commit",
+            "-q",
+            "-m",
+            "first",
+        ][..],
+    ] {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(tree)
+            .args(args)
+            .output()
+            .expect("git is on the path");
+        assert!(out.status.success(), "git {args:?}: {out:?}");
     }
 }

@@ -169,6 +169,27 @@ enum Command {
     #[command(subcommand)]
     Secret(SecretCommand),
 
+    /// The project's services file as nunki lifts it, and your approval of
+    /// it (SPEC 4.2).
+    ///
+    /// Read from a commit, never from a tree: a mission's slot's `HEAD`
+    /// when one is named, the repository's otherwise. What you approve is
+    /// the digest of nunki's rendering, kept in the project's HQ; a
+    /// rendering nobody approved starts no service, and the mission that
+    /// needed it is handed back to you.
+    #[command(group(clap::ArgGroup::new("gesture").required(true).args(["show", "approve"])))]
+    Services {
+        /// Print the rendering nunki would lift, and its digest.
+        #[arg(long)]
+        show: bool,
+        /// Approve the rendering with this digest — only while it is the
+        /// file's rendering as it stands now.
+        #[arg(long, value_name = "DIGEST")]
+        approve: Option<String>,
+        /// Read the file from this mission's slot.
+        mission: Option<String>,
+    },
+
     /// Say whether the project holds what the specification describes.
     ///
     /// Red when a restriction is not held; and it always says what it could
@@ -1239,6 +1260,9 @@ fn main() -> ExitCode {
                                      another once this run is read back"
                                 );
                             }
+                            nunki::verify::Step::PortsDropped { services } => {
+                                println!("ports     {}", nunki::services::ports_dropped(services));
+                            }
                             nunki::verify::Step::Launched { role, application } => {
                                 owed = true;
                                 println!("launched  a {role:?} run — {application}");
@@ -1398,6 +1422,72 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
 
+        Command::Services {
+            show: _,
+            approve,
+            mission,
+        } => {
+            let project = match open(&start) {
+                Some(p) => p,
+                None => return ExitCode::FAILURE,
+            };
+            let readings =
+                match nunki::services::readings(&project, mission.as_deref(), approve.is_some()) {
+                    Ok(readings) => readings,
+                    Err(e) => {
+                        eprintln!("nunki: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                };
+            if let Some(digest) = approve {
+                let current: Vec<_> = readings
+                    .into_iter()
+                    .filter_map(|r| r.current.ok())
+                    .collect();
+                return match nunki::services::approve(&project, &digest, &current) {
+                    Ok(nunki::services::Approved::Now(a)) => {
+                        println!("approved  {}", a.digest);
+                        println!("by        {}", a.by);
+                        println!("in        {}", nunki::services::file(&project).display());
+                        ExitCode::SUCCESS
+                    }
+                    Ok(nunki::services::Approved::Already(a)) => {
+                        println!("already approved  {}", a.digest);
+                        println!("by                {} at {}", a.by, a.at);
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("nunki: {e}");
+                        ExitCode::FAILURE
+                    }
+                };
+            }
+            let approvals = match nunki::services::Approvals::load(&nunki::services::file(&project))
+            {
+                Ok(a) => a,
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let mut code = ExitCode::SUCCESS;
+            for reading in readings {
+                match reading.current {
+                    Ok(current) => {
+                        print!(
+                            "{}",
+                            nunki::services::show(&current, &reading.from, &approvals)
+                        )
+                    }
+                    Err(e) => {
+                        eprintln!("nunki: {}: {e}", reading.from);
+                        code = ExitCode::FAILURE;
+                    }
+                }
+            }
+            code
+        }
+
         Command::Check {
             slot: which,
             mission,
@@ -1414,6 +1504,11 @@ fn main() -> ExitCode {
                 &mut report,
             );
             report.checks.extend(probes(&project, which.as_deref()));
+            report.checks.extend(nunki::services::checks(
+                &project,
+                which.as_deref(),
+                mission.as_deref(),
+            ));
             if let Some(id) = &mission {
                 let engine_bin = std::env::var("HQ_ENGINE").unwrap_or_else(|_| "docker".into());
                 let engine: std::sync::Arc<dyn nunki::engine::Engine> =

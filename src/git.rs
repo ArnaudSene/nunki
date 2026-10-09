@@ -140,6 +140,84 @@ fn finish(
     }
 }
 
+/// A file as a commit holds it: its mode, and its bytes as they are.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Blob {
+    /// The git mode: `100644` or `100755` for a regular file, `120000` for a
+    /// symbolic link, whose bytes are the path it points at.
+    pub mode: String,
+    pub bytes: Vec<u8>,
+}
+
+impl Blob {
+    /// Whether the entry is a regular file, executable or not.
+    pub fn is_file(&self) -> bool {
+        self.mode == "100644" || self.mode == "100755"
+    }
+}
+
+/// The first entry of `ls-tree -z` output, as (mode, type, id), or `None`
+/// when it lists nothing. The path is given whole and literally
+/// (`GIT_LITERAL_PATHSPECS`), so the one entry `ls-tree` can list is the one
+/// asked for: a directory is listed as itself, never as its children.
+fn tree_entry(listing: &[u8]) -> Option<(String, String, String)> {
+    let entry = listing.split(|b| *b == 0).next()?;
+    let (meta, _) = std::str::from_utf8(entry).ok()?.split_once('\t')?;
+    let mut fields = meta.split(' ');
+    Some((
+        fields.next()?.to_string(),
+        fields.next()?.to_string(),
+        fields.next()?.to_string(),
+    ))
+}
+
+/// The file at `path` in the commit `HEAD` names in the human's repository
+/// at `at`, or `None` when that commit holds no blob there. Read from the
+/// commit, never from the working tree.
+pub fn blob_at_head(at: &Path, path: &str) -> Result<Option<Blob>, GitError> {
+    let raw = |args: &[&str]| -> Result<Vec<u8>, GitError> {
+        let mut git = Command::new("git");
+        git.env("LC_ALL", "C")
+            .env("GIT_LITERAL_PATHSPECS", "1")
+            .arg("-C")
+            .arg(at)
+            .args(args);
+        raw_output(git, args, &at.display().to_string())
+    };
+    read_blob(raw, path)
+}
+
+/// [`blob_at_head`] for any git that answers with raw bytes.
+fn read_blob(
+    git: impl Fn(&[&str]) -> Result<Vec<u8>, GitError>,
+    path: &str,
+) -> Result<Option<Blob>, GitError> {
+    let listing = git(&["ls-tree", "-z", "HEAD", "--", path])?;
+    let Some((mode, kind, id)) = tree_entry(&listing) else {
+        return Ok(None);
+    };
+    if kind != "blob" {
+        return Ok(None);
+    }
+    let bytes = git(&["cat-file", "blob", &id])?;
+    Ok(Some(Blob { mode, bytes }))
+}
+
+/// Spawn `git` and return its stdout untouched — a file's bytes are not to
+/// be trimmed — or what it said on stderr.
+fn raw_output(mut git: Command, args: &[&str], at: &str) -> Result<Vec<u8>, GitError> {
+    let out = output(&mut git, None)?;
+    if out.status.success() {
+        Ok(out.stdout)
+    } else {
+        Err(GitError::Failed {
+            verb: args.first().unwrap_or(&"?").to_string(),
+            at: at.to_string(),
+            stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        })
+    }
+}
+
 fn output(git: &mut Command, input: Option<&[u8]>) -> Result<std::process::Output, GitError> {
     let missing = |e: std::io::Error| GitError::Missing(e.to_string());
     let Some(input) = input else {
@@ -561,6 +639,18 @@ impl SlotGit {
     }
 
     /// The commit `HEAD` names.
+    /// The file at `path` in the commit the slot's `HEAD` names, read in the
+    /// mirror: what the slot committed, never what its tree holds now.
+    pub fn blob_at_head(&self, path: &str) -> Result<Option<Blob>, GitError> {
+        let at = self.at();
+        let raw = |args: &[&str]| -> Result<Vec<u8>, GitError> {
+            let mut git = self.git();
+            git.env("GIT_LITERAL_PATHSPECS", "1").args(args);
+            raw_output(git, args, &at)
+        };
+        read_blob(raw, path)
+    }
+
     pub fn head(&self) -> Result<String, GitError> {
         self.run(&["rev-parse", "--verify", "HEAD^{commit}"])
     }

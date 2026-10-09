@@ -53,6 +53,21 @@ pub enum Handover {
         attempt: u32,
         survivors: Vec<String>,
     },
+    /// The services file on the slot's `HEAD` renders to `digest`, which no
+    /// human approved, so the system profile the `role` needed was not
+    /// started (SPEC 4.2). No attempt is spent: none would change it. A
+    /// human reads the rendering (`nunki services --show`), approves it, and
+    /// `retry` resumes the same role at the same attempt.
+    ///
+    /// Its own variant, and not [`Handover::AwaitingRuling`]: that one is
+    /// the mutation campaign's, reached only while coding, and this one is
+    /// reached only where a system profile is lifted.
+    ServicesNotApproved {
+        role: Role,
+        attempt: u32,
+        file: String,
+        digest: String,
+    },
 }
 
 impl Handover {
@@ -99,6 +114,12 @@ impl Handover {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
+            Handover::ServicesNotApproved {
+                role, file, digest, ..
+            } => format!(
+                "the {role:?} needs the project's services, and {file} on the slot's HEAD \
+                 renders to {digest}, which no human approved: nothing was started"
+            ),
         };
         one_line(&raw)
     }
@@ -125,6 +146,13 @@ impl Handover {
                     "rule each (`nunki mission mutants {mission} --equivalent <survivor> \
                      --because <why>`), then `nunki mission retry {mission} --because <what \
                      was ruled>`"
+                ),
+            ),
+            Handover::ServicesNotApproved { digest, .. } => (
+                "the human",
+                format!(
+                    "read it (`nunki services --show {mission}`), approve it (`nunki services \
+                     --approve {digest}`), then {retry}"
                 ),
             ),
         }
@@ -194,6 +222,11 @@ pub enum Event {
         what: String,
         survivors: Vec<String>,
     },
+    /// A system profile was due, and the services file on the slot's
+    /// `HEAD` renders to `digest`, which no human approved: the engine
+    /// started nothing. Only where a system profile is lifted, before the
+    /// role's run is launched.
+    ServicesUnapproved { file: String, digest: String },
     /// The human called the mission off (`nunki mission end`), with a reason.
     /// Valid wherever a mission can still be worked on: what it says is
     /// "stop asking me about this", and there is no stage where that is not
@@ -414,6 +447,27 @@ impl Flow {
                     survivors,
                 })
             }
+            // --- a system profile nobody approved -------------------------
+            //
+            // Nothing was started and no run was spent, so the attempt is
+            // kept: the human's approval is what changes, not the agent's
+            // work.
+            (Stage::Integration { attempt }, Event::ServicesUnapproved { file, digest }) => {
+                Stage::AwaitingHuman(Handover::ServicesNotApproved {
+                    role: Role::Integrator,
+                    attempt,
+                    file,
+                    digest,
+                })
+            }
+            (Stage::SecurityAgent { attempt }, Event::ServicesUnapproved { file, digest }) => {
+                Stage::AwaitingHuman(Handover::ServicesNotApproved {
+                    role: Role::Security,
+                    attempt,
+                    file,
+                    digest,
+                })
+            }
             // Gates 1 to 4 are played at the end of **every** run, not only
             // at the final verification (SPEC 4.4): a
             // perimeter gate that only falls at the end loses a six-hour
@@ -527,6 +581,12 @@ impl Flow {
                 Stage::AwaitingHuman(Handover::RoleAttemptsExhausted { role, .. }),
                 Event::Retried { .. },
             ) => self.role_stage(role, 1),
+            // Approved since, or not: the same role at the same attempt, and
+            // a profile still unapproved hands over again on the next launch.
+            (
+                Stage::AwaitingHuman(Handover::ServicesNotApproved { role, attempt, .. }),
+                Event::Retried { .. },
+            ) => self.role_stage(role, attempt),
             // A ruling is not a bound running out, so it hands no budget
             // back: the lot resumes at the attempt after the one that asked.
             // Never past the bound: when the attempt that asked was the last

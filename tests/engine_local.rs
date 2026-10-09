@@ -1046,3 +1046,20 @@ fn record_base(tree: &Path) {
         .fetch_origin(&project)
         .unwrap();
 }
+
+/// The local engine lifts no service, so it lists none, and a request to
+/// take containers down is refused rather than answered as done: a removal
+/// reported without happening would leave a stale definition running and
+/// a launch believing it had gone.
+#[test]
+fn the_local_engine_lists_no_service_and_refuses_to_remove_one() {
+    let engine = LocalEngine::new(&[]);
+    assert!(engine.containers("local").unwrap().is_empty());
+    match engine.remove(&["stale".to_string()]) {
+        Err(nunki::engine::EngineError::Command { status, stderr, .. }) => {
+            assert_eq!(status, "unsupported");
+            assert!(stderr.contains("does not implement remove"), "{stderr}");
+        }
+        other => panic!("a removal the engine cannot do was answered {other:?}"),
+    }
+}

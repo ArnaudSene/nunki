@@ -74,6 +74,10 @@ pub enum Step {
         /// agent, how the application was started for it, or why it was not.
         application: String,
     },
+    /// The launch dropped the `ports` of these lifted services: the agent
+    /// reaches a service by its name, and a published port would collide
+    /// between slots. Said in one line, before the launch it belongs to.
+    PortsDropped { services: Vec<String> },
     /// A launch ended a mutation campaign that was still running: the switch
     /// it performs recreates the container the campaign lives in, so the
     /// campaign dies either way. Said rather than not — a slot that went
@@ -671,7 +675,7 @@ pub fn verify_as(
                             return Ok(steps);
                         }
                     };
-                let launched = crate::run::launch(&crate::run::Launching {
+                let launched = match crate::run::launch(&crate::run::Launching {
                     project,
                     slot: &slot,
                     engine: engine.clone(),
@@ -682,8 +686,17 @@ pub fn verify_as(
                     lot: "integration".to_string(),
                     attempt,
                     session: None,
-                })?;
+                }) {
+                    Err(crate::run::RunError::Services(
+                        crate::services::ApprovalError::NotApproved { path, digest },
+                    )) => {
+                        unapproved(&store, &mut state, &paths, id, path, digest, &mut steps)?;
+                        continue;
+                    }
+                    launched => launched?,
+                };
                 let application = describe(&launched);
+                let launched_ports = launched.ports_dropped.clone();
                 state.run = Some(launched.run);
                 state.app = launched.app;
                 store.save(&state)?;
@@ -691,6 +704,7 @@ pub fn verify_as(
                 if let Some(since) = launched.campaign_ended {
                     steps.push(Step::CampaignEnded { since });
                 }
+                steps.extend(ports_step(launched_ports));
                 steps.push(Step::Launched {
                     role: Role::Integrator,
                     application,
@@ -761,7 +775,7 @@ pub fn verify_as(
                     steps.push(step);
                     return Ok(steps);
                 }
-                let launched = crate::run::launch(&crate::run::Launching {
+                let launched = match crate::run::launch(&crate::run::Launching {
                     project,
                     slot: &slot,
                     engine: engine.clone(),
@@ -772,8 +786,17 @@ pub fn verify_as(
                     lot: "security".to_string(),
                     attempt,
                     session: None,
-                })?;
+                }) {
+                    Err(crate::run::RunError::Services(
+                        crate::services::ApprovalError::NotApproved { path, digest },
+                    )) => {
+                        unapproved(&store, &mut state, &paths, id, path, digest, &mut steps)?;
+                        continue;
+                    }
+                    launched => launched?,
+                };
                 let application = describe(&launched);
+                let launched_ports = launched.ports_dropped.clone();
                 state.run = Some(launched.run);
                 state.app = launched.app;
                 store.save(&state)?;
@@ -781,6 +804,7 @@ pub fn verify_as(
                 if let Some(since) = launched.campaign_ended {
                     steps.push(Step::CampaignEnded { since });
                 }
+                steps.extend(ports_step(launched_ports));
                 steps.push(Step::Launched {
                     role: Role::Security,
                     application,
@@ -853,6 +877,36 @@ pub fn verify_as(
             }
         }
     }
+}
+
+/// The system profile a role needed was not started: the services file on
+/// the slot's `HEAD` renders to `digest`, which no human approved. Said in
+/// the follow-up first, then the mission is handed over with a handover of
+/// its own (SPEC 4.5), and nothing was spent.
+fn unapproved(
+    store: &Store,
+    state: &mut MissionState,
+    paths: &Paths,
+    id: &str,
+    file: String,
+    digest: String,
+    steps: &mut Vec<Step>,
+) -> Result<(), VerifyError> {
+    crate::followup::said(
+        &paths.followup,
+        "nunki",
+        &format!(
+            "{file} on the slot's HEAD renders to {digest}, which no human has approved, so \
+             no system profile was started. `nunki services --show {id}` prints the \
+             rendering, `nunki services --approve {digest}` approves it, and `nunki mission \
+             retry {id}` resumes."
+        ),
+    )?;
+    store.apply(state, Event::ServicesUnapproved { file, digest })?;
+    steps.push(Step::Moved {
+        to: state.flow.stage().clone(),
+    });
+    Ok(())
 }
 
 /// The commits after the security agent's last concluded round, named as
@@ -1560,6 +1614,12 @@ pub fn gate_seven_said(paths: &Paths, id: &str) -> Result<(), VerifyError> {
     Ok(())
 }
 
+/// The line a launch owes when it dropped some services' `ports`, and none
+/// when it dropped nothing.
+fn ports_step(services: Vec<String>) -> Option<Step> {
+    (!services.is_empty()).then_some(Step::PortsDropped { services })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1755,5 +1815,16 @@ mod tests {
         assert!(lift_on(Some(&low), &Stage::Verified).is_none());
         assert!(lift_on(Some(&low), &Stage::SecurityAgent { attempt: 1 }).is_none());
         assert!(lift_on(Some(&low), &findings()).is_some_and(|d| d.is_ok()));
+    }
+
+    #[test]
+    fn a_launch_says_which_ports_it_dropped_and_nothing_when_none() {
+        assert_eq!(
+            ports_step(vec!["db".to_string()]),
+            Some(Step::PortsDropped {
+                services: vec!["db".to_string()]
+            })
+        );
+        assert_eq!(ports_step(Vec::new()), None);
     }
 }

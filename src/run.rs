@@ -226,13 +226,8 @@ pub enum RunError {
     Io(PathBuf, std::io::Error),
     #[error("the run could not be launched: {0}")]
     Launch(String),
-    #[error(
-        "nunki.yaml names {0} as the project's services file, and the slot's tree has no \
-         such file on this commit"
-    )]
-    NoServicesFile(PathBuf),
-    #[error("{0} is not a Compose file nunki can read: {1}")]
-    BadServicesFile(PathBuf, String),
+    #[error(transparent)]
+    Services(#[from] crate::services::ApprovalError),
     #[error(transparent)]
     Application(#[from] crate::launch::LaunchError),
     #[error(
@@ -382,6 +377,10 @@ pub struct Launched {
     /// A mutation campaign this launch ended, and since when it had been
     /// running. `None` when there was none, which is the normal case.
     pub campaign_ended: Option<String>,
+    /// The lifted services whose `ports` nunki dropped from the file, for
+    /// the launch to say so in one line: the agent reaches a service by its
+    /// name, and a published port would collide between slots.
+    pub ports_dropped: Vec<String>,
 }
 
 /// End the mutation campaign this launch is about to kill, and say since
@@ -455,6 +454,15 @@ pub fn launch(l: &Launching) -> Result<Launched, RunError> {
     } = l;
     let role = *role;
 
+    // First of all, for a profile that lifts the project's services: a
+    // rendering no human approved starts nothing, and is said before an
+    // account, an image or a branch is so much as looked at. `plan` reads it
+    // again and is the guard; this is what keeps a refusal from being
+    // reported as a missing image (SPEC 4.2).
+    if Profile::of(role) == Profile::System {
+        crate::services::approved(project, &slot.tree)?;
+    }
+
     // Which subscription this mission spends. Checked before the machine:
     // what the project declares is cheap to check and belongs to the
     // mission, while a missing image belongs to this machine. Saying "build
@@ -499,6 +507,7 @@ pub fn launch(l: &Launching) -> Result<Launched, RunError> {
     std::fs::write(&prompt, role::prompt(role)).map_err(|e| RunError::Io(prompt.clone(), e))?;
 
     let plan = plan(project, slot, &stack, &images, paths, &token, header, role)?;
+    let ports_dropped = ports_dropped(&plan);
     // The perimeter the firewall is about to enforce, written where the agent
     // reads: an autonomous agent cannot ask why a name does not resolve.
     std::fs::write(&paths.allowlist, allowlist(role, &plan.perimeter))
@@ -538,7 +547,7 @@ pub fn launch(l: &Launching) -> Result<Launched, RunError> {
     };
     seed_writable(slot, &writable)?;
 
-    engine.up(&file, &compose_project)?;
+    lift(engine.as_ref(), project, &file, &compose_project, &plan)?;
     // And the ownership of that volume comes from the **image**, not from the
     // tree: an image built before the stack declared this directory yields a
     // root-owned volume, silently, and the first build inside the container
@@ -607,7 +616,89 @@ pub fn launch(l: &Launching) -> Result<Launched, RunError> {
         app,
         launch: declared,
         campaign_ended,
+        ports_dropped,
     })
+}
+
+/// Start the profile `plan` describes, written at `file` — and first take
+/// down what the project's file lifted before whose definition is not the
+/// approved one ([`crate::services::stale`]): an older approved version, one
+/// lifted before approvals existed, a service the file no longer names.
+/// Taken down by container, never with a volume, before anything is started
+/// beside it (SPEC 4.2). Returns what was taken down.
+///
+/// Public because it is the one thing a launch takes down on its own, and a
+/// test should be able to hold it, and its order, to account without an
+/// agent.
+pub fn lift(
+    engine: &dyn Engine,
+    project: &Project,
+    file: &Path,
+    compose_project: &str,
+    plan: &Plan,
+) -> Result<Vec<String>, RunError> {
+    let approvals = crate::services::Approvals::load(&crate::services::file(project))?;
+    let stale = crate::services::stale(
+        &engine.containers(compose_project)?,
+        plan.project_services.as_ref(),
+        &approvals,
+    );
+    take_down_and_up(engine, file, compose_project, stale)
+}
+
+/// Start again the profile a launch wrote at `file`, without writing it:
+/// what `nunki exec` and the gates do when the slot's containers are down.
+///
+/// It goes through what [`lift`] goes through, so it is not a second way to
+/// lift. Every project service of the profile must carry the label of a
+/// rendering a human approved, or nothing is started
+/// ([`crate::services::labels_of_profile`]): a profile written before
+/// approvals lifts its services unlabelled and unfenced. Then what the
+/// profile does not lift under that label is taken down, by container and
+/// never with a volume, before anything is started. Returns what was taken
+/// down.
+pub fn relift(
+    engine: &dyn Engine,
+    project: &Project,
+    file: &Path,
+    compose_project: &str,
+) -> Result<Vec<String>, RunError> {
+    let approvals = crate::services::Approvals::load(&crate::services::file(project))?;
+    let lifting = crate::services::labels_of_profile(file, &approvals)?;
+    let stale = crate::services::stale_labelled(
+        &engine.containers(compose_project)?,
+        lifting.as_ref(),
+        &approvals,
+    );
+    take_down_and_up(engine, file, compose_project, stale)
+}
+
+fn take_down_and_up(
+    engine: &dyn Engine,
+    file: &Path,
+    compose_project: &str,
+    stale: Vec<String>,
+) -> Result<Vec<String>, RunError> {
+    if !stale.is_empty() {
+        engine.remove(&stale)?;
+    }
+    engine.up(file, compose_project)?;
+    Ok(stale)
+}
+
+/// The services of `plan` whose `ports` nunki dropped: what the launch says
+/// in one line, since nothing the file publishes is published.
+pub fn ports_dropped(plan: &Plan) -> Vec<String> {
+    plan.project_services
+        .as_ref()
+        .map(|l| {
+            l.services
+                .dropped_ports()
+                .into_iter()
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The session a run is launched in, and whether the harness resumes it: the
@@ -895,13 +986,20 @@ pub fn plan(
         Profile::System => credentials(project)?,
     };
 
-    // The project's own services, merged verbatim into the system profile.
-    // Not into the mission one: the coder reaches no service, so lifting a
-    // database beside it would be lifting what its allowlist forbids it to
-    // talk to.
-    let (project_services, project_networks, project_volumes) = match profile {
-        Profile::Mission => (None, None, None),
-        Profile::System => project_compose(project, slot)?,
+    // The project's own services, read into the closed model and lifted
+    // into the system profile as nunki renders them — those the frozen
+    // header declares, and those they depend on; the others are not
+    // started. Not into the mission profile: the coder reaches no service,
+    // so lifting a database beside it would be lifting what its allowlist
+    // forbids it to talk to, and re-declaring them there would need the file
+    // approved while the coder may be the one changing it. They stay up
+    // across the switch all the same: nunki never removes orphans, and the
+    // takedown keeps what a human approved ([`crate::services::stale`]).
+    let project_services = match profile {
+        Profile::Mission => None,
+        Profile::System => project_compose(project, slot)?.map(|file| {
+            crate::compose::services::Lifted::declared(file, &declared_services(header))
+        }),
     };
 
     Ok(Plan {
@@ -925,8 +1023,7 @@ pub fn plan(
         command: vec!["sleep".to_string(), "infinity".to_string()],
         perimeter,
         project_services,
-        project_networks,
-        project_volumes,
+        prober: None,
     })
 }
 
@@ -1100,35 +1197,30 @@ fn credentials(project: &Project) -> Result<Vec<(PathBuf, PathBuf)>, RunError> {
     Ok(files)
 }
 
-/// The project's own `services:` and `networks:` blocks, read from the slot's
-/// tree.
+/// The project's own services, as a profile may lift them (SPEC 4.2).
 ///
-/// From the tree and not from the repository: the file is the project's, it
-/// travels with the commit, and the integrator may amend it in its wiring —
-/// the same rule as the launch script (SPEC 4.2). What `nunki.yaml` decides is
-/// **which** file; what the slot decides is what is in it.
-type ProjectBlocks = (
-    Option<serde_yaml_ng::Value>,
-    Option<serde_yaml_ng::Value>,
-    Option<serde_yaml_ng::Value>,
-);
+/// Read from the commit the slot's `HEAD` names, through the host's mirror,
+/// and never from the tree: what a human approves is what is committed. The
+/// file is the project's and travels with the commit, so the integrator may
+/// still amend it in its wiring — and an amended file is a new rendering,
+/// which starts nothing until a human approves it. A file the closed model
+/// refuses, or whose rendering nobody approved, lifts nothing, and the
+/// profile is not started ([`crate::services::approved`]).
+fn project_compose(
+    project: &Project,
+    slot: &Slot,
+) -> Result<Option<crate::compose::services::ServicesFile>, RunError> {
+    Ok(crate::services::approved(project, &slot.tree)?)
+}
 
-fn project_compose(project: &Project, slot: &Slot) -> Result<ProjectBlocks, RunError> {
-    let Some(relative) = &project.config.services_file else {
-        return Ok((None, None, None));
-    };
-    let file = slot.tree.join(relative);
-    if !file.is_file() {
-        return Err(RunError::NoServicesFile(file));
+/// The services a mission's frozen header declares, by name.
+fn declared_services(header: &crate::mission::Header) -> Vec<String> {
+    match &header.integration {
+        crate::mission::Integration::Services { services, .. } => {
+            services.iter().map(|s| s.name.clone()).collect()
+        }
+        crate::mission::Integration::None { .. } => Vec::new(),
     }
-    let text = std::fs::read_to_string(&file).map_err(|e| RunError::Io(file.clone(), e))?;
-    let document: serde_yaml_ng::Value = serde_yaml_ng::from_str(&text)
-        .map_err(|e| RunError::BadServicesFile(file.clone(), e.to_string()))?;
-    let pick = |key: &str| match &document {
-        serde_yaml_ng::Value::Mapping(map) => map.get(serde_yaml_ng::Value::from(key)).cloned(),
-        _ => None,
-    };
-    Ok((pick("services"), pick("networks"), pick("volumes")))
 }
 
 /// A v4-shaped identifier. `nunki` imposes it rather than reading one back

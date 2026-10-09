@@ -475,18 +475,18 @@ fn live_the_services_survive_a_switch_and_the_application_starts_in_the_profile(
             // Re-declared identically in both profiles — that identity is
             // what makes the switch a no-op for them. The named volume is
             // the point: it is the state the integrator leaves behind.
-            project_services: Some(
-                serde_yaml_ng::from_str(
-                    "db:\n  image: alpine:3.20\n  command: [\"sleep\", \"600\"]\n  \
-                     volumes:\n    - dbdata:/state\n",
+            // The top-level volume matters as much: without it the whole
+            // project is invalid — `service "db" refers to undefined volume
+            // dbdata` (measured).
+            project_services: Some(nunki::compose::services::Lifted::whole(
+                nunki::compose::services::ServicesFile::parse(
+                    "services:\n  db:\n    image: alpine:3.20\n    \
+                     command: [\"sleep\", \"600\"]\n    volumes:\n      - dbdata:/state\n\
+                     volumes:\n  dbdata:\n",
                 )
                 .unwrap(),
-            ),
-            project_networks: None,
-            // Without this the whole project is invalid — `service "db"
-            // refers to undefined volume dbdata` (measured, and the reason
-            // the block is merged at all).
-            project_volumes: Some(serde_yaml_ng::from_str("dbdata: null\n").unwrap()),
+            )),
+            prober: None,
         }
     };
     let write = |role: Role| {
@@ -763,8 +763,7 @@ fn live_the_security_profile_writes_only_what_the_stack_declared() {
             command: vec!["sleep".to_string(), "600".to_string()],
             perimeter,
             project_services: None,
-            project_networks: None,
-            project_volumes: None,
+            prober: None,
         };
         std::fs::write(&file, generate(&plan, docker.dialect()).unwrap()).unwrap();
     };

@@ -2,8 +2,8 @@
 //!
 //! Not a Compose implementation: only the keys the generator writes, in a
 //! fixed order, so that regenerating an unchanged plan yields the same bytes.
-//! Everything the project itself declares travels as an opaque YAML value and
-//! is never re-typed.
+//! What the project itself declares is typed elsewhere, in the closed model
+//! of [`super::services`], and arrives here as that model's rendering.
 
 use std::collections::BTreeMap;
 
@@ -17,11 +17,13 @@ pub struct Document {
     /// that switching profiles leaves the project's services untouched.
     pub name: String,
     /// Insertion-ordered so the generated file reads the way it was built:
-    /// the firewall, the agent, then the project's own services verbatim.
+    /// the firewall, the agent, nunki's prober when there is one, then the
+    /// project's own services as nunki rendered them.
     pub services: Mapping,
     #[serde(skip_serializing_if = "Mapping::is_empty")]
     pub volumes: Mapping,
-    /// The project's own `networks:` block, verbatim.
+    /// nunki's internal network for the project's services, when there are
+    /// any. Never the project's: a services file declares no network.
     #[serde(skip_serializing_if = "Mapping::is_empty")]
     pub networks: Mapping,
 }

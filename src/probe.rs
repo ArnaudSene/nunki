@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::check::{Check, Verdict};
+use crate::compose::model::{Service, depends_on_healthy};
 use crate::compose::{AGENT_SERVICE, FIREWALL_SERVICE, NamedVolume, Plan, UserIds};
 use crate::engine::{Engine, EngineError};
 use crate::harness::Role;
@@ -39,10 +40,6 @@ pub enum ProbeError {
     Slot(#[from] crate::slot::SlotError),
     #[error("the system profile could not be planned: {0}")]
     Plan(#[from] crate::run::RunError),
-    #[error(
-        "the project's services file declares a service named {0:?}, which the check needs for its prober"
-    )]
-    ProberNameTaken(String),
 }
 
 /// Lift the mission profile of `slot` and try to get out of it.
@@ -73,7 +70,7 @@ pub fn mission_profile(
     // not to a container, and a stack image has no reason to carry
     // `nslookup`. Measured — the Debian Rust image has none, and every
     // positive probe came back "refused".
-    plan.project_services = Some(prober_service(&images.prober, plan.user)?);
+    plan.prober = Some(prober_service(&images.prober, plan.user));
     let file = project
         .hq_root
         .join("checks")
@@ -257,10 +254,10 @@ pub fn scratch_paths(
 /// Compose project, the network, every named volume — becomes the check's
 /// and not the slot's, so the project's services (a database with its data)
 /// are lifted a second time **beside** the slot's rather than on top of
-/// them: two databases on one volume is a corrupted volume. The one way
-/// around it is a project volume with an explicit `name:` in its services
-/// file, which Compose then shares across projects; that is the project's
-/// to avoid, and it is written here so nobody has to rediscover it.
+/// them: two databases on one volume is a corrupted volume. The way around
+/// it that once existed — a project volume with an explicit `name:`, which
+/// Compose shares across projects — is closed: a services file declares a
+/// volume by name only (see `compose::services`).
 ///
 /// No token: a check must not spend a subscription, and nothing here runs
 /// the harness — the agent's container only sleeps.
@@ -288,34 +285,16 @@ pub fn system_plan(
     )?;
     plan.command = vec!["sleep".to_string(), "600".to_string()];
 
-    let serde_yaml_ng::Value::Mapping(prober) = prober_service(&images.prober, plan.user)? else {
-        unreachable!("prober_service builds a mapping");
-    };
-    plan.project_services = Some(match plan.project_services.take() {
-        None => serde_yaml_ng::Value::Mapping(prober),
-        Some(serde_yaml_ng::Value::Mapping(mut services)) => {
-            if services.contains_key(serde_yaml_ng::Value::from(PROBER_SERVICE)) {
-                return Err(ProbeError::ProberNameTaken(PROBER_SERVICE.to_string()));
-            }
-            services.extend(prober);
-            serde_yaml_ng::Value::Mapping(services)
-        }
-        // Not a mapping: handed on as it is, for the generator to refuse
-        // with the message it already has for it.
-        Some(other) => other,
-    });
+    plan.prober = Some(prober_service(&images.prober, plan.user));
     Ok(plan)
 }
 
 /// What is tried from inside a system profile: the mission profile's
 /// battery, plus the two things only a system profile has.
 ///
-/// Each service the mission declares must resolve. Each service the
-/// **project** lifts but the mission does not declare must not: the
-/// project's services file is merged whole, so an undeclared database is on
-/// the same network, and the fence is the only thing between it and the
-/// agent. That probe would succeed without the firewall — Compose's own
-/// resolver answers every service name — which is what makes it one.
+/// Each service the mission declares must resolve. Each service of the
+/// project's file the mission does not declare must not: it is held back,
+/// never started, and a name that resolved would be a service that was.
 pub fn system_probes(plan: &Plan, header: &crate::mission::Header) -> Vec<crate::perimeter::Probe> {
     use crate::perimeter::Probe;
 
@@ -349,17 +328,13 @@ pub fn system_probes(plan: &Plan, header: &crate::mission::Header) -> Vec<crate:
             script: resolves(name),
         });
     }
-    if let Some(serde_yaml_ng::Value::Mapping(services)) = &plan.project_services {
-        for name in services.keys().filter_map(|k| k.as_str()) {
-            if name != PROBER_SERVICE && !declared.iter().any(|d| d == name) {
-                probes.push(Probe {
-                    what: format!(
-                        "{name}, a project service the mission does not declare, resolves"
-                    ),
-                    expected: false,
-                    script: resolves(name),
-                });
-            }
+    if let Some(project) = &plan.project_services {
+        for name in &project.held_back {
+            probes.push(Probe {
+                what: format!("{name}, a project service the mission does not declare, resolves"),
+                expected: false,
+                script: resolves(name),
+            });
         }
     }
     probes
@@ -430,13 +405,12 @@ fn plan(
         command: vec!["sleep".to_string(), "600".to_string()],
         perimeter,
         project_services: None,
-        project_networks: None,
-        project_volumes: None,
+        prober: None,
     })
 }
 
 /// The service the battery is run from.
-pub const PROBER_SERVICE: &str = "prober";
+pub const PROBER_SERVICE: &str = crate::compose::PROBER_SERVICE;
 
 /// The Compose project a probe run uses: the slot's, with `-check` appended.
 ///
@@ -448,23 +422,19 @@ pub fn compose_project(session: &str, slot: &str) -> Result<String, crate::compo
     crate::compose::project_name(session, &format!("{slot}-check"))
 }
 
-/// The prober, declared the way a project declares a service so that it goes
-/// through the generator's own merge rather than a second code path.
-fn prober_service(image: &str, user: UserIds) -> Result<serde_yaml_ng::Value, ProbeError> {
-    let yaml = format!(
-        "{PROBER_SERVICE}:\n  \
-           image: {image}\n  \
-           network_mode: \"service:{FIREWALL_SERVICE}\"\n  \
-           cap_drop: [ALL]\n  \
-           security_opt: [\"no-new-privileges:true\"]\n  \
-           user: \"{}:{}\"\n  \
-           depends_on:\n    \
-             {FIREWALL_SERVICE}:\n      \
-               condition: service_healthy\n  \
-           command: [\"sleep\", \"600\"]\n",
-        user.uid, user.gid
-    );
-    Ok(serde_yaml_ng::from_str(&yaml).expect("the prober service is valid YAML"))
+/// The prober: a service nunki writes itself, in its own field of the plan,
+/// so that the project's closed model never has to allow what it holds.
+fn prober_service(image: &str, user: UserIds) -> Service {
+    Service {
+        image: image.to_string(),
+        user: Some(format!("{}:{}", user.uid, user.gid)),
+        network_mode: Some(format!("service:{FIREWALL_SERVICE}")),
+        cap_drop: vec!["ALL".to_string()],
+        security_opt: vec!["no-new-privileges:true".to_string()],
+        depends_on: Some(depends_on_healthy(FIREWALL_SERVICE)),
+        command: vec!["sleep".to_string(), "600".to_string()],
+        ..Service::default()
+    }
 }
 
 /// The services a probe run lifts, named for a caller that wants to stop

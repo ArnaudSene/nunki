@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use super::cli::{Cli, RealCli};
-use super::{Dialect, Engine, EngineError, ExecOutput, Liveness, Netns};
+use super::{Container, Dialect, Engine, EngineError, ExecOutput, Liveness, Netns};
 use crate::harness::spawn::CommandSpec;
 
 /// How to invoke the engine. Both halves are overridable, because the
@@ -274,4 +274,58 @@ impl Engine for Docker {
             _ => Err(EngineError::Unreadable(text.trim().to_string())),
         }
     }
+
+    fn containers(&self, project: &str) -> Result<Vec<Container>, EngineError> {
+        // Asked of the engine and not of Compose: `compose ps` answers for
+        // the services of the file it is given, and the containers this is
+        // for are the ones the file no longer names.
+        let filter = format!("label=com.docker.compose.project={project}");
+        let format = format!(
+            "{{{{.ID}}}}\t{{{{.Label \"com.docker.compose.service\"}}}}\t{{{{.Label \"{}\"}}}}",
+            crate::compose::services::LABEL
+        );
+        let out = self.run(
+            "ps",
+            &self.engine_command(&["ps", "-a", "--filter", &filter, "--format", &format]),
+        )?;
+        parse_containers(&out)
+    }
+
+    fn remove(&self, containers: &[String]) -> Result<(), EngineError> {
+        if containers.is_empty() {
+            return Ok(());
+        }
+        // `-f` stops it first; no `-v`, so no volume goes with it — not even
+        // the anonymous one an image's `VOLUME` made.
+        let mut args = vec!["rm", "-f"];
+        args.extend(containers.iter().map(String::as_str));
+        self.run("rm", &self.engine_command(&args))?;
+        Ok(())
+    }
+}
+
+/// `docker ps --format` lines of id, service and label, tab-separated. A
+/// line without an id and a service is an answer nunki cannot read, and
+/// said as such rather than skipped: a container skipped here is one left
+/// running.
+pub fn parse_containers(out: &str) -> Result<Vec<Container>, EngineError> {
+    out.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let mut fields = line.split('\t');
+            match (fields.next(), fields.next(), fields.next()) {
+                (Some(id), Some(service), digest) if !id.is_empty() && !service.is_empty() => {
+                    Ok(Container {
+                        id: id.to_string(),
+                        service: service.to_string(),
+                        digest: digest
+                            .map(str::trim)
+                            .filter(|d| !d.is_empty())
+                            .map(str::to_string),
+                    })
+                }
+                _ => Err(EngineError::Unreadable(line.to_string())),
+            }
+        })
+        .collect()
 }

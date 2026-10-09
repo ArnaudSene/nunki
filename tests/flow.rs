@@ -1296,3 +1296,91 @@ fn every_handover_line_shows_agent_text_escaped() {
     .line("m7");
     assert!(!role.chars().any(common::raw_control), "{role}");
 }
+
+fn unapproved(digest: &str) -> Event {
+    Event::ServicesUnapproved {
+        file: "compose.yaml".into(),
+        digest: digest.into(),
+    }
+}
+
+/// A system profile nobody approved hands the mission back with a handover
+/// of its own, naming the file and the digest, and spends nothing: the
+/// retry resumes the same role at the same attempt.
+#[test]
+fn an_unapproved_services_file_hands_the_mission_back_and_spends_nothing() {
+    let mut flow = Flow::new(header(services(), Security::Agent, Bounds::default())).unwrap();
+    code_through(&mut flow);
+    flow.advance(Event::GatesPassed).unwrap();
+    // A failed integration attempt first, so the attempt kept is not 1.
+    flow.advance(Event::Stalled {
+        reason: "stalled".into(),
+    })
+    .unwrap();
+    assert_eq!(flow.stage(), &Stage::Integration { attempt: 2 });
+
+    flow.advance(unapproved("sha256:aa")).unwrap();
+    let Stage::AwaitingHuman(handover) = flow.stage().clone() else {
+        panic!("{:?}", flow.stage());
+    };
+    assert_eq!(
+        handover,
+        Handover::ServicesNotApproved {
+            role: Role::Integrator,
+            attempt: 2,
+            file: "compose.yaml".into(),
+            digest: "sha256:aa".into(),
+        }
+    );
+    let line = handover.line("m1");
+    assert!(
+        line.contains("compose.yaml") && line.contains("sha256:aa"),
+        "{line}"
+    );
+    assert!(line.contains("nunki services --show m1"), "{line}");
+    assert!(
+        line.contains("nunki services --approve sha256:aa"),
+        "{line}"
+    );
+    assert!(line.contains("nunki mission retry m1"), "{line}");
+    assert_eq!(handover.awaits("m1").0, "the human");
+
+    flow.advance(Event::Retried {
+        because: "approved".into(),
+    })
+    .unwrap();
+    assert_eq!(flow.stage(), &Stage::Integration { attempt: 2 });
+}
+
+#[test]
+fn the_security_agent_is_handed_back_the_same_way() {
+    let mut flow = Flow::new(header(none(), Security::Agent, Bounds::default())).unwrap();
+    code_through(&mut flow);
+    flow.advance(Event::GatesPassed).unwrap();
+    assert_eq!(flow.stage(), &Stage::SecurityAgent { attempt: 1 });
+    flow.advance(unapproved("sha256:bb")).unwrap();
+    assert!(matches!(
+        flow.stage(),
+        Stage::AwaitingHuman(Handover::ServicesNotApproved {
+            role: Role::Security,
+            attempt: 1,
+            ..
+        })
+    ));
+    flow.advance(Event::Retried {
+        because: "approved".into(),
+    })
+    .unwrap();
+    assert_eq!(flow.stage(), &Stage::SecurityAgent { attempt: 1 });
+}
+
+/// Only where a system profile is lifted: the coder's profile lifts no
+/// service, and the gates lift none either.
+#[test]
+fn an_unapproved_services_file_means_nothing_where_no_service_is_lifted() {
+    let mut flow = Flow::new(header(services(), Security::Agent, Bounds::default())).unwrap();
+    assert!(flow.advance(unapproved("sha256:aa")).is_err());
+    code_through(&mut flow);
+    assert_eq!(flow.stage(), &Stage::Gates);
+    assert!(flow.advance(unapproved("sha256:aa")).is_err());
+}

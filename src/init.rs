@@ -542,9 +542,11 @@ harness: claude-code
 # never waits for a human who is not there.
 permission_mode: {permission_mode}
 
-# The project's own Compose file, whose services and networks nunki merges into
-# every system profile. They are lifted once per slot and never stopped
-# between two profiles, so what the integrator laid down survives.
+# The project's own services file, read into a closed model and lifted into
+# every system profile as nunki renders it — the README section on the
+# project's services says what it may hold. Its services are lifted once per
+# slot and never stopped between two profiles, so what the integrator laid
+# down survives.
 # services_file: compose.yaml
 
 {branches}

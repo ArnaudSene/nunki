@@ -1242,22 +1242,83 @@ fn only_a_system_profile_mounts_the_test_credentials() {
     );
 }
 
-/// The project's own services are merged verbatim into the system profile —
-/// `include:` is unusable on one of the two engines (SPEC 4.2, engine table)
-/// — and into no mission profile: the coder's allowlist forbids it to talk
-/// to them.
+/// A slot whose tree is a git repository holding `files` in its one commit.
+fn committed_slot(dir: &Path, files: &[(&str, &str)]) -> nunki::slot::Slot {
+    let slot = slot_at(dir);
+    git(&slot.tree, &["init", "-q", "-b", "mission/x"]);
+    for (name, body) in files {
+        std::fs::write(slot.tree.join(name), body).unwrap();
+    }
+    git(&slot.tree, &["add", "-A"]);
+    git(
+        &slot.tree,
+        &[
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "user.name=T",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "first",
+        ],
+    );
+    slot
+}
+
+/// A project declaring `compose.yaml` as its services file.
+fn with_services_file(dir: &Path) -> Project {
+    let mut config = project(dir).config;
+    config.services_file = Some(std::path::PathBuf::from("compose.yaml"));
+    Project::at(dir.join("repo"), config, dir.join("nunki"))
+}
+
+/// What a human does with `nunki services --approve`, for the slot's HEAD.
+fn approve_head(project: &Project, slot: &nunki::slot::Slot) {
+    let current = nunki::services::read(project, nunki::services::At::Slot(&slot.tree))
+        .unwrap()
+        .unwrap();
+    nunki::services::approve(project, &current.digest, std::slice::from_ref(&current)).unwrap();
+}
+
+fn plan_err(project: &Project, slot: &nunki::slot::Slot) -> run::RunError {
+    let images = nunki::image::Images {
+        agent: "img/agent".into(),
+        firewall: "img/fw".into(),
+        prober: "img/probe".into(),
+    };
+    let paths = nunki::mission::dir::Paths::of(&project.hq_root, "m1");
+    run::plan(
+        project,
+        slot,
+        "rust",
+        &images,
+        &paths,
+        "t",
+        &header_with(with_services()),
+        Role::Integrator,
+    )
+    .unwrap_err()
+}
+
+/// The project's own services are lifted into the system profile as nunki
+/// renders them — `include:` is unusable on one of the two engines (SPEC
+/// 4.2, engine table), and the file's bytes are never what is lifted — and
+/// into no mission profile: the coder's allowlist forbids it to talk to them.
 #[test]
 fn the_projects_services_are_merged_into_the_system_profile_only() {
     let dir = tempfile::tempdir().unwrap();
-    let mut config = project(dir.path()).config;
-    config.services_file = Some(std::path::PathBuf::from("compose.yaml"));
-    let project = Project::at(dir.path().join("repo"), config, dir.path().join("nunki"));
-    let slot = slot_at(dir.path());
-    std::fs::write(
-        slot.tree.join("compose.yaml"),
-        "services:\n  db:\n    image: postgres:16\n    volumes:\n      - dbdata:/var/lib/postgresql/data\nnetworks:\n  back: {}\nvolumes:\n  dbdata: null\n",
-    )
-    .unwrap();
+    let project = with_services_file(dir.path());
+    let slot = committed_slot(
+        dir.path(),
+        &[(
+            "compose.yaml",
+            "services:\n  db:\n    image: postgres:16\n    environment:\n      PGPASSWORD: pa$$word\n    \
+             volumes:\n      - dbdata:/var/lib/postgresql/data\nvolumes:\n  dbdata: null\n",
+        )],
+    );
+    approve_head(&project, &slot);
     let header = header_with(with_services());
 
     let (_, coder) = profile_for(&project, &slot, &header, Role::Coder);
@@ -1265,20 +1326,18 @@ fn the_projects_services_are_merged_into_the_system_profile_only() {
 
     let (_, doc) = profile_for(&project, &slot, &header, Role::Integrator);
     assert_eq!(doc["services"]["db"]["image"].as_str(), Some("postgres:16"));
-    // Verbatim: a key nunki does not know about survives, because re-typing the
-    // block would lose it.
     assert_eq!(
         doc["services"]["db"]["volumes"][0].as_str(),
         Some("dbdata:/var/lib/postgresql/data")
     );
-    // And the firewall attaches to the network the project declared — it is
-    // the one that can, the agent having `network_mode` instead.
+    // nunki's rendering, not the file's bytes: every `$` doubled again, so
+    // what Compose reads back is the literal the file wrote.
     assert_eq!(
-        doc["services"][nunki::compose::FIREWALL_SERVICE]["networks"][0].as_str(),
-        Some("back")
+        doc["services"]["db"]["environment"]["PGPASSWORD"].as_str(),
+        Some("pa$$$$word")
     );
-    // The volumes block travels with them: a service naming a volume the
-    // document does not declare makes the whole project invalid (measured).
+    // The volumes travel with them: a service naming a volume the document
+    // does not declare makes the whole project invalid (measured).
     assert!(
         doc["volumes"]
             .as_mapping()
@@ -1288,34 +1347,56 @@ fn the_projects_services_are_merged_into_the_system_profile_only() {
     );
 }
 
+/// A services file the closed model refuses lifts nothing: the profile is
+/// not planned, and the error names the file and the key.
+#[test]
+fn a_services_file_the_model_refuses_plans_no_profile() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = with_services_file(dir.path());
+    let slot = committed_slot(
+        dir.path(),
+        &[(
+            "compose.yaml",
+            "services:\n  db:\n    image: postgres:16\n    privileged: true\n",
+        )],
+    );
+    let err = plan_err(&project, &slot);
+    assert!(
+        matches!(
+            err,
+            run::RunError::Services(nunki::services::ApprovalError::Refused { .. })
+        ),
+        "{err}"
+    );
+    let said = err.to_string();
+    assert!(
+        said.contains("compose.yaml") && said.contains("privileged"),
+        "{said}"
+    );
+}
+
 /// A services file that `nunki.yaml` names and the commit does not carry is
 /// said by name, before a profile is lifted without the services the
-/// integrator was called to wire.
+/// integrator was called to wire — even when the tree holds one: what is
+/// read is the commit.
 #[test]
 fn a_services_file_that_is_not_on_the_commit_is_named() {
     let dir = tempfile::tempdir().unwrap();
-    let mut config = project(dir.path()).config;
-    config.services_file = Some(std::path::PathBuf::from("compose.yaml"));
-    let project = Project::at(dir.path().join("repo"), config, dir.path().join("nunki"));
-    let slot = slot_at(dir.path());
-    let images = nunki::image::Images {
-        agent: "img/agent".into(),
-        firewall: "img/fw".into(),
-        prober: "img/probe".into(),
-    };
-    let paths = nunki::mission::dir::Paths::of(&project.hq_root, "m1");
-    let err = run::plan(
-        &project,
-        &slot,
-        "rust",
-        &images,
-        &paths,
-        "t",
-        &header_with(with_services()),
-        Role::Integrator,
+    let project = with_services_file(dir.path());
+    let slot = committed_slot(dir.path(), &[]);
+    std::fs::write(
+        slot.tree.join("compose.yaml"),
+        "services:\n  db:\n    image: postgres:16\n",
     )
-    .unwrap_err();
-    assert!(matches!(err, run::RunError::NoServicesFile(_)), "{err}");
+    .unwrap();
+    let err = plan_err(&project, &slot);
+    assert!(
+        matches!(
+            err,
+            run::RunError::Services(nunki::services::ApprovalError::NotOnCommit { .. })
+        ),
+        "{err}"
+    );
     assert!(err.to_string().contains("compose.yaml"), "{err}");
 }
 
@@ -2167,5 +2248,160 @@ fn the_prompt_explains_the_proposal_of_an_equivalence_and_when_not_to_make_it() 
     assert!(
         coder.contains("propose it, or await a ruling on it, not\nboth"),
         "{coder}"
+    );
+}
+
+/// Before a profile is started, what the project's file lifted before and
+/// is not the approved definition is taken down — by container, never with
+/// a volume, and never one of nunki's own.
+#[test]
+fn a_launch_takes_down_what_was_lifted_from_a_definition_nobody_approved() {
+    use nunki::engine::fake::{Call, FakeEngine};
+    let dir = tempfile::tempdir().unwrap();
+    let project = with_services_file(dir.path());
+    let slot = committed_slot(
+        dir.path(),
+        &[("compose.yaml", "services:\n  db:\n    image: postgres:16\n")],
+    );
+    approve_head(&project, &slot);
+    let header = header_with(with_services());
+    let (plan, _) = profile_for(&project, &slot, &header, Role::Integrator);
+    let lifting = plan.project_services.as_ref().unwrap().approved.clone();
+
+    let lifted = |id: &str, service: &str, digest: Option<&str>| nunki::engine::Container {
+        id: id.into(),
+        service: service.into(),
+        digest: digest.map(str::to_string),
+    };
+    let engine = FakeEngine::default()
+        .with_lifted(lifted("keep", "db", Some(&lifting)))
+        .with_lifted(lifted("privileged", "db", None))
+        .with_lifted(lifted("orphan", "miner", Some("sha256:nobody")))
+        .with_lifted(lifted("fw", "firewall", None));
+    let removed = run::lift(
+        &engine,
+        &project,
+        Path::new("/hq/profiles/one.yml"),
+        "nunki-11111111-one",
+        &plan,
+    )
+    .unwrap();
+    assert_eq!(removed, vec!["privileged", "orphan"]);
+    let calls = engine.calls.lock().unwrap().clone();
+    assert_eq!(
+        calls,
+        vec![
+            Call::Containers("nunki-11111111-one".into()),
+            Call::Remove(vec!["privileged".into(), "orphan".into()]),
+            Call::Up("nunki-11111111-one".into()),
+        ],
+        "taken down first, then started"
+    );
+    // What was taken down is gone, so the next launch takes nothing more
+    // down: what stayed is the approved definition and nunki's own.
+    assert!(
+        run::lift(
+            &engine,
+            &project,
+            Path::new("/hq/profiles/one.yml"),
+            "nunki-11111111-one",
+            &plan,
+        )
+        .unwrap()
+        .is_empty()
+    );
+
+    // With nothing stale, nothing is asked to go.
+    let quiet = FakeEngine::default().with_lifted(lifted("keep", "db", Some(&lifting)));
+    assert!(
+        run::lift(&quiet, &project, Path::new("/p.yml"), "p", &plan)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !quiet
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|c| matches!(c, Call::Remove(_))),
+        "nothing to remove is no call at all"
+    );
+}
+
+/// A mission profile lifts no service, and leaves up what a human approved:
+/// the services are kept between profiles (SPEC 4.2). What nobody approved
+/// still goes.
+#[test]
+fn a_mission_profile_keeps_what_a_human_approved_and_nothing_else() {
+    use nunki::engine::fake::FakeEngine;
+    let dir = tempfile::tempdir().unwrap();
+    let project = with_services_file(dir.path());
+    let slot = committed_slot(
+        dir.path(),
+        &[("compose.yaml", "services:\n  db:\n    image: postgres:16\n")],
+    );
+    approve_head(&project, &slot);
+    let approved = nunki::services::approved(&project, &slot.tree)
+        .unwrap()
+        .unwrap()
+        .digest();
+    let header = header_with(with_services());
+    let (plan, _) = profile_for(&project, &slot, &header, Role::Coder);
+    assert!(plan.project_services.is_none());
+    let engine = FakeEngine::default()
+        .with_lifted(nunki::engine::Container {
+            id: "kept".into(),
+            service: "db".into(),
+            digest: Some(approved),
+        })
+        .with_lifted(nunki::engine::Container {
+            id: "gone".into(),
+            service: "db".into(),
+            digest: None,
+        });
+    assert_eq!(
+        run::lift(&engine, &project, Path::new("/p.yml"), "p", &plan).unwrap(),
+        vec!["gone"]
+    );
+}
+
+/// A system profile lifts the services its frozen header declares, and
+/// those they depend on; the file's others are not started, and the probes
+/// know them as held back (SPEC 4.2).
+#[test]
+fn a_system_profile_lifts_only_the_services_the_mission_declares() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = with_services_file(dir.path());
+    let slot = committed_slot(
+        dir.path(),
+        &[(
+            "compose.yaml",
+            "services:\n  db:\n    image: postgres:16\n    ports: [\"5432:5432\"]\n  \
+             miner:\n    image: coin\n",
+        )],
+    );
+    approve_head(&project, &slot);
+    let header = header_with(with_services());
+    let (plan, doc) = profile_for(&project, &slot, &header, Role::Integrator);
+    assert!(doc["services"]["db"].is_mapping(), "{doc:?}");
+    assert!(doc["services"]["miner"].is_null(), "{doc:?}");
+    let lifted = plan.project_services.as_ref().unwrap();
+    assert_eq!(lifted.held_back, vec!["miner".to_string()]);
+    assert_eq!(lifted.services.dropped_ports(), vec!["db"]);
+    // What the launch says in one line: the ports it did not publish.
+    assert_eq!(run::ports_dropped(&plan), vec!["db".to_string()]);
+    let (coder, _) = profile_for(&project, &slot, &header, Role::Coder);
+    assert!(run::ports_dropped(&coder).is_empty());
+    assert_eq!(
+        doc["services"]["db"]["labels"][nunki::compose::services::LABEL].as_str(),
+        Some(
+            nunki::services::read(&project, nunki::services::At::Slot(&slot.tree))
+                .unwrap()
+                .unwrap()
+                .digest
+                .as_str()
+        ),
+        "labelled with the digest a human approved"
     );
 }
