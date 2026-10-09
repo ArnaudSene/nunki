@@ -5174,6 +5174,111 @@ fn at_standard_a_campaign_after_a_passing_one_is_partial_from_its_head() {
     );
 }
 
+/// At critical, the chain is the same: after a passing campaign, the next
+/// one is partial from its `HEAD`, under exactly the conditions `standard`
+/// uses — and each of them, made false, gives a full campaign with the
+/// reason it gives at `standard`.
+#[test]
+fn at_critical_a_campaign_after_a_passing_one_is_partial_under_the_same_conditions() {
+    assert_eq!(
+        scope_with(|rigor, _, _, _, _, _, _| *rigor = Rigor::Critical),
+        Scope::Partial {
+            since: "aaaaaaaaaaaaaaaa".into()
+        }
+    );
+    type Refusal = fn(
+        &mut Rigor,
+        &mut Replay,
+        &mut Option<Campaign>,
+        &mut Option<&str>,
+        &mut bool,
+        &mut bool,
+        &mut Option<String>,
+    );
+    let refusals: Vec<(&str, Refusal)> = vec![
+        ("--again", |_, replay, _, _, _, _, _| *replay = Replay::Now),
+        ("the first campaign", |_, _, previous, _, _, _, _| {
+            *previous = None
+        }),
+        (
+            "gate 7 did not pass on the previous campaign",
+            |_, _, _, _, owes, _, _| *owes = true,
+        ),
+        (
+            "is not an ancestor of HEAD",
+            |_, _, _, _, _, ancestor, _| *ancestor = false,
+        ),
+        ("fork point moved", |_, _, previous, _, _, _, _| {
+            previous.as_mut().unwrap().chain.fork = Some("e".repeat(40))
+        }),
+        ("did not count each file", |_, _, previous, _, _, _, _| {
+            previous.as_mut().unwrap().files = None
+        }),
+        ("cannot be carried", |_, _, _, _, _, _, compare| {
+            *compare = Some("fatal: bad object".into())
+        }),
+        ("could not be read", |_, _, _, tooling, _, _, _| {
+            *tooling = None
+        }),
+        (
+            "changed since the previous campaign",
+            |_, _, _, tooling, _, _, _| *tooling = Some("tools-2"),
+        ),
+    ];
+    for (said, refusal) in refusals {
+        let at = |rigor: Rigor| {
+            scope_with(|r, replay, previous, tooling, owes, ancestor, compare| {
+                *r = rigor;
+                refusal(r, replay, previous, tooling, owes, ancestor, compare)
+            })
+        };
+        let critical = at(Rigor::Critical);
+        assert!(
+            matches!(&critical, Scope::Full { why } if why.contains(said)),
+            "{said:?}: {critical:?}"
+        );
+        assert_eq!(critical, at(Rigor::Standard), "{said:?}");
+    }
+}
+
+/// At critical, the previous campaign passes only when every survivor it
+/// lists has an outcome — gate 7's rule at `critical`, with no threshold —
+/// so a campaign that left one open, however high its share, gives a full
+/// one; answered, the next is partial.
+#[test]
+fn at_critical_a_previous_campaign_with_one_open_survivor_gives_a_full_campaign() {
+    let previous = on_file_at("aaaaaaaaaaaaaaaa", vec![one("m1", 1, "a")], Some(100));
+    let scope_after = |coders: &std::collections::BTreeMap<String, Triage>| {
+        mutants::scope(
+            Rigor::Critical,
+            Replay::WhenChanged,
+            Some(&previous),
+            Some("tools-1"),
+            FORK,
+            |c: &Campaign| mutants::owed(c, coders, Rigor::Critical, 80),
+            |_| true,
+            |_| None,
+        )
+    };
+    let scope = scope_after(&Default::default());
+    assert!(
+        matches!(&scope, Scope::Full { why } if why.contains("1 survivor(s) have no outcome")),
+        "{scope:?}"
+    );
+    let answered = [(
+        "m1".to_string(),
+        Triage::Killed {
+            test: "the_test".into(),
+        },
+    )]
+    .into_iter()
+    .collect();
+    assert!(
+        matches!(scope_after(&answered), Scope::Partial { .. }),
+        "an answered campaign is continued"
+    );
+}
+
 /// Every condition the chain rests on, made false one at a time: each gives
 /// a full campaign, and its record says why.
 #[test]
@@ -5184,8 +5289,8 @@ fn each_refusal_gives_a_full_campaign_with_its_reason_recorded() {
     };
     let cases: Vec<(&str, Scope)> = vec![
         (
-            "`critical` mission",
-            scope_with(|rigor, _, _, _, _, _, _| *rigor = Rigor::Critical),
+            "a `prototype` mission's campaigns are all full",
+            scope_with(|rigor, _, _, _, _, _, _| *rigor = Rigor::Prototype),
         ),
         (
             "--again",

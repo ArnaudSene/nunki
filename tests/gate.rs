@@ -3355,6 +3355,36 @@ fn at_standard_a_chain_at_the_threshold_is_green_and_says_how_it_was_rebuilt() {
     assert!(note.contains("16 of 20 tried mutant(s) killed"), "{note}");
 }
 
+/// At critical, a chain is judged as `critical` judges any campaign: no
+/// threshold, and every survivor listed needs an outcome — one kept from a
+/// file unchanged since an earlier campaign as much as one the latest found.
+/// Here 109 of 110 tried are killed, a share that passes any threshold, and
+/// the gate is red on the one kept survivor until it is answered.
+#[test]
+fn at_critical_a_survivor_kept_from_an_unchanged_file_still_needs_an_outcome() {
+    let mut f = standard();
+    f.header.rigor = Rigor::Critical;
+    f.chained(50, 1, 60, 0, true);
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => {
+            assert!(why.contains("1 survivor(s) have no outcome"), "{why}");
+            assert!(why.contains("src/kept.rs:1"), "{why}");
+            assert!(!why.contains("threshold of"), "no threshold: {why}");
+        }
+        other => panic!("a kept survivor without an outcome is red: {other:?}"),
+    }
+    f.coder_answers(&[(
+        "src/kept.rs:1",
+        Triage::Killed {
+            test: "the_thing_holds".into(),
+        },
+    )]);
+    let outcome = f.gate_seven(Role::Coder);
+    assert_eq!(outcome.decision, Decision::Passed);
+    let note = outcome.note.expect("a chain is said");
+    assert!(note.contains("judged once, as one campaign"), "{note}");
+}
+
 /// A chain whose counts could not be trusted carries no count, and is
 /// judged as `critical` judges: every survivor needs an outcome.
 #[test]
