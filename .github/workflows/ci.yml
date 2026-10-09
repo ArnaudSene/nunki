@@ -160,16 +160,25 @@ jobs:
             cargo test --all-features --test "$suite" -- --ignored --test-threads=1
             echo "::endgroup::"
           done
-          # The fences of the project's services: no way out, no host, no
-          # outside name, only what the mission declares. The capability
-          # measurement is left out: it lifts every image once per
-          # capability, from a fresh start (about 35 minutes), and it is a
-          # measurement the HQ runs when the set or its images change. The
-          # set itself is still exercised here: these tests lift Postgres
-          # and nginx with it, and a set too small turns them red.
+          # The fences of the project's services: no way out to a public
+          # address, no outside name, only what the mission declares, and the
+          # agent still reaching its service. Three are left out:
+          # - the capability measurement lifts every image once per
+          #   capability, from a fresh start (about 35 minutes); the HQ runs
+          #   it when the set or its images change. The set is still
+          #   exercised here: these tests lift nginx with it;
+          # - the host-port and COPY TO PROGRAM tests end "inconclusive" on
+          #   this runner (measured on #118): Linux filters a published port
+          #   from an internal network even without the fence, and the
+          #   unfenced Postgres control runs while the image restarts its
+          #   server after initdb. Their controls are to be made conclusive
+          #   on Linux; until then they prove the fence on the HQ's engine
+          #   only.
           echo "::group::services_file"
           cargo test --all-features --test services_file -- --ignored --test-threads=1 \
-            --skip live_the_capability_set_is_the_smallest_the_images_need
+            --skip live_the_capability_set_is_the_smallest_the_images_need \
+            --skip live_a_lifted_service_cannot_reach_a_port_the_host_publishes \
+            --skip live_a_program_run_through_the_database_cannot_reach_out
           echo "::endgroup::"
 
       - name: Leave nothing behind
