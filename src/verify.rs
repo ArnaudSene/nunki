@@ -1433,6 +1433,11 @@ fn security_concluded(
     };
     if let Event::Verdict { verdict, .. } = &event {
         state.conclude(Role::Security, Some(*verdict), head);
+        // On the same parse as the lift below: what the rigor reads when
+        // the HQ sends this report back (SPEC 4.5).
+        state
+            .flow
+            .rank(concluded_file.as_ref().and_then(|f| f.worst()));
     }
     state.run = None;
     state.app = None;

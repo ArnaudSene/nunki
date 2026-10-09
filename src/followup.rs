@@ -276,6 +276,23 @@ pub fn reviewed(file: &Path, who: &str, why: &str) -> Result<(), FollowupError> 
     )
 }
 
+/// The HQ set the mission's rigor aside to send it back, and said why
+/// (SPEC 4.5): written, dated, as a departure from the rigor, so that
+/// whoever reads the follow-up sees how often the rule was set aside and
+/// on what grounds. `departure` is what the rigor said, as
+/// [`crate::mission::flow::Departure`] says it.
+pub fn overridden(file: &Path, who: &str, departure: &str, why: &str) -> Result<(), FollowupError> {
+    append(
+        file,
+        &format!(
+            "## {date} — {who} departed from the rigor\n\n\
+             The rigor says: {departure}. The HQ sends the mission back all the same.\n\n\
+             **Why:** {why}\n",
+            date = today(),
+        ),
+    )
+}
+
 /// The mission was verified without the security agent, after a `CLEAR` or
 /// a lifted `FINDINGS`, because the rounds its rigor allows were spent
 /// (SPEC 4.5): `rounds` played of `max`, and `not_attacked` the commits

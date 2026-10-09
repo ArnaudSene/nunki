@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::harness::{Outcome, Role};
 use crate::text::{brief, one_line};
 
-use super::{Header, RigorError, Verdict};
+use super::{Header, Rigor, RigorError, Severity, Verdict};
 
 /// Which piece of work a coder run is for.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -244,6 +244,14 @@ pub enum Event {
     /// "stop asking me about this", and there is no stage where that is not
     /// a thing a human may say.
     Ended { reason: String },
+    /// The HQ sends the mission back although its rigor says not to, and says
+    /// why (`nunki mission iterate --override --because`): from `Findings`
+    /// on a report the rigor does not count as blocking, or from `Verified`
+    /// on a review the rigor does not allow. Recorded as a departure from
+    /// the rigor, dated `date`, then a volet like any other. Refused where
+    /// the rigor would let the plain verb through: there is nothing to set
+    /// aside there.
+    Overridden { because: String, date: String },
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -273,6 +281,16 @@ pub enum FlowError {
          recorded which work it stopped on — reframe it, or start it again"
     )]
     NothingToResume,
+    /// The rigor does not send the mission back from here: said with what
+    /// it would set aside. The caller names the verbs.
+    #[error("the mission's rigor does not send it back: {0}")]
+    RigorRefuses(Departure),
+    /// `--override` where the rigor already lets the verb through.
+    #[error(
+        "the rigor already lets this through, so there is nothing to override — drop \
+         --override"
+    )]
+    NothingToOverride,
     /// The header asks for a role its rigor does not run. Said where a header
     /// is frozen — at the start of a mission and at a reframe — and not
     /// only by `mission new`, which a header written by hand never went
@@ -329,6 +347,20 @@ pub struct Flow {
     /// as "no findings held".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_findings: Option<String>,
+    /// The worst severity the last `FINDINGS` concluded ranks, when every
+    /// finding carries one ([`super::VerdictFile::worst`]); `None` when it
+    /// ranks nothing, which blocks as a report always did. `serde(default)`
+    /// because state written before it reads as unranked, hence blocking.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    findings_worst: Option<Severity>,
+    /// The rank the caller read for the verdict it is about to apply
+    /// ([`Flow::rank`]), taken by that verdict and by nothing else, so a
+    /// verdict nobody ranked is unranked rather than ranked as the last one.
+    #[serde(skip)]
+    ranked: Option<Severity>,
+    /// Every time the HQ set the rigor aside, in order, with its reason.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    overrides: Vec<Override>,
 }
 
 /// The security agent was not launched because its rounds were spent:
@@ -338,6 +370,55 @@ pub struct SecurityCap {
     pub rounds: u32,
     pub max: u32,
 }
+
+/// What the rigor says not to do with the mission where it stands: the
+/// rule an override sets aside (SPEC 4.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Departure {
+    /// A `FINDINGS` whose worst finding is `worst`, below `HIGH`, at a
+    /// `rigor` and `round` where such a report does not block.
+    ReportNotBlocking {
+        rigor: Rigor,
+        round: u32,
+        worst: Severity,
+    },
+    /// A verified mission sent back on review once more, at a `rigor` that
+    /// allows one review: `reviews` were already sent back.
+    AnotherReview { rigor: Rigor, reviews: u32 },
+}
+
+impl std::fmt::Display for Departure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Departure::ReportNotBlocking {
+                rigor,
+                round,
+                worst,
+            } => write!(
+                f,
+                "at {rigor}, security round {round}, a report whose worst finding is {worst} \
+                 does not block — only a HIGH does"
+            ),
+            Departure::AnotherReview { rigor, reviews } => write!(
+                f,
+                "at {rigor}, a verified mission is sent back on review once, and this one \
+                 already was {reviews} time(s)"
+            ),
+        }
+    }
+}
+
+/// The HQ set the rigor aside: what it set aside, why, and when.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Override {
+    pub departure: Departure,
+    pub because: String,
+    pub date: String,
+}
+
+/// How an HQ review's volet cause starts: what counts the reviews a
+/// mission was sent back on, in state written before and after the count.
+const REVIEW_CAUSE: &str = "HQ review: ";
 
 impl Flow {
     /// A new flow starts with the first lot, first attempt.
@@ -358,6 +439,9 @@ impl Flow {
             security_rounds: 0,
             security_cap: None,
             last_findings: None,
+            findings_worst: None,
+            ranked: None,
+            overrides: Vec::new(),
         })
     }
 
@@ -450,6 +534,73 @@ impl Flow {
     /// caller records it in the follow-up, and a second call says nothing.
     pub fn take_security_cap(&mut self) -> Option<SecurityCap> {
         self.security_cap.take()
+    }
+
+    /// Rank the security verdict about to be applied: the worst severity
+    /// its findings carry, or `None` when they carry none `nunki` can read
+    /// ([`super::VerdictFile::worst`]). Taken by that verdict only.
+    pub fn rank(&mut self, worst: Option<Severity>) {
+        self.ranked = worst;
+    }
+
+    /// The worst severity of the report the mission stands on, if it was
+    /// ranked.
+    pub fn findings_worst(&self) -> Option<Severity> {
+        self.findings_worst
+    }
+
+    /// Every departure from the rigor the HQ made, in order.
+    pub fn overrides(&self) -> &[Override] {
+        &self.overrides
+    }
+
+    /// Verified missions the HQ sent back on review: the volet causes a
+    /// review opened, over the mission's life.
+    pub fn reviews(&self) -> u32 {
+        let reviews = self
+            .volet_causes
+            .iter()
+            .filter(|cause| cause.starts_with(REVIEW_CAUSE))
+            .count();
+        u32::try_from(reviews).unwrap_or(u32::MAX)
+    }
+
+    /// What the rigor refuses about sending the mission back from where it
+    /// stands, or `None` when it lets it be sent back (SPEC 4.5).
+    ///
+    /// On `Findings`: a report blocks when it ranks a `HIGH`, or ranks
+    /// nothing (its findings carry no severity, as before severities
+    /// existed); otherwise it blocks only on a `critical` mission's first
+    /// round. On `Verified`: a `standard` mission is sent back on review
+    /// once. Anywhere else there is nothing to send back, and the flow says
+    /// so on its own.
+    pub fn rigor_refuses(&self) -> Option<Departure> {
+        let rigor = self.header.rigor;
+        match &self.stage {
+            Stage::Findings { .. } => {
+                let worst = self.findings_worst?;
+                let round = self.security_rounds;
+                let blocks = worst >= Severity::High
+                    || match rigor {
+                        Rigor::Standard => false,
+                        Rigor::Critical => round <= 1,
+                        // No security agent ever concludes there; nothing
+                        // to relax.
+                        Rigor::Prototype => true,
+                    };
+                (!blocks).then_some(Departure::ReportNotBlocking {
+                    rigor,
+                    round,
+                    worst,
+                })
+            }
+            Stage::Verified => {
+                let reviews = self.reviews();
+                (rigor == Rigor::Standard && reviews >= 1)
+                    .then_some(Departure::AnotherReview { rigor, reviews })
+            }
+            _ => None,
+        }
     }
 
     /// Apply an event; returns the new stage. An event that makes no sense
@@ -569,6 +720,8 @@ impl Flow {
             ) => {
                 self.security_rounds += 1;
                 self.last_findings = None;
+                self.findings_worst = None;
+                self.ranked = None;
                 self.verified_or_final()
             }
             (
@@ -580,9 +733,21 @@ impl Flow {
             ) => {
                 self.security_rounds += 1;
                 self.last_findings = Some(report.clone());
+                self.findings_worst = self.ranked.take();
                 Stage::Findings { report }
             }
+            // The rigor binds the HQ's verb, not only the agents: a report
+            // it does not count as blocking is not sent back by the plain
+            // verb, and `Overridden` is the way past it that leaves a
+            // record (SPEC 4.5).
             (Stage::Findings { report }, Event::Iterate) => {
+                if let Some(departure) = self.rigor_refuses() {
+                    return Err(FlowError::RigorRefuses(departure));
+                }
+                self.volet(format!("security FINDINGS: {report}"))
+            }
+            (Stage::Findings { report }, Event::Overridden { because, date }) => {
+                self.overridden(because, date)?;
                 self.volet(format!("security FINDINGS: {report}"))
             }
             // A report a human lifted is no longer held: kept, it would come
@@ -605,9 +770,18 @@ impl Flow {
             // A verified branch is not a pushed one: the HQ reads it first,
             // and what it refuses goes back as a volet, bounded like the
             // others. With none left, the handover says so and `retry`
-            // grants one more.
+            // grants one more. At `standard`, once: a second review sets the
+            // rigor aside, and only `Overridden` says so.
             (Stage::Verified, Event::Reviewed { because }) => {
-                self.volet(format!("HQ review: {because}"))
+                if let Some(departure) = self.rigor_refuses() {
+                    return Err(FlowError::RigorRefuses(departure));
+                }
+                self.volet(format!("{REVIEW_CAUSE}{because}"))
+            }
+            (Stage::Verified, Event::Overridden { because, date }) => {
+                let cause = format!("{REVIEW_CAUSE}{because}");
+                self.overridden(because, date)?;
+                self.volet(cause)
             }
 
             // --- the human takes it back -------------------------------
@@ -836,6 +1010,19 @@ impl Flow {
             Role::Security => Stage::SecurityAgent { attempt },
             Role::Coder => unreachable!("coder runs are handled by retry_coder"),
         }
+    }
+
+    /// Record the HQ setting the rigor aside where it stands, or refuse
+    /// when the rigor sets nothing in the way: an override that departs
+    /// from nothing would be a record of a departure that never happened.
+    fn overridden(&mut self, because: String, date: String) -> Result<(), FlowError> {
+        let departure = self.rigor_refuses().ok_or(FlowError::NothingToOverride)?;
+        self.overrides.push(Override {
+            departure,
+            because,
+            date,
+        });
+        Ok(())
     }
 
     /// A red verdict: back to the coder, bounded by `max_volets`. The volet

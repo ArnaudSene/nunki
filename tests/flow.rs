@@ -1040,9 +1040,12 @@ fn after_an_accept_a_review_and_green_gates_at_the_cap_the_old_report_does_not_c
         Some(SecurityCap { rounds: 1, max: 1 })
     );
 
-    // And after a second review too: nothing brings the lifted report back.
-    flow.advance(Event::Reviewed {
+    // And after a second review too — one the rigor lets through only as a
+    // departure from it, at `standard`: nothing brings the lifted report
+    // back.
+    flow.advance(Event::Overridden {
         because: "and this".into(),
+        date: "2026-10-09T00:00:00Z".into(),
     })
     .unwrap();
     flow.advance(finished(true)).unwrap();
@@ -1739,4 +1742,285 @@ fn the_final_stage_takes_only_its_gate_or_an_end() {
         flow.stage(),
         Stage::AwaitingHuman(Handover::Abandoned { .. })
     ));
+}
+
+// --- the rigor binds the HQ's verbs (SPEC 4.5) ------------------------------
+
+use nunki::mission::Severity;
+use nunki::mission::flow::{Departure, FlowError};
+
+/// A flow at `rigor` standing on a `FINDINGS` of round 1 ranked `worst`.
+fn on_findings(rigor: Rigor, worst: Option<Severity>) -> Flow {
+    let mut flow = at(rigor, none());
+    code_through(&mut flow);
+    flow.advance(Event::GatesPassed).unwrap();
+    flow.rank(worst);
+    flow.advance(findings(1)).unwrap();
+    assert_eq!(flow.stage(), &back_on(1));
+    flow
+}
+
+fn overridden(because: &str) -> Event {
+    Event::Overridden {
+        because: because.into(),
+        date: "2026-10-09T10:00:00Z".into(),
+    }
+}
+
+/// At `standard`, a report with no `HIGH` does not block: the plain verb is
+/// refused, says what the rigor said, and moves nothing.
+#[test]
+fn at_standard_iterate_on_a_medium_only_report_is_refused() {
+    let mut flow = on_findings(Rigor::Standard, Some(Severity::Medium));
+    let before = flow.clone();
+
+    let error = flow.advance(Event::Iterate).unwrap_err();
+
+    assert_eq!(
+        error,
+        FlowError::RigorRefuses(Departure::ReportNotBlocking {
+            rigor: Rigor::Standard,
+            round: 1,
+            worst: Severity::Medium,
+        })
+    );
+    assert_eq!(flow, before, "a refused verb changes nothing");
+    assert_eq!(flow.volets(), 0);
+}
+
+/// With `--override`, the same report is sent back, as a volet like any
+/// other, and the departure is kept with its reason and date.
+#[test]
+fn at_standard_an_override_sends_a_medium_only_report_back_and_is_kept() {
+    let mut flow = on_findings(Rigor::Standard, Some(Severity::Medium));
+
+    flow.advance(overridden("the redirect is reachable from the login page"))
+        .unwrap();
+
+    assert!(
+        matches!(
+            flow.stage(),
+            Stage::Coding {
+                work: Work::Volet { n: 1, .. },
+                attempt: 1
+            }
+        ),
+        "{:?}",
+        flow.stage()
+    );
+    assert_eq!(flow.overrides().len(), 1);
+    let kept = &flow.overrides()[0];
+    assert_eq!(
+        kept.because,
+        "the redirect is reachable from the login page"
+    );
+    assert_eq!(kept.date, "2026-10-09T10:00:00Z");
+    assert_eq!(
+        kept.departure,
+        Departure::ReportNotBlocking {
+            rigor: Rigor::Standard,
+            round: 1,
+            worst: Severity::Medium,
+        }
+    );
+    // And it is kept across a write of the state.
+    let back: Flow = serde_json::from_str(&serde_json::to_string(&flow).unwrap()).unwrap();
+    assert_eq!(back.overrides(), flow.overrides());
+}
+
+/// A `HIGH` blocks at every rigor: sent back without an override, and an
+/// override on it is refused, since nothing is being set aside.
+#[test]
+fn a_high_is_sent_back_without_an_override() {
+    for rigor in [Rigor::Standard, Rigor::Critical] {
+        let flow = on_findings(rigor, Some(Severity::High));
+        assert_eq!(flow.rigor_refuses(), None);
+        let mut refused = flow.clone();
+        assert_eq!(
+            refused.advance(overridden("why not")).unwrap_err(),
+            FlowError::NothingToOverride
+        );
+        assert!(refused.overrides().is_empty());
+        let mut sent = flow;
+        sent.advance(Event::Iterate).unwrap();
+        assert!(
+            matches!(sent.stage(), Stage::Coding { .. }),
+            "{rigor}: {:?}",
+            sent.stage()
+        );
+    }
+}
+
+/// A report whose findings carry no severity is treated as blocking, as it
+/// always was: no ranking is no licence.
+#[test]
+fn a_report_whose_findings_carry_no_severity_is_sent_back_as_today() {
+    let mut flow = on_findings(Rigor::Standard, None);
+    assert_eq!(flow.rigor_refuses(), None);
+    flow.advance(Event::Iterate).unwrap();
+    assert!(matches!(flow.stage(), Stage::Coding { .. }));
+}
+
+/// At `critical`, round 1 sends any finding back; from round 2 on, a report
+/// with no `HIGH` is refused like at `standard`.
+#[test]
+fn at_critical_round_one_sends_any_finding_back_and_round_two_refuses_a_medium() {
+    let mut flow = on_findings(Rigor::Critical, Some(Severity::Low));
+    flow.advance(Event::Iterate).unwrap();
+    flow.advance(finished(true)).unwrap();
+    flow.advance(Event::GatesPassed).unwrap();
+    assert_eq!(flow.stage(), &Stage::SecurityAgent { attempt: 1 });
+    flow.rank(Some(Severity::Medium));
+    flow.advance(findings(2)).unwrap();
+
+    assert_eq!(
+        flow.advance(Event::Iterate).unwrap_err(),
+        FlowError::RigorRefuses(Departure::ReportNotBlocking {
+            rigor: Rigor::Critical,
+            round: 2,
+            worst: Severity::Medium,
+        })
+    );
+    flow.advance(overridden("round 2 regressed the fix"))
+        .unwrap();
+    assert_eq!(flow.volets(), 2);
+}
+
+/// The rank is the verdict's it was read for, and no other's: a later
+/// `FINDINGS` nobody ranked is unranked — hence blocking — rather than
+/// ranked as the one before it, and a `CLEAR` clears it.
+#[test]
+fn a_rank_is_taken_by_the_one_verdict_it_was_read_for() {
+    let mut flow = on_findings(Rigor::Critical, Some(Severity::Low));
+    assert_eq!(flow.findings_worst(), Some(Severity::Low));
+    flow.advance(Event::Iterate).unwrap();
+    flow.advance(finished(true)).unwrap();
+    flow.advance(Event::GatesPassed).unwrap();
+    flow.advance(findings(2)).unwrap();
+    assert_eq!(flow.findings_worst(), None);
+    assert_eq!(flow.rigor_refuses(), None, "round 2, unranked: it blocks");
+
+    // Ranked, then a CLEAR: the rank does not wait for the next FINDINGS.
+    flow.advance(Event::Iterate).unwrap();
+    flow.advance(finished(true)).unwrap();
+    flow.advance(Event::GatesPassed).unwrap();
+    flow.rank(Some(Severity::Info));
+    flow.advance(verdict(Verdict::Clear)).unwrap();
+    assert_eq!(flow.findings_worst(), None);
+}
+
+/// The worst severity is kept with the state: a mission written to disk on
+/// `Findings` and read back is refused the same way.
+#[test]
+fn the_rank_of_the_report_survives_a_write_of_the_state() {
+    let flow = on_findings(Rigor::Standard, Some(Severity::Low));
+    let back: Flow = serde_json::from_str(&serde_json::to_string(&flow).unwrap()).unwrap();
+    assert_eq!(back.findings_worst(), Some(Severity::Low));
+    assert!(back.rigor_refuses().is_some());
+}
+
+/// A verified mission sent back on review counts as a volet like any other,
+/// and at `standard` a second one needs `--override`. At `critical`, the
+/// rigor does not bound reviews.
+#[test]
+fn a_second_review_at_standard_is_refused_without_an_override() {
+    let mut flow = at(Rigor::Standard, none());
+    code_through(&mut flow);
+    flow.advance(Event::GatesPassed).unwrap();
+    flow.rank(Some(Severity::High));
+    flow.advance(findings(1)).unwrap();
+    flow.advance(Event::HumanAccepted).unwrap();
+    assert_eq!(flow.stage(), &Stage::Verified);
+    assert_eq!(
+        flow.rigor_refuses(),
+        None,
+        "the first review is the rigor's"
+    );
+    assert_eq!(
+        flow.advance(overridden("nothing to set aside"))
+            .unwrap_err(),
+        FlowError::NothingToOverride
+    );
+
+    flow.advance(Event::Reviewed {
+        because: "rename it".into(),
+    })
+    .unwrap();
+    assert_eq!(flow.volets(), 1, "a review is a volet");
+    assert_eq!(flow.reviews(), 1);
+    flow.advance(finished(true)).unwrap();
+    flow.advance(Event::GatesPassed).unwrap();
+    assert_eq!(flow.stage(), &Stage::Verified);
+
+    let before = flow.clone();
+    assert_eq!(
+        flow.advance(Event::Reviewed {
+            because: "and this".into(),
+        })
+        .unwrap_err(),
+        FlowError::RigorRefuses(Departure::AnotherReview {
+            rigor: Rigor::Standard,
+            reviews: 1,
+        })
+    );
+    assert_eq!(flow, before);
+
+    flow.advance(overridden("the rename broke the API"))
+        .unwrap();
+    match flow.stage() {
+        Stage::Coding {
+            work: Work::Volet { n: 2, cause },
+            ..
+        } => assert_eq!(cause, "HQ review: the rename broke the API"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(flow.reviews(), 2);
+    assert_eq!(flow.overrides().len(), 1);
+
+    // At `critical`, two reviews in a row need nothing.
+    let mut flow = at(Rigor::Critical, none());
+    code_through(&mut flow);
+    flow.advance(Event::GatesPassed).unwrap();
+    flow.advance(verdict(Verdict::Clear)).unwrap();
+    the_final_campaign_passes(&mut flow);
+    for n in 1..=2 {
+        flow.advance(Event::Reviewed {
+            because: format!("review {n}"),
+        })
+        .unwrap();
+        flow.advance(finished(true)).unwrap();
+        flow.advance(Event::GatesPassed).unwrap();
+        if matches!(flow.stage(), Stage::SecurityAgent { .. }) {
+            flow.advance(verdict(Verdict::Clear)).unwrap();
+        }
+        the_final_campaign_passes(&mut flow);
+    }
+    assert_eq!(flow.reviews(), 2);
+}
+
+/// A `CLEAR` drops the rank of the report before it and any rank read for
+/// it: after a review, the next `FINDINGS` nobody ranked is unranked, and
+/// blocks, rather than inheriting a severity from a verdict that was green.
+#[test]
+fn a_clear_drops_every_rank_and_the_next_unranked_findings_blocks() {
+    let mut flow = on_findings(Rigor::Critical, Some(Severity::Low));
+    flow.advance(Event::Iterate).unwrap();
+    flow.advance(finished(true)).unwrap();
+    flow.advance(Event::GatesPassed).unwrap();
+    assert_eq!(flow.findings_worst(), Some(Severity::Low));
+    flow.rank(Some(Severity::Info));
+    flow.advance(verdict(Verdict::Clear)).unwrap();
+    assert_eq!(flow.findings_worst(), None, "the old report's rank is gone");
+    the_final_campaign_passes(&mut flow);
+
+    flow.advance(Event::Reviewed {
+        because: "one more thing".into(),
+    })
+    .unwrap();
+    flow.advance(finished(true)).unwrap();
+    flow.advance(Event::GatesPassed).unwrap();
+    assert_eq!(flow.stage(), &Stage::SecurityAgent { attempt: 1 });
+    flow.advance(findings(3)).unwrap();
+    assert_eq!(flow.findings_worst(), None);
+    assert_eq!(flow.rigor_refuses(), None, "unranked at round 3: it blocks");
 }

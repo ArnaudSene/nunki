@@ -402,8 +402,10 @@ pub struct Finding {
 }
 
 /// How bad a finding is, by what it lets an attacker do. Ordered, least
-/// severe first.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+/// severe first. Serialized as the verdict file spells it, so the flow can
+/// keep the worst of a report (SPEC 4.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
 pub enum Severity {
     Info,
     Low,
@@ -503,6 +505,27 @@ impl VerdictFile {
                 Some("a CLEAR whose `findings` is not a list nunki can read")
             }
         }
+    }
+
+    /// The worst severity a `FINDINGS` ranks, when every finding it lists
+    /// carries one `nunki` can read; `None` otherwise — no list, an
+    /// unreadable or empty one, one finding without a known severity, or a
+    /// verdict that is not `FINDINGS`. `None` is read as blocking: a
+    /// report whose findings carry no severity is sent back as it always
+    /// was, never let through on a guess (SPEC 4.5).
+    pub fn worst(&self) -> Option<Severity> {
+        if self.verdict != Verdict::Findings {
+            return None;
+        }
+        let Some(FindingList::Listed(listed)) = &self.findings else {
+            return None;
+        };
+        listed
+            .iter()
+            .map(|f| Severity::parse(&f.severity))
+            .collect::<Option<Vec<_>>>()?
+            .into_iter()
+            .max()
     }
 
     /// The findings `nunki` lifts on its own, or why it lifts nothing

@@ -291,6 +291,13 @@ and who it waits on —
 m1 · findings · security round 1 of 1 found: … · awaits the HQ: `nunki mission iterate m1` sends it back to the coder, or `nunki mission accept m1 --because <why>` lifts it
 ```
 
+A report the rigor does not count as blocking says so, and names `accept`
+first:
+
+```text
+m1 · findings · security round 1 of 1 found: … — it does not block: at standard, security round 1, a report whose worst finding is MEDIUM does not block — only a HIGH does · awaits the HQ: `nunki mission accept m1 --because <why>` lifts it, or `nunki mission iterate m1 --override --because <why>` sends it back as a departure from the rigor
+```
+
 and exits with a code that says which stop it is:
 
 | Stop | Code |
@@ -527,6 +534,20 @@ where `mission accept` lifts them or `mission iterate` spends a volet, and
 `FOLLOWUP_HQ.md` says the fix was not attacked again. A lifted report stays
 lifted: a later review whose volet comes through the gates green is verified
 without bringing it back. `nunki mission status` prints the rigor and the rounds played.
+
+The rigor binds the HQ's verbs too, not only the agents. `mission iterate`
+on a `FINDINGS` is refused when the rigor says the report does not block:
+at `standard`, a report with no `HIGH`; at `critical`, from the second
+round on, a report with no `HIGH`. A report whose findings carry no
+severity blocks, as it always did. The refusal names the two ways on:
+`mission accept --because` (the finding is written as accepted), or
+`mission iterate --override --because <why>`, written, dated, in
+`FOLLOWUP_HQ.md` as a departure from the rigor. A verified mission sent
+back on review (`mission iterate --because`) spends a volet like any other,
+and at `standard` a second review needs `--override` as well. `mission
+status` lists every override with its reason, and `nunki push` adds them to
+the pull request under "Departures from the rigor", so a reader sees how
+often the rigor was set aside.
 
 `nunki push` asks for a security verdict on the branch's `HEAD` while a round
 is left. Once the rounds are spent, no verdict can come on a later commit, so

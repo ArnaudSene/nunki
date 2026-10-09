@@ -1141,3 +1141,34 @@ fn the_hq_reads_the_proposals_from_the_mission_folder() {
         Ok(n) => panic!("an unreadable file is not {n} proposals"),
     }
 }
+
+/// A report the rigor does not count as blocking — at `standard`, no HIGH —
+/// says so, and names `accept` first: the plain `iterate` would be refused.
+#[test]
+fn a_report_that_does_not_block_says_so_and_names_accept_first() {
+    let mut flow = Flow::new(header(Security::Agent)).unwrap();
+    flow.advance(finished(true)).unwrap();
+    flow.advance(Event::GatesPassed).unwrap();
+    flow.rank(Some(nunki::mission::Severity::Medium));
+    flow.advance(Event::Verdict {
+        verdict: Verdict::Findings,
+        report: "an open redirect".into(),
+    })
+    .unwrap();
+    let said = stop_of(&state_of(flow));
+    assert_eq!((said.stop, said.code), (Stop::Findings, 10));
+    assert_says(
+        &said,
+        &[
+            "found: an open redirect — it does not block: at standard, security round 1, \
+             a report whose worst finding is MEDIUM does not block",
+            "awaits the HQ: `nunki mission accept m1 --because <why>` lifts it, or \
+             `nunki mission iterate m1 --override --because <why>`",
+        ],
+    );
+    assert!(
+        !said.line().contains("`nunki mission iterate m1` sends"),
+        "{}",
+        said.line()
+    );
+}

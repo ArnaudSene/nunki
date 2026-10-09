@@ -3786,3 +3786,189 @@ fn only_the_final_stage_runs_the_final_campaign() {
         );
     }
 }
+
+// --- the rigor binds the HQ's verbs (SPEC 4.5) ------------------------------
+
+const MEDIUM_ONLY: &str = r#"[{"severity":"MEDIUM","title":"an open redirect"}]"#;
+
+/// A `standard` mission standing on a security report ranked `findings`,
+/// reached through `verify` as a real report is.
+fn at_standard_on(findings: &str) -> World {
+    let world = with_security_agent_at(nunki::mission::Rigor::Standard);
+    std::fs::write(
+        world.project.nunki_home().join("me.yaml"),
+        "name: Alex Martin\nemail: a@example.com\n",
+    )
+    .unwrap();
+    world.at_security();
+    world.run_recorded(Some(41), FINISHED);
+    world.ranked("FINDINGS", findings);
+    world.verify().unwrap();
+    assert!(matches!(world.state().flow.stage(), Stage::Findings { .. }));
+    world
+}
+
+/// At `standard`, `iterate` on a MEDIUM-only report is refused, names both
+/// ways on — `accept` first — and writes nothing; with `--override` it runs,
+/// and the follow-up carries the departure and its reason, dated.
+#[test]
+fn at_standard_iterate_on_a_medium_only_report_is_refused_and_names_both_verbs() {
+    let world = at_standard_on(MEDIUM_ONLY);
+    assert_eq!(
+        world.state().flow.findings_worst(),
+        Some(nunki::mission::Severity::Medium),
+        "verify ranks the report it concluded"
+    );
+    let before = world.followup();
+
+    let err = nunki::findings::iterate(&world.project, "m1", None).unwrap_err();
+    assert!(
+        matches!(err, nunki::findings::FindingsError::RigorRefuses { .. }),
+        "{err}"
+    );
+    let said = err.to_string();
+    let accept = said
+        .find("`nunki mission accept m1 --because <why>`")
+        .unwrap_or_else(|| panic!("accept is not named: {said}"));
+    let overriding = said
+        .find("`nunki mission iterate m1 --override --because <why>`")
+        .unwrap_or_else(|| panic!("the override is not named: {said}"));
+    assert!(accept < overriding, "accept comes first: {said}");
+    assert!(said.contains("MEDIUM"), "{said}");
+    assert_eq!(world.followup(), before, "a refused verb leaves no record");
+    assert!(matches!(world.state().flow.stage(), Stage::Findings { .. }));
+
+    let state = nunki::findings::iterate_overriding(
+        &world.project,
+        "m1",
+        "the redirect is reachable before login",
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            state.flow.stage(),
+            Stage::Coding {
+                work: Work::Volet { .. },
+                ..
+            }
+        ),
+        "{:?}",
+        state.flow.stage()
+    );
+    assert_eq!(state.flow.overrides().len(), 1);
+    let told = world.followup();
+    let record = told
+        .split("## ")
+        .find(|s| s.contains("departed from the rigor"))
+        .unwrap_or_else(|| panic!("no departure recorded:\n{told}"));
+    assert!(record.contains("Alex Martin"), "{record}");
+    assert!(record.contains("does not block"), "{record}");
+    assert!(
+        record.contains("**Why:** the redirect is reachable before login"),
+        "{record}"
+    );
+    let date: Vec<char> = record.chars().take(10).collect();
+    assert!(
+        date.iter().enumerate().all(|(i, c)| match i {
+            4 | 7 => *c == '-',
+            _ => c.is_ascii_digit(),
+        }),
+        "the departure is not dated: {record}"
+    );
+}
+
+/// A HIGH is sent back with the plain verb, and `--override` on it is
+/// refused without writing anything: there is nothing to set aside.
+#[test]
+fn at_standard_a_high_is_sent_back_without_an_override() {
+    let world = at_standard_on(
+        r#"[{"severity":"HIGH","title":"SQL injection"},{"severity":"LOW","title":"x","why_acceptable":"y"}]"#,
+    );
+    let before = world.followup();
+    let err =
+        nunki::findings::iterate_overriding(&world.project, "m1", "just because").unwrap_err();
+    assert!(
+        matches!(
+            err,
+            nunki::findings::FindingsError::NothingToOverride { .. }
+        ),
+        "{err}"
+    );
+    assert_eq!(world.followup(), before);
+
+    let state = nunki::findings::iterate(&world.project, "m1", None).unwrap();
+    assert!(matches!(state.flow.stage(), Stage::Coding { .. }));
+    assert!(state.flow.overrides().is_empty());
+}
+
+/// An override needs its reason: without one it is refused, and nothing is
+/// written.
+#[test]
+fn an_override_without_a_reason_is_refused() {
+    let world = at_standard_on(MEDIUM_ONLY);
+    let before = world.followup();
+    let err = nunki::findings::iterate_overriding(&world.project, "m1", " \n").unwrap_err();
+    assert!(
+        matches!(err, nunki::findings::FindingsError::NoOverrideReason),
+        "{err}"
+    );
+    assert_eq!(world.followup(), before);
+}
+
+/// A second HQ review at `standard` is refused without `--override`, and
+/// the refusal names the push and the override; with it, the review reaches
+/// the coder and the departure is written beside it.
+#[test]
+fn a_second_review_at_standard_needs_an_override() {
+    let world = at_standard_on(MEDIUM_ONLY);
+    nunki::findings::accept(
+        &world.project,
+        "m1",
+        nunki::findings::Lift::Verdict,
+        "the redirect is behind the VPN",
+    )
+    .unwrap();
+    assert_eq!(world.state().flow.stage(), &Stage::Verified);
+    nunki::findings::iterate(&world.project, "m1", Some("rename it")).unwrap();
+    // The volet done and gated green: at the round cap, verified again.
+    let store = Store::open(&world.project.hq_root).unwrap();
+    let mut state = store.load("m1").unwrap();
+    for event in [
+        nunki::mission::flow::Event::RunEnded {
+            outcome: nunki::harness::Outcome::Finished(Default::default()),
+            lot_done: true,
+        },
+        nunki::mission::flow::Event::GatesPassed,
+        nunki::mission::flow::Event::Verdict {
+            verdict: nunki::mission::Verdict::Integrated,
+            report: "wired".into(),
+        },
+    ] {
+        store.apply(&mut state, event).unwrap();
+    }
+    assert_eq!(state.flow.stage(), &Stage::Verified);
+
+    let err = nunki::findings::iterate(&world.project, "m1", Some("zz second look")).unwrap_err();
+    let said = err.to_string();
+    assert!(said.contains("`nunki push m1 --yes`"), "{said}");
+    assert!(
+        said.contains("`nunki mission iterate m1 --override --because <why>`"),
+        "{said}"
+    );
+    assert!(
+        !said.contains("mission accept"),
+        "nothing to accept: {said}"
+    );
+    assert!(!world.followup().contains("zz second look"));
+
+    let state =
+        nunki::findings::iterate_overriding(&world.project, "m1", "the rename broke the API")
+            .unwrap();
+    assert_eq!(state.flow.volets(), 2);
+    let told = world.followup();
+    assert!(told.contains("departed from the rigor"), "{told}");
+    assert!(
+        told.contains("**What to change:** the rename broke the API"),
+        "the coder reads the review: {told}"
+    );
+}

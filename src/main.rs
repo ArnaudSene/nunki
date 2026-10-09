@@ -527,13 +527,23 @@ enum MissionCommand {
 
     /// Send the mission back to the coder, as a volet: a `FINDINGS` verdict,
     /// or a verified branch the HQ refuses on review, with `--because`.
+    ///
+    /// Bound by the mission's rigor: a report with no HIGH (at `standard`,
+    /// and at `critical` from the second round on) is not sent back, nor a
+    /// `standard` mission reviewed a second time — unless `--override`.
     Iterate {
         /// The mission.
         id: String,
         /// What the review refuses, for a verified mission. It is what the
-        /// coder reads, in `FOLLOWUP_HQ.md`, and the volet's cause.
+        /// coder reads, in `FOLLOWUP_HQ.md`, and the volet's cause. With
+        /// `--override`, why the rigor is set aside.
         #[arg(long = "because", value_name = "WHAT")]
         because: Option<String>,
+        /// Send it back although the rigor says not to. Needs `--because`,
+        /// written, dated, in `FOLLOWUP_HQ.md` as a departure from the rigor
+        /// and listed by `mission status` and in the pull request.
+        #[arg(long = "override", requires = "because")]
+        overriding: bool,
     },
 
     /// Start the mutation campaign, or say where the one in flight is
@@ -2212,10 +2222,23 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             }
         }
 
-        MissionCommand::Iterate { id, because } => {
-            match nunki::findings::iterate(project, &id, because.as_deref()) {
+        MissionCommand::Iterate {
+            id,
+            because,
+            overriding,
+        } => {
+            let sent = match (overriding, because.as_deref()) {
+                (true, Some(why)) => nunki::findings::iterate_overriding(project, &id, why),
+                (_, because) => nunki::findings::iterate(project, &id, because),
+            };
+            match sent {
                 Ok(state) => {
                     println!("stage     {:?}", state.flow.stage());
+                    if overriding {
+                        println!(
+                            "override  written to FOLLOWUP_HQ.md as a departure from the rigor"
+                        );
+                    }
                     println!("          `nunki verify {id}` plays it from there");
                     ExitCode::SUCCESS
                 }
@@ -2715,6 +2738,11 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                         println!("handover  {}", handover.line(&id));
                     }
                     println!("volets    {}", state.flow.volets_said());
+                    // Every time the HQ set the rigor aside, with its reason:
+                    // how often the rule gave way is part of the mission.
+                    for said in nunki::push::overrides_said(state.flow.overrides()) {
+                        println!("override  {said}");
+                    }
                     println!(
                         "security rounds: {} / {}{}",
                         state.flow.security_rounds(),

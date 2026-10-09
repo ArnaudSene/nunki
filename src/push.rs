@@ -360,7 +360,15 @@ pub fn push_to(
     // After the push, and under the same `--yes`: SPEC names one verb that
     // pushes the branch and opens the pull request, on one argument.
     let pr = crate::mission::dir::Paths::of(&project.hq_root, id).pr;
-    let pull_request = open_pull_request(project, &remote, &header, &fetched.branch, &pr, api);
+    let pull_request = open_pull_request(
+        project,
+        &remote,
+        &header,
+        &fetched.branch,
+        &pr,
+        state.flow.overrides(),
+        api,
+    );
     Ok(Pushed {
         branch: fetched.branch.clone(),
         head,
@@ -380,6 +388,7 @@ fn open_pull_request(
     header: &crate::mission::Header,
     branch: &str,
     pr_file: &std::path::Path,
+    overrides: &[crate::mission::flow::Override],
     api: &str,
 ) -> PullRequestState {
     // The forge the remote is on, if `nunki` has an adapter for it. The
@@ -414,13 +423,14 @@ fn open_pull_request(
         ));
     };
     let text = std::fs::read_to_string(pr_file).unwrap_or_default();
-    let Some(request) = crate::forge::PullRequest::from_markdown(&text, branch, &header.base)
+    let Some(mut request) = crate::forge::PullRequest::from_markdown(&text, branch, &header.base)
     else {
         return by_hand(format!(
             "{} says nothing a pull request could be titled with",
             pr_file.display()
         ));
     };
+    request.body = with_overrides(&request.body, overrides);
     match forge.open(&token, &repo, &request) {
         Ok(opened) => PullRequestState::Opened(opened),
         Err(e) => by_hand(e.to_string()),
@@ -826,6 +836,47 @@ fn only_wiring_since(
 fn remote_url(project: &Project) -> Result<String, PushError> {
     crate::git::run(&project.root, &["remote", "get-url", REMOTE])
         .map_err(|_| PushError::NoRemote(REMOTE.to_string()))
+}
+
+/// Each departure from the rigor in one printable line — its date, what
+/// the rigor said, and the HQ's reason — as `mission status` and the pull
+/// request's note list them (SPEC 4.5).
+pub fn overrides_said(overrides: &[crate::mission::flow::Override]) -> Vec<String> {
+    overrides
+        .iter()
+        .map(|o| {
+            crate::text::one_line(&format!(
+                "{} — {}; set aside because: {}",
+                o.date.split('T').next().unwrap_or_default(),
+                o.departure,
+                o.because
+            ))
+        })
+        .collect()
+}
+
+/// The pull request's body, followed by the note on the rigor when the HQ
+/// set it aside: every override, with its reason, so a reviewer on the
+/// forge sees how often the rule gave way. `PR.md` is the agent's and is
+/// left as it is; the note is added on the way to the forge.
+pub fn with_overrides(body: &str, overrides: &[crate::mission::flow::Override]) -> String {
+    if overrides.is_empty() {
+        return body.to_string();
+    }
+    let lines: Vec<String> = overrides_said(overrides)
+        .into_iter()
+        .map(|said| format!("- {said}"))
+        .collect();
+    let note = format!(
+        "## Departures from the rigor\n\nThe HQ set the mission's rigor aside {} time(s):\n\n{}",
+        overrides.len(),
+        lines.join("\n")
+    );
+    if body.trim().is_empty() {
+        note
+    } else {
+        format!("{}\n\n{note}", body.trim_end())
+    }
 }
 
 #[cfg(test)]
