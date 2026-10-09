@@ -203,14 +203,15 @@ nunki itself, and the file supplies none of them:
 
 - it joins one network, nunki's, which is declared `internal` and so has no
   route out, and which has no gateway address on the host, so the host's
-  own ports are out of reach too (a Docker bridge option; not measured on
-  Podman). The firewall joins that network too, so the agent reaches a
-  service by its name, through the firewall's rules.
+  own ports are out of reach too: no IPv4 address on its bridge (a Docker
+  bridge option; not measured on Podman), and IPv6 turned off on it. The
+  firewall joins that network too, so the agent reaches a service by its
+  name, through the firewall's rules.
 - no port is published. The launch says in one line which `ports` it
   dropped.
-- every capability is dropped, and a fixed few are given back (`CHOWN`,
-  `DAC_OVERRIDE`, `FOWNER`, `SETGID`, `SETUID`), which is what the official
-  database images need to take their data directory and drop to their own
+- every capability is dropped, and a fixed few are given back
+  (`DAC_OVERRIDE`, `SETGID`, `SETUID`), which is what the official database
+  images measured need to read their data directory and drop to their own
   user.
 - it gets `no-new-privileges`, a 2 GB memory limit and a 1024-process
   limit.

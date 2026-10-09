@@ -65,19 +65,29 @@ pub const NETWORK: &str = "nunki-services";
 /// port is closed from the service, and a peer on the network is still
 /// reached by its name. A Docker bridge option; what Podman makes of it is
 /// not measured.
+///
+/// It removes the IPv4 gateway only. The network is also declared with
+/// `enable_ipv6: false`, so a daemon whose networks default to IPv6 gives
+/// the bridge no IPv6 gateway on the host either. The HQ measured no IPv6
+/// on Docker Engine 29.4.0 by default; no IPv6 daemon was at hand to
+/// measure the declaration against.
 pub const NO_GATEWAY: (&str, &str) = ("com.docker.network.bridge.inhibit_ipv4", "true");
 
 /// The capabilities a lifted service gets back, after all of them are
 /// dropped. Fixed, nunki's, never the file's: what the official database
-/// images' entrypoints need to take their data directory and drop from root
-/// to their own user — own it (`CHOWN`, `FOWNER`), read it whatever its
-/// mode (`DAC_OVERRIDE`), and change user (`SETUID`, `SETGID`).
+/// images' entrypoints need to drop from root to their own user — read
+/// their data directory whatever its mode (`DAC_OVERRIDE`), and change user
+/// (`SETUID`, `SETGID`).
 ///
-/// **Not measured in the run that wrote it**, which had no container engine:
-/// the set the mission named as expected. `live_the_capability_set_is_the_
-/// smallest_the_images_need` in `tests/services_file.rs` measures it, image
-/// by image and capability by capability.
-pub const CAPABILITIES: [&str; 5] = ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"];
+/// Measured by the HQ on Docker Engine 29.4.0 with
+/// `live_the_capability_set_is_the_smallest_the_images_need`:
+/// `postgres:16-alpine`, `postgres:16` and `questdb/questdb:9.4.3`, healthy
+/// with the five the mission expected, then with each taken away in turn:
+/// `DAC_OVERRIDE` is needed by both Postgres images, `SETGID` and `SETUID`
+/// by all three, `CHOWN` and `FOWNER` by none, so those two are not given.
+/// The three together are measured by the same test, which the HQ runs
+/// again before the push.
+pub const CAPABILITIES: [&str; 3] = ["DAC_OVERRIDE", "SETGID", "SETUID"];
 
 /// The memory a lifted service may use: a bound, so a service cannot take
 /// the human's machine with it. Enough for a database and a JVM under test.

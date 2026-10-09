@@ -679,7 +679,7 @@ const FENCE_KEYS: [&str; 7] = [
 /// still reaches the service.
 #[test]
 fn the_lifted_services_are_fenced_by_nunki() {
-    use nunki::compose::services::{CAPABILITIES, Lifted, MEMORY, NETWORK, NO_GATEWAY, PROCESSES};
+    use nunki::compose::services::{Lifted, MEMORY, NETWORK, NO_GATEWAY, PROCESSES};
     let mut plan = plan(Role::Integrator);
     plan.project_services = Some(Lifted::whole(services_file(
         "services:\n  db:\n    image: postgres:16\n    ports: [\"5432:5432\"]\n  \
@@ -700,7 +700,10 @@ fn the_lifted_services_are_fenced_by_nunki() {
         assert_eq!(strings(&service["cap_drop"]), vec!["ALL"], "{yaml}");
         assert_eq!(
             strings(&service["cap_add"]),
-            CAPABILITIES.to_vec(),
+            // The set the HQ measured (Docker Engine 29.4.0): each one needed
+            // by at least one of the images in real use. Named here and not
+            // read from the constant, so a change to the set is seen.
+            vec!["DAC_OVERRIDE", "SETGID", "SETUID"],
             "{yaml}"
         );
         assert_eq!(
@@ -727,6 +730,11 @@ fn the_lifted_services_are_fenced_by_nunki() {
         doc["networks"][NETWORK]["driver_opts"][NO_GATEWAY.0].as_str(),
         Some(NO_GATEWAY.1),
         "the host has no address on the services' network: {yaml}"
+    );
+    assert_eq!(
+        doc["networks"][NETWORK]["enable_ipv6"].as_bool(),
+        Some(false),
+        "no IPv6 on the services' network, whatever the daemon's default: {yaml}"
     );
     assert_eq!(doc["networks"].as_mapping().unwrap().len(), 1, "{yaml}");
     assert_eq!(

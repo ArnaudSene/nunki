@@ -292,7 +292,9 @@ fn build(plan: &Plan, dialect: &Dialect) -> Result<Document, ComposeError> {
             }
         }
         // Internal, so the engine routes nothing out of it, and without a
-        // gateway, so the host is not on it either.
+        // gateway, so the host is not on it either: no IPv4 address on the
+        // bridge, and no IPv6 at all, whatever the daemon's default. Every
+        // address family is turned off but nunki's own.
         let mut internal = Mapping::new();
         internal.insert(Value::from("internal"), Value::from(true));
         let mut options = Mapping::new();
@@ -301,6 +303,7 @@ fn build(plan: &Plan, dialect: &Dialect) -> Result<Document, ComposeError> {
             Value::from(services::NO_GATEWAY.1),
         );
         internal.insert(Value::from("driver_opts"), Value::Mapping(options));
+        internal.insert(Value::from("enable_ipv6"), Value::from(false));
         networks.insert(Value::from(services::NETWORK), Value::Mapping(internal));
     }
 
