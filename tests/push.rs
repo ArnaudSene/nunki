@@ -2677,3 +2677,162 @@ fn at_standard_push_takes_a_partial_campaign() {
     });
     push::push(&world.project, "m1", true).unwrap();
 }
+
+/// `mission status` prints the volets taken against the cap, and past it how
+/// many the HQ granted; `mission retry` on spent volets grants exactly one
+/// and says the new count — through the real binary, on a mission handed
+/// over at 3 / 3.
+#[test]
+fn status_counts_the_volets_against_the_cap_and_a_retry_grants_one() {
+    let world = World::opened_at(nunki::mission::Rigor::Standard);
+    let store = world.store();
+    let mut state = world.state();
+    let mut events = vec![Event::RunEnded {
+        outcome: nunki::harness::Outcome::Finished(Default::default()),
+        lot_done: true,
+    }];
+    for n in 1..=4 {
+        events.push(Event::GatesFailed {
+            reason: format!("red {n}"),
+        });
+        if n < 4 {
+            events.push(Event::RunEnded {
+                outcome: nunki::harness::Outcome::Finished(Default::default()),
+                lot_done: true,
+            });
+        }
+    }
+    for event in events {
+        store.apply(&mut state, event).unwrap();
+    }
+
+    let status = world.printed_by_the_binary(&["mission", "status", "m1"]);
+    assert!(status.contains("volets    3 / 3\n"), "{status}");
+
+    let retried =
+        world.printed_by_the_binary(&["mission", "retry", "m1", "--because", "one more look"]);
+    assert!(
+        retried.contains("volets    4 / 3 (1 granted by the HQ)"),
+        "{retried}"
+    );
+    assert!(!retried.contains("handed back whole"), "{retried}");
+    let status = world.printed_by_the_binary(&["mission", "status", "m1"]);
+    assert!(
+        status.contains("volets    4 / 3 (1 granted by the HQ)\n"),
+        "{status}"
+    );
+}
+
+/// Put on `m1`'s state, as a write of it would, the departures from the
+/// rigor the HQ made.
+fn with_overrides_on_file(world: &World, overrides: serde_json::Value) {
+    let store = world.store();
+    let mut state = world.state();
+    let mut flow = serde_json::to_value(&state.flow).unwrap();
+    flow.as_object_mut()
+        .unwrap()
+        .insert("overrides".into(), overrides);
+    state.flow = serde_json::from_value(flow).unwrap();
+    store.save(&state).unwrap();
+}
+
+fn two_overrides() -> serde_json::Value {
+    serde_json::json!([
+        {
+            "departure": {"ReportNotBlocking": {"rigor": "standard", "round": 1, "worst": "MEDIUM"}},
+            "because": "the redirect is reachable before login",
+            "date": "2026-10-08T09:00:00Z"
+        },
+        {
+            "departure": {"AnotherReview": {"rigor": "standard", "reviews": 1}},
+            "because": "the rename broke the API",
+            "date": "2026-10-09T09:00:00Z"
+        }
+    ])
+}
+
+/// Every departure from the rigor reaches the pull request, with its
+/// reason, after what the mission wrote in `PR.md` — which is left as the
+/// agent wrote it.
+#[test]
+fn the_pull_request_lists_every_departure_from_the_rigor_with_its_reason() {
+    let world = World::new(with_wiring(), Security::Agent);
+    world.on_github();
+    world.with_token();
+    world.pr_says("# feat: one returns two\n\nBecause it had to.\n");
+    world.ready();
+    with_overrides_on_file(&world, two_overrides());
+
+    let (api, server) = serve(vec![(
+        201,
+        r#"{"html_url":"https://github.com/o/r/pull/9"}"#,
+    )]);
+    push::push_to(&world.project, "m1", true, &api).unwrap();
+
+    let sent = &server.join().unwrap()[0];
+    let body: serde_json::Value = serde_json::from_str(sent.split("\r\n\r\n").nth(1).unwrap())
+        .unwrap_or_else(|e| panic!("{e}: {sent}"));
+    let body = body["body"].as_str().unwrap();
+    assert!(
+        body.starts_with("Because it had to.\n\n## Departures from the rigor\n"),
+        "{body}"
+    );
+    assert!(
+        body.contains("set the mission's rigor aside 2 time(s)"),
+        "{body}"
+    );
+    assert!(
+        body.contains(
+            "- 2026-10-08 — at standard, security round 1, a report whose worst finding is \
+             MEDIUM does not block — only a HIGH does; set aside because: the redirect is \
+             reachable before login"
+        ),
+        "{body}"
+    );
+    assert!(
+        body.contains("- 2026-10-09 — at standard, a verified mission is sent back on review once"),
+        "{body}"
+    );
+    assert!(
+        body.contains("set aside because: the rename broke the API"),
+        "{body}"
+    );
+    let file = std::fs::read_to_string(world.project.hq_root.join("missions/m1/PR.md")).unwrap();
+    assert_eq!(file, "# feat: one returns two\n\nBecause it had to.\n");
+}
+
+/// With no departure, the body is what `PR.md` says, and nothing more.
+#[test]
+fn a_pull_request_with_no_departure_carries_no_note() {
+    assert_eq!(push::with_overrides("Because.", &[]), "Because.");
+}
+
+/// `mission status` lists every departure, one line each, with its reason —
+/// through the real binary.
+#[test]
+fn status_lists_every_departure_from_the_rigor() {
+    let world = World::opened_at(nunki::mission::Rigor::Standard);
+    with_overrides_on_file(&world, two_overrides());
+    let status = world.printed_by_the_binary(&["mission", "status", "m1"]);
+    let lines: Vec<&str> = status
+        .lines()
+        .filter(|l| l.starts_with("override  "))
+        .collect();
+    assert_eq!(lines.len(), 2, "{status}");
+    assert!(
+        lines[0].starts_with("override  2026-10-08 — at standard"),
+        "{status}"
+    );
+    assert!(lines[0].ends_with("set aside because: the redirect is reachable before login"));
+    assert!(lines[1].ends_with("set aside because: the rename broke the API"));
+}
+
+/// `--override` without `--because` is refused by the binary before any
+/// verb runs: a departure from the rigor always carries its reason.
+#[test]
+fn an_override_without_because_is_refused_by_the_binary() {
+    let world = World::opened_at(nunki::mission::Rigor::Standard);
+    let said = world.printed_by_the_binary(&["mission", "iterate", "m1", "--override"]);
+    assert!(said.contains("--because"), "{said}");
+    assert!(world.state().flow.overrides().is_empty());
+}

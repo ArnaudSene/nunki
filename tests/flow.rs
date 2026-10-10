@@ -366,11 +366,11 @@ fn the_flow_survives_a_round_trip_through_json() {
 /// opens a volet that counts, and the third hands over — so the only way the
 /// bounds could stop a mission was into a stage nothing could leave.
 ///
-/// A retry hands the bounds back **whole**. Resetting the counter is the
-/// verb: without it the very next red gate lands in the same handover, and
-/// the human is back where they started having spent a run to learn it.
+/// A retry on spent volets grants **one**, not the cap again: the volets are
+/// counted over the mission's life, so the next red verdict lands back in
+/// the same handover, and each volet past the cap is one the HQ granted.
 #[test]
-fn a_mission_whose_volets_ran_out_is_taken_back_with_its_budget_whole() {
+fn a_mission_whose_volets_ran_out_is_retried_for_one_volet_only() {
     let mut flow = Flow::new(header(none(), Security::Gates, Bounds::default())).unwrap();
     code_through(&mut flow);
 
@@ -391,6 +391,12 @@ fn a_mission_whose_volets_ran_out_is_taken_back_with_its_budget_whole() {
         "{:?}",
         flow.stage()
     );
+    assert_eq!(
+        flow.volets(),
+        3,
+        "the cause waiting for a volet is no volet"
+    );
+    assert_eq!(flow.volets_said(), "3 / 3");
 
     flow.advance(Event::Retried {
         because: "the campaign was reading a stale log; it is fixed".into(),
@@ -398,29 +404,27 @@ fn a_mission_whose_volets_ran_out_is_taken_back_with_its_budget_whole() {
     .unwrap();
 
     // On the cause nobody ever got to work on — the fourth, which arrived
-    // with no budget left to open a volet for it.
+    // with no volet left to open for it — numbered by the mission's count.
     match flow.stage() {
         Stage::Coding {
             work: Work::Volet { n, cause },
             attempt: 1,
         } => {
-            assert_eq!(*n, 1, "the budget was not handed back whole");
+            assert_eq!(*n, 4, "volet 4 of 3, not volet 1 of a fresh budget");
             assert_eq!(cause, "gate: run 4", "not the cause nobody worked on");
         }
         other => panic!("{other:?}"),
     }
-    assert_eq!(flow.volets(), 1);
+    assert_eq!(flow.volets(), 4);
+    assert_eq!(flow.volets_said(), "4 / 3 (1 granted by the HQ)");
 
-    // And the budget really is whole: three more returns before it stops
-    // again, not zero.
-    for n in 1..=3 {
-        flow.advance(finished(true)).unwrap();
-        assert_eq!(flow.stage(), &Stage::Gates);
-        flow.advance(Event::GatesFailed {
-            reason: format!("after the retry, {n}"),
-        })
-        .unwrap();
-    }
+    // Exactly one: the next red verdict hands it back again.
+    flow.advance(finished(true)).unwrap();
+    assert_eq!(flow.stage(), &Stage::Gates);
+    flow.advance(Event::GatesFailed {
+        reason: "after the retry".into(),
+    })
+    .unwrap();
     assert!(
         matches!(
             flow.stage(),
@@ -428,6 +432,220 @@ fn a_mission_whose_volets_ran_out_is_taken_back_with_its_budget_whole() {
         ),
         "{:?}",
         flow.stage()
+    );
+    assert_eq!(flow.volets(), 4);
+}
+
+/// The mission's own proof, on the security agent's verdict: a mission at
+/// 3 / 3 that is retried runs exactly one more volet, and is handed back at
+/// the next `FINDINGS` the HQ iterates on. And again: every retry is one.
+///
+/// The rounds are spent with the volets (three of each by default), so the
+/// `FINDINGS` after each granted volet is the one held at the round cap.
+#[test]
+fn a_retried_mission_at_its_cap_is_handed_back_at_the_next_findings() {
+    let mut flow = Flow::new(header(none(), Security::Agent, Bounds::default())).unwrap();
+    code_through(&mut flow);
+    for round in 1..=3 {
+        flow.advance(Event::GatesPassed).unwrap();
+        flow.advance(findings(round)).unwrap();
+        flow.advance(Event::Iterate).unwrap();
+        flow.advance(finished(true)).unwrap();
+    }
+    flow.advance(Event::GatesPassed).unwrap();
+    assert_eq!(flow.stage(), &back_on(3));
+    assert_eq!(flow.volets(), 3);
+    flow.advance(Event::Iterate).unwrap();
+    assert!(
+        matches!(
+            flow.stage(),
+            Stage::AwaitingHuman(Handover::VoletsExhausted { .. })
+        ),
+        "{:?}",
+        flow.stage()
+    );
+
+    for granted in 1..=2 {
+        flow.advance(Event::Retried {
+            because: format!("grant {granted}"),
+        })
+        .unwrap();
+        assert!(
+            matches!(
+                flow.stage(),
+                Stage::Coding { work: Work::Volet { n, .. }, attempt: 1 } if *n == 3 + granted
+            ),
+            "{:?}",
+            flow.stage()
+        );
+        flow.advance(finished(true)).unwrap();
+        flow.advance(Event::GatesPassed).unwrap();
+        assert_eq!(flow.stage(), &back_on(3));
+        flow.advance(Event::Iterate).unwrap();
+        assert!(
+            matches!(
+                flow.stage(),
+                Stage::AwaitingHuman(Handover::VoletsExhausted { .. })
+            ),
+            "grant {granted} ran more than one volet: {:?}",
+            flow.stage()
+        );
+        assert_eq!(flow.volets(), 3 + granted);
+        assert_eq!(flow.volets_granted(), granted);
+    }
+}
+
+/// A retry from another handover hands back what ran out there — a lot's
+/// attempts — and leaves the volet count alone, even when the work that ran
+/// out of attempts was itself a volet.
+#[test]
+fn a_retry_from_an_attempts_handover_leaves_the_volet_count_alone() {
+    let bounds = Bounds {
+        attempts_per_lot: 2,
+        ..Bounds::default()
+    };
+    let mut flow = Flow::new(header(none(), Security::Gates, bounds)).unwrap();
+    code_through(&mut flow);
+    for n in 1..=2 {
+        flow.advance(Event::GatesFailed {
+            reason: format!("red {n}"),
+        })
+        .unwrap();
+        if n < 2 {
+            flow.advance(finished(true)).unwrap();
+        }
+    }
+    assert_eq!(flow.volets(), 2);
+    flow.advance(finished(false)).unwrap();
+    flow.advance(finished(false)).unwrap();
+    assert!(
+        matches!(
+            flow.stage(),
+            Stage::AwaitingHuman(Handover::LotAttemptsExhausted { .. })
+        ),
+        "{:?}",
+        flow.stage()
+    );
+
+    flow.advance(Event::Retried {
+        because: "the fixture is in place".into(),
+    })
+    .unwrap();
+    assert!(
+        matches!(
+            flow.stage(),
+            Stage::Coding {
+                work: Work::Volet { n: 2, .. },
+                attempt: 1
+            }
+        ),
+        "{:?}",
+        flow.stage()
+    );
+    assert_eq!(
+        flow.volets(),
+        2,
+        "an attempts retry spends or grants no volet"
+    );
+    assert_eq!(flow.volets_said(), "2 / 3");
+
+    // One volet is left, and only one: the cap still binds.
+    flow.advance(finished(true)).unwrap();
+    flow.advance(Event::GatesFailed {
+        reason: "red 3".into(),
+    })
+    .unwrap();
+    assert!(matches!(
+        flow.stage(),
+        Stage::Coding {
+            work: Work::Volet { n: 3, .. },
+            ..
+        }
+    ));
+    flow.advance(finished(true)).unwrap();
+    flow.advance(Event::GatesFailed {
+        reason: "red 4".into(),
+    })
+    .unwrap();
+    assert!(
+        matches!(
+            flow.stage(),
+            Stage::AwaitingHuman(Handover::VoletsExhausted { .. })
+        ),
+        "{:?}",
+        flow.stage()
+    );
+}
+
+/// State written before the count was the causes held a `volets` counter a
+/// retry had reset, and a pending volet numbered 1. It reads with the count
+/// its causes hold: here four volets taken — three, then one after an old
+/// retry that reset the counter to 1 — and a fifth cause waiting, so the
+/// next retry opens volet 5 and the counter on disk is not believed.
+#[test]
+fn a_state_written_before_the_count_reads_with_the_count_its_causes_hold() {
+    let flow = Flow::new(header(none(), Security::Gates, Bounds::default())).unwrap();
+    let mut json = serde_json::to_value(&flow).unwrap();
+    let object = json.as_object_mut().unwrap();
+    object.insert("volets".into(), serde_json::json!(1));
+    object.insert(
+        "volet_causes".into(),
+        serde_json::json!(["gate: a", "gate: b", "gate: c", "gate: d", "gate: e"]),
+    );
+    object.insert(
+        "stage".into(),
+        serde_json::json!({"AwaitingHuman": {"VoletsExhausted": {
+            "causes": ["gate: a", "gate: b", "gate: c", "gate: d", "gate: e"]
+        }}}),
+    );
+    object.insert(
+        "resume_with".into(),
+        serde_json::json!({"Volet": {"n": 1, "cause": "gate: e"}}),
+    );
+    let mut old: Flow = serde_json::from_value(json).unwrap();
+
+    assert_eq!(old.volets(), 4);
+    assert_eq!(old.volets_said(), "4 / 3 (1 granted by the HQ)");
+    old.advance(Event::Retried {
+        because: "read after the upgrade".into(),
+    })
+    .unwrap();
+    assert_eq!(
+        old.stage(),
+        &Stage::Coding {
+            work: Work::Volet {
+                n: 5,
+                cause: "gate: e".into()
+            },
+            attempt: 1
+        }
+    );
+    assert_eq!(old.volets(), 5);
+
+    // And one mid-flight, on a volet the old counter numbered 1: the next
+    // red verdict counts the causes, and hands it back.
+    let flow = Flow::new(header(none(), Security::Gates, Bounds::default())).unwrap();
+    let mut json = serde_json::to_value(&flow).unwrap();
+    let object = json.as_object_mut().unwrap();
+    object.insert("volets".into(), serde_json::json!(1));
+    object.insert(
+        "volet_causes".into(),
+        serde_json::json!(["gate: a", "gate: b", "gate: c", "gate: d"]),
+    );
+    object.insert("stage".into(), serde_json::json!("Gates"));
+    let mut old: Flow = serde_json::from_value(json).unwrap();
+    assert_eq!(old.volets(), 4);
+    old.advance(Event::GatesFailed {
+        reason: "again".into(),
+    })
+    .unwrap();
+    assert!(
+        matches!(
+            old.stage(),
+            Stage::AwaitingHuman(Handover::VoletsExhausted { .. })
+        ),
+        "{:?}",
+        old.stage()
     );
 }
 
@@ -822,9 +1040,12 @@ fn after_an_accept_a_review_and_green_gates_at_the_cap_the_old_report_does_not_c
         Some(SecurityCap { rounds: 1, max: 1 })
     );
 
-    // And after a second review too: nothing brings the lifted report back.
-    flow.advance(Event::Reviewed {
+    // And after a second review too — one the rigor lets through only as a
+    // departure from it, at `standard`: nothing brings the lifted report
+    // back.
+    flow.advance(Event::Overridden {
         because: "and this".into(),
+        date: "2026-10-09T00:00:00Z".into(),
     })
     .unwrap();
     flow.advance(finished(true)).unwrap();
@@ -1521,4 +1742,285 @@ fn the_final_stage_takes_only_its_gate_or_an_end() {
         flow.stage(),
         Stage::AwaitingHuman(Handover::Abandoned { .. })
     ));
+}
+
+// --- the rigor binds the HQ's verbs (SPEC 4.5) ------------------------------
+
+use nunki::mission::Severity;
+use nunki::mission::flow::{Departure, FlowError};
+
+/// A flow at `rigor` standing on a `FINDINGS` of round 1 ranked `worst`.
+fn on_findings(rigor: Rigor, worst: Option<Severity>) -> Flow {
+    let mut flow = at(rigor, none());
+    code_through(&mut flow);
+    flow.advance(Event::GatesPassed).unwrap();
+    flow.rank(worst);
+    flow.advance(findings(1)).unwrap();
+    assert_eq!(flow.stage(), &back_on(1));
+    flow
+}
+
+fn overridden(because: &str) -> Event {
+    Event::Overridden {
+        because: because.into(),
+        date: "2026-10-09T10:00:00Z".into(),
+    }
+}
+
+/// At `standard`, a report with no `HIGH` does not block: the plain verb is
+/// refused, says what the rigor said, and moves nothing.
+#[test]
+fn at_standard_iterate_on_a_medium_only_report_is_refused() {
+    let mut flow = on_findings(Rigor::Standard, Some(Severity::Medium));
+    let before = flow.clone();
+
+    let error = flow.advance(Event::Iterate).unwrap_err();
+
+    assert_eq!(
+        error,
+        FlowError::RigorRefuses(Departure::ReportNotBlocking {
+            rigor: Rigor::Standard,
+            round: 1,
+            worst: Severity::Medium,
+        })
+    );
+    assert_eq!(flow, before, "a refused verb changes nothing");
+    assert_eq!(flow.volets(), 0);
+}
+
+/// With `--override`, the same report is sent back, as a volet like any
+/// other, and the departure is kept with its reason and date.
+#[test]
+fn at_standard_an_override_sends_a_medium_only_report_back_and_is_kept() {
+    let mut flow = on_findings(Rigor::Standard, Some(Severity::Medium));
+
+    flow.advance(overridden("the redirect is reachable from the login page"))
+        .unwrap();
+
+    assert!(
+        matches!(
+            flow.stage(),
+            Stage::Coding {
+                work: Work::Volet { n: 1, .. },
+                attempt: 1
+            }
+        ),
+        "{:?}",
+        flow.stage()
+    );
+    assert_eq!(flow.overrides().len(), 1);
+    let kept = &flow.overrides()[0];
+    assert_eq!(
+        kept.because,
+        "the redirect is reachable from the login page"
+    );
+    assert_eq!(kept.date, "2026-10-09T10:00:00Z");
+    assert_eq!(
+        kept.departure,
+        Departure::ReportNotBlocking {
+            rigor: Rigor::Standard,
+            round: 1,
+            worst: Severity::Medium,
+        }
+    );
+    // And it is kept across a write of the state.
+    let back: Flow = serde_json::from_str(&serde_json::to_string(&flow).unwrap()).unwrap();
+    assert_eq!(back.overrides(), flow.overrides());
+}
+
+/// A `HIGH` blocks at every rigor: sent back without an override, and an
+/// override on it is refused, since nothing is being set aside.
+#[test]
+fn a_high_is_sent_back_without_an_override() {
+    for rigor in [Rigor::Standard, Rigor::Critical] {
+        let flow = on_findings(rigor, Some(Severity::High));
+        assert_eq!(flow.rigor_refuses(), None);
+        let mut refused = flow.clone();
+        assert_eq!(
+            refused.advance(overridden("why not")).unwrap_err(),
+            FlowError::NothingToOverride
+        );
+        assert!(refused.overrides().is_empty());
+        let mut sent = flow;
+        sent.advance(Event::Iterate).unwrap();
+        assert!(
+            matches!(sent.stage(), Stage::Coding { .. }),
+            "{rigor}: {:?}",
+            sent.stage()
+        );
+    }
+}
+
+/// A report whose findings carry no severity is treated as blocking, as it
+/// always was: no ranking is no licence.
+#[test]
+fn a_report_whose_findings_carry_no_severity_is_sent_back_as_today() {
+    let mut flow = on_findings(Rigor::Standard, None);
+    assert_eq!(flow.rigor_refuses(), None);
+    flow.advance(Event::Iterate).unwrap();
+    assert!(matches!(flow.stage(), Stage::Coding { .. }));
+}
+
+/// At `critical`, round 1 sends any finding back; from round 2 on, a report
+/// with no `HIGH` is refused like at `standard`.
+#[test]
+fn at_critical_round_one_sends_any_finding_back_and_round_two_refuses_a_medium() {
+    let mut flow = on_findings(Rigor::Critical, Some(Severity::Low));
+    flow.advance(Event::Iterate).unwrap();
+    flow.advance(finished(true)).unwrap();
+    flow.advance(Event::GatesPassed).unwrap();
+    assert_eq!(flow.stage(), &Stage::SecurityAgent { attempt: 1 });
+    flow.rank(Some(Severity::Medium));
+    flow.advance(findings(2)).unwrap();
+
+    assert_eq!(
+        flow.advance(Event::Iterate).unwrap_err(),
+        FlowError::RigorRefuses(Departure::ReportNotBlocking {
+            rigor: Rigor::Critical,
+            round: 2,
+            worst: Severity::Medium,
+        })
+    );
+    flow.advance(overridden("round 2 regressed the fix"))
+        .unwrap();
+    assert_eq!(flow.volets(), 2);
+}
+
+/// The rank is the verdict's it was read for, and no other's: a later
+/// `FINDINGS` nobody ranked is unranked — hence blocking — rather than
+/// ranked as the one before it, and a `CLEAR` clears it.
+#[test]
+fn a_rank_is_taken_by_the_one_verdict_it_was_read_for() {
+    let mut flow = on_findings(Rigor::Critical, Some(Severity::Low));
+    assert_eq!(flow.findings_worst(), Some(Severity::Low));
+    flow.advance(Event::Iterate).unwrap();
+    flow.advance(finished(true)).unwrap();
+    flow.advance(Event::GatesPassed).unwrap();
+    flow.advance(findings(2)).unwrap();
+    assert_eq!(flow.findings_worst(), None);
+    assert_eq!(flow.rigor_refuses(), None, "round 2, unranked: it blocks");
+
+    // Ranked, then a CLEAR: the rank does not wait for the next FINDINGS.
+    flow.advance(Event::Iterate).unwrap();
+    flow.advance(finished(true)).unwrap();
+    flow.advance(Event::GatesPassed).unwrap();
+    flow.rank(Some(Severity::Info));
+    flow.advance(verdict(Verdict::Clear)).unwrap();
+    assert_eq!(flow.findings_worst(), None);
+}
+
+/// The worst severity is kept with the state: a mission written to disk on
+/// `Findings` and read back is refused the same way.
+#[test]
+fn the_rank_of_the_report_survives_a_write_of_the_state() {
+    let flow = on_findings(Rigor::Standard, Some(Severity::Low));
+    let back: Flow = serde_json::from_str(&serde_json::to_string(&flow).unwrap()).unwrap();
+    assert_eq!(back.findings_worst(), Some(Severity::Low));
+    assert!(back.rigor_refuses().is_some());
+}
+
+/// A verified mission sent back on review counts as a volet like any other,
+/// and at `standard` a second one needs `--override`. At `critical`, the
+/// rigor does not bound reviews.
+#[test]
+fn a_second_review_at_standard_is_refused_without_an_override() {
+    let mut flow = at(Rigor::Standard, none());
+    code_through(&mut flow);
+    flow.advance(Event::GatesPassed).unwrap();
+    flow.rank(Some(Severity::High));
+    flow.advance(findings(1)).unwrap();
+    flow.advance(Event::HumanAccepted).unwrap();
+    assert_eq!(flow.stage(), &Stage::Verified);
+    assert_eq!(
+        flow.rigor_refuses(),
+        None,
+        "the first review is the rigor's"
+    );
+    assert_eq!(
+        flow.advance(overridden("nothing to set aside"))
+            .unwrap_err(),
+        FlowError::NothingToOverride
+    );
+
+    flow.advance(Event::Reviewed {
+        because: "rename it".into(),
+    })
+    .unwrap();
+    assert_eq!(flow.volets(), 1, "a review is a volet");
+    assert_eq!(flow.reviews(), 1);
+    flow.advance(finished(true)).unwrap();
+    flow.advance(Event::GatesPassed).unwrap();
+    assert_eq!(flow.stage(), &Stage::Verified);
+
+    let before = flow.clone();
+    assert_eq!(
+        flow.advance(Event::Reviewed {
+            because: "and this".into(),
+        })
+        .unwrap_err(),
+        FlowError::RigorRefuses(Departure::AnotherReview {
+            rigor: Rigor::Standard,
+            reviews: 1,
+        })
+    );
+    assert_eq!(flow, before);
+
+    flow.advance(overridden("the rename broke the API"))
+        .unwrap();
+    match flow.stage() {
+        Stage::Coding {
+            work: Work::Volet { n: 2, cause },
+            ..
+        } => assert_eq!(cause, "HQ review: the rename broke the API"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(flow.reviews(), 2);
+    assert_eq!(flow.overrides().len(), 1);
+
+    // At `critical`, two reviews in a row need nothing.
+    let mut flow = at(Rigor::Critical, none());
+    code_through(&mut flow);
+    flow.advance(Event::GatesPassed).unwrap();
+    flow.advance(verdict(Verdict::Clear)).unwrap();
+    the_final_campaign_passes(&mut flow);
+    for n in 1..=2 {
+        flow.advance(Event::Reviewed {
+            because: format!("review {n}"),
+        })
+        .unwrap();
+        flow.advance(finished(true)).unwrap();
+        flow.advance(Event::GatesPassed).unwrap();
+        if matches!(flow.stage(), Stage::SecurityAgent { .. }) {
+            flow.advance(verdict(Verdict::Clear)).unwrap();
+        }
+        the_final_campaign_passes(&mut flow);
+    }
+    assert_eq!(flow.reviews(), 2);
+}
+
+/// A `CLEAR` drops the rank of the report before it and any rank read for
+/// it: after a review, the next `FINDINGS` nobody ranked is unranked, and
+/// blocks, rather than inheriting a severity from a verdict that was green.
+#[test]
+fn a_clear_drops_every_rank_and_the_next_unranked_findings_blocks() {
+    let mut flow = on_findings(Rigor::Critical, Some(Severity::Low));
+    flow.advance(Event::Iterate).unwrap();
+    flow.advance(finished(true)).unwrap();
+    flow.advance(Event::GatesPassed).unwrap();
+    assert_eq!(flow.findings_worst(), Some(Severity::Low));
+    flow.rank(Some(Severity::Info));
+    flow.advance(verdict(Verdict::Clear)).unwrap();
+    assert_eq!(flow.findings_worst(), None, "the old report's rank is gone");
+    the_final_campaign_passes(&mut flow);
+
+    flow.advance(Event::Reviewed {
+        because: "one more thing".into(),
+    })
+    .unwrap();
+    flow.advance(finished(true)).unwrap();
+    flow.advance(Event::GatesPassed).unwrap();
+    assert_eq!(flow.stage(), &Stage::SecurityAgent { attempt: 1 });
+    flow.advance(findings(3)).unwrap();
+    assert_eq!(flow.findings_worst(), None);
+    assert_eq!(flow.rigor_refuses(), None, "unranked at round 3: it blocks");
 }

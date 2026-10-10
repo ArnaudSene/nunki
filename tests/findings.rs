@@ -425,3 +425,43 @@ fn a_clear_contradicts_itself_only_when_it_lists_or_garbles_findings() {
         );
     }
 }
+
+/// The worst severity of a report is what the rigor reads when the HQ sends
+/// it back. It is given only when every finding carries one `nunki` reads;
+/// anything else is `None`, which blocks, as a report always did.
+#[test]
+fn a_reports_worst_severity_is_read_only_when_every_finding_carries_one() {
+    let ranked = |findings: &str| verdict_with("FINDINGS", Some(findings)).worst();
+    assert_eq!(
+        ranked(
+            r#"[{"severity":"LOW","title":"a"},{"severity":"MEDIUM","title":"b"},{"severity":"INFO","title":"c"}]"#
+        ),
+        Some(Severity::Medium)
+    );
+    assert_eq!(
+        ranked(r#"[{"severity":"MEDIUM","title":"a"},{"severity":"HIGH","title":"b"}]"#),
+        Some(Severity::High)
+    );
+    assert_eq!(
+        ranked(r#"[{"severity":"INFO","title":"a"}]"#),
+        Some(Severity::Info)
+    );
+    // One finding without a severity, or with one spelled otherwise, leaves
+    // the whole report unranked.
+    assert_eq!(
+        ranked(r#"[{"severity":"LOW","title":"a"},{"title":"b"}]"#),
+        None
+    );
+    assert_eq!(
+        ranked(r#"[{"severity":"LOW","title":"a"},{"severity":"high","title":"b"}]"#),
+        None
+    );
+    assert_eq!(ranked("[]"), None);
+    assert_eq!(ranked(r#""not a list""#), None);
+    assert_eq!(verdict_with("FINDINGS", None).worst(), None);
+    // A CLEAR ranks nothing: there is no report to send back.
+    assert_eq!(
+        verdict_with("CLEAR", Some(r#"[{"severity":"HIGH","title":"a"}]"#)).worst(),
+        None
+    );
+}

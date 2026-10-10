@@ -145,6 +145,10 @@ pub enum Retaken<'a> {
     /// A bound ran out — `was` says which, in one clause — and the retry
     /// hands it back whole.
     Bound { was: &'a str },
+    /// The volets ran out. They are counted over the mission's life, so
+    /// the retry grants one — volet `n` of a cap of `cap` — and never the
+    /// cap again.
+    Volet { n: u32, cap: u32 },
     /// The coder awaited the HQ's ruling on `survivors` at `asked` of `of`
     /// attempts. A ruling is not a bound, so none is handed back: the lot
     /// resumes at the next attempt.
@@ -180,8 +184,9 @@ pub enum Retaken<'a> {
 /// the whole point of the verb.
 ///
 /// What it says about the bounds depends on what stopped the mission, and is
-/// read by the next run as a statement of fact: only a bound is handed back
-/// whole, never a ruling.
+/// read by the next run as a statement of fact: attempts are handed back
+/// whole, volets one at a time (the HQ grants each, dated, with its reason),
+/// and a ruling hands nothing back.
 pub fn retried(file: &Path, who: &str, why: &str, taken: &Retaken) -> Result<(), FollowupError> {
     let head = format!(
         "## {date} \u{2014} {who} took this mission back",
@@ -196,6 +201,13 @@ pub fn retried(file: &Path, who: &str, why: &str, taken: &Retaken) -> Result<(),
     let body = match taken {
         Retaken::Bound { was } => format!(
             "It had stopped on its own bounds: {was}. They are handed back whole, and this is what changed since:"
+        ),
+        // The grant and its reason on one line, so that a reader counting
+        // how far past its cap a mission went finds each grant whole.
+        Retaken::Volet { n, cap } => format!(
+            "It had stopped on its own bounds: its volets were spent. Volets are counted over \
+             the mission's life, and a retry grants one, not the cap again: the next red \
+             verdict hands the mission back.\n\nVolet {n} of {cap}, granted by the HQ: {why}"
         ),
         Retaken::Ruling {
             lot,
@@ -232,10 +244,16 @@ pub fn retried(file: &Path, who: &str, why: &str, taken: &Retaken) -> Result<(),
              again. What changed since:"
         ),
     };
+    // A grant carries its reason in its own line; every other record asks
+    // the question and gives the answer its own paragraph.
+    let body = match taken {
+        Retaken::Volet { .. } => body,
+        _ => format!("{body}\n\n{why}"),
+    };
     append(
         file,
         &format!(
-            "{head}\n\n{body}\n\n{why}\n\nRead it before the journal. Nothing in the tree moved on its own.\n"
+            "{head}\n\n{body}\n\nRead it before the journal. Nothing in the tree moved on its own.\n"
         ),
     )
 }
@@ -253,6 +271,23 @@ pub fn reviewed(file: &Path, who: &str, why: &str) -> Result<(), FollowupError> 
              **What to change:** {why}\n\n\
              This is a volet: change what is asked, prove it as for any lot, and\n\
              the verification runs again from the gates.\n",
+            date = today(),
+        ),
+    )
+}
+
+/// The HQ set the mission's rigor aside to send it back, and said why
+/// (SPEC 4.5): written, dated, as a departure from the rigor, so that
+/// whoever reads the follow-up sees how often the rule was set aside and
+/// on what grounds. `departure` is what the rigor said, as
+/// [`crate::mission::flow::Departure`] says it.
+pub fn overridden(file: &Path, who: &str, departure: &str, why: &str) -> Result<(), FollowupError> {
+    append(
+        file,
+        &format!(
+            "## {date} — {who} departed from the rigor\n\n\
+             The rigor says: {departure}. The HQ sends the mission back all the same.\n\n\
+             **Why:** {why}\n",
             date = today(),
         ),
     )

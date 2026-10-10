@@ -389,8 +389,11 @@ enum MissionCommand {
     /// Take a mission back from a handover, and say what changed.
     ///
     /// Every handover is a bound running out — a lot's attempts, a role's, or
-    /// the returns to the coder. This hands the bounds back whole and puts
-    /// the mission on the work it stopped on. A lot that awaited your ruling
+    /// the returns to the coder. This puts the mission on the work it stopped
+    /// on, and hands a lot's or a role's attempts back whole. The returns to
+    /// the coder are counted over the mission's life: on spent volets it
+    /// grants one more, written with your reason in FOLLOWUP_HQ.md, and the
+    /// next red verdict hands the mission back again. A lot that awaited your ruling
     /// on survivors is no bound: it resumes at its next attempt, once you
     /// have ruled. A mission you called off yourself is not a handover, and
     /// is refused.
@@ -524,13 +527,23 @@ enum MissionCommand {
 
     /// Send the mission back to the coder, as a volet: a `FINDINGS` verdict,
     /// or a verified branch the HQ refuses on review, with `--because`.
+    ///
+    /// Bound by the mission's rigor: a report with no HIGH (at `standard`,
+    /// and at `critical` from the second round on) is not sent back, nor a
+    /// `standard` mission reviewed a second time — unless `--override`.
     Iterate {
         /// The mission.
         id: String,
         /// What the review refuses, for a verified mission. It is what the
-        /// coder reads, in `FOLLOWUP_HQ.md`, and the volet's cause.
+        /// coder reads, in `FOLLOWUP_HQ.md`, and the volet's cause. With
+        /// `--override`, why the rigor is set aside.
         #[arg(long = "because", value_name = "WHAT")]
         because: Option<String>,
+        /// Send it back although the rigor says not to. Needs `--because`,
+        /// written, dated, in `FOLLOWUP_HQ.md` as a departure from the rigor
+        /// and listed by `mission status` and in the pull request.
+        #[arg(long = "override", requires = "because")]
+        overriding: bool,
     },
 
     /// Start the mutation campaign, or say where the one in flight is
@@ -2021,9 +2034,13 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
         MissionCommand::Retry { id, why } => match nunki::lifecycle::retry(project, &id, &why) {
             Ok(state) => {
                 println!("retried   {:?}", state.flow.stage());
-                println!("          the bounds are handed back whole");
+                // What it handed back depends on the handover — attempts
+                // whole, one volet, nothing for a ruling — and the record
+                // says which; the count is said here whatever it was.
+                println!("volets    {}", state.flow.volets_said());
                 println!(
-                    "          written to FOLLOWUP_HQ.md; `nunki verify {id}` launches the run"
+                    "          what it hands back is written to FOLLOWUP_HQ.md; `nunki verify \
+                     {id}` launches the run"
                 );
                 start_monitor(project, &id);
                 ExitCode::SUCCESS
@@ -2205,10 +2222,23 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             }
         }
 
-        MissionCommand::Iterate { id, because } => {
-            match nunki::findings::iterate(project, &id, because.as_deref()) {
+        MissionCommand::Iterate {
+            id,
+            because,
+            overriding,
+        } => {
+            let sent = match (overriding, because.as_deref()) {
+                (true, Some(why)) => nunki::findings::iterate_overriding(project, &id, why),
+                (_, because) => nunki::findings::iterate(project, &id, because),
+            };
+            match sent {
                 Ok(state) => {
                     println!("stage     {:?}", state.flow.stage());
+                    if overriding {
+                        println!(
+                            "override  written to FOLLOWUP_HQ.md as a departure from the rigor"
+                        );
+                    }
                     println!("          `nunki verify {id}` plays it from there");
                     ExitCode::SUCCESS
                 }
@@ -2706,6 +2736,12 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                     if let nunki::mission::flow::Stage::AwaitingHuman(handover) = state.flow.stage()
                     {
                         println!("handover  {}", handover.line(&id));
+                    }
+                    println!("volets    {}", state.flow.volets_said());
+                    // Every time the HQ set the rigor aside, with its reason:
+                    // how often the rule gave way is part of the mission.
+                    for said in nunki::push::overrides_said(state.flow.overrides()) {
+                        println!("override  {said}");
                     }
                     println!(
                         "security rounds: {} / {}{}",

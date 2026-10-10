@@ -57,6 +57,24 @@ pub enum FindingsError {
     NoReview,
     #[error("nunki does not know who you are: `nunki whoami` says where it looks")]
     NoHuman,
+    /// The rigor does not send the mission back from here (SPEC 4.5); the
+    /// message names the ways on, `accept` first where there is a report.
+    #[error("{}", rigor_refused(mission, departure, *on_review))]
+    RigorRefuses {
+        mission: String,
+        departure: crate::mission::flow::Departure,
+        on_review: bool,
+    },
+    #[error(
+        "the rigor already lets mission {mission} be sent back, so there is nothing to \
+         override — `nunki mission iterate {mission}` without --override"
+    )]
+    NothingToOverride { mission: String },
+    #[error(
+        "setting the rigor aside without a reason is not a decision anyone can read — say \
+         why with `--because`"
+    )]
+    NoOverrideReason,
     #[error(transparent)]
     State(#[from] crate::state::StateError),
     #[error(transparent)]
@@ -214,10 +232,36 @@ pub fn lifted_by_nunki(accepted: &Accepted) -> Vec<String> {
 /// the HQ reads the code, and its answer is the iteration loop): `because`
 /// is then required, is written to `FOLLOWUP_HQ.md` where the coder reads it,
 /// and becomes the volet's cause.
+///
+/// Bound by the mission's rigor ([`crate::mission::flow::Flow::rigor_refuses`]):
+/// a report the rigor does not count as blocking, or a review past the one
+/// `standard` allows, is refused, and the refusal names the two ways on —
+/// `accept`, and [`iterate_overriding`].
 pub fn iterate(
     project: &Project,
     id: &str,
     because: Option<&str>,
+) -> Result<MissionState, FindingsError> {
+    send_back(project, id, because, false)
+}
+
+/// [`iterate`] past what the rigor refuses, with the reason the HQ sets it
+/// aside: written, dated, in `FOLLOWUP_HQ.md` as a departure from the
+/// rigor, and kept in the flow for `mission status` and the pull request.
+/// Refused where the rigor refuses nothing.
+pub fn iterate_overriding(
+    project: &Project,
+    id: &str,
+    because: &str,
+) -> Result<MissionState, FindingsError> {
+    send_back(project, id, Some(because), true)
+}
+
+fn send_back(
+    project: &Project,
+    id: &str,
+    because: Option<&str>,
+    overriding: bool,
 ) -> Result<MissionState, FindingsError> {
     let store = Store::open(&project.hq_root)?;
     let mut state = load(&store, id)?;
@@ -227,31 +271,59 @@ pub fn iterate(
         "mission iterate",
     )?;
     let because = because.map(str::trim).filter(|b| !b.is_empty());
-    match state.flow.stage() {
-        Stage::Findings { .. } => {
-            store.apply(&mut state, Event::Iterate)?;
-        }
-        // The HQ read the verified branch and refuses part of it. The reason
-        // is what the coder is sent back with, so a review without one is
-        // refused rather than turned into a volet nobody can act on.
-        Stage::Verified => {
-            let because = because.ok_or(FindingsError::NoReview)?;
-            let paths = Paths::of(&project.hq_root, id);
-            let who = crate::human::me(&project.nunki_home(), Some(&project.root)).addressed();
-            crate::followup::reviewed(&paths.followup, &who, because)?;
-            store.apply(
-                &mut state,
-                Event::Reviewed {
-                    because: because.to_string(),
-                },
-            )?;
-        }
+    let on_review = match state.flow.stage() {
+        Stage::Findings { .. } => false,
+        Stage::Verified => true,
         stage => {
             return Err(FindingsError::NotOnFindings {
                 mission: id.to_string(),
                 stage: stage.clone(),
             });
         }
+    };
+    // Said before anything is written: a refused verb leaves no record.
+    let refused = state.flow.rigor_refuses();
+    let paths = Paths::of(&project.hq_root, id);
+    let who = || crate::human::me(&project.nunki_home(), Some(&project.root)).addressed();
+    if overriding {
+        let because = because.ok_or(FindingsError::NoOverrideReason)?;
+        let departure = refused.ok_or(FindingsError::NothingToOverride {
+            mission: id.to_string(),
+        })?;
+        crate::followup::overridden(&paths.followup, &who(), &departure.to_string(), because)?;
+        if on_review {
+            crate::followup::reviewed(&paths.followup, &who(), because)?;
+        }
+        store.apply(
+            &mut state,
+            Event::Overridden {
+                because: because.to_string(),
+                date: crate::state::now_rfc3339(),
+            },
+        )?;
+        return Ok(state);
+    }
+    if let Some(departure) = refused {
+        return Err(FindingsError::RigorRefuses {
+            mission: id.to_string(),
+            departure,
+            on_review,
+        });
+    }
+    if on_review {
+        // The HQ read the verified branch and refuses part of it. The reason
+        // is what the coder is sent back with, so a review without one is
+        // refused rather than turned into a volet nobody can act on.
+        let because = because.ok_or(FindingsError::NoReview)?;
+        crate::followup::reviewed(&paths.followup, &who(), because)?;
+        store.apply(
+            &mut state,
+            Event::Reviewed {
+                because: because.to_string(),
+            },
+        )?;
+    } else {
+        store.apply(&mut state, Event::Iterate)?;
     }
     Ok(state)
 }
@@ -677,4 +749,30 @@ pub fn lift_equivalent(
         }
         Ok(crate::equivalences::Registered::Done(removed))
     })
+}
+
+/// What a refusal by the rigor says: what it refuses, and the ways on, each
+/// spelled for `mission`. On a report, `accept` comes first — the finding is
+/// written down as accepted, which is what the rigor expects of a report
+/// that does not block — then the override, which is written down as a
+/// departure.
+fn rigor_refused(
+    mission: &str,
+    departure: &crate::mission::flow::Departure,
+    on_review: bool,
+) -> String {
+    let overriding = format!("`nunki mission iterate {mission} --override --because <why>`");
+    if on_review {
+        format!(
+            "{departure}. Push it as it is (`nunki push {mission} --yes`), or send it back \
+             all the same with {overriding}, written in FOLLOWUP_HQ.md as a departure from \
+             the rigor"
+        )
+    } else {
+        format!(
+            "{departure}. Lift it with `nunki mission accept {mission} --because <why>`, \
+             written as accepted, or send it back all the same with {overriding}, written in \
+             FOLLOWUP_HQ.md as a departure from the rigor"
+        )
+    }
 }

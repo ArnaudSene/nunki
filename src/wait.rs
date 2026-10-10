@@ -312,33 +312,51 @@ fn settled(id: &str, state: &MissionState) -> Option<Status> {
             });
         }
         Stage::Findings { report } => {
+            let found = format!(
+                "security round {} of {} found: {}",
+                flow.security_rounds(),
+                flow.max_security_rounds(),
+                brief(report, REPORT_CHARS)
+            );
+            // A report the rigor does not count as blocking says so, and
+            // names `accept` first: `iterate` alone would be refused.
+            let (detail, what) = match flow.rigor_refuses() {
+                Some(departure) => (
+                    format!("{found} — it does not block: {departure}"),
+                    format!(
+                        "`nunki mission accept {id} --because <why>` lifts it, or \
+                         `nunki mission iterate {id} --override --because <why>` sends it \
+                         back as a departure from the rigor"
+                    ),
+                ),
+                None => (
+                    found,
+                    format!(
+                        "`nunki mission iterate {id}` sends it back to the coder, or \
+                         `nunki mission accept {id} --because <why>` lifts it"
+                    ),
+                ),
+            };
             return Some(Status::new(
                 id,
                 stage,
-                format!(
-                    "security round {} of {} found: {}",
-                    flow.security_rounds(),
-                    flow.max_security_rounds(),
-                    brief(report, REPORT_CHARS)
-                ),
+                detail,
                 "the HQ",
-                format!(
-                    "`nunki mission iterate {id}` sends it back to the coder, or \
-                     `nunki mission accept {id} --because <why>` lifts it"
-                ),
+                what,
                 Stop::Findings,
             ));
         }
         Stage::AwaitingHuman(handover) => {
             let (who, what) = handover.awaits(id);
-            return Some(Status::new(
-                id,
-                stage,
-                handover.detail(),
-                who,
-                what,
-                Stop::Handover,
-            ));
+            // The handover lists the causes; the count against the cap is
+            // the flow's, which knows the cap and what the HQ granted.
+            let detail = match handover {
+                crate::mission::flow::Handover::VoletsExhausted { .. } => {
+                    format!("volets {} — {}", flow.volets_said(), handover.detail())
+                }
+                _ => handover.detail(),
+            };
+            return Some(Status::new(id, stage, detail, who, what, Stop::Handover));
         }
         _ => {}
     }

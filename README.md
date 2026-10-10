@@ -260,11 +260,17 @@ the turn in progress too), `nunki mission resume m1` lifts the hold,
 
 When a bound runs out — a lot's attempts, a role's, or the returns to the
 coder — `nunki` stops and hands the mission to you. `nunki mission retry m1
---because "what changed"` takes it back, on the work it stopped on, with the
-bounds handed back whole. The reason is required and it is not paperwork: the
-tree and the cause have not moved on their own, so the next run reads it
-before anything else. A mission you called off yourself with `mission end` is
-a decision, not a bound, and is refused.
+--because "what changed"` takes it back, on the work it stopped on. A lot's or
+a role's attempts are handed back whole. The returns to the coder are not:
+they are counted over the mission's whole life, so a retry on spent volets
+grants **one** — written, dated, in `FOLLOWUP_HQ.md` as "Volet 4 of 3, granted
+by the HQ: <why>" — and the next red verdict hands the mission back again.
+`mission status` prints `volets    4 / 3 (1 granted by the HQ)`, so how far past
+its cap a mission went is never a guess. A retry from any other handover
+leaves the volet count alone. The reason is required and it is not
+paperwork: the tree and the cause have not moved on their own, so the next
+run reads it before anything else. A mission you called off yourself with
+`mission end` is a decision, not a bound, and is refused.
 
 ### Following a mission
 
@@ -283,6 +289,13 @@ and who it waits on —
 
 ```text
 m1 · findings · security round 1 of 1 found: … · awaits the HQ: `nunki mission iterate m1` sends it back to the coder, or `nunki mission accept m1 --because <why>` lifts it
+```
+
+A report the rigor does not count as blocking says so, and names `accept`
+first:
+
+```text
+m1 · findings · security round 1 of 1 found: … — it does not block: at standard, security round 1, a report whose worst finding is MEDIUM does not block — only a HIGH does · awaits the HQ: `nunki mission accept m1 --because <why>` lifts it, or `nunki mission iterate m1 --override --because <why>` sends it back as a departure from the rigor
 ```
 
 and exits with a code that says which stop it is:
@@ -522,6 +535,20 @@ where `mission accept` lifts them or `mission iterate` spends a volet, and
 lifted: a later review whose volet comes through the gates green is verified
 without bringing it back. `nunki mission status` prints the rigor and the rounds played.
 
+The rigor binds the HQ's verbs too, not only the agents. `mission iterate`
+on a `FINDINGS` is refused when the rigor says the report does not block:
+at `standard`, a report with no `HIGH`; at `critical`, from the second
+round on, a report with no `HIGH`. A report whose findings carry no
+severity blocks, as it always did. The refusal names the two ways on:
+`mission accept --because` (the finding is written as accepted), or
+`mission iterate --override --because <why>`, written, dated, in
+`FOLLOWUP_HQ.md` as a departure from the rigor. A verified mission sent
+back on review (`mission iterate --because`) spends a volet like any other,
+and at `standard` a second review needs `--override` as well. `mission
+status` lists every override with its reason, and `nunki push` adds them to
+the pull request under "Departures from the rigor", so a reader sees how
+often the rigor was set aside.
+
 `nunki push` asks for a security verdict on the branch's `HEAD` while a round
 is left. Once the rounds are spent, no verdict can come on a later commit, so
 the last one stands for the commits after it: a `CLEAR` as it is, a `FINDINGS`
@@ -592,7 +619,9 @@ MISSION  (one branch off its base, one slot)
   Only the coder has lots.
 - **Volet** — unplanned coder work, opened by a red verdict (the integrator's
   `BROKEN`, the security agent's `FINDINGS`, or red final gates). Named
-  `volet-1`, `volet-2`…, bounded by `max_volets` (3 by default). After a
+  `volet-1`, `volet-2`…, bounded by `max_volets` (3 by default), counted
+  over the mission's life: past the cap, each further volet is one a
+  `retry` granted, and numbered on (`volet-4`, `volet-5`…). After a
   volet every later stage is replayed while rounds are left, because a
   verdict is worth one commit and no other; once the security rounds are
   spent, the last verdict stands for the commits after it (see "Choosing a
