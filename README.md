@@ -939,7 +939,11 @@ reset` clears the volumes while keeping the clone: it takes the slot's
 containers down first — an engine will not remove a volume a container still
 mounts — through a call that never removes a volume, then removes the slot's
 named volumes by name, and says any it could not. It refuses while a run or a
-mutation campaign is in flight in the slot.
+mutation campaign is in flight in the slot. It refuses too when the state of a
+mission not archived cannot be read, since it then cannot tell whether that
+mission runs there: it names the file and why, and changes nothing. Repair
+the file, or, for a mission that is over, move its state file aside: the
+mission then reads as never started, and `nunki mission archive` closes it.
 
 Finally, the binary and the accounts, once no project uses them:
 
