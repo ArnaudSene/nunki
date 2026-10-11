@@ -523,7 +523,7 @@ par un adaptateur (4.3), et le moteur de conteneurs que par un autre.
 | `nunki mission new/start/reframe/status/say/watch/pause/resume/stop/kill/end/accept/iterate/fetch/archive` | le cycle d'une mission, du cadrage au rapatriement des commits ; `say` dépose une consigne pour le **run suivant**, `watch` rend deux états (tourne, fini) plus un troisième que l'humain provoque (gelé), `stop` termine le run proprement (4.3), **`end` déclare la mission abandonnée** |
 | `nunki exec <slot> <cmd>` | joue une commande dans le conteneur du slot — c'est ainsi que le HQ **rejoue une preuve** sans avoir la stack sur l'hôte. Par défaut sur la **copie git propre de `HEAD`** que la porte 7 utilise, pas sur l'arbre que l'agent a habité : un `Makefile`, un `pytest.ini` ou un alias `cargo` posé par l'agent y tromperait la preuve. Jamais pendant un run sur l'arbre de travail. Un slot dont les conteneurs sont arrêtés est d'abord relevé avec le profil que le dernier lancement a écrit — sans quoi chaque porte jouée dans la copie reste injouée, et le run suivant, qui n'est lancé qu'une fois ces portes jouées, ne part jamais |
 | `nunki verify <mission>` | les portes de vérification sur la mission du codeur, puis enchaîne la mission d'intégration, puis la mission de sécurité, chacune avec ses portes ; à la première rouge, applique les règles d'itération (4.5) ; à la fin, rend la main à l'humain pour la validation du push. **Reprenable** : son état est persisté à chaque transition, et le relancer reprend au même point |
-| `nunki push <mission>` | après validation humaine explicite (un argument, pas un dialogue), pousse la branche depuis le dépôt principal et ouvre la pull request. C'est le seul verbe qui touche la forge en écriture, et il refuse sans `INTEGRATED` et `CLEAR` sur le dernier commit et le verdict du codeur sur son ancêtre (4.4). Il parle à l'API de la forge avec un credential de l'humain, rangé à côté des comptes (`~/.nunki/forge-token`, un jeton GitHub qui peut ouvrir des pull requests) et jamais monté dans un conteneur — un conteneur ne voit du HQ que son propre dossier de mission, un niveau plus bas. **Le même `--yes` couvre le push et l'ouverture** : un verbe, un argument. Titre et corps viennent du `PR.md` de la mission (la première ligne qui dit quelque chose est le titre) ; une pull request déjà ouverte pour la branche — second push après un volet — est retrouvée, pas signalée en échec. Sans credential, sur une remote dont la forge n'a pas d'adaptateur, ou si la forge refuse, **le push reste fait** et `nunki` rend l'adresse exacte à ouvrir avec la raison : un push rapporté rouge serait relancé, et le second `git push` ne ferait rien qu'effacer la trace du premier. **Un adaptateur par forge**, comme il y en a un par harnais (4.3) et un par moteur de conteneurs (4.2) : ce qui est propre à une forge — l'adresse de son API, la forme de ses requêtes, la façon dont une remote nomme un dépôt — vit dans son adaptateur, et rien au-dessus ne le connaît. GitHub est le seul implémenté ; une remote ailleurs est **dite ailleurs, jamais devinée**, et ajouter GitLab est un fichier à écrire, pas un remaniement. Client HTTP : `ureq` ; ses racines de confiance sont celles de Mozilla, embarquées (`webpki-roots`, données sous CDLA-Permissive-2.0, exception écrite dans `deny.toml` pour cette seule crate) — un proxy d'entreprise qui re-signe le TLS serait la raison d'y revenir |
+| `nunki push <mission>` | après validation humaine explicite (un argument, pas un dialogue), pousse la branche depuis le dépôt principal et ouvre la pull request. C'est le seul verbe qui touche la forge en écriture, et il refuse sans `INTEGRATED` et `CLEAR` sur le dernier commit et le verdict du codeur sur son ancêtre (4.4). Il parle à l'API de la forge avec un credential de l'humain, rangé à côté des comptes (`~/.nunki/forge-token`, un jeton GitHub qui peut ouvrir des pull requests) et jamais monté dans un conteneur — un conteneur ne voit du HQ que son propre dossier de mission, un niveau plus bas. **Le même `--yes` couvre le push et l'ouverture** : un verbe, un argument. Titre et corps viennent du `PR.md` de la mission (la première ligne qui dit quelque chose est le titre) ; sur un `FINDINGS` levé, la section `Security` du corps est remplacée par une note, sans toucher `PR.md` (4.5) ; une pull request déjà ouverte pour la branche — second push après un volet — est retrouvée, pas signalée en échec. Sans credential, sur une remote dont la forge n'a pas d'adaptateur, ou si la forge refuse, **le push reste fait** et `nunki` rend l'adresse exacte à ouvrir avec la raison : un push rapporté rouge serait relancé, et le second `git push` ne ferait rien qu'effacer la trace du premier. **Un adaptateur par forge**, comme il y en a un par harnais (4.3) et un par moteur de conteneurs (4.2) : ce qui est propre à une forge — l'adresse de son API, la forme de ses requêtes, la façon dont une remote nomme un dépôt — vit dans son adaptateur, et rien au-dessus ne le connaît. GitHub est le seul implémenté ; une remote ailleurs est **dite ailleurs, jamais devinée**, et ajouter GitLab est un fichier à écrire, pas un remaniement. Client HTTP : `ureq` ; ses racines de confiance sont celles de Mozilla, embarquées (`webpki-roots`, données sous CDLA-Permissive-2.0, exception écrite dans `deny.toml` pour cette seule crate) — un proxy d'entreprise qui re-signe le TLS serait la raison d'y revenir |
 | `nunki check [--mission <id>]` | dit si un dépôt, ses slots et leurs conteneurs sont dans l'état que ce fichier décrit ; rouge si une restriction n'est pas tenue ; sonde le profil mission sans argument, et le profil système d'une mission donnée avec `--mission` ; **dit ce qu'il n'a pas pu vérifier** (la forge sans credential ou quand l'humain tient la protection à la main, LF quand un `.gitattributes` existant ne le force pas) |
 | `nunki logs <mission>` | rend la sortie structurée des runs, lisible |
 
@@ -573,7 +573,20 @@ travail en cours et les **volumes nommés** du slot. C'est la vraie raison
 d'y toucher : un cache de compilation ou un répertoire d'état de harnais
 devenu mauvais survit à toutes les reconstructions d'image, et rien d'autre
 ne l'atteint. Il refuse sur les mêmes bases que `rm`, et tant qu'un run ou
-une campagne de mutation est en vol dans le slot. **Le moteur refuse de
+une campagne de mutation est en vol dans le slot. **Un état qui ne se lit pas
+n'est pas un état qui dit que rien ne tourne** : le reset refuse aussi quand
+l'état d'une mission non archivée ne se lit pas, ou quand le magasin d'état
+ne s'ouvre pas, puisqu'il ne peut alors pas dire si cette mission tourne
+dans le slot. Il nomme le fichier et la raison, et ne change rien : ni
+l'arbre, ni un conteneur, ni un volume. Une mission cadrée et jamais démarrée
+n'a pas d'état, et se lit toujours comme rien en vol. Seules les missions non
+archivées comptent, pour qu'un vieux fichier cassé ne bloque pas tous les
+resets pour toujours ; le message dit comment passer : réparer le fichier,
+ou, pour une mission terminée, écarter son fichier d'état — elle se lit
+alors comme jamais démarrée, et `nunki mission archive` la clôt. La limite,
+écrite : l'état illisible d'une mission non archivée bloque le reset de
+**tous** les slots du projet, parce que le slot où elle tournait est dans le
+fichier qui ne se lit pas. **Le moteur refuse de
 supprimer un volume qu'un conteneur monte**, et un reset qui avalait ce refus
 comme « aucun volume de ce nom » laissait les caches en place. Le reset
 descend donc d'abord les conteneurs du slot — les conteneurs seulement,
@@ -1593,6 +1606,34 @@ dernier lot. La première rouge arrête tout.
    La campagne Rust ne lit **aucune configuration de l'arbre qu'elle mute**
    (`cargo mutants --no-config`).
 
+   **Une campagne ne perd pas un survivant qu'elle a trouvé.** La ligne de
+   fin peut porter un compte de plus, `"missed":K` : le nombre de survivants
+   que l'outil a rapportés. Il vient **du compte que l'outil tient lui-même**,
+   jamais des lignes que le script imprime ni de celles qu'il a lues pour les
+   imprimer : un compte tiré des mêmes lignes s'accorde toujours avec elles.
+   Quand il est là, `nunki` le compare aux lignes de survivants qu'il a lues,
+   et une campagne où les deux diffèrent, **dans un sens ou dans l'autre**,
+   n'a pas mesuré : moins de lignes, c'est un survivant perdu ; plus, c'est
+   une ligne que quelque chose d'autre a écrite. Elle prend le chemin de la
+   campagne qui n'a rien mesuré : rien n'est enregistré, la porte 7 est rouge
+   avec les deux nombres, et `nunki push` n'a rien pour répondre. Sans ce
+   compte, la ligne est lue comme avant. Sur plusieurs stacks, chaque compte
+   est comparé aux lignes de sa propre stack avant d'être additionné :
+   comparées seulement dans la somme, une ligne perdue ici et une ligne en
+   trop là s'annuleraient.
+
+   Mesuré avec cargo-mutants 27.1.0 et le script déposé jusque-là, qui
+   échappait ses lignes JSON à la main et lisait `missed.txt`, un mutant par
+   ligne. Un crate d'exemple portait deux fichiers atteints par `#[path]`,
+   l'un avec une tabulation dans son nom, l'autre avec un saut de ligne, cinq
+   mutants chacun, sans test. L'outil rapportait **10 survivants**. Les cinq
+   lignes de la tabulation n'étaient pas du JSON et étaient écartées en
+   silence ; le saut de ligne coupait chacun des cinq autres en deux lignes
+   valides. `nunki` lisait donc 10 survivants, **dont aucun n'était un de
+   ceux de l'outil** : la perte et la coupure s'annulaient, et c'est pourquoi
+   le compte ne peut pas venir des lignes. Avec la seule tabulation, aucun
+   survivant n'était lu, et la porte 7 du niveau `standard` passait.
+
    **Les lignes changées, pas les fichiers entiers.** C'est la règle de la
    porte 8 : **ce qui est nouveau depuis la base appartient à la mission, ce
    qui préexiste appartient au projet.** Une
@@ -1630,8 +1671,8 @@ dernier lot. La première rouge arrête tout.
    contre le vrai outil (cargo-mutants 27.1.0) le montre :
 
    - **`--output DIR` écrit dans `DIR/mutants.out/`**, pas dans `DIR`. Le
-     script qui lit `DIR/missed.txt` ne trouve rien et sort en erreur :
-     **toutes** les campagnes échouent ;
+     script qui lit les résultats dans `DIR` ne trouve rien et sort en
+     erreur : **toutes** les campagnes échouent ;
    - **`--output` ne crée pas le répertoire parent**. Une copie propre de
      `HEAD` jamais compilée n'a pas de `target/` — et c'est exactement là que
      la porte 7 tourne ;
@@ -1775,10 +1816,11 @@ dernier lot. La première rouge arrête tout.
 
    Ce n'est pas le cas nominal : une campagne qui atteint
    les mutants fait tourner `mutants.out` en `mutants.out.old` et en écrit un
-   neuf — une seconde campagne qui tue tout laisse bien `missed.txt` vide. Le
-   script **vide donc son dossier avant de lancer** : le même échec ne laisse
-   alors rien, et la garde `[ ! -f missed.txt ]` dit « la campagne n'a rien
-   laissé », ce qui est la vérité. Une porte 7 qui ne peut pas dire « je n'ai
+   neuf — une seconde campagne qui tue tout ne laisse aucun survivant de la
+   première. Le script **vide donc son dossier avant de lancer** : le même
+   échec ne laisse alors rien, et la garde sur le fichier de résultats de
+   l'outil (`outcomes.json`) dit « la campagne n'a rien laissé », ce qui est
+   la vérité. Une porte 7 qui ne peut pas dire « je n'ai
    pas pu mesurer » ment — c'est la règle du 4.4 sur la base d'avis, ici pour
    la campagne.
 
@@ -1997,6 +2039,20 @@ dernier lot. La première rouge arrête tout.
    - des lignes par fichier avant la ligne de fin,
      `{"measured":"<chemin>","tried":N,"found":M}`, annoncées par
      `"by_file":true` sur la ligne de fin, qui font ses totaux ;
+   - `"missed":K` sur la ligne de fin, le nombre de survivants que l'outil a
+     rapportés, pris dans son propre compte (plus haut). Le script Rust lit
+     tout dans le `outcomes.json` de cargo-mutants — chaque résultat y porte
+     le nom, le fichier et l'étendue de son mutant, et le fichier se termine
+     sur les totaux de l'outil — et **écrit chaque ligne JSON avec `jq`**
+     (1.6, celui de l'image) : aucune ligne n'est plus échappée à la main.
+     Mesuré sur 27.1.0 avec une tabulation et un saut de ligne dans des noms
+     de fichiers : les dix survivants sont enregistrés, chacun sous son
+     fichier. Là où `nunki` affiche le nom d'un survivant, ses caractères de
+     contrôle sont échappés, tabulation et saut de ligne compris. Les
+     scripts Python et Next écrivent leurs lignes avec un encodeur JSON et ne
+     donnent pas ce compte : leurs outils ne tiennent pas de total à eux sur
+     les fichiers touchés, et un compte tiré de la liste qui fait les lignes
+     s'accorderait toujours avec elles ;
    - un diff contre `NUNKI_BASE` lu sans détection de renommage ;
    - **des chemins pris à la lettre.** Un chemin que `nunki` confie à une
      campagne peut porter une espace, un deux-points, un guillemet, un
@@ -2858,6 +2914,40 @@ Ce que la boucle veut dire, et ce qu'elle ne veut pas dire.
   toucher `PR.md`, et la ligne de `mission wait` sur un rapport qui ne
   bloque pas le dit et nomme `accept` d'abord. La règle d'arrêt des tours
   ne tient plus à la discipline du HQ : l'outil la tient.
+- **Un constat accepté n'est pas un constat corrigé, et la pull request est
+  publiée.** Quand le verdict de sécurité sur lequel `nunki push` s'appuie
+  est un `FINDINGS` levé — par `mission accept`, ou par `nunki` pour des
+  `LOW`/`INFO` —, ses constats ne sont pas corrigés, et la section de
+  l'agent sécurité dans `PR.md` les décrirait sur la forge, où une
+  modification ultérieure laisse l'original dans l'historique.
+  - **L'agent sécurité écrit dans `PR.md` sous un seul titre à lui**, qui
+    commence par `Security`, comme celui de l'intégrateur commence par
+    `Integration`. Ses constats restent dans `VERDICT.json`.
+  - **`nunki push` retient cette section par défaut.** Sur le chemin de la
+    forge, toute section de `PR.md` sous un titre qui commence par
+    `Security` est remplacée par une note que `nunki` écrit lui-même — à la
+    place de la première, les autres retirées : combien de constats par
+    sévérité, qu'ils ont été acceptés et par qui (le HQ, ou `nunki` pour des
+    `LOW`/`INFO`), et que leur détail est retenu jusqu'à leur correction.
+    Une section va de son titre au prochain titre de même niveau ou de
+    niveau supérieur, ou à la fin du fichier : un constat sous son propre
+    sous-titre part avec elle. `PR.md` lui-même n'est pas touché, comme
+    pour la note sur les écarts. Un `CLEAR` publie la section telle qu'elle
+    est écrite.
+  - **Le compte vient de `VERDICT.json`**, et seulement quand ce fichier
+    est le `FINDINGS` de l'agent sécurité sur le commit que la levée
+    couvre : chaque rôle réécrit ce fichier. Sinon la note dit que le
+    nombre n'a pas pu être lu, plutôt que de le deviner.
+  - **Le projet décide, dans `nunki.yaml`** : `security_findings: withhold`
+    (le défaut, et ce que veut dire une clé absente) ou `publish`, pour un
+    dépôt que seuls ses propriétaires lisent.
+  - `nunki push` dit ce qu'il a retenu, et sur combien de constats.
+    `VERDICT.json` et `FOLLOWUP_HQ.md` les gardent en entier : rien n'est
+    caché au HQ.
+  - **La limite, écrite : seule cette section est retenue.** Ce qu'une
+    autre section de `PR.md` dit, celle du codeur ou celle de
+    l'intégrateur, est publié tel quel. Et une pull request ouverte à la
+    main l'est depuis `PR.md` tel qu'il est : `push` le dit.
 - **Une décision attendue n'est pas une borne épuisée.** Un codeur qui finit
   son lot hormis des survivants qu'il ne peut ni tuer ni figer en bug le
   termine par `Lot: <lot> — awaits ruling: <quoi>`. `nunki` vérifie que
