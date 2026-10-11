@@ -1587,11 +1587,26 @@ mod live {
             "postgres:16-alpine",
         ]);
         assert!(started.status.success(), "{}", said(&started));
+        // The **final** server, and not the first one to answer. The image
+        // runs a temporary server for `initdb`'s scripts, stops it and starts
+        // the real one; `pg_isready` on the socket answers for the temporary
+        // one, and a COPY played then fails for a reason that is not the
+        // fence (measured on CI's Linux runner, #118). The temporary server
+        // listens on no TCP address (`listen_addresses=''`), so asking over
+        // TCP waits for the final one.
         let ready = (0..60).any(|_| {
             std::thread::sleep(std::time::Duration::from_secs(1));
-            docker(&["exec", name, "pg_isready", "-U", "postgres"])
-                .status
-                .success()
+            docker(&[
+                "exec",
+                name,
+                "pg_isready",
+                "-h",
+                "127.0.0.1",
+                "-U",
+                "postgres",
+            ])
+            .status
+            .success()
         });
         let unfenced = docker(&["exec", name, "sh", "-c", copy]);
         let _ = docker(&["rm", "-f", name]);
@@ -1611,10 +1626,13 @@ mod live {
             Lifted::whole(file(
                 "services:\n  db:\n    image: postgres:16-alpine\n    environment:\n      \
                  POSTGRES_PASSWORD: live\n    healthcheck:\n      \
-                 test: [\"CMD-SHELL\", \"pg_isready -U postgres\"]\n      interval: 2s\n      \
-                 retries: 30\n",
+                 test: [\"CMD-SHELL\", \"pg_isready -h 127.0.0.1 -U postgres\"]\n      \
+                 interval: 2s\n      retries: 30\n",
             )),
         );
+        // Healthy by the same TCP question as the control: healthy on the
+        // temporary server, the COPY below could fail on the restart and
+        // read as the fence holding.
         let up = profile.up();
         assert!(
             up.status.success(),
@@ -1656,12 +1674,20 @@ mod live {
         assert!(!out.status.success(), "{}", said(&out));
     }
 
-    /// The host is not on the services' network: a port a container
-    /// publishes on the host's `0.0.0.0` is closed from a lifted service,
-    /// whether it is tried through the services network's gateway or
-    /// through the default bridge's. The control is the same profile
-    /// without [`NO_GATEWAY`]: `internal: true` alone, which the HQ measured
-    /// reaching that port through the gateway.
+    /// The host is not on the services' network: neither a port a container
+    /// publishes on the host's `0.0.0.0`, nor a process of the host's own
+    /// listening on the network's gateway address, is reachable from a lifted
+    /// service — through the services network's gateway or through the
+    /// default bridge's.
+    ///
+    /// The control is the same profile without [`NO_GATEWAY`] — `internal:
+    /// true` alone — reaching **the host's own process** through the gateway.
+    /// Not the published port: Linux filters a port Docker publishes from an
+    /// internal network even without the fence (measured on CI's runner,
+    /// #118), so a control on it ended "inconclusive" there, and proved the
+    /// fence on the HQ's engine only. A process listening on the host is
+    /// reached over the gateway address itself, which the host owns, and
+    /// which is what [`NO_GATEWAY`] takes away.
     #[test]
     #[ignore = "builds an image and lifts containers; the HQ runs it by hand"]
     fn live_a_lifted_service_cannot_reach_a_port_the_host_publishes() {
@@ -1686,6 +1712,13 @@ mod live {
             }
         }
         let _published = Remove(name);
+        // The host's own process: a listener of this test's, on every address
+        // the host has — the gateway of each network below among them, once
+        // that network is up. Listening is enough for `nc -z`: the kernel
+        // completes the connection for a listening socket before anything
+        // accepts it.
+        let host = std::net::TcpListener::bind(("0.0.0.0", 0)).expect("the host can listen");
+        let listened = host.local_addr().unwrap().port().to_string();
 
         let gateway = |network: &str| {
             let out = docker(&[
@@ -1703,10 +1736,10 @@ mod live {
         };
         let text = "services:\n  web:\n    image: nginx:alpine\n  \
                     probe:\n    image: alpine:3.20\n    command: [sleep, \"600\"]\n";
-        let reaches = |profile: &Profile, addresses: &[String]| {
+        let reaches = |profile: &Profile, addresses: &[String], port: &str| {
             addresses.iter().any(|address| {
                 profile
-                    .exec("probe", &format!("nc -z -w3 {address} {PORT}"))
+                    .exec("probe", &format!("nc -z -w3 {address} {port}"))
                     .status
                     .success()
             })
@@ -1722,9 +1755,15 @@ mod live {
         assert!(up.status.success(), "{}", said(&up));
         let through = gateway(&format!("{}_{NETWORK}", open.project));
         assert!(
-            reaches(&open, &through),
-            "inconclusive: the host's published port is closed through {through:?} even \
-             without {NO_GATEWAY:?}, so its being closed with it proves nothing here"
+            // Either way in: the host's own process where the test runs on the
+            // engine's host (Linux), the published port where the engine runs
+            // in a machine of its own and this test's listener is not behind
+            // the gateway — the case the HQ measured. The fence below must
+            // refuse both.
+            reaches(&open, &through, &listened) || reaches(&open, &through, PORT),
+            "inconclusive: neither the host's own port {listened} nor its published port \
+             {PORT} is open through {through:?} even without {NO_GATEWAY:?}, so their being \
+             closed with it proves nothing here"
         );
         drop(open);
 
@@ -1738,10 +1777,13 @@ mod live {
         let mut tried = gateway(&format!("{}_{NETWORK}", fenced.project));
         tried.extend(gateway("bridge"));
         tried.extend(through);
-        assert!(
-            !reaches(&fenced, &tried),
-            "a lifted service reached the host's port {PORT} through one of {tried:?}"
-        );
+        for port in [PORT, listened.as_str()] {
+            assert!(
+                !reaches(&fenced, &tried, port),
+                "a lifted service reached the host's port {port} through one of {tried:?}"
+            );
+        }
+        drop(host);
         // And the network still carries what it is for.
         let out = fenced.exec("agent", "nc -z -w3 web 80");
         assert!(

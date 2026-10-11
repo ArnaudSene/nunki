@@ -1697,15 +1697,15 @@ pub fn changed_between(
     from: &str,
     to: &str,
 ) -> Result<BTreeSet<String>, MutantsError> {
-    let names = git::on_slot(
-        tree,
-        &["diff", "--name-only", "--no-renames", "-z", from, to],
-    )?;
-    Ok(names
-        .split('\0')
-        .filter(|p| !p.is_empty())
-        .map(str::to_string)
-        .collect())
+    let names = git::SlotGit::open(tree)?.names(&[
+        "diff",
+        "--name-only",
+        "--no-renames",
+        "-z",
+        from,
+        to,
+    ])?;
+    Ok(names.into_iter().collect())
 }
 
 /// Give each new survivor what the HQ said on its twin in the previous
@@ -2335,12 +2335,8 @@ pub fn uncarried(tree: &Path, previous: &Campaign, touched: &[String]) -> Option
 
 /// Every file in `commit`'s tree, by path.
 fn files_at(tree: &Path, commit: &str) -> Result<BTreeSet<String>, MutantsError> {
-    let names = git::on_slot(tree, &["ls-tree", "-r", "--name-only", "-z", commit])?;
-    Ok(names
-        .split('\0')
-        .filter(|p| !p.is_empty())
-        .map(str::to_string)
-        .collect())
+    let names = git::SlotGit::open(tree)?.names(&["ls-tree", "-r", "--name-only", "-z", commit])?;
+    Ok(names.into_iter().collect())
 }
 
 /// A campaign's per-file counts ([`by_file`]), trusted only when every key

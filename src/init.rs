@@ -1008,17 +1008,19 @@ shift
 
 # Only Rust sources are worth mutating; the touched list holds whatever the
 # branch touched.
-files=""
-paths=""
+#
+# Each path stays **one argument**, whatever it holds — a space, a colon, a
+# quote, a character outside ASCII: the list is rebuilt in the positional
+# parameters, and never in a string split on spaces again. Measured on
+# cargo-mutants 27.1.0 with the list in a string, `src/with space.rs` became
+# two paths, and the campaign mutated neither.
 for path in "$@"; do
+  shift
   case "$path" in
-    *.rs)
-      files="$files --file $path"
-      paths="$paths $path"
-      ;;
+    *.rs) set -- "$@" "$path" ;;
   esac
 done
-if [ -z "$files" ]; then
+if [ "$#" -eq 0 ]; then
   # Nothing this branch touched is mutable, so there are no mutants and no
   # survivors — and that is a measurement, not a campaign that failed to
   # happen. The terminal line is printed **before** leaving, because `nunki`
@@ -1063,15 +1065,29 @@ mkdir -p "$out"
 # again. With git's rename detection, a pure rename gave cargo-mutants no
 # hunk at all ("No mutants to filter", 27.1.0): the survivors went and
 # nothing was tried in their place.
-scope="$files"
+#
+# The paths go to git after `--`, and as **literal** paths
+# (`--literal-pathspecs`): a file the branch commits under a name that reads
+# as a pathspec — `:!*.rs` — would otherwise be read as one, and exclude
+# every Rust file from the diff. Measured: the diff came out empty, and the
+# campaign said it had tried nothing. `core.quotePath=false` keeps a name
+# outside ASCII as it is in the diff's headers, rather than in octal escapes.
+#
+# The scope replaces the paths in the positional parameters: `--in-diff`
+# and the diff, or a `--file` for each path when there is no base.
 if [ -n "${NUNKI_BASE:-}" ]; then
   diff="$out/touched.diff"
-  # shellcheck disable=SC2086
-  if ! git diff --relative --no-renames "$NUNKI_BASE" HEAD -- $paths > "$diff"; then
+  if ! git -c core.quotePath=false --literal-pathspecs \
+    diff --relative --no-renames "$NUNKI_BASE" HEAD -- "$@" > "$diff"; then
     echo "nunki: cannot diff against the base $NUNKI_BASE" >&2
     exit 1
   fi
-  scope="--in-diff $diff"
+  set -- --in-diff "$diff"
+else
+  for path in "$@"; do
+    shift
+    set -- "$@" --file "$path"
+  done
 fi
 
 # How many mutants run at once. At 1 — the default, and what a campaign runs
@@ -1237,7 +1253,7 @@ trap stop INT TERM HUP
 # command line is the whole of the campaign's configuration.
 # shellcheck disable=SC2086
 status=0
-cargo mutants --no-config $where --no-shuffle --exclude-re "replace main -> " --output "$out" $scope >&2 &
+cargo mutants --no-config $where --no-shuffle --exclude-re "replace main -> " --output "$out" "$@" >&2 &
 child=$!
 wait "$child" || status=$?
 child=""
@@ -1287,21 +1303,34 @@ esac
 # made: its `name` is that same line, and its `span` the code replaced —
 # measured on 27.1.0, `replace body -> u8 with 0` on a two-line body spans
 # lines 6 to 7, where `missed.txt` says only 6.
+#
+# The file comes from that listing too, and the line is read after it: a
+# path holding a colon — `src/with:colon.rs` — was cut at its first colon
+# when the line was split on them. Only when the listing does not name the
+# mutant exactly once is the line cut, as before. The file is escaped like
+# the rest: a quote in a path would otherwise end the JSON string.
 listing="$out/mutants.out/mutants.json"
+escape() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
 while IFS= read -r mutant; do
   [ -n "$mutant" ] || continue
-  file=${mutant%%:*}
-  rest=${mutant#*:}
+  file=$(jq -r --arg name "$mutant" \
+    '[.[] | select(.name == $name)] | if length == 1 then .[0].file else "" end' \
+    "$listing" 2>/dev/null || true)
+  case "$mutant" in
+    "$file":*) ;;
+    *) file=${mutant%%:*} ;;
+  esac
+  rest=${mutant#"$file":}
   line=${rest%%:*}
   rest=${rest#*:}
   what=${rest#*: }
-  escape() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
+  case "$line" in ''|*[!0-9]*) line=0 ;; esac
   end=$(jq -r --arg name "$mutant" \
     '[.[] | select(.name == $name)] | if length == 1 then .[0].span.end.line else 0 end' \
     "$listing" 2>/dev/null || true)
   case "$end" in ''|*[!0-9]*) end=0 ;; esac
   printf '{"id":"%s","file":"%s","line":%s,"end_line":%s,"description":"%s"}\n' \
-    "$(escape "$mutant")" "$file" "$line" "$end" "$(escape "$what")"
+    "$(escape "$mutant")" "$(escape "$file")" "$line" "$end" "$(escape "$what")"
 done < "$missed"
 
 # How many mutants were tried: each one cargo-mutants ran the tests against,

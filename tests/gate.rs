@@ -3633,3 +3633,57 @@ fn a_raised_deadline_owes_a_new_campaign_and_the_same_one_does_not() {
     assert!(why.contains("the coder is rewriting this file"), "{why}");
     assert!(why.contains("--again"), "{why}");
 }
+
+/// The names a branch may give its files that git does not print as they
+/// are, or reads as something else: a space, a colon, a quote, a character
+/// outside ASCII, and a name that reads as an excluding pathspec.
+const AWKWARD: [&str; 5] = [
+    ":!*.rs",
+    "src/with space.rs",
+    "src/with:colon.rs",
+    "src/with\"quote.rs",
+    "src/é.rs",
+];
+
+/// Gate 7's touched list holds each name as the tree holds it — the list
+/// the campaign is handed and the fingerprint is read from. Read line by
+/// line, git quoted two of them (`"src/with\"quote.rs"`, `"src/\303\251.rs"`)
+/// and those quoted strings named files that do not exist.
+#[test]
+fn every_awkward_name_a_branch_touches_is_in_the_touched_list_as_it_is() {
+    let f = Fixture::new();
+    for (n, path) in AWKWARD.iter().enumerate() {
+        commit(&f.tree, path, &format!("pub fn f{n}() {{}}\n"), "L1");
+    }
+    let touched = nunki::gate::touched_since_base(&f.tree, "dev").unwrap();
+    let mut expected: Vec<String> = AWKWARD.iter().map(|p| p.to_string()).collect();
+    expected.sort();
+    assert_eq!(touched, expected);
+
+    // And the fingerprint reads each one's content: changing any of them
+    // changes it, which a path git could not find ("absent") would not.
+    let before = nunki::mutants::fingerprint(&f.tree, &touched).unwrap();
+    for (n, path) in AWKWARD.iter().enumerate() {
+        commit(&f.tree, path, &format!("pub fn g{n}() {{}}\n"), "volet");
+        let after = nunki::mutants::fingerprint(&f.tree, &touched).unwrap();
+        assert_ne!(before, after, "{path} is not read by the fingerprint");
+    }
+}
+
+/// A file named like an excluding pathspec (`:!*.rs`) is read as the file
+/// it is when `nunki` hands its path to git: here, the blob a slot's file is
+/// read from, which a pathspec excluding every Rust file would have missed.
+#[test]
+fn a_file_named_like_a_pathspec_is_read_as_the_file_it_is() {
+    let f = Fixture::new();
+    commit(&f.tree, ":!*.rs", "pub fn magic() {}\n", "L1");
+    commit(&f.tree, "src/other.rs", "pub fn other() {}\n", "L1");
+    let repo = nunki::git::SlotGit::open(&f.tree).unwrap();
+    let blob = repo
+        .blob_at_head(":!*.rs")
+        .unwrap()
+        .expect("the file is there");
+    assert_eq!(blob.bytes, b"pub fn magic() {}\n");
+    let other = repo.blob_at_head("src/other.rs").unwrap().unwrap();
+    assert_eq!(other.bytes, b"pub fn other() {}\n");
+}

@@ -7036,3 +7036,133 @@ fn the_cancel_verb_needs_a_reason_and_says_when_there_is_nothing_to_call_off() {
     let followup = std::fs::read_to_string(&paths.followup).unwrap_or_default();
     assert!(!followup.contains("called off"), "{followup}");
 }
+
+/// Whether a tool answers `--version` on this machine.
+fn has(program: &str, args: &[&str]) -> bool {
+    Command::new(program)
+        .args(args)
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+/// The shipped Rust `mutation.sh`, on a branch whose files carry the names
+/// git and a shell mishandle: a space, a colon, a quote, a character outside
+/// ASCII, and `:!*.rs`, which git reads as "every file but the Rust ones"
+/// when it is taken as a pathspec. Each file's mutants are found, under the
+/// name the touched list gives it. Measured before the fix: the campaign
+/// found and tried nothing at all, and said so as a finished campaign.
+///
+/// Played with the real cargo-mutants, so it skips — and says so — where
+/// cargo-mutants or jq is not installed, as on CI's runner.
+#[test]
+fn the_rust_campaign_finds_the_mutants_of_every_awkward_name() {
+    if !has("cargo", &["mutants", "--version"]) || !has("jq", &["--version"]) {
+        eprintln!("skipped: cargo-mutants and jq are needed to play a real campaign");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("crate");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    git(&root, &["init", "-q", "-b", "dev"]);
+    git(&root, &["config", "user.email", "a@b.c"]);
+    git(&root, &["config", "user.name", "t"]);
+    // The library's root is the file named like a pathspec, at the
+    // repository's root, where a pathspec's magic applies.
+    write(
+        &root,
+        "Cargo.toml",
+        "[package]\nname = \"awkward\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+         [lib]\npath = \":!*.rs\"\n",
+    );
+    write(&root, ":!*.rs", "pub fn base() -> u8 { 1 }\n");
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "base"]);
+    let base = git(&root, &["rev-parse", "HEAD"]);
+
+    let awkward = [
+        ("src/with space.rs", "spaced"),
+        ("src/with:colon.rs", "coloned"),
+        ("src/with\"quote.rs", "quoted"),
+        ("src/é.rs", "accented"),
+    ];
+    let mut lib =
+        String::from("pub fn base() -> u8 { 1 }\npub fn magic(n: u8) -> bool {\n    n > 3\n}\n");
+    for (path, name) in awkward {
+        write(
+            &root,
+            path,
+            &format!("pub fn {name}(n: u8) -> bool {{\n    n > 3\n}}\n"),
+        );
+        lib.push_str(&format!("#[path = {path:?}]\npub mod {name};\n",));
+    }
+    write(&root, ":!*.rs", &lib);
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "awkward names"]);
+
+    nunki::init::init(&root, &dir.path().join("nunki"), &["rust".to_string()]).unwrap();
+    let script = dir
+        .path()
+        .join("nunki/stacks/rust")
+        .join(nunki::mutants::SCRIPT);
+    let mut handed: Vec<&str> = vec![":!*.rs"];
+    handed.extend(awkward.iter().map(|(path, _)| *path));
+    let out = Command::new(&script)
+        .arg("campaign-1")
+        .args(&handed)
+        .env(nunki::mutants::BASE_ENV, &base)
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(mutants::completed(&stdout), "{stdout}");
+
+    let survivors = mutants::parse(&stdout);
+    for path in &handed {
+        let found = survivors.iter().filter(|s| s.file == *path).count();
+        assert_eq!(found, 5, "{path}: {found} mutant(s) found\n{stdout}");
+        assert!(
+            survivors
+                .iter()
+                .filter(|s| s.file == *path)
+                .all(|s| s.line == 2 || s.line == 3 && *path == ":!*.rs"),
+            "{path}: {survivors:?}"
+        );
+    }
+    let files = mutants::by_file(&stdout, "HEAD").expect("each file is counted");
+    for path in &handed {
+        assert_eq!(
+            files.get(*path).map(|m| m.tried),
+            Some(5),
+            "{path}: {files:?}"
+        );
+    }
+    assert_eq!(mutants::tried(&stdout), Some(25), "{stdout}");
+}
+
+/// What changed between two campaigns is listed by the names the tree
+/// holds: a name starting with a space keeps it, and one outside ASCII is not
+/// quoted — either would otherwise be a file the chain never finds again.
+#[test]
+fn what_changed_between_two_campaigns_keeps_each_name_as_it_is() {
+    let dir = tempfile::tempdir().unwrap();
+    let tree = repo(dir.path());
+    let from = git(&tree, &["rev-parse", "HEAD"]);
+    for path in [" leading.rs", "src/é.rs", "src/with\"quote.rs"] {
+        write(&tree, path, "pub fn f() {}\n");
+    }
+    git(&tree, &["add", "-A"]);
+    git(&tree, &["commit", "-q", "-m", "awkward"]);
+    let to = git(&tree, &["rev-parse", "HEAD"]);
+
+    let changed = mutants::changed_between(&tree, &from, &to).unwrap();
+
+    assert_eq!(
+        changed.into_iter().collect::<Vec<_>>(),
+        [" leading.rs", "src/with\"quote.rs", "src/é.rs"]
+    );
+}

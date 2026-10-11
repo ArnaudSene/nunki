@@ -1101,9 +1101,29 @@ fn a_run_that_leaves_sleep_600_behind_leaves_nothing_once_it_ends() {
     let left = leave(Some(&run));
     let other_run = leave(Some(&format!("{run}-other")));
     let untagged = leave(None);
-    assert!(alive(left) && alive(other_run) && alive(untagged));
+    // And one that says which signal ended it: `TERM` is caught and written
+    // down, which `KILL` never can be — so the marker is there only if the
+    // run's leftovers were asked to end before anything killed them.
+    let marker = tempfile::tempdir().unwrap();
+    let asked = marker.path().join("asked");
+    let out = Command::new("sh")
+        .args([
+            "-c",
+            "sh -c 'trap \"echo term > \\\"$0\\\"; exit 0\" TERM; sleep 600 & wait' \"$1\" \
+             >/dev/null 2>&1 & echo $!",
+            "sh",
+        ])
+        .arg(&asked)
+        .env("NUNKI_RUN", &run)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .unwrap();
+    let polite: u32 = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap();
+    // Let it install its trap before anything is asked of it.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert!(alive(left) && alive(other_run) && alive(untagged) && alive(polite));
 
-    let started = std::time::Instant::now();
     let out = Command::new("sh")
         .args(["-c", &nunki::engine::spawn::reap_script(&run)])
         .output()
@@ -1115,12 +1135,12 @@ fn a_run_that_leaves_sleep_600_behind_leaves_nothing_once_it_ends() {
     assert!(!alive(left), "the run's `sleep 600` outlived it");
     assert!(alive(other_run), "another run's process was stopped");
     assert!(alive(untagged), "a process of no run was stopped");
-    // Asked to end, and it did: nobody waited for the `KILL` that follows a
-    // process that will not.
-    assert!(
-        started.elapsed() < std::time::Duration::from_secs(2),
-        "the leftover was not asked to end, only killed after waiting: {:?}",
-        started.elapsed()
+    // Asked to end before anything killed it: it caught `TERM` and said so.
+    assert!(!alive(polite), "the run's leftover outlived it");
+    assert_eq!(
+        std::fs::read_to_string(&asked).unwrap_or_default().trim(),
+        "term",
+        "the leftover was killed without being asked to end"
     );
 
     for pid in [other_run, untagged] {

@@ -48,8 +48,10 @@ pub const RUN_TAG: &str = "NUNKI_RUN";
 const REAPED: &str = "nunki-reaped";
 
 /// The shell that stops every process still carrying `NUNKI_RUN=<run>`:
-/// `TERM` first, and `KILL` for what is left a few seconds later. It prints
-/// [`REAPED`] and the pids it signalled.
+/// `TERM` first, and `KILL` for what is left a few seconds later — again,
+/// until none is left or a few rounds have passed, since a process killed is
+/// not gone at once, and one that ignored `TERM` may have started another
+/// meanwhile. It prints [`REAPED`] and the pids it signalled first.
 ///
 /// Read out of `/proc/<pid>/environ`, with nothing but a POSIX shell, `tr`
 /// and `grep`: no `pkill` or `ps`, which an image need not ship. A process
@@ -64,8 +66,8 @@ pub fn reap_script(run: &str) -> String {
          pids=$(mine)\n\
          if [ -n \"$pids\" ]; then kill -TERM $pids 2>/dev/null; fi\n\
          for i in 1 2 3; do [ -z \"$(mine)\" ] && break; sleep 1; done\n\
-         left=$(mine)\n\
-         if [ -n \"$left\" ]; then kill -KILL $left 2>/dev/null; fi\n\
+         for i in 1 2 3; do left=$(mine); [ -z \"$left\" ] && break; \
+         kill -KILL $left 2>/dev/null; sleep 1; done\n\
          echo {REAPED} $pids\n"
     )
 }

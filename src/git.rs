@@ -319,7 +319,7 @@ pub fn executable_keys(tree: &Path) -> Result<Vec<String>, GitError> {
     // No repository: what `--file` names is all git reads.
     git.env("GIT_DIR", mirror_of(tree).join("no-repository"))
         .args(["config", "--no-includes", "--null", "--list", "--file"])
-        .arg(&file);
+        .arg(file);
     let listed = finish(git, &["config"], &tree.display().to_string(), None)?;
     let mut keys: Vec<String> = listed
         .split('\0')
@@ -543,6 +543,21 @@ impl SlotGit {
         let mut git = host_git();
         git.arg("--git-dir").arg(&self.mirror);
         git
+    }
+
+    /// The paths a git command run with `-z` lists, NUL-separated and taken
+    /// as they are: never trimmed, never unquoted. Without `-z` git quotes a
+    /// name holding a quote or a character outside ASCII (`"src/\303\251.rs"`),
+    /// and a trimmed output loses a name's leading space.
+    pub fn names(&self, args: &[&str]) -> Result<Vec<String>, GitError> {
+        let mut git = self.git();
+        git.args(args);
+        let raw = raw_output(git, args, &self.at())?;
+        Ok(raw
+            .split(|b| *b == 0)
+            .filter(|name| !name.is_empty())
+            .map(|name| String::from_utf8_lossy(name).into_owned())
+            .collect())
     }
 
     /// A git that reads the mirror, with `index` as its index and no work
@@ -1937,7 +1952,7 @@ mod tests {
 
         let outside = dir.path().join("outside");
         std::fs::create_dir_all(&outside).unwrap();
-        std::os::unix::fs::symlink(&outside, objects.join("ab")).unwrap();
+        std::os::unix::fs::symlink(outside, objects.join("ab")).unwrap();
         let why = plain_object_store(&objects).unwrap_err();
         assert!(
             why.contains("ab is neither a file nor a directory"),
@@ -2118,7 +2133,7 @@ mod tests {
         let hour_ago = std::time::SystemTime::now() - Duration::from_secs(3600);
         std::fs::File::options()
             .write(true)
-            .open(&file)
+            .open(file)
             .unwrap()
             .set_modified(hour_ago)
             .unwrap();

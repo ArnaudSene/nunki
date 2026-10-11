@@ -760,7 +760,13 @@ struct Touched {
 }
 
 fn touched(tree: &Path, base: &Rev) -> Result<Touched, GateError> {
-    let diff = git::on_slot(tree, &["diff", "--name-only", &format!("{base}...HEAD")])?;
+    // NUL-separated (`-z`), every name as the tree holds it. Read line by
+    // line, git quoted a name holding a quote or a character outside ASCII
+    // — `"src/\303\251.rs"` — and that quoted string became the path gate 4
+    // matched, the campaign was handed, and the fingerprint read: a file
+    // that does not exist, whose mutants nobody found.
+    let repo = git::SlotGit::open(tree)?;
+    let diff = repo.names(&["diff", "--name-only", "-z", &format!("{base}...HEAD")])?;
     let commits: Vec<String> = git::on_slot(tree, &["rev-list", &format!("{base}..HEAD")])?
         .lines()
         .map(str::to_string)
@@ -768,20 +774,20 @@ fn touched(tree: &Path, base: &Rev) -> Result<Touched, GateError> {
     // A merge commit shows nothing under `diff-tree` without `-m`, and that
     // is deliberate: its content is its parents', already judged.
     let mut seen: Vec<(String, String)> = diff
-        .lines()
-        .filter(|p| !p.is_empty())
-        .map(|p| (p.to_string(), "the diff against the base".to_string()))
+        .into_iter()
+        .map(|p| (p, "the diff against the base".to_string()))
         .collect();
     for commit in &commits {
-        let in_commit = git::on_slot(
-            tree,
-            &["diff-tree", "--no-commit-id", "--name-only", "-r", commit],
-        )?;
-        for path in in_commit.lines().filter(|p| !p.is_empty()) {
-            seen.push((
-                path.to_string(),
-                format!("commit {}", &commit[..7.min(commit.len())]),
-            ));
+        let in_commit = repo.names(&[
+            "diff-tree",
+            "--no-commit-id",
+            "--name-only",
+            "-z",
+            "-r",
+            commit,
+        ])?;
+        for path in in_commit {
+            seen.push((path, format!("commit {}", &commit[..7.min(commit.len())])));
         }
     }
     Ok(Touched { seen, commits })
