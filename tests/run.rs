@@ -862,7 +862,8 @@ fn live_a_mission_starts_and_its_run_is_read_back() {
     );
 
     let state = run::start(&project, "alpha", &slot, engine.clone(), &engine_bin)
-        .expect("the mission starts");
+        .expect("the mission starts")
+        .state;
 
     // The slot is on the mission's branch, taken from its base.
     assert_eq!(
@@ -2404,4 +2405,130 @@ fn a_system_profile_lifts_only_the_services_the_mission_declares() {
         ),
         "labelled with the digest a human approved"
     );
+}
+
+/// An origin on `dev` with one commit, and a slot cloned from it.
+fn origin_and_slot(dir: &Path) -> (std::path::PathBuf, nunki::slot::Slot) {
+    let origin = dir.join("origin");
+    std::fs::create_dir_all(&origin).unwrap();
+    git(&origin, &["init", "-q", "-b", "dev"]);
+    git(&origin, &["config", "user.email", "a@b.c"]);
+    git(&origin, &["config", "user.name", "t"]);
+    std::fs::write(origin.join("f"), "one").unwrap();
+    git(&origin, &["add", "-A"]);
+    git(&origin, &["commit", "-qm", "base"]);
+    let tree = dir.join("slot");
+    git(dir, &["clone", "-q", origin.to_str().unwrap(), "slot"]);
+    git(&tree, &["config", "user.email", "a@b.c"]);
+    git(&tree, &["config", "user.name", "t"]);
+    (
+        origin,
+        nunki::slot::Slot {
+            name: "one".into(),
+            tree,
+        },
+    )
+}
+
+/// A mission starts from a fresh base, and so does the slot's own `dev`: a
+/// clone writes it once, and an agent or a human reading `dev` in the slot
+/// read the base as it stood the day the slot was made. At the mission's
+/// start it is brought to the project's.
+#[test]
+fn starting_a_mission_brings_the_slots_own_base_to_the_projects() {
+    let dir = tempfile::tempdir().unwrap();
+    let (origin, slot) = origin_and_slot(dir.path());
+    nunki::run::branch(&slot, &origin, "mission/first", "dev").unwrap();
+    let stale = git(&slot.tree, &["rev-parse", "dev"]);
+
+    std::fs::write(origin.join("f"), "two").unwrap();
+    git(
+        &origin,
+        &["commit", "-qam", "what the first mission merged"],
+    );
+    let moved = git(&origin, &["rev-parse", "HEAD"]);
+
+    let brought = nunki::run::branch(&slot, &origin, "mission/second", "dev").unwrap();
+    assert_eq!(
+        brought,
+        Some(nunki::git::Brought::Moved {
+            from: stale,
+            to: moved.clone()
+        })
+    );
+    assert_eq!(git(&slot.tree, &["rev-parse", "dev"]), moved);
+    assert_eq!(
+        git(&slot.tree, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "mission/second"
+    );
+    let said = nunki::run::base_said("dev", brought.as_ref().unwrap());
+    assert!(said.contains("brought to the project's"), "{said}");
+
+    // A later launch of the same mission leaves the base alone: only the
+    // start brings it.
+    assert_eq!(
+        nunki::run::branch(&slot, &origin, "mission/second", "dev").unwrap(),
+        None
+    );
+}
+
+/// Only forward: a slot's `dev` holding a commit the project does not have
+/// is left where it is and said, never moved off that commit. The mission
+/// branches from the project's base all the same.
+#[test]
+fn a_slots_base_holding_its_own_commit_is_left_and_said() {
+    let dir = tempfile::tempdir().unwrap();
+    let (origin, slot) = origin_and_slot(dir.path());
+    std::fs::write(slot.tree.join("local"), "x").unwrap();
+    git(&slot.tree, &["add", "-A"]);
+    git(&slot.tree, &["commit", "-qm", "a commit only the slot has"]);
+    let local = git(&slot.tree, &["rev-parse", "dev"]);
+    let project_base = git(&origin, &["rev-parse", "HEAD"]);
+
+    let brought = nunki::run::branch(&slot, &origin, "mission/x", "dev").unwrap();
+
+    assert_eq!(
+        brought,
+        Some(nunki::git::Brought::Diverged { at: local.clone() })
+    );
+    assert_eq!(git(&slot.tree, &["rev-parse", "dev"]), local);
+    assert_eq!(git(&slot.tree, &["rev-parse", "HEAD"]), project_base);
+    let said = nunki::run::base_said("dev", brought.as_ref().unwrap());
+    assert!(said.contains("left at"), "{said}");
+}
+
+/// The branch the slot is on is never moved under its tree, and one already
+/// at the target is left as it is.
+#[test]
+fn the_base_the_slot_is_on_is_never_moved_under_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (origin, slot) = origin_and_slot(dir.path());
+    std::fs::write(origin.join("f"), "two").unwrap();
+    git(&origin, &["commit", "-qam", "moved"]);
+    let repo = nunki::git::SlotGit::open(&slot.tree).unwrap();
+    repo.fetch_origin(&origin).unwrap();
+    let target = repo.origin_branch("dev").unwrap();
+    let before = git(&slot.tree, &["rev-parse", "dev"]);
+
+    assert_eq!(
+        repo.bring_branch("dev", &target).unwrap(),
+        nunki::git::Brought::CheckedOut
+    );
+    assert_eq!(git(&slot.tree, &["rev-parse", "dev"]), before);
+
+    git(&slot.tree, &["checkout", "-q", "-b", "elsewhere"]);
+    let repo = nunki::git::SlotGit::open(&slot.tree).unwrap();
+    assert!(matches!(
+        repo.bring_branch("dev", &target).unwrap(),
+        nunki::git::Brought::Moved { .. }
+    ));
+    assert_eq!(
+        repo.bring_branch("dev", &target).unwrap(),
+        nunki::git::Brought::Already
+    );
+    assert!(matches!(
+        repo.bring_branch("fresh", &target).unwrap(),
+        nunki::git::Brought::Created { .. }
+    ));
+    assert_eq!(git(&slot.tree, &["rev-parse", "fresh"]), target);
 }

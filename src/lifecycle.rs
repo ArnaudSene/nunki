@@ -179,6 +179,17 @@ fn lots(header: &Header) -> String {
         .join("; ")
 }
 
+/// What [`end`] closed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ended {
+    /// A started mission, now handed back to the human as abandoned.
+    Started(Box<MissionState>),
+    /// A mission framed and never started: there is no flow to move, so the
+    /// reason in `FOLLOWUP_HQ.md` is the whole record, and `archive` moves
+    /// the folder as it would any other.
+    NeverStarted,
+}
+
 /// Call a mission off before it is verified (SPEC 4.2, verb table).
 ///
 /// The one verb in SPEC's list that the list never explains, and this
@@ -187,18 +198,33 @@ fn lots(header: &Header) -> String {
 /// given up on — still `Coding`, never to be verified, and impossible to
 /// close. `end` is what closes it, and after it `archive` will.
 ///
+/// A mission that was framed and never started is called off too: refusing
+/// it left a folder nobody could close but by hand. It has no state to move,
+/// so the reason is written and nothing else ([`Ended::NeverStarted`]).
+///
 /// It refuses on a mission that is already over, because "call it off" is not
 /// a thing to say twice, and it takes a reason for the same purpose every
 /// other reason in `nunki` is taken for: six months from now, "abandoned" alone
 /// says nothing.
-pub fn end(project: &Project, id: &str, why: &str) -> Result<MissionState, LifecycleError> {
+pub fn end(project: &Project, id: &str, why: &str) -> Result<Ended, LifecycleError> {
     if why.trim().is_empty() {
         return Err(LifecycleError::NoReason);
     }
     let store = Store::open(&project.hq_root)?;
-    let mut state = store
-        .load(id)
-        .map_err(|_| LifecycleError::NotStarted(id.to_string()))?;
+    let paths = Paths::of(&project.hq_root, id);
+    let who = || crate::human::me(&project.nunki_home(), Some(&project.root)).addressed();
+    let mut state = match store.load(id) {
+        Ok(state) => state,
+        Err(crate::state::StateError::Missing(_)) => {
+            // Its framing has to be there: a mission nobody framed is not one
+            // to call off, and its follow-up would land in a folder of its own
+            // making.
+            crate::mission::dir::read_header(&project.hq_root, id)?;
+            crate::followup::ended(&paths.followup, &who(), why.trim())?;
+            return Ok(Ended::NeverStarted);
+        }
+        Err(e) => return Err(e.into()),
+    };
     if state.run.is_some() {
         return Err(LifecycleError::RunInProgress {
             mission: id.to_string(),
@@ -207,16 +233,14 @@ pub fn end(project: &Project, id: &str, why: &str) -> Result<MissionState, Lifec
     }
     // Written where a human reads it, and before the transition: a mission
     // called off leaves a record of why, or it leaves a puzzle.
-    let paths = Paths::of(&project.hq_root, id);
-    let who = crate::human::me(&project.nunki_home(), Some(&project.root)).addressed();
-    crate::followup::ended(&paths.followup, &who, why.trim())?;
+    crate::followup::ended(&paths.followup, &who(), why.trim())?;
     store.apply(
         &mut state,
         crate::mission::flow::Event::Ended {
             reason: why.trim().to_string(),
         },
     )?;
-    Ok(state)
+    Ok(Ended::Started(Box::new(state)))
 }
 
 /// Take a mission back from a handover, and say what changed.
@@ -402,22 +426,34 @@ pub struct Archived {
 /// not create (SPEC 3.3). The slot is left alone: `nunki slot reset` and
 /// `nunki slot rm` are the verbs for a slot, and archiving a mission is not one
 /// of them.
+///
+/// A mission framed and never started is archived as it stands: it has no
+/// state and nothing in flight, and refusing it left a folder nobody could
+/// close but by hand.
 pub fn archive(project: &Project, id: &str) -> Result<Archived, LifecycleError> {
     let store = Store::open(&project.hq_root)?;
-    let state = store
-        .load(id)
-        .map_err(|_| LifecycleError::NotStarted(id.to_string()))?;
-    if state.run.is_some() {
-        return Err(LifecycleError::RunInProgress {
-            mission: id.to_string(),
-            slot: state.slot.clone(),
-        });
-    }
-    if !finished(&state) {
-        return Err(LifecycleError::NotFinished {
-            mission: id.to_string(),
-            stage: state.flow.stage().clone(),
-        });
+    // A mission never started has no state, and nothing in flight: it is
+    // moved as it stands. Only a missing state means that — one that cannot
+    // be read is not a mission nobody started.
+    match store.load(id) {
+        Ok(state) => {
+            if state.run.is_some() {
+                return Err(LifecycleError::RunInProgress {
+                    mission: id.to_string(),
+                    slot: state.slot.clone(),
+                });
+            }
+            if !finished(&state) {
+                return Err(LifecycleError::NotFinished {
+                    mission: id.to_string(),
+                    stage: state.flow.stage().clone(),
+                });
+            }
+        }
+        Err(crate::state::StateError::Missing(_)) => {
+            crate::mission::dir::read_header(&project.hq_root, id)?;
+        }
+        Err(e) => return Err(e.into()),
     }
 
     let at = archive_dir(project).join(id);
@@ -450,4 +486,86 @@ fn finished(state: &MissionState) -> bool {
         state.flow.stage(),
         Stage::Verified | Stage::AwaitingHuman(_)
     )
+}
+
+/// One mission as `nunki mission list` prints it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Listed {
+    pub id: String,
+    /// Its stage in a short word ([`crate::wait::stage_word`]): `framed`
+    /// for a mission never started, `pushed` once `nunki push` has pushed
+    /// it, `unreadable` for a state that cannot be read.
+    pub stage: String,
+    /// Whether it has started: a state is on file, readable or not.
+    pub started: bool,
+    /// Its branch and its lots, from the header — or why it cannot be read.
+    pub framing: Result<(String, usize), String>,
+}
+
+impl Listed {
+    /// The line `nunki mission list` prints.
+    pub fn line(&self) -> String {
+        match &self.framing {
+            Ok((branch, lots)) => format!(
+                "{:<20} {:<12} {branch:<24} {lots} lot(s)",
+                self.id, self.stage
+            ),
+            Err(why) => format!("{:<20} {:<12} unreadable: {why}", self.id, self.stage),
+        }
+    }
+}
+
+/// The missions the HQ holds — those not archived, since archiving moves a
+/// mission out of the HQ's list — each with its stage in a word. `active`
+/// keeps only those started: what is being worked on, or waits on someone.
+pub fn listing(project: &Project, active: bool) -> Result<Vec<Listed>, LifecycleError> {
+    let store = Store::open(&project.hq_root)?;
+    let mut listed = Vec::new();
+    for id in crate::mission::dir::list(&project.hq_root) {
+        let (stage, started) = match store.load(&id) {
+            Ok(state) if state.pushed.is_some() => ("pushed".to_string(), true),
+            Ok(state) => (crate::wait::stage_word(&state.flow).to_string(), true),
+            Err(crate::state::StateError::Missing(_)) => ("framed".to_string(), false),
+            Err(_) => ("unreadable".to_string(), true),
+        };
+        if active && !started {
+            continue;
+        }
+        let framing = crate::mission::dir::read_header(&project.hq_root, &id)
+            .map(|h| (h.branch, h.lots.len()))
+            .map_err(|e| e.to_string());
+        listed.push(Listed {
+            id,
+            stage,
+            started,
+            framing,
+        });
+    }
+    Ok(listed)
+}
+
+/// Which started missions occupy each slot, by slot name: a mission that has
+/// started and is not archived holds its slot's tree and branch until it is
+/// archived, verified or not. A slot no mission names is free.
+pub fn occupants(
+    project: &Project,
+) -> Result<std::collections::BTreeMap<String, Vec<String>>, LifecycleError> {
+    let store = Store::open(&project.hq_root)?;
+    let mut by_slot: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    for id in crate::mission::dir::list(&project.hq_root) {
+        if let Ok(state) = store.load(&id) {
+            by_slot.entry(state.slot).or_default().push(id);
+        }
+    }
+    Ok(by_slot)
+}
+
+/// The line `nunki slot list` prints for `slot`, with the missions that
+/// occupy it ([`occupants`]).
+pub fn slot_line(slot: &crate::slot::Slot, missions: &[String]) -> String {
+    let held = match missions {
+        [] => "free".to_string(),
+        some => format!("mission {}", some.join(", ")),
+    };
+    format!("{:<20} {held:<24} {}", slot.name, slot.tree.display())
 }

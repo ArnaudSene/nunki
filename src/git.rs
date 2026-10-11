@@ -319,7 +319,7 @@ pub fn executable_keys(tree: &Path) -> Result<Vec<String>, GitError> {
     // No repository: what `--file` names is all git reads.
     git.env("GIT_DIR", mirror_of(tree).join("no-repository"))
         .args(["config", "--no-includes", "--null", "--list", "--file"])
-        .arg(&file);
+        .arg(file);
     let listed = finish(git, &["config"], &tree.display().to_string(), None)?;
     let mut keys: Vec<String> = listed
         .split('\0')
@@ -455,6 +455,21 @@ const ORIGIN_NS: &str = "refs/nunki/origin";
 /// mirrored. Equal to what the slot holds now, there is nothing to fetch.
 const SYNCED: &str = "nunki-synced";
 
+/// What [`SlotGit::bring_branch`] did with a slot's branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Brought {
+    /// It did not exist, and now does, at `at`.
+    Created { at: String },
+    /// Moved forward.
+    Moved { from: String, to: String },
+    /// Already there.
+    Already,
+    /// The slot is on it, and it was left alone.
+    CheckedOut,
+    /// It holds commits the target does not, and was left at `at`.
+    Diverged { at: String },
+}
+
 /// Git on a slot, from the host — the one way `nunki` runs git on a slot
 /// (module documentation).
 #[derive(Debug, Clone)]
@@ -528,6 +543,21 @@ impl SlotGit {
         let mut git = host_git();
         git.arg("--git-dir").arg(&self.mirror);
         git
+    }
+
+    /// The paths a git command run with `-z` lists, NUL-separated and taken
+    /// as they are: never trimmed, never unquoted. Without `-z` git quotes a
+    /// name holding a quote or a character outside ASCII (`"src/\303\251.rs"`),
+    /// and a trimmed output loses a name's leading space.
+    pub fn names(&self, args: &[&str]) -> Result<Vec<String>, GitError> {
+        let mut git = self.git();
+        git.args(args);
+        let raw = raw_output(git, args, &self.at())?;
+        Ok(raw
+            .split(|b| *b == 0)
+            .filter(|name| !name.is_empty())
+            .map(|name| String::from_utf8_lossy(name).into_owned())
+            .collect())
     }
 
     /// A git that reads the mirror, with `index` as its index and no work
@@ -891,6 +921,42 @@ impl SlotGit {
         self.forget_sync()?;
         self.sync()?;
         self.checkout(branch)
+    }
+
+    /// Bring the slot's own `branch` to `to`, a commit the mirror holds — the
+    /// project's base as [`SlotGit::fetch_origin`] last fetched it.
+    ///
+    /// Only forward: a branch that holds a commit `to` does not have is left
+    /// where it is ([`Brought::Diverged`]), since moving it would drop that
+    /// commit from every ref. And never the branch the slot is on: moving it
+    /// would change `HEAD` under a tree that was not updated with it.
+    pub fn bring_branch(&self, branch: &str, to: &str) -> Result<Brought, GitError> {
+        let to = self.run(&["rev-parse", "--verify", &format!("{to}^{{commit}}")])?;
+        let name = format!("refs/heads/{branch}");
+        if self.current_branch()? == branch {
+            return Ok(Brought::CheckedOut);
+        }
+        let from = if self.has(&name) {
+            let from = self.run(&["rev-parse", "--verify", &format!("{name}^{{commit}}")])?;
+            if from == to {
+                return Ok(Brought::Already);
+            }
+            let ahead = self.run(&["rev-list", "--count", &format!("{to}..{from}")])?;
+            if ahead.trim() != "0" {
+                return Ok(Brought::Diverged { at: from });
+            }
+            Some(from)
+        } else {
+            None
+        };
+        self.give_objects(&[to.as_str()])?;
+        self.write_into_slot(&name, format!("{to}\n").as_bytes())?;
+        self.forget_sync()?;
+        self.sync()?;
+        Ok(match from {
+            Some(from) => Brought::Moved { from, to },
+            None => Brought::Created { at: to },
+        })
     }
 
     /// Bring the branches of the human's repository at `origin` into the
@@ -1886,7 +1952,7 @@ mod tests {
 
         let outside = dir.path().join("outside");
         std::fs::create_dir_all(&outside).unwrap();
-        std::os::unix::fs::symlink(&outside, objects.join("ab")).unwrap();
+        std::os::unix::fs::symlink(outside, objects.join("ab")).unwrap();
         let why = plain_object_store(&objects).unwrap_err();
         assert!(
             why.contains("ab is neither a file nor a directory"),
@@ -2067,7 +2133,7 @@ mod tests {
         let hour_ago = std::time::SystemTime::now() - Duration::from_secs(3600);
         std::fs::File::options()
             .write(true)
-            .open(&file)
+            .open(file)
             .unwrap()
             .set_modified(hour_ago)
             .unwrap();

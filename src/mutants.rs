@@ -338,6 +338,99 @@ pub struct Campaign {
     /// then reads as a full campaign with nothing before it.
     #[serde(default)]
     pub chain: Chain,
+    /// Why the campaign ended before it said it had finished, when `nunki` or
+    /// the HQ stopped it ([`Stopped`]); absent for a campaign that finished.
+    /// Its survivors are the ones the tool had already reported, and they
+    /// **never** make gate 7 green: an incomplete campaign measured part of
+    /// what it was handed, and the rest is not known to be killed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped: Option<Stopped>,
+}
+
+/// Why a campaign on file is incomplete (SPEC 4.4, gate 7: "un délai
+/// paramétré").
+///
+/// Kept apart from a campaign that could not run: one stopped here was
+/// measuring, and running it again **does** change something once its bound
+/// is raised. So it does not go back to the coder on its own; the HQ chooses
+/// ([`stopped_short`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "by", rename_all = "snake_case")]
+pub enum Stopped {
+    /// Past the mission's `mutation_minutes`, stopped by `nunki`.
+    Deadline { minutes: u32 },
+    /// Called off by the HQ (`nunki mission mutants --cancel`), and why.
+    Cancelled { because: String },
+}
+
+impl Stopped {
+    /// How a sentence names it: "stopped at its 45-minute deadline".
+    pub fn said(&self) -> String {
+        match self {
+            Stopped::Deadline { minutes } => format!("stopped at its {minutes}-minute deadline"),
+            Stopped::Cancelled { because } => {
+                format!("called off by the HQ ({})", crate::text::one_line(because))
+            }
+        }
+    }
+}
+
+/// What an incomplete campaign on file asks for, now that the mission's
+/// deadline is what it is ([`stopped_short`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Standing {
+    /// The HQ's to choose, and the sentence names both ways on.
+    HqChooses(String),
+    /// A new campaign is owed: the bound it was stopped at has been raised
+    /// since (`nunki mission reframe`), so running it again no longer runs
+    /// into the same wall.
+    Owed(String),
+}
+
+/// What `campaign` asks for when it is incomplete, the mission's deadline
+/// being `deadline_minutes`; `None` for a campaign that finished.
+///
+/// Gate 7 and [`already_answered`] both ask it here, so the gate and the
+/// launcher cannot disagree on whether a campaign is owed: a gate saying
+/// "owed" over a launcher answering "on file" would leave the monitor
+/// starting nothing, tick after tick.
+pub fn stopped_short(campaign: &Campaign, deadline_minutes: u32) -> Option<Standing> {
+    let stopped = campaign.stopped.as_ref()?;
+    let found = campaign.survivors.len();
+    Some(match stopped {
+        Stopped::Deadline { minutes } if deadline_minutes > *minutes => Standing::Owed(format!(
+            "{}. The deadline has been raised to {deadline_minutes} minutes since, so a new \
+             campaign is owed",
+            what_stopped(stopped, found)
+        )),
+        _ => Standing::HqChooses(stopped_said(stopped, found)),
+    })
+}
+
+/// What a campaign stopped short says, wherever it is said — gate 7, the
+/// monitor, `nunki mission mutants` — with the two ways on the HQ has.
+pub fn stopped_said(stopped: &Stopped, survivors: usize) -> String {
+    let what = what_stopped(stopped, survivors);
+    match stopped {
+        Stopped::Deadline { .. } => format!(
+            "{what}. The HQ chooses: raise `mutation_minutes` in MISSION.md and `nunki mission \
+             reframe --yes`, which owes a new campaign; or send these survivors to the coder \
+             with `nunki mission iterate --because`"
+        ),
+        Stopped::Cancelled { .. } => format!(
+            "{what}. The HQ chooses: send these survivors to the coder with `nunki mission \
+             iterate --because`, or run a new campaign with `nunki mission mutants --again`"
+        ),
+    }
+}
+
+fn what_stopped(stopped: &Stopped, survivors: usize) -> String {
+    format!(
+        "the mutation campaign was {} before it finished, having already reported \
+         {survivors} survivor(s), kept in {FILE} as from an incomplete campaign: they never \
+         make gate 7 green",
+        stopped.said()
+    )
 }
 
 /// One file's counts, and the campaign that measured them (SPEC 4.4, the
@@ -500,6 +593,16 @@ pub enum MutantsError {
     Followup(#[from] crate::followup::FollowupError),
     #[error("the chain of campaigns is broken: {0}")]
     Broken(String),
+    #[error(
+        "a campaign is called off with a reason: `--because` says why, and the HQ and the \
+         next coder run read it in FOLLOWUP_HQ.md"
+    )]
+    NoReason,
+    #[error(
+        "the campaign's container is paused, so it cannot be stopped: `nunki mission resume` \
+         unfreezes it, and `--cancel` then calls it off"
+    )]
+    Paused,
 }
 
 /// Where a mission's campaign result lives.
@@ -881,6 +984,15 @@ pub fn owed(
     if rigor == Rigor::Prototype {
         return None;
     }
+    // Whatever its share: what it did not reach is not known to be killed.
+    if let Some(stopped) = &campaign.stopped {
+        return Some(format!(
+            "the campaign was {} before it finished, and an incomplete campaign is never an \
+             answer — {} survivor(s) reported so far",
+            stopped.said(),
+            campaign.survivors.len()
+        ));
+    }
     let open: Vec<String> = campaign
         .survivors
         .iter()
@@ -928,12 +1040,13 @@ pub fn chain_said(campaign: &Campaign, coders: &BTreeMap<String, Triage>) -> Vec
         .iter()
         .filter(|s| answer(s, coders).is_none())
         .count();
-    let counts = match campaign.tried {
-        Some(tried) => format!(
+    let counts = match (&campaign.stopped, campaign.tried) {
+        (Some(stopped), _) => format!("incomplete, {}", stopped.said()),
+        (None, Some(tried)) => format!(
             "tried {tried}, killed {}",
             (tried as usize).saturating_sub(open)
         ),
-        None => "tried: not said".to_string(),
+        (None, None) => "tried: not said".to_string(),
     };
     let named = |scope: &Scope, head: &str| {
         let why = match scope {
@@ -1513,6 +1626,7 @@ fn record(
             tried: counted,
             files,
             chain,
+            stopped: None,
         },
     )?;
     Ok(count)
@@ -1583,15 +1697,15 @@ pub fn changed_between(
     from: &str,
     to: &str,
 ) -> Result<BTreeSet<String>, MutantsError> {
-    let names = git::on_slot(
-        tree,
-        &["diff", "--name-only", "--no-renames", "-z", from, to],
-    )?;
-    Ok(names
-        .split('\0')
-        .filter(|p| !p.is_empty())
-        .map(str::to_string)
-        .collect())
+    let names = git::SlotGit::open(tree)?.names(&[
+        "diff",
+        "--name-only",
+        "--no-renames",
+        "-z",
+        from,
+        to,
+    ])?;
+    Ok(names.into_iter().collect())
 }
 
 /// Give each new survivor what the HQ said on its twin in the previous
@@ -2221,12 +2335,8 @@ pub fn uncarried(tree: &Path, previous: &Campaign, touched: &[String]) -> Option
 
 /// Every file in `commit`'s tree, by path.
 fn files_at(tree: &Path, commit: &str) -> Result<BTreeSet<String>, MutantsError> {
-    let names = git::on_slot(tree, &["ls-tree", "-r", "--name-only", "-z", commit])?;
-    Ok(names
-        .split('\0')
-        .filter(|p| !p.is_empty())
-        .map(str::to_string)
-        .collect())
+    let names = git::SlotGit::open(tree)?.names(&["ls-tree", "-r", "--name-only", "-z", commit])?;
+    Ok(names.into_iter().collect())
 }
 
 /// A campaign's per-file counts ([`by_file`]), trusted only when every key
@@ -2271,10 +2381,15 @@ pub fn touched_since(
 /// fingerprint is over the touched files and not over `mutation.sh`, the
 /// tool's version, or an exclusion added since. The final campaign of a
 /// `critical` mission is answered only by a full one on this content.
+///
+/// An incomplete one on this content ([`Stopped`]) answers with what it is,
+/// and the HQ chooses — unless the deadline it was stopped at has been
+/// raised to `deadline_minutes` since ([`stopped_short`]).
 pub fn already_answered(
     dir: &Path,
     want: &str,
     replay: Replay,
+    deadline_minutes: u32,
 ) -> Result<Option<Progress>, MutantsError> {
     if replay == Replay::Now {
         return Ok(None);
@@ -2284,6 +2399,19 @@ pub fn already_answered(
     };
     if existing.fingerprint != want {
         return Ok(None);
+    }
+    match (
+        stopped_short(&existing, deadline_minutes),
+        &existing.stopped,
+    ) {
+        (Some(Standing::Owed(_)), _) => return Ok(None),
+        (Some(Standing::HqChooses(_)), Some(stopped)) => {
+            return Ok(Some(Progress::Incomplete {
+                survivors: existing.survivors.len(),
+                stopped: stopped.clone(),
+            }));
+        }
+        _ => {}
     }
     // The final one is a full campaign on this content, and a partial one
     // on file here does not answer it.
@@ -2310,8 +2438,14 @@ pub enum Progress {
         survivors: usize,
         chain: Vec<String>,
     },
-    /// Past its deadline and stopped (SPEC 4.4, "un délai paramétré").
-    Overrun { minutes: u32 },
+    /// Past its deadline and stopped (SPEC 4.4, "un délai paramétré"), and
+    /// recorded as incomplete with the `survivors` the tool had already
+    /// reported ([`Stopped::Deadline`]). The HQ's to choose: raise the bound,
+    /// or send them to the coder.
+    Overrun { minutes: u32, survivors: usize },
+    /// An incomplete campaign on this content is on file ([`Stopped`]), and
+    /// nothing is launched over it: the HQ chooses ([`stopped_short`]).
+    Incomplete { survivors: usize, stopped: Stopped },
     /// Ended without the line that says it finished, and its stderr says
     /// why: a test the branch carries failing inside `mutants/`, a crate that
     /// does not compile. That is the branch's to fix, and gate 7 reads the
@@ -2404,11 +2538,21 @@ pub fn read_back(
             if minutes_since(&running.started_at) > running.deadline_minutes {
                 // Stopped rather than left: SPEC 4.4 gives the campaign a
                 // configured delay, and a campaign past it is holding a slot,
-                // not working in it.
+                // not working in it. What it had found is kept, as from an
+                // incomplete campaign, rather than left inside a log.
                 let _ = spawner.signal(&spawned, Signal::Terminate);
+                let survivors = record_stopped(
+                    dir,
+                    &running,
+                    &text,
+                    Stopped::Deadline {
+                        minutes: running.deadline_minutes,
+                    },
+                )?;
                 forget_running(&project.hq_root, &slot.name)?;
                 Progress::Overrun {
                     minutes: running.deadline_minutes,
+                    survivors,
                 }
             } else {
                 Progress::Running {
@@ -2532,6 +2676,160 @@ pub fn end(
     forget_running(&project.hq_root, &slot.name)
 }
 
+/// Record the campaign `running` describes as incomplete, from what its log
+/// `text` holds so far: the survivors the tool had already reported, the
+/// HQ's rulings carried from the campaign on file by the same rules as any
+/// replay, and why it stopped. Returns how many survivors it holds.
+///
+/// No count is kept, and no per-file counts: a campaign stopped midway
+/// tried part of what it was handed, and a share over that part would be a
+/// share of the wrong whole. Gate 7 never judges it anyway ([`owed`],
+/// [`stopped_short`]).
+///
+/// Only the exact twin of a ruled survivor is given its proposal here: the
+/// looser tier of [`carry`] needs the code read at `HEAD`, which this
+/// recording does not do, and fails closed without it.
+pub fn record_stopped(
+    dir: &Path,
+    running: &Running,
+    text: &str,
+    stopped: Stopped,
+) -> Result<usize, MutantsError> {
+    let mut survivors = parse(text);
+    if let Some(previous) = read(dir)? {
+        carry(&previous, &mut survivors, |_| false);
+    }
+    let count = survivors.len();
+    write(
+        dir,
+        &Campaign {
+            fingerprint: running.fingerprint.clone(),
+            head: running.head.clone(),
+            date: crate::state::now_rfc3339(),
+            survivors,
+            tried: None,
+            files: None,
+            chain: Chain {
+                earlier: Vec::new(),
+                ran: None,
+                ..running.chain.clone()
+            },
+            stopped: Some(stopped),
+        },
+    )?;
+    Ok(count)
+}
+
+/// What [`cancel`] found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Cancelled {
+    /// No campaign is in flight on this slot.
+    Nothing,
+    /// The campaign had already ended, or could not be asked: read back as
+    /// any call would, and nothing was cancelled.
+    Ended(Progress),
+    /// Stopped, and recorded as incomplete with the survivors it had found.
+    Stopped { survivors: usize },
+}
+
+/// The HQ calls off the campaign in flight on this slot, because it knows it
+/// is wasted: stopped the way the deadline stops one, and recorded as
+/// incomplete with `because` ([`Stopped::Cancelled`]), so that the mission
+/// stays where `nunki mission iterate` or `nunki verify` can take it.
+///
+/// A campaign that has already ended is read back instead, and its result
+/// kept: calling off a campaign that finished would throw a measurement
+/// away. A **paused** one is refused: its container is frozen, the signal
+/// would not reach it, and forgetting it would leave a campaign nobody
+/// follows rewriting the copy once it is unfrozen.
+pub fn cancel(
+    project: &crate::project::Project,
+    slot: &crate::slot::Slot,
+    engine: std::sync::Arc<dyn crate::engine::Engine>,
+    dir: &Path,
+    because: &str,
+) -> Result<Cancelled, MutantsError> {
+    use crate::harness::spawn::{Presence, Signal, Spawned, Spawner};
+
+    let because = because.trim();
+    if because.is_empty() {
+        return Err(MutantsError::NoReason);
+    }
+    let Some(running) = read_running(&project.hq_root, &slot.name)? else {
+        return Ok(Cancelled::Nothing);
+    };
+    let spawner = crate::engine::spawn::ContainerSpawner::new(
+        engine.clone(),
+        crate::run::profile_path(project, &slot.name),
+        &crate::compose::project_name(&project.session(), &slot.name)
+            .map_err(|e| MutantsError::Exec(crate::exec::ExecError::Compose(e)))?,
+        crate::compose::AGENT_SERVICE,
+    )
+    .identified_by(&running.fingerprint);
+    let spawned = Spawned {
+        pid: running.pid,
+        container: running.container.clone(),
+    };
+    match spawner
+        .alive(&spawned)
+        .map_err(|e| MutantsError::Launch(e.to_string()))?
+    {
+        Presence::Running => {
+            let text = std::fs::read_to_string(&running.log).unwrap_or_default();
+            let _ = spawner.signal(&spawned, Signal::Terminate);
+            let survivors = record_stopped(
+                dir,
+                &running,
+                &text,
+                Stopped::Cancelled {
+                    because: because.to_string(),
+                },
+            )?;
+            forget_running(&project.hq_root, &slot.name)?;
+            Ok(Cancelled::Stopped { survivors })
+        }
+        Presence::Paused => Err(MutantsError::Paused),
+        _ => match read_back(project, slot, engine, dir)? {
+            Some(progress) => Ok(Cancelled::Ended(progress)),
+            None => Ok(Cancelled::Nothing),
+        },
+    }
+}
+
+/// What `nunki mission mutants --cancel` says of what [`cancel`] found.
+pub fn cancelled_said(cancelled: &Cancelled) -> String {
+    match cancelled {
+        Cancelled::Nothing => "no campaign is in flight on this slot: nothing to call off".into(),
+        Cancelled::Ended(progress) => format!(
+            "the campaign had already ended, and nothing was called off: {}",
+            crate::monitor::campaign_line(progress)
+        ),
+        Cancelled::Stopped { survivors } => format!(
+            "campaign called off — {survivors} survivor(s) kept in {FILE} as from an \
+             incomplete campaign, and the reason written to FOLLOWUP_HQ.md. `nunki mission \
+             iterate --because` sends them to the coder; `nunki mission mutants --again` runs a \
+             new campaign"
+        ),
+    }
+}
+
+/// [`cancel`], and the reason written in `FOLLOWUP_HQ.md` as `who`'s, when a
+/// campaign was stopped: the file the HQ and the next coder run read.
+pub fn cancel_and_say(
+    project: &crate::project::Project,
+    slot: &crate::slot::Slot,
+    engine: std::sync::Arc<dyn crate::engine::Engine>,
+    paths: &crate::mission::dir::Paths,
+    who: &str,
+    because: &str,
+) -> Result<Cancelled, MutantsError> {
+    let cancelled = cancel(project, slot, engine, &paths.dir, because)?;
+    if let Cancelled::Stopped { survivors } = &cancelled {
+        crate::followup::campaign_cancelled(&paths.followup, who, because, *survivors)?;
+    }
+    Ok(cancelled)
+}
+
 /// What a caller asks of [`campaign`], beyond where it runs.
 #[derive(Debug, Clone, Copy)]
 pub struct Asked<'a> {
@@ -2605,7 +2903,7 @@ pub fn campaign(
     // Nothing in flight. A campaign on this exact content is not run again:
     // SPEC 4.4 says it replays only when the touched files have changed, and
     // § 7 counts the hour it would otherwise spend.
-    if let Some(fresh) = already_answered(dir, &want, asked.replay)? {
+    if let Some(fresh) = already_answered(dir, &want, asked.replay, asked.deadline_minutes)? {
         return Ok(fresh);
     }
 

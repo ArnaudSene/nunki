@@ -415,7 +415,11 @@ fn ending_a_mission_makes_it_closable() {
         LifecycleError::NotFinished { .. }
     ));
 
-    let state = lifecycle::end(&world.project, "m1", "the approach was wrong").unwrap();
+    let lifecycle::Ended::Started(state) =
+        lifecycle::end(&world.project, "m1", "the approach was wrong").unwrap()
+    else {
+        panic!("a started mission was ended as one never started");
+    };
     assert!(
         matches!(
             state.flow.stage(),
@@ -826,4 +830,197 @@ fn a_volet_granted_by_a_retry_is_written_with_its_count_and_its_reason() {
     );
     // And never the old promise.
     assert!(!followup.contains("handed back whole"), "{followup}");
+}
+
+impl World {
+    /// A second mission, `m2`, framed and never started: a folder and no
+    /// state.
+    fn framed_only(&self) {
+        nunki::mission::dir::create(&self.project.hq_root, "m2", &header(1), "later").unwrap();
+    }
+}
+
+/// A mission framed and never started can be called off, and archived: both
+/// verbs refused it, which left a folder nobody could close but by hand.
+/// `end` writes the reason where a human reads it; `archive` moves the folder
+/// as it moves any mission's, and there is no state to move with it.
+#[test]
+fn a_mission_that_never_started_can_be_called_off_and_archived() {
+    let world = World::new(1);
+    world.framed_only();
+
+    let err = lifecycle::end(&world.project, "m2", "  ").unwrap_err();
+    assert!(matches!(err, LifecycleError::NoReason), "{err}");
+
+    let ended = lifecycle::end(&world.project, "m2", "the need went away").unwrap();
+    assert_eq!(ended, lifecycle::Ended::NeverStarted);
+    let followup =
+        std::fs::read_to_string(world.project.hq_root.join("missions/m2/FOLLOWUP_HQ.md")).unwrap();
+    assert!(followup.contains("called this mission off"), "{followup}");
+    assert!(followup.contains("the need went away"), "{followup}");
+    // Nothing started on the way.
+    assert!(
+        Store::open(&world.project.hq_root)
+            .unwrap()
+            .load("m2")
+            .is_err()
+    );
+
+    let archived = lifecycle::archive(&world.project, "m2").unwrap();
+    assert_eq!(
+        archived.at,
+        lifecycle::archive_dir(&world.project).join("m2")
+    );
+    assert!(!world.project.hq_root.join("missions/m2").exists());
+    assert!(archived.at.join("MISSION.md").is_file());
+    assert!(archived.at.join("FOLLOWUP_HQ.md").is_file());
+    assert!(!archived.at.join("state.json").exists());
+}
+
+/// Archived directly, without being called off first: "as for any mission".
+#[test]
+fn a_mission_that_never_started_is_archived_without_being_ended_first() {
+    let world = World::new(1);
+    world.framed_only();
+    lifecycle::archive(&world.project, "m2").unwrap();
+    assert!(
+        lifecycle::archive_dir(&world.project)
+            .join("m2/MISSION.md")
+            .is_file()
+    );
+}
+
+/// Only a **missing** state is a mission never started. One that cannot be
+/// read is something to look at, and neither verb takes it for an unstarted
+/// mission; and a mission nobody framed is not one to close at all.
+#[test]
+fn a_state_that_cannot_be_read_is_not_a_mission_that_never_started() {
+    let world = World::new(1);
+    world.framed_only();
+    std::fs::write(
+        world.project.hq_root.join("state/missions/m2.json"),
+        "{ not json",
+    )
+    .unwrap();
+
+    let err = lifecycle::end(&world.project, "m2", "why").unwrap_err();
+    assert!(matches!(err, LifecycleError::State(_)), "{err}");
+    let err = lifecycle::archive(&world.project, "m2").unwrap_err();
+    assert!(matches!(err, LifecycleError::State(_)), "{err}");
+    assert!(world.project.hq_root.join("missions/m2").is_dir());
+    let followup =
+        std::fs::read_to_string(world.project.hq_root.join("missions/m2/FOLLOWUP_HQ.md")).unwrap();
+    assert!(!followup.contains("called this mission off"), "{followup}");
+
+    // Refused as a mission nobody framed, not as a follow-up it could not write.
+    let err = lifecycle::end(&world.project, "nobody", "why").unwrap_err();
+    assert!(matches!(err, LifecycleError::Mission(_)), "{err}");
+    assert!(!world.project.hq_root.join("missions/nobody").exists());
+    let err = lifecycle::archive(&world.project, "nobody").unwrap_err();
+    assert!(matches!(err, LifecycleError::Mission(_)), "{err}");
+    assert!(
+        !lifecycle::archive_dir(&world.project)
+            .join("nobody")
+            .exists()
+    );
+}
+
+/// `mission list` says each mission's stage in a word, and `--active` keeps
+/// only those started: a mission archived has left the list already.
+#[test]
+fn the_mission_list_says_each_stage_in_a_word_and_active_keeps_the_started() {
+    let world = World::new(1);
+    world.framed_only();
+
+    let all = lifecycle::listing(&world.project, false).unwrap();
+    let words: Vec<(&str, &str, bool)> = all
+        .iter()
+        .map(|l| (l.id.as_str(), l.stage.as_str(), l.started))
+        .collect();
+    assert_eq!(words, [("m1", "coding", true), ("m2", "framed", false)]);
+    let line = all[0].line();
+    assert!(line.contains("coding"), "{line}");
+    assert!(line.contains("mission/x"), "{line}");
+    assert!(line.contains("1 lot(s)"), "{line}");
+
+    let active = lifecycle::listing(&world.project, true).unwrap();
+    let ids: Vec<&str> = active.iter().map(|l| l.id.as_str()).collect();
+    assert_eq!(ids, ["m1"]);
+
+    // The word follows the stage.
+    world.at(&[
+        Event::RunEnded {
+            outcome: nunki::harness::Outcome::Finished(Default::default()),
+            lot_done: true,
+        },
+        Event::GatesPassed,
+        Event::GatesPassed,
+    ]);
+    let all = lifecycle::listing(&world.project, false).unwrap();
+    assert_eq!(all[0].stage, "verified");
+    // Pushed is said apart from verified: the one still waits on a human.
+    let store = Store::open(&world.project.hq_root).unwrap();
+    let mut state = store.load("m1").unwrap();
+    state.pushed = Some(nunki::state::PushedAt {
+        head: "abc".into(),
+        date: "2026-10-11T00:00:00Z".into(),
+    });
+    store.save(&state).unwrap();
+    let all = lifecycle::listing(&world.project, false).unwrap();
+    assert_eq!(all[0].stage, "pushed");
+    lifecycle::archive(&world.project, "m1").unwrap();
+    let active = lifecycle::listing(&world.project, true).unwrap();
+    assert!(active.is_empty(), "{active:?}");
+}
+
+/// Every stage has its own word: a column that said the same thing for two
+/// stages would be a column nobody can scan.
+#[test]
+fn every_stage_has_a_word_of_its_own() {
+    let world = World::new(1);
+    let mut seen = std::collections::BTreeSet::new();
+    let mut flow = Flow::new(header(1)).unwrap();
+    seen.insert(nunki::wait::stage_word(&flow));
+    for event in [
+        Event::RunEnded {
+            outcome: nunki::harness::Outcome::Finished(Default::default()),
+            lot_done: true,
+        },
+        Event::GatesPassed,
+        Event::GatesPassed,
+    ] {
+        flow.advance(event).unwrap();
+        seen.insert(nunki::wait::stage_word(&flow));
+    }
+    assert_eq!(
+        seen.into_iter().collect::<Vec<_>>(),
+        ["campaign", "coding", "gates", "verified"]
+    );
+    let _ = world;
+}
+
+/// `slot list` says which mission occupies each slot: a started mission holds
+/// its slot's tree and branch until it is archived.
+#[test]
+fn the_slot_list_names_the_mission_that_occupies_each_slot() {
+    let world = World::new(1);
+    world.framed_only();
+    let occupants = lifecycle::occupants(&world.project).unwrap();
+    assert_eq!(
+        occupants.into_iter().collect::<Vec<_>>(),
+        [("one".to_string(), vec!["m1".to_string()])]
+    );
+
+    let one = nunki::slot::Slot {
+        name: "one".into(),
+        tree: PathBuf::from("/slots/one"),
+    };
+    let line = lifecycle::slot_line(&one, &["m1".to_string()]);
+    assert!(line.contains("mission m1"), "{line}");
+    assert!(line.contains("/slots/one"), "{line}");
+    let two = nunki::slot::Slot {
+        name: "two".into(),
+        tree: PathBuf::from("/slots/two"),
+    };
+    assert!(lifecycle::slot_line(&two, &[]).contains("free"));
 }

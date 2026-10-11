@@ -252,6 +252,8 @@ pub fn after_verify(mission: &str, result: &Result<Vec<Step>, VerifyError>) -> N
                 // Said, not acted on: the launch that ended it is the step
                 // after, and that one goes on.
                 | Step::CampaignEnded { .. }
+                // Said: what a run left behind is stopped, and the flow goes on.
+                | Step::LeftBehind { .. }
                 // Said before the launch it belongs to, which is the step after.
                 | Step::PortsDropped { .. }
                 // Always followed by `Verified` or `Findings`, which stop.
@@ -292,9 +294,15 @@ pub fn after_campaign(progress: &crate::mutants::Progress) -> Next {
         | Progress::Running { .. }
         | Progress::Fresh { .. }
         | Progress::Finished { .. } => Next::Continue,
-        Progress::Overrun { minutes } => Next::Exit(format!(
-            "the mutation campaign passed its {minutes}-minute deadline and was stopped"
+        // Stopped short, and recorded: the HQ's to choose, never a volet of
+        // its own — running it again would run into the same deadline.
+        Progress::Overrun { minutes, survivors } => Next::Exit(crate::mutants::stopped_said(
+            &crate::mutants::Stopped::Deadline { minutes: *minutes },
+            *survivors,
         )),
+        Progress::Incomplete { survivors, stopped } => {
+            Next::Exit(crate::mutants::stopped_said(stopped, *survivors))
+        }
         // The branch's to fix, and the next `verify` says so: gate 7 reads
         // the stderr this campaign left and goes red, which sends a volet.
         Progress::CouldNotRun(_) => Next::Continue,
@@ -601,9 +609,14 @@ pub fn campaign_line(progress: &crate::mutants::Progress) -> String {
             }
             line
         }
-        Progress::Overrun { minutes } => {
-            format!("mutation campaign stopped past its {minutes}-minute deadline")
-        }
+        Progress::Overrun { minutes, survivors } => format!(
+            "mutation campaign stopped past its {minutes}-minute deadline, {survivors} \
+             survivor(s) kept as from an incomplete campaign"
+        ),
+        Progress::Incomplete { survivors, stopped } => format!(
+            "mutation campaign on file is incomplete ({}), {survivors} survivor(s)",
+            stopped.said()
+        ),
         Progress::CouldNotRun(why) => {
             format!("mutation campaign could not run: {}", one_line(why))
         }

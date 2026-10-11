@@ -20,6 +20,7 @@ pub enum Call {
     Liveness(String),
     Containers(String),
     Remove(Vec<String>),
+    RemoveVolume(String),
 }
 
 pub struct FakeEngine {
@@ -31,6 +32,12 @@ pub struct FakeEngine {
     exec_queue: Mutex<Vec<ExecOutput>>,
     fail_up: Mutex<Option<String>>,
     lifted: Mutex<Vec<Container>>,
+    /// The named volumes the engine holds. One is **in use** while any
+    /// container of the project remains, as Docker refuses `volume rm` on a
+    /// volume a container mounts, stopped or not.
+    volumes: Mutex<std::collections::BTreeSet<String>>,
+    /// Volumes some other project's container mounts: never removable here.
+    held: Mutex<std::collections::BTreeSet<String>>,
 }
 
 impl Default for FakeEngine {
@@ -52,6 +59,8 @@ impl Default for FakeEngine {
             exec_queue: Mutex::new(Vec::new()),
             fail_up: Mutex::new(None),
             lifted: Mutex::new(Vec::new()),
+            volumes: Mutex::new(Default::default()),
+            held: Mutex::new(Default::default()),
         }
     }
 }
@@ -70,6 +79,24 @@ impl FakeEngine {
     pub fn with_lifted(self, container: Container) -> Self {
         self.lifted.lock().unwrap().push(container);
         self
+    }
+
+    /// A named volume the engine holds.
+    pub fn with_volume(self, name: &str) -> Self {
+        self.volumes.lock().unwrap().insert(name.to_string());
+        self
+    }
+
+    /// A named volume a container outside the project mounts: it exists,
+    /// and removing it fails whatever is taken down.
+    pub fn with_volume_held(self, name: &str) -> Self {
+        self.held.lock().unwrap().insert(name.to_string());
+        self.with_volume(name)
+    }
+
+    /// The named volumes the engine still holds.
+    pub fn volumes(&self) -> Vec<String> {
+        self.volumes.lock().unwrap().iter().cloned().collect()
     }
 
     pub fn with_liveness(self, container: &str, state: Liveness) -> Self {
@@ -245,6 +272,22 @@ impl Engine for FakeEngine {
             .unwrap()
             .retain(|c| !containers.contains(&c.id));
         Ok(())
+    }
+
+    fn remove_volume(&self, name: &str) -> Result<bool, EngineError> {
+        self.record(Call::RemoveVolume(name.to_string()));
+        if !self.volumes.lock().unwrap().contains(name) {
+            return Ok(false);
+        }
+        if !self.lifted.lock().unwrap().is_empty() || self.held.lock().unwrap().contains(name) {
+            return Err(EngineError::Command {
+                verb: "volume rm",
+                status: "1".to_string(),
+                stderr: format!("Error response from daemon: remove {name}: volume is in use"),
+            });
+        }
+        self.volumes.lock().unwrap().remove(name);
+        Ok(true)
     }
 }
 

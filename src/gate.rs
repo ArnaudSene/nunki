@@ -113,6 +113,13 @@ pub struct Outcome {
     /// why — a flow that told the two apart by matching on a string would
     /// start doing something else the day the string was reworded.
     pub waits_on_campaign: bool,
+    /// Set when gate 7 could not be played **because the campaign on file
+    /// stopped short** ([`crate::mutants::Stopped`]) and the HQ has to choose
+    /// what comes next. Unplayed like any other, to a human; to the flow, a
+    /// wall rather than a campaign owed — launching the same campaign again
+    /// would run into the same deadline, and a volet would send the coder
+    /// survivors nobody chose to send.
+    pub awaits_hq: bool,
 }
 
 impl Outcome {
@@ -122,6 +129,7 @@ impl Outcome {
             decision,
             note: None,
             waits_on_campaign: false,
+            awaits_hq: false,
         }
     }
 
@@ -132,6 +140,18 @@ impl Outcome {
             decision: Decision::Unplayed(why.to_string()),
             note: None,
             waits_on_campaign: true,
+            awaits_hq: false,
+        }
+    }
+
+    /// Gate 7 over a campaign that stopped short: the HQ's to choose.
+    fn for_the_hq(gate: Gate, why: &str) -> Self {
+        Self {
+            gate,
+            decision: Decision::Unplayed(why.to_string()),
+            note: None,
+            waits_on_campaign: false,
+            awaits_hq: true,
         }
     }
 }
@@ -208,15 +228,17 @@ impl Report {
         // Every gate nobody could play, and whether the campaign is what it
         // waits on. Gate 7 unplayed **is** a campaign owed — no campaign has
         // run, or the one on file ran on other content, and running one
-        // answers both. A gate that stood down *while* a campaign runs is the
-        // same obstacle seen from the other side.
+        // answers both — unless the campaign on file stopped short and the HQ
+        // chooses ([`Outcome::awaits_hq`]), which is a wall. A gate that stood
+        // down *while* a campaign runs is the same obstacle seen from the other
+        // side.
         let mut owed: Option<String> = None;
         let mut wall: Option<&Outcome> = None;
         for outcome in &self.outcomes {
             let Decision::Unplayed(why) = &outcome.decision else {
                 continue;
             };
-            if outcome.gate == Gate::Mutation {
+            if outcome.gate == Gate::Mutation && !outcome.awaits_hq {
                 // Gate 7's own sentence first: it is the one that names the
                 // verb, where a gate standing down only says to look again.
                 owed = Some(why.clone());
@@ -738,7 +760,13 @@ struct Touched {
 }
 
 fn touched(tree: &Path, base: &Rev) -> Result<Touched, GateError> {
-    let diff = git::on_slot(tree, &["diff", "--name-only", &format!("{base}...HEAD")])?;
+    // NUL-separated (`-z`), every name as the tree holds it. Read line by
+    // line, git quoted a name holding a quote or a character outside ASCII
+    // — `"src/\303\251.rs"` — and that quoted string became the path gate 4
+    // matched, the campaign was handed, and the fingerprint read: a file
+    // that does not exist, whose mutants nobody found.
+    let repo = git::SlotGit::open(tree)?;
+    let diff = repo.names(&["diff", "--name-only", "-z", &format!("{base}...HEAD")])?;
     let commits: Vec<String> = git::on_slot(tree, &["rev-list", &format!("{base}..HEAD")])?
         .lines()
         .map(str::to_string)
@@ -746,20 +774,20 @@ fn touched(tree: &Path, base: &Rev) -> Result<Touched, GateError> {
     // A merge commit shows nothing under `diff-tree` without `-m`, and that
     // is deliberate: its content is its parents', already judged.
     let mut seen: Vec<(String, String)> = diff
-        .lines()
-        .filter(|p| !p.is_empty())
-        .map(|p| (p.to_string(), "the diff against the base".to_string()))
+        .into_iter()
+        .map(|p| (p, "the diff against the base".to_string()))
         .collect();
     for commit in &commits {
-        let in_commit = git::on_slot(
-            tree,
-            &["diff-tree", "--no-commit-id", "--name-only", "-r", commit],
-        )?;
-        for path in in_commit.lines().filter(|p| !p.is_empty()) {
-            seen.push((
-                path.to_string(),
-                format!("commit {}", &commit[..7.min(commit.len())]),
-            ));
+        let in_commit = repo.names(&[
+            "diff-tree",
+            "--no-commit-id",
+            "--name-only",
+            "-z",
+            "-r",
+            commit,
+        ])?;
+        for path in in_commit {
+            seen.push((path, format!("commit {}", &commit[..7.min(commit.len())])));
         }
     }
     Ok(Touched { seen, commits })
@@ -1481,9 +1509,11 @@ fn read(path: &Path) -> Result<String, GateError> {
 /// gets to be transient — nothing is here to read yet — and it is the second
 /// call that finds this and stops asking.
 ///
-/// A campaign killed on the 45-minute deadline lands here too, and that is
-/// the right side to err on: a red gate quoting what the tooling said is more
-/// use than a silent retry of something that will be killed again.
+/// A campaign stopped at its deadline, or called off by the HQ, does not land
+/// here: it is recorded as incomplete, with what it had found, and the HQ
+/// chooses ([`crate::mutants::stopped_short`]). Read as "measured nothing",
+/// it went back to the coder as if running it again changed nothing — when
+/// raising its bound does.
 fn campaign_that_could_not_run(
     mission_dir: &Path,
     fingerprint: &str,
@@ -1585,6 +1615,19 @@ fn mutation(subject: &Subject, threshold: Threshold) -> Result<Outcome, GateErro
                 &want[..7.min(want.len())]
             )),
         ));
+    }
+
+    // Stopped short (SPEC 4.4, "un délai paramétré"): never green, never a
+    // volet of its own. Its survivors are on file; whether they go to the
+    // coder, or the bound is raised first, is the HQ's choice.
+    match crate::mutants::stopped_short(&campaign, subject.header.bounds.mutation_minutes) {
+        Some(crate::mutants::Standing::HqChooses(why)) => {
+            return Ok(Outcome::for_the_hq(gate, &why));
+        }
+        Some(crate::mutants::Standing::Owed(why)) => {
+            return Ok(Outcome::of(gate, Decision::Unplayed(why)));
+        }
+        None => {}
     }
 
     // Two sources, and which one a line came from is decided by the mount,

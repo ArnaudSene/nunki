@@ -276,6 +276,46 @@ pub fn reviewed(file: &Path, who: &str, why: &str) -> Result<(), FollowupError> 
     )
 }
 
+/// The HQ called off the mutation campaign in flight, and said why
+/// (`nunki mission mutants --cancel`): `survivors` is how many it had already
+/// reported, kept in `MUTANTS.json` as from an incomplete campaign.
+pub fn campaign_cancelled(
+    file: &Path,
+    who: &str,
+    why: &str,
+    survivors: usize,
+) -> Result<(), FollowupError> {
+    append(
+        file,
+        &format!(
+            "## {date} — {who} called off the mutation campaign\n\n\
+             **Because:** {why}\n\n\
+             It had reported {survivors} survivor(s), kept in MUTANTS.json as from an\n\
+             incomplete campaign: they never make gate 7 green. `nunki mission iterate\n\
+             --because` sends them to the coder; `nunki mission mutants --again` runs a\n\
+             new campaign.\n",
+            date = today(),
+        ),
+    )
+}
+
+/// The HQ sent the survivors of an incomplete campaign to the coder
+/// (`nunki mission iterate --because`, at the gates): the coder answers
+/// them as it would a red gate 7's, knowing the campaign did not finish.
+pub fn partial_survivors_sent(file: &Path, who: &str, why: &str) -> Result<(), FollowupError> {
+    append(
+        file,
+        &format!(
+            "## {date} — {who} sends the survivors of an incomplete campaign\n\n\
+             **Why:** {why}\n\n\
+             The mutation campaign did not finish: MUTANTS.json holds the survivors it\n\
+             had reported when it stopped. Give each one of its outcomes, as for any\n\
+             campaign; the next campaign runs once the touched files have changed.\n",
+            date = today(),
+        ),
+    )
+}
+
 /// The HQ set the mission's rigor aside to send it back, and said why
 /// (SPEC 4.5): written, dated, as a departure from the rigor, so that
 /// whoever reads the follow-up sees how often the rule was set aside and

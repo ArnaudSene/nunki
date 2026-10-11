@@ -125,6 +125,7 @@ images and clone a slot:
 ```sh
 nunki slot rebuild --stack rust # the agent's image and the firewall sidecar
 nunki slot add one              # a clone at ../<project>-slots/one
+nunki slot list                 # each slot, and the mission that occupies it
 nunki check                     # what is held, and what could not be checked
 ```
 
@@ -239,10 +240,14 @@ reads, and prose the agent reads. Edit the prose, then start it:
 nunki mission start m1 --slot one
 ```
 
-The coder's first run is launched, detached, and a monitor is started for the
-mission. From then on `nunki` drives: it reads each run back, plays the gates,
-launches the next lot, waits out a harness that fails, and stops a run that
-would pass your subscription's threshold.
+The slot is put on the mission's branch, made from the project's base as the
+repository has it now, and the slot's own copy of that base (`dev`, say) is
+brought forward to it — only forward: one holding a commit the project lacks
+is left where it is, and `mission start` says so. The coder's first run is
+launched, detached, and a monitor is started for the mission. From then on
+`nunki` drives: it reads each run back, plays the gates, launches the next
+lot, waits out a harness that fails, and stops a run that would pass your
+subscription's threshold.
 
 While it works:
 
@@ -253,10 +258,27 @@ nunki mission watch m1      # follow the run in progress
 nunki verify m1             # read back and launch what is owed, by hand
 ```
 
-If you need to intervene: `nunki mission stop m1` holds the mission (`--now` ends
-the turn in progress too), `nunki mission resume m1` lifts the hold,
+If you need to intervene: `nunki mission stop m1 --because "why"` holds the
+mission (`--now` ends the turn in progress too) — the reason is required, and
+it is shown wherever the hold is: `mission status`, `watch`, `wait`, `verify`,
+the monitor's last line — `nunki mission resume m1` lifts the hold,
 `nunki mission say m1 "..."` leaves an instruction for the next run, and
 `nunki mission kill m1` is the emergency brake.
+
+`nunki mission list` gives each mission's stage in one word (`framed` for one
+never started, then `coding`, `gates`, `integration`, `security`, `findings`,
+`campaign`, `handed-over`, `verified`, `pushed`), and `--active` keeps only the
+missions started and not archived. `nunki slot list` says which mission
+occupies each slot, or that it is free. A mission framed and never started is
+closed like any other: `nunki mission end <id> --because "..."` writes why to
+its `FOLLOWUP_HQ.md`, and `nunki mission archive <id>` moves its folder.
+
+A run never leaves a process behind in the agent's container: every process a
+run starts carries `NUNKI_RUN=<its session>` in its environment, and once the
+run has ended, `nunki verify` stops every process still carrying it — `TERM`,
+then `KILL` a few seconds later — and says how many. A convenience rather than
+a guard: a process that clears its own environment is not found, and what
+contains an agent is its container.
 
 When a bound runs out — a lot's attempts, a role's, or the returns to the
 coder — `nunki` stops and hands the mission to you. `nunki mission retry m1
@@ -452,6 +474,33 @@ the content of the pushed commit, is full, and passes; its refusal names
 `nunki mission mutants <mission>` at that last stage runs the final
 campaign, as the monitor does.
 
+### A campaign stopped short: the deadline, and `--cancel`
+
+A campaign is given the mission's `mutation_minutes` (45 by default). One
+still running past it is stopped, and it is **not** read as a campaign that
+measured nothing: the survivors the tool had already reported are recorded
+in `MUTANTS.json`, marked as from an incomplete campaign (`"stopped"`), with
+the HQ's rulings carried as on any replay. An incomplete campaign **never**
+makes gate 7 green, nor lets `nunki push` through, nor lets the next
+campaign be partial on it. It does not go back to the coder on its own
+either: gate 7 stops the flow for the HQ, which chooses —
+
+- raise `mutation_minutes` in `MISSION.md` and `nunki mission reframe
+  <mission> --yes`: past the deadline it was stopped at, a campaign is owed
+  again, and the monitor starts it;
+- or send the survivors found so far to the coder with `nunki mission
+  iterate <mission> --because <why>`: a volet, as a red gate 7 opens one,
+  with the reason in `FOLLOWUP_HQ.md`.
+
+`nunki mission mutants <mission> --cancel --because <why>` calls off the
+campaign in flight, for a campaign the HQ knows is wasted: it is stopped as
+the deadline stops one, recorded as incomplete in the same way, and the
+reason is written to `FOLLOWUP_HQ.md`. The mission stays at its gates, where
+`iterate --because` sends the survivors on, or `nunki mission mutants
+<mission> --again` runs a new campaign. A campaign that had already ended is
+read back instead, and its result kept; a paused one is refused until
+`nunki mission resume`.
+
 ### Running mutants at once: `mutation_jobs`
 
 `mutation_jobs` in `nunki.yaml` — a whole number of at least 1, refused
@@ -544,7 +593,10 @@ severity blocks, as it always did. The refusal names the two ways on:
 `mission iterate --override --because <why>`, written, dated, in
 `FOLLOWUP_HQ.md` as a departure from the rigor. A verified mission sent
 back on review (`mission iterate --because`) spends a volet like any other,
-and at `standard` a second review needs `--override` as well. `mission
+and at `standard` a second review needs `--override` as well. Sending the
+survivors of a campaign that stopped short (`mission iterate --because`, at
+the gates) is no review: the rigor does not bound it, and there is nothing
+to override. `mission
 status` lists every override with its reason, and `nunki push` adds them to
 the pull request under "Departures from the rigor", so a reader sees how
 often the rigor was set aside.
@@ -852,7 +904,11 @@ named `nunki-<session>-<slot>`, the session being the first eight characters
 of the one `~/.nunki/sessions.json` gives this repository — two projects with
 a slot of the same name are two Compose projects, two networks and two sets
 of volumes. `nunki slot rm` takes them down with the slot, and `nunki slot
-reset` clears the volumes while keeping the clone.
+reset` clears the volumes while keeping the clone: it takes the slot's
+containers down first — an engine will not remove a volume a container still
+mounts — through a call that never removes a volume, then removes the slot's
+named volumes by name, and says any it could not. It refuses while a run or a
+mutation campaign is in flight in the slot.
 
 Finally, the binary and the accounts, once no project uses them:
 

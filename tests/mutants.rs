@@ -8,6 +8,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod common;
+
 use nunki::mutants::{self, Campaign, Survivor, Triage};
 
 fn git(at: &Path, args: &[&str]) -> String {
@@ -523,6 +525,7 @@ fn a_campaign_round_trips_through_the_mission_folder() {
     let dir = tempfile::tempdir().unwrap();
     assert_eq!(mutants::read(dir.path()).unwrap(), None);
     let campaign = Campaign {
+        stopped: None,
         files: None,
         chain: Default::default(),
         fingerprint: "abc1234".into(),
@@ -820,6 +823,7 @@ fn an_equivalence_is_ruled_by_a_verb_and_lands_in_the_hqs_own_file() {
     mutants::write(
         dir.path(),
         &Campaign {
+            stopped: None,
             files: None,
             chain: Default::default(),
             fingerprint: "abc1234".into(),
@@ -881,6 +885,7 @@ fn ruled_before(dir: &std::path::Path, survivors: Vec<Survivor>) {
     mutants::write(
         dir,
         &Campaign {
+            stopped: None,
             files: None,
             chain: Default::default(),
             fingerprint: "old0000".into(),
@@ -1480,6 +1485,7 @@ fn on_file(dir: &std::path::Path, fingerprint: &str, survivors: usize) {
     mutants::write(
         dir,
         &mutants::Campaign {
+            stopped: None,
             files: None,
             chain: Default::default(),
             fingerprint: fingerprint.into(),
@@ -1500,7 +1506,7 @@ fn a_campaign_on_the_same_content_is_not_run_again() {
     on_file(dir.path(), "abc", 2);
 
     let answer =
-        mutants::already_answered(dir.path(), "abc", mutants::Replay::WhenChanged).unwrap();
+        mutants::already_answered(dir.path(), "abc", mutants::Replay::WhenChanged, 45).unwrap();
 
     assert_eq!(answer, Some(mutants::Progress::Fresh { survivors: 2 }));
 }
@@ -1519,7 +1525,7 @@ fn a_campaign_is_run_again_when_the_human_says_something_changed() {
     let dir = tempfile::tempdir().unwrap();
     on_file(dir.path(), "abc", 2);
 
-    let answer = mutants::already_answered(dir.path(), "abc", mutants::Replay::Now).unwrap();
+    let answer = mutants::already_answered(dir.path(), "abc", mutants::Replay::Now, 45).unwrap();
 
     assert_eq!(answer, None, "the campaign on file was taken anyway");
     // And the file is left where it is: asking again is not deleting.
@@ -1534,7 +1540,7 @@ fn a_campaign_on_content_that_moved_is_run_again() {
     on_file(dir.path(), "abc", 2);
 
     let answer =
-        mutants::already_answered(dir.path(), "def", mutants::Replay::WhenChanged).unwrap();
+        mutants::already_answered(dir.path(), "def", mutants::Replay::WhenChanged, 45).unwrap();
 
     assert_eq!(answer, None);
 }
@@ -1545,7 +1551,7 @@ fn a_campaign_that_never_ran_is_run() {
     let dir = tempfile::tempdir().unwrap();
 
     let answer =
-        mutants::already_answered(dir.path(), "abc", mutants::Replay::WhenChanged).unwrap();
+        mutants::already_answered(dir.path(), "abc", mutants::Replay::WhenChanged, 45).unwrap();
 
     assert_eq!(answer, None);
 }
@@ -2541,6 +2547,7 @@ fn a_refusal_written_in_the_campaigns_log_is_never_taken() {
 
 fn campaign_of(survivors: Vec<Survivor>, tried: Option<u32>) -> Campaign {
     Campaign {
+        stopped: None,
         files: None,
         chain: Default::default(),
         fingerprint: "f".into(),
@@ -5066,6 +5073,7 @@ fn lifting_an_older_carried_ruling_takes_its_entry_out_by_origin() {
     mutants::write(
         &a,
         &Campaign {
+            stopped: None,
             files: None,
             chain: Default::default(),
             fingerprint: "f".into(),
@@ -5103,6 +5111,7 @@ const FORK: &str = "ffffffffffffffffffffffffffffffffffffffff";
 /// all in `src/lib.rs` when it has one.
 fn on_file_at(head: &str, survivors: Vec<Survivor>, tried: Option<u32>) -> Campaign {
     Campaign {
+        stopped: None,
         files: tried.map(|tried| counts(head, &[("src/lib.rs", tried)])),
         fingerprint: format!("fp-{head}"),
         head: head.into(),
@@ -6502,11 +6511,11 @@ fn only_a_full_campaign_on_the_same_content_answers_the_final_one() {
     let dir = tempfile::tempdir().unwrap();
     on_file(dir.path(), "abc", 0);
     assert_eq!(
-        mutants::already_answered(dir.path(), "abc", Replay::Final).unwrap(),
+        mutants::already_answered(dir.path(), "abc", Replay::Final, 45).unwrap(),
         Some(mutants::Progress::Fresh { survivors: 0 })
     );
     assert_eq!(
-        mutants::already_answered(dir.path(), "def", Replay::Final).unwrap(),
+        mutants::already_answered(dir.path(), "def", Replay::Final, 45).unwrap(),
         None
     );
 
@@ -6516,13 +6525,13 @@ fn only_a_full_campaign_on_the_same_content_answers_the_final_one() {
     };
     mutants::write(dir.path(), &partial).unwrap();
     assert_eq!(
-        mutants::already_answered(dir.path(), "abc", Replay::Final).unwrap(),
+        mutants::already_answered(dir.path(), "abc", Replay::Final, 45).unwrap(),
         None,
         "a partial campaign was taken for the final one"
     );
     // While, asked only when the content changed, it is the campaign on file.
     assert!(
-        mutants::already_answered(dir.path(), "abc", Replay::WhenChanged)
+        mutants::already_answered(dir.path(), "abc", Replay::WhenChanged, 45)
             .unwrap()
             .is_some()
     );
@@ -6540,4 +6549,620 @@ fn a_partial_campaign_is_not_the_final_one_and_says_since_when() {
     assert!(why.contains("at aaaaaaaaaaaa"), "{why}");
     assert!(why.contains("partial since bbbbbbbbbbbb"), "{why}");
     assert!(why.contains("full campaign at HEAD"), "{why}");
+}
+
+// ---------------------------------------------------------------------------
+// A campaign stopped short: at its deadline, or called off by the HQ.
+// ---------------------------------------------------------------------------
+
+/// What a stopped campaign's log holds: two survivors reported, progress
+/// around them, and no terminal line.
+const HALF_A_CAMPAIGN: &str = "Found 120 mutants to test\n\
+     {\"id\":\"a\",\"file\":\"src/lib.rs\",\"line\":3,\"description\":\"replace one\"}\n\
+     12/120 mutants tested\n\
+     {\"id\":\"b\",\"file\":\"src/lib.rs\",\"line\":7,\"description\":\"delete !\"}\n";
+
+/// A campaign filed as in flight on the slot, started long ago with a
+/// `deadline` in minutes, its log holding `log`; and the engine that says it
+/// is `liveness`, and running when asked.
+fn in_flight(
+    project: &nunki::project::Project,
+    slot: &nunki::slot::Slot,
+    mission: &Path,
+    log: &str,
+    deadline: u32,
+    liveness: nunki::engine::Liveness,
+    answer: &str,
+) -> std::sync::Arc<dyn nunki::engine::Engine> {
+    use nunki::engine::{ExecOutput, fake::FakeEngine};
+
+    let profile = nunki::run::profile_path(project, &slot.name);
+    std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+    std::fs::write(&profile, "services: {}\n").unwrap();
+    std::fs::create_dir_all(mission).unwrap();
+    let file = mission.join("mutants.log");
+    std::fs::write(&file, log).unwrap();
+    mutants::write_running(
+        &project.hq_root,
+        &slot.name,
+        &mutants::Running {
+            chain: Default::default(),
+            fingerprint: "abc1234".into(),
+            head: "def5678".into(),
+            started_at: "2026-09-18T22:52:37Z".into(),
+            container: "cafe1234".into(),
+            pid: Some(41),
+            log: file,
+            deadline_minutes: deadline,
+        },
+    )
+    .unwrap();
+    std::sync::Arc::new(
+        FakeEngine::default()
+            .with_liveness("cafe1234", liveness)
+            .with_exec(ExecOutput {
+                status: 0,
+                stdout: format!("{answer}\n"),
+                stderr: String::new(),
+            }),
+    )
+}
+
+/// The HQ's ruling on survivor `a`, on a finished campaign of other content
+/// already on file: what a stopped campaign carries, as any replay does.
+fn hq_ruled_on_a(mission: &Path) {
+    mutants::write(
+        mission,
+        &Campaign {
+            stopped: None,
+            fingerprint: "0ld0000".into(),
+            head: "0ld0000".into(),
+            date: "2026-09-01T00:00:00Z".into(),
+            survivors: vec![ruled(
+                Survivor {
+                    file: "src/lib.rs".into(),
+                    ..one("a", 3, "replace one")
+                },
+                "dead code",
+            )],
+            tried: Some(10),
+            files: None,
+            chain: Default::default(),
+        },
+    )
+    .unwrap();
+}
+
+/// A campaign past its deadline is stopped, and what the tool had already
+/// reported is recorded — as from an incomplete campaign, with the HQ's
+/// rulings carried as on any replay — rather than left inside a log where
+/// nobody reads it. The campaign is forgotten as in flight.
+#[test]
+fn a_campaign_stopped_at_its_deadline_keeps_the_survivors_it_had_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot) = context(dir.path());
+    let mission = dir.path().join("mission");
+    let engine = in_flight(
+        &project,
+        &slot,
+        &mission,
+        HALF_A_CAMPAIGN,
+        45,
+        nunki::engine::Liveness::Running,
+        "nunki-run-running",
+    );
+    hq_ruled_on_a(&mission);
+
+    let progress = mutants::read_back(&project, &slot, engine, &mission)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        progress,
+        mutants::Progress::Overrun {
+            minutes: 45,
+            survivors: 2
+        }
+    );
+    let campaign = mutants::read(&mission).unwrap().unwrap();
+    assert_eq!(
+        campaign.stopped,
+        Some(mutants::Stopped::Deadline { minutes: 45 })
+    );
+    assert_eq!(campaign.fingerprint, "abc1234");
+    assert_eq!(campaign.head, "def5678");
+    let ids: Vec<&str> = campaign.survivors.iter().map(|s| s.id.as_str()).collect();
+    assert_eq!(ids, ["a", "b"]);
+    assert_eq!(
+        campaign.tried, None,
+        "a share of part of a campaign was kept"
+    );
+    assert!(
+        matches!(
+            campaign.survivors[0].outcome,
+            Some(Triage::ProposedByNunki { .. })
+        ),
+        "the HQ's ruling on `a` was not carried: {:?}",
+        campaign.survivors[0]
+    );
+    assert!(
+        mutants::read_running(&project.hq_root, &slot.name)
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// Inside its deadline, the same campaign is running and nothing is
+/// recorded: the control for the test above.
+#[test]
+fn a_campaign_inside_its_deadline_is_left_running_and_recorded_nowhere() {
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot) = context(dir.path());
+    let mission = dir.path().join("mission");
+    let engine = in_flight(
+        &project,
+        &slot,
+        &mission,
+        HALF_A_CAMPAIGN,
+        u32::MAX,
+        nunki::engine::Liveness::Running,
+        "nunki-run-running",
+    );
+
+    let progress = mutants::read_back(&project, &slot, engine, &mission)
+        .unwrap()
+        .unwrap();
+
+    assert!(
+        matches!(progress, mutants::Progress::Running { .. }),
+        "{progress:?}"
+    );
+    assert_eq!(mutants::read(&mission).unwrap(), None);
+}
+
+/// An incomplete campaign never passes gate 7's rule, whatever its counts
+/// say — and so never lets `nunki push` through, nor the next campaign be
+/// partial on it.
+#[test]
+fn an_incomplete_campaign_always_owes_something() {
+    let finished = Campaign {
+        stopped: None,
+        fingerprint: "abc".into(),
+        head: "abc".into(),
+        date: "2026-09-01T00:00:00Z".into(),
+        survivors: vec![],
+        tried: Some(1000),
+        files: None,
+        chain: Default::default(),
+    };
+    for rigor in [
+        nunki::mission::Rigor::Standard,
+        nunki::mission::Rigor::Critical,
+    ] {
+        assert_eq!(
+            mutants::owed(&finished, &Default::default(), rigor, 80),
+            None
+        );
+        let stopped = Campaign {
+            stopped: Some(mutants::Stopped::Deadline { minutes: 45 }),
+            ..finished.clone()
+        };
+        let owed = mutants::owed(&stopped, &Default::default(), rigor, 80)
+            .expect("an incomplete campaign passed gate 7's rule");
+        assert!(owed.contains("45-minute deadline"), "{owed}");
+    }
+}
+
+/// A campaign stopped short on this content is not launched again over
+/// itself: the launcher answers with what it is, as gate 7 does — unless the
+/// human asks `--again`, or the deadline it was stopped at has been raised.
+#[test]
+fn an_incomplete_campaign_is_answered_until_its_bound_is_raised() {
+    use mutants::Replay;
+
+    let dir = tempfile::tempdir().unwrap();
+    on_file(dir.path(), "abc", 2);
+    let mut campaign = mutants::read(dir.path()).unwrap().unwrap();
+    campaign.stopped = Some(mutants::Stopped::Deadline { minutes: 45 });
+    mutants::write(dir.path(), &campaign).unwrap();
+
+    assert_eq!(
+        mutants::already_answered(dir.path(), "abc", Replay::WhenChanged, 45).unwrap(),
+        Some(mutants::Progress::Incomplete {
+            survivors: 2,
+            stopped: mutants::Stopped::Deadline { minutes: 45 }
+        })
+    );
+    assert_eq!(
+        mutants::already_answered(dir.path(), "abc", Replay::WhenChanged, 46).unwrap(),
+        None,
+        "a raised deadline owes the campaign again"
+    );
+    assert_eq!(
+        mutants::already_answered(dir.path(), "abc", Replay::Now, 45).unwrap(),
+        None
+    );
+
+    campaign.stopped = Some(mutants::Stopped::Cancelled {
+        because: "wasted".into(),
+    });
+    mutants::write(dir.path(), &campaign).unwrap();
+    assert!(
+        matches!(
+            mutants::already_answered(dir.path(), "abc", Replay::WhenChanged, 90).unwrap(),
+            Some(mutants::Progress::Incomplete { .. })
+        ),
+        "a deadline raised since does not restart a campaign the HQ called off"
+    );
+}
+
+/// The HQ calls off a campaign in flight: it is stopped, what it had found
+/// is recorded as incomplete with the HQ's reason, and the reason is written
+/// to `FOLLOWUP_HQ.md`.
+#[test]
+fn the_hq_calls_off_a_campaign_and_its_reason_is_recorded() {
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot) = context(dir.path());
+    let paths = nunki::mission::dir::Paths::of(&project.hq_root, "m1");
+    let engine = in_flight(
+        &project,
+        &slot,
+        &paths.dir,
+        HALF_A_CAMPAIGN,
+        u32::MAX,
+        nunki::engine::Liveness::Running,
+        "nunki-run-running",
+    );
+
+    let cancelled = mutants::cancel_and_say(
+        &project,
+        &slot,
+        engine,
+        &paths,
+        "Alex Martin",
+        "the coder rewrites src/lib.rs in the next volet",
+    )
+    .unwrap();
+
+    assert_eq!(cancelled, mutants::Cancelled::Stopped { survivors: 2 });
+    let campaign = mutants::read(&paths.dir).unwrap().unwrap();
+    assert_eq!(
+        campaign.stopped,
+        Some(mutants::Stopped::Cancelled {
+            because: "the coder rewrites src/lib.rs in the next volet".into()
+        })
+    );
+    assert_eq!(campaign.survivors.len(), 2);
+    assert!(
+        mutants::read_running(&project.hq_root, &slot.name)
+            .unwrap()
+            .is_none()
+    );
+    let followup = std::fs::read_to_string(&paths.followup).unwrap();
+    assert!(
+        followup.contains("Alex Martin called off the mutation campaign"),
+        "{followup}"
+    );
+    assert!(
+        followup.contains("the coder rewrites src/lib.rs in the next volet"),
+        "{followup}"
+    );
+    let said = mutants::cancelled_said(&cancelled);
+    assert!(said.contains("2 survivor(s)"), "{said}");
+    assert!(said.contains("iterate --because"), "{said}");
+}
+
+/// Nothing to call off, a reason that says nothing, a paused container: each
+/// refused or said, and nothing recorded or written.
+#[test]
+fn calling_off_a_campaign_refuses_what_it_cannot_honestly_do() {
+    use nunki::engine::fake::FakeEngine;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot) = context(dir.path());
+    let paths = nunki::mission::dir::Paths::of(&project.hq_root, "m1");
+    std::fs::create_dir_all(&paths.dir).unwrap();
+
+    // Nothing in flight.
+    let none = mutants::cancel_and_say(
+        &project,
+        &slot,
+        std::sync::Arc::new(FakeEngine::default()),
+        &paths,
+        "Alex Martin",
+        "wasted",
+    )
+    .unwrap();
+    assert_eq!(none, mutants::Cancelled::Nothing);
+    assert!(mutants::cancelled_said(&none).contains("nothing to call off"));
+
+    // A blank reason.
+    let engine = in_flight(
+        &project,
+        &slot,
+        &paths.dir,
+        HALF_A_CAMPAIGN,
+        u32::MAX,
+        nunki::engine::Liveness::Running,
+        "nunki-run-running",
+    );
+    let err =
+        mutants::cancel_and_say(&project, &slot, engine, &paths, "Alex Martin", "  ").unwrap_err();
+    assert!(matches!(err, mutants::MutantsError::NoReason), "{err}");
+
+    // Paused: the signal would not reach it.
+    let engine = in_flight(
+        &project,
+        &slot,
+        &paths.dir,
+        HALF_A_CAMPAIGN,
+        u32::MAX,
+        nunki::engine::Liveness::Paused,
+        "nunki-run-running",
+    );
+    let err = mutants::cancel_and_say(&project, &slot, engine, &paths, "Alex Martin", "wasted")
+        .unwrap_err();
+    assert!(matches!(err, mutants::MutantsError::Paused), "{err}");
+    assert!(
+        mutants::read_running(&project.hq_root, &slot.name)
+            .unwrap()
+            .is_some(),
+        "a paused campaign was forgotten while it still holds the copy"
+    );
+
+    assert_eq!(mutants::read(&paths.dir).unwrap(), None);
+    assert!(!paths.followup.exists());
+}
+
+/// A campaign that has already ended when the HQ calls it off is read back
+/// as any call would: its result is kept, and nothing is called off.
+#[test]
+fn calling_off_a_campaign_that_already_ended_keeps_its_result() {
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot) = context(dir.path());
+    let paths = nunki::mission::dir::Paths::of(&project.hq_root, "m1");
+    let engine = in_flight(
+        &project,
+        &slot,
+        &paths.dir,
+        "{\"campaign\":\"done\",\"tried\":3}\n",
+        u32::MAX,
+        nunki::engine::Liveness::Running,
+        "nunki-run-ended",
+    );
+
+    let cancelled =
+        mutants::cancel_and_say(&project, &slot, engine, &paths, "Alex Martin", "wasted").unwrap();
+
+    match &cancelled {
+        mutants::Cancelled::Ended(mutants::Progress::Finished { survivors, .. }) => {
+            assert_eq!(*survivors, 0)
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(mutants::read(&paths.dir).unwrap().unwrap().stopped, None);
+    assert!(!paths.followup.exists());
+}
+
+/// How a mission's campaigns are listed says an incomplete one is.
+#[test]
+fn an_incomplete_campaign_is_said_as_one() {
+    let campaign = Campaign {
+        stopped: Some(mutants::Stopped::Deadline { minutes: 45 }),
+        fingerprint: "abc".into(),
+        head: "abc".into(),
+        date: "2026-09-01T00:00:00Z".into(),
+        survivors: vec![],
+        tried: None,
+        files: None,
+        chain: Default::default(),
+    };
+    let said = mutants::chain_said(&campaign, &Default::default()).join("\n");
+    assert!(
+        said.contains("incomplete, stopped at its 45-minute deadline"),
+        "{said}"
+    );
+}
+
+/// `nunki mission mutants --cancel` through the binary: refused without a
+/// reason, refused beside a verb it cannot mean together with, and with
+/// nothing in flight it says so and writes nothing.
+#[test]
+fn the_cancel_verb_needs_a_reason_and_says_when_there_is_nothing_to_call_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    let user_home = dir.path().join("home");
+    let home = common::project_home(&root, &user_home, "harness: claude-code\n");
+    let hq_root = home.join(nunki::project::HQ_DIR);
+    nunki::mission::dir::create(
+        &hq_root,
+        "m1",
+        &nunki::mission::Header {
+            branch: "feat/x".into(),
+            base: "dev".into(),
+            lots: vec![nunki::mission::Lot {
+                id: "L1".into(),
+                title: "one".into(),
+            }],
+            integration: nunki::mission::Integration::None {
+                reason: "pure domain".into(),
+            },
+            security: nunki::mission::Security::Gates,
+            rigor: Default::default(),
+            mutation_threshold: None,
+            arbiter: None,
+            run: None,
+            account: None,
+            model: None,
+            bounds: Default::default(),
+        },
+        "do it",
+    )
+    .unwrap();
+    // A slot is a clone beside the repository.
+    std::fs::create_dir_all(dir.path().join("repo-slots/one/.git")).unwrap();
+    // And its lock lives where a started mission leaves the HQ's locks.
+    std::fs::create_dir_all(hq_root.join("locks")).unwrap();
+
+    let nunki = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_nunki"))
+            .arg("-C")
+            .arg(&root)
+            .args(["mission", "mutants", "m1"])
+            .args(args)
+            .env("HOME", &user_home)
+            .output()
+            .unwrap()
+    };
+
+    let out = nunki(&["--slot", "one", "--cancel"]);
+    assert!(!out.status.success());
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(said.contains("--because"), "{said}");
+
+    let out = nunki(&["--slot", "one", "--cancel", "--because", "x", "--again"]);
+    assert!(!out.status.success());
+
+    let out = nunki(&["--slot", "one", "--cancel", "--because", "wasted"]);
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{said}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(said.contains("nothing to call off"), "{said}");
+    let paths = nunki::mission::dir::Paths::of(&hq_root, "m1");
+    assert_eq!(mutants::read(&paths.dir).unwrap(), None);
+    let followup = std::fs::read_to_string(&paths.followup).unwrap_or_default();
+    assert!(!followup.contains("called off"), "{followup}");
+}
+
+/// Whether a tool answers `--version` on this machine.
+fn has(program: &str, args: &[&str]) -> bool {
+    Command::new(program)
+        .args(args)
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+/// The shipped Rust `mutation.sh`, on a branch whose files carry the names
+/// git and a shell mishandle: a space, a colon, a quote, a character outside
+/// ASCII, and `:!*.rs`, which git reads as "every file but the Rust ones"
+/// when it is taken as a pathspec. Each file's mutants are found, under the
+/// name the touched list gives it. Measured before the fix: the campaign
+/// found and tried nothing at all, and said so as a finished campaign.
+///
+/// Played with the real cargo-mutants, so it skips — and says so — where
+/// cargo-mutants or jq is not installed, as on CI's runner.
+#[test]
+fn the_rust_campaign_finds_the_mutants_of_every_awkward_name() {
+    if !has("cargo", &["mutants", "--version"]) || !has("jq", &["--version"]) {
+        eprintln!("skipped: cargo-mutants and jq are needed to play a real campaign");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("crate");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    git(&root, &["init", "-q", "-b", "dev"]);
+    git(&root, &["config", "user.email", "a@b.c"]);
+    git(&root, &["config", "user.name", "t"]);
+    // The library's root is the file named like a pathspec, at the
+    // repository's root, where a pathspec's magic applies.
+    write(
+        &root,
+        "Cargo.toml",
+        "[package]\nname = \"awkward\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+         [lib]\npath = \":!*.rs\"\n",
+    );
+    write(&root, ":!*.rs", "pub fn base() -> u8 { 1 }\n");
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "base"]);
+    let base = git(&root, &["rev-parse", "HEAD"]);
+
+    let awkward = [
+        ("src/with space.rs", "spaced"),
+        ("src/with:colon.rs", "coloned"),
+        ("src/with\"quote.rs", "quoted"),
+        ("src/é.rs", "accented"),
+    ];
+    let mut lib =
+        String::from("pub fn base() -> u8 { 1 }\npub fn magic(n: u8) -> bool {\n    n > 3\n}\n");
+    for (path, name) in awkward {
+        write(
+            &root,
+            path,
+            &format!("pub fn {name}(n: u8) -> bool {{\n    n > 3\n}}\n"),
+        );
+        lib.push_str(&format!("#[path = {path:?}]\npub mod {name};\n",));
+    }
+    write(&root, ":!*.rs", &lib);
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "awkward names"]);
+
+    nunki::init::init(&root, &dir.path().join("nunki"), &["rust".to_string()]).unwrap();
+    let script = dir
+        .path()
+        .join("nunki/stacks/rust")
+        .join(nunki::mutants::SCRIPT);
+    let mut handed: Vec<&str> = vec![":!*.rs"];
+    handed.extend(awkward.iter().map(|(path, _)| *path));
+    let out = Command::new(&script)
+        .arg("campaign-1")
+        .args(&handed)
+        .env(nunki::mutants::BASE_ENV, &base)
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(mutants::completed(&stdout), "{stdout}");
+
+    let survivors = mutants::parse(&stdout);
+    for path in &handed {
+        let found = survivors.iter().filter(|s| s.file == *path).count();
+        assert_eq!(found, 5, "{path}: {found} mutant(s) found\n{stdout}");
+        assert!(
+            survivors
+                .iter()
+                .filter(|s| s.file == *path)
+                .all(|s| s.line == 2 || s.line == 3 && *path == ":!*.rs"),
+            "{path}: {survivors:?}"
+        );
+    }
+    let files = mutants::by_file(&stdout, "HEAD").expect("each file is counted");
+    for path in &handed {
+        assert_eq!(
+            files.get(*path).map(|m| m.tried),
+            Some(5),
+            "{path}: {files:?}"
+        );
+    }
+    assert_eq!(mutants::tried(&stdout), Some(25), "{stdout}");
+}
+
+/// What changed between two campaigns is listed by the names the tree
+/// holds: a name starting with a space keeps it, and one outside ASCII is not
+/// quoted — either would otherwise be a file the chain never finds again.
+#[test]
+fn what_changed_between_two_campaigns_keeps_each_name_as_it_is() {
+    let dir = tempfile::tempdir().unwrap();
+    let tree = repo(dir.path());
+    let from = git(&tree, &["rev-parse", "HEAD"]);
+    for path in [" leading.rs", "src/é.rs", "src/with\"quote.rs"] {
+        write(&tree, path, "pub fn f() {}\n");
+    }
+    git(&tree, &["add", "-A"]);
+    git(&tree, &["commit", "-q", "-m", "awkward"]);
+    let to = git(&tree, &["rev-parse", "HEAD"]);
+
+    let changed = mutants::changed_between(&tree, &from, &to).unwrap();
+
+    assert_eq!(
+        changed.into_iter().collect::<Vec<_>>(),
+        [" leading.rs", "src/with\"quote.rs", "src/é.rs"]
+    );
 }

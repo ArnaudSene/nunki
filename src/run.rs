@@ -276,6 +276,15 @@ pub fn model_for(project: &Project, header: &crate::mission::Header) -> Option<S
         .or_else(|| project.config.model.clone())
 }
 
+/// What [`start`] started, and what it did with the slot's own base branch.
+#[derive(Debug)]
+pub struct Started {
+    pub state: MissionState,
+    /// The slot's base branch, brought to the project's base when the
+    /// mission's branch was made ([`branch`]).
+    pub base: Option<git::Brought>,
+}
+
 /// Start the mission's first run: the coder, on its first lot.
 pub fn start(
     project: &Project,
@@ -283,7 +292,7 @@ pub fn start(
     slot: &Slot,
     engine: Arc<dyn Engine>,
     engine_bin: &str,
-) -> Result<MissionState, RunError> {
+) -> Result<Started, RunError> {
     let store = Store::open(&project.hq_root)?;
     if store.load(id).is_ok() {
         return Err(RunError::AlreadyStarted(id.to_string()));
@@ -339,7 +348,10 @@ pub fn start(
     };
     store.save(&state)?;
     state.updated_at = crate::state::now_rfc3339();
-    Ok(state)
+    Ok(Started {
+        state,
+        base: launched.base,
+    })
 }
 
 /// Everything one launch needs that its caller already holds. Gathered as a
@@ -381,6 +393,10 @@ pub struct Launched {
     /// the launch to say so in one line: the agent reaches a service by its
     /// name, and a published port would collide between slots.
     pub ports_dropped: Vec<String>,
+    /// What the launch did with the slot's own base branch, when it made
+    /// the mission's branch ([`branch`]): `None` on every launch after the
+    /// first.
+    pub base: Option<git::Brought>,
 }
 
 /// End the mutation campaign this launch is about to kill, and say since
@@ -480,7 +496,7 @@ pub fn launch(l: &Launching) -> Result<Launched, RunError> {
     // The slot on the mission's branch, before anything is written into it.
     // Idempotent: a role that follows another finds the branch already
     // checked out and this does nothing.
-    branch(slot, &project.root, &header.branch, &header.base)?;
+    let base = branch(slot, &project.root, &header.branch, &header.base)?;
 
     // The image against what **this branch** pins, read from the slot's tree
     // now that it is on it (SPEC 4.2). `slot rebuild` read the repository as
@@ -617,6 +633,7 @@ pub fn launch(l: &Launching) -> Result<Launched, RunError> {
         launch: declared,
         campaign_ended,
         ports_dropped,
+        base,
     })
 }
 
@@ -830,7 +847,9 @@ pub fn profile_path(project: &Project, slot: &str) -> PathBuf {
 /// The services a mission's profile lifts, for a caller taking them down.
 pub const SERVICES: [&str; 2] = [AGENT_SERVICE, FIREWALL_SERVICE];
 
-/// Put the slot on the mission's branch, from its base.
+/// Put the slot on the mission's branch, from its base, and bring the slot's
+/// own base branch to the project's base when the mission branch is made —
+/// that is, at the mission's start.
 ///
 /// Public for the same reason [`plan`] is: what a mission starts from is the
 /// decision, and a test that cannot call this can only check that a launch
@@ -840,10 +859,19 @@ pub const SERVICES: [&str; 2] = [AGENT_SERVICE, FIREWALL_SERVICE];
 /// caller knows it — never the slot's `remote.origin.url`, which its agent
 /// may have pointed anywhere. Everything here is played from the slot's host
 /// mirror ([`git::SlotGit`]); no git runs in the slot.
-pub fn branch(slot: &Slot, origin: &Path, branch: &str, base: &str) -> Result<(), git::GitError> {
+///
+/// Returns what was done with the slot's base branch, when the mission's
+/// branch was made: `None` when it already existed, or when the project has
+/// no such branch to bring it to.
+pub fn branch(
+    slot: &Slot,
+    origin: &Path,
+    branch: &str,
+    base: &str,
+) -> Result<Option<git::Brought>, git::GitError> {
     let repo = git::SlotGit::open(&slot.tree)?;
     if repo.current_branch()? == branch {
-        return Ok(());
+        return Ok(None);
     }
     // A branch that already exists is **checked out and never moved**. `-B`
     // repoints a branch at its start: `checkout -B mission/x dev` on a branch
@@ -852,7 +880,7 @@ pub fn branch(slot: &Slot, origin: &Path, branch: &str, base: &str) -> Result<()
     // switch that did not come back — would spend the mission's work to get
     // back to it.
     if repo.has(&refs(branch)) {
-        return repo.checkout(branch);
+        return repo.checkout(branch).map(|()| None);
     }
 
     // A slot's `origin` is the project on this machine, not the forge, so
@@ -865,13 +893,18 @@ pub fn branch(slot: &Slot, origin: &Path, branch: &str, base: &str) -> Result<()
     // The failure is said rather than swallowed: branching from a base that
     // could not be refreshed is exactly the silence this replaces.
     repo.fetch_origin(origin)?;
-    let start = match repo.origin_branch(base) {
-        Some(commit) => commit,
+    let Some(start) = repo.origin_branch(base) else {
         // No such branch in the repository: the slot's own base is all
         // there is, and it is better than nothing.
-        None => refs(base),
+        repo.create_branch(branch, &refs(base))?;
+        return Ok(None);
     };
-    repo.create_branch(branch, &start)
+    repo.create_branch(branch, &start)?;
+    // And the slot's own base, which a clone writes once and nothing moved
+    // since: an agent or a human reading `dev` in the slot read the base as
+    // it stood the day the slot was made. After the branch is made, so that
+    // the slot is no longer on it — a fresh clone sits on its base.
+    repo.bring_branch(base, &start).map(Some)
 }
 
 /// A local branch, spelled so that `rev-parse --verify` cannot match a tag or
@@ -1288,4 +1321,32 @@ fn restrict(path: &PathBuf) -> Result<(), RunError> {
 #[cfg(not(unix))]
 fn restrict(_path: &PathBuf) -> Result<(), RunError> {
     Ok(())
+}
+
+/// What `nunki mission start` says of the slot's own `base` branch
+/// ([`branch`]).
+pub fn base_said(base: &str, brought: &git::Brought) -> String {
+    let short = |c: &str| c.get(..12).unwrap_or(c).to_string();
+    match brought {
+        git::Brought::Created { at } => {
+            format!(
+                "the slot's {base} is created at the project's, {}",
+                short(at)
+            )
+        }
+        git::Brought::Moved { from, to } => format!(
+            "the slot's {base} is brought to the project's, from {} to {}",
+            short(from),
+            short(to)
+        ),
+        git::Brought::Already => format!("the slot's {base} is already the project's"),
+        git::Brought::CheckedOut => {
+            format!("the slot's {base} is checked out, and was left where it is")
+        }
+        git::Brought::Diverged { at } => format!(
+            "the slot's {base} holds commits the project's does not, and was left at {} — the \
+             mission branched from the project's all the same",
+            short(at)
+        ),
+    }
 }

@@ -260,7 +260,7 @@ fn a_monitor_is_wanted_for_a_run_or_a_wait_and_not_for_a_held_mission() {
     assert!(!wanted(&project, &waiting, now), "a wait already over");
 
     let mut held = state(true);
-    held.hold("Alex Martin", false);
+    held.hold("Alex Martin", false, "the base is being rewritten");
     assert!(!wanted(&project, &held, now), "held: a human's to lift");
 }
 
@@ -483,7 +483,10 @@ fn a_campaign_that_overran_or_vanished_stops_the_monitor_and_the_rest_does_not()
     // A campaign past its deadline was stopped, and a monitor that started
     // another would spend the same hour again. Both of these are a human's
     // to look at.
-    match after_campaign(&Progress::Overrun { minutes: 45 }) {
+    match after_campaign(&Progress::Overrun {
+        minutes: 45,
+        survivors: 3,
+    }) {
         Next::Exit(why) => assert!(why.contains("45-minute deadline"), "{why}"),
         other => panic!("{other:?}"),
     }
@@ -858,4 +861,43 @@ fn a_full_campaign_without_a_reason_is_logged_without_one() {
         scope: Scope::Full { why: " ".into() },
     });
     assert_eq!(started, "mutation campaign started on abc1234, full");
+}
+
+/// A campaign stopped short is the HQ's to choose, and the monitor stops on
+/// it saying both ways on — never a campaign it would start again itself
+/// against the same deadline.
+#[test]
+fn the_monitor_stops_on_a_campaign_stopped_short_and_names_the_hqs_choice() {
+    use nunki::monitor::after_campaign;
+    use nunki::mutants::{Progress, Stopped};
+
+    for progress in [
+        Progress::Overrun {
+            minutes: 45,
+            survivors: 3,
+        },
+        Progress::Incomplete {
+            survivors: 3,
+            stopped: Stopped::Deadline { minutes: 45 },
+        },
+    ] {
+        match after_campaign(&progress) {
+            Next::Exit(why) => {
+                assert!(why.contains("45-minute deadline"), "{why}");
+                assert!(why.contains("3 survivor(s)"), "{why}");
+                assert!(why.contains("nunki mission reframe"), "{why}");
+                assert!(why.contains("nunki mission iterate --because"), "{why}");
+            }
+            other => panic!("{progress:?}: {other:?}"),
+        }
+    }
+    match after_campaign(&Progress::Incomplete {
+        survivors: 0,
+        stopped: Stopped::Cancelled {
+            because: "wasted".into(),
+        },
+    }) {
+        Next::Exit(why) => assert!(why.contains("called off by the HQ (wasted)"), "{why}"),
+        other => panic!("{other:?}"),
+    }
 }

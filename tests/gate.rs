@@ -1141,6 +1141,7 @@ impl Fixture {
         nunki::mutants::write(
             self._dir.path(),
             &Campaign {
+                stopped: None,
                 files: None,
                 chain: Default::default(),
                 fingerprint,
@@ -1667,6 +1668,7 @@ fn report_of(decisions: &[(Gate, Decision)]) -> gate::Report {
                 decision: decision.clone(),
                 note: None,
                 waits_on_campaign: false,
+                awaits_hq: false,
             })
             .collect(),
     }
@@ -3289,6 +3291,7 @@ impl Fixture {
         nunki::mutants::write(
             self._dir.path(),
             &Campaign {
+                stopped: None,
                 tried: trusted.then(|| nunki::mutants::tried_in(&files)).flatten(),
                 files: trusted.then_some(files),
                 fingerprint,
@@ -3532,4 +3535,155 @@ fn the_final_stage_with_no_campaign_at_head_owes_one() {
         nunki::gate::Verdict::CampaignOwed(why) => assert!(why.contains("other content"), "{why}"),
         other => panic!("a campaign on other content verified the mission: {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Gate 7 over a campaign that stopped short (SPEC 4.4, "un délai paramétré").
+// ---------------------------------------------------------------------------
+
+impl Fixture {
+    /// A campaign on the current content that tried a thousand mutants and
+    /// left no survivor — green, finished — then marked as stopped short.
+    fn campaign_stopped(&self, stopped: Option<nunki::mutants::Stopped>) {
+        self.campaign_tried(vec![], Some(1000));
+        let mut campaign = nunki::mutants::read(self._dir.path()).unwrap().unwrap();
+        campaign.stopped = stopped;
+        nunki::mutants::write(self._dir.path(), &campaign).unwrap();
+    }
+
+    /// What the flow reads of gate 7 alone: the other gates of this fixture
+    /// are unplayable without an engine, and would make any report a wall.
+    fn gate_seven_alone(&self) -> nunki::gate::Verdict {
+        gate::Report {
+            role: Role::Coder,
+            head: "0123456789ab".into(),
+            outcomes: vec![self.gate_seven(Role::Coder)],
+        }
+        .verdict()
+    }
+}
+
+/// A campaign stopped at its deadline is not green whatever it found — it
+/// did not reach the rest — and it is not a campaign that measured nothing
+/// either: gate 7 says so in its own words and leaves the choice to the HQ,
+/// as a wall, rather than opening a volet or starting the same campaign
+/// against the same deadline.
+#[test]
+fn a_campaign_stopped_at_its_deadline_is_the_hqs_to_choose_and_never_green() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.journal_names_head();
+
+    // The control: the same campaign, finished, is green.
+    f.campaign_stopped(None);
+    assert_eq!(f.gate_seven(Role::Coder).decision, Decision::Passed);
+
+    f.campaign_stopped(Some(nunki::mutants::Stopped::Deadline { minutes: 45 }));
+    let outcome = f.gate_seven(Role::Coder);
+    let Decision::Unplayed(why) = &outcome.decision else {
+        panic!("an incomplete campaign was judged: {outcome:?}");
+    };
+    assert!(outcome.awaits_hq, "{outcome:?}");
+    assert!(why.contains("45-minute deadline"), "{why}");
+    assert!(why.contains("incomplete"), "{why}");
+    assert!(!why.contains("measured nothing"), "{why}");
+    assert!(why.contains("nunki mission reframe"), "{why}");
+    assert!(why.contains("nunki mission iterate --because"), "{why}");
+    match f.gate_seven_alone() {
+        nunki::gate::Verdict::Wall(said) => assert!(said.contains("deadline"), "{said}"),
+        other => panic!("the HQ's choice became {other:?}"),
+    }
+}
+
+/// Raising the bound with `reframe` is one of the HQ's two ways on, and it
+/// is enough: past the deadline the campaign was stopped at, a campaign is
+/// owed again and the monitor starts it. Not at the same bound — that is
+/// the same wall — and never for one the HQ called off.
+#[test]
+fn a_raised_deadline_owes_a_new_campaign_and_the_same_one_does_not() {
+    let mut f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.journal_names_head();
+    f.campaign_stopped(Some(nunki::mutants::Stopped::Deadline { minutes: 45 }));
+
+    f.header.bounds.mutation_minutes = 45;
+    assert!(
+        matches!(f.gate_seven_alone(), nunki::gate::Verdict::Wall(_)),
+        "the same deadline owes the same campaign"
+    );
+
+    f.header.bounds.mutation_minutes = 90;
+    let outcome = f.gate_seven(Role::Coder);
+    assert!(!outcome.awaits_hq, "{outcome:?}");
+    match f.gate_seven_alone() {
+        nunki::gate::Verdict::CampaignOwed(why) => {
+            assert!(why.contains("raised to 90 minutes"), "{why}")
+        }
+        other => panic!("a raised deadline owes a campaign: {other:?}"),
+    }
+
+    f.campaign_stopped(Some(nunki::mutants::Stopped::Cancelled {
+        because: "the coder is rewriting this file".into(),
+    }));
+    let outcome = f.gate_seven(Role::Coder);
+    assert!(outcome.awaits_hq, "{outcome:?}");
+    let Decision::Unplayed(why) = &outcome.decision else {
+        panic!("{outcome:?}");
+    };
+    assert!(why.contains("the coder is rewriting this file"), "{why}");
+    assert!(why.contains("--again"), "{why}");
+}
+
+/// The names a branch may give its files that git does not print as they
+/// are, or reads as something else: a space, a colon, a quote, a character
+/// outside ASCII, and a name that reads as an excluding pathspec.
+const AWKWARD: [&str; 5] = [
+    ":!*.rs",
+    "src/with space.rs",
+    "src/with:colon.rs",
+    "src/with\"quote.rs",
+    "src/é.rs",
+];
+
+/// Gate 7's touched list holds each name as the tree holds it — the list
+/// the campaign is handed and the fingerprint is read from. Read line by
+/// line, git quoted two of them (`"src/with\"quote.rs"`, `"src/\303\251.rs"`)
+/// and those quoted strings named files that do not exist.
+#[test]
+fn every_awkward_name_a_branch_touches_is_in_the_touched_list_as_it_is() {
+    let f = Fixture::new();
+    for (n, path) in AWKWARD.iter().enumerate() {
+        commit(&f.tree, path, &format!("pub fn f{n}() {{}}\n"), "L1");
+    }
+    let touched = nunki::gate::touched_since_base(&f.tree, "dev").unwrap();
+    let mut expected: Vec<String> = AWKWARD.iter().map(|p| p.to_string()).collect();
+    expected.sort();
+    assert_eq!(touched, expected);
+
+    // And the fingerprint reads each one's content: changing any of them
+    // changes it, which a path git could not find ("absent") would not.
+    let before = nunki::mutants::fingerprint(&f.tree, &touched).unwrap();
+    for (n, path) in AWKWARD.iter().enumerate() {
+        commit(&f.tree, path, &format!("pub fn g{n}() {{}}\n"), "volet");
+        let after = nunki::mutants::fingerprint(&f.tree, &touched).unwrap();
+        assert_ne!(before, after, "{path} is not read by the fingerprint");
+    }
+}
+
+/// A file named like an excluding pathspec (`:!*.rs`) is read as the file
+/// it is when `nunki` hands its path to git: here, the blob a slot's file is
+/// read from, which a pathspec excluding every Rust file would have missed.
+#[test]
+fn a_file_named_like_a_pathspec_is_read_as_the_file_it_is() {
+    let f = Fixture::new();
+    commit(&f.tree, ":!*.rs", "pub fn magic() {}\n", "L1");
+    commit(&f.tree, "src/other.rs", "pub fn other() {}\n", "L1");
+    let repo = nunki::git::SlotGit::open(&f.tree).unwrap();
+    let blob = repo
+        .blob_at_head(":!*.rs")
+        .unwrap()
+        .expect("the file is there");
+    assert_eq!(blob.bytes, b"pub fn magic() {}\n");
+    let other = repo.blob_at_head("src/other.rs").unwrap().unwrap();
+    assert_eq!(other.bytes, b"pub fn other() {}\n");
 }

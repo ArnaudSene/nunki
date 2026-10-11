@@ -41,8 +41,9 @@ pub enum FindingsError {
     #[error("mission {0} has not started — nothing has reported a finding yet")]
     NotStarted(String),
     #[error(
-        "mission {mission} is at {stage:?}, neither on a security verdict nor verified — \
-         there is nothing to lift or to send back yet"
+        "mission {mission} is at {stage:?}: not on a security verdict, not verified, and not at \
+         the gates over an incomplete mutation campaign — there is nothing to lift or to \
+         send back yet"
     )]
     NotOnFindings { mission: String, stage: Stage },
     #[error(
@@ -55,6 +56,11 @@ pub enum FindingsError {
          `--because`, which is what the coder reads"
     )]
     NoReview,
+    #[error(
+        "the survivors of an incomplete campaign are sent with why — say it with \
+         `--because`, which is what the coder reads"
+    )]
+    NoPartialReason,
     #[error("nunki does not know who you are: `nunki whoami` says where it looks")]
     NoHuman,
     /// The rigor does not send the mission back from here (SPEC 4.5); the
@@ -271,6 +277,37 @@ fn send_back(
         "mission iterate",
     )?;
     let because = because.map(str::trim).filter(|b| !b.is_empty());
+    // At the gates over a campaign that stopped short, the HQ's choice is to
+    // send its survivors to the coder (SPEC 4.4): a volet as a red gate 7
+    // opens one, with the HQ's reason. Not a review of a verified branch, so
+    // the rigor's bound on reviews does not apply, and there is nothing to
+    // override.
+    if matches!(state.flow.stage(), Stage::Gates | Stage::FinalCampaign)
+        && crate::mutants::read(&Paths::of(&project.hq_root, id).dir)?
+            .is_some_and(|c| c.stopped.is_some())
+    {
+        if overriding {
+            return Err(FindingsError::NothingToOverride {
+                mission: id.to_string(),
+            });
+        }
+        let because = because.ok_or(FindingsError::NoPartialReason)?;
+        let who = crate::human::me(&project.nunki_home(), Some(&project.root)).addressed();
+        crate::followup::partial_survivors_sent(
+            &Paths::of(&project.hq_root, id).followup,
+            &who,
+            because,
+        )?;
+        store.apply(
+            &mut state,
+            Event::GatesFailed {
+                reason: format!(
+                    "the HQ sends the survivors of an incomplete mutation campaign: {because}"
+                ),
+            },
+        )?;
+        return Ok(state);
+    }
     let on_review = match state.flow.stage() {
         Stage::Findings { .. } => false,
         Stage::Verified => true,

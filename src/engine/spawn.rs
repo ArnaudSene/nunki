@@ -34,6 +34,44 @@ const HAS_ENDED: &str = "nunki-run-ended";
 /// folder leave nowhere else (see [`crate::compose`]).
 pub const RUN_DIR: &str = "/run/nunki";
 
+/// The variable every process of a run carries, set by the wrapper and
+/// inherited by whatever the run starts — in the background too, and by a
+/// process that leaves its group or its session. What [`reap_script`] finds
+/// a run's leftovers by.
+///
+/// A convenience and not a guard: a process may clear its own environment,
+/// and one that does is not found. What contains an agent is its container.
+pub const RUN_TAG: &str = "NUNKI_RUN";
+
+/// What [`reap_script`] prints once it has looked, so that a script that did
+/// not run is never read as one that found nothing.
+const REAPED: &str = "nunki-reaped";
+
+/// The shell that stops every process still carrying `NUNKI_RUN=<run>`:
+/// `TERM` first, and `KILL` for what is left a few seconds later — again,
+/// until none is left or a few rounds have passed, since a process killed is
+/// not gone at once, and one that ignored `TERM` may have started another
+/// meanwhile. It prints [`REAPED`] and the pids it signalled first.
+///
+/// Read out of `/proc/<pid>/environ`, with nothing but a POSIX shell, `tr`
+/// and `grep`: no `pkill` or `ps`, which an image need not ship. A process
+/// it cannot read — another user's, or a zombie, whose environment is empty
+/// — is not one of the run's.
+pub fn reap_script(run: &str) -> String {
+    let wanted = crate::exec::quote(&format!("{RUN_TAG}={run}"));
+    format!(
+        "mine() {{ for p in /proc/[0-9]*; do \
+         if tr '\\0' '\\n' < \"$p/environ\" 2>/dev/null | grep -qxF -- {wanted}; then \
+         echo \"${{p#/proc/}}\"; fi; done; }}\n\
+         pids=$(mine)\n\
+         if [ -n \"$pids\" ]; then kill -TERM $pids 2>/dev/null; fi\n\
+         for i in 1 2 3; do [ -z \"$(mine)\" ] && break; sleep 1; done\n\
+         for i in 1 2 3; do left=$(mine); [ -z \"$left\" ] && break; \
+         kill -KILL $left 2>/dev/null; sleep 1; done\n\
+         echo {REAPED} $pids\n"
+    )
+}
+
 pub struct ContainerSpawner {
     engine: Arc<dyn Engine>,
     /// What the harness's command line must still contain for the recorded
@@ -71,11 +109,49 @@ impl ContainerSpawner {
     /// The pid file a run publishes, named after its log — which is named
     /// after the session.
     fn pid_file(log: &Path) -> String {
-        let stem = log
-            .file_stem()
+        format!("{RUN_DIR}/{}.pid", Self::run_of(log))
+    }
+
+    /// What names a run inside the container: its log's stem, which is its
+    /// session — the pid file's name, and the value of [`RUN_TAG`].
+    fn run_of(log: &Path) -> String {
+        log.file_stem()
             .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "run".to_string());
-        format!("{RUN_DIR}/{stem}.pid")
+            .unwrap_or_else(|| "run".to_string())
+    }
+
+    /// Stop whatever the run whose log is `log` left running in the
+    /// container once it has ended: every process still carrying its
+    /// [`RUN_TAG`] ([`reap_script`]). Returns the pids it signalled, or
+    /// `None` when the container is not running — stopped, gone or frozen,
+    /// nothing in it can outlive the run, or nothing can be asked.
+    ///
+    /// The run itself has ended: the caller asks only then. A mutation
+    /// campaign in the same container carries its own tag, and is never one
+    /// of the run's.
+    pub fn reap(&self, container: &str, log: &Path) -> io::Result<Option<Vec<u32>>> {
+        match self.engine.liveness(container) {
+            Ok(Liveness::Running) => {}
+            Ok(_) => return Ok(None),
+            Err(e) => return Err(io::Error::other(e)),
+        }
+        let out = self.in_container(&["sh", "-c", &reap_script(&Self::run_of(log))])?;
+        let Some(said) = out
+            .stdout
+            .lines()
+            .find_map(|line| line.trim().strip_prefix(REAPED))
+        else {
+            return Err(io::Error::other(format!(
+                "the check for what the run left behind did not run in the container ({}): {}",
+                out.status,
+                out.stderr.trim()
+            )));
+        };
+        Ok(Some(
+            said.split_whitespace()
+                .filter_map(|pid| pid.parse().ok())
+                .collect(),
+        ))
     }
 
     /// The host-side command that runs `cmd` in the container.
@@ -85,6 +161,10 @@ impl ContainerSpawner {
     /// as arguments — `"$@"` — so nothing has to be quoted into a script.
     pub fn command(&self, cmd: &CommandSpec, log: &Path) -> CommandSpec {
         let mut options = vec!["-w".to_string(), cmd.cwd.display().to_string()];
+        // Tagged, so that what the run leaves behind can be found once it
+        // ends ([`ContainerSpawner::reap`]).
+        options.push("-e".to_string());
+        options.push(format!("{RUN_TAG}={}", Self::run_of(log)));
         for (key, value) in &cmd.env {
             options.push("-e".to_string());
             options.push(format!("{key}={value}"));
