@@ -273,12 +273,12 @@ occupies each slot, or that it is free. A mission framed and never started is
 closed like any other: `nunki mission end <id> --because "..."` writes why to
 its `FOLLOWUP_HQ.md`, and `nunki mission archive <id>` moves its folder.
 
-A run never leaves a process behind in the agent's container: every process a
-run starts carries `NUNKI_RUN=<its session>` in its environment, and once the
-run has ended, `nunki verify` stops every process still carrying it — `TERM`,
-then `KILL` a few seconds later — and says how many. A convenience rather than
-a guard: a process that clears its own environment is not found, and what
-contains an agent is its container.
+What a run leaves running in the agent's container is stopped once it ends:
+every process a run starts carries `NUNKI_RUN=<its session>` in its
+environment, and once the run has ended, `nunki verify` stops every process
+still carrying it — `TERM`, then `KILL` a few seconds later — and says how
+many. A convenience rather than a guard: a process that clears its own
+environment is not found, and what contains an agent is its container.
 
 When a bound runs out — a lot's attempts, a role's, or the returns to the
 coder — `nunki` stops and hands the mission to you. `nunki mission retry m1
