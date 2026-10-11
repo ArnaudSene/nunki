@@ -459,7 +459,7 @@ fn proposals_ruled(project: &Project, id: &str) -> Result<(), PushError> {
             .map(|p| {
                 format!(
                     "`{}` ({}: {})",
-                    crate::text::one_line(&p.id),
+                    crate::text::name(&p.id),
                     p.source(),
                     crate::text::brief(&p.why, 120)
                 )

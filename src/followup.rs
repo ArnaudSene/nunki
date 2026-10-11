@@ -468,8 +468,8 @@ pub fn proposals_await(
         .map(|p| {
             format!(
                 "- `{}` ({}:{}, {}) — {}",
-                crate::text::one_line(&p.id),
-                crate::text::one_line(&p.file),
+                crate::text::name(&p.id),
+                crate::text::name(&p.file),
                 p.line,
                 p.source(),
                 crate::text::one_line(&p.why)

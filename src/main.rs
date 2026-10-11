@@ -2996,7 +2996,7 @@ fn ratify_all(project: &Project, id: &str) -> ExitCode {
             for ratified in &done {
                 println!(
                     "{} ruled equivalent — {}",
-                    nunki::text::one_line(&ratified.proposal.id),
+                    nunki::text::name(&ratified.proposal.id),
                     nunki::text::one_line(&ratified.proposal.why)
                 );
                 say_registered(&ratified.registered);
@@ -3023,7 +3023,7 @@ fn print_registry(project: &Project) {
 fn proposal_line(p: &nunki::mutants::Proposal) -> String {
     format!(
         "{} ({}) — {}",
-        nunki::text::one_line(&p.id),
+        nunki::text::name(&p.id),
         p.source(),
         nunki::text::one_line(&p.why)
     )

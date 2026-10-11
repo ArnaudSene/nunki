@@ -2969,6 +2969,66 @@ fn a_campaign_that_measured_nothing_is_red_at_every_rigor() {
     }
 }
 
+/// Gate 7 names a survivor whose id and file hold a tab or a newline with
+/// each shown as its escape, never folded into a space nor printed raw.
+#[test]
+fn gate_seven_names_a_survivor_with_a_tab_or_a_newline_escaped() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    let mut s = survivor(1, None);
+    s.id = "src/with\ttab.rs:1:1: replace".into();
+    s.file = "src/with\nnewline.rs".into();
+    f.campaign(vec![s]);
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => {
+            assert!(
+                why.contains("src/with\\u{a}newline.rs:1 src/with\\u{9}tab.rs:1:1: replace"),
+                "{why}"
+            );
+            assert!(
+                !why.contains("with\ttab") && !why.contains("with\nnewline"),
+                "{why}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A campaign whose tool reported more survivors than the lines nunki read
+/// — a survivor lost to a name the script could not carry — is settled the
+/// same way, and gate 7 is red at every rigor with both numbers. Measured
+/// before the fix: 4 tried, every survivor line lost, and a `standard`
+/// gate 7 green at 100% killed.
+#[test]
+fn a_campaign_that_lost_a_survivor_is_red_at_every_rigor() {
+    let mut f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.journal_names_head();
+    let touched = nunki::gate::touched_since_base(&f.tree, "dev").unwrap();
+    let fingerprint = nunki::mutants::fingerprint(&f.tree, &touched).unwrap();
+    let runs = f._dir.path().join("runs");
+    std::fs::create_dir_all(&runs).unwrap();
+    let log = runs.join(format!("mutants-{}.log", &fingerprint[..7]));
+    let settled = nunki::mutants::settle_unmeasured(
+        &log,
+        "{\"id\":\"src/new.rs\tx:1:1: y\",\"file\":\"src/new.rs\tx\",\"line\":1}\n\
+         {\"campaign\":\"done\",\"tried\":4,\"found\":4,\"missed\":4}\n",
+    )
+    .unwrap();
+    assert!(settled.is_some());
+
+    for rigor in [Rigor::Critical, Rigor::Standard] {
+        f.header.rigor = rigor;
+        match f.gate_seven(Role::Coder).decision {
+            Decision::Failed(why) => assert!(
+                why.contains("reported 4 survivor(s)") && why.contains("read 0 survivor"),
+                "{rigor}: {why}"
+            ),
+            other => panic!("{rigor}: a campaign that lost its survivors is not green: {other:?}"),
+        }
+    }
+}
+
 /// The threshold frozen in the header is the one gate 7 reads; a header
 /// framed before it was frozen reads the project's.
 #[test]

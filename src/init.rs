@@ -976,21 +976,21 @@ const MUTATION_RUST: &str = r#"#!/bin/sh
 # then one per file the tool reached, with that file's counts:
 #   {"measured":"src/lib.rs","tried":12,"found":13}
 # and, last of all and exactly once, the line that says it got to the end:
-#   {"campaign":"done","tried":42,"found":45,"by_file":true}
+#   {"campaign":"done","tried":42,"found":45,"missed":3,"by_file":true}
 # `by_file` says the files were counted, and their counts add up to the
 # totals: a later partial campaign is rebuilt from them, file by file
 # (SPEC 4.4, the chain). A file with no line has nothing tried in it.
 # `end_line` is the last line of the code the mutation replaces, from the
-# tool's own listing: a function body replaced whole spans every line of it,
-# and a ruling on it is about all of them. 0 when the listing does not name
-# the mutant exactly once — a span nobody knows, which no ruling is tied to.
+# tool's own account of the mutant: a function body replaced whole spans
+# every line of it, and a ruling on it is about all of them.
 # `tried` is how many mutants were run against the tests, unviable ones left
 # out: what a `standard` mission's gate 7 divides by. `found` is how many
 # testable mutants the tool listed; `tried` 0 beside a `found` above 0 is a
-# campaign that measured nothing. Both come from the tool's own results,
-# never from counting the survivors, and `--in-diff` scopes them to the
-# lines the branch changed whenever `nunki` gives `NUNKI_BASE`, as it always
-# does.
+# campaign that measured nothing. `missed` is how many survivors the tool
+# reported, which `nunki` compares with the survivor lines it reads. All
+# three come from the tool's own tallies, never from counting lines, and
+# `--in-diff` scopes them to the lines the branch changed whenever `nunki`
+# gives `NUNKI_BASE`, as it always does.
 # `nunki` reads no other line as a result, so progress may go to stdout freely —
 # though this script keeps the tool's own chatter on stderr. A campaign that
 # stops before that last line has measured nothing, whatever else it printed.
@@ -1026,7 +1026,7 @@ if [ "$#" -eq 0 ]; then
   # happen. The terminal line is printed **before** leaving, because `nunki`
   # reads its absence as a campaign that was killed and asks for another:
   # a branch touching only tests or documentation would be asked for ever.
-  printf '{"campaign":"done","tried":0,"found":0,"by_file":true}\n'
+  printf '{"campaign":"done","tried":0,"found":0,"missed":0,"by_file":true}\n'
   exit 0
 fi
 
@@ -1260,18 +1260,31 @@ child=""
 
 # `--output DIR` writes into `DIR/mutants.out/`, not into `DIR` (measured on
 # 27.1.0). Reading the wrong path makes the whole campaign fail silently.
-missed="$out/mutants.out/missed.txt"
-if [ ! -f "$missed" ]; then
+#
+# Everything below is read from `outcomes.json`, the tool's own account of
+# what it did with each mutant, in JSON: each outcome names its mutant —
+# its `name`, its `file`, its `span` — and the file closes on the tool's
+# tallies (`missed`, `caught`, `timeout`, `unviable`, `total_mutants`).
+# Never from `missed.txt` and its siblings: they hold one mutant per line,
+# and a file whose name holds a newline — `#[path]` reaches one — turns
+# each of its mutants into two lines there. Measured on 27.1.0 with a tab
+# in one file's name and a newline in another's, and the lines escaped by
+# hand: the tool missed 10, the tab's 5 lines were not JSON and were
+# dropped, the newline's 5 became 10 lines that were, and `nunki` read 10
+# survivors of which none was one the tool had found.
+outcomes="$out/mutants.out/outcomes.json"
+listing="$out/mutants.out/mutants.json"
+if [ ! -f "$outcomes" ]; then
   # A diff that reaches no mutant, a comment or a test changed, say, makes
   # cargo-mutants exit 0 without writing `mutants.out` at all ("No mutants
   # to filter", measured on 27.1.0). That is a measurement: nothing to mutate.
   # A crate that does not parse also leaves no `mutants.out`, but exits 1,
   # so only the status tells the two apart.
   if [ -n "${NUNKI_BASE:-}" ] && [ "$status" -eq 0 ]; then
-    printf '{"campaign":"done","tried":0,"found":0,"by_file":true}\n'
+    printf '{"campaign":"done","tried":0,"found":0,"missed":0,"by_file":true}\n'
     exit 0
   fi
-  echo "nunki: the campaign left no $missed" >&2
+  echo "nunki: the campaign left no $outcomes" >&2
   exit 1
 fi
 
@@ -1289,139 +1302,107 @@ case "$status" in
     ;;
 esac
 
-# One mutant per line, as `file:line:col: what it replaced`:
-#   src/lib.rs:2:7: replace > with == in keep
+# One line per survivor: each outcome whose summary is `MissedMutant`.
 #
-# **The whole line is the identifier**, and nothing shorter will do. Measured
+# **Its `name` is the identifier**, and nothing shorter will do. Measured
 # on 27.1.0: a single position carries several mutants — `> ==`, `> <` and
 # `> >=` are all at `src/lib.rs:2:7` — so `file:line` and even
 # `file:line:col` hand the coder survivors it cannot tell apart, in a file
-# whose whole purpose is answering them one by one. The tool's own name for a
-# mutant is that line, so that is the name nunki uses.
+# whose whole purpose is answering them one by one. The name reads
+# `file:line:col: what it replaced`:
+#   src/lib.rs:2:7: replace > with == in keep
+# and the description is what follows the file and the position.
 #
-# The span comes from `mutants.json`, the tool's listing of every mutant it
-# made: its `name` is that same line, and its `span` the code replaced —
-# measured on 27.1.0, `replace body -> u8 with 0` on a two-line body spans
-# lines 6 to 7, where `missed.txt` says only 6.
+# The file and the span are the outcome's own: a path holding a colon is
+# never cut at it, and `end_line` is the last line of the code replaced —
+# `replace body -> u8 with 0` on a two-line body spans lines 6 to 7.
 #
-# The file comes from that listing too, and the line is read after it: a
-# path holding a colon — `src/with:colon.rs` — was cut at its first colon
-# when the line was split on them. Only when the listing does not name the
-# mutant exactly once is the line cut, as before. The file is escaped like
-# the rest: a quote in a path would otherwise end the JSON string.
-listing="$out/mutants.out/mutants.json"
-escape() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
-while IFS= read -r mutant; do
-  [ -n "$mutant" ] || continue
-  file=$(jq -r --arg name "$mutant" \
-    '[.[] | select(.name == $name)] | if length == 1 then .[0].file else "" end' \
-    "$listing" 2>/dev/null || true)
-  case "$mutant" in
-    "$file":*) ;;
-    *) file=${mutant%%:*} ;;
-  esac
-  rest=${mutant#"$file":}
-  line=${rest%%:*}
-  rest=${rest#*:}
-  what=${rest#*: }
-  case "$line" in ''|*[!0-9]*) line=0 ;; esac
-  end=$(jq -r --arg name "$mutant" \
-    '[.[] | select(.name == $name)] | if length == 1 then .[0].span.end.line else 0 end' \
-    "$listing" 2>/dev/null || true)
-  case "$end" in ''|*[!0-9]*) end=0 ;; esac
-  printf '{"id":"%s","file":"%s","line":%s,"end_line":%s,"description":"%s"}\n' \
-    "$(escape "$mutant")" "$(escape "$file")" "$line" "$end" "$(escape "$what")"
-done < "$missed"
+# Written by `jq`, never by hand: a tab, a newline, a quote, any control
+# character in a name comes out escaped, and each survivor is one line.
+if ! jq -c '
+  .outcomes[]
+  | select(.summary == "MissedMutant")
+  | .scenario.Mutant
+  | (.file + ":") as $at
+  | {
+      id: .name,
+      file: .file,
+      line: (.span.start.line // 0),
+      end_line: (.span.end.line // 0),
+      description: (
+        if (.name | startswith($at))
+        then .name | ltrimstr($at) | sub("^[0-9]+:[0-9]+: "; "")
+        else .name
+        end
+      )
+    }' "$outcomes"; then
+  echo "nunki: cannot read the survivors out of $outcomes" >&2
+  exit 1
+fi
 
-# How many mutants were tried: each one cargo-mutants ran the tests against,
-# from its own outcome files, one mutant per line — `caught.txt`, `missed.txt`
-# and `timeout.txt`. `unviable.txt` is left out: those mutants did not build,
-# so no test ever ran against them. Measured on 27.1.0, which writes all four
-# beside `missed.txt`, empty when nothing landed there.
-tried=0
-for outcome in caught missed timeout; do
-  if [ -f "$out/mutants.out/$outcome.txt" ]; then
-    n=$(grep -c . "$out/mutants.out/$outcome.txt" || true)
-    tried=$((tried + n))
+# Each file's counts, keyed by the file each mutant names: `tried` from the
+# outcomes, unviable ones left out as from the totals; `found` from the
+# tool's listing of every mutant it made, `mutants.json`, less the file's
+# unviable ones. `nunki` trusts a count only under a path it handed this
+# campaign, and checks that they add up to the totals; a listing `jq` cannot
+# read, and there are no per-file counts: no `by_file`, and the next
+# campaign is full.
+byfile=false
+if counts=$(jq -c --slurpfile listed "$listing" '
+  [ ($listed[0][] | {file: .file, n: 1, t: 0, u: 0}),
+    ( .outcomes[]
+      | select(.scenario | type == "object")
+      | {
+          file: .scenario.Mutant.file,
+          n: 0,
+          t: (if .summary == "CaughtMutant" or .summary == "MissedMutant"
+                or .summary == "Timeout" then 1 else 0 end),
+          u: (if .summary == "Unviable" then 1 else 0 end)
+        } ) ]
+  | group_by(.file)[]
+  | {
+      measured: .[0].file,
+      tried: (map(.t) | add),
+      found: ((map(.n) | add) - (map(.u) | add))
+    }' "$outcomes" 2>/dev/null); then
+  if [ -n "$counts" ]; then
+    printf '%s\n' "$counts"
   fi
-done
-
-# And how many testable mutants it found: every mutant in `mutants.json`,
-# the unviable ones left out, as they are from `tried`. A campaign that
-# found some and tried none measured nothing, and `nunki` refuses it on that
-# count even should the status above have let it through.
-found=""
-listed=$(jq length "$out/mutants.out/mutants.json" 2>/dev/null || true)
-case "$listed" in
-  ''|*[!0-9]*) ;;
-  *)
-    unviable=0
-    if [ -f "$out/mutants.out/unviable.txt" ]; then
-      unviable=$(grep -c . "$out/mutants.out/unviable.txt" || true)
-    fi
-    found=$((listed - unviable))
-    ;;
-esac
-
-# Each file's counts, keyed by the file `mutants.json` gives each mutant —
-# for `tried` as for `found`. A line of an outcome file is the mutant's
-# `name` in that listing (the same lookup as the survivors' spans above),
-# so its file is read from the listing and never cut out of the line: a
-# path with a colon in it would be cut short (HQ review of 00f8e51), and
-# `nunki` trusts a count only under a path it handed this campaign. A line
-# the listing does not name, or no listing at all, and there are no
-# per-file counts: no `by_file`, and the next campaign is full. Added up,
-# they are the totals above, which `nunki` checks too.
-byfile=""
-if [ -n "$found" ]; then
-  if counts=$({
-    jq -r '.[] | "N\t\(.name)\t\(.file)"' "$out/mutants.out/mutants.json"
-    for outcome in caught missed timeout; do
-      if [ -f "$out/mutants.out/$outcome.txt" ]; then
-        sed 's/^/T\t/' "$out/mutants.out/$outcome.txt"
-      fi
-    done
-    if [ -f "$out/mutants.out/unviable.txt" ]; then
-      sed 's/^/U\t/' "$out/mutants.out/unviable.txt"
-    fi
-  } | awk -F '\t' '
-    $1 == "N" { file[$2] = $3; seen[$3] = 1; n[$3]++; next }
-    $2 == "" { next }
-    !($2 in file) { bad = 1; next }
-    $1 == "T" { t[file[$2]]++ }
-    $1 == "U" { u[file[$2]]++ }
-    END {
-      if (bad) exit 1
-      for (f in seen) {
-        e = f
-        gsub(/\\/, "\\\\", e)
-        gsub(/"/, "\\\"", e)
-        printf "{\"measured\":\"%s\",\"tried\":%d,\"found\":%d}\n", e, t[f], n[f] - u[f]
-      }
-    }'); then
-    # Sorted here, not in the pipe: there the status would be sort's, and
-    # awk's refusal would be lost.
-    if [ -n "$counts" ]; then
-      printf '%s\n' "$counts" | LC_ALL=C sort
-    fi
-    byfile=',"by_file":true'
-  fi
+  byfile=true
 fi
 
 # The last thing it prints, and the only line that says the campaign got to
 # the end. Without it `nunki` cannot tell "no survivor" from "no answer": a
 # campaign killed halfway, one whose container went away and one that never
-# compiled all leave a log that parses to zero survivors — and gate 7 would go
-# green on a measurement nobody made.
+# compiled all leave a log that parses to zero survivors — and gate 7 would
+# go green on a measurement nobody made.
 #
 # A line and not an exit status, because the status does not survive. The
 # spawner `exec`s the command so that the pid it published is the campaign's
 # own, and a shell that has been replaced cannot write `$?`. A truncated log
 # loses its last line, which is this one, so the three failures fail alike.
-if [ -n "$found" ]; then
-  printf '{"campaign":"done","tried":%s,"found":%s%s}\n' "$tried" "$found" "$byfile"
-else
-  printf '{"campaign":"done","tried":%s}\n' "$tried"
+#
+# Its counts are the tool's own tallies, closing `outcomes.json`, and never
+# a count of the lines above: `nunki` compares `missed` with the survivor
+# lines it reads, and a count taken from those lines would always agree
+# with them. `tried` is every mutant the tests ran against — caught, missed
+# or timed out, unviable ones left out — what a `standard` mission's gate 7
+# divides by; `found` every testable mutant, `tried` 0 beside a `found`
+# above 0 being a campaign that measured nothing. A tally missing is a
+# campaign this script cannot account for, and it says so rather than
+# concluding.
+if ! jq -c --argjson byfile "$byfile" '
+  if [.caught, .missed, .timeout, .unviable, .total_mutants] | all(type == "number")
+  then {
+      campaign: "done",
+      tried: (.caught + .missed + .timeout),
+      found: (.total_mutants - .unviable),
+      missed: .missed
+    } + (if $byfile then {by_file: true} else {} end)
+  else error("the tallies are not all there")
+  end' "$outcomes"; then
+  echo "nunki: cannot read the tool's tallies out of $outcomes" >&2
+  exit 1
 fi
 "#;
 
@@ -3116,7 +3097,7 @@ if [ "$status" -ne 0 ]; then
   exit 1
 fi
 
-# The counterpart of the Rust fragment's `[ ! -f "$missed" ]`. On a source
+# The counterpart of the Rust fragment's `[ ! -f "$outcomes" ]`. On a source
 # that does not parse, Stryker writes no report at all.
 if [ ! -f "$report" ]; then
   echo "nunki: the campaign left no report at $report, so nothing was measured" >&2

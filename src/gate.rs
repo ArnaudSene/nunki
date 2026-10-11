@@ -2005,6 +2005,7 @@ impl Answers<'_> {
     /// The survivors with no outcome, as the gate names them — with the
     /// reason a line the coder wrote for one was not read, when it wrote one.
     fn unanswered(&self, campaign: &crate::mutants::Campaign) -> Vec<String> {
+        let name = crate::text::name;
         campaign
             .survivors
             .iter()
@@ -2021,8 +2022,8 @@ impl Answers<'_> {
                     )
                 });
                 match foreign.or_else(|| crate::mutants::not_an_outcome(s, self.coders)) {
-                    Some(why) => format!("{}:{} {} ({why})", s.file, s.line, s.id),
-                    None => format!("{}:{} {}", s.file, s.line, s.id),
+                    Some(why) => format!("{}:{} {} ({why})", name(&s.file), s.line, name(&s.id)),
+                    None => format!("{}:{} {}", name(&s.file), s.line, name(&s.id)),
                 }
             })
             .collect()

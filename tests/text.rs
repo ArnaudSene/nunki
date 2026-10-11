@@ -4,7 +4,7 @@
 
 mod common;
 
-use nunki::text::{blank, brief, one_line, printable};
+use nunki::text::{blank, brief, name, one_line, printable};
 
 #[test]
 fn every_control_an_agent_could_send_a_terminal_is_shown_escaped() {
@@ -189,4 +189,25 @@ fn emoji_with_presentation_selectors_are_printed_as_written() {
     for nothing in ["\u{fe0f}", "\u{fe0e}", " \u{fe0f}\u{fe0e} "] {
         assert!(blank(nothing), "{nothing:?} shows nothing");
     }
+}
+
+/// A name is spelled as it is, on one line: a tab, a newline and a carriage
+/// return are shown as their escapes rather than folded into a space — a
+/// file named with a tab is not the file named with a space — and every
+/// other escape `printable` makes is made too. A space, an accent, a colon
+/// and a quote are the name's own.
+#[test]
+fn a_name_shows_its_tabs_and_newlines_as_escapes() {
+    assert_eq!(name("src/with\ttab.rs"), "src/with\\u{9}tab.rs");
+    assert_eq!(name("src/with\nnewline.rs"), "src/with\\u{a}newline.rs");
+    assert_eq!(name("a\r\nb"), "a\\u{d}\\u{a}b");
+    assert_ne!(name("src/with\ttab.rs"), name("src/with tab.rs"));
+    assert_eq!(
+        name("src/with space é:\"q\".rs"),
+        "src/with space é:\"q\".rs"
+    );
+    assert_eq!(name("a\u{1b}[2Kb\u{202e}"), "a\\u{1b}[2Kb\\u{202e}");
+    let out = name(common::HOSTILE);
+    assert!(!out.contains('\n') && !out.contains('\t'), "{out}");
+    common::assert_printable(&out, "name");
 }

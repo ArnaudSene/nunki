@@ -414,9 +414,23 @@ file with that file's counts, `{"measured":"src/lib.rs","tried":12,"found":13}`,
 and its last line says `"by_file":true`. nunki trusts them only when each
 file is named once, every one is a path nunki handed that campaign, and
 they add up to the totals. The Rust template gives them, keyed by the file
-cargo-mutants' own listing names for each mutant. The Python and Next.js
+cargo-mutants' own account names for each mutant. The Python and Next.js
 ones measure whole files, give no count at all, and so never chain: every
 campaign of theirs is full.
+
+**Survivors reported.** The last line may also say how many survivors the
+tool reported, `"missed":3`, taken from the tool's own account and never
+from the lines the script printed. When it does, nunki compares it with the
+survivor lines it read, and a campaign where the two differ — fewer lines,
+a survivor lost; more, a line something else wrote — measured nothing: it
+is not recorded, gate 7 is red with both numbers, and `nunki push` has
+nothing to answer with. The Rust template gives it, from cargo-mutants'
+`outcomes.json`, and writes every line with `jq`, so a tab or a newline in
+a file's name is carried, escaped, and never splits a survivor in two. The
+Python and Next.js templates write theirs with a JSON encoder and give no
+count: their tools keep no tally of their own over the touched files, and
+a count taken from the lines they print would always agree with them. A
+survivor's name is printed with its control characters escaped (`\u{9}`).
 
 **How a chain is judged: once.** `MUTANTS.json` keeps, for each touched
 file, the counts of the latest campaign that measured it. A file unchanged
