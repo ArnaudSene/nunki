@@ -29,6 +29,7 @@ fn project(dir: &Path) -> Project {
             mutation_threshold: 80,
             mutation_jobs: None,
             forge_protection: Default::default(),
+            security_findings: Default::default(),
         },
         dir.join("nunki"),
     )
@@ -2531,4 +2532,23 @@ fn the_base_the_slot_is_on_is_never_moved_under_it() {
         nunki::git::Brought::Created { .. }
     ));
     assert_eq!(git(&slot.tree, &["rev-parse", "fresh"]), target);
+}
+
+/// The security agent is told where its words go in `PR.md`: under one
+/// heading that begins with `Security`, the one `nunki push` withholds while
+/// its findings are unfixed — and that what it writes elsewhere is
+/// published as written.
+#[test]
+fn the_security_agent_is_told_its_section_of_the_pull_request_is_the_one_withheld() {
+    let security = role::prompt(Role::Security).replace('\n', " ");
+    assert!(
+        security.contains("under **one** heading of your own that begins with `Security`"),
+        "{security}"
+    );
+    assert!(security.contains("withholds that section"), "{security}");
+    assert!(security.contains("is published as written"), "{security}");
+    assert!(
+        !role::prompt(Role::Coder).contains("begins with `Security`"),
+        "the heading is the security agent's"
+    );
 }

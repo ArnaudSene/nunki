@@ -121,6 +121,7 @@ impl World {
                 mutation_threshold: 80,
                 mutation_jobs: None,
                 forge_protection: Default::default(),
+                security_findings: Default::default(),
             },
             hq_root.parent().unwrap().to_path_buf(),
         );

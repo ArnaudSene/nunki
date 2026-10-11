@@ -317,6 +317,7 @@ fn context(dir: &Path) -> (nunki::project::Project, nunki::slot::Slot) {
             mutation_threshold: 80,
             mutation_jobs: None,
             forge_protection: Default::default(),
+            security_findings: Default::default(),
         },
         dir.join("nunki"),
     );
@@ -644,6 +645,7 @@ fn live_a_campaign_is_launched_watched_and_read_back() {
             mutation_threshold: 80,
             mutation_jobs: None,
             forge_protection: Default::default(),
+            security_findings: Default::default(),
         },
         dir.path().join("nunki"),
     );
@@ -1325,11 +1327,11 @@ fn live_the_shipped_mutation_script_reads_a_real_campaign() {
 }
 
 /// The Rust stack's script carries each survivor's span from cargo-mutants'
-/// own listing, `mutants.json`: its `name` is the line `missed.txt` holds,
-/// its `span` the code replaced. Run as `nunki init` deposits it, with a
-/// `cargo` that writes what cargo-mutants 27.1.0 was measured to write — a
-/// body replaced whole spanning lines 6 to 7 — and a name the listing gives
-/// twice, whose span is then said to be unknown.
+/// own account of it, the outcome's mutant in `outcomes.json`: its `name`,
+/// its `file`, its `span` — the code replaced. Run as `nunki init` deposits
+/// it, with a `cargo` that writes what cargo-mutants 27.1.0 was measured to
+/// write: a body replaced whole spanning lines 6 to 7. Two mutants under
+/// one name keep each its own span, as each outcome names its own.
 #[cfg(unix)]
 #[test]
 fn the_rust_campaign_carries_each_survivors_span_from_the_tools_listing() {
@@ -1344,17 +1346,28 @@ fn the_rust_campaign_carries_each_survivors_span_from_the_tools_listing() {
 
     let bin = dir.path().join("bin");
     std::fs::create_dir_all(&bin).unwrap();
-    let listing = r#"[
- {"name":"src/lib.rs:6:5: replace body -> u8 with 0","span":{"start":{"line":6,"column":5},"end":{"line":7,"column":10}}},
- {"name":"src/lib.rs:2:7: replace > with < in keep","span":{"start":{"line":2,"column":7},"end":{"line":2,"column":8}}},
- {"name":"src/lib.rs:9:1: twice","span":{"start":{"line":9,"column":1},"end":{"line":9,"column":2}}},
- {"name":"src/lib.rs:9:1: twice","span":{"start":{"line":9,"column":1},"end":{"line":12,"column":2}}}
-]"#;
-    let missed = "src/lib.rs:6:5: replace body -> u8 with 0\n\
-                  src/lib.rs:2:7: replace > with < in keep\n\
-                  src/lib.rs:9:1: twice\n";
+    let mutant = |name: &str, (from, to): (u32, u32)| {
+        format!(
+            r#"{{"name":"{name}","file":"src/lib.rs","span":{{"start":{{"line":{from},"column":5}},"end":{{"line":{to},"column":10}}}}}}"#
+        )
+    };
+    let mutants = [
+        mutant("src/lib.rs:6:5: replace body -> u8 with 0", (6, 7)),
+        mutant("src/lib.rs:2:7: replace > with < in keep", (2, 2)),
+        mutant("src/lib.rs:9:1: twice", (9, 9)),
+        mutant("src/lib.rs:9:1: twice", (9, 12)),
+    ];
+    let listing = format!("[{}]", mutants.join(","));
+    let outcomes = format!(
+        r#"{{"outcomes":[{{"scenario":"Baseline","summary":"Success"}},{}],"total_mutants":4,"missed":4,"caught":0,"timeout":0,"unviable":0}}"#,
+        mutants
+            .iter()
+            .map(|m| format!(r#"{{"scenario":{{"Mutant":{m}}},"summary":"MissedMutant"}}"#))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
     std::fs::write(dir.path().join("listing.json"), listing).unwrap();
-    std::fs::write(dir.path().join("missed.txt"), missed).unwrap();
+    std::fs::write(dir.path().join("outcomes.json"), outcomes).unwrap();
     std::fs::write(
         bin.join("cargo"),
         format!(
@@ -1363,11 +1376,10 @@ fn the_rust_campaign_carries_each_survivors_span_from_the_tools_listing() {
              while [ $# -gt 0 ]; do [ \"$1\" = --output ] && out=$2; shift; done\n\
              mkdir -p \"$out/mutants.out\"\n\
              cp {listing} \"$out/mutants.out/mutants.json\"\n\
-             cp {missed} \"$out/mutants.out/missed.txt\"\n\
-             : > \"$out/mutants.out/caught.txt\"\n\
+             cp {outcomes} \"$out/mutants.out/outcomes.json\"\n\
              exit 2\n",
             listing = dir.path().join("listing.json").display(),
-            missed = dir.path().join("missed.txt").display(),
+            outcomes = dir.path().join("outcomes.json").display(),
         ),
     )
     .unwrap();
@@ -1415,7 +1427,13 @@ fn the_rust_campaign_carries_each_survivors_span_from_the_tools_listing() {
         span("src/lib.rs:2:7: replace > with < in keep"),
         Some((2, 2))
     );
-    assert_eq!(span("src/lib.rs:9:1: twice"), None, "named twice: unknown");
+    let twice: Vec<_> = survivors
+        .iter()
+        .filter(|s| s.id == "src/lib.rs:9:1: twice")
+        .map(|s| s.span())
+        .collect();
+    assert_eq!(twice, [Some((9, 9)), Some((9, 12))], "{stdout}");
+    assert_eq!(mutants::unmeasured(&stdout), None, "{stdout}");
 }
 
 /// A campaign that killed everything has nobody to triage, and says so.
@@ -1947,6 +1965,197 @@ fn an_unmeasured_campaign_leaves_its_reason_where_gate_seven_reads_it() {
         None
     );
     assert!(!measured.with_extension("err").exists());
+}
+
+// ---------------------------------------------------------------------------
+// A campaign cannot lose a survivor it found: the survivors the tool
+// reported, on the terminal line, against the survivor lines nunki read
+// (security review of the survivors-and-findings mission's predecessor).
+// ---------------------------------------------------------------------------
+
+/// Two survivor lines a campaign printed, as `nunki` reads them.
+const TWO_SURVIVORS: &str = "{\"id\":\"src/a.rs:1:1: x\",\"file\":\"src/a.rs\",\"line\":1,\"description\":\"x\"}\n\
+     {\"id\":\"src/a.rs:2:1: y\",\"file\":\"src/a.rs\",\"line\":2,\"description\":\"y\"}\n";
+
+/// Logs whose terminal line counts more, or fewer, survivors than the lines
+/// `nunki` reads — and the two each says.
+fn counted_otherwise() -> Vec<(String, u32, usize)> {
+    // What the shipped script printed before the fix for one survivor in
+    // `src/with\nnewline.rs`, measured on cargo-mutants 27.1.0: the line of
+    // `missed.txt` split in two, each half valid JSON.
+    let split = "{\"id\":\"src/with\",\"file\":\"src/with\",\"line\":0,\"end_line\":0,\"description\":\"src/with\"}\n\
+         {\"id\":\"newline.rs:2:5: replace split -> bool with true\",\"file\":\"newline.rs\",\"line\":2,\"end_line\":0,\"description\":\"replace split -> bool with true\"}\n";
+    // And for one in `src/with\ttab.rs`: a raw tab inside a JSON string,
+    // which is not JSON, and is skipped as the tool's chatter is.
+    let tabbed = "{\"id\":\"src/with\ttab.rs:2:5: replace tabbed -> bool with true\",\"file\":\"src/with\ttab.rs\",\"line\":2,\"end_line\":2,\"description\":\"replace tabbed -> bool with true\"}\n";
+    vec![
+        (
+            format!("{TWO_SURVIVORS}{{\"campaign\":\"done\",\"tried\":5,\"missed\":3}}\n"),
+            3,
+            2,
+        ),
+        (
+            format!("{TWO_SURVIVORS}{{\"campaign\":\"done\",\"tried\":5,\"missed\":1}}\n"),
+            1,
+            2,
+        ),
+        (
+            format!("{split}{{\"campaign\":\"done\",\"tried\":5,\"found\":5,\"missed\":1}}\n"),
+            1,
+            2,
+        ),
+        (
+            format!("{tabbed}{{\"campaign\":\"done\",\"tried\":5,\"found\":5,\"missed\":1}}\n"),
+            1,
+            0,
+        ),
+    ]
+}
+
+/// A terminal line that counts more survivors than the lines `nunki` read
+/// is a survivor lost; one that counts fewer is a line something else
+/// wrote, or a name a newline split in two. Either way the campaign did not
+/// measure, and says so with both numbers. A line that says no count is read
+/// as before, and one whose count agrees measured.
+#[test]
+fn a_campaign_whose_survivor_lines_are_not_the_tools_count_did_not_measure() {
+    for (log, reported, read) in counted_otherwise() {
+        assert!(mutants::completed(&log), "{log}");
+        assert_eq!(mutants::parse(&log).len(), read, "{log}");
+        let why = mutants::unmeasured(&log).unwrap_or_else(|| panic!("measured: {log}"));
+        assert!(
+            why.contains(&format!("reported {reported} survivor(s)"))
+                && why.contains(&format!("read {read} survivor line(s)"))
+                && why.contains("measured nothing"),
+            "{why}"
+        );
+    }
+    for measured in [
+        format!("{TWO_SURVIVORS}{{\"campaign\":\"done\",\"tried\":5,\"missed\":2}}\n"),
+        format!("{TWO_SURVIVORS}{{\"campaign\":\"done\",\"tried\":5}}\n"),
+        format!("{TWO_SURVIVORS}{{\"campaign\":\"done\"}}\n"),
+        "{\"campaign\":\"done\",\"tried\":5,\"found\":5,\"missed\":0}\n".to_string(),
+    ] {
+        assert_eq!(mutants::unmeasured(&measured), None, "{measured}");
+    }
+}
+
+/// A campaign that did not measure is never recorded, whoever hands it
+/// over: nothing is written in its place, and the campaign on file — here
+/// none, so `nunki push` refuses for want of one — stays as it was. One
+/// whose count agrees is recorded with every survivor it names.
+#[test]
+fn a_campaign_whose_count_disagrees_is_never_recorded() {
+    for (log, reported, _) in counted_otherwise() {
+        let dir = tempfile::tempdir().unwrap();
+        match mutants::record_finished(dir.path(), "fp", "abc9999", &log) {
+            Err(mutants::MutantsError::Unmeasured(why)) => {
+                assert!(why.contains(&format!("reported {reported}")), "{why}")
+            }
+            other => panic!("recorded a campaign that did not measure: {other:?}\n{log}"),
+        }
+        assert_eq!(mutants::read(dir.path()).unwrap(), None, "{log}");
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let agreed = format!("{TWO_SURVIVORS}{{\"campaign\":\"done\",\"tried\":5,\"missed\":2}}\n");
+    assert_eq!(
+        mutants::record_finished(dir.path(), "fp", "abc9999", &agreed).unwrap(),
+        2
+    );
+}
+
+/// Read back in its slot, a finished campaign whose count disagrees is one
+/// that could not run, in its own words with both numbers, left beside its
+/// log where gate 7 reads it; nothing is recorded, so neither gate 7 nor
+/// `nunki push` is answered by it.
+#[test]
+fn a_campaign_whose_count_disagrees_is_read_back_as_one_that_could_not_run() {
+    for (log, reported, read) in counted_otherwise() {
+        let dir = tempfile::tempdir().unwrap();
+        let (project, slot) = context(dir.path());
+        let mission = dir.path().join("mission");
+        let engine = in_flight(
+            &project,
+            &slot,
+            &mission,
+            &log,
+            u32::MAX,
+            nunki::engine::Liveness::Running,
+            "nunki-run-ended",
+        );
+
+        let progress = mutants::read_back(&project, &slot, engine, &mission)
+            .unwrap()
+            .unwrap();
+
+        match &progress {
+            mutants::Progress::CouldNotRun(why) => assert!(
+                why.contains(&format!("reported {reported} survivor(s)"))
+                    && why.contains(&format!("read {read} survivor line(s)")),
+                "{why}"
+            ),
+            other => panic!("{other:?}\n{log}"),
+        }
+        assert_eq!(mutants::read(&mission).unwrap(), None, "{log}");
+        let said = std::fs::read_to_string(mission.join("mutants.err")).unwrap();
+        assert!(said.contains(&format!("reported {reported}")), "{said}");
+        assert!(
+            mutants::read_running(&project.hq_root, &slot.name)
+                .unwrap()
+                .is_none()
+        );
+    }
+}
+
+/// Over several stacks the survivors each tool reported are added up, and
+/// given only when every stack gave a count; a stack whose count is not its
+/// own survivor lines leaves the campaign unfinished, saying both numbers —
+/// compared only in the sum, its lost line would be cancelled by another
+/// stack's extra one.
+#[cfg(unix)]
+#[test]
+fn a_campaign_over_several_stacks_adds_up_the_survivors_each_tool_reported() {
+    let one = r#"{"id":"1","file":"src/lib.rs","line":2,"description":"x"}"#;
+    let rust = says(&[one, r#"{"campaign":"done","tried":3,"missed":1}"#]);
+    let next = says(&[r#"{"campaign":"done","tried":4,"missed":0}"#]);
+    let out = TwoStacks::new(&rust, &next).run();
+    assert!(mutants::completed(&out), "{out}");
+    assert!(out.contains(r#""missed":1"#), "{out}");
+    assert_eq!(mutants::unmeasured(&out), None, "{out}");
+
+    let older = says(&[r#"{"campaign":"done","tried":4}"#]);
+    let out = TwoStacks::new(&rust, &older).run();
+    assert!(mutants::completed(&out), "{out}");
+    assert!(!out.contains("missed"), "{out}");
+
+    // One stack lost a line, the other printed one too many: the sum agrees,
+    // and the campaign is still not finished.
+    let lost = says(&[r#"{"campaign":"done","tried":3,"missed":1}"#]);
+    let extra = says(&[
+        r#"{"id":"2","file":"app/page.ts","line":1,"description":"y"}"#,
+        r#"{"campaign":"done","tried":4,"missed":0}"#,
+    ]);
+    let judged = TwoStacks::new(&lost, &extra);
+    let touched = vec!["src/lib.rs".to_string(), "frontend/app/page.ts".to_string()];
+    let script = mutants::several_campaigns(&judged.judged, "abc1234", &touched);
+    let ran = Command::new("sh")
+        .args(["-c", &script])
+        .current_dir(&judged.tree)
+        .output()
+        .unwrap();
+    let out = String::from_utf8_lossy(&ran.stdout);
+    assert!(!mutants::completed(&out), "{out}");
+    let said = String::from_utf8_lossy(&ran.stderr);
+    assert!(
+        said.contains("rust stack's tool reported 1 survivor(s)")
+            && said.contains("printed 0 survivor line(s)"),
+        "{said}"
+    );
+    assert!(
+        said.contains("next stack's tool reported 0 survivor(s)")
+            && said.contains("printed 1 survivor line(s)"),
+        "{said}"
+    );
 }
 
 /// Over several stacks `found` is summed like `tried`, and given only when
@@ -2556,6 +2765,27 @@ fn campaign_of(survivors: Vec<Survivor>, tried: Option<u32>) -> Campaign {
         survivors,
         tried,
     }
+}
+
+/// What gate 7 still owes names a survivor whose id and file hold a tab or
+/// a newline with each shown as its escape: folded into a space, the tab
+/// would name another file and the newline another line.
+#[test]
+fn a_survivor_named_with_a_tab_or_a_newline_is_owed_under_its_escaped_name() {
+    let mut s = one("src/with\ttab.rs:2:5: replace", 2, "replace");
+    s.file = "src/with\nnewline.rs".into();
+    let owed = mutants::owed(
+        &campaign_of(vec![s], None),
+        &Default::default(),
+        nunki::mission::Rigor::Critical,
+        80,
+    )
+    .expect("one survivor has no outcome");
+    assert!(
+        owed.contains("src/with\\u{a}newline.rs:2 src/with\\u{9}tab.rs:2:5: replace"),
+        "{owed}"
+    );
+    assert!(!owed.contains('\t') && !owed.contains('\n'), "{owed}");
 }
 
 /// Gate 7's rule, as push asks it again: nothing at prototype; at critical
@@ -7142,6 +7372,109 @@ fn the_rust_campaign_finds_the_mutants_of_every_awkward_name() {
         );
     }
     assert_eq!(mutants::tried(&stdout), Some(25), "{stdout}");
+}
+
+/// The shipped Rust `mutation.sh`, on a branch whose files hold a tab and a
+/// newline in their names — `#[path]` reaches both. Every survivor the tool
+/// reports is recorded, under its own file, as many as the tool's own
+/// account says. Measured before the fix, on cargo-mutants 27.1.0: the tool
+/// reported 10 missed; the 5 lines of the tab's file were not JSON and were
+/// dropped, and the newline split each of the other 5 into two lines that
+/// were — 10 lines read, as many as the tool reported, and not one of them a
+/// survivor it found.
+///
+/// Played with the real cargo-mutants, so it skips — and says so — where
+/// cargo-mutants or jq is not installed, as on CI's runner.
+#[test]
+fn the_rust_campaign_records_every_survivor_of_a_name_with_a_tab_or_a_newline() {
+    if !has("cargo", &["mutants", "--version"]) || !has("jq", &["--version"]) {
+        eprintln!("skipped: cargo-mutants and jq are needed to play a real campaign");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("crate");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    git(&root, &["init", "-q", "-b", "dev"]);
+    git(&root, &["config", "user.email", "a@b.c"]);
+    git(&root, &["config", "user.name", "t"]);
+    write(
+        &root,
+        "Cargo.toml",
+        "[package]\nname = \"controlled\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    );
+    write(&root, "src/lib.rs", "\n");
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "base"]);
+    let base = git(&root, &["rev-parse", "HEAD"]);
+
+    let controlled = [
+        ("src/with\ttab.rs", "tabbed"),
+        ("src/with\nnewline.rs", "split"),
+    ];
+    let mut lib = String::new();
+    for (path, name) in controlled {
+        write(
+            &root,
+            path,
+            &format!("pub fn {name}(n: u8) -> bool {{\n    n > 3\n}}\n"),
+        );
+        lib.push_str(&format!("#[path = {:?}]\npub mod {name};\n", &path[4..]));
+    }
+    write(&root, "src/lib.rs", &lib);
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "controlled names"]);
+
+    nunki::init::init(&root, &dir.path().join("nunki"), &["rust".to_string()]).unwrap();
+    let script = dir
+        .path()
+        .join("nunki/stacks/rust")
+        .join(nunki::mutants::SCRIPT);
+    let out = Command::new(&script)
+        .arg("campaign-1")
+        .args(controlled.iter().map(|(path, _)| *path))
+        .env(nunki::mutants::BASE_ENV, &base)
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(mutants::completed(&stdout), "{stdout}");
+
+    // What the tool itself says it missed, from its own account.
+    let outcomes = root.join("target/mutants-campaign-1/mutants.out/outcomes.json");
+    let outcomes: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&outcomes).unwrap()).unwrap();
+    assert_eq!(outcomes["missed"], 10, "{outcomes}");
+
+    assert_eq!(mutants::unmeasured(&stdout), None, "{stdout}");
+    let recorded = tempfile::tempdir().unwrap();
+    mutants::record_finished(recorded.path(), "fp", "HEAD", &stdout).unwrap();
+    let campaign = mutants::read(recorded.path()).unwrap().unwrap();
+    assert_eq!(campaign.survivors.len(), 10, "{stdout}");
+    for (path, name) in controlled {
+        let mine: Vec<&Survivor> = campaign
+            .survivors
+            .iter()
+            .filter(|s| s.file == path)
+            .collect();
+        assert_eq!(mine.len(), 5, "{path:?}: {mine:?}\n{stdout}");
+        for s in mine {
+            assert!(s.id.starts_with(&format!("{path}:2:")), "{s:?}");
+            assert!(s.description.contains(name), "{s:?}");
+            assert_eq!((s.line, s.end_line), (2, Some(2)), "{s:?}");
+        }
+    }
+    let files = mutants::by_file(&stdout, "HEAD").expect("each file is counted");
+    for (path, _) in controlled {
+        let counted = files.get(path).map(|m| (m.tried, m.found));
+        assert_eq!(counted, Some((5, Some(5))), "{path:?}: {files:?}");
+    }
+    assert_eq!(mutants::tried(&stdout), Some(10), "{stdout}");
+    assert_eq!(mutants::found(&stdout), Some(10), "{stdout}");
 }
 
 /// What changed between two campaigns is listed by the names the tree

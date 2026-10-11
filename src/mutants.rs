@@ -593,6 +593,8 @@ pub enum MutantsError {
     Followup(#[from] crate::followup::FollowupError),
     #[error("the chain of campaigns is broken: {0}")]
     Broken(String),
+    #[error("the campaign is not recorded: {0}")]
+    Unmeasured(String),
     #[error(
         "a campaign is called off with a reason: `--because` says why, and the HQ and the \
          next coder run read it in FOLLOWUP_HQ.md"
@@ -742,7 +744,7 @@ pub fn foreign_said(foreign: &[Foreign]) -> Option<String> {
             .map(|f| {
                 format!(
                     "{} (`{}`, which {})",
-                    crate::text::one_line(&f.id),
+                    crate::text::name(&f.id),
                     crate::text::one_line(&f.kind),
                     crate::text::one_line(&f.why)
                 )
@@ -1000,9 +1002,9 @@ pub fn owed(
         .map(|s| {
             format!(
                 "{}:{} {}",
-                crate::text::one_line(&s.file),
+                crate::text::name(&s.file),
                 s.line,
-                crate::text::one_line(&s.id)
+                crate::text::name(&s.id)
             )
         })
         .collect();
@@ -1228,6 +1230,14 @@ struct Terminal {
     /// mutant found and none tested ([`unmeasured`]).
     #[serde(default)]
     found: Option<u32>,
+    /// How many survivors the tool reported, from its own account of its
+    /// outcomes — never from the survivor lines the script printed, nor from
+    /// the lines it read to print them: a count taken from those lines always
+    /// agrees with them. Compared with the survivor lines `nunki` read
+    /// ([`unmeasured`]). Absent from a script that does not say it, which is
+    /// read as before.
+    #[serde(default)]
+    missed: Option<u32>,
     /// Whether the script counted each file, on its own lines before this
     /// one ([`by_file`]). Absent from a script that does not: no per-file
     /// count is then read, even from lines that look like one.
@@ -1372,15 +1382,38 @@ pub fn found(text: &str) -> Option<u32> {
 /// Both counts are needed: a `found` without a `tried` is a line that gives
 /// no count — which gate 7 judges as `critical` does — and not a campaign
 /// that said it tried nothing.
+///
+/// Nor did a campaign measure when the survivors the tool reported — the
+/// terminal line's `missed`, from the tool's own account — are not as many
+/// as the survivor lines `nunki` reads ([`parse`]), **in either direction**.
+/// Fewer lines is a survivor lost: a line that is not JSON, which [`parse`]
+/// skips as it skips the tool's chatter — measured on cargo-mutants 27.1.0
+/// with a tab in a file's name and a script that escaped its lines by hand.
+/// More lines is a line something else wrote, or a name split in two by a
+/// newline. Either way what is on file would not be what the tool found.
+/// A line without `missed` is read as before.
 pub fn unmeasured(text: &str) -> Option<String> {
     let line = terminal(text)?;
-    match line.found {
-        Some(found) if found > 0 && line.tried == Some(0) => Some(format!(
+    if let Some(found) = line.found
+        && found > 0
+        && line.tried == Some(0)
+    {
+        return Some(format!(
             "the campaign found {found} mutant(s) and tried none, so it measured nothing — \
              a baseline whose tests fail before any mutant is tried leaves exactly this"
-        )),
-        _ => None,
+        ));
     }
+    let missed = line.missed?;
+    let read = parse(text).len();
+    (read != missed as usize).then(|| {
+        format!(
+            "the mutation tool reported {missed} survivor(s) and nunki read {read} survivor \
+             line(s) from the campaign, so what it would record is not what the tool found \
+             and it measured nothing — fewer lines is a survivor lost, a line that is not \
+             JSON or a name the script could not carry; more is a line something else \
+             wrote, or a name split in two"
+        )
+    })
 }
 
 /// Settle a campaign that said it finished and measured nothing: its reason
@@ -1577,6 +1610,13 @@ fn record(
     identified: impl Fn(&Survivor) -> bool,
     then: impl FnOnce(&mut [Survivor]),
 ) -> Result<usize, MutantsError> {
+    // What [`settle_unmeasured`] refuses before a campaign is read back is
+    // refused here too, by the one writer of a finished campaign: a log that
+    // did not measure never becomes the campaign gate 7 and `nunki push`
+    // judge, whoever hands it over.
+    if let Some(why) = unmeasured(text) {
+        return Err(MutantsError::Unmeasured(why));
+    }
     let mut survivors = parse(text);
     let previous = read(dir)?;
     let mut chain = chain.clone();
@@ -3097,11 +3137,15 @@ pub fn command(
 /// [`completed`] reads a log with.
 /// A stack that found mutants and tried none measured nothing, and the
 /// campaign is then not finished either, whatever the other stacks did.
-/// It carries `tried` and `found`, each the stacks' counts added up, and
-/// each only when every stack that ran gave one: a sum missing a stack's
-/// mutants would be a share of the wrong whole. Without `tried` gate 7
+/// It carries `tried`, `found` and `missed`, each the stacks' counts added
+/// up, and each only when every stack that ran gave one: a sum missing a
+/// stack's mutants would be a share of the wrong whole. Without `tried` gate 7
 /// judges as `critical` does; without `found` the not-measured rule has
 /// nothing to compare, and the stacks' own scripts are what refuse.
+/// A stack whose `missed` is not as many as the survivor lines it printed
+/// measured nothing ([`unmeasured`]), and the campaign is not finished,
+/// with both numbers on stderr: compared only in the sum, one stack's lost
+/// line and another's extra one would cancel out.
 ///
 /// Each stack's per-file counts pass through, their paths made the
 /// repository's like the survivors' files, and the line says `by_file` only
@@ -3124,7 +3168,7 @@ pub fn several_campaigns(
 ) -> String {
     use crate::exec::quote;
     let mut script = String::from(
-        "set -u\ncomplete=1\ncounted=1\ntried=0\nsized=1\nfound=0\nbyfile=1\nout=\"$(mktemp)\"\n",
+        "set -u\ncomplete=1\ncounted=1\ntried=0\nsized=1\nfound=0\nreported=1\nmissed=0\nbyfile=1\nout=\"$(mktemp)\"\n",
     );
     for j in judged {
         let mine: Vec<String> = touched
@@ -3174,6 +3218,20 @@ pub fn several_campaigns(
              ''|*[!0-9]*) sized=0 ;;\n\
              *) found=$((found + seen)) ;;\n\
              esac\n\
+             lost=$(jq -R -r 'fromjson? | select(type == \"object\" and .campaign == \"done\") \
+             | (.missed // \"none\") | tostring' < \"$out\" | tail -n 1)\n\
+             case \"$lost\" in\n\
+             ''|*[!0-9]*) reported=0 ;;\n\
+             *) missed=$((missed + lost))\n\
+             kept=$(jq -R -c 'fromjson? | select(type == \"object\" and has(\"id\"))' \
+             < \"$out\" | grep -c .)\n\
+             if [ \"$kept\" != \"$lost\" ]; then\n\
+             printf 'nunki: the %s stack'\"'\"'s tool reported %s survivor(s) and its \
+             script printed %s survivor line(s), so its campaign measured nothing\\n' \
+             {name} \"$lost\" \"$kept\" >&2\n\
+             complete=0\n\
+             fi ;;\n\
+             esac\n\
              case \"$said:$seen\" in 0:[1-9]*) complete=0 ;; esac\n",
             dir = quote(&dir),
             at = j.scripts_at,
@@ -3189,6 +3247,7 @@ pub fn several_campaigns(
          line='{\"campaign\":\"done\"'\n\
          if [ \"$counted\" = 1 ]; then line=\"$line,\\\"tried\\\":$tried\"; fi\n\
          if [ \"$sized\" = 1 ]; then line=\"$line,\\\"found\\\":$found\"; fi\n\
+         if [ \"$reported\" = 1 ]; then line=\"$line,\\\"missed\\\":$missed\"; fi\n\
          if [ \"$counted\" = 1 ] && [ \"$byfile\" = 1 ]; then line=\"$line,\\\"by_file\\\":true\"; fi\n\
          printf '%s}\\n' \"$line\"\n\
          fi\n",

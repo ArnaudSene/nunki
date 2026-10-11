@@ -331,3 +331,25 @@ fn a_chain_of_campaigns_is_said_once_per_change_and_a_single_campaign_never() {
     followup::campaigns(&file, &three).unwrap();
     assert_eq!(count(), 2, "a longer chain is a new section");
 }
+
+/// A proposal on a survivor whose name holds a tab or a newline is listed
+/// with each shown as its escape, on its own line: folded into a space, the
+/// tab would name another file, and the newline would start a line of the
+/// HQ's file that nobody wrote.
+#[test]
+fn a_proposal_on_a_name_with_a_tab_or_a_newline_is_listed_escaped() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("FOLLOWUP_HQ.md");
+    let mut p = proposal("src/with\ttab.rs:2:5: replace", "only a log line reads it");
+    p.file = "src/with\nnewline.rs".into();
+    followup::proposals_await(&file, "m1", &[p]).unwrap();
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(
+        text.contains("`src/with\\u{9}tab.rs:2:5: replace` (src/with\\u{a}newline.rs:3,"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("with\ttab") && !text.contains("with\nnewline"),
+        "{text}"
+    );
+}

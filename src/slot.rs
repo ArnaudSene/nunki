@@ -60,6 +60,27 @@ pub enum SlotError {
          it. Let it end, or stop it, first"
     )]
     Busy { name: String, what: String },
+    /// A state the reset could not read: it cannot tell whether a run is in
+    /// flight in the slot, so it does not take its containers down.
+    #[error(
+        "slot {name:?} was not reset, and nothing in it was changed: {why}. nunki cannot tell \
+         whether a run of mission {mission} is in flight in this slot, and a reset would take \
+         its container down under it. Repair that file; or, if mission {mission} is over, \
+         move its state file out of {missions} — it then reads as never started, and \
+         `nunki mission archive {mission}` closes it. Only missions not archived are read"
+    )]
+    StateUnreadable {
+        name: String,
+        mission: String,
+        why: String,
+        missions: String,
+    },
+    /// The state store itself would not open.
+    #[error(
+        "slot {name:?} was not reset, and nothing in it was changed: the missions' states \
+         cannot be read ({why}), so nunki cannot tell whether a run is in flight in this slot"
+    )]
+    StoreUnreadable { name: String, why: String },
     #[error("the engine: {0}")]
     Engine(String),
     #[error("the slot's campaign record could not be read: {0}")]
@@ -155,7 +176,7 @@ pub fn reset(
     force: bool,
 ) -> Result<Reset, SlotError> {
     let slot = find(project, name)?;
-    if let Some(mission) = running_in(project, name) {
+    if let Some(mission) = running_in(project, name)? {
         return Err(SlotError::Busy {
             name: name.to_string(),
             what: format!("mission {mission} has a run in progress"),
@@ -223,15 +244,34 @@ pub fn reset(
 }
 
 /// The mission whose run is in progress in slot `name`, if one is.
-fn running_in(project: &Project, name: &str) -> Option<String> {
-    let store = crate::state::Store::open(&project.hq_root).ok()?;
-    crate::mission::dir::list(&project.hq_root)
-        .into_iter()
-        .find(|id| {
-            store
-                .load(id)
-                .is_ok_and(|s| s.slot == name && s.run.is_some())
-        })
+///
+/// A state that cannot be read is not a state that says nothing runs: it is
+/// refused, naming the file and why, rather than read as "no run" and a
+/// live run's container taken down. Only the missions not archived are read
+/// — `archive/` is out of reach of [`crate::mission::dir::list`] — so an old
+/// broken file stops blocking once its mission is closed. A mission framed
+/// and never started has no state, and nothing in flight.
+fn running_in(project: &Project, name: &str) -> Result<Option<String>, SlotError> {
+    let store =
+        crate::state::Store::open(&project.hq_root).map_err(|e| SlotError::StoreUnreadable {
+            name: name.to_string(),
+            why: e.to_string(),
+        })?;
+    for id in crate::mission::dir::list(&project.hq_root) {
+        match store.load(&id) {
+            Ok(state) if state.slot == name && state.run.is_some() => return Ok(Some(id)),
+            Ok(_) | Err(crate::state::StateError::Missing(_)) => {}
+            Err(e) => {
+                return Err(SlotError::StateUnreadable {
+                    name: name.to_string(),
+                    mission: id,
+                    why: e.to_string(),
+                    missions: store.root().join("missions").display().to_string(),
+                });
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// What a reset threw away, for the caller to print.

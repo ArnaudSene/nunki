@@ -401,14 +401,14 @@ fn occurrences(source: &str, span: &[&str]) -> usize {
 /// doubt**: its span is known, every line of it can be read, and that text
 /// occurs exactly once in the file. Otherwise why not, in a sentence.
 pub fn identify(tree: &Path, commit: &str, survivor: &Survivor) -> Result<String, String> {
-    let at = format!("{}:{}", survivor.file, survivor.line);
+    let at = format!("{}:{}", crate::text::name(&survivor.file), survivor.line);
     let (start, end) = survivor.span().ok_or_else(|| {
         format!("{at}: the campaign does not say which lines the mutation replaces")
     })?;
     let source = source_at(tree, commit, &survivor.file).ok_or_else(|| {
         format!(
             "{} cannot be read at {} in {}",
-            survivor.file,
+            crate::text::name(&survivor.file),
             short(commit),
             tree.display()
         )
@@ -616,7 +616,7 @@ pub fn enter(ruling: &Ruling, campaign: &Campaign, id: &str) -> Registered {
             return only(format!(
                 "the campaign holds {twins} survivors on {} with this mutation, and the \
                  registry cannot tell them apart",
-                s.file
+                crate::text::name(&s.file)
             ));
         }
         let line = match identify(ruling.tree, &campaign.head, s) {
@@ -824,7 +824,7 @@ pub fn listing(registry: &Registry, tree: &Path) -> String {
             format!(
                 "{file} — {description}\n  {why}\n  ruled by {by} on mission {mission} at {commit}, \
                  {date}; {standing}\n",
-                file = one(&e.file),
+                file = crate::text::name(&e.file),
                 description = one(&e.description),
                 why = one(&e.why),
                 by = one(&e.by),

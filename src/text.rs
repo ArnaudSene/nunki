@@ -50,6 +50,21 @@ pub fn one_line(text: &str) -> String {
     printable(&text.split_whitespace().collect::<Vec<_>>().join(" "))
 }
 
+/// A name — a survivor's id, a file's path — printable, and spelled as it
+/// is: every character [`printable`] escapes, and the line breaks and tabs
+/// it keeps too, each shown as its escape (`\u{9}`). Where [`one_line`]
+/// would fold a tab or a newline into a space, a file named
+/// `src/with\ttab.rs` would read as `src/with tab.rs`, another file; here it
+/// reads as itself, on one line.
+pub fn name(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            '\n' | '\t' | '\r' => c.escape_unicode().to_string(),
+            c => printable(c.encode_utf8(&mut [0; 4])),
+        })
+        .collect()
+}
+
 /// [`one_line`], cut after `chars` characters of the text with an ellipsis
 /// when it was longer. The cut is made before the escapes are spelled, so it
 /// never splits one.

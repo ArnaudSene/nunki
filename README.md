@@ -119,6 +119,9 @@ Two more decide how the agents run: `model` (which model they use, absent
 means the harness's own default) and `permission_mode` (`auto` by default —
 what the harness does with a permission it would otherwise ask a human
 about, since nobody is there to ask).
+`security_findings` decides whether the security agent's section of the
+pull request is withheld while its findings are accepted and not fixed
+(`withhold`, the default) or published as written (`publish`).
 Then commit the three files `nunki init` wrote in the repository, build the
 images and clone a slot:
 
@@ -414,9 +417,23 @@ file with that file's counts, `{"measured":"src/lib.rs","tried":12,"found":13}`,
 and its last line says `"by_file":true`. nunki trusts them only when each
 file is named once, every one is a path nunki handed that campaign, and
 they add up to the totals. The Rust template gives them, keyed by the file
-cargo-mutants' own listing names for each mutant. The Python and Next.js
+cargo-mutants' own account names for each mutant. The Python and Next.js
 ones measure whole files, give no count at all, and so never chain: every
 campaign of theirs is full.
+
+**Survivors reported.** The last line may also say how many survivors the
+tool reported, `"missed":3`, taken from the tool's own account and never
+from the lines the script printed. When it does, nunki compares it with the
+survivor lines it read, and a campaign where the two differ — fewer lines,
+a survivor lost; more, a line something else wrote — measured nothing: it
+is not recorded, gate 7 is red with both numbers, and `nunki push` has
+nothing to answer with. The Rust template gives it, from cargo-mutants'
+`outcomes.json`, and writes every line with `jq`, so a tab or a newline in
+a file's name is carried, escaped, and never splits a survivor in two. The
+Python and Next.js templates write theirs with a JSON encoder and give no
+count: their tools keep no tally of their own over the touched files, and
+a count taken from the lines they print would always agree with them. A
+survivor's name is printed with its control characters escaped (`\u{9}`).
 
 **How a chain is judged: once.** `MUTANTS.json` keeps, for each touched
 file, the counts of the latest campaign that measured it. A file unchanged
@@ -622,6 +639,20 @@ anything `nunki` cannot read for certain: no ranking at all, an empty list, an
 unknown severity, a `LOW` without its reason. Such a lift obeys every rule
 push applies to a human's: it is worth its commit, and a later `FINDINGS` is
 not covered by it.
+
+A finding accepted is not a finding fixed, and the pull request is
+published. So when the verdict `nunki push` stands on is a lifted
+`FINDINGS` — by `mission accept` or by `nunki` — every section of `PR.md`
+under a heading that begins with `Security` (where the security agent
+writes) is replaced, in the pull request only, by a note: how many findings
+per severity, accepted by whom, and that their details are withheld until
+they are fixed. A section runs to the next heading of its own level or
+higher, so its sub-headings go with it. `PR.md` is left as it is, `nunki
+push` says how many findings it withheld, and `mission status` and
+`VERDICT.json` still hold them in full. Only that section is withheld: what
+another section says is published as written. A repository only its owners
+read can say `security_findings: publish` in `nunki.yaml` to send the
+section as written; absent, it is `withhold`. A `CLEAR` sends it as written.
 
 ## Vocabulary
 
@@ -908,7 +939,11 @@ reset` clears the volumes while keeping the clone: it takes the slot's
 containers down first — an engine will not remove a volume a container still
 mounts — through a call that never removes a volume, then removes the slot's
 named volumes by name, and says any it could not. It refuses while a run or a
-mutation campaign is in flight in the slot.
+mutation campaign is in flight in the slot. It refuses too when the state of a
+mission not archived cannot be read, since it then cannot tell whether that
+mission runs there: it names the file and why, and changes nothing. Repair
+the file, or, for a mission that is over, move its state file aside: the
+mission then reads as never started, and `nunki mission archive` closes it.
 
 Finally, the binary and the accounts, once no project uses them:
 

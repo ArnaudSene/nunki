@@ -782,6 +782,11 @@ fn a_campaign_that_could_not_run_does_not_report_the_last_ones_survivors() {
         "src/lib.rs:2:7: replace > with >= in keep\n",
     )
     .unwrap();
+    std::fs::write(
+        stale.join("outcomes.json"),
+        r#"{"outcomes":[{"scenario":{"Mutant":{"name":"src/lib.rs:2:7: replace > with >= in keep","file":"src/lib.rs","span":{"start":{"line":2,"column":7},"end":{"line":2,"column":8}}}},"summary":"MissedMutant"}],"total_mutants":1,"missed":1,"caught":0,"timeout":0,"unviable":0}"#,
+    )
+    .unwrap();
 
     let path = format!(
         "{}:{}",
@@ -833,36 +838,23 @@ fn a_campaign_that_reached_the_end_says_so_on_its_last_line() {
         .join("rust")
         .join(nunki::mutants::SCRIPT);
 
-    let stubs = root.join("stubs");
-    std::fs::create_dir_all(&stubs).unwrap();
     // `--output DIR` writes into `DIR/mutants.out/`; the script reads
-    // `missed.txt` there. One survivor, so the two lines can be told apart.
-    std::fs::write(
-        stubs.join("cargo"),
+    // `outcomes.json` there. One survivor, so the two lines can be told apart.
+    let path = stub_cargo(
+        &root,
         "#!/bin/sh
 out=\"\"
 while [ $# -gt 0 ]; do
   if [ \"$1\" = --output ]; then out=$2; fi
   shift
 done
-mkdir -p \"$out/mutants.out\"
-printf '%s\\n' 'src/lib.rs:2:7: replace > with >= in keep' > \"$out/mutants.out/missed.txt\"
+echo 'MissedMutant|src/lib.rs|2|2|src/lib.rs:2:7: replace > with >= in keep' \\
+  | mutants-out \"$out/mutants.out\"
 ",
-    )
-    .unwrap();
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(stubs.join("cargo"), std::fs::Permissions::from_mode(0o755))
-            .unwrap();
-    }
+    );
 
     let tree = root.join("tree");
     std::fs::create_dir_all(&tree).unwrap();
-    let path = format!(
-        "{}:{}",
-        stubs.display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
     let out = sh()
         .arg(&script)
         .arg("abc123")
@@ -2285,16 +2277,7 @@ fn forked_tree(root: &std::path::Path) -> (std::path::PathBuf, String) {
 /// A `cargo` stub on the path, and the `PATH` that puts it first.
 #[cfg(unix)]
 fn stub_cargo(root: &std::path::Path, body: &str) -> String {
-    use std::os::unix::fs::PermissionsExt;
-    let stubs = root.join("stubs");
-    std::fs::create_dir_all(&stubs).unwrap();
-    std::fs::write(stubs.join("cargo"), body).unwrap();
-    std::fs::set_permissions(stubs.join("cargo"), std::fs::Permissions::from_mode(0o755)).unwrap();
-    format!(
-        "{}:{}",
-        stubs.display(),
-        std::env::var("PATH").unwrap_or_default()
-    )
+    stubs(&root.join("stubs"), &[("cargo", body)])
 }
 
 /// The campaign answers for the lines the branch changed, not for every line
@@ -2330,8 +2313,8 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
-mkdir -p \"$out/mutants.out\"
-printf '%s\\n' 'src/lib.rs:3:33: replace + with - in other' > \"$out/mutants.out/missed.txt\"
+echo 'MissedMutant|src/lib.rs|3|3|src/lib.rs:3:33: replace + with - in other' \\
+  | mutants-out \"$out/mutants.out\"
 exit 2
 ",
             asked = asked.display()
@@ -2574,11 +2557,43 @@ mkdir -p \"$out/mutants.out\"
 // ---------------------------------------------------------------------------
 
 /// Stubs on a fresh `PATH`, each an executable shell script.
+/// Stands in for what cargo-mutants 27.1.0 leaves in `mutants.out`, the
+/// directory it is given: `mutants.json`, its listing of every mutant, and
+/// `outcomes.json`, its account of what it did with each, closed by its
+/// tallies — the shapes measured on the real tool
+/// (`the_rust_campaign_records_every_survivor_of_a_name_with_a_tab_or_a_newline`).
+/// One mutant per line on stdin, `summary|file|first line|last line|name`,
+/// `-` as the summary of a mutant listed and never tried. `STUB_MISSED`, when
+/// set, is the `missed` tally whatever the outcomes say: a tool whose
+/// account disagrees with itself.
+#[cfg(unix)]
+const MUTANTS_OUT: &str = r#"#!/bin/sh
+set -e
+mkdir -p "$1"
+all=$(jq -R -s '[split("\n")[] | select(length > 0) | split("|")
+  | {summary: .[0], mutant: {name: (.[4:] | join("|")), file: .[1],
+     span: {start: {line: (.[2] | tonumber), column: 1},
+            end: {line: (.[3] | tonumber), column: 1}}}}]')
+printf '%s' "$all" | jq '[.[].mutant]' > "$1/mutants.json"
+printf '%s' "$all" | jq --argjson missed "${STUB_MISSED:-null}" '
+  def n(s): [.[] | select(.summary == s)] | length;
+  {
+    outcomes: ([{scenario: "Baseline", summary: "Success"}]
+      + [.[] | select(.summary != "-") | {scenario: {Mutant: .mutant}, summary}]),
+    total_mutants: length,
+    missed: ($missed // n("MissedMutant")),
+    caught: n("CaughtMutant"),
+    timeout: n("Timeout"),
+    unviable: n("Unviable"),
+    success: 0
+  }' > "$1/outcomes.json"
+"#;
+
 #[cfg(unix)]
 fn stubs(at: &Path, scripts: &[(&str, &str)]) -> String {
     use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(at).unwrap();
-    for (name, body) in scripts {
+    for (name, body) in scripts.iter().chain(&[("mutants-out", MUTANTS_OUT)]) {
         std::fs::write(at.join(name), body).unwrap();
         std::fs::set_permissions(at.join(name), std::fs::Permissions::from_mode(0o755)).unwrap();
     }
@@ -2651,8 +2666,10 @@ fn campaign_with(
 }
 
 /// Rust: caught, missed and timed out are tried — read from cargo-mutants'
-/// own outcome files — and unviable is not. Measured on 27.1.0, which
-/// writes all four beside `missed.txt`.
+/// own tallies, closing `outcomes.json` — and unviable is not. And the
+/// survivors it reported, `missed`, from that tally and never from the
+/// lines the script printed: a tool whose tally says three while its
+/// outcomes name one is a campaign `nunki` refuses, with both numbers.
 #[cfg(unix)]
 #[test]
 fn the_rust_campaign_says_how_many_mutants_it_tried() {
@@ -2662,13 +2679,15 @@ while [ $# -gt 0 ]; do
   if [ \"$1\" = --output ]; then out=$2; fi
   shift
 done
-o=\"$out/mutants.out\"
-mkdir -p \"$o\"
-printf 'src/lib.rs:2:5: replace keep -> bool with true\\nsrc/lib.rs:2:7: replace > with == in keep\\nsrc/lib.rs:2:7: replace > with < in keep\\n' > \"$o/caught.txt\"
-printf 'src/lib.rs:2:7: replace > with >= in keep\\n' > \"$o/missed.txt\"
-printf 'src/lib.rs:9:1: replace spin with ()\\n' > \"$o/timeout.txt\"
-printf 'src/lib.rs:5:5: replace make -> Opaque with Default::default()\\nsrc/lib.rs:6:5: replace x\\n' > \"$o/unviable.txt\"
-printf '[1,2,3,4,5,6,7]' > \"$o/mutants.json\"
+mutants-out \"$out/mutants.out\" <<'LISTED'
+CaughtMutant|src/lib.rs|2|2|src/lib.rs:2:5: replace keep -> bool with true
+CaughtMutant|src/lib.rs|2|2|src/lib.rs:2:7: replace > with == in keep
+CaughtMutant|src/lib.rs|2|2|src/lib.rs:2:7: replace > with < in keep
+MissedMutant|src/lib.rs|2|2|src/lib.rs:2:7: replace > with >= in keep
+Timeout|src/lib.rs|9|9|src/lib.rs:9:1: replace spin with ()
+Unviable|src/lib.rs|5|5|src/lib.rs:5:5: replace make -> Opaque with Default::default()
+Unviable|src/lib.rs|6|6|src/lib.rs:6:5: replace x
+LISTED
 exit 2
 ";
     let (said, why) = campaign_of("rust", "src/lib.rs", &[("cargo", cargo)]);
@@ -2677,17 +2696,34 @@ exit 2
     assert_eq!(nunki::mutants::tried(&said), Some(5), "{said}\n{why}");
     // Seven mutants listed, two of them unviable: five testable found.
     assert_eq!(nunki::mutants::found(&said), Some(5), "{said}\n{why}");
+    assert!(said.contains(r#""missed":1"#), "{said}");
+    assert_eq!(nunki::mutants::unmeasured(&said), None, "{said}");
+
+    let (said, why, _) = campaign_with(
+        "rust",
+        "src/lib.rs",
+        &[("cargo", cargo)],
+        &[],
+        &[("STUB_MISSED", "3")],
+    );
+    assert!(nunki::mutants::completed(&said), "{said}\n{why}");
+    assert_eq!(nunki::mutants::parse(&said).len(), 1, "{said}");
+    let refused = nunki::mutants::unmeasured(&said).unwrap_or_else(|| panic!("{said}"));
+    assert!(
+        refused.contains("reported 3 survivor(s)") && refused.contains("read 1 survivor"),
+        "{refused}"
+    );
 }
 
-/// Rust: each file's counts too, keyed by the file `mutants.json` gives
-/// each mutant — an outcome line is the mutant's `name` there (measured on
-/// cargo-mutants 27.1.0) — adding up to the totals, so `nunki` can rebuild
+/// Rust: each file's counts too, keyed by the file each mutant names in the
+/// tool's own JSON — `tried` from its outcomes, `found` from its listing
+/// less the unviable ones — adding up to the totals, so `nunki` can rebuild
 /// a later partial campaign from them (SPEC 4.4, the chain of campaigns).
-/// An outcome the listing does not name, or no listing, gives none.
+/// A listing `jq` cannot read gives none.
 #[cfg(unix)]
 #[test]
 fn the_rust_campaign_counts_each_file() {
-    let cargo = |listing: &str, extra_missed: &str| {
+    let cargo = |after: &str| {
         format!(
             "#!/bin/sh
 out=\"\"
@@ -2696,66 +2732,55 @@ while [ $# -gt 0 ]; do
   shift
 done
 o=\"$out/mutants.out\"
-mkdir -p \"$o\"
-printf 'src/lib.rs:2:5: replace keep -> bool with true\\nsrc/b.rs:2:7: replace * with + in b\\nsrc/lib.rs:2:7: replace > with < in keep\\n' > \"$o/caught.txt\"
-printf 'src/b.rs:2:7: replace * with / in b\\nsrc/co:lon.rs:1:1: replace c -> u8 with 0\\n{extra_missed}' > \"$o/missed.txt\"
-printf 'src/lib.rs:9:1: replace spin with ()\\n' > \"$o/timeout.txt\"
-printf 'src/b.rs:5:5: replace make -> Opaque with Default::default()\\n' > \"$o/unviable.txt\"
-printf '%s' '{listing}' > \"$o/mutants.json\"
+mutants-out \"$o\" <<'LISTED'
+CaughtMutant|src/lib.rs|2|2|src/lib.rs:2:5: replace keep -> bool with true
+CaughtMutant|src/lib.rs|2|2|src/lib.rs:2:7: replace > with < in keep
+Timeout|src/lib.rs|9|9|src/lib.rs:9:1: replace spin with ()
+-|src/lib.rs|4|4|src/lib.rs:4:1: replace never tried
+CaughtMutant|src/b.rs|2|2|src/b.rs:2:7: replace * with + in b
+MissedMutant|src/b.rs|2|2|src/b.rs:2:7: replace * with / in b
+Unviable|src/b.rs|5|5|src/b.rs:5:5: replace make -> Opaque with Default::default()
+MissedMutant|src/co:lon.rs|1|1|src/co:lon.rs:1:1: replace c -> u8 with 0
+LISTED
+{after}
 exit 2
 "
         )
     };
-    let entry = |name: &str, file: &str| format!(r#"{{"name":"{name}","file":"{file}"}}"#);
-    let listing = format!(
-        "[{}]",
-        [
-            entry(
-                "src/lib.rs:2:5: replace keep -> bool with true",
-                "src/lib.rs"
-            ),
-            entry("src/lib.rs:2:7: replace > with < in keep", "src/lib.rs"),
-            entry("src/lib.rs:9:1: replace spin with ()", "src/lib.rs"),
-            entry("src/lib.rs:4:1: replace never tried", "src/lib.rs"),
-            entry("src/b.rs:2:7: replace * with + in b", "src/b.rs"),
-            entry("src/b.rs:2:7: replace * with / in b", "src/b.rs"),
-            entry(
-                "src/b.rs:5:5: replace make -> Opaque with Default::default()",
-                "src/b.rs"
-            ),
-            entry("src/co:lon.rs:1:1: replace c -> u8 with 0", "src/co:lon.rs"),
-        ]
-        .join(",")
-    );
-    let (said, why) = campaign_of("rust", "src/lib.rs", &[("cargo", &cargo(&listing, ""))]);
+    let (said, why) = campaign_of("rust", "src/lib.rs", &[("cargo", &cargo(""))]);
     let files = nunki::mutants::by_file(&said, "h").unwrap_or_else(|| panic!("{said}\n{why}"));
     let count = |f: &str| (files[f].tried, files[f].found);
     assert_eq!(count("src/lib.rs"), (3, Some(4)), "{said}");
     assert_eq!(count("src/b.rs"), (2, Some(2)), "{said}");
-    // A colon in the path: keyed by the listing's file, both counts alike,
+    // A colon in the path: keyed by the tool's file, both counts alike,
     // never by the text before the first colon (HQ review of 00f8e51).
     assert_eq!(count("src/co:lon.rs"), (1, Some(1)), "{said}");
     assert_eq!(files.len(), 3, "{said}");
     assert_eq!(nunki::mutants::tried(&said), Some(6));
+    assert_eq!(nunki::mutants::found(&said), Some(7));
+    let survivors = nunki::mutants::parse(&said);
+    assert_eq!(
+        survivors
+            .iter()
+            .map(|s| (s.file.as_str(), s.description.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("src/b.rs", "replace * with / in b"),
+            ("src/co:lon.rs", "replace c -> u8 with 0"),
+        ],
+        "{said}"
+    );
 
-    // An outcome the listing does not name: no file to key it by, so no
-    // per-file count at all, and the totals still said.
+    // The listing unreadable: no file for any mutant found, so no per-file
+    // count, and the totals still said.
     let (said, why) = campaign_of(
         "rust",
         "src/lib.rs",
-        &[(
-            "cargo",
-            &cargo(&listing, "src/lib.rs:7:7: replace unlisted\\n"),
-        )],
+        &[("cargo", &cargo("echo 'not json' > \"$o/mutants.json\""))],
     );
     assert!(nunki::mutants::completed(&said), "{said}\n{why}");
-    assert_eq!(nunki::mutants::tried(&said), Some(7));
+    assert_eq!(nunki::mutants::tried(&said), Some(6));
     assert!(!said.contains("measured"), "{said}");
-    assert_eq!(nunki::mutants::by_file(&said, "h"), None, "{said}");
-
-    // The listing unreadable: no file for any mutant, so no per-file count.
-    let (said, why) = campaign_of("rust", "src/lib.rs", &[("cargo", &cargo("not json", ""))]);
-    assert!(nunki::mutants::completed(&said), "{said}\n{why}");
     assert_eq!(nunki::mutants::by_file(&said, "h"), None, "{said}");
 
     // Nothing this branch touched is mutable: counted, and nothing in it.
@@ -2883,19 +2908,20 @@ while [ $# -gt 0 ]; do
 done
 o="$out/mutants.out"
 mkdir -p "$o"
-: > "$o/unviable.txt"; : > "$o/caught.txt"; : > "$o/missed.txt"; : > "$o/timeout.txt"
 config=.cargo/mutants.toml
 if [ "$noconfig" = 0 ] && [ -f "$config" ] && grep -q exclude_re "$config"; then
-  printf '[]' > "$o/mutants.json"
+  mutants-out "$o" < /dev/null
   exit 0
 fi
-printf '[1,2,3,4,5,6,7,8,9,10,11]' > "$o/mutants.json"
 if [ "$noconfig" = 0 ] && [ -f "$config" ] && grep -q timeout_multiplier "$config"; then
-  for n in 1 2 3 4 5 6 7 8 9 10 11; do echo "src/lib.rs:$n:1: replace m$n" >> "$o/timeout.txt"; done
+  for n in 1 2 3 4 5 6 7 8 9 10 11; do echo "Timeout|src/lib.rs|$n|$n|src/lib.rs:$n:1: replace m$n"; done \
+    | mutants-out "$o"
   exit 3
 fi
-for n in 1 2 3 4; do echo "src/lib.rs:$n:1: replace c$n" >> "$o/caught.txt"; done
-for n in 5 6 7 8 9 10 11; do echo "src/lib.rs:$n:1: replace m$n" >> "$o/missed.txt"; done
+{
+  for n in 1 2 3 4; do echo "CaughtMutant|src/lib.rs|$n|$n|src/lib.rs:$n:1: replace c$n"; done
+  for n in 5 6 7 8 9 10 11; do echo "MissedMutant|src/lib.rs|$n|$n|src/lib.rs:$n:1: replace m$n"; done
+} | mutants-out "$o"
 exit 2
 "#;
 
@@ -2936,9 +2962,8 @@ while [ $# -gt 0 ]; do
   shift
 done
 o="$out/mutants.out"
-mkdir -p "$o"
-: > "$o/caught.txt"; : > "$o/missed.txt"; : > "$o/timeout.txt"; : > "$o/unviable.txt"
-printf '[1,2,3,4,5,6,7,8,9,10,11,12]' > "$o/mutants.json"
+for n in 1 2 3 4 5 6 7 8 9 10 11 12; do echo "-|src/lib.rs|$n|$n|src/lib.rs:$n:1: replace m$n"; done \
+  | mutants-out "$o"
 exit 4
 "#;
     let (said, why, status) = campaign_in("rust", "src/lib.rs", &[("cargo", cargo)], &[]);
@@ -3097,11 +3122,8 @@ while [ $# -gt 0 ]; do
   shift
 done
 o="$out/mutants.out"
-mkdir -p "$o"
-printf 'src/lib.rs:2:7: replace > with == in keep\n' > "$o/caught.txt"
-printf 'src/lib.rs:2:7: replace > with >= in keep\n' > "$o/missed.txt"
-: > "$o/timeout.txt"; : > "$o/unviable.txt"
-printf '[1,2]' > "$o/mutants.json"
+printf '%s\n' 'CaughtMutant|src/lib.rs|2|2|src/lib.rs:2:7: replace > with == in keep' \
+  'MissedMutant|src/lib.rs|2|2|src/lib.rs:2:7: replace > with >= in keep' | mutants-out "$o"
 exit 2
 "#;
     let run =
@@ -3426,16 +3448,9 @@ if [ -n "$jobs" ]; then
 fi
 o="$out/mutants.out"
 case "$STUB_END" in
-  caught|missed|baseline)
-    mkdir -p "$o"
-    : > "$o/caught.txt"; : > "$o/missed.txt"; : > "$o/timeout.txt"; : > "$o/unviable.txt"
-    printf '[1]' > "$o/mutants.json"
-    ;;
-esac
-case "$STUB_END" in
-  caught) echo 'src/lib.rs:1:1: replace a' > "$o/caught.txt"; exit 0 ;;
-  missed) echo 'src/lib.rs:1:1: replace a' > "$o/missed.txt"; exit 2 ;;
-  baseline) exit 4 ;;
+  caught) echo 'CaughtMutant|src/lib.rs|1|1|src/lib.rs:1:1: replace a' | mutants-out "$o"; exit 0 ;;
+  missed) echo 'MissedMutant|src/lib.rs|1|1|src/lib.rs:1:1: replace a' | mutants-out "$o"; exit 2 ;;
+  baseline) echo '-|src/lib.rs|1|1|src/lib.rs:1:1: replace a' | mutants-out "$o"; exit 4 ;;
   crash) exit 1 ;;
   stopped) kill -TERM "$PPID"; exec sleep 30 ;;
 esac
@@ -3734,4 +3749,39 @@ exit 0
             "{line:?} not mutated:\n{handed}"
         );
     }
+}
+
+/// The template names `security_findings`, commented out: left so, the
+/// findings a push stands on unfixed are withheld from the pull request;
+/// uncommented, they are published as written. An unknown value is refused
+/// rather than read as either.
+#[test]
+fn the_nunki_yaml_it_writes_withholds_unfixed_findings_unless_told_to_publish() {
+    use nunki::project::SecurityFindings;
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    init(&repo, &home(&repo), &["rust".to_string()]).unwrap();
+
+    let text = std::fs::read_to_string(home(&repo).join("nunki.yaml")).unwrap();
+    assert!(text.contains("\n# security_findings: publish\n"), "{text}");
+    let commented: nunki::project::Config = serde_yaml_ng::from_str(&text).unwrap();
+    assert_eq!(commented.security_findings, SecurityFindings::Withhold);
+    let published: nunki::project::Config =
+        serde_yaml_ng::from_str(&text.replace("\n# security_findings:", "\nsecurity_findings:"))
+            .unwrap();
+    assert_eq!(published.security_findings, SecurityFindings::Publish);
+    let withheld: nunki::project::Config = serde_yaml_ng::from_str(&text.replace(
+        "\n# security_findings: publish",
+        "\nsecurity_findings: withhold",
+    ))
+    .unwrap();
+    assert_eq!(withheld.security_findings, SecurityFindings::Withhold);
+    assert!(
+        serde_yaml_ng::from_str::<nunki::project::Config>(&text.replace(
+            "\n# security_findings: publish",
+            "\nsecurity_findings: maybe"
+        ),)
+        .is_err()
+    );
 }

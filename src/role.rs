@@ -206,6 +206,12 @@ What `nunki` checks on your work, so that none of it is a surprise:
   leave;
 - your report **is** your deliverable, and it lives in `VERDICT.json`. An
   empty one is a red gate, whatever the verdict says;
+- `PR.md` is the pull request the others wrote. What you write there goes
+  under **one** heading of your own that begins with `Security`, as the
+  integrator's begins with `Integration`; your findings stay in
+  `VERDICT.json`. When they are accepted rather than fixed, `nunki push`
+  withholds that section from the forge by default — and only that one: a
+  finding you describe anywhere else in `PR.md` is published as written;
 - your run ends with that file, on the commit you attacked, in full:
 
     {\"role\": \"Security\", \"verdict\": \"CLEAR\", \"head\": \"<the full HEAD sha>\", \"date\": \"<RFC 3339>\", \"report\": \"<what you attacked, what you found, what you did not look at>\", \"findings\": []}

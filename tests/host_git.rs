@@ -178,6 +178,7 @@ fn world() -> World {
             mutation_threshold: 80,
             mutation_jobs: None,
             forge_protection: Default::default(),
+            security_findings: Default::default(),
         },
         nunki_home,
     );
