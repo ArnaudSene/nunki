@@ -302,6 +302,24 @@ impl Engine for Docker {
         self.run("rm", &self.engine_command(&args))?;
         Ok(())
     }
+
+    fn remove_volume(&self, name: &str) -> Result<bool, EngineError> {
+        // Listed first, and compared whole: `--filter name=` matches a part
+        // of a name, and reading "no such volume" out of an error message
+        // would be a guess about wording.
+        let filter = format!("name={name}");
+        let listed = self.run(
+            "volume ls",
+            &self.engine_command(&["volume", "ls", "--quiet", "--filter", &filter]),
+        )?;
+        if !listed.lines().any(|line| line.trim() == name) {
+            return Ok(false);
+        }
+        // No `-f`: it would not remove a volume in use either, and it would
+        // hide why.
+        self.run("volume rm", &self.engine_command(&["volume", "rm", name]))?;
+        Ok(true)
+    }
 }
 
 /// `docker ps --format` lines of id, service and label, tab-separated. A

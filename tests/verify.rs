@@ -222,7 +222,7 @@ impl World {
     fn hold(&self) {
         let store = Store::open(&self.project.hq_root).unwrap();
         let mut state = store.load("m1").unwrap();
-        state.hold("Alex Martin", false);
+        state.hold("Alex Martin", false, "the base is being rewritten");
         store.save(&state).unwrap();
     }
 
@@ -4099,4 +4099,55 @@ fn a_campaign_stopped_at_its_deadline_waits_for_the_hq_who_can_send_its_survivor
         followup.contains("answer the survivor it found; the rest waits for the next campaign"),
         "{followup}"
     );
+}
+
+/// No process outlives its run: when `verify` reads back a run that has
+/// ended, what it left running in its container — tagged with the run's
+/// `NUNKI_RUN` — is stopped, and said. The engine answers the liveness probe
+/// that the run ended, then the reaping script with the pids it stopped.
+#[test]
+fn what_a_run_left_running_is_stopped_once_it_ends_and_said() {
+    use nunki::engine::fake::{Call, FakeEngine};
+    use nunki::engine::{ExecOutput, Liveness};
+    let said = |stdout: &str| ExecOutput {
+        status: 0,
+        stdout: stdout.into(),
+        stderr: String::new(),
+    };
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.run_recorded(Some(41), FINISHED);
+    // Held, so that `verify` stops at the launch that would follow the
+    // read-back, rather than failing on an account this world does not have.
+    world.hold();
+    let engine = Arc::new(
+        FakeEngine::default()
+            .with_liveness("cafe1234", Liveness::Running)
+            .with_execs(vec![said("nunki-run-ended\n"), said("nunki-reaped 77\n")]),
+    );
+
+    let steps = verify::verify(&world.project, "m1", engine.clone(), "docker").unwrap();
+
+    let calls = engine.calls();
+    let reaped = calls.iter().any(|c| match c {
+        Call::Exec(_, _, argv) => argv.iter().any(|a| a.contains("NUNKI_RUN=integration")),
+        _ => false,
+    });
+    assert!(
+        reaped,
+        "the run's leftovers were never looked for: {calls:?}"
+    );
+    let left: Vec<&String> = steps
+        .iter()
+        .filter_map(|s| match s {
+            Step::LeftBehind { role, said } => {
+                assert_eq!(*role, Role::Integrator);
+                Some(said)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(left.len(), 1, "{steps:?}");
+    assert!(left[0].contains("stopped 1 process(es)"), "{}", left[0]);
+    assert!(left[0].contains("77"), "{}", left[0]);
 }

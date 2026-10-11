@@ -316,7 +316,7 @@ fn status_says_a_mission_is_held_and_who_held_it() {
         status()
     );
 
-    state.hold("Alex Martin", false);
+    state.hold("Alex Martin", false, "the base is being rewritten");
     store.save(&state).unwrap();
     let text = status();
     assert!(text.contains("held"), "{text}");
@@ -338,7 +338,7 @@ fn watch_says_the_hold_before_it_says_there_is_no_run() {
     nunki::mission::dir::create(&hq_root, "m1", &header(), "do it").unwrap();
     let store = Store::open(&hq_root).unwrap();
     let mut state = state("m1");
-    state.hold("Alex Martin", false);
+    state.hold("Alex Martin", false, "the base is being rewritten");
     store.save(&state).unwrap();
 
     let out = Command::new(env!("CARGO_BIN_EXE_nunki"))
@@ -452,4 +452,69 @@ fn an_old_lift_reads_as_a_humans_and_a_humans_is_written_as_before() {
     assert!(written.contains("\"by_nunki\":true"), "{written}");
     let back: nunki::state::Accepted = serde_json::from_str(&written).unwrap();
     assert_eq!(back, ours);
+}
+
+/// The verbs through the binary: `mission stop` asks why before anything
+/// else, `mission list` says each stage in a word and `--active` keeps the
+/// started ones, and `slot list` says which mission occupies each slot.
+#[test]
+fn the_listing_verbs_say_stage_and_occupant_and_stop_asks_why() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    let home = common::project_home(&root, &dir.path().join("home"), "harness: claude-code\n");
+    let hq_root = home.join(nunki::project::HQ_DIR);
+    let nunki = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_nunki"))
+            .arg("-C")
+            .arg(&root)
+            .args(args)
+            .env("HOME", dir.path().join("home"))
+            .output()
+            .unwrap()
+    };
+    nunki::mission::dir::create(&hq_root, "m1", &header(), "do it").unwrap();
+    nunki::mission::dir::create(&hq_root, "m2", &header(), "later").unwrap();
+    let mut started = state("m1");
+    started.slot = "one".into();
+    Store::open(&hq_root).unwrap().save(&started).unwrap();
+    // Slots are clones beside the repository.
+    fs::create_dir_all(dir.path().join("repo-slots/one/.git")).unwrap();
+    fs::create_dir_all(dir.path().join("repo-slots/two/.git")).unwrap();
+
+    let out = nunki(&["mission", "stop", "m1"]);
+    assert!(!out.status.success());
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(said.contains("--because"), "{said}");
+    assert!(!Store::open(&hq_root).unwrap().load("m1").unwrap().held());
+
+    let out = nunki(&["mission", "list"]);
+    let said = String::from_utf8_lossy(&out.stdout);
+    let m1 = said
+        .lines()
+        .find(|l| l.starts_with("m1"))
+        .unwrap_or_default();
+    let m2 = said
+        .lines()
+        .find(|l| l.starts_with("m2"))
+        .unwrap_or_default();
+    assert!(m1.contains("coding"), "{said}");
+    assert!(m2.contains("framed"), "{said}");
+
+    let out = nunki(&["mission", "list", "--active"]);
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(said.lines().any(|l| l.starts_with("m1")), "{said}");
+    assert!(!said.lines().any(|l| l.starts_with("m2")), "{said}");
+
+    let out = nunki(&["slot", "list"]);
+    let said = String::from_utf8_lossy(&out.stdout);
+    let one = said
+        .lines()
+        .find(|l| l.starts_with("one"))
+        .unwrap_or_default();
+    let two = said
+        .lines()
+        .find(|l| l.starts_with("two"))
+        .unwrap_or_default();
+    assert!(one.contains("mission m1"), "{said}");
+    assert!(two.contains("free"), "{said}");
 }

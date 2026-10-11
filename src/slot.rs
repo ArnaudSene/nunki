@@ -55,6 +55,15 @@ pub enum SlotError {
     Dirty(String),
     #[error("a slot name may hold letters, digits, - and _ only, and {0:?} does not")]
     BadName(String),
+    #[error(
+        "slot {name:?} is in use — {what}; resetting it would take its container down under \
+         it. Let it end, or stop it, first"
+    )]
+    Busy { name: String, what: String },
+    #[error("the engine: {0}")]
+    Engine(String),
+    #[error("the slot's campaign record could not be read: {0}")]
+    Unreadable(String),
     #[error(transparent)]
     Git(#[from] GitError),
     #[error("{0}: {1}")]
@@ -123,6 +132,18 @@ pub fn find(project: &Project, name: &str) -> Result<Slot, SlotError> {
 /// harness state directory that has gone bad outlives every rebuild of the
 /// image, and nothing else can reach it.
 ///
+/// **The slot's containers are taken down first**, and that alone. An engine
+/// refuses to remove a volume a container still mounts, running or stopped,
+/// so a reset that went straight to the volumes removed none of them while a
+/// profile stood — and said "no named volume to remove", which was false.
+/// Containers go through [`crate::engine::Engine::remove`], which never takes
+/// a volume with it: the only volumes removed are the slot's own, by name
+/// ([`volumes_of`]). A volume that still cannot be removed is said, with the
+/// engine's reason ([`Reset::failed`]).
+///
+/// Refused while a run or a mutation campaign is in flight in the slot:
+/// taking its container down would end it under the mission that owns it.
+///
 /// It refuses on the same grounds as `rm`, and for the same reason: commits
 /// the repository does not have are work nobody else holds, and a verb that
 /// discarded them because its name sounds mild would be the worst kind of
@@ -130,10 +151,25 @@ pub fn find(project: &Project, name: &str) -> Result<Slot, SlotError> {
 pub fn reset(
     project: &Project,
     name: &str,
-    engine_bin: &str,
+    engine: &dyn crate::engine::Engine,
     force: bool,
 ) -> Result<Reset, SlotError> {
     let slot = find(project, name)?;
+    if let Some(mission) = running_in(project, name) {
+        return Err(SlotError::Busy {
+            name: name.to_string(),
+            what: format!("mission {mission} has a run in progress"),
+        });
+    }
+    if crate::mutants::read_running(&project.hq_root, name)
+        .map_err(|e| SlotError::Unreadable(e.to_string()))?
+        .is_some()
+    {
+        return Err(SlotError::Busy {
+            name: name.to_string(),
+            what: "a mutation campaign is in flight".to_string(),
+        });
+    }
     if !force {
         let missing = git::commits_not_in(&slot.tree, &project.root)?;
         if !missing.is_empty() {
@@ -154,23 +190,48 @@ pub fn reset(
     let discarded = !repo.is_clean()?;
     repo.reset_hard()?;
 
+    let compose = crate::compose::project_name(&project.session(), &slot.name)
+        .map_err(|e| SlotError::Engine(e.to_string()))?;
+    let containers = engine
+        .containers(&compose)
+        .map_err(|e| SlotError::Engine(e.to_string()))?;
+    let ids: Vec<String> = containers.iter().map(|c| c.id.clone()).collect();
+    engine
+        .remove(&ids)
+        .map_err(|e| SlotError::Engine(e.to_string()))?;
+    let mut taken_down: Vec<String> = containers.into_iter().map(|c| c.service).collect();
+    taken_down.sort();
+    taken_down.dedup();
+
     let mut volumes = Vec::new();
+    let mut failed = Vec::new();
     for volume in volumes_of(project, &slot) {
-        let out = std::process::Command::new(engine_bin)
-            .args(["volume", "rm", "-f", &volume])
-            .output();
-        // A volume that was never created is not an error: a slot reset
-        // before its first run has none, and saying so as a failure would
-        // make the ordinary case look broken.
-        if out.map(|o| o.status.success()).unwrap_or(false) {
-            volumes.push(volume);
+        match engine.remove_volume(&volume) {
+            Ok(true) => volumes.push(volume),
+            // Never created: a slot reset before its first run has none.
+            Ok(false) => {}
+            Err(e) => failed.push((volume, e.to_string())),
         }
     }
     Ok(Reset {
         slot,
         discarded,
+        taken_down,
         volumes,
+        failed,
     })
+}
+
+/// The mission whose run is in progress in slot `name`, if one is.
+fn running_in(project: &Project, name: &str) -> Option<String> {
+    let store = crate::state::Store::open(&project.hq_root).ok()?;
+    crate::mission::dir::list(&project.hq_root)
+        .into_iter()
+        .find(|id| {
+            store
+                .load(id)
+                .is_ok_and(|s| s.slot == name && s.run.is_some())
+        })
 }
 
 /// What a reset threw away, for the caller to print.
@@ -179,8 +240,13 @@ pub struct Reset {
     pub slot: Slot,
     /// Whether the tree had uncommitted work.
     pub discarded: bool,
+    /// The services whose containers were taken down so that their volumes
+    /// could go — their containers only, never a volume with them.
+    pub taken_down: Vec<String>,
     /// The named volumes that were actually removed.
     pub volumes: Vec<String>,
+    /// The named volumes the engine would not remove, and why.
+    pub failed: Vec<(String, String)>,
 }
 
 /// Every named volume a slot owns, whichever profile put it there.

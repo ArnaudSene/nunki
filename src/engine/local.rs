@@ -221,6 +221,10 @@ impl Engine for LocalEngine {
         Err(unsupported("remove"))
     }
 
+    fn remove_volume(&self, _name: &str) -> Result<bool, EngineError> {
+        Err(unsupported("volume rm"))
+    }
+
     fn detached_command(
         &self,
         _file: &Path,

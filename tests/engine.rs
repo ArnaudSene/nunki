@@ -955,3 +955,219 @@ fn removing_containers_never_takes_a_volume_with_them() {
     let (docker, _) = recorded(vec![saying(1, "", "busy")]);
     assert!(docker.remove(&["c1".into()]).is_err());
 }
+
+/// A named volume is removed by name, after the engine is asked whether it
+/// has one — compared whole, since `--filter name=` matches a part — and
+/// never with `-f`, which would hide why one in use stayed.
+#[test]
+fn a_volume_is_removed_by_name_and_one_the_engine_lacks_is_not_an_error() {
+    // Listed, among a longer name that contains it: removed.
+    let (docker, cli) = recorded(vec![
+        saying(0, "nunki-one-proof-old\nnunki-one-proof\n", ""),
+        ok(),
+    ]);
+    assert!(docker.remove_volume("nunki-one-proof").unwrap());
+    let lines = cli.lines();
+    assert_eq!(
+        lines,
+        [
+            "docker volume ls --quiet --filter name=nunki-one-proof",
+            "docker volume rm nunki-one-proof"
+        ]
+    );
+
+    // Only a longer name listed: none by that name, and nothing removed.
+    let (docker, cli) = recorded(vec![saying(0, "nunki-one-proof-old\n", "")]);
+    assert!(!docker.remove_volume("nunki-one-proof").unwrap());
+    assert_eq!(cli.lines().len(), 1);
+
+    // In use: an error carrying the engine's words.
+    let (docker, _) = recorded(vec![
+        saying(0, "nunki-one-proof\n", ""),
+        saying(
+            1,
+            "",
+            "Error response from daemon: remove nunki-one-proof: volume is in use",
+        ),
+    ]);
+    let err = docker.remove_volume("nunki-one-proof").unwrap_err();
+    assert!(err.to_string().contains("volume is in use"), "{err}");
+}
+
+/// Every run is started carrying `NUNKI_RUN=<its session>`, as an engine
+/// option before the service: what finds what it leaves behind.
+#[test]
+fn a_run_is_started_tagged_with_its_session() {
+    let fake = std::sync::Arc::new(nunki::engine::fake::FakeEngine::default());
+    let spawner = nunki::engine::spawn::ContainerSpawner::new(
+        fake,
+        file(),
+        "nunki-demo",
+        nunki::compose::AGENT_SERVICE,
+    );
+    let command = spawner.command(
+        &CommandSpec {
+            program: "claude".into(),
+            args: vec![],
+            cwd: PathBuf::from("/work/tree"),
+            env: Default::default(),
+        },
+        Path::new("/hq/runs/session-1.jsonl"),
+    );
+    let line = command.display();
+    assert!(line.contains("-e NUNKI_RUN=session-1"), "{line}");
+}
+
+/// What the reaping answers, read from the container: the pids it stopped
+/// after the marker; nothing asked of a container that is not running; and
+/// an answer without the marker is a check that did not run, never "none".
+#[test]
+fn reaping_reads_what_the_container_said_and_never_guesses() {
+    use nunki::engine::fake::{Call, FakeEngine};
+    use nunki::engine::{ExecOutput, Liveness};
+    let spawner = |fake: &std::sync::Arc<FakeEngine>| {
+        nunki::engine::spawn::ContainerSpawner::new(
+            fake.clone(),
+            file(),
+            "nunki-demo",
+            nunki::compose::AGENT_SERVICE,
+        )
+    };
+    let log = Path::new("/hq/runs/session-1.jsonl");
+    let answering = |stdout: &str| {
+        std::sync::Arc::new(
+            FakeEngine::default()
+                .with_liveness("cafe1234", Liveness::Running)
+                .with_exec(ExecOutput {
+                    status: 0,
+                    stdout: stdout.into(),
+                    stderr: String::new(),
+                }),
+        )
+    };
+
+    let fake = answering("nunki-reaped 12 13\n");
+    assert_eq!(
+        spawner(&fake).reap("cafe1234", log).unwrap(),
+        Some(vec![12, 13])
+    );
+    let fake = answering("nunki-reaped\n");
+    assert_eq!(spawner(&fake).reap("cafe1234", log).unwrap(), Some(vec![]));
+    let fake = answering("");
+    assert!(spawner(&fake).reap("cafe1234", log).is_err());
+
+    for gone in [Liveness::Exited(0), Liveness::Gone, Liveness::Paused] {
+        let fake = std::sync::Arc::new(FakeEngine::default().with_liveness("cafe1234", gone));
+        assert_eq!(spawner(&fake).reap("cafe1234", log).unwrap(), None);
+        assert!(
+            !fake.calls().iter().any(|c| matches!(c, Call::Exec(..))),
+            "{:?}",
+            fake.calls()
+        );
+    }
+}
+
+/// The reaping script itself, run by this machine's `sh` over its own
+/// `/proc`: a run that left `sleep 600` behind leaves nothing once reaped,
+/// and a process of another run, or of none, is left alone. Linux only —
+/// there is no `/proc` on macOS, where CI runs.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_run_that_leaves_sleep_600_behind_leaves_nothing_once_it_ends() {
+    use std::process::{Command, Stdio};
+
+    let run = format!("reap-test-{}", std::process::id());
+    // What a run does: start something in the background, and end.
+    let leave = |tag: Option<&str>| -> u32 {
+        let mut sh = Command::new("sh");
+        sh.args(["-c", "sleep 600 >/dev/null 2>&1 & echo $!"])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null());
+        if let Some(tag) = tag {
+            sh.env("NUNKI_RUN", tag);
+        }
+        let out = sh.output().unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().parse().unwrap()
+    };
+    // Alive: there, and not a zombie waiting for its parent to read it.
+    let alive = |pid: u32| {
+        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .map(|stat| {
+                let state = stat.rsplit(") ").next().unwrap_or("");
+                !state.starts_with('Z') && !state.starts_with('X')
+            })
+            .unwrap_or(false)
+    };
+    let left = leave(Some(&run));
+    let other_run = leave(Some(&format!("{run}-other")));
+    let untagged = leave(None);
+    assert!(alive(left) && alive(other_run) && alive(untagged));
+
+    let started = std::time::Instant::now();
+    let out = Command::new("sh")
+        .args(["-c", &nunki::engine::spawn::reap_script(&run)])
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&out.stdout);
+
+    assert!(said.starts_with("nunki-reaped"), "{said}");
+    assert!(said.contains(&left.to_string()), "{said}");
+    assert!(!alive(left), "the run's `sleep 600` outlived it");
+    assert!(alive(other_run), "another run's process was stopped");
+    assert!(alive(untagged), "a process of no run was stopped");
+    // Asked to end, and it did: nobody waited for the `KILL` that follows a
+    // process that will not.
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "the leftover was not asked to end, only killed after waiting: {:?}",
+        started.elapsed()
+    );
+
+    for pid in [other_run, untagged] {
+        let _ = Command::new("kill").arg(pid.to_string()).status();
+    }
+}
+
+/// A leftover that will not end when asked — it ignores `TERM` — is killed
+/// once the reaping has waited for it.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_leftover_that_ignores_term_is_killed() {
+    use std::process::{Command, Stdio};
+
+    let run = format!("reap-stubborn-{}", std::process::id());
+    let out = Command::new("sh")
+        .args([
+            "-c",
+            "sh -c 'trap \"\" TERM; while :; do sleep 1; done' >/dev/null 2>&1 & echo $!",
+        ])
+        .env("NUNKI_RUN", &run)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .unwrap();
+    let pid: u32 = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap();
+    let alive = |pid: u32| {
+        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .map(|stat| {
+                let state = stat.rsplit(") ").next().unwrap_or("");
+                !state.starts_with('Z') && !state.starts_with('X')
+            })
+            .unwrap_or(false)
+    };
+    // Let the shell install its trap before it is asked anything.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert!(alive(pid));
+
+    let said = Command::new("sh")
+        .args(["-c", &nunki::engine::spawn::reap_script(&run)])
+        .output()
+        .unwrap();
+
+    assert!(
+        String::from_utf8_lossy(&said.stdout).starts_with("nunki-reaped"),
+        "{}",
+        String::from_utf8_lossy(&said.stdout)
+    );
+    assert!(!alive(pid), "a process that ignores TERM outlived its run");
+}

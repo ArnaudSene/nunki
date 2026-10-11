@@ -527,7 +527,13 @@ fn play(w: &World) -> Readings {
     nunki::run::branch(&slot, &w.project.root, "mission/x", "dev").unwrap();
     let back = on(&slot);
 
-    let reset = nunki::slot::reset(&w.project, "one", "true", true).unwrap();
+    let reset = nunki::slot::reset(
+        &w.project,
+        "one",
+        &nunki::engine::fake::FakeEngine::default(),
+        true,
+    )
+    .unwrap();
     let after_reset = (
         nunki::git::slot_head(&slot.tree).unwrap(),
         nunki::git::is_clean(&slot.tree).unwrap(),
@@ -862,7 +868,13 @@ fn a_broken_slot_is_an_error_and_nothing_runs_in_it() {
         );
         assert!(nunki::git::slot_head(&w.tree).is_err(), "{name}");
         assert!(
-            nunki::slot::reset(&w.project, "one", "true", true).is_err(),
+            nunki::slot::reset(
+                &w.project,
+                "one",
+                &nunki::engine::fake::FakeEngine::default(),
+                true
+            )
+            .is_err(),
             "{name}"
         );
         assert!(nunki::push::fetch(&w.project, "m1").is_err(), "{name}");
@@ -1084,7 +1096,13 @@ fn a_reset_leaves_a_slot_its_own_git_finds_clean() {
     git(&w.tree, &["add", "src.rs"]);
     assert!(!nunki::git::is_clean(&w.tree).unwrap());
 
-    let reset = nunki::slot::reset(&w.project, "one", "true", true).unwrap();
+    let reset = nunki::slot::reset(
+        &w.project,
+        "one",
+        &nunki::engine::fake::FakeEngine::default(),
+        true,
+    )
+    .unwrap();
     assert!(reset.discarded);
     assert!(nunki::git::is_clean(&w.tree).unwrap());
     assert!(!w.tree.join("untracked.rs").exists());
@@ -1925,9 +1943,14 @@ fn play_anything(w: &World) -> Vec<(&'static str, Result<String, String>)> {
     played.push(("check", Ok(format!("{:?}", slots_line(w)))));
     played.push((
         "reset",
-        nunki::slot::reset(&w.project, "one", "true", true)
-            .map(|r| r.discarded.to_string())
-            .map_err(|e| e.to_string()),
+        nunki::slot::reset(
+            &w.project,
+            "one",
+            &nunki::engine::fake::FakeEngine::default(),
+            true,
+        )
+        .map(|r| r.discarded.to_string())
+        .map_err(|e| e.to_string()),
     ));
     played.push((
         "after_reset",

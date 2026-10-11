@@ -227,10 +227,15 @@ fn resetting_discards_the_work_in_progress_and_keeps_the_clone() {
     std::fs::write(slot.tree.join("README.md"), "changed\n").unwrap();
     assert!(!nunki::git::is_clean(&slot.tree).unwrap());
 
-    // `false` as the engine binary: there is no engine here, and a volume
-    // that cannot be removed is not an error — a slot reset before its first
-    // run has none.
-    let reset = nunki::slot::reset(&project, "one", "false", false).unwrap();
+    // An engine holding no volume: a volume never created is not an error —
+    // a slot reset before its first run has none.
+    let reset = nunki::slot::reset(
+        &project,
+        "one",
+        &nunki::engine::fake::FakeEngine::default(),
+        false,
+    )
+    .unwrap();
     assert!(reset.discarded);
     assert!(reset.volumes.is_empty());
     assert!(nunki::git::is_clean(&slot.tree).unwrap());
@@ -263,7 +268,13 @@ fn resetting_refuses_while_the_slot_holds_work_the_repository_lacks() {
         ],
     );
 
-    let err = nunki::slot::reset(&project, "one", "false", false).unwrap_err();
+    let err = nunki::slot::reset(
+        &project,
+        "one",
+        &nunki::engine::fake::FakeEngine::default(),
+        false,
+    )
+    .unwrap_err();
     assert!(
         matches!(err, nunki::slot::SlotError::Unfetched { .. }),
         "{err}"
@@ -277,7 +288,13 @@ fn resetting_refuses_while_the_slot_holds_work_the_repository_lacks() {
     );
 
     // And said explicitly, it goes.
-    nunki::slot::reset(&project, "one", "false", true).unwrap();
+    nunki::slot::reset(
+        &project,
+        "one",
+        &nunki::engine::fake::FakeEngine::default(),
+        true,
+    )
+    .unwrap();
     let _ = dir;
 }
 
@@ -313,4 +330,195 @@ fn a_slots_volumes_are_known_without_a_profile_file() {
         names.contains(&nunki::run::writable_volume("one", "target")),
         "{names:?}"
     );
+}
+
+/// The slot's Compose project, as `nunki` names it.
+fn compose_project(project: &Project) -> String {
+    nunki::compose::project_name(&project.session(), "one").unwrap()
+}
+
+/// A container of the slot's profile, up and mounting its volumes.
+fn the_agent() -> nunki::engine::Container {
+    nunki::engine::Container {
+        id: "cafe1234".into(),
+        service: "agent".into(),
+        digest: None,
+    }
+}
+
+/// `slot reset` really empties the caches while a profile stands: an engine
+/// refuses to remove a volume a container mounts, so the slot's containers go
+/// first — containers only, through a call that never takes a volume — and
+/// then its named volumes, by name. A volume that is not the slot's is never
+/// touched.
+#[test]
+fn resetting_takes_the_slots_containers_down_and_then_empties_its_caches() {
+    use nunki::engine::fake::{Call, FakeEngine};
+
+    let dir = tempfile::tempdir().unwrap();
+    let project = repository(dir.path());
+    let slot = add(&project, "one").unwrap();
+    let cache = nunki::exec::proof_volume("one");
+    let harness = "nunki-one-harness".to_string();
+    let engine = FakeEngine::default()
+        .with_lifted(the_agent())
+        .with_volume(&cache)
+        .with_volume(&harness)
+        .with_volume("someone-elses-volume");
+
+    // The control: with the container standing, the engine refuses.
+    assert!(
+        nunki::engine::Engine::remove_volume(
+            &FakeEngine::default()
+                .with_lifted(the_agent())
+                .with_volume(&cache),
+            &cache
+        )
+        .is_err(),
+        "the fake does not model a volume in use, and this test proves nothing"
+    );
+
+    let reset = nunki::slot::reset(&project, "one", &engine, false).unwrap();
+
+    assert_eq!(reset.taken_down, ["agent"]);
+    let mut removed = reset.volumes.clone();
+    removed.sort();
+    let mut expected = vec![cache.clone(), harness.clone()];
+    expected.sort();
+    assert_eq!(removed, expected);
+    assert!(reset.failed.is_empty(), "{:?}", reset.failed);
+    assert_eq!(engine.volumes(), ["someone-elses-volume"]);
+
+    // In that order, and the containers by id: never `down --volumes`.
+    let calls = engine.calls.lock().unwrap().clone();
+    let removed_at = calls
+        .iter()
+        .position(|c| *c == Call::Remove(vec!["cafe1234".into()]))
+        .expect("the slot's containers were taken down");
+    let first_volume = calls
+        .iter()
+        .position(|c| matches!(c, Call::RemoveVolume(_)))
+        .unwrap();
+    assert!(removed_at < first_volume, "{calls:?}");
+    assert!(
+        calls.contains(&Call::Containers(compose_project(&project))),
+        "{calls:?}"
+    );
+    assert!(
+        !calls.iter().any(|c| matches!(c, Call::Down(..))),
+        "{calls:?}"
+    );
+    let _ = slot;
+}
+
+/// A volume the engine still will not remove is said, with the engine's
+/// reason, rather than counted as one there was nothing to remove.
+#[test]
+fn a_volume_reset_could_not_remove_is_said() {
+    use nunki::engine::fake::FakeEngine;
+
+    let dir = tempfile::tempdir().unwrap();
+    let project = repository(dir.path());
+    add(&project, "one").unwrap();
+    let cache = nunki::exec::proof_volume("one");
+    let engine = FakeEngine::default().with_volume_held(&cache);
+
+    let reset = nunki::slot::reset(&project, "one", &engine, false).unwrap();
+
+    assert!(reset.volumes.is_empty());
+    assert_eq!(reset.failed.len(), 1, "{:?}", reset.failed);
+    assert_eq!(reset.failed[0].0, cache);
+    assert!(reset.failed[0].1.contains("in use"), "{:?}", reset.failed);
+}
+
+/// Taking the slot's container down under a run, or under a campaign, would
+/// end it under the mission that owns it: refused, and nothing touched.
+#[test]
+fn resetting_refuses_while_a_run_or_a_campaign_is_in_flight_in_the_slot() {
+    use nunki::engine::fake::FakeEngine;
+
+    let dir = tempfile::tempdir().unwrap();
+    let project = repository(dir.path());
+    let slot = add(&project, "one").unwrap();
+    std::fs::write(slot.tree.join("half-written.rs"), "fn oops(").unwrap();
+    let header = nunki::mission::Header {
+        branch: "mission/x".into(),
+        base: "main".into(),
+        lots: vec![nunki::mission::Lot {
+            id: "L1".into(),
+            title: "one".into(),
+        }],
+        integration: nunki::mission::Integration::None {
+            reason: "none".into(),
+        },
+        security: nunki::mission::Security::Gates,
+        rigor: Default::default(),
+        mutation_threshold: None,
+        arbiter: None,
+        run: None,
+        account: None,
+        model: None,
+        bounds: Default::default(),
+    };
+    nunki::mission::dir::create(&project.hq_root, "m1", &header, "do it").unwrap();
+    let store = nunki::state::Store::open(&project.hq_root).unwrap();
+    let mut state = nunki::state::MissionState {
+        id: "m1".into(),
+        slot: "one".into(),
+        flow: nunki::mission::flow::Flow::new(header).unwrap(),
+        run: Some(nunki::harness::RunHandle {
+            session: nunki::harness::SessionId("s1".into()),
+            container: "cafe1234".into(),
+            pid: Some(41),
+            log: PathBuf::from("/dev/null"),
+        }),
+        app: None,
+        verdicts: Vec::new(),
+        accepted: Vec::new(),
+        stopped: None,
+        harness_down: None,
+        spent: Default::default(),
+        spared: None,
+        coder_session: None,
+        pushed: None,
+        updated_at: "2026-09-10T00:00:00Z".into(),
+        revision: 0,
+    };
+    store.save(&state).unwrap();
+    let engine = FakeEngine::default().with_lifted(the_agent());
+
+    let err = nunki::slot::reset(&project, "one", &engine, true).unwrap_err();
+    assert!(matches!(err, SlotError::Busy { .. }), "{err}");
+    assert!(err.to_string().contains("mission m1"), "{err}");
+    assert!(
+        slot.tree.join("half-written.rs").exists(),
+        "refused means refused"
+    );
+    assert!(engine.calls.lock().unwrap().is_empty());
+
+    // The run is over; a campaign rewrites the copy now.
+    state.run = None;
+    store.save(&state).unwrap();
+    nunki::mutants::write_running(
+        &project.hq_root,
+        "one",
+        &nunki::mutants::Running {
+            chain: Default::default(),
+            fingerprint: "abc1234".into(),
+            head: "def5678".into(),
+            started_at: "2026-09-18T22:52:37Z".into(),
+            container: "cafe1234".into(),
+            pid: Some(41),
+            log: PathBuf::from("/dev/null"),
+            deadline_minutes: 45,
+        },
+    )
+    .unwrap();
+    let err = nunki::slot::reset(&project, "one", &engine, true).unwrap_err();
+    assert!(err.to_string().contains("mutation campaign"), "{err}");
+
+    // Neither: it resets.
+    nunki::mutants::forget_running(&project.hq_root, "one").unwrap();
+    nunki::slot::reset(&project, "one", &engine, true).unwrap();
+    assert!(!slot.tree.join("half-written.rs").exists());
 }

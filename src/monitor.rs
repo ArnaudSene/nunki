@@ -252,6 +252,8 @@ pub fn after_verify(mission: &str, result: &Result<Vec<Step>, VerifyError>) -> N
                 // Said, not acted on: the launch that ended it is the step
                 // after, and that one goes on.
                 | Step::CampaignEnded { .. }
+                // Said: what a run left behind is stopped, and the flow goes on.
+                | Step::LeftBehind { .. }
                 // Said before the launch it belongs to, which is the step after.
                 | Step::PortsDropped { .. }
                 // Always followed by `Verified` or `Findings`, which stop.

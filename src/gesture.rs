@@ -44,6 +44,11 @@ pub enum GestureError {
     NoRun(String),
     #[error("say what: an empty instruction is not one")]
     NothingSaid,
+    #[error(
+        "say why with `--because`: it is shown wherever the hold is, and a hold without a \
+         reason reads as a mission someone forgot"
+    )]
+    NoReason,
     #[error(transparent)]
     Engine(#[from] crate::engine::EngineError),
     #[error(transparent)]
@@ -185,7 +190,14 @@ pub fn stop(
     id: &str,
     harness: &dyn crate::harness::Harness,
     now: bool,
+    because: &str,
 ) -> Result<crate::state::Stopped, GestureError> {
+    // Refused before anything is done: a hold without a reason reads, a week
+    // later, as a mission someone forgot.
+    let because = because.trim();
+    if because.is_empty() {
+        return Err(GestureError::NoReason);
+    }
     let store = Store::open(&project.hq_root)?;
     let mut state = started(project, id)?;
 
@@ -198,7 +210,7 @@ pub fn stop(
     };
 
     let who = crate::human::me(&project.nunki_home(), Some(&project.root)).addressed();
-    state.hold(&who, interrupted);
+    state.hold(&who, interrupted, because);
     store.save(&state)?;
     // `expect`: `hold` has just set it.
     Ok(state.stopped.expect("hold sets the hold"))

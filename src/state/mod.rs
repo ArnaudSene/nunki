@@ -214,8 +214,9 @@ pub struct Stopped {
     /// because the two are different facts: one says what `nunki` will not do
     /// next, the other says what was done to the run that was going.
     pub interrupted: bool,
-    /// Why, when `nunki` held it itself — a harness it stopped waiting for. A
-    /// hold whose reason is lost reads as a mission someone forgot.
+    /// Why: the human's `--because`, or `nunki`'s own reason — a harness it
+    /// stopped waiting for. A hold whose reason is lost reads as a mission
+    /// someone forgot. Absent only from a hold an older `nunki` recorded.
     #[serde(default)]
     pub reason: Option<String>,
 }
@@ -258,13 +259,13 @@ impl MissionState {
         self.accepted_on(head).iter().any(|a| a.finding.is_none())
     }
 
-    /// Hold the mission: `nunki` launches no further run for it.
-    pub fn hold(&mut self, who: &str, interrupted: bool) {
+    /// Hold the mission, saying why: `nunki` launches no further run for it.
+    pub fn hold(&mut self, who: &str, interrupted: bool, because: &str) {
         self.stopped = Some(Stopped {
             who: who.to_string(),
             date: now_rfc3339(),
             interrupted,
-            reason: None,
+            reason: Some(because.to_string()),
         });
     }
 

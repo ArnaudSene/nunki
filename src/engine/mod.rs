@@ -186,6 +186,12 @@ pub trait Engine: Send + Sync {
     /// anonymous one either, which an image's `VOLUME` makes on its own.
     fn remove(&self, containers: &[String]) -> Result<(), EngineError>;
 
+    /// Remove the named volume `name`: `Ok(true)` when it was removed,
+    /// `Ok(false)` when the engine has no volume by that name — a slot reset
+    /// before its first run has none, and that is not a failure. A volume a
+    /// container still mounts is an error, and said as one.
+    fn remove_volume(&self, name: &str) -> Result<bool, EngineError>;
+
     /// The command line that would run `argv` in a service's container, as
     /// data. [`exec`](Engine::exec) runs it and waits; a caller that needs
     /// the process to outlive the call — a run — takes this and detaches it

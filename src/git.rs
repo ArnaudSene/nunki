@@ -455,6 +455,21 @@ const ORIGIN_NS: &str = "refs/nunki/origin";
 /// mirrored. Equal to what the slot holds now, there is nothing to fetch.
 const SYNCED: &str = "nunki-synced";
 
+/// What [`SlotGit::bring_branch`] did with a slot's branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Brought {
+    /// It did not exist, and now does, at `at`.
+    Created { at: String },
+    /// Moved forward.
+    Moved { from: String, to: String },
+    /// Already there.
+    Already,
+    /// The slot is on it, and it was left alone.
+    CheckedOut,
+    /// It holds commits the target does not, and was left at `at`.
+    Diverged { at: String },
+}
+
 /// Git on a slot, from the host — the one way `nunki` runs git on a slot
 /// (module documentation).
 #[derive(Debug, Clone)]
@@ -891,6 +906,42 @@ impl SlotGit {
         self.forget_sync()?;
         self.sync()?;
         self.checkout(branch)
+    }
+
+    /// Bring the slot's own `branch` to `to`, a commit the mirror holds — the
+    /// project's base as [`SlotGit::fetch_origin`] last fetched it.
+    ///
+    /// Only forward: a branch that holds a commit `to` does not have is left
+    /// where it is ([`Brought::Diverged`]), since moving it would drop that
+    /// commit from every ref. And never the branch the slot is on: moving it
+    /// would change `HEAD` under a tree that was not updated with it.
+    pub fn bring_branch(&self, branch: &str, to: &str) -> Result<Brought, GitError> {
+        let to = self.run(&["rev-parse", "--verify", &format!("{to}^{{commit}}")])?;
+        let name = format!("refs/heads/{branch}");
+        if self.current_branch()? == branch {
+            return Ok(Brought::CheckedOut);
+        }
+        let from = if self.has(&name) {
+            let from = self.run(&["rev-parse", "--verify", &format!("{name}^{{commit}}")])?;
+            if from == to {
+                return Ok(Brought::Already);
+            }
+            let ahead = self.run(&["rev-list", "--count", &format!("{to}..{from}")])?;
+            if ahead.trim() != "0" {
+                return Ok(Brought::Diverged { at: from });
+            }
+            Some(from)
+        } else {
+            None
+        };
+        self.give_objects(&[to.as_str()])?;
+        self.write_into_slot(&name, format!("{to}\n").as_bytes())?;
+        self.forget_sync()?;
+        self.sync()?;
+        Ok(match from {
+            Some(from) => Brought::Moved { from, to },
+            None => Brought::Created { at: to },
+        })
     }
 
     /// Bring the branches of the human's repository at `origin` into the

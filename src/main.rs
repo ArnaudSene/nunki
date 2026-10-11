@@ -340,8 +340,13 @@ enum MissionCommand {
         #[arg(long, default_value = "Describe the mission here.")]
         about: String,
     },
-    /// List the missions this project's HQ holds.
-    List,
+    /// List the missions this project's HQ holds, each with its stage in a
+    /// word: `framed` for one never started.
+    List {
+        /// Only the missions started and not archived.
+        #[arg(long)]
+        active: bool,
+    },
     /// What a mission is, and where it stands.
     Status { id: String },
     /// Start the mission: freeze its framing and launch the coder's first run.
@@ -359,6 +364,10 @@ enum MissionCommand {
         /// and writes its resume block, instead of finishing its lot.
         #[arg(long)]
         now: bool,
+        /// Why it is held. Required: it is shown wherever the hold is —
+        /// `mission status`, `watch`, `wait`, `verify` and the monitor.
+        #[arg(long = "because", value_name = "WHY")]
+        why: String,
     },
     /// Put a mission's framing back in front of you, and re-freeze it.
     ///
@@ -377,7 +386,8 @@ enum MissionCommand {
     /// Call a mission off before it is verified.
     ///
     /// `stop` ends a run, `archive` closes a finished mission; this is for a
-    /// mission you have given up on, so that it can be closed.
+    /// mission you have given up on, so that it can be closed — started or
+    /// not.
     End {
         /// The mission.
         id: String,
@@ -406,8 +416,9 @@ enum MissionCommand {
         why: String,
     },
 
-    /// Close a finished mission: its folder and its state move under
-    /// `archive/`. Nothing is deleted, and the slot is left alone.
+    /// Close a finished mission, or one never started: its folder and its
+    /// state move under `archive/`. Nothing is deleted, and the slot is left
+    /// alone.
     Archive {
         /// The mission.
         id: String,
@@ -848,8 +859,16 @@ fn main() -> ExitCode {
                     if slots.is_empty() {
                         println!("no slot yet: `nunki slot add <name>`");
                     }
+                    let occupants = match nunki::lifecycle::occupants(&project) {
+                        Ok(o) => o,
+                        Err(e) => {
+                            eprintln!("nunki: {e}");
+                            return ExitCode::FAILURE;
+                        }
+                    };
                     for s in slots {
-                        println!("{:<20} {}", s.name, s.tree.display());
+                        let missions = occupants.get(&s.name).cloned().unwrap_or_default();
+                        println!("{}", nunki::lifecycle::slot_line(&s, &missions));
                     }
                     ExitCode::SUCCESS
                 }
@@ -914,18 +933,32 @@ fn main() -> ExitCode {
                     }
                 }
                 SlotCommand::Reset { name, force } => {
-                    let engine_bin = std::env::var("HQ_ENGINE").unwrap_or_else(|_| "docker".into());
-                    match slot::reset(&project, &name, &engine_bin, force) {
+                    let engine = nunki::engine::docker::Docker::real();
+                    match slot::reset(&project, &name, &engine, force) {
                         Ok(reset) => {
                             println!("reset     {}", reset.slot.tree.display());
                             if reset.discarded {
                                 println!("          uncommitted work was discarded");
                             }
+                            if !reset.taken_down.is_empty() {
+                                println!(
+                                    "          took down the containers of {} — containers only, \
+                                     no volume with them",
+                                    reset.taken_down.join(", ")
+                                );
+                            }
                             match reset.volumes.len() {
                                 0 => println!("          no named volume to remove"),
                                 _ => println!("          removed {}", reset.volumes.join(", ")),
                             }
-                            ExitCode::SUCCESS
+                            for (volume, why) in &reset.failed {
+                                eprintln!("nunki: {volume} was not removed: {why}");
+                            }
+                            if reset.failed.is_empty() {
+                                ExitCode::SUCCESS
+                            } else {
+                                ExitCode::FAILURE
+                            }
                         }
                         Err(e) => {
                             eprintln!("nunki: {e}");
@@ -1274,6 +1307,9 @@ fn main() -> ExitCode {
                                     "          nunki launches none until it is free; the \
                                      mission's monitor looks again every minute"
                                 );
+                            }
+                            nunki::verify::Step::LeftBehind { role, said } => {
+                                println!("left      the {role:?} run ended — {said}");
                             }
                             nunki::verify::Step::CampaignEnded { since } => {
                                 println!(
@@ -1957,16 +1993,25 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             }
         }
 
-        MissionCommand::List => {
-            let ids = mission_dir::list(&project.hq_root);
-            if ids.is_empty() {
-                println!("no mission yet: `nunki mission new <id> --branch <branch> --lot L1:…`");
-            }
-            for id in ids {
-                match mission_dir::read_header(&project.hq_root, &id) {
-                    Ok(h) => println!("{id:<20} {:<24} {} lot(s)", h.branch, h.lots.len()),
-                    Err(e) => println!("{id:<20} unreadable: {e}"),
+        MissionCommand::List { active } => {
+            let listed = match nunki::lifecycle::listing(project, active) {
+                Ok(listed) => listed,
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    return ExitCode::FAILURE;
                 }
+            };
+            if listed.is_empty() {
+                if active {
+                    println!("no mission started and not archived");
+                } else {
+                    println!(
+                        "no mission yet: `nunki mission new <id> --branch <branch> --lot L1:…`"
+                    );
+                }
+            }
+            for mission in &listed {
+                println!("{}", mission.line());
             }
             ExitCode::SUCCESS
         }
@@ -1986,8 +2031,15 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             let engine: std::sync::Arc<dyn nunki::engine::Engine> =
                 std::sync::Arc::new(nunki::engine::docker::Docker::real());
             match nunki::run::start(project, &id, &slot, engine, &engine_bin) {
-                Ok(state) => {
+                Ok(started) => {
+                    let state = started.state;
                     println!("mission {id} started in slot {}", state.slot);
+                    if let Some(brought) = &started.base {
+                        println!(
+                            "base    {}",
+                            nunki::run::base_said(&state.flow.header().base, brought)
+                        );
+                    }
                     if let Some(run) = &state.run {
                         println!("session {}", run.session.0);
                         println!("log     {}", run.log.display());
@@ -2031,8 +2083,15 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
         },
 
         MissionCommand::End { id, why } => match nunki::lifecycle::end(project, &id, &why) {
-            Ok(state) => {
-                println!("ended     {:?}", state.flow.stage());
+            Ok(ended) => {
+                match ended {
+                    nunki::lifecycle::Ended::Started(state) => {
+                        println!("ended     {:?}", state.flow.stage())
+                    }
+                    nunki::lifecycle::Ended::NeverStarted => {
+                        println!("ended     it had never started, so nothing else moved")
+                    }
+                }
                 println!(
                     "          written to FOLLOWUP_HQ.md; `nunki mission archive {id}` closes it"
                 );
@@ -2131,6 +2190,9 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                                 "lifted    the hold {} put on {} is lifted",
                                 held.who, held.date
                             );
+                            if let Some(why) = &held.reason {
+                                println!("          it said: {}", nunki::text::printable(why));
+                            }
                             println!("          and the harness's failures are forgotten");
                         }
                         None => println!("lifted    nothing was holding mission {id}"),
@@ -2682,7 +2744,7 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             }
         }
 
-        MissionCommand::Stop { id, now } => {
+        MissionCommand::Stop { id, now, why } => {
             // Read once for the slot and the session: the harness has to be
             // built against the container the run is in, and `--now`
             // identifies the process by its session id.
@@ -2695,9 +2757,12 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             };
             let session = state.run.as_ref().map(|r| r.session.0.clone());
             let harness = harness_for(project, &state.slot, session.as_deref());
-            match nunki::gesture::stop(project, &id, &harness, now) {
+            match nunki::gesture::stop(project, &id, &harness, now, &why) {
                 Ok(held) => {
                     println!("held      nunki will launch no further run for mission {id}");
+                    if let Some(why) = &held.reason {
+                        println!("because   {}", nunki::text::printable(why));
+                    }
                     match (now, held.interrupted) {
                         // SIGINT, not SIGTERM: the agent ends its turn and
                         // writes its resume block (SPEC 4.3).

@@ -83,6 +83,11 @@ pub enum Step {
     /// campaign dies either way. Said rather than not — a slot that went
     /// quiet for an hour with nothing to show for it is worth a sentence.
     CampaignEnded { since: String },
+    /// A run ended and left processes behind in its container — started in
+    /// the background, and orphaned when it ended. `said` is what was done:
+    /// the pids stopped, or why nobody could look. Said, never decided on:
+    /// what a run leaves behind is not its verdict.
+    LeftBehind { role: Role, said: String },
     /// A run was recorded and the engine could not be asked about it.
     /// Nothing is decided on a silence (SPEC 4.2, "la reprise re-dérive
     /// avant de décider").
@@ -279,17 +284,23 @@ pub fn verify_as(
                 let label = state.flow.label(&work);
                 let event = match state.run.clone() {
                     Some(handle) => {
-                        let (outcome, usage, windows) =
-                            match read_back(project, engine.clone(), &state, &handle) {
-                                Ended::Unreachable(why) => {
-                                    steps.push(Step::Unreachable {
-                                        role: Role::Coder,
-                                        why,
-                                    });
-                                    return Ok(steps);
-                                }
-                                Ended::With(outcome, usage, windows) => (outcome, usage, windows),
-                            };
+                        let (outcome, usage, windows) = match read_back(
+                            project,
+                            engine.clone(),
+                            &state,
+                            &handle,
+                            Role::Coder,
+                            &mut steps,
+                        ) {
+                            Ended::Unreachable(why) => {
+                                steps.push(Step::Unreachable {
+                                    role: Role::Coder,
+                                    why,
+                                });
+                                return Ok(steps);
+                            }
+                            Ended::With(outcome, usage, windows) => (outcome, usage, windows),
+                        };
                         let spared = tally(
                             project,
                             &mut state,
@@ -534,7 +545,14 @@ pub fn verify_as(
             // to see.
             Stage::Integration { attempt } => {
                 if let Some(handle) = state.run.clone() {
-                    match read_back(project, engine.clone(), &state, &handle) {
+                    match read_back(
+                        project,
+                        engine.clone(),
+                        &state,
+                        &handle,
+                        Role::Integrator,
+                        &mut steps,
+                    ) {
                         Ended::Unreachable(why) => {
                             steps.push(Step::Unreachable {
                                 role: Role::Integrator,
@@ -715,7 +733,14 @@ pub fn verify_as(
             // integration one — the profile differs, the reading does not.
             Stage::SecurityAgent { attempt } => {
                 if let Some(handle) = state.run.clone() {
-                    match read_back(project, engine.clone(), &state, &handle) {
+                    match read_back(
+                        project,
+                        engine.clone(),
+                        &state,
+                        &handle,
+                        Role::Security,
+                        &mut steps,
+                    ) {
                         Ended::Unreachable(why) => {
                             steps.push(Step::Unreachable {
                                 role: Role::Security,
@@ -1220,22 +1245,48 @@ fn read_back(
     engine: Arc<dyn Engine>,
     state: &MissionState,
     handle: &RunHandle,
+    role: Role,
+    steps: &mut Vec<Step>,
 ) -> Ended {
     let harness = crate::harness::claude_code::ClaudeCode::new(
         Default::default(),
         Box::new(harness_spawner(
             project,
-            engine,
+            engine.clone(),
             &state.slot,
             &handle.session.0,
         )),
     );
     match crate::harness::Harness::state(&harness, handle) {
-        Ok(RunState::Finished(outcome)) => Ended::With(
-            outcome,
-            crate::harness::Harness::usage(&harness, handle),
-            crate::harness::Harness::windows(&harness, handle),
-        ),
+        Ok(RunState::Finished(outcome)) => {
+            // No process outlives its run: what it started in the background
+            // is stopped now that it has ended, before anything else reads
+            // the container — the gates, the next run, a campaign.
+            let spawner = harness_spawner(project, engine, &state.slot, &handle.session.0);
+            match spawner.reap(&handle.container, &handle.log) {
+                Ok(Some(pids)) if !pids.is_empty() => steps.push(Step::LeftBehind {
+                    role,
+                    said: format!(
+                        "stopped {} process(es) the run left running: {}",
+                        pids.len(),
+                        pids.iter()
+                            .map(u32::to_string)
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    ),
+                }),
+                Ok(_) => {}
+                Err(e) => steps.push(Step::LeftBehind {
+                    role,
+                    said: format!("what the run left running could not be looked for: {e}"),
+                }),
+            }
+            Ended::With(
+                outcome,
+                crate::harness::Harness::usage(&harness, handle),
+                crate::harness::Harness::windows(&harness, handle),
+            )
+        }
         // A frozen run is a run in progress that a human stopped on purpose.
         // Nothing is concluded from it, and the message says whose doing it
         // is rather than leaving `verify` looking stuck.

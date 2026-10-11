@@ -220,7 +220,14 @@ fn an_empty_instruction_is_not_one() {
 fn stopping_holds_the_mission_and_signals_nothing() {
     let world = World::new(true);
     let harness = nunki::harness::fake::FakeHarness::new();
-    let held = gesture::stop(&world.project, "m1", &harness, false).unwrap();
+    let held = gesture::stop(
+        &world.project,
+        "m1",
+        &harness,
+        false,
+        "the base is being rewritten",
+    )
+    .unwrap();
 
     assert!(!held.interrupted, "a bare stop interrupts nothing");
     assert!(harness.stopped().is_empty(), "{:?}", harness.stopped());
@@ -239,7 +246,14 @@ fn stopping_holds_the_mission_and_signals_nothing() {
 fn stopping_now_also_ends_the_turn() {
     let world = World::new(true);
     let harness = nunki::harness::fake::FakeHarness::new();
-    let held = gesture::stop(&world.project, "m1", &harness, true).unwrap();
+    let held = gesture::stop(
+        &world.project,
+        "m1",
+        &harness,
+        true,
+        "the base is being rewritten",
+    )
+    .unwrap();
 
     assert!(held.interrupted);
     assert_eq!(harness.stopped(), vec![SessionId("s1".into())]);
@@ -259,7 +273,14 @@ fn stopping_now_also_ends_the_turn() {
 fn a_mission_between_two_runs_can_still_be_held() {
     let world = World::new(false);
     let harness = nunki::harness::fake::FakeHarness::new();
-    gesture::stop(&world.project, "m1", &harness, false).unwrap();
+    gesture::stop(
+        &world.project,
+        "m1",
+        &harness,
+        false,
+        "the base is being rewritten",
+    )
+    .unwrap();
     assert!(
         Store::open(&world.project.hq_root)
             .unwrap()
@@ -277,7 +298,14 @@ fn a_mission_between_two_runs_can_still_be_held() {
 fn stopping_now_after_the_run_ended_still_holds_the_mission() {
     let world = World::new(false);
     let harness = nunki::harness::fake::FakeHarness::new();
-    let held = gesture::stop(&world.project, "m1", &harness, true).unwrap();
+    let held = gesture::stop(
+        &world.project,
+        "m1",
+        &harness,
+        true,
+        "the base is being rewritten",
+    )
+    .unwrap();
 
     assert!(!held.interrupted, "nothing was there to interrupt");
     assert!(harness.stopped().is_empty());
@@ -297,7 +325,14 @@ fn stopping_now_after_the_run_ended_still_holds_the_mission() {
 fn resuming_lifts_the_hold_and_unfreezes() {
     let world = World::new(true);
     let harness = nunki::harness::fake::FakeHarness::new();
-    gesture::stop(&world.project, "m1", &harness, false).unwrap();
+    gesture::stop(
+        &world.project,
+        "m1",
+        &harness,
+        false,
+        "the base is being rewritten",
+    )
+    .unwrap();
 
     let fake = Arc::new(
         nunki::engine::fake::FakeEngine::default()
@@ -331,7 +366,14 @@ fn resuming_lifts_the_hold_and_unfreezes() {
 fn resuming_a_mission_with_no_run_lifts_the_hold_all_the_same() {
     let world = World::new(false);
     let harness = nunki::harness::fake::FakeHarness::new();
-    gesture::stop(&world.project, "m1", &harness, false).unwrap();
+    gesture::stop(
+        &world.project,
+        "m1",
+        &harness,
+        false,
+        "the base is being rewritten",
+    )
+    .unwrap();
 
     let (engine, fake) = engine();
     assert!(
@@ -364,7 +406,14 @@ fn resuming_a_mission_nobody_held_lifts_nothing() {
 fn resuming_a_run_that_was_never_frozen_asks_for_no_unpause() {
     let world = World::new(true);
     let harness = nunki::harness::fake::FakeHarness::new();
-    gesture::stop(&world.project, "m1", &harness, false).unwrap();
+    gesture::stop(
+        &world.project,
+        "m1",
+        &harness,
+        false,
+        "the base is being rewritten",
+    )
+    .unwrap();
 
     let fake = Arc::new(
         nunki::engine::fake::FakeEngine::default()
@@ -556,4 +605,45 @@ fn a_slot_driven_by_another_verb_is_left_to_it() {
 
     drop(lock);
     assert!(spare().is_some(), "free again, the run is spared");
+}
+
+/// A hold carries a reason: `stop` without one is refused before anything is
+/// done — no hold, and no run interrupted — and with one, the reason is in
+/// the hold, where every place that shows the hold reads it.
+#[test]
+fn a_hold_without_a_reason_is_refused_and_one_with_a_reason_carries_it() {
+    let world = World::new(true);
+    let harness = nunki::harness::fake::FakeHarness::new();
+    let store = Store::open(&world.project.hq_root).unwrap();
+
+    let err = gesture::stop(&world.project, "m1", &harness, true, " \n ").unwrap_err();
+    assert!(matches!(err, GestureError::NoReason), "{err}");
+    assert!(!store.load("m1").unwrap().held());
+    assert!(harness.stopped().is_empty(), "{:?}", harness.stopped());
+
+    let held = gesture::stop(
+        &world.project,
+        "m1",
+        &harness,
+        false,
+        "  the base is being rewritten  ",
+    )
+    .unwrap();
+    assert_eq!(held.reason.as_deref(), Some("the base is being rewritten"));
+    let state = store.load("m1").unwrap();
+    let status = nunki::wait::status(
+        "m1",
+        &state,
+        &nunki::wait::Context {
+            watcher: nunki::wait::Watcher::Alive,
+            window: None,
+            proposals: Ok(Vec::new()),
+        },
+    )
+    .expect("a held mission is stopped");
+    assert!(
+        status.line().contains("the base is being rewritten"),
+        "{}",
+        status.line()
+    );
 }

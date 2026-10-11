@@ -187,6 +187,21 @@ pub fn stage_name(flow: &Flow) -> String {
     }
 }
 
+/// The stage in one short word, as `nunki mission list` prints it: a column
+/// to scan, where [`stage_name`] is a sentence to read.
+pub fn stage_word(flow: &Flow) -> &'static str {
+    match flow.stage() {
+        Stage::Coding { .. } => "coding",
+        Stage::Gates => "gates",
+        Stage::Integration { .. } => "integration",
+        Stage::SecurityAgent { .. } => "security",
+        Stage::Findings { .. } => "findings",
+        Stage::FinalCampaign => "campaign",
+        Stage::AwaitingHuman(_) => "handed-over",
+        Stage::Verified => "verified",
+    }
+}
+
 /// The stop the mission stands at, or `None` while it is still being driven.
 ///
 /// Where the flow stands comes first, then a hold, then the monitor, then the
