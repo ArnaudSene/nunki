@@ -173,6 +173,7 @@ impl World {
         nunki::mutants::write(
             &nunki::mission::dir::Paths::of(&hq_root, "m1").dir,
             &nunki::mutants::Campaign {
+                stopped: None,
                 files: None,
                 chain: Default::default(),
                 fingerprint: "f".into(),
@@ -1478,6 +1479,7 @@ fn push_refuses_until_every_proposed_equivalence_is_ratified_or_refused() {
     mutants::write(
         &dir,
         &Campaign {
+            stopped: None,
             files: None,
             chain: Default::default(),
             fingerprint: world.fingerprint(),
@@ -1604,6 +1606,7 @@ fn the_hq_rules_on_proposals_with_two_verbs_and_status_lists_them() {
     mutants::write(
         &paths.dir,
         &Campaign {
+            stopped: None,
             files: None,
             chain: Default::default(),
             fingerprint: world.fingerprint(),
@@ -1699,6 +1702,7 @@ fn at_standard_push_refuses_a_share_below_the_threshold_gate_seven_used() {
     mutants::write(
         &dir,
         &Campaign {
+            stopped: None,
             files: None,
             chain: Default::default(),
             fingerprint: world.fingerprint(),
@@ -1752,6 +1756,7 @@ fn refusing_a_proposal_on_a_verified_mission_sends_it_back_to_the_coder() {
         mutants::write(
             &paths.dir,
             &Campaign {
+                stopped: None,
                 files: None,
                 chain: Default::default(),
                 fingerprint: world.fingerprint(),
@@ -1850,6 +1855,7 @@ fn verified_with(rigor: nunki::mission::Rigor, survivors: &[&str]) -> (World, Pa
     mutants::write(
         &dir,
         &Campaign {
+            stopped: None,
             files: None,
             chain: Default::default(),
             fingerprint: world.fingerprint(),
@@ -2042,6 +2048,7 @@ fn the_binary_lists_proposals_by_source_and_says_when_the_registry_is_left_alone
     nunki::mutants::write(
         &nunki::mission::dir::Paths::of(&world.project.hq_root, "m1").dir,
         &Campaign {
+            stopped: None,
             files: None,
             chain: Default::default(),
             fingerprint: world.fingerprint(),
@@ -2153,6 +2160,7 @@ fn push_waits_on_nunkis_proposals_and_ratify_all_rules_them() {
     mutants::write(
         &paths.dir,
         &Campaign {
+            stopped: None,
             files: None,
             chain: Default::default(),
             fingerprint: world.fingerprint(),
@@ -2458,6 +2466,7 @@ fn push_judges_the_chain_once_on_its_reconstruction() {
     // The file kept from the earlier campaign tried 50; the one measured
     // again, 60: one full campaign would try 110.
     let chain = |open: u32| Campaign {
+        stopped: None,
         files: Some(
             [
                 ("src/kept.rs".to_string(), measured(50, &earlier)),
@@ -2514,6 +2523,7 @@ fn status_says_each_campaign_of_the_chain_with_its_counts() {
     mutants::write(
         &dir,
         &Campaign {
+            stopped: None,
             files: None,
             fingerprint: world.fingerprint(),
             head: head.clone(),

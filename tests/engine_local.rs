@@ -625,6 +625,7 @@ impl Volet {
         nunki::mutants::write(
             &self.mission,
             &nunki::mutants::Campaign {
+                stopped: None,
                 files: Some(
                     [(
                         "src/lib.rs".to_string(),

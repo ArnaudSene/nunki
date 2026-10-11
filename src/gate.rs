@@ -113,6 +113,13 @@ pub struct Outcome {
     /// why — a flow that told the two apart by matching on a string would
     /// start doing something else the day the string was reworded.
     pub waits_on_campaign: bool,
+    /// Set when gate 7 could not be played **because the campaign on file
+    /// stopped short** ([`crate::mutants::Stopped`]) and the HQ has to choose
+    /// what comes next. Unplayed like any other, to a human; to the flow, a
+    /// wall rather than a campaign owed — launching the same campaign again
+    /// would run into the same deadline, and a volet would send the coder
+    /// survivors nobody chose to send.
+    pub awaits_hq: bool,
 }
 
 impl Outcome {
@@ -122,6 +129,7 @@ impl Outcome {
             decision,
             note: None,
             waits_on_campaign: false,
+            awaits_hq: false,
         }
     }
 
@@ -132,6 +140,18 @@ impl Outcome {
             decision: Decision::Unplayed(why.to_string()),
             note: None,
             waits_on_campaign: true,
+            awaits_hq: false,
+        }
+    }
+
+    /// Gate 7 over a campaign that stopped short: the HQ's to choose.
+    fn for_the_hq(gate: Gate, why: &str) -> Self {
+        Self {
+            gate,
+            decision: Decision::Unplayed(why.to_string()),
+            note: None,
+            waits_on_campaign: false,
+            awaits_hq: true,
         }
     }
 }
@@ -208,15 +228,17 @@ impl Report {
         // Every gate nobody could play, and whether the campaign is what it
         // waits on. Gate 7 unplayed **is** a campaign owed — no campaign has
         // run, or the one on file ran on other content, and running one
-        // answers both. A gate that stood down *while* a campaign runs is the
-        // same obstacle seen from the other side.
+        // answers both — unless the campaign on file stopped short and the HQ
+        // chooses ([`Outcome::awaits_hq`]), which is a wall. A gate that stood
+        // down *while* a campaign runs is the same obstacle seen from the other
+        // side.
         let mut owed: Option<String> = None;
         let mut wall: Option<&Outcome> = None;
         for outcome in &self.outcomes {
             let Decision::Unplayed(why) = &outcome.decision else {
                 continue;
             };
-            if outcome.gate == Gate::Mutation {
+            if outcome.gate == Gate::Mutation && !outcome.awaits_hq {
                 // Gate 7's own sentence first: it is the one that names the
                 // verb, where a gate standing down only says to look again.
                 owed = Some(why.clone());
@@ -1481,9 +1503,11 @@ fn read(path: &Path) -> Result<String, GateError> {
 /// gets to be transient — nothing is here to read yet — and it is the second
 /// call that finds this and stops asking.
 ///
-/// A campaign killed on the 45-minute deadline lands here too, and that is
-/// the right side to err on: a red gate quoting what the tooling said is more
-/// use than a silent retry of something that will be killed again.
+/// A campaign stopped at its deadline, or called off by the HQ, does not land
+/// here: it is recorded as incomplete, with what it had found, and the HQ
+/// chooses ([`crate::mutants::stopped_short`]). Read as "measured nothing",
+/// it went back to the coder as if running it again changed nothing — when
+/// raising its bound does.
 fn campaign_that_could_not_run(
     mission_dir: &Path,
     fingerprint: &str,
@@ -1585,6 +1609,19 @@ fn mutation(subject: &Subject, threshold: Threshold) -> Result<Outcome, GateErro
                 &want[..7.min(want.len())]
             )),
         ));
+    }
+
+    // Stopped short (SPEC 4.4, "un délai paramétré"): never green, never a
+    // volet of its own. Its survivors are on file; whether they go to the
+    // coder, or the bound is raised first, is the HQ's choice.
+    match crate::mutants::stopped_short(&campaign, subject.header.bounds.mutation_minutes) {
+        Some(crate::mutants::Standing::HqChooses(why)) => {
+            return Ok(Outcome::for_the_hq(gate, &why));
+        }
+        Some(crate::mutants::Standing::Owed(why)) => {
+            return Ok(Outcome::of(gate, Decision::Unplayed(why)));
+        }
+        None => {}
     }
 
     // Two sources, and which one a line came from is decided by the mount,

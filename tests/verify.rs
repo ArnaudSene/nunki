@@ -747,6 +747,7 @@ impl World {
         nunki::mutants::write(
             &self.mission(),
             &nunki::mutants::Campaign {
+                stopped: None,
                 files: None,
                 chain: Default::default(),
                 fingerprint: nunki::mutants::fingerprint(&self.tree, &touched).unwrap(),
@@ -3239,6 +3240,7 @@ impl World {
         nunki::mutants::write(
             &self.mission(),
             &Campaign {
+                stopped: None,
                 files: None,
                 chain: Default::default(),
                 fingerprint: "f".into(),
@@ -3425,6 +3427,7 @@ fn green_final_gates_leave_each_campaign_of_the_chain_in_the_follow_up() {
     nunki::mutants::write(
         &paths.dir,
         &Campaign {
+            stopped: None,
             files: None,
             fingerprint: "f".into(),
             head: world.head(),
@@ -3970,5 +3973,130 @@ fn a_second_review_at_standard_needs_an_override() {
     assert!(
         told.contains("**What to change:** the rename broke the API"),
         "the coder reads the review: {told}"
+    );
+}
+
+/// A campaign stopped at its deadline, on the content as it stands, with
+/// everything else green: the flow stops for the HQ — no volet, and no
+/// campaign started against the same deadline — and the HQ's `iterate
+/// --because` is what sends its survivors to the coder, as a volet with the
+/// HQ's reason, written where the coder reads it first.
+#[test]
+fn a_campaign_stopped_at_its_deadline_waits_for_the_hq_who_can_send_its_survivors() {
+    use nunki::engine::{ExecOutput, fake::FakeEngine};
+
+    let world = World::new(1);
+    world.commit("src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    world.journal_names_head();
+    std::fs::write(
+        world.mission().join("PR.md"),
+        "# What this changes\n\nL1, and nothing else.\n",
+    )
+    .unwrap();
+    world.coder_finished_the_lot();
+    std::fs::write(
+        world.project.nunki_home().join("me.yaml"),
+        "name: Alex Martin\n",
+    )
+    .unwrap();
+
+    let file = nunki::run::profile_path(&world.project, "one");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, "services:\n  agent:\n    image: alpine:3.20\n").unwrap();
+    let engine: Arc<dyn nunki::engine::Engine> =
+        Arc::new(FakeEngine::default().with_exec(ExecOutput {
+            status: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+
+    // At the gates, nothing iterates yet: there is nothing to send.
+    let err = nunki::findings::iterate(&world.project, "m1", Some("answer them")).unwrap_err();
+    assert!(
+        matches!(err, nunki::findings::FindingsError::NotOnFindings { .. }),
+        "{err}"
+    );
+
+    let touched = nunki::gate::touched_since_base(&world.tree, "dev").unwrap();
+    nunki::mutants::write(
+        &world.mission(),
+        &nunki::mutants::Campaign {
+            stopped: Some(nunki::mutants::Stopped::Deadline { minutes: 45 }),
+            fingerprint: nunki::mutants::fingerprint(&world.tree, &touched).unwrap(),
+            head: git(&world.tree, &["rev-parse", "HEAD"]),
+            date: "2026-10-11T10:00:00Z".into(),
+            survivors: vec![nunki::mutants::Survivor {
+                found_on: None,
+                id: "src/new.rs:1:22: replace two -> u8 with 0".into(),
+                file: "src/new.rs".into(),
+                line: 1,
+                end_line: None,
+                description: "replace two -> u8 with 0".into(),
+                outcome: None,
+                refused: None,
+            }],
+            tried: None,
+            files: None,
+            chain: Default::default(),
+        },
+    )
+    .unwrap();
+
+    let steps = verify::verify(&world.project, "m1", engine, "docker").unwrap();
+    match steps.last() {
+        Some(Step::GateUnplayable { role, why }) => {
+            assert_eq!(*role, Role::Coder);
+            assert!(why.contains("45-minute deadline"), "{why}");
+            assert!(why.contains("1 survivor(s)"), "{why}");
+            assert!(why.contains("iterate --because"), "{why}");
+        }
+        other => panic!("a campaign stopped at its deadline is the HQ's to choose: {other:?}"),
+    }
+    assert_eq!(world.state().flow.stage(), &Stage::Gates, "{steps:?}");
+    assert_eq!(world.state().flow.volets(), 0);
+
+    // Sent with no reason: refused, and nothing moved.
+    let err = nunki::findings::iterate(&world.project, "m1", None).unwrap_err();
+    assert!(
+        matches!(err, nunki::findings::FindingsError::NoPartialReason),
+        "{err}"
+    );
+    assert_eq!(world.state().flow.stage(), &Stage::Gates);
+    // Nor is there a rigor to set aside here: this is no review.
+    let err = nunki::findings::iterate_overriding(&world.project, "m1", "because").unwrap_err();
+    assert!(
+        matches!(
+            err,
+            nunki::findings::FindingsError::NothingToOverride { .. }
+        ),
+        "{err}"
+    );
+    assert_eq!(world.state().flow.volets(), 0);
+
+    let state = nunki::findings::iterate(
+        &world.project,
+        "m1",
+        Some("answer the survivor it found; the rest waits for the next campaign"),
+    )
+    .unwrap();
+    match state.flow.stage() {
+        Stage::Coding {
+            work: Work::Volet { cause, .. },
+            ..
+        } => {
+            assert!(cause.contains("incomplete mutation campaign"), "{cause}");
+            assert!(cause.contains("answer the survivor it found"), "{cause}");
+        }
+        other => panic!("not a volet: {other:?}"),
+    }
+    assert_eq!(state.flow.volets(), 1);
+    let followup = world.followup();
+    assert!(
+        followup.contains("Alex Martin sends the survivors of an incomplete campaign"),
+        "{followup}"
+    );
+    assert!(
+        followup.contains("answer the survivor it found; the rest waits for the next campaign"),
+        "{followup}"
     );
 }

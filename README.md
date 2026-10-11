@@ -452,6 +452,33 @@ the content of the pushed commit, is full, and passes; its refusal names
 `nunki mission mutants <mission>` at that last stage runs the final
 campaign, as the monitor does.
 
+### A campaign stopped short: the deadline, and `--cancel`
+
+A campaign is given the mission's `mutation_minutes` (45 by default). One
+still running past it is stopped, and it is **not** read as a campaign that
+measured nothing: the survivors the tool had already reported are recorded
+in `MUTANTS.json`, marked as from an incomplete campaign (`"stopped"`), with
+the HQ's rulings carried as on any replay. An incomplete campaign **never**
+makes gate 7 green, nor lets `nunki push` through, nor lets the next
+campaign be partial on it. It does not go back to the coder on its own
+either: gate 7 stops the flow for the HQ, which chooses —
+
+- raise `mutation_minutes` in `MISSION.md` and `nunki mission reframe
+  <mission> --yes`: past the deadline it was stopped at, a campaign is owed
+  again, and the monitor starts it;
+- or send the survivors found so far to the coder with `nunki mission
+  iterate <mission> --because <why>`: a volet, as a red gate 7 opens one,
+  with the reason in `FOLLOWUP_HQ.md`.
+
+`nunki mission mutants <mission> --cancel --because <why>` calls off the
+campaign in flight, for a campaign the HQ knows is wasted: it is stopped as
+the deadline stops one, recorded as incomplete in the same way, and the
+reason is written to `FOLLOWUP_HQ.md`. The mission stays at its gates, where
+`iterate --because` sends the survivors on, or `nunki mission mutants
+<mission> --again` runs a new campaign. A campaign that had already ended is
+read back instead, and its result kept; a paused one is refused until
+`nunki mission resume`.
+
 ### Running mutants at once: `mutation_jobs`
 
 `mutation_jobs` in `nunki.yaml` — a whole number of at least 1, refused
@@ -544,7 +571,10 @@ severity blocks, as it always did. The refusal names the two ways on:
 `mission iterate --override --because <why>`, written, dated, in
 `FOLLOWUP_HQ.md` as a departure from the rigor. A verified mission sent
 back on review (`mission iterate --because`) spends a volet like any other,
-and at `standard` a second review needs `--override` as well. `mission
+and at `standard` a second review needs `--override` as well. Sending the
+survivors of a campaign that stopped short (`mission iterate --because`, at
+the gates) is no review: the rigor does not bound it, and there is nothing
+to override. `mission
 status` lists every override with its reason, and `nunki push` adds them to
 the pull request under "Departures from the rigor", so a reader sees how
 often the rigor was set aside.

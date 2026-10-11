@@ -1141,6 +1141,7 @@ impl Fixture {
         nunki::mutants::write(
             self._dir.path(),
             &Campaign {
+                stopped: None,
                 files: None,
                 chain: Default::default(),
                 fingerprint,
@@ -1667,6 +1668,7 @@ fn report_of(decisions: &[(Gate, Decision)]) -> gate::Report {
                 decision: decision.clone(),
                 note: None,
                 waits_on_campaign: false,
+                awaits_hq: false,
             })
             .collect(),
     }
@@ -3289,6 +3291,7 @@ impl Fixture {
         nunki::mutants::write(
             self._dir.path(),
             &Campaign {
+                stopped: None,
                 tried: trusted.then(|| nunki::mutants::tried_in(&files)).flatten(),
                 files: trusted.then_some(files),
                 fingerprint,
@@ -3532,4 +3535,101 @@ fn the_final_stage_with_no_campaign_at_head_owes_one() {
         nunki::gate::Verdict::CampaignOwed(why) => assert!(why.contains("other content"), "{why}"),
         other => panic!("a campaign on other content verified the mission: {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Gate 7 over a campaign that stopped short (SPEC 4.4, "un délai paramétré").
+// ---------------------------------------------------------------------------
+
+impl Fixture {
+    /// A campaign on the current content that tried a thousand mutants and
+    /// left no survivor — green, finished — then marked as stopped short.
+    fn campaign_stopped(&self, stopped: Option<nunki::mutants::Stopped>) {
+        self.campaign_tried(vec![], Some(1000));
+        let mut campaign = nunki::mutants::read(self._dir.path()).unwrap().unwrap();
+        campaign.stopped = stopped;
+        nunki::mutants::write(self._dir.path(), &campaign).unwrap();
+    }
+
+    /// What the flow reads of gate 7 alone: the other gates of this fixture
+    /// are unplayable without an engine, and would make any report a wall.
+    fn gate_seven_alone(&self) -> nunki::gate::Verdict {
+        gate::Report {
+            role: Role::Coder,
+            head: "0123456789ab".into(),
+            outcomes: vec![self.gate_seven(Role::Coder)],
+        }
+        .verdict()
+    }
+}
+
+/// A campaign stopped at its deadline is not green whatever it found — it
+/// did not reach the rest — and it is not a campaign that measured nothing
+/// either: gate 7 says so in its own words and leaves the choice to the HQ,
+/// as a wall, rather than opening a volet or starting the same campaign
+/// against the same deadline.
+#[test]
+fn a_campaign_stopped_at_its_deadline_is_the_hqs_to_choose_and_never_green() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.journal_names_head();
+
+    // The control: the same campaign, finished, is green.
+    f.campaign_stopped(None);
+    assert_eq!(f.gate_seven(Role::Coder).decision, Decision::Passed);
+
+    f.campaign_stopped(Some(nunki::mutants::Stopped::Deadline { minutes: 45 }));
+    let outcome = f.gate_seven(Role::Coder);
+    let Decision::Unplayed(why) = &outcome.decision else {
+        panic!("an incomplete campaign was judged: {outcome:?}");
+    };
+    assert!(outcome.awaits_hq, "{outcome:?}");
+    assert!(why.contains("45-minute deadline"), "{why}");
+    assert!(why.contains("incomplete"), "{why}");
+    assert!(!why.contains("measured nothing"), "{why}");
+    assert!(why.contains("nunki mission reframe"), "{why}");
+    assert!(why.contains("nunki mission iterate --because"), "{why}");
+    match f.gate_seven_alone() {
+        nunki::gate::Verdict::Wall(said) => assert!(said.contains("deadline"), "{said}"),
+        other => panic!("the HQ's choice became {other:?}"),
+    }
+}
+
+/// Raising the bound with `reframe` is one of the HQ's two ways on, and it
+/// is enough: past the deadline the campaign was stopped at, a campaign is
+/// owed again and the monitor starts it. Not at the same bound — that is
+/// the same wall — and never for one the HQ called off.
+#[test]
+fn a_raised_deadline_owes_a_new_campaign_and_the_same_one_does_not() {
+    let mut f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.journal_names_head();
+    f.campaign_stopped(Some(nunki::mutants::Stopped::Deadline { minutes: 45 }));
+
+    f.header.bounds.mutation_minutes = 45;
+    assert!(
+        matches!(f.gate_seven_alone(), nunki::gate::Verdict::Wall(_)),
+        "the same deadline owes the same campaign"
+    );
+
+    f.header.bounds.mutation_minutes = 90;
+    let outcome = f.gate_seven(Role::Coder);
+    assert!(!outcome.awaits_hq, "{outcome:?}");
+    match f.gate_seven_alone() {
+        nunki::gate::Verdict::CampaignOwed(why) => {
+            assert!(why.contains("raised to 90 minutes"), "{why}")
+        }
+        other => panic!("a raised deadline owes a campaign: {other:?}"),
+    }
+
+    f.campaign_stopped(Some(nunki::mutants::Stopped::Cancelled {
+        because: "the coder is rewriting this file".into(),
+    }));
+    let outcome = f.gate_seven(Role::Coder);
+    assert!(outcome.awaits_hq, "{outcome:?}");
+    let Decision::Unplayed(why) = &outcome.decision else {
+        panic!("{outcome:?}");
+    };
+    assert!(why.contains("the coder is rewriting this file"), "{why}");
+    assert!(why.contains("--again"), "{why}");
 }

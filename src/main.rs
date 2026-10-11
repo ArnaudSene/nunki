@@ -526,7 +526,8 @@ enum MissionCommand {
     },
 
     /// Send the mission back to the coder, as a volet: a `FINDINGS` verdict,
-    /// or a verified branch the HQ refuses on review, with `--because`.
+    /// a verified branch the HQ refuses on review, or the survivors of a
+    /// mutation campaign that stopped short — those two with `--because`.
     ///
     /// Bound by the mission's rigor: a report with no HIGH (at `standard`,
     /// and at `critical` from the second round on) is not sent back, nor a
@@ -558,7 +559,7 @@ enum MissionCommand {
         /// `HEAD`. Needs no mission.
         #[arg(
             long,
-            conflicts_with_all = ["equivalent", "ratify", "all", "refuse", "lift", "again", "slot", "because"]
+            conflicts_with_all = ["equivalent", "ratify", "all", "refuse", "lift", "again", "slot", "because", "cancel"]
         )]
         registry: bool,
         /// Which slot runs it. Defaults to the one the mission started in.
@@ -609,6 +610,18 @@ enum MissionCommand {
         /// from one that was wrong, or that changed code made wrong.
         #[arg(long = "lift", value_name = "SURVIVOR", conflicts_with = "equivalent")]
         lift: Option<String>,
+        /// Call off the campaign in flight, with `--because`: it is stopped
+        /// as its deadline would stop it, the survivors it had reported are
+        /// kept in MUTANTS.json as from an incomplete campaign — they never
+        /// make gate 7 green — and the reason goes to FOLLOWUP_HQ.md. The
+        /// mission stays at its gates: `nunki mission iterate --because`
+        /// sends those survivors to the coder, `--again` runs a new one.
+        #[arg(
+            long,
+            requires = "because",
+            conflicts_with_all = ["equivalent", "ratify", "refuse", "lift", "again"]
+        )]
+        cancel: bool,
         /// Run it again although a campaign on this exact content is on
         /// file. The fingerprint is over the touched files, so it cannot see
         /// a change to the stack's `mutation.sh`, to the tool, or to an
@@ -2259,6 +2272,7 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             refuse,
             lift,
             again,
+            cancel,
             registry,
         } => {
             if registry {
@@ -2277,10 +2291,15 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                 eprintln!("nunki: name the mission — only `--registry` needs none");
                 return ExitCode::FAILURE;
             };
-            if because.is_some() && equivalent.is_none() && ratify.is_none() && refuse.is_none() {
+            if because.is_some()
+                && equivalent.is_none()
+                && ratify.is_none()
+                && refuse.is_none()
+                && !cancel
+            {
                 eprintln!(
-                    "nunki: --because goes with --equivalent, --ratify or --refuse: it is the \
-                     reason of a ruling"
+                    "nunki: --because goes with --equivalent, --ratify, --refuse or --cancel: \
+                     it is the reason of a ruling, or of calling a campaign off"
                 );
                 return ExitCode::FAILURE;
             }
@@ -2430,6 +2449,28 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
+            // Calling a campaign off needs no run to be idle: it touches the
+            // campaign alone, and stopping one is what the deadline does
+            // whatever the agent is doing.
+            if cancel {
+                let why = because.as_deref().unwrap_or_default();
+                let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+                    std::sync::Arc::new(nunki::engine::docker::Docker::real());
+                let paths = nunki::mission::dir::Paths::of(&project.hq_root, &id);
+                let who = nunki::human::me(&project.nunki_home(), Some(&project.root)).addressed();
+                return match nunki::mutants::cancel_and_say(
+                    project, &slot, engine, &paths, &who, why,
+                ) {
+                    Ok(cancelled) => {
+                        println!("{}", nunki::mutants::cancelled_said(&cancelled));
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("nunki: {e}");
+                        ExitCode::FAILURE
+                    }
+                };
+            }
             if let Ok(state) = nunki::state::Store::open(&project.hq_root).and_then(|s| s.load(&id))
             {
                 let engine: std::sync::Arc<dyn nunki::engine::Engine> =
@@ -2508,9 +2549,20 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                                 println!("campaign  {said}");
                             }
                         }
-                        Progress::Overrun { minutes } => {
+                        Progress::Overrun { minutes, survivors } => {
                             eprintln!(
-                                "nunki: the campaign passed its {minutes}-minute deadline and was stopped"
+                                "nunki: {}",
+                                nunki::mutants::stopped_said(
+                                    &nunki::mutants::Stopped::Deadline { minutes },
+                                    survivors
+                                )
+                            );
+                            return ExitCode::FAILURE;
+                        }
+                        Progress::Incomplete { survivors, stopped } => {
+                            eprintln!(
+                                "nunki: {}",
+                                nunki::mutants::stopped_said(&stopped, survivors)
                             );
                             return ExitCode::FAILURE;
                         }
