@@ -554,14 +554,32 @@ où un humain la lit, dans `FOLLOWUP_HQ.md`, pas seulement dans l'état. Le
 verbe vaut **partout où une mission peut encore être travaillée** — un verbe
 qui marcherait dans cinq étapes sur sept est un verbe sur lequel l'humain ne
 peut pas compter au moment où il veut sortir — et refuse sur une mission déjà
-terminée.
+terminée. **Une mission jamais démarrée se clôt aussi** : `end --because`
+écrit sa raison dans son `FOLLOWUP_HQ.md`, et `archive` déplace son dossier
+comme pour toute autre, sans état à déplacer avec lui. Seul un état
+**absent** veut dire « jamais démarrée » : un état illisible reste une
+erreur, et une mission que personne n'a cadrée est refusée.
+
+**Ce que les listes disent.** `nunki mission list` donne l'étape de chaque
+mission en un mot — `framed`, `coding`, `gates`, `integration`, `security`,
+`findings`, `campaign`, `handed-over`, `verified` ou `pushed` — et
+`--active` ne garde que les missions démarrées et pas archivées.
+`nunki slot list` nomme la mission qui occupe chaque slot, ou dit `free` :
+une mission démarrée occupe son slot jusqu'à son archivage.
 
 `nunki slot reset` remet un slot au propre **sans le détruire** : le clone
 reste — `nunki slot rm` est le verbe qui supprime — et ce qui part, c'est le
 travail en cours et les **volumes nommés** du slot. C'est la vraie raison
 d'y toucher : un cache de compilation ou un répertoire d'état de harnais
 devenu mauvais survit à toutes les reconstructions d'image, et rien d'autre
-ne l'atteint. Il refuse sur les mêmes bases que `rm`.
+ne l'atteint. Il refuse sur les mêmes bases que `rm`, et tant qu'un run ou
+une campagne de mutation est en vol dans le slot. **Le moteur refuse de
+supprimer un volume qu'un conteneur monte**, et un reset qui avalait ce refus
+comme « aucun volume de ce nom » laissait les caches en place. Le reset
+descend donc d'abord les conteneurs du slot — les conteneurs seulement,
+jamais un volume —, puis supprime ses volumes nommés **par leur nom**, en
+distinguant « aucun volume de ce nom » d'un refus. Un volume qu'il n'a pas pu
+supprimer est nommé, et le verbe sort en erreur.
 
 **Pourquoi un seul verbe.** Cette phase est une seule machine à états —
 codeur, puis intégrateur, puis sécurité, avec des retours en arrière — et si
@@ -638,6 +656,12 @@ l'écrit en fichiers. `slot rm` emporte le miroir.
   depuis le chemin du projet tel que `nunki` le connaît, jamais depuis le
   `remote.origin.url` du slot, et l'hôte l'enregistre
   (`refs/nunki/origin/<base>`). Les portes ne lisent la base que là.
+- *Une mission part d'une base fraîche.* Quand `mission start` crée la
+  branche de mission, la branche de base du slot lui-même est amenée à celle
+  du projet, qui vient d'être lue — en avance rapide seulement : une base de
+  slot qui porte un commit que le projet n'a pas reste où elle est, et
+  `mission start` le dit. La branche sur laquelle le slot se trouve n'est
+  jamais déplacée sous son arbre.
 - `nunki check` porte une ligne, *l'hôte ne lance aucun git dans un slot*,
   verte quand chaque slot se lit par son miroir, ambre quand un slot est
   illisible depuis l'hôte, porte un gitlink, ou quand son `.git/config`
@@ -1252,6 +1276,12 @@ Trois choses en découlent :
   et d'elle seule — une ligne absente, en échec ou qui nomme un autre lot est
   une tentative échouée, dont la raison est portée dans `FOLLOWUP_HQ.md` pour
   la tentative suivante. Le run suivant est lancé aussitôt.
+- **Ce qu'un run laisse derrière lui est arrêté, en confort.** L'enveloppe
+  d'un run marque chacun de ses processus de `NUNKI_RUN=<session>`. Quand
+  `verify` relit un run fini, tout processus du conteneur qui porte encore
+  cette marque reçoit TERM, puis KILL quelques secondes après, et c'est dit
+  comme une étape (`LeftBehind`). C'est un confort, pas une garde : un
+  processus qui efface son propre environnement n'est pas trouvé.
 - **Deux niveaux de contrôle pendant un run**, et ce qui les distingue :
   - **toutes les 15 minutes, la vie et le progrès**, par les signaux seuls,
     sans rien demander à l'agent — le processus est vivant, le flux du harnais
@@ -1370,7 +1400,7 @@ l'humain les tape lui-même.
 | verbe | ce qu'il fait | ce que l'agent en voit |
 |---|---|---|
 | `nunki mission pause` / `resume` | **gèle** le conteneur de l'agent, tel quel, au milieu de ce qu'il fait ; `resume` le dégèle exactement là | rien : le processus est suspendu par le moteur de conteneurs, aucun état n'est perdu ; un appel réseau en cours vers l'API du modèle peut expirer pendant un long gel, et le harnais le rejoue |
-| `nunki mission stop` | **arrêt propre** : `nunki` ne relancera aucun run ; le run en cours finit son lot, ou s'interrompt tout de suite avec `--now` par le signal qui termine le tour proprement, pour que l'agent écrive son état de reprise — l'ancien fichier `STOP` | sans `--now`, il finit son lot ; avec, son tour est interrompu proprement |
+| `nunki mission stop --because <pourquoi>` | **arrêt propre** : `nunki` ne relancera aucun run ; le run en cours finit son lot, ou s'interrompt tout de suite avec `--now` par le signal qui termine le tour proprement, pour que l'agent écrive son état de reprise — l'ancien fichier `STOP` | sans `--now`, il finit son lot ; avec, son tour est interrompu proprement |
 | `nunki mission kill` | **frein d'urgence** : le conteneur est tué immédiatement, rien n'est attendu — l'ancien `AGENT_STOP` | rien, il n'existe plus |
 
 **Un conteneur gelé n'est pas un conteneur qui tourne.** Sur Docker 28, un
@@ -1399,7 +1429,11 @@ runs**, quand il n'y a précisément aucun processus à interrompre. `--now`
 choisit seulement le sort du run déjà lancé : sans lui il finit son lot, avec
 lui son tour est interrompu proprement. La retenue n'est **pas une étape** du
 flux : une mission retenue n'est ni abandonnée (`end` dit ça) ni finie, et le
-flux est exactement où il était quand on la lève.
+flux est exactement où il était quand on la lève. **Une retenue porte sa
+raison** : `stop` exige `--because`, et la raison paraît partout où la
+retenue était déjà montrée — `status`, `watch`, `wait`, `verify`, la ligne
+du moniteur — et au `resume`. Une mission retenue sans raison est une
+mission que la session suivante relance sans savoir pourquoi elle dormait.
 
 **C'est `resume` qui la lève** — le même verbe que celui qui dégèle un
 conteneur, parce que pour la main qui le tape c'est une seule chose : la
@@ -1964,6 +1998,19 @@ dernier lot. La première rouge arrête tout.
      `{"measured":"<chemin>","tried":N,"found":M}`, annoncées par
      `"by_file":true` sur la ligne de fin, qui font ses totaux ;
    - un diff contre `NUNKI_BASE` lu sans détection de renommage ;
+   - **des chemins pris à la lettre.** Un chemin que `nunki` confie à une
+     campagne peut porter une espace, un deux-points, un guillemet, un
+     caractère hors ASCII ou ressembler à une pathspec : le script les garde
+     dans ses paramètres positionnels, ne les coupe jamais sur une espace, et
+     les passe à git après `--` avec `--literal-pathspecs`. Mesuré avec
+     cargo-mutants 27.1.0 sur des fichiers nommés `:!*.rs`,
+     `src/with space.rs`, `src/with:colon.rs`, `src/with"quote.rs` et
+     `src/é.rs` : l'ancien script n'en trouvait ni n'en essayait aucun et
+     rapportait une campagne finie ; le nouveau trouve leurs 25 mutants. De
+     son côté, la liste des fichiers touchés de la porte 7 se lit séparée par
+     des NUL : un nom qui porte un guillemet ou un caractère hors ASCII y
+     reste tel quel, au lieu de la forme entre guillemets que git en donne
+     ligne à ligne ;
    - `NUNKI_MUTATION_JOBS`, la valeur de `mutation_jobs` (`nunki.yaml`, un
      entier d'au moins 1, 1 par défaut) : combien de mutants la campagne peut
      jouer à la fois. Mesuré sur `nunki` lui-même, deux jobs gagnent 13 % et
@@ -2000,6 +2047,41 @@ dernier lot. La première rouge arrête tout.
    vol — celle qui tourne est rapportée comme telle — et reste **une décision
    humaine** : le moniteur ne redemande jamais de lui-même, puisque rejouer
    coûte l'heure que la section 7 compte.
+
+   **Une campagne arrêtée court est incomplète, et c'est au HQ de choisir.**
+   Arrêtée à son délai (`mutation_minutes`), une campagne n'écrivait rien
+   dans `MUTANTS.json` : la porte 7 trouvait ensuite l'échec laissé sur la
+   même empreinte, renvoyait la mission au codeur avec « cette campagne a
+   déjà tourné et n'a rien mesuré », et les survivants déjà rapportés ne
+   voyageaient que dans ce texte. Désormais, ce que le journal de l'outil
+   tenait est enregistré, marqué `"stopped": {"by": "deadline",
+   "minutes": N}`, avec les décisions du HQ reportées comme à tout rejeu, et
+   **sans compte** : la part d'une partie de campagne est la part du mauvais
+   tout. Une campagne incomplète **ne rend jamais la porte 7 verte**, ne
+   répond jamais à `nunki push`, et ne sert jamais de base à une campagne
+   partielle. La porte 7 sur elle attend le HQ — un **mur**, ni un volet ni
+   une campagne due — et le moniteur s'y arrête en nommant les deux voies :
+   relever `mutation_minutes` et `nunki mission reframe --yes`, ce qui doit
+   une nouvelle campagne dès que la borne dépasse celle où elle s'est
+   arrêtée ; ou envoyer au codeur les survivants déjà rapportés par
+   `nunki mission iterate <mission> --because <pourquoi>` (4.5). La porte et
+   le lanceur en décident par la même fonction, et ne peuvent pas se
+   contredire.
+
+   **Le HQ peut annuler une campagne en vol.**
+   `nunki mission mutants <mission> --cancel --because <pourquoi>` l'arrête
+   comme le délai, l'enregistre incomplète avec
+   `"stopped": {"by": "cancelled", "because": …}`, et écrit la raison dans
+   `FOLLOWUP_HQ.md`. La mission reste à ses portes, où `iterate --because`
+   ou `mutants --again` la reprennent. Une campagne déjà finie est relue et
+   son résultat gardé ; une campagne gelée est refusée, parce que le signal
+   n'atteindrait pas un conteneur en pause et que l'oublier laisserait une
+   campagne que personne ne suit. Limites, écrites : une campagne arrêtée
+   court remplace celle du dossier, et une décision du HQ sur un survivant
+   qu'elle n'avait pas encore atteint n'est pas reportée au-delà d'elle — le
+   registre des équivalences du projet la propose de nouveau à la campagne
+   suivante ; sur une campagne arrêtée, le report ne garde que le jumeau
+   exact d'un survivant décidé, et échoue fermé pour le reste.
 
 8. **sécurité mécanique** : audit des dépendances, scan de secrets, analyse
    statique, par stack, dans `security.sh`.
@@ -2715,6 +2797,12 @@ Ce que la boucle veut dire, et ce qu'elle ne veut pas dire.
     branche vérifiée qui porte un commit hors de son sujet — un contournement
     d'un défaut de l'outillage, par exemple — ne peut que partir telle quelle
     ou être abandonnée.
+  - **Aux portes, sur une campagne incomplète** (arrêtée à son délai ou
+    annulée, 4.4), `iterate --because` est accepté aussi, et à la campagne
+    complète finale du niveau `critical` : il ouvre un volet comme une
+    porte 7 rouge, avec la raison dans `FOLLOWUP_HQ.md`. Ce n'est pas une
+    revue : le niveau d'exigence ne le borne pas, et `--override` y est
+    refusé, faute de rien à outrepasser.
   - `--because` n'est jamais facultatif : un risque accepté sans raison n'est
     pas accepté, il est oublié.
   - **Une acceptation vaut pour un `HEAD`**, comme le verdict qu'elle lève.
