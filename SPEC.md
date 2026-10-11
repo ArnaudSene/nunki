@@ -1909,8 +1909,9 @@ dernier lot. La première rouge arrête tout.
    depuis la dernière campagne verte sur cette mission. Son résultat est un
    fichier du dossier de mission que le HQ lit.
 
-   **Au niveau `standard`, les campagnes d'une mission forment une chaîne,
-   dont l'unité est le fichier.** La première est complète. Une suivante est
+   **Aux niveaux `standard` et `critical`, les campagnes d'une mission
+   forment une chaîne, dont l'unité est le fichier** (un `prototype` ne doit
+   aucune campagne). La première est complète. Une suivante est
    **partielle** : elle ne mute que les fichiers touchés dont le contenu a
    changé depuis le `HEAD` de la précédente, avec toujours le point de
    fourche dans `NUNKI_BASE` — dans ces fichiers, tout ce que la branche a
@@ -1922,8 +1923,24 @@ dernier lot. La première rouge arrête tout.
    chaque fichier compté qui n'a pas changé est touché et présent à `HEAD` ;
    le `mutation.sh` de la stack et la version de son outil sont inchangés ;
    `--again` n'a pas été demandé. Sinon la campagne est complète, et sa raison
-   est écrite dans `MUTANTS.json`. Au niveau `critical`, toutes sont
-   complètes.
+   est écrite dans `MUTANTS.json`.
+
+   **Au niveau `critical`, la chaîne sert pendant la mission, jamais à la
+   fin.** La reconstruction y est jugée sans seuil : chaque survivant
+   qu'elle liste, gardé d'un fichier inchangé ou trouvé par la dernière
+   campagne, doit recevoir une issue. Et **une campagne complète au `HEAD`
+   final est due avant `Verified`** : quand toutes les autres étapes dues
+   sont vertes (`CLEAR`, une levée, ou des tours épuisés sans rien à lever)
+   et que la campagne enregistrée au `HEAD` est partielle, `nunki` lance la
+   campagne complète, comme toute campagne. Verte, la mission est
+   `Verified` ; des survivants, et c'est un volet, compté dans la borne. Une
+   campagne qui a tourné complète de toute façon compte comme la finale
+   quand elle est au `HEAD` et passe. `nunki push`, au niveau `critical`,
+   exige que la campagne enregistrée ait tourné sur le contenu du commit
+   poussé, soit complète et passe ; son refus nomme
+   `nunki mission mutants <id> --again`. Mesuré sur une mission `critical` de
+   ce dépôt : sept campagnes complètes d'environ deux heures, là où la
+   chaîne en aurait demandé une ou deux.
 
    `MUTANTS.json` garde, pour chaque fichier touché, les comptes de la
    dernière campagne qui l'a mesuré. Un fichier inchangé garde ses comptes et
@@ -1933,7 +1950,8 @@ dernier lot. La première rouge arrête tout.
    total essayé, telle qu'une campagne complète à `HEAD` la donnerait. Aucun
    diff n'est lu ligne à ligne : deviner ce qu'un changement atteint a été
    contourné trois fois, comparer des contenus de fichiers ne l'est pas. La
-   limite, écrite avec son remède (`--again`, ou le niveau `critical`) : un
+   limite, écrite avec son remède (`--again`, ou la campagne complète finale
+   du niveau `critical`) : un
    mutant mesuré dans un fichier que personne n'a changé est supposé exister
    encore et être encore tué.
 
@@ -2733,7 +2751,25 @@ Ce que la boucle veut dire, et ce qu'elle ne veut pas dire.
   l'humain, avec les trois constats côte à côte. La valeur se règle dans
   `nunki.yaml` et par mission (`MISSION.md` prime), jamais en dur dans le
   moteur ; la mettre à zéro n'est pas « sans limite » mais « aucune
-  itération : le premier rouge remonte ».
+  itération : le premier rouge remonte ». **La borne vaut pour toute la vie
+  de la mission** : les volets se comptent par la longueur de leurs causes
+  enregistrées, jamais par un compteur qu'un verbe remet à zéro, et la
+  dépasser est une décision du HQ, un volet par `retry`, écrite. Un renvoi
+  du HQ après revue (`iterate --because` depuis `Verified`) est un volet
+  comme un autre ; au niveau `standard`, un second demande `--override`.
+- **Le niveau d'exigence lie aussi le HQ.** `nunki mission iterate` sur un
+  `FINDINGS` est refusé quand le niveau dit que le rapport ne bloque pas :
+  à `standard`, un rapport sans `HIGH` ; à `critical`, à partir du deuxième
+  tour, un rapport sans `HIGH`. Un rapport dont les constats ne portent pas
+  de sévérité lisible bloque, comme avant. Le refus nomme les deux voies :
+  `mission accept --because`, ou `mission iterate --override --because
+  <pourquoi>`, écrit daté dans `FOLLOWUP_HQ.md` comme un écart au niveau
+  d'exigence ; `--override` là où rien n'est refusé est refusé.
+  `mission status` liste chaque écart avec sa raison, `nunki push` les
+  ajoute au corps de la pull request (« Departures from the rigor ») sans
+  toucher `PR.md`, et la ligne de `mission wait` sur un rapport qui ne
+  bloque pas le dit et nomme `accept` d'abord. La règle d'arrêt des tours
+  ne tient plus à la discipline du HQ : l'outil la tient.
 - **Une décision attendue n'est pas une borne épuisée.** Un codeur qui finit
   son lot hormis des survivants qu'il ne peut ni tuer ni figer en bug le
   termine par `Lot: <lot> — awaits ruling: <quoi>`. `nunki` vérifie que
@@ -2761,9 +2797,16 @@ Ce que la boucle veut dire, et ce qu'elle ne veut pas dire.
   pour en sortir, une mission qui a épuisé ses volets serait finie sans être
   terminée.
   `nunki mission retry <mission> --because <ce qui a changé>` la reprend, sur
-  le travail où elle s'est arrêtée, **et rend les bornes entières** — remettre
-  le compteur *est* le verbe, pas un effet de bord : sans cela le rouge
-  suivant retombe dans la même remontée. La raison n'est pas facultative et ne
+  le travail où elle s'est arrêtée. Il rend entières les tentatives d'un lot
+  ou d'un rôle — remettre ce compteur *est* le verbe, pas un effet de bord :
+  sans cela le rouge suivant retombe dans la même remontée. Les volets, non :
+  après `VoletsExhausted`, `retry` en accorde **un**, écrit daté dans
+  `FOLLOWUP_HQ.md` (« Volet 4 of 3, granted by the HQ: <pourquoi> »), et le
+  rouge suivant rend de nouveau la mission. Un `retry` depuis une autre
+  remise ne touche pas au compte. `mission status` affiche `volets n / cap`
+  et, au-delà, `(m granted by the HQ)` ; la ligne de `mission wait` sur
+  `VoletsExhausted` nomme le compte et le verbe. Mesuré avant ce changement :
+  10 missions sur 50 dépassaient trois volets, l'une en comptait douze. La raison n'est pas facultative et ne
   va pas que dans l'état : elle est écrite dans `FOLLOWUP_HQ.md`, que chaque
   rôle lit avant tout le reste, parce que ni l'arbre ni la cause n'ont bougé
   d'eux-mêmes — un `retry` qui ne dit rien rachète la même remontée. Une
