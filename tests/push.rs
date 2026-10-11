@@ -162,6 +162,7 @@ impl World {
                 mutation_threshold: 80,
                 mutation_jobs: None,
                 forge_protection: Default::default(),
+                security_findings: Default::default(),
             },
             hq_root.parent().unwrap().to_path_buf(),
         );
@@ -2845,4 +2846,344 @@ fn an_override_without_because_is_refused_by_the_binary() {
     let said = world.printed_by_the_binary(&["mission", "iterate", "m1", "--override"]);
     assert!(said.contains("--because"), "{said}");
     assert!(world.state().flow.overrides().is_empty());
+}
+
+// --- an unfixed finding is not published by default (SPEC 4.5) -------------
+
+/// A `PR.md` whose security section holds its findings under sub-headings,
+/// between the coder's section and the integrator's.
+const PR_WITH_FINDINGS: &str = "# feat: one returns two\n\
+\n\
+Because it had to.\n\
+\n\
+## Security review\n\
+\n\
+Two findings, both accepted.\n\
+\n\
+### The open redirect\n\
+\n\
+`/login?next=` follows any host.\n\
+\n\
+#### How to reach it\n\
+\n\
+Send `next=//evil.example`.\n\
+\n\
+## Integration\n\
+\n\
+Wired in compose.yaml.\n";
+
+/// The security agent's `VERDICT.json` for the `FINDINGS` on `head`.
+fn findings_verdict(world: &World, head: &str) {
+    let verdict = serde_json::json!({
+        "role": "Security",
+        "verdict": "FINDINGS",
+        "head": head,
+        "date": T1,
+        "report": "an open redirect, a verbose error page",
+        "findings": [
+            {"severity": "MEDIUM", "title": "open redirect on /login"},
+            {"severity": "LOW", "title": "verbose error page", "why_acceptable": "it names no path"},
+            {"severity": "LOW", "title": "no rate limit", "why_acceptable": "behind the VPN"}
+        ]
+    });
+    std::fs::write(
+        world.project.hq_root.join("missions/m1/VERDICT.json"),
+        verdict.to_string(),
+    )
+    .unwrap();
+}
+
+/// A world at `Verified` on a `FINDINGS` the HQ lifted, on GitHub with a
+/// token, its `PR.md` saying `pr`.
+fn lifted_findings(pr: &str) -> World {
+    let world = World::at(nunki::mission::Rigor::Critical);
+    world.on_github();
+    world.with_token();
+    world.pr_says(pr);
+    let lot = world.coded("pub fn one() -> u8 { 2 }\n", "the lot");
+    world.security(Verdict::Findings, T1);
+    findings_verdict(&world, &lot);
+    world.accepted(&lot, T2);
+    assert_eq!(world.stage(), Stage::Verified);
+    world
+}
+
+/// Push `world`'s mission against a forge that opens the pull request, and
+/// return what push answered and the body the forge was sent.
+fn pushed_body(world: &World) -> (push::Pushed, String) {
+    let (api, server) = serve(vec![(
+        201,
+        r#"{"html_url":"https://github.com/o/r/pull/9"}"#,
+    )]);
+    let pushed = push::push_to(&world.project, "m1", true, &api).unwrap();
+    let sent = &server.join().unwrap()[0];
+    let body: serde_json::Value = serde_json::from_str(sent.split("\r\n\r\n").nth(1).unwrap())
+        .unwrap_or_else(|e| panic!("{e}: {sent}"));
+    (pushed, body["body"].as_str().unwrap().to_string())
+}
+
+fn pr_on_disk(world: &World) -> String {
+    std::fs::read_to_string(world.project.hq_root.join("missions/m1/PR.md")).unwrap()
+}
+
+/// A push over a `FINDINGS` the HQ lifted sends the pull request without
+/// the security section — its sub-headings included, and nothing after the
+/// next heading of its level lost — and with a note in its place, written
+/// from `VERDICT.json`: how many findings per severity, accepted by whom,
+/// and withheld until fixed. `PR.md` is not touched, and the push says what
+/// it withheld.
+#[test]
+fn a_push_over_a_lifted_findings_withholds_the_security_section() {
+    let world = lifted_findings(PR_WITH_FINDINGS);
+    let (pushed, body) = pushed_body(&world);
+
+    for secret in [
+        "Two findings, both accepted.",
+        "The open redirect",
+        "follows any host",
+        "How to reach it",
+        "evil.example",
+    ] {
+        assert!(!body.contains(secret), "{secret:?} published:\n{body}");
+    }
+    assert!(
+        body.starts_with("Because it had to.\n\n## Security\n\n"),
+        "{body}"
+    );
+    assert!(
+        body.contains("reported 3 finding(s) — 1 MEDIUM, 2 LOW"),
+        "{body}"
+    );
+    assert!(
+        body.contains("accepted, not fixed — by the HQ (Alex Martin)"),
+        "{body}"
+    );
+    assert!(
+        body.contains("withheld from this pull request until they are fixed"),
+        "{body}"
+    );
+    assert!(
+        body.ends_with("## Integration\n\nWired in compose.yaml."),
+        "{body}"
+    );
+    assert_eq!(
+        pushed.withheld,
+        Some(push::Withheld {
+            sections: 1,
+            findings: Some(3)
+        })
+    );
+    assert_eq!(pr_on_disk(&world), PR_WITH_FINDINGS);
+}
+
+/// The same push, in a project whose `nunki.yaml` says to publish, sends
+/// the section as written, and says nothing was withheld.
+#[test]
+fn a_project_that_publishes_its_findings_sends_the_section_as_written() {
+    let mut world = lifted_findings(PR_WITH_FINDINGS);
+    world.project.config.security_findings = nunki::project::SecurityFindings::Publish;
+    let (pushed, body) = pushed_body(&world);
+
+    let written = PR_WITH_FINDINGS
+        .strip_prefix("# feat: one returns two\n\n")
+        .unwrap()
+        .trim_end();
+    assert_eq!(body, written);
+    assert_eq!(pushed.withheld, None);
+    assert_eq!(pr_on_disk(&world), PR_WITH_FINDINGS);
+}
+
+/// A push over a `CLEAR` has nothing unfixed to withhold: the section goes
+/// out as written.
+#[test]
+fn a_push_over_a_clear_sends_the_security_section_as_written() {
+    let world = World::new(with_wiring(), Security::Agent);
+    world.on_github();
+    world.with_token();
+    world.pr_says(PR_WITH_FINDINGS);
+    world.ready();
+    let (pushed, body) = pushed_body(&world);
+
+    assert!(
+        body.contains("### The open redirect\n\n`/login?next=` follows any host."),
+        "{body}"
+    );
+    assert!(!body.contains("withheld"), "{body}");
+    assert_eq!(pushed.withheld, None);
+    assert_eq!(pr_on_disk(&world), PR_WITH_FINDINGS);
+}
+
+/// A `FINDINGS` nunki lifted itself is withheld too, and the note says it
+/// was nunki that accepted it.
+#[test]
+fn a_findings_lifted_by_nunki_is_withheld_naming_nunki() {
+    let world = World::at(nunki::mission::Rigor::Critical);
+    world.on_github();
+    world.with_token();
+    world.pr_says(PR_WITH_FINDINGS);
+    let lot = world.coded("pub fn one() -> u8 { 2 }\n", "the lot");
+    world.security(Verdict::Findings, T1);
+    findings_verdict(&world, &lot);
+    world.lifted_by_nunki();
+    let (pushed, body) = pushed_body(&world);
+
+    assert!(!body.contains("evil.example"), "{body}");
+    assert!(
+        body.contains("by nunki, every one being LOW or INFO"),
+        "{body}"
+    );
+    assert_eq!(pushed.withheld.map(|w| w.sections), Some(1));
+}
+
+/// A `VERDICT.json` that is not the security agent's verdict on the lifted
+/// commit — another role's, or another commit's — gives no count: the note
+/// says so rather than count another verdict's findings, and the section
+/// is withheld all the same.
+#[test]
+fn a_verdict_file_that_is_not_the_lifted_one_gives_no_count() {
+    let world = lifted_findings(PR_WITH_FINDINGS);
+    findings_verdict(&world, "0000000000000000000000000000000000000000");
+    let (pushed, body) = pushed_body(&world);
+
+    assert!(!body.contains("evil.example"), "{body}");
+    assert!(
+        body.contains("findings whose number nunki could not read"),
+        "{body}"
+    );
+    assert_eq!(
+        pushed.withheld,
+        Some(push::Withheld {
+            sections: 1,
+            findings: None
+        })
+    );
+}
+
+/// `nunki push`, through the real binary, says how many findings it
+/// withheld from the pull request.
+#[test]
+fn push_says_what_it_withheld() {
+    let world = World::opened_at(nunki::mission::Rigor::Critical);
+    world.pr_says(PR_WITH_FINDINGS);
+    let lot = world.coded("pub fn one() -> u8 { 2 }\n", "the lot");
+    world.security(Verdict::Findings, T1);
+    findings_verdict(&world, &lot);
+    world.accepted(&lot, T2);
+    let out = world.pushed_by_the_binary();
+    assert!(
+        out.contains(
+            "security  withheld from the pull request: 1 `Security` section(s) of PR.md, on 3 \
+             finding(s) accepted and not fixed"
+        ),
+        "{out}"
+    );
+    assert!(
+        out.contains("PR.md still holds the `Security` section(s)"),
+        "{out}"
+    );
+}
+
+/// Every section under a heading beginning with `Security` is withheld:
+/// two of them both go, the note standing in the first's place only.
+#[test]
+fn two_security_headings_are_both_withheld() {
+    let body = "Intro.\n\n## Security\n\nfirst secret\n\n## Tests\n\nkept\n\n\
+                ## Security, round 2\n\nsecond secret\n";
+    let (out, n) = push::without_security(body, "Security\n\nNOTE");
+    assert_eq!(n, 2);
+    assert_eq!(out, "Intro.\n\n## Security\n\nNOTE\n\n## Tests\n\nkept");
+}
+
+/// A section runs to the next heading of its own level or higher: its
+/// sub-headings go with it, a deeper heading after it stays inside it, and
+/// what follows a heading of a higher level is kept.
+#[test]
+fn a_security_section_ends_at_the_next_heading_of_its_level() {
+    let body = "# Lot\n\n### Security\n\nsecret\n\n#### detail\n\nsecret too\n\n\
+                ### Next\n\nkept\n\n## Higher\n\nkept too\n";
+    let (out, n) = push::without_security(body, "Security\n\nNOTE");
+    assert_eq!(n, 1);
+    assert_eq!(
+        out,
+        "# Lot\n\n### Security\n\nNOTE\n\n### Next\n\nkept\n\n## Higher\n\nkept too"
+    );
+    // Lower-case, and as a last section running to the end.
+    let (out, n) = push::without_security("a\n\n## security notes\n\nsecret\n", "N");
+    assert_eq!((out.as_str(), n), ("a\n\n## N", 1));
+}
+
+/// Headings are read as the forge renders them: an underlined one is a
+/// heading, a `#` line in a fenced code block is code, and `#Security` with
+/// no space is not a heading, so it neither opens nor ends a section.
+#[test]
+fn security_headings_are_read_as_the_forge_renders_them() {
+    let body = "Intro.\n\nSecurity\n========\n\nsecret\n";
+    let (out, n) = push::without_security(body, "N");
+    assert_eq!((out.as_str(), n), ("Intro.\n\n# N", 1));
+
+    let body = "## Security\n\n```sh\n# Tests\nsecret\n```\n\n## Tests\n\nkept\n";
+    let (out, n) = push::without_security(body, "N");
+    assert_eq!((out.as_str(), n), ("## N\n\n## Tests\n\nkept", 1));
+
+    let body = "## Notes\n\n#Security\n\nkept\n";
+    assert_eq!(push::without_security(body, "N"), (body.to_string(), 0));
+
+    let body = "## Notes\n\nkept\n\n---\n\n## Security\n\nsecret\n";
+    let (out, n) = push::without_security(body, "N");
+    assert_eq!((out.as_str(), n), ("## Notes\n\nkept\n\n---\n\n## N", 1));
+}
+
+/// A section with no heading of its own level after it runs to the next
+/// heading of a higher one, and no further; a `Security` sub-heading inside
+/// it is part of it, not a second section.
+#[test]
+fn a_security_section_stops_at_a_higher_heading_and_holds_its_own_sub_headings() {
+    let body =
+        "### Security\n\nsecret\n\n#### Security details\n\nsecret too\n\n## Higher\n\nkept\n";
+    let (out, n) = push::without_security(body, "N");
+    assert_eq!((out.as_str(), n), ("### N\n\n## Higher\n\nkept", 1));
+}
+
+/// A rule is not the first line of a paragraph: `Security` underlined just
+/// after one is a heading, as the forge renders it.
+#[test]
+fn an_underlined_security_heading_after_a_rule_is_a_heading() {
+    let body = "## Notes\n\nkept\n\n---\nSecurity\n---\n\nsecret\n";
+    let (out, n) = push::without_security(body, "N");
+    assert_eq!((out.as_str(), n), ("## Notes\n\nkept\n\n---\n## N", 1));
+}
+
+/// A `PR.md` with no security section loses nothing: the body is sent as
+/// written, and the push says no section was withheld.
+#[test]
+fn a_pull_request_with_no_security_section_loses_nothing() {
+    let written = "# feat: one returns two\n\nBecause it had to.\n\n## Integration\n\nWired.\n";
+    let world = lifted_findings(written);
+    let (pushed, body) = pushed_body(&world);
+    assert_eq!(body, "Because it had to.\n\n## Integration\n\nWired.");
+    assert_eq!(
+        pushed.withheld,
+        Some(push::Withheld {
+            sections: 0,
+            findings: Some(3)
+        })
+    );
+}
+
+/// A `FINDINGS` written under another role's name is not the security
+/// agent's list, even on the lifted commit: it gives no count.
+#[test]
+fn a_findings_under_another_roles_name_gives_no_count() {
+    let world = lifted_findings(PR_WITH_FINDINGS);
+    let file = world.project.hq_root.join("missions/m1/VERDICT.json");
+    let text = std::fs::read_to_string(&file)
+        .unwrap()
+        .replace("\"Security\"", "\"Integrator\"");
+    std::fs::write(&file, text).unwrap();
+    let (pushed, body) = pushed_body(&world);
+    assert!(
+        body.contains("findings whose number nunki could not read"),
+        "{body}"
+    );
+    assert_eq!(pushed.withheld.and_then(|w| w.findings), None);
 }

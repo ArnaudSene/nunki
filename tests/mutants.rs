@@ -317,6 +317,7 @@ fn context(dir: &Path) -> (nunki::project::Project, nunki::slot::Slot) {
             mutation_threshold: 80,
             mutation_jobs: None,
             forge_protection: Default::default(),
+            security_findings: Default::default(),
         },
         dir.join("nunki"),
     );
@@ -644,6 +645,7 @@ fn live_a_campaign_is_launched_watched_and_read_back() {
             mutation_threshold: 80,
             mutation_jobs: None,
             forge_protection: Default::default(),
+            security_findings: Default::default(),
         },
         dir.path().join("nunki"),
     );

@@ -122,6 +122,11 @@ pub struct Config {
     /// or the human (SPEC 4.1 bis, "branche protégée").
     #[serde(default)]
     pub forge_protection: ForgeProtection,
+    /// Whether `nunki push` withholds the security agent's section of `PR.md`
+    /// from the pull request while its findings are lifted and not fixed
+    /// ([`SecurityFindings`]). Absent, they are withheld.
+    #[serde(default)]
+    pub security_findings: SecurityFindings,
 }
 
 /// One stack a project declares: a fragment's name, and the directory of the
@@ -375,6 +380,25 @@ pub enum ForgeProtection {
     /// The human holds the rule; `nunki check` does not ask the forge, and says
     /// so for every protected branch.
     ByHand,
+}
+
+/// What `nunki push` does with the security agent's section of `PR.md` when
+/// the verdict that answers the push is a `FINDINGS` that was lifted — by the
+/// HQ's `accept`, or by `nunki` for `LOW` and `INFO` (SPEC 4.5). Those
+/// findings are not fixed, and the pull request's body is published: on a
+/// public repository the section would describe an open flaw, and an edit
+/// afterwards leaves it in the forge's history.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SecurityFindings {
+    /// Every section under a heading that begins with `Security` is replaced,
+    /// on the way to the forge, by a note saying how many findings were
+    /// accepted, by whom, and that their details are withheld.
+    #[default]
+    Withhold,
+    /// The section is published as written: for a repository only its
+    /// owners read.
+    Publish,
 }
 
 /// The two modes of SPEC 4.1. There is no "ask": nothing can ask in an

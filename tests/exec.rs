@@ -363,6 +363,7 @@ fn project(root: &Path) -> Project {
             mutation_threshold: 80,
             mutation_jobs: None,
             forge_protection: Default::default(),
+            security_findings: Default::default(),
         },
         root.join("nunki"),
     )

@@ -52,6 +52,7 @@ fn repository(dir: &Path) -> Project {
             mutation_threshold: 80,
             mutation_jobs: None,
             forge_protection: Default::default(),
+            security_findings: Default::default(),
         },
         dir.join("nunki"),
     )

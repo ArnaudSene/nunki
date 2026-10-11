@@ -119,6 +119,9 @@ Two more decide how the agents run: `model` (which model they use, absent
 means the harness's own default) and `permission_mode` (`auto` by default —
 what the harness does with a permission it would otherwise ask a human
 about, since nobody is there to ask).
+`security_findings` decides whether the security agent's section of the
+pull request is withheld while its findings are accepted and not fixed
+(`withhold`, the default) or published as written (`publish`).
 Then commit the three files `nunki init` wrote in the repository, build the
 images and clone a slot:
 
@@ -636,6 +639,20 @@ anything `nunki` cannot read for certain: no ranking at all, an empty list, an
 unknown severity, a `LOW` without its reason. Such a lift obeys every rule
 push applies to a human's: it is worth its commit, and a later `FINDINGS` is
 not covered by it.
+
+A finding accepted is not a finding fixed, and the pull request is
+published. So when the verdict `nunki push` stands on is a lifted
+`FINDINGS` — by `mission accept` or by `nunki` — every section of `PR.md`
+under a heading that begins with `Security` (where the security agent
+writes) is replaced, in the pull request only, by a note: how many findings
+per severity, accepted by whom, and that their details are withheld until
+they are fixed. A section runs to the next heading of its own level or
+higher, so its sub-headings go with it. `PR.md` is left as it is, `nunki
+push` says how many findings it withheld, and `mission status` and
+`VERDICT.json` still hold them in full. Only that section is withheld: what
+another section says is published as written. A repository only its owners
+read can say `security_findings: publish` in `nunki.yaml` to send the
+section as written; absent, it is `withhold`. A `CLEAR` sends it as written.
 
 ## Vocabulary
 

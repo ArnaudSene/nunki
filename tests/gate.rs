@@ -198,6 +198,7 @@ impl Fixture {
                 mutation_threshold: self.threshold,
                 mutation_jobs: None,
                 forge_protection: Default::default(),
+                security_findings: Default::default(),
             },
             nunki,
         );
@@ -946,6 +947,7 @@ fn live_the_battery_is_the_stacks_mounted_one_and_an_absent_one_is_red() {
             mutation_threshold: 80,
             mutation_jobs: None,
             forge_protection: Default::default(),
+            security_findings: Default::default(),
         },
         dir.path().join("nunki"),
     );

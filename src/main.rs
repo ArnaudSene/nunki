@@ -1162,6 +1162,23 @@ fn main() -> ExitCode {
                             println!("          {}", nunki::text::one_line(finding));
                         }
                     }
+                    // Findings accepted and not fixed are not published by
+                    // default (`security_findings` in nunki.yaml): said here,
+                    // with how many, so nobody wonders where the section went.
+                    // `mission status` still shows them in full.
+                    let withheld = pushed.withheld.as_ref().filter(|w| w.sections > 0);
+                    if let Some(w) = withheld {
+                        let findings = match w.findings {
+                            Some(n) => format!("{n} finding(s)"),
+                            None => "findings nunki could not count".to_string(),
+                        };
+                        println!(
+                            "security  withheld from the pull request: {} `Security` section(s) \
+                             of PR.md, on {findings} accepted and not fixed — a note stands in \
+                             their place",
+                            w.sections
+                        );
+                    }
                     match pushed.pull_request {
                         nunki::push::PullRequestState::Opened(nunki::forge::Opened::Created(
                             url,
@@ -1180,6 +1197,12 @@ fn main() -> ExitCode {
                             println!("pull request not opened by nunki: {why}");
                             if let Some(url) = compare {
                                 println!("          open it yourself at {url}");
+                            }
+                            if withheld.is_some() {
+                                println!(
+                                    "          PR.md still holds the `Security` section(s): \
+                                     leave them out of what you publish"
+                                );
                             }
                         }
                     }

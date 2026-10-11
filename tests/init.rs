@@ -3750,3 +3750,38 @@ exit 0
         );
     }
 }
+
+/// The template names `security_findings`, commented out: left so, the
+/// findings a push stands on unfixed are withheld from the pull request;
+/// uncommented, they are published as written. An unknown value is refused
+/// rather than read as either.
+#[test]
+fn the_nunki_yaml_it_writes_withholds_unfixed_findings_unless_told_to_publish() {
+    use nunki::project::SecurityFindings;
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    init(&repo, &home(&repo), &["rust".to_string()]).unwrap();
+
+    let text = std::fs::read_to_string(home(&repo).join("nunki.yaml")).unwrap();
+    assert!(text.contains("\n# security_findings: publish\n"), "{text}");
+    let commented: nunki::project::Config = serde_yaml_ng::from_str(&text).unwrap();
+    assert_eq!(commented.security_findings, SecurityFindings::Withhold);
+    let published: nunki::project::Config =
+        serde_yaml_ng::from_str(&text.replace("\n# security_findings:", "\nsecurity_findings:"))
+            .unwrap();
+    assert_eq!(published.security_findings, SecurityFindings::Publish);
+    let withheld: nunki::project::Config = serde_yaml_ng::from_str(&text.replace(
+        "\n# security_findings: publish",
+        "\nsecurity_findings: withhold",
+    ))
+    .unwrap();
+    assert_eq!(withheld.security_findings, SecurityFindings::Withhold);
+    assert!(
+        serde_yaml_ng::from_str::<nunki::project::Config>(&text.replace(
+            "\n# security_findings: publish",
+            "\nsecurity_findings: maybe"
+        ),)
+        .is_err()
+    );
+}
