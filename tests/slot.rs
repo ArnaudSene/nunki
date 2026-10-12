@@ -700,3 +700,138 @@ fn a_run_in_another_slot_does_not_block_a_reset() {
     store.save(&state).unwrap();
     assert!(nunki::slot::reset(&project, "one", &engine, true).is_err());
 }
+
+/// A live run of mission `id` in slot `one`, recorded in the state store,
+/// its mission framed as `mission new` frames it.
+fn running(project: &Project, id: &str) -> nunki::state::MissionState {
+    framed(project, id);
+    let header = nunki::mission::dir::read_header(&project.hq_root, id).unwrap();
+    let state = nunki::state::MissionState {
+        id: id.into(),
+        slot: "one".into(),
+        flow: nunki::mission::flow::Flow::new(header).unwrap(),
+        run: Some(nunki::harness::RunHandle {
+            session: nunki::harness::SessionId("s1".into()),
+            container: "cafe1234".into(),
+            pid: Some(41),
+            log: PathBuf::from("/dev/null"),
+        }),
+        app: None,
+        verdicts: Vec::new(),
+        accepted: Vec::new(),
+        stopped: None,
+        harness_down: None,
+        spent: Default::default(),
+        spared: None,
+        coder_session: None,
+        pushed: None,
+        updated_at: "2026-09-10T00:00:00Z".into(),
+        revision: 0,
+    };
+    nunki::state::Store::open(&project.hq_root)
+        .unwrap()
+        .save(&state)
+        .unwrap();
+    state
+}
+
+/// A list of missions that cannot be read is not an empty list: with a live
+/// run in the slot and `missions/` unreadable — at mode 000, or not a
+/// directory at all — the reset refuses, names the directory and why, and
+/// changes nothing: not the tree, not a container, not a volume.
+#[test]
+fn resetting_refuses_when_the_list_of_missions_cannot_be_read() {
+    use nunki::engine::fake::FakeEngine;
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let project = repository(dir.path());
+    let slot = add(&project, "one").unwrap();
+    std::fs::write(slot.tree.join("half-written.rs"), "fn oops(").unwrap();
+    running(&project, "m1");
+    let missions = project.hq_root.join("missions");
+    let cache = nunki::exec::proof_volume("one");
+
+    for unreadable in ["mode 000", "a file"] {
+        match unreadable {
+            "mode 000" => {
+                std::fs::set_permissions(&missions, std::fs::Permissions::from_mode(0o000))
+                    .unwrap();
+                // Under a uid that reads through any mode, this case
+                // proves nothing; the other one still does.
+                if std::fs::read_dir(&missions).is_ok() {
+                    eprintln!("mode 000 does not stop this uid: case not measured");
+                    std::fs::set_permissions(&missions, std::fs::Permissions::from_mode(0o755))
+                        .unwrap();
+                    continue;
+                }
+            }
+            _ => {
+                std::fs::set_permissions(&missions, std::fs::Permissions::from_mode(0o755))
+                    .unwrap();
+                std::fs::rename(&missions, dir.path().join("missions-aside")).unwrap();
+                std::fs::write(&missions, "not a directory").unwrap();
+            }
+        }
+        let engine = FakeEngine::default()
+            .with_lifted(the_agent())
+            .with_volume(&cache);
+
+        let err = nunki::slot::reset(&project, "one", &engine, true).unwrap_err();
+        assert!(
+            matches!(err, SlotError::MissionsUnreadable { .. }),
+            "{unreadable}: {err}"
+        );
+        let said = err.to_string();
+        assert!(said.contains(&missions.display().to_string()), "{said}");
+        assert!(said.contains("nothing in it was changed"), "{said}");
+        assert!(
+            slot.tree.join("half-written.rs").exists(),
+            "{unreadable}: refused means refused"
+        );
+        assert!(engine.calls.lock().unwrap().is_empty(), "{unreadable}");
+        assert_eq!(
+            engine.volumes(),
+            std::slice::from_ref(&cache),
+            "{unreadable}"
+        );
+    }
+}
+
+/// A run the state store records in this slot blocks the reset whether or
+/// not its mission folder is listed: without its `MISSION.md`, or without
+/// its folder at all. The control: the same mission with no run in flight,
+/// everything readable, and the reset proceeds as it always did.
+#[test]
+fn a_run_the_state_records_blocks_a_reset_without_its_mission_folder() {
+    use nunki::engine::fake::FakeEngine;
+
+    let dir = tempfile::tempdir().unwrap();
+    let project = repository(dir.path());
+    let slot = add(&project, "one").unwrap();
+    std::fs::write(slot.tree.join("half-written.rs"), "fn oops(").unwrap();
+    let mut state = running(&project, "m1");
+    let folder = project.hq_root.join("missions/m1");
+    let engine = FakeEngine::default().with_lifted(the_agent());
+
+    std::fs::remove_file(folder.join("MISSION.md")).unwrap();
+    let err = nunki::slot::reset(&project, "one", &engine, true).unwrap_err();
+    assert!(matches!(err, SlotError::Busy { .. }), "{err}");
+    assert!(err.to_string().contains("mission m1"), "{err}");
+
+    std::fs::remove_dir_all(&folder).unwrap();
+    let err = nunki::slot::reset(&project, "one", &engine, true).unwrap_err();
+    assert!(matches!(err, SlotError::Busy { .. }), "{err}");
+    assert!(slot.tree.join("half-written.rs").exists());
+    assert!(engine.calls.lock().unwrap().is_empty());
+
+    framed(&project, "m1");
+    state.run = None;
+    nunki::state::Store::open(&project.hq_root)
+        .unwrap()
+        .save(&state)
+        .unwrap();
+    let reset = nunki::slot::reset(&project, "one", &engine, true).unwrap();
+    assert_eq!(reset.taken_down, ["agent"]);
+    assert!(!slot.tree.join("half-written.rs").exists());
+}

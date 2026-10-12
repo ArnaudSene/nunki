@@ -955,6 +955,11 @@ mission not archived cannot be read, since it then cannot tell whether that
 mission runs there: it names the file and why, and changes nothing. Repair
 the file, or, for a mission that is over, move its state file aside: the
 mission then reads as never started, and `nunki mission archive` closes it.
+A list of missions that cannot be read is not an empty one: when the HQ's
+`missions/` directory cannot be read, the reset refuses the same way, naming
+the directory. And a run the state store records in the slot blocks the reset
+whether or not its mission folder is there: every state file not archived is
+read, with or without a `MISSION.md` beside it.
 
 Finally, the binary and the accounts, once no project uses them:
 
