@@ -7,7 +7,23 @@
 # Anything RustSec knows about is an error. Ignoring one must be a written
 # decision, listed here with the reason.
 yanked = "deny"
-ignore = []
+ignore = [
+    # unsafe-libyaml is unmaintained (RUSTSEC-2024-0449, published
+    # 2026-10-12): its repository is archived and no patched version exists.
+    # It comes with serde_yaml_ng 0.10.0, the latest release, which reads and
+    # writes every YAML file nunki handles. The advisory reports no
+    # vulnerability: it says that one found later would not be fixed
+    # upstream. Where that would matter is the one YAML file nunki parses on
+    # the host that an agent may have written, a project's services file.
+    #
+    # Accepted until 2026-11-08, the day the image scan's own exceptions
+    # expire (.trivyignore.yaml). Neither auditor can expire an entry, so the
+    # date is a rule and not a mechanism: by then the YAML dependency is
+    # replaced by a parser written in safe Rust, or this entry is argued
+    # again here. `cargo audit` reads the same id from .cargo/audit.toml:
+    # remove both together.
+    { id = "RUSTSEC-2024-0449", reason = "unmaintained, no vulnerability reported, no patched version; serde_yaml_ng 0.10.0, the latest, depends on it; to be replaced by 2026-11-08" },
+]
 
 [licenses]
 # Permissive only, and only what the tree actually needs — plus ISC and the
