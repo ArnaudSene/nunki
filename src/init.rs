@@ -1055,8 +1055,8 @@ out="target/mutants-$campaign"
 # that has changed since. A replay of the same fingerprint reuses the same
 # path, so it is reachable.
 #
-# Cleared first, the same failure leaves nothing, and the `[ ! -f "$missed" ]`
-# below says "the campaign left no missed.txt" — which is the truth.
+# Cleared first, the same failure leaves nothing, and the `[ ! -f "$outcomes" ]`
+# below says "the campaign left no outcomes.json" — which is the truth.
 #
 # The parent has to exist: `--output` creates its own directory and not the
 # path above it, and a clean copy of HEAD that has never been built has no
