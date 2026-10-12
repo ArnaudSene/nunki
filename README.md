@@ -647,12 +647,23 @@ under a heading that begins with `Security` (where the security agent
 writes) is replaced, in the pull request only, by a note: how many findings
 per severity, accepted by whom, and that their details are withheld until
 they are fixed. A section runs to the next heading of its own level or
-higher, so its sub-headings go with it. `PR.md` is left as it is, `nunki
-push` says how many findings it withheld, and `mission status` and
-`VERDICT.json` still hold them in full. Only that section is withheld: what
-another section says is published as written. A repository only its owners
-read can say `security_findings: publish` in `nunki.yaml` to send the
-section as written; absent, it is `withhold`. A `CLEAR` sends it as written.
+higher, so its sub-headings go with it, and a line `nunki` is not sure is
+a heading — a fence it reads one way and the forge may read another — can
+open a section but never end one. `PR.md` is left as it is, `nunki push`
+says how many findings it withheld, and `VERDICT.json` still holds them in
+full; `mission status`, once `mission accept` has lifted them, shows the
+stage and no longer the report. A push that must withhold and reads no
+`Security` section in `PR.md` — none written, or one under a form `nunki`
+does not read, such as `## **Security**`, a heading in a quote, or the
+file's first line, which is the title — **refuses before anything is
+pushed**, says how many findings were accepted, and names the two ways
+past: a heading `nunki` reads (the HQ may edit `PR.md`), or
+`security_findings: publish`. Only that section is withheld: what another
+section says is published as written, and so is a second security section
+under a form `nunki` does not read when it did read a first one. A
+repository only its owners read can say `security_findings: publish` in
+`nunki.yaml` to send the section as written; absent, it is `withhold`. A
+`CLEAR` sends it as written.
 
 ## Vocabulary
 

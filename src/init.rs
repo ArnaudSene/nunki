@@ -564,8 +564,9 @@ permission_mode: {permission_mode}
 # it, in the pull request only, with a note saying how many were accepted and
 # by whom; `publish` sends it as written, for a repository only its owners
 # read. Only that section is withheld: what another section says is published
-# as written. PR.md itself is never changed, and `nunki mission status` shows
-# the findings in full.
+# as written. A push that must withhold and reads no such section in PR.md
+# refuses, before anything is pushed. PR.md itself is never changed, and the
+# security agent's VERDICT.json keeps the findings in full.
 # security_findings: publish
 
 protected_paths:
