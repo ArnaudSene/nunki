@@ -133,22 +133,23 @@ pub enum PushError {
         rigor: crate::mission::Rigor,
         file: &'static str,
     },
-    /// A push that must withhold the security agent's section and read
-    /// none in `PR.md` (SPEC 4.5): sending the body as written could
-    /// publish findings under a heading `nunki` did not read as one.
+    /// A push that must withhold, over a `PR.md` that may still hold the
+    /// section a security agent wrote under an older `nunki` (SPEC 4.5): see
+    /// `old_security_headings`. Refused before anything leaves; nothing is
+    /// cut.
     #[error(
-        "mission {mission} stands on a FINDINGS accepted and not fixed ({findings}), and the \
-         project withholds those from the pull request, but nunki found no `Security` section \
-         it could read in {pr}: sending it as written could publish them, so nothing was \
-         pushed. Either give the security agent's section a heading nunki reads — `## \
-         Security` on a line of its own, outside any quote or code block, and not the file's \
-         first line, which is the title (the HQ may edit {pr}) — or set `security_findings: \
-         publish` in nunki.yaml to publish the findings as written"
+        "mission {mission} stands on a FINDINGS accepted and not fixed, and the project \
+         withholds those from the pull request, but {pr} holds what reads as a Security \
+         heading — {lines} — the section a security agent wrote there under an older nunki. \
+         PR.md is sent as written, so nothing was pushed. Either edit {pr} and take that \
+         section out or rename its heading (the HQ may edit it), or set `security_findings: \
+         publish` in nunki.yaml to publish the findings"
     )]
-    NothingWithheld {
+    SecurityHeadingInPr {
         mission: String,
-        findings: String,
         pr: String,
+        /// Each line that fired, as `line N: <text>`, joined.
+        lines: String,
     },
     #[error(transparent)]
     Mutants(#[from] crate::mutants::MutantsError),
@@ -379,6 +380,19 @@ pub fn push_to(
         .as_ref()
         .map(|a| security_section(a, withhold, &not_attacked));
     let withheld = section.as_ref().and_then(|(_, withheld)| withheld.clone());
+    // The one transition case: a section a security agent wrote in `PR.md`
+    // under an older `nunki`, which a push sending `PR.md` as written would
+    // publish. Refused, never cut, and only when the push must withhold.
+    if withheld.is_some() {
+        let found = old_security_headings(&text);
+        if !found.is_empty() {
+            return Err(PushError::SecurityHeadingInPr {
+                mission: id.to_string(),
+                pr: paths.pr.display().to_string(),
+                lines: found.join("; "),
+            });
+        }
+    }
     let request = request.map(|r| {
         let body = with_overrides(&r.body, state.flow.overrides());
         crate::forge::PullRequest {
@@ -1174,6 +1188,38 @@ fn quoted(text: &str) -> String {
         .join("\n")
 }
 
+/// The lines of `pr` on which a `#` comes before the first letter, and
+/// that letter starts `security`, in any case: `## Security review`,
+/// `> ## Security`, `## **Security**`. Each as `line N: <text>`, in order.
+/// Line breaks are the forge's: `\n`, `\r\n`, and a lone `\r`.
+///
+/// **This is not the guard, and it is coarse on purpose** (SPEC 4.5). The
+/// guard is that the security agent cannot write `PR.md`: its profile does
+/// not mount it. This catches the one thing that guard cannot: a section a
+/// cooperative security agent wrote under an older `nunki`, as its role then
+/// told it to, in a mission still running. A push that must withhold
+/// refuses over such a line, and in doing so reminds the HQ to read
+/// `PR.md`. It refuses; it never cuts, and it decides nowhere where a
+/// section ends.
+///
+/// It reads no Markdown, and it is not trying to. A heading in another form
+/// — `<h2>Security</h2>`, `Security` underlined with `===`, a heading that
+/// begins with another word — passes, and falls under the stated limit:
+/// what the coder or the integrator writes in `PR.md` is published as
+/// written, a finding they describe included. `nunki` does not read their
+/// prose; the HQ reads `PR.md` before a push.
+fn old_security_headings(pr: &str) -> Vec<String> {
+    pr.replace("\r\n", "\n")
+        .split(['\n', '\r'])
+        .enumerate()
+        .filter_map(|(n, line)| {
+            let first = line.find(char::is_alphabetic)?;
+            (line[..first].contains('#') && line[first..].to_lowercase().starts_with("security"))
+                .then(|| format!("line {}: {}", n + 1, crate::text::one_line(line)))
+        })
+        .collect()
+}
+
 /// `body` followed by `section`, a blank line between them; `section` alone
 /// when the body is empty.
 fn with_section(body: &str, section: &str) -> String {
@@ -1182,181 +1228,6 @@ fn with_section(body: &str, section: &str) -> String {
     } else {
         format!("{}\n\n{section}", body.trim_end())
     }
-}
-
-/// The pull request's body with every section under a heading that begins
-/// with `Security` — case aside, as gate 5 reads `Integration` — replaced by
-/// `note`: the note in place of the first, the others dropped. Returns the
-/// body and how many sections it lost.
-///
-/// A section runs from its heading to the next heading of the same or a
-/// higher level, or to the end of the body: a finding under its own
-/// sub-heading is inside it and goes with it. Headings are read as the forge
-/// renders them — `#` to `######` followed by a space or nothing, indented
-/// three spaces at most, and a paragraph underlined with `=` or `-` — and
-/// never inside a fenced code block, where a `#` line is code.
-///
-/// A line whose reading is in doubt may open a section, never end one. The
-/// body is read twice: once with CommonMark's fences ([`Fences::CommonMark`])
-/// and once with every line that starts like a fence taken as one
-/// ([`Fences::Any`]). A `Security` heading either reading finds opens a
-/// section — one heading too many, before a section, is harmless — and only
-/// a heading both readings find ends one: inside a section, a line wrongly
-/// read as a heading would end it early, and what follows would be
-/// published.
-///
-/// Only those sections are withheld. What another section says is
-/// published as written. And a body where one section was cut and another
-/// was written under a form this does not read — `## **Security**`, a
-/// heading in a quote — still publishes the second: the refusal of a push
-/// that cut none ([`PushError::NothingWithheld`]) cannot see it.
-pub fn without_security(body: &str, note: &str) -> (String, usize) {
-    let lines: Vec<&str> = body.lines().collect();
-    let strict = headings(&lines, Fences::CommonMark);
-    let liberal = headings(&lines, Fences::Any);
-    let mut starts: Vec<(usize, usize)> = strict
-        .iter()
-        .chain(&liberal)
-        .filter(|(_, _, text)| text.to_lowercase().starts_with("security"))
-        .map(|(at, level, _)| (*at, *level))
-        .collect();
-    starts.sort_unstable();
-    starts.dedup();
-    let ends: Vec<(usize, usize)> = strict
-        .iter()
-        .filter(|(at, level, _)| liberal.iter().any(|h| h.0 == *at && h.1 == *level))
-        .map(|(at, level, _)| (*at, *level))
-        .collect();
-    let mut cut: Vec<(usize, usize, usize)> = Vec::new();
-    let mut covered = 0;
-    for (at, level) in starts {
-        // A `Security` heading inside a section already cut goes with it.
-        if at < covered {
-            continue;
-        }
-        let end = ends
-            .iter()
-            .find(|(n, l)| *n > at && *l <= level)
-            .map_or(lines.len(), |(n, _)| *n);
-        cut.push((at, end, level));
-        covered = end;
-    }
-    if cut.is_empty() {
-        return (body.to_string(), 0);
-    }
-    let mut out: Vec<String> = Vec::new();
-    let mut at = 0;
-    for (n, (from, to, level)) in cut.iter().enumerate() {
-        out.extend(lines[at..*from].iter().map(|l| l.to_string()));
-        if n == 0 {
-            out.push(format!("{} {note}", "#".repeat(*level)));
-            out.push(String::new());
-        }
-        at = *to;
-    }
-    out.extend(lines[at..].iter().map(|l| l.to_string()));
-    (out.join("\n").trim_end().to_string(), cut.len())
-}
-
-/// Which lines [`headings`] takes to open a fenced code block.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Fences {
-    /// CommonMark's: three backticks or tildes or more, and a backtick
-    /// fence's info string holds no backtick — "```x``` is inline." is a
-    /// paragraph with inline code.
-    CommonMark,
-    /// Every line that starts with three backticks or tildes.
-    Any,
-}
-
-/// A fenced code block, while inside one: its character and its length.
-struct Fence {
-    mark: char,
-    len: usize,
-}
-
-impl Fence {
-    /// The fence `trimmed` opens, if it opens one under `fences`.
-    fn opened_by(trimmed: &str, fences: Fences) -> Option<Fence> {
-        let mark = trimmed.chars().next().filter(|c| matches!(c, '`' | '~'))?;
-        let len = trimmed.chars().take_while(|c| *c == mark).count();
-        if len < 3 {
-            return None;
-        }
-        // `mark` is ASCII: `len` characters are `len` bytes.
-        if fences == Fences::CommonMark && mark == '`' && trimmed[len..].contains('`') {
-            return None;
-        }
-        Some(Fence { mark, len })
-    }
-
-    /// Whether `trimmed` closes this fence: its own character, at least as
-    /// many, and nothing after them.
-    fn closed_by(&self, trimmed: &str) -> bool {
-        let n = trimmed.chars().take_while(|c| *c == self.mark).count();
-        n >= self.len && trimmed[n..].trim().is_empty()
-    }
-}
-
-/// The headings of `lines`, in order, as `(first line, level, text)`, with
-/// code fences read as `fences` says.
-fn headings(lines: &[&str], fences: Fences) -> Vec<(usize, usize, String)> {
-    let indent = |line: &str| line.len() - line.trim_start_matches(' ').len();
-    let mut found = Vec::new();
-    // The code block the current line is in, while inside one.
-    let mut fence: Option<Fence> = None;
-    // Where the paragraph the current line belongs to began.
-    let mut paragraph: Option<usize> = None;
-    for (n, line) in lines.iter().enumerate() {
-        let shallow = indent(line) <= 3;
-        let trimmed = line.trim();
-        if let Some(open) = &fence {
-            if shallow && open.closed_by(trimmed) {
-                fence = None;
-            }
-            continue;
-        }
-        if shallow && let Some(open) = Fence::opened_by(trimmed, fences) {
-            fence = Some(open);
-            paragraph = None;
-            continue;
-        }
-        if trimmed.is_empty() {
-            paragraph = None;
-            continue;
-        }
-        let hashes = trimmed.chars().take_while(|c| *c == '#').count();
-        let rest = &trimmed[hashes..];
-        if shallow
-            && (1..=6).contains(&hashes)
-            && (rest.is_empty() || rest.starts_with([' ', '\t']))
-        {
-            found.push((
-                n,
-                hashes,
-                rest.trim().trim_end_matches('#').trim().to_string(),
-            ));
-            paragraph = None;
-            continue;
-        }
-        if let Some(start) = paragraph
-            && shallow
-            && (trimmed.chars().all(|c| c == '=') || trimmed.chars().all(|c| c == '-'))
-        {
-            let level = if trimmed.starts_with('=') { 1 } else { 2 };
-            found.push((start, level, lines[start].trim().to_string()));
-            paragraph = None;
-            continue;
-        }
-        if shallow && trimmed.chars().all(|c| c == '-') {
-            // A rule, with no paragraph above it to underline.
-            continue;
-        }
-        if paragraph.is_none() {
-            paragraph = Some(n);
-        }
-    }
-    found
 }
 
 #[cfg(test)]

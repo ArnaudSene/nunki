@@ -207,14 +207,14 @@ impl World {
             .unwrap();
 
         // What every mission's `PR.md` holds by the time it is pushed: a
-        // title, and the security agent's section under its own heading
-        // (SPEC 4.5). A push over a lifted `FINDINGS` refuses a `PR.md` it
-        // reads no such section in; the tests about that write their own.
+        // title and the coder's words, and nothing of the security agent's,
+        // which cannot write it (SPEC 4.5). The tests about the Security
+        // section write their own.
         let mission = hq_root.join("missions/m1");
         std::fs::create_dir_all(&mission).unwrap();
         std::fs::write(
             mission.join("PR.md"),
-            "# feat: one returns two\n\n## Security\n\nThe review.\n",
+            "# feat: one returns two\n\nBecause it had to.\n",
         )
         .unwrap();
 
@@ -3454,76 +3454,6 @@ fn the_security_section_comes_after_the_departures_from_the_rigor() {
     );
 }
 
-/// Every section under a heading beginning with `Security` is withheld:
-/// two of them both go, the note standing in the first's place only.
-#[test]
-fn two_security_headings_are_both_withheld() {
-    let body = "Intro.\n\n## Security\n\nfirst secret\n\n## Tests\n\nkept\n\n\
-                ## Security, round 2\n\nsecond secret\n";
-    let (out, n) = push::without_security(body, "Security\n\nNOTE");
-    assert_eq!(n, 2);
-    assert_eq!(out, "Intro.\n\n## Security\n\nNOTE\n\n## Tests\n\nkept");
-}
-
-/// A section runs to the next heading of its own level or higher: its
-/// sub-headings go with it, a deeper heading after it stays inside it, and
-/// what follows a heading of a higher level is kept.
-#[test]
-fn a_security_section_ends_at_the_next_heading_of_its_level() {
-    let body = "# Lot\n\n### Security\n\nsecret\n\n#### detail\n\nsecret too\n\n\
-                ### Next\n\nkept\n\n## Higher\n\nkept too\n";
-    let (out, n) = push::without_security(body, "Security\n\nNOTE");
-    assert_eq!(n, 1);
-    assert_eq!(
-        out,
-        "# Lot\n\n### Security\n\nNOTE\n\n### Next\n\nkept\n\n## Higher\n\nkept too"
-    );
-    // Lower-case, and as a last section running to the end.
-    let (out, n) = push::without_security("a\n\n## security notes\n\nsecret\n", "N");
-    assert_eq!((out.as_str(), n), ("a\n\n## N", 1));
-}
-
-/// Headings are read as the forge renders them: an underlined one is a
-/// heading, a `#` line in a fenced code block is code, and `#Security` with
-/// no space is not a heading, so it neither opens nor ends a section.
-#[test]
-fn security_headings_are_read_as_the_forge_renders_them() {
-    let body = "Intro.\n\nSecurity\n========\n\nsecret\n";
-    let (out, n) = push::without_security(body, "N");
-    assert_eq!((out.as_str(), n), ("Intro.\n\n# N", 1));
-
-    let body = "## Security\n\n```sh\n# Tests\nsecret\n```\n\n## Tests\n\nkept\n";
-    let (out, n) = push::without_security(body, "N");
-    assert_eq!((out.as_str(), n), ("## N\n\n## Tests\n\nkept", 1));
-
-    let body = "## Notes\n\n#Security\n\nkept\n";
-    assert_eq!(push::without_security(body, "N"), (body.to_string(), 0));
-
-    let body = "## Notes\n\nkept\n\n---\n\n## Security\n\nsecret\n";
-    let (out, n) = push::without_security(body, "N");
-    assert_eq!((out.as_str(), n), ("## Notes\n\nkept\n\n---\n\n## N", 1));
-}
-
-/// A section with no heading of its own level after it runs to the next
-/// heading of a higher one, and no further; a `Security` sub-heading inside
-/// it is part of it, not a second section.
-#[test]
-fn a_security_section_stops_at_a_higher_heading_and_holds_its_own_sub_headings() {
-    let body =
-        "### Security\n\nsecret\n\n#### Security details\n\nsecret too\n\n## Higher\n\nkept\n";
-    let (out, n) = push::without_security(body, "N");
-    assert_eq!((out.as_str(), n), ("### N\n\n## Higher\n\nkept", 1));
-}
-
-/// A rule is not the first line of a paragraph: `Security` underlined just
-/// after one is a heading, as the forge renders it.
-#[test]
-fn an_underlined_security_heading_after_a_rule_is_a_heading() {
-    let body = "## Notes\n\nkept\n\n---\nSecurity\n---\n\nsecret\n";
-    let (out, n) = push::without_security(body, "N");
-    assert_eq!((out.as_str(), n), ("## Notes\n\nkept\n\n---\n## N", 1));
-}
-
 /// The note counts a finding whose severity it cannot rank as unranked,
 /// beside those it can.
 #[test]
@@ -3546,68 +3476,6 @@ fn the_note_counts_findings_it_cannot_rank_as_unranked() {
         "{note}"
     );
     assert_eq!(count, Some(3));
-}
-
-/// A fence is closed by a line of its own character, at least as long, with
-/// nothing after it, indented three spaces at most — and by nothing else.
-/// Every line that does not close it stays code, inside the section.
-#[test]
-fn a_fence_closes_only_where_commonmark_closes_it() {
-    for inside in [
-        "    ```\n", // indented four spaces: code, not a closing fence
-        "```rust\n", // an info string: not a closing fence
-        "~~~\n",     // the other character
-    ] {
-        let body = format!(
-            "## Security\n\n```sh\n{inside}# a root heading in the example\nsecret\n```\n\n## Tests\n\nkept\n"
-        );
-        let (out, n) = push::without_security(&body, "N");
-        assert_eq!(
-            (out.as_str(), n),
-            ("## N\n\n## Tests\n\nkept", 1),
-            "{inside:?}"
-        );
-    }
-    // A four-backtick fence holds a three-backtick line.
-    let body = "## Security\n\n````md\n```\n# example\n````\n\n## Tests\n\nkept\n";
-    let (out, n) = push::without_security(body, "N");
-    assert_eq!((out.as_str(), n), ("## N\n\n## Tests\n\nkept", 1));
-    // And a fence that does close ends the code: the heading after it is one.
-    let body = "## Security\n\n```sh\n# code\n  ```  \n## Tests\n\nkept\n";
-    let (out, n) = push::without_security(body, "N");
-    assert_eq!((out.as_str(), n), ("## N\n\n## Tests\n\nkept", 1));
-}
-
-/// A line whose reading is in doubt may open a `Security` section, never
-/// end one: a backtick line holding another backtick is no fence to the
-/// forge, but inside the security section the `# ` lines after it are not
-/// read as the headings that would end it. The two readings never agree on
-/// a heading after it, so the section runs to the end: withholding too
-/// much is the side the doubt falls on.
-#[test]
-fn a_line_in_doubt_never_ends_a_security_section() {
-    let body = "## Security\n\n```sh `x`\n# a root heading in the example\nsecret\n```\n\n\
-                ## Tests\n\nkept\n";
-    let (out, n) = push::without_security(body, "N");
-    assert_eq!((out.as_str(), n), ("## N", 1));
-}
-
-/// The other side of the doubt: a `Security` heading that only one of the
-/// two readings finds still opens a section. Here the line holding a
-/// backtick is a fence to one reading and not to the other, the two are out
-/// of step on every fence after it, and the heading is read by one only.
-#[test]
-fn a_security_heading_either_reading_finds_is_withheld() {
-    // CommonMark reads code from the second line on; the other reading
-    // closes a fence there and reads the heading.
-    let body = "```x``` is inline.\n```\n## Security\nsecret\n";
-    let (out, n) = push::without_security(body, "N");
-    assert_eq!((out.as_str(), n), ("```x``` is inline.\n```\n## N", 1));
-    // And the measured case the other way round: CommonMark reads the
-    // heading, the other reading reads code.
-    let body = "```x``` is inline.\n## Security\nsecret\n";
-    let (out, n) = push::without_security(body, "N");
-    assert_eq!((out.as_str(), n), ("```x``` is inline.\n## N", 1));
 }
 
 /// The note names only the severities it counted, and no `unranked` when
@@ -3636,4 +3504,187 @@ fn the_note_names_no_severity_it_did_not_count() {
     let said = note(serde_json::json!([]));
     assert!(said.contains("reported 0 finding(s). They"), "{said}");
     assert!(said.contains("by nobody nunki can name"), "{said}");
+}
+
+// --- the one transition case: a section an older nunki's agent wrote -------
+
+/// A `PR.md` whose line `n` is `line`, followed by a finding of the kind a
+/// security agent wrote there under an older `nunki`.
+fn pr_holding(line: &str) -> String {
+    format!(
+        "# feat: one returns two\n\nBecause it had to.\n\n{line}\nthe zanzibar finding\n\n\
+         ## Integration\n\nWired.\n"
+    )
+}
+
+/// The forms the transition refusal catches, each with the line it names.
+fn refused_forms() -> Vec<(String, &'static str)> {
+    vec![
+        (
+            pr_holding("## Security review"),
+            "line 5: ## Security review",
+        ),
+        (pr_holding("## security"), "line 5: ## security"),
+        (pr_holding("## **Security**"), "line 5: ## **Security**"),
+        (pr_holding("> ## Security"), "line 5: > ## Security"),
+        (pr_holding("\t## Security"), "line 5: ## Security"),
+        (
+            "# feat: one returns two\n\n```x``` is inline.\n## Security\nthe zanzibar finding\n"
+                .to_string(),
+            "line 4: ## Security",
+        ),
+        (
+            "# Security review of the branch\n\nthe zanzibar finding\n".to_string(),
+            "line 1: # Security review of the branch",
+        ),
+        // `\r\n` is one line break, and the lines are counted so.
+        (
+            "# feat: one returns two\r\n\r\n## Security\r\nthe zanzibar finding\r\n".to_string(),
+            "line 3: ## Security",
+        ),
+        // A lone `\r` is a line break to the forge, and to the rule.
+        (
+            "# feat: one returns two\r\rIntro.\r\r## Security\r\rthe zanzibar finding\r"
+                .to_string(),
+            "line 5: ## Security",
+        ),
+    ]
+}
+
+/// A push that must withhold, over a `PR.md` holding a line where a `#`
+/// comes before the first letter and the first letters are `security`, in
+/// any case: refused before anything leaves, naming the line and the two
+/// ways past. Nothing is cut, and `PR.md` is left as it is.
+#[test]
+fn a_push_that_must_withhold_refuses_a_pr_md_holding_a_security_heading() {
+    for (written, line) in refused_forms() {
+        let (world, _) = lifted_findings(&written, Some(findings_said()));
+        let (outcome, seen) = pushed_and_asked(&world);
+        let err = match outcome {
+            Err(e) => e,
+            Ok(pushed) => panic!("{written:?} pushed: {pushed:?}"),
+        };
+        assert!(
+            matches!(err, PushError::SecurityHeadingInPr { .. }),
+            "{written:?}: {err}"
+        );
+        let said = err.to_string();
+        for part in [
+            line,
+            "PR.md",
+            "the HQ may edit it",
+            "security_findings: publish",
+            "nothing was pushed",
+        ] {
+            assert!(said.contains(part), "{written:?}: {part:?} not in: {said}");
+        }
+        assert!(
+            seen.is_empty(),
+            "{written:?}: the forge was asked: {seen:?}"
+        );
+        assert_eq!(world.on_forge("mission/x"), None, "{written:?}");
+        assert_eq!(pr_on_disk(&world), written);
+    }
+}
+
+/// Every line that fires is named, so the HQ can fix them in one pass.
+#[test]
+fn the_refusal_names_every_line_that_fires() {
+    let written = "# feat: one returns two\n\n## Security review\n\nx\n\n### security round 2\n";
+    let (world, _) = lifted_findings(written, Some(findings_said()));
+    let err = push::push(&world.project, "m1", true).unwrap_err();
+    let said = err.to_string();
+    assert!(
+        said.contains("line 3: ## Security review; line 7: ### security round 2"),
+        "{said}"
+    );
+}
+
+/// What the rule does not fire on, measured on past missions' `PR.md`:
+/// prose that wraps onto `security`, a table row, a list item naming the
+/// setting, a heading that begins with another word. Such a push goes
+/// through: `PR.md` as written, then the withheld section.
+#[test]
+fn a_push_that_must_withhold_sends_lines_that_only_mention_security() {
+    for line in [
+        "The rounds were spent, and the\nsecurity agent did not attack the volet.",
+        "| Security agent rounds | 3 |",
+        "- `security_findings: publish` is not set here",
+        "## The security round",
+    ] {
+        let written = pr_holding(line);
+        let (world, _) = lifted_findings(&written, Some(findings_said()));
+        let (pushed, _, body) = pushed_request(&world);
+        let as_written = written
+            .strip_prefix("# feat: one returns two\n\n")
+            .unwrap()
+            .trim_end();
+        assert!(
+            body.starts_with(&format!(
+                "{as_written}\n\n## Security\n\nThe security review"
+            )),
+            "{line:?}:\n{body}"
+        );
+        assert_eq!(pushed.withheld, Some(push::Withheld { findings: Some(3) }));
+    }
+}
+
+/// The refusal is only for a push that must withhold: over a `CLEAR`, or a
+/// `FINDINGS` the project publishes, the same `PR.md` is sent as written.
+#[test]
+fn a_push_that_withholds_nothing_sends_the_same_pr_md_as_written() {
+    for (written, _) in refused_forms() {
+        let world = World::new(with_wiring(), Security::Agent);
+        world.on_github();
+        world.with_token();
+        world.pr_says(&written);
+        world.ready();
+        let (outcome, seen) = pushed_and_asked(&world);
+        let pushed = outcome.unwrap_or_else(|e| panic!("CLEAR, {written:?}: {e}"));
+        assert_eq!(pushed.withheld, None);
+        // Title and body together: as written, whichever line the title
+        // was taken from.
+        let request = request_sent(&seen);
+        let body = request["body"].as_str().unwrap().to_string();
+        assert!(
+            request.to_string().contains("the zanzibar finding"),
+            "{written:?}:\n{request}"
+        );
+        assert!(body.contains("concluded CLEAR"), "{body}");
+
+        let (mut world, _) = lifted_findings(&written, Some(findings_said()));
+        world.project.config.security_findings = nunki::project::SecurityFindings::Publish;
+        let (outcome, seen) = pushed_and_asked(&world);
+        let pushed = outcome.unwrap_or_else(|e| panic!("publish, {written:?}: {e}"));
+        assert_eq!(pushed.withheld, None);
+        // Title and body together: as written, whichever line the title
+        // was taken from.
+        let request = request_sent(&seen);
+        let body = request["body"].as_str().unwrap().to_string();
+        assert!(
+            request.to_string().contains("the zanzibar finding"),
+            "{written:?}:\n{request}"
+        );
+        assert!(body.contains("concluded FINDINGS"), "{body}");
+    }
+}
+
+/// The stated limit, pinned so that nobody reads the refusal as promising
+/// more: a Security heading in a form the rule does not catch — HTML, or
+/// `Security` underlined with `===` — is sent as written by a push that
+/// must withhold. What the coder or the integrator writes in `PR.md` is
+/// published as written; the guard is that the security agent cannot write
+/// it, and the HQ reads `PR.md` before a push.
+#[test]
+fn the_stated_limit_an_html_or_underlined_security_heading_is_sent_as_written() {
+    for line in ["<h2>Security</h2>", "Security\n========"] {
+        let written = pr_holding(line);
+        let (world, _) = lifted_findings(&written, Some(findings_said()));
+        let (pushed, _, body) = pushed_request(&world);
+        assert!(
+            body.contains(&format!("{line}\nthe zanzibar finding")),
+            "{line:?}:\n{body}"
+        );
+        assert_eq!(pushed.withheld, Some(push::Withheld { findings: Some(3) }));
+    }
 }
