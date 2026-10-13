@@ -257,12 +257,16 @@ pub fn approve(
         });
     };
     let human = crate::human::me(&project.nunki_home(), Some(&project.root));
+    let unreadable = human.unreadable();
     let approval = Approval {
         digest: shown.digest.clone(),
         by: match (human.name, human.email) {
             (Some(name), Some(email)) => format!("{name} <{email}>"),
             (Some(name), None) => name,
-            (None, _) => "a human nunki has no name for".to_string(),
+            (None, _) => match unreadable {
+                Some(why) => format!("a human nunki has no name for ({why})"),
+                None => "a human nunki has no name for".to_string(),
+            },
         },
         at: crate::state::now_rfc3339(),
         rendering: shown.rendering.clone(),

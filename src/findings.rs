@@ -63,6 +63,8 @@ pub enum FindingsError {
     NoPartialReason,
     #[error("nunki does not know who you are: `nunki whoami` says where it looks")]
     NoHuman,
+    #[error("nunki cannot name who you are: {0}")]
+    HumanUnreadable(String),
     /// The rigor does not send the mission back from here (SPEC 4.5); the
     /// message names the ways on, `accept` first where there is a report.
     #[error("{}", rigor_refused(mission, departure, *on_review))]
@@ -137,9 +139,11 @@ pub fn accept(
     if why.trim().is_empty() {
         return Err(FindingsError::NoReason);
     }
-    let who = crate::human::me(&project.nunki_home(), Some(&project.root))
+    let human = crate::human::me(&project.nunki_home(), Some(&project.root));
+    let unreadable = human.unreadable();
+    let who = human
         .name
-        .ok_or(FindingsError::NoHuman)?;
+        .ok_or_else(|| unreadable.map_or(FindingsError::NoHuman, FindingsError::HumanUnreadable))?;
 
     let store = Store::open(&project.hq_root)?;
     let mut state = load(&store, id)?;

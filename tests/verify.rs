@@ -1382,6 +1382,38 @@ fn a_lift_without_a_reason_is_refused() {
     assert!(matches!(world.state().flow.stage(), Stage::Findings { .. }));
 }
 
+/// A lift is recorded under the human's name; when their declaration
+/// cannot be read, it is refused saying why, and no other name signs it.
+#[test]
+fn a_lift_by_a_human_whose_declaration_cannot_be_read_is_refused_saying_why() {
+    let world = with_security_agent(1);
+    world.at_findings();
+    let me_yaml = world.project.nunki_home().join(nunki::human::ME_FILE);
+    std::fs::create_dir_all(me_yaml.parent().unwrap()).unwrap();
+    std::fs::write(&me_yaml, "name: [Alex\n").unwrap();
+    let err = nunki::findings::accept(
+        &world.project,
+        "m1",
+        nunki::findings::Lift::Verdict,
+        "accepted for the demo",
+    )
+    .unwrap_err();
+    match &err {
+        nunki::findings::FindingsError::HumanUnreadable(why) => {
+            assert!(
+                why.contains("me.yaml, which cannot be read: line 1"),
+                "{why}"
+            )
+        }
+        other => panic!("{other}"),
+    }
+    assert!(
+        err.to_string()
+            .starts_with("nunki cannot name who you are: ")
+    );
+    assert!(matches!(world.state().flow.stage(), Stage::Findings { .. }));
+}
+
 // --- the lift nunki records itself (SPEC 4.5) ------------------------------
 
 impl World {

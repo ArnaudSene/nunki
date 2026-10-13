@@ -1354,6 +1354,20 @@ fn an_approval_records_who_when_and_the_rendering() {
 }
 
 #[test]
+fn an_approval_by_a_human_whose_declaration_cannot_be_read_says_so() {
+    let world = World::new();
+    let me_yaml = world.project.nunki_home().join(nunki::human::ME_FILE);
+    std::fs::create_dir_all(me_yaml.parent().unwrap()).unwrap();
+    std::fs::write(&me_yaml, "name: [Alex\n").unwrap();
+    let shown = world.shown();
+    world.approve(&shown.digest).unwrap();
+    let by = &world.approvals().approved[0].by;
+    assert!(by.starts_with("a human nunki has no name for ("), "{by}");
+    assert!(by.contains("me.yaml, which cannot be read: line 1"), "{by}");
+    // Not git's name in its place.
+    assert!(!by.contains("Alex Martin"), "{by}");
+}
+#[test]
 fn a_list_of_approvals_nunki_cannot_read_approves_nothing() {
     let world = World::new();
     let file = nunki::services::file(&world.project);

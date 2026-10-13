@@ -1309,3 +1309,26 @@ fn without_a_slot_the_verb_names_its_container_probes_as_not_run() {
     );
     assert!(text.contains("no slot named"), "{text}");
 }
+
+/// A `me.yaml` that cannot be read is red, naming the file and why: nunki
+/// names nobody rather than whoever git or the account would say.
+#[test]
+fn a_declaration_that_cannot_be_read_is_a_red_line_naming_the_file_and_why() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = sound(dir.path());
+    std::fs::write(
+        project.nunki_home().join(nunki::human::ME_FILE),
+        "name: [Alex\n",
+    )
+    .unwrap();
+    match verdict(&run(&project), "who to hand a mission back to") {
+        Verdict::Red(why) => {
+            assert!(
+                why.contains("me.yaml, which cannot be read: line 1"),
+                "{why}"
+            );
+            assert!(why.ends_with("nunki names nobody until it reads"), "{why}");
+        }
+        other => panic!("{other:?}"),
+    }
+}

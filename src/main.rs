@@ -995,6 +995,15 @@ fn main() -> ExitCode {
                     }
                     println!("from {}", me.source.describe());
                 }
+                None if me.unreadable().is_some() => {
+                    // Written, and unreadable: said, and nothing else asked
+                    // in its place.
+                    eprintln!(
+                        "nunki: {}; nunki names nobody until it reads",
+                        me.source.describe()
+                    );
+                    return ExitCode::FAILURE;
+                }
                 None => {
                     println!("nunki does not know who you are.");
                     println!();
@@ -1945,6 +1954,24 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                 eprintln!("nunki: {e}");
                 return ExitCode::FAILURE;
             }
+            // Said rather than assumed: whoever frames a mission is who it
+            // comes back to, until somebody says otherwise. A `me.yaml` that
+            // cannot be read names nobody, and a mission framed now would
+            // say nobody arbitrates: refused, saying why.
+            let arbiter = match arbiter {
+                Some(arbiter) => Some(arbiter),
+                None => {
+                    let me = nunki::human::me(&project.nunki_home(), Some(&project.root));
+                    if let Some(why) = me.unreadable() {
+                        eprintln!(
+                            "nunki: who arbitrates this mission is not known: {why}. Fix it, \
+                             or name the arbiter with --for"
+                        );
+                        return ExitCode::FAILURE;
+                    }
+                    me.name
+                }
+            };
             let lots = match lots
                 .iter()
                 .map(|l| parse_lot(l))
@@ -1993,10 +2020,7 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                 account,
                 model,
                 run,
-                // Said rather than assumed: whoever frames a mission is who
-                // it comes back to, until somebody says otherwise.
-                arbiter: arbiter
-                    .or_else(|| nunki::human::me(&project.nunki_home(), Some(&project.root)).name),
+                arbiter,
                 bounds: project.config.bounds.clone(),
             };
             match mission_dir::create(&project.hq_root, &id, &header, &about) {
