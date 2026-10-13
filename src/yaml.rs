@@ -9,20 +9,26 @@
 //! - a merge key (`<<`) is an **ordinary key**, as it always was here: never
 //!   expanded into its mapping, so a walk that refuses it by name still sees
 //!   it, and a typed reader still ignores it as a key it does not know;
-//! - a **tag the parser does not know is refused**, not dropped: `!custom 5`
-//!   is not `5`;
 //! - **only `true` and `false` are booleans**: `restart: no`, `y`, `on` stay
 //!   the strings they were (YAML 1.2), and are not read as YAML 1.1 booleans;
 //! - a **duplicate key is an error**.
+//!
+//! And **a tag is refused, in every file**, from the parser's own events
+//! ([`constructs`]): nunki writes none, and a tag is exactly where this
+//! library and the one before it read the same text to different values
+//! (`!!binary aGk=` was the string `aGk=` and is `hi`; `!!null ''` was an
+//! empty string and is nothing). Whether a text holds a tag, an anchor or an
+//! alias is the parser's to say, never a second reading of the text's.
 //!
 //! Every YAML file `nunki` writes — the generated Compose file, the mission
 //! header — goes through [`to_string`], whose one setting is in
 //! [`write_options`]: every string is quoted, so that what nunki writes is
 //! read as written by any reader, Compose's included.
 //!
-//! A clippy rule (`clippy.toml`, `disallowed-methods`) refuses every other
-//! call to a `serde_saphyr` reader or writer, in the code and in the tests,
-//! so that these settings cannot be bypassed by a call that forgot them.
+//! A clippy rule (`clippy.toml`) refuses every other call to a
+//! `serde_saphyr` reader or writer and every other use of its parser, in
+//! the code and in the tests, so that these settings cannot be bypassed by
+//! a call that forgot them.
 //!
 //! Where a reader needs a tree rather than a type, it is [`Value`], nunki's
 //! own: a mapping keeps the order of the file and keeps its keys as values,
@@ -32,14 +38,18 @@ use std::fmt;
 
 use serde::de::{self, DeserializeOwned, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
+use serde_saphyr::granit_parser::{ErrorKind, Event, StrInput};
 use serde_saphyr::{DuplicateKeyPolicy, MergeKeyPolicy};
 
 /// The settings every read uses, and the only place they are written.
+///
+/// No `reject_unsupported_tags`: every tag, known or not, is refused from
+/// the events before a value is returned, so the setting could change
+/// nothing.
 fn options() -> serde_saphyr::Options {
     serde_saphyr::options! {
         duplicate_keys: DuplicateKeyPolicy::Error,
         merge_keys: MergeKeyPolicy::AsOrdinary,
-        reject_unsupported_tags: true,
         strict_booleans: true,
         // The message carries the line and the column; a snippet would
         // copy the file's text into it, and a profile holds a token.
@@ -48,10 +58,131 @@ fn options() -> serde_saphyr::Options {
 }
 
 /// Read `text` into `T`: the one function in `nunki` that parses YAML.
+///
+/// The reader goes first, so a text it cannot read is said in its words;
+/// then the events of the same text are asked for a tag, and one refuses
+/// the file, with its place.
 pub fn from_str<T: DeserializeOwned>(text: &str) -> Result<T, Error> {
     #[allow(clippy::disallowed_methods)] // the one reader, with the settings above
     let read = serde_saphyr::from_str_with_options(text, options());
-    read.map_err(|e| Error::from_parser(&e))
+    let value = read.map_err(|e| Error::from_parser(&e))?;
+    if let Some(tag) = constructs(text)?
+        .into_iter()
+        .find(|found| found.construct == Construct::Tag)
+    {
+        return Err(Error {
+            place: Some((tag.line, tag.column)),
+            message: format!(
+                "a tag ({}), which nunki reads in no file: write the value without it",
+                tag.written
+            ),
+        });
+    }
+    Ok(value)
+}
+
+/// A construct the parser reports on a node, which nunki refuses: a tag in
+/// every file, and an anchor and an alias too in a services file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Construct {
+    Tag,
+    Anchor,
+    Alias,
+}
+
+impl Construct {
+    /// As a refusal names it.
+    pub fn described(self) -> &'static str {
+        match self {
+            Construct::Tag => "a tag",
+            Construct::Anchor => "an anchor",
+            Construct::Alias => "an alias",
+        }
+    }
+}
+
+/// One construct, where the parser saw the node that carries it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Found {
+    pub construct: Construct,
+    /// From 1, as a human counts them.
+    pub line: u64,
+    pub column: u64,
+    /// The tag as the parser resolved it (`tag:yaml.org,2002:binary`,
+    /// `!custom`); empty for an anchor and an alias.
+    pub written: String,
+}
+
+/// Every tag, anchor and alias of `text`, in the order the parser meets
+/// them, from the events of the reader's own parser.
+///
+/// The same parser as [`from_str`]'s, on the same text:
+/// `serde_saphyr::from_str_with_options` strips one leading BOM, which the
+/// parser skips by itself (measured: stripping it here changes nothing), then reads
+/// with `Parser::with_options(StrInput::new(text), parser_options)`. Its
+/// `Options::parser_options()` (`pub(crate)` in serde-saphyr 1.3.0) sets
+/// limits and nothing else, from the default `Budget`: 32 buffered comment
+/// events, keys looked for over 1024 characters, flow and block collections
+/// nested 255 deep. The parser's own defaults, used here, are the same but
+/// for the comments, buffered up to 96. Limits are not grammar: one that is
+/// hit is an error, never another reading. With limits no stricter than the
+/// reader's, this pass reads every text the reader reads, to the same
+/// events, so the two cannot disagree on what a text holds; and what it
+/// cannot read, it refuses, as the reader does.
+pub fn constructs(text: &str) -> Result<Vec<Found>, Error> {
+    // The one use of the parser itself: its events, to say what the text
+    // holds. Nothing here reads a value.
+    #[allow(clippy::disallowed_types)]
+    let parser: serde_saphyr::granit_parser::Parser<'_, StrInput<'_>> =
+        serde_saphyr::granit_parser::Parser::new_from_str(text);
+    let mut found = Vec::new();
+    for event in parser {
+        let (event, span) = match event {
+            Ok(event) => event,
+            // An alias to no anchor is an alias all the same: reported as
+            // one, where it stands, and the reading ends there. Every caller
+            // refuses the text then — a services file for the alias, the
+            // others because their reader, which goes first, cannot read it.
+            Err(e) if matches!(e.kind(), ErrorKind::UnknownAnchor) => {
+                found.push(Found {
+                    construct: Construct::Alias,
+                    line: e.marker().line() as u64,
+                    column: e.marker().col() as u64 + 1,
+                    written: String::new(),
+                });
+                return Ok(found);
+            }
+            Err(e) => {
+                return Err(Error {
+                    place: Some((e.marker().line() as u64, e.marker().col() as u64 + 1)),
+                    message: e.kind().to_string(),
+                });
+            }
+        };
+        let at = |construct, written: String| Found {
+            construct,
+            line: span.start.line() as u64,
+            column: span.start.col() as u64 + 1,
+            written,
+        };
+        let (anchor, tag) = match event {
+            Event::Alias(_) => {
+                found.push(at(Construct::Alias, String::new()));
+                continue;
+            }
+            Event::Scalar(_, _, anchor, tag)
+            | Event::SequenceStart(_, anchor, tag)
+            | Event::MappingStart(_, anchor, tag) => (anchor, tag),
+            _ => continue,
+        };
+        if let Some(tag) = tag {
+            found.push(at(Construct::Tag, tag.to_string()));
+        }
+        if anchor != 0 {
+            found.push(at(Construct::Anchor, String::new()));
+        }
+    }
+    Ok(found)
 }
 
 /// The settings every write uses, and the only place they are written.

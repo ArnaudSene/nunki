@@ -157,9 +157,17 @@ Everything else is refused, with the service and the key named:
 top-level `networks`, an `x-` field, and any key a later Compose adds. So is
 any YAML construct that resolves to something other than what is written:
 anchors, aliases, tags, merge keys (`<<`), duplicate keys, directives and a
-second document. So is a raw NEL, LS or PS character (U+0085, U+2028,
-U+2029), which a YAML 1.1 reader takes for a line break; write it as an
-escape (`"\N"`, `"\L"`, `"\P"`) if you mean it.
+second document. Whether the file holds an anchor, an alias or a tag is
+what the YAML parser itself reports, wherever the construct stands. So is
+a raw NEL, LS or PS character (U+0085, U+2028, U+2029), which a YAML 1.1
+reader takes for a line break, and a carriage return not followed by a line
+feed: lines end with LF or CRLF. Write the character as an escape (`"\N"`,
+`"\L"`, `"\P"`, `"\r"`) if you mean it.
+
+A tag is refused in every YAML file nunki reads, not only here — `nunki.yaml`,
+a mission header, `accounts.yaml`, `me.yaml` and the profiles nunki writes:
+two YAML libraries read the same tag to different values (`!!binary aGk=`
+is `aGk=` to one and `hi` to the other), and nunki writes none.
 
 A plain scalar that reads as a number is a number: `image: 012`, a
 variable set to `1_000` or a volume named `00` is refused where a name or a

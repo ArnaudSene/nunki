@@ -1,10 +1,10 @@
 # Every YAML file nunki reads goes through `nunki::yaml::from_str`, whose
-# settings are not the library's defaults (a merge key is an ordinary key, an
-# unknown tag is refused, only `true` and `false` are booleans, a duplicate
-# key is an error), and every YAML file it writes through
-# `nunki::yaml::to_string`, which quotes every string. A call to any other
-# reader or writer would use the defaults, so each one is refused here, in
-# the code and in the tests alike.
+# settings are not the library's defaults (a merge key is an ordinary key,
+# only `true` and `false` are booleans, a duplicate key is an error) and
+# which refuses every tag, as the parser's events report them; and every
+# YAML file it writes through `nunki::yaml::to_string`, which quotes every
+# string. A call to any other reader or writer would use the defaults, so
+# each one is refused here, in the code and in the tests alike.
 disallowed-methods = [
     { path = "serde_saphyr::from_str", reason = "read YAML with nunki::yaml::from_str" },
     { path = "serde_saphyr::from_str_with_options", reason = "read YAML with nunki::yaml::from_str" },
@@ -33,7 +33,9 @@ disallowed-methods = [
     { path = "serde_saphyr::to_string_multiple", reason = "write YAML with nunki::yaml::to_string" },
     { path = "serde_saphyr::to_string_multiple_with_options", reason = "write YAML with nunki::yaml::to_string" },
 ]
-# The parser's own event stream, which reads YAML without any of the settings.
+# The parser's own event stream. Its one sanctioned use is `nunki::yaml::constructs`,
+# which asks it for the tags, anchors and aliases of a text, under a scoped
+# allow; any other use would be a second reading nobody keeps in step.
 disallowed-types = [
-    { path = "serde_saphyr::granit_parser::Parser", reason = "read YAML with nunki::yaml::from_str" },
+    { path = "serde_saphyr::granit_parser::Parser", reason = "read YAML with nunki::yaml::from_str, or ask nunki::yaml::constructs what a text holds" },
 ]

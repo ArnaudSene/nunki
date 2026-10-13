@@ -491,3 +491,158 @@ fn an_integer_is_written_as_the_narrowest_kind_it_fits() {
     assert_eq!(kind(i128::from(u64::MAX) + 1), "i128");
     assert_eq!(kind(i128::from(i64::MIN) - 1), "i128");
 }
+
+// --- a tag, in every file (volet 2) ---------------------------------------------
+//
+// `!!binary aGk=` was the string `aGk=` to the previous reader and is `hi`
+// to this one; `!!null ''` was an empty string and is nothing. A tag is
+// refused in every file nunki reads, naming the file and the line.
+
+/// The two measured tags, as the value of `key` on the second line of a
+/// file whose first line is `first`.
+fn tagged(first: &str, key: &str) -> [String; 2] {
+    [
+        format!("{first}{key}: !!binary aGk=\n"),
+        format!("{first}{key}: !!null ''\n"),
+    ]
+}
+
+#[test]
+fn a_tag_in_nunki_yaml_refuses_the_file_naming_it_and_the_line() {
+    // `common::project_home` writes `root:` on line 1.
+    for text in tagged("harness: claude-code\n", "model") {
+        let err = open_project(&text).unwrap_err();
+        assert!(matches!(err, ProjectError::Invalid(..)), "{err}");
+        let said = err.to_string();
+        assert!(said.contains("nunki.yaml"), "{said}");
+        assert!(said.contains("line 3, column "), "{said}");
+        assert!(said.contains("a tag ("), "{said}");
+    }
+}
+
+#[test]
+fn a_tag_in_a_mission_header_refuses_it_naming_the_file_and_the_line() {
+    // A header the previous writer wrote, whole, with one value tagged:
+    // `branch` (line 2 of MISSION.md) a string, `arbiter` an optional one.
+    let frozen = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/older/yaml/MISSION.md"),
+    )
+    .unwrap();
+    let arbiter = frozen
+        .lines()
+        .position(|l| l.starts_with("arbiter:"))
+        .unwrap()
+        + 1;
+    for (header, line) in [
+        (
+            frozen.replace("branch: feat/1_000", "branch: !!binary aGk="),
+            2,
+        ),
+        (
+            frozen.replace("arbiter: 'null'", "arbiter: !!null ''"),
+            arbiter,
+        ),
+    ] {
+        let hq = tempfile::tempdir().unwrap();
+        let mission = hq.path().join("missions/m1/MISSION.md");
+        std::fs::create_dir_all(mission.parent().unwrap()).unwrap();
+        std::fs::write(&mission, header).unwrap();
+        let err = read_header(hq.path(), "m1").unwrap_err();
+        assert!(matches!(err, MissionDirError::BadHeader { .. }), "{err}");
+        let said = err.to_string();
+        assert!(said.contains(&mission.display().to_string()), "{said}");
+        assert!(said.contains(&format!("line {line}, column ")), "{said}");
+        assert!(said.contains("a tag ("), "{said}");
+    }
+}
+
+#[test]
+fn a_tag_in_the_account_index_refuses_it_naming_the_file_and_the_line() {
+    for index in tagged("accounts: {}\n", "default") {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join(nunki::account::INDEX_FILE);
+        std::fs::write(&path, index).unwrap();
+        let err = nunki::account::Accounts::load(home.path()).unwrap_err();
+        let said = err.to_string();
+        assert!(said.contains(&path.display().to_string()), "{said}");
+        assert!(said.contains("line 2, column "), "{said}");
+        assert!(said.contains("a tag ("), "{said}");
+    }
+}
+
+#[test]
+fn a_tag_in_me_yaml_names_nobody_and_says_the_file_and_the_line() {
+    for me in [
+        "email: a@b.c\nname: !!binary aGk=\n",
+        "name: Alex\nemail: !!null ''\n",
+    ] {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join(nunki::human::ME_FILE), me).unwrap();
+        let who = nunki::human::me(home.path(), None);
+        assert_eq!(who.name, None);
+        let said = who.unreadable().unwrap();
+        assert!(said.contains(nunki::human::ME_FILE), "{said}");
+        assert!(said.contains("line 2, column "), "{said}");
+        assert!(said.contains("a tag ("), "{said}");
+    }
+}
+
+#[test]
+fn a_tag_in_a_profile_refuses_it_naming_the_file_and_the_line() {
+    for label in [
+        format!("      {LABEL}: !!binary aGk=\n"),
+        format!("      {LABEL}: !!null ''\n"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = profile(
+            dir.path(),
+            &format!("services:\n  db:\n    image: x\n    labels:\n{label}"),
+        );
+        let err = labels_of_profile(&path, &approved()).unwrap_err();
+        assert!(matches!(&err, ApprovalError::NotAProfile(..)), "{err}");
+        let said = err.to_string();
+        assert!(said.contains(&path.display().to_string()), "{said}");
+        assert!(said.contains("line 5, column "), "{said}");
+        assert!(said.contains("a tag ("), "{said}");
+    }
+}
+
+/// The parser's report itself: every tag, anchor and alias of a text, in
+/// order, each where the parser saw its node — line and column from 1.
+#[test]
+fn the_parser_reports_every_tag_anchor_and_alias_in_order_with_its_place() {
+    use nunki::yaml::{Construct, Found, constructs};
+    let found = |construct, line, column, written: &str| Found {
+        construct,
+        line,
+        column,
+        written: written.to_string(),
+    };
+    assert_eq!(
+        constructs("a: &x 1\nb: *x\nc: !!str 2\nd: &y !custom [3]\n").unwrap(),
+        [
+            found(Construct::Anchor, 1, 7, ""),
+            found(Construct::Alias, 2, 4, ""),
+            found(Construct::Tag, 3, 10, "tag:yaml.org,2002:str"),
+            found(Construct::Tag, 4, 15, "!custom"),
+            found(Construct::Anchor, 4, 15, ""),
+        ]
+    );
+    assert_eq!(constructs("a: [1, {b: c}]\n").unwrap(), []);
+    // An alias to no anchor is reported as the alias it is, where it is.
+    assert_eq!(
+        constructs("a: 1\nb: *nowhere\n").unwrap(),
+        [found(Construct::Alias, 2, 4, "")]
+    );
+    // A text the parser cannot read is an error, with its place.
+    let err = constructs("a: [1\n").unwrap_err();
+    assert!(err.place.is_some(), "{err}");
+    // One leading BOM is not text, as for the reader.
+    assert_eq!(
+        constructs("\u{feff}a: *x\n").unwrap(),
+        [found(Construct::Alias, 1, 4, "")]
+    );
+    assert_eq!(Construct::Tag.described(), "a tag");
+    assert_eq!(Construct::Anchor.described(), "an anchor");
+    assert_eq!(Construct::Alias.described(), "an alias");
+}
