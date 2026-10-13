@@ -428,14 +428,14 @@ fn live_a_profile_switch_keeps_the_projects_services() {
 
 /// A profile of the same slot, written where the engine can read it.
 fn write_profile(dir: &Path, slot: &str, role: nunki::harness::Role, name: &str) -> PathBuf {
-    use nunki::compose::{AGENT_WRITABLE, NamedVolume, Plan, UserIds, generate};
+    use nunki::compose::{NamedVolume, Plan, UserIds, generate};
     use nunki::perimeter::{Sources, compute};
 
     let tree = dir.join("tree");
     let mission_dir = dir.join("mission");
     std::fs::create_dir_all(&tree).unwrap();
     std::fs::create_dir_all(&mission_dir).unwrap();
-    for f in AGENT_WRITABLE {
+    for f in nunki::compose::any_agent_writable() {
         let _ = std::fs::write(mission_dir.join(f), "");
     }
 

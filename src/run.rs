@@ -515,7 +515,7 @@ pub fn launch(l: &Launching) -> Result<Launched, RunError> {
     };
 
     // Before the profile is generated, and so before anything is mounted: the
-    // four files the agent writes are bind-mounted one at a time, and an
+    // files the agent writes are bind-mounted one at a time, and an
     // engine given a source that is missing creates a directory there.
     mission_dir::ensure_writable(&paths.dir)?;
 

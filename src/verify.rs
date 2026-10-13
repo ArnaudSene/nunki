@@ -1483,7 +1483,16 @@ fn security_concluded(
         _ => None,
     };
     if let Event::Verdict { verdict, .. } = &event {
-        state.conclude(Role::Security, Some(*verdict), head);
+        // What it said is kept from the same parse, for the Security
+        // section `nunki push` writes: `VERDICT.json` is rewritten by every
+        // role after this, and the flow forgets a report once it moves on
+        // (SPEC 4.5).
+        state.conclude_saying(
+            Role::Security,
+            Some(*verdict),
+            head,
+            concluded_file.as_ref().map(crate::state::Said::of),
+        );
         // On the same parse as the lift below: what the rigor reads when
         // the HQ sends this report back (SPEC 4.5).
         state
@@ -1920,6 +1929,45 @@ mod tests {
         );
         assert_eq!(state.flow.stage(), &Stage::Verified);
         assert_eq!(state.accepted.len(), 1);
+    }
+
+    /// What the security verdict said is kept in the state with it, from
+    /// the parse it was concluded on: the report and findings `nunki push`
+    /// lays into the Security section (SPEC 4.5), not the file as another
+    /// writer left it after.
+    #[test]
+    fn what_the_security_verdict_said_is_kept_from_the_verdict_concluded() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let (store, mut state, paths) = at_security(dir.path());
+        let honest = ranked(r#"[{"severity":"MEDIUM","title":"an open redirect"}]"#);
+        std::fs::write(&paths.verdict, &honest).expect("the verdict is written");
+        let concluded: crate::mission::VerdictFile =
+            serde_json::from_str(&honest).expect("the verdict parses");
+        let gates = || {
+            std::fs::write(&paths.verdict, r#"{"role":"Integrator"}"#)
+                .expect("the verdict is rewritten");
+            Ok(green(HEAD))
+        };
+        security_concluded(
+            &store,
+            &mut state,
+            &paths,
+            HEAD,
+            finished(),
+            gates,
+            &mut Vec::new(),
+        )
+        .expect("the run is concluded");
+
+        let expected = Some(crate::state::Said {
+            report: concluded.report.clone(),
+            findings: concluded.findings.clone(),
+        });
+        assert!(!concluded.report.is_empty());
+        for state in [state, store.load("m1").expect("the state")] {
+            let security = state.concluded(Role::Security).expect("it concluded");
+            assert_eq!(security.said, expected);
+        }
     }
 
     /// Nothing is decided without a verdict concluded, or off `Findings`.

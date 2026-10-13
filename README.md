@@ -119,9 +119,10 @@ Two more decide how the agents run: `model` (which model they use, absent
 means the harness's own default) and `permission_mode` (`auto` by default —
 what the harness does with a permission it would otherwise ask a human
 about, since nobody is there to ask).
-`security_findings` decides whether the security agent's section of the
-pull request is withheld while its findings are accepted and not fixed
-(`withhold`, the default) or published as written (`publish`).
+`security_findings` decides what the Security section `nunki push` writes
+says while the security agent's findings are accepted and not fixed: their
+count only (`withhold`, the default), or the report and every finding
+(`publish`).
 Then commit the three files `nunki init` wrote in the repository, build the
 images and clone a slot:
 
@@ -659,29 +660,43 @@ push applies to a human's: it is worth its commit, and a later `FINDINGS` is
 not covered by it.
 
 A finding accepted is not a finding fixed, and the pull request is
-published. So when the verdict `nunki push` stands on is a lifted
-`FINDINGS` — by `mission accept` or by `nunki` — every section of `PR.md`
-under a heading that begins with `Security` (where the security agent
-writes) is replaced, in the pull request only, by a note: how many findings
-per severity, accepted by whom, and that their details are withheld until
-they are fixed. A section runs to the next heading of its own level or
-higher, so its sub-headings go with it, and a line `nunki` is not sure is
-a heading — a fence it reads one way and the forge may read another — can
-open a section but never end one. `PR.md` is left as it is, `nunki push`
-says how many findings it withheld, and `VERDICT.json` still holds them in
-full; `mission status`, once `mission accept` has lifted them, shows the
-stage and no longer the report. A push that must withhold and reads no
-`Security` section in `PR.md` — none written, or one under a form `nunki`
-does not read, such as `## **Security**`, a heading in a quote, or the
-file's first line, which is the title — **refuses before anything is
-pushed**, says how many findings were accepted, and names the two ways
-past: a heading `nunki` reads (the HQ may edit `PR.md`), or
-`security_findings: publish`. Only that section is withheld: what another
-section says is published as written, and so is a second security section
-under a form `nunki` does not read when it did read a first one. A
-repository only its owners read can say `security_findings: publish` in
-`nunki.yaml` to send the section as written; absent, it is `withhold`. A
-`CLEAR` sends it as written.
+published. The security agent therefore does not write in `PR.md` — its
+profile mounts the file read-only — and `nunki push` writes the pull
+request's Security section itself, from the security verdict it stands on.
+The body sent is `PR.md` as the coder and the integrator wrote it, then the
+departures from the rigor, then that section, last:
+
+- on a `CLEAR`, the commit attacked, then the report, quoted, as the agent
+  wrote it;
+- on a `FINDINGS` lifted — by `mission accept` or by `nunki` — a note: how
+  many findings per severity, accepted by whom, and that their details are
+  withheld until they are fixed. No word of the report, of a finding's
+  title or of its reason reaches the forge, in the title or the body;
+- with no security agent, no section.
+
+Where the rounds were spent, the section also names the commits the
+security agent did not attack. The report and the findings come from what
+`nunki` kept when the verdict was concluded, never from `VERDICT.json`,
+which every role rewrites; when it kept nothing, the section says it could
+not read them. `PR.md` is left as it is, `nunki push` says how many findings
+it withheld, and `VERDICT.json` still holds them in full; `mission status`,
+once `mission accept` has lifted them, shows the stage and no longer the
+report. With no `PR.md`, or an empty one, the branch is pushed and no pull
+request is opened. A repository only its owners read can say
+`security_findings: publish` in `nunki.yaml`: the section then names who
+accepted the findings, lists each with its severity, its title and its
+reason, and quotes the report. Absent, it is `withhold`.
+
+What the coder or the integrator writes in `PR.md` is published as written,
+a finding they describe included: `nunki` does not read their prose, and
+the HQ reads `PR.md` before a push. One case is caught, coarsely and on
+purpose: a mission whose security agent ran under an older `nunki` wrote its
+section in `PR.md`. So a push that must withhold **refuses before anything
+is pushed** when a line of `PR.md` has a `#` before its first letter and
+those letters begin `security`, in any case, such as `## Security review`;
+it names each such line and the two ways past: edit `PR.md` (the HQ may),
+or `security_findings: publish`. It never cuts. A heading in another form,
+such as `<h2>Security</h2>`, is not caught, and falls under the rule above.
 
 ## Vocabulary
 
@@ -709,8 +724,9 @@ MISSION  (one branch off its base, one slot)
 
 - **Mission** — one piece of work, framed by a human. A folder at the HQ,
   outside the repository: `MISSION.md` (its header and brief),
-  `FOLLOWUP_HQ.md` (what the HQ tells the agents), and the agent's own
-  `JOURNAL.md`, `PR.md` and `VERDICT.json`. Its **header** is frozen when the
+  `FOLLOWUP_HQ.md` (what the HQ tells the agents), and the agents' own
+  `JOURNAL.md`, `VERDICT.json` and `PR.md` — the last written by the coder
+  and the integrator, and read-only for the security agent. Its **header** is frozen when the
   mission starts: `nunki` never re-reads it, and `nunki mission reframe` is the only
   way to change it.
 - **Slot** — the isolated clone and container where a mission runs, with an

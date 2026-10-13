@@ -1173,10 +1173,8 @@ fn main() -> ExitCode {
                     }
                     // Findings accepted and not fixed are not published by
                     // default (`security_findings` in nunki.yaml): said here,
-                    // with how many, so nobody wonders where the section went.
-                    // `VERDICT.json` still holds them in full. A push that had
-                    // to withhold and read no section was refused before it
-                    // pushed, so a `withheld` here always cut one at least.
+                    // with how many, so nobody wonders where the report went.
+                    // The Security section nunki writes gives only the count.
                     let withheld = pushed.withheld.as_ref();
                     if let Some(w) = withheld {
                         let findings = match w.findings {
@@ -1184,10 +1182,9 @@ fn main() -> ExitCode {
                             None => "findings nunki could not count".to_string(),
                         };
                         println!(
-                            "security  withheld from the pull request: {} `Security` section(s) \
-                             of PR.md, on {findings} accepted and not fixed — a note stands in \
-                             their place",
-                            w.sections
+                            "security  withheld from the pull request: the security agent's \
+                             report and its {findings}, accepted and not fixed — the Security \
+                             section nunki wrote says how many, and who accepted them"
                         );
                     }
                     match pushed.pull_request {
@@ -1211,8 +1208,8 @@ fn main() -> ExitCode {
                             }
                             if withheld.is_some() {
                                 println!(
-                                    "          PR.md still holds the `Security` section(s): \
-                                     leave them out of what you publish"
+                                    "          the findings stay withheld: publish nothing of \
+                                     the security agent's report or of VERDICT.json"
                                 );
                             }
                         }

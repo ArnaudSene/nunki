@@ -122,9 +122,9 @@ pub struct Config {
     /// or the human (SPEC 4.1 bis, "branche protégée").
     #[serde(default)]
     pub forge_protection: ForgeProtection,
-    /// Whether `nunki push` withholds the security agent's section of `PR.md`
-    /// from the pull request while its findings are lifted and not fixed
-    /// ([`SecurityFindings`]). Absent, they are withheld.
+    /// Whether the Security section `nunki push` writes withholds the
+    /// security agent's report and findings while they are lifted and not
+    /// fixed ([`SecurityFindings`]). Absent, they are withheld.
     #[serde(default)]
     pub security_findings: SecurityFindings,
 }
@@ -385,22 +385,24 @@ pub enum ForgeProtection {
     ByHand,
 }
 
-/// What `nunki push` does with the security agent's section of `PR.md` when
-/// the verdict that answers the push is a `FINDINGS` that was lifted — by the
-/// HQ's `accept`, or by `nunki` for `LOW` and `INFO` (SPEC 4.5). Those
-/// findings are not fixed, and the pull request's body is published: on a
-/// public repository the section would describe an open flaw, and an edit
-/// afterwards leaves it in the forge's history.
+/// What the Security section `nunki push` writes says when the verdict that
+/// answers the push is a `FINDINGS` that was lifted — by the HQ's `accept`,
+/// or by `nunki` for `LOW` and `INFO` (SPEC 4.5). Those findings are not
+/// fixed, and the pull request's body is published: on a public repository
+/// the report would describe an open flaw, and an edit afterwards leaves it
+/// in the forge's history.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SecurityFindings {
-    /// Every section under a heading that begins with `Security` is replaced,
-    /// on the way to the forge, by a note saying how many findings were
-    /// accepted, by whom, and that their details are withheld.
+    /// The section says how many findings were accepted, by whom, and that
+    /// their details are withheld: no word of the report, of a finding's
+    /// title or of its reason. A push refuses a `PR.md` that may still hold
+    /// the section an older `nunki`'s security agent wrote there.
     #[default]
     Withhold,
-    /// The section is published as written: for a repository only its
-    /// owners read.
+    /// The section names who accepted the findings, lists each with its
+    /// severity, title and reason, and quotes the report: for a repository
+    /// only its owners read.
     Publish,
 }
 

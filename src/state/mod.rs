@@ -174,6 +174,34 @@ pub struct Concluded {
     /// The commit the role concluded on.
     pub head: String,
     pub date: String,
+    /// What the verdict said, as `nunki` parsed it when the role concluded:
+    /// kept for the security agent, whose report and findings `nunki push`
+    /// lays into the pull request's Security section (SPEC 4.5). Kept here
+    /// because `VERDICT.json` is rewritten by every role and nothing else
+    /// holds them once the flow moves on. `None` for the other roles, and
+    /// in state an older `nunki` wrote: the section then says it could not
+    /// read them, and never reads the file instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub said: Option<Said>,
+}
+
+/// A verdict's report and findings, as its file held them when it was
+/// concluded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Said {
+    pub report: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub findings: Option<crate::mission::FindingList>,
+}
+
+impl Said {
+    /// What `file` says, taken whole.
+    pub fn of(file: &crate::mission::VerdictFile) -> Self {
+        Said {
+            report: file.report.clone(),
+            findings: file.findings.clone(),
+        }
+    }
 }
 
 /// One risk taken, on the record: by a human through `nunki mission
@@ -234,12 +262,24 @@ impl MissionState {
         verdict: Option<crate::mission::Verdict>,
         head: &str,
     ) {
+        self.conclude_saying(role, verdict, head, None);
+    }
+
+    /// [`MissionState::conclude`], keeping what the verdict said with it.
+    pub fn conclude_saying(
+        &mut self,
+        role: crate::harness::Role,
+        verdict: Option<crate::mission::Verdict>,
+        head: &str,
+        said: Option<Said>,
+    ) {
         self.verdicts.retain(|c| c.role != role);
         self.verdicts.push(Concluded {
             role,
             verdict,
             head: head.to_string(),
             date: now_rfc3339(),
+            said,
         });
     }
 

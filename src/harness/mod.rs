@@ -25,6 +25,11 @@ pub enum Role {
     Security,
 }
 
+impl Role {
+    /// Every role, for what must hold for each of them.
+    pub const ALL: [Role; 3] = [Role::Coder, Role::Integrator, Role::Security];
+}
+
 /// Where a run works: the slot's tree and the mission folder, **as the
 /// container sees them** — every path here is a container path, and nothing
 /// on the host may be derived from one. The harness only needs paths; how
@@ -33,8 +38,10 @@ pub enum Role {
 pub struct Workspace {
     /// The slot's working tree inside the container.
     pub tree: PathBuf,
-    /// The mission folder inside the container (`JOURNAL.md`, `PR.md`,
-    /// `VERDICT.json` writable; `MISSION.md`, `FOLLOWUP_HQ.md` read-only).
+    /// The mission folder inside the container: writable for what
+    /// [`crate::compose::agent_writable`] gives the role, read-only for the
+    /// rest (`MISSION.md`, `FOLLOWUP_HQ.md`, and `PR.md` for the security
+    /// agent).
     pub mission_dir: PathBuf,
 }
 

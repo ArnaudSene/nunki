@@ -466,7 +466,7 @@ fn the_agent_reads_the_perimeter_its_firewall_enforces() {
 #[test]
 fn the_allowlist_is_read_only_for_the_agent_and_every_prompt_names_it() {
     use nunki::mission::dir::ALLOWLIST_FILE;
-    assert!(!nunki::compose::AGENT_WRITABLE.contains(&ALLOWLIST_FILE));
+    assert!(!nunki::compose::any_agent_writable().contains(&ALLOWLIST_FILE));
     let paths = nunki::mission::dir::Paths::of(Path::new("/hq"), "m1");
     assert_eq!(paths.allowlist, paths.dir.join(ALLOWLIST_FILE));
     for role in [Role::Coder, Role::Integrator, Role::Security] {
@@ -549,9 +549,17 @@ fn the_role_prompts_say_what_the_role_may_not_do() {
             prompt.contains("names the commit it describes"),
             "gate 3 refuses a resume block that does not carry HEAD: {prompt}"
         );
+        // Gate 5 asks the coder and the integrator for PR.md, and the
+        // security agent, which cannot write it, for its report.
+        let owed = if std::ptr::eq(prompt, &security) {
+            "it lives in `VERDICT.json`. An empty one is a red gate"
+        } else {
+            "`PR.md`, the pull request this mission delivers, written as you go. It is \
+             the deliverable a gate looks for, and an empty one is a red gate"
+        };
         assert!(
-            prompt.contains("an empty one is a red gate"),
-            "gate 5 asks for PR.md, so the run contract has to ask for it: {prompt}"
+            flat(prompt).contains(owed),
+            "gate 5 asks for a deliverable, so the run contract has to ask for it: {prompt}"
         );
         assert!(
             prompt.contains("inside the block"),
@@ -692,7 +700,7 @@ fn the_prompt_travels_as_a_file_and_never_into_the_slot() {
     // for the agent's own files — so the agent reads it and nothing in the
     // repository is touched (SPEC 3.3).
     assert_eq!(role::PROMPT_FILE, "ROLE.md");
-    let writable = nunki::compose::AGENT_WRITABLE;
+    let writable = nunki::compose::any_agent_writable();
     assert!(
         !writable.contains(&role::PROMPT_FILE),
         "the role prompt is not the agent's to rewrite"
@@ -703,7 +711,7 @@ fn the_prompt_travels_as_a_file_and_never_into_the_slot() {
         !writable.contains(&nunki::mutants::FILE),
         "the HQ's campaign file is not the agent's to rewrite"
     );
-    assert!(writable.contains(&nunki::mutants::TRIAGE_FILE));
+    assert!(nunki::compose::agent_writable(Role::Coder).contains(&nunki::mutants::TRIAGE_FILE));
 }
 
 #[test]
@@ -2534,22 +2542,72 @@ fn the_base_the_slot_is_on_is_never_moved_under_it() {
     assert_eq!(git(&slot.tree, &["rev-parse", "fresh"]), target);
 }
 
-/// The security agent is told where its words go in `PR.md`: under one
-/// heading that begins with `Security`, the one `nunki push` withholds while
-/// its findings are unfixed — and that what it writes elsewhere is
-/// published as written.
+/// The security agent cannot write `PR.md` (SPEC 4.5), and is told so: its
+/// report in `VERDICT.json` is the whole of its deliverable, and a `CLEAR`
+/// one is what `nunki` publishes as the pull request's Security section.
 #[test]
-fn the_security_agent_is_told_its_section_of_the_pull_request_is_the_one_withheld() {
-    let security = role::prompt(Role::Security).replace('\n', " ");
+fn the_security_agent_is_told_pr_md_is_read_only_and_its_report_is_published_when_clear() {
+    let security = flat(&role::prompt(Role::Security));
+    for said in [
+        "it is read-only for you: you write nothing there",
+        "your report **is** your whole deliverable, and it lives in `VERDICT.json`",
+        "**When you conclude `CLEAR`, `nunki` publishes your report as the pull \
+         request's Security section**",
+        "write it for that reader",
+    ] {
+        assert!(security.contains(said), "not told {said:?}: {security}");
+    }
+    // Nothing left of the old rule: no section of its own in PR.md.
     assert!(
-        security.contains("under **one** heading of your own that begins with `Security`"),
+        !security.contains("heading of your own that begins with `Security`"),
         "{security}"
     );
-    assert!(security.contains("withholds that section"), "{security}");
-    assert!(security.contains("is published as written"), "{security}");
     assert!(
-        !role::prompt(Role::Coder).contains("begins with `Security`"),
-        "the heading is the security agent's"
+        !security.contains("- `PR.md`, the pull request this mission delivers"),
+        "PR.md is not its deliverable: {security}"
+    );
+}
+
+/// The two roles that write `PR.md` are told it is published as written, and
+/// that the Security section is `nunki`'s.
+#[test]
+fn the_coder_and_the_integrator_are_told_pr_md_is_published_as_written() {
+    for role in [Role::Coder, Role::Integrator] {
+        let prompt = flat(&role::prompt(role));
+        for said in [
+            "- `PR.md`, the pull request this mission delivers",
+            "It is published as written",
+            "a security finding that is not fixed is not described in it",
+            "no heading in it opens with the word `Security`",
+            "that section is `nunki`'s",
+        ] {
+            assert!(prompt.contains(said), "{role:?} is not told {said:?}");
+        }
+    }
+}
+
+/// What a prompt says the role may write is what compose mounts for it, and
+/// nothing more: the common part does not hand `PR.md` to every role.
+#[test]
+fn every_role_is_told_the_files_its_profile_lets_it_write_and_no_other() {
+    for role in Role::ALL {
+        let prompt = flat(&role::prompt(role));
+        let start = prompt
+            .find("The files you may write in the mission folder are these, and no other: ")
+            .unwrap_or_else(|| panic!("{role:?} is not told which files it writes"));
+        let sentence = &prompt[start..];
+        let sentence = &sentence[..sentence.find(". ").unwrap()];
+        let named: Vec<&str> = sentence.split('`').skip(1).step_by(2).collect();
+        assert_eq!(
+            named,
+            nunki::compose::agent_writable(role),
+            "{role:?}: {sentence}"
+        );
+    }
+    let security = flat(&role::prompt(Role::Security));
+    assert!(
+        security.contains("`JOURNAL.md`, `VERDICT.json` and `MUTANTS.triage.json`. "),
+        "{security}"
     );
 }
 
@@ -2568,4 +2626,10 @@ fn every_role_is_told_that_a_run_ends_with_its_turn() {
             assert!(prompt.contains(said), "{role:?} is not told {said:?}");
         }
     }
+}
+
+/// A prompt with every run of whitespace made one space, so that what it
+/// says can be looked for whatever its lines wrap on.
+fn flat(prompt: &str) -> String {
+    prompt.split_whitespace().collect::<Vec<_>>().join(" ")
 }

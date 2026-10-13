@@ -133,22 +133,23 @@ pub enum PushError {
         rigor: crate::mission::Rigor,
         file: &'static str,
     },
-    /// A push that must withhold the security agent's section and read
-    /// none in `PR.md` (SPEC 4.5): sending the body as written could
-    /// publish findings under a heading `nunki` did not read as one.
+    /// A push that must withhold, over a `PR.md` that may still hold the
+    /// section a security agent wrote under an older `nunki` (SPEC 4.5): see
+    /// `old_security_headings`. Refused before anything leaves; nothing is
+    /// cut.
     #[error(
-        "mission {mission} stands on a FINDINGS accepted and not fixed ({findings}), and the \
-         project withholds those from the pull request, but nunki found no `Security` section \
-         it could read in {pr}: sending it as written could publish them, so nothing was \
-         pushed. Either give the security agent's section a heading nunki reads — `## \
-         Security` on a line of its own, outside any quote or code block, and not the file's \
-         first line, which is the title (the HQ may edit {pr}) — or set `security_findings: \
-         publish` in nunki.yaml to publish the findings as written"
+        "mission {mission} stands on a FINDINGS accepted and not fixed, and the project \
+         withholds those from the pull request, but {pr} holds what reads as a Security \
+         heading — {lines} — the section a security agent wrote there under an older nunki. \
+         PR.md is sent as written, so nothing was pushed. Either edit {pr} and take that \
+         section out or rename its heading (the HQ may edit it), or set `security_findings: \
+         publish` in nunki.yaml to publish the findings"
     )]
-    NothingWithheld {
+    SecurityHeadingInPr {
         mission: String,
-        findings: String,
         pr: String,
+        /// Each line that fired, as `line N: <text>`, joined.
+        lines: String,
     },
     #[error(transparent)]
     Mutants(#[from] crate::mutants::MutantsError),
@@ -298,10 +299,11 @@ pub struct Pushed {
     /// lift this push stands on, one line each (SPEC 4.5). Empty when the
     /// security verdict was a `CLEAR`, or a human lifted it.
     pub lifted_by_nunki: Vec<String>,
-    /// What the pull request was sent without, when the security verdict
-    /// the push stands on is a lifted `FINDINGS` and `nunki.yaml` withholds
-    /// it (the default). `None` when nothing was withheld: such a push that
-    /// cut no section is refused ([`PushError::NothingWithheld`]).
+    /// What the Security section `nunki` wrote kept off the forge, when the
+    /// security verdict the push stands on is a lifted `FINDINGS` and
+    /// `nunki.yaml` withholds it (the default): the report and the findings,
+    /// of which the section gives only the count. `None` when nothing was
+    /// withheld.
     pub withheld: Option<Withheld>,
 }
 
@@ -360,50 +362,46 @@ pub fn push_to(
     let Held {
         not_attacked,
         lifted_by_nunki,
-        lifted,
+        attacked,
     } = verdicts_hold(&slot, &state, &head)?;
     proposals_ruled(project, id)?;
     nothing_owed(project, id, &header, &slot.tree, &head)?;
 
-    // The pull request, read once from `PR.md` and decided before anything
-    // leaves the machine: the refusal below and the body sent come from the
-    // same reading.
+    // The pull request: `PR.md` as the coder and the integrator wrote it,
+    // sent as written, then the note on the rigor, then the Security section
+    // `nunki` writes from the verdict the push stands on (SPEC 4.5). Nothing
+    // here reads `PR.md` but for its title; the security agent cannot write
+    // it, and what it said reaches the forge only through that section.
     let paths = crate::mission::dir::Paths::of(&project.hq_root, id);
     let text = std::fs::read_to_string(&paths.pr).unwrap_or_default();
     let request = crate::forge::PullRequest::from_markdown(&text, &header.branch, &header.base);
-    // A `FINDINGS` lifted and not fixed: the security agent's section of
-    // `PR.md` stays off the forge unless the project said to publish it.
-    let withholding = lifted
-        .filter(|_| project.config.security_findings == SecurityFindings::Withhold)
-        .map(|l| withheld_note(security_verdict(&paths.verdict, &l.on).as_ref(), &l.by));
-    let (request, withheld) = match withholding {
-        None => (request, None),
-        Some((note, findings)) => {
-            let (body, sections) = request
-                .as_ref()
-                .map_or((String::new(), 0), |r| without_security(&r.body, &note));
-            // Nothing read to withhold is not nothing to withhold: the
-            // findings may sit under a heading this does not read, or in the
-            // title. Refused, whatever the count, before the push.
-            if sections == 0 {
-                return Err(PushError::NothingWithheld {
-                    mission: id.to_string(),
-                    findings: match findings {
-                        Some(n) => format!("{n} finding(s)"),
-                        None => "findings nunki could not count".to_string(),
-                    },
-                    pr: paths.pr.display().to_string(),
-                });
-            }
-            (
-                request.map(|r| crate::forge::PullRequest { body, ..r }),
-                Some(Withheld { sections, findings }),
-            )
+    let withhold = project.config.security_findings == SecurityFindings::Withhold;
+    let section = attacked
+        .as_ref()
+        .map(|a| security_section(a, withhold, &not_attacked));
+    let withheld = section.as_ref().and_then(|(_, withheld)| withheld.clone());
+    // The one transition case: a section a security agent wrote in `PR.md`
+    // under an older `nunki`, which a push sending `PR.md` as written would
+    // publish. Refused, never cut, and only when the push must withhold.
+    if withheld.is_some() {
+        let found = old_security_headings(&text);
+        if !found.is_empty() {
+            return Err(PushError::SecurityHeadingInPr {
+                mission: id.to_string(),
+                pr: paths.pr.display().to_string(),
+                lines: found.join("; "),
+            });
         }
-    };
-    let request = request.map(|r| crate::forge::PullRequest {
-        body: with_overrides(&r.body, state.flow.overrides()),
-        ..r
+    }
+    let request = request.map(|r| {
+        let body = with_overrides(&r.body, state.flow.overrides());
+        crate::forge::PullRequest {
+            body: match &section {
+                Some((section, _)) => with_section(&body, section),
+                None => body,
+            },
+            ..r
+        }
     });
 
     // Exactly the judged commit, by id: refused before the fetch when the
@@ -447,8 +445,8 @@ pub fn push_to(
 /// piece is missing otherwise. Every branch but the last is a reason the
 /// forge was never asked; the last is the forge's own answer.
 ///
-/// `request` is `PR.md` as [`push_to`] read it, its body rewritten on the way
-/// out — the security section withheld, the departures from the rigor added —
+/// `request` is `PR.md` as [`push_to`] read it, sent as written and followed
+/// by the departures from the rigor and the Security section `nunki` writes,
 /// or `None` when it says nothing a title could come from. `PR.md` itself is
 /// never written.
 fn open_pull_request(
@@ -472,6 +470,14 @@ fn open_pull_request(
         why,
     };
 
+    // First, because it holds whatever the forge: with no `PR.md`, or one
+    // that gives no title, there is no pull request to open anywhere.
+    let Some(request) = request else {
+        return by_hand(format!(
+            "{} says nothing a pull request could be titled with",
+            pr_file.display()
+        ));
+    };
     let Some((forge, repo)) = found else {
         return by_hand(format!(
             "the remote is on a forge nunki has no adapter for ({remote}): GitHub is the one \
@@ -489,12 +495,6 @@ fn open_pull_request(
             forge.name(),
             repo.owner,
             repo.name
-        ));
-    };
-    let Some(request) = request else {
-        return by_hand(format!(
-            "{} says nothing a pull request could be titled with",
-            pr_file.display()
         ));
     };
     match forge.open(&token, &repo, &request) {
@@ -634,19 +634,33 @@ struct Held {
     not_attacked: Vec<String>,
     /// The findings `nunki` lifted itself in the lift the push stands on.
     lifted_by_nunki: Vec<String>,
-    /// The lift the push stands on, when the security verdict that answers
-    /// it is a `FINDINGS`: its findings are not fixed. `None` on a `CLEAR`,
-    /// and when the mission has no security round.
-    lifted: Option<Lifted>,
+    /// The security verdict the push stands on, for the Security section
+    /// `nunki` writes. `None` when the mission has no security round.
+    attacked: Option<Attacked>,
 }
 
-/// A `FINDINGS` the push stands on, lifted rather than fixed.
-struct Lifted {
-    /// The commit the security agent concluded on: the `VERDICT.json` that
-    /// lists the findings names it.
+/// The security verdict a push stands on: a `CLEAR`, or a `FINDINGS`
+/// lifted rather than fixed.
+struct Attacked {
+    /// The commit the security agent concluded on.
     on: String,
-    /// Who lifted it, one entry per lift, as the pull request names them.
-    by: Vec<String>,
+    /// What its verdict said, as `nunki` kept it when it was concluded;
+    /// `None` when it kept nothing (state an older `nunki` wrote).
+    said: Option<crate::state::Said>,
+    /// Who lifted it, one entry per lift, as the pull request names them,
+    /// when it is a `FINDINGS`: its findings are not fixed. `None` on a
+    /// `CLEAR`.
+    lifted_by: Option<Vec<String>>,
+}
+
+impl Attacked {
+    fn of(concluded: &crate::state::Concluded, lifted_by: Option<Vec<String>>) -> Self {
+        Attacked {
+            on: concluded.head.clone(),
+            said: concluded.said.clone(),
+            lifted_by,
+        }
+    }
 }
 
 /// Who took each of `lifts`, as the pull request's note names them: the HQ,
@@ -690,7 +704,7 @@ fn verdicts_hold(
         Held {
             not_attacked: Vec::new(),
             lifted_by_nunki: Vec::new(),
-            lifted: None,
+            attacked: None,
         }
     };
 
@@ -730,7 +744,7 @@ fn security_holds(
     let mut held = Held {
         not_attacked: Vec::new(),
         lifted_by_nunki: Vec::new(),
-        lifted: None,
+        attacked: None,
     };
     if state.flow.max_security_rounds() == 0 {
         return Ok(held);
@@ -756,12 +770,10 @@ fn security_holds(
                 return Err(PushError::NotLifted(head.to_string()));
             }
             held.lifted_by_nunki = by_nunki(&lifts);
-            held.lifted = Some(Lifted {
-                on: concluded.head.clone(),
-                by: lifted_by(&lifts),
-            });
+            held.attacked = Some(Attacked::of(concluded, Some(lifted_by(&lifts))));
         } else {
             green(Role::Security, concluded.verdict)?;
+            held.attacked = Some(Attacked::of(concluded, None));
         }
         return Ok(held);
     }
@@ -779,12 +791,10 @@ fn security_holds(
             return Err(PushError::NotLifted(head.to_string()));
         }
         held.lifted_by_nunki = by_nunki(&lifts);
-        held.lifted = Some(Lifted {
-            on: concluded.head.clone(),
-            by: lifted_by(&lifts),
-        });
+        held.attacked = Some(Attacked::of(concluded, Some(lifted_by(&lifts))));
     } else {
         green(Role::Security, concluded.verdict)?;
+        held.attacked = Some(Attacked::of(concluded, None));
     }
     held.not_attacked = not_attacked(&slot.tree, &concluded.head, head)?;
     Ok(held)
@@ -985,35 +995,31 @@ pub fn with_overrides(body: &str, overrides: &[crate::mission::flow::Override]) 
     }
 }
 
-/// What `nunki push` withheld from the pull request it sent: the security
-/// agent's sections of `PR.md`, while the findings they describe are lifted
-/// and not fixed (`security_findings` in `nunki.yaml`).
+/// What `nunki push` kept off the forge: the security agent's report and
+/// findings, while they are lifted and not fixed (`security_findings` in
+/// `nunki.yaml`). The Security section `nunki` wrote says how many there
+/// are, and nothing else of them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Withheld {
-    /// How many sections under a heading beginning with `Security` the body
-    /// lost: one at least, since a push that must withhold and cut none is
-    /// refused before it pushes.
-    pub sections: usize,
-    /// How many findings the security agent's `VERDICT.json` lists; `None`
-    /// when that file could not be read as the verdict the lift answered.
+    /// How many findings the security verdict lists; `None` when `nunki`
+    /// holds no list of them it can read.
     pub findings: Option<usize>,
 }
 
-/// The note that takes the place of the security agent's sections, written
-/// by `nunki` from `VERDICT.json` and the lifts: how many findings per
-/// severity, that they were accepted and by whom, and that their details
-/// are withheld until they are fixed. Its first line is the heading's text;
-/// the level is the replaced section's.
+/// The paragraph that stands for findings withheld, written by `nunki` from
+/// the verdict and the lifts: how many findings per severity, that they
+/// were accepted and by whom, and that their details are withheld until
+/// they are fixed. Nothing of a finding but its severity is read.
 ///
-/// `verdict` is the security agent's verdict file, or `None` when it could
-/// not be read as the verdict the lift answered: the note then says the
-/// count is unknown rather than guess it. Returns the note and the count.
+/// `findings` is the list `nunki` kept when the verdict was concluded, or
+/// `None` when it kept none it can read: the note then says the count is
+/// unknown rather than guess it. Returns the note and the count.
 pub fn withheld_note(
-    verdict: Option<&crate::mission::VerdictFile>,
+    findings: Option<&crate::mission::FindingList>,
     by: &[String],
 ) -> (String, Option<usize>) {
     use crate::mission::{FindingList, Severity};
-    let listed = match verdict.and_then(|v| v.findings.as_ref()) {
+    let listed = match findings {
         Some(FindingList::Listed(findings)) => Some(findings),
         _ => None,
     };
@@ -1051,203 +1057,177 @@ pub fn withheld_note(
                  verdict"
             .to_string(),
     };
-    let by = if by.is_empty() {
-        "nobody nunki can name".to_string()
-    } else {
-        by.join(" and ")
-    };
     let note = format!(
-        "Security\n\nThe security review of this branch reported {counted}. They were \
-         accepted, not fixed — by {by} — and their details are withheld from this pull \
-         request until they are fixed."
+        "The security review of this branch reported {counted}. They were accepted, not \
+         fixed — by {} — and their details are withheld from this pull request until they \
+         are fixed.",
+        accepted_by(by)
     );
     (note, listed.map(Vec::len))
 }
 
-/// The security agent's `VERDICT.json`, when it is the `FINDINGS` the lift
-/// answered — the role's, on `on`. Every role overwrites that file, so
-/// anything else is not the list the lift was about, and the note says the
-/// count is unknown rather than read another verdict's.
-fn security_verdict(file: &std::path::Path, on: &str) -> Option<crate::mission::VerdictFile> {
-    let text = std::fs::read_to_string(file).ok()?;
-    let verdict: crate::mission::VerdictFile = serde_json::from_str(&text).ok()?;
-    (verdict.role == Role::Security && verdict.verdict == Verdict::Findings && verdict.head == on)
-        .then_some(verdict)
+/// Who accepted a `FINDINGS`, as the pull request names them.
+fn accepted_by(by: &[String]) -> String {
+    if by.is_empty() {
+        "nobody nunki can name".to_string()
+    } else {
+        by.join(" and ")
+    }
 }
 
-/// The pull request's body with every section under a heading that begins
-/// with `Security` — case aside, as gate 5 reads `Integration` — replaced by
-/// `note`: the note in place of the first, the others dropped. Returns the
-/// body and how many sections it lost.
+/// The pull request's Security section, written by `nunki` from the
+/// security verdict the push stands on (SPEC 4.5), and what it withheld.
 ///
-/// A section runs from its heading to the next heading of the same or a
-/// higher level, or to the end of the body: a finding under its own
-/// sub-heading is inside it and goes with it. Headings are read as the forge
-/// renders them — `#` to `######` followed by a space or nothing, indented
-/// three spaces at most, and a paragraph underlined with `=` or `-` — and
-/// never inside a fenced code block, where a `#` line is code.
+/// - On a `CLEAR`: the commit attacked, then the report as the agent wrote
+///   it.
+/// - On a lifted `FINDINGS` the project withholds: the note of
+///   [`withheld_note`], and no word of the report, of a finding's title or
+///   of a reason.
+/// - On a lifted `FINDINGS` the project publishes: who accepted it, each
+///   finding with its severity, its title and its reason, then the report.
 ///
-/// A line whose reading is in doubt may open a section, never end one. The
-/// body is read twice: once with CommonMark's fences ([`Fences::CommonMark`])
-/// and once with every line that starts like a fence taken as one
-/// ([`Fences::Any`]). A `Security` heading either reading finds opens a
-/// section — one heading too many, before a section, is harmless — and only
-/// a heading both readings find ends one: inside a section, a line wrongly
-/// read as a heading would end it early, and what follows would be
-/// published.
+/// Every form names the commits after the verdict that the security agent
+/// did not attack, when there are some. What `nunki` did not keep when the
+/// verdict was concluded is said to be unreadable, never read elsewhere.
 ///
-/// Only those sections are withheld. What another section says is
-/// published as written. And a body where one section was cut and another
-/// was written under a form this does not read — `## **Security**`, a
-/// heading in a quote — still publishes the second: the refusal of a push
-/// that cut none ([`PushError::NothingWithheld`]) cannot see it.
-pub fn without_security(body: &str, note: &str) -> (String, usize) {
-    let lines: Vec<&str> = body.lines().collect();
-    let strict = headings(&lines, Fences::CommonMark);
-    let liberal = headings(&lines, Fences::Any);
-    let mut starts: Vec<(usize, usize)> = strict
+/// The agent's prose comes last, and quoted ([`quoted`]): whatever it holds
+/// renders inside the quote and ends with it, and nothing `nunki` writes
+/// comes after it for it to disguise or swallow.
+fn security_section(
+    attacked: &Attacked,
+    withhold: bool,
+    not_attacked: &[String],
+) -> (String, Option<Withheld>) {
+    let mut parts: Vec<String> = Vec::new();
+    let mut withheld = None;
+    let findings = attacked.said.as_ref().and_then(|s| s.findings.as_ref());
+    match &attacked.lifted_by {
+        Some(by) if withhold => {
+            let (note, count) = withheld_note(findings, by);
+            parts.push(note);
+            withheld = Some(Withheld { findings: count });
+        }
+        Some(by) => parts.push(format!(
+            "The security agent attacked commit `{}` and concluded FINDINGS. They were \
+             accepted, not fixed — by {}.",
+            attacked.on,
+            accepted_by(by)
+        )),
+        None => parts.push(format!(
+            "The security agent attacked commit `{}` and concluded CLEAR.",
+            attacked.on
+        )),
+    }
+    if !not_attacked.is_empty() {
+        let commits: Vec<String> = not_attacked.iter().map(|c| format!("- {c}")).collect();
+        parts.push(format!(
+            "The security agent's rounds were spent, and it did not attack the commits \
+             pushed after it:\n\n{}",
+            commits.join("\n")
+        ));
+    }
+    if withheld.is_none() {
+        if attacked.lifted_by.is_some() {
+            parts.push(findings_published(findings));
+        }
+        parts.push(match &attacked.said {
+            Some(said) => format!("Its report, as it wrote it:\n\n{}", quoted(&said.report)),
+            None => "Its report could not be read: nunki kept none when the verdict was \
+                     concluded."
+                .to_string(),
+        });
+    }
+    (format!("## Security\n\n{}", parts.join("\n\n")), withheld)
+}
+
+/// The findings of a `FINDINGS` the project publishes, one line each: its
+/// severity, its title and its reason, as the agent wrote them, each made
+/// one printable line.
+fn findings_published(findings: Option<&crate::mission::FindingList>) -> String {
+    let Some(crate::mission::FindingList::Listed(findings)) = findings else {
+        return "Its findings could not be read: nunki kept no list it can read with the \
+                verdict."
+            .to_string();
+    };
+    if findings.is_empty() {
+        return "Its findings: none listed.".to_string();
+    }
+    let lines: Vec<String> = findings
         .iter()
-        .chain(&liberal)
-        .filter(|(_, _, text)| text.to_lowercase().starts_with("security"))
-        .map(|(at, level, _)| (*at, *level))
-        .collect();
-    starts.sort_unstable();
-    starts.dedup();
-    let ends: Vec<(usize, usize)> = strict
-        .iter()
-        .filter(|(at, level, _)| liberal.iter().any(|h| h.0 == *at && h.1 == *level))
-        .map(|(at, level, _)| (*at, *level))
-        .collect();
-    let mut cut: Vec<(usize, usize, usize)> = Vec::new();
-    let mut covered = 0;
-    for (at, level) in starts {
-        // A `Security` heading inside a section already cut goes with it.
-        if at < covered {
-            continue;
-        }
-        let end = ends
-            .iter()
-            .find(|(n, l)| *n > at && *l <= level)
-            .map_or(lines.len(), |(n, _)| *n);
-        cut.push((at, end, level));
-        covered = end;
-    }
-    if cut.is_empty() {
-        return (body.to_string(), 0);
-    }
-    let mut out: Vec<String> = Vec::new();
-    let mut at = 0;
-    for (n, (from, to, level)) in cut.iter().enumerate() {
-        out.extend(lines[at..*from].iter().map(|l| l.to_string()));
-        if n == 0 {
-            out.push(format!("{} {note}", "#".repeat(*level)));
-            out.push(String::new());
-        }
-        at = *to;
-    }
-    out.extend(lines[at..].iter().map(|l| l.to_string()));
-    (out.join("\n").trim_end().to_string(), cut.len())
-}
-
-/// Which lines [`headings`] takes to open a fenced code block.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Fences {
-    /// CommonMark's: three backticks or tildes or more, and a backtick
-    /// fence's info string holds no backtick — "```x``` is inline." is a
-    /// paragraph with inline code.
-    CommonMark,
-    /// Every line that starts with three backticks or tildes.
-    Any,
-}
-
-/// A fenced code block, while inside one: its character and its length.
-struct Fence {
-    mark: char,
-    len: usize,
-}
-
-impl Fence {
-    /// The fence `trimmed` opens, if it opens one under `fences`.
-    fn opened_by(trimmed: &str, fences: Fences) -> Option<Fence> {
-        let mark = trimmed.chars().next().filter(|c| matches!(c, '`' | '~'))?;
-        let len = trimmed.chars().take_while(|c| *c == mark).count();
-        if len < 3 {
-            return None;
-        }
-        // `mark` is ASCII: `len` characters are `len` bytes.
-        if fences == Fences::CommonMark && mark == '`' && trimmed[len..].contains('`') {
-            return None;
-        }
-        Some(Fence { mark, len })
-    }
-
-    /// Whether `trimmed` closes this fence: its own character, at least as
-    /// many, and nothing after them.
-    fn closed_by(&self, trimmed: &str) -> bool {
-        let n = trimmed.chars().take_while(|c| *c == self.mark).count();
-        n >= self.len && trimmed[n..].trim().is_empty()
-    }
-}
-
-/// The headings of `lines`, in order, as `(first line, level, text)`, with
-/// code fences read as `fences` says.
-fn headings(lines: &[&str], fences: Fences) -> Vec<(usize, usize, String)> {
-    let indent = |line: &str| line.len() - line.trim_start_matches(' ').len();
-    let mut found = Vec::new();
-    // The code block the current line is in, while inside one.
-    let mut fence: Option<Fence> = None;
-    // Where the paragraph the current line belongs to began.
-    let mut paragraph: Option<usize> = None;
-    for (n, line) in lines.iter().enumerate() {
-        let shallow = indent(line) <= 3;
-        let trimmed = line.trim();
-        if let Some(open) = &fence {
-            if shallow && open.closed_by(trimmed) {
-                fence = None;
+        .map(|f| {
+            let line = format!(
+                "- {}: {}",
+                crate::text::one_line(&f.severity),
+                crate::text::one_line(&f.title)
+            );
+            match &f.why_acceptable {
+                Some(why) => format!("{line} — accepted because: {}", crate::text::one_line(why)),
+                None => line,
             }
-            continue;
-        }
-        if shallow && let Some(open) = Fence::opened_by(trimmed, fences) {
-            fence = Some(open);
-            paragraph = None;
-            continue;
-        }
-        if trimmed.is_empty() {
-            paragraph = None;
-            continue;
-        }
-        let hashes = trimmed.chars().take_while(|c| *c == '#').count();
-        let rest = &trimmed[hashes..];
-        if shallow
-            && (1..=6).contains(&hashes)
-            && (rest.is_empty() || rest.starts_with([' ', '\t']))
-        {
-            found.push((
-                n,
-                hashes,
-                rest.trim().trim_end_matches('#').trim().to_string(),
-            ));
-            paragraph = None;
-            continue;
-        }
-        if let Some(start) = paragraph
-            && shallow
-            && (trimmed.chars().all(|c| c == '=') || trimmed.chars().all(|c| c == '-'))
-        {
-            let level = if trimmed.starts_with('=') { 1 } else { 2 };
-            found.push((start, level, lines[start].trim().to_string()));
-            paragraph = None;
-            continue;
-        }
-        if shallow && trimmed.chars().all(|c| c == '-') {
-            // A rule, with no paragraph above it to underline.
-            continue;
-        }
-        if paragraph.is_none() {
-            paragraph = Some(n);
-        }
+        })
+        .collect();
+    format!("Its findings:\n\n{}", lines.join("\n"))
+}
+
+/// `text` as a Markdown block quote, every line of it inside: printable
+/// first ([`crate::text::printable`]), which leaves `\n` as the only line
+/// break — a lone `\r`, which the forge reads as one, is shown as its
+/// escape — so no line of the text can start outside the quote.
+fn quoted(text: &str) -> String {
+    crate::text::printable(text)
+        .trim_end()
+        .lines()
+        .map(|line| {
+            if line.is_empty() {
+                ">".to_string()
+            } else {
+                format!("> {line}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The lines of `pr` on which a `#` comes before the first letter, and
+/// that letter starts `security`, in any case: `## Security review`,
+/// `> ## Security`, `## **Security**`. Each as `line N: <text>`, in order.
+/// Line breaks are the forge's: `\n`, `\r\n`, and a lone `\r`.
+///
+/// **This is not the guard, and it is coarse on purpose** (SPEC 4.5). The
+/// guard is that the security agent cannot write `PR.md`: its profile does
+/// not mount it. This catches the one thing that guard cannot: a section a
+/// cooperative security agent wrote under an older `nunki`, as its role then
+/// told it to, in a mission still running. A push that must withhold
+/// refuses over such a line, and in doing so reminds the HQ to read
+/// `PR.md`. It refuses; it never cuts, and it decides nowhere where a
+/// section ends.
+///
+/// It reads no Markdown, and it is not trying to. A heading in another form
+/// — `<h2>Security</h2>`, `Security` underlined with `===`, a heading that
+/// begins with another word — passes, and falls under the stated limit:
+/// what the coder or the integrator writes in `PR.md` is published as
+/// written, a finding they describe included. `nunki` does not read their
+/// prose; the HQ reads `PR.md` before a push.
+fn old_security_headings(pr: &str) -> Vec<String> {
+    pr.replace("\r\n", "\n")
+        .split(['\n', '\r'])
+        .enumerate()
+        .filter_map(|(n, line)| {
+            let first = line.find(char::is_alphabetic)?;
+            (line[..first].contains('#') && line[first..].to_lowercase().starts_with("security"))
+                .then(|| format!("line {}: {}", n + 1, crate::text::one_line(line)))
+        })
+        .collect()
+}
+
+/// `body` followed by `section`, a blank line between them; `section` alone
+/// when the body is empty.
+fn with_section(body: &str, section: &str) -> String {
+    if body.trim().is_empty() {
+        section.to_string()
+    } else {
+        format!("{}\n\n{section}", body.trim_end())
     }
-    found
 }
 
 #[cfg(test)]
