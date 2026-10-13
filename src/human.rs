@@ -113,19 +113,18 @@ pub fn me(nunki_home: &Path, at: Option<&Path>) -> Human {
         }
         Ok(None) => {}
     }
-    if let Some(at) = at {
-        if let Ok(name) = crate::git::run(at, &["config", "user.name"]) {
-            if !name.trim().is_empty() {
-                let email = crate::git::run(at, &["config", "user.email"])
-                    .ok()
-                    .filter(|e| !e.trim().is_empty());
-                return Human {
-                    name: Some(name.trim().to_string()),
-                    email,
-                    source: Source::Git,
-                };
-            }
-        }
+    if let Some(at) = at
+        && let Ok(name) = crate::git::run(at, &["config", "user.name"])
+        && !name.trim().is_empty()
+    {
+        let email = crate::git::run(at, &["config", "user.email"])
+            .ok()
+            .filter(|e| !e.trim().is_empty());
+        return Human {
+            name: Some(name.trim().to_string()),
+            email,
+            source: Source::Git,
+        };
     }
     match std::env::var("USER").ok().filter(|u| !u.is_empty()) {
         Some(user) => Human {
