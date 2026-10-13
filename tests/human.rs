@@ -377,3 +377,32 @@ fn a_mission_is_not_framed_for_nobody_when_the_declaration_cannot_be_read() {
     );
     assert!(framed("m2"));
 }
+
+/// With no declaration and no name in git, the machine's account name is
+/// the answer, said to be a guess; an empty one is no name at all.
+#[test]
+fn without_a_declaration_or_git_the_account_name_answers_and_an_empty_one_does_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    let home = dir.path().join("home");
+    common::project_home(&root, &home, "harness: claude-code\n");
+    let whoami = |user: &str| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_nunki"))
+            .env("HOME", &home)
+            .env("USER", user)
+            .args(["-C"])
+            .arg(&root)
+            .arg("whoami")
+            .output()
+            .unwrap()
+    };
+
+    let out = whoami("alex-account");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(text.lines().next(), Some("alex-account"), "{text}");
+    assert!(text.contains("from the machine's account name"), "{text}");
+
+    let out = whoami("");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("does not know who you are"), "{text}");
+}

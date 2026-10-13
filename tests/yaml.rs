@@ -353,3 +353,141 @@ fn a_value_that_cannot_be_written_is_an_error_saying_why() {
     assert_eq!(err.place, None);
     assert!(err.message.contains("no YAML for this"), "{err}");
 }
+
+/// A serializer that answers with the name of the method it was given, and
+/// refuses everything that is not a scalar.
+struct Spy;
+
+macro_rules! spied {
+    ($($method:ident($ty:ty) => $name:literal,)*) => {
+        $(fn $method(self, _: $ty) -> Result<&'static str, Self::Error> { Ok($name) })*
+    };
+}
+
+impl serde::Serializer for Spy {
+    type Ok = &'static str;
+    type Error = serde::de::value::Error;
+    type SerializeSeq = serde::ser::Impossible<&'static str, Self::Error>;
+    type SerializeTuple = serde::ser::Impossible<&'static str, Self::Error>;
+    type SerializeTupleStruct = serde::ser::Impossible<&'static str, Self::Error>;
+    type SerializeTupleVariant = serde::ser::Impossible<&'static str, Self::Error>;
+    type SerializeMap = serde::ser::Impossible<&'static str, Self::Error>;
+    type SerializeStruct = serde::ser::Impossible<&'static str, Self::Error>;
+    type SerializeStructVariant = serde::ser::Impossible<&'static str, Self::Error>;
+
+    spied! {
+        serialize_bool(bool) => "bool",
+        serialize_i8(i8) => "i8",
+        serialize_i16(i16) => "i16",
+        serialize_i32(i32) => "i32",
+        serialize_i64(i64) => "i64",
+        serialize_i128(i128) => "i128",
+        serialize_u8(u8) => "u8",
+        serialize_u16(u16) => "u16",
+        serialize_u32(u32) => "u32",
+        serialize_u64(u64) => "u64",
+        serialize_u128(u128) => "u128",
+        serialize_f32(f32) => "f32",
+        serialize_f64(f64) => "f64",
+        serialize_char(char) => "char",
+        serialize_str(&str) => "str",
+        serialize_bytes(&[u8]) => "bytes",
+        serialize_unit_struct(&'static str) => "unit_struct",
+    }
+
+    fn serialize_none(self) -> Result<&'static str, Self::Error> {
+        Ok("none")
+    }
+    fn serialize_some<T: ?Sized + serde::Serialize>(
+        self,
+        _: &T,
+    ) -> Result<&'static str, Self::Error> {
+        Ok("some")
+    }
+    fn serialize_unit(self) -> Result<&'static str, Self::Error> {
+        Ok("unit")
+    }
+    fn serialize_unit_variant(
+        self,
+        _: &'static str,
+        _: u32,
+        _: &'static str,
+    ) -> Result<&'static str, Self::Error> {
+        Ok("unit_variant")
+    }
+    fn serialize_newtype_struct<T: ?Sized + serde::Serialize>(
+        self,
+        _: &'static str,
+        _: &T,
+    ) -> Result<&'static str, Self::Error> {
+        Ok("newtype_struct")
+    }
+    fn serialize_newtype_variant<T: ?Sized + serde::Serialize>(
+        self,
+        _: &'static str,
+        _: u32,
+        _: &'static str,
+        _: &T,
+    ) -> Result<&'static str, Self::Error> {
+        Ok("newtype_variant")
+    }
+    fn serialize_seq(self, _: Option<usize>) -> Result<Self::SerializeSeq, Self::Error> {
+        Err(serde::ser::Error::custom("a scalar only"))
+    }
+    fn serialize_tuple(self, _: usize) -> Result<Self::SerializeTuple, Self::Error> {
+        Err(serde::ser::Error::custom("a scalar only"))
+    }
+    fn serialize_tuple_struct(
+        self,
+        _: &'static str,
+        _: usize,
+    ) -> Result<Self::SerializeTupleStruct, Self::Error> {
+        Err(serde::ser::Error::custom("a scalar only"))
+    }
+    fn serialize_tuple_variant(
+        self,
+        _: &'static str,
+        _: u32,
+        _: &'static str,
+        _: usize,
+    ) -> Result<Self::SerializeTupleVariant, Self::Error> {
+        Err(serde::ser::Error::custom("a scalar only"))
+    }
+    fn serialize_map(self, _: Option<usize>) -> Result<Self::SerializeMap, Self::Error> {
+        Err(serde::ser::Error::custom("a scalar only"))
+    }
+    fn serialize_struct(
+        self,
+        _: &'static str,
+        _: usize,
+    ) -> Result<Self::SerializeStruct, Self::Error> {
+        Err(serde::ser::Error::custom("a scalar only"))
+    }
+    fn serialize_struct_variant(
+        self,
+        _: &'static str,
+        _: u32,
+        _: &'static str,
+        _: usize,
+    ) -> Result<Self::SerializeStructVariant, Self::Error> {
+        Err(serde::ser::Error::custom("a scalar only"))
+    }
+}
+
+/// An integer is handed to a serializer as the narrowest of `i64`, `u64`
+/// and `i128` it fits. The writers nunki uses print the three alike, but
+/// not every serializer takes an `i128` (serde's own default refuses it), so
+/// a `-1` or a `30` written as one would be refused by those.
+#[test]
+fn an_integer_is_written_as_the_narrowest_kind_it_fits() {
+    use serde::Serialize;
+    let kind = |n: i128| Value::Integer(n).serialize(Spy).unwrap();
+    assert_eq!(kind(-1), "i64");
+    assert_eq!(kind(30), "i64");
+    assert_eq!(kind(i64::MAX.into()), "i64");
+    assert_eq!(kind(i64::MIN.into()), "i64");
+    assert_eq!(kind(i128::from(i64::MAX) + 1), "u64");
+    assert_eq!(kind(u64::MAX.into()), "u64");
+    assert_eq!(kind(i128::from(u64::MAX) + 1), "i128");
+    assert_eq!(kind(i128::from(i64::MIN) - 1), "i128");
+}
