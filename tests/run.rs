@@ -2552,3 +2552,20 @@ fn the_security_agent_is_told_its_section_of_the_pull_request_is_the_one_withhel
         "the heading is the security agent's"
     );
 }
+
+/// A headless run is over when the agent's turn ends, a command still
+/// running in the background included: every role is told so, and told to
+/// wait for such a command with a foreground one rather than end its turn.
+#[test]
+fn every_role_is_told_that_a_run_ends_with_its_turn() {
+    for role in [Role::Coder, Role::Integrator, Role::Security] {
+        let prompt = role::prompt(role).replace('\n', " ");
+        for said in [
+            "**A run ends when your turn ends**",
+            "Never end a turn while something you started is still running",
+            "wait for a background command with a foreground one",
+        ] {
+            assert!(prompt.contains(said), "{role:?} is not told {said:?}");
+        }
+    }
+}

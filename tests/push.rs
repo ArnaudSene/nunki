@@ -206,6 +206,18 @@ impl World {
             })
             .unwrap();
 
+        // What every mission's `PR.md` holds by the time it is pushed: a
+        // title, and the security agent's section under its own heading
+        // (SPEC 4.5). A push over a lifted `FINDINGS` refuses a `PR.md` it
+        // reads no such section in; the tests about that write their own.
+        let mission = hq_root.join("missions/m1");
+        std::fs::create_dir_all(&mission).unwrap();
+        std::fs::write(
+            mission.join("PR.md"),
+            "# feat: one returns two\n\n## Security\n\nThe review.\n",
+        )
+        .unwrap();
+
         Self {
             home: dir.path().join("home"),
             _dir: dir,
@@ -3153,23 +3165,6 @@ fn an_underlined_security_heading_after_a_rule_is_a_heading() {
     assert_eq!((out.as_str(), n), ("## Notes\n\nkept\n\n---\n## N", 1));
 }
 
-/// A `PR.md` with no security section loses nothing: the body is sent as
-/// written, and the push says no section was withheld.
-#[test]
-fn a_pull_request_with_no_security_section_loses_nothing() {
-    let written = "# feat: one returns two\n\nBecause it had to.\n\n## Integration\n\nWired.\n";
-    let world = lifted_findings(written);
-    let (pushed, body) = pushed_body(&world);
-    assert_eq!(body, "Because it had to.\n\n## Integration\n\nWired.");
-    assert_eq!(
-        pushed.withheld,
-        Some(push::Withheld {
-            sections: 0,
-            findings: Some(3)
-        })
-    );
-}
-
 /// A `FINDINGS` written under another role's name is not the security
 /// agent's list, even on the lifted commit: it gives no count.
 #[test]
@@ -3186,4 +3181,392 @@ fn a_findings_under_another_roles_name_gives_no_count() {
         "{body}"
     );
     assert_eq!(pushed.withheld.and_then(|w| w.findings), None);
+}
+
+// --- a push that must withhold and found nothing to withhold (SPEC 4.5) -----
+
+/// The case the review measured: a line that starts with three backticks
+/// and holds another is a paragraph with inline code, not a fence, and the
+/// `Security` heading after it is a heading.
+const FENCE_THAT_IS_NOT_ONE: &str = "# feat: one returns two\n\
+\n\
+## Coder\n\
+```x``` is inline.\n\
+## Integration\n\
+## Security\n\
+a line that must not be published\n";
+
+/// A `PR.md` that holds no `Security` heading at all.
+const NO_SECURITY_HEADING: &str = "# feat: one returns two\n\
+\n\
+Because it had to.\n\
+\n\
+## Integration\n\
+\n\
+Wired.\n";
+
+/// Push `world`'s mission against a forge that would open the pull
+/// request, and return what push answered and every request the forge
+/// received. The forge is asked once more after the push, by the test
+/// itself, so that "no request" is read from a forge that was listening.
+fn pushed_and_asked(world: &World) -> (Result<push::Pushed, PushError>, Vec<String>) {
+    use std::io::{Read, Write};
+    let (api, server) = serve(vec![
+        (201, r#"{"html_url":"https://github.com/o/r/pull/9"}"#),
+        (200, "{}"),
+    ]);
+    let pushed = push::push_to(&world.project, "m1", true, &api);
+    let address = api.strip_prefix("http://").unwrap();
+    for _ in 0..2 {
+        if let Ok(mut probe) = std::net::TcpStream::connect(address) {
+            let _ = probe.write_all(b"GET /the-test-asks HTTP/1.1\r\n\r\n");
+            let _ = probe.read_to_end(&mut Vec::new());
+        }
+    }
+    let seen = server
+        .join()
+        .unwrap()
+        .into_iter()
+        .filter(|r| !r.starts_with("GET /the-test-asks"))
+        .collect();
+    (pushed, seen)
+}
+
+/// The body of the one pull request the forge was asked to open.
+fn body_sent(seen: &[String]) -> String {
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    let body: serde_json::Value =
+        serde_json::from_str(seen[0].split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    body["body"].as_str().unwrap().to_string()
+}
+
+/// A refusal of a push that found nothing to withhold: nothing reached the
+/// forge or the remote, and the refusal says how many findings, that no
+/// `Security` section was read, and both ways past.
+fn refused_with_nothing_sent(
+    world: &World,
+    outcome: Result<push::Pushed, PushError>,
+    seen: &[String],
+    findings: &str,
+) {
+    let err = match outcome {
+        Err(e) => e,
+        Ok(pushed) => panic!("pushed: {pushed:?}"),
+    };
+    assert!(matches!(err, PushError::NothingWithheld { .. }), "{err}");
+    let said = err.to_string();
+    for part in [
+        findings,
+        "found no `Security` section it could read",
+        "PR.md",
+        "the HQ may edit",
+        "security_findings: publish",
+        "nothing was pushed",
+    ] {
+        assert!(said.contains(part), "{part:?} not in: {said}");
+    }
+    assert!(seen.is_empty(), "the forge was asked: {seen:?}");
+    assert_eq!(
+        world.on_forge("mission/x"),
+        None,
+        "the branch reached the remote"
+    );
+}
+
+/// A lifted `FINDINGS`, a project that withholds, and a `PR.md` with no
+/// `Security` heading: the push refuses before anything leaves the machine.
+#[test]
+fn a_push_that_must_withhold_and_reads_no_security_section_sends_nothing() {
+    let world = lifted_findings(NO_SECURITY_HEADING);
+    let (outcome, seen) = pushed_and_asked(&world);
+    refused_with_nothing_sent(&world, outcome, &seen, "3 finding(s)");
+    assert_eq!(pr_on_disk(&world), NO_SECURITY_HEADING);
+}
+
+/// The same refusal when the count could not be read from `VERDICT.json`.
+#[test]
+fn a_push_that_must_withhold_refuses_even_when_the_count_is_unknown() {
+    let world = lifted_findings(NO_SECURITY_HEADING);
+    findings_verdict(&world, "0000000000000000000000000000000000000000");
+    let (outcome, seen) = pushed_and_asked(&world);
+    refused_with_nothing_sent(&world, outcome, &seen, "findings nunki could not count");
+}
+
+/// A missing `PR.md` is no section read either: refused, nothing sent.
+#[test]
+fn a_push_that_must_withhold_and_has_no_pull_request_file_sends_nothing() {
+    let world = lifted_findings(NO_SECURITY_HEADING);
+    std::fs::remove_file(world.project.hq_root.join("missions/m1/PR.md")).unwrap();
+    let (outcome, seen) = pushed_and_asked(&world);
+    refused_with_nothing_sent(&world, outcome, &seen, "3 finding(s)");
+}
+
+/// The measured case: the `Security` section after a line that only looks
+/// like a fence is read, and withheld.
+#[test]
+fn a_security_heading_after_a_fence_that_is_not_one_is_withheld() {
+    let world = lifted_findings(FENCE_THAT_IS_NOT_ONE);
+    let (outcome, seen) = pushed_and_asked(&world);
+    let pushed = outcome.unwrap();
+    let body = body_sent(&seen);
+    assert!(!body.contains("must not be published"), "{body}");
+    assert!(
+        body.starts_with(
+            "## Coder\n```x``` is inline.\n## Integration\n## Security\n\nThe security review"
+        ),
+        "{body}"
+    );
+    assert_eq!(pushed.withheld.map(|w| w.sections), Some(1));
+}
+
+/// A project that publishes its findings sends both bodies as written.
+#[test]
+fn a_project_that_publishes_sends_a_body_without_a_security_section_as_written() {
+    for written in [NO_SECURITY_HEADING, FENCE_THAT_IS_NOT_ONE] {
+        let mut world = lifted_findings(written);
+        world.project.config.security_findings = nunki::project::SecurityFindings::Publish;
+        let (outcome, seen) = pushed_and_asked(&world);
+        let pushed = outcome.unwrap();
+        let as_written = written
+            .strip_prefix("# feat: one returns two\n\n")
+            .unwrap()
+            .trim_end();
+        assert_eq!(body_sent(&seen), as_written);
+        assert_eq!(pushed.withheld, None);
+        assert!(world.on_forge("mission/x").is_some());
+    }
+}
+
+/// A `CLEAR` has nothing to withhold: a body with no `Security` heading
+/// goes through as written.
+#[test]
+fn a_clear_over_a_body_without_a_security_section_goes_through() {
+    let world = World::new(with_wiring(), Security::Agent);
+    world.on_github();
+    world.with_token();
+    world.pr_says(NO_SECURITY_HEADING);
+    world.ready();
+    let (outcome, seen) = pushed_and_asked(&world);
+    assert_eq!(outcome.unwrap().withheld, None);
+    assert_eq!(
+        body_sent(&seen),
+        "Because it had to.\n\n## Integration\n\nWired."
+    );
+}
+
+/// Four forms the forge renders as a `Security` heading and `nunki` does
+/// not read as one. Each, over a lifted `FINDINGS`, is refused or withheld:
+/// what is under it never reaches the forge.
+#[test]
+fn security_headings_nunki_cannot_read_are_never_published() {
+    let forms = [
+        "# feat: one returns two\n\nIntro.\n\n## **Security**\n\nthe secret finding\n",
+        "# feat: one returns two\n\nIntro.\n\n> ## Security\n> the secret finding\n",
+        "# feat: one returns two\r\rIntro.\r\r## Security\r\rthe secret finding\r",
+        "## Security\n\nthe secret finding\n",
+    ];
+    for written in forms {
+        let world = lifted_findings(written);
+        let (outcome, seen) = pushed_and_asked(&world);
+        for request in &seen {
+            assert!(
+                !request.contains("secret finding"),
+                "published: {written:?}\n{request}"
+            );
+        }
+        match outcome {
+            Err(PushError::NothingWithheld { .. }) => {
+                assert!(seen.is_empty(), "{written:?}: {seen:?}");
+                assert_eq!(world.on_forge("mission/x"), None, "{written:?}");
+            }
+            Ok(pushed) => assert!(pushed.withheld.is_some(), "{written:?}"),
+            Err(e) => panic!("{written:?}: {e}"),
+        }
+    }
+}
+
+/// A shell example inside the security section, whose lines begin with
+/// `# `, is code: the section is withheld whole, and nothing of the block
+/// reaches the forge.
+#[test]
+fn a_fenced_block_inside_the_security_section_is_withheld_with_it() {
+    let written = "# feat: one returns two\n\
+\n\
+Intro.\n\
+\n\
+## Security\n\
+\n\
+How to reach it:\n\
+\n\
+```sh\n\
+# log in as anyone\n\
+curl https://evil.example/login\n\
+## then read the tokens\n\
+cat /secret/tokens\n\
+```\n\
+\n\
+## Integration\n\
+\n\
+Wired.\n";
+    let world = lifted_findings(written);
+    let (outcome, seen) = pushed_and_asked(&world);
+    assert_eq!(outcome.unwrap().withheld.map(|w| w.sections), Some(1));
+    let body = body_sent(&seen);
+    for secret in [
+        "How to reach it",
+        "log in as anyone",
+        "evil.example",
+        "read the tokens",
+        "/secret/tokens",
+        "```",
+    ] {
+        assert!(!body.contains(secret), "{secret:?} published:\n{body}");
+    }
+    assert!(body.ends_with("## Integration\n\nWired."), "{body}");
+}
+
+/// `nunki push`, through the real binary, over a lifted `FINDINGS` and a
+/// `PR.md` it reads no `Security` section in: it refuses, says why, and
+/// says nothing of having pushed or withheld anything.
+#[test]
+fn push_says_it_found_nothing_to_withhold_and_pushes_nothing() {
+    let world = World::opened_at(nunki::mission::Rigor::Critical);
+    world.pr_says(NO_SECURITY_HEADING);
+    let lot = world.coded("pub fn one() -> u8 { 2 }\n", "the lot");
+    world.security(Verdict::Findings, T1);
+    findings_verdict(&world, &lot);
+    world.accepted(&lot, T2);
+    let out = Command::new(env!("CARGO_BIN_EXE_nunki"))
+        .arg("-C")
+        .arg(&world.project.root)
+        .args(["push", "m1", "--yes"])
+        .env("HOME", &world.home)
+        .output()
+        .unwrap();
+    let (stdout, stderr) = (
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(!out.status.success(), "{stdout}{stderr}");
+    assert_eq!(stdout, "", "{stdout}");
+    assert!(
+        stderr.contains("found no `Security` section it could read"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("3 finding(s)"), "{stderr}");
+    assert_eq!(world.on_forge("mission/x"), None);
+}
+
+/// The note counts a finding whose severity it cannot rank as unranked,
+/// beside those it can.
+#[test]
+fn the_note_counts_findings_it_cannot_rank_as_unranked() {
+    let verdict: nunki::mission::VerdictFile = serde_json::from_value(serde_json::json!({
+        "role": "Security",
+        "verdict": "FINDINGS",
+        "head": "abc",
+        "date": T1,
+        "findings": [
+            {"severity": "HIGH", "title": "one"},
+            {"severity": "SEVERE", "title": "two"},
+            {"severity": "", "title": "three"}
+        ]
+    }))
+    .unwrap();
+    let (note, count) = push::withheld_note(Some(&verdict), &["the HQ (A)".into()]);
+    assert!(
+        note.contains("reported 3 finding(s) — 1 HIGH, 2 unranked."),
+        "{note}"
+    );
+    assert_eq!(count, Some(3));
+}
+
+/// A fence is closed by a line of its own character, at least as long, with
+/// nothing after it, indented three spaces at most — and by nothing else.
+/// Every line that does not close it stays code, inside the section.
+#[test]
+fn a_fence_closes_only_where_commonmark_closes_it() {
+    for inside in [
+        "    ```\n", // indented four spaces: code, not a closing fence
+        "```rust\n", // an info string: not a closing fence
+        "~~~\n",     // the other character
+    ] {
+        let body = format!(
+            "## Security\n\n```sh\n{inside}# a root heading in the example\nsecret\n```\n\n## Tests\n\nkept\n"
+        );
+        let (out, n) = push::without_security(&body, "N");
+        assert_eq!(
+            (out.as_str(), n),
+            ("## N\n\n## Tests\n\nkept", 1),
+            "{inside:?}"
+        );
+    }
+    // A four-backtick fence holds a three-backtick line.
+    let body = "## Security\n\n````md\n```\n# example\n````\n\n## Tests\n\nkept\n";
+    let (out, n) = push::without_security(body, "N");
+    assert_eq!((out.as_str(), n), ("## N\n\n## Tests\n\nkept", 1));
+    // And a fence that does close ends the code: the heading after it is one.
+    let body = "## Security\n\n```sh\n# code\n  ```  \n## Tests\n\nkept\n";
+    let (out, n) = push::without_security(body, "N");
+    assert_eq!((out.as_str(), n), ("## N\n\n## Tests\n\nkept", 1));
+}
+
+/// A line whose reading is in doubt may open a `Security` section, never
+/// end one: a backtick line holding another backtick is no fence to the
+/// forge, but inside the security section the `# ` lines after it are not
+/// read as the headings that would end it. The two readings never agree on
+/// a heading after it, so the section runs to the end: withholding too
+/// much is the side the doubt falls on.
+#[test]
+fn a_line_in_doubt_never_ends_a_security_section() {
+    let body = "## Security\n\n```sh `x`\n# a root heading in the example\nsecret\n```\n\n\
+                ## Tests\n\nkept\n";
+    let (out, n) = push::without_security(body, "N");
+    assert_eq!((out.as_str(), n), ("## N", 1));
+}
+
+/// The other side of the doubt: a `Security` heading that only one of the
+/// two readings finds still opens a section. Here the line holding a
+/// backtick is a fence to one reading and not to the other, the two are out
+/// of step on every fence after it, and the heading is read by one only.
+#[test]
+fn a_security_heading_either_reading_finds_is_withheld() {
+    // CommonMark reads code from the second line on; the other reading
+    // closes a fence there and reads the heading.
+    let body = "```x``` is inline.\n```\n## Security\nsecret\n";
+    let (out, n) = push::without_security(body, "N");
+    assert_eq!((out.as_str(), n), ("```x``` is inline.\n```\n## N", 1));
+    // And the measured case the other way round: CommonMark reads the
+    // heading, the other reading reads code.
+    let body = "```x``` is inline.\n## Security\nsecret\n";
+    let (out, n) = push::without_security(body, "N");
+    assert_eq!((out.as_str(), n), ("```x``` is inline.\n## N", 1));
+}
+
+/// The note names only the severities it counted, and no `unranked` when
+/// every finding is ranked; an empty list is a count and nothing more.
+#[test]
+fn the_note_names_no_severity_it_did_not_count() {
+    let note = |findings: serde_json::Value| {
+        let verdict: nunki::mission::VerdictFile = serde_json::from_value(serde_json::json!({
+            "role": "Security",
+            "verdict": "FINDINGS",
+            "head": "abc",
+            "date": T1,
+            "findings": findings
+        }))
+        .unwrap();
+        push::withheld_note(Some(&verdict), &[]).0
+    };
+    let said = note(serde_json::json!([
+        {"severity": "HIGH", "title": "one"},
+        {"severity": "LOW", "title": "two"}
+    ]));
+    assert!(
+        said.contains("reported 2 finding(s) — 1 HIGH, 1 LOW. They"),
+        "{said}"
+    );
+    let said = note(serde_json::json!([]));
+    assert!(said.contains("reported 0 finding(s). They"), "{said}");
+    assert!(said.contains("by nobody nunki can name"), "{said}");
 }

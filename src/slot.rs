@@ -81,6 +81,18 @@ pub enum SlotError {
          cannot be read ({why}), so nunki cannot tell whether a run is in flight in this slot"
     )]
     StoreUnreadable { name: String, why: String },
+    /// The list of missions would not read: an empty list it is not, and a
+    /// run in flight may be among what could not be read.
+    #[error(
+        "slot {name:?} was not reset, and nothing in it was changed: the list of missions in \
+         {dir} cannot be read ({why}), so nunki cannot tell whether a run is in flight in \
+         this slot. Make that directory readable again"
+    )]
+    MissionsUnreadable {
+        name: String,
+        dir: String,
+        why: String,
+    },
     #[error("the engine: {0}")]
     Engine(String),
     #[error("the slot's campaign record could not be read: {0}")]
@@ -247,17 +259,38 @@ pub fn reset(
 ///
 /// A state that cannot be read is not a state that says nothing runs: it is
 /// refused, naming the file and why, rather than read as "no run" and a
-/// live run's container taken down. Only the missions not archived are read
-/// — `archive/` is out of reach of [`crate::mission::dir::list`] — so an old
-/// broken file stops blocking once its mission is closed. A mission framed
-/// and never started has no state, and nothing in flight.
+/// live run's container taken down. So is a list of missions that cannot be
+/// read: an empty list it is not. And the missions read are those with a
+/// folder ([`crate::mission::dir::list_checked`]) **and** those with a state
+/// file ([`crate::state::Store::missions`]): a run the store records in this
+/// slot blocks the reset whether or not its folder is listed.
+///
+/// Only the missions not archived are read — archiving moves the folder and
+/// the state under `archive/`, out of reach of both — so an old broken file
+/// stops blocking once its mission is closed. A mission framed and never
+/// started has no state, and nothing in flight.
 fn running_in(project: &Project, name: &str) -> Result<Option<String>, SlotError> {
     let store =
         crate::state::Store::open(&project.hq_root).map_err(|e| SlotError::StoreUnreadable {
             name: name.to_string(),
             why: e.to_string(),
         })?;
-    for id in crate::mission::dir::list(&project.hq_root) {
+    // A set: a mission with both a folder and a state is read once, in name
+    // order.
+    let mut ids: std::collections::BTreeSet<String> =
+        crate::mission::dir::list_checked(&project.hq_root)
+            .map_err(|e| SlotError::MissionsUnreadable {
+                name: name.to_string(),
+                dir: project.hq_root.join("missions").display().to_string(),
+                why: e.to_string(),
+            })?
+            .into_iter()
+            .collect();
+    ids.extend(store.missions().map_err(|e| SlotError::StoreUnreadable {
+        name: name.to_string(),
+        why: e.to_string(),
+    })?);
+    for id in ids {
         match store.load(&id) {
             Ok(state) if state.slot == name && state.run.is_some() => return Ok(Some(id)),
             Ok(_) | Err(crate::state::StateError::Missing(_)) => {}

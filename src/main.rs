@@ -1165,8 +1165,10 @@ fn main() -> ExitCode {
                     // Findings accepted and not fixed are not published by
                     // default (`security_findings` in nunki.yaml): said here,
                     // with how many, so nobody wonders where the section went.
-                    // `mission status` still shows them in full.
-                    let withheld = pushed.withheld.as_ref().filter(|w| w.sections > 0);
+                    // `VERDICT.json` still holds them in full. A push that had
+                    // to withhold and read no section was refused before it
+                    // pushed, so a `withheld` here always cut one at least.
+                    let withheld = pushed.withheld.as_ref();
                     if let Some(w) = withheld {
                         let findings = match w.findings {
                             Some(n) => format!("{n} finding(s)"),

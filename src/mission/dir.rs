@@ -192,6 +192,29 @@ pub fn list(hq_root: &Path) -> Vec<String> {
     ids
 }
 
+/// Every name under `missions/`, for a caller to which a list that cannot be
+/// read is not an empty one: `missions/` unreadable, or an entry of it, is an
+/// error naming the directory. A `missions/` that does not exist holds no
+/// mission. In no particular order.
+///
+/// Unlike [`list`], a folder is named whether or not it holds a
+/// `MISSION.md`: a folder whose `MISSION.md` is gone may still be a mission
+/// in flight, and the caller asks the state store about each name.
+pub fn list_checked(hq_root: &Path) -> Result<Vec<String>, MissionDirError> {
+    let dir = hq_root.join("missions");
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(MissionDirError::Io(dir, e)),
+    };
+    let mut ids = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| MissionDirError::Io(dir.clone(), e))?;
+        ids.push(entry.file_name().to_string_lossy().into_owned());
+    }
+    Ok(ids)
+}
+
 /// The YAML between the first two `---` lines.
 fn front_matter(text: &str) -> Option<&str> {
     let rest = text.strip_prefix("---\n")?;
