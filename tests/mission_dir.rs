@@ -667,7 +667,7 @@ fn a_header_without_a_frozen_threshold_still_reads_and_a_bad_one_is_refused() {
         Some(70)
     );
 
-    for bad in ["0", "101"] {
+    for bad in ["0", "101", "-5"] {
         let text = std::fs::read_to_string(&paths.mission).unwrap();
         std::fs::write(
             &paths.mission,

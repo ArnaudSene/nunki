@@ -73,7 +73,7 @@ pub enum MissionDirError {
     #[error("the header of {path} is not valid: {source}")]
     BadHeader {
         path: PathBuf,
-        source: serde_yaml_ng::Error,
+        source: crate::yaml::Error,
     },
     #[error("{0}: {1}")]
     Io(PathBuf, std::io::Error),
@@ -173,9 +173,10 @@ pub fn read_header(hq_root: &Path, id: &str) -> Result<Header, MissionDirError> 
         .map_err(|e| MissionDirError::Io(paths.mission.clone(), e))?;
     let yaml =
         front_matter(&text).ok_or_else(|| MissionDirError::NoHeader(paths.mission.clone()))?;
-    serde_yaml_ng::from_str(yaml).map_err(|source| MissionDirError::BadHeader {
+    crate::yaml::from_str(yaml).map_err(|source| MissionDirError::BadHeader {
         path: paths.mission.clone(),
-        source,
+        // The header starts below the `---` that opens the file.
+        source: source.below(1),
     })
 }
 

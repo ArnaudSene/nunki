@@ -357,7 +357,7 @@ fn declares(home: &Path) -> Vec<crate::project::Stack> {
         Ok(t) => t,
         Err(_) => return Vec::new(),
     };
-    match serde_yaml_ng::from_str::<crate::project::Config>(&text) {
+    match crate::yaml::from_str::<crate::project::Config>(&text) {
         Ok(config) => config.stacks,
         Err(_) => Vec::new(),
     }

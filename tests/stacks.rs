@@ -9,7 +9,7 @@ use nunki::image;
 use nunki::project::{Config, Project, Stack};
 
 fn config(yaml: &str) -> Result<Config, String> {
-    serde_yaml_ng::from_str(&format!("harness: claude-code\n{yaml}")).map_err(|e| e.to_string())
+    nunki::yaml::from_str(&format!("harness: claude-code\n{yaml}")).map_err(|e| e.to_string())
 }
 
 /// Every `nunki.yaml` written before a stack could have a directory still

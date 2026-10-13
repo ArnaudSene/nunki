@@ -340,7 +340,7 @@ fn a_run_profile_carries_the_clean_copy_of_head() {
     .unwrap();
     let engine = nunki::engine::fake::FakeEngine::default();
     let written = nunki::compose::generate(&plan, nunki::engine::Engine::dialect(&engine)).unwrap();
-    let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&written).unwrap();
+    let doc: nunki::yaml::Value = nunki::yaml::from_str(&written).unwrap();
 
     let mounts: Vec<String> = doc["services"][nunki::compose::AGENT_SERVICE]["volumes"]
         .as_sequence()
@@ -358,7 +358,7 @@ fn a_run_profile_carries_the_clean_copy_of_head() {
         .as_mapping()
         .expect("the document declares its named volumes");
     assert!(
-        declared.contains_key(serde_yaml_ng::Value::from(nunki::exec::proof_volume("one"))),
+        declared.contains_key(&nunki::yaml::Value::from(nunki::exec::proof_volume("one"))),
         "a named volume is declared as well as mounted: {written}"
     );
 }
@@ -875,7 +875,7 @@ fn live_a_mission_starts_and_its_run_is_read_back() {
     // The token reaches the agent through the profile's environment, and
     // nowhere else: not a file in the slot, not a layer in the image.
     let written = std::fs::read_to_string(&profile).unwrap();
-    let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&written).unwrap();
+    let doc: nunki::yaml::Value = nunki::yaml::from_str(&written).unwrap();
     assert_eq!(
         doc["services"][nunki::compose::AGENT_SERVICE]["environment"]["CLAUDE_CODE_OAUTH_TOKEN"]
             .as_str(),
@@ -1135,7 +1135,7 @@ fn profile_for(
     slot: &nunki::slot::Slot,
     header: &nunki::mission::Header,
     role: Role,
-) -> (nunki::compose::Plan, serde_yaml_ng::Value) {
+) -> (nunki::compose::Plan, nunki::yaml::Value) {
     let images = nunki::image::Images {
         agent: "img/agent".into(),
         firewall: "img/fw".into(),
@@ -1155,7 +1155,7 @@ fn profile_for(
     .unwrap();
     let engine = nunki::engine::fake::FakeEngine::default();
     let written = nunki::compose::generate(&plan, nunki::engine::Engine::dialect(&engine)).unwrap();
-    (plan, serde_yaml_ng::from_str(&written).unwrap())
+    (plan, nunki::yaml::from_str(&written).unwrap())
 }
 
 fn slot_at(dir: &Path) -> nunki::slot::Slot {
@@ -1344,7 +1344,7 @@ fn the_projects_services_are_merged_into_the_system_profile_only() {
         doc["volumes"]
             .as_mapping()
             .unwrap()
-            .contains_key(serde_yaml_ng::Value::from("dbdata")),
+            .contains_key(&nunki::yaml::Value::from("dbdata")),
         "{doc:?}"
     );
 }
@@ -1574,7 +1574,7 @@ fn only_the_security_profile_carries_the_stacks_writable_volumes() {
     // Declared as well as mounted, or Compose refuses the whole project.
     let declared = doc["volumes"].as_mapping().unwrap();
     assert!(
-        declared.contains_key(serde_yaml_ng::Value::from(
+        declared.contains_key(&nunki::yaml::Value::from(
             "nunki-one-security-target".to_string()
         )),
         "{declared:?}"
@@ -2386,7 +2386,7 @@ fn a_system_profile_lifts_only_the_services_the_mission_declares() {
     approve_head(&project, &slot);
     let header = header_with(with_services());
     let (plan, doc) = profile_for(&project, &slot, &header, Role::Integrator);
-    assert!(doc["services"]["db"].is_mapping(), "{doc:?}");
+    assert!(doc["services"]["db"].as_mapping().is_some(), "{doc:?}");
     assert!(doc["services"]["miner"].is_null(), "{doc:?}");
     let lifted = plan.project_services.as_ref().unwrap();
     assert_eq!(lifted.held_back, vec!["miner".to_string()]);

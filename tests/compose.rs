@@ -148,7 +148,7 @@ fn the_agent_joins_the_firewall_and_waits_for_it() {
     // Measured against Docker Compose v5.1.2: in the other direction the
     // agent starts first and has a network before any rule is laid.
     let yaml = generate(&plan(Role::Coder), &dialect()).unwrap();
-    let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+    let doc: nunki::yaml::Value = nunki::yaml::from_str(&yaml).unwrap();
     let agent = &doc["services"][AGENT_SERVICE];
     let firewall = &doc["services"][FIREWALL_SERVICE];
 
@@ -175,7 +175,7 @@ fn the_agent_joins_the_firewall_and_waits_for_it() {
 #[test]
 fn the_agent_has_no_power_and_the_firewall_has_it_all() {
     let yaml = generate(&plan(Role::Coder), &dialect()).unwrap();
-    let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+    let doc: nunki::yaml::Value = nunki::yaml::from_str(&yaml).unwrap();
     let agent = &doc["services"][AGENT_SERVICE];
     let firewall = &doc["services"][FIREWALL_SERVICE];
 
@@ -202,7 +202,7 @@ fn the_agent_declares_no_network_because_compose_refuses_both() {
     // "mutually exclusive `network_mode` and `networks`: invalid compose
     // project" — measured. The firewall is what attaches to the services.
     let yaml = generate(&plan(Role::Integrator), &dialect()).unwrap();
-    let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+    let doc: nunki::yaml::Value = nunki::yaml::from_str(&yaml).unwrap();
     assert!(doc["services"][AGENT_SERVICE]["networks"].is_null());
     assert!(doc["services"][AGENT_SERVICE]["ports"].is_null());
 }
@@ -210,7 +210,7 @@ fn the_agent_declares_no_network_because_compose_refuses_both() {
 #[test]
 fn the_allowlist_reaches_the_sidecar_and_only_the_sidecar() {
     let coder = generate(&plan(Role::Coder), &dialect()).unwrap();
-    let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&coder).unwrap();
+    let doc: nunki::yaml::Value = nunki::yaml::from_str(&coder).unwrap();
     let env = &doc["services"][FIREWALL_SERVICE]["environment"];
     assert_eq!(
         env["HQ_ALLOW_DOMAINS"].as_str(),
@@ -223,7 +223,7 @@ fn the_allowlist_reaches_the_sidecar_and_only_the_sidecar() {
     );
 
     let integrator = generate(&plan(Role::Integrator), &dialect()).unwrap();
-    let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&integrator).unwrap();
+    let doc: nunki::yaml::Value = nunki::yaml::from_str(&integrator).unwrap();
     let env = &doc["services"][FIREWALL_SERVICE]["environment"];
     assert!(env["HQ_ALLOW_DOMAINS"].as_str().unwrap().contains(",db,"));
     assert_eq!(env["HQ_ALLOW_ADDRESSES"].as_str(), Some("10.4.0.7"));
@@ -237,7 +237,7 @@ fn the_security_agent_reads_the_tree_and_the_others_write_it() {
         (Role::Security, "ro"),
     ] {
         let yaml = generate(&plan(role), &dialect()).unwrap();
-        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let doc: nunki::yaml::Value = nunki::yaml::from_str(&yaml).unwrap();
         let mounts: Vec<_> = doc["services"][AGENT_SERVICE]["volumes"]
             .as_sequence()
             .unwrap()
@@ -259,7 +259,7 @@ fn the_security_agent_reads_the_tree_and_the_others_write_it() {
 fn the_stacks_scripts_are_mounted_read_only_one_file_at_a_time() {
     for role in [Role::Coder, Role::Integrator, Role::Security] {
         let yaml = generate(&plan(role), &dialect()).unwrap();
-        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let doc: nunki::yaml::Value = nunki::yaml::from_str(&yaml).unwrap();
         let mounts: Vec<_> = doc["services"][AGENT_SERVICE]["volumes"]
             .as_sequence()
             .unwrap()
@@ -285,7 +285,7 @@ fn the_stacks_scripts_are_mounted_read_only_one_file_at_a_time() {
 #[test]
 fn the_mission_folder_is_read_only_but_for_the_agents_own_files() {
     let yaml = generate(&plan(Role::Coder), &dialect()).unwrap();
-    let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+    let doc: nunki::yaml::Value = nunki::yaml::from_str(&yaml).unwrap();
     let mounts: Vec<_> = doc["services"][AGENT_SERVICE]["volumes"]
         .as_sequence()
         .unwrap()
@@ -342,11 +342,11 @@ fn the_projects_services_are_lifted_as_nunkis_rendering() {
         "services:\n  db:\n    image: postgres:16\n    environment:\n      PGHOST: ${HOME}\n    \
          healthcheck:\n      test: [\"CMD\", \"pg_isready\"]\n",
     );
-    let rendered: serde_yaml_ng::Value = serde_yaml_ng::from_str(&project.render()).unwrap();
+    let rendered: nunki::yaml::Value = nunki::yaml::from_str(&project.render()).unwrap();
     let digest = project.digest();
     plan.project_services = Some(nunki::compose::services::Lifted::whole(project));
     let yaml = generate(&plan, &dialect()).unwrap();
-    let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+    let mut doc: nunki::yaml::Value = nunki::yaml::from_str(&yaml).unwrap();
     // nunki's own label says which rendering the container came from …
     assert_eq!(
         doc["services"]["db"]["labels"][nunki::compose::services::LABEL].as_str(),
@@ -355,7 +355,11 @@ fn the_projects_services_are_lifted_as_nunkis_rendering() {
     );
     // … and, but for nunki's own keys, the service is the rendering read
     // back.
-    let db = doc["services"]["db"].as_mapping_mut().unwrap();
+    let db = doc
+        .get_mut("services")
+        .and_then(|s| s.get_mut("db"))
+        .and_then(nunki::yaml::Value::as_mapping_mut)
+        .unwrap();
     for key in FENCE_KEYS {
         db.remove(key);
     }
@@ -407,7 +411,7 @@ fn the_prober_travels_apart_from_the_projects_services() {
         ..Default::default()
     });
     let yaml = generate(&plan, &dialect()).unwrap();
-    let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+    let doc: nunki::yaml::Value = nunki::yaml::from_str(&yaml).unwrap();
     assert_eq!(
         doc["services"][PROBER_SERVICE]["network_mode"].as_str(),
         Some("service:firewall"),
@@ -428,7 +432,7 @@ fn the_project_name_is_stable_across_profiles_and_legal_for_compose() {
         .iter()
         .map(|role| {
             let yaml = generate(&plan(*role), &dialect()).unwrap();
-            let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+            let doc: nunki::yaml::Value = nunki::yaml::from_str(&yaml).unwrap();
             doc["name"].as_str().unwrap().to_string()
         })
         .collect();
@@ -592,7 +596,7 @@ fn a_project_declaring_no_network_gets_no_networks_block() {
     // network and reach each other there, so nunki invents nothing.
     let yaml = generate(&plan(Role::Integrator), &dialect()).unwrap();
     assert!(!yaml.contains("\nnetworks:"), "{yaml}");
-    let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+    let doc: nunki::yaml::Value = nunki::yaml::from_str(&yaml).unwrap();
     assert!(doc["services"][FIREWALL_SERVICE]["networks"].is_null());
 }
 
@@ -620,10 +624,10 @@ fn the_projects_volumes_are_declared_beside_hqs() {
     )));
 
     let yaml = generate(&plan, &dialect()).unwrap();
-    let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+    let doc: nunki::yaml::Value = nunki::yaml::from_str(&yaml).unwrap();
     let volumes = doc["volumes"].as_mapping().expect("volumes are declared");
     assert!(
-        volumes.contains_key(serde_yaml_ng::Value::from("dbdata")),
+        volumes.contains_key(&nunki::yaml::Value::from("dbdata")),
         "{yaml}"
     );
     assert_eq!(
@@ -632,7 +636,7 @@ fn the_projects_volumes_are_declared_beside_hqs() {
     );
     // And nunki's own are still there: the two sets are merged, not replaced.
     assert!(
-        volumes.contains_key(serde_yaml_ng::Value::from("nunki-demo-1-harness")),
+        volumes.contains_key(&nunki::yaml::Value::from("nunki-demo-1-harness")),
         "{yaml}"
     );
 }
@@ -686,8 +690,8 @@ fn the_lifted_services_are_fenced_by_nunki() {
          cache:\n    image: redis:7\n    ports: [\"127.0.0.1::6379\"]\n",
     )));
     let yaml = generate(&plan, &dialect()).unwrap();
-    let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
-    let strings = |v: &serde_yaml_ng::Value| -> Vec<String> {
+    let doc: nunki::yaml::Value = nunki::yaml::from_str(&yaml).unwrap();
+    let strings = |v: &nunki::yaml::Value| -> Vec<String> {
         v.as_sequence()
             .unwrap_or_else(|| panic!("a list: {v:?}\n{yaml}"))
             .iter()
@@ -757,7 +761,7 @@ fn a_profile_lifting_no_service_has_no_services_network() {
         let mut plan = plan(Role::Integrator);
         plan.project_services = project;
         let yaml = generate(&plan, &dialect()).unwrap();
-        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let doc: nunki::yaml::Value = nunki::yaml::from_str(&yaml).unwrap();
         assert!(doc["networks"].is_null(), "{yaml}");
         assert!(
             doc["services"][FIREWALL_SERVICE]["networks"].is_null(),

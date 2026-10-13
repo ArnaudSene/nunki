@@ -889,10 +889,10 @@ fn by_hand_asks_no_forge_and_names_every_branch_as_held_by_hand() {
 fn forge_protection_reads_from_the_file_and_defaults_to_the_forge() {
     use nunki::project::ForgeProtection;
     let base = "harness: claude-code\n";
-    let absent: Config = serde_yaml_ng::from_str(base).unwrap();
+    let absent: Config = nunki::yaml::from_str(base).unwrap();
     assert_eq!(absent.forge_protection, ForgeProtection::Forge);
     let by_hand: Config =
-        serde_yaml_ng::from_str(&format!("{base}forge_protection: by_hand\n")).unwrap();
+        nunki::yaml::from_str(&format!("{base}forge_protection: by_hand\n")).unwrap();
     assert_eq!(by_hand.forge_protection, ForgeProtection::ByHand);
 }
 

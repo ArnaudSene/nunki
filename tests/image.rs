@@ -209,7 +209,7 @@ fn pinning(dir: &std::path::Path, dockerfile: &str) -> nunki::project::Project {
         "[toolchain]\nchannel = \"1.98.0\"\ntargets = [\"wasm32-unknown-unknown\"]\n",
     )
     .unwrap();
-    let config = serde_yaml_ng::from_str("harness: claude-code\nstacks: [rust]\n").unwrap();
+    let config = nunki::yaml::from_str("harness: claude-code\nstacks: [rust]\n").unwrap();
     nunki::project::Project::at(root, config, home)
 }
 

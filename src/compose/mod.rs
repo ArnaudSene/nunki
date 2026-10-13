@@ -30,14 +30,13 @@ pub mod services;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use serde_yaml_ng::{Mapping, Value};
-
 use crate::engine::Dialect;
 use crate::engine::spawn::RUN_DIR;
 use crate::harness::Role;
 use crate::perimeter::{Perimeter, Profile};
+use crate::yaml::{self, Mapping, Value};
 
-use model::{Document, Healthcheck, Service, depends_on_healthy};
+use model::{Document, Entry, Healthcheck, Service, depends_on_healthy};
 
 /// The sidecar's service name in every generated file.
 pub const FIREWALL_SERVICE: &str = "firewall";
@@ -244,14 +243,21 @@ fn build(plan: &Plan, dialect: &Dialect) -> Result<Document, ComposeError> {
         .as_ref()
         .filter(|l| !l.services.services.is_empty());
 
-    let mut services = Mapping::new();
-    services.insert(
-        Value::from(FIREWALL_SERVICE),
-        firewall(plan, lifted.is_some()).to_value(),
-    );
-    services.insert(Value::from(AGENT_SERVICE), agent(plan, dialect)?.to_value());
+    let mut services = vec![
+        (
+            FIREWALL_SERVICE.to_string(),
+            Entry::Own(Box::new(firewall(plan, lifted.is_some()))),
+        ),
+        (
+            AGENT_SERVICE.to_string(),
+            Entry::Own(Box::new(agent(plan, dialect)?)),
+        ),
+    ];
     if let Some(prober) = &plan.prober {
-        services.insert(Value::from(PROBER_SERVICE), prober.to_value());
+        services.push((
+            PROBER_SERVICE.to_string(),
+            Entry::Own(Box::new(prober.clone())),
+        ));
     }
 
     let mut volumes = Mapping::new();
@@ -264,31 +270,34 @@ fn build(plan: &Plan, dialect: &Dialect) -> Result<Document, ComposeError> {
         // The rendering, read back: what the engine is given is the text a
         // human is shown, and not a second serialisation of the model that
         // could drift from it.
-        let mut rendered: Value = serde_yaml_ng::from_str(&project.services.render())
+        let mut rendered: Value = yaml::from_str(&project.services.render())
             .expect("nunki's own rendering is YAML it reads back");
-        if let Some(Value::Mapping(declared)) = rendered.get_mut("services") {
+        if let Some(declared) = rendered.get_mut("services").and_then(Value::as_mapping_mut) {
             for (_, service) in declared.iter_mut() {
-                if let Value::Mapping(service) = service {
+                if let Some(service) = service.as_mapping_mut() {
                     fence(service, &project.approved);
                 }
             }
         }
-        for (block, into) in [("services", &mut services), ("volumes", &mut volumes)] {
-            let Some(Value::Mapping(declared)) = rendered.get(block) else {
-                continue;
-            };
+        // The model refuses these names already; this is the second guard,
+        // on the document itself, so a name nunki writes is never
+        // overwritten by one the project wrote.
+        if let Some(declared) = rendered.get("services").and_then(Value::as_mapping) {
             for (key, value) in declared {
                 let name = key.as_str().unwrap_or_default();
-                // The model refuses these names already; this is the second
-                // guard, on the document itself, so a name nunki writes is
-                // never overwritten by one the project wrote.
-                if into.contains_key(key) {
-                    return Err(match block {
-                        "services" => ComposeError::ReservedService(name.to_string()),
-                        _ => ComposeError::ReservedVolume(name.to_string()),
-                    });
+                if services.iter().any(|(taken, _)| taken == name) {
+                    return Err(ComposeError::ReservedService(name.to_string()));
                 }
-                into.insert(key.clone(), value.clone());
+                services.push((name.to_string(), Entry::Lifted(value.clone())));
+            }
+        }
+        if let Some(declared) = rendered.get("volumes").and_then(Value::as_mapping) {
+            for (key, value) in declared {
+                if volumes.contains_key(key) {
+                    let name = key.as_str().unwrap_or_default();
+                    return Err(ComposeError::ReservedVolume(name.to_string()));
+                }
+                volumes.insert(key.clone(), value.clone());
             }
         }
         // Internal, so the engine routes nothing out of it, and without a

@@ -688,7 +688,7 @@ fn the_rendering_is_ascii_and_reads_back_as_the_model() {
         )),
         "{rendering}"
     );
-    let back: serde_yaml_ng::Value = serde_yaml_ng::from_str(&rendering).unwrap();
+    let back: nunki::yaml::Value = nunki::yaml::from_str(&rendering).unwrap();
     assert_eq!(
         back["services"]["db"]["environment"]["A"].as_str(),
         Some("café \u{1b}[2J \u{2028} 😀 \" \\")
@@ -1444,9 +1444,9 @@ mod live {
 
         /// The generated file with `edit` applied to it first: how the
         /// capability measurement takes one capability away.
-        fn edit(&self, edit: impl Fn(&mut serde_yaml_ng::Value)) {
-            let mut doc: serde_yaml_ng::Value =
-                serde_yaml_ng::from_str(&std::fs::read_to_string(&self.file).unwrap()).unwrap();
+        fn edit(&self, edit: impl Fn(&mut nunki::yaml::Value)) {
+            let mut doc: nunki::yaml::Value =
+                nunki::yaml::from_str(&std::fs::read_to_string(&self.file).unwrap()).unwrap();
             edit(&mut doc);
             std::fs::write(&self.file, serde_yaml_ng::to_string(&doc).unwrap()).unwrap();
         }
@@ -1749,7 +1749,11 @@ mod live {
         // The control: internal, with its gateway.
         let open = Profile::generate("svchostc", &["web", "probe"], Lifted::whole(file(text)));
         open.edit(|doc| {
-            let network = doc["networks"][NETWORK].as_mapping_mut().unwrap();
+            let network = doc
+                .get_mut("networks")
+                .and_then(|n| n.get_mut(NETWORK))
+                .and_then(nunki::yaml::Value::as_mapping_mut)
+                .unwrap();
             network.remove("driver_opts");
         });
         let up = open.up();
@@ -1931,7 +1935,12 @@ mod live {
             let profile = Profile::generate(&slot, &["db"], Lifted::whole(file(text)));
             if let Some(cap) = without {
                 profile.edit(|doc| {
-                    let caps = doc["services"]["db"]["cap_add"].as_sequence_mut().unwrap();
+                    let caps = doc
+                        .get_mut("services")
+                        .and_then(|s| s.get_mut("db"))
+                        .and_then(|d| d.get_mut("cap_add"))
+                        .and_then(nunki::yaml::Value::as_sequence_mut)
+                        .unwrap();
                     caps.retain(|c| c.as_str() != Some(cap));
                 });
             }
@@ -2017,10 +2026,10 @@ fn an_empty_command_is_rendered_as_an_empty_list() {
     let file = parse(&with_service_line("entrypoint: []")).unwrap();
     let rendering = file.render();
     assert!(rendering.contains("    entrypoint: []\n"), "{rendering}");
-    let back: serde_yaml_ng::Value = serde_yaml_ng::from_str(&rendering).unwrap();
+    let back: nunki::yaml::Value = nunki::yaml::from_str(&rendering).unwrap();
     assert_eq!(
         back["services"]["db"]["entrypoint"],
-        serde_yaml_ng::Value::Sequence(vec![]),
+        nunki::yaml::Value::Sequence(vec![]),
         "an empty list, not a null: an entrypoint reset, not an absent one"
     );
 }

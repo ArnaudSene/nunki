@@ -366,7 +366,7 @@ pub fn labels_of_profile(
 ) -> Result<Option<BTreeMap<String, String>>, ApprovalError> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| ApprovalError::Unreadable(path.to_path_buf(), e))?;
-    let document: serde_yaml_ng::Value = serde_yaml_ng::from_str(&text)
+    let document: crate::yaml::Value = crate::yaml::from_str(&text)
         .map_err(|e| ApprovalError::NotAProfile(path.to_path_buf(), e.to_string()))?;
     let Some(services) = document.get("services").and_then(|s| s.as_mapping()) else {
         return Err(ApprovalError::NotAProfile(

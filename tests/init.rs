@@ -452,7 +452,7 @@ fn a_new_project_keeps_what_gates_and_fences_its_agents_out_of_the_tree() {
     );
 
     let text = std::fs::read_to_string(home(&repo).join("nunki.yaml")).unwrap();
-    let config: nunki::project::Config = serde_yaml_ng::from_str(&text).unwrap();
+    let config: nunki::project::Config = nunki::yaml::from_str(&text).unwrap();
     assert!(
         config.protected_paths.refuse.is_empty(),
         "nothing of nunki's is left in the tree to refuse: {text}"
@@ -474,7 +474,7 @@ fn the_nunki_yaml_it_writes_parses_back_with_the_permission_mode_it_declares() {
     init(&repo, &home(&repo), &["rust".to_string()]).unwrap();
 
     let text = std::fs::read_to_string(home(&repo).join("nunki.yaml")).unwrap();
-    let config: nunki::project::Config = serde_yaml_ng::from_str(&text).unwrap();
+    let config: nunki::project::Config = nunki::yaml::from_str(&text).unwrap();
     assert_eq!(config.permission_mode, "auto", "{text}");
     // And it names the repository it belongs to.
     assert_eq!(config.root, Some(repo), "{text}");
@@ -497,8 +497,8 @@ fn the_nunki_yaml_it_writes_names_the_rigor_and_the_threshold_with_their_default
     assert!(text.contains("\n# rigor: critical\n"), "{text}");
     assert!(text.contains("\n# mutation_threshold: 80\n"), "{text}");
     assert!(text.contains("\n# mutation_jobs: 1\n"), "{text}");
-    let commented: nunki::project::Config = serde_yaml_ng::from_str(&text).unwrap();
-    let uncommented: nunki::project::Config = serde_yaml_ng::from_str(
+    let commented: nunki::project::Config = nunki::yaml::from_str(&text).unwrap();
+    let uncommented: nunki::project::Config = nunki::yaml::from_str(
         &text
             .replace("\n# rigor:", "\nrigor:")
             .replace("\n# mutation_threshold:", "\nmutation_threshold:")
@@ -3765,20 +3765,20 @@ fn the_nunki_yaml_it_writes_withholds_unfixed_findings_unless_told_to_publish() 
 
     let text = std::fs::read_to_string(home(&repo).join("nunki.yaml")).unwrap();
     assert!(text.contains("\n# security_findings: publish\n"), "{text}");
-    let commented: nunki::project::Config = serde_yaml_ng::from_str(&text).unwrap();
+    let commented: nunki::project::Config = nunki::yaml::from_str(&text).unwrap();
     assert_eq!(commented.security_findings, SecurityFindings::Withhold);
     let published: nunki::project::Config =
-        serde_yaml_ng::from_str(&text.replace("\n# security_findings:", "\nsecurity_findings:"))
+        nunki::yaml::from_str(&text.replace("\n# security_findings:", "\nsecurity_findings:"))
             .unwrap();
     assert_eq!(published.security_findings, SecurityFindings::Publish);
-    let withheld: nunki::project::Config = serde_yaml_ng::from_str(&text.replace(
+    let withheld: nunki::project::Config = nunki::yaml::from_str(&text.replace(
         "\n# security_findings: publish",
         "\nsecurity_findings: withhold",
     ))
     .unwrap();
     assert_eq!(withheld.security_findings, SecurityFindings::Withhold);
     assert!(
-        serde_yaml_ng::from_str::<nunki::project::Config>(&text.replace(
+        nunki::yaml::from_str::<nunki::project::Config>(&text.replace(
             "\n# security_findings: publish",
             "\nsecurity_findings: maybe"
         ),)

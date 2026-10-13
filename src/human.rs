@@ -109,7 +109,7 @@ pub fn me(nunki_home: &Path, at: Option<&Path>) -> Human {
 
 fn declared(nunki_home: &Path) -> Option<Declared> {
     let text = std::fs::read_to_string(nunki_home.join(ME_FILE)).ok()?;
-    let declared: Declared = serde_yaml_ng::from_str(&text).ok()?;
+    let declared: Declared = crate::yaml::from_str(&text).ok()?;
     (!declared.name.trim().is_empty()).then_some(Declared {
         name: declared.name.trim().to_string(),
         email: declared.email,

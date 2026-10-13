@@ -25,7 +25,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde_yaml_ng::Value;
+use crate::yaml::{self, Value};
 
 use super::{AGENT_SERVICE, FIREWALL_SERVICE, PROBER_SERVICE};
 
@@ -196,8 +196,6 @@ pub enum ServicesError {
     Feature { feature: &'static str, line: usize },
     #[error("{at} uses a merge key (`<<`), which a services file may not: write the keys out")]
     MergeKey { at: String },
-    #[error("{at} carries a YAML tag, which a services file may not")]
-    Tag { at: String },
     #[error("{at} has a key that is not a string")]
     KeyNotString { at: String },
     #[error(
@@ -330,7 +328,7 @@ impl ServicesFile {
     pub fn parse(text: &str) -> Result<ServicesFile, ServicesError> {
         plain_yaml(text)?;
         let document: Value =
-            serde_yaml_ng::from_str(text).map_err(|e| ServicesError::Yaml(e.to_string()))?;
+            yaml::from_str(text).map_err(|e| ServicesError::Yaml(e.to_string()))?;
         decoded(&document, "the file")?;
         typed(&document)
     }
@@ -637,12 +635,17 @@ fn plain_yaml(text: &str) -> Result<(), ServicesError> {
     Ok(())
 }
 
-/// Refuse what the parser decoded but the model must not read past: a tag
-/// it kept, a merge key, a key that is not a string. Anywhere in the
-/// document, so that nothing below a refused key can matter.
+/// Refuse what the parser decoded but the model must not read past: a merge
+/// key, which the reader keeps as an ordinary key, and a key that is not a
+/// string. Anywhere in the document, so that nothing below a refused key can
+/// matter.
+///
+/// A tag is no longer the walk's: the reader refuses one it does not know,
+/// and resolves the ones it knows (`!!str`, `!!binary`, `!!null`) without a
+/// trace in the tree, which leaves the scan of [`plain_yaml`] their only
+/// guard.
 fn decoded(value: &Value, at: &str) -> Result<(), ServicesError> {
     match value {
-        Value::Tagged(_) => Err(ServicesError::Tag { at: at.to_string() }),
         Value::Sequence(items) => {
             for (i, item) in items.iter().enumerate() {
                 decoded(item, &format!("{at}[{i}]"))?;
@@ -1180,18 +1183,19 @@ mod tests {
     }
 
     #[test]
-    fn the_walk_refuses_a_tag_the_parser_kept_and_walks_into_lists() {
-        let tagged: Value = serde_yaml_ng::from_str("!custom 5").unwrap();
-        assert!(matches!(
-            decoded(&tagged, "here"),
-            Err(ServicesError::Tag { at }) if at == "here"
-        ));
-        let listed: Value = serde_yaml_ng::from_str("- a\n- {\"<<\": 1}\n").unwrap();
+    fn the_walk_refuses_a_merge_key_inside_a_list_and_a_key_of_another_kind() {
+        let listed: Value = yaml::from_str("- a\n- {\"<<\": 1}\n").unwrap();
         assert!(matches!(
             decoded(&listed, "the file"),
             Err(ServicesError::MergeKey { at }) if at == "the file[1]"
         ));
-        let plain: Value = serde_yaml_ng::from_str("- a\n- {b: [c]}\n").unwrap();
+        // `1` is a key of its own kind, not the string `"1"`.
+        let numbered: Value = yaml::from_str("k:\n  1: a\n").unwrap();
+        assert!(matches!(
+            decoded(&numbered, "the file"),
+            Err(ServicesError::KeyNotString { at }) if at == "the file.k"
+        ));
+        let plain: Value = yaml::from_str("- a\n- {b: [c], \"1\": d}\n").unwrap();
         assert!(decoded(&plain, "the file").is_ok());
     }
 }

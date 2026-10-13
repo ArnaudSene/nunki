@@ -70,8 +70,9 @@ impl Accounts {
     pub fn load(nunki_home: &Path) -> Result<Self, AccountError> {
         let path = nunki_home.join(INDEX_FILE);
         match std::fs::read_to_string(&path) {
-            Ok(text) => serde_yaml_ng::from_str(&text)
-                .map_err(|e| AccountError::Invalid(path, e.to_string())),
+            Ok(text) => {
+                crate::yaml::from_str(&text).map_err(|e| AccountError::Invalid(path, e.to_string()))
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(e) => Err(AccountError::Io(path, e)),
         }

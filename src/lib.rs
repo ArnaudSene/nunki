@@ -48,3 +48,4 @@ pub mod text;
 pub mod verify;
 pub mod versions;
 pub mod wait;
+pub mod yaml;
