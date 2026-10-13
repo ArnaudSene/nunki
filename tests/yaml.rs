@@ -634,9 +634,15 @@ fn the_parser_reports_every_tag_anchor_and_alias_in_order_with_its_place() {
         constructs("a: 1\nb: *nowhere\n").unwrap(),
         [found(Construct::Alias, 2, 4, "")]
     );
-    // A text the parser cannot read is an error, with its place.
+    // A text the parser cannot read is an error, with its place: an
+    // unclosed bracket is placed on the bracket, column 4 counted from 1,
+    // where the reader places it too.
     let err = constructs("a: [1\n").unwrap_err();
-    assert!(err.place.is_some(), "{err}");
+    assert_eq!(err.place, Some((1, 4)), "{err}");
+    // And a column from 1 where the parser counts from 0: `a: b: c` stops on
+    // the second `:`, the fifth character.
+    let err = constructs("a: b: c\n").unwrap_err();
+    assert_eq!(err.place, Some((1, 5)), "{err}");
     // One leading BOM is not text, as for the reader.
     assert_eq!(
         constructs("\u{feff}a: *x\n").unwrap(),
