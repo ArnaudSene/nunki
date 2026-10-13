@@ -44,7 +44,7 @@ fn with_search_list(yaml: String) -> String {
         "dns_search".into(),
         nunki::yaml::Value::Sequence(vec![SEARCH_DOMAIN.into()]),
     );
-    serde_yaml_ng::to_string(&doc).unwrap()
+    nunki::yaml::to_string(&doc).unwrap()
 }
 
 /// The address a container of this project got, so a probe can try to reach

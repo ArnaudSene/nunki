@@ -981,9 +981,13 @@ fn mounts(
         .map(|item| {
             let refuse = |why| ServicesError::Mount {
                 service: service.to_string(),
-                mount: serde_yaml_ng::to_string(item)
-                    .map(|s| s.trim_end().to_string())
-                    .unwrap_or_default(),
+                // A short mount as written; a long one as YAML.
+                mount: match item {
+                    Value::String(short) => short.clone(),
+                    long => yaml::to_string(long)
+                        .map(|s| s.trim_end().to_string())
+                        .unwrap_or_default(),
+                },
                 why,
             };
             let mount = match item {

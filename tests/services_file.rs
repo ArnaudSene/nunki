@@ -221,6 +221,21 @@ fn a_volume_mounted_at_a_relative_path_is_refused() {
 }
 
 #[test]
+fn a_refused_mount_is_named_as_it_was_written() {
+    match parse(&with_service_line("volumes: [\"./data:/x\"]")) {
+        Err(ServicesError::Mount { mount, .. }) => assert_eq!(mount, "./data:/x"),
+        other => panic!("{other:?}"),
+    }
+    match parse(&with_service_line(
+        "volumes: [{type: bind, source: /, target: /x}]",
+    )) {
+        Err(ServicesError::Mount { mount, .. }) => {
+            assert_eq!(mount, "type: 'bind'\nsource: '/'\ntarget: '/x'")
+        }
+        other => panic!("{other:?}"),
+    }
+}
+#[test]
 fn a_named_volume_of_the_file_is_mounted_in_either_syntax() {
     let file = parse(&format!(
         "{}volumes:\n  data:\n",
@@ -1702,7 +1717,7 @@ mod live {
             let mut doc: nunki::yaml::Value =
                 nunki::yaml::from_str(&std::fs::read_to_string(&self.file).unwrap()).unwrap();
             edit(&mut doc);
-            std::fs::write(&self.file, serde_yaml_ng::to_string(&doc).unwrap()).unwrap();
+            std::fs::write(&self.file, nunki::yaml::to_string(&doc).unwrap()).unwrap();
         }
 
         fn up(&self) -> Output {

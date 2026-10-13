@@ -2137,7 +2137,7 @@ fn raising_the_cap_and_resuming_lets_the_mission_launch_again() {
 fn caps_are_absent_unless_set() {
     let bounds = Bounds::default();
     assert_eq!((bounds.max_runs, bounds.max_tokens), (None, None));
-    let yaml = serde_yaml_ng::to_string(&bounds).unwrap();
+    let yaml = nunki::yaml::to_string(&bounds).unwrap();
     assert!(
         !yaml.contains("max_runs") && !yaml.contains("max_tokens"),
         "{yaml}"

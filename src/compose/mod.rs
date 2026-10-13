@@ -160,7 +160,7 @@ pub enum ComposeError {
 /// engine table this file needs, and it must not be spelled here.
 pub fn generate(plan: &Plan, dialect: &Dialect) -> Result<String, ComposeError> {
     let document = build(plan, dialect)?;
-    Ok(serde_yaml_ng::to_string(&document).expect("the document serialises"))
+    Ok(yaml::to_string(&document).expect("the document serialises"))
 }
 
 /// The Compose project name: the **session** and the slot, in that order.

@@ -629,7 +629,7 @@ fn the_account_a_project_spends_is_checked_not_assumed() {
     let write_index = |index: &Accounts| {
         std::fs::write(
             nunki_home.join("accounts.yaml"),
-            serde_yaml_ng::to_string(index).unwrap(),
+            nunki::yaml::to_string(index).unwrap(),
         )
         .unwrap()
     };

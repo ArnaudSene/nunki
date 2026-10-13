@@ -224,7 +224,7 @@ fn front_matter(text: &str) -> Option<&str> {
 }
 
 fn render(header: &Header, prose: &str) -> String {
-    let yaml = serde_yaml_ng::to_string(header).expect("a header serialises");
+    let yaml = crate::yaml::to_string(header).expect("a header serialises");
     format!("---\n{yaml}---\n\n# Mission\n\n{}\n", prose.trim_end())
 }
 

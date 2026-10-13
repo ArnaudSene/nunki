@@ -244,7 +244,10 @@ nunki mission new m1 \
 ```
 
 That writes `<home>/hq/missions/m1/MISSION.md`: a YAML header `nunki`
-reads, and prose the agent reads. Edit the prose, then start it:
+reads, and prose the agent reads. Every string nunki writes there, as in the
+Compose files it generates, is quoted (`branch: 'mission/first'`), so that
+no reader takes a date or `1_000` for something else. Edit the prose, then
+start it:
 
 ```sh
 nunki mission start m1 --slot one

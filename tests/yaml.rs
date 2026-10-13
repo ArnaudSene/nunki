@@ -340,3 +340,16 @@ fn a_node_of_no_kind_the_tree_holds_is_refused_saying_what_was_expected() {
         "invalid type: byte array, expected a YAML node"
     );
 }
+
+#[test]
+fn a_value_that_cannot_be_written_is_an_error_saying_why() {
+    struct Unwritable;
+    impl serde::Serialize for Unwritable {
+        fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom("no YAML for this"))
+        }
+    }
+    let err = yaml::to_string(&Unwritable).unwrap_err();
+    assert_eq!(err.place, None);
+    assert!(err.message.contains("no YAML for this"), "{err}");
+}

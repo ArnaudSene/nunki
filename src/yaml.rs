@@ -1,5 +1,5 @@
-//! YAML, read one way (SPEC 4.1, `nunki.yaml` and the mission header; SPEC
-//! 4.2, the services file and the generated file).
+//! YAML, read one way and written one way (SPEC 4.1, `nunki.yaml` and the
+//! mission header; SPEC 4.2, the services file and the generated file).
 //!
 //! Every YAML file `nunki` reads goes through [`from_str`], and its settings
 //! are written once, in [`options`]. They are not the library's defaults,
@@ -15,9 +15,14 @@
 //!   the strings they were (YAML 1.2), and are not read as YAML 1.1 booleans;
 //! - a **duplicate key is an error**.
 //!
+//! Every YAML file `nunki` writes — the generated Compose file, the mission
+//! header — goes through [`to_string`], whose one setting is in
+//! [`write_options`]: every string is quoted, so that what nunki writes is
+//! read as written by any reader, Compose's included.
+//!
 //! A clippy rule (`clippy.toml`, `disallowed-methods`) refuses every other
-//! call to a `serde_saphyr` reader, in the code and in the tests, so that
-//! these settings cannot be bypassed by a reader that forgot them.
+//! call to a `serde_saphyr` reader or writer, in the code and in the tests,
+//! so that these settings cannot be bypassed by a call that forgot them.
 //!
 //! Where a reader needs a tree rather than a type, it is [`Value`], nunki's
 //! own: a mapping keeps the order of the file and keeps its keys as values,
@@ -47,6 +52,29 @@ pub fn from_str<T: DeserializeOwned>(text: &str) -> Result<T, Error> {
     #[allow(clippy::disallowed_methods)] // the one reader, with the settings above
     let read = serde_saphyr::from_str_with_options(text, options());
     read.map_err(|e| Error::from_parser(&e))
+}
+
+/// The settings every write uses, and the only place they are written.
+///
+/// `quote_all`: every string leaves as one quoted scalar on one line, so
+/// no reader has to guess its type. The writer's own judgement of which
+/// strings are ambiguous is its parser's, and Compose's is another's:
+/// measured on Docker Compose 5.1.2, a plain `1_000` arrived as 1000 and
+/// `2026-10-13` as a timestamp. A boolean, a number and null stay bare.
+fn write_options() -> serde_saphyr::SerializerOptions {
+    serde_saphyr::ser_options! {
+        quote_all: true,
+    }
+}
+
+/// Write `value` as YAML: the one function in `nunki` that does.
+pub fn to_string<T: Serialize>(value: &T) -> Result<String, Error> {
+    #[allow(clippy::disallowed_methods)] // the one writer, with the settings above
+    let written = serde_saphyr::to_string_with_options(value, write_options());
+    written.map_err(|e| Error {
+        place: None,
+        message: e.to_string(),
+    })
 }
 
 /// Why a text could not be read: what the parser said, and where. The

@@ -169,7 +169,7 @@ fn a_token_lives_beside_the_accounts_and_whitespace_is_not_part_of_it() {
     };
     std::fs::write(
         nunki_home.join("accounts.yaml"),
-        serde_yaml_ng::to_string(&index).unwrap(),
+        nunki::yaml::to_string(&index).unwrap(),
     )
     .unwrap();
     assert_eq!(Accounts::load(nunki_home).unwrap(), index);
