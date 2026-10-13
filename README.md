@@ -48,7 +48,7 @@ reaches the forge but `nunki push`, on your explicit word.
 
 What you need:
 
-- **Rust 1.85 or later**, to build `nunki` — `rustup` gives you one.
+- **Rust 1.89 or later**, to build `nunki` — `rustup` gives you one.
 - **git**.
 - **A container engine** with Compose: Docker, or OrbStack. Every agent runs
   in a container behind a firewall sidecar; nothing runs on your machine.
