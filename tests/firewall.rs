@@ -439,12 +439,86 @@ fn an_engine_is_there() -> bool {
     answers(compose) && answers(docker)
 }
 
+/// What the agent tries on the mission folder: append to `PR.md`, replace
+/// it through the folder (`mv` over it), remove it, append to
+/// `VERDICT.json`. Each attempt prints what happened, so one exec answers
+/// them all and a failure shows every line.
+const PR_ATTEMPTS: &str = "\
+    (echo agent >> /work/mission/PR.md) 2>/dev/null \
+        && echo PR-WRITTEN || echo PR-REFUSED; \
+    (echo agent > /work/mission/PR.new && mv -f /work/mission/PR.new /work/mission/PR.md) \
+        2>/dev/null && echo PR-REPLACED || echo PR-NOT-REPLACED; \
+    (rm -f /work/mission/PR.md && test ! -e /work/mission/PR.md) 2>/dev/null \
+        && echo PR-REMOVED || echo PR-NOT-REMOVED; \
+    (echo agent >> /work/mission/VERDICT.json) 2>/dev/null \
+        && echo VERDICT-WRITTEN || echo VERDICT-REFUSED";
+
+/// What the security agent's container must answer to [`PR_ATTEMPTS`].
+const SECURITY_ANSWERS: [&str; 4] = [
+    "PR-REFUSED",
+    "PR-NOT-REPLACED",
+    "PR-NOT-REMOVED",
+    "VERDICT-WRITTEN",
+];
+
+/// A slot's tree and a mission folder under `dir`, every file an agent
+/// writes present, and `PR.md` saying what the coder wrote.
+fn mission_folder(dir: &Path) -> (PathBuf, PathBuf) {
+    let tree = dir.join("tree");
+    let mission = dir.join("mission");
+    std::fs::create_dir_all(&tree).unwrap();
+    std::fs::create_dir_all(&mission).unwrap();
+    for file in nunki::compose::any_agent_writable() {
+        std::fs::write(mission.join(file), "").unwrap();
+    }
+    std::fs::write(mission.join("PR.md"), "the coder's\n").unwrap();
+    (tree, mission)
+}
+
+/// The profile `role` runs in, on `slot`, over `tree` and `mission`, under
+/// the host's uid: what compose generates for it, nothing added.
+fn role_plan(role: Role, slot: &str, tree: &Path, mission: &Path) -> Plan {
+    let (uid, gid) = nunki::image::host_ids();
+    let perimeter = compute(
+        role,
+        &Sources {
+            stack: &[ALLOWED.to_string()],
+            harness: &[],
+            services: &[],
+            forge: &[],
+        },
+    )
+    .unwrap();
+    Plan {
+        session: "11111111-2222-4333-8444-555555555555".into(),
+        slot: slot.to_string(),
+        role,
+        image: "alpine:3.20".to_string(),
+        firewall_image: FIREWALL_IMAGE.to_string(),
+        user: UserIds { uid, gid },
+        tree: tree.to_path_buf(),
+        tree_at: PathBuf::from("/work/tree"),
+        mission_dir: mission.to_path_buf(),
+        mission_dir_at: PathBuf::from("/work/mission"),
+        stack_scripts: Vec::new(),
+        credentials: Vec::new(),
+        advisories: vec![],
+        secrets: None,
+        volumes: Vec::<NamedVolume>::new(),
+        environment: BTreeMap::new(),
+        command: vec!["sleep".to_string(), "600".to_string()],
+        perimeter,
+        project_services: None,
+        prober: None,
+    }
+}
+
 /// SPEC 4.5, "Un constat accepté n'est pas un constat corrigé": in the
 /// profile the security agent runs in, `PR.md` is read-only — not
 /// writable, not replaceable through the folder it sits in — while its
 /// verdict is; in the coder's, both are writable. What the generated file
 /// says is checked in `tests/compose.rs`; this is what the engine makes of
-/// it, measured.
+/// it, measured, each role lifted in a fresh project.
 #[test]
 #[ignore = "builds an image and lifts containers; run by hand"]
 fn live_the_security_agent_cannot_write_pr_md_and_the_coder_can() {
@@ -453,63 +527,11 @@ fn live_the_security_agent_cannot_write_pr_md_and_the_coder_can() {
         return;
     }
     let _context = build_image();
-    let (uid, gid) = nunki::image::host_ids();
-
-    // Each attempt prints what happened, so one exec answers them all and a
-    // failure shows every line.
-    let attempts = "\
-        (echo agent >> /work/mission/PR.md) 2>/dev/null \
-            && echo PR-WRITTEN || echo PR-REFUSED; \
-        (echo agent > /work/mission/PR.new && mv -f /work/mission/PR.new /work/mission/PR.md) \
-            2>/dev/null && echo PR-REPLACED || echo PR-NOT-REPLACED; \
-        (rm -f /work/mission/PR.md && test ! -e /work/mission/PR.md) 2>/dev/null \
-            && echo PR-REMOVED || echo PR-NOT-REMOVED; \
-        (echo agent >> /work/mission/VERDICT.json) 2>/dev/null \
-            && echo VERDICT-WRITTEN || echo VERDICT-REFUSED";
 
     for role in [Role::Security, Role::Coder] {
         let dir = tempfile::tempdir().unwrap();
-        let tree = dir.path().join("tree");
-        let mission = dir.path().join("mission");
-        std::fs::create_dir_all(&tree).unwrap();
-        std::fs::create_dir_all(&mission).unwrap();
-        for file in nunki::compose::any_agent_writable() {
-            std::fs::write(mission.join(file), "").unwrap();
-        }
-        std::fs::write(mission.join("PR.md"), "the coder's\n").unwrap();
-
-        let perimeter = compute(
-            role,
-            &Sources {
-                stack: &[ALLOWED.to_string()],
-                harness: &[],
-                services: &[],
-                forge: &[],
-            },
-        )
-        .unwrap();
-        let plan = Plan {
-            session: "11111111-2222-4333-8444-555555555555".into(),
-            slot: SLOT.to_string(),
-            role,
-            image: "alpine:3.20".to_string(),
-            firewall_image: FIREWALL_IMAGE.to_string(),
-            user: UserIds { uid, gid },
-            tree,
-            tree_at: PathBuf::from("/work/tree"),
-            mission_dir: mission.clone(),
-            mission_dir_at: PathBuf::from("/work/mission"),
-            stack_scripts: Vec::new(),
-            credentials: Vec::new(),
-            advisories: vec![],
-            secrets: None,
-            volumes: Vec::<NamedVolume>::new(),
-            environment: BTreeMap::new(),
-            command: vec!["sleep".to_string(), "600".to_string()],
-            perimeter,
-            project_services: None,
-            prober: None,
-        };
+        let (tree, mission) = mission_folder(dir.path());
+        let plan = role_plan(role, SLOT, &tree, &mission);
         let file = dir.path().join("profile.yml");
         std::fs::write(&file, generate(&plan, &dialect()).unwrap()).unwrap();
 
@@ -525,7 +547,7 @@ fn live_the_security_agent_cannot_write_pr_md_and_the_coder_can() {
         let said = compose(
             &file,
             &project,
-            &["exec", "-T", "agent", "sh", "-c", attempts],
+            &["exec", "-T", "agent", "sh", "-c", PR_ATTEMPTS],
         );
         down(&file, &project);
         let said = String::from_utf8_lossy(&said.stdout).to_string();
@@ -534,12 +556,7 @@ fn live_the_security_agent_cannot_write_pr_md_and_the_coder_can() {
         let pr = std::fs::read_to_string(mission.join("PR.md")).unwrap_or_default();
         match role {
             Role::Security => {
-                for line in [
-                    "PR-REFUSED",
-                    "PR-NOT-REPLACED",
-                    "PR-NOT-REMOVED",
-                    "VERDICT-WRITTEN",
-                ] {
+                for line in SECURITY_ANSWERS {
                     assert!(said.contains(line), "security: expected {line}:\n{said}");
                 }
                 assert_eq!(pr, "the coder's\n", "PR.md moved under the security agent");
@@ -554,5 +571,122 @@ fn live_the_security_agent_cannot_write_pr_md_and_the_coder_can() {
                 );
             }
         }
+    }
+}
+
+/// Takes a Compose project down, volumes included, when dropped: a test that
+/// fails half-way leaves no container behind.
+struct TakenDown<'a> {
+    engine: &'a dyn nunki::engine::Engine,
+    file: &'a Path,
+    project: &'a str,
+}
+
+impl Drop for TakenDown<'_> {
+    fn drop(&mut self) {
+        if self.file.is_file() {
+            let _ = self.engine.down(self.file, self.project, true);
+        }
+    }
+}
+
+/// The guard of SPEC 4.5 as a mission meets it: the security agent is
+/// lifted on the very Compose project the coder's or the integrator's
+/// container was just running in, and it is that switch that must leave it
+/// a container without `PR.md` read-write. Played as `run::launch` plays it
+/// — the real engine's own `stop` of `run::SERVICES` from the file that is
+/// up, the security agent's profile written to that same file, then the
+/// engine's `up` — and never its command lines retyped, so the test moves
+/// with them. `Docker::real()` honours `HQ_COMPOSE`.
+///
+/// In the container up after the switch, `PR.md` cannot be appended to,
+/// replaced or removed, the host's file is byte for byte what it was before
+/// the switch, and `VERDICT.json` is written. The previous role's write to
+/// `PR.md` succeeding first is what shows the switch is from a container
+/// that could write it.
+#[test]
+#[ignore = "builds an image and lifts containers; run by hand"]
+fn live_the_security_agent_cannot_write_pr_md_after_a_role_switch_on_one_project() {
+    use nunki::engine::Engine;
+
+    if !an_engine_is_there() {
+        eprintln!("skipped: no container engine on this machine");
+        return;
+    }
+    let _context = build_image();
+    let docker = nunki::engine::docker::Docker::real();
+    let engine: &dyn Engine = &docker;
+    let slot = "fwswitch";
+    let project = project_name("11111111-2222-4333-8444-555555555555", slot).unwrap();
+    let agent = nunki::compose::AGENT_SERVICE;
+    let attempts = |file: &Path| {
+        engine
+            .exec(
+                file,
+                &project,
+                agent,
+                &["sh".to_string(), "-c".to_string(), PR_ATTEMPTS.to_string()],
+            )
+            .unwrap()
+            .stdout
+    };
+
+    for before in [Role::Coder, Role::Integrator] {
+        // One mission folder, one profile file, one Compose project.
+        let dir = tempfile::tempdir().unwrap();
+        let (tree, mission) = mission_folder(dir.path());
+        let file = dir.path().join("profile.yml");
+        let _down = TakenDown {
+            engine,
+            file: &file,
+            project: &project,
+        };
+
+        // The previous role's container, up, writing PR.md.
+        let profile = |role: Role| {
+            generate(&role_plan(role, slot, &tree, &mission), engine.dialect()).unwrap()
+        };
+        std::fs::write(&file, profile(before)).unwrap();
+        let _ = engine.down(&file, &project, true);
+        engine.up(&file, &project).unwrap();
+        let first = engine.container_of(&file, &project, agent).unwrap();
+        let said = attempts(&file);
+        println!("{before:?}:\n{said}");
+        assert!(
+            said.contains("PR-WRITTEN"),
+            "{before:?} could not write PR.md:\n{said}"
+        );
+        let written = std::fs::read_to_string(mission.join("PR.md")).unwrap();
+        assert!(written.contains("agent"), "{before:?}: {written:?}");
+
+        // The switch, as `run::launch` plays it.
+        engine.stop(&file, &project, &nunki::run::SERVICES).unwrap();
+        std::fs::write(&file, profile(Role::Security)).unwrap();
+        // The previous role wrote VERDICT.json too: emptied, so what is in
+        // it after is the security agent's.
+        std::fs::write(mission.join("VERDICT.json"), "").unwrap();
+        engine.up(&file, &project).unwrap();
+        let second = engine.container_of(&file, &project, agent).unwrap();
+        assert!(
+            second.is_some(),
+            "no agent after the switch from {before:?}"
+        );
+        assert_ne!(first, second, "the agent container survived the switch");
+
+        let said = attempts(&file);
+        println!("Security after {before:?}:\n{said}");
+        for line in SECURITY_ANSWERS {
+            assert!(
+                said.contains(line),
+                "security after {before:?}: expected {line}:\n{said}"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(mission.join("PR.md")).unwrap(),
+            written,
+            "PR.md moved under the security agent, after {before:?}"
+        );
+        let verdict = std::fs::read_to_string(mission.join("VERDICT.json")).unwrap();
+        assert!(verdict.contains("agent"), "after {before:?}: {verdict:?}");
     }
 }
