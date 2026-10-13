@@ -110,7 +110,7 @@ is worth**. Applied to our own work:
 
 ## 6. Rust
 
-- Edition 2024, minimum 1.85, licence Apache-2.0. One binary `nunki`, one
+- Edition 2024, minimum 1.89, licence Apache-2.0. One binary `nunki`, one
   library.
 - Before every commit, all five, and they must be silent — each read from
   its own exit code, never through a pipe:

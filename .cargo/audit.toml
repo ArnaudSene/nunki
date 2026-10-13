@@ -1,5 +1,0 @@
-# What `cargo audit` lets through. One entry, the same as in deny.toml, where
-# the reason and the date it is accepted until are written: remove both
-# together.
-[advisories]
-ignore = ["RUSTSEC-2024-0449"]

@@ -35,7 +35,17 @@ disallowed-methods = [
 ]
 # The parser's own event stream. Its one sanctioned use is `nunki::yaml::constructs`,
 # which asks it for the tags, anchors and aliases of a text, under a scoped
-# allow; any other use would be a second reading nobody keeps in step.
+# allow; any other use would be a second reading nobody keeps in step. The
+# scanner under it and the two other parsers the crate exports read a text
+# just as well, so each is refused with it.
+#
+# And the library's serializer as a type: built by hand it writes with the
+# default settings or with whatever it is given, so without the quoting
+# `nunki::yaml::to_string` holds.
 disallowed-types = [
     { path = "serde_saphyr::granit_parser::Parser", reason = "read YAML with nunki::yaml::from_str, or ask nunki::yaml::constructs what a text holds" },
+    { path = "serde_saphyr::granit_parser::Scanner", reason = "read YAML with nunki::yaml::from_str, or ask nunki::yaml::constructs what a text holds" },
+    { path = "serde_saphyr::granit_parser::ParserStack", reason = "read YAML with nunki::yaml::from_str, or ask nunki::yaml::constructs what a text holds" },
+    { path = "serde_saphyr::granit_parser::ReplayParser", reason = "read YAML with nunki::yaml::from_str, or ask nunki::yaml::constructs what a text holds" },
+    { path = "serde_saphyr::Serializer", reason = "write YAML with nunki::yaml::to_string" },
 ]

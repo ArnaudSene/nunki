@@ -121,14 +121,26 @@ pub struct Found {
 /// parser skips by itself (measured: stripping it here changes nothing), then reads
 /// with `Parser::with_options(StrInput::new(text), parser_options)`. Its
 /// `Options::parser_options()` (`pub(crate)` in serde-saphyr 1.3.0) sets
-/// limits and nothing else, from the default `Budget`: 32 buffered comment
-/// events, keys looked for over 1024 characters, flow and block collections
-/// nested 255 deep. The parser's own defaults, used here, are the same but
-/// for the comments, buffered up to 96. Limits are not grammar: one that is
-/// hit is an error, never another reading. With limits no stricter than the
-/// reader's, this pass reads every text the reader reads, to the same
-/// events, so the two cannot disagree on what a text holds; and what it
-/// cannot read, it refuses, as the reader does.
+/// four numbers and nothing else, from the default `Budget`: 32 buffered
+/// comment events, keys looked for over 1024 characters, flow and block
+/// collections nested 255 deep. The parser's own defaults, used here, are
+/// the same but for the comments, buffered up to 96.
+///
+/// Three of the four are limits: one that is hit is an error, never another
+/// reading, and none is stricter here than the reader's. The fourth is
+/// grammar. A key not found within the lookahead is not an error, unless
+/// the text required one there: the scanner stops taking the text for a key
+/// and reads on, to other tokens. So the two passes read a text to the same
+/// events only while their two lookaheads are equal, and they are equal
+/// because both defaults are 1024 today, not because anything here holds
+/// them together. Whoever moves serde-saphyr or its parser to another
+/// version compares `serde_saphyr::Budget::default()` with
+/// `granit_parser::Options::default()` first, and builds this parser with
+/// the reader's numbers if they differ.
+///
+/// While they are equal, this pass reads every text the reader reads, to
+/// the same events, so the two cannot disagree on what a text holds; and
+/// what it cannot read, it refuses, as the reader does.
 pub fn constructs(text: &str) -> Result<Vec<Found>, Error> {
     // The one use of the parser itself: its events, to say what the text
     // holds. Nothing here reads a value.
