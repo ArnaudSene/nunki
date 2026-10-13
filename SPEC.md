@@ -326,6 +326,26 @@ nette, et seule la troisième connaît le harnais.
 Ce que tout harnais lit ou que `nunki` lit lui-même. Du Markdown, du shell, du
 YAML, du JSON, du git. Rien d'autre.
 
+**Le YAML, `nunki` le lit par un seul lecteur et l'écrit par un seul
+écrivain.** Tout fichier YAML qu'il lit — `nunki.yaml`, l'en-tête de mission,
+l'index des comptes, `me.yaml`, un profil généré, un fichier de services —
+passe par les mêmes réglages : une clé en double est une erreur, seuls `true`
+et `false` sont des booléens (`restart: no` reste la chaîne `no`), une clé de
+fusion `<<` est une clé ordinaire, jamais développée, et **une balise refuse
+le fichier**, quelle qu'elle soit, avec sa ligne — `nunki` n'en écrit aucune,
+et c'est là que deux analyseurs lisent le même texte en deux valeurs. Un
+scalaire nu que l'analyseur lit comme un nombre (`012`, `1_000`) est un
+nombre : un nom ou une chaîne écrit ainsi est refusé tant qu'il n'est pas
+entre guillemets, et là où un nombre est attendu c'est ce nombre
+(`retries: 1_000` vaut 1000). Une erreur de lecture nomme le fichier, la ligne
+et la colonne, et ne recopie aucune ligne du fichier : un profil porte un
+jeton. Et toute chaîne que `nunki` écrit en YAML — le fichier Compose généré,
+l'en-tête de mission — est un scalaire entre guillemets, sur une ligne ; un
+booléen, un nombre et `null` restent nus. Ce qu'il écrit est ainsi relu tel
+qu'écrit par n'importe quel lecteur, Compose compris. Une règle de lint refuse
+dans le code tout autre appel au lecteur, à l'écrivain ou à l'analyseur de la
+bibliothèque.
+
 | élément | forme | lu par |
 |---|---|---|
 | les règles du lieu | `AGENTS.md` à la racine (et par zone) ; `CLAUDE.md` n'est qu'un import (`@AGENTS.md`) ou un lien vers lui, les deux documentés par Claude Code. Un `CLAUDE.md` existant n'est pas écrasé (3.3) : `nunki init` dépose l'import à côté, le résumé le dit, et **`nunki check` est rouge** tant que ce `CLAUDE.md` n'importe pas `AGENTS.md` — sinon les règles ne seraient jamais lues par ce harnais et `mission start` partirait sans elles. L'adaptateur peut, en attendant, passer `AGENTS.md` par `--append-system-prompt-file` | tous les harnais qui le supportent, Claude Code via import ou lien |
@@ -577,7 +597,12 @@ une campagne de mutation est en vol dans le slot. **Un état qui ne se lit pas
 n'est pas un état qui dit que rien ne tourne** : le reset refuse aussi quand
 l'état d'une mission non archivée ne se lit pas, ou quand le magasin d'état
 ne s'ouvre pas, puisqu'il ne peut alors pas dire si cette mission tourne
-dans le slot. Il nomme le fichier et la raison, et ne change rien : ni
+dans le slot. **Une liste de missions qui ne se lit pas n'est pas une liste
+vide** : le reset refuse aussi quand `missions/` ne se lit pas, en nommant le
+répertoire ; et un run que le magasin d'état enregistre dans le slot bloque
+le reset, que le dossier de sa mission soit listé ou non — chaque fichier
+d'état non archivé est lu. Il nomme le fichier et la raison, et ne change
+rien : ni
 l'arbre, ni un conteneur, ni un volume. Une mission cadrée et jamais démarrée
 n'a pas d'état, et se lit toujours comme rien en vol. Seules les missions non
 archivées comptent, pour qu'un vieux fichier cassé ne bloque pas tous les
@@ -712,8 +737,18 @@ arrêté. Trois règles, et une seule mécanique quelle que soit la forme de la 
    littéraux explicites, `command`, `entrypoint`, `healthcheck`,
    `depends_on`, `working_dir`, des volumes nommés ; au niveau supérieur,
    `services` et des noms de volumes, sans valeur) ; toute autre clé, un
-   `networks` de premier niveau, une ancre, une balise, une clé de fusion ou
-   une clé en double refusent le fichier entier, en le nommant. `nunki` émet
+   `networks` de premier niveau, une ancre, un alias, une balise, une clé de
+   fusion, une directive, un second document ou une clé en double refusent
+   le fichier entier, en le nommant. **Ce que le fichier porte, c'est
+   l'analyseur YAML qui le dit, jamais une seconde lecture du texte** : une
+   ancre, un alias ou une balise sont pris dans ses propres événements, sur
+   n'importe quel nœud, et refusent avec leur ligne — une lecture du texte
+   écrite à la main a été mesurée aveugle derrière un retour chariot seul,
+   ou derrière une apostrophe au milieu d'une valeur. Ce que les événements
+   ne disent pas — une directive, un second document, `...` — se lit à la
+   première colonne de chaque ligne, sans rien suivre d'une ligne à l'autre.
+   Et une ligne finit par LF ou CRLF : un NEL, un LS ou un PS brut, et un CR
+   que ne suit pas un LF, refusent le fichier où qu'ils soient. `nunki` émet
    son propre rendu canonique, chaque `$` doublé pour que Compose
    n'interpole rien ; c'est ce rendu qui est montré
    (`nunki services --show`), haché, approuvé (`nunki services --approve
@@ -1275,7 +1310,11 @@ Trois choses en découlent :
   qui a échoué n'est pas celui qu'on veut garder. Un run **n'a pas de durée
   maximale** : il se termine quand le lot est fini et prouvé, ou quand le HQ
   constate qu'il est bloqué. **Jamais un arrêt parce qu'une durée est
-  atteinte.** Le contrat de sortie d'un run, vérifié par `nunki` : le lot est
+  atteinte.** **Un run headless finit avec le tour de l'agent**, même si une
+  commande qu'il a lancée tourne encore en arrière-plan : chaque rôle en est
+  prévenu, ne finit jamais son tour tant que quelque chose qu'il a lancé
+  tourne, et attend une commande d'arrière-plan par une commande au premier
+  plan. Le contrat de sortie d'un run, vérifié par `nunki` : le lot est
   commité et sa preuve passe, ou le run dit qu'il a échoué ; l'arbre est
   commitable ; le journal porte un bloc `ÉTAT DE REPRISE` qui nomme `HEAD`, le
   lot, la prochaine action ; pour le codeur, il se termine par
@@ -1500,6 +1539,13 @@ arbitrage pour l'un n'est pas un arbitrage pour l'autre.
   nom de compte de la machine. **D'où vient le nom est conservé** : un nom
   déclaré est une affirmation, un nom pris à `$USER` est une supposition, et
   `nunki check` le dit ainsi.
+- **Un `me.yaml` qui existe et ne se lit pas ne nomme personne**, et aucune
+  autre source ne répond à sa place : l'humain a dit qui il est, et le nom de
+  git ou du compte serait celui de quelqu'un d'autre. `nunki check` le dit en
+  rouge, avec le fichier et la raison ; `nunki whoami` échoue ; et
+  `nunki mission new` sans `--for` refuse plutôt que de cadrer une mission
+  sans arbitre. Un fichier absent reste « rien de déclaré », et la source
+  suivante répond.
 - **Rien n'est inventé.** Sans aucune source, `nunki` dit qu'il ne sait pas
   plutôt que d'écrire « l'humain » comme s'il s'agissait d'un nom.
 - L'en-tête de mission porte **`arbiter`** : qui tranche quand elle revient
@@ -2934,6 +2980,20 @@ Ce que la boucle veut dire, et ce qu'elle ne veut pas dire.
     sous-titre part avec elle. `PR.md` lui-même n'est pas touché, comme
     pour la note sur les écarts. Un `CLEAR` publie la section telle qu'elle
     est écrite.
+  - **Un push qui doit retenir et ne lit aucune section `Security` refuse**,
+    avant que rien ne parte — ni `git push`, ni requête à la forge. Il dit
+    combien de constats ont été acceptés, ou que le nombre n'a pas pu être
+    lu, et nomme les deux issues : un titre que `nunki` lit (le HQ peut
+    éditer `PR.md`), ou `security_findings: publish`. Une forme que `nunki`
+    ne lit pas comme un titre n'ouvre rien : `## **Security**`, un titre
+    dans une citation, ou la première ligne du fichier, qui est le titre de
+    la pull request.
+  - **Un bloc de code est lu de deux façons, et le doute retient.** Une
+    ligne que l'une des deux lectures prend pour un titre et l'autre pour le
+    contenu d'un bloc de code peut ouvrir une section `Security`, jamais en
+    fermer une : une section commence à un titre que l'une ou l'autre lit,
+    et ne se termine qu'à un titre que les deux lisent. Cette prudence ne
+    porte que sur les blocs de code.
   - **Le compte vient de `VERDICT.json`**, et seulement quand ce fichier
     est le `FINDINGS` de l'agent sécurité sur le commit que la levée
     couvre : chaque rôle réécrit ce fichier. Sinon la note dit que le
@@ -2943,10 +3003,13 @@ Ce que la boucle veut dire, et ce qu'elle ne veut pas dire.
     dépôt que seuls ses propriétaires lisent.
   - `nunki push` dit ce qu'il a retenu, et sur combien de constats.
     `VERDICT.json` et `FOLLOWUP_HQ.md` les gardent en entier : rien n'est
-    caché au HQ.
+    caché au HQ. Après `mission accept`, `mission status` montre l'étape et
+    plus le rapport.
   - **La limite, écrite : seule cette section est retenue.** Ce qu'une
     autre section de `PR.md` dit, celle du codeur ou celle de
-    l'intégrateur, est publié tel quel. Et une pull request ouverte à la
+    l'intégrateur, est publié tel quel. Si une section `Security` est
+    retenue pendant qu'une autre est écrite sous une forme que `nunki` ne
+    lit pas, la seconde est publiée. Et une pull request ouverte à la
     main l'est depuis `PR.md` tel qu'il est : `push` le dit.
 - **Une décision attendue n'est pas une borne épuisée.** Un codeur qui finit
   son lot hormis des survivants qu'il ne peut ni tuer ni figer en bug le
