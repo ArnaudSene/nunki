@@ -9,6 +9,7 @@
 //! own rendering, never the file's bytes.
 
 use nunki::compose::services::{ServicesError, ServicesFile};
+use nunki::yaml::Value;
 
 fn parse(text: &str) -> Result<ServicesFile, ServicesError> {
     ServicesFile::parse(text)
@@ -550,6 +551,259 @@ fn a_feature_is_named_with_its_line() {
             feature: "an alias",
             line: 3
         })
+    );
+}
+
+// --- what the YAML 1.2 reader reads otherwise ---------------------------------
+//
+// The reader nunki uses now (YAML 1.2) and the one it used before (YAML 1.1)
+// disagree on a few spellings. A file accepted before is read to the same
+// model, or it is refused; these tests hold each disagreement measured to
+// one side or the other.
+
+#[test]
+fn text_after_a_document_end_marker_is_refused() {
+    refused_feature("services: {}\n...\nvolumes: {}\n", "a document end marker");
+    refused_feature("services: {}\n... # end\n", "a document end marker");
+}
+
+/// The reader refuses a tag it does not know, but resolves the ones it
+/// knows without a trace in the tree: for those, the scan of the text is the
+/// only guard, and each case here says which kind it is.
+#[test]
+fn a_tag_is_refused_by_the_scan_in_every_form_even_one_the_reader_resolves() {
+    let cases = [
+        (with_service_line("command: !custom echo"), None),
+        (
+            "services:\n  db:\n    image: !!binary aGk=\n".to_string(),
+            Some("hi"),
+        ),
+        (
+            with_service_line("environment:\n      A: !!str 5"),
+            Some("5"),
+        ),
+        (with_service_line("environment:\n      A: ! 5"), Some("5")),
+        (
+            "services:\n  db:\n    image: !<tag:yaml.org,2002:str> x\n".to_string(),
+            Some("x"),
+        ),
+    ];
+    for (text, resolved) in cases {
+        refused_feature(&text, "a tag");
+        let alone = nunki::yaml::from_str::<Value>(&text);
+        match resolved {
+            None => assert!(alone.is_err(), "{text}"),
+            Some(read) => {
+                let db = &alone.unwrap()["services"]["db"];
+                let value = if db["environment"]["A"].is_null() {
+                    &db["image"]
+                } else {
+                    &db["environment"]["A"]
+                };
+                assert_eq!(value.as_str(), Some(read), "{text}");
+            }
+        }
+    }
+    // `!!null` turns any text into the null a top-level volume holds.
+    let null = "services: {}\nvolumes:\n  data: !!null x\n";
+    refused_feature(null, "a tag");
+    let alone: Value = nunki::yaml::from_str(null).unwrap();
+    assert!(alone["volumes"]["data"].is_null());
+    // And on a key, where `!!str` leaves the service name it decorates.
+    let key = "services:\n  !!str db:\n    image: x\n";
+    refused_feature(key, "a tag");
+    let alone: Value = nunki::yaml::from_str(key).unwrap();
+    assert_eq!(alone["services"]["db"]["image"].as_str(), Some("x"));
+}
+
+#[test]
+fn a_merge_key_is_refused_in_every_spelling() {
+    for spelled in ["<<", "\"<<\"", "'<<'"] {
+        let text = format!("services:\n  db:\n    {spelled}: {{image: x}}\n");
+        assert!(
+            matches!(
+                parse(&text),
+                Err(ServicesError::MergeKey { at }) if at == "the file.services.db"
+            ),
+            "{text}: {:?}",
+            parse(&text)
+        );
+    }
+    // Tagged, it is the scan that refuses it; the reader alone keeps it as
+    // the key `<<`, which the walk would refuse by name.
+    let tagged = "services:\n  db:\n    !!merge <<: {image: x}\n";
+    refused_feature(tagged, "a tag");
+    let alone: Value = nunki::yaml::from_str(tagged).unwrap();
+    assert!(alone["services"]["db"].get("<<").is_some(), "{alone:?}");
+}
+
+#[test]
+fn a_key_written_twice_is_refused_even_when_one_is_escaped() {
+    for text in [
+        with_service_line("environment:\n      a: x\n      \"\\x61\": y"),
+        "services: {}\n\"s\\x65rvices\": {}\n".to_string(),
+    ] {
+        let err = parse(&text).unwrap_err();
+        assert!(
+            matches!(&err, ServicesError::Yaml(said) if said.contains("duplicate")),
+            "{text}: {err:?}"
+        );
+    }
+}
+
+#[test]
+fn a_key_of_any_kind_but_a_string_is_refused() {
+    // The last four were strings to the reader nunki used before, and are
+    // numbers to this one.
+    for key in [
+        "1", "true", "null", "~", "1.5", "[a]", "{a: b}", "", "012", "00", "1_000", "-1_0",
+    ] {
+        let text = format!("services:\n  db:\n    image: x\n    {key}: y\n");
+        assert!(
+            matches!(
+                parse(&text),
+                Err(ServicesError::KeyNotString { at }) if at == "the file.services.db"
+            ),
+            "{key:?}: {:?}",
+            parse(&text)
+        );
+    }
+    // Quoted, they are names like any other, and refused as names.
+    refused_key(&with_service_line("\"1_000\": y"), "1_000");
+}
+
+/// `012`, `00` and `09` read as floats, `1_000` and `-1_0` as integers:
+/// where the model takes a string, the file is refused, as a number always
+/// was there, and never lifted as the number's text.
+#[test]
+fn a_plain_scalar_read_as_a_number_is_refused_where_a_string_is_expected() {
+    for value in ["012", "00", "09", "1_000", "-1_0"] {
+        for (line, expected) in [
+            (format!("image: {value}"), "a string"),
+            (
+                format!("entrypoint: {value}"),
+                "a string or a list of strings",
+            ),
+            (format!("command: [run, {value}]"), "a string"),
+            (format!("working_dir: {value}"), "a string"),
+            (format!("healthcheck:\n      interval: {value}"), "a string"),
+        ] {
+            let text = format!("services:\n  db:\n    {line}\n    image: x\n").replacen(
+                "    image: x\n",
+                "",
+                usize::from(line.starts_with("image")),
+            );
+            assert!(
+                matches!(
+                    parse(&text),
+                    Err(ServicesError::Shape { expected: e, .. }) if e == expected
+                ),
+                "{text}: {:?}",
+                parse(&text)
+            );
+        }
+        let environment = with_service_line(&format!("environment:\n      A: {value}"));
+        assert!(
+            matches!(
+                parse(&environment),
+                Err(ServicesError::Environment { why, .. }) if why.contains("quote it")
+            ),
+            "{environment}: {:?}",
+            parse(&environment)
+        );
+        // A volume, and a service, named so.
+        for text in [
+            format!("services: {{}}\nvolumes:\n  {value}:\n"),
+            format!("services:\n  {value}:\n    image: x\n"),
+        ] {
+            assert!(
+                matches!(parse(&text), Err(ServicesError::KeyNotString { .. })),
+                "{text}: {:?}",
+                parse(&text)
+            );
+        }
+        // Quoted, each is the string written (and a volume name starts on a
+        // letter or a digit, so `-1_0` is no volume's).
+        let quoted = parse(&format!("services:\n  db:\n    image: \"{value}\"\n")).unwrap();
+        assert_eq!(quoted.services["db"].image, value);
+        if !value.starts_with('-') {
+            let named = parse(&format!(
+                "services:\n  db:\n    image: x\n    volumes: [\"{value}:/data\"]\n\
+                 volumes:\n  \"{value}\":\n"
+            ))
+            .unwrap();
+            assert!(named.volumes.contains(value));
+        }
+    }
+}
+
+/// The one plain scalar this reader takes as a number where the one before
+/// refused it: `1_000` was a string, which a count refuses; it is now the
+/// integer 1000, which is what Compose reads too, and what the rendering
+/// shows the human who approves it.
+#[test]
+fn a_count_of_retries_spelled_with_an_underscore_is_the_number_it_spells() {
+    let file = parse(&with_service_line("healthcheck:\n      retries: 1_000")).unwrap();
+    assert_eq!(
+        file.services["db"]
+            .healthcheck
+            .as_ref()
+            .and_then(|h| h.retries),
+        Some(1000)
+    );
+    assert!(file.render().contains("      retries: 1000\n"));
+    // A negative or a float is no count, as before.
+    for retries in ["-1_0", "012", "1.5"] {
+        assert!(matches!(
+            parse(&with_service_line(&format!(
+                "healthcheck:\n      retries: {retries}"
+            ))),
+            Err(ServicesError::Shape {
+                expected: "a whole number",
+                ..
+            })
+        ));
+    }
+}
+
+/// A raw NEL, LS or PS is a line break to a YAML 1.1 reader and text to
+/// this one. Measured before this reader: in a quoted scalar a NEL was
+/// folded to a space, and in a comment each of the three ended the comment
+/// and made the rest of the line YAML. Refused, wherever it stands.
+#[test]
+fn a_character_yaml_1_1_reads_as_a_line_break_is_refused_anywhere() {
+    const FEATURE: &str = "a NEL, LS or PS character, which YAML 1.1 reads as a line break";
+    for c in ['\u{85}', '\u{2028}', '\u{2029}'] {
+        for line in [
+            format!("A: \"a{c}b\""),
+            format!("A: 'a{c}b'"),
+            format!("A: a{c}b"),
+            format!("A: a # c{c}privileged: true"),
+        ] {
+            let text = with_service_line(&format!("environment:\n      {line}"));
+            assert_eq!(
+                parse(&text),
+                Err(ServicesError::Feature {
+                    feature: FEATURE,
+                    line: 5
+                }),
+                "{text:?}"
+            );
+        }
+    }
+    // Written as an escape, each reads the same to both readers, and is kept.
+    let file = parse(&with_service_line(
+        "environment:\n      A: \"a\\Nb\\Lc\\Pd\"",
+    ))
+    .unwrap();
+    assert_eq!(
+        file.services["db"].environment["A"],
+        "a\u{85}b\u{2028}c\u{2029}d"
+    );
+    assert!(
+        file.render().contains(r#""A": "a\u0085b\u2028c\u2029d""#),
+        "{}",
+        file.render()
     );
 }
 

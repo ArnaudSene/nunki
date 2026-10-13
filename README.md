@@ -157,7 +157,14 @@ Everything else is refused, with the service and the key named:
 top-level `networks`, an `x-` field, and any key a later Compose adds. So is
 any YAML construct that resolves to something other than what is written:
 anchors, aliases, tags, merge keys (`<<`), duplicate keys, directives and a
-second document.
+second document. So is a raw NEL, LS or PS character (U+0085, U+2028,
+U+2029), which a YAML 1.1 reader takes for a line break; write it as an
+escape (`"\N"`, `"\L"`, `"\P"`) if you mean it.
+
+A plain scalar that reads as a number is a number: `image: 012`, a
+variable set to `1_000` or a volume named `00` is refused where a name or a
+string is expected. Quote it (`"012"`). nunki's reader follows YAML 1.2:
+only `true` and `false` are booleans, so `no` and `on` stay strings.
 
 What is lifted is not the file but nunki's rendering of it. Keys come in a
 fixed order, every string is quoted and written in ASCII, and every `$` is

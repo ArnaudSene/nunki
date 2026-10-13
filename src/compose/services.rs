@@ -327,6 +327,7 @@ impl ServicesFile {
     /// Read a services file, or refuse it whole.
     pub fn parse(text: &str) -> Result<ServicesFile, ServicesError> {
         plain_yaml(text)?;
+        no_yaml_1_1_break(text)?;
         let document: Value =
             yaml::from_str(text).map_err(|e| ServicesError::Yaml(e.to_string()))?;
         decoded(&document, "the file")?;
@@ -474,6 +475,32 @@ fn quote(text: &str) -> String {
 }
 
 // --- the YAML features nunki refuses ------------------------------------------
+
+/// The characters YAML 1.1 reads as a line break and YAML 1.2 does not:
+/// NEL, LS and PS.
+pub const YAML_1_1_BREAKS: [char; 3] = ['\u{85}', '\u{2028}', '\u{2029}'];
+
+/// Refuse a raw NEL, LS or PS anywhere in the text, where the file says one
+/// thing to a YAML 1.1 reader and another to the YAML 1.2 reader nunki uses.
+///
+/// Measured against the reader nunki used before this one: a NEL in
+/// a quoted scalar was folded to a space and is now kept, and any of the
+/// three in a comment ended the comment, so what followed it on the line
+/// was read as YAML, and is now not read at all. Written as an escape
+/// (`\N`, `\L`, `\P`) in a double-quoted scalar, each reads the same in
+/// both, and is rendered as a `\u` escape.
+fn no_yaml_1_1_break(text: &str) -> Result<(), ServicesError> {
+    match text
+        .split('\n')
+        .position(|line| line.contains(YAML_1_1_BREAKS))
+    {
+        Some(at) => Err(ServicesError::Feature {
+            feature: "a NEL, LS or PS character, which YAML 1.1 reads as a line break",
+            line: at + 1,
+        }),
+        None => Ok(()),
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Quote {
