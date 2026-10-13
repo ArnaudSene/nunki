@@ -350,7 +350,7 @@ bibliothèque.
 |---|---|---|
 | les règles du lieu | `AGENTS.md` à la racine (et par zone) ; `CLAUDE.md` n'est qu'un import (`@AGENTS.md`) ou un lien vers lui, les deux documentés par Claude Code. Un `CLAUDE.md` existant n'est pas écrasé (3.3) : `nunki init` dépose l'import à côté, le résumé le dit, et **`nunki check` est rouge** tant que ce `CLAUDE.md` n'importe pas `AGENTS.md` — sinon les règles ne seraient jamais lues par ce harnais et `mission start` partirait sans elles. L'adaptateur peut, en attendant, passer `AGENTS.md` par `--append-system-prompt-file` | tous les harnais qui le supportent, Claude Code via import ou lien |
 | les compétences | `SKILL.md`, standard ouvert (agentskills.io) adopté par OpenCode, Codex, Gemini CLI, Cursor, Copilot et d'autres ; il peut porter des choses essentielles | les harnais |
-| la mission | un dossier **au HQ, hors de l'arbre git** (voir les montages) : `MISSION.md`, `FOLLOWUP_HQ.md` et `MUTANTS.json` (à l'humain et au HQ, lecture seule pour l'agent), `JOURNAL.md`, `PR.md`, `VERDICT.json`, `MUTANTS.triage.json` (à l'agent) — la même forme pour les trois rôles | l'agent qui la porte, le HQ |
+| la mission | un dossier **au HQ, hors de l'arbre git** (voir les montages) : `MISSION.md`, `FOLLOWUP_HQ.md` et `MUTANTS.json` (à l'humain et au HQ, lecture seule pour l'agent), `JOURNAL.md`, `VERDICT.json`, `MUTANTS.triage.json` (à l'agent), `PR.md` (au codeur et à l'intégrateur ; en lecture seule pour l'agent sécurité) — la même forme pour les trois rôles | l'agent qui la porte, le HQ |
 | le bloc structuré de `MISSION.md` | un en-tête YAML que `nunki` lit, valide et **fige dans son état à la validation humaine** : forme (`integration`, `security`), rôle, branche, base, **la liste des lots** (un identifiant et un titre chacun — c'est elle qui donne « un run par lot » et qui fait refuser un `VERDICT.json` écrit avant que le dernier lot ait son entrée « fini » dans le journal), borne de volets, tentatives par lot, délais, script de lancement, **niveau d'exigence** (`rigor:`, pris de `--rigor`, sinon de `nunki.yaml`, sinon `critical`) et **seuil de mutation** (`mutation_threshold:`, figé depuis `nunki.yaml` avec lui ; un en-tête plus ancien qui ne le porte pas lit celui du projet), **modèle** (`model:`, quand le harnais en prend un ; `nunki.yaml` le déclare pour le projet et l'en-tête le raffine), et pour une mission d'intégration les **services** (réseau nommé, adresses, domaines, et `shared: true` pour un fournisseur réel, que les autres missions attendent — 7) et les **fichiers d'identifiants** montés. La prose du gabarit vient après, pour l'agent. L'agent ne peut pas l'écrire, et `nunki` ne le relit pas en cours de mission | `nunki`, puis l'agent |
 | le verdict | `VERDICT.json` dans le dossier de mission : `{ role, verdict, head, date, report }`, écrit par l'agent à la fin de son dernier run ; `nunki` le refuse si `head` n'est pas le `HEAD` réel de la branche | `nunki` |
 | le contrat de run | un run par lot (4.3) : ce qu'un run doit avoir produit avant de sortir — le lot commité et prouvé ou l'échec dit, arbre commitable, bloc `ÉTAT DE REPRISE` en tête du journal (écrit aussi toutes les 45 minutes en cours de run), et pour le dernier lot le verdict. Pour le codeur, ce bloc se termine par la ligne `Lot: <lot> — done`, `Lot: <lot> — failed: <raison>`, ou — seulement quand le lot est fini hormis des survivants dont il ne peut pas donner l'équivalence — `Lot: <lot> — awaits ruling: <quoi>`, chaque identifiant de survivant entre accents graves dans `<quoi>` : la seule que `nunki` lise pour savoir le lot fini | l'agent, par `MISSION.md` ; `nunki`, à la sortie et aux checkpoints |
@@ -370,7 +370,7 @@ lecture seule, et la porte « arbre propre » ne doit pas le voir.
 |---|---|---|---|---|
 | mission (codeur) | lecture-écriture | **hors de l'arbre**, au HQ : `~/.nunki/<projet>/hq/missions/<id>/`, monté dans le conteneur — **quatre fichiers en écriture** (`JOURNAL.md`, `PR.md`, `VERDICT.json`, `MUTANTS.triage.json`), le reste en lecture seule | aucun | aucun |
 | système (intégrateur) | lecture-écriture | idem | les fichiers nommés par la mission, en lecture seule, depuis le dossier réservé | ceux de la mission, à côté |
-| système (sécurité) | **lecture seule**, plus les répertoires d'écriture déclarés par la stack en volumes | idem | idem | idem, jamais arrêtés depuis le profil précédent |
+| système (sécurité) | **lecture seule**, plus les répertoires d'écriture déclarés par la stack en volumes | idem, sauf `PR.md`, en lecture seule : **trois fichiers en écriture** (`JOURNAL.md`, `VERDICT.json`, `MUTANTS.triage.json`) | idem | idem, jamais arrêtés depuis le profil précédent |
 | interactif (HQ) | lecture-écriture | tout `~/.nunki/<projet>/` | ce que l'humain décide | ce que l'humain décide |
 
 **Le dossier de mission vit au HQ, pas dans le slot.** Il est sous
@@ -388,9 +388,15 @@ borne — serait relu par `nunki` à chaque run, laisserait un agent, ou un prom
 injecté par une dépendance qu'il lit, s'écrire un domaine et un fichier
 d'identifiants de plus au run 1 et les obtenir au run 2. Donc :
 
-1. L'agent n'écrit que dans **`JOURNAL.md`, `PR.md`, `VERDICT.json` et
-   `MUTANTS.triage.json`**. `MISSION.md`, `FOLLOWUP_HQ.md` et `MUTANTS.json`
-   lui sont montés en **lecture seule** : ils sont à l'humain et au HQ.
+1. L'agent n'écrit que dans les fichiers que son rôle lui donne, montés un
+   à un en écriture par-dessus le dossier en lecture seule : le codeur et
+   l'intégrateur dans **`JOURNAL.md`, `PR.md`, `VERDICT.json` et
+   `MUTANTS.triage.json`**, l'agent sécurité dans les mêmes sauf **`PR.md`,
+   qu'il lit et n'écrit pas** : son rapport n'atteint la pull request que
+   par la section que `nunki push` écrit à partir du verdict (4.5).
+   `MISSION.md`, `FOLLOWUP_HQ.md` et `MUTANTS.json` leur sont montés en
+   **lecture seule** : ils sont à l'humain et au HQ. Ce que chaque rôle peut
+   écrire est dit en un seul endroit du code, et le texte de rôle le lit là.
 
    Le quatrième fichier va avec la porte 7 (4.4) : le codeur doit pouvoir répondre aux survivants d'une campagne, et deux de
    ses trois réponses sont du code. Il est séparé de `MUTANTS.json` — qui
@@ -543,7 +549,7 @@ par un adaptateur (4.3), et le moteur de conteneurs que par un autre.
 | `nunki mission new/start/reframe/status/say/watch/pause/resume/stop/kill/end/accept/iterate/fetch/archive` | le cycle d'une mission, du cadrage au rapatriement des commits ; `say` dépose une consigne pour le **run suivant**, `watch` rend deux états (tourne, fini) plus un troisième que l'humain provoque (gelé), `stop` termine le run proprement (4.3), **`end` déclare la mission abandonnée** |
 | `nunki exec <slot> <cmd>` | joue une commande dans le conteneur du slot — c'est ainsi que le HQ **rejoue une preuve** sans avoir la stack sur l'hôte. Par défaut sur la **copie git propre de `HEAD`** que la porte 7 utilise, pas sur l'arbre que l'agent a habité : un `Makefile`, un `pytest.ini` ou un alias `cargo` posé par l'agent y tromperait la preuve. Jamais pendant un run sur l'arbre de travail. Un slot dont les conteneurs sont arrêtés est d'abord relevé avec le profil que le dernier lancement a écrit — sans quoi chaque porte jouée dans la copie reste injouée, et le run suivant, qui n'est lancé qu'une fois ces portes jouées, ne part jamais |
 | `nunki verify <mission>` | les portes de vérification sur la mission du codeur, puis enchaîne la mission d'intégration, puis la mission de sécurité, chacune avec ses portes ; à la première rouge, applique les règles d'itération (4.5) ; à la fin, rend la main à l'humain pour la validation du push. **Reprenable** : son état est persisté à chaque transition, et le relancer reprend au même point |
-| `nunki push <mission>` | après validation humaine explicite (un argument, pas un dialogue), pousse la branche depuis le dépôt principal et ouvre la pull request. C'est le seul verbe qui touche la forge en écriture, et il refuse sans `INTEGRATED` et `CLEAR` sur le dernier commit et le verdict du codeur sur son ancêtre (4.4). Il parle à l'API de la forge avec un credential de l'humain, rangé à côté des comptes (`~/.nunki/forge-token`, un jeton GitHub qui peut ouvrir des pull requests) et jamais monté dans un conteneur — un conteneur ne voit du HQ que son propre dossier de mission, un niveau plus bas. **Le même `--yes` couvre le push et l'ouverture** : un verbe, un argument. Titre et corps viennent du `PR.md` de la mission (la première ligne qui dit quelque chose est le titre) ; sur un `FINDINGS` levé, la section `Security` du corps est remplacée par une note, sans toucher `PR.md` (4.5) ; une pull request déjà ouverte pour la branche — second push après un volet — est retrouvée, pas signalée en échec. Sans credential, sur une remote dont la forge n'a pas d'adaptateur, ou si la forge refuse, **le push reste fait** et `nunki` rend l'adresse exacte à ouvrir avec la raison : un push rapporté rouge serait relancé, et le second `git push` ne ferait rien qu'effacer la trace du premier. **Un adaptateur par forge**, comme il y en a un par harnais (4.3) et un par moteur de conteneurs (4.2) : ce qui est propre à une forge — l'adresse de son API, la forme de ses requêtes, la façon dont une remote nomme un dépôt — vit dans son adaptateur, et rien au-dessus ne le connaît. GitHub est le seul implémenté ; une remote ailleurs est **dite ailleurs, jamais devinée**, et ajouter GitLab est un fichier à écrire, pas un remaniement. Client HTTP : `ureq` ; ses racines de confiance sont celles de Mozilla, embarquées (`webpki-roots`, données sous CDLA-Permissive-2.0, exception écrite dans `deny.toml` pour cette seule crate) — un proxy d'entreprise qui re-signe le TLS serait la raison d'y revenir |
+| `nunki push <mission>` | après validation humaine explicite (un argument, pas un dialogue), pousse la branche depuis le dépôt principal et ouvre la pull request. C'est le seul verbe qui touche la forge en écriture, et il refuse sans `INTEGRATED` et `CLEAR` sur le dernier commit et le verdict du codeur sur son ancêtre (4.4). Il parle à l'API de la forge avec un credential de l'humain, rangé à côté des comptes (`~/.nunki/forge-token`, un jeton GitHub qui peut ouvrir des pull requests) et jamais monté dans un conteneur — un conteneur ne voit du HQ que son propre dossier de mission, un niveau plus bas. **Le même `--yes` couvre le push et l'ouverture** : un verbe, un argument. Titre et corps viennent du `PR.md` de la mission (la première ligne qui dit quelque chose est le titre) ; le corps est `PR.md` tel qu'il est écrit, suivi de la note sur les écarts puis de la section Security que `nunki` écrit à partir du verdict, sans toucher `PR.md` (4.5) ; sans `PR.md`, ou vide, la branche est poussée et aucune pull request n'est ouverte ; une pull request déjà ouverte pour la branche — second push après un volet — est retrouvée, pas signalée en échec. Sans credential, sur une remote dont la forge n'a pas d'adaptateur, ou si la forge refuse, **le push reste fait** et `nunki` rend l'adresse exacte à ouvrir avec la raison : un push rapporté rouge serait relancé, et le second `git push` ne ferait rien qu'effacer la trace du premier. **Un adaptateur par forge**, comme il y en a un par harnais (4.3) et un par moteur de conteneurs (4.2) : ce qui est propre à une forge — l'adresse de son API, la forme de ses requêtes, la façon dont une remote nomme un dépôt — vit dans son adaptateur, et rien au-dessus ne le connaît. GitHub est le seul implémenté ; une remote ailleurs est **dite ailleurs, jamais devinée**, et ajouter GitLab est un fichier à écrire, pas un remaniement. Client HTTP : `ureq` ; ses racines de confiance sont celles de Mozilla, embarquées (`webpki-roots`, données sous CDLA-Permissive-2.0, exception écrite dans `deny.toml` pour cette seule crate) — un proxy d'entreprise qui re-signe le TLS serait la raison d'y revenir |
 | `nunki check [--mission <id>]` | dit si un dépôt, ses slots et leurs conteneurs sont dans l'état que ce fichier décrit ; rouge si une restriction n'est pas tenue ; sonde le profil mission sans argument, et le profil système d'une mission donnée avec `--mission` ; **dit ce qu'il n'a pas pu vérifier** (la forge sans credential ou quand l'humain tient la protection à la main, LF quand un `.gitattributes` existant ne le force pas) |
 | `nunki logs <mission>` | rend la sortie structurée des runs, lisible |
 
@@ -2963,54 +2969,75 @@ Ce que la boucle veut dire, et ce qu'elle ne veut pas dire.
 - **Un constat accepté n'est pas un constat corrigé, et la pull request est
   publiée.** Quand le verdict de sécurité sur lequel `nunki push` s'appuie
   est un `FINDINGS` levé — par `mission accept`, ou par `nunki` pour des
-  `LOW`/`INFO` —, ses constats ne sont pas corrigés, et la section de
-  l'agent sécurité dans `PR.md` les décrirait sur la forge, où une
-  modification ultérieure laisse l'original dans l'historique.
-  - **L'agent sécurité écrit dans `PR.md` sous un seul titre à lui**, qui
-    commence par `Security`, comme celui de l'intégrateur commence par
-    `Integration`. Ses constats restent dans `VERDICT.json`.
-  - **`nunki push` retient cette section par défaut.** Sur le chemin de la
-    forge, toute section de `PR.md` sous un titre qui commence par
-    `Security` est remplacée par une note que `nunki` écrit lui-même — à la
-    place de la première, les autres retirées : combien de constats par
-    sévérité, qu'ils ont été acceptés et par qui (le HQ, ou `nunki` pour des
-    `LOW`/`INFO`), et que leur détail est retenu jusqu'à leur correction.
-    Une section va de son titre au prochain titre de même niveau ou de
-    niveau supérieur, ou à la fin du fichier : un constat sous son propre
-    sous-titre part avec elle. `PR.md` lui-même n'est pas touché, comme
-    pour la note sur les écarts. Un `CLEAR` publie la section telle qu'elle
-    est écrite.
-  - **Un push qui doit retenir et ne lit aucune section `Security` refuse**,
-    avant que rien ne parte — ni `git push`, ni requête à la forge. Il dit
-    combien de constats ont été acceptés, ou que le nombre n'a pas pu être
-    lu, et nomme les deux issues : un titre que `nunki` lit (le HQ peut
-    éditer `PR.md`), ou `security_findings: publish`. Une forme que `nunki`
-    ne lit pas comme un titre n'ouvre rien : `## **Security**`, un titre
-    dans une citation, ou la première ligne du fichier, qui est le titre de
-    la pull request.
-  - **Un bloc de code est lu de deux façons, et le doute retient.** Une
-    ligne que l'une des deux lectures prend pour un titre et l'autre pour le
-    contenu d'un bloc de code peut ouvrir une section `Security`, jamais en
-    fermer une : une section commence à un titre que l'une ou l'autre lit,
-    et ne se termine qu'à un titre que les deux lisent. Cette prudence ne
-    porte que sur les blocs de code.
-  - **Le compte vient de `VERDICT.json`**, et seulement quand ce fichier
-    est le `FINDINGS` de l'agent sécurité sur le commit que la levée
-    couvre : chaque rôle réécrit ce fichier. Sinon la note dit que le
-    nombre n'a pas pu être lu, plutôt que de le deviner.
+  `LOW`/`INFO` —, ses constats ne sont pas corrigés, et le rapport de
+  l'agent sécurité les décrirait sur la forge, où une modification
+  ultérieure laisse l'original dans l'historique.
+  - **L'agent sécurité n'écrit pas dans `PR.md`.** Son profil ne monte pas
+    le fichier en écriture : il le lit par le montage en lecture seule du
+    dossier, comme `MISSION.md`, et ne peut ni l'écrire, ni le remplacer, ni
+    le retirer. Son rapport, dans `VERDICT.json`, est tout son livrable.
+    C'est là la garde : rien de ce que `nunki push` retient ne dépend d'une
+    lecture du Markdown. Mesuré sur un moteur réel, y compris au changement
+    de rôle sur un même projet Compose : le conteneur de l'agent sécurité
+    est un autre que celui du codeur ou de l'intégrateur, et `PR.md` n'y
+    est pas en écriture.
+  - **`nunki push` écrit la section Security de la pull request.** Le corps
+    envoyé est le texte de `PR.md`, inchangé, puis la note sur les écarts,
+    puis une section sous le titre `## Security`, écrite par `nunki` à
+    partir du verdict de sécurité sur lequel le push s'appuie :
+    - sans agent sécurité (ou un `prototype`, qui ne joue aucun tour),
+      aucune section ;
+    - sur un `CLEAR`, le commit attaqué, puis le rapport tel que l'agent l'a
+      écrit ;
+    - sur un `FINDINGS` levé, retenu, la note : combien de constats par
+      sévérité, acceptés par qui (le HQ, ou `nunki` pour des `LOW`/`INFO`),
+      et que leur détail est retenu jusqu'à leur correction — aucun mot du
+      rapport, d'un titre de constat ni d'un `why_acceptable`, ni dans le
+      titre ni dans le corps ;
+    - sur un `FINDINGS` levé, publié, qui l'a accepté, chaque constat avec
+      sa sévérité, son titre et sa raison, puis le rapport.
+
+    Quand les tours sont épuisés, la section nomme aussi les commits que
+    l'agent sécurité n'a pas attaqués. Le rapport est cité ligne à ligne
+    (`> `), après que chaque caractère de contrôle a été rendu visible : un
+    `\r` seul, que la forge lit comme un saut de ligne, ne peut pas faire
+    sortir une ligne de la citation. La section vient en dernier, après la
+    note sur les écarts : rien de ce que `nunki` écrit ne suit la prose de
+    l'agent. `PR.md` lui-même n'est pas touché.
+  - **Le rapport et les constats viennent de l'état de `nunki`**, gardés
+    avec le verdict quand `verify` le conclut, depuis la lecture même sur
+    laquelle le verdict et la levée sont décidés. `nunki push` ne lit jamais
+    `VERDICT.json`, que chaque rôle réécrit. Un état écrit par un `nunki`
+    plus ancien n'en garde rien : la section dit alors que le nombre, les
+    constats ou le rapport n'ont pas pu être lus, plutôt que de les deviner
+    ou de lire le verdict d'un autre rôle.
   - **Le projet décide, dans `nunki.yaml`** : `security_findings: withhold`
     (le défaut, et ce que veut dire une clé absente) ou `publish`, pour un
     dépôt que seuls ses propriétaires lisent.
+  - **Sans `PR.md`, ou vide, il n'y a pas de pull request** : la branche est
+    poussée, aucune pull request n'est ouverte, et `nunki push` le dit.
   - `nunki push` dit ce qu'il a retenu, et sur combien de constats.
     `VERDICT.json` et `FOLLOWUP_HQ.md` les gardent en entier : rien n'est
     caché au HQ. Après `mission accept`, `mission status` montre l'étape et
     plus le rapport.
-  - **La limite, écrite : seule cette section est retenue.** Ce qu'une
-    autre section de `PR.md` dit, celle du codeur ou celle de
-    l'intégrateur, est publié tel quel. Si une section `Security` est
-    retenue pendant qu'une autre est écrite sous une forme que `nunki` ne
-    lit pas, la seconde est publiée. Et une pull request ouverte à la
-    main l'est depuis `PR.md` tel qu'il est : `push` le dit.
+  - **Un seul cas de transition, grossier exprès.** Une mission dont l'agent
+    sécurité a tourné sous un `nunki` plus ancien a écrit sa section dans
+    `PR.md`, comme son rôle le lui disait. Un push qui doit retenir refuse
+    donc, avant que rien ne parte, un `PR.md` qui porte une ligne où un `#`
+    précède la première lettre et où les premières lettres sont
+    `security`, sans égard à la casse (les sauts de ligne sont ceux de la
+    forge : `\n`, `\r\n`, un `\r` seul). Il nomme chaque ligne et les deux
+    issues : éditer `PR.md` (le HQ le peut), ou
+    `security_findings: publish`. Il refuse ; il ne coupe jamais, et ne
+    décide nulle part où une section finit. Ce refus n'est pas la garde (la
+    garde est le montage) : il rappelle au HQ de lire `PR.md`.
+  - **La limite, écrite.** Ce que le codeur ou l'intégrateur écrit dans
+    `PR.md` est publié tel quel, un constat qu'ils décriraient compris :
+    `nunki` ne lit pas leur prose, et le HQ lit `PR.md` avant un push. Une
+    forme que le refus de transition ne voit pas (`<h2>Security</h2>`,
+    `Security` souligné de `===`, un titre qui commence par un autre mot)
+    relève de cette limite. Une pull request ouverte à la main l'est depuis
+    `PR.md` tel qu'il est, sans la section que `nunki` aurait écrite.
 - **Une décision attendue n'est pas une borne épuisée.** Un codeur qui finit
   son lot hormis des survivants qu'il ne peut ni tuer ni figer en bug le
   termine par `Lot: <lot> — awaits ruling: <quoi>`. `nunki` vérifie que
