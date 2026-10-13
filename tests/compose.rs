@@ -8,8 +8,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use nunki::compose::{
-    AGENT_SERVICE, AGENT_WRITABLE, ComposeError, FIREWALL_SERVICE, NamedVolume, PROBER_SERVICE,
-    Plan, UserIds, generate, project_name,
+    AGENT_SERVICE, ComposeError, FIREWALL_SERVICE, NamedVolume, PROBER_SERVICE, Plan, UserIds,
+    generate, project_name,
 };
 use nunki::harness::Role;
 use nunki::mission::Service;
@@ -282,34 +282,124 @@ fn the_stacks_scripts_are_mounted_read_only_one_file_at_a_time() {
     }
 }
 
-#[test]
-fn the_mission_folder_is_read_only_but_for_the_agents_own_files() {
-    let yaml = generate(&plan(Role::Coder), &dialect()).unwrap();
+/// The agent's volumes, as the generated file holds them.
+fn agent_mounts(plan: &Plan) -> Vec<String> {
+    let yaml = generate(plan, &dialect()).unwrap();
     let doc: nunki::yaml::Value = nunki::yaml::from_str(&yaml).unwrap();
-    let mounts: Vec<_> = doc["services"][AGENT_SERVICE]["volumes"]
+    doc["services"][AGENT_SERVICE]["volumes"]
         .as_sequence()
         .unwrap()
         .iter()
         .map(|v| v.as_str().unwrap().to_string())
-        .collect();
+        .collect()
+}
 
-    assert!(
-        mounts.contains(&"/Users/h/.nunki/demo/hq/missions/m1:/work/mission:ro".to_string()),
-        "{mounts:?}"
-    );
-    for file in AGENT_WRITABLE {
-        let expected =
-            format!("/Users/h/.nunki/demo/hq/missions/m1/{file}:/work/mission/{file}:rw");
+/// The mission folder's mounts that name `file`, whatever their mode.
+fn mounts_of(mounts: &[String], file: &str) -> Vec<String> {
+    let suffix = format!("/{file}");
+    mounts
+        .iter()
+        .filter(|m| m.split(':').any(|part| part.ends_with(&suffix)))
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn the_mission_folder_is_read_only_but_for_the_files_the_role_writes() {
+    for role in Role::ALL {
+        let mounts = agent_mounts(&plan(role));
+
         assert!(
-            mounts.contains(&expected),
-            "missing {expected} in {mounts:?}"
+            mounts.contains(&"/Users/h/.nunki/demo/hq/missions/m1:/work/mission:ro".to_string()),
+            "{role:?}: {mounts:?}"
+        );
+        for file in nunki::compose::agent_writable(role) {
+            let expected =
+                format!("/Users/h/.nunki/demo/hq/missions/m1/{file}:/work/mission/{file}:rw");
+            assert!(
+                mounts.contains(&expected),
+                "{role:?}: missing {expected} in {mounts:?}"
+            );
+        }
+        // Nothing of the folder is mounted read-write but what the role's
+        // list names: the folder itself, then one line per file.
+        let folder: Vec<_> = mounts
+            .iter()
+            .filter(|m| m.contains("/work/mission"))
+            .collect();
+        assert_eq!(
+            folder.len(),
+            1 + nunki::compose::agent_writable(role).len(),
+            "{role:?}: {folder:?}"
+        );
+        // MISSION.md is inside the read-only mount and nowhere else: the
+        // header the run is framed by cannot be rewritten by the run
+        // (SPEC 4.1).
+        assert!(
+            !mounts.iter().any(|m| m.contains("MISSION.md")),
+            "{role:?}: {mounts:?}"
         );
     }
-    // MISSION.md is inside the read-only mount and nowhere else: the header
-    // the run is framed by cannot be rewritten by the run (SPEC 4.1).
-    assert!(
-        !mounts.iter().any(|m| m.contains("MISSION.md")),
-        "{mounts:?}"
+}
+
+/// SPEC 4.5, "Un constat accepté n'est pas un constat corrigé": the security
+/// agent's words reach the pull request only through the section `nunki`
+/// writes from its verdict. `PR.md` stays readable to it through the
+/// folder's read-only mount, and is mounted over it for the two others.
+#[test]
+fn pr_md_is_writable_for_the_coder_and_the_integrator_and_not_for_the_security_agent() {
+    let pr = "/Users/h/.nunki/demo/hq/missions/m1/PR.md:/work/mission/PR.md:rw".to_string();
+
+    for role in [Role::Coder, Role::Integrator] {
+        let mounts = agent_mounts(&plan(role));
+        assert_eq!(mounts_of(&mounts, "PR.md"), vec![pr.clone()], "{role:?}");
+    }
+
+    // The profile the security agent runs in, the system one, with and
+    // without the mission's services and credentials: whichever it is,
+    // nothing mounts PR.md, and the folder is read-only.
+    let mut bare = plan(Role::Security);
+    bare.credentials.clear();
+    bare.volumes.truncate(1);
+    for plan in [plan(Role::Security), bare] {
+        assert_eq!(
+            nunki::perimeter::Profile::of(plan.role),
+            nunki::perimeter::Profile::System
+        );
+        let mounts = agent_mounts(&plan);
+        assert_eq!(mounts_of(&mounts, "PR.md"), Vec::<String>::new());
+        assert!(
+            mounts.contains(&"/Users/h/.nunki/demo/hq/missions/m1:/work/mission:ro".to_string()),
+            "{mounts:?}"
+        );
+        // What it does write is still there: its report is its deliverable.
+        assert!(
+            mounts.contains(
+                &"/Users/h/.nunki/demo/hq/missions/m1/VERDICT.json:/work/mission/VERDICT.json:rw"
+                    .to_string()
+            ),
+            "{mounts:?}"
+        );
+    }
+
+    // The coder's is the mission profile; the integrator's the system one.
+    assert_eq!(
+        nunki::perimeter::Profile::of(Role::Coder),
+        nunki::perimeter::Profile::Mission
+    );
+    assert_eq!(
+        nunki::perimeter::Profile::of(Role::Integrator),
+        nunki::perimeter::Profile::System
+    );
+}
+
+/// The folder's files exist before any profile is lifted, `PR.md` included:
+/// the security agent reads it even though it is not mounted for it.
+#[test]
+fn every_file_some_role_writes_is_a_bind_source_and_only_those() {
+    assert_eq!(
+        nunki::compose::any_agent_writable(),
+        vec!["JOURNAL.md", "PR.md", "VERDICT.json", "MUTANTS.triage.json"]
     );
 }
 

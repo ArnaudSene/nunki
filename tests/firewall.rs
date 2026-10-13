@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use nunki::compose::{AGENT_WRITABLE, NamedVolume, Plan, UserIds, generate, project_name};
+use nunki::compose::{NamedVolume, Plan, UserIds, generate, project_name};
 use nunki::harness::Role;
 use nunki::perimeter::{Sources, compute, probes, resolves};
 
@@ -92,7 +92,7 @@ fn live_the_firewall_holds() {
     let mission = dir.path().join("mission");
     std::fs::create_dir_all(&tree).unwrap();
     std::fs::create_dir_all(&mission).unwrap();
-    for file in AGENT_WRITABLE {
+    for file in nunki::compose::any_agent_writable() {
         std::fs::write(mission.join(file), "").unwrap();
     }
 
@@ -262,7 +262,7 @@ fn live_a_declared_service_is_reachable_and_nothing_else_is() {
     let mission = dir.path().join("mission");
     std::fs::create_dir_all(&tree).unwrap();
     std::fs::create_dir_all(&mission).unwrap();
-    for file in AGENT_WRITABLE {
+    for file in nunki::compose::any_agent_writable() {
         std::fs::write(mission.join(file), "").unwrap();
     }
 
@@ -417,5 +417,142 @@ fn dialect() -> nunki::engine::Dialect {
         netns: nunki::engine::Netns::Service,
         host_alias: "host.docker.internal".to_string(),
         userns: None,
+    }
+}
+
+/// Whether this machine has an engine to lift a pair with: the compose
+/// command `HQ_COMPOSE` names (or `docker compose`), and `docker` itself,
+/// which builds the sidecar. Without them a live test skips, it does not
+/// fail.
+fn an_engine_is_there() -> bool {
+    let (program, leading) = compose_command();
+    let answers = |mut command: Command| {
+        command
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    };
+    let mut compose = Command::new(program);
+    compose.args(leading).arg("version");
+    let mut docker = Command::new("docker");
+    docker.arg("info");
+    answers(compose) && answers(docker)
+}
+
+/// SPEC 4.5, "Un constat accepté n'est pas un constat corrigé": in the
+/// profile the security agent runs in, `PR.md` is read-only — not
+/// writable, not replaceable through the folder it sits in — while its
+/// verdict is; in the coder's, both are writable. What the generated file
+/// says is checked in `tests/compose.rs`; this is what the engine makes of
+/// it, measured.
+#[test]
+#[ignore = "builds an image and lifts containers; run by hand"]
+fn live_the_security_agent_cannot_write_pr_md_and_the_coder_can() {
+    if !an_engine_is_there() {
+        eprintln!("skipped: no container engine on this machine");
+        return;
+    }
+    let _context = build_image();
+    let (uid, gid) = nunki::image::host_ids();
+
+    // Each attempt prints what happened, so one exec answers them all and a
+    // failure shows every line.
+    let attempts = "\
+        (echo agent >> /work/mission/PR.md) 2>/dev/null \
+            && echo PR-WRITTEN || echo PR-REFUSED; \
+        (echo agent > /work/mission/PR.new && mv -f /work/mission/PR.new /work/mission/PR.md) \
+            2>/dev/null && echo PR-REPLACED || echo PR-NOT-REPLACED; \
+        (rm -f /work/mission/PR.md && test ! -e /work/mission/PR.md) 2>/dev/null \
+            && echo PR-REMOVED || echo PR-NOT-REMOVED; \
+        (echo agent >> /work/mission/VERDICT.json) 2>/dev/null \
+            && echo VERDICT-WRITTEN || echo VERDICT-REFUSED";
+
+    for role in [Role::Security, Role::Coder] {
+        let dir = tempfile::tempdir().unwrap();
+        let tree = dir.path().join("tree");
+        let mission = dir.path().join("mission");
+        std::fs::create_dir_all(&tree).unwrap();
+        std::fs::create_dir_all(&mission).unwrap();
+        for file in nunki::compose::any_agent_writable() {
+            std::fs::write(mission.join(file), "").unwrap();
+        }
+        std::fs::write(mission.join("PR.md"), "the coder's\n").unwrap();
+
+        let perimeter = compute(
+            role,
+            &Sources {
+                stack: &[ALLOWED.to_string()],
+                harness: &[],
+                services: &[],
+                forge: &[],
+            },
+        )
+        .unwrap();
+        let plan = Plan {
+            session: "11111111-2222-4333-8444-555555555555".into(),
+            slot: SLOT.to_string(),
+            role,
+            image: "alpine:3.20".to_string(),
+            firewall_image: FIREWALL_IMAGE.to_string(),
+            user: UserIds { uid, gid },
+            tree,
+            tree_at: PathBuf::from("/work/tree"),
+            mission_dir: mission.clone(),
+            mission_dir_at: PathBuf::from("/work/mission"),
+            stack_scripts: Vec::new(),
+            credentials: Vec::new(),
+            advisories: vec![],
+            secrets: None,
+            volumes: Vec::<NamedVolume>::new(),
+            environment: BTreeMap::new(),
+            command: vec!["sleep".to_string(), "600".to_string()],
+            perimeter,
+            project_services: None,
+            prober: None,
+        };
+        let file = dir.path().join("profile.yml");
+        std::fs::write(&file, generate(&plan, &dialect()).unwrap()).unwrap();
+
+        let project = project_name("11111111-2222-4333-8444-555555555555", SLOT).unwrap();
+        down(&file, &project);
+        let up = compose(&file, &project, &["up", "-d", "--wait"]);
+        assert!(
+            up.status.success(),
+            "{role:?}: the pair did not come up:\n{}\n{}",
+            String::from_utf8_lossy(&up.stdout),
+            String::from_utf8_lossy(&up.stderr)
+        );
+        let said = compose(
+            &file,
+            &project,
+            &["exec", "-T", "agent", "sh", "-c", attempts],
+        );
+        down(&file, &project);
+        let said = String::from_utf8_lossy(&said.stdout).to_string();
+        println!("{role:?}:\n{said}");
+
+        let pr = std::fs::read_to_string(mission.join("PR.md")).unwrap_or_default();
+        match role {
+            Role::Security => {
+                for line in [
+                    "PR-REFUSED",
+                    "PR-NOT-REPLACED",
+                    "PR-NOT-REMOVED",
+                    "VERDICT-WRITTEN",
+                ] {
+                    assert!(said.contains(line), "security: expected {line}:\n{said}");
+                }
+                assert_eq!(pr, "the coder's\n", "PR.md moved under the security agent");
+            }
+            _ => {
+                for line in ["PR-WRITTEN", "VERDICT-WRITTEN"] {
+                    assert!(said.contains(line), "{role:?}: expected {line}:\n{said}");
+                }
+                assert!(
+                    pr.contains("agent"),
+                    "the coder's write did not land: {pr:?}"
+                );
+            }
+        }
     }
 }

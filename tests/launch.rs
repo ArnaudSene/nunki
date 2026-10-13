@@ -424,7 +424,7 @@ fn live_the_services_survive_a_switch_and_the_application_starts_in_the_profile(
 
     let mission_dir = dir.path().join("mission");
     std::fs::create_dir_all(&mission_dir).unwrap();
-    for f in nunki::compose::AGENT_WRITABLE {
+    for f in nunki::compose::any_agent_writable() {
         std::fs::write(mission_dir.join(f), "").unwrap();
     }
 
@@ -723,7 +723,7 @@ fn live_the_security_profile_writes_only_what_the_stack_declared() {
 
     let mission_dir = dir.path().join("mission");
     std::fs::create_dir_all(&mission_dir).unwrap();
-    for f in nunki::compose::AGENT_WRITABLE {
+    for f in nunki::compose::any_agent_writable() {
         std::fs::write(mission_dir.join(f), "").unwrap();
     }
     let project = Project::at(dir.path().join("repo"), config(), dir.path().join("nunki"));

@@ -123,7 +123,8 @@ pub fn create(
 /// [`create`] writes them once, but that alone is no guard: a
 /// `MUTANTS.triage.json` removed by hand comes back as a **directory** on the
 /// next launch (`verify: the mutation campaign could not be read:
-/// …/MUTANTS.triage.json: Is a directory (os error 21)`). These four
+/// …/MUTANTS.triage.json: Is a directory (os error 21)`). These files,
+/// every one some role writes, whichever role is about to be lifted,
 /// are bind-mounted one file at a time, so that the rest of the folder stays
 /// read-only, and a bind mount whose source is missing makes the engine
 /// create a directory in its place — after which the file is unreadable and
@@ -145,7 +146,7 @@ pub fn create(
 /// Idempotent: a file that is there is left exactly as it is, content and
 /// modification time included.
 pub fn ensure_writable(dir: &Path) -> Result<(), MissionDirError> {
-    for file in crate::compose::AGENT_WRITABLE {
+    for file in crate::compose::any_agent_writable() {
         let path = dir.join(file);
         if path.is_file() {
             continue;

@@ -38,14 +38,46 @@ What a run must leave behind, without exception:
   about an earlier commit is a resume nobody can trust. Everything `nunki` reads
   there it reads **inside the block** — between its heading and the next one
   — so a line left further down the file is a line `nunki` will not see;
+";
+
+    // `PR.md` is published as written, and the Security section of the pull
+    // request is `nunki`'s, written from the verdict (SPEC 4.5): the roles
+    // that write the file are told both, the one that may not is told so in
+    // its own part.
+    let pull_request = match role {
+        Role::Coder | Role::Integrator => {
+            "\
 - `PR.md`, the pull request this mission delivers, written as you go. It is
-  the deliverable a gate looks for, and an empty one is a red gate;
+  the deliverable a gate looks for, and an empty one is a red gate. It is
+  published as written: a security finding that is not fixed is not
+  described in it, and no heading in it opens with the word `Security` —
+  that section is `nunki`'s, written from the security agent's verdict;
+"
+        }
+        Role::Security => "",
+    };
+
+    // Said from the list compose mounts, so the text cannot name a file the
+    // role cannot write, nor miss one it can (SPEC 4.1).
+    let quoted: Vec<String> = crate::compose::agent_writable(role)
+        .iter()
+        .map(|f| format!("`{f}`"))
+        .collect();
+    let (last, rest) = quoted
+        .split_last()
+        .expect("every role writes its journal and its verdict, so its list is never empty");
+    let files = format!("{} and {last}", rest.join(", "));
+    let own_files = format!(
+        "\
 - on the last lot only, `VERDICT.json`.
 
-You may write exactly four files in the mission folder: `JOURNAL.md`,
-`PR.md`, `VERDICT.json` and `MUTANTS.triage.json`. Everything else there
-belongs to the human and to the HQ, `MUTANTS.json` included.
+The files you may write in the mission folder are these, and no other:
+{files}. Everything else there is read-only for you, `MUTANTS.json`
+included.
+"
+    );
 
+    let campaign = "
 A mutation campaign's survivors are yours to answer, in `MUTANTS.triage.json`,
 with one of two outcomes: killed by a test you name and commit, or a bug you
 have frozen in a test you name and commit. That file is a JSON object keyed by
@@ -209,14 +241,13 @@ What `nunki` checks on your work, so that none of it is a surprise:
 - your journal's `ÉTAT DE REPRISE` block names the commit you attacked; you
   commit nothing, so that block and your report are the whole of what you
   leave;
-- your report **is** your deliverable, and it lives in `VERDICT.json`. An
-  empty one is a red gate, whatever the verdict says;
-- `PR.md` is the pull request the others wrote. What you write there goes
-  under **one** heading of your own that begins with `Security`, as the
-  integrator's begins with `Integration`; your findings stay in
-  `VERDICT.json`. When they are accepted rather than fixed, `nunki push`
-  withholds that section from the forge by default — and only that one: a
-  finding you describe anywhere else in `PR.md` is published as written;
+- your report **is** your whole deliverable, and it lives in `VERDICT.json`.
+  An empty one is a red gate, whatever the verdict says;
+- `PR.md` is the pull request the others wrote, and it is read-only for
+  you: you write nothing there. **When you conclude `CLEAR`, `nunki`
+  publishes your report as the pull request's Security section**, as you
+  wrote it: write it for that reader, who reads the pull request and not
+  this folder;
 - your run ends with that file, on the commit you attacked, in full:
 
     {\"role\": \"Security\", \"verdict\": \"CLEAR\", \"head\": \"<the full HEAD sha>\", \"date\": \"<RFC 3339>\", \"report\": \"<what you attacked, what you found, what you did not look at>\", \"findings\": []}
@@ -242,11 +273,11 @@ What `nunki` checks on your work, so that none of it is a surprise:
         }
     };
 
-    format!("{particular}\n\n{common}\n")
+    format!("{particular}\n\n{common}{pull_request}{own_files}{campaign}\n")
 }
 
 /// The file the prompt is written to, inside the mission folder — read-only
-/// for the agent, like everything there but its own four files.
+/// for the agent, like everything there but the files its role writes.
 pub const PROMPT_FILE: &str = "ROLE.md";
 
 /// The role's name as `nunki` writes it down: in `HQ_ROLE`, in a log's name, in

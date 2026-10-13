@@ -1614,7 +1614,7 @@ mod live {
     use std::process::{Command, Output};
 
     use nunki::compose::services::{CAPABILITIES, Lifted, NETWORK, NO_GATEWAY, ServicesFile};
-    use nunki::compose::{AGENT_WRITABLE, NamedVolume, Plan, UserIds, generate, project_name};
+    use nunki::compose::{NamedVolume, Plan, UserIds, generate, project_name};
     use nunki::harness::Role;
     use nunki::perimeter::{Sources, compute};
 
@@ -1685,7 +1685,7 @@ mod live {
             let mission = dir.path().join("mission");
             std::fs::create_dir_all(&tree).unwrap();
             std::fs::create_dir_all(&mission).unwrap();
-            for file in AGENT_WRITABLE {
+            for file in nunki::compose::any_agent_writable() {
                 std::fs::write(mission.join(file), "").unwrap();
             }
             let services: Vec<nunki::mission::Service> = declared

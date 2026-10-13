@@ -44,15 +44,45 @@ pub const FIREWALL_SERVICE: &str = "firewall";
 pub const AGENT_SERVICE: &str = "agent";
 /// The service `nunki check` runs its probes from, when a plan carries one.
 pub const PROBER_SERVICE: &str = "prober";
-/// The only files an agent may write in the mission folder (SPEC 4.1).
+/// The files an agent of `role` may write in the mission folder (SPEC 4.1):
+/// each is bind-mounted read-write over the folder's read-only mount, and
+/// nothing else there is. The one place this is said.
 ///
-/// `MUTANTS.triage.json` is the fourth, added with gate 7: the
+/// `MUTANTS.triage.json` was added with gate 7: the
 /// coder answers a campaign's survivors there, and it is a **different file**
 /// from `MUTANTS.json` on purpose. What decides who wrote a line is this
 /// list, not the line — so the outcome no machine can check lives in the
 /// HQ's file, which is mounted read-only here.
-pub const AGENT_WRITABLE: [&str; 4] =
-    ["JOURNAL.md", "PR.md", "VERDICT.json", "MUTANTS.triage.json"];
+///
+/// `PR.md` is not the security agent's (SPEC 4.5, "Un constat accepté n'est
+/// pas un constat corrigé"): its report reaches the pull request only through
+/// the section `nunki push` writes from the verdict, so a finding withheld
+/// from the forge is withheld by what the agent cannot write, not by reading
+/// what it wrote. It still reads `PR.md`, through the folder's own mount,
+/// read-only, like `MISSION.md`.
+pub fn agent_writable(role: Role) -> &'static [&'static str] {
+    match role {
+        Role::Coder | Role::Integrator => {
+            &["JOURNAL.md", "PR.md", "VERDICT.json", "MUTANTS.triage.json"]
+        }
+        Role::Security => &["JOURNAL.md", "VERDICT.json", "MUTANTS.triage.json"],
+    }
+}
+
+/// Every file some role may write, once each, in the order [`agent_writable`]
+/// first names it: the bind sources a mission folder must hold before a
+/// profile is lifted, whichever role it is lifted for.
+pub fn any_agent_writable() -> Vec<&'static str> {
+    let mut files: Vec<&'static str> = Vec::new();
+    for role in Role::ALL {
+        for file in agent_writable(role) {
+            if !files.contains(file) {
+                files.push(file);
+            }
+        }
+    }
+    files
+}
 
 /// The uid and gid of the human, passed through so that files the agent
 /// creates belong to them on the host (SPEC 4.2 bis).
@@ -425,11 +455,11 @@ fn agent(plan: &Plan, dialect: &Dialect) -> Result<Service, ComposeError> {
     volumes.push(mount(&plan.tree, &plan.tree_at, tree_mode));
 
     // The mission folder is the agent's only channel with the HQ, and it is
-    // read-only but for the agent's own files (SPEC 4.1). A directory
+    // read-only but for the files its role writes (SPEC 4.1). A directory
     // mounted rw would
     // hand back `MISSION.md` — the header the whole run is framed by.
     volumes.push(mount(&plan.mission_dir, &plan.mission_dir_at, "ro"));
-    for file in AGENT_WRITABLE {
+    for file in agent_writable(plan.role) {
         volumes.push(mount(
             &plan.mission_dir.join(file),
             &plan.mission_dir_at.join(file),

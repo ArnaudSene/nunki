@@ -271,11 +271,11 @@ fn the_follow_up_file_is_prose_and_not_a_code_block() {
     assert!(text.contains("never writes it"), "{text}");
 }
 
-/// The four files the agent writes are bind-mounted one at a time, so the
+/// The files the agents write are bind-mounted one at a time, so the
 /// rest of the folder can stay read-only. An engine handed a source that does
 /// not exist creates a **directory** there, and the mission then fails on a
 /// message naming the symptom: `MUTANTS.triage.json: Is a directory (os error
-/// 21)`, as happens when that file is removed by hand between two runs. `create` writes the four once; this is the guard that holds at
+/// 21)`, as happens when that file is removed by hand between two runs. `create` writes them once; this is the guard that holds at
 /// every lift, because the folder is the human's and removing a file from it
 /// — clearing a `VERDICT.json` that froze wrong — is a repair, not a mistake.
 #[test]
@@ -286,8 +286,8 @@ fn every_file_the_agent_writes_is_put_back_before_a_lift() {
     // Driven by the list compose mounts file by file, and not by a copy of
     // it: a fifth writable file added there is covered here without anyone
     // remembering to come back.
-    assert!(!nunki::compose::AGENT_WRITABLE.is_empty());
-    for file in nunki::compose::AGENT_WRITABLE {
+    assert!(!nunki::compose::any_agent_writable().is_empty());
+    for file in nunki::compose::any_agent_writable() {
         let path = paths.dir.join(file);
         std::fs::remove_file(&path).unwrap();
 

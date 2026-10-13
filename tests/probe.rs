@@ -686,7 +686,7 @@ fn a_system_profile_check_mounts_a_scratch_mission_folder() {
         "{}",
         paths.dir.display()
     );
-    for file in nunki::compose::AGENT_WRITABLE {
+    for file in nunki::compose::any_agent_writable() {
         assert!(
             paths.dir.join(file).is_file(),
             "{file} is there to be mounted"
