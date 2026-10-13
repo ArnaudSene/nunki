@@ -7,8 +7,9 @@
 
 use std::collections::BTreeMap;
 
-use serde::Serialize;
-use serde_yaml_ng::{Mapping, Value};
+use serde::{Serialize, Serializer};
+
+use crate::yaml::{Mapping, Value};
 
 /// A generated Compose file.
 #[derive(Debug, Clone, Serialize)]
@@ -19,13 +20,27 @@ pub struct Document {
     /// Insertion-ordered so the generated file reads the way it was built:
     /// the firewall, the agent, nunki's prober when there is one, then the
     /// project's own services as nunki rendered them.
-    pub services: Mapping,
+    #[serde(serialize_with = "in_order")]
+    pub services: Vec<(String, Entry)>,
     #[serde(skip_serializing_if = "Mapping::is_empty")]
     pub volumes: Mapping,
     /// nunki's internal network for the project's services, when there are
     /// any. Never the project's: a services file declares no network.
     #[serde(skip_serializing_if = "Mapping::is_empty")]
     pub networks: Mapping,
+}
+
+/// A service of the generated file: one `nunki` writes itself, or one of
+/// the project's, as its rendering reads back, fenced.
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum Entry {
+    Own(Box<Service>),
+    Lifted(Value),
+}
+
+fn in_order<S: Serializer>(entries: &[(String, Entry)], out: S) -> Result<S::Ok, S::Error> {
+    out.collect_map(entries.iter().map(|(name, entry)| (name, entry)))
 }
 
 /// A service `nunki` writes itself.
@@ -84,10 +99,4 @@ pub fn depends_on_healthy(service: &str) -> Mapping {
     let mut deps = Mapping::new();
     deps.insert(Value::from(service), Value::Mapping(condition));
     deps
-}
-
-impl Service {
-    pub fn to_value(&self) -> Value {
-        serde_yaml_ng::to_value(self).expect("a service serialises to a mapping")
-    }
 }

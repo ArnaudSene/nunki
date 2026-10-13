@@ -273,15 +273,20 @@ fn default_mutation_threshold() -> u32 {
 
 /// `mutation_threshold`, refused outside 1 to 100 rather than clamped: a
 /// threshold silently moved is a gate that passes on a number nobody wrote.
+///
+/// Read signed, so that `-5` is refused by this rule and in its words,
+/// naming the key, and not by the parser as a number that is no `u32`.
 fn mutation_threshold<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
-    let value = u32::deserialize(deserializer)?;
-    if (1..=100).contains(&value) {
-        Ok(value)
-    } else {
-        Err(serde::de::Error::custom(format!(
-            "mutation_threshold is a whole percentage from 1 to 100, and {value} is not"
-        )))
-    }
+    whole_percentage(i64::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+}
+
+fn whole_percentage(value: i64) -> Result<u32, String> {
+    u32::try_from(value)
+        .ok()
+        .filter(|value| (1..=100).contains(value))
+        .ok_or_else(|| {
+            format!("mutation_threshold is a whole percentage from 1 to 100, and {value} is not")
+        })
 }
 
 /// What `mutation_jobs` is when `nunki.yaml` does not say: one mutant at a
@@ -359,12 +364,10 @@ fn mutation_jobs<'de, D: serde::Deserializer<'de>>(
 pub(crate) fn frozen_mutation_threshold<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<u32>, D::Error> {
-    match Option::<u32>::deserialize(deserializer)? {
-        Some(value) if !(1..=100).contains(&value) => Err(serde::de::Error::custom(format!(
-            "mutation_threshold is a whole percentage from 1 to 100, and {value} is not"
-        ))),
-        other => Ok(other),
-    }
+    Option::<i64>::deserialize(deserializer)?
+        .map(whole_percentage)
+        .transpose()
+        .map_err(serde::de::Error::custom)
 }
 
 /// A private repository on GitHub's free plan can neither protect a branch
@@ -544,7 +547,7 @@ impl Project {
 
         let text = std::fs::read_to_string(&file)
             .map_err(|e| ProjectError::Unreadable(file.clone(), e.to_string()))?;
-        let config: Config = serde_yaml_ng::from_str(&text)
+        let config: Config = crate::yaml::from_str(&text)
             .map_err(|e| ProjectError::Invalid(file.clone(), e.to_string()))?;
         // One fragment per name: two entries naming one would share its
         // scripts and its image steps, and only one directory could be right.

@@ -55,6 +55,11 @@ pub enum InitError {
     BadStack(String, String),
     #[error("stack {0} is named twice")]
     TwiceNamed(String),
+    #[error(
+        "{0} is not a configuration nunki can read, so the stacks it declares are not \
+         known and no fragment was examined: {1}"
+    )]
+    UnreadableConfig(PathBuf, String),
 }
 
 /// The stacks `nunki init` can write a fragment for: the three SPEC 4.2
@@ -154,7 +159,7 @@ pub fn init_as(
     // lines and no hint that its fragments were never examined, and the
     // remedy (`nunki init --stack rust`) would stay undiscoverable.
     let stacks = if asked.is_empty() {
-        declares(home)
+        declares(home)?
     } else {
         asked
     };
@@ -346,21 +351,24 @@ fn write_fragment(path: &Path, body: &str, executable: bool) -> Result<(), InitE
     std::fs::rename(&staged, path).map_err(|e| InitError::Io(path.to_path_buf(), e))
 }
 
-/// The stacks a project already declares, or none when it declares nothing
-/// yet.
+/// The stacks a project already declares, or none when it has no
+/// configuration yet.
 ///
 /// Read here rather than through [`crate::project::Project::open`] because
-/// `init` is the one verb that runs before a project exists: an unreadable or
-/// absent configuration is the ordinary case on a first run, not an error.
-fn declares(home: &Path) -> Vec<crate::project::Stack> {
-    let text = match std::fs::read_to_string(home.join(crate::project::CONFIG_FILE)) {
+/// `init` is the one verb that runs before a project exists: an absent
+/// configuration is the ordinary case on a first run, not an error. One that
+/// exists and cannot be read is: taken for "no stacks", it would leave every
+/// fragment unexamined and say only "kept".
+fn declares(home: &Path) -> Result<Vec<crate::project::Stack>, InitError> {
+    let path = home.join(crate::project::CONFIG_FILE);
+    let text = match std::fs::read_to_string(&path) {
         Ok(t) => t,
-        Err(_) => return Vec::new(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(InitError::UnreadableConfig(path, e.to_string())),
     };
-    match serde_yaml_ng::from_str::<crate::project::Config>(&text) {
-        Ok(config) => config.stacks,
-        Err(_) => Vec::new(),
-    }
+    crate::yaml::from_str::<crate::project::Config>(&text)
+        .map(|config| config.stacks)
+        .map_err(|e| InitError::UnreadableConfig(path, e.to_string()))
 }
 
 fn create_if_absent(

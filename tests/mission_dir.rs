@@ -361,13 +361,13 @@ fn a_file_that_is_there_keeps_what_it_holds() {
 }
 
 /// Every rigor is written into MISSION.md in lowercase, as the human types
-/// it, and read back as itself.
+/// it — quoted, as every string nunki writes — and read back as itself.
 #[test]
 fn each_rigor_survives_a_round_trip_through_the_file() {
     for (rigor, written) in [
-        (Rigor::Prototype, "rigor: prototype\n"),
-        (Rigor::Standard, "rigor: standard\n"),
-        (Rigor::Critical, "rigor: critical\n"),
+        (Rigor::Prototype, "rigor: 'prototype'\n"),
+        (Rigor::Standard, "rigor: 'standard'\n"),
+        (Rigor::Critical, "rigor: 'critical'\n"),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let mut h = header();
@@ -424,8 +424,8 @@ fn a_rigor_is_parsed_and_printed_as_it_is_written_in_the_header() {
         let word = rigor.to_string();
         assert_eq!(word.parse::<Rigor>(), Ok(rigor));
         assert_eq!(
-            serde_yaml_ng::to_string(&rigor).unwrap(),
-            format!("{word}\n")
+            nunki::yaml::to_string(&rigor).unwrap(),
+            format!("'{word}'\n")
         );
     }
     assert!("Critical".parse::<Rigor>().is_err());
@@ -667,7 +667,7 @@ fn a_header_without_a_frozen_threshold_still_reads_and_a_bad_one_is_refused() {
         Some(70)
     );
 
-    for bad in ["0", "101"] {
+    for bad in ["0", "101", "-5"] {
         let text = std::fs::read_to_string(&paths.mission).unwrap();
         std::fs::write(
             &paths.mission,
@@ -695,4 +695,53 @@ fn a_header_without_a_frozen_threshold_still_reads_and_a_bad_one_is_refused() {
         )
         .unwrap();
     }
+}
+
+/// A header whose strings a reader could take for something else: a date,
+/// `1_000`, `null`, a `: ` and a ` #`.
+fn awkward_header() -> Header {
+    let mut framed = header();
+    framed.branch = "feat/1_000".to_string();
+    framed.lots[0].title = "2026-10-13".to_string();
+    framed.lots[1].title = "no: not yes, # really".to_string();
+    framed.mutation_threshold = Some(90);
+    framed.arbiter = Some("null".to_string());
+    framed
+}
+
+#[test]
+fn a_header_is_written_with_every_string_quoted_and_reads_back_equal() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = create(dir.path(), "m1", &awkward_header(), "Do the thing.").unwrap();
+    let text = std::fs::read_to_string(&paths.mission).unwrap();
+    for line in [
+        "\nbranch: 'feat/1_000'\n",
+        "\n  title: '2026-10-13'\n",
+        "\n  title: 'no: not yes, # really'\n",
+        "\narbiter: 'null'\n",
+        "\nmutation_threshold: 90\n",
+        "\naccount: null\n",
+    ] {
+        assert!(text.contains(line), "{line:?}\n{text}");
+    }
+    assert_eq!(read_header(dir.path(), "m1").unwrap(), awkward_header());
+}
+
+/// A MISSION.md the previous writer wrote, frozen as it wrote it, reads to
+/// the header it was written from.
+#[test]
+fn a_header_written_by_the_previous_writer_reads_to_the_same_header() {
+    let frozen = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/older/yaml/MISSION.md"),
+    )
+    .unwrap();
+    // As that writer left them: unquoted where it judged a string plain.
+    assert!(frozen.contains("\nbranch: feat/1_000\n"), "{frozen}");
+    assert!(frozen.contains("\n  title: 2026-10-13\n"), "{frozen}");
+    let dir = tempfile::tempdir().unwrap();
+    let mission = dir.path().join("missions/m1/MISSION.md");
+    std::fs::create_dir_all(mission.parent().unwrap()).unwrap();
+    std::fs::write(&mission, frozen).unwrap();
+    assert_eq!(read_header(dir.path(), "m1").unwrap(), awkward_header());
 }

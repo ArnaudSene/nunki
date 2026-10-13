@@ -9,7 +9,7 @@ use nunki::image;
 use nunki::project::{Config, Project, Stack};
 
 fn config(yaml: &str) -> Result<Config, String> {
-    serde_yaml_ng::from_str(&format!("harness: claude-code\n{yaml}")).map_err(|e| e.to_string())
+    nunki::yaml::from_str(&format!("harness: claude-code\n{yaml}")).map_err(|e| e.to_string())
 }
 
 /// Every `nunki.yaml` written before a stack could have a directory still
@@ -27,9 +27,9 @@ fn a_stack_is_a_name_or_a_name_with_its_directory() {
             }
         ]
     );
-    // And it is written back the way it was read.
-    let written = serde_yaml_ng::to_string(&c.stacks).unwrap();
-    assert_eq!(written, "- rust\n- next: frontend\n");
+    // And it is written back the way it was read, every string quoted.
+    let written = nunki::yaml::to_string(&c.stacks).unwrap();
+    assert_eq!(written, "- 'rust'\n- next: 'frontend'\n");
     assert_eq!(
         config("stacks: [rust]\n").unwrap().stacks,
         vec![Stack::root("rust")]

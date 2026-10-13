@@ -629,7 +629,7 @@ fn the_account_a_project_spends_is_checked_not_assumed() {
     let write_index = |index: &Accounts| {
         std::fs::write(
             nunki_home.join("accounts.yaml"),
-            serde_yaml_ng::to_string(index).unwrap(),
+            nunki::yaml::to_string(index).unwrap(),
         )
         .unwrap()
     };
@@ -889,10 +889,10 @@ fn by_hand_asks_no_forge_and_names_every_branch_as_held_by_hand() {
 fn forge_protection_reads_from_the_file_and_defaults_to_the_forge() {
     use nunki::project::ForgeProtection;
     let base = "harness: claude-code\n";
-    let absent: Config = serde_yaml_ng::from_str(base).unwrap();
+    let absent: Config = nunki::yaml::from_str(base).unwrap();
     assert_eq!(absent.forge_protection, ForgeProtection::Forge);
     let by_hand: Config =
-        serde_yaml_ng::from_str(&format!("{base}forge_protection: by_hand\n")).unwrap();
+        nunki::yaml::from_str(&format!("{base}forge_protection: by_hand\n")).unwrap();
     assert_eq!(by_hand.forge_protection, ForgeProtection::ByHand);
 }
 
@@ -1308,4 +1308,27 @@ fn without_a_slot_the_verb_names_its_container_probes_as_not_run() {
         "{text}"
     );
     assert!(text.contains("no slot named"), "{text}");
+}
+
+/// A `me.yaml` that cannot be read is red, naming the file and why: nunki
+/// names nobody rather than whoever git or the account would say.
+#[test]
+fn a_declaration_that_cannot_be_read_is_a_red_line_naming_the_file_and_why() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = sound(dir.path());
+    std::fs::write(
+        project.nunki_home().join(nunki::human::ME_FILE),
+        "name: [Alex\n",
+    )
+    .unwrap();
+    match verdict(&run(&project), "who to hand a mission back to") {
+        Verdict::Red(why) => {
+            assert!(
+                why.contains("me.yaml, which cannot be read: line 1"),
+                "{why}"
+            );
+            assert!(why.ends_with("nunki names nobody until it reads"), "{why}");
+        }
+        other => panic!("{other:?}"),
+    }
 }

@@ -717,6 +717,12 @@ fn somebody_to_hand_back_to(project: &Project, report: &mut Report) {
             Verdict::Green(format!("{name}, from {}", path.display()))
         }
         (Some(name), Source::Git) => Verdict::Green(format!("{name}, from git")),
+        // The human said who they are, and it cannot be read: nunki names
+        // nobody rather than somebody else, and says why.
+        (_, Source::Unreadable { .. }) => Verdict::Red(format!(
+            "{}; nunki names nobody until it reads",
+            who.source.describe()
+        )),
         // A machine account name is a guess, not a statement — usable, and
         // said to be a guess.
         (Some(name), _) => Verdict::NotChecked(format!(

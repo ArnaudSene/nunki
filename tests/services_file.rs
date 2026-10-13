@@ -9,6 +9,7 @@
 //! own rendering, never the file's bytes.
 
 use nunki::compose::services::{ServicesError, ServicesFile};
+use nunki::yaml::Value;
 
 fn parse(text: &str) -> Result<ServicesFile, ServicesError> {
     ServicesFile::parse(text)
@@ -219,6 +220,21 @@ fn a_volume_mounted_at_a_relative_path_is_refused() {
     ));
 }
 
+#[test]
+fn a_refused_mount_is_named_as_it_was_written() {
+    match parse(&with_service_line("volumes: [\"./data:/x\"]")) {
+        Err(ServicesError::Mount { mount, .. }) => assert_eq!(mount, "./data:/x"),
+        other => panic!("{other:?}"),
+    }
+    match parse(&with_service_line(
+        "volumes: [{type: bind, source: /, target: /x}]",
+    )) {
+        Err(ServicesError::Mount { mount, .. }) => {
+            assert_eq!(mount, "type: 'bind'\nsource: '/'\ntarget: '/x'")
+        }
+        other => panic!("{other:?}"),
+    }
+}
 #[test]
 fn a_named_volume_of_the_file_is_mounted_in_either_syntax() {
     let file = parse(&format!(
@@ -467,7 +483,14 @@ fn an_anchor_and_an_alias_are_refused() {
     refused_feature("services:\n  - &x a\n", "an anchor");
     refused_feature("services: {db: {image: &a x}}\n", "an anchor");
     refused_feature("services: [&a x]\n", "an anchor");
-    refused_feature("\"services\":&a {}\n", "an anchor");
+    // Not YAML to the parser at all (a quoted key, `:` and an anchor with
+    // no space between): refused as unreadable. The previous scan named an
+    // anchor here; the parser, which decides now, sees none.
+    assert!(matches!(
+        parse("\"services\":&a {}\n"),
+        Err(ServicesError::Yaml(_))
+    ));
+    refused_feature("\"services\": &a {}\n", "an anchor");
     refused_feature("services:\n  db:\n    image:\n      &a x\n", "an anchor");
 }
 
@@ -550,6 +573,269 @@ fn a_feature_is_named_with_its_line() {
             feature: "an alias",
             line: 3
         })
+    );
+}
+
+// --- what the YAML 1.2 reader reads otherwise ---------------------------------
+//
+// The reader nunki uses now (YAML 1.2) and the one it used before (YAML 1.1)
+// disagree on a few spellings. A file accepted before is read to the same
+// model, or it is refused; these tests hold each disagreement measured to
+// one side or the other.
+
+#[test]
+fn text_after_a_document_end_marker_is_refused() {
+    refused_feature("services: {}\n...\nvolumes: {}\n", "a document end marker");
+    refused_feature("services: {}\n... # end\n", "a document end marker");
+}
+
+/// A file refused for `feature`, on `line`.
+fn refused_at(text: &str, feature: &str, line: usize) {
+    match parse(text) {
+        Err(ServicesError::Feature {
+            feature: f,
+            line: l,
+        }) => {
+            assert_eq!((f, l), (feature, line), "{text:?}")
+        }
+        other => panic!("{feature} on line {line} not refused: {other:?}\n{text:?}"),
+    }
+}
+
+/// Every tag is refused, from the parser's own events, with its line: the
+/// ones the reader would resolve without a trace (`!!binary aGk=` to `hi`,
+/// `!!str 5` and `! 5` to `5`, `!!null x` to null, `!!str db:` to the key
+/// `db`) as much as one it does not know. And the reader, read alone, refuses
+/// each of them too, naming the tag: the services file is not the only
+/// file a tag cannot pass.
+#[test]
+fn a_tag_is_refused_in_every_form_by_the_parsers_events_and_by_the_reader_alone() {
+    for (text, line, tag) in [
+        (with_service_line("command: !custom echo"), 4, "!custom"),
+        (
+            "services:\n  db:\n    image: !!binary aGk=\n".to_string(),
+            3,
+            "tag:yaml.org,2002:binary",
+        ),
+        (
+            with_service_line("environment:\n      A: !!str 5"),
+            5,
+            "tag:yaml.org,2002:str",
+        ),
+        (with_service_line("environment:\n      A: ! 5"), 5, "!"),
+        (
+            "services:\n  db:\n    image: !<tag:yaml.org,2002:str> x\n".to_string(),
+            3,
+            "tag:yaml.org,2002:str",
+        ),
+        (
+            "services: {}\nvolumes:\n  data: !!null x\n".to_string(),
+            3,
+            "tag:yaml.org,2002:null",
+        ),
+        (
+            "services:\n  !!str db:\n    image: x\n".to_string(),
+            2,
+            "tag:yaml.org,2002:str",
+        ),
+    ] {
+        refused_at(&text, "a tag", line);
+        let alone = nunki::yaml::from_str::<Value>(&text).unwrap_err();
+        assert_eq!(alone.place.map(|(l, _)| l), Some(line as u64), "{text:?}");
+        assert!(
+            alone.message.starts_with(&format!("a tag ({tag}), ")),
+            "{text:?}: {alone}"
+        );
+    }
+}
+
+#[test]
+fn a_merge_key_is_refused_in_every_spelling() {
+    for spelled in ["<<", "\"<<\"", "'<<'"] {
+        let text = format!("services:\n  db:\n    {spelled}: {{image: x}}\n");
+        assert!(
+            matches!(
+                parse(&text),
+                Err(ServicesError::MergeKey { at }) if at == "the file.services.db"
+            ),
+            "{text}: {:?}",
+            parse(&text)
+        );
+    }
+    // Tagged, it is a tag, refused as one, by the services file and by the
+    // reader alone.
+    let tagged = "services:\n  db:\n    !!merge <<: {image: x}\n";
+    refused_at(tagged, "a tag", 3);
+    assert!(nunki::yaml::from_str::<Value>(tagged).is_err());
+}
+
+#[test]
+fn a_key_written_twice_is_refused_even_when_one_is_escaped() {
+    for text in [
+        with_service_line("environment:\n      a: x\n      \"\\x61\": y"),
+        "services: {}\n\"s\\x65rvices\": {}\n".to_string(),
+    ] {
+        let err = parse(&text).unwrap_err();
+        assert!(
+            matches!(&err, ServicesError::Yaml(said) if said.contains("duplicate")),
+            "{text}: {err:?}"
+        );
+    }
+}
+
+#[test]
+fn a_key_of_any_kind_but_a_string_is_refused() {
+    // The last four were strings to the reader nunki used before, and are
+    // numbers to this one.
+    for key in [
+        "1", "true", "null", "~", "1.5", "[a]", "{a: b}", "", "012", "00", "1_000", "-1_0",
+    ] {
+        let text = format!("services:\n  db:\n    image: x\n    {key}: y\n");
+        assert!(
+            matches!(
+                parse(&text),
+                Err(ServicesError::KeyNotString { at }) if at == "the file.services.db"
+            ),
+            "{key:?}: {:?}",
+            parse(&text)
+        );
+    }
+    // Quoted, they are names like any other, and refused as names.
+    refused_key(&with_service_line("\"1_000\": y"), "1_000");
+}
+
+/// `012`, `00` and `09` read as floats, `1_000` and `-1_0` as integers:
+/// where the model takes a string, the file is refused, as a number always
+/// was there, and never lifted as the number's text.
+#[test]
+fn a_plain_scalar_read_as_a_number_is_refused_where_a_string_is_expected() {
+    for value in ["012", "00", "09", "1_000", "-1_0"] {
+        for (line, expected) in [
+            (format!("image: {value}"), "a string"),
+            (
+                format!("entrypoint: {value}"),
+                "a string or a list of strings",
+            ),
+            (format!("command: [run, {value}]"), "a string"),
+            (format!("working_dir: {value}"), "a string"),
+            (format!("healthcheck:\n      interval: {value}"), "a string"),
+        ] {
+            let text = format!("services:\n  db:\n    {line}\n    image: x\n").replacen(
+                "    image: x\n",
+                "",
+                usize::from(line.starts_with("image")),
+            );
+            assert!(
+                matches!(
+                    parse(&text),
+                    Err(ServicesError::Shape { expected: e, .. }) if e == expected
+                ),
+                "{text}: {:?}",
+                parse(&text)
+            );
+        }
+        let environment = with_service_line(&format!("environment:\n      A: {value}"));
+        assert!(
+            matches!(
+                parse(&environment),
+                Err(ServicesError::Environment { why, .. }) if why.contains("quote it")
+            ),
+            "{environment}: {:?}",
+            parse(&environment)
+        );
+        // A volume, and a service, named so.
+        for text in [
+            format!("services: {{}}\nvolumes:\n  {value}:\n"),
+            format!("services:\n  {value}:\n    image: x\n"),
+        ] {
+            assert!(
+                matches!(parse(&text), Err(ServicesError::KeyNotString { .. })),
+                "{text}: {:?}",
+                parse(&text)
+            );
+        }
+        // Quoted, each is the string written (and a volume name starts on a
+        // letter or a digit, so `-1_0` is no volume's).
+        let quoted = parse(&format!("services:\n  db:\n    image: \"{value}\"\n")).unwrap();
+        assert_eq!(quoted.services["db"].image, value);
+        if !value.starts_with('-') {
+            let named = parse(&format!(
+                "services:\n  db:\n    image: x\n    volumes: [\"{value}:/data\"]\n\
+                 volumes:\n  \"{value}\":\n"
+            ))
+            .unwrap();
+            assert!(named.volumes.contains(value));
+        }
+    }
+}
+
+/// The one plain scalar this reader takes as a number where the one before
+/// refused it: `1_000` was a string, which a count refuses; it is now the
+/// integer 1000, which is what Compose reads too, and what the rendering
+/// shows the human who approves it.
+#[test]
+fn a_count_of_retries_spelled_with_an_underscore_is_the_number_it_spells() {
+    let file = parse(&with_service_line("healthcheck:\n      retries: 1_000")).unwrap();
+    assert_eq!(
+        file.services["db"]
+            .healthcheck
+            .as_ref()
+            .and_then(|h| h.retries),
+        Some(1000)
+    );
+    assert!(file.render().contains("      retries: 1000\n"));
+    // A negative or a float is no count, as before.
+    for retries in ["-1_0", "012", "1.5"] {
+        assert!(matches!(
+            parse(&with_service_line(&format!(
+                "healthcheck:\n      retries: {retries}"
+            ))),
+            Err(ServicesError::Shape {
+                expected: "a whole number",
+                ..
+            })
+        ));
+    }
+}
+
+/// A raw NEL, LS or PS is a line break to a YAML 1.1 reader and text to
+/// this one. Measured before this reader: in a quoted scalar a NEL was
+/// folded to a space, and in a comment each of the three ended the comment
+/// and made the rest of the line YAML. Refused, wherever it stands.
+#[test]
+fn a_character_yaml_1_1_reads_as_a_line_break_is_refused_anywhere() {
+    const FEATURE: &str = "a NEL, LS or PS character, which YAML 1.1 reads as a line break";
+    for c in ['\u{85}', '\u{2028}', '\u{2029}'] {
+        for line in [
+            format!("A: \"a{c}b\""),
+            format!("A: 'a{c}b'"),
+            format!("A: a{c}b"),
+            format!("A: a # c{c}privileged: true"),
+        ] {
+            let text = with_service_line(&format!("environment:\n      {line}"));
+            assert_eq!(
+                parse(&text),
+                Err(ServicesError::Feature {
+                    feature: FEATURE,
+                    line: 5
+                }),
+                "{text:?}"
+            );
+        }
+    }
+    // Written as an escape, each reads the same to both readers, and is kept.
+    let file = parse(&with_service_line(
+        "environment:\n      A: \"a\\Nb\\Lc\\Pd\"",
+    ))
+    .unwrap();
+    assert_eq!(
+        file.services["db"].environment["A"],
+        "a\u{85}b\u{2028}c\u{2029}d"
+    );
+    assert!(
+        file.render().contains(r#""A": "a\u0085b\u2028c\u2029d""#),
+        "{}",
+        file.render()
     );
 }
 
@@ -688,7 +974,7 @@ fn the_rendering_is_ascii_and_reads_back_as_the_model() {
         )),
         "{rendering}"
     );
-    let back: serde_yaml_ng::Value = serde_yaml_ng::from_str(&rendering).unwrap();
+    let back: nunki::yaml::Value = nunki::yaml::from_str(&rendering).unwrap();
     assert_eq!(
         back["services"]["db"]["environment"]["A"].as_str(),
         Some("café \u{1b}[2J \u{2028} 😀 \" \\")
@@ -1085,6 +1371,20 @@ fn an_approval_records_who_when_and_the_rendering() {
 }
 
 #[test]
+fn an_approval_by_a_human_whose_declaration_cannot_be_read_says_so() {
+    let world = World::new();
+    let me_yaml = world.project.nunki_home().join(nunki::human::ME_FILE);
+    std::fs::create_dir_all(me_yaml.parent().unwrap()).unwrap();
+    std::fs::write(&me_yaml, "name: [Alex\n").unwrap();
+    let shown = world.shown();
+    world.approve(&shown.digest).unwrap();
+    let by = &world.approvals().approved[0].by;
+    assert!(by.starts_with("a human nunki has no name for ("), "{by}");
+    assert!(by.contains("me.yaml, which cannot be read: line 1"), "{by}");
+    // Not git's name in its place.
+    assert!(!by.contains("Alex Martin"), "{by}");
+}
+#[test]
 fn a_list_of_approvals_nunki_cannot_read_approves_nothing() {
     let world = World::new();
     let file = nunki::services::file(&world.project);
@@ -1444,11 +1744,11 @@ mod live {
 
         /// The generated file with `edit` applied to it first: how the
         /// capability measurement takes one capability away.
-        fn edit(&self, edit: impl Fn(&mut serde_yaml_ng::Value)) {
-            let mut doc: serde_yaml_ng::Value =
-                serde_yaml_ng::from_str(&std::fs::read_to_string(&self.file).unwrap()).unwrap();
+        fn edit(&self, edit: impl Fn(&mut nunki::yaml::Value)) {
+            let mut doc: nunki::yaml::Value =
+                nunki::yaml::from_str(&std::fs::read_to_string(&self.file).unwrap()).unwrap();
             edit(&mut doc);
-            std::fs::write(&self.file, serde_yaml_ng::to_string(&doc).unwrap()).unwrap();
+            std::fs::write(&self.file, nunki::yaml::to_string(&doc).unwrap()).unwrap();
         }
 
         fn up(&self) -> Output {
@@ -1749,7 +2049,11 @@ mod live {
         // The control: internal, with its gateway.
         let open = Profile::generate("svchostc", &["web", "probe"], Lifted::whole(file(text)));
         open.edit(|doc| {
-            let network = doc["networks"][NETWORK].as_mapping_mut().unwrap();
+            let network = doc
+                .get_mut("networks")
+                .and_then(|n| n.get_mut(NETWORK))
+                .and_then(nunki::yaml::Value::as_mapping_mut)
+                .unwrap();
             network.remove("driver_opts");
         });
         let up = open.up();
@@ -1931,7 +2235,12 @@ mod live {
             let profile = Profile::generate(&slot, &["db"], Lifted::whole(file(text)));
             if let Some(cap) = without {
                 profile.edit(|doc| {
-                    let caps = doc["services"]["db"]["cap_add"].as_sequence_mut().unwrap();
+                    let caps = doc
+                        .get_mut("services")
+                        .and_then(|s| s.get_mut("db"))
+                        .and_then(|d| d.get_mut("cap_add"))
+                        .and_then(nunki::yaml::Value::as_sequence_mut)
+                        .unwrap();
                     caps.retain(|c| c.as_str() != Some(cap));
                 });
             }
@@ -2017,10 +2326,10 @@ fn an_empty_command_is_rendered_as_an_empty_list() {
     let file = parse(&with_service_line("entrypoint: []")).unwrap();
     let rendering = file.render();
     assert!(rendering.contains("    entrypoint: []\n"), "{rendering}");
-    let back: serde_yaml_ng::Value = serde_yaml_ng::from_str(&rendering).unwrap();
+    let back: nunki::yaml::Value = nunki::yaml::from_str(&rendering).unwrap();
     assert_eq!(
         back["services"]["db"]["entrypoint"],
-        serde_yaml_ng::Value::Sequence(vec![]),
+        nunki::yaml::Value::Sequence(vec![]),
         "an empty list, not a null: an entrypoint reset, not an absent one"
     );
 }
@@ -2058,5 +2367,250 @@ fn a_list_of_approvals_that_cannot_be_read_is_an_error_and_not_an_empty_list() {
         matches!(world.lifted(), Err(ApprovalError::Unreadable(..))),
         "{:?}",
         world.lifted()
+    );
+}
+
+// --- what the parser reports, the parser decides (volet 2) ----------------------
+//
+// Each form the security agent and the HQ measured accepted on d1c19a3: a
+// tag, an anchor or an alias that the text scan of the time did not see,
+// behind a bare CR or a false quote. Each is refused now as what the parser
+// reports, on the line the parser gives it (a bare CR ends a line for the
+// parser).
+
+/// A services file: one service, `db`, whose lines after `image` are `body`
+/// (each already indented under the service).
+fn db(body: &str) -> String {
+    format!("services:\n  db:\n    image: x\n{body}")
+}
+
+#[test]
+fn a_binary_tag_behind_a_bare_cr_is_refused_as_a_tag() {
+    refused_at(
+        "services:\n  db:\n    image:\r      !!binary cG9zdGdyZXM6MTY=\n",
+        "a tag",
+        4,
+    );
+}
+
+#[test]
+fn a_non_specific_tag_behind_a_bare_cr_is_refused_as_a_tag() {
+    refused_at(&db("    environment:\n      A:\r        ! 5\n"), "a tag", 6);
+}
+
+#[test]
+fn an_anchor_and_its_alias_behind_bare_crs_are_refused_as_an_anchor() {
+    refused_at(
+        &format!(
+            "{}  other:\n    image: x\n    environment:\r      *m\n",
+            db("    environment:\r      &m {A: b}\n")
+        ),
+        "an anchor",
+        5,
+    );
+}
+
+#[test]
+fn a_tag_after_a_false_quote_in_a_flow_mapping_is_refused() {
+    refused_at(
+        &db("    environment: {K: a:'b, L: !!binary aGk=, M: c'd}\n"),
+        "a tag",
+        4,
+    );
+}
+
+#[test]
+fn a_tag_after_a_false_quote_in_a_flow_list_is_refused() {
+    refused_at(&db("    command: [a:'b, !!binary aGk=, c'd]\n"), "a tag", 4);
+}
+
+#[test]
+fn a_tag_between_false_single_quotes_in_block_lines_is_refused() {
+    refused_at(
+        &db("    environment:\n      K: a:'b\n      L: !!binary aGk=\n      M: c'd\n"),
+        "a tag",
+        6,
+    );
+}
+
+#[test]
+fn a_tag_between_false_double_quotes_in_block_lines_is_refused() {
+    refused_at(
+        &db("    environment:\n      K: a:\"b\n      L: !!binary aGk=\n      M: c\"d\n"),
+        "a tag",
+        6,
+    );
+}
+
+#[test]
+fn a_tag_after_a_quote_that_starts_a_continuation_line_is_refused() {
+    refused_at(
+        &db("    environment:\n      K: a\n        'b\n      L: !!binary aGk=\n      M: c'd\n"),
+        "a tag",
+        7,
+    );
+}
+
+#[test]
+fn a_tag_after_a_false_quote_on_another_key_is_refused() {
+    refused_at(
+        &db("    working_dir: /a:'b\n    command: [!!binary aGk=, \"c'd\"]\n"),
+        "a tag",
+        5,
+    );
+}
+
+#[test]
+fn an_anchor_and_an_alias_after_a_false_quote_are_refused_as_an_anchor() {
+    refused_at(
+        &db("    environment: {A: a:'b, K: &x v, L: *x, M: c'd}\n"),
+        "an anchor",
+        4,
+    );
+}
+
+#[test]
+fn a_tag_after_a_comment_ended_by_a_bare_cr_is_refused() {
+    refused_at(
+        &db("    environment:\n      K: v # c\r      L: !!binary aGk=\n"),
+        "a tag",
+        6,
+    );
+}
+
+#[test]
+fn a_tag_on_a_key_behind_a_bare_cr_is_refused() {
+    refused_at(
+        &db("    environment:\n      K: v\r      !!str L: w\n"),
+        "a tag",
+        6,
+    );
+}
+
+#[test]
+fn a_tag_behind_lf_cr_before_the_value_is_refused() {
+    refused_at(
+        &db("    environment:\n      K:\n\r        !!binary aGk=\n"),
+        "a tag",
+        7,
+    );
+}
+
+#[test]
+fn a_tag_behind_cr_cr_before_the_value_is_refused() {
+    refused_at(
+        &db("    environment:\n      K:\r\r        !!binary aGk=\n"),
+        "a tag",
+        7,
+    );
+}
+
+#[test]
+fn a_tag_behind_a_bare_cr_inside_braces_is_refused() {
+    refused_at(&db("    environment: {K:\r !!binary aGk=}\n"), "a tag", 5);
+}
+
+#[test]
+fn a_tag_behind_a_bare_cr_inside_brackets_is_refused() {
+    refused_at(&db("    command: [a,\r !!binary aGk=]\n"), "a tag", 5);
+}
+
+/// A directive behind a comment ended by a bare CR carries no tag, anchor
+/// or alias for the parser to report: it is the bare CR that refuses it,
+/// before any line is read for a directive.
+#[test]
+fn a_directive_behind_a_comment_ended_by_a_bare_cr_is_refused_for_the_cr() {
+    refused_at(
+        "# c\r%YAML 1.1\n---\nservices: {}\n",
+        "a carriage return without a line feed, which YAML reads as a line break",
+        1,
+    );
+}
+
+/// What the previous scan refused and the parser reads as text: an
+/// indicator that starts a continuation line of a plain value is part of
+/// the value, not an alias, an anchor or a tag.
+#[test]
+fn an_indicator_starting_a_continuation_line_is_the_text_it_is() {
+    let file = parse(&db(
+        "    command: echo\n      *not-an-alias &nor-anchor !nor-tag\n",
+    ))
+    .unwrap();
+    assert_eq!(
+        file.services["db"].command,
+        Some(nunki::compose::services::Command::Shell(
+            "echo *not-an-alias &nor-anchor !nor-tag".to_string()
+        ))
+    );
+}
+
+/// A place to put a separator and a payload, and the file around it.
+type Frame = (&'static str, fn(&str) -> String);
+
+/// Frames × separators × payloads, as the HQ asked: no generated text is
+/// accepted while the parser reports a tag, an anchor or an alias in it.
+#[test]
+fn no_generated_text_is_accepted_while_the_parser_reports_a_tag_an_anchor_or_an_alias() {
+    let frames: [Frame; 9] = [
+        ("an environment value", |v| {
+            db(&format!("    environment:\n      K:{v}\n"))
+        }),
+        ("a command item", |v| {
+            db(&format!("    command:\n      -{v}\n"))
+        }),
+        ("a flow mapping", |v| {
+            db(&format!("    environment: {{K:{v}}}\n"))
+        }),
+        ("a flow list", |v| db(&format!("    command: [a,{v}]\n"))),
+        ("the image", |v| {
+            format!("services:\n  db:\n    image:{v}\n")
+        }),
+        ("after a quoted value", |v| {
+            db(&format!("    environment:\n      J: \"v\"\n      K:{v}\n"))
+        }),
+        ("after a block scalar", |v| {
+            db(&format!("    entrypoint: |\n      run\n    command:{v}\n"))
+        }),
+        ("after a false quote in block", |v| {
+            db(&format!(
+                "    environment:\n      J: a:'b\n      K:{v}\n      M: c'd\n"
+            ))
+        }),
+        ("after a false quote in flow", |v| {
+            db(&format!("    environment: {{J: a:'b, K:{v}, M: c'd}}\n"))
+        }),
+    ];
+    let separators = [" ", "\t", "\r", "\r ", "\n\r", "\r\r", " # c\r"];
+    let payloads = [
+        "!!binary aGk=",
+        "! 5",
+        "!!str x",
+        "!!null x",
+        "!custom x",
+        "!<tag:yaml.org,2002:str> x",
+        "&a x",
+        "*a",
+    ];
+    let mut reported = 0;
+    for (frame, build) in frames {
+        for separator in separators {
+            for payload in payloads {
+                let text = build(&format!("{separator}{payload}"));
+                let found = nunki::yaml::constructs(&text);
+                if found.as_ref().is_ok_and(|f| !f.is_empty()) {
+                    reported += 1;
+                    assert!(
+                        parse(&text).is_err(),
+                        "{frame}, {separator:?}, {payload}: accepted while the parser \
+                         reports {found:?}\n{text:?}"
+                    );
+                }
+            }
+        }
+    }
+    // Not vacuous: the parser reported something in most of the texts.
+    assert!(
+        reported > 9 * 7 * 8 / 2,
+        "only {reported} texts carried one"
     );
 }

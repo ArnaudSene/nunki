@@ -257,12 +257,16 @@ pub fn approve(
         });
     };
     let human = crate::human::me(&project.nunki_home(), Some(&project.root));
+    let unreadable = human.unreadable();
     let approval = Approval {
         digest: shown.digest.clone(),
         by: match (human.name, human.email) {
             (Some(name), Some(email)) => format!("{name} <{email}>"),
             (Some(name), None) => name,
-            (None, _) => "a human nunki has no name for".to_string(),
+            (None, _) => match unreadable {
+                Some(why) => format!("a human nunki has no name for ({why})"),
+                None => "a human nunki has no name for".to_string(),
+            },
         },
         at: crate::state::now_rfc3339(),
         rendering: shown.rendering.clone(),
@@ -366,7 +370,7 @@ pub fn labels_of_profile(
 ) -> Result<Option<BTreeMap<String, String>>, ApprovalError> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| ApprovalError::Unreadable(path.to_path_buf(), e))?;
-    let document: serde_yaml_ng::Value = serde_yaml_ng::from_str(&text)
+    let document: crate::yaml::Value = crate::yaml::from_str(&text)
         .map_err(|e| ApprovalError::NotAProfile(path.to_path_buf(), e.to_string()))?;
     let Some(services) = document.get("services").and_then(|s| s.as_mapping()) else {
         return Err(ApprovalError::NotAProfile(

@@ -34,7 +34,7 @@ const SEARCH_DOMAIN: &str = "search.internal.example";
 /// (see `nunki::perimeter::resolves`), so the battery meets it on every
 /// platform: a probe a search list can fool goes red here too.
 fn with_search_list(yaml: String) -> String {
-    let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+    let mut doc: nunki::yaml::Value = nunki::yaml::from_str(&yaml).unwrap();
     let firewall = doc
         .get_mut("services")
         .and_then(|s| s.get_mut("firewall"))
@@ -42,9 +42,9 @@ fn with_search_list(yaml: String) -> String {
         .expect("the generated file has a firewall service");
     firewall.insert(
         "dns_search".into(),
-        serde_yaml_ng::Value::Sequence(vec![SEARCH_DOMAIN.into()]),
+        nunki::yaml::Value::Sequence(vec![SEARCH_DOMAIN.into()]),
     );
-    serde_yaml_ng::to_string(&doc).unwrap()
+    nunki::yaml::to_string(&doc).unwrap()
 }
 
 /// The address a container of this project got, so a probe can try to reach

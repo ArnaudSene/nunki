@@ -212,17 +212,17 @@ fn only_shared_providers_are_claimed_whatever_their_name() {
 /// `shared: true`.
 #[test]
 fn a_header_says_shared_only_when_it_is() {
-    let plain = serde_yaml_ng::to_string(&header(&[("db", false)])).unwrap();
+    let plain = nunki::yaml::to_string(&header(&[("db", false)])).unwrap();
     assert!(!plain.contains("shared"), "{plain}");
     assert_eq!(
-        serde_yaml_ng::from_str::<Header>(&plain).unwrap(),
+        nunki::yaml::from_str::<Header>(&plain).unwrap(),
         header(&[("db", false)])
     );
 
-    let real = serde_yaml_ng::to_string(&header(&[("stripe", true)])).unwrap();
+    let real = nunki::yaml::to_string(&header(&[("stripe", true)])).unwrap();
     assert!(real.contains("shared: true"), "{real}");
     assert_eq!(
-        serde_yaml_ng::from_str::<Header>(&real).unwrap(),
+        nunki::yaml::from_str::<Header>(&real).unwrap(),
         header(&[("stripe", true)])
     );
 }

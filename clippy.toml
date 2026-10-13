@@ -1,0 +1,41 @@
+# Every YAML file nunki reads goes through `nunki::yaml::from_str`, whose
+# settings are not the library's defaults (a merge key is an ordinary key,
+# only `true` and `false` are booleans, a duplicate key is an error) and
+# which refuses every tag, as the parser's events report them; and every
+# YAML file it writes through `nunki::yaml::to_string`, which quotes every
+# string. A call to any other reader or writer would use the defaults, so
+# each one is refused here, in the code and in the tests alike.
+disallowed-methods = [
+    { path = "serde_saphyr::from_str", reason = "read YAML with nunki::yaml::from_str" },
+    { path = "serde_saphyr::from_str_with_options", reason = "read YAML with nunki::yaml::from_str" },
+    { path = "serde_saphyr::from_slice", reason = "read YAML with nunki::yaml::from_str" },
+    { path = "serde_saphyr::from_slice_with_options", reason = "read YAML with nunki::yaml::from_str" },
+    { path = "serde_saphyr::from_reader", reason = "read YAML with nunki::yaml::from_str" },
+    { path = "serde_saphyr::from_reader_with_options", reason = "read YAML with nunki::yaml::from_str" },
+    { path = "serde_saphyr::from_multiple", reason = "read YAML with nunki::yaml::from_str" },
+    { path = "serde_saphyr::from_multiple_with_options", reason = "read YAML with nunki::yaml::from_str" },
+    { path = "serde_saphyr::from_slice_multiple", reason = "read YAML with nunki::yaml::from_str" },
+    { path = "serde_saphyr::from_slice_multiple_with_options", reason = "read YAML with nunki::yaml::from_str" },
+    { path = "serde_saphyr::read", reason = "read YAML with nunki::yaml::from_str" },
+    { path = "serde_saphyr::read_with_options", reason = "read YAML with nunki::yaml::from_str" },
+    { path = "serde_saphyr::with_deserializer_from_str", reason = "read YAML with nunki::yaml::from_str" },
+    { path = "serde_saphyr::with_deserializer_from_str_with_options", reason = "read YAML with nunki::yaml::from_str" },
+    { path = "serde_saphyr::with_deserializer_from_slice", reason = "read YAML with nunki::yaml::from_str" },
+    { path = "serde_saphyr::with_deserializer_from_slice_with_options", reason = "read YAML with nunki::yaml::from_str" },
+    { path = "serde_saphyr::with_deserializer_from_reader", reason = "read YAML with nunki::yaml::from_str" },
+    { path = "serde_saphyr::with_deserializer_from_reader_with_options", reason = "read YAML with nunki::yaml::from_str" },
+    { path = "serde_saphyr::to_string", reason = "write YAML with nunki::yaml::to_string" },
+    { path = "serde_saphyr::to_string_with_options", reason = "write YAML with nunki::yaml::to_string" },
+    { path = "serde_saphyr::to_fmt_writer", reason = "write YAML with nunki::yaml::to_string" },
+    { path = "serde_saphyr::to_fmt_writer_with_options", reason = "write YAML with nunki::yaml::to_string" },
+    { path = "serde_saphyr::to_io_writer", reason = "write YAML with nunki::yaml::to_string" },
+    { path = "serde_saphyr::to_io_writer_with_options", reason = "write YAML with nunki::yaml::to_string" },
+    { path = "serde_saphyr::to_string_multiple", reason = "write YAML with nunki::yaml::to_string" },
+    { path = "serde_saphyr::to_string_multiple_with_options", reason = "write YAML with nunki::yaml::to_string" },
+]
+# The parser's own event stream. Its one sanctioned use is `nunki::yaml::constructs`,
+# which asks it for the tags, anchors and aliases of a text, under a scoped
+# allow; any other use would be a second reading nobody keeps in step.
+disallowed-types = [
+    { path = "serde_saphyr::granit_parser::Parser", reason = "read YAML with nunki::yaml::from_str, or ask nunki::yaml::constructs what a text holds" },
+]

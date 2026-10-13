@@ -48,7 +48,7 @@ reaches the forge but `nunki push`, on your explicit word.
 
 What you need:
 
-- **Rust 1.85 or later**, to build `nunki` — `rustup` gives you one.
+- **Rust 1.89 or later**, to build `nunki` — `rustup` gives you one.
 - **git**.
 - **A container engine** with Compose: Docker, or OrbStack. Every agent runs
   in a container behind a firewall sidecar; nothing runs on your machine.
@@ -157,7 +157,22 @@ Everything else is refused, with the service and the key named:
 top-level `networks`, an `x-` field, and any key a later Compose adds. So is
 any YAML construct that resolves to something other than what is written:
 anchors, aliases, tags, merge keys (`<<`), duplicate keys, directives and a
-second document.
+second document. Whether the file holds an anchor, an alias or a tag is
+what the YAML parser itself reports, wherever the construct stands. So is
+a raw NEL, LS or PS character (U+0085, U+2028, U+2029), which a YAML 1.1
+reader takes for a line break, and a carriage return not followed by a line
+feed: lines end with LF or CRLF. Write the character as an escape (`"\N"`,
+`"\L"`, `"\P"`, `"\r"`) if you mean it.
+
+A tag is refused in every YAML file nunki reads, not only here — `nunki.yaml`,
+a mission header, `accounts.yaml`, `me.yaml` and the profiles nunki writes:
+two YAML libraries read the same tag to different values (`!!binary aGk=`
+is `aGk=` to one and `hi` to the other), and nunki writes none.
+
+A plain scalar that reads as a number is a number: `image: 012`, a
+variable set to `1_000` or a volume named `00` is refused where a name or a
+string is expected. Quote it (`"012"`). nunki's reader follows YAML 1.2:
+only `true` and `false` are booleans, so `no` and `on` stay strings.
 
 What is lifted is not the file but nunki's rendering of it. Keys come in a
 fixed order, every string is quoted and written in ASCII, and every `$` is
@@ -237,7 +252,10 @@ nunki mission new m1 \
 ```
 
 That writes `<home>/hq/missions/m1/MISSION.md`: a YAML header `nunki`
-reads, and prose the agent reads. Edit the prose, then start it:
+reads, and prose the agent reads. Every string nunki writes there, as in the
+Compose files it generates, is quoted (`branch: 'mission/first'`), so that
+no reader takes a date or `1_000` for something else. Edit the prose, then
+start it:
 
 ```sh
 nunki mission start m1 --slot one

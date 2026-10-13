@@ -180,7 +180,7 @@ pub fn note(
 
 /// Thousandths as a percent a human reads: 530 is "53", 905 is "90.5".
 pub fn percent(per_mille: u32) -> String {
-    if per_mille % 10 == 0 {
+    if per_mille.is_multiple_of(10) {
         format!("{}", per_mille / 10)
     } else {
         format!("{}.{}", per_mille / 10, per_mille % 10)

@@ -951,7 +951,7 @@ fn no_plain_git_runs_on_a_slot() {
         // The human's identity, from their repository.
         (
             "src/human.rs",
-            "if let Ok(name) = crate::git::run(at, &[\"config\", \"user.name\"]) {",
+            "&& let Ok(name) = crate::git::run(at, &[\"config\", \"user.name\"])",
         ),
         (
             "src/human.rs",

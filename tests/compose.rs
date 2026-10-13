@@ -148,7 +148,7 @@ fn the_agent_joins_the_firewall_and_waits_for_it() {
     // Measured against Docker Compose v5.1.2: in the other direction the
     // agent starts first and has a network before any rule is laid.
     let yaml = generate(&plan(Role::Coder), &dialect()).unwrap();
-    let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+    let doc: nunki::yaml::Value = nunki::yaml::from_str(&yaml).unwrap();
     let agent = &doc["services"][AGENT_SERVICE];
     let firewall = &doc["services"][FIREWALL_SERVICE];
 
@@ -175,7 +175,7 @@ fn the_agent_joins_the_firewall_and_waits_for_it() {
 #[test]
 fn the_agent_has_no_power_and_the_firewall_has_it_all() {
     let yaml = generate(&plan(Role::Coder), &dialect()).unwrap();
-    let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+    let doc: nunki::yaml::Value = nunki::yaml::from_str(&yaml).unwrap();
     let agent = &doc["services"][AGENT_SERVICE];
     let firewall = &doc["services"][FIREWALL_SERVICE];
 
@@ -202,7 +202,7 @@ fn the_agent_declares_no_network_because_compose_refuses_both() {
     // "mutually exclusive `network_mode` and `networks`: invalid compose
     // project" — measured. The firewall is what attaches to the services.
     let yaml = generate(&plan(Role::Integrator), &dialect()).unwrap();
-    let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+    let doc: nunki::yaml::Value = nunki::yaml::from_str(&yaml).unwrap();
     assert!(doc["services"][AGENT_SERVICE]["networks"].is_null());
     assert!(doc["services"][AGENT_SERVICE]["ports"].is_null());
 }
@@ -210,7 +210,7 @@ fn the_agent_declares_no_network_because_compose_refuses_both() {
 #[test]
 fn the_allowlist_reaches_the_sidecar_and_only_the_sidecar() {
     let coder = generate(&plan(Role::Coder), &dialect()).unwrap();
-    let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&coder).unwrap();
+    let doc: nunki::yaml::Value = nunki::yaml::from_str(&coder).unwrap();
     let env = &doc["services"][FIREWALL_SERVICE]["environment"];
     assert_eq!(
         env["HQ_ALLOW_DOMAINS"].as_str(),
@@ -223,7 +223,7 @@ fn the_allowlist_reaches_the_sidecar_and_only_the_sidecar() {
     );
 
     let integrator = generate(&plan(Role::Integrator), &dialect()).unwrap();
-    let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&integrator).unwrap();
+    let doc: nunki::yaml::Value = nunki::yaml::from_str(&integrator).unwrap();
     let env = &doc["services"][FIREWALL_SERVICE]["environment"];
     assert!(env["HQ_ALLOW_DOMAINS"].as_str().unwrap().contains(",db,"));
     assert_eq!(env["HQ_ALLOW_ADDRESSES"].as_str(), Some("10.4.0.7"));
@@ -237,7 +237,7 @@ fn the_security_agent_reads_the_tree_and_the_others_write_it() {
         (Role::Security, "ro"),
     ] {
         let yaml = generate(&plan(role), &dialect()).unwrap();
-        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let doc: nunki::yaml::Value = nunki::yaml::from_str(&yaml).unwrap();
         let mounts: Vec<_> = doc["services"][AGENT_SERVICE]["volumes"]
             .as_sequence()
             .unwrap()
@@ -259,7 +259,7 @@ fn the_security_agent_reads_the_tree_and_the_others_write_it() {
 fn the_stacks_scripts_are_mounted_read_only_one_file_at_a_time() {
     for role in [Role::Coder, Role::Integrator, Role::Security] {
         let yaml = generate(&plan(role), &dialect()).unwrap();
-        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let doc: nunki::yaml::Value = nunki::yaml::from_str(&yaml).unwrap();
         let mounts: Vec<_> = doc["services"][AGENT_SERVICE]["volumes"]
             .as_sequence()
             .unwrap()
@@ -285,7 +285,7 @@ fn the_stacks_scripts_are_mounted_read_only_one_file_at_a_time() {
 #[test]
 fn the_mission_folder_is_read_only_but_for_the_agents_own_files() {
     let yaml = generate(&plan(Role::Coder), &dialect()).unwrap();
-    let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+    let doc: nunki::yaml::Value = nunki::yaml::from_str(&yaml).unwrap();
     let mounts: Vec<_> = doc["services"][AGENT_SERVICE]["volumes"]
         .as_sequence()
         .unwrap()
@@ -342,11 +342,11 @@ fn the_projects_services_are_lifted_as_nunkis_rendering() {
         "services:\n  db:\n    image: postgres:16\n    environment:\n      PGHOST: ${HOME}\n    \
          healthcheck:\n      test: [\"CMD\", \"pg_isready\"]\n",
     );
-    let rendered: serde_yaml_ng::Value = serde_yaml_ng::from_str(&project.render()).unwrap();
+    let rendered: nunki::yaml::Value = nunki::yaml::from_str(&project.render()).unwrap();
     let digest = project.digest();
     plan.project_services = Some(nunki::compose::services::Lifted::whole(project));
     let yaml = generate(&plan, &dialect()).unwrap();
-    let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+    let mut doc: nunki::yaml::Value = nunki::yaml::from_str(&yaml).unwrap();
     // nunki's own label says which rendering the container came from …
     assert_eq!(
         doc["services"]["db"]["labels"][nunki::compose::services::LABEL].as_str(),
@@ -355,7 +355,11 @@ fn the_projects_services_are_lifted_as_nunkis_rendering() {
     );
     // … and, but for nunki's own keys, the service is the rendering read
     // back.
-    let db = doc["services"]["db"].as_mapping_mut().unwrap();
+    let db = doc
+        .get_mut("services")
+        .and_then(|s| s.get_mut("db"))
+        .and_then(nunki::yaml::Value::as_mapping_mut)
+        .unwrap();
     for key in FENCE_KEYS {
         db.remove(key);
     }
@@ -407,7 +411,7 @@ fn the_prober_travels_apart_from_the_projects_services() {
         ..Default::default()
     });
     let yaml = generate(&plan, &dialect()).unwrap();
-    let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+    let doc: nunki::yaml::Value = nunki::yaml::from_str(&yaml).unwrap();
     assert_eq!(
         doc["services"][PROBER_SERVICE]["network_mode"].as_str(),
         Some("service:firewall"),
@@ -428,7 +432,7 @@ fn the_project_name_is_stable_across_profiles_and_legal_for_compose() {
         .iter()
         .map(|role| {
             let yaml = generate(&plan(*role), &dialect()).unwrap();
-            let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+            let doc: nunki::yaml::Value = nunki::yaml::from_str(&yaml).unwrap();
             doc["name"].as_str().unwrap().to_string()
         })
         .collect();
@@ -592,7 +596,7 @@ fn a_project_declaring_no_network_gets_no_networks_block() {
     // network and reach each other there, so nunki invents nothing.
     let yaml = generate(&plan(Role::Integrator), &dialect()).unwrap();
     assert!(!yaml.contains("\nnetworks:"), "{yaml}");
-    let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+    let doc: nunki::yaml::Value = nunki::yaml::from_str(&yaml).unwrap();
     assert!(doc["services"][FIREWALL_SERVICE]["networks"].is_null());
 }
 
@@ -620,10 +624,10 @@ fn the_projects_volumes_are_declared_beside_hqs() {
     )));
 
     let yaml = generate(&plan, &dialect()).unwrap();
-    let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+    let doc: nunki::yaml::Value = nunki::yaml::from_str(&yaml).unwrap();
     let volumes = doc["volumes"].as_mapping().expect("volumes are declared");
     assert!(
-        volumes.contains_key(serde_yaml_ng::Value::from("dbdata")),
+        volumes.contains_key(&nunki::yaml::Value::from("dbdata")),
         "{yaml}"
     );
     assert_eq!(
@@ -632,7 +636,7 @@ fn the_projects_volumes_are_declared_beside_hqs() {
     );
     // And nunki's own are still there: the two sets are merged, not replaced.
     assert!(
-        volumes.contains_key(serde_yaml_ng::Value::from("nunki-demo-1-harness")),
+        volumes.contains_key(&nunki::yaml::Value::from("nunki-demo-1-harness")),
         "{yaml}"
     );
 }
@@ -686,8 +690,8 @@ fn the_lifted_services_are_fenced_by_nunki() {
          cache:\n    image: redis:7\n    ports: [\"127.0.0.1::6379\"]\n",
     )));
     let yaml = generate(&plan, &dialect()).unwrap();
-    let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
-    let strings = |v: &serde_yaml_ng::Value| -> Vec<String> {
+    let doc: nunki::yaml::Value = nunki::yaml::from_str(&yaml).unwrap();
+    let strings = |v: &nunki::yaml::Value| -> Vec<String> {
         v.as_sequence()
             .unwrap_or_else(|| panic!("a list: {v:?}\n{yaml}"))
             .iter()
@@ -757,11 +761,274 @@ fn a_profile_lifting_no_service_has_no_services_network() {
         let mut plan = plan(Role::Integrator);
         plan.project_services = project;
         let yaml = generate(&plan, &dialect()).unwrap();
-        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let doc: nunki::yaml::Value = nunki::yaml::from_str(&yaml).unwrap();
         assert!(doc["networks"].is_null(), "{yaml}");
         assert!(
             doc["services"][FIREWALL_SERVICE]["networks"].is_null(),
             "{yaml}"
         );
+    }
+}
+
+// --- what nunki writes, the engine reads as written ------------------------------
+
+/// The strings a reader other than nunki's could take for something else,
+/// each with the scalar the generated file must hold for it. The first four
+/// arrived changed in Docker Compose 5.1.2 when written unquoted (`1_000` as
+/// 1000, `0_0` as 0, `1__0` as 10, a date as a timestamp); the others stand
+/// for a family each.
+fn awkward() -> Vec<(String, String)> {
+    let long = format!("{}end", "word ".repeat(45));
+    let mut cases: Vec<(String, String)> = [
+        "1_000",
+        "0_0",
+        "1__0",
+        "2026-10-13",
+        "yes",
+        "no",
+        "on",
+        "off",
+        "y",
+        "~",
+        "null",
+        "true",
+        "012",
+        "0x1F",
+        "1e3",
+        "1:30",
+        "<<",
+        "a: b",
+        "a #b",
+        " lead",
+        "trail ",
+        "",
+    ]
+    .iter()
+    .map(|s| (s.to_string(), format!("'{s}'")))
+    .collect();
+    cases.push(("a\nb".to_string(), "\"a\\nb\"".to_string()));
+    cases.push((long.clone(), format!("'{long}'")));
+    cases
+}
+
+/// The names given to a variable, a service and a volume that a YAML 1.1
+/// reader would take for a boolean, null or a number.
+const AWKWARD_NAMES: [&str; 7] = ["y", "n", "no", "on", "null", "true", "NULL"];
+
+/// A services file holding every awkward string as an environment value
+/// (but the empty one, which an environment refuses) and as a command
+/// word, and the awkward names, in a service named `yes` mounting volumes
+/// named `012` and `1_000`; and the profile nunki generates from it.
+fn awkward_profile() -> String {
+    let quoted = |s: &str| {
+        format!(
+            "\"{}\"",
+            s.replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('\n', "\\n")
+        )
+    };
+    let mut text = String::from("services:\n  \"yes\":\n    image: x\n    environment:\n");
+    for (i, (value, _)) in awkward().iter().enumerate() {
+        if !value.is_empty() {
+            text.push_str(&format!("      V{i:02}: {}\n", quoted(value)));
+        }
+    }
+    for name in AWKWARD_NAMES {
+        text.push_str(&format!("      \"{name}\": x\n"));
+    }
+    text.push_str("    command:\n");
+    for (value, _) in awkward() {
+        text.push_str(&format!("      - {}\n", quoted(&value)));
+    }
+    text.push_str("    volumes: [\"012:/a\", \"1_000:/b\"]\nvolumes:\n  \"012\":\n  \"1_000\":\n");
+    let project = nunki::compose::services::ServicesFile::parse(&text).unwrap();
+    let mut plan = plan(Role::Integrator);
+    plan.project_services = Some(nunki::compose::services::Lifted::whole(project));
+    generate(&plan, &dialect()).unwrap()
+}
+
+#[test]
+fn every_string_the_generated_file_holds_is_one_quoted_scalar_on_its_line() {
+    let yaml = awkward_profile();
+    // As a list item: the command, word for word and line for line.
+    let command: String = awkward()
+        .iter()
+        .map(|(_, scalar)| format!("    - {scalar}\n"))
+        .collect();
+    assert!(
+        yaml.contains(&format!("    command:\n{command}    environment:\n")),
+        "{yaml}"
+    );
+    // As a value.
+    for (i, (value, scalar)) in awkward().iter().enumerate() {
+        if !value.is_empty() {
+            assert!(
+                yaml.contains(&format!("\n      V{i:02}: {scalar}\n")),
+                "{yaml}"
+            );
+        }
+    }
+    // As a key: a name a reader could take for something else is quoted,
+    // a plain one is not.
+    for name in AWKWARD_NAMES {
+        assert!(
+            yaml.contains(&format!("\n      \"{name}\": 'x'\n")),
+            "{yaml}"
+        );
+    }
+    assert!(yaml.contains("\n  \"yes\":\n    image: 'x'\n"), "{yaml}");
+    assert!(
+        yaml.contains("\n  \"012\": null\n  \"1_000\": null\n"),
+        "{yaml}"
+    );
+    // nunki's own strings are quoted the same way, its booleans, numbers and
+    // nulls are not, and neither are its plain keys.
+    for line in [
+        "\n    restart: 'no'\n",
+        "\n    init: true\n",
+        "\n    pids_limit: 1024\n",
+        "\n      retries: 30\n",
+        "\n  nunki-demo-1-harness: null\n",
+        "\n      com.docker.network.bridge.inhibit_ipv4: 'true'\n",
+    ] {
+        assert!(yaml.contains(line), "{line:?}\n{yaml}");
+    }
+    // And what is written reads back as written.
+    let doc: nunki::yaml::Value = nunki::yaml::from_str(&yaml).unwrap();
+    let service = &doc["services"]["yes"];
+    for (i, (value, _)) in awkward().iter().enumerate() {
+        assert_eq!(service["command"][i].as_str(), Some(value.as_str()));
+    }
+}
+
+fn older(name: &str) -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/older/yaml")
+        .join(name);
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
+
+/// The services file of `tests/fixtures/older/yaml/profile-lifted.yml`,
+/// which the previous writer turned into that profile.
+const LIFTED: &str = "services:\n  db:\n    image: postgres:16\n    environment:\n      \
+    RELEASE: \"2026-10-13\"\n      BUILD: \"1_000\"\n    command: [\"postgres\", \"1_000\", \
+    \"yes\"]\n    healthcheck:\n      test: [\"CMD-SHELL\", \"pg_isready\"]\n      retries: 30\n    \
+    volumes: [\"dbdata:/var/lib/postgresql/data\"]\nvolumes:\n  dbdata:\n";
+
+/// `services::labels_of_profile` reads the profiles already on disk to
+/// decide whether a running service carries an approved label. A profile
+/// the previous writer wrote, frozen as it wrote it, gives the labels a
+/// profile written today gives.
+#[test]
+fn a_profile_written_by_the_previous_writer_gives_the_same_labels() {
+    use nunki::services::{Approval, Approvals, labels_of_profile};
+
+    let file = nunki::compose::services::ServicesFile::parse(LIFTED).unwrap();
+    let approvals = Approvals {
+        approved: vec![Approval {
+            digest: file.digest(),
+            by: "a human".to_string(),
+            at: "2026-10-13T00:00:00Z".to_string(),
+            rendering: file.render(),
+        }],
+    };
+    let mut lifting = plan(Role::Integrator);
+    lifting.project_services = Some(nunki::compose::services::Lifted::whole(file.clone()));
+    let today = generate(&lifting, &dialect()).unwrap();
+    let before = older("profile-lifted.yml");
+    // The defect this writer removes, as the previous one wrote it: the two
+    // strings unquoted, which Compose read as 1000 and as a timestamp.
+    assert!(before.contains("\n      BUILD: 1_000\n      RELEASE: 2026-10-13\n"));
+    assert!(before.contains("\n    - 1_000\n"));
+    assert!(today.contains("\n      BUILD: '1_000'\n      RELEASE: '2026-10-13'\n"));
+    assert!(today.contains("\n    - '1_000'\n"));
+
+    let dir = tempfile::tempdir().unwrap();
+    let labels = |name: &str, text: &str| {
+        let path = dir.path().join(name);
+        std::fs::write(&path, text).unwrap();
+        labels_of_profile(&path, &approvals).unwrap()
+    };
+    let read_before = labels("before.yml", &before);
+    assert_eq!(
+        read_before,
+        Some(BTreeMap::from([("db".to_string(), file.digest())]))
+    );
+    assert_eq!(read_before, labels("today.yml", &today));
+    // A profile lifting nothing reads as lifting nothing, either way.
+    assert_eq!(
+        labels("old-golden.yml", &older("system-integrator.yml")),
+        None
+    );
+    assert_eq!(
+        labels(
+            "golden.yml",
+            &generate(&plan(Role::Integrator), &dialect()).unwrap()
+        ),
+        None
+    );
+}
+
+mod live_quoting {
+    //! What Compose itself reads from what nunki writes. Run by hand:
+    //! `cargo test --test compose -- --ignored`, honouring `HQ_COMPOSE`.
+
+    use std::process::Command;
+
+    use super::{AWKWARD_NAMES, awkward, awkward_profile};
+
+    #[test]
+    #[ignore = "needs a container engine; run by hand"]
+    fn live_compose_reads_every_string_as_nunki_wrote_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("profile.yml");
+        std::fs::write(&file, awkward_profile()).unwrap();
+        let raw = std::env::var("HQ_COMPOSE").unwrap_or_else(|_| "docker compose".to_string());
+        let mut words = raw.split_whitespace();
+        let program = words.next().expect("HQ_COMPOSE names a program");
+        let out = match Command::new(program)
+            .args(words)
+            .args(["-p", "nunki-quoting", "-f"])
+            .arg(&file)
+            .args(["config", "--no-interpolate", "--format", "json"])
+            .output()
+        {
+            Ok(out) => out,
+            Err(e) => {
+                eprintln!("skipped: no {program} to ask ({e})");
+                return;
+            }
+        };
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let read: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let service = &read["services"]["yes"];
+        let command: Vec<&str> = service["command"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| w.as_str().unwrap())
+            .collect();
+        let written: Vec<String> = awkward().into_iter().map(|(value, _)| value).collect();
+        assert_eq!(command, written);
+        for (i, (value, _)) in awkward().iter().enumerate() {
+            if !value.is_empty() {
+                assert_eq!(
+                    service["environment"][format!("V{i:02}")].as_str(),
+                    Some(value.as_str()),
+                    "V{i:02}"
+                );
+            }
+        }
+        for name in AWKWARD_NAMES {
+            assert_eq!(service["environment"][name].as_str(), Some("x"), "{name}");
+        }
+        for volume in ["012", "1_000"] {
+            assert!(read["volumes"].get(volume).is_some(), "{volume}: {read}");
+        }
     }
 }

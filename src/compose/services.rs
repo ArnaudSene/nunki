@@ -16,7 +16,11 @@
 //! No YAML feature carries meaning past the parser: anchors, aliases, tags,
 //! merge keys, directives, duplicate keys and a second document are all
 //! refused, and every key is compared after decoding, so an escaped key is
-//! the key it decodes to.
+//! the key it decodes to. Whether the file holds a tag, an anchor or an
+//! alias is decided by the parser's own events, never by a second reading
+//! of the text; what the events do not say (a directive, the document
+//! markers) is read from the first columns of lines that only LF and CRLF
+//! end.
 //!
 //! What is lifted is never the file's bytes but nunki's own rendering of the
 //! model ([`ServicesFile::render`]): keys in a fixed order, every string
@@ -25,7 +29,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde_yaml_ng::Value;
+use crate::yaml::{self, Value};
 
 use super::{AGENT_SERVICE, FIREWALL_SERVICE, PROBER_SERVICE};
 
@@ -196,8 +200,6 @@ pub enum ServicesError {
     Feature { feature: &'static str, line: usize },
     #[error("{at} uses a merge key (`<<`), which a services file may not: write the keys out")]
     MergeKey { at: String },
-    #[error("{at} carries a YAML tag, which a services file may not")]
-    Tag { at: String },
     #[error("{at} has a key that is not a string")]
     KeyNotString { at: String },
     #[error(
@@ -328,9 +330,22 @@ pub struct Mount {
 impl ServicesFile {
     /// Read a services file, or refuse it whole.
     pub fn parse(text: &str) -> Result<ServicesFile, ServicesError> {
+        // What the parser reports, the parser decides: a tag, an anchor or
+        // an alias on any node refuses the file, with the line the parser
+        // gives it. First, so that one behind a stray line break is named
+        // for what it is.
+        let constructs = yaml::constructs(text).map_err(|e| ServicesError::Yaml(e.to_string()))?;
+        if let Some(found) = constructs.first() {
+            return Err(ServicesError::Feature {
+                feature: found.construct.described(),
+                line: usize::try_from(found.line).unwrap_or(usize::MAX),
+            });
+        }
+        // Then one idea of a line, before anything reads lines.
+        one_kind_of_line_break(text)?;
         plain_yaml(text)?;
         let document: Value =
-            serde_yaml_ng::from_str(text).map_err(|e| ServicesError::Yaml(e.to_string()))?;
+            yaml::from_str(text).map_err(|e| ServicesError::Yaml(e.to_string()))?;
         decoded(&document, "the file")?;
         typed(&document)
     }
@@ -477,172 +492,106 @@ fn quote(text: &str) -> String {
 
 // --- the YAML features nunki refuses ------------------------------------------
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Quote {
-    Double,
-    Single,
-}
+/// The characters YAML 1.1 reads as a line break and YAML 1.2 does not:
+/// NEL, LS and PS.
+pub const YAML_1_1_BREAKS: [char; 3] = ['\u{85}', '\u{2028}', '\u{2029}'];
 
-/// Refuse anchors, aliases, tags, directives and a second document, which
-/// the parser would otherwise resolve silently: an alias expands, `!!str`
-/// vanishes, and nobody reading the file sees what the engine was given.
+/// Refuse every line break but LF and CRLF, so that the file has one idea
+/// of a line, the one [`plain_yaml`] counts by, and the parser's.
 ///
-/// A scan of the text rather than of the parser's events, which the parser
-/// does not expose. Those indicators mean something only where a node
-/// starts — at the start of a line, after `- `, `? `, `:`, and inside `[…]`
-/// and `{…}` after `[`, `{` and `,` — and quoted scalars, block scalars and
-/// comments are skipped as the parser skips them. It errs towards refusing:
-/// every `:` is taken as a node start, and so is the start of every line,
-/// even one continuing a plain scalar — a file it refuses wrongly is one a
-/// human rewrites, a feature it missed would be one nobody sees.
-fn plain_yaml(text: &str) -> Result<(), ServicesError> {
-    let mut quote: Option<Quote> = None;
-    let mut flow = 0usize;
-    // Lines more indented than this belong to a block scalar.
-    let mut block: Option<usize> = None;
-    let mut documents = 0usize;
-    let mut content = false;
-
-    for (number, raw) in text.split('\n').enumerate() {
-        let line: Vec<char> = raw.strip_suffix('\r').unwrap_or(raw).chars().collect();
+/// A raw NEL, LS or PS says one thing to a YAML 1.1 reader and another to
+/// the YAML 1.2 reader nunki uses. Measured against the reader nunki used
+/// before this one: a NEL in a quoted scalar was folded to a space and is
+/// now kept, and any of the three in a comment ended the comment, so what
+/// followed it on the line was read as YAML, and is now not read at all.
+/// Written as an escape (`\N`, `\L`, `\P`) in a double-quoted scalar, each
+/// reads the same in both, and is rendered as a `\u` escape.
+///
+/// A CR not followed by an LF is a line break to both readers and to no
+/// text that splits lines on LF: what followed it on the "same" line was
+/// read as another line, out of sight of the checks of this file. Written
+/// as an escape (`\r`), it is a character of a quoted scalar like any other.
+fn one_kind_of_line_break(text: &str) -> Result<(), ServicesError> {
+    let lines: Vec<&str> = text.split('\n').collect();
+    for (at, line) in lines.iter().enumerate() {
+        // The last piece has no LF after it: a CR that ends it ends nothing
+        // else either.
+        let ended_by_lf = at + 1 < lines.len();
         let refuse = |feature| ServicesError::Feature {
             feature,
-            line: number + 1,
+            line: at + 1,
         };
-        let indent = line.iter().take_while(|c| **c == ' ').count();
-        let blank = line.iter().all(|c| c.is_whitespace());
-
-        let mut i = 0;
-        let mut at_node = true;
-        if quote.is_none() {
-            if let Some(parent) = block {
-                if blank || indent > parent {
-                    continue;
-                }
-                block = None;
-            }
-            if line.first() == Some(&'%') {
-                return Err(refuse("a directive"));
-            }
-            let marker = |m: &str| {
-                let m: Vec<char> = m.chars().collect();
-                line.starts_with(&m) && line.get(3).is_none_or(|c| *c == ' ' || *c == '\t')
-            };
-            if marker("---") {
-                if documents > 0 || content {
-                    return Err(refuse("a second document"));
-                }
-                documents += 1;
-                i = 3;
-            } else if marker("...") {
-                return Err(refuse("a document end marker"));
-            }
-        } else {
-            at_node = false;
+        if line.contains(YAML_1_1_BREAKS) {
+            return Err(refuse(
+                "a NEL, LS or PS character, which YAML 1.1 reads as a line break",
+            ));
         }
-
-        // Where the node that owns this line's block scalar starts: the
-        // first thing on the line that is not `- ` or `? `. Never less than
-        // the parent's indentation, so a line skipped as the scalar's is
-        // never one the parser reads as structure.
-        let mut entry = None;
-        let mut space_before = true;
-        while i < line.len() {
-            let c = line[i];
-            match quote {
-                Some(Quote::Double) => {
-                    if c == '\\' {
-                        i += 2;
-                        continue;
-                    }
-                    if c == '"' {
-                        quote = None;
-                    }
-                    i += 1;
-                    continue;
-                }
-                Some(Quote::Single) => {
-                    if c == '\'' {
-                        if line.get(i + 1) == Some(&'\'') {
-                            i += 2;
-                            continue;
-                        }
-                        quote = None;
-                    }
-                    i += 1;
-                    continue;
-                }
-                None => {}
-            }
-            if c == ' ' || c == '\t' {
-                space_before = true;
-                i += 1;
-                continue;
-            }
-            if c == '#' && space_before {
-                break;
-            }
-            content = true;
-            let spaced = line.get(i + 1).is_none_or(|n| *n == ' ' || *n == '\t');
-            let opens_entry = (c == '-' || c == '?') && spaced && flow == 0;
-            if entry.is_none() && !opens_entry {
-                entry = Some(i);
-            }
-            if at_node {
-                match c {
-                    '&' => return Err(refuse("an anchor")),
-                    '*' => return Err(refuse("an alias")),
-                    '!' => return Err(refuse("a tag")),
-                    '|' | '>' if flow == 0 => {
-                        block = Some(entry.unwrap_or(indent));
-                        break;
-                    }
-                    '"' => {
-                        quote = Some(Quote::Double);
-                        at_node = false;
-                    }
-                    '\'' => {
-                        quote = Some(Quote::Single);
-                        at_node = false;
-                    }
-                    '-' | '?' if spaced => {}
-                    ':' => {}
-                    '[' | '{' => flow += 1,
-                    ']' | '}' => {
-                        flow = flow.saturating_sub(1);
-                        at_node = false;
-                    }
-                    // An empty entry of a flow mapping, `{a: , b: c}`: what
-                    // follows still starts a node. Outside brackets a `,`
-                    // cannot start a plain scalar, so the parser refuses the
-                    // line whatever this says.
-                    ',' => {}
-                    _ => at_node = false,
-                }
-            } else {
-                match c {
-                    ':' => at_node = true,
-                    ',' if flow > 0 => at_node = true,
-                    // No `[` or `{` here: inside brackets one can only open
-                    // a node, which the branch above counts, and outside them
-                    // it is a plain scalar's text.
-                    ']' | '}' if flow > 0 => flow -= 1,
-                    _ => {}
-                }
-            }
-            space_before = false;
-            i += 1;
+        let line = match line.strip_suffix('\r') {
+            Some(before) if ended_by_lf => before,
+            _ => line,
+        };
+        if line.contains('\r') {
+            return Err(refuse(
+                "a carriage return without a line feed, which YAML reads as a line break",
+            ));
         }
     }
     Ok(())
 }
 
-/// Refuse what the parser decoded but the model must not read past: a tag
-/// it kept, a merge key, a key that is not a string. Anywhere in the
-/// document, so that nothing below a refused key can matter.
+/// Refuse a directive, a second document and a document end marker: what a
+/// line says from its first column, and the parser's events do not say.
+///
+/// A tag, an anchor and an alias are not this function's: the parser's
+/// events report them ([`crate::yaml::constructs`]), and a second reading of
+/// the text would only be wrong where it disagrees. This one looks at the
+/// first characters of each line and nothing else — no quote, no block
+/// scalar, no comment is followed across lines — so it cannot be blinded by
+/// one; and [`one_kind_of_line_break`] has made its lines the parser's. A
+/// line inside a multi-line scalar that starts with `%`, `---` or `...` in
+/// its first column is refused with the rest: a file refused wrongly is one
+/// a human rewrites, a feature missed would be one nobody sees.
+fn plain_yaml(text: &str) -> Result<(), ServicesError> {
+    let mut documents = 0usize;
+    let mut content = false;
+    for (number, raw) in text.split('\n').enumerate() {
+        let line = raw.strip_suffix('\r').unwrap_or(raw);
+        let refuse = |feature| ServicesError::Feature {
+            feature,
+            line: number + 1,
+        };
+        if line.starts_with('%') {
+            return Err(refuse("a directive"));
+        }
+        let marker = |m: &str| {
+            line.strip_prefix(m)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with([' ', '\t']))
+        };
+        if marker("---") {
+            if documents > 0 || content {
+                return Err(refuse("a second document"));
+            }
+            documents += 1;
+        } else if marker("...") {
+            return Err(refuse("a document end marker"));
+        } else {
+            let trimmed = line.trim_start_matches([' ', '\t']);
+            content |= !trimmed.is_empty() && !trimmed.starts_with('#');
+        }
+    }
+    Ok(())
+}
+
+/// Refuse what the parser decoded but the model must not read past: a merge
+/// key, which the reader keeps as an ordinary key, and a key that is not a
+/// string. Anywhere in the document, so that nothing below a refused key can
+/// matter.
+///
+/// A tag is not the walk's: the parser's events refuse one before the tree
+/// is read ([`crate::yaml::constructs`]), as they refuse an anchor and an
+/// alias, which the tree would not show either.
 fn decoded(value: &Value, at: &str) -> Result<(), ServicesError> {
     match value {
-        Value::Tagged(_) => Err(ServicesError::Tag { at: at.to_string() }),
         Value::Sequence(items) => {
             for (i, item) in items.iter().enumerate() {
                 decoded(item, &format!("{at}[{i}]"))?;
@@ -951,9 +900,13 @@ fn mounts(
         .map(|item| {
             let refuse = |why| ServicesError::Mount {
                 service: service.to_string(),
-                mount: serde_yaml_ng::to_string(item)
-                    .map(|s| s.trim_end().to_string())
-                    .unwrap_or_default(),
+                // A short mount as written; a long one as YAML.
+                mount: match item {
+                    Value::String(short) => short.clone(),
+                    long => yaml::to_string(long)
+                        .map(|s| s.trim_end().to_string())
+                        .unwrap_or_default(),
+                },
                 why,
             };
             let mount = match item {
@@ -1089,109 +1042,92 @@ fn variable_name(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    //! The scan of [`plain_yaml`] and the walk of [`decoded`], branch by
-    //! branch. Through [`ServicesFile::parse`] most of them are masked: a
-    //! scan that missed an indicator on a line the parser then refuses for
-    //! another reason reads the same. Here each case is one the scan alone
-    //! decides, and each says which way.
+    //! The text checks of [`plain_yaml`] and [`one_kind_of_line_break`], and
+    //! the walk of [`decoded`], branch by branch. Through
+    //! [`ServicesFile::parse`] some are masked: a check that missed a line
+    //! the parser then refuses for another reason reads the same. Here each
+    //! case is one the check alone decides, and each says which way and on
+    //! which line.
 
     use super::*;
 
-    fn feature(text: &str) -> Option<&'static str> {
+    fn feature(text: &str) -> Option<(&'static str, usize)> {
         match plain_yaml(text) {
             Ok(()) => None,
-            Err(ServicesError::Feature { feature, .. }) => Some(feature),
+            Err(ServicesError::Feature { feature, line }) => Some((feature, line)),
             Err(other) => panic!("the scan only refuses features: {other:?}"),
         }
     }
 
     #[test]
-    fn a_document_marker_is_three_characters_then_a_blank() {
-        // `--- ` and `---<tab>` open a document, and a node starts after them.
-        assert_eq!(feature("--- &a x\n"), Some("an anchor"));
-        assert_eq!(feature("---\t&a x\n"), Some("an anchor"));
-        // `---y` is a plain scalar, not a marker: what refuses this line is
-        // the anchor after its `:`, not a second document.
-        assert_eq!(feature("x: 1\n---y: &a 2\n"), Some("an anchor"));
-    }
-
-    #[test]
-    fn a_second_marker_is_a_second_document_even_with_nothing_between() {
-        assert_eq!(feature("---\n---\nk: v\n"), Some("a second document"));
+    fn a_document_marker_is_three_characters_then_a_blank_or_the_end() {
+        assert_eq!(feature("---\n---\n"), Some(("a second document", 2)));
+        assert_eq!(feature("--- a\n---\tb\n"), Some(("a second document", 2)));
+        // `---y` is a plain scalar, and content: the marker after it is a
+        // second document.
+        assert_eq!(feature("---y: 1\n---\n"), Some(("a second document", 2)));
         assert_eq!(feature("---\nk: v\n"), None);
+        assert_eq!(feature("...\n"), Some(("a document end marker", 1)));
+        assert_eq!(
+            feature("k: v\n... # end\n"),
+            Some(("a document end marker", 2))
+        );
+        assert_eq!(feature("k: v\n...x: 1\n"), None);
     }
 
     #[test]
-    fn an_escape_in_double_quotes_skips_one_character_and_no_more() {
-        // `"\\"` closes after the escaped backslash; the anchor after it is
-        // at a node.
-        assert_eq!(feature("k: [\"\\\\\", &a x]\n"), Some("an anchor"));
-        // And what is inside the quotes is text: `: &b` there starts nothing.
-        assert_eq!(feature("k: \"a: &b\"\n"), None);
+    fn content_before_a_first_marker_makes_it_a_second_document_and_a_comment_does_not() {
+        assert_eq!(feature("k: v\n---\n"), Some(("a second document", 2)));
+        assert_eq!(feature("\t- a\n---\n"), Some(("a second document", 2)));
+        assert_eq!(feature("# about\n  # more\n \n---\nk: v\n"), None);
     }
 
     #[test]
-    fn single_quotes_close_on_a_lone_quote_and_not_on_a_doubled_one() {
-        assert_eq!(feature("k: 'a: &b'\n"), None);
-        assert_eq!(feature("k: ['a', &b x]\n"), Some("an anchor"));
-        // `''` is a quote inside the string, so `: &c` is still text.
-        assert_eq!(feature("k: 'b'': &c'\n"), None);
-        // `'b'''` is the string `b'`, closed after the doubled quote.
-        assert_eq!(feature("k: ['b''', &c x]\n"), Some("an anchor"));
+    fn a_directive_is_a_percent_in_the_first_column_only() {
+        assert_eq!(feature("%YAML 1.2\n---\n"), Some(("a directive", 1)));
+        assert_eq!(feature("k: v\n%TAG ! x\n"), Some(("a directive", 2)));
+        assert_eq!(feature("k: '50\n  %'\n"), None);
     }
 
     #[test]
-    fn a_dash_starts_an_entry_only_before_a_blank() {
-        assert_eq!(feature("k: -&a\n"), None);
-        assert_eq!(feature("k:\n  - &a x\n"), Some("an anchor"));
-        assert_eq!(feature("k:\n  -\t&a x\n"), Some("an anchor"));
+    fn a_crlf_line_is_read_as_the_line_without_its_cr() {
+        assert_eq!(feature("k: v\r\n---\r\n"), Some(("a second document", 2)));
+        assert_eq!(feature("---\r\nk: v\r\n"), None);
+    }
+
+    fn break_in(text: &str) -> Option<(&'static str, usize)> {
+        match one_kind_of_line_break(text) {
+            Ok(()) => None,
+            Err(ServicesError::Feature { feature, line }) => Some((feature, line)),
+            Err(other) => panic!("the check only refuses features: {other:?}"),
+        }
     }
 
     #[test]
-    fn a_block_scalars_lines_end_where_its_owner_starts() {
-        // The owner of `|` is the key `a b`, at column 4 — not `b`, which a
-        // blank after `a` does not make an entry. Its text, at column 6, is
-        // text.
-        assert_eq!(feature("k:\n  - a b: |\n      &x\n"), None);
+    fn only_lf_and_crlf_end_a_line() {
+        const CR: &str = "a carriage return without a line feed, which YAML reads as a line break";
+        const NEL: &str = "a NEL, LS or PS character, which YAML 1.1 reads as a line break";
+        assert_eq!(break_in("a: b\r\nc: d\r\n"), None);
+        assert_eq!(break_in("a: b\rc: d\n"), Some((CR, 1)));
+        assert_eq!(break_in("a: b\nc: d\r"), Some((CR, 2)));
+        assert_eq!(break_in("a: b\n\r\nc: d\r\r\n"), Some((CR, 3)));
+        assert_eq!(break_in("a: b\nc: \u{2029}\n"), Some((NEL, 2)));
     }
 
     #[test]
-    fn a_bar_inside_brackets_is_not_a_block_scalar() {
-        assert_eq!(feature("k: [>, &a x]\n"), Some("an anchor"));
-    }
-
-    #[test]
-    fn a_colon_at_the_start_of_a_node_starts_another() {
-        assert_eq!(feature("? a\n: &b c\n"), Some("an anchor"));
-    }
-
-    #[test]
-    fn brackets_are_counted_open_and_closed() {
-        // Inside brackets, a `,` starts a node.
-        assert_eq!(feature("k: [a, &b c]\n"), Some("an anchor"));
-        assert_eq!(feature("k: {a: ,&c d}\n"), Some("an anchor"));
-        // Closed, at a node or after one, they count for nothing: in block
-        // context `a, &b` is one plain scalar.
-        assert_eq!(feature("k: []\nm: a, &b\n"), None);
-        assert_eq!(feature("k: [a]\nm: a, &b\n"), None);
-        assert_eq!(feature("k: [[a]]\nm: a, &b\n"), None);
-        // And text never opens one.
-        assert_eq!(feature("m: a[1], &b\n"), None);
-    }
-
-    #[test]
-    fn the_walk_refuses_a_tag_the_parser_kept_and_walks_into_lists() {
-        let tagged: Value = serde_yaml_ng::from_str("!custom 5").unwrap();
-        assert!(matches!(
-            decoded(&tagged, "here"),
-            Err(ServicesError::Tag { at }) if at == "here"
-        ));
-        let listed: Value = serde_yaml_ng::from_str("- a\n- {\"<<\": 1}\n").unwrap();
+    fn the_walk_refuses_a_merge_key_inside_a_list_and_a_key_of_another_kind() {
+        let listed: Value = yaml::from_str("- a\n- {\"<<\": 1}\n").unwrap();
         assert!(matches!(
             decoded(&listed, "the file"),
             Err(ServicesError::MergeKey { at }) if at == "the file[1]"
         ));
-        let plain: Value = serde_yaml_ng::from_str("- a\n- {b: [c]}\n").unwrap();
+        // `1` is a key of its own kind, not the string `"1"`.
+        let numbered: Value = yaml::from_str("k:\n  1: a\n").unwrap();
+        assert!(matches!(
+            decoded(&numbered, "the file"),
+            Err(ServicesError::KeyNotString { at }) if at == "the file.k"
+        ));
+        let plain: Value = yaml::from_str("- a\n- {b: [c], \"1\": d}\n").unwrap();
         assert!(decoded(&plain, "the file").is_ok());
     }
 }
