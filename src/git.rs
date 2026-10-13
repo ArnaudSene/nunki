@@ -1536,7 +1536,7 @@ fn read_refs(tree: &Path, gitdir: &Path) -> Result<Refs, GitError> {
         why,
     };
     let head_file = gitdir.join("HEAD");
-    let head = regular_file(&head_file, REF_FILE_LIMIT).map_err(&unreadable)?;
+    let head = regular_file(&head_file, REF_FILE_LIMIT).map_err(unreadable)?;
     let head = head.trim();
     let head = match head.strip_prefix("ref:") {
         Some(name) if name.trim().starts_with("refs/heads/") => {
@@ -1561,7 +1561,7 @@ fn read_refs(tree: &Path, gitdir: &Path) -> Result<Refs, GitError> {
     // Absent only when lstat says so: any other answer is read, and the
     // read says what is wrong rather than a slot looking packless.
     if !absent(&std::fs::symlink_metadata(&packed)) {
-        let text = regular_file(&packed, PACKED_REFS_LIMIT).map_err(&unreadable)?;
+        let text = regular_file(&packed, PACKED_REFS_LIMIT).map_err(unreadable)?;
         for line in text.lines() {
             if line.starts_with('#') || line.starts_with('^') || line.trim().is_empty() {
                 continue;
@@ -1587,7 +1587,7 @@ fn read_refs(tree: &Path, gitdir: &Path) -> Result<Refs, GitError> {
                 )));
             }
         }
-        loose(gitdir, &gitdir.join(ns), ns, &mut refs).map_err(&unreadable)?;
+        loose(gitdir, &gitdir.join(ns), ns, &mut refs).map_err(unreadable)?;
     }
     for name in refs.keys() {
         if name.chars().any(|c| c.is_control() || c == ' ') {
