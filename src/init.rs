@@ -566,15 +566,16 @@ permission_mode: {permission_mode}
 # says so.
 {protection}
 
-# What `nunki push` does with the security agent's section of PR.md — every
-# section under a heading that begins with `Security` — when the findings it
-# describes were accepted rather than fixed: `withhold` (the default) replaces
-# it, in the pull request only, with a note saying how many were accepted and
-# by whom; `publish` sends it as written, for a repository only its owners
-# read. Only that section is withheld: what another section says is published
-# as written. A push that must withhold and reads no such section in PR.md
-# refuses, before anything is pushed. PR.md itself is never changed, and the
-# security agent's VERDICT.json keeps the findings in full.
+# What the Security section `nunki push` writes in the pull request says when
+# the security agent's findings were accepted rather than fixed: `withhold`
+# (the default) gives how many were accepted, and by whom, and no word of the
+# report or of a finding; `publish` gives the report and every finding, for a
+# repository only its owners read. The security agent cannot write PR.md: what
+# the coder and the integrator write there is published as written. A push
+# that must withhold refuses a PR.md holding a line such as `## Security
+# review`, the section an older nunki's security agent wrote there. PR.md
+# itself is never changed, and the security agent's VERDICT.json keeps the
+# findings in full.
 # security_findings: publish
 
 protected_paths:

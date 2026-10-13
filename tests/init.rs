@@ -3752,9 +3752,10 @@ exit 0
 }
 
 /// The template names `security_findings`, commented out: left so, the
-/// findings a push stands on unfixed are withheld from the pull request;
-/// uncommented, they are published as written. An unknown value is refused
-/// rather than read as either.
+/// findings a push stands on unfixed are withheld from the Security section
+/// `nunki push` writes; uncommented, that section publishes them. An unknown
+/// value is refused rather than read as either. The comment says what holds:
+/// the section is nunki's, and nothing is cut out of `PR.md`.
 #[test]
 fn the_nunki_yaml_it_writes_withholds_unfixed_findings_unless_told_to_publish() {
     use nunki::project::SecurityFindings;
@@ -3765,6 +3766,16 @@ fn the_nunki_yaml_it_writes_withholds_unfixed_findings_unless_told_to_publish() 
 
     let text = std::fs::read_to_string(home(&repo).join("nunki.yaml")).unwrap();
     assert!(text.contains("\n# security_findings: publish\n"), "{text}");
+    let comment = text.replace("\n# ", " ");
+    assert!(
+        comment.contains("What the Security section `nunki push` writes in the pull request says"),
+        "{text}"
+    );
+    assert!(
+        comment.contains("The security agent cannot write PR.md"),
+        "{text}"
+    );
+    assert!(!comment.contains("replaces it"), "{text}");
     let commented: nunki::project::Config = nunki::yaml::from_str(&text).unwrap();
     assert_eq!(commented.security_findings, SecurityFindings::Withhold);
     let published: nunki::project::Config =
