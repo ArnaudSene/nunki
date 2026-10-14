@@ -77,7 +77,13 @@ included.
 "
     );
 
-    let campaign = "
+    // Survivors only ever go back to the coder (SPEC 4.4): the integrator
+    // does not play gate 7, the security agent commits nothing, and the triage
+    // file is mounted read-write for the coder alone. The two others are told
+    // nothing that has them answer one.
+    let survivors = match role {
+        Role::Coder => {
+            "
 A mutation campaign's survivors are yours to answer, in `MUTANTS.triage.json`,
 with one of two outcomes: killed by a test you name and commit, or a bug you
 have frozen in a test you name and commit. That file is a JSON object keyed by
@@ -114,15 +120,35 @@ id between backquotes — and stop. The HQ decides what happens then — it may
 rule the survivor equivalent itself, or put it out of the campaign's reach.
 Writing nothing, or inventing an outcome of your own, only makes the gate red
 without saying why.
+"
+        }
+        Role::Integrator | Role::Security => "",
+    };
 
+    // Never running a whole campaign holds for every role; where its
+    // survivors go is said to each as it is.
+    let campaign = match role {
+        Role::Coder => {
+            "\
 Running the campaign is `nunki`'s work, not yours. **Never run a whole
 mutation campaign yourself**, over the branch or over a file: `nunki` runs
 one after your run, on a clean copy of your commit, and hands you its
 survivors. A campaign of your own costs an hour or more of your run and is
 then played again. To check that a test kills a survivor, run the stack's
 mutation tool on that one mutant or that one function only — minutes, not
-hours.
+hours."
+        }
+        Role::Integrator | Role::Security => {
+            "\
+Running the campaign is `nunki`'s work, not yours. **Never run a whole
+mutation campaign yourself**, over the branch or over a file: `nunki` runs
+one after the coder's run, on a clean copy of its commit, and its survivors
+go back to the coder, never to you. A campaign of your own costs an hour or
+more of your run and is then played again."
+        }
+    };
 
+    let commits = "\
 Your commit messages say what changed and why it had to. They carry
 **no trailer naming a harness, a model or a tool** — no `Co-Authored-By`,
 no session link, nothing of the sort: the commit's author already says which
@@ -273,7 +299,9 @@ What `nunki` checks on your work, so that none of it is a surprise:
         }
     };
 
-    format!("{particular}\n\n{common}{pull_request}{own_files}{campaign}\n")
+    format!(
+        "{particular}\n\n{common}{pull_request}{own_files}{survivors}\n{campaign}\n\n{commits}\n"
+    )
 }
 
 /// The file the prompt is written to, inside the mission folder — read-only

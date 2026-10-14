@@ -726,7 +726,10 @@ MISSION  (one branch off its base, one slot)
   outside the repository: `MISSION.md` (its header and brief),
   `FOLLOWUP_HQ.md` (what the HQ tells the agents), and the agents' own
   `JOURNAL.md`, `VERDICT.json` and `PR.md` — the last written by the coder
-  and the integrator, and read-only for the security agent. Its **header** is frozen when the
+  and the integrator, and read-only for the security agent — and
+  `MUTANTS.triage.json`, where the coder answers a campaign's survivors:
+  written by the coder alone, and read-only for the integrator and the
+  security agent, since survivors only ever go back to the coder. Its **header** is frozen when the
   mission starts: `nunki` never re-reads it, and `nunki mission reframe` is the only
   way to change it.
 - **Slot** — the isolated clone and container where a mission runs, with an
@@ -848,7 +851,9 @@ MISSION  (one branch off its base, one slot)
   it.
 
   **From `MUTANTS.triage.json`, `nunki` reads only what the coder may give**:
-  `killed`, `bug` and `equivalent_proposed`. Anything else written there —
+  `killed`, `bug` and `equivalent_proposed`. The file is mounted read-write
+  in the coder's profile only, so no other role can put an outcome there.
+  Anything else written there —
   `equivalent`, `equivalent_registered`, `proposed_by_nunki`, or an entry it
   cannot read — is no outcome, never shadows what `MUTANTS.json` holds, and
   is named as refused in gate 7's note and in `nunki push`'s refusal.
