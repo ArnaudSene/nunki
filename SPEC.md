@@ -350,7 +350,7 @@ bibliothèque.
 |---|---|---|
 | les règles du lieu | `AGENTS.md` à la racine (et par zone) ; `CLAUDE.md` n'est qu'un import (`@AGENTS.md`) ou un lien vers lui, les deux documentés par Claude Code. Un `CLAUDE.md` existant n'est pas écrasé (3.3) : `nunki init` dépose l'import à côté, le résumé le dit, et **`nunki check` est rouge** tant que ce `CLAUDE.md` n'importe pas `AGENTS.md` — sinon les règles ne seraient jamais lues par ce harnais et `mission start` partirait sans elles. L'adaptateur peut, en attendant, passer `AGENTS.md` par `--append-system-prompt-file` | tous les harnais qui le supportent, Claude Code via import ou lien |
 | les compétences | `SKILL.md`, standard ouvert (agentskills.io) adopté par OpenCode, Codex, Gemini CLI, Cursor, Copilot et d'autres ; il peut porter des choses essentielles | les harnais |
-| la mission | un dossier **au HQ, hors de l'arbre git** (voir les montages) : `MISSION.md`, `FOLLOWUP_HQ.md` et `MUTANTS.json` (à l'humain et au HQ, lecture seule pour l'agent), `JOURNAL.md`, `VERDICT.json`, `MUTANTS.triage.json` (à l'agent), `PR.md` (au codeur et à l'intégrateur ; en lecture seule pour l'agent sécurité) — la même forme pour les trois rôles | l'agent qui la porte, le HQ |
+| la mission | un dossier **au HQ, hors de l'arbre git** (voir les montages) : `MISSION.md`, `FOLLOWUP_HQ.md` et `MUTANTS.json` (à l'humain et au HQ, lecture seule pour l'agent), `JOURNAL.md`, `VERDICT.json` (à l'agent), `PR.md` (au codeur et à l'intégrateur ; en lecture seule pour l'agent sécurité), `MUTANTS.triage.json` (au codeur seul ; en lecture seule pour l'intégrateur et l'agent sécurité) — la même forme pour les trois rôles | l'agent qui la porte, le HQ |
 | le bloc structuré de `MISSION.md` | un en-tête YAML que `nunki` lit, valide et **fige dans son état à la validation humaine** : forme (`integration`, `security`), rôle, branche, base, **la liste des lots** (un identifiant et un titre chacun — c'est elle qui donne « un run par lot » et qui fait refuser un `VERDICT.json` écrit avant que le dernier lot ait son entrée « fini » dans le journal), borne de volets, tentatives par lot, délais, script de lancement, **niveau d'exigence** (`rigor:`, pris de `--rigor`, sinon de `nunki.yaml`, sinon `critical`) et **seuil de mutation** (`mutation_threshold:`, figé depuis `nunki.yaml` avec lui ; un en-tête plus ancien qui ne le porte pas lit celui du projet), **modèle** (`model:`, quand le harnais en prend un ; `nunki.yaml` le déclare pour le projet et l'en-tête le raffine), et pour une mission d'intégration les **services** (réseau nommé, adresses, domaines, et `shared: true` pour un fournisseur réel, que les autres missions attendent — 7) et les **fichiers d'identifiants** montés. La prose du gabarit vient après, pour l'agent. L'agent ne peut pas l'écrire, et `nunki` ne le relit pas en cours de mission | `nunki`, puis l'agent |
 | le verdict | `VERDICT.json` dans le dossier de mission : `{ role, verdict, head, date, report }`, écrit par l'agent à la fin de son dernier run ; `nunki` le refuse si `head` n'est pas le `HEAD` réel de la branche | `nunki` |
 | le contrat de run | un run par lot (4.3) : ce qu'un run doit avoir produit avant de sortir — le lot commité et prouvé ou l'échec dit, arbre commitable, bloc `ÉTAT DE REPRISE` en tête du journal (écrit aussi toutes les 45 minutes en cours de run), et pour le dernier lot le verdict. Pour le codeur, ce bloc se termine par la ligne `Lot: <lot> — done`, `Lot: <lot> — failed: <raison>`, ou — seulement quand le lot est fini hormis des survivants dont il ne peut pas donner l'équivalence — `Lot: <lot> — awaits ruling: <quoi>`, chaque identifiant de survivant entre accents graves dans `<quoi>` : la seule que `nunki` lise pour savoir le lot fini | l'agent, par `MISSION.md` ; `nunki`, à la sortie et aux checkpoints |
@@ -369,8 +369,8 @@ lecture seule, et la porte « arbre propre » ne doit pas le voir.
 | profil | l'arbre du slot | le dossier de mission | identifiants | services |
 |---|---|---|---|---|
 | mission (codeur) | lecture-écriture | **hors de l'arbre**, au HQ : `~/.nunki/<projet>/hq/missions/<id>/`, monté dans le conteneur — **quatre fichiers en écriture** (`JOURNAL.md`, `PR.md`, `VERDICT.json`, `MUTANTS.triage.json`), le reste en lecture seule | aucun | aucun |
-| système (intégrateur) | lecture-écriture | idem | les fichiers nommés par la mission, en lecture seule, depuis le dossier réservé | ceux de la mission, à côté |
-| système (sécurité) | **lecture seule**, plus les répertoires d'écriture déclarés par la stack en volumes | idem, sauf `PR.md`, en lecture seule : **trois fichiers en écriture** (`JOURNAL.md`, `VERDICT.json`, `MUTANTS.triage.json`) | idem | idem, jamais arrêtés depuis le profil précédent |
+| système (intégrateur) | lecture-écriture | idem, sauf `MUTANTS.triage.json`, en lecture seule : **trois fichiers en écriture** (`JOURNAL.md`, `PR.md`, `VERDICT.json`) | les fichiers nommés par la mission, en lecture seule, depuis le dossier réservé | ceux de la mission, à côté |
+| système (sécurité) | **lecture seule**, plus les répertoires d'écriture déclarés par la stack en volumes | idem, sauf `PR.md` et `MUTANTS.triage.json`, en lecture seule : **deux fichiers en écriture** (`JOURNAL.md`, `VERDICT.json`) | idem | idem, jamais arrêtés depuis le profil précédent |
 | interactif (HQ) | lecture-écriture | tout `~/.nunki/<projet>/` | ce que l'humain décide | ce que l'humain décide |
 
 **Le dossier de mission vit au HQ, pas dans le slot.** Il est sous
@@ -389,11 +389,18 @@ injecté par une dépendance qu'il lit, s'écrire un domaine et un fichier
 d'identifiants de plus au run 1 et les obtenir au run 2. Donc :
 
 1. L'agent n'écrit que dans les fichiers que son rôle lui donne, montés un
-   à un en écriture par-dessus le dossier en lecture seule : le codeur et
-   l'intégrateur dans **`JOURNAL.md`, `PR.md`, `VERDICT.json` et
-   `MUTANTS.triage.json`**, l'agent sécurité dans les mêmes sauf **`PR.md`,
-   qu'il lit et n'écrit pas** : son rapport n'atteint la pull request que
-   par la section que `nunki push` écrit à partir du verdict (4.5).
+   à un en écriture par-dessus le dossier en lecture seule : le codeur dans
+   **`JOURNAL.md`, `PR.md`, `VERDICT.json` et `MUTANTS.triage.json`**,
+   l'intégrateur dans les mêmes sauf **`MUTANTS.triage.json`**, l'agent
+   sécurité dans **`JOURNAL.md` et `VERDICT.json`** seulement.
+   `MUTANTS.triage.json` est au codeur seul : les survivants ne
+   retournent qu'à lui (4.4, « Qui écrit quoi ») — l'intégrateur ne joue
+   pas la porte 7, l'agent sécurité ne commite rien —, et une issue qui
+   compte ne peut donc s'écrire dans le profil d'aucun autre rôle ; les
+   deux autres le lisent par le montage en lecture seule du dossier. Quant
+   à `PR.md`, l'agent sécurité le lit et ne l'écrit pas : son rapport
+   n'atteint la pull request que par la section que `nunki push` écrit à
+   partir du verdict (4.5).
    `MISSION.md`, `FOLLOWUP_HQ.md` et `MUTANTS.json` leur sont montés en
    **lecture seule** : ils sont à l'humain et au HQ. Ce que chaque rôle peut
    écrire est dit en un seul endroit du code, et le texte de rôle le lit là.
