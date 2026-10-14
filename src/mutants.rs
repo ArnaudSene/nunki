@@ -40,8 +40,10 @@ use crate::git;
 /// no machine can check — `equivalent`.
 pub const FILE: &str = "MUTANTS.json";
 
-/// The coder's answers, beside it. **The agent's file**, and the only one of
-/// the two it can write.
+/// The coder's answers, beside it. **The coder's file**, and the only one of
+/// the two it can write; no other role can write it at all — it is mounted
+/// read-write in the coder's profile alone, since survivors only ever go
+/// back to the coder (SPEC 4.4).
 ///
 /// Two files rather than one field, because what decides who wrote a line is
 /// the **mount**, not the content: `nunki` cannot read a file and tell whose
@@ -693,7 +695,10 @@ fn as_now(outcome: Triage) -> Triage {
 
 /// The coder's answers, by survivor id. Absent until it writes one, and an
 /// unreadable one is an error rather than an empty triage: a file the coder
-/// wrote and `nunki` cannot parse must be said, not silently ignored.
+/// wrote and `nunki` cannot parse must be said, not silently ignored. The
+/// coder is the only role that can write it: the integrator and the security
+/// agent see it read-only ([`crate::compose::agent_writable`]), so no other
+/// role's run can put a line here.
 ///
 /// **Only the outcomes the coder may give are ever read from it** —
 /// `killed`, `bug`, `equivalent_proposed` (HQ review 3, the class rule) —

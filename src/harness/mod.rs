@@ -40,7 +40,8 @@ pub struct Workspace {
     pub tree: PathBuf,
     /// The mission folder inside the container: writable for what
     /// [`crate::compose::agent_writable`] gives the role, read-only for the
-    /// rest (`MISSION.md`, `FOLLOWUP_HQ.md`, and `PR.md` for the security
+    /// rest (`MISSION.md`, `FOLLOWUP_HQ.md`, `MUTANTS.triage.json` for the
+    /// integrator and the security agent, and `PR.md` for the security
     /// agent).
     pub mission_dir: PathBuf,
 }

@@ -1631,8 +1631,10 @@ fn mutation(subject: &Subject, threshold: Threshold) -> Result<Outcome, GateErro
     }
 
     // Two sources, and which one a line came from is decided by the mount,
-    // not by the line: the coder can only write its own file, and the
-    // outcome no machine can check is not in it (SPEC 4.1, 4.4). From the
+    // not by the line: the coder can only write its own file, no other role
+    // can write it at all — it is mounted read-write in the coder's profile
+    // alone — and the outcome no machine can check is not in it (SPEC 4.1,
+    // 4.4). From the
     // coder's file only the outcomes it may give are read: anything else
     // there is no outcome, never shadows the HQ's file, and is named in the
     // note (HQ review 3).

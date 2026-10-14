@@ -52,7 +52,12 @@ pub const PROBER_SERVICE: &str = "prober";
 /// coder answers a campaign's survivors there, and it is a **different file**
 /// from `MUTANTS.json` on purpose. What decides who wrote a line is this
 /// list, not the line — so the outcome no machine can check lives in the
-/// HQ's file, which is mounted read-only here.
+/// HQ's file, which is mounted read-only here. It is **the coder's alone**
+/// (SPEC 4.4, "Qui écrit quoi"): survivors only ever go back to the coder —
+/// the integrator does not play gate 7, the security agent commits nothing
+/// — so an outcome that counts can be written in no other role's profile.
+/// The two others read it through the folder's read-only mount, and
+/// [`any_agent_writable`] still names it, so it exists before every lift.
 ///
 /// `PR.md` is not the security agent's (SPEC 4.5, "Un constat accepté n'est
 /// pas un constat corrigé"): its report reaches the pull request only through
