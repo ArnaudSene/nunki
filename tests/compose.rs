@@ -393,8 +393,63 @@ fn pr_md_is_writable_for_the_coder_and_the_integrator_and_not_for_the_security_a
     );
 }
 
+/// Survivors only ever go back to the coder (SPEC 4.4), and what decides who
+/// wrote a line of `MUTANTS.triage.json` is the mount: read-write in the
+/// coder's profile, the mission one, and in no profile the integrator or
+/// the security agent runs in, the system one — with or without the
+/// mission's services and credentials. There it stays readable through the
+/// folder's own read-only mount, and nothing else of the role's list moves.
+#[test]
+fn the_triage_file_is_read_write_for_the_coder_and_for_no_other_role() {
+    let folder = "/Users/h/.nunki/demo/hq/missions/m1:/work/mission:ro".to_string();
+    let triage = format!(
+        "/Users/h/.nunki/demo/hq/missions/m1/{0}:/work/mission/{0}:rw",
+        nunki::mutants::TRIAGE_FILE
+    );
+
+    for role in Role::ALL {
+        let mut bare = plan(role);
+        bare.credentials.clear();
+        bare.volumes.truncate(1);
+        for plan in [plan(role), bare] {
+            let mounts = agent_mounts(&plan);
+            let (profile, expected) = match role {
+                Role::Coder => (nunki::perimeter::Profile::Mission, vec![triage.clone()]),
+                Role::Integrator | Role::Security => {
+                    (nunki::perimeter::Profile::System, Vec::new())
+                }
+            };
+            assert_eq!(nunki::perimeter::Profile::of(role), profile, "{role:?}");
+            assert_eq!(
+                mounts_of(&mounts, nunki::mutants::TRIAGE_FILE),
+                expected,
+                "{role:?}: {mounts:?}"
+            );
+            assert!(mounts.contains(&folder), "{role:?}: {mounts:?}");
+        }
+    }
+
+    // Every other file is where it was: the triage file is the one change.
+    assert_eq!(
+        nunki::compose::agent_writable(Role::Coder),
+        ["JOURNAL.md", "PR.md", "VERDICT.json", "MUTANTS.triage.json"]
+    );
+    assert_eq!(
+        nunki::compose::agent_writable(Role::Integrator),
+        ["JOURNAL.md", "PR.md", "VERDICT.json"]
+    );
+    assert_eq!(
+        nunki::compose::agent_writable(Role::Security),
+        ["JOURNAL.md", "VERDICT.json"]
+    );
+}
+
 /// The folder's files exist before any profile is lifted, `PR.md` included:
-/// the security agent reads it even though it is not mounted for it.
+/// the security agent reads it even though it is not mounted for it. So is
+/// `MUTANTS.triage.json`, which only the coder writes: `ensure_writable`
+/// creates it from this list before the integrator's or the security agent's
+/// lift as well, and a source missing at the coder's next lift would come
+/// back from the engine as a directory.
 #[test]
 fn every_file_some_role_writes_is_a_bind_source_and_only_those() {
     assert_eq!(

@@ -503,7 +503,11 @@ fn the_role_prompts_say_what_the_role_may_not_do() {
         // in the same breath (SPEC 4.1, 4.4).
         assert!(prompt.contains("JOURNAL.md"), "{prompt}");
         assert!(prompt.contains("VERDICT.json"), "{prompt}");
-        assert!(prompt.contains("MUTANTS.triage.json"), "{prompt}");
+        // A campaign is `nunki`'s to run, whoever reads this.
+        assert!(
+            flat(prompt).contains("**Never run a whole mutation campaign yourself**"),
+            "{prompt}"
+        );
         // A commit that names the tool that typed it says nothing about
         // the change, and the author already says which role wrote it.
         assert!(
@@ -515,32 +519,12 @@ fn the_role_prompts_say_what_the_role_may_not_do() {
             prompt.contains("no trailer naming a harness, a model or a tool"),
             "{prompt}"
         );
-        assert!(
-            prompt.contains("not yours to give"),
-            "the outcome nobody can check must be refused where the agent reads \
-             its rules, not only where nunki checks them: {prompt}"
-        );
-        // The shape of the answer, not just its name. A coder left to guess
-        // it writes MUTANTS.json's shape instead, and `nunki` refuses the file
-        // with a serde error that stops the whole verification rather than
-        // reddening one gate.
-        assert!(
-            prompt.contains(r#"{"<survivor id>": {"kind": "killed", "test":"#),
-            "the triage file's shape belongs where the agent reads its rules: {prompt}"
-        );
         // Three outcomes and no fourth (SPEC 4.4). A prompt that sanctions
         // "unanswered" sends the agent at a gate that refuses it, and the
         // agent obeys the prompt.
         assert!(
             !prompt.contains("left unanswered"),
             "the prompt must not offer an outcome gate 7 refuses: {prompt}"
-        );
-        assert!(prompt.contains("no third answer of your own"), "{prompt}");
-        // A survivor nobody can answer points at the line that hands it to
-        // the HQ, not at a line the role has to guess.
-        assert!(
-            prompt.contains("`Lot: <lot> — awaits ruling: <what>`, with the survivor's"),
-            "{prompt}"
         );
         assert!(!prompt.contains("the way your role is told to"), "{prompt}");
         // What the gates actually require, said where the agent reads it and
@@ -566,6 +550,33 @@ fn the_role_prompts_say_what_the_role_may_not_do() {
             "nunki reads the block, not the file: a line further down is unseen: {prompt}"
         );
     }
+
+    // Survivors only ever go back to the coder, so how to answer one is said
+    // to the coder alone (SPEC 4.4).
+    assert!(
+        coder.contains("MUTANTS.triage.json"),
+        "the coder's own file, named: {coder}"
+    );
+    assert!(
+        coder.contains("not yours to give"),
+        "the outcome nobody can check must be refused where the agent reads \
+         its rules, not only where nunki checks them: {coder}"
+    );
+    // The shape of the answer, not just its name. A coder left to guess
+    // it writes MUTANTS.json's shape instead, and `nunki` refuses the file
+    // with a serde error that stops the whole verification rather than
+    // reddening one gate.
+    assert!(
+        coder.contains(r#"{"<survivor id>": {"kind": "killed", "test":"#),
+        "the triage file's shape belongs where the agent reads its rules: {coder}"
+    );
+    assert!(coder.contains("no third answer of your own"), "{coder}");
+    // A survivor nobody can answer points at the line that hands it to
+    // the HQ, not at a line the role has to guess.
+    assert!(
+        coder.contains("`Lot: <lot> — awaits ruling: <what>`, with the survivor's"),
+        "{coder}"
+    );
 
     // And each says the thing that is its own.
     assert!(coder.contains("break the decision and check the test goes red"));
@@ -2226,39 +2237,41 @@ fn a_database_the_host_never_filled_is_not_mounted_empty() {
     assert_eq!(plan.advisories, vec![]);
 }
 
-/// The proposal of an equivalence is explained where every role reads the
+/// The proposal of an equivalence is explained where the coder reads the
 /// triage outcomes: its shape, that it needs a reason, what it is for — a
 /// mutation that cannot change anything observable — and what it is never
-/// for. And a survivor proposed is never also awaited.
+/// for. And a survivor proposed is never also awaited. The two other roles
+/// answer no survivor, so they are not told how to propose one.
 #[test]
 fn the_prompt_explains_the_proposal_of_an_equivalence_and_when_not_to_make_it() {
     let coder = role::prompt(Role::Coder);
-    for prompt in [
-        &coder,
-        &role::prompt(Role::Integrator),
-        &role::prompt(Role::Security),
-    ] {
-        assert!(
-            prompt.contains(
-                r#"{"<survivor id>": {"kind": "equivalent_proposed", "why": "<one sentence>"}}"#
-            ),
-            "{prompt}"
-        );
-        assert!(
-            prompt.contains("cannot change any observable\nbehaviour"),
-            "{prompt}"
-        );
-        assert!(
-            prompt.contains("never for a survivor that is merely"),
-            "{prompt}"
-        );
-        assert!(prompt.contains("it is not a ruling"), "{prompt}");
-        assert!(prompt.contains("blank `why`\nis no outcome"), "{prompt}");
-    }
+    assert!(
+        coder.contains(
+            r#"{"<survivor id>": {"kind": "equivalent_proposed", "why": "<one sentence>"}}"#
+        ),
+        "{coder}"
+    );
+    assert!(
+        coder.contains("cannot change any observable\nbehaviour"),
+        "{coder}"
+    );
+    assert!(
+        coder.contains("never for a survivor that is merely"),
+        "{coder}"
+    );
+    assert!(coder.contains("it is not a ruling"), "{coder}");
+    assert!(coder.contains("blank `why`\nis no outcome"), "{coder}");
     assert!(
         coder.contains("propose it, or await a ruling on it, not\nboth"),
         "{coder}"
     );
+    for role in [Role::Integrator, Role::Security] {
+        let prompt = role::prompt(role);
+        assert!(
+            !prompt.contains("equivalent_proposed"),
+            "{role:?}: {prompt}"
+        );
+    }
 }
 
 /// Before a profile is started, what the project's file lifted before and
@@ -2604,11 +2617,66 @@ fn every_role_is_told_the_files_its_profile_lets_it_write_and_no_other() {
             "{role:?}: {sentence}"
         );
     }
+    let coder = flat(&role::prompt(Role::Coder));
+    assert!(
+        coder.contains("`JOURNAL.md`, `PR.md`, `VERDICT.json` and `MUTANTS.triage.json`. "),
+        "{coder}"
+    );
+    let integrator = flat(&role::prompt(Role::Integrator));
+    assert!(
+        integrator.contains("`JOURNAL.md`, `PR.md` and `VERDICT.json`. "),
+        "{integrator}"
+    );
     let security = flat(&role::prompt(Role::Security));
     assert!(
-        security.contains("`JOURNAL.md`, `VERDICT.json` and `MUTANTS.triage.json`. "),
+        security.contains("`JOURNAL.md` and `VERDICT.json`. "),
         "{security}"
     );
+}
+
+/// Survivors only ever go back to the coder (SPEC 4.4): the integrator does
+/// not play gate 7 and the security agent commits nothing. So the coder is
+/// told how to answer them, in the file it alone writes, and the two others
+/// are told nothing that has them write it — while what holds for every
+/// role about a campaign, a commit and the forge is still said to each.
+#[test]
+fn only_the_coder_is_told_to_answer_survivors_and_every_role_keeps_what_is_common() {
+    let coder = flat(&role::prompt(Role::Coder));
+    for said in [
+        "A mutation campaign's survivors are yours to answer, in `MUTANTS.triage.json`",
+        "You may **propose** it instead",
+        "There is no third answer of your own",
+        "and hands you its survivors",
+        "To check that a test kills a survivor",
+        "`VERDICT.json` and `MUTANTS.triage.json`. ",
+    ] {
+        assert!(coder.contains(said), "the coder is not told {said:?}");
+    }
+
+    for role in [Role::Integrator, Role::Security] {
+        let prompt = flat(&role::prompt(role));
+        for unsaid in [
+            "MUTANTS.triage.json",
+            "survivors are yours to answer",
+            "equivalent_proposed",
+            "awaits ruling",
+            "hands you its survivors",
+            "To check that a test kills a survivor",
+        ] {
+            assert!(!prompt.contains(unsaid), "{role:?} is told {unsaid:?}");
+        }
+        for said in [
+            "Running the campaign is `nunki`'s work, not yours. \
+             **Never run a whole mutation campaign yourself**, over the branch or over a file",
+            "its survivors go back to the coder, never to you",
+            "A campaign of your own costs an hour or more of your run",
+            "**no trailer naming a harness, a model or a tool**",
+            "You never push, never merge, never reach the forge.",
+            "`MUTANTS.json` included",
+        ] {
+            assert!(prompt.contains(said), "{role:?} is not told {said:?}");
+        }
+    }
 }
 
 /// A headless run is over when the agent's turn ends, a command still

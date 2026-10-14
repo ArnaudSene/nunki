@@ -62,10 +62,9 @@ pub const PROBER_SERVICE: &str = "prober";
 /// read-only, like `MISSION.md`.
 pub fn agent_writable(role: Role) -> &'static [&'static str] {
     match role {
-        Role::Coder | Role::Integrator => {
-            &["JOURNAL.md", "PR.md", "VERDICT.json", "MUTANTS.triage.json"]
-        }
-        Role::Security => &["JOURNAL.md", "VERDICT.json", "MUTANTS.triage.json"],
+        Role::Coder => &["JOURNAL.md", "PR.md", "VERDICT.json", "MUTANTS.triage.json"],
+        Role::Integrator => &["JOURNAL.md", "PR.md", "VERDICT.json"],
+        Role::Security => &["JOURNAL.md", "VERDICT.json"],
     }
 }
 

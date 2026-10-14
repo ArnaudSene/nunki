@@ -461,8 +461,36 @@ const SECURITY_ANSWERS: [&str; 4] = [
     "VERDICT-WRITTEN",
 ];
 
+/// What the agent tries on `MUTANTS.triage.json`, the same three ways as on
+/// `PR.md`: append to it, replace it through the folder, remove it.
+const TRIAGE_ATTEMPTS: &str = "\
+    (echo agent >> /work/mission/MUTANTS.triage.json) 2>/dev/null \
+        && echo TRIAGE-WRITTEN || echo TRIAGE-REFUSED; \
+    (echo agent > /work/mission/MUTANTS.triage.new \
+        && mv -f /work/mission/MUTANTS.triage.new /work/mission/MUTANTS.triage.json) \
+        2>/dev/null && echo TRIAGE-REPLACED || echo TRIAGE-NOT-REPLACED; \
+    (rm -f /work/mission/MUTANTS.triage.json && test ! -e /work/mission/MUTANTS.triage.json) \
+        2>/dev/null && echo TRIAGE-REMOVED || echo TRIAGE-NOT-REMOVED";
+
+/// What a role that does not answer survivors — the integrator, the
+/// security agent — must answer to [`TRIAGE_ATTEMPTS`].
+const TRIAGE_REFUSED: [&str; 3] = [
+    "TRIAGE-REFUSED",
+    "TRIAGE-NOT-REPLACED",
+    "TRIAGE-NOT-REMOVED",
+];
+
+/// What the triage file holds on the host before any agent touches it.
+const TRIAGE_BEFORE: &str = "{\"the coder's\": {}}\n";
+
+/// Every attempt an agent makes on the mission folder, in one exec.
+fn attempts_script() -> String {
+    format!("{PR_ATTEMPTS}; {TRIAGE_ATTEMPTS}")
+}
+
 /// A slot's tree and a mission folder under `dir`, every file an agent
-/// writes present, and `PR.md` saying what the coder wrote.
+/// writes present, and `PR.md` and `MUTANTS.triage.json` saying what the
+/// coder wrote.
 fn mission_folder(dir: &Path) -> (PathBuf, PathBuf) {
     let tree = dir.join("tree");
     let mission = dir.join("mission");
@@ -472,6 +500,7 @@ fn mission_folder(dir: &Path) -> (PathBuf, PathBuf) {
         std::fs::write(mission.join(file), "").unwrap();
     }
     std::fs::write(mission.join("PR.md"), "the coder's\n").unwrap();
+    std::fs::write(mission.join(nunki::mutants::TRIAGE_FILE), TRIAGE_BEFORE).unwrap();
     (tree, mission)
 }
 
@@ -516,9 +545,13 @@ fn role_plan(role: Role, slot: &str, tree: &Path, mission: &Path) -> Plan {
 /// SPEC 4.5, "Un constat accepté n'est pas un constat corrigé": in the
 /// profile the security agent runs in, `PR.md` is read-only — not
 /// writable, not replaceable through the folder it sits in — while its
-/// verdict is; in the coder's, both are writable. What the generated file
-/// says is checked in `tests/compose.rs`; this is what the engine makes of
-/// it, measured, each role lifted in a fresh project.
+/// verdict is; in the coder's, both are writable. And survivors only ever
+/// go back to the coder (SPEC 4.4): in the security agent's profile and in
+/// the integrator's, `MUTANTS.triage.json` cannot be appended to, replaced
+/// or removed, and the host's file is byte for byte what it was; in the
+/// coder's it is written. What the generated file says is checked in
+/// `tests/compose.rs`; this is what the engine makes of it, measured, each
+/// role lifted in a fresh project.
 #[test]
 #[ignore = "builds an image and lifts containers; run by hand"]
 fn live_the_security_agent_cannot_write_pr_md_and_the_coder_can() {
@@ -528,7 +561,7 @@ fn live_the_security_agent_cannot_write_pr_md_and_the_coder_can() {
     }
     let _context = build_image();
 
-    for role in [Role::Security, Role::Coder] {
+    for role in [Role::Security, Role::Integrator, Role::Coder] {
         let dir = tempfile::tempdir().unwrap();
         let (tree, mission) = mission_folder(dir.path());
         let plan = role_plan(role, SLOT, &tree, &mission);
@@ -547,13 +580,15 @@ fn live_the_security_agent_cannot_write_pr_md_and_the_coder_can() {
         let said = compose(
             &file,
             &project,
-            &["exec", "-T", "agent", "sh", "-c", PR_ATTEMPTS],
+            &["exec", "-T", "agent", "sh", "-c", &attempts_script()],
         );
         down(&file, &project);
         let said = String::from_utf8_lossy(&said.stdout).to_string();
         println!("{role:?}:\n{said}");
 
         let pr = std::fs::read_to_string(mission.join("PR.md")).unwrap_or_default();
+        let triage =
+            std::fs::read_to_string(mission.join(nunki::mutants::TRIAGE_FILE)).unwrap_or_default();
         match role {
             Role::Security => {
                 for line in SECURITY_ANSWERS {
@@ -561,13 +596,34 @@ fn live_the_security_agent_cannot_write_pr_md_and_the_coder_can() {
                 }
                 assert_eq!(pr, "the coder's\n", "PR.md moved under the security agent");
             }
-            _ => {
+            Role::Integrator | Role::Coder => {
                 for line in ["PR-WRITTEN", "VERDICT-WRITTEN"] {
                     assert!(said.contains(line), "{role:?}: expected {line}:\n{said}");
                 }
                 assert!(
                     pr.contains("agent"),
-                    "the coder's write did not land: {pr:?}"
+                    "the {role:?}'s write did not land: {pr:?}"
+                );
+            }
+        }
+        match role {
+            Role::Security | Role::Integrator => {
+                for line in TRIAGE_REFUSED {
+                    assert!(said.contains(line), "{role:?}: expected {line}:\n{said}");
+                }
+                assert_eq!(
+                    triage, TRIAGE_BEFORE,
+                    "MUTANTS.triage.json moved under the {role:?}"
+                );
+            }
+            Role::Coder => {
+                assert!(
+                    said.contains("TRIAGE-WRITTEN"),
+                    "the coder could not write MUTANTS.triage.json:\n{said}"
+                );
+                assert!(
+                    triage.starts_with(TRIAGE_BEFORE) && triage.contains("agent"),
+                    "the coder's write did not land: {triage:?}"
                 );
             }
         }
@@ -595,15 +651,21 @@ impl Drop for TakenDown<'_> {
 /// container was just running in, and it is that switch that must leave it
 /// a container without `PR.md` read-write. Played as `run::launch` plays it
 /// — the real engine's own `stop` of `run::SERVICES` from the file that is
-/// up, the security agent's profile written to that same file, then the
+/// up, the next role's profile written to that same file, then the
 /// engine's `up` — and never its command lines retyped, so the test moves
 /// with them. `Docker::real()` honours `HQ_COMPOSE`.
 ///
-/// In the container up after the switch, `PR.md` cannot be appended to,
-/// replaced or removed, the host's file is byte for byte what it was before
-/// the switch, and `VERDICT.json` is written. The previous role's write to
-/// `PR.md` succeeding first is what shows the switch is from a container
-/// that could write it.
+/// In the security agent's container up after the switch, `PR.md` cannot be
+/// appended to, replaced or removed, the host's file is byte for byte what
+/// it was before the switch, and `VERDICT.json` is written. The previous
+/// role's write to `PR.md` succeeding first is what shows the switch is from
+/// a container that could write it.
+///
+/// The same holds of `MUTANTS.triage.json`, which only the coder answers
+/// survivors in (SPEC 4.4), on the switches from the coder to the security
+/// agent and from the coder to the integrator: the coder's write lands
+/// first, and after the switch the agent container is a new one in which
+/// the file cannot be changed.
 #[test]
 #[ignore = "builds an image and lifts containers; run by hand"]
 fn live_the_security_agent_cannot_write_pr_md_after_a_role_switch_on_one_project() {
@@ -625,16 +687,21 @@ fn live_the_security_agent_cannot_write_pr_md_after_a_role_switch_on_one_project
                 file,
                 &project,
                 agent,
-                &["sh".to_string(), "-c".to_string(), PR_ATTEMPTS.to_string()],
+                &["sh".to_string(), "-c".to_string(), attempts_script()],
             )
             .unwrap()
             .stdout
     };
 
-    for before in [Role::Coder, Role::Integrator] {
+    for (before, after) in [
+        (Role::Coder, Role::Security),
+        (Role::Integrator, Role::Security),
+        (Role::Coder, Role::Integrator),
+    ] {
         // One mission folder, one profile file, one Compose project.
         let dir = tempfile::tempdir().unwrap();
         let (tree, mission) = mission_folder(dir.path());
+        let triage_file = mission.join(nunki::mutants::TRIAGE_FILE);
         let file = dir.path().join("profile.yml");
         let _down = TakenDown {
             engine,
@@ -642,7 +709,8 @@ fn live_the_security_agent_cannot_write_pr_md_after_a_role_switch_on_one_project
             project: &project,
         };
 
-        // The previous role's container, up, writing PR.md.
+        // The previous role's container, up, writing PR.md — and the triage
+        // file, when it is the coder's.
         let profile = |role: Role| {
             generate(&role_plan(role, slot, &tree, &mission), engine.dialect()).unwrap()
         };
@@ -658,35 +726,65 @@ fn live_the_security_agent_cannot_write_pr_md_after_a_role_switch_on_one_project
         );
         let written = std::fs::read_to_string(mission.join("PR.md")).unwrap();
         assert!(written.contains("agent"), "{before:?}: {written:?}");
+        let triage = std::fs::read_to_string(&triage_file).unwrap();
+        match before {
+            Role::Coder => {
+                assert!(
+                    said.contains("TRIAGE-WRITTEN"),
+                    "the coder could not write the triage file:\n{said}"
+                );
+                assert!(triage.contains("agent"), "the coder's: {triage:?}");
+            }
+            _ => assert_eq!(triage, TRIAGE_BEFORE, "{before:?} changed the triage file"),
+        }
 
         // The switch, as `run::launch` plays it.
         engine.stop(&file, &project, &nunki::run::SERVICES).unwrap();
-        std::fs::write(&file, profile(Role::Security)).unwrap();
+        std::fs::write(&file, profile(after)).unwrap();
         // The previous role wrote VERDICT.json too: emptied, so what is in
-        // it after is the security agent's.
+        // it after is the next role's.
         std::fs::write(mission.join("VERDICT.json"), "").unwrap();
         engine.up(&file, &project).unwrap();
         let second = engine.container_of(&file, &project, agent).unwrap();
         assert!(
             second.is_some(),
-            "no agent after the switch from {before:?}"
+            "no agent after the switch from {before:?} to {after:?}"
         );
-        assert_ne!(first, second, "the agent container survived the switch");
+        assert_ne!(
+            first, second,
+            "the agent container survived the switch from {before:?} to {after:?}"
+        );
 
         let said = attempts(&file);
-        println!("Security after {before:?}:\n{said}");
-        for line in SECURITY_ANSWERS {
+        println!("{after:?} after {before:?}:\n{said}");
+        if after == Role::Security {
+            for line in SECURITY_ANSWERS {
+                assert!(
+                    said.contains(line),
+                    "security after {before:?}: expected {line}:\n{said}"
+                );
+            }
+            assert_eq!(
+                std::fs::read_to_string(mission.join("PR.md")).unwrap(),
+                written,
+                "PR.md moved under the security agent, after {before:?}"
+            );
+        }
+        for line in TRIAGE_REFUSED {
             assert!(
                 said.contains(line),
-                "security after {before:?}: expected {line}:\n{said}"
+                "{after:?} after {before:?}: expected {line}:\n{said}"
             );
         }
         assert_eq!(
-            std::fs::read_to_string(mission.join("PR.md")).unwrap(),
-            written,
-            "PR.md moved under the security agent, after {before:?}"
+            std::fs::read_to_string(&triage_file).unwrap(),
+            triage,
+            "MUTANTS.triage.json moved under the {after:?}, after {before:?}"
         );
         let verdict = std::fs::read_to_string(mission.join("VERDICT.json")).unwrap();
-        assert!(verdict.contains("agent"), "after {before:?}: {verdict:?}");
+        assert!(
+            verdict.contains("agent"),
+            "{after:?} after {before:?}: {verdict:?}"
+        );
     }
 }
