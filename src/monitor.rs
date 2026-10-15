@@ -296,9 +296,17 @@ pub fn after_campaign(progress: &crate::mutants::Progress) -> Next {
         | Progress::Finished { .. } => Next::Continue,
         // Stopped short, and recorded: the HQ's to choose, never a volet of
         // its own — running it again would run into the same deadline.
-        Progress::Overrun { minutes, survivors } => Next::Exit(crate::mutants::stopped_said(
-            &crate::mutants::Stopped::Deadline { minutes: *minutes },
-            *survivors,
+        Progress::Overrun {
+            minutes,
+            survivors,
+            reset,
+        } => Next::Exit(format!(
+            "{}; {}",
+            crate::mutants::stopped_said(
+                &crate::mutants::Stopped::Deadline { minutes: *minutes },
+                *survivors,
+            ),
+            crate::mutants::reset_said(reset)
         )),
         Progress::Incomplete { survivors, stopped } => {
             Next::Exit(crate::mutants::stopped_said(stopped, *survivors))
@@ -594,9 +602,17 @@ pub fn campaign_line(progress: &crate::mutants::Progress) -> String {
                 scope.said()
             )
         }
-        Progress::Running { started_at, .. } => {
-            format!("mutation campaign running since {started_at}")
-        }
+        Progress::Running {
+            started_at,
+            unstopped,
+            ..
+        } => match unstopped {
+            None => format!("mutation campaign running since {started_at}"),
+            Some(why) => format!(
+                "mutation campaign since {started_at} still holds the clean copy: {}",
+                one_line(why)
+            ),
+        },
         Progress::Finished { survivors, chain } => {
             let mut line = format!("mutation campaign ended: {survivors} survivor(s)");
             for (n, said) in chain.iter().enumerate() {
@@ -609,9 +625,14 @@ pub fn campaign_line(progress: &crate::mutants::Progress) -> String {
             }
             line
         }
-        Progress::Overrun { minutes, survivors } => format!(
-            "mutation campaign stopped past its {minutes}-minute deadline, {survivors} \
-             survivor(s) kept as from an incomplete campaign"
+        Progress::Overrun {
+            minutes,
+            survivors,
+            reset,
+        } => format!(
+            "mutation campaign stopped whole past its {minutes}-minute deadline, {survivors} \
+             survivor(s) kept as from an incomplete campaign; {}",
+            one_line(&crate::mutants::reset_said(reset))
         ),
         Progress::Incomplete { survivors, stopped } => format!(
             "mutation campaign on file is incomplete ({}), {survivors} survivor(s)",

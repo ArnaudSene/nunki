@@ -28,9 +28,16 @@ pub struct FakeEngine {
     pub calls: Mutex<Vec<Call>>,
     containers: Mutex<BTreeMap<String, String>>,
     liveness: Mutex<BTreeMap<String, Liveness>>,
+    /// Answers given in turn for a container, the last kept, before
+    /// `liveness` is looked at.
+    liveness_queue: Mutex<BTreeMap<String, Vec<Liveness>>>,
     exec_result: Mutex<ExecOutput>,
     exec_queue: Mutex<Vec<ExecOutput>>,
+    /// Answers given to an `exec` whose argv holds a fragment, before the
+    /// queue and the default are looked at: the first that matches.
+    exec_when: Mutex<Vec<(String, ExecOutput)>>,
     fail_up: Mutex<Option<String>>,
+    fail_stop: Mutex<Option<String>>,
     lifted: Mutex<Vec<Container>>,
     /// The named volumes the engine holds. One is **in use** while any
     /// container of the project remains, as Docker refuses `volume rm` on a
@@ -51,13 +58,16 @@ impl Default for FakeEngine {
             calls: Mutex::new(Vec::new()),
             containers: Mutex::new(BTreeMap::new()),
             liveness: Mutex::new(BTreeMap::new()),
+            liveness_queue: Mutex::new(BTreeMap::new()),
             exec_result: Mutex::new(ExecOutput {
                 status: 0,
                 stdout: String::new(),
                 stderr: String::new(),
             }),
             exec_queue: Mutex::new(Vec::new()),
+            exec_when: Mutex::new(Vec::new()),
             fail_up: Mutex::new(None),
+            fail_stop: Mutex::new(None),
             lifted: Mutex::new(Vec::new()),
             volumes: Mutex::new(Default::default()),
             held: Mutex::new(Default::default()),
@@ -107,6 +117,17 @@ impl FakeEngine {
         self
     }
 
+    /// Answer each question about `container` in turn, and keep answering
+    /// with the last: a container that changes state between two questions,
+    /// as one paused by a human does.
+    pub fn with_livenesses(self, container: &str, states: Vec<Liveness>) -> Self {
+        self.liveness_queue
+            .lock()
+            .unwrap()
+            .insert(container.to_string(), states);
+        self
+    }
+
     pub fn with_exec(self, out: ExecOutput) -> Self {
         *self.exec_result.lock().unwrap() = out;
         self
@@ -120,6 +141,25 @@ impl FakeEngine {
     /// be said without the other.
     pub fn with_execs(self, outs: Vec<ExecOutput>) -> Self {
         *self.exec_queue.lock().unwrap() = outs;
+        self
+    }
+
+    /// Answer any `exec` one of whose arguments contains `fragment` with
+    /// `out`, whatever its turn: what lets a test script the stop, the check
+    /// after it and the refresh of the copy apart, rather than by an order
+    /// the code under test is free to change.
+    pub fn with_exec_when(self, fragment: &str, out: ExecOutput) -> Self {
+        self.exec_when
+            .lock()
+            .unwrap()
+            .push((fragment.to_string(), out));
+        self
+    }
+
+    /// Make `stop` fail, the way an engine that cannot remove a container
+    /// does.
+    pub fn failing_stop(self, why: &str) -> Self {
+        *self.fail_stop.lock().unwrap() = Some(why.to_string());
         self
     }
 
@@ -188,7 +228,14 @@ impl Engine for FakeEngine {
             project.to_string(),
             services.iter().map(|s| s.to_string()).collect(),
         ));
-        Ok(())
+        match self.fail_stop.lock().unwrap().clone() {
+            Some(stderr) => Err(EngineError::Command {
+                verb: "stop",
+                status: "1".to_string(),
+                stderr,
+            }),
+            None => Ok(()),
+        }
     }
 
     fn down(&self, _file: &Path, project: &str, volumes: bool) -> Result<(), EngineError> {
@@ -208,6 +255,15 @@ impl Engine for FakeEngine {
             service.to_string(),
             argv.to_vec(),
         ));
+        if let Some((_, out)) = self
+            .exec_when
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(fragment, _)| argv.iter().any(|a| a.contains(fragment.as_str())))
+        {
+            return Ok(out.clone());
+        }
         let mut queue = self.exec_queue.lock().unwrap();
         if queue.len() > 1 {
             return Ok(queue.remove(0));
@@ -251,6 +307,14 @@ impl Engine for FakeEngine {
 
     fn liveness(&self, container: &str) -> Result<Liveness, EngineError> {
         self.record(Call::Liveness(container.to_string()));
+        if let Some(queue) = self.liveness_queue.lock().unwrap().get_mut(container) {
+            if queue.len() > 1 {
+                return Ok(queue.remove(0));
+            }
+            if let Some(last) = queue.first() {
+                return Ok(last.clone());
+            }
+        }
         Ok(self
             .liveness
             .lock()

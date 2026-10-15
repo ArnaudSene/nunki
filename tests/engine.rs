@@ -218,14 +218,43 @@ fn liveness_reads_the_engine_and_treats_an_unknown_container_as_an_answer() {
 
     // A machine that slept, an engine restarted without its containers, a
     // slot removed: the engine knowing nothing is a fact, not a failure.
-    let (docker, _) = recorded(vec![saying(1, "", "No such object: c1")]);
+    // Gone because the engine said so: it answered a listing of the
+    // container, and the listing was empty.
+    let (docker, cli) = recorded(vec![saying(1, "", "No such object: c1"), saying(0, "", "")]);
     assert_eq!(docker.liveness("c1").unwrap(), Liveness::Gone);
+    assert_eq!(
+        cli.lines().last().map(String::as_str),
+        Some("docker ps -a -q --no-trunc --filter id=c1")
+    );
 
     let (docker, _) = recorded(vec![saying(0, "perhaps\n", "")]);
     assert!(
         docker.liveness("c1").is_err(),
         "an answer we cannot read is an error, not a guess"
     );
+}
+
+/// A daemon or a socket that cannot be reached fails `inspect` too, and is
+/// no answer about the container: `Gone` read on it would declare a
+/// container removed on a question nobody answered — and a campaign in it
+/// forgotten, its doors reopened, while it still runs.
+#[test]
+fn an_engine_that_cannot_be_reached_never_says_a_container_is_gone() {
+    let unreachable = "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. \
+                       Is the docker daemon running?";
+    let (docker, _) = recorded(vec![saying(1, "", unreachable), saying(1, "", unreachable)]);
+    let err = docker.liveness("c1").unwrap_err();
+    assert!(err.to_string().contains("Cannot connect"), "{err}");
+
+    // Listed, and still there: it could not be inspected, which is no
+    // answer about it either.
+    let (docker, _) = recorded(vec![
+        saying(1, "", "permission denied"),
+        saying(0, "c1\n", ""),
+    ]);
+    let err = docker.liveness("c1").unwrap_err();
+    assert!(err.to_string().contains("inspect"), "{err}");
+    assert!(err.to_string().contains("permission denied"), "{err}");
 }
 
 #[test]
@@ -315,6 +344,33 @@ fn the_fake_engine_records_what_it_was_asked() {
             Call::Stop("nunki-demo".to_string(), vec!["agent".to_string()]),
         ]
     );
+}
+
+/// The tests of a campaign frozen, or gone, between two questions rest on
+/// this: the queue's last answer is kept, never used up and replaced by the
+/// container's standing state.
+#[test]
+fn the_fake_engine_answers_liveness_in_turn_and_keeps_the_last_answer() {
+    let engine = FakeEngine::default()
+        .with_liveness("c-agent", Liveness::Running)
+        .with_livenesses("c-agent", vec![Liveness::Running, Liveness::Paused])
+        .with_livenesses("c-other", vec![Liveness::Exited(137)]);
+
+    let asked: Vec<Liveness> = (0..4)
+        .map(|_| engine.liveness("c-agent").unwrap())
+        .collect();
+    assert_eq!(
+        asked,
+        vec![
+            Liveness::Running,
+            Liveness::Paused,
+            Liveness::Paused,
+            Liveness::Paused
+        ]
+    );
+    for _ in 0..3 {
+        assert_eq!(engine.liveness("c-other").unwrap(), Liveness::Exited(137));
+    }
 }
 
 #[test]
@@ -1190,4 +1246,303 @@ fn a_leftover_that_ignores_term_is_killed() {
         String::from_utf8_lossy(&said.stdout)
     );
     assert!(!alive(pid), "a process that ignores TERM outlived its run");
+}
+
+/// What [`ContainerSpawner::halt`] answers, read from what the engine says
+/// of the container and from what the two scripts print — and never a guess.
+///
+/// A frozen, exited or gone container is answered from the engine alone,
+/// and nothing is asked of it. A running one is stopped by the run's tag
+/// (its log's stem) and then asked, apart, what still carries it. A script
+/// that did not run is never read as one that found nothing.
+#[test]
+fn a_halt_says_what_the_container_said_and_never_guesses() {
+    use nunki::engine::spawn::{ContainerSpawner, Halt, SYSTEM_SHELL, left_script, reap_script};
+    use std::sync::Arc;
+
+    let log = Path::new("/hq/runs/mutants-abc1234.log");
+    let halt = |fake: FakeEngine| {
+        let fake = Arc::new(fake);
+        let halt = ContainerSpawner::new(
+            fake.clone(),
+            file(),
+            "nunki-demo",
+            nunki::compose::AGENT_SERVICE,
+        )
+        .halt("cafe1234abcdef", log);
+        (halt, fake)
+    };
+    let says = |stdout: &str| ExecOutput {
+        status: 0,
+        stdout: format!("{stdout}\n"),
+        stderr: String::new(),
+    };
+    let execs = |fake: &FakeEngine| -> Vec<Vec<String>> {
+        fake.calls()
+            .into_iter()
+            .filter_map(|call| match call {
+                Call::Exec(_, _, argv) => Some(argv),
+                _ => None,
+            })
+            .collect()
+    };
+
+    // Answered from the engine alone.
+    let (paused, fake) =
+        halt(FakeEngine::default().with_liveness("cafe1234abcdef", Liveness::Paused));
+    assert_eq!(paused, Halt::Paused);
+    assert!(
+        execs(&fake).is_empty(),
+        "a paused container was asked something"
+    );
+    let (exited, fake) =
+        halt(FakeEngine::default().with_liveness("cafe1234abcdef", Liveness::Exited(137)));
+    assert_eq!(
+        exited,
+        Halt::NotRunning("container cafe1234abcd exited (137)".into())
+    );
+    assert!(execs(&fake).is_empty());
+    let (gone, fake) = halt(FakeEngine::default());
+    assert_eq!(
+        gone,
+        Halt::NotRunning("the engine no longer knows container cafe1234abcd".into())
+    );
+    assert!(execs(&fake).is_empty());
+
+    let running = || FakeEngine::default().with_liveness("cafe1234abcdef", Liveness::Running);
+
+    // Stopped by the tag, asked again, and nothing left.
+    let (done, fake) = halt(
+        running()
+            .with_exec_when("nunki-reaped", says("nunki-reaped 7 9"))
+            .with_exec_when("nunki-left", says("nunki-left")),
+    );
+    assert_eq!(
+        done,
+        Halt::Done {
+            signalled: vec![7, 9]
+        }
+    );
+    let execs_done = execs(&fake);
+    assert_eq!(
+        execs_done,
+        vec![
+            vec![
+                SYSTEM_SHELL.to_string(),
+                "-c".into(),
+                reap_script("mutants-abc1234")
+            ],
+            vec![
+                SYSTEM_SHELL.to_string(),
+                "-c".into(),
+                left_script("mutants-abc1234")
+            ],
+        ]
+    );
+
+    // Something left after the stop: named.
+    let (left, _) = halt(
+        running()
+            .with_exec_when("nunki-reaped", says("nunki-reaped 7 9"))
+            .with_exec_when("nunki-left", says("nunki-left 9 12")),
+    );
+    assert_eq!(left, Halt::Left(vec![9, 12]));
+
+    // The check prints what each of its two looks found: a process both
+    // found is named once, in the order first said.
+    let (twice, _) = halt(
+        running()
+            .with_exec_when("nunki-reaped", says("nunki-reaped 7 9"))
+            .with_exec_when("nunki-left", says("nunki-left 12 9 12 15")),
+    );
+    assert_eq!(twice, Halt::Left(vec![12, 9, 15]));
+
+    // The stop did not run: nothing asked after it, and said with what the
+    // container said.
+    let (unknown, fake) = halt(running().with_exec_when(
+        "nunki-reaped",
+        ExecOutput {
+            status: 126,
+            stdout: String::new(),
+            stderr: "exec failed\n".into(),
+        },
+    ));
+    assert_eq!(
+        unknown,
+        Halt::Unknown("the stop did not run in the container (126): exec failed".into())
+    );
+    assert_eq!(
+        execs(&fake).len(),
+        1,
+        "checked after a stop that did not run"
+    );
+
+    // The check did not run, and said nothing: the status is all there is.
+    let (unknown, _) = halt(
+        running()
+            .with_exec_when("nunki-reaped", says("nunki-reaped"))
+            .with_exec_when(
+                "nunki-left",
+                ExecOutput {
+                    status: 137,
+                    stdout: "chatter\n".into(),
+                    stderr: String::new(),
+                },
+            ),
+    );
+    assert_eq!(
+        unknown,
+        Halt::Unknown("the check after the stop did not run in the container (137)".into())
+    );
+}
+
+/// The check after a stop, run for real: it names what carries the run's
+/// tag, and nothing else — not another run's process, not an untagged one.
+#[cfg(target_os = "linux")]
+#[test]
+fn what_is_left_of_a_run_is_named_by_its_tag() {
+    use std::process::{Command, Stdio};
+
+    let run = format!("left-{}", std::process::id());
+    let leave = |tag: Option<&str>| -> u32 {
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "sleep 60 >/dev/null 2>&1 & echo $!"])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null());
+        if let Some(tag) = tag {
+            command.env("NUNKI_RUN", tag);
+        }
+        String::from_utf8_lossy(&command.output().unwrap().stdout)
+            .trim()
+            .parse()
+            .unwrap()
+    };
+    let mine = leave(Some(&run));
+    let other = leave(Some(&format!("{run}-other")));
+    let untagged = leave(None);
+
+    let said = |run: &str| {
+        let out = Command::new("sh")
+            .args(["-c", &nunki::engine::spawn::left_script(run)])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let found = said(&run);
+    for pid in [mine, other, untagged] {
+        let _ = Command::new("kill").arg(pid.to_string()).status();
+    }
+
+    // Once per look: it looks twice.
+    assert_eq!(found, format!("nunki-left {mine} {mine}"));
+    assert_eq!(
+        said(&format!("nobody-{}", std::process::id())),
+        "nunki-left"
+    );
+}
+
+/// A `tr` and a `grep` that find nothing, in a directory put first on the
+/// `PATH`: what code a campaign runs could drop in `~/.cargo/bin`, which an
+/// agent image puts first and the agent's own uid can write. Neither the
+/// stop nor the check after it may take them.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_stop_and_its_check_never_take_tr_or_grep_from_the_path_they_were_given() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::{Command, Stdio};
+
+    let decoys = tempfile::tempdir().unwrap();
+    for tool in ["tr", "grep", "sleep"] {
+        let path = decoys.path().join(tool);
+        std::fs::write(&path, "#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let path = format!(
+        "{}:{}",
+        decoys.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let run = format!("decoyed-{}", std::process::id());
+    let pid: u32 = String::from_utf8_lossy(
+        &Command::new("sh")
+            .args(["-c", "sleep 60 >/dev/null 2>&1 & echo $!"])
+            .env("NUNKI_RUN", &run)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .trim()
+    .parse()
+    .unwrap();
+
+    let under_decoys = |script: String| {
+        let out = Command::new(nunki::engine::spawn::SYSTEM_SHELL)
+            .args(["-c", &script])
+            .env("PATH", &path)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let left = under_decoys(nunki::engine::spawn::left_script(&run));
+    let reaped = under_decoys(nunki::engine::spawn::reap_script(&run));
+    let gone = !std::path::Path::new(&format!("/proc/{pid}")).exists()
+        || std::fs::read_to_string(format!("/proc/{pid}/status"))
+            .map(|s| s.contains("State:\tZ"))
+            .unwrap_or(true);
+    let _ = Command::new("sh")
+        .args(["-c", &format!("kill {pid}")])
+        .status();
+
+    assert_eq!(
+        left,
+        format!("nunki-left {pid} {pid}"),
+        "the check was fooled"
+    );
+    assert_eq!(reaped, format!("nunki-reaped {pid}"), "the stop was fooled");
+    assert!(gone, "the stop did not stop {pid}");
+}
+
+/// A process that appears between the check's two looks — one tagged, born
+/// of an untagged parent half a second after the check starts — is found by
+/// the second. One look, a single pass over `/proc`, reads "nothing left".
+#[cfg(target_os = "linux")]
+#[test]
+fn the_check_after_a_stop_looks_twice_before_it_says_nothing_is_left() {
+    use std::process::{Command, Stdio};
+
+    let run = format!("late-{}", std::process::id());
+    let check = Command::new("sh")
+        .args(["-c", &nunki::engine::spawn::left_script(&run)])
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Untagged, so the first look cannot see it; it starts the tagged one
+    // half a second in, which the second look, a second in, can.
+    let late = Command::new("sh")
+        .args([
+            "-c",
+            &format!("sleep 0.5; NUNKI_RUN={run} exec sleep 5 >/dev/null 2>&1"),
+        ])
+        .stdin(Stdio::null())
+        .spawn()
+        .unwrap();
+    let found = String::from_utf8_lossy(&check.wait_with_output().unwrap().stdout)
+        .trim()
+        .to_string();
+    let pid = late.id();
+    let _ = Command::new("sh")
+        .args(["-c", &format!("kill {pid}")])
+        .status();
+    let mut late = late;
+    let _ = late.wait();
+
+    assert_eq!(
+        found,
+        format!("nunki-left {pid}"),
+        "the late process was missed"
+    );
 }

@@ -258,6 +258,34 @@ impl Engine for Docker {
             // The engine not knowing the container is an answer, not a
             // failure: a machine that slept, an engine that restarted without
             // its containers, a slot removed (SPEC 4.2).
+            //
+            // But only if the engine **said** so. A failed `inspect` is also
+            // what a daemon or a socket that cannot be reached answers, and
+            // `Gone` read on that is a container declared removed on a
+            // question nobody answered: a campaign forgotten, its doors
+            // reopened, while it still runs. So the engine is asked to list
+            // the container, which it can do only if it answers: an empty
+            // listing is `Gone`, anything else is an error. Listed rather
+            // than read out of `inspect`'s message, which would be a guess
+            // about wording ([`Docker::remove_volume`] says the same).
+            let failed = EngineError::Command {
+                verb: "inspect",
+                status: out
+                    .status
+                    .code()
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "signalled".to_string()),
+                stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+            };
+            let filter = format!("id={container}");
+            let listed = self.run(
+                "ps",
+                &self.engine_command(&["ps", "-a", "-q", "--no-trunc", "--filter", &filter]),
+            )?;
+            if listed.lines().any(|line| !line.trim().is_empty()) {
+                // It is there, and could not be inspected: no answer.
+                return Err(failed);
+            }
             return Ok(Liveness::Gone);
         }
         let text = String::from_utf8_lossy(&out.stdout);

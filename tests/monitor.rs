@@ -467,6 +467,7 @@ fn a_campaign_that_overran_or_vanished_stops_the_monitor_and_the_rest_does_not()
         Progress::Running {
             started_at: "2026-09-16T05:00:00Z".into(),
             lines: 12,
+            unstopped: None,
         },
         Progress::Fresh { survivors: 0 },
         Progress::Finished {
@@ -487,6 +488,7 @@ fn a_campaign_that_overran_or_vanished_stops_the_monitor_and_the_rest_does_not()
     match after_campaign(&Progress::Overrun {
         minutes: 45,
         survivors: 3,
+        reset: nunki::mutants::Reset::Done,
     }) {
         Next::Exit(why) => assert!(why.contains("45-minute deadline"), "{why}"),
         other => panic!("{other:?}"),
@@ -583,6 +585,7 @@ fn a_running_campaign_is_said_once_whatever_it_has_written() {
     let running = |lines| Progress::Running {
         started_at: "2026-10-05T10:00:00Z".into(),
         lines,
+        unstopped: None,
     };
     assert_eq!(campaign_line(&running(3)), campaign_line(&running(300)));
     assert_eq!(
@@ -876,6 +879,7 @@ fn the_monitor_stops_on_a_campaign_stopped_short_and_names_the_hqs_choice() {
         Progress::Overrun {
             minutes: 45,
             survivors: 3,
+            reset: nunki::mutants::Reset::Done,
         },
         Progress::Incomplete {
             survivors: 3,

@@ -1177,3 +1177,285 @@ fn the_local_engine_lists_no_service_and_refuses_to_remove_one() {
         other => panic!("a removal the engine cannot do was answered {other:?}"),
     }
 }
+
+/// Stops whatever still carries `NUNKI_RUN=<run>` on this machine when it
+/// goes out of scope, so a test whose stop failed leaves no loop behind.
+#[cfg(target_os = "linux")]
+struct Reaper(String);
+
+#[cfg(target_os = "linux")]
+impl Drop for Reaper {
+    fn drop(&mut self) {
+        let _ = Command::new("sh")
+            .args(["-c", &nunki::engine::spawn::reap_script(&self.0)])
+            .output();
+    }
+}
+
+/// A stand-in campaign, written to `at`: a script that starts a child,
+/// which starts a grandchild that ignores `TERM` and runs `body` every
+/// 100 ms — the shape of `mutation.sh`, `cargo-mutants` and a test binary.
+#[cfg(target_os = "linux")]
+fn stand_in(at: &Path, body: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::create_dir_all(at).unwrap();
+    let scripts = [
+        (
+            "campaign.sh",
+            format!("#!/bin/sh\n{}/child.sh &\nwait\n", at.display()),
+        ),
+        (
+            "child.sh",
+            format!("#!/bin/sh\n{}/grandchild.sh &\nwait\n", at.display()),
+        ),
+        (
+            "grandchild.sh",
+            format!("#!/bin/sh\ntrap '' TERM\nwhile :; do {body}; sleep 0.1; done\n"),
+        ),
+    ];
+    for (name, text) in scripts {
+        let file = at.join(name);
+        std::fs::write(&file, text).unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    at.join("campaign.sh")
+}
+
+/// Launch `program` the way `mutants::campaign` does — through
+/// `ContainerSpawner`, so with its wrapper and its `NUNKI_RUN` tag, the
+/// log's stem — and give back the spawner and the record it would file.
+#[cfg(target_os = "linux")]
+fn launch_stand_in(
+    w: &World,
+    program: &Path,
+    fingerprint: &str,
+) -> (
+    nunki::engine::spawn::ContainerSpawner,
+    nunki::mutants::Running,
+) {
+    use nunki::harness::spawn::{CommandSpec, Spawner};
+
+    let log = w
+        ._dir
+        .path()
+        .join("runs")
+        .join(format!("mutants-{fingerprint}.log"));
+    let spawner = nunki::engine::spawn::ContainerSpawner::new(
+        w.engine.clone(),
+        nunki::run::profile_path(&w.project, &w.slot.name),
+        "local",
+        nunki::compose::AGENT_SERVICE,
+    )
+    .identified_by(fingerprint);
+    let spawned = spawner
+        .spawn(
+            &CommandSpec {
+                program: program.display().to_string(),
+                args: vec![fingerprint.to_string()],
+                cwd: w._dir.path().to_path_buf(),
+                env: Default::default(),
+            },
+            &log,
+        )
+        .unwrap();
+    let running = nunki::mutants::Running {
+        chain: Default::default(),
+        fingerprint: fingerprint.to_string(),
+        head: git(&w.slot.tree, &["rev-parse", "HEAD"]),
+        started_at: "2026-10-15T12:00:00Z".into(),
+        container: spawned.container,
+        pid: spawned.pid,
+        log,
+        deadline_minutes: u32::MAX,
+    };
+    (spawner, running)
+}
+
+/// Wait until `file` exists and is not empty, or panic.
+#[cfg(target_os = "linux")]
+fn until_written(file: &Path) {
+    for _ in 0..100 {
+        if std::fs::metadata(file)
+            .map(|m| m.len() > 0)
+            .unwrap_or(false)
+        {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("the stand-in campaign never wrote {}", file.display());
+}
+
+/// The stop every path shares ends the whole campaign, down to a grandchild
+/// that ignores `TERM`: nothing carries the tag afterwards, and what the
+/// grandchild was writing stops growing. Real processes, found through
+/// `/proc` by the same shell an agent image runs.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_campaign_is_stopped_whole_down_to_a_grandchild_that_ignores_term() {
+    let w = world();
+    let fingerprint = format!("stopwhole{}", std::process::id());
+    let _reaper = Reaper(format!("mutants-{fingerprint}"));
+    let grown = w._dir.path().join("grown");
+    let program = stand_in(
+        &w._dir.path().join("stand-in"),
+        &format!("echo x >> {}", grown.display()),
+    );
+    let (spawner, running) = launch_stand_in(&w, &program, &fingerprint);
+    until_written(&grown);
+
+    let halt = nunki::mutants::stop_whole(&spawner, &running);
+
+    assert!(
+        matches!(halt, nunki::engine::spawn::Halt::Done { .. }),
+        "{halt:?}"
+    );
+    let left = Command::new("sh")
+        .args([
+            "-c",
+            &nunki::engine::spawn::left_script(&format!("mutants-{fingerprint}")),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&left.stdout).trim(), "nunki-left");
+    let before = std::fs::metadata(&grown).unwrap().len();
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    assert_eq!(
+        std::fs::metadata(&grown).unwrap().len(),
+        before,
+        "the grandchild is still writing"
+    );
+}
+
+/// `--cancel` on a campaign that is rewriting the copy: stopped whole,
+/// recorded, forgotten, and the copy put back to its commit — no mutated
+/// file is left in it, and none appears afterwards.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_campaign_called_off_leaves_the_copy_as_its_commit_holds_it() {
+    let w = world();
+    exec::refresh(&w.project, &w.slot, w.engine.clone()).unwrap();
+    let fingerprint = format!("calledoff{}", std::process::id());
+    let _reaper = Reaper(format!("mutants-{fingerprint}"));
+    let mutated = w.proof.join("src/lib.rs");
+    let program = stand_in(
+        &w._dir.path().join("stand-in"),
+        &format!(
+            "printf 'pub fn keep(_n: u8) -> bool {{\\n    true\\n}}\\n' > {}",
+            mutated.display()
+        ),
+    );
+    let (_spawner, running) = launch_stand_in(&w, &program, &fingerprint);
+    nunki::mutants::write_running(&w.project.hq_root, &w.slot.name, &running).unwrap();
+    for _ in 0..100 {
+        if std::fs::read_to_string(&mutated)
+            .unwrap_or_default()
+            .contains("true")
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(std::fs::read_to_string(&mutated).unwrap().contains("true"));
+    let mission = w._dir.path().join("mission");
+    std::fs::create_dir_all(&mission).unwrap();
+
+    let cancelled = nunki::mutants::cancel(
+        &w.project,
+        &w.slot,
+        w.engine.clone(),
+        &mission,
+        "the coder rewrites it",
+    )
+    .unwrap();
+
+    assert_eq!(
+        cancelled,
+        nunki::mutants::Cancelled::Stopped {
+            survivors: 0,
+            reset: nunki::mutants::Reset::Done
+        }
+    );
+    assert!(
+        nunki::mutants::read_running(&w.project.hq_root, &w.slot.name)
+            .unwrap()
+            .is_none()
+    );
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    assert!(
+        std::fs::read_to_string(&mutated).unwrap().contains("n > 3"),
+        "a mutated file is in the copy after the call-off"
+    );
+}
+
+/// The script is killed — by something the campaign ran, say — while what
+/// it started keeps writing: `--cancel` finds the script ended, and still
+/// stops what carries the campaign's tag before it forgets anything. Real
+/// processes; the grandchild ignores `TERM`.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_campaign_whose_script_was_killed_is_called_off_whole() {
+    let w = world();
+    let fingerprint = format!("orphaned{}", std::process::id());
+    let _reaper = Reaper(format!("mutants-{fingerprint}"));
+    let grown = w._dir.path().join("grown");
+    let program = stand_in(
+        &w._dir.path().join("stand-in"),
+        &format!("echo x >> {}", grown.display()),
+    );
+    let (_spawner, running) = launch_stand_in(&w, &program, &fingerprint);
+    nunki::mutants::write_running(&w.project.hq_root, &w.slot.name, &running).unwrap();
+    until_written(&grown);
+    let script = running.pid.expect("the stand-in published its pid");
+    assert!(
+        Command::new("sh")
+            .args(["-c", &format!("kill -KILL {script}")])
+            .status()
+            .unwrap()
+            .success()
+    );
+    // Its children are reparented and go on.
+    let before = std::fs::metadata(&grown).unwrap().len();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(
+        std::fs::metadata(&grown).unwrap().len() > before,
+        "the stand-in's children did not outlive its script"
+    );
+    let mission = w._dir.path().join("mission");
+    std::fs::create_dir_all(&mission).unwrap();
+
+    let cancelled = nunki::mutants::cancel(
+        &w.project,
+        &w.slot,
+        w.engine.clone(),
+        &mission,
+        "its script was killed",
+    )
+    .unwrap();
+
+    assert!(
+        matches!(cancelled, nunki::mutants::Cancelled::Ended(_)),
+        "{cancelled:?}"
+    );
+    let left = Command::new("sh")
+        .args([
+            "-c",
+            &nunki::engine::spawn::left_script(&format!("mutants-{fingerprint}")),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&left.stdout).trim(), "nunki-left");
+    let before = std::fs::metadata(&grown).unwrap().len();
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    assert_eq!(
+        std::fs::metadata(&grown).unwrap().len(),
+        before,
+        "the campaign was forgotten while its grandchild is still writing"
+    );
+    assert!(
+        nunki::mutants::read_running(&w.project.hq_root, &w.slot.name)
+            .unwrap()
+            .is_none()
+    );
+}

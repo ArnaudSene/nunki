@@ -33,6 +33,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::engine::spawn::Halt;
 use crate::git;
 
 /// The campaign's result, in the mission folder. **The HQ's file**, mounted
@@ -607,6 +608,9 @@ pub enum MutantsError {
          unfreezes it, and `--cancel` then calls it off"
     )]
     Paused,
+    /// The stop did not take, or could not be confirmed ([`unstopped_said`]).
+    #[error("{0}")]
+    NotStopped(String),
 }
 
 /// Where a mission's campaign result lives.
@@ -2475,8 +2479,16 @@ pub enum Progress {
     Fresh { survivors: usize },
     /// Launched just now, full or partial.
     Started { fingerprint: String, scope: Scope },
-    /// Still going.
-    Running { started_at: String, lines: usize },
+    /// Still going, or not known to have stopped. `unstopped` says why it
+    /// is held as in flight when it should not be running: past its
+    /// deadline, or its script ended, and the stop did not take or could not
+    /// be confirmed ([`unstopped_said`]); or whether it runs could not be
+    /// told at all. Its record stays filed, and the next reading tries again.
+    Running {
+        started_at: String,
+        lines: usize,
+        unstopped: Option<String>,
+    },
     /// Ended, and `MUTANTS.json` is written. `chain` says each campaign of
     /// the chain in one line ([`chain_said`]).
     Finished {
@@ -2487,7 +2499,14 @@ pub enum Progress {
     /// recorded as incomplete with the `survivors` the tool had already
     /// reported ([`Stopped::Deadline`]). The HQ's to choose: raise the bound,
     /// or send them to the coder.
-    Overrun { minutes: u32, survivors: usize },
+    ///
+    /// Reported only once nothing of the campaign is left running, and
+    /// `reset` says whether the clean copy was put back to its commit.
+    Overrun {
+        minutes: u32,
+        survivors: usize,
+        reset: Reset,
+    },
     /// An incomplete campaign on this content is on file ([`Stopped`]), and
     /// nothing is launched over it: the HQ chooses ([`stopped_short`]).
     Incomplete { survivors: usize, stopped: Stopped },
@@ -2541,6 +2560,15 @@ pub fn started(mission: &str) -> String {
 /// **clears the record** whenever the campaign is over, however it ended, so
 /// a caller that asks cannot be misled by a stale file.
 ///
+/// A campaign still running past its deadline is stopped here, whole
+/// ([`stop_whole`]), and is over only once the stop is confirmed: then it
+/// is recorded as incomplete ([`Stopped::Deadline`]), forgotten, and the
+/// clean copy reset ([`Progress::Overrun`]). A stop that did not take, or
+/// could not be confirmed, keeps the record filed and reports the campaign
+/// as in flight with what is left ([`Progress::Running`]'s `unstopped`), and
+/// the next reading tries again (SPEC 4.4, "Une campagne arrêtée court est
+/// incomplète").
+///
 /// Its own function because two callers need the answer and only one of them
 /// may launch: [`campaign`] below, and `run::launch`, which recreates the
 /// container a campaign lives in and would otherwise kill it blind.
@@ -2550,19 +2578,12 @@ pub fn read_back(
     engine: std::sync::Arc<dyn crate::engine::Engine>,
     dir: &Path,
 ) -> Result<Option<Progress>, MutantsError> {
-    use crate::harness::spawn::{Presence, Signal, Spawned, Spawner};
+    use crate::harness::spawn::{Presence, Spawned, Spawner};
 
     let Some(running) = read_running(&project.hq_root, &slot.name)? else {
         return Ok(None);
     };
-    let spawner = crate::engine::spawn::ContainerSpawner::new(
-        engine,
-        crate::run::profile_path(project, &slot.name),
-        &crate::compose::project_name(&project.session(), &slot.name)
-            .map_err(|e| MutantsError::Exec(crate::exec::ExecError::Compose(e)))?,
-        crate::compose::AGENT_SERVICE,
-    )
-    .identified_by(&running.fingerprint);
+    let spawner = spawner_of(project, slot, engine.clone(), &running)?;
     let spawned = Spawned {
         pid: running.pid,
         container: running.container.clone(),
@@ -2571,125 +2592,189 @@ pub fn read_back(
         .alive(&spawned)
         .map_err(|e| MutantsError::Launch(e.to_string()))?;
     let text = std::fs::read_to_string(&running.log).unwrap_or_default();
+    let in_flight = |unstopped| Progress::Running {
+        started_at: running.started_at.clone(),
+        lines: text.lines().count(),
+        unstopped,
+    };
     let progress = match presence {
         // A frozen campaign is still in flight, and its deadline must not run
         // against a clock the human stopped on purpose. Reported as running,
         // with the freeze named, rather than counted as an overrun.
-        Presence::Paused => Progress::Running {
-            started_at: running.started_at.clone(),
-            lines: text.lines().count(),
-        },
+        Presence::Paused => in_flight(None),
         Presence::Running => {
             if minutes_since(&running.started_at) > running.deadline_minutes {
                 // Stopped rather than left: SPEC 4.4 gives the campaign a
                 // configured delay, and a campaign past it is holding a slot,
                 // not working in it. What it had found is kept, as from an
                 // incomplete campaign, rather than left inside a log.
-                let _ = spawner.signal(&spawned, Signal::Terminate);
-                let survivors = record_stopped(
-                    dir,
-                    &running,
-                    &text,
-                    Stopped::Deadline {
-                        minutes: running.deadline_minutes,
-                    },
-                )?;
-                forget_running(&project.hq_root, &slot.name)?;
-                Progress::Overrun {
-                    minutes: running.deadline_minutes,
-                    survivors,
+                //
+                // Stopped whole, and recorded only once that is confirmed
+                // ([`stop_whole`]). A stop that did not take keeps the record
+                // filed, so every door into the copy stays shut, and the
+                // campaign is reported as still in flight: the next reading
+                // comes back here and tries again.
+                let halt = stop_whole(&spawner, &running);
+                match unstopped_said(&halt) {
+                    Some(why) => in_flight(Some(format!(
+                        "past its {}-minute deadline, {why}",
+                        running.deadline_minutes
+                    ))),
+                    // Frozen between the two questions: in flight, as a
+                    // paused campaign always is here.
+                    None if halt == Halt::Paused => in_flight(None),
+                    None => {
+                        let survivors = record_stopped(
+                            dir,
+                            &running,
+                            &text,
+                            Stopped::Deadline {
+                                minutes: running.deadline_minutes,
+                            },
+                        )?;
+                        forget_running(&project.hq_root, &slot.name)?;
+                        Progress::Overrun {
+                            minutes: running.deadline_minutes,
+                            survivors,
+                            reset: reset_copy(project, slot, engine),
+                        }
+                    }
                 }
             } else {
-                Progress::Running {
-                    started_at: running.started_at.clone(),
-                    lines: text.lines().count(),
-                }
+                in_flight(None)
             }
         }
-        // Ended, and it said so. Anything else is a campaign that stopped:
-        // nothing is written, so gate 7 keeps asking rather than passing on a
-        // log that happens to hold no survivor.
-        Presence::Ended if completed(&text) => {
-            // Finished, and still measured nothing: not recorded, and its
-            // reason left where gate 7 reads it.
-            let progress = match settle_unmeasured(&running.log, &text)? {
-                Some(why) => Progress::CouldNotRun(why),
-                None => match record_finished_with_registry(
-                    dir,
-                    &project.hq_root,
-                    &slot.tree,
-                    &running.fingerprint,
-                    &running.head,
-                    &text,
-                    &running.chain,
-                ) {
-                    Ok(recorded) => Progress::Finished {
-                        survivors: recorded.survivors,
-                        chain: chain_on_file(dir)?,
-                    },
-                    // A partial campaign whose chain broke under it measured
-                    // only what changed since, and is not recorded alone:
-                    // forgotten, and said, rather than asked about for ever.
-                    Err(MutantsError::Broken(why)) => Progress::Lost(why),
-                    Err(e) => return Err(e),
-                },
-            };
-            forget_running(&project.hq_root, &slot.name)?;
-            progress
-        }
-        Presence::Ended => {
-            forget_running(&project.hq_root, &slot.name)?;
-            // Said it finished more than once: not a campaign that stopped,
-            // and its reason is left where gate 7 reads it.
-            if let Some(why) = settle_repeated(&running.log, &text)? {
-                return Ok(Some(Progress::CouldNotRun(why)));
-            }
-            // The **stderr** file, not the log. A campaign that got nowhere
-            // wrote nothing to stdout — that is what "after 0 line(s)" says —
-            // so naming the log sends whoever reads this to an empty file,
-            // precisely when they need the reason. Typically the log is
-            // 0 bytes and the sibling `.err` holds the traceback that
-            // explains it, which otherwise has to be found by hand.
-            //
-            // The log is still named when it holds something: a campaign that
-            // printed survivors and then died says more there than in its
-            // stderr.
-            let stderr = running.log.with_extension("err");
-            let said_why = std::fs::read_to_string(&stderr)
-                .map(|t| !t.trim().is_empty())
-                .unwrap_or(false);
-            let diagnosis = if text.trim().is_empty() {
-                stderr
-            } else {
-                running.log.clone()
-            };
-            let why = format!(
-                "it stopped without saying it had finished, after {} line(s): a campaign \
-                 that was killed, whose container went away, or that never compiled \
-                 leaves exactly this, and none of them measured anything. What it said \
-                 is in {}",
-                text.lines().count(),
-                diagnosis.display()
-            );
-            // A campaign whose stderr explains the failure (a guard failing
-            // inside `mutants/`, say) is one gate 7 can go red on. Reporting
-            // it as lost instead stops the monitor here, and the volet waits
-            // for someone to type `nunki verify`.
-            if said_why {
-                Progress::CouldNotRun(why)
-            } else {
-                Progress::Lost(why)
-            }
-        }
-        Presence::Vanished(why) | Presence::Unknown(why) => {
+        // The script has ended, which says nothing of what it started:
+        // `cargo-mutants`, its builds and its test binaries are reparented
+        // when it goes, and go on rewriting the copy — killed on purpose by
+        // something the campaign ran, or left behind by a script that died.
+        // So what still carries the campaign's tag is stopped and the stop
+        // confirmed ([`stop_whole`]) before the campaign is read back and
+        // forgotten. A stop that did not take keeps the record filed, every
+        // door into the copy shut, and the next reading tries again.
+        Presence::Ended => match stop_whole(&spawner, &running) {
+            // Frozen under the stop: in flight, as a paused campaign always
+            // is here.
+            Halt::Paused => in_flight(None),
+            halt => match unstopped_said(&halt) {
+                Some(why) => in_flight(Some(format!("its script has ended, and {why}"))),
+                None => read_ended(project, slot, dir, &running)?,
+            },
+        },
+        // A positive answer from the engine: the container has exited, or the
+        // engine no longer knows it. Nothing in it can be running.
+        Presence::Vanished(why) => {
             forget_running(&project.hq_root, &slot.name)?;
             Progress::Lost(why)
         }
+        // No answer at all: the campaign may be running as well as not. Its
+        // record stays filed, so no door into the copy opens on a question
+        // nobody answered, and the next reading asks again.
+        Presence::Unknown(why) => in_flight(Some(format!(
+            "whether it is still running could not be told: {why}. Its record stays \
+             filed, so no door into the clean copy of HEAD opens, and nothing is \
+             recorded; the next reading asks again"
+        ))),
     };
     Ok(Some(progress))
 }
 
-/// End the campaign that owns this slot's clean copy, and forget it.
+/// Read back a campaign whose script has ended and of which nothing is left
+/// running — confirmed by [`stop_whole`] — and forget it.
+///
+/// Ended, and it said so: recorded, or its reason left where gate 7 reads
+/// it. Anything else is a campaign that stopped: nothing is written, so gate
+/// 7 keeps asking rather than passing on a log that happens to hold no
+/// survivor.
+fn read_ended(
+    project: &crate::project::Project,
+    slot: &crate::slot::Slot,
+    dir: &Path,
+    running: &Running,
+) -> Result<Progress, MutantsError> {
+    // Read after the stop: whatever the campaign printed until then counts.
+    let text = std::fs::read_to_string(&running.log).unwrap_or_default();
+    if completed(&text) {
+        // Finished, and still measured nothing: not recorded, and its
+        // reason left where gate 7 reads it.
+        let progress = match settle_unmeasured(&running.log, &text)? {
+            Some(why) => Progress::CouldNotRun(why),
+            None => match record_finished_with_registry(
+                dir,
+                &project.hq_root,
+                &slot.tree,
+                &running.fingerprint,
+                &running.head,
+                &text,
+                &running.chain,
+            ) {
+                Ok(recorded) => Progress::Finished {
+                    survivors: recorded.survivors,
+                    chain: chain_on_file(dir)?,
+                },
+                // A partial campaign whose chain broke under it measured
+                // only what changed since, and is not recorded alone:
+                // forgotten, and said, rather than asked about for ever.
+                Err(MutantsError::Broken(why)) => Progress::Lost(why),
+                Err(e) => return Err(e),
+            },
+        };
+        forget_running(&project.hq_root, &slot.name)?;
+        return Ok(progress);
+    }
+    forget_running(&project.hq_root, &slot.name)?;
+    // Said it finished more than once: not a campaign that stopped, and its
+    // reason is left where gate 7 reads it.
+    if let Some(why) = settle_repeated(&running.log, &text)? {
+        return Ok(Progress::CouldNotRun(why));
+    }
+    // The **stderr** file, not the log. A campaign that got nowhere wrote
+    // nothing to stdout — that is what "after 0 line(s)" says — so naming
+    // the log sends whoever reads this to an empty file, precisely when they
+    // need the reason. Typically the log is 0 bytes and the sibling `.err`
+    // holds the traceback that explains it, which otherwise has to be found
+    // by hand.
+    //
+    // The log is still named when it holds something: a campaign that
+    // printed survivors and then died says more there than in its stderr.
+    let stderr = running.log.with_extension("err");
+    let said_why = std::fs::read_to_string(&stderr)
+        .map(|t| !t.trim().is_empty())
+        .unwrap_or(false);
+    let diagnosis = if text.trim().is_empty() {
+        stderr
+    } else {
+        running.log.clone()
+    };
+    let why = format!(
+        "it stopped without saying it had finished, after {} line(s): a campaign \
+         that was killed, whose container went away, or that never compiled \
+         leaves exactly this, and none of them measured anything. What it said \
+         is in {}",
+        text.lines().count(),
+        diagnosis.display()
+    );
+    // A campaign whose stderr explains the failure (a guard failing inside
+    // `mutants/`, say) is one gate 7 can go red on. Reporting it as lost
+    // instead stops the monitor here, and the volet waits for someone to
+    // type `nunki verify`.
+    Ok(if said_why {
+        Progress::CouldNotRun(why)
+    } else {
+        Progress::Lost(why)
+    })
+}
+
+/// End the campaign that owns this slot's clean copy, before a profile
+/// switch removes its container, and say what the stop found ([`stop_whole`]).
+/// `None` when no campaign is filed.
+///
+/// It does **not** forget the campaign. Its one caller, `run::launch`,
+/// removes the agent's container right after, and every process in it ends
+/// with it — so a leftover here does not fail the switch, and the record is
+/// forgotten only once that container is removed (`run::switch_out`), never
+/// before: until then, something of the campaign may still be writing in
+/// the copy.
 ///
 /// Nothing is written to [`FILE`]: a campaign cut short measured nothing, and
 /// gate 7 must ask for another rather than read this one (SPEC 4.4).
@@ -2697,28 +2782,115 @@ pub fn end(
     project: &crate::project::Project,
     slot: &crate::slot::Slot,
     engine: std::sync::Arc<dyn crate::engine::Engine>,
-) -> Result<(), MutantsError> {
-    use crate::harness::spawn::{Signal, Spawned, Spawner};
-
+) -> Result<Option<Halt>, MutantsError> {
     let Some(running) = read_running(&project.hq_root, &slot.name)? else {
-        return Ok(());
+        return Ok(None);
     };
-    let spawner = crate::engine::spawn::ContainerSpawner::new(
+    let spawner = spawner_of(project, slot, engine, &running)?;
+    Ok(Some(stop_whole(&spawner, &running)))
+}
+
+/// The stop every path that ends a campaign goes through — [`cancel`], the
+/// deadline in [`read_back`], [`end`], and a campaign whose script has ended
+/// before [`read_back`] forgets it — so that none keeps a copy of its own
+/// (SPEC 4.4, "Le HQ peut annuler une campagne en vol").
+///
+/// The campaign is stopped **whole**: every process in its container that
+/// carries its [`RUN_TAG`](crate::engine::spawn::RUN_TAG) — its log's stem,
+/// which the wrapper sets and every process it starts inherits: the script,
+/// `cargo-mutants`, the builds, the test binaries, at whatever depth. Not by
+/// the pid on file: that is the script's alone, and a script that is told to
+/// end leaves the rest reparented and rewriting the copy in place.
+///
+/// And confirmed: the container is asked again, after the stop, what still
+/// carries the tag. Only [`Halt::Done`] and [`Halt::NotRunning`] mean that
+/// nothing of the campaign runs; a caller forgets its record on nothing
+/// else ([`unstopped_said`]).
+///
+/// A process that clears its own environment is not found by its tag. What
+/// contains such a process is its container.
+pub fn stop_whole(spawner: &crate::engine::spawn::ContainerSpawner, running: &Running) -> Halt {
+    spawner.halt(&running.container, &running.log)
+}
+
+/// What a stop that did not take says — what is left, or why that could not
+/// be told — or `None` when nothing of the campaign can be running, or when
+/// its container is paused (each caller says that its own way).
+pub fn unstopped_said(halt: &Halt) -> Option<String> {
+    let what = match halt {
+        Halt::Done { .. } | Halt::NotRunning(_) | Halt::Paused => return None,
+        Halt::Left(pids) => format!(
+            "the campaign was stopped, but processes carrying its tag are still running in \
+             its container: pid(s) {}",
+            pids.iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
+        Halt::Unknown(why) => format!(
+            "whether anything of the campaign is still running in its container could not be \
+             told: {why}"
+        ),
+    };
+    Some(format!(
+        "{what}. Its record stays filed, so no door into the clean copy of HEAD opens, and \
+         nothing is recorded as stopped; running the same verb again tries the stop again"
+    ))
+}
+
+/// Whether the clean copy of `HEAD` was put back to its commit after a stop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reset {
+    Done,
+    /// It was not, and why.
+    Failed(String),
+}
+
+/// What a stop says of the copy it reset ([`Reset`]).
+pub fn reset_said(reset: &Reset) -> String {
+    match reset {
+        Reset::Done => "the clean copy of HEAD was reset to its commit".to_string(),
+        Reset::Failed(why) => format!(
+            "the clean copy of HEAD could NOT be reset to its commit, and may still hold a \
+             mutated file: {}. Every door into it resets it before working there",
+            crate::text::one_line(why)
+        ),
+    }
+}
+
+/// Put the clean copy back to its commit after a confirmed stop, by the
+/// refresh every door into it already uses ([`crate::exec::refresh`]): a
+/// campaign stopped midway may have left a mutated file in place.
+///
+/// Only once the record is forgotten — the refresh refuses a copy a
+/// campaign owns.
+fn reset_copy(
+    project: &crate::project::Project,
+    slot: &crate::slot::Slot,
+    engine: std::sync::Arc<dyn crate::engine::Engine>,
+) -> Reset {
+    match crate::exec::refresh(project, slot, engine) {
+        Ok(()) => Reset::Done,
+        Err(e) => Reset::Failed(e.to_string()),
+    }
+}
+
+/// The spawner that reaches the campaign `running` describes, in this slot's
+/// agent container.
+fn spawner_of(
+    project: &crate::project::Project,
+    slot: &crate::slot::Slot,
+    engine: std::sync::Arc<dyn crate::engine::Engine>,
+    running: &Running,
+) -> Result<crate::engine::spawn::ContainerSpawner, MutantsError> {
+    Ok(crate::engine::spawn::ContainerSpawner::new(
         engine,
         crate::run::profile_path(project, &slot.name),
         &crate::compose::project_name(&project.session(), &slot.name)
             .map_err(|e| MutantsError::Exec(crate::exec::ExecError::Compose(e)))?,
         crate::compose::AGENT_SERVICE,
     )
-    .identified_by(&running.fingerprint);
-    let _ = spawner.signal(
-        &Spawned {
-            pid: running.pid,
-            container: running.container.clone(),
-        },
-        Signal::Terminate,
-    );
-    forget_running(&project.hq_root, &slot.name)
+    .identified_by(&running.fingerprint))
 }
 
 /// Record the campaign `running` describes as incomplete, from what its log
@@ -2773,8 +2945,9 @@ pub enum Cancelled {
     /// The campaign had already ended, or could not be asked: read back as
     /// any call would, and nothing was cancelled.
     Ended(Progress),
-    /// Stopped, and recorded as incomplete with the survivors it had found.
-    Stopped { survivors: usize },
+    /// Stopped whole, and recorded as incomplete with the survivors it had
+    /// found; `reset` says whether the clean copy was put back.
+    Stopped { survivors: usize, reset: Reset },
 }
 
 /// The HQ calls off the campaign in flight on this slot, because it knows it
@@ -2782,11 +2955,21 @@ pub enum Cancelled {
 /// incomplete with `because` ([`Stopped::Cancelled`]), so that the mission
 /// stays where `nunki mission iterate` or `nunki verify` can take it.
 ///
-/// A campaign that has already ended is read back instead, and its result
-/// kept: calling off a campaign that finished would throw a measurement
-/// away. A **paused** one is refused: its container is frozen, the signal
-/// would not reach it, and forgetting it would leave a campaign nobody
-/// follows rewriting the copy once it is unfrozen.
+/// Stopped whole ([`stop_whole`]), and only once nothing of it is left
+/// running is it recorded, forgotten, and the clean copy reset to its
+/// commit. A stop that did not take, or could not be confirmed, is an error
+/// that says what is left or why it could not tell: the record stays filed,
+/// so no door into the copy opens, nothing is recorded as stopped, and the
+/// same verb tries again.
+///
+/// A campaign whose script has already ended is read back instead
+/// ([`read_back`], which first stops and confirms what the script left
+/// carrying the tag), and its result kept: calling off a campaign that
+/// finished would throw a measurement away. What `read_back` still holds as
+/// in flight — a leftover, an answer nobody gave — is an error, as a stop
+/// that did not take is. A **paused** one is refused: its container is
+/// frozen, the stop would not reach it, and forgetting it would leave a
+/// campaign nobody follows rewriting the copy once it is unfrozen.
 pub fn cancel(
     project: &crate::project::Project,
     slot: &crate::slot::Slot,
@@ -2794,7 +2977,7 @@ pub fn cancel(
     dir: &Path,
     because: &str,
 ) -> Result<Cancelled, MutantsError> {
-    use crate::harness::spawn::{Presence, Signal, Spawned, Spawner};
+    use crate::harness::spawn::{Presence, Spawned, Spawner};
 
     let because = because.trim();
     if because.is_empty() {
@@ -2803,14 +2986,7 @@ pub fn cancel(
     let Some(running) = read_running(&project.hq_root, &slot.name)? else {
         return Ok(Cancelled::Nothing);
     };
-    let spawner = crate::engine::spawn::ContainerSpawner::new(
-        engine.clone(),
-        crate::run::profile_path(project, &slot.name),
-        &crate::compose::project_name(&project.session(), &slot.name)
-            .map_err(|e| MutantsError::Exec(crate::exec::ExecError::Compose(e)))?,
-        crate::compose::AGENT_SERVICE,
-    )
-    .identified_by(&running.fingerprint);
+    let spawner = spawner_of(project, slot, engine.clone(), &running)?;
     let spawned = Spawned {
         pid: running.pid,
         container: running.container.clone(),
@@ -2821,7 +2997,13 @@ pub fn cancel(
     {
         Presence::Running => {
             let text = std::fs::read_to_string(&running.log).unwrap_or_default();
-            let _ = spawner.signal(&spawned, Signal::Terminate);
+            let halt = stop_whole(&spawner, &running);
+            if halt == Halt::Paused {
+                return Err(MutantsError::Paused);
+            }
+            if let Some(why) = unstopped_said(&halt) {
+                return Err(MutantsError::NotStopped(why));
+            }
             let survivors = record_stopped(
                 dir,
                 &running,
@@ -2831,10 +3013,28 @@ pub fn cancel(
                 },
             )?;
             forget_running(&project.hq_root, &slot.name)?;
-            Ok(Cancelled::Stopped { survivors })
+            Ok(Cancelled::Stopped {
+                survivors,
+                reset: reset_copy(project, slot, engine),
+            })
         }
         Presence::Paused => Err(MutantsError::Paused),
+        // Not running, as far as the first question goes: read back, which
+        // stops whatever an ended script left carrying the tag before it
+        // forgets anything. A campaign it still holds as in flight was not
+        // called off, and is never said to have ended.
         _ => match read_back(project, slot, engine, dir)? {
+            Some(Progress::Running {
+                unstopped: Some(why),
+                ..
+            }) => Err(MutantsError::NotStopped(why)),
+            Some(Progress::Running { .. }) => Err(MutantsError::NotStopped(
+                "the campaign is still in flight — frozen, or found running on a second \
+                 look — and nothing was called off. Its record stays filed, so no door into \
+                 the clean copy of HEAD opens, and nothing is recorded as stopped; running \
+                 the same verb again tries again"
+                    .to_string(),
+            )),
             Some(progress) => Ok(Cancelled::Ended(progress)),
             None => Ok(Cancelled::Nothing),
         },
@@ -2849,11 +3049,12 @@ pub fn cancelled_said(cancelled: &Cancelled) -> String {
             "the campaign had already ended, and nothing was called off: {}",
             crate::monitor::campaign_line(progress)
         ),
-        Cancelled::Stopped { survivors } => format!(
-            "campaign called off — {survivors} survivor(s) kept in {FILE} as from an \
-             incomplete campaign, and the reason written to FOLLOWUP_HQ.md. `nunki mission \
-             iterate --because` sends them to the coder; `nunki mission mutants --again` runs a \
-             new campaign"
+        Cancelled::Stopped { survivors, reset } => format!(
+            "campaign called off — nothing of it is left running, {survivors} survivor(s) \
+             kept in {FILE} as from an incomplete campaign, and the reason written to \
+             FOLLOWUP_HQ.md; {}. `nunki mission iterate --because` sends them to the coder; \
+             `nunki mission mutants --again` runs a new campaign",
+            reset_said(reset)
         ),
     }
 }
@@ -2869,7 +3070,7 @@ pub fn cancel_and_say(
     because: &str,
 ) -> Result<Cancelled, MutantsError> {
     let cancelled = cancel(project, slot, engine, &paths.dir, because)?;
-    if let Cancelled::Stopped { survivors } = &cancelled {
+    if let Cancelled::Stopped { survivors, .. } = &cancelled {
         crate::followup::campaign_cancelled(&paths.followup, who, because, *survivors)?;
     }
     Ok(cancelled)

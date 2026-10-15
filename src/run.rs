@@ -424,6 +424,12 @@ pub struct Launched {
 ///
 /// Its own function so that the decision can be played without lifting a
 /// container: `launch` below is only ever exercised against a real engine.
+///
+/// The campaign is stopped whole ([`crate::mutants::end`]), and its record
+/// is **kept**: whatever the stop left — or could not confirm — ends when
+/// [`switch_out`] removes the container, and only then is the record
+/// forgotten. So a leftover does not fail the switch, and no door into the
+/// copy opens while anything of the campaign may still be running.
 pub fn end_campaign_before_switching(
     project: &Project,
     slot: &Slot,
@@ -440,6 +446,35 @@ pub fn end_campaign_before_switching(
         }
         _ => Ok(None),
     }
+}
+
+/// Step 2 of [`launch`], the profile switch: stop and remove the agent and
+/// its sidecar ([`SERVICES`]), read from the file that is up — and, once the
+/// agent's container is removed, forget the campaign that lived in it.
+///
+/// In that order and no other. A campaign the stop of
+/// [`end_campaign_before_switching`] did not end whole is still running
+/// until the container goes, and every process in it goes with it; its
+/// record is what keeps every door into the copy shut until then. If the
+/// removal fails, the record stays.
+///
+/// Without a profile file nothing is removed, and nothing is forgotten: a
+/// campaign still filed then is read back by the next caller, as any is.
+pub fn switch_out(
+    engine: &dyn Engine,
+    project: &Project,
+    slot: &Slot,
+    file: &Path,
+    compose_project: &str,
+) -> Result<(), RunError> {
+    // `stop` and never `down`: `down` would take the project's services
+    // with it.
+    if file.is_file() {
+        engine.stop(file, compose_project, &SERVICES)?;
+        crate::mutants::forget_running(&project.hq_root, &slot.name)
+            .map_err(|e| RunError::Launch(e.to_string()))?;
+    }
+    Ok(())
 }
 
 /// Lift the role's profile and launch its run, on a slot whose lock the
@@ -537,11 +572,9 @@ pub fn launch(l: &Launching) -> Result<Launched, RunError> {
     let campaign_ended = end_campaign_before_switching(project, slot, engine.clone(), &paths.dir)?;
 
     // Step 2. The switch, read from the file that is up — the one that names
-    // the services to remove. `stop` and never `down`: `down` would take the
-    // project's services with it.
-    if file.is_file() {
-        engine.stop(&file, &compose_project, &SERVICES)?;
-    }
+    // the services to remove — and the campaign ended above forgotten only
+    // once its container is gone.
+    switch_out(engine.as_ref(), project, slot, &file, &compose_project)?;
 
     std::fs::write(&file, crate::compose::generate(&plan, engine.dialect())?)
         .map_err(|e| RunError::Io(file.clone(), e))?;
