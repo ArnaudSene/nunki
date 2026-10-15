@@ -2056,7 +2056,9 @@ dernier lot. La première rouge arrête tout.
    donné des comptes par fichier qui font son total, sous des chemins que
    `nunki` lui avait confiés ; les fichiers changés ont pu être listés, et
    chaque fichier compté qui n'a pas changé est touché et présent à `HEAD` ;
-   le `mutation.sh` de la stack et la version de son outil sont inchangés ;
+   le `mutation.sh` et la version de l'outil de chaque stack que la campagne
+   appelle — celles qui portent un chemin touché — sont inchangés ; une stack
+   que la branche n'a pas touchée n'est pas appelée, et ne compte pas ;
    `--again` n'a pas été demandé. Sinon la campagne est complète, et sa raison
    est écrite dans `MUTANTS.json`.
 
@@ -2093,8 +2095,11 @@ dernier lot. La première rouge arrête tout.
    **Le contrat de `mutation.sh` s'enrichit**, tout en restant facultatif
    pour une stack qui ne veut pas de chaîne :
    - une ligne `# nunki-tool-version: <commande>`, que `nunki` lance dans la
-     copie propre pour lire la version de l'outil (sans elle, chaque
-     campagne est complète) ;
+     copie propre, là où la campagne lance le script de la stack — son propre
+     dossier quand le projet en porte plusieurs —, pour lire la version de
+     l'outil (sans elle, chaque campagne est complète). Une version illisible
+     rend la campagne complète, et sa raison nomme la stack, la commande et
+     ce qu'elle a répondu ;
    - des lignes par fichier avant la ligne de fin,
      `{"measured":"<chemin>","tried":N,"found":M}`, annoncées par
      `"by_file":true` sur la ligne de fin, qui font ses totaux ;
@@ -2148,6 +2153,12 @@ dernier lot. La première rouge arrête tout.
    soit à la portée de `nunki` : sans campagne, ou avec une campagne sur un
    autre contenu, il en lance une et regarde de nouveau au tour suivant.
    `nunki mission mutants` reste, pour l'humain qui en veut une à la main.
+   Sans option, il en lance une dès qu'aucune n'est en vol : une boucle qui
+   l'interroge pour attendre la fin en relance une à chaque fin. Pour suivre
+   une campagne sans risquer d'en lancer une, `nunki mission mutants <id>
+   --status` ne fait que lire le dossier de la campagne en vol et son
+   journal — il ne demande rien au conteneur et ne relit rien — puis les
+   campagnes enregistrées ; `nunki mission status` en donne la même ligne.
    **Seulement si elle est seule** : une porte 6 injouable à côté, et
    l'heure de mutation serait dépensée devant un mur que rien ne bouge.
 
