@@ -428,7 +428,12 @@ the reason in `MUTANTS.json`:
 - the stack's `mutation.sh` and its tool's version are the ones it ran with —
   read through the script's `# nunki-tool-version: <command>` line, which
   every shipped `mutation.sh` carries; a script without it runs full
-  campaigns only;
+  campaigns only. With several stacks, only those the campaign calls count —
+  the ones owning a touched path — and each stack's command runs where its
+  script does, in the stack's own directory. A stack the branch did not
+  touch neither counts nor can make the campaign full. When a version
+  cannot be read, the reason in `MUTANTS.json` names the stack, the command
+  and what it answered;
 - it was not asked with `nunki mission mutants --again`.
 
 **Per-file counts.** Before its last line, `mutation.sh` prints one line per
@@ -527,6 +532,16 @@ either: gate 7 stops the flow for the HQ, which chooses —
 - or send the survivors found so far to the coder with `nunki mission
   iterate <mission> --because <why>`: a volet, as a red gate 7 opens one,
   with the reason in `FOLLOWUP_HQ.md`.
+
+**Following a campaign.** `nunki mission mutants <mission>` with no flag
+starts a campaign whenever none is in flight, so a loop that polls it to wait
+for the end starts a new one each time the last one ends.
+`nunki mission mutants <mission> --status` only reads: it says the campaign
+in flight in the mission's slot — since when, how far into its deadline,
+full or partial, how many lines its log holds — or that none is, then the
+campaigns on file. It asks the container nothing and reads nothing back, so
+what it says is the record's word until a reading asks; `nunki mission
+status` says the same line first.
 
 `nunki mission mutants <mission> --cancel --because <why>` calls off the
 campaign in flight, for a campaign the HQ knows is wasted: it is stopped as

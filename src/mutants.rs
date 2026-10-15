@@ -466,11 +466,11 @@ pub struct Measured {
 pub struct Chain {
     #[serde(default)]
     pub scope: Scope,
-    /// A digest of what the campaign ran with — each stack's `mutation.sh`
-    /// and its tool's version ([`tooling`]) — or `None` when that could not
-    /// be read. A later campaign continues this one only when both are known
-    /// and equal: the fingerprint covers the touched files, and says nothing
-    /// of a script or a tool that changed under them.
+    /// A digest of what the campaign ran with — the `mutation.sh` and the
+    /// tool's version of each stack it called ([`tooling`]) — or `None` when
+    /// that could not be read. A later campaign continues this one only when
+    /// both are known and equal: the fingerprint covers the touched files,
+    /// and says nothing of a script or a tool that changed under them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tooling: Option<String>,
     /// The earlier campaigns of the chain, oldest first, each as it was
@@ -1206,6 +1206,66 @@ pub fn forget_running(hq_root: &Path, slot: &str) -> Result<(), MutantsError> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(MutantsError::Io(file, e)),
     }
+}
+
+/// A campaign in flight, as its record and its log say: what
+/// `nunki mission mutants <id> --status` and `nunki mission status` print.
+///
+/// Read without asking the container anything and without reading the
+/// campaign back, so that following a campaign can never start one. The
+/// bare `nunki mission mutants <id>` starts a campaign whenever none is in
+/// flight: a loop polling it to wait for the end started a new full one
+/// minutes after the previous one crashed (#139). What this says is the
+/// record's word — a campaign that died is still in flight here until a
+/// reading asks the container, which the monitor and the bare verb do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InFlight {
+    pub fingerprint: String,
+    pub started_at: String,
+    pub deadline_minutes: u32,
+    pub scope: Scope,
+    /// The lines its log holds so far, or why the log could not be read.
+    pub lines: Result<usize, String>,
+}
+
+/// The campaign the slot's record says is in flight, or `None` when there
+/// is no record.
+pub fn in_flight(hq_root: &Path, slot: &str) -> Result<Option<InFlight>, MutantsError> {
+    let Some(running) = read_running(hq_root, slot)? else {
+        return Ok(None);
+    };
+    let lines = std::fs::read_to_string(&running.log)
+        .map(|text| text.lines().count())
+        .map_err(|e| format!("{}: {e}", running.log.display()));
+    Ok(Some(InFlight {
+        fingerprint: running.fingerprint,
+        started_at: running.started_at,
+        deadline_minutes: running.deadline_minutes,
+        scope: running.chain.scope,
+        lines,
+    }))
+}
+
+/// One line for a campaign in flight: which, since when, how far into its
+/// deadline, full or partial, and how much its log holds.
+pub fn in_flight_said(campaign: &InFlight) -> String {
+    format!(
+        "{} in flight since {}, {} of {} minute(s), {} — {}",
+        crate::text::one_line(
+            campaign
+                .fingerprint
+                .get(..7)
+                .unwrap_or(&campaign.fingerprint)
+        ),
+        crate::text::one_line(&campaign.started_at),
+        minutes_since(&campaign.started_at),
+        campaign.deadline_minutes,
+        campaign.scope.said(),
+        match &campaign.lines {
+            Ok(lines) => format!("{lines} line(s) in its log so far"),
+            Err(why) => format!("its log could not be read: {}", crate::text::one_line(why)),
+        }
+    )
 }
 
 /// The survivors a campaign printed: one JSON object per line, and anything
@@ -2167,7 +2227,9 @@ pub fn not_final(campaign: &Campaign) -> Option<String> {
 ///   file it counted that did not change is one the branch touches at
 ///   `HEAD`, there to be counted;
 /// - it ran with the same `mutation.sh` and tool as this one will: both
-///   digests known ([`tooling`]) and equal.
+///   digests known ([`tooling`]) and equal. `tooling` is that digest, or why
+///   it could not be read — the stack and what its command said, which the
+///   full campaign's reason then carries.
 ///
 /// **Fails closed**: a condition that cannot be checked is one that does not
 /// hold. A partial campaign assumes that a mutant measured earlier in a file
@@ -2178,7 +2240,7 @@ pub fn scope(
     rigor: crate::mission::Rigor,
     replay: Replay,
     previous: Option<&Campaign>,
-    tooling: Option<&str>,
+    tooling: Result<&str, &str>,
     fork: &str,
     owed: impl Fn(&Campaign) -> Option<String>,
     is_ancestor: impl Fn(&str) -> bool,
@@ -2246,19 +2308,18 @@ pub fn scope(
         ));
     }
     match (tooling, previous.chain.tooling.as_deref()) {
-        (None, _) => full(
-            "what this campaign runs with could not be read: a stack's mutation.sh, or its \
-             tool's version"
-                .to_string(),
-        ),
-        (Some(_), None) => full(format!(
+        (Err(why), _) => full(format!(
+            "what this campaign runs with could not be read: {}",
+            crate::text::one_line(why)
+        )),
+        (Ok(_), None) => full(format!(
             "the previous campaign, at {at}, recorded nothing of what it ran with"
         )),
-        (Some(now), Some(then)) if now != then => full(format!(
+        (Ok(now), Some(then)) if now != then => full(format!(
             "a stack's mutation.sh or its tool's version changed since the previous \
              campaign, at {at}"
         )),
-        (Some(_), Some(_)) => Scope::Partial {
+        (Ok(_), Some(_)) => Scope::Partial {
             since: previous.head.clone(),
         },
     }
@@ -2276,7 +2337,9 @@ pub fn chains(rigor: crate::mission::Rigor) -> bool {
 }
 
 /// The line of a stack's `mutation.sh` that says how to read its tool's
-/// version: `# nunki-tool-version: <command>`, run in the clean copy.
+/// version: `# nunki-tool-version: <command>`, run in the clean copy where
+/// the campaign runs that stack's script ([`runs_in`]) — its own directory,
+/// when the project carries several stacks.
 ///
 /// The stack's to say, since `nunki` knows no mutation tool (SPEC 4.4): a
 /// script that says nothing — a project's own, written before this — runs
@@ -2312,19 +2375,41 @@ pub fn tooling_manifest(stacks: &[(String, String, Option<String>)]) -> Option<S
     Some(manifest)
 }
 
-/// The digest of what a campaign about to run will run with: each judged
-/// stack's `mutation.sh` and its tool's version, read in the clean copy
-/// through the slot's container ([`tooling_manifest`]). `None` when any of
-/// it cannot be read — a script that names no version command, a command
-/// that fails or says nothing.
+/// The digest of what a campaign about to run will run with: the
+/// `mutation.sh` of each stack it calls ([`called_stacks`]) and that
+/// stack's tool version, read in the clean copy through the slot's
+/// container ([`tooling_manifest`]).
+///
+/// The inner `Err` says why it could not be read, naming the stack: a script
+/// that cannot be read or names no version command, or a command that fails
+/// or says nothing. A campaign whose tooling cannot be read is full
+/// ([`scope`]), and that reason is what it records.
+///
+/// Only the stacks the campaign calls count (#139). A stack the branch did
+/// not touch is not called by [`several_campaigns`], so its tool is not what
+/// the campaign runs with — and when its version could not be read, every
+/// campaign of the project was full, on every stack. Measured on a project
+/// with a `rust` stack and a `next: frontend` one, on a branch that touched
+/// no file under `frontend/`: `pnpm exec stryker --version` failed, and a
+/// campaign after a volet that only added tests ran full, 514 mutants for
+/// about 6.5 hours.
+///
+/// Each version command runs where the campaign runs that stack's script
+/// ([`runs_in`]): run at the copy's root, the `next` stack's command failed
+/// with `ERR_PNPM_RECURSIVE_EXEC_NO_PACKAGE` whatever was installed.
+///
+/// The stacks counted are those owning a **touched** path, not only the
+/// paths a partial campaign is handed: which campaign runs depends on this
+/// digest, and the touched set does not.
 pub fn tooling(
     project: &crate::project::Project,
     slot: &crate::slot::Slot,
     engine: std::sync::Arc<dyn crate::engine::Engine>,
     judged: &[crate::run::Judged],
-) -> Result<Option<String>, MutantsError> {
+    touched: &[String],
+) -> Result<Result<String, String>, MutantsError> {
     let mut stacks = Vec::new();
-    for j in judged {
+    for j in called_stacks(judged, touched) {
         let run = |argv: &[&str]| {
             crate::exec::run(
                 project,
@@ -2334,22 +2419,82 @@ pub fn tooling(
                 crate::exec::On::Proof,
             )
         };
-        let script = run(&["cat", &format!("{}/{SCRIPT}", j.scripts_at)])?;
+        let name = &j.stack.name;
+        let at = format!("{}/{SCRIPT}", j.scripts_at);
+        let script = run(&["cat", &at])?;
         if !script.ok() {
-            return Ok(None);
+            return Ok(Err(format!(
+                "the `{name}` stack's {at} could not be read ({})",
+                exec_said(&script)
+            )));
         }
-        let version = match tool_version_command(&script.stdout) {
-            Some(command) => {
-                let said = run(&["sh", "-c", command])?;
-                said.ok().then_some(said.stdout)
-            }
-            None => None,
+        let Some(command) = tool_version_command(&script.stdout) else {
+            return Ok(Err(format!(
+                "the `{name}` stack's {SCRIPT} names no `{TOOL_VERSION_MARK}` command"
+            )));
         };
-        stacks.push((j.stack.name.clone(), script.stdout, version));
+        let dir = runs_in(judged, j);
+        let said = run(&[
+            "sh",
+            "-c",
+            &format!("cd {} && {command}", crate::exec::quote(&dir)),
+        ])?;
+        if !said.ok() || said.stdout.trim().is_empty() {
+            return Ok(Err(format!(
+                "the `{name}` stack's tool version could not be read: `{command}`, run in \
+                 `{dir}`, {}",
+                exec_said(&said)
+            )));
+        }
+        stacks.push((name.clone(), script.stdout, Some(said.stdout)));
     }
     match tooling_manifest(&stacks) {
-        Some(manifest) => Ok(Some(hash_object(&slot.tree, &manifest)?)),
-        None => Ok(None),
+        Some(manifest) => Ok(Ok(hash_object(&slot.tree, &manifest)?)),
+        // Every version was checked above; kept rather than unwrapped.
+        None => Ok(Err("a stack's tool version said nothing".to_string())),
+    }
+}
+
+/// What a command run in the container said, for a reason on one line: its
+/// exit status and the first of its error output, or that it printed
+/// nothing.
+fn exec_said(out: &crate::engine::ExecOutput) -> String {
+    let stderr = crate::text::brief(&out.stderr, 200);
+    match (out.ok(), stderr.is_empty()) {
+        (true, _) => "it exited 0 and printed nothing".to_string(),
+        (false, true) => format!("it exited {}, with nothing on stderr", out.status),
+        (false, false) => format!("it exited {}: {stderr}", out.status),
+    }
+}
+
+/// The stacks a campaign over `touched` calls ([`command`]): a project's one
+/// stack, whatever was touched; of several, each that owns a touched path —
+/// [`several_campaigns`] does not call the others.
+pub fn called_stacks<'a>(
+    judged: &'a [crate::run::Judged],
+    touched: &[String],
+) -> Vec<&'a crate::run::Judged> {
+    match judged {
+        [one] => vec![one],
+        several => several
+            .iter()
+            .filter(|j| {
+                touched
+                    .iter()
+                    .any(|path| owner(several, path).is_some_and(|o| o.stack == j.stack))
+            })
+            .collect(),
+    }
+}
+
+/// Where a campaign runs `j`'s script, relative to the clean copy: its root
+/// for a project's one stack ([`command`]), the stack's own directory among
+/// several ([`several_campaigns`]).
+pub fn runs_in(judged: &[crate::run::Judged], j: &crate::run::Judged) -> String {
+    match judged {
+        [_] => ".".to_string(),
+        _ if j.stack.dir.is_empty() => ".".to_string(),
+        _ => j.stack.dir.clone(),
     }
 }
 
@@ -3183,16 +3328,19 @@ pub fn campaign(
     // Full or partial (SPEC 4.4, the chain). The previous campaign is judged
     // as gate 7 would judge it now, the tests its outcomes name included.
     let tooling = if chains(asked.rigor) {
-        tooling(project, slot, engine.clone(), &judged)?
+        tooling(project, slot, engine.clone(), &judged, &touched)?
     } else {
-        None
+        Err(format!(
+            "not read: a `{}` mission chains no campaign",
+            asked.rigor
+        ))
     };
     let coders = read_triage(dir)?;
     let scope = scope(
         asked.rigor,
         asked.replay,
         read(dir)?.as_ref(),
-        tooling.as_deref(),
+        tooling.as_deref().map_err(String::as_str),
         &fork,
         |previous| {
             owed(previous, &coders, asked.rigor, asked.threshold)
@@ -3243,7 +3391,7 @@ pub fn campaign(
             deadline_minutes: asked.deadline_minutes,
             chain: Chain {
                 scope: scope.clone(),
-                tooling,
+                tooling: tooling.ok(),
                 earlier: Vec::new(),
                 ran: None,
                 fork: Some(fork.clone()),
