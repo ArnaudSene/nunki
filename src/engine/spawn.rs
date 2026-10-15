@@ -58,18 +58,61 @@ const REAPED: &str = "nunki-reaped";
 /// it cannot read — another user's, or a zombie, whose environment is empty
 /// — is not one of the run's.
 pub fn reap_script(run: &str) -> String {
-    let wanted = crate::exec::quote(&format!("{RUN_TAG}={run}"));
     format!(
-        "mine() {{ for p in /proc/[0-9]*; do \
-         if tr '\\0' '\\n' < \"$p/environ\" 2>/dev/null | grep -qxF -- {wanted}; then \
-         echo \"${{p#/proc/}}\"; fi; done; }}\n\
+        "{}\
          pids=$(mine)\n\
          if [ -n \"$pids\" ]; then kill -TERM $pids 2>/dev/null; fi\n\
          for i in 1 2 3; do [ -z \"$(mine)\" ] && break; sleep 1; done\n\
          for i in 1 2 3; do left=$(mine); [ -z \"$left\" ] && break; \
          kill -KILL $left 2>/dev/null; sleep 1; done\n\
-         echo {REAPED} $pids\n"
+         echo {REAPED} $pids\n",
+        mine(run)
     )
+}
+
+/// What [`left_script`] prints once it has looked, followed by what it
+/// found: a word, so that a check that did not run is never read as one that
+/// found nothing.
+const LEFT: &str = "nunki-left";
+
+/// The shell function both scripts find a run's processes with: `mine`
+/// prints the pid of every process whose environment carries
+/// `NUNKI_RUN=<run>`, one per line.
+fn mine(run: &str) -> String {
+    let wanted = crate::exec::quote(&format!("{RUN_TAG}={run}"));
+    format!(
+        "mine() {{ for p in /proc/[0-9]*; do \
+         if tr '\\0' '\\n' < \"$p/environ\" 2>/dev/null | grep -qxF -- {wanted}; then \
+         echo \"${{p#/proc/}}\"; fi; done; }}\n"
+    )
+}
+
+/// The shell that says what still carries `NUNKI_RUN=<run>`, and stops
+/// nothing: [`LEFT`] and the pids, on one line. It reads the way
+/// [`reap_script`] reads, so a zombie — whose environment is empty — is not
+/// counted: it runs nothing, and it is gone once its parent reaps it.
+pub fn left_script(run: &str) -> String {
+    format!("{}echo {LEFT} $(mine)\n", mine(run))
+}
+
+/// What [`ContainerSpawner::halt`] found once it had stopped a run by its
+/// tag and asked again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Halt {
+    /// Nothing carrying the tag is left. `signalled` is what the stop found
+    /// to signal, which may be nothing.
+    Done { signalled: Vec<u32> },
+    /// The container is not running — gone, or exited — so nothing in it
+    /// can be, and nothing was asked of it.
+    NotRunning(String),
+    /// The container is frozen: the engine refuses to exec into one, so
+    /// nothing could be stopped, and nothing was.
+    Paused,
+    /// Still carrying the tag after the stop: these pids.
+    Left(Vec<u32>),
+    /// Whether anything is left could not be told, and why: the engine did
+    /// not answer, or a script did not run. Never read as "nothing left".
+    Unknown(String),
 }
 
 pub struct ContainerSpawner {
@@ -152,6 +195,74 @@ impl ContainerSpawner {
                 .filter_map(|pid| pid.parse().ok())
                 .collect(),
         ))
+    }
+
+    /// Stop every process in the container carrying the [`RUN_TAG`] of the
+    /// run whose log is `log` — whatever started it, at whatever depth —
+    /// and then ask the container, apart from the stop, what still carries
+    /// it ([`left_script`]).
+    ///
+    /// By the tag and never by a pid: a recorded pid is one process, and a
+    /// script told to end leaves its children reparented and running. The
+    /// stop is [`reap_script`]'s, `TERM` then `KILL`.
+    ///
+    /// Asked again because a stop that was sent is not a stop that took: a
+    /// process can ignore `TERM`, outlast the rounds of `KILL`, or have been
+    /// started meanwhile. And every step that could not be put is said as
+    /// such ([`Halt::Unknown`]), never as "nothing left".
+    ///
+    /// Beside [`Spawner::signal`] rather than in it: that one is what stops a
+    /// harness run — `nunki mission stop --now`, the emergency brake — and it
+    /// keeps doing exactly what it did.
+    pub fn halt(&self, container: &str, log: &Path) -> Halt {
+        match self.engine.liveness(container) {
+            Ok(Liveness::Running) => {}
+            Ok(Liveness::Paused) => return Halt::Paused,
+            Ok(Liveness::Exited(code)) => {
+                return Halt::NotRunning(format!("container {} exited ({code})", short(container)));
+            }
+            Ok(Liveness::Gone) => {
+                return Halt::NotRunning(format!(
+                    "the engine no longer knows container {}",
+                    short(container)
+                ));
+            }
+            Err(e) => return Halt::Unknown(format!("the engine did not answer: {e}")),
+        }
+        let run = Self::run_of(log);
+        let signalled = match self.said(&reap_script(&run), REAPED) {
+            Ok(pids) => pids,
+            Err(why) => return Halt::Unknown(format!("the stop {why}")),
+        };
+        match self.said(&left_script(&run), LEFT) {
+            Ok(left) if left.is_empty() => Halt::Done { signalled },
+            Ok(left) => Halt::Left(left),
+            Err(why) => Halt::Unknown(format!("the check after the stop {why}")),
+        }
+    }
+
+    /// Run `script` in the container and read the pids it printed after
+    /// `word`, or say why that could not be done.
+    fn said(&self, script: &str, word: &str) -> Result<Vec<u32>, String> {
+        let out = self
+            .in_container(&["sh", "-c", script])
+            .map_err(|e| format!("could not be put: the engine did not answer: {e}"))?;
+        let Some(pids) = out
+            .stdout
+            .lines()
+            .find_map(|line| line.trim().strip_prefix(word))
+        else {
+            let said = out.stderr.trim();
+            return Err(if said.is_empty() {
+                format!("did not run in the container ({})", out.status)
+            } else {
+                format!("did not run in the container ({}): {said}", out.status)
+            });
+        };
+        Ok(pids
+            .split_whitespace()
+            .filter_map(|pid| pid.parse().ok())
+            .collect())
     }
 
     /// The host-side command that runs `cmd` in the container.

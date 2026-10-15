@@ -2569,6 +2569,17 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                 return match nunki::mutants::cancel_and_say(
                     project, &slot, engine, &paths, &who, why,
                 ) {
+                    // Called off, but the copy not put back: said on stderr,
+                    // and not a success.
+                    Ok(
+                        cancelled @ nunki::mutants::Cancelled::Stopped {
+                            reset: nunki::mutants::Reset::Failed(_),
+                            ..
+                        },
+                    ) => {
+                        eprintln!("nunki: {}", nunki::mutants::cancelled_said(&cancelled));
+                        ExitCode::FAILURE
+                    }
                     Ok(cancelled) => {
                         println!("{}", nunki::mutants::cancelled_said(&cancelled));
                         ExitCode::SUCCESS
@@ -2648,8 +2659,16 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                                 _ => String::new(),
                             }
                         ),
-                        Progress::Running { started_at, lines } => {
-                            println!("running since {started_at} — {lines} line(s) so far")
+                        Progress::Running {
+                            started_at,
+                            lines,
+                            unstopped,
+                        } => {
+                            println!("running since {started_at} — {lines} line(s) so far");
+                            if let Some(why) = unstopped {
+                                eprintln!("nunki: past its deadline, and not stopped: {why}");
+                                return ExitCode::FAILURE;
+                            }
                         }
                         Progress::Finished { survivors, chain } => {
                             println!("{}", nunki::mutants::ended(survivors));
@@ -2657,13 +2676,18 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                                 println!("campaign  {said}");
                             }
                         }
-                        Progress::Overrun { minutes, survivors } => {
+                        Progress::Overrun {
+                            minutes,
+                            survivors,
+                            reset,
+                        } => {
                             eprintln!(
-                                "nunki: {}",
+                                "nunki: {}; {}",
                                 nunki::mutants::stopped_said(
                                     &nunki::mutants::Stopped::Deadline { minutes },
                                     survivors
-                                )
+                                ),
+                                nunki::mutants::reset_said(&reset)
                             );
                             return ExitCode::FAILURE;
                         }

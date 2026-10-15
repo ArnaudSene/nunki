@@ -1191,3 +1191,187 @@ fn a_leftover_that_ignores_term_is_killed() {
     );
     assert!(!alive(pid), "a process that ignores TERM outlived its run");
 }
+
+/// What [`ContainerSpawner::halt`] answers, read from what the engine says
+/// of the container and from what the two scripts print — and never a guess.
+///
+/// A frozen, exited or gone container is answered from the engine alone,
+/// and nothing is asked of it. A running one is stopped by the run's tag
+/// (its log's stem) and then asked, apart, what still carries it. A script
+/// that did not run is never read as one that found nothing.
+#[test]
+fn a_halt_says_what_the_container_said_and_never_guesses() {
+    use nunki::engine::spawn::{ContainerSpawner, Halt, left_script, reap_script};
+    use std::sync::Arc;
+
+    let log = Path::new("/hq/runs/mutants-abc1234.log");
+    let halt = |fake: FakeEngine| {
+        let fake = Arc::new(fake);
+        let halt = ContainerSpawner::new(
+            fake.clone(),
+            file(),
+            "nunki-demo",
+            nunki::compose::AGENT_SERVICE,
+        )
+        .halt("cafe1234abcdef", log);
+        (halt, fake)
+    };
+    let says = |stdout: &str| ExecOutput {
+        status: 0,
+        stdout: format!("{stdout}\n"),
+        stderr: String::new(),
+    };
+    let execs = |fake: &FakeEngine| -> Vec<Vec<String>> {
+        fake.calls()
+            .into_iter()
+            .filter_map(|call| match call {
+                Call::Exec(_, _, argv) => Some(argv),
+                _ => None,
+            })
+            .collect()
+    };
+
+    // Answered from the engine alone.
+    let (paused, fake) =
+        halt(FakeEngine::default().with_liveness("cafe1234abcdef", Liveness::Paused));
+    assert_eq!(paused, Halt::Paused);
+    assert!(
+        execs(&fake).is_empty(),
+        "a paused container was asked something"
+    );
+    let (exited, fake) =
+        halt(FakeEngine::default().with_liveness("cafe1234abcdef", Liveness::Exited(137)));
+    assert_eq!(
+        exited,
+        Halt::NotRunning("container cafe1234abcd exited (137)".into())
+    );
+    assert!(execs(&fake).is_empty());
+    let (gone, fake) = halt(FakeEngine::default());
+    assert_eq!(
+        gone,
+        Halt::NotRunning("the engine no longer knows container cafe1234abcd".into())
+    );
+    assert!(execs(&fake).is_empty());
+
+    let running = || FakeEngine::default().with_liveness("cafe1234abcdef", Liveness::Running);
+
+    // Stopped by the tag, asked again, and nothing left.
+    let (done, fake) = halt(
+        running()
+            .with_exec_when("nunki-reaped", says("nunki-reaped 7 9"))
+            .with_exec_when("nunki-left", says("nunki-left")),
+    );
+    assert_eq!(
+        done,
+        Halt::Done {
+            signalled: vec![7, 9]
+        }
+    );
+    let execs_done = execs(&fake);
+    assert_eq!(
+        execs_done,
+        vec![
+            vec![
+                "sh".to_string(),
+                "-c".into(),
+                reap_script("mutants-abc1234")
+            ],
+            vec![
+                "sh".to_string(),
+                "-c".into(),
+                left_script("mutants-abc1234")
+            ],
+        ]
+    );
+
+    // Something left after the stop: named.
+    let (left, _) = halt(
+        running()
+            .with_exec_when("nunki-reaped", says("nunki-reaped 7 9"))
+            .with_exec_when("nunki-left", says("nunki-left 9 12")),
+    );
+    assert_eq!(left, Halt::Left(vec![9, 12]));
+
+    // The stop did not run: nothing asked after it, and said with what the
+    // container said.
+    let (unknown, fake) = halt(running().with_exec_when(
+        "nunki-reaped",
+        ExecOutput {
+            status: 126,
+            stdout: String::new(),
+            stderr: "exec failed\n".into(),
+        },
+    ));
+    assert_eq!(
+        unknown,
+        Halt::Unknown("the stop did not run in the container (126): exec failed".into())
+    );
+    assert_eq!(
+        execs(&fake).len(),
+        1,
+        "checked after a stop that did not run"
+    );
+
+    // The check did not run, and said nothing: the status is all there is.
+    let (unknown, _) = halt(
+        running()
+            .with_exec_when("nunki-reaped", says("nunki-reaped"))
+            .with_exec_when(
+                "nunki-left",
+                ExecOutput {
+                    status: 137,
+                    stdout: "chatter\n".into(),
+                    stderr: String::new(),
+                },
+            ),
+    );
+    assert_eq!(
+        unknown,
+        Halt::Unknown("the check after the stop did not run in the container (137)".into())
+    );
+}
+
+/// The check after a stop, run for real: it names what carries the run's
+/// tag, and nothing else — not another run's process, not an untagged one.
+#[cfg(target_os = "linux")]
+#[test]
+fn what_is_left_of_a_run_is_named_by_its_tag() {
+    use std::process::{Command, Stdio};
+
+    let run = format!("left-{}", std::process::id());
+    let leave = |tag: Option<&str>| -> u32 {
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "sleep 60 >/dev/null 2>&1 & echo $!"])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null());
+        if let Some(tag) = tag {
+            command.env("NUNKI_RUN", tag);
+        }
+        String::from_utf8_lossy(&command.output().unwrap().stdout)
+            .trim()
+            .parse()
+            .unwrap()
+    };
+    let mine = leave(Some(&run));
+    let other = leave(Some(&format!("{run}-other")));
+    let untagged = leave(None);
+
+    let said = |run: &str| {
+        let out = Command::new("sh")
+            .args(["-c", &nunki::engine::spawn::left_script(run)])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let found = said(&run);
+    for pid in [mine, other, untagged] {
+        let _ = Command::new("kill").arg(pid.to_string()).status();
+    }
+
+    assert_eq!(found, format!("nunki-left {mine}"));
+    assert_eq!(
+        said(&format!("nobody-{}", std::process::id())),
+        "nunki-left"
+    );
+}
