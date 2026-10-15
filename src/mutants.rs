@@ -2559,6 +2559,15 @@ pub fn started(mission: &str) -> String {
 /// **clears the record** whenever the campaign is over, however it ended, so
 /// a caller that asks cannot be misled by a stale file.
 ///
+/// A campaign still running past its deadline is stopped here, whole
+/// ([`stop_whole`]), and is over only once the stop is confirmed: then it
+/// is recorded as incomplete ([`Stopped::Deadline`]), forgotten, and the
+/// clean copy reset ([`Progress::Overrun`]). A stop that did not take, or
+/// could not be confirmed, keeps the record filed and reports the campaign
+/// as in flight with what is left ([`Progress::Running`]'s `unstopped`), and
+/// the next reading tries again (SPEC 4.4, "Une campagne arrêtée court est
+/// incomplète").
+///
 /// Its own function because two callers need the answer and only one of them
 /// may launch: [`campaign`] below, and `run::launch`, which recreates the
 /// container a campaign lives in and would otherwise kill it blind.
