@@ -2168,7 +2168,27 @@ dernier lot. La première rouge arrête tout.
    dans `MUTANTS.json` : la porte 7 trouvait ensuite l'échec laissé sur la
    même empreinte, renvoyait la mission au codeur avec « cette campagne a
    déjà tourné et n'a rien mesuré », et les survivants déjà rapportés ne
-   voyageaient que dans ce texte. Désormais, ce que le journal de l'outil
+   voyageaient que dans ce texte.
+
+   Arrêtée à son délai, une campagne l'est **entière**. Le seul pid tenu au
+   dossier est celui du script, et l'arrêter seul laisserait `cargo-mutants`,
+   ses compilations et ses binaires de test rattachés à un autre parent et
+   réécrivant la copie propre en place. L'arrêt passe donc par l'étiquette
+   `NUNKI_RUN` de la campagne, que porte tout ce qu'elle a lancé, à toute
+   profondeur : `TERM`, puis `KILL`. Puis le conteneur est interrogé de
+   nouveau sur ce qui porte encore l'étiquette ; un zombie, qui n'exécute
+   rien, ne compte pas. Si rien ne reste, ou si le conteneur est arrêté ou
+   parti, la campagne est enregistrée comme suit, oubliée, et la copie propre
+   de `HEAD` est remise à son commit par le rafraîchissement que prend toute
+   porte. Le verbe dit que la copie a été remise, ou qu'elle ne l'a pas été,
+   et pourquoi. S'il reste quelque chose, ou si la question n'a pas pu être
+   posée, le dossier de la campagne **reste**, et toute porte de la copie
+   reste fermée. Rien n'est enregistré comme arrêté, et la campagne est
+   rapportée en vol au-delà de son délai, avec les pids restants ou la
+   raison ; la lecture suivante tente l'arrêt de nouveau. Une campagne gelée
+   reste comptée en vol.
+
+   Désormais, ce que le journal de l'outil
    tenait est enregistré, marqué `"stopped": {"by": "deadline",
    "minutes": N}`, avec les décisions du HQ reportées comme à tout rejeu, et
    **sans compte** : la part d'une partie de campagne est la part du mauvais
@@ -2185,10 +2205,23 @@ dernier lot. La première rouge arrête tout.
 
    **Le HQ peut annuler une campagne en vol.**
    `nunki mission mutants <mission> --cancel --because <pourquoi>` l'arrête
-   comme le délai, l'enregistre incomplète avec
-   `"stopped": {"by": "cancelled", "because": …}`, et écrit la raison dans
-   `FOLLOWUP_HQ.md`. La mission reste à ses portes, où `iterate --because`
-   ou `mutants --again` la reprennent. Une campagne déjà finie est relue et
+   comme le délai, par la même fonction : entière et confirmée. Une fois
+   l'arrêt confirmé seulement, il l'enregistre incomplète avec
+   `"stopped": {"by": "cancelled", "because": …}`, écrit la raison dans
+   `FOLLOWUP_HQ.md`, et remet la copie propre à son commit. S'il reste
+   quelque chose, ou si la question n'a pas pu être posée, le verbe échoue
+   en nommant les pids ou la raison. Le dossier de la campagne reste alors,
+   aucune porte de la copie ne s'ouvre, rien n'est enregistré, et le même
+   verbe retente l'arrêt. La mission reste à ses portes, où
+   `iterate --because` ou `mutants --again` la reprennent.
+
+   Un changement de profil arrête la campagne en vol de la même façon, mais
+   un reste n'y fait pas échouer la bascule. Le conteneur de l'agent est
+   retiré juste après, et tout ce qu'il tient part avec lui. Le dossier de
+   la campagne n'est oublié qu'une fois ce conteneur retiré, jamais avant ;
+   si le retrait échoue, il reste.
+
+   Une campagne déjà finie est relue et
    son résultat gardé ; une campagne gelée est refusée, parce que le signal
    n'atteindrait pas un conteneur en pause et que l'oublier laisserait une
    campagne que personne ne suit. Limites, écrites : une campagne arrêtée
@@ -2197,6 +2230,14 @@ dernier lot. La première rouge arrête tout.
    registre des équivalences du projet la propose de nouveau à la campagne
    suivante ; sur une campagne arrêtée, le report ne garde que le jumeau
    exact d'un survivant décidé, et échoue fermé pour le reste.
+
+   Une campagne dont le script a fini n'est pas une campagne finie : ce
+   qu'il a lancé lui survit, rattaché à un autre parent. Avant d'être relue
+   et oubliée, elle est donc arrêtée de la même façon, et l'arrêt confirmé ;
+   sinon elle reste en vol, son dossier avec elle. Une campagne sur laquelle
+   le moteur n'a pas répondu n'est jamais oubliée : ne pas savoir n'est pas
+   savoir qu'elle est finie. Un conteneur ne compte comme disparu que si le
+   moteur, interrogé, l'a dit ; un moteur injoignable ne dit rien.
 
 8. **sécurité mécanique** : audit des dépendances, scan de secrets, analyse
    statique, par stack, dans `security.sh`.
