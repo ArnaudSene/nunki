@@ -317,6 +317,33 @@ fn the_fake_engine_records_what_it_was_asked() {
     );
 }
 
+/// The tests of a campaign frozen, or gone, between two questions rest on
+/// this: the queue's last answer is kept, never used up and replaced by the
+/// container's standing state.
+#[test]
+fn the_fake_engine_answers_liveness_in_turn_and_keeps_the_last_answer() {
+    let engine = FakeEngine::default()
+        .with_liveness("c-agent", Liveness::Running)
+        .with_livenesses("c-agent", vec![Liveness::Running, Liveness::Paused])
+        .with_livenesses("c-other", vec![Liveness::Exited(137)]);
+
+    let asked: Vec<Liveness> = (0..4)
+        .map(|_| engine.liveness("c-agent").unwrap())
+        .collect();
+    assert_eq!(
+        asked,
+        vec![
+            Liveness::Running,
+            Liveness::Paused,
+            Liveness::Paused,
+            Liveness::Paused
+        ]
+    );
+    for _ in 0..3 {
+        assert_eq!(engine.liveness("c-other").unwrap(), Liveness::Exited(137));
+    }
+}
+
 #[test]
 fn a_sidecar_that_never_becomes_healthy_fails_the_profile() {
     let engine = FakeEngine::default().failing_up("dependency failed to start");
