@@ -1208,6 +1208,66 @@ pub fn forget_running(hq_root: &Path, slot: &str) -> Result<(), MutantsError> {
     }
 }
 
+/// A campaign in flight, as its record and its log say: what
+/// `nunki mission mutants <id> --status` and `nunki mission status` print.
+///
+/// Read without asking the container anything and without reading the
+/// campaign back, so that following a campaign can never start one. The
+/// bare `nunki mission mutants <id>` starts a campaign whenever none is in
+/// flight: a loop polling it to wait for the end started a new full one
+/// minutes after the previous one crashed (#139). What this says is the
+/// record's word — a campaign that died is still in flight here until a
+/// reading asks the container, which the monitor and the bare verb do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InFlight {
+    pub fingerprint: String,
+    pub started_at: String,
+    pub deadline_minutes: u32,
+    pub scope: Scope,
+    /// The lines its log holds so far, or why the log could not be read.
+    pub lines: Result<usize, String>,
+}
+
+/// The campaign the slot's record says is in flight, or `None` when there
+/// is no record.
+pub fn in_flight(hq_root: &Path, slot: &str) -> Result<Option<InFlight>, MutantsError> {
+    let Some(running) = read_running(hq_root, slot)? else {
+        return Ok(None);
+    };
+    let lines = std::fs::read_to_string(&running.log)
+        .map(|text| text.lines().count())
+        .map_err(|e| format!("{}: {e}", running.log.display()));
+    Ok(Some(InFlight {
+        fingerprint: running.fingerprint,
+        started_at: running.started_at,
+        deadline_minutes: running.deadline_minutes,
+        scope: running.chain.scope,
+        lines,
+    }))
+}
+
+/// One line for a campaign in flight: which, since when, how far into its
+/// deadline, full or partial, and how much its log holds.
+pub fn in_flight_said(campaign: &InFlight) -> String {
+    format!(
+        "{} in flight since {}, {} of {} minute(s), {} — {}",
+        crate::text::one_line(
+            campaign
+                .fingerprint
+                .get(..7)
+                .unwrap_or(&campaign.fingerprint)
+        ),
+        crate::text::one_line(&campaign.started_at),
+        minutes_since(&campaign.started_at),
+        campaign.deadline_minutes,
+        campaign.scope.said(),
+        match &campaign.lines {
+            Ok(lines) => format!("{lines} line(s) in its log so far"),
+            Err(why) => format!("its log could not be read: {}", crate::text::one_line(why)),
+        }
+    )
+}
+
 /// The survivors a campaign printed: one JSON object per line, and anything
 /// that is not one is ignored — a mutation tool writes progress on the same
 /// stream, and a campaign that produced a hundred good lines and one banner

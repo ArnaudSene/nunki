@@ -518,3 +518,81 @@ fn the_listing_verbs_say_stage_and_occupant_and_stop_asks_why() {
     assert!(one.contains("mission m1"), "{said}");
     assert!(two.contains("free"), "{said}");
 }
+
+/// A record of a campaign in flight in `slot`, partial, whose log holds
+/// `lines` lines.
+fn campaign_in_flight(hq_root: &std::path::Path, slot: &str, lines: usize) -> std::path::PathBuf {
+    let log = hq_root.join("mutants-in-flight.log");
+    fs::write(&log, "{\"progress\":1}\n".repeat(lines)).unwrap();
+    nunki::mutants::write_running(
+        hq_root,
+        slot,
+        &nunki::mutants::Running {
+            fingerprint: "abc1234def".into(),
+            head: "h".into(),
+            started_at: "2026-10-14T12:00:00Z".into(),
+            container: "cafe1234".into(),
+            pid: Some(41),
+            log,
+            deadline_minutes: 240,
+            chain: nunki::mutants::Chain {
+                scope: nunki::mutants::Scope::Partial {
+                    since: "0123456789abcdef".into(),
+                },
+                ..Default::default()
+            },
+        },
+    )
+    .unwrap();
+    nunki::mutants::running_path(hq_root, slot)
+}
+
+/// `mission status` lists the campaigns on file, and those are only the
+/// ones that ended: a reader following a campaign was shown the last one
+/// recorded, and not the one running. The campaign in flight in the
+/// mission's slot is said first, from its record alone.
+#[test]
+fn status_says_the_campaign_in_flight_in_the_missions_slot() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    let home = common::project_home(&root, &dir.path().join("home"), "harness: claude-code\n");
+    let hq_root = home.join(nunki::project::HQ_DIR);
+    let status = || {
+        let out = Command::new(env!("CARGO_BIN_EXE_nunki"))
+            .args(["-C"])
+            .arg(&root)
+            .args(["mission", "status", "m1"])
+            .env("HOME", dir.path().join("home"))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    nunki::mission::dir::create(&hq_root, "m1", &header(), "do it").unwrap();
+    Store::open(&hq_root).unwrap().save(&state("m1")).unwrap();
+    assert!(
+        !status().contains("in flight"),
+        "the probe is worth nothing unless no campaign says nothing: {}",
+        status()
+    );
+
+    // Another slot's campaign is not this mission's.
+    campaign_in_flight(&hq_root, "s2", 3);
+    assert!(!status().contains("in flight"), "{}", status());
+
+    campaign_in_flight(&hq_root, "s1", 3);
+    let text = status();
+    let line = text
+        .lines()
+        .find(|l| l.starts_with("campaign  abc1234 in flight"))
+        .unwrap_or_else(|| panic!("no campaign in flight said: {text}"));
+    for said in [
+        "since 2026-10-14T12:00:00Z",
+        "of 240 minute(s)",
+        "partial since 0123456789ab",
+        "3 line(s) in its log so far",
+        "(slot s1)",
+    ] {
+        assert!(line.contains(said), "{said:?} in {line}");
+    }
+}

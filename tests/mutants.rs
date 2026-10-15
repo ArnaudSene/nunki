@@ -9078,3 +9078,171 @@ fn a_tool_version_that_cannot_be_read_names_its_stack_and_what_it_said() {
         "{recorded}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Following a campaign never starts one.
+// ---------------------------------------------------------------------------
+
+/// What [`mutants::in_flight`] reads: nothing without a record; with one,
+/// its fingerprint, start, deadline, scope and the lines its log holds — or
+/// why the log could not be read, rather than a count of zero.
+#[test]
+fn a_campaign_in_flight_is_read_from_its_record_and_its_log_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let hq_root = dir.path();
+    assert_eq!(mutants::in_flight(hq_root, "one").unwrap(), None);
+
+    let log = hq_root.join("mutants.log");
+    std::fs::write(&log, "a\nb\nc\n").unwrap();
+    let running = |log: PathBuf| mutants::Running {
+        fingerprint: "abc1234def".into(),
+        head: "h".into(),
+        started_at: "2026-10-14T12:00:00Z".into(),
+        container: "cafe1234".into(),
+        pid: Some(41),
+        log,
+        deadline_minutes: 240,
+        chain: Chain::default(),
+    };
+    mutants::write_running(hq_root, "one", &running(log.clone())).unwrap();
+    let campaign = mutants::in_flight(hq_root, "one").unwrap().unwrap();
+    assert_eq!(campaign.lines, Ok(3));
+    let said = mutants::in_flight_said(&campaign);
+    for part in [
+        "abc1234 in flight since 2026-10-14T12:00:00Z",
+        "of 240 minute(s)",
+        "full",
+        "3 line(s) in its log so far",
+    ] {
+        assert!(said.contains(part), "{part:?} in {said}");
+    }
+
+    // A record edited by hand, whose fingerprint is not ASCII where the
+    // line cuts it, is said whole rather than split inside a character.
+    let mut odd = running(log.clone());
+    odd.fingerprint = "abcdefé9".into();
+    mutants::write_running(hq_root, "one", &odd).unwrap();
+    let campaign = mutants::in_flight(hq_root, "one").unwrap().unwrap();
+    assert!(
+        mutants::in_flight_said(&campaign).starts_with("abcdefé9 in flight"),
+        "{}",
+        mutants::in_flight_said(&campaign)
+    );
+
+    mutants::write_running(hq_root, "one", &running(hq_root.join("gone.log"))).unwrap();
+    let campaign = mutants::in_flight(hq_root, "one").unwrap().unwrap();
+    assert!(campaign.lines.is_err(), "{:?}", campaign.lines);
+    let said = mutants::in_flight_said(&campaign);
+    assert!(said.contains("its log could not be read"), "{said}");
+    assert!(said.contains("gone.log"), "{said}");
+}
+
+/// `nunki mission mutants <id> --status` through the binary: it says where
+/// the campaign in flight is, or that none is, and the campaigns on file —
+/// and it leaves everything as it found it. The bare verb starts a campaign
+/// whenever none is in flight, so a loop polling it to wait for the end
+/// started a new full one minutes after the previous one crashed.
+///
+/// No container engine is reachable here, and none is needed: `--status`
+/// asks none, so a verb that tried to would fail this test.
+#[test]
+fn following_a_campaign_with_status_never_starts_or_touches_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    let user_home = dir.path().join("home");
+    let home = common::project_home(&root, &user_home, "harness: claude-code\n");
+    let hq_root = home.join(nunki::project::HQ_DIR);
+    nunki::mission::dir::create(
+        &hq_root,
+        "m1",
+        &nunki::mission::Header {
+            branch: "feat/x".into(),
+            base: "dev".into(),
+            lots: vec![nunki::mission::Lot {
+                id: "L1".into(),
+                title: "one".into(),
+            }],
+            integration: nunki::mission::Integration::None {
+                reason: "pure domain".into(),
+            },
+            security: nunki::mission::Security::Gates,
+            rigor: Default::default(),
+            mutation_threshold: None,
+            arbiter: None,
+            run: None,
+            account: None,
+            model: None,
+            bounds: Default::default(),
+        },
+        "do it",
+    )
+    .unwrap();
+    let nunki = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_nunki"))
+            .arg("-C")
+            .arg(&root)
+            .args(["mission", "mutants", "m1"])
+            .args(args)
+            .env("HOME", &user_home)
+            .output()
+            .unwrap()
+    };
+    let paths = nunki::mission::dir::Paths::of(&hq_root, "m1");
+    let record = mutants::running_path(&hq_root, "one");
+
+    // Nothing in flight: it says so, names the verb that would start one,
+    // and starts none.
+    let out = nunki(&["--slot", "one", "--status"]);
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{said}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(said.contains("none in slot one"), "{said}");
+    assert!(
+        said.contains("`nunki mission mutants m1` starts one"),
+        "{said}"
+    );
+    assert!(!record.exists(), "a campaign was filed as started");
+    assert_eq!(mutants::read(&paths.dir).unwrap(), None);
+
+    // In flight: said from its record, which is left byte for byte — not
+    // read back, not forgotten, not stopped.
+    let log = hq_root.join("mutants.log");
+    std::fs::write(&log, "{\"progress\":1}\n{\"progress\":2}\n").unwrap();
+    mutants::write_running(
+        &hq_root,
+        "one",
+        &mutants::Running {
+            fingerprint: "abc1234def".into(),
+            head: "h".into(),
+            started_at: "2026-10-14T12:00:00Z".into(),
+            container: "cafe1234".into(),
+            pid: Some(41),
+            log,
+            deadline_minutes: 240,
+            chain: Chain::default(),
+        },
+    )
+    .unwrap();
+    let before = std::fs::read(&record).unwrap();
+    let out = nunki(&["--slot", "one", "--status"]);
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{said}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(said.contains("abc1234 in flight since"), "{said}");
+    assert!(said.contains("2 line(s) in its log so far"), "{said}");
+    assert_eq!(std::fs::read(&record).unwrap(), before);
+    assert_eq!(mutants::read(&paths.dir).unwrap(), None);
+
+    // And it means nothing beside a verb that acts.
+    let out = nunki(&["--slot", "one", "--status", "--again"]);
+    assert!(!out.status.success());
+    let out = nunki(&["--slot", "one", "--status", "--cancel", "--because", "x"]);
+    assert!(!out.status.success());
+    assert_eq!(std::fs::read(&record).unwrap(), before);
+}

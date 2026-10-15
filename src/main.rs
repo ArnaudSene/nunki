@@ -561,6 +561,10 @@ enum MissionCommand {
     /// Start the mutation campaign, or say where the one in flight is
     /// (SPEC 4.4, gate 7). Long: it is launched detached and watched, and
     /// the call that finds it finished writes `MUTANTS.json`.
+    ///
+    /// Without a flag this **starts** a campaign whenever none is in flight:
+    /// a loop that polls it starts a new one each time the last one ends.
+    /// To follow a campaign without starting one, `--status`.
     Mutants {
         /// The mission. Not needed with `--registry`.
         id: Option<String>,
@@ -570,9 +574,19 @@ enum MissionCommand {
         /// `HEAD`. Needs no mission.
         #[arg(
             long,
-            conflicts_with_all = ["equivalent", "ratify", "all", "refuse", "lift", "again", "slot", "because", "cancel"]
+            conflicts_with_all = ["equivalent", "ratify", "all", "refuse", "lift", "again", "slot", "because", "cancel", "status"]
         )]
         registry: bool,
+        /// Say where the campaign in flight is — since when, how far into its
+        /// deadline, full or partial, how many lines its log holds — or that
+        /// none is, and the campaigns on file. Reads the record and the log
+        /// only: it asks the container nothing, reads nothing back, and never
+        /// starts a campaign.
+        #[arg(
+            long,
+            conflicts_with_all = ["equivalent", "ratify", "all", "refuse", "lift", "again", "because", "cancel"]
+        )]
+        status: bool,
         /// Which slot runs it. Defaults to the one the mission started in.
         #[arg(long)]
         slot: Option<String>,
@@ -2382,6 +2396,7 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             again,
             cancel,
             registry,
+            status,
         } => {
             if registry {
                 return match nunki::equivalences::read(&project.hq_root) {
@@ -2399,6 +2414,9 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                 eprintln!("nunki: name the mission — only `--registry` needs none");
                 return ExitCode::FAILURE;
             };
+            if status {
+                return campaign_status(project, &id, slot);
+            }
             if because.is_some()
                 && equivalent.is_none()
                 && ratify.is_none()
@@ -2883,6 +2901,21 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                 ),
                 (rigor, _) => println!("rigor     {rigor}"),
             }
+            // The campaign in flight first, as its record says: the chain
+            // below holds only the campaigns that ended, and a reader
+            // following a campaign was shown the last one recorded instead.
+            if let Ok(state) = nunki::state::Store::open(&project.hq_root).and_then(|s| s.load(&id))
+            {
+                match nunki::mutants::in_flight(&project.hq_root, &state.slot) {
+                    Ok(Some(campaign)) => println!(
+                        "campaign  {} (slot {})",
+                        nunki::mutants::in_flight_said(&campaign),
+                        state.slot
+                    ),
+                    Ok(None) => {}
+                    Err(e) => println!("campaign  in flight could not be read: {e}"),
+                }
+            }
             // Each campaign of the chain, full or partial, with its counts:
             // gate 7 judges them one by one, and so does this listing.
             match nunki::mutants::chain_on_file(&mission_dir::Paths::of(&project.hq_root, &id).dir)
@@ -3039,6 +3072,48 @@ fn parse_service(spec: &str) -> Result<Service, String> {
 fn say_registered(registered: &nunki::equivalences::Registered) {
     if let Some(why) = registered.warning() {
         eprintln!("nunki: the registry of equivalences is unchanged — {why}");
+    }
+}
+
+/// `nunki mission mutants <id> --status`: the campaign in flight in the
+/// mission's slot, as its record and its log say, then the campaigns on
+/// file. Takes no lock and builds no engine: following a campaign must not
+/// be able to start one, or to stop one ([`nunki::mutants::in_flight`]).
+fn campaign_status(project: &Project, id: &str, slot: Option<String>) -> ExitCode {
+    let Some(slot) = slot.or_else(|| {
+        nunki::state::Store::open(&project.hq_root)
+            .and_then(|s| s.load(id))
+            .ok()
+            .map(|s| s.slot)
+    }) else {
+        eprintln!("nunki: mission {id} has not started — name a slot with --slot");
+        return ExitCode::FAILURE;
+    };
+    match nunki::mutants::in_flight(&project.hq_root, &slot) {
+        Ok(Some(campaign)) => println!(
+            "in flight  {} (slot {slot}; the record's word — `nunki mission mutants {id}` \
+             asks the container, and reads it back once it ended)",
+            nunki::mutants::in_flight_said(&campaign)
+        ),
+        Ok(None) => {
+            println!("in flight  none in slot {slot} — `nunki mission mutants {id}` starts one")
+        }
+        Err(e) => {
+            eprintln!("nunki: {e}");
+            return ExitCode::FAILURE;
+        }
+    }
+    match nunki::mutants::chain_on_file(&mission_dir::Paths::of(&project.hq_root, id).dir) {
+        Ok(chain) => {
+            for said in &chain {
+                println!("on file    {said}");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("nunki: {e}");
+            ExitCode::FAILURE
+        }
     }
 }
 
