@@ -2337,7 +2337,9 @@ pub fn chains(rigor: crate::mission::Rigor) -> bool {
 }
 
 /// The line of a stack's `mutation.sh` that says how to read its tool's
-/// version: `# nunki-tool-version: <command>`, run in the clean copy.
+/// version: `# nunki-tool-version: <command>`, run in the clean copy where
+/// the campaign runs that stack's script ([`runs_in`]) — its own directory,
+/// when the project carries several stacks.
 ///
 /// The stack's to say, since `nunki` knows no mutation tool (SPEC 4.4): a
 /// script that says nothing — a project's own, written before this — runs
