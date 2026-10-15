@@ -2077,7 +2077,9 @@ dernier lot. La première rouge arrête tout.
    poussé, soit complète et passe ; son refus nomme
    `nunki mission mutants <id> --again`. Mesuré sur une mission `critical` de
    ce dépôt : sept campagnes complètes d'environ deux heures, là où la
-   chaîne en aurait demandé une ou deux.
+   chaîne en aurait demandé une ou deux. Décidé, pas encore construit : la
+   campagne complète finale sort de la mission (plus bas, « Décidé, pas
+   encore construit »).
 
    `MUTANTS.json` garde, pour chaque fichier touché, les comptes de la
    dernière campagne qui l'a mesuré. Un fichier inchangé garde ses comptes et
@@ -2091,6 +2093,77 @@ dernier lot. La première rouge arrête tout.
    du niveau `critical`) : un
    mutant mesuré dans un fichier que personne n'a changé est supposé exister
    encore et être encore tué.
+
+   **Décidé, pas encore construit.** Trois règles changent la porte 7. Le
+   changement qui construit chacune l'écrit à la place de celle qu'elle
+   remplace, et retire son entrée d'ici. Jusque-là, le reste de cette
+   section décrit ce que `nunki` fait.
+
+   - **Plus de campagne complète finale au niveau `critical`.** La chaîne y
+     sert jusqu'à `Verified` et jusqu'à `nunki push`. La reconstruction est
+     jugée sans seuil : chaque survivant qu'elle liste doit recevoir une
+     issue, et `nunki push` exige qu'elle porte sur le contenu du commit
+     poussé et qu'elle passe. Mesuré sur trois missions `critical` : la
+     campagne finale a coûté 109 minutes, 36 en moyenne, pour refaire à peu
+     près la mesure de la première campagne complète.
+
+     Ce qu'on perd : la limite de la chaîne, écrite plus haut, n'a plus de
+     remède dans la mission. Un test modifié ou supprimé, ou tout autre
+     changement d'un fichier touché, peut laisser revivre un mutant d'un
+     fichier inchangé, et aucune campagne partielle ne le voit. Son remède
+     devient la campagne hors mission sur tout le code (troisième règle).
+     Tant qu'elle n'existe pas, c'est `--again`, à la main.
+
+   - **Un budget de temps, mesuré sur un échantillon choisi d'avance.**
+     `mutation_minutes` devient le budget d'une campagne, et le délai ne
+     sert plus qu'à arrêter une campagne bloquée. Quand le diff atteint plus
+     de mutants que le budget n'en permet, d'après la durée par mutant
+     mesurée sur le projet, la campagne n'en mesure qu'une fraction, 1/*k*,
+     choisie avant de commencer.
+
+     Le choix précède la campagne, parce que les mutants essayés avant une
+     coupure ne sont pas un échantillon : ils suivent l'ordre de l'outil.
+     Il suit la clé qui reporte les avis, le même fichier et la même
+     description, jamais la ligne. Ainsi, un mutant qu'un retour au codeur
+     n'a pas changé reste dans l'échantillon, et un mutant ajouté ailleurs
+     ne redistribue pas les autres. Un choix par position dans la liste de
+     l'outil (`--sharding round-robin` de cargo-mutants) les redistribuerait,
+     et chaque retour amènerait des survivants jamais vus. Pour la même
+     raison, *k* est fixé par la première campagne de la chaîne et gardé
+     tant que la chaîne tient.
+
+     La porte 7 juge l'échantillon comme un tout : le seuil au niveau
+     `standard`, et une issue pour chaque survivant de l'échantillon au
+     niveau `critical`. `MUTANTS.json` dit la fraction. La stack Rust
+     d'abord : rien n'est vérifié de mutmut ni de Stryker, et leurs
+     campagnes restent entières. Mesuré sur un projet Rust + Next.js : une
+     campagne a compté 514 mutants à environ 47 secondes chacun, soit
+     environ 6,5 heures, quand le délai par défaut est de 45 minutes.
+
+     Ce qu'on perd : un vrai survivant hors de l'échantillon passe la
+     mission, et c'est la campagne hors mission qui le trouve.
+
+   - **Des campagnes hors mission, lancées par l'humain.** `nunki` n'a
+     aucun ordonnanceur. C'est un verbe, que l'humain lance quand il le
+     veut, sur la branche de base du projet, sous deux formes :
+     - sur ce qui a changé depuis la dernière campagne hors mission, qui
+       rattrape ce que les échantillons ont laissé ;
+     - sur tout le code, seule à fermer la limite de la chaîne.
+
+     Leurs survivants vont dans une liste propre au projet, dans son home.
+     Le registre des équivalences s'y applique, et le HQ tranche les
+     nouvelles en une fois, plutôt qu'une par mission. Une mission de
+     durcissement, au niveau `standard`, écrit les tests qui les tuent.
+
+     Ce qu'on perd : ces cas ne sont rattrapés que quand l'humain lance une
+     campagne. Le minimum conseillé est une campagne sur tout le code avant
+     chaque mise en production. Prérequis : les informations de débogage
+     séparées ne remplissent plus le disque pendant une longue campagne
+     (mesuré : environ 11 Go par heure).
+
+   L'ordre de construction : la première règle, puis le disque, puis la
+   deuxième, puis la troisième. Entre la première et la troisième, le cas
+   d'un fichier inchangé n'a pour remède que `--again` : c'est assumé.
 
    **Le contrat de `mutation.sh` s'enrichit**, tout en restant facultatif
    pour une stack qui ne veut pas de chaîne :
