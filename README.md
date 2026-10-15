@@ -545,14 +545,27 @@ go through the same stop, and it stops the **whole** campaign. Every
 process the campaign started carries its `NUNKI_RUN` tag (the stem of its
 log), at whatever depth. Every process in the agent container that carries
 the tag gets `TERM`, then `KILL` if it is still there a few seconds later.
-The stop needs only a POSIX shell, `tr` and `grep`, and no `procps`.
+The stop needs only a POSIX shell, `tr` and `grep`, and no `procps`. It
+runs `/bin/sh` by its path, and finds `tr`, `grep` and `sleep` in the
+system's directories only, never on the `PATH` the container was given,
+whose first directory the agent's own uid can write.
 
-Then the container is **asked again** what still carries the tag. Zombies
-are not counted, since they run nothing. Only an answer of "nothing" counts
-as a stop. A container that has exited or is gone also counts, because
-nothing can run in it.
+Then the container is **asked again** what still carries the tag, twice, a
+second apart, so that a process that forks and exits between two entries
+of `/proc` is not missed. Zombies are not counted, since they run nothing.
+Only two answers of "nothing" count as a stop. A container that has exited,
+or that the engine answered it no longer knows, also counts, because
+nothing can run in it. An engine that could not be reached is no answer.
 
-- **Nothing left:** the campaign is recorded as incomplete, as above, and
+A campaign whose **script has ended** is stopped the same way before it is
+read back: what the script started may still be running, whether the
+script finished, died, or was killed by something the campaign ran. And a
+campaign whose state could not be asked at all is not forgotten: its
+record stays filed, and the next reading asks again.
+
+- **Nothing left:** the campaign is recorded as incomplete, as above (one
+  whose script had ended is read back as it always was instead, and its
+  copy is left to the refresh every door runs first), and
   its record is forgotten. Then the clean copy is reset to its commit, by
   the same refresh the battery and the gates use, so that no mutated file
   stays in it. The verb says that the copy was reset, or that it could
@@ -567,7 +580,9 @@ nothing can run in it.
     could not tell. Running the same command again tries the stop again.
   - Past the deadline, the campaign is reported as still running and past
     its deadline, with the same words. `nunki mission mutants <mission>`
-    exits non-zero, and the next reading tries the stop again.
+    exits non-zero, and the next reading tries the stop again. A campaign
+    whose script ended, or whose state could not be asked, is reported the
+    same way.
 - **A profile switch** stops the campaign the same way, but a leftover
   does not fail the switch: the switch removes the agent's container right
   after, and every process in it goes with it. The record is forgotten only

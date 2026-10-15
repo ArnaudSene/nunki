@@ -2666,7 +2666,7 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                         } => {
                             println!("running since {started_at} — {lines} line(s) so far");
                             if let Some(why) = unstopped {
-                                eprintln!("nunki: past its deadline, and not stopped: {why}");
+                                eprintln!("nunki: the campaign still holds the clean copy: {why}");
                                 return ExitCode::FAILURE;
                             }
                         }

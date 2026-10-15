@@ -609,7 +609,7 @@ pub fn campaign_line(progress: &crate::mutants::Progress) -> String {
         } => match unstopped {
             None => format!("mutation campaign running since {started_at}"),
             Some(why) => format!(
-                "mutation campaign running since {started_at}, past its deadline: {}",
+                "mutation campaign since {started_at} still holds the clean copy: {}",
                 one_line(why)
             ),
         },

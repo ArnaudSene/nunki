@@ -162,7 +162,7 @@ fn a_campaign_found_stopped_writes_no_result() {
 
     // The container is up and the process is not — the shape a kill leaves.
     let engine: std::sync::Arc<dyn nunki::engine::Engine> = std::sync::Arc::new(
-        FakeEngine::default()
+        stops_whole(FakeEngine::default())
             .with_liveness("cafe1234", nunki::engine::Liveness::Running)
             .with_exec(ExecOutput {
                 status: 0,
@@ -253,7 +253,7 @@ fn a_campaign_that_stopped_and_said_why_goes_back_to_the_branch() {
 
     // The container is up and the process is not — the shape a kill leaves.
     let engine: std::sync::Arc<dyn nunki::engine::Engine> = std::sync::Arc::new(
-        FakeEngine::default()
+        stops_whole(FakeEngine::default())
             .with_liveness("cafe1234", nunki::engine::Liveness::Running)
             .with_exec(ExecOutput {
                 status: 0,
@@ -367,7 +367,7 @@ fn a_launch_ends_the_campaign_it_would_have_killed_anyway() {
         )
         .unwrap();
         std::sync::Arc::new(
-            FakeEngine::default()
+            stops_whole(FakeEngine::default())
                 .with_liveness("cafe1234", Liveness::Running)
                 .with_exec(ExecOutput {
                     status: 0,
@@ -770,6 +770,198 @@ fn live_a_campaign_is_stopped_whole_in_its_container() {
     );
     assert_eq!(left.stdout.trim(), "nunki-left", "{left:?}");
     assert_eq!(before, after, "the grandchild is still writing");
+}
+
+/// The script of a real campaign is killed while what it started keeps
+/// writing — what code the campaign runs can do to its own ancestor — and
+/// `--cancel` is asked to call it off. The script is over, its children are
+/// not: the cancel stops them by the campaign's tag before it forgets the
+/// record, and the file stops growing.
+///
+/// The same stand-in as [`live_a_campaign_is_stopped_whole_in_its_container`]
+/// (a grandchild that ignores `TERM`), on the same image without `procps`,
+/// launched as `mutants::cancel` finds a campaign: the record filed where
+/// it reads it, the spawner built as it builds it.
+///
+/// Flip check: in `mutants::read_back`, forget a campaign whose script has
+/// ended without `stop_whole`, as before, and the grandchild is still
+/// writing.
+///
+/// ```text
+/// cargo test --test mutants -- --ignored live_a_campaign_whose_script_was_killed --nocapture
+/// HQ_COMPOSE=/path/to/docker-compose-2.38.2 cargo test --test mutants -- --ignored live_a_campaign_whose_script_was_killed
+/// ```
+#[test]
+#[ignore = "lifts real containers; run by hand"]
+fn live_a_campaign_whose_script_was_killed_is_called_off_whole_in_its_container() {
+    use nunki::harness::spawn::{CommandSpec, Presence, Spawned, Spawner};
+
+    if !an_engine_is_there() {
+        eprintln!("skipped: no container engine on this machine");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot) = context(dir.path());
+    let slot = nunki::slot::Slot {
+        name: "killedscript".into(),
+        ..slot
+    };
+    let out = dir.path().join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o777)).unwrap();
+    }
+    let scripts = [
+        ("campaign.sh", "#!/bin/sh\n/work/out/child.sh &\nwait\n"),
+        ("child.sh", "#!/bin/sh\n/work/out/grandchild.sh &\nwait\n"),
+        (
+            "grandchild.sh",
+            "#!/bin/sh\ntrap '' TERM\nwhile :; do echo x >> /work/out/grown; sleep 0.1; done\n",
+        ),
+    ];
+    for (name, text) in scripts {
+        let file = out.join(name);
+        std::fs::write(&file, text).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+    let profile = nunki::run::profile_path(&project, &slot.name);
+    std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+    std::fs::write(
+        &profile,
+        format!(
+            "services:\n\
+             \x20 agent:\n\
+             \x20   image: debian:bookworm-slim\n\
+             \x20   volumes:\n\
+             \x20     - {out}:/work/out\n\
+             \x20   tmpfs:\n\
+             \x20     - {run_dir}\n\
+             \x20   command: [\"sleep\", \"600\"]\n",
+            out = out.display(),
+            run_dir = nunki::engine::spawn::RUN_DIR,
+        ),
+    )
+    .unwrap();
+
+    let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+        std::sync::Arc::new(nunki::engine::docker::Docker::real());
+    let compose_project = nunki::compose::project_name(&project.session(), &slot.name).unwrap();
+    let _ = engine.down(&profile, &compose_project, true);
+    engine.up(&profile, &compose_project).unwrap();
+
+    let fingerprint = "killedscript1234";
+    let log = dir.path().join("runs").join("mutants-killedscript.log");
+    let spawner = nunki::engine::spawn::ContainerSpawner::new(
+        engine.clone(),
+        profile.clone(),
+        &compose_project,
+        nunki::compose::AGENT_SERVICE,
+    )
+    .identified_by(fingerprint);
+    let spawned = spawner
+        .spawn(
+            &CommandSpec {
+                program: "/work/out/campaign.sh".into(),
+                args: vec![fingerprint.into()],
+                cwd: PathBuf::from("/work/out"),
+                env: Default::default(),
+            },
+            &log,
+        )
+        .unwrap();
+    mutants::write_running(
+        &project.hq_root,
+        &slot.name,
+        &mutants::Running {
+            chain: Default::default(),
+            fingerprint: fingerprint.into(),
+            head: "0000000".into(),
+            started_at: "2026-10-15T12:00:00Z".into(),
+            container: spawned.container.clone(),
+            pid: spawned.pid,
+            log,
+            deadline_minutes: u32::MAX,
+        },
+    )
+    .unwrap();
+    let grown = out.join("grown");
+    for _ in 0..100 {
+        if std::fs::metadata(&grown)
+            .map(|m| m.len() > 0)
+            .unwrap_or(false)
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let started = std::fs::metadata(&grown).map(|m| m.len()).unwrap_or(0);
+
+    // The script, and only the script, is killed.
+    let pid = spawned.pid.expect("the stand-in published its pid");
+    let killed = engine
+        .exec(
+            &profile,
+            &compose_project,
+            "agent",
+            &["sh".into(), "-c".into(), format!("kill -KILL {pid}")],
+        )
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let presence = spawner
+        .alive(&Spawned {
+            pid: spawned.pid,
+            container: spawned.container.clone(),
+        })
+        .unwrap();
+    let orphaned = std::fs::metadata(&grown).map(|m| m.len()).unwrap_or(0);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let still_growing = std::fs::metadata(&grown).map(|m| m.len()).unwrap_or(0) > orphaned;
+
+    let mission = dir.path().join("mission");
+    std::fs::create_dir_all(&mission).unwrap();
+    let cancelled = mutants::cancel(
+        &project,
+        &slot,
+        engine.clone(),
+        &mission,
+        "its script was killed",
+    );
+
+    let left = engine
+        .exec(
+            &profile,
+            &compose_project,
+            "agent",
+            &[
+                "sh".into(),
+                "-c".into(),
+                nunki::engine::spawn::left_script("mutants-killedscript"),
+            ],
+        )
+        .unwrap();
+    let before = std::fs::metadata(&grown).map(|m| m.len()).unwrap_or(0);
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let after = std::fs::metadata(&grown).map(|m| m.len()).unwrap_or(0);
+    let filed = mutants::read_running(&project.hq_root, &slot.name).unwrap();
+    engine.down(&profile, &compose_project, true).unwrap();
+
+    assert!(started > 0, "the stand-in campaign never wrote");
+    assert!(killed.ok(), "the script could not be killed: {killed:?}");
+    assert_eq!(presence, Presence::Ended, "the script is not seen as ended");
+    assert!(still_growing, "its children did not outlive the script");
+    assert!(
+        matches!(cancelled, Ok(mutants::Cancelled::Ended(_))),
+        "{cancelled:?}"
+    );
+    assert_eq!(left.stdout.trim(), "nunki-left", "{left:?}");
+    assert_eq!(before, after, "the grandchild is still writing");
+    assert!(filed.is_none(), "a campaign confirmed over is still filed");
 }
 
 /// A campaign, launched detached in a real container and watched to its end,
@@ -2423,7 +2615,7 @@ fn a_finished_campaign_that_tried_nothing_of_what_it_found_is_not_recorded() {
     )
     .unwrap();
     let engine: std::sync::Arc<dyn nunki::engine::Engine> = std::sync::Arc::new(
-        FakeEngine::default()
+        stops_whole(FakeEngine::default())
             .with_liveness("cafe1234", nunki::engine::Liveness::Running)
             .with_exec(ExecOutput {
                 status: 0,
@@ -2532,7 +2724,7 @@ fn a_campaign_that_said_it_finished_twice_leaves_its_reason_and_no_result() {
     )
     .unwrap();
     let engine: std::sync::Arc<dyn nunki::engine::Engine> = std::sync::Arc::new(
-        FakeEngine::default()
+        stops_whole(FakeEngine::default())
             .with_liveness("cafe1234", nunki::engine::Liveness::Running)
             .with_exec(ExecOutput {
                 status: 0,
@@ -6118,7 +6310,7 @@ fn a_partial_campaign_is_read_back_with_its_chain_or_forgotten_when_it_broke() {
         )
         .unwrap();
         let engine: std::sync::Arc<dyn nunki::engine::Engine> = std::sync::Arc::new(
-            FakeEngine::default()
+            stops_whole(FakeEngine::default())
                 .with_liveness("cafe1234", nunki::engine::Liveness::Running)
                 .with_exec(ExecOutput {
                     status: 0,
@@ -7008,6 +7200,15 @@ fn in_flight(
         answer,
         "nunki-left",
     )
+}
+
+/// `engine`, whose container answers the stop of a campaign and the check
+/// after it: nothing signalled, nothing left. What a campaign whose script
+/// has ended needs before it is read back and forgotten.
+fn stops_whole(engine: nunki::engine::fake::FakeEngine) -> nunki::engine::fake::FakeEngine {
+    engine
+        .with_exec_when("nunki-reaped", container_says("nunki-reaped"))
+        .with_exec_when("nunki-left", container_says("nunki-left"))
 }
 
 /// What the container answers to a script, with a status of 0.
@@ -8113,6 +8314,216 @@ fn a_profile_switch_forgets_the_campaign_only_once_its_container_is_removed() {
         "still filed once its container was removed"
     );
     assert_eq!(mutants::read(&mission).unwrap(), None);
+}
+
+/// A campaign whose script has ended is not over: what the script started —
+/// `cargo-mutants`, its builds, its test binaries — is reparented when it
+/// goes, and goes on rewriting the copy. So it is stopped by its tag, and
+/// asked about again, before it is read back and forgotten.
+#[test]
+fn a_campaign_whose_script_ended_is_stopped_by_its_tag_before_it_is_read_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot) = context(dir.path());
+    let mission = dir.path().join("mission");
+    let engine = in_flight_left(
+        &project,
+        &slot,
+        &mission,
+        HALF_A_CAMPAIGN,
+        u32::MAX,
+        nunki::engine::Liveness::Running,
+        "nunki-run-ended",
+        "nunki-left",
+    );
+
+    let progress = mutants::read_back(&project, &slot, engine.clone(), &mission)
+        .unwrap()
+        .unwrap();
+
+    assert!(
+        matches!(progress, mutants::Progress::Lost(_)),
+        "{progress:?}"
+    );
+    stopped_by_its_tag(&engine);
+    assert!(
+        mutants::read_running(&project.hq_root, &slot.name)
+            .unwrap()
+            .is_none(),
+        "a campaign confirmed over is still filed"
+    );
+}
+
+/// The case the security round proved: the script is killed — by something
+/// the campaign ran, say — while what it started keeps running. The record
+/// stays filed and every door into the copy shut, on every path: the
+/// monitor's reading, `--cancel`, and a profile switch, which ends it and
+/// leaves the forgetting to the container's removal.
+#[test]
+fn a_campaign_whose_script_was_killed_while_its_children_run_keeps_its_record_and_every_door_shut()
+{
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot) = context(dir.path());
+    let paths = nunki::mission::dir::Paths::of(&project.hq_root, "m1");
+    let engine = in_flight_left(
+        &project,
+        &slot,
+        &paths.dir,
+        HALF_A_CAMPAIGN,
+        u32::MAX,
+        nunki::engine::Liveness::Running,
+        "nunki-run-ended",
+        "nunki-left 57 63",
+    );
+    let still_filed = || {
+        assert!(
+            mutants::read_running(&project.hq_root, &slot.name)
+                .unwrap()
+                .is_some(),
+            "the campaign was forgotten while something of it still runs"
+        );
+        let door = nunki::exec::refresh(&project, &slot, engine.clone()).unwrap_err();
+        assert!(
+            matches!(door, nunki::exec::ExecError::CampaignInFlight { .. }),
+            "{door}"
+        );
+    };
+
+    let progress = mutants::read_back(&project, &slot, engine.clone(), &paths.dir)
+        .unwrap()
+        .unwrap();
+    let mutants::Progress::Running {
+        unstopped: Some(why),
+        ..
+    } = &progress
+    else {
+        panic!("read back as over: {progress:?}");
+    };
+    assert!(why.contains("its script has ended"), "{why}");
+    assert!(why.contains("57 63"), "{why}");
+    stopped_by_its_tag(&engine);
+    still_filed();
+
+    let err = mutants::cancel_and_say(
+        &project,
+        &slot,
+        engine.clone(),
+        &paths,
+        "Alex Martin",
+        "wasted",
+    )
+    .unwrap_err();
+    assert!(matches!(err, mutants::MutantsError::NotStopped(_)), "{err}");
+    assert!(err.to_string().contains("57 63"), "{err}");
+    still_filed();
+
+    assert_eq!(
+        nunki::run::end_campaign_before_switching(&project, &slot, engine.clone(), &paths.dir)
+            .unwrap(),
+        Some("2026-09-18T22:52:37Z".to_string()),
+        "a switch did not end the campaign"
+    );
+    still_filed();
+
+    assert_eq!(mutants::read(&paths.dir).unwrap(), None, "recorded");
+    assert!(!paths.followup.exists(), "written to FOLLOWUP_HQ.md");
+    assert_eq!(refreshed(&execs(&engine)), None, "the copy was reset");
+}
+
+/// When whether the script still runs cannot be asked — the check printed
+/// neither of its words — nothing is known, and nothing is forgotten: the
+/// record stays, the doors stay shut, and the reading and `--cancel` both
+/// say why.
+#[test]
+fn a_campaign_nobody_could_ask_about_keeps_its_record_and_says_why() {
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot) = context(dir.path());
+    let paths = nunki::mission::dir::Paths::of(&project.hq_root, "m1");
+    let engine = in_flight(
+        &project,
+        &slot,
+        &paths.dir,
+        HALF_A_CAMPAIGN,
+        u32::MAX,
+        nunki::engine::Liveness::Running,
+        "sh: 1: tr: Permission denied",
+    );
+
+    let progress = mutants::read_back(&project, &slot, engine.clone(), &paths.dir)
+        .unwrap()
+        .unwrap();
+    let mutants::Progress::Running {
+        unstopped: Some(why),
+        ..
+    } = &progress
+    else {
+        panic!("a campaign nobody could ask about was read as {progress:?}");
+    };
+    assert!(why.contains("could not be told"), "{why}");
+    assert!(why.contains("asks again"), "{why}");
+
+    let err = mutants::cancel_and_say(
+        &project,
+        &slot,
+        engine.clone(),
+        &paths,
+        "Alex Martin",
+        "wasted",
+    )
+    .unwrap_err();
+    assert!(matches!(err, mutants::MutantsError::NotStopped(_)), "{err}");
+    assert!(err.to_string().contains("could not be told"), "{err}");
+
+    assert!(
+        mutants::read_running(&project.hq_root, &slot.name)
+            .unwrap()
+            .is_some(),
+        "forgotten on a question nobody answered"
+    );
+    let door = nunki::exec::refresh(&project, &slot, engine.clone()).unwrap_err();
+    assert!(
+        matches!(door, nunki::exec::ExecError::CampaignInFlight { .. }),
+        "{door}"
+    );
+    assert_eq!(mutants::read(&paths.dir).unwrap(), None, "recorded");
+    assert!(!paths.followup.exists(), "written to FOLLOWUP_HQ.md");
+}
+
+/// `--cancel` on a campaign whose script had ended, frozen before the
+/// reading that follows: still in flight, so an error — never "the campaign
+/// had already ended".
+#[test]
+fn a_campaign_called_off_that_freezes_once_its_script_ended_is_not_said_to_have_ended() {
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot) = context(dir.path());
+    let paths = nunki::mission::dir::Paths::of(&project.hq_root, "m1");
+    let engine = in_flight_with(
+        &project,
+        &slot,
+        &paths.dir,
+        HALF_A_CAMPAIGN,
+        u32::MAX,
+        nunki::engine::Liveness::Running,
+        "nunki-run-ended",
+        stops_whole(nunki::engine::fake::FakeEngine::default()).with_livenesses(
+            "cafe1234",
+            vec![
+                nunki::engine::Liveness::Running,
+                nunki::engine::Liveness::Paused,
+            ],
+        ),
+    );
+
+    let err = mutants::cancel_and_say(&project, &slot, engine, &paths, "Alex Martin", "wasted")
+        .unwrap_err();
+
+    assert!(matches!(err, mutants::MutantsError::NotStopped(_)), "{err}");
+    assert!(err.to_string().contains("still in flight"), "{err}");
+    assert!(
+        mutants::read_running(&project.hq_root, &slot.name)
+            .unwrap()
+            .is_some()
+    );
+    assert!(!paths.followup.exists(), "written to FOLLOWUP_HQ.md");
 }
 
 /// How a mission's campaigns are listed says an incomplete one is.

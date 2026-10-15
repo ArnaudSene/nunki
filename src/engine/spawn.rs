@@ -75,13 +75,27 @@ pub fn reap_script(run: &str) -> String {
 /// found nothing.
 const LEFT: &str = "nunki-left";
 
+/// Where both scripts find `tr`, `grep` and `sleep`: the system's own
+/// directories, and nothing else. Never the `PATH` the container was given:
+/// in an agent image it starts with a directory the agent's own uid can
+/// write (`~/.cargo/bin`), and a `grep` that code the campaign runs dropped
+/// there would find nothing — a stop read as confirmed while the campaign
+/// goes on.
+pub const SYSTEM_PATH: &str = "/usr/sbin:/usr/bin:/sbin:/bin";
+
+/// The shell both scripts are run with, by its path for the same reason
+/// ([`SYSTEM_PATH`]).
+pub const SYSTEM_SHELL: &str = "/bin/sh";
+
 /// The shell function both scripts find a run's processes with: `mine`
 /// prints the pid of every process whose environment carries
-/// `NUNKI_RUN=<run>`, one per line.
+/// `NUNKI_RUN=<run>`, one per line. Preceded by the `PATH` both scripts run
+/// under ([`SYSTEM_PATH`]).
 fn mine(run: &str) -> String {
     let wanted = crate::exec::quote(&format!("{RUN_TAG}={run}"));
     format!(
-        "mine() {{ for p in /proc/[0-9]*; do \
+        "PATH={SYSTEM_PATH}; export PATH\n\
+         mine() {{ for p in /proc/[0-9]*; do \
          if tr '\\0' '\\n' < \"$p/environ\" 2>/dev/null | grep -qxF -- {wanted}; then \
          echo \"${{p#/proc/}}\"; fi; done; }}\n"
     )
@@ -91,8 +105,17 @@ fn mine(run: &str) -> String {
 /// nothing: [`LEFT`] and the pids, on one line. It reads the way
 /// [`reap_script`] reads, so a zombie — whose environment is empty — is not
 /// counted: it runs nothing, and it is gone once its parent reaps it.
+///
+/// It looks **twice**, a second apart, and prints what either look found.
+/// One look is one pass over `/proc`, and a process that forks and exits
+/// can be between two entries of it — its parent gone before the pass
+/// reaches it, its child started after the pass began. "Nothing left" is
+/// two empty looks in a row.
 pub fn left_script(run: &str) -> String {
-    format!("{}echo {LEFT} $(mine)\n", mine(run))
+    format!(
+        "{}first=$(mine)\nsleep 1\necho {LEFT} $first $(mine)\n",
+        mine(run)
+    )
 }
 
 /// What [`ContainerSpawner::halt`] found once it had stopped a run by its
@@ -178,7 +201,7 @@ impl ContainerSpawner {
             Ok(_) => return Ok(None),
             Err(e) => return Err(io::Error::other(e)),
         }
-        let out = self.in_container(&["sh", "-c", &reap_script(&Self::run_of(log))])?;
+        let out = self.in_container(&[SYSTEM_SHELL, "-c", &reap_script(&Self::run_of(log))])?;
         let Some(said) = out
             .stdout
             .lines()
@@ -245,7 +268,7 @@ impl ContainerSpawner {
     /// `word`, or say why that could not be done.
     fn said(&self, script: &str, word: &str) -> Result<Vec<u32>, String> {
         let out = self
-            .in_container(&["sh", "-c", script])
+            .in_container(&[SYSTEM_SHELL, "-c", script])
             .map_err(|e| format!("could not be put: the engine did not answer: {e}"))?;
         let Some(pids) = out
             .stdout
@@ -259,10 +282,15 @@ impl ContainerSpawner {
                 format!("did not run in the container ({}): {said}", out.status)
             });
         };
-        Ok(pids
-            .split_whitespace()
-            .filter_map(|pid| pid.parse().ok())
-            .collect())
+        // Each pid once, in the order first said: the check prints what each
+        // of its two looks found, and a process both found is one process.
+        let mut said: Vec<u32> = Vec::new();
+        for pid in pids.split_whitespace().filter_map(|pid| pid.parse().ok()) {
+            if !said.contains(&pid) {
+                said.push(pid);
+            }
+        }
+        Ok(said)
     }
 
     /// The host-side command that runs `cmd` in the container.
@@ -399,10 +427,9 @@ impl Spawner for ContainerSpawner {
             }
             // The engine no longer knows it: a machine that slept, an engine
             // restarted without its containers, a profile taken down (SPEC
-            // 4.2 names the first two). Worth knowing: the Docker adapter
-            // also answers `Gone` when the daemon itself cannot be reached,
-            // so a stopped engine arrives here dressed as a removed
-            // container — a conflation of its own, and not this one to fix.
+            // 4.2 names the first two). An engine that could not be reached
+            // is not this: the adapter answers it with an error, which lands
+            // in the arm below as `Unknown`.
             Ok(Liveness::Gone) => {
                 return Ok(Presence::Vanished(format!(
                     "the engine no longer knows container {}",
