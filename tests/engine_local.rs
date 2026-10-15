@@ -659,15 +659,18 @@ impl Volet {
         .unwrap();
     }
 
-    /// What the slot's stack runs with now, read the way a launch reads it.
+    /// What the slot's stack runs with now, read the way a launch reads it:
+    /// the digest, or `None` when it could not be read.
     fn tooling_now(&self) -> Option<String> {
         nunki::mutants::tooling(
             &self.project,
             &self.w.slot,
             self.engine.clone(),
             &nunki::run::judged(&self.project, "rust"),
+            &["src/lib.rs".to_string()],
         )
         .unwrap()
+        .ok()
     }
 
     fn launch(&self, rigor: nunki::mission::Rigor) -> nunki::mutants::Progress {

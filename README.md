@@ -428,7 +428,12 @@ the reason in `MUTANTS.json`:
 - the stack's `mutation.sh` and its tool's version are the ones it ran with —
   read through the script's `# nunki-tool-version: <command>` line, which
   every shipped `mutation.sh` carries; a script without it runs full
-  campaigns only;
+  campaigns only. With several stacks, only those the campaign calls count —
+  the ones owning a touched path — and each stack's command runs where its
+  script does, in the stack's own directory. A stack the branch did not
+  touch neither counts nor can make the campaign full. When a version
+  cannot be read, the reason in `MUTANTS.json` names the stack, the command
+  and what it answered;
 - it was not asked with `nunki mission mutants --again`.
 
 **Per-file counts.** Before its last line, `mutation.sh` prints one line per

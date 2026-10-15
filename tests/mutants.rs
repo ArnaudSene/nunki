@@ -5755,7 +5755,7 @@ fn scope_with(
         &mut Rigor,
         &mut Replay,
         &mut Option<Campaign>,
-        &mut Option<&str>,
+        &mut Result<&str, &str>,
         &mut bool,
         &mut bool,
         &mut Option<String>,
@@ -5763,7 +5763,7 @@ fn scope_with(
 ) -> Scope {
     let (mut rigor, mut replay) = (Rigor::Standard, Replay::WhenChanged);
     let mut previous = Some(on_file_at("aaaaaaaaaaaaaaaa", vec![], Some(10)));
-    let mut tooling = Some("tools-1");
+    let mut tooling: Result<&str, &str> = Ok("tools-1");
     let (mut owes, mut ancestor) = (false, true);
     let mut compare: Option<String> = None;
     change(
@@ -5815,7 +5815,7 @@ fn at_critical_a_campaign_after_a_passing_one_is_partial_under_the_same_conditio
         &mut Rigor,
         &mut Replay,
         &mut Option<Campaign>,
-        &mut Option<&str>,
+        &mut Result<&str, &str>,
         &mut bool,
         &mut bool,
         &mut Option<String>,
@@ -5843,11 +5843,11 @@ fn at_critical_a_campaign_after_a_passing_one_is_partial_under_the_same_conditio
             *compare = Some("fatal: bad object".into())
         }),
         ("could not be read", |_, _, _, tooling, _, _, _| {
-            *tooling = None
+            *tooling = Err("the `rust` stack's tool version could not be read")
         }),
         (
             "changed since the previous campaign",
-            |_, _, _, tooling, _, _, _| *tooling = Some("tools-2"),
+            |_, _, _, tooling, _, _, _| *tooling = Ok("tools-2"),
         ),
     ];
     for (said, refusal) in refusals {
@@ -5878,7 +5878,7 @@ fn at_critical_a_previous_campaign_with_one_open_survivor_gives_a_full_campaign(
             Rigor::Critical,
             Replay::WhenChanged,
             Some(&previous),
-            Some("tools-1"),
+            Ok("tools-1"),
             FORK,
             |c: &Campaign| mutants::owed(c, coders, Rigor::Critical, 80),
             |_| true,
@@ -5959,7 +5959,7 @@ fn each_refusal_gives_a_full_campaign_with_its_reason_recorded() {
         ),
         (
             "could not be read",
-            scope_with(|_, _, _, tooling, _, _, _| *tooling = None),
+            scope_with(|_, _, _, tooling, _, _, _| *tooling = Err("the `rust` stack said nothing")),
         ),
         (
             "recorded nothing of what it ran with",
@@ -5969,7 +5969,7 @@ fn each_refusal_gives_a_full_campaign_with_its_reason_recorded() {
         ),
         (
             "changed since the previous campaign",
-            scope_with(|_, _, _, tooling, _, _, _| *tooling = Some("tools-2")),
+            scope_with(|_, _, _, tooling, _, _, _| *tooling = Ok("tools-2")),
         ),
     ];
     for (said, scope) in cases {
@@ -5993,7 +5993,7 @@ fn a_previous_campaign_below_the_threshold_gives_a_full_campaign() {
         Rigor::Standard,
         Replay::WhenChanged,
         Some(&previous),
-        Some("tools-1"),
+        Ok("tools-1"),
         FORK,
         owed,
         |_| true,
@@ -6019,7 +6019,7 @@ fn a_previous_campaign_below_the_threshold_gives_a_full_campaign() {
         Rigor::Standard,
         Replay::WhenChanged,
         Some(&previous),
-        Some("tools-1"),
+        Ok("tools-1"),
         FORK,
         |c: &Campaign| mutants::owed(c, &answered, Rigor::Standard, 80),
         |_| true,
@@ -6225,7 +6225,7 @@ fn an_old_campaign_file_reads_as_a_full_campaign_alone() {
             },
             ..campaign.clone()
         }),
-        Some("tools-1"),
+        Ok("tools-1"),
         FORK,
         |_| None,
         |_| true,
@@ -6997,7 +6997,7 @@ fn a_count_under_a_path_the_campaign_was_not_handed_makes_the_next_campaign_full
         Rigor::Standard,
         Replay::WhenChanged,
         Some(&campaign),
-        Some("tools-1"),
+        Ok("tools-1"),
         FORK,
         |_| None,
         |_| true,
@@ -7061,7 +7061,7 @@ fn a_kept_count_that_names_no_touched_file_makes_the_campaign_full() {
         Rigor::Standard,
         Replay::WhenChanged,
         Some(&previous),
-        Some("tools-1"),
+        Ok("tools-1"),
         FORK,
         |_| None,
         |_| true,
@@ -8849,5 +8849,232 @@ fn what_changed_between_two_campaigns_keeps_each_name_as_it_is() {
     assert_eq!(
         changed.into_iter().collect::<Vec<_>>(),
         [" leading.rs", "src/with\"quote.rs", "src/é.rs"]
+    );
+}
+
+// ---------------------------------------------------------------------------
+// What a campaign runs with: only the stacks it calls, read where each runs.
+// ---------------------------------------------------------------------------
+
+/// A project with the two stacks a frontend brings: `rust` at the root,
+/// `next` in `frontend/`.
+fn rust_and_next(dir: &Path) -> (nunki::project::Project, nunki::slot::Slot) {
+    let (mut project, slot) = context(dir);
+    project.config.stacks = vec![
+        "rust".into(),
+        nunki::project::Stack::new("next", "frontend").unwrap(),
+    ];
+    let profile = nunki::run::profile_path(&project, &slot.name);
+    std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+    std::fs::write(&profile, "services: {}\n").unwrap();
+    (project, slot)
+}
+
+/// What [`mutants::tooling`] reads over `touched` on [`rust_and_next`],
+/// with the `next` stack's version command answering `next_says`, and every
+/// argv the container was asked to run.
+fn tooling_over(
+    touched: &[&str],
+    next_says: nunki::engine::ExecOutput,
+) -> (Result<String, String>, Vec<Vec<String>>) {
+    use nunki::engine::fake::{Call, FakeEngine};
+
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot) = rust_and_next(dir.path());
+    let fake = std::sync::Arc::new(
+        FakeEngine::default()
+            .with_container(nunki::compose::AGENT_SERVICE, "cafe1234")
+            .with_exec_when(
+                "/work/stack-next/mutation.sh",
+                container_says("#!/bin/sh\n# nunki-tool-version: pnpm exec stryker --version"),
+            )
+            .with_exec_when(
+                "/work/stack/mutation.sh",
+                container_says("#!/bin/sh\n# nunki-tool-version: cargo mutants --version"),
+            )
+            .with_exec_when("stryker --version", next_says)
+            .with_exec_when(
+                "cargo mutants --version",
+                container_says("cargo-mutants 27.1.0"),
+            ),
+    );
+    let engine: std::sync::Arc<dyn nunki::engine::Engine> = fake.clone();
+    let judged = nunki::run::judged(&project, "rust");
+    let touched: Vec<String> = touched.iter().map(|p| p.to_string()).collect();
+    let read = mutants::tooling(&project, &slot, engine, &judged, &touched).unwrap();
+    let argvs = fake
+        .calls()
+        .into_iter()
+        .filter_map(|call| match call {
+            Call::Exec(_, _, argv) => Some(argv),
+            _ => None,
+        })
+        .collect();
+    (read, argvs)
+}
+
+fn failed(status: i32, stderr: &str) -> nunki::engine::ExecOutput {
+    nunki::engine::ExecOutput {
+        status,
+        stdout: String::new(),
+        stderr: stderr.to_string(),
+    }
+}
+
+/// A campaign calls a project's one stack whatever was touched, and of
+/// several only those owning a touched path — the very stacks
+/// [`mutants::several_campaigns`] runs a script for, and no other. Each runs
+/// where that script runs: the root for one stack, its own directory among
+/// several.
+#[test]
+fn a_campaign_calls_only_the_stacks_its_branch_touched() {
+    let dir = tempfile::tempdir().unwrap();
+    let (project, _) = rust_and_next(dir.path());
+    let judged = nunki::run::judged(&project, "rust");
+    let names = |touched: &[&str]| -> Vec<String> {
+        let touched: Vec<String> = touched.iter().map(|p| p.to_string()).collect();
+        mutants::called_stacks(&judged, &touched)
+            .iter()
+            .map(|j| j.stack.name.clone())
+            .collect()
+    };
+    assert_eq!(names(&["src/lib.rs"]), ["rust"]);
+    assert_eq!(names(&["frontend/app/page.ts"]), ["next"]);
+    assert_eq!(
+        names(&["frontend/app/page.ts", "src/lib.rs"]),
+        ["rust", "next"]
+    );
+    // `frontend.rs` at the root is not under `frontend/`.
+    assert_eq!(names(&["frontend.rs"]), ["rust"]);
+    assert!(names(&[]).is_empty());
+
+    // Agreement with the script that runs them: a stack is called exactly
+    // when the campaign's script runs its `mutation.sh`.
+    for touched in [
+        vec!["src/lib.rs"],
+        vec!["frontend/app/page.ts"],
+        vec!["src/lib.rs", "frontend/app/page.ts"],
+    ] {
+        let paths: Vec<String> = touched.iter().map(|p| p.to_string()).collect();
+        let script = mutants::several_campaigns(&judged, "abc1234", &paths);
+        let called = names(&touched);
+        assert_eq!(
+            script.contains("/work/stack-next/mutation.sh"),
+            called.contains(&"next".to_string()),
+            "{touched:?}"
+        );
+        assert_eq!(
+            script.contains("/work/stack/mutation.sh"),
+            called.contains(&"rust".to_string()),
+            "{touched:?}"
+        );
+    }
+
+    assert_eq!(mutants::runs_in(&judged, &judged[0]), ".");
+    assert_eq!(mutants::runs_in(&judged, &judged[1]), "frontend");
+    // One stack runs at the root, as `command` runs its script, wherever
+    // the stack says it lives.
+    let one = vec![nunki::run::Judged {
+        stack: nunki::project::Stack::new("next", "frontend").unwrap(),
+        scripts_at: "/work/stack".into(),
+        advisories_at: String::new(),
+    }];
+    assert_eq!(mutants::runs_in(&one, &one[0]), ".");
+    assert_eq!(
+        mutants::called_stacks(&one, &[]).len(),
+        1,
+        "a project's one stack is called whatever was touched"
+    );
+}
+
+/// A stack the branch did not touch is not called, so its tool is not what
+/// the campaign runs with: its script is not read and its version command
+/// is not run. Its version, unreadable here, does not make the campaign's
+/// tooling unreadable — which made every campaign of such a project full.
+#[test]
+fn a_stack_the_branch_did_not_touch_does_not_count_in_what_a_campaign_runs_with() {
+    let (read, argvs) = tooling_over(
+        &["src/lib.rs"],
+        failed(1, "ERR_PNPM_RECURSIVE_EXEC_NO_PACKAGE No package found"),
+    );
+    assert!(read.is_ok(), "{read:?}");
+    for argv in &argvs {
+        assert!(
+            !argv
+                .iter()
+                .any(|a| a.contains("stack-next") || a.contains("stryker")),
+            "the untouched stack was asked about: {argv:?}"
+        );
+    }
+    // And what it reads is the rust stack's alone: the same digest whatever
+    // the untouched stack would have said.
+    let (again, _) = tooling_over(&["src/lib.rs"], container_says("stryker 9.0.0"));
+    assert_eq!(read, again);
+}
+
+/// Each stack's version command runs where the campaign runs its script:
+/// `next`'s in `frontend/`, where its package is, and the root stack's at
+/// the root of the clean copy.
+#[test]
+fn a_stack_tool_version_is_read_where_its_script_runs() {
+    let (read, argvs) = tooling_over(
+        &["src/lib.rs", "frontend/app/page.ts"],
+        container_says("9.0.0"),
+    );
+    assert!(read.is_ok(), "{read:?}");
+    let ran = |command: &str| {
+        argvs
+            .iter()
+            .any(|argv| argv.iter().any(|a| a == &format!("cd {command}")))
+    };
+    assert!(
+        ran("'frontend' && pnpm exec stryker --version"),
+        "{argvs:#?}"
+    );
+    assert!(ran("'.' && cargo mutants --version"), "{argvs:#?}");
+}
+
+/// A version that cannot be read is said with its stack, where its command
+/// ran and what it answered — and that is the reason the full campaign
+/// records, instead of "a stack's mutation.sh, or its tool's version".
+#[test]
+fn a_tool_version_that_cannot_be_read_names_its_stack_and_what_it_said() {
+    let (read, _) = tooling_over(
+        &["src/lib.rs", "frontend/app/page.ts"],
+        failed(254, "Command \"stryker\" not found"),
+    );
+    let why = read.expect_err("an unreadable version is not a digest");
+    for said in [
+        "`next` stack",
+        "pnpm exec stryker --version",
+        "`frontend`",
+        "exited 254",
+        "Command \"stryker\" not found",
+    ] {
+        assert!(why.contains(said), "{said:?} in {why}");
+    }
+    // Answered with nothing at all, it says so rather than an empty reason.
+    let (silent, _) = tooling_over(&["src/lib.rs", "frontend/app/page.ts"], container_says(""));
+    let silent = silent.expect_err("a version that says nothing is not one");
+    assert!(silent.contains("printed nothing"), "{silent}");
+
+    let scope = mutants::scope(
+        Rigor::Standard,
+        Replay::WhenChanged,
+        Some(&on_file_at("aaaaaaaaaaaaaaaa", vec![], Some(10))),
+        Err(&why),
+        FORK,
+        |_| None,
+        |_| true,
+        |_| None,
+    );
+    let Scope::Full { why: recorded } = &scope else {
+        panic!("an unreadable tooling continued a chain: {scope:?}");
+    };
+    assert!(recorded.contains("could not be read"), "{recorded}");
+    assert!(recorded.contains("`next` stack"), "{recorded}");
+    assert!(
+        recorded.contains("Command \"stryker\" not found"),
+        "{recorded}"
     );
 }
