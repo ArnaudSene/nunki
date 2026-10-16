@@ -318,6 +318,7 @@ fn decision_of(s: &Several, gate: nunki::gate::Gate) -> nunki::gate::Decision {
         security: nunki::mission::Security::Gates,
         rigor: Default::default(),
         mutation_threshold: None,
+        hardening: Vec::new(),
         arbiter: None,
         run: None,
         account: None,
@@ -688,6 +689,7 @@ impl Volet {
                 replay: nunki::mutants::Replay::WhenChanged,
                 rigor,
                 threshold: 80,
+                hardening: &[],
             },
         )
         .unwrap()
@@ -867,6 +869,7 @@ fn at_critical_a_volets_campaign_asked_again_is_launched_full() {
             replay: nunki::mutants::Replay::Now,
             rigor: nunki::mission::Rigor::Critical,
             threshold: 80,
+            hardening: &[],
         },
     )
     .unwrap();
@@ -1654,4 +1657,193 @@ fn a_campaign_outside_missions_runs_on_the_recorded_base_and_lands_in_the_debt()
     let third = said();
     assert!(third.contains("arg src/more.rs"), "{third}");
     assert!(read_back().is_some());
+}
+
+/// A hardening mission's campaign, launched on an engine that really runs
+/// (SPEC 4.4, the debt): full, though its previous campaign would let a
+/// partial one continue it; handed its survivors' files and their names in
+/// its environment, with the fork point as any mission's; and filed under
+/// the fingerprint gate 7 asks of it. A script that does not say it
+/// measures by name is not handed them: the launch is refused.
+#[test]
+fn a_hardening_missions_campaign_is_handed_its_survivors_by_name() {
+    let v = volet();
+    let script = v.project.fragment("rust").join(nunki::mutants::SCRIPT);
+    let recording = |mark: &str| {
+        format!(
+            "#!/bin/sh\n# nunki-tool-version: echo stand-in 1.0\n{mark}\n\
+             {{ env | grep '^NUNKI_BASE=\\|^NUNKI_MUTATION_NAMES=' | sort; printf 'arg %s\\n' \"$@\"; }} > nunki-named.tmp\n\
+             mv nunki-named.tmp nunki-named.txt\n\
+             printf '%s\\n' '{{\"campaign\":\"done\",\"tried\":0,\"found\":0}}'\n"
+        )
+    };
+    std::fs::write(&script, recording(nunki::mutants::BY_NAME_MARK)).unwrap();
+    v.first_campaign_ran_with(v.tooling_now());
+    let hardening = [nunki::mission::Hardened {
+        id: "src/lib.rs:2:7: replace > with == in keep".into(),
+        file: "src/lib.rs".into(),
+        line: 2,
+        end_line: Some(2),
+        description: "replace > with == in keep".into(),
+        found_at: "f".repeat(40),
+    }];
+    let launch = || {
+        nunki::mutants::campaign(
+            &v.project,
+            &v.w.slot,
+            v.engine.clone(),
+            &v.mission,
+            "rust",
+            &nunki::mutants::Asked {
+                base: "dev",
+                budget_minutes: 45,
+                replay: nunki::mutants::Replay::WhenChanged,
+                rigor: nunki::mission::Rigor::Standard,
+                threshold: 80,
+                hardening: &hardening,
+            },
+        )
+    };
+    match launch().unwrap() {
+        nunki::mutants::Progress::Started { scope, .. } => assert!(
+            matches!(&scope, nunki::mutants::Scope::Full { why } if why.contains("hardening")),
+            "{scope:?}"
+        ),
+        other => panic!("the campaign was not launched: {other:?}"),
+    }
+    let at = v.w.proof.join("nunki-named.txt");
+    let started = std::time::Instant::now();
+    while !at.exists() && started.elapsed() < std::time::Duration::from_secs(20) {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let said = std::fs::read_to_string(&at).expect("the script ran");
+    let fork = nunki::gate::fork_point(&v.w.slot.tree, "dev").unwrap();
+    assert!(said.contains(&format!("NUNKI_BASE={fork}\n")), "{said}");
+    assert!(
+        said.contains("NUNKI_MUTATION_NAMES=[\"src/lib.rs:2:7: replace > with == in keep\"]\n"),
+        "{said}"
+    );
+    assert!(said.contains("arg src/lib.rs\n"), "{said}");
+    let filed = nunki::mutants::read_running(&v.project.hq_root, &v.w.slot.name)
+        .unwrap()
+        .expect("filed in flight");
+    assert_eq!(
+        filed.fingerprint,
+        nunki::gate::campaign_on(&v.w.slot.tree, "dev", &hardening)
+            .unwrap()
+            .fingerprint
+    );
+    nunki::mutants::forget_running(&v.project.hq_root, &v.w.slot.name).unwrap();
+
+    std::fs::write(&script, recording("")).unwrap();
+    let err = launch().unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("does not say it measures mutants by name"),
+        "{err}"
+    );
+}
+
+/// The debt measured by name, end to end on an engine that really runs
+/// (SPEC 4.4, the debt): `--owed` hands the debt's survivors' names and
+/// their files, with the base's own commit as the fork point, so that the
+/// script runs them and nothing else; read back, a survivor a test now
+/// kills leaves the debt, one still surviving stays, and what the debt last
+/// measured does not move.
+#[test]
+fn the_debt_measured_by_name_keeps_only_what_still_survives() {
+    let v = volet();
+    let mut project = v.project.clone();
+    project.root = v.w.slot.tree.with_file_name("tree-project.git");
+    let script = project.fragment("rust").join(nunki::mutants::SCRIPT);
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\n{}\n\
+             {{ env | grep '^NUNKI_BASE=\\|^NUNKI_MUTATION_NAMES=' | sort; printf 'arg %s\\n' \"$@\"; }} > nunki-owed.tmp\n\
+             mv nunki-owed.tmp nunki-owed.txt\n\
+             [ -n \"${{NUNKI_MUTATION_NAMES:-}}\" ] || printf '%s\\n' '{{\"id\":\"a\",\"file\":\"src/lib.rs\",\"line\":2,\"description\":\"replace > with ==\"}}'\n\
+             printf '%s\\n' '{{\"id\":\"b\",\"file\":\"src/lib.rs\",\"line\":2,\"description\":\"replace > with <\"}}'\n\
+             printf '%s\\n' '{{\"campaign\":\"done\",\"tried\":2,\"found\":2}}'\n",
+            nunki::mutants::BY_NAME_MARK
+        ),
+    )
+    .unwrap();
+    let dev = git(&project.root, &["rev-parse", "dev"]);
+    let said = || {
+        let at = v.w.proof.join("nunki-owed.txt");
+        let started = std::time::Instant::now();
+        while !at.exists() && started.elapsed() < std::time::Duration::from_secs(20) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let said = std::fs::read_to_string(&at).expect("the script ran");
+        std::fs::remove_file(&at).unwrap();
+        said
+    };
+    let read_back = || {
+        let started = std::time::Instant::now();
+        loop {
+            match nunki::mutants::read_back_off_mission(&project, &v.w.slot, v.engine.clone())
+                .unwrap()
+            {
+                Some(nunki::mutants::Progress::Running { .. })
+                    if started.elapsed() < std::time::Duration::from_secs(20) =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(100))
+                }
+                other => return other,
+            }
+        }
+    };
+    let run = |form| {
+        nunki::offmission::run(
+            &project,
+            &v.w.slot,
+            v.engine.clone(),
+            "rust",
+            &nunki::offmission::Asked {
+                base: "dev",
+                form,
+                minutes: 720,
+            },
+        )
+    };
+
+    let err = run(nunki::offmission::Form::Owed).unwrap_err();
+    assert!(
+        matches!(err, nunki::offmission::OffMissionError::NothingOwed),
+        "{err}"
+    );
+    run(nunki::offmission::Form::Whole).unwrap();
+    said();
+    assert!(read_back().is_some());
+    let before = nunki::offmission::read_debt(&project.hq_root).unwrap();
+    assert_eq!(before.owed.len(), 2);
+
+    let started = run(nunki::offmission::Form::Owed).unwrap();
+    assert_eq!(
+        started.owed,
+        Some(nunki::offmission::Owing {
+            named: 2,
+            left: 0,
+            why: None
+        })
+    );
+    let filed = nunki::mutants::read_running(&project.hq_root, &v.w.slot.name)
+        .unwrap()
+        .and_then(|r| r.off_mission)
+        .expect("filed outside missions");
+    assert_eq!(filed.owed, Some(vec!["a".to_string(), "b".to_string()]));
+    let owed = said();
+    assert!(owed.contains(&format!("NUNKI_BASE={dev}\n")), "{owed}");
+    assert!(
+        owed.contains("NUNKI_MUTATION_NAMES=[\"a\",\"b\"]\n"),
+        "{owed}"
+    );
+    assert!(owed.contains("arg src/lib.rs\n"), "{owed}");
+    assert!(read_back().is_some());
+    let after = nunki::offmission::read_debt(&project.hq_root).unwrap();
+    let ids: Vec<&str> = after.owed.iter().map(|o| o.survivor.id.as_str()).collect();
+    assert_eq!(ids, vec!["b"]);
+    assert_eq!(after.last, before.last);
 }

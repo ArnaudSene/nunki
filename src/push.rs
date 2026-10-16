@@ -572,7 +572,7 @@ fn nothing_owed(
     }
     if header.rigor == crate::mission::Rigor::Critical
         && let Some(campaign) = crate::mutants::read(&dir)?
-        && let Some(why) = not_at_pushed(tree, &header.base, &campaign)?
+        && let Some(why) = not_at_pushed(tree, header, &campaign)?
     {
         return Err(PushError::NotAtPushed {
             mission: id.to_string(),
@@ -612,11 +612,10 @@ fn nothing_owed(
 /// full: the chain holds to the push, judged on its reconstruction.
 fn not_at_pushed(
     tree: &std::path::Path,
-    base: &str,
+    header: &crate::mission::Header,
     campaign: &crate::mutants::Campaign,
 ) -> Result<Option<String>, PushError> {
-    let touched = crate::gate::touched_since_base(tree, base)?;
-    let want = crate::mutants::fingerprint(tree, &touched)?;
+    let want = crate::gate::campaign_on(tree, &header.base, &header.hardening)?.fingerprint;
     if campaign.fingerprint != want {
         return Ok(Some(format!(
             "the campaign on file ran on other content than the pushed commit ({} against {})",

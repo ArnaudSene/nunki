@@ -261,6 +261,39 @@ fn default_mutation_minutes() -> u32 {
     45
 }
 
+/// A survivor of the project's debt that a hardening mission is to kill
+/// (SPEC 4.4, the debt), as `mission new --harden` froze it: what its
+/// campaigns hand the stack by name ([`crate::mutants::NAMES_ENV`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Hardened {
+    /// What the tool calls it, and what the campaign hands it by.
+    pub id: String,
+    pub file: String,
+    pub line: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_line: Option<u32>,
+    #[serde(default)]
+    pub description: String,
+    /// The commit of the campaign outside missions that found it.
+    pub found_at: String,
+}
+
+impl Hardened {
+    /// The survivor as a campaign names it, with no outcome.
+    pub fn survivor(&self) -> crate::mutants::Survivor {
+        crate::mutants::Survivor {
+            id: self.id.clone(),
+            file: self.file.clone(),
+            line: self.line,
+            end_line: self.end_line,
+            description: self.description.clone(),
+            outcome: None,
+            refused: None,
+            found_on: None,
+        }
+    }
+}
+
 /// The structured header of `MISSION.md`, frozen into the state at
 /// validation (SPEC 4.1). The agent cannot write it and `nunki` never re-reads
 /// it during the mission.
@@ -288,6 +321,13 @@ pub struct Header {
         deserialize_with = "crate::project::frozen_mutation_threshold"
     )]
     pub mutation_threshold: Option<u32>,
+    /// The debt's survivors a **hardening mission** is to kill, frozen at
+    /// `mission new --harden` (SPEC 4.4, the debt): its gate 7 measures them
+    /// by name, besides what its branch changed. Frozen rather than read from
+    /// the debt, which a campaign outside missions or a ruling can change
+    /// under a mission already framed. Empty for every other mission.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hardening: Vec<Hardened>,
     /// Who decides when this mission comes back with a question — an
     /// arbitration, a verdict to accept, a push to authorise. Defaults to
     /// whoever framed it, and is said rather than assumed the moment a

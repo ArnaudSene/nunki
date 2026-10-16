@@ -107,6 +107,7 @@ fn header() -> Header {
         security: Security::Gates,
         rigor: Default::default(),
         mutation_threshold: None,
+        hardening: Vec::new(),
         arbiter: None,
         run: None,
         account: None,
@@ -972,6 +973,14 @@ fn no_plain_git_runs_on_a_slot() {
         (
             "src/interview.rs",
             "let has = |r: &str| crate::git::run(root, &[\"rev-parse\", \"--verify\", \"--quiet\", r]).is_ok();",
+        ),
+        // What a hardening mission and `nunki mutants run --owed` take from
+        // the debt: the base, and whether a survivor's file changed since the
+        // campaign that found it, in the human's repository.
+        ("src/offmission.rs", "crate::git::run("),
+        (
+            "src/offmission.rs",
+            "let commit = crate::git::head_of(&project.root, base).map_err(|_| OffMissionError::NoBase {",
         ),
         // Finding the project from where `nunki` was started.
         (

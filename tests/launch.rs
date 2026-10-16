@@ -47,6 +47,7 @@ fn header() -> Header {
         security: Security::Gates,
         rigor: Default::default(),
         mutation_threshold: None,
+        hardening: Vec::new(),
         arbiter: None,
         run: None,
         account: None,

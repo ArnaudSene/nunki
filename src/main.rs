@@ -239,8 +239,8 @@ enum SecretCommand {
 enum MutantsCommand {
     /// Start a campaign outside missions, in a slot no mission holds, on the
     /// base as your repository has it: on the files changed since the last
-    /// completed one, each mutated whole, or on the whole code with
-    /// `--whole`. It starts nothing
+    /// completed one, each mutated whole, on the whole code with `--whole`,
+    /// or on the debt's survivors by name with `--owed`. It starts nothing
     /// while a campaign is filed in the slot; `nunki mutants status` reads
     /// one back.
     Run {
@@ -249,8 +249,13 @@ enum MutantsCommand {
         slot: String,
         /// Measure the whole code, rather than the files changed since the
         /// last completed campaign outside missions.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "owed")]
         whole: bool,
+        /// Measure the debt's survivors by name, and nothing else: each one
+        /// a test now kills leaves the debt. What settles a hardening
+        /// mission's survivors once its tests are on the base.
+        #[arg(long)]
+        owed: bool,
         /// The branch it runs on, as `nunki mission new` defaults it.
         #[arg(long, default_value = "dev")]
         base: String,
@@ -356,8 +361,23 @@ enum MissionCommand {
         #[arg(long, default_value = "dev")]
         base: String,
         /// A unit of work, as `id:title`. Repeat it; order is the order.
-        #[arg(long = "lot", value_name = "ID:TITLE", required = true)]
+        #[arg(
+            long = "lot",
+            value_name = "ID:TITLE",
+            required_unless_present = "harden"
+        )]
         lots: Vec<String>,
+        /// Frame a hardening mission: the tests that kill the project's
+        /// debt (`nunki mutants debt`). nunki freezes into its header as many
+        /// of the debt's survivors as its campaign's budget measures, oldest
+        /// first, writes its lot and its brief, and frames it at `standard`.
+        /// Its gate 7 runs each survivor by name; `nunki mutants run --owed`
+        /// settles the debt once its tests are on the base.
+        #[arg(
+            long,
+            conflicts_with_all = ["lots", "services", "wiring", "security_agent", "about"]
+        )]
+        harden: bool,
         /// A service the integrator may reach, as `name=host[,host…]`.
         /// Declaring one makes this an integration mission.
         #[arg(long = "service", value_name = "NAME=REACH")]
@@ -2023,6 +2043,7 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             branch,
             base,
             lots,
+            harden,
             services,
             wiring,
             no_integration,
@@ -2034,9 +2055,23 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             arbiter,
             about,
         } => {
+            // A hardening mission is framed at `standard` (SPEC 4.4, the
+            // debt), whatever the project's default: its gate 7 is the share
+            // of what it runs killed.
+            if let Some(asked) = rigor.filter(|r| harden && *r != Rigor::Standard) {
+                eprintln!(
+                    "nunki: a hardening mission runs at standard, and --rigor {asked} says \
+                     otherwise: drop --rigor"
+                );
+                return ExitCode::FAILURE;
+            }
+            let rigor = if harden {
+                Rigor::Standard
+            } else {
+                Rigor::chosen(rigor, project.config.rigor)
+            };
             // Refused before anything is parsed or written: a prototype that
             // asks for an integrator or a security agent contradicts itself.
-            let rigor = Rigor::chosen(rigor, project.config.rigor);
             if let Err(e) = rigor.admits(!services.is_empty(), security_agent) {
                 eprintln!("nunki: {e}");
                 return ExitCode::FAILURE;
@@ -2059,16 +2094,46 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                     me.name
                 }
             };
-            let lots = match lots
-                .iter()
-                .map(|l| parse_lot(l))
-                .collect::<Result<Vec<_>, _>>()
-            {
-                Ok(l) => l,
-                Err(e) => {
-                    eprintln!("nunki: {e}");
-                    return ExitCode::FAILURE;
+            // What a hardening mission takes from the debt, frozen now: a
+            // campaign or a ruling after this does not change what it kills.
+            let taken = if harden {
+                match nunki::offmission::hardening(
+                    project,
+                    &base,
+                    project.config.bounds.mutation_minutes,
+                ) {
+                    Ok(taken) => Some(taken),
+                    Err(e) => {
+                        eprintln!("nunki: {e}");
+                        return ExitCode::FAILURE;
+                    }
                 }
+            } else {
+                None
+            };
+            let lots = match &taken {
+                Some(taken) => vec![nunki::mission::Lot {
+                    id: "harden".to_string(),
+                    title: format!(
+                        "Write the tests that kill the {} survivor(s) of the debt named below",
+                        taken.taken.len()
+                    ),
+                }],
+                None => match lots
+                    .iter()
+                    .map(|l| parse_lot(l))
+                    .collect::<Result<Vec<_>, _>>()
+                {
+                    Ok(l) => l,
+                    Err(e) => {
+                        eprintln!("nunki: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                },
+            };
+            let about = match &taken {
+                Some(taken) => nunki::offmission::hardening_brief(taken),
+                None => about,
             };
             let integration = if services.is_empty() {
                 // The shape is declared, never inferred from silence: a
@@ -2104,6 +2169,10 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                 // Frozen with the rigor it serves, like the bounds: a threshold read
                 // live could be lowered under a mission already framed.
                 mutation_threshold: Some(project.config.mutation_threshold),
+                hardening: taken
+                    .as_ref()
+                    .map(nunki::offmission::hardened)
+                    .unwrap_or_default(),
                 account,
                 model,
                 run,
@@ -2113,6 +2182,23 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             match mission_dir::create(&project.hq_root, &id, &header, &about) {
                 Ok(paths) => {
                     println!("mission {id} at {}", paths.dir.display());
+                    if let Some(taken) = &taken {
+                        let left = taken.left.len() + taken.beyond;
+                        println!(
+                            "  a hardening mission: {} survivor(s) of the debt frozen into its \
+                             header{}",
+                            taken.taken.len(),
+                            match (left, taken.left.is_empty()) {
+                                (0, _) => String::new(),
+                                (left, true) => format!(
+                                    ", {left} left beyond what its campaign's budget measures"
+                                ),
+                                (left, false) => {
+                                    format!(", {left} left — {}", taken.left_said())
+                                }
+                            }
+                        );
+                    }
                     println!(
                         "  {} — yours and the HQ's, read-only for the agent",
                         paths.mission.display()
@@ -2729,6 +2815,7 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                     threshold: header
                         .mutation_threshold
                         .unwrap_or(project.config.mutation_threshold),
+                    hardening: &header.hardening,
                 },
             ) {
                 Ok(progress) => {
@@ -3498,6 +3585,7 @@ fn mutants_outside_missions(
         MutantsCommand::Run {
             slot,
             whole,
+            owed,
             base,
             minutes,
         } => {
@@ -3511,6 +3599,8 @@ fn mutants_outside_missions(
                 base: &base,
                 form: if whole {
                     nunki::offmission::Form::Whole
+                } else if owed {
+                    nunki::offmission::Form::Owed
                 } else {
                     nunki::offmission::Form::SinceLast
                 },
@@ -3525,9 +3615,23 @@ fn mutants_outside_missions(
             };
             match nunki::offmission::run(project, &slot, engine, &stack, &asked) {
                 Ok(started) => {
-                    let on = match &started.since {
-                        None => "the whole code".to_string(),
-                        Some(since) => format!(
+                    let on = match (&started.since, &started.owed) {
+                        (_, Some(owing)) => format!(
+                            "{} survivor(s) of the debt, by name{}",
+                            owing.named,
+                            match (owing.left, &owing.why) {
+                                (0, _) => String::new(),
+                                (left, Some(why)) => {
+                                    format!(", {left} left — {why}")
+                                }
+                                (left, None) => format!(
+                                    ", {left} left beyond what one campaign is handed: run it \
+                                     again once it is read back"
+                                ),
+                            }
+                        ),
+                        (None, None) => "the whole code".to_string(),
+                        (Some(since), None) => format!(
                             "the files changed since {}, each whole",
                             since.chars().take(12).collect::<String>()
                         ),

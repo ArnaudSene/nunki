@@ -24,6 +24,7 @@ fn header(integration: Integration, security: Security, bounds: Bounds) -> Heade
         security,
         rigor: Default::default(),
         mutation_threshold: None,
+        hardening: Vec::new(),
         arbiter: None,
         run: None,
         account: None,
