@@ -159,11 +159,60 @@ pub enum OffMissionError {
     Slot(#[from] crate::slot::SlotError),
     #[error(transparent)]
     Exec(#[from] crate::exec::ExecError),
+    #[error("no survivor called {0:?} is owed: `nunki mutants debt` lists the debt")]
+    NotOwed(String),
+    #[error(
+        "a ruling needs its sentence: `--because <why>` says why the mutant changes nothing \
+         anyone can observe"
+    )]
+    Blank,
+    #[error(
+        "the registry of equivalences is unchanged — {why}. Nothing is ruled, and the debt still \
+         owes {ids}: a test that kills a survivor settles it"
+    )]
+    NotRegistered { ids: String, why: String },
+    #[error(
+        "the registry proposes nothing on {0:?}: `nunki mutants debt --equivalent <survivor> \
+         --because <why>` rules on it yourself"
+    )]
+    NoProposal(String),
+    #[error(
+        "the proposal on {0:?} changed since it was listed, so nothing was ratified — list them \
+         again"
+    )]
+    Changed(String),
+    #[error(
+        "the registry of equivalences took the ruling on {ids}, but the debt could not be \
+         written ({why}): it still lists them as owed, and the same command given again settles \
+         them without ruling twice"
+    )]
+    DebtNotWritten { ids: String, why: String },
+    #[error("the project's debt could not be locked: {0}")]
+    Locked(String),
+    #[error(transparent)]
+    Registry(#[from] crate::equivalences::RegistryError),
 }
 
 /// Where the project's debt is.
 pub fn debt_path(hq_root: &Path) -> PathBuf {
     hq_root.join(DEBT_FILE)
+}
+
+/// The lock the debt's writers take, beside the slots' and the registry's:
+/// `nunki mutants status`, reading a campaign back into it, and the HQ's
+/// rulings on it. A leading dot, so that no slot can be called the same.
+const DEBT_LOCK: &str = ".debt";
+
+fn lock_debt(hq_root: &Path, verb: &str) -> Result<crate::state::SlotLock, String> {
+    crate::equivalences::hq_lock(hq_root, DEBT_LOCK, verb)
+}
+
+/// What a campaign outside missions is called — its log, its record, and
+/// where a ruling on its survivors names its mission in the registry of
+/// equivalences: `off-mission-` and the first twelve characters of the
+/// base's commit it ran on.
+pub fn campaign_id(commit: &str) -> String {
+    format!("off-mission-{}", short(commit))
 }
 
 /// The project's debt: empty when none is on file; an error, naming the
@@ -310,7 +359,7 @@ pub fn run(
         &commit,
     )?;
     let judged = crate::run::judged(project, stack);
-    let id = format!("off-mission-{}", short(&commit));
+    let id = campaign_id(&commit);
     // No budget, so no sample: this is where the whole is measured.
     let launched = mutants::command(&judged, &id, &paths, &fork, project.config.jobs());
     let runs = project.hq_root.join(DIR).join("runs");
@@ -373,11 +422,25 @@ pub fn run(
 /// campaign goes through. The registry of equivalences applies to what it
 /// found, as to a mission's campaign. Anything else leaves the debt as it
 /// was, and says why.
-pub(crate) fn read_ended(
+///
+/// Under the debt's lock, taken **before** the record is forgotten: when the
+/// HQ is ruling on the debt, the campaign stays filed and the next `nunki
+/// mutants status` reads it back, rather than being forgotten unrecorded.
+/// The record is read again under it, and `None` when it is not `running`
+/// any more: another `status` read it back first — twice into the debt
+/// would undo a ruling given between the two — and the record now filed,
+/// if any, is a later campaign's, which forgetting would lose. `nunki
+/// mutants run` files none while this one is filed, so it cannot change
+/// once read under the lock.
+pub fn read_ended(
     project: &Project,
     slot: &crate::slot::Slot,
     running: &Running,
-) -> Result<Progress, MutantsError> {
+) -> Result<Option<Progress>, MutantsError> {
+    let _lock = lock_debt(&project.hq_root, "mutants status").map_err(MutantsError::DebtLocked)?;
+    if mutants::read_running(&project.hq_root, &slot.name)?.as_ref() != Some(running) {
+        return Ok(None);
+    }
     let text = std::fs::read_to_string(&running.log).unwrap_or_default();
     mutants::forget_running(&project.hq_root, &slot.name)?;
     let Some(off) = &running.off_mission else {
@@ -387,17 +450,17 @@ pub(crate) fn read_ended(
     };
     if !mutants::completed(&text) {
         let stderr = running.log.with_extension("err");
-        return Ok(Progress::CouldNotRun(format!(
+        return Ok(Some(Progress::CouldNotRun(format!(
             "it stopped without saying it had finished, after {} line(s), and the debt is \
              left as it was. What it said is in {}",
             text.lines().count(),
             stderr.display()
-        )));
+        ))));
     }
     if let Some(why) = mutants::unmeasured(&text) {
-        return Ok(Progress::CouldNotRun(format!(
+        return Ok(Some(Progress::CouldNotRun(format!(
             "{why}; the debt is left as it was"
-        )));
+        ))));
     }
     let mut found = mutants::parse(&text);
     if let Ok(registry) = crate::equivalences::read_locked(&project.hq_root) {
@@ -419,10 +482,10 @@ pub(crate) fn read_ended(
         off.changed.as_deref(),
     );
     write_debt(&project.hq_root, &debt)?;
-    Ok(Progress::Finished {
+    Ok(Some(Progress::Finished {
         survivors: count,
         chain: vec![debt_said(&debt)],
-    })
+    }))
 }
 
 /// The debt in one line: how many survivors it owes, and from which
@@ -431,9 +494,13 @@ pub fn debt_said(debt: &Debt) -> String {
     match &debt.last {
         None => "no campaign outside missions has completed on this project".to_string(),
         Some(last) => format!(
-            "{} survivor(s) owed; the last campaign outside missions ran on {} at {}, {}, \
+            "{} survivor(s) owed{}; the last campaign outside missions ran on {} at {}, {}, \
              tried {}",
             debt.owed.len(),
+            match debt.owed.iter().filter(|o| proposal(o).is_some()).count() {
+                0 => String::new(),
+                n => format!(", {n} of them proposed equivalent by the registry"),
+            },
             last.base,
             short(&last.commit),
             if last.whole {
@@ -445,6 +512,275 @@ pub fn debt_said(debt: &Debt) -> String {
                 .map_or_else(|| "a number not said".to_string(), |t| t.to_string())
         ),
     }
+}
+
+/// `nunki mutants debt`: one paragraph per survivor owed — its name, the
+/// commit that found it, the registry's proposal on it when there is one,
+/// and when it shares its mutation with another survivor of the debt, which
+/// the registry cannot tell apart — then the debt in one line.
+///
+/// A proposal whose entry `registry` no longer holds is said to be one
+/// `--ratify` refuses ([`crate::equivalences::ratified_owed`]); with no
+/// registry read (`None`), that it cannot be ratified now.
+pub fn listing(debt: &Debt, registry: Option<&crate::equivalences::Registry>) -> String {
+    let key = |s: &Survivor| (s.file.clone(), s.description.clone());
+    let mut out = String::new();
+    for owed in &debt.owed {
+        let s = &owed.survivor;
+        out.push_str(&crate::text::name(&s.id));
+        out.push('\n');
+        let lines = match s.span() {
+            Some((start, end)) if start == end => format!("line {start}"),
+            Some((start, end)) => format!("lines {start} to {end}"),
+            None => format!("line {}, span not known", s.line),
+        };
+        out.push_str(&format!("  found at {}, {lines}\n", short(&owed.found_at)));
+        if let Some(p) = proposal(owed) {
+            out.push_str(&format!(
+                "  proposed equivalent, {} — {}\n",
+                p.from.as_ref().map(|f| f.said()).unwrap_or_default(),
+                crate::text::one_line(&p.why)
+            ));
+            match registry {
+                Some(registry) if standing(registry, owed) => {}
+                Some(_) => out.push_str(
+                    "  its entry was lifted or replaced since, so it cannot be ratified: \
+                     `--equivalent` rules on it afresh\n",
+                ),
+                None => {
+                    out.push_str("  the registry cannot be read, so it cannot be ratified now\n")
+                }
+            }
+        }
+        let twins = debt
+            .owed
+            .iter()
+            .filter(|o| key(&o.survivor) == key(s))
+            .count();
+        if twins > 1 {
+            out.push_str(&format!(
+                "  {twins} survivors of the debt share this mutation: the registry cannot tell \
+                 them apart, so only a test settles them\n"
+            ));
+        }
+    }
+    out.push_str(&format!("debt  {}", debt_said(debt)));
+    out
+}
+
+/// The registry's proposal on a survivor of the debt, when the campaign
+/// that found it matched it to an entry ([`read_ended`]).
+fn proposal(owed: &Owed) -> Option<mutants::Proposal> {
+    match &owed.survivor.outcome {
+        Some(mutants::Triage::ProposedByNunki {
+            why,
+            from: from @ mutants::ProposedFrom::Registry { .. },
+        }) => Some(mutants::Proposal {
+            id: owed.survivor.id.clone(),
+            file: owed.survivor.file.clone(),
+            line: owed.survivor.line,
+            why: why.clone(),
+            from: Some(from.clone()),
+        }),
+        _ => None,
+    }
+}
+
+/// Whether the registry still holds the entry the proposal on `owed` came
+/// from, as it was when the proposal was made
+/// ([`crate::equivalences::holds`]).
+fn standing(registry: &crate::equivalences::Registry, owed: &Owed) -> bool {
+    crate::equivalences::holds(registry, &owed.survivor)
+}
+
+/// The registry's proposals on `debt` that can be ratified, in the debt's
+/// order: those whose entry `registry` still holds, on a survivor that
+/// shares its mutation with no other survivor of the debt — two the
+/// registry cannot tell apart, which only a test settles.
+fn pending_in(debt: &Debt, registry: &crate::equivalences::Registry) -> Vec<mutants::Proposal> {
+    let key = |s: &Survivor| (s.file.clone(), s.description.clone());
+    debt.owed
+        .iter()
+        .filter(|o| standing(registry, o))
+        .filter(|o| {
+            debt.owed
+                .iter()
+                .filter(|t| key(&t.survivor) == key(&o.survivor))
+                .count()
+                == 1
+        })
+        .filter_map(proposal)
+        .collect()
+}
+
+/// The registry's proposals the debt can ratify, in its order, for
+/// `--ratify --all` to print before it ratifies them: those whose entry the
+/// registry still holds. An unreadable registry is an error, never an empty
+/// list.
+pub fn pending(project: &Project) -> Result<Vec<mutants::Proposal>, OffMissionError> {
+    let registry = crate::equivalences::read(&project.hq_root)?;
+    Ok(pending_in(&read_debt(&project.hq_root)?, &registry))
+}
+
+/// `nunki mutants debt --equivalent <survivor> --because <why>`: the HQ
+/// rules a survivor of the debt equivalent, **in the registry of
+/// equivalences**, which every mission's campaign reads; then, and only
+/// then, it leaves the debt.
+///
+/// The registry first, failing closed: when it cannot take the ruling —
+/// the debt holds another survivor on the same file and description, the
+/// code the mutation replaces occurs more than once in its file or cannot
+/// be read at the commit that found it, the registry cannot be locked, read
+/// or written — nothing is ruled, the debt is left as it was, and the error
+/// says why. On a mission the ruling would still stand on the mission;
+/// outside missions, nothing else would hold it.
+pub fn rule_equivalent(project: &Project, id: &str, why: &str) -> Result<(), OffMissionError> {
+    if crate::text::blank(why) {
+        return Err(OffMissionError::Blank);
+    }
+    let _lock = lock_debt(&project.hq_root, "mutants debt --equivalent")
+        .map_err(OffMissionError::Locked)?;
+    let debt = read_debt(&project.hq_root)?;
+    let at = debt
+        .owed
+        .iter()
+        .position(|o| o.survivor.id == id)
+        .ok_or_else(|| OffMissionError::NotOwed(id.to_string()))?;
+    let found_at = debt.owed[at].found_at.clone();
+    // The debt's survivors as the registry is to read them: the one ruled
+    // holding the HQ's `equivalent`, every other as it is.
+    let mut owed: Vec<Survivor> = debt.owed.iter().map(|o| o.survivor.clone()).collect();
+    owed[at].outcome = Some(mutants::Triage::Equivalent {
+        why: why.to_string(),
+        carried_from: None,
+    });
+    let by = crate::human::me(&project.nunki_home(), Some(&project.root)).addressed();
+    let owing = crate::equivalences::Owing {
+        hq_root: &project.hq_root,
+        root: &project.root,
+        by: &by,
+    };
+    let registered =
+        crate::equivalences::enter_owed(&owing, &owed, id, &found_at, &campaign_id(&found_at));
+    taken_out(project, &debt, &[id], registered)
+}
+
+/// `nunki mutants debt --ratify <survivor>`: the HQ ratifies the registry's
+/// proposal on a survivor of the debt. The entry it came from keeps its
+/// origin and records the ratification beside it, as on a mission. When that
+/// entry is not there any more as it was, or the survivor shares its
+/// mutation with another of the debt, nothing is ratified
+/// ([`crate::equivalences::ratified_owed`]). Then it leaves the debt.
+/// Returns the sentence.
+pub fn ratify(project: &Project, id: &str) -> Result<String, OffMissionError> {
+    let _lock =
+        lock_debt(&project.hq_root, "mutants debt --ratify").map_err(OffMissionError::Locked)?;
+    let debt = read_debt(&project.hq_root)?;
+    let mut said = ratified_by(project, &debt, &[id])?;
+    Ok(said.remove(0))
+}
+
+/// `nunki mutants debt --ratify --all`: `listed` — the proposals the verb
+/// printed, read by [`pending`] — ratified as [`ratify`] ratifies one, all
+/// in **one** write of the registry and one of the debt, under one hold of
+/// the debt's lock: what was printed is what is ruled, or nothing is. A
+/// proposal that is not pending any more as it was listed fails the verb
+/// before anything is written.
+pub fn ratify_all(
+    project: &Project,
+    listed: &[mutants::Proposal],
+) -> Result<Vec<String>, OffMissionError> {
+    let _lock = lock_debt(&project.hq_root, "mutants debt --ratify --all")
+        .map_err(OffMissionError::Locked)?;
+    let debt = read_debt(&project.hq_root)?;
+    let now = pending_in(&debt, &crate::equivalences::read(&project.hq_root)?);
+    if let Some(gone) = listed.iter().find(|p| !now.contains(p)) {
+        return Err(OffMissionError::Changed(gone.id.clone()));
+    }
+    let ids: Vec<&str> = listed.iter().map(|p| p.id.as_str()).collect();
+    ratified_by(project, &debt, &ids)?;
+    Ok(ids.into_iter().map(str::to_string).collect())
+}
+
+/// The proposals on survivors `ids` of `debt` ratified in the registry in
+/// one write, then those survivors taken out of the debt in one more; the
+/// debt left as it was when the registry did not take them all. The debt's
+/// lock is the caller's. Returns each one's sentence.
+fn ratified_by(
+    project: &Project,
+    debt: &Debt,
+    ids: &[&str],
+) -> Result<Vec<String>, OffMissionError> {
+    let mut said = Vec::new();
+    let mut campaigns = Vec::new();
+    for id in ids {
+        let owed = debt
+            .owed
+            .iter()
+            .find(|o| o.survivor.id == *id)
+            .ok_or_else(|| OffMissionError::NotOwed(id.to_string()))?;
+        let p = proposal(owed).ok_or_else(|| OffMissionError::NoProposal(id.to_string()))?;
+        said.push(p.why);
+        campaigns.push((*id, owed.found_at.as_str(), campaign_id(&owed.found_at)));
+    }
+    let each: Vec<crate::equivalences::Ratifying> = campaigns
+        .iter()
+        .map(|(id, found_at, campaign)| crate::equivalences::Ratifying {
+            id,
+            found_at,
+            campaign,
+        })
+        .collect();
+    let survivors: Vec<Survivor> = debt.owed.iter().map(|o| o.survivor.clone()).collect();
+    let by = crate::human::me(&project.nunki_home(), Some(&project.root)).addressed();
+    let owing = crate::equivalences::Owing {
+        hq_root: &project.hq_root,
+        root: &project.root,
+        by: &by,
+    };
+    let registered = crate::equivalences::ratified_owed(&owing, &survivors, &each);
+    taken_out(project, debt, ids, registered)?;
+    Ok(said)
+}
+
+/// Survivors `ids` taken out of `debt` once the registry took the ruling
+/// on them — `registered` — and the debt left as it was when it did not.
+/// The registry first: outside missions nothing else holds the ruling. A
+/// debt that cannot be written then is said as such, with the ruling in
+/// the registry: given again, the same command enters or records it once
+/// more in its place, never beside it, and settles the debt.
+fn taken_out(
+    project: &Project,
+    debt: &Debt,
+    ids: &[&str],
+    registered: crate::equivalences::Registered,
+) -> Result<(), OffMissionError> {
+    let named = || {
+        ids.iter()
+            .map(|id| format!("{:?}", id))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    match registered {
+        crate::equivalences::Registered::Done(n) if n > 0 => {}
+        crate::equivalences::Registered::Done(_) => {
+            return Err(OffMissionError::NotRegistered {
+                ids: named(),
+                why: "it entered nothing".to_string(),
+            });
+        }
+        crate::equivalences::Registered::Not(why) => {
+            return Err(OffMissionError::NotRegistered { ids: named(), why });
+        }
+    }
+    let mut after = debt.clone();
+    after
+        .owed
+        .retain(|o| !ids.contains(&o.survivor.id.as_str()));
+    write_debt(&project.hq_root, &after).map_err(|e| OffMissionError::DebtNotWritten {
+        ids: named(),
+        why: e.to_string(),
+    })
 }
 
 fn short(commit: &str) -> String {

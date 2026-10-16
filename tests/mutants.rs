@@ -9904,3 +9904,823 @@ fn asking_for_the_status_outside_missions_never_starts_a_campaign() {
     assert_eq!(filed, 0, "a campaign was filed by asking for the status");
     assert!(!nunki::offmission::debt_path(&hq_root).exists());
 }
+
+/// The code of a project whose base a campaign outside missions ran on, at
+/// the commit it returns: `keep`'s `a > b` once, `a + 1` twice, and
+/// `twins`' two `>` under one description, as cargo-mutants 27.1.0 names
+/// them for `a > b && c > d`.
+fn debt_code(tree: &Path) -> String {
+    write(
+        tree,
+        "src/keep.rs",
+        "pub fn keep(a: u8, b: u8) -> bool {\n    a > b\n}\n\
+         pub fn twice(a: u8) -> u8 {\n    a + 1\n}\n\
+         pub fn again(a: u8) -> u8 {\n    a + 1\n}\n",
+    );
+    write(
+        tree,
+        "src/twins.rs",
+        "pub fn keep(a: u8, b: u8, c: u8, d: u8) -> bool {\n    a > b && c > d\n}\n",
+    );
+    git(tree, &["add", "-A"]);
+    git(tree, &["commit", "-q", "-m", "code"]);
+    git(tree, &["rev-parse", "HEAD"])
+}
+
+fn owed(id: &str, line: u32, description: &str, found_at: &str) -> nunki::offmission::Owed {
+    let file = id.split(':').next().unwrap().to_string();
+    nunki::offmission::Owed {
+        survivor: Survivor {
+            id: id.to_string(),
+            file,
+            line,
+            end_line: Some(line),
+            description: description.to_string(),
+            outcome: None,
+            refused: None,
+            found_on: None,
+        },
+        found_at: found_at.to_string(),
+    }
+}
+
+const OWED_KEEP: &str = "src/keep.rs:2:7: replace > with == in keep";
+const OWED_TWICE: &str = "src/keep.rs:5:7: replace + with - in twice";
+const OWED_TWIN_A: &str = "src/twins.rs:2:7: replace > with == in keep";
+const OWED_TWIN_B: &str = "src/twins.rs:2:16: replace > with == in keep";
+
+/// A debt on file, as a campaign outside missions at `commit` leaves it.
+fn file_debt(project: &nunki::project::Project, owed: Vec<nunki::offmission::Owed>, commit: &str) {
+    let debt = nunki::offmission::Debt {
+        owed,
+        last: Some(nunki::offmission::Measured {
+            base: "dev".into(),
+            commit: commit.into(),
+            date: "2026-10-16T12:00:00Z".into(),
+            whole: true,
+            tried: Some(40),
+        }),
+    };
+    std::fs::create_dir_all(&project.hq_root).unwrap();
+    std::fs::write(
+        nunki::offmission::debt_path(&project.hq_root),
+        serde_json::to_string_pretty(&debt).unwrap(),
+    )
+    .unwrap();
+}
+
+fn the_debt(project: &nunki::project::Project) -> Vec<u8> {
+    std::fs::read(nunki::offmission::debt_path(&project.hq_root)).unwrap()
+}
+
+fn the_registry(project: &nunki::project::Project) -> Option<Vec<u8>> {
+    std::fs::read(equivalences::path(&project.hq_root)).ok()
+}
+
+/// `nunki mutants debt --equivalent` rules a survivor of the debt in the
+/// registry of equivalences — found at the commit its campaign ran on, read
+/// in the human's own repository, its mission the campaign's name — and it
+/// leaves the debt. A mission's campaign later meeting the same code, moved
+/// down a line, is proposed that ruling.
+#[test]
+fn a_survivor_of_the_debt_ruled_equivalent_enters_the_registry_missions_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let (project, _slot) = context(dir.path());
+    let commit = debt_code(&project.root);
+    file_debt(
+        &project,
+        vec![
+            owed(OWED_KEEP, 2, "replace > with == in keep", &commit),
+            owed(OWED_TWICE, 5, "replace + with - in twice", &commit),
+        ],
+        &commit,
+    );
+
+    nunki::offmission::rule_equivalent(
+        &project,
+        OWED_KEEP,
+        "a > b and a == b agree on every input keep is given",
+    )
+    .unwrap();
+
+    let registry = equivalences::read(&project.hq_root).unwrap();
+    assert_eq!(registry.entries.len(), 1);
+    let entry = &registry.entries[0];
+    assert_eq!(
+        (entry.file.as_str(), entry.description.as_str()),
+        ("src/keep.rs", "replace > with == in keep")
+    );
+    assert_eq!(entry.line, equivalences::span_digest(&["a > b"]));
+    assert_eq!(entry.lines, 1);
+    assert_eq!(entry.commit, commit);
+    assert_eq!(entry.mission, nunki::offmission::campaign_id(&commit));
+    assert!(entry.mission.starts_with("off-mission-"));
+    let debt = nunki::offmission::read_debt(&project.hq_root).unwrap();
+    let left: Vec<&str> = debt.owed.iter().map(|o| o.survivor.id.as_str()).collect();
+    assert_eq!(left, [OWED_TWICE]);
+
+    // A mission's campaign, a line added above `keep`.
+    let tree = &project.root;
+    write(
+        tree,
+        "src/keep.rs",
+        &format!(
+            "// moved\n{}",
+            std::fs::read_to_string(tree.join("src/keep.rs")).unwrap()
+        ),
+    );
+    git(tree, &["commit", "-q", "-am", "moved"]);
+    let mut found = vec![Survivor {
+        id: "src/keep.rs:3:7: replace > with == in keep".into(),
+        file: "src/keep.rs".into(),
+        line: 3,
+        end_line: Some(3),
+        description: "replace > with == in keep".into(),
+        outcome: None,
+        refused: None,
+        found_on: None,
+    }];
+    let applied = equivalences::apply(&registry, &mut found, |s| {
+        equivalences::identify(tree, "HEAD", s).ok()
+    });
+    assert_eq!(applied, 1);
+    assert!(
+        matches!(
+            &found[0].outcome,
+            Some(Triage::ProposedByNunki {
+                from: mutants::ProposedFrom::Registry { mission, commit: at, .. },
+                ..
+            }) if *mission == nunki::offmission::campaign_id(&commit) && *at == commit
+        ),
+        "{:?}",
+        found[0].outcome
+    );
+}
+
+/// Nothing is ruled — the registry and the debt left byte for byte — when
+/// the registry cannot tell which code the ruling is about: the code
+/// occurs twice in its file, two survivors of the debt share the mutation,
+/// the commit that found it is not in the human's repository. Nor without
+/// a sentence, nor on a survivor the debt does not owe.
+#[test]
+fn a_ruling_on_the_debt_the_registry_cannot_take_rules_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (project, _slot) = context(dir.path());
+    let commit = debt_code(&project.root);
+    let gone = "0123456789abcdef0123456789abcdef01234567";
+    file_debt(
+        &project,
+        vec![
+            owed(OWED_TWICE, 5, "replace + with - in twice", &commit),
+            owed(OWED_TWIN_A, 2, "replace > with == in keep", &commit),
+            owed(OWED_TWIN_B, 2, "replace > with == in keep", &commit),
+            owed(OWED_KEEP, 2, "replace > with == in keep", gone),
+        ],
+        &commit,
+    );
+    let debt = the_debt(&project);
+    let refused = |id: &str, why: &str| {
+        let err = nunki::offmission::rule_equivalent(&project, id, why).unwrap_err();
+        assert_eq!(the_debt(&project), debt, "{id}: {err}");
+        assert_eq!(the_registry(&project), None, "{id}: {err}");
+        err
+    };
+
+    let err = refused(OWED_TWICE, "one more or one less, the caller cannot tell");
+    assert!(err.to_string().contains("occurs 2 times"), "{err}");
+    assert!(err.to_string().contains("still owes"), "{err}");
+    let err = refused(OWED_TWIN_A, "the same");
+    assert!(
+        err.to_string().contains("the debt holds 2 survivors"),
+        "{err}"
+    );
+    let err = refused(OWED_KEEP, "the same");
+    assert!(err.to_string().contains("cannot be read at"), "{err}");
+    let err = refused("src/keep.rs:9:9: not owed", "the same");
+    assert!(
+        matches!(err, nunki::offmission::OffMissionError::NotOwed(_)),
+        "{err}"
+    );
+    let err = refused(OWED_TWICE, "  ");
+    assert!(
+        matches!(err, nunki::offmission::OffMissionError::Blank),
+        "{err}"
+    );
+}
+
+/// A proposal on the debt, from the registry entry given on `mission` at
+/// `c0ffee`.
+fn proposed(mut o: nunki::offmission::Owed, why: &str, mission: &str) -> nunki::offmission::Owed {
+    o.survivor.outcome = Some(Triage::ProposedByNunki {
+        why: why.into(),
+        from: mutants::ProposedFrom::Registry {
+            mission: mission.into(),
+            commit: "c0ffee".into(),
+            date: "2026-10-01T00:00:00Z".into(),
+        },
+    });
+    o
+}
+
+fn registry_entry(
+    file: &str,
+    description: &str,
+    line: &str,
+    why: &str,
+    mission: &str,
+) -> equivalences::Entry {
+    equivalences::Entry {
+        file: file.into(),
+        description: description.into(),
+        line: equivalences::span_digest(&[line]),
+        lines: 1,
+        why: why.into(),
+        by: "the HQ".into(),
+        mission: mission.into(),
+        commit: "c0ffee".into(),
+        date: "2026-10-01T00:00:00Z".into(),
+        ratified: vec![],
+    }
+}
+
+const OWED_AGAIN: &str = "src/keep.rs:8:7: replace + with * in again";
+
+/// The registry's proposal on a survivor of the debt is ratified: the entry
+/// it came from keeps its origin and records the ratification, named after
+/// the campaign that found it, and the survivor leaves the debt. `--all`
+/// ratifies exactly what it listed, and nothing when the listing is stale;
+/// a survivor without a proposal is refused.
+///
+/// A proposal whose entry was lifted since, or replaced by a newer ruling on
+/// the same mutation, is not ratified and not listed for `--all`: entering
+/// its sentence again would undo the lift, or overwrite the newer ruling.
+/// The registry and the debt are left byte for byte.
+#[test]
+fn the_registrys_proposals_on_the_debt_are_ratified_and_settled() {
+    let dir = tempfile::tempdir().unwrap();
+    let (project, _slot) = context(dir.path());
+    let commit = debt_code(&project.root);
+    let entry = registry_entry(
+        "src/keep.rs",
+        "replace > with == in keep",
+        "a > b",
+        "keep is only given distinct values",
+        "m1",
+    );
+    let newer = registry_entry(
+        "src/keep.rs",
+        "replace + with * in again",
+        "a + 1",
+        "a newer ruling",
+        "m-new",
+    );
+    equivalences::write(
+        &project.hq_root,
+        &equivalences::Registry {
+            entries: vec![entry.clone(), newer.clone()],
+        },
+    )
+    .unwrap();
+    file_debt(
+        &project,
+        vec![
+            proposed(
+                owed(OWED_KEEP, 2, "replace > with == in keep", &commit),
+                "keep is only given distinct values",
+                "m1",
+            ),
+            owed(OWED_TWICE, 5, "replace + with - in twice", &commit),
+            proposed(
+                owed(OWED_TWIN_A, 2, "replace > with == in keep", &commit),
+                "both sides are given 0",
+                "m-lifted",
+            ),
+            proposed(
+                owed(OWED_AGAIN, 8, "replace + with * in again", &commit),
+                "an older ruling",
+                "m-old",
+            ),
+        ],
+        &commit,
+    );
+
+    let err = nunki::offmission::ratify(&project, OWED_TWICE).unwrap_err();
+    assert!(
+        matches!(err, nunki::offmission::OffMissionError::NoProposal(_)),
+        "{err}"
+    );
+    let (debt, registry) = (the_debt(&project), the_registry(&project));
+    for gone in [OWED_TWIN_A, OWED_AGAIN] {
+        let err = nunki::offmission::ratify(&project, gone).unwrap_err();
+        assert!(
+            err.to_string().contains("was lifted or replaced since"),
+            "{gone}: {err}"
+        );
+        assert_eq!(the_debt(&project), debt, "{gone}");
+        assert_eq!(the_registry(&project), registry, "{gone}");
+    }
+    let listed = nunki::offmission::pending(&project).unwrap();
+    let ids: Vec<&str> = listed.iter().map(|p| p.id.as_str()).collect();
+    assert_eq!(ids, [OWED_KEEP]);
+
+    // A stale listing ratifies nothing.
+    let mut stale = listed.clone();
+    stale[0].why = "another sentence".into();
+    let err = nunki::offmission::ratify_all(&project, &stale).unwrap_err();
+    assert!(
+        matches!(err, nunki::offmission::OffMissionError::Changed(_)),
+        "{err}"
+    );
+    assert_eq!(the_debt(&project), debt);
+
+    let done = nunki::offmission::ratify_all(&project, &listed).unwrap();
+    assert_eq!(done, [OWED_KEEP]);
+    let after = equivalences::read(&project.hq_root).unwrap();
+    assert_eq!(after.entries.len(), 2);
+    let kept = &after.entries[0];
+    assert_eq!(
+        (kept.mission.as_str(), kept.why.as_str()),
+        ("m1", entry.why.as_str()),
+        "the entry keeps its origin"
+    );
+    assert_eq!(kept.ratified.len(), 1);
+    assert_eq!(
+        (
+            kept.ratified[0].mission.as_str(),
+            kept.ratified[0].commit.as_str()
+        ),
+        (
+            nunki::offmission::campaign_id(&commit).as_str(),
+            commit.as_str()
+        )
+    );
+    assert_eq!(after.entries[1], newer, "the newer ruling is untouched");
+    let left: Vec<String> = nunki::offmission::read_debt(&project.hq_root)
+        .unwrap()
+        .owed
+        .iter()
+        .map(|o| o.survivor.id.clone())
+        .collect();
+    assert_eq!(left, [OWED_TWICE, OWED_TWIN_A, OWED_AGAIN]);
+}
+
+/// The listing names each survivor owed, the commit that found it, the
+/// registry's proposal on it, and the survivors that share a mutation; the
+/// debt's line counts the proposals. A proposal whose entry the registry no
+/// longer holds is said to be one that cannot be ratified, and so is every
+/// proposal when the registry cannot be read.
+#[test]
+fn the_debt_is_listed_with_what_the_registry_proposes() {
+    let found = "aaaaaaaaaaaaaaaaaaaa";
+    let debt = nunki::offmission::Debt {
+        owed: vec![
+            proposed(
+                owed(OWED_KEEP, 2, "replace > with == in keep", found),
+                "keep is only given distinct values",
+                "m1",
+            ),
+            owed(OWED_TWIN_A, 2, "replace > with == in keep", found),
+            owed(OWED_TWIN_B, 2, "replace > with == in keep", found),
+            proposed(
+                owed(OWED_AGAIN, 8, "replace + with * in again", found),
+                "an older ruling",
+                "m-old",
+            ),
+        ],
+        last: Some(nunki::offmission::Measured {
+            base: "dev".into(),
+            commit: found.into(),
+            date: "2026-10-16T12:00:00Z".into(),
+            whole: false,
+            tried: Some(9),
+        }),
+    };
+    let registry = equivalences::Registry {
+        entries: vec![registry_entry(
+            "src/keep.rs",
+            "replace > with == in keep",
+            "a > b",
+            "keep is only given distinct values",
+            "m1",
+        )],
+    };
+    let said = nunki::offmission::listing(&debt, Some(&registry));
+    for line in [
+        OWED_KEEP,
+        "  found at aaaaaaaaaaaa, line 2",
+        "  proposed equivalent, from the registry: ruled on mission m1 at c0ffee — keep is only \
+         given distinct values\nsrc/twins.rs:2:7",
+        OWED_TWIN_B,
+        "  2 survivors of the debt share this mutation",
+        "  proposed equivalent, from the registry: ruled on mission m-old at c0ffee — an older \
+         ruling\n  its entry was lifted or replaced since, so it cannot be ratified",
+        "debt  4 survivor(s) owed, 2 of them proposed equivalent by the registry",
+    ] {
+        assert!(said.contains(line), "{line:?} not in:\n{said}");
+    }
+    assert_eq!(said.matches("share this mutation").count(), 2, "{said}");
+    assert_eq!(said.matches("cannot be ratified").count(), 1, "{said}");
+
+    let unread = nunki::offmission::listing(&debt, None);
+    assert_eq!(
+        unread
+            .matches("the registry cannot be read, so it cannot be ratified now")
+            .count(),
+        2,
+        "{unread}"
+    );
+}
+
+/// The debt's writers hold its lock: while another holds it, a ruling is
+/// refused and a campaign outside missions that ended is not read back —
+/// it stays filed, the debt as it was — and once the lock is free, it is.
+#[test]
+fn the_debt_is_written_only_under_its_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot) = with_profile(dir.path());
+    let commit = debt_code(&project.root);
+    file_debt(
+        &project,
+        vec![owed(OWED_KEEP, 2, "replace > with == in keep", &commit)],
+        &commit,
+    );
+    let log = dir.path().join("off.log");
+    std::fs::write(
+        &log,
+        "{\"campaign\":\"done\",\"tried\":3,\"found\":3,\"missed\":0}\n",
+    )
+    .unwrap();
+    off_mission_filed(&project, &slot.name, &log, &commit, None);
+    let debt = the_debt(&project);
+
+    let locks = project.hq_root.join("locks");
+    std::fs::create_dir_all(&locks).unwrap();
+    let held = nunki::state::SlotLock::acquire(&locks, ".debt", "a test").unwrap();
+    let err = nunki::offmission::rule_equivalent(&project, OWED_KEEP, "the same").unwrap_err();
+    assert!(
+        matches!(err, nunki::offmission::OffMissionError::Locked(_)),
+        "{err}"
+    );
+    let err = mutants::read_back_off_mission(&project, &slot, ended_engine()).unwrap_err();
+    assert!(matches!(err, mutants::MutantsError::DebtLocked(_)), "{err}");
+    assert!(
+        mutants::read_running(&project.hq_root, &slot.name)
+            .unwrap()
+            .is_some(),
+        "the campaign was forgotten unrecorded"
+    );
+    assert_eq!(the_debt(&project), debt);
+    assert_eq!(the_registry(&project), None);
+
+    drop(held);
+    mutants::read_back_off_mission(&project, &slot, ended_engine())
+        .unwrap()
+        .expect("filed");
+    assert!(
+        mutants::read_running(&project.hq_root, &slot.name)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        nunki::offmission::read_debt(&project.hq_root)
+            .unwrap()
+            .owed
+            .is_empty()
+    );
+}
+
+/// The real binary: `nunki mutants debt` lists an empty debt, and the
+/// ruling verbs refuse what they cannot rule on, failing, starting nothing
+/// and writing nothing; with nothing proposed, `--ratify --all` says so and
+/// succeeds.
+#[test]
+fn the_debt_verb_lists_and_refuses_without_writing() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    let user_home = dir.path().join("home");
+    let home = common::project_home(&root, &user_home, "harness: claude-code\n");
+    let hq_root = home.join(nunki::project::HQ_DIR);
+    let nunki = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_nunki"))
+            .arg("-C")
+            .arg(&root)
+            .arg("mutants")
+            .arg("debt")
+            .args(args)
+            .env("HOME", &user_home)
+            .output()
+            .unwrap()
+    };
+    let out = nunki(&[]);
+    assert!(out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stdout)
+            .contains("debt  no campaign outside missions has completed on this project"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    // Each refusal fails the verb; nothing to ratify is no failure.
+    for (args, said, ok) in [
+        (&["--equivalent", "x"][..], "--because", false),
+        (&["--ratify"][..], "or takes --all", false),
+        (&["--ratify", "x", "--all"][..], "names no survivor", false),
+        (
+            &["--equivalent", "x", "--because", "why"][..],
+            "is owed",
+            false,
+        ),
+        (&["--ratify", "x"][..], "is owed", false),
+        (&["--ratify", "--all"][..], "proposes nothing", true),
+    ] {
+        let out = nunki(args);
+        let both = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(both.contains(said), "{args:?}: {both}");
+        assert_eq!(out.status.success(), ok, "{args:?}: {both}");
+    }
+    assert!(!nunki::offmission::debt_path(&hq_root).exists());
+    assert!(!equivalences::path(&hq_root).exists());
+}
+
+/// A registry entry as the registry's proposal on `owed` names it: the same
+/// mutation, mission, commit, date and sentence.
+fn entry_of(owed: &nunki::offmission::Owed, line: &str) -> equivalences::Entry {
+    let Some(Triage::ProposedByNunki {
+        why,
+        from:
+            mutants::ProposedFrom::Registry {
+                mission,
+                commit,
+                date,
+            },
+    }) = &owed.survivor.outcome
+    else {
+        panic!("not a registry proposal");
+    };
+    equivalences::Entry {
+        file: owed.survivor.file.clone(),
+        description: owed.survivor.description.clone(),
+        line: equivalences::span_digest(&[line]),
+        lines: 1,
+        why: why.clone(),
+        by: "the HQ".into(),
+        mission: mission.clone(),
+        commit: commit.clone(),
+        date: date.clone(),
+        ratified: vec![],
+    }
+}
+
+/// A proposal of the debt is ratified only on the entry it came from, as it
+/// stood: an entry lifted and given again on the same mission and commit —
+/// a newer date, or another sentence — is another ruling, and so refused,
+/// as is a proposal on a survivor that shares its mutation with another of
+/// the debt, which `--all` does not list. Several are ratified in one write
+/// of the registry, or none: one that cannot be leaves it byte for byte.
+#[test]
+fn a_ratification_on_the_debt_holds_only_on_its_entry_as_it_stood() {
+    let dir = tempfile::tempdir().unwrap();
+    let (project, _slot) = context(dir.path());
+    let commit = debt_code(&project.root);
+    let keep = proposed(
+        owed(OWED_KEEP, 2, "replace > with == in keep", &commit),
+        "keep is only given distinct values",
+        "m1",
+    );
+    let twin = proposed(
+        owed(OWED_TWIN_A, 2, "replace > with == in keep", &commit),
+        "both sides are given 0",
+        "m2",
+    );
+    let refused = |debt: Vec<nunki::offmission::Owed>,
+                   entries: Vec<equivalences::Entry>,
+                   id: &str,
+                   said: &str| {
+        file_debt(&project, debt, &commit);
+        equivalences::write(&project.hq_root, &equivalences::Registry { entries }).unwrap();
+        let (debt, registry) = (the_debt(&project), the_registry(&project));
+        let err = nunki::offmission::ratify(&project, id).unwrap_err();
+        assert!(err.to_string().contains(said), "{id}: {err}");
+        assert_eq!(the_debt(&project), debt, "{id}");
+        assert_eq!(the_registry(&project), registry, "{id}");
+        assert!(
+            nunki::offmission::pending(&project).unwrap().is_empty(),
+            "{id} listed for --all"
+        );
+    };
+
+    let mut later = entry_of(&keep, "a > b");
+    later.date = "2026-10-02T00:00:00Z".into();
+    refused(
+        vec![keep.clone()],
+        vec![later],
+        OWED_KEEP,
+        "lifted or replaced",
+    );
+    let mut reworded = entry_of(&keep, "a > b");
+    reworded.why = "another sentence".into();
+    refused(
+        vec![keep.clone()],
+        vec![reworded],
+        OWED_KEEP,
+        "lifted or replaced",
+    );
+    refused(
+        vec![
+            twin.clone(),
+            owed(OWED_TWIN_B, 2, "replace > with == in keep", &commit),
+        ],
+        vec![entry_of(&twin, "    a > b && c > d")],
+        OWED_TWIN_A,
+        "the debt holds 2 survivors",
+    );
+
+    // Two asked in one write, the second's entry gone: neither is recorded.
+    file_debt(&project, vec![keep.clone(), twin.clone()], &commit);
+    equivalences::write(
+        &project.hq_root,
+        &equivalences::Registry {
+            entries: vec![entry_of(&keep, "a > b")],
+        },
+    )
+    .unwrap();
+    let registry = the_registry(&project);
+    let campaign = nunki::offmission::campaign_id(&commit);
+    let each = [OWED_KEEP, OWED_TWIN_A].map(|id| equivalences::Ratifying {
+        id,
+        found_at: &commit,
+        campaign: &campaign,
+    });
+    let owing = equivalences::Owing {
+        hq_root: &project.hq_root,
+        root: &project.root,
+        by: "the HQ",
+    };
+    let survivors = [keep.survivor.clone(), twin.survivor.clone()];
+    let registered = equivalences::ratified_owed(&owing, &survivors, &each);
+    assert!(
+        matches!(&registered, equivalences::Registered::Not(why) if why.contains("lifted or replaced")),
+        "{registered:?}"
+    );
+    assert_eq!(the_registry(&project), registry);
+}
+
+/// The registry first, the debt next: a debt that cannot be written after
+/// the registry took the ruling is said as such, the survivors still listed;
+/// given again, the same command settles them and records nothing twice —
+/// for `--equivalent`, `--ratify`, and `--ratify --all`, whose list is
+/// recorded whole before the debt fails, and then settled whole.
+#[test]
+fn a_ruling_whose_debt_could_not_be_written_is_given_again_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let (project, _slot) = context(dir.path());
+    let commit = debt_code(&project.root);
+    let keep = proposed(
+        owed(OWED_KEEP, 2, "replace > with == in keep", &commit),
+        "keep is only given distinct values",
+        "m1",
+    );
+    let twin = proposed(
+        owed(OWED_TWIN_A, 2, "replace > with == in keep", &commit),
+        "both sides are given 0",
+        "m2",
+    );
+    let staged = nunki::offmission::debt_path(&project.hq_root).with_extension("json.new");
+    let blocked = |on: bool| {
+        if on {
+            std::fs::create_dir_all(&staged).unwrap();
+        } else {
+            std::fs::remove_dir(&staged).unwrap();
+        }
+    };
+    let left = || -> Vec<String> {
+        nunki::offmission::read_debt(&project.hq_root)
+            .unwrap()
+            .owed
+            .iter()
+            .map(|o| o.survivor.id.clone())
+            .collect()
+    };
+    let ratifications = || -> Vec<usize> {
+        equivalences::read(&project.hq_root)
+            .unwrap()
+            .entries
+            .iter()
+            .map(|e| e.ratified.len())
+            .collect()
+    };
+    let reset = |entries: Vec<equivalences::Entry>| {
+        file_debt(&project, vec![keep.clone(), twin.clone()], &commit);
+        equivalences::write(&project.hq_root, &equivalences::Registry { entries }).unwrap();
+    };
+
+    // `--ratify`.
+    reset(vec![entry_of(&keep, "a > b")]);
+    let debt = the_debt(&project);
+    blocked(true);
+    let err = nunki::offmission::ratify(&project, OWED_KEEP).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            nunki::offmission::OffMissionError::DebtNotWritten { .. }
+        ),
+        "{err}"
+    );
+    assert_eq!(the_debt(&project), debt);
+    assert_eq!(ratifications(), [1]);
+    blocked(false);
+    nunki::offmission::ratify(&project, OWED_KEEP).unwrap();
+    assert_eq!(ratifications(), [1], "recorded twice");
+    assert_eq!(left(), [OWED_TWIN_A]);
+
+    // `--ratify --all`.
+    reset(vec![
+        entry_of(&keep, "a > b"),
+        entry_of(&twin, "    a > b && c > d"),
+    ]);
+    let listed = nunki::offmission::pending(&project).unwrap();
+    assert_eq!(listed.len(), 2);
+    blocked(true);
+    let err = nunki::offmission::ratify_all(&project, &listed).unwrap_err();
+    assert!(
+        err.to_string().contains(OWED_KEEP) && err.to_string().contains(OWED_TWIN_A),
+        "{err}"
+    );
+    assert_eq!(ratifications(), [1, 1]);
+    assert_eq!(left(), [OWED_KEEP, OWED_TWIN_A]);
+    blocked(false);
+    nunki::offmission::ratify_all(&project, &listed).unwrap();
+    assert_eq!(ratifications(), [1, 1], "recorded twice");
+    assert!(left().is_empty());
+
+    // `--equivalent`.
+    reset(vec![]);
+    blocked(true);
+    let err = nunki::offmission::rule_equivalent(&project, OWED_TWIN_A, "the same").unwrap_err();
+    assert!(
+        matches!(
+            err,
+            nunki::offmission::OffMissionError::DebtNotWritten { .. }
+        ),
+        "{err}"
+    );
+    assert_eq!(left(), [OWED_KEEP, OWED_TWIN_A]);
+    blocked(false);
+    nunki::offmission::rule_equivalent(&project, OWED_TWIN_A, "the same").unwrap();
+    let entries = equivalences::read(&project.hq_root).unwrap().entries;
+    assert_eq!(entries.len(), 1, "entered twice: {entries:?}");
+    assert_eq!(left(), [OWED_KEEP]);
+}
+
+/// `status` reads a campaign back once. Under the debt's lock the record is
+/// read again: one another `status` already read back — the record gone, or
+/// a later campaign's filed in its place — is left alone, the debt as it
+/// was and the later record still filed.
+#[test]
+fn a_campaign_read_back_by_another_status_is_not_read_back_twice() {
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot) = with_profile(dir.path());
+    let log = dir.path().join("off.log");
+    std::fs::write(
+        &log,
+        "{\"id\":\"a\",\"file\":\"src/lib.rs\",\"line\":3,\"description\":\"x\"}\n\
+         {\"campaign\":\"done\",\"tried\":3,\"found\":3,\"missed\":1}\n",
+    )
+    .unwrap();
+    off_mission_filed(&project, &slot.name, &log, "aaaaaaaaaaaaaaaa", None);
+    let first = mutants::read_running(&project.hq_root, &slot.name)
+        .unwrap()
+        .unwrap();
+    nunki::offmission::read_ended(&project, &slot, &first)
+        .unwrap()
+        .expect("read back");
+    let debt = the_debt(&project);
+
+    assert_eq!(
+        nunki::offmission::read_ended(&project, &slot, &first).unwrap(),
+        None
+    );
+    assert_eq!(the_debt(&project), debt);
+
+    off_mission_filed(
+        &project,
+        &slot.name,
+        &log,
+        "bbbbbbbbbbbbbbbb",
+        Some(("aaaaaaaaaaaaaaaa", Some(&["src/lib.rs"]))),
+    );
+    assert_eq!(
+        nunki::offmission::read_ended(&project, &slot, &first).unwrap(),
+        None
+    );
+    assert_eq!(the_debt(&project), debt);
+    assert!(
+        mutants::read_running(&project.hq_root, &slot.name)
+            .unwrap()
+            .is_some(),
+        "the later campaign was forgotten"
+    );
+}

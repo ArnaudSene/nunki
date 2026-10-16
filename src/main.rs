@@ -268,6 +268,34 @@ enum MutantsCommand {
         #[arg(long)]
         slot: Option<String>,
     },
+    /// List the project's debt — each survivor campaigns outside missions
+    /// left, the commit that found it, and the registry's proposal on it —
+    /// or rule on it, once for the project, in the registry of equivalences
+    /// every mission's campaign reads. A survivor ruled leaves the debt.
+    Debt {
+        /// Rule that a survivor of the debt is equivalent, in the registry.
+        /// Nothing is ruled when the registry cannot take it, and the
+        /// survivor stays owed.
+        #[arg(
+            long,
+            value_name = "SURVIVOR",
+            requires = "because",
+            conflicts_with = "ratify"
+        )]
+        equivalent: Option<String>,
+        /// Why it is equivalent, in one sentence. Required with
+        /// `--equivalent`.
+        #[arg(long, value_name = "SENTENCE", requires = "equivalent")]
+        because: Option<String>,
+        /// Ratify the registry's proposal on a survivor of the debt, with
+        /// the registry's sentence. With `--all` and no survivor, every
+        /// proposal, each printed first.
+        #[arg(long, value_name = "SURVIVOR", num_args = 0..=1)]
+        ratify: Option<Option<String>>,
+        /// With `--ratify`: every proposal of the debt.
+        #[arg(long, requires = "ratify")]
+        all: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -3572,5 +3600,113 @@ fn mutants_outside_missions(
                 ExitCode::SUCCESS
             }
         }
+        MutantsCommand::Debt {
+            equivalent,
+            because,
+            ratify,
+            all,
+        } => debt(project, equivalent, because, ratify, all),
+    }
+}
+
+/// `nunki mutants debt`: the listing, or one of the HQ's rulings on it.
+fn debt(
+    project: &nunki::project::Project,
+    equivalent: Option<String>,
+    because: Option<String>,
+    ratify: Option<Option<String>>,
+    all: bool,
+) -> ExitCode {
+    let failed = |e: nunki::offmission::OffMissionError| {
+        eprintln!("nunki: {e}");
+        ExitCode::FAILURE
+    };
+    match (equivalent, ratify) {
+        (Some(survivor), _) => {
+            let why = because.unwrap_or_default();
+            match nunki::offmission::rule_equivalent(project, &survivor, &why) {
+                Ok(()) => {
+                    println!(
+                        "{} ruled equivalent in the registry, and settled — {}",
+                        nunki::text::name(&survivor),
+                        nunki::text::one_line(&why)
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => failed(e),
+            }
+        }
+        (None, Some(Some(_))) if all => {
+            eprintln!("nunki: --ratify --all names no survivor: it takes every one");
+            ExitCode::FAILURE
+        }
+        (None, Some(Some(survivor))) => match nunki::offmission::ratify(project, &survivor) {
+            Ok(why) => {
+                println!(
+                    "{} ruled equivalent in the registry, and settled — {}",
+                    nunki::text::name(&survivor),
+                    nunki::text::one_line(&why)
+                );
+                ExitCode::SUCCESS
+            }
+            Err(e) => failed(e),
+        },
+        (None, Some(None)) if !all => {
+            eprintln!(
+                "nunki: --ratify names a survivor of the debt, or takes --all for every proposal"
+            );
+            ExitCode::FAILURE
+        }
+        (None, Some(None)) => {
+            let listed = match nunki::offmission::pending(project) {
+                Ok(listed) => listed,
+                Err(e) => return failed(e),
+            };
+            if listed.is_empty() {
+                println!("the registry proposes nothing on the debt");
+                return ExitCode::SUCCESS;
+            }
+            println!("ratifying {} proposal(s):", listed.len());
+            for p in &listed {
+                println!("          {}", proposal_line(p));
+            }
+            match nunki::offmission::ratify_all(project, &listed) {
+                Ok(done) => {
+                    for (id, p) in done.iter().zip(&listed) {
+                        println!(
+                            "{} ruled equivalent in the registry, and settled — {}",
+                            nunki::text::name(id),
+                            nunki::text::one_line(&p.why)
+                        );
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => failed(e),
+            }
+        }
+        (None, None) => match nunki::offmission::read_debt(&project.hq_root) {
+            Ok(debt) => {
+                let registry = nunki::equivalences::read(&project.hq_root);
+                if let Err(e) = &registry {
+                    println!("registry  could not be read: {e}");
+                }
+                println!(
+                    "{}",
+                    nunki::offmission::listing(&debt, registry.as_ref().ok())
+                );
+                if !debt.owed.is_empty() {
+                    println!(
+                        "          `nunki mutants debt --equivalent <survivor> --because <why>` \
+                         rules one in the registry; `--ratify <survivor>` (or `--ratify --all`) \
+                         ratifies the registry's proposals"
+                    );
+                }
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("nunki: {e}");
+                ExitCode::FAILURE
+            }
+        },
     }
 }

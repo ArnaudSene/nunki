@@ -801,6 +801,11 @@ pub enum MutantsError {
          mission's own verbs read it back"
     )]
     MissionCampaign { slot: String },
+    #[error(
+        "the project's debt could not be locked ({0}): the campaign outside missions stays \
+         filed, and `nunki mutants status` reads it back once the debt is free"
+    )]
+    DebtLocked(String),
     #[error(transparent)]
     Git(#[from] git::GitError),
     #[error("{0} is not a campaign `nunki` can read: {1}")]
@@ -2940,7 +2945,9 @@ pub fn read_back(
 /// [`read_back`] for a campaign outside missions: the same reading — the
 /// deadline, the stop confirmed, the container asked — recorded into the
 /// project's debt ([`crate::offmission`]) rather than a mission's [`FILE`].
-/// A mission's campaign filed in the slot is refused.
+/// A mission's campaign filed in the slot is refused. `None` too when
+/// another `nunki mutants status` read it back first
+/// ([`crate::offmission::read_ended`]).
 pub fn read_back_off_mission(
     project: &crate::project::Project,
     slot: &crate::slot::Slot,
@@ -3068,7 +3075,12 @@ fn read_back_into(
                 Some(why) => in_flight(Some(format!("its script has ended, and {why}"))),
                 None => match &sink {
                     Sink::Mission(dir) => read_ended(project, slot, dir, &running)?,
-                    Sink::OffMission => crate::offmission::read_ended(project, slot, &running)?,
+                    Sink::OffMission => {
+                        match crate::offmission::read_ended(project, slot, &running)? {
+                            Some(progress) => progress,
+                            None => return Ok(None),
+                        }
+                    }
                 },
             },
         },
