@@ -185,9 +185,11 @@ pub enum Stage {
     /// coder) or the human lifts the findings.
     Findings { report: String },
     /// A `critical` mission whose every other stage is green: gate 7 is
-    /// played again, alone, and the mission is `Verified` only on a full
-    /// campaign at `HEAD` that passes (SPEC 4.4, 4.5). One the chain left
-    /// partial owes the final full campaign first.
+    /// played again, alone, and the mission is `Verified` only on a campaign
+    /// at `HEAD` that passes (SPEC 4.4, 4.5). The chain holds to the end: a
+    /// partial campaign answers, and a `HEAD` the gates' campaign measured
+    /// owes none. The name is kept, so a mission on file at this stage
+    /// still reads.
     FinalCampaign,
     /// Stopped; the human decides.
     AwaitingHuman(Handover),
@@ -757,12 +759,12 @@ impl Flow {
                 self.last_findings = None;
                 self.verified_or_final()
             }
-            // --- the final full campaign, at `critical` ----------------
+            // --- the final campaign, at `critical` ---------------------
             //
-            // Green on a full campaign at `HEAD`: verified. Red: its
-            // survivors go back to the coder as a red gate 7 at the final
-            // gates sends them — a volet, bounded like the others — and the
-            // full campaign is owed again before `Verified`.
+            // Green on a campaign at `HEAD`, partial or full: verified. Red:
+            // its survivors go back to the coder as a red gate 7 at the final
+            // gates sends them — a volet, bounded like the others — and gate
+            // 7 is played again at this stage before `Verified`.
             (Stage::FinalCampaign, Event::GatesPassed) => Stage::Verified,
             (Stage::FinalCampaign, Event::GatesFailed { reason }) => {
                 self.volet(format!("final campaign: {reason}"))
@@ -952,9 +954,9 @@ impl Flow {
     }
 
     /// Where a mission whose every other stage is green goes: `Verified`,
-    /// or at `critical` the final full campaign first (SPEC 4.4, 4.5), which
-    /// the flow cannot judge itself — whether the campaign on file is full
-    /// is the file's to say, and `verify` reads it there.
+    /// or at `critical` the final campaign first (SPEC 4.4, 4.5), which the
+    /// flow cannot judge itself — whether a campaign at `HEAD` passes is the
+    /// file's to say, and `verify` reads it there.
     fn verified_or_final(&self) -> Stage {
         if self.header.rigor == super::Rigor::Critical {
             Stage::FinalCampaign

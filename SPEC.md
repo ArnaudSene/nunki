@@ -2062,24 +2062,25 @@ dernier lot. La première rouge arrête tout.
    `--again` n'a pas été demandé. Sinon la campagne est complète, et sa raison
    est écrite dans `MUTANTS.json`.
 
-   **Au niveau `critical`, la chaîne sert pendant la mission, jamais à la
-   fin.** La reconstruction y est jugée sans seuil : chaque survivant
-   qu'elle liste, gardé d'un fichier inchangé ou trouvé par la dernière
-   campagne, doit recevoir une issue. Et **une campagne complète au `HEAD`
-   final est due avant `Verified`** : quand toutes les autres étapes dues
-   sont vertes (`CLEAR`, une levée, ou des tours épuisés sans rien à lever)
-   et que la campagne enregistrée au `HEAD` est partielle, `nunki` lance la
-   campagne complète, comme toute campagne. Verte, la mission est
-   `Verified` ; des survivants, et c'est un volet, compté dans la borne. Une
-   campagne qui a tourné complète de toute façon compte comme la finale
-   quand elle est au `HEAD` et passe. `nunki push`, au niveau `critical`,
-   exige que la campagne enregistrée ait tourné sur le contenu du commit
-   poussé, soit complète et passe ; son refus nomme
-   `nunki mission mutants <id> --again`. Mesuré sur une mission `critical` de
-   ce dépôt : sept campagnes complètes d'environ deux heures, là où la
-   chaîne en aurait demandé une ou deux. Décidé, pas encore construit : la
-   campagne complète finale sort de la mission (plus bas, « Décidé, pas
-   encore construit »).
+   **Au niveau `critical`, la chaîne sert jusqu'à `Verified` et jusqu'à
+   `nunki push`.** La reconstruction y est jugée sans seuil : chaque
+   survivant qu'elle liste, gardé d'un fichier inchangé ou trouvé par la
+   dernière campagne, doit recevoir une issue. Quand toutes les autres
+   étapes dues sont vertes (`CLEAR`, une levée, ou des tours épuisés sans
+   rien à lever), la porte 7 est jouée de nouveau, seule, au `HEAD` final :
+   une campagne enregistrée sur son contenu et qui passe, partielle ou
+   complète, rend la mission `Verified`. Quand rien n'a bougé `HEAD` depuis
+   les portes, c'est leur campagne, et rien ne tourne de nouveau ; un commit
+   venu après elles doit une campagne, partielle si la chaîne le permet. Des
+   survivants, et c'est un volet, compté dans la borne. `nunki push`, au
+   niveau `critical`, exige que la campagne enregistrée ait tourné sur le
+   contenu du commit poussé et passe ; son refus nomme
+   `nunki mission mutants <id>`. Mesuré sur une mission `critical` de ce
+   dépôt : sept campagnes complètes d'environ deux heures, là où la chaîne
+   en aurait demandé une ou deux. Et sur trois missions `critical`, une
+   campagne complète de plus au `HEAD` final a coûté 109 minutes, 36 en
+   moyenne, pour refaire à peu près la mesure de la première campagne
+   complète : c'est pourquoi aucune n'est due à la fin.
 
    `MUTANTS.json` garde, pour chaque fichier touché, les comptes de la
    dernière campagne qui l'a mesuré. Un fichier inchangé garde ses comptes et
@@ -2089,30 +2090,18 @@ dernier lot. La première rouge arrête tout.
    total essayé, telle qu'une campagne complète à `HEAD` la donnerait. Aucun
    diff n'est lu ligne à ligne : deviner ce qu'un changement atteint a été
    contourné trois fois, comparer des contenus de fichiers ne l'est pas. La
-   limite, écrite avec son remède (`--again`, ou la campagne complète finale
-   du niveau `critical`) : un
-   mutant mesuré dans un fichier que personne n'a changé est supposé exister
-   encore et être encore tué.
+   limite, écrite avec son remède : un mutant mesuré dans un fichier que
+   personne n'a changé est supposé exister encore et être encore tué. Un
+   test modifié ou supprimé, ou tout autre changement d'un fichier touché,
+   peut laisser revivre un mutant d'un fichier inchangé, et aucune campagne
+   partielle ne le voit, à aucun niveau. Dans la mission, le seul remède est
+   `--again`, à la main ; hors mission, c'est la campagne sur tout le code
+   (plus bas, « Décidé, pas encore construit »).
 
-   **Décidé, pas encore construit.** Trois règles changent la porte 7. Le
+   **Décidé, pas encore construit.** Deux règles changent la porte 7. Le
    changement qui construit chacune l'écrit à la place de celle qu'elle
    remplace, et retire son entrée d'ici. Jusque-là, le reste de cette
    section décrit ce que `nunki` fait.
-
-   - **Plus de campagne complète finale au niveau `critical`.** La chaîne y
-     sert jusqu'à `Verified` et jusqu'à `nunki push`. La reconstruction est
-     jugée sans seuil : chaque survivant qu'elle liste doit recevoir une
-     issue, et `nunki push` exige qu'elle porte sur le contenu du commit
-     poussé et qu'elle passe. Mesuré sur trois missions `critical` : la
-     campagne finale a coûté 109 minutes, 36 en moyenne, pour refaire à peu
-     près la mesure de la première campagne complète.
-
-     Ce qu'on perd : la limite de la chaîne, écrite plus haut, n'a plus de
-     remède dans la mission. Un test modifié ou supprimé, ou tout autre
-     changement d'un fichier touché, peut laisser revivre un mutant d'un
-     fichier inchangé, et aucune campagne partielle ne le voit. Son remède
-     devient la campagne hors mission sur tout le code (troisième règle).
-     Tant qu'elle n'existe pas, c'est `--again`, à la main.
 
    - **Un budget de temps, mesuré sur un échantillon choisi d'avance.**
      `mutation_minutes` devient le budget d'une campagne, et le délai ne
@@ -2161,9 +2150,9 @@ dernier lot. La première rouge arrête tout.
      séparées ne remplissent plus le disque pendant une longue campagne
      (mesuré : environ 11 Go par heure).
 
-   L'ordre de construction : la première règle, puis le disque, puis la
-   deuxième, puis la troisième. Entre la première et la troisième, le cas
-   d'un fichier inchangé n'a pour remède que `--again` : c'est assumé.
+   L'ordre de construction : le disque, puis le budget, puis les campagnes
+   hors mission. D'ici là, le cas d'un fichier inchangé n'a pour remède que
+   `--again` : c'est assumé.
 
    **Le contrat de `mutation.sh` s'enrichit**, tout en restant facultatif
    pour une stack qui ne veut pas de chaîne :
@@ -2998,7 +2987,7 @@ Ce que la boucle veut dire, et ce qu'elle ne veut pas dire.
     ou être abandonnée.
   - **Aux portes, sur une campagne incomplète** (arrêtée à son délai ou
     annulée, 4.4), `iterate --because` est accepté aussi, et à la campagne
-    complète finale du niveau `critical` : il ouvre un volet comme une
+    finale du niveau `critical` : il ouvre un volet comme une
     porte 7 rouge, avec la raison dans `FOLLOWUP_HQ.md`. Ce n'est pas une
     revue : le niveau d'exigence ne le borne pas, et `--override` y est
     refusé, faute de rien à outrepasser.

@@ -878,10 +878,10 @@ pub fn verify_as(
                 return Ok(steps);
             }
             // A `critical` mission whose every other stage is green: gate 7
-            // alone, and `Verified` only on a full campaign at `HEAD` that
-            // passes (SPEC 4.4, 4.5). A partial one owes the final full
-            // campaign, which the caller runs as it runs any campaign owed
-            // ([`campaign`], [`replay_at`]).
+            // alone, and `Verified` only on a campaign at `HEAD` that passes,
+            // partial when the chain allows it (SPEC 4.4, 4.5). A `HEAD` that
+            // moved since owes one, which the caller runs as it runs any
+            // campaign owed ([`campaign`]).
             Stage::FinalCampaign => {
                 let head = crate::git::slot_head(&slot.tree)?;
                 let report = gate::final_campaign(&subject, &verification)?;
@@ -898,7 +898,7 @@ pub fn verify_as(
                             &paths.followup,
                             "nunki",
                             &format!(
-                                "the final full campaign was red on {}: {reason}",
+                                "the final campaign was red on {}: {reason}",
                                 &head[..head.len().min(12)]
                             ),
                         )?;
@@ -1679,9 +1679,8 @@ pub fn campaign(
             deadline_minutes: header.bounds.mutation_minutes,
             // The monitor never asks again by itself: replaying costs an
             // hour, and "ask again" is a human saying something changed that
-            // the fingerprint cannot see. The final full campaign is not
-            // asking again: it is the stage the mission stands at.
-            replay: replay_at(state.flow.stage()),
+            // the fingerprint cannot see.
+            replay: crate::mutants::Replay::WhenChanged,
             rigor: header.rigor,
             // The threshold gate 7 judges with: frozen in the header, or the
             // project's for a header framed before it was frozen.
@@ -1690,16 +1689,6 @@ pub fn campaign(
                 .unwrap_or(project.config.mutation_threshold),
         },
     )?)
-}
-
-/// How a campaign launched for a mission at `stage` replays, unless a human
-/// asks `--again`: the final full campaign at [`Stage::FinalCampaign`]
-/// (SPEC 4.4, 4.5), and otherwise only when the touched files changed.
-pub fn replay_at(stage: &Stage) -> crate::mutants::Replay {
-    match stage {
-        Stage::FinalCampaign => crate::mutants::Replay::Final,
-        _ => crate::mutants::Replay::WhenChanged,
-    }
 }
 
 /// The spawner that can ask about a run: the engine `verify` was given, not

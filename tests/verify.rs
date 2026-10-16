@@ -3709,41 +3709,49 @@ fn partial() -> nunki::mutants::Scope {
     }
 }
 
-/// A `critical` mission whose security verdict is `CLEAR` on a partial chain
-/// is not `Verified`: it stands at the final stage, which owes a full
-/// campaign, and the campaign the caller runs from there is the final one.
-/// Once a full campaign at `HEAD` passes, it is verified.
+/// The chain holds to the end: a `critical` mission whose security verdict
+/// is `CLEAR` on a partial chain that passes at `HEAD` is `Verified`, and no
+/// full campaign is owed.
 #[test]
-fn a_clear_on_a_partial_chain_is_not_verified_until_a_full_campaign_at_head_passes() {
+fn at_critical_a_clear_on_a_partial_chain_that_passes_at_head_is_verified() {
     let world = with_security_agent(1);
     world.at_security();
     world.campaign_at_head(partial(), 0);
+    let steps = world.cleared();
+    assert!(
+        !steps.iter().any(|s| matches!(s, Step::CampaignOwed { .. })),
+        "a partial chain that passes owed a campaign: {steps:?}"
+    );
+    assert!(matches!(steps.last(), Some(Step::Verified)), "{steps:?}");
+}
+
+/// A mission at the final stage that owes a campaign — none at `HEAD`'s
+/// content — is answered by a partial one there, as a mission parked at that
+/// stage by an earlier `nunki` is: the campaign the caller runs from there is
+/// not run again on that content, and the next look verifies.
+#[test]
+fn at_the_final_stage_a_partial_campaign_at_head_answers_the_campaign_owed() {
+    let world = with_security_agent(1);
+    world.at_security();
+    world.campaign_at_head(partial(), 0);
+    let mut elsewhere = nunki::mutants::read(&world.mission()).unwrap().unwrap();
+    elsewhere.fingerprint = "f".repeat(64);
+    nunki::mutants::write(&world.mission(), &elsewhere).unwrap();
 
     let steps = world.cleared();
-    match steps.last() {
-        Some(Step::CampaignOwed {
-            role: Role::Coder,
-            why,
-        }) => {
-            assert!(why.contains("is partial since eeeeeeeeeeee"), "{why}");
-        }
-        other => panic!("a partial chain verified a critical mission: {other:?}\n{steps:?}"),
-    }
-    let stage = world.state().flow.stage().clone();
-    assert_eq!(stage, Stage::FinalCampaign);
-    assert_eq!(verify::replay_at(&stage), nunki::mutants::Replay::Final);
-    // A second look, with nothing changed, still owes it.
-    assert!(matches!(
-        world.verify().unwrap().last(),
-        Some(Step::CampaignOwed { .. })
-    ));
+    assert!(
+        matches!(steps.last(), Some(Step::CampaignOwed { .. })),
+        "{steps:?}"
+    );
+    assert_eq!(world.state().flow.stage(), &Stage::FinalCampaign);
 
-    // The final full campaign, recorded at `HEAD` with nothing surviving.
-    world.campaign_at_head(
-        nunki::mutants::Scope::Full {
-            why: nunki::mutants::FINAL.into(),
-        },
-        0,
+    world.campaign_at_head(partial(), 0);
+    let engine: Arc<dyn nunki::engine::Engine> =
+        Arc::new(nunki::engine::fake::FakeEngine::default());
+    assert_eq!(
+        verify::campaign(&world.project, "m1", engine).unwrap(),
+        nunki::mutants::Progress::Fresh { survivors: 0 },
+        "the final stage ran a campaign again on content a partial one measured"
     );
     let steps = world.verify().unwrap();
     assert!(matches!(steps.last(), Some(Step::Verified)), "{steps:?}");
@@ -3763,10 +3771,10 @@ fn a_full_campaign_at_head_that_passes_needs_no_second_one() {
     assert!(matches!(steps.last(), Some(Step::Verified)), "{steps:?}");
 }
 
-/// The final full campaign's survivors go back to the coder, as any
-/// campaign's do: a volet, told why in the follow-up.
+/// The final campaign's survivors go back to the coder, as any campaign's
+/// do: a volet, told why in the follow-up.
 #[test]
-fn the_final_full_campaigns_survivors_go_back_to_the_coder() {
+fn the_final_campaigns_survivors_go_back_to_the_coder() {
     let world = with_security_agent(1);
     world.at_security();
     world.campaign_at_head(nunki::mutants::Scope::Full { why: String::new() }, 1);
@@ -3788,7 +3796,7 @@ fn the_final_full_campaigns_survivors_go_back_to_the_coder() {
     }
     let followup = std::fs::read_to_string(world.mission().join("FOLLOWUP_HQ.md")).unwrap();
     assert!(
-        followup.contains("the final full campaign was red on"),
+        followup.contains("the final campaign was red on"),
         "{followup}"
     );
 }
@@ -3801,26 +3809,6 @@ fn at_standard_a_clear_on_a_partial_chain_is_verified() {
     world.campaign_at_head(partial(), 0);
     let steps = world.cleared();
     assert!(matches!(steps.last(), Some(Step::Verified)), "{steps:?}");
-}
-
-/// The campaign the caller runs is the final one at that stage only.
-#[test]
-fn only_the_final_stage_runs_the_final_campaign() {
-    assert_eq!(
-        verify::replay_at(&Stage::FinalCampaign),
-        nunki::mutants::Replay::Final
-    );
-    for stage in [
-        Stage::Gates,
-        Stage::Verified,
-        Stage::SecurityAgent { attempt: 1 },
-    ] {
-        assert_eq!(
-            verify::replay_at(&stage),
-            nunki::mutants::Replay::WhenChanged,
-            "{stage:?}"
-        );
-    }
 }
 
 // --- the rigor binds the HQ's verbs (SPEC 4.5) ------------------------------

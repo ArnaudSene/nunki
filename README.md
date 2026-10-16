@@ -387,7 +387,7 @@ A mission declares how much verification asks of it, with `--rigor` on
 | | `prototype` | `standard` | `critical` (the default) |
 |---|---|---|---|
 | Gate 7, the mutation campaign | not played | passes when the share of tried mutants killed reaches `mutation_threshold` (80 unless `nunki.yaml` says otherwise); a survivor with an outcome, a coder's proposal included, counts as killed | every survivor needs an outcome — killed, a bug, the HQ's equivalence, or the coder's proposal of one |
-| Gate 7's campaigns | none | the first full, a later one partial when the chain allows it | the same chain during the mission, then one full campaign at `HEAD` before `Verified` and `nunki push` |
+| Gate 7's campaigns | none | the first full, a later one partial when the chain allows it | the same chain, to `Verified` and to `nunki push`; gate 7 is played again at the final `HEAD` before `Verified` |
 | Security agent rounds | none | at most 1 | at most 3 |
 | Integration | none | as declared | as declared |
 
@@ -488,32 +488,31 @@ earlier in a file nobody has changed since still exists, and is still
 killed. A volet that weakens a test can make the second false; one that
 stops compiling an unchanged file — its `mod` line removed — makes the
 first false, and that file keeps its counts. The chain will not see
-either. `critical` makes it during the mission as `standard` does, and
-never at the end (below); `--again` forces a full campaign at any rigor.
+either, at any rigor, and nothing in the mission does. `--again` forces a
+full campaign, and today it is the only remedy: a campaign outside the
+mission, over the whole code, is decided in SPEC 4.4 and not yet built.
 
-**The final full campaign, at `critical`.** A `critical` mission is never
-verified, and never pushed, on anything but one full campaign at its final
-`HEAD`. When every other stage it owes is green — the gates, the integrator
-and the security verdict as its shape requires: `CLEAR`, a lift, or rounds
-spent with nothing left to lift — it stands at a last stage, the final full
-campaign, where gate 7 is played again alone:
+**The final campaign, at `critical`.** The chain holds to the end: a
+`critical` mission is verified, and pushed, on a campaign at its final
+`HEAD` that passes, partial or full. When every other stage it owes is
+green — the gates, the integrator and the security verdict as its shape
+requires: `CLEAR`, a lift, or rounds spent with nothing left to lift — it
+stands at a last stage, the final campaign, where gate 7 is played again
+alone:
 
-- the campaign on file at `HEAD` is full and passes: the mission is
-  `Verified`. A campaign that ran full anyway — the first one, or one a
-  changed tool or a moved fork point made full — counts, so no second full
-  campaign runs on the same content;
-- it is partial and passes: `nunki` launches a full campaign at `HEAD`,
-  watched like any campaign, whose record says it is the final one, and
-  looks again once it is read back;
+- a campaign on file at `HEAD` passes: the mission is `Verified`. When
+  nothing moved `HEAD` since the gates, that is the gates' own campaign,
+  and nothing runs again;
+- none is on file at `HEAD`'s content — a commit came after the gates:
+  `nunki` launches one, partial when the chain allows it, watched like any
+  campaign, and looks again once it is read back;
 - it has survivors without an outcome: they go back to the coder as a volet,
-  as any campaign's do. The next campaign may be partial again, and the
-  final full campaign is owed again before `Verified`.
+  as any campaign's do, and gate 7 is played again at this stage before
+  `Verified`.
 
 `nunki push` at `critical` refuses unless the campaign on file was run on
-the content of the pushed commit, is full, and passes; its refusal names
-`nunki mission mutants <mission> --again`, which runs a full one.
-`nunki mission mutants <mission>` at that last stage runs the final
-campaign, as the monitor does.
+the content of the pushed commit and passes; its refusal names
+`nunki mission mutants <mission>`, which runs one there.
 
 ### A campaign stopped short: the deadline, and `--cancel`
 
@@ -809,7 +808,7 @@ MISSION  (one branch off its base, one slot)
 
 - **Stage** — where the mission stands, one at a time: coding, final gates,
   integration, security, findings (the security agent's, for a human to
-  iterate on or lift), the final full campaign (`critical` only), awaiting a
+  iterate on or lift), the final campaign (`critical` only), awaiting a
   human, verified. A stage the mission does
   not declare is absent by declaration, not skipped.
 - **Lot** — a planned unit of the coder's work, listed in the header (`L1`,

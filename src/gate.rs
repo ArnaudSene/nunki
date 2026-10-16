@@ -440,36 +440,19 @@ fn threshold(subject: &Subject, verification: &Verification) -> Threshold {
 
 /// Gate 7 alone, as the final stage of a `critical` mission plays it
 /// (SPEC 4.4, 4.5): every other stage owed is green, and the mission is
-/// `Verified` only on a **full** campaign at `HEAD` that passes.
+/// `Verified` only on a campaign at `HEAD` that passes.
 ///
-/// Gate 7 as it is played at the final gates, with one answer more: a
-/// campaign on file at `HEAD` that passes and is partial leaves the gate
-/// unplayed, so the flow owes a campaign and the caller runs the final one
-/// ([`crate::mutants::Replay::Final`]). One that fails is red, partial or
-/// not: its survivors go back to the coder as any campaign's do, and the
-/// full one is owed again after them. A full campaign at `HEAD` that passes,
-/// whatever made it full, is the final one.
+/// Gate 7 as it is played at the final gates. The chain holds to the end: a
+/// partial campaign at `HEAD` that passes verifies the mission, judged on
+/// its reconstruction as the final gates judge it. A `HEAD` the gates'
+/// campaign already measured owes nothing more; one that moved since owes a
+/// campaign, partial when the chain allows it. One that fails is red: its
+/// survivors go back to the coder as any campaign's do.
 pub fn final_campaign(subject: &Subject, verification: &Verification) -> Result<Report, GateError> {
     let head = git::slot_head(subject.tree)?;
     let outcome = match campaign_in_flight(verification) {
         Some(why) => Outcome::waiting(Gate::Mutation, &why),
-        None => {
-            let outcome = mutation(subject, threshold(subject, verification))?;
-            let partial = match outcome.decision {
-                Decision::Passed => crate::mutants::read(subject.mission_dir)
-                    .map_err(|e| GateError::Mutants(e.to_string()))?
-                    .as_ref()
-                    .and_then(crate::mutants::not_final),
-                _ => None,
-            };
-            match partial {
-                Some(why) => Outcome::of(
-                    Gate::Mutation,
-                    Decision::Unplayed(format!("{why} — the final full campaign is owed")),
-                ),
-                None => outcome,
-            }
-        }
+        None => mutation(subject, threshold(subject, verification))?,
     };
     Ok(Report {
         role: subject.role,

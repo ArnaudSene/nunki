@@ -2340,7 +2340,7 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                         nunki::mission::flow::Stage::FinalCampaign
                     ) {
                         println!(
-                            "          `nunki verify {id}` plays the final full campaign a \
+                            "          `nunki verify {id}` plays gate 7 again at HEAD, which a \
                              `critical` mission is verified on"
                         );
                     }
@@ -2643,15 +2643,11 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                     // brought, through the same call gate 7 makes.
                     base: &header.base,
                     deadline_minutes: header.bounds.mutation_minutes,
-                    // Without `--again`, as the monitor would: at the final
-                    // stage of a `critical` mission, the final full campaign.
+                    // Without `--again`, as the monitor would.
                     replay: if again {
                         nunki::mutants::Replay::Now
                     } else {
-                        nunki::state::Store::open(&project.hq_root)
-                            .and_then(|s| s.load(&id))
-                            .map(|state| nunki::verify::replay_at(state.flow.stage()))
-                            .unwrap_or(nunki::mutants::Replay::WhenChanged)
+                        nunki::mutants::Replay::WhenChanged
                     },
                     rigor: header.rigor,
                     threshold: header
