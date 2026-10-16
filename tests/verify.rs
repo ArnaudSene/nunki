@@ -3468,6 +3468,7 @@ fn green_final_gates_leave_each_campaign_of_the_chain_in_the_follow_up() {
             survivors: vec![],
             tried: Some(3),
             chain: Chain {
+                sample: None,
                 fork: None,
                 handed: None,
                 ran: None,
@@ -4042,7 +4043,11 @@ fn a_campaign_stopped_at_its_deadline_waits_for_the_hq_who_can_send_its_survivor
     nunki::mutants::write(
         &world.mission(),
         &nunki::mutants::Campaign {
-            stopped: Some(nunki::mutants::Stopped::Deadline { minutes: 45 }),
+            // Stopped at the deadline the mission's 45-minute budget gives
+            // (SPEC 4.4, gate 7: the budget).
+            stopped: Some(nunki::mutants::Stopped::Deadline {
+                minutes: nunki::mutants::deadline_minutes(45),
+            }),
             fingerprint: nunki::mutants::fingerprint(&world.tree, &touched).unwrap(),
             head: git(&world.tree, &["rev-parse", "HEAD"]),
             date: "2026-10-11T10:00:00Z".into(),
@@ -4067,7 +4072,7 @@ fn a_campaign_stopped_at_its_deadline_waits_for_the_hq_who_can_send_its_survivor
     match steps.last() {
         Some(Step::GateUnplayable { role, why }) => {
             assert_eq!(*role, Role::Coder);
-            assert!(why.contains("45-minute deadline"), "{why}");
+            assert!(why.contains("68-minute deadline"), "{why}");
             assert!(why.contains("1 survivor(s)"), "{why}");
             assert!(why.contains("iterate --because"), "{why}");
         }

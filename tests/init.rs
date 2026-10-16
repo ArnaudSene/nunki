@@ -3982,6 +3982,404 @@ fn a_failed_rust_campaign_explains_only_the_status_it_got() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// A sample when the whole would not fit the budget (SPEC 4.4, gate 7).
+// ---------------------------------------------------------------------------
+
+/// A stand-in `cargo mutants` that lists `$LISTING` — a JSON array, as
+/// `--list --json` gives it — filtered by the `-F` it is handed, with `jq`'s
+/// own regex, and runs what is left: a mutant whose description holds
+/// "missed" survives. Every call is written to `$CALLS`. With
+/// `STUB_IGNORE_F` set, its `--list` ignores the filter, as a tool whose
+/// syntax read it otherwise would; with `STUB_LIST_FAILS`, `--list` fails.
+#[cfg(unix)]
+const CARGO_THAT_SAMPLES: &str = r#"#!/bin/sh
+printf '%s\n' "$*" >> "$CALLS"
+out=""
+re=""
+list=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --output) out=$2; shift ;;
+    -F) re=$2; shift ;;
+    --list) list=1 ;;
+  esac
+  shift
+done
+if [ "$list" = 1 ] && [ -n "${STUB_LIST_FAILS:-}" ]; then
+  echo "error: the stand-in cannot list" >&2
+  exit 1
+fi
+if [ "$list" = 1 ] && [ -n "${STUB_IGNORE_F:-}" ]; then
+  re=""
+fi
+sel=$(jq -c --arg re "$re" '[.[] | select($re == "" or (.name | test($re)))]' "$LISTING")
+if [ "$list" = 1 ]; then
+  printf '%s\n' "$sel"
+  exit 0
+fi
+printf '%s' "$sel" | jq -r '.[]
+  | (if (.name | test("missed")) then "MissedMutant" else "CaughtMutant" end)
+    + "|" + .file + "|" + (.span.start.line | tostring)
+    + "|" + (.span.end.line | tostring) + "|" + .name' \
+  | mutants-out "$out/mutants.out"
+if printf '%s' "$sel" | jq -e 'any(.[]; .name | test("missed"))' > /dev/null; then
+  exit 2
+fi
+exit 0
+"#;
+
+/// A mutant as `--list --json` gives it, at `line`.
+#[cfg(unix)]
+fn listed(file: &str, line: u32, description: &str) -> serde_json::Value {
+    serde_json::json!({
+        "name": format!("{file}:{line}:5: {description}"),
+        "file": file,
+        "span": {"start": {"line": line, "column": 5}, "end": {"line": line, "column": 9}},
+    })
+}
+
+/// Forty mutants in two files, with names as the real tool writes them —
+/// `<impl …>::`, `->`, `&&`, `vec![…]` — each on its own line, `shift` lines
+/// further down.
+#[cfg(unix)]
+fn forty(shift: u32) -> Vec<serde_json::Value> {
+    (0..40)
+        .map(|i| {
+            let file = if i % 2 == 0 { "src/a.rs" } else { "src/b.rs" };
+            let description = match i % 4 {
+                0 => format!("replace <impl Spawner for S{i}>::alive -> io::Result<u8> with Ok(0)"),
+                1 => format!("replace && with || in f{i}"),
+                2 => format!(
+                    "replace g{i} -> Vec<&'a J> with vec![Box::leak(Box::new(Default::default()))]"
+                ),
+                _ => format!("replace h{i} -> u8 with 0, missed"),
+            };
+            listed(file, 10 + i + shift, &description)
+        })
+        .collect()
+}
+
+/// What a campaign run against [`CARGO_THAT_SAMPLES`] with `listing` and
+/// `env` said: its stdout, its stderr, its status and every call it made.
+#[cfg(unix)]
+fn sampled_campaign(
+    listing: &[serde_json::Value],
+    env: &[(&str, &str)],
+) -> (String, String, Option<i32>, String) {
+    let (dir, root, nunki) = fresh();
+    init(&root, &nunki, &["rust".to_string()]).unwrap();
+    let script = home(&root).join("stacks/rust/mutation.sh");
+    let tree = dir.path().join("tree");
+    std::fs::create_dir_all(tree.join("src")).unwrap();
+    std::fs::write(tree.join("src/a.rs"), "pub fn a() {}\n").unwrap();
+    let file = dir.path().join("listing.json");
+    std::fs::write(&file, serde_json::to_string(listing).unwrap()).unwrap();
+    let calls = dir.path().join("calls");
+    let path = stubs(
+        &dir.path().join("stub-bin"),
+        &[("cargo", CARGO_THAT_SAMPLES)],
+    );
+    let out = sh()
+        .arg(&script)
+        .arg("abc123")
+        .arg("src/a.rs")
+        .env("PATH", path)
+        .env("LISTING", &file)
+        .env("CALLS", &calls)
+        .envs(env.iter().copied())
+        .current_dir(&tree)
+        .output()
+        .expect("sh runs the campaign");
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        out.status.code(),
+        std::fs::read_to_string(&calls).unwrap_or_default(),
+    )
+}
+
+/// The names of the mutants a campaign ran, as its stand-in's run named them.
+#[cfg(unix)]
+fn ran(said: &str) -> std::collections::BTreeSet<String> {
+    let campaign: serde_json::Value = serde_json::from_str(
+        said.lines()
+            .find(|l| l.contains("\"sampled\""))
+            .expect("the campaign says what it ran at"),
+    )
+    .unwrap();
+    assert!(campaign["sampled"].as_u64().is_some(), "{said}");
+    said.lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter_map(|v| v.get("id").and_then(|id| id.as_str()).map(str::to_string))
+        .collect()
+}
+
+/// The hash the script keys a mutant with, written again here: the key that
+/// carries rulings — the file and the description — as one JSON string, its
+/// characters folded as `jq` folds them.
+#[cfg(unix)]
+fn key_hash(file: &str, description: &str) -> u64 {
+    serde_json::to_string(&[file, description])
+        .unwrap()
+        .chars()
+        .fold(5381u64, |h, c| (h * 33 + u64::from(c)) % 1_000_003)
+}
+
+/// The hash is the same in `jq` as written here, on keys with what a real
+/// name holds: what pins it, so that no `jq` version and no edit to the
+/// script redraws a sample without a test going red.
+#[cfg(unix)]
+#[test]
+fn the_sample_key_hashes_alike_in_jq_and_here() {
+    let keys = [
+        (
+            "src/a.rs",
+            "replace <impl Spawner for S0>::alive -> io::Result<u8> with Ok(0)",
+        ),
+        ("src/b.rs", "replace && with || in f1"),
+        (
+            "src/lib.rs",
+            "replace g -> Vec<&'a J> with vec![Box::leak(Box::new(Default::default()))]",
+        ),
+        ("src/with space.rs", "replace \"quoted\" with \\ in x"),
+    ];
+    for (file, description) in keys {
+        let out = std::process::Command::new("jq")
+            .args([
+                "-n",
+                "--arg",
+                "f",
+                file,
+                "--arg",
+                "d",
+                description,
+                "[$f, $d] | tojson | explode | reduce .[] as $c (5381; (. * 33 + $c) % 1000003)",
+            ])
+            .output()
+            .expect("jq runs");
+        let jq: u64 = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap();
+        assert_eq!(jq, key_hash(file, description), "{file} {description}");
+    }
+    // And the script's own program is the one written here.
+    let (_d, root, nunki) = fresh();
+    init(&root, &nunki, &["rust".to_string()]).unwrap();
+    let script = std::fs::read_to_string(home(&root).join("stacks/rust/mutation.sh")).unwrap();
+    assert!(
+        script.contains("def hash: explode | reduce .[] as $c (5381; (. * 33 + $c) % 1000003);"),
+        "the script hashes otherwise"
+    );
+    assert!(
+        script.contains("| [.file, $description] | tojson;"),
+        "the script keys otherwise"
+    );
+}
+
+/// Given a budget its mutants do not fit, a campaign measures a sample:
+/// the fraction the budget allows — forty mutants, 60 s each and one more
+/// for the baseline, 600 s: nine fit, so one in five — chosen by the key,
+/// and only those reach the tool, through a filter checked first. It says
+/// what it ran at, and its tallies are the sample's.
+#[cfg(unix)]
+#[test]
+fn a_rust_campaign_over_its_budget_measures_a_sample_chosen_by_the_key() {
+    let listing = forty(0);
+    let (said, why, status, calls) =
+        sampled_campaign(&listing, &[(nunki::mutants::BUDGET_ENV, "600")]);
+    assert_eq!(status, Some(0), "{why}");
+    assert!(nunki::mutants::completed(&said), "{said}\n{why}");
+    let expected: std::collections::BTreeSet<String> = listing
+        .iter()
+        .filter(|m| {
+            let name = m["name"].as_str().unwrap();
+            let file = m["file"].as_str().unwrap();
+            let description = name.splitn(4, ':').nth(3).unwrap().trim_start();
+            key_hash(file, description).is_multiple_of(5)
+        })
+        .map(|m| m["name"].as_str().unwrap().to_string())
+        .collect();
+    assert!(!expected.is_empty() && expected.len() < 40, "{expected:?}");
+    let line = said.lines().find(|l| l.contains("\"sampled\"")).unwrap();
+    let line: serde_json::Value = serde_json::from_str(line).unwrap();
+    assert_eq!(line["sampled"], 5, "{said}");
+    assert_eq!(line["listed"], 40, "{said}");
+    assert_eq!(line["paced"], 60, "{said}");
+    let tried = nunki::mutants::tried(&said).unwrap() as usize;
+    assert_eq!(tried, expected.len(), "{said}");
+    // The survivors are the sample's, and only the sample's.
+    let survivors: std::collections::BTreeSet<String> = ran(&said);
+    assert!(
+        survivors.iter().all(|s| expected.contains(s)),
+        "{survivors:?}"
+    );
+    // Listed, checked with the filter, then run with it.
+    let calls: Vec<&str> = calls.lines().collect();
+    assert_eq!(calls.len(), 3, "{calls:?}");
+    assert!(
+        calls[0].contains("--list") && !calls[0].contains("-F"),
+        "{calls:?}"
+    );
+    assert!(
+        calls[1].contains("--list") && calls[1].contains("-F"),
+        "{calls:?}"
+    );
+    assert!(
+        !calls[2].contains("--list") && calls[2].contains("-F"),
+        "{calls:?}"
+    );
+}
+
+/// The sample is the same from one return to the next: every line moved
+/// and a mutant added in another file, at the chain's fraction, keep every
+/// mutant that was in it, and add the new one or not by its own key.
+#[cfg(unix)]
+#[test]
+fn a_sample_keeps_its_mutants_when_lines_move_and_others_are_added() {
+    let names = |said: &str| -> std::collections::BTreeSet<String> {
+        said.lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter_map(|v| v.get("id").and_then(|id| id.as_str()).map(str::to_string))
+            .collect()
+    };
+    // Every mutant survives here, so the survivors are the sample.
+    let all_missed = |list: Vec<serde_json::Value>| -> Vec<serde_json::Value> {
+        list.into_iter()
+            .map(|mut m| {
+                let name = format!("{}, missed", m["name"].as_str().unwrap());
+                m["name"] = serde_json::Value::String(name);
+                m
+            })
+            .collect()
+    };
+    let key = |name: &str| {
+        let mut parts = name.splitn(4, ':');
+        let file = parts.next().unwrap().to_string();
+        (file, parts.nth(2).unwrap().trim_start().to_string())
+    };
+    let before = all_missed(forty(0));
+    let (said, why, _, _) = sampled_campaign(&before, &[(nunki::mutants::SAMPLE_ENV, "4")]);
+    let first: std::collections::BTreeSet<_> = names(&said).iter().map(|n| key(n)).collect();
+    assert!(!first.is_empty(), "{said}\n{why}");
+
+    let mut after = all_missed(forty(7));
+    after.push(listed(
+        "src/c.rs",
+        3,
+        "replace added -> bool with true, missed",
+    ));
+    let (said, why, _, _) = sampled_campaign(&after, &[(nunki::mutants::SAMPLE_ENV, "4")]);
+    let second: std::collections::BTreeSet<_> = names(&said).iter().map(|n| key(n)).collect();
+    let added = (
+        "src/c.rs".to_string(),
+        "replace added -> bool with true, missed".to_string(),
+    );
+    let mut without_added = second.clone();
+    without_added.remove(&added);
+    assert_eq!(
+        without_added, first,
+        "the sample moved with the lines\n{why}"
+    );
+    assert_eq!(
+        second.contains(&added),
+        key_hash(&added.0, &added.1).is_multiple_of(4),
+        "the added mutant is in the sample by its own key"
+    );
+}
+
+/// The selection fails closed. A listing that fails, a filter whose
+/// listing names other mutants than the ones chosen, and a sample that holds
+/// none of the mutants the scope reaches are campaigns that measured
+/// nothing, and say why — never a run of the whole.
+#[cfg(unix)]
+#[test]
+fn a_sample_that_cannot_be_trusted_is_a_campaign_that_measured_nothing() {
+    let listing = forty(0);
+    let (said, why, status, calls) = sampled_campaign(
+        &listing,
+        &[
+            (nunki::mutants::BUDGET_ENV, "660"),
+            ("STUB_LIST_FAILS", "1"),
+        ],
+    );
+    assert_eq!(status, Some(1), "{why}");
+    assert!(!nunki::mutants::completed(&said), "{said}");
+    assert!(
+        why.contains("could not list this campaign's mutants"),
+        "{why}"
+    );
+    assert_eq!(
+        calls.lines().count(),
+        1,
+        "the tool ran after a failed listing: {calls}"
+    );
+
+    let (said, why, status, calls) = sampled_campaign(
+        &listing,
+        &[(nunki::mutants::BUDGET_ENV, "660"), ("STUB_IGNORE_F", "1")],
+    );
+    assert_eq!(status, Some(1), "{why}");
+    assert!(!nunki::mutants::completed(&said), "{said}");
+    assert!(why.contains("did not select the"), "{why}");
+    assert_eq!(
+        calls.lines().count(),
+        2,
+        "the tool ran on an unchecked filter: {calls}"
+    );
+
+    // Two mutants whose keys both hash off the fraction: the sample is empty.
+    let mut off = Vec::new();
+    let mut i = 0;
+    while off.len() < 2 {
+        let description = format!("replace k{i} -> u8 with 1");
+        if !key_hash("src/a.rs", &description).is_multiple_of(2) {
+            off.push(listed("src/a.rs", 10 + i, &description));
+        }
+        i += 1;
+    }
+    let (said, why, status, calls) = sampled_campaign(&off, &[(nunki::mutants::SAMPLE_ENV, "2")]);
+    assert_eq!(status, Some(1), "{why}");
+    assert!(!nunki::mutants::completed(&said), "{said}");
+    assert!(
+        why.contains("a sample of 1/2 of the 2 mutants this campaign reaches holds none of them"),
+        "{why}"
+    );
+    assert_eq!(calls.lines().count(), 1, "{calls}");
+
+    let (_, why, status, _) = sampled_campaign(&listing, &[(nunki::mutants::BUDGET_ENV, "ten")]);
+    assert_eq!(status, Some(1), "{why}");
+    assert!(
+        why.contains("whole numbers of at least 1, and 'ten' is not"),
+        "{why}"
+    );
+}
+
+/// Given neither a budget nor a fraction, as by an older `nunki`, the
+/// campaign runs whole and unlisted, as it always has, and says no sample.
+/// Within the budget, it runs whole too, and says so.
+#[cfg(unix)]
+#[test]
+fn a_rust_campaign_within_its_budget_or_without_one_runs_whole() {
+    let listing = forty(0);
+    let (said, why, status, calls) = sampled_campaign(&listing, &[]);
+    assert_eq!(status, Some(0), "{why}");
+    assert!(nunki::mutants::completed(&said), "{said}");
+    assert!(!said.contains("\"sampled\""), "{said}");
+    assert_eq!(calls.lines().count(), 1, "{calls}");
+    assert!(!calls.contains("--list"), "{calls}");
+    assert_eq!(nunki::mutants::tried(&said), Some(40), "{said}");
+
+    let (said, why, status, calls) =
+        sampled_campaign(&listing, &[(nunki::mutants::BUDGET_ENV, "100000")]);
+    assert_eq!(status, Some(0), "{why}");
+    let line = said.lines().find(|l| l.contains("\"sampled\"")).unwrap();
+    let line: serde_json::Value = serde_json::from_str(line).unwrap();
+    assert_eq!(line["sampled"], 1, "{said}");
+    assert_eq!(line["listed"], 40, "{said}");
+    assert_eq!(nunki::mutants::tried(&said), Some(40), "{said}");
+    assert_eq!(calls.lines().count(), 2, "listed, then run whole: {calls}");
+    assert!(!calls.contains("-F"), "{calls}");
+}
+
 /// Next.js: the sandbox a killed Stryker left, `.stryker-tmp/`, is cleared
 /// before the next run — the one thing Stryker leaves behind that
 /// `--cleanTempDir always` cannot remove, since a killed process runs nothing.

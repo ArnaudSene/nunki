@@ -1305,7 +1305,9 @@ free_mib() {
 sweep() {
   set +e
   nap=""
-  trap 'if [ -n "$nap" ]; then kill "$nap" 2>/dev/null; wait "$nap"; fi; exit 0' TERM
+  # Reaped, and quietly: dash says `Terminated` for a child it waits on
+  # after a kill, and that line would close the campaign's stderr.
+  trap 'if [ -n "$nap" ]; then kill "$nap" 2>/dev/null; wait "$nap" 2>/dev/null; fi; exit 0' TERM
   while :; do
     sleep "$sweep_every" &
     nap=$!
@@ -1332,6 +1334,104 @@ if [ -z "$left" ]; then
 elif [ "$left" -lt "$floor_mib" ]; then
   echo "nunki: the disk under target/ has $left MiB left, below the campaign's floor of $floor_mib MiB, so the campaign did not start and measured nothing" >&2
   exit 1
+fi
+
+# A sample when the whole would not fit the budget (SPEC 4.4, gate 7).
+#
+# `nunki` gives the campaign its budget in seconds (`NUNKI_MUTATION_BUDGET`,
+# the mission's `mutation_minutes`), the seconds a mutant took on this
+# project's last campaign (`NUNKI_MUTATION_PACE`, 60 without one), and, for
+# a campaign that continues a chain, the fraction the chain runs at
+# (`NUNKI_MUTATION_SAMPLE`). The mutants the scope reaches are listed first.
+# Unless the chain fixed it, the fraction is 1/k with k as small as fits:
+# the budget holds `budget / pace` mutants, less one for the baseline, which
+# rebuilds the crate as a mutant does.
+#
+# Which mutants make the sample is chosen before the tool starts, and by the
+# key that carries the HQ's rulings — the file and the description, never
+# the line — hashed: a mutant kept is one whose key's hash `% k` is 0. So a
+# mutant a return to the coder did not change stays in the sample whatever
+# moved above it, and one added elsewhere does not reshuffle the others. A
+# choice by position, as `--shard` makes it, would: every return would bring
+# survivors never seen. The hash is written in `jq`, kept below 2^31 at each
+# step so that every `jq` computes it alike (measured on 1.6 and 1.8.2).
+#
+# The sample reaches the tool as one `-F`, an alternation of the names it
+# holds, escaped where Rust's regex syntax would read them, and is checked
+# before it runs: `--list` with that filter must name exactly the mutants
+# chosen. Measured on 27.1.0: names such as
+# `replace <impl Spawner for ContainerSpawner>::alive -> io::Result<u8>`
+# and `vec![Box::leak(Box::new(Default::default()))]` come back exactly,
+# and the tool's own tallies and `mutants.json` then count the sample alone.
+# A listing that fails, a filter that does not select what was chosen, or a
+# sample that came out empty while the scope holds mutants measured
+# nothing, and says so: never a fallback to the whole. Given no budget and
+# no fraction, as by an older `nunki`, the campaign runs whole, unlisted.
+budget="${NUNKI_MUTATION_BUDGET:-}"
+pace="${NUNKI_MUTATION_PACE:-}"
+fixed="${NUNKI_MUTATION_SAMPLE:-}"
+for value in "$budget" "$pace" "$fixed"; do
+  case "$value" in
+    *[!0-9]*|0*)
+      echo "nunki: the campaign's budget, pace and sample are whole numbers of at least 1, and '$value' is not" >&2
+      exit 1
+      ;;
+  esac
+done
+[ -n "$pace" ] || pace=60
+k=1
+n=""
+listed="$out/listed.json"
+if [ -n "$budget" ] || [ -n "$fixed" ]; then
+  if ! cargo mutants --no-config --list --json --exclude-re "replace main -> " "$@" > "$listed" 2> "$listed.err"; then
+    echo "nunki: cargo mutants could not list this campaign's mutants, so it measured nothing:" >&2
+    tail -n 20 "$listed.err" >&2
+    exit 1
+  fi
+  if ! n=$(jq 'length' "$listed"); then
+    echo "nunki: cannot read the list of this campaign's mutants, so it measured nothing" >&2
+    exit 1
+  fi
+  if [ -n "$fixed" ]; then
+    k=$fixed
+  elif [ -n "$budget" ] && [ "$n" -gt 0 ]; then
+    fit=$((budget / pace - 1))
+    [ "$fit" -ge 1 ] || fit=1
+    k=$(((n + fit - 1) / fit))
+  fi
+  if [ "$n" -gt 0 ] && [ "$k" -gt "$n" ]; then
+    k=$n
+  fi
+  # shellcheck disable=SC2016
+  sampled='
+    def key:
+      (.file + ":") as $at
+      | (if (.name | startswith($at))
+         then .name | ltrimstr($at) | sub("^[0-9]+:[0-9]+: "; "")
+         else .name
+         end) as $description
+      | [.file, $description] | tojson;
+    def hash: explode | reduce .[] as $c (5381; (. * 33 + $c) % 1000003);
+    [.[] | select((key | hash) % $k == 0) | .name] | sort'
+  if [ "$k" -gt 1 ]; then
+    if ! chosen=$(jq -c --argjson k "$k" "$sampled" "$listed") \
+      || ! m=$(printf '%s' "$chosen" | jq 'length') \
+      || ! re=$(printf '%s' "$chosen" | jq -r '
+        "^(?:" + (map(gsub("(?<c>[\\\\.+*?()|\\[\\]{}^$#&~-])"; "\\\(.c)")) | join("|")) + ")$"'); then
+      echo "nunki: cannot choose this campaign's sample, so it measured nothing" >&2
+      exit 1
+    fi
+    if [ "$m" -eq 0 ]; then
+      echo "nunki: a sample of 1/$k of the $n mutants this campaign reaches holds none of them, so it measured nothing: a budget of $budget s at $pace s a mutant is too small for them; raise mutation_minutes" >&2
+      exit 1
+    fi
+    if ! cargo mutants --no-config --list --json --exclude-re "replace main -> " "$@" -F "$re" > "$listed.check" 2> "$listed.err" \
+      || [ "$(jq -c '[.[].name] | sort' "$listed.check")" != "$chosen" ]; then
+      echo "nunki: the filter for this campaign's sample of 1/$k did not select the $m mutants chosen, so it measured nothing" >&2
+      exit 1
+    fi
+    set -- "$@" -F "$re"
+  fi
 fi
 
 # A campaign that finds survivors exits non-zero — 2, measured on
@@ -1493,6 +1593,22 @@ if counts=$(jq -c --slurpfile listed "$listing" '
     printf '%s\n' "$counts"
   fi
   byfile=true
+fi
+
+# What the campaign ran at, for `nunki` to record and to keep through the
+# chain: the fraction's denominator, how many mutants the scope reached
+# before the sample, the pace the sample was sized with, and the seconds a
+# mutant took — each mutant's build and test, the baseline left out,
+# rounded up — when any was tried. Said only of a campaign that was listed.
+if [ -n "$n" ] && ! jq -c --argjson k "$k" --argjson n "$n" --argjson paced "$pace" '
+  [ .outcomes[]
+    | select(.scenario | type == "object")
+    | [.phase_results[]?.duration // 0] | add // 0 ] as $took
+  | {sampled: $k, listed: $n, paced: $paced}
+    + (if ($took | length) > 0 then {pace: (($took | add) / ($took | length) | ceil)} else {} end)
+  ' "$outcomes"; then
+  echo "nunki: cannot read what this campaign ran at out of $outcomes" >&2
+  exit 1
 fi
 
 # The last thing it prints, and the only line that says the campaign got to

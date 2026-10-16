@@ -3361,6 +3361,7 @@ impl Fixture {
                 date: "2026-10-01T12:00:00Z".into(),
                 survivors,
                 chain: Chain {
+                    sample: None,
                     fork: None,
                     handed: None,
                     ran: Some(tried),
@@ -3637,13 +3638,16 @@ fn a_campaign_stopped_at_its_deadline_is_the_hqs_to_choose_and_never_green() {
     f.campaign_stopped(None);
     assert_eq!(f.gate_seven(Role::Coder).decision, Decision::Passed);
 
-    f.campaign_stopped(Some(nunki::mutants::Stopped::Deadline { minutes: 45 }));
+    // Stopped at the deadline the fixture's 45-minute budget gives: 68.
+    f.campaign_stopped(Some(nunki::mutants::Stopped::Deadline {
+        minutes: nunki::mutants::deadline_minutes(45),
+    }));
     let outcome = f.gate_seven(Role::Coder);
     let Decision::Unplayed(why) = &outcome.decision else {
         panic!("an incomplete campaign was judged: {outcome:?}");
     };
     assert!(outcome.awaits_hq, "{outcome:?}");
-    assert!(why.contains("45-minute deadline"), "{why}");
+    assert!(why.contains("68-minute deadline"), "{why}");
     assert!(why.contains("incomplete"), "{why}");
     assert!(!why.contains("measured nothing"), "{why}");
     assert!(why.contains("nunki mission reframe"), "{why}");
@@ -3663,7 +3667,9 @@ fn a_raised_deadline_owes_a_new_campaign_and_the_same_one_does_not() {
     let mut f = Fixture::new();
     commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
     f.journal_names_head();
-    f.campaign_stopped(Some(nunki::mutants::Stopped::Deadline { minutes: 45 }));
+    f.campaign_stopped(Some(nunki::mutants::Stopped::Deadline {
+        minutes: nunki::mutants::deadline_minutes(45),
+    }));
 
     f.header.bounds.mutation_minutes = 45;
     assert!(
@@ -3671,12 +3677,14 @@ fn a_raised_deadline_owes_a_new_campaign_and_the_same_one_does_not() {
         "the same deadline owes the same campaign"
     );
 
+    // The deadline is the budget's (SPEC 4.4, gate 7: the budget): a budget
+    // of 90 minutes gives 135.
     f.header.bounds.mutation_minutes = 90;
     let outcome = f.gate_seven(Role::Coder);
     assert!(!outcome.awaits_hq, "{outcome:?}");
     match f.gate_seven_alone() {
         nunki::gate::Verdict::CampaignOwed(why) => {
-            assert!(why.contains("raised to 90 minutes"), "{why}")
+            assert!(why.contains("raised to 135 minutes"), "{why}")
         }
         other => panic!("a raised deadline owes a campaign: {other:?}"),
     }
