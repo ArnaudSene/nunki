@@ -681,14 +681,18 @@ from 7 s to 70 s.
   rustc's incremental directories are never swept.
   Measured on this repository, the same 48 mutants in place: the results
   are the same mutant by mutant with and without the sweep (40 caught,
-  8 unviable), and the sweep removed 5,946 files, about 120 MB, in
-  19 minutes. This repository's leak is small; on the crate that showed
-  it, what the sweep removes there is not measured.
+  8 unviable), and the sweep removed 5,946 names, whose files weighed
+  about 120 MB, in 19 minutes; the space it freed is not measured. This
+  repository's leak is small; on the crate that showed it, what the sweep
+  removes there is not measured.
 
   Each sweep also reads the space left under `target/`: below 2 GiB, the
   tool is stopped and the campaign fails, saying how much was left; below
   2 GiB at the start, it does not start. A campaign that did not complete
-  names the status cargo-mutants gave, and explains only that one.
+  names the status cargo-mutants gave, and explains only that one. A
+  limit: a campaign stopped at the floor writes nothing to `MUTANTS.json`,
+  so gate 7 reads it as any campaign that measured nothing — red, and sent
+  back to the coder, who cannot fix a disk.
 - **Python:** what mutmut leaves per mutant is all in `mutants/`, cleared
   before the run and when the script exits.
 - **Next.js:** Stryker's sandbox, `.stryker-tmp/`, is removed by

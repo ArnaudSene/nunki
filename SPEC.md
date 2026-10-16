@@ -2243,10 +2243,13 @@ dernier lot. La première rouge arrête tout.
      pourrait s'y cacher. D'où les dix minutes, et les dossiers
      incrémentaux, jamais balayés. Mesuré sur ce dépôt, mêmes 48 mutants en
      place : les résultats sont les mêmes, mutant par mutant, avec et sans
-     balayage (40 tués, 8 non viables), et le balayage a retiré 5 946
-     fichiers, environ 120 Mo, en 19 minutes. La fuite de ce dépôt est
-     faible ; sur le crate qui l'a montrée, ce que le balayage y retire
-     n'est pas mesuré.
+     balayage (40 tués, 8 non viables), et le balayage a retiré 5 946 noms,
+     dont les fichiers pesaient environ 120 Mo, en 19 minutes ; la place
+     libérée n'est pas mesurée. La fuite de ce dépôt est faible ; sur le
+     crate qui l'a montrée, ce que le balayage y retire n'est pas mesuré.
+     Une campagne arrêtée au plancher n'écrit rien dans `MUTANTS.json`, et
+     la porte 7 la lit comme toute campagne qui n'a rien mesuré : rouge, et
+     renvoyée au codeur, qui n'y peut rien. C'est une limite, écrite.
      Chaque balayage lit aussi l'espace restant sous `target/`. Sous 2 Gio,
      l'outil est arrêté et la campagne échoue en le disant, avec l'espace
      restant et le plancher ; sous 2 Gio au départ, elle ne démarre pas. Le
