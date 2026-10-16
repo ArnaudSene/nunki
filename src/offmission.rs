@@ -193,20 +193,40 @@ fn write_debt(hq_root: &Path, debt: &Debt) -> Result<(), MutantsError> {
 /// keeping its entry: its base moves with every campaign, so it measured
 /// again only the lines changed since the last one, and replacing a file's
 /// entries would drop survivors on lines it never measured again.
+///
+/// **Each entry owed before the campaign stands for one survivor it found,
+/// never more:** the one with the same id first, then one with the same
+/// key. Two survivors of one campaign can share a key — the description
+/// names the function, not the position, so measured on cargo-mutants
+/// 27.1.0 `src/lib.rs:2:7: replace > with == in keep` and `src/lib.rs:2:16:
+/// replace > with == in keep` both survive as `replace > with == in keep` —
+/// and each is owed.
 pub fn settled(mut debt: Debt, found: Vec<Survivor>, measured: Measured) -> Debt {
     let key = |s: &Survivor| (s.file.clone(), s.description.clone());
     if measured.whole {
         debt.owed.clear();
     }
-    for survivor in found {
-        if debt.owed.iter().any(|o| key(&o.survivor) == key(&survivor)) {
-            continue;
-        }
-        debt.owed.push(Owed {
+    let mut free = vec![true; debt.owed.len()];
+    let mut take = |matches: &dyn Fn(&Survivor) -> bool| {
+        let i = (0..free.len()).find(|&i| free[i] && matches(&debt.owed[i].survivor))?;
+        free[i] = false;
+        Some(i)
+    };
+    // The same id first: with [A] owed and [B, A] found under one key, a
+    // match by key alone would let B stand for A, and A be owed twice.
+    let unmatched: Vec<Survivor> = found
+        .into_iter()
+        .filter(|s| take(&|o| o.id == s.id && key(o) == key(s)).is_none())
+        .collect();
+    let fresh: Vec<Owed> = unmatched
+        .into_iter()
+        .filter(|s| take(&|o| key(o) == key(s)).is_none())
+        .map(|survivor| Owed {
             survivor,
             found_at: measured.commit.clone(),
-        });
-    }
+        })
+        .collect();
+    debt.owed.extend(fresh);
     debt.last = Some(measured);
     debt
 }

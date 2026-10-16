@@ -2205,7 +2205,12 @@ dernier lot. La première rouge arrête tout.
    appliqué. Une campagne sur tout le code la remplace. Une campagne sur ce
    qui a changé depuis y ajoute ce qu'elle a trouvé, un survivant déjà dû
    sous la même clé gardant son entrée : sa base bouge à chaque campagne, et
-   elle ne remesure que les lignes changées depuis. Une campagne arrêtée
+   elle ne remesure que les lignes changées depuis. Une entrée due ne tient
+   lieu que d'un survivant retrouvé — le même identifiant d'abord, puis la
+   même clé — et deux survivants d'une même campagne sous la même clé
+   restent deux : la description nomme la fonction, pas la position
+   (mesuré sur cargo-mutants 27.1.0 : `a > b && c > d` donne deux
+   survivants `replace > with == in keep`). Une campagne arrêtée
    court, ou qui n'a rien mesuré, laisse la dette telle qu'elle était.
 
    Ce qu'on perd : ces cas ne sont rattrapés que quand l'humain lance une

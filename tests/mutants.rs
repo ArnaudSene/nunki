@@ -9690,6 +9690,62 @@ fn a_campaign_outside_missions_is_read_back_into_the_debt() {
     assert!(nunki::offmission::debt_said(&debt).contains("1 survivor(s) owed"));
 }
 
+/// Two survivors of one campaign under the same key are two entries of the
+/// debt: the description names the function, not the position, and the two
+/// names here are what cargo-mutants 27.1.0 lists for `a > b && c > d`. An
+/// entry already owed stands for one survivor found again, by id first —
+/// with [A] owed and [B, A] found, A is not owed twice and B is not lost —
+/// then by key, keeping its entry when the mutant moved.
+#[test]
+fn a_debt_keeps_every_survivor_its_campaigns_found() {
+    use nunki::offmission::{Debt, Measured, settled};
+    let at = |id: &str| mutants::Survivor {
+        id: id.to_string(),
+        file: "src/lib.rs".into(),
+        line: 2,
+        end_line: Some(2),
+        description: "replace > with == in keep".into(),
+        outcome: None,
+        refused: None,
+        found_on: None,
+    };
+    let (a, b) = (
+        "src/lib.rs:2:7: replace > with == in keep",
+        "src/lib.rs:2:16: replace > with == in keep",
+    );
+    let measured = |commit: &str, whole: bool| Measured {
+        base: "dev".into(),
+        commit: commit.into(),
+        date: "2026-10-16T12:00:00Z".into(),
+        whole,
+        tried: Some(10),
+    };
+    let owed = |debt: &Debt| -> Vec<(String, String)> {
+        debt.owed
+            .iter()
+            .map(|o| (o.survivor.id.clone(), o.found_at.clone()))
+            .collect()
+    };
+    let pair = |id: &str, commit: &str| (id.to_string(), commit.to_string());
+
+    let whole = settled(Debt::default(), vec![at(a), at(b)], measured("c1", true));
+    assert_eq!(owed(&whole), [pair(a, "c1"), pair(b, "c1")]);
+
+    let only_a = settled(Debt::default(), vec![at(a)], measured("c1", true));
+    let both = settled(only_a.clone(), vec![at(b), at(a)], measured("c2", false));
+    assert_eq!(owed(&both), [pair(a, "c1"), pair(b, "c2")]);
+
+    let again = settled(only_a.clone(), vec![at(a)], measured("c2", false));
+    assert_eq!(owed(&again), [pair(a, "c1")]);
+
+    let moved = settled(
+        only_a,
+        vec![at("src/lib.rs:4:7: replace > with == in keep")],
+        measured("c2", false),
+    );
+    assert_eq!(owed(&moved), [pair(a, "c1")]);
+}
+
 /// `run` starts nothing while a campaign is filed in the slot, and nothing
 /// in a slot no mission ever ran in: no profile, no container.
 #[test]

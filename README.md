@@ -739,6 +739,10 @@ nunki mutants status                       # read it back, and say the debt
   - One on what changed since adds what it found. A survivor already owed
     under the same key keeps its entry: such a campaign measures again only
     the lines changed since the last one.
+  - An entry owed stands for one survivor found again, never more: the same
+    id first, then the same key. Two survivors of one campaign under the
+    same key stay two, since the description names the function, not the
+    position: `a > b && c > d` gives two `replace > with == in keep`.
   - A campaign stopped short, or that measured nothing, leaves the debt as
     it was.
 - **Not built yet:** listing and ruling the debt in one go (`nunki mutants
