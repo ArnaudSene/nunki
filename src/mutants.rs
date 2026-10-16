@@ -2168,31 +2168,6 @@ pub enum Replay {
     /// already running is reported as running, and asking again does not
     /// start a second.
     Now,
-    /// The final full campaign a `critical` mission owes at `HEAD` before it
-    /// is `Verified` (SPEC 4.4, 4.5): always full, its record saying so
-    /// ([`FINAL`]). A full campaign already on file on the same content
-    /// answers it, whichever reason made it full: no second full campaign
-    /// on the same content.
-    Final,
-}
-
-/// The reason the record of the final full campaign gives for being full
-/// ([`Replay::Final`]).
-pub const FINAL: &str =
-    "the final campaign: a `critical` mission is verified on a full campaign at HEAD";
-
-/// Why `campaign`, on file at `HEAD`, cannot be the final one a `critical`
-/// mission is verified and pushed on, or `None` when it can: only a full
-/// campaign can, since a partial one assumes what it did not measure
-/// (SPEC 4.4, the chain of campaigns).
-pub fn not_final(campaign: &Campaign) -> Option<String> {
-    let since = campaign.chain.scope.since()?;
-    Some(format!(
-        "the campaign on file, at {}, is partial since {}: a `critical` mission is verified \
-         and pushed only on a full campaign at HEAD",
-        crate::text::one_line(short(&campaign.head)),
-        crate::text::one_line(short(since))
-    ))
 }
 
 /// Whether the next campaign may be partial, and when not, why (SPEC 4.4,
@@ -2207,8 +2182,6 @@ pub fn not_final(campaign: &Campaign) -> Option<String> {
 ///   `critical` do, and a `prototype`, which owes none, does not;
 /// - the human did not ask `--again`, which is a full campaign by
 ///   definition: it is asked for what the chain cannot see;
-/// - it is not the final campaign of a `critical` mission ([`Replay::Final`]),
-///   full by definition too;
 /// - a previous campaign of this mission is on file — only a completed one
 ///   ever is;
 /// - gate 7 passed on it: `owed` says what it still owes, as the gate
@@ -2255,7 +2228,6 @@ pub fn scope(
     }
     match replay {
         Replay::Now => return full("asked `--again`, which is a full campaign".to_string()),
-        Replay::Final => return full(FINAL.to_string()),
         Replay::WhenChanged => {}
     }
     let Some(previous) = previous else {
@@ -2573,8 +2545,7 @@ pub fn touched_since(
 /// an hour (SPEC § 7), so one on the same content is not run again — unless a
 /// human says something changed that the fingerprint cannot see, since the
 /// fingerprint is over the touched files and not over `mutation.sh`, the
-/// tool's version, or an exclusion added since. The final campaign of a
-/// `critical` mission is answered only by a full one on this content.
+/// tool's version, or an exclusion added since.
 ///
 /// An incomplete one on this content ([`Stopped`]) answers with what it is,
 /// and the HQ chooses — unless the deadline it was stopped at has been
@@ -2606,11 +2577,6 @@ pub fn already_answered(
             }));
         }
         _ => {}
-    }
-    // The final one is a full campaign on this content, and a partial one
-    // on file here does not answer it.
-    if replay == Replay::Final && not_final(&existing).is_some() {
-        return Ok(None);
     }
     Ok(Some(Progress::Fresh {
         survivors: existing.survivors.len(),

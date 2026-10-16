@@ -3490,7 +3490,7 @@ fn gate_two_refuses_a_head_that_is_not_on_the_missions_branch() {
 }
 
 // ---------------------------------------------------------------------------
-// The final full campaign of a `critical` mission (SPEC 4.4, 4.5).
+// The final campaign of a `critical` mission (SPEC 4.4, 4.5).
 // ---------------------------------------------------------------------------
 
 impl Fixture {
@@ -3528,21 +3528,19 @@ fn critical() -> Fixture {
     f
 }
 
-/// A partial campaign at `HEAD` that passes is not what a `critical` mission
-/// is verified on: the final stage owes the full one, and says why.
+/// The chain holds to the end: a partial campaign at `HEAD` that passes is
+/// what a `critical` mission is verified on, and no full one is owed.
 #[test]
-fn a_partial_campaign_that_passes_at_head_owes_the_final_full_campaign() {
+fn a_partial_campaign_that_passes_at_head_verifies_a_critical_mission() {
     let f = critical();
     f.chained(10, 0, 10, 0, true);
     let report = f.final_campaign();
     assert_eq!(report.outcomes.len(), 1, "gate 7 alone: {report:?}");
-    match report.verdict() {
-        nunki::gate::Verdict::CampaignOwed(why) => {
-            assert!(why.contains("is partial since eeeeeeeeeeee"), "{why}");
-            assert!(why.contains("the final full campaign is owed"), "{why}");
-        }
-        other => panic!("a partial campaign verified a critical mission: {other:?}"),
-    }
+    assert_eq!(
+        report.verdict(),
+        nunki::gate::Verdict::Green,
+        "a partial campaign that passes owed a full one: {report:?}"
+    );
 }
 
 /// A full campaign at `HEAD` that passes is the final one, whatever made it
@@ -3554,10 +3552,10 @@ fn a_full_campaign_that_passes_at_head_is_the_final_one() {
     assert_eq!(f.final_campaign().verdict(), nunki::gate::Verdict::Green);
 }
 
-/// The final full campaign's survivors are red: they go back to the coder,
-/// as any campaign's survivors do.
+/// The final campaign's survivors are red: they go back to the coder, as any
+/// campaign's survivors do.
 #[test]
-fn the_final_full_campaigns_survivors_are_red() {
+fn the_final_campaigns_survivors_are_red() {
     let f = critical();
     f.campaign(vec![survivor(1, None)]);
     match f.final_campaign().verdict() {
@@ -3568,9 +3566,8 @@ fn the_final_full_campaigns_survivors_are_red() {
     }
 }
 
-/// A partial campaign with a survivor left open is red too, not owed: the
-/// survivor is the coder's to answer before any full campaign is worth an
-/// hour.
+/// A partial campaign with a survivor left open is red too: the survivor is
+/// the coder's to answer.
 #[test]
 fn a_partial_campaign_with_an_open_survivor_is_red_rather_than_owed() {
     let f = critical();

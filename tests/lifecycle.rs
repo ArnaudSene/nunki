@@ -250,7 +250,7 @@ fn archiving_moves_a_finished_mission_and_keeps_everything_in_it() {
             lot_done: true,
         },
         Event::GatesPassed,
-        // The final full campaign, green: `critical` is the default rigor.
+        // The final campaign, green: `critical` is the default rigor.
         Event::GatesPassed,
     ]);
     assert!(matches!(world.state().flow.stage(), Stage::Verified));
@@ -325,7 +325,7 @@ fn archiving_twice_says_so() {
             lot_done: true,
         },
         Event::GatesPassed,
-        // The final full campaign, green: `critical` is the default rigor.
+        // The final campaign, green: `critical` is the default rigor.
         Event::GatesPassed,
     ]);
     lifecycle::archive(&world.project, "m1").unwrap();
@@ -357,7 +357,7 @@ fn archiving_twice_says_so() {
             lot_done: true,
         },
         Event::GatesPassed,
-        // The final full campaign, green: `critical` is the default rigor.
+        // The final campaign, green: `critical` is the default rigor.
         Event::GatesPassed,
     ]);
 
@@ -460,7 +460,7 @@ fn a_mission_that_is_already_over_is_not_ended_again() {
             lot_done: true,
         },
         Event::GatesPassed,
-        // The final full campaign, green: `critical` is the default rigor.
+        // The final campaign, green: `critical` is the default rigor.
         Event::GatesPassed,
     ]);
     assert!(matches!(world.state().flow.stage(), Stage::Verified));

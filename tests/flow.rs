@@ -63,7 +63,7 @@ fn verdict(v: Verdict) -> Event {
     }
 }
 
-/// At `critical`, every other stage green: the final full campaign is the
+/// At `critical`, every other stage green: the final campaign is the
 /// last stage, and a green one verifies the mission (SPEC 4.4, 4.5).
 fn the_final_campaign_passes(flow: &mut Flow) {
     assert_eq!(flow.stage(), &Stage::FinalCampaign);
@@ -1617,11 +1617,11 @@ fn an_unapproved_services_file_means_nothing_where_no_service_is_lifted() {
 }
 
 // ---------------------------------------------------------------------------
-// The final full campaign of a `critical` mission (SPEC 4.4, 4.5).
+// The final campaign of a `critical` mission (SPEC 4.4, 4.5).
 // ---------------------------------------------------------------------------
 
-/// At `critical`, every way to `Verified` goes through the final full
-/// campaign first: green gates with no security agent, a `CLEAR`, a human's
+/// At `critical`, every way to `Verified` goes through the final campaign
+/// first: green gates with no security agent, a `CLEAR`, a human's
 /// lift, and the rounds spent with nothing left to lift.
 #[test]
 fn at_critical_every_way_to_verified_goes_through_the_final_campaign() {
@@ -1685,9 +1685,9 @@ fn at_standard_and_prototype_no_final_campaign_is_owed() {
     assert_eq!(prototype.stage(), &Stage::Verified);
 }
 
-/// The final full campaign's survivors go back to the coder as a volet that
+/// The final campaign's survivors go back to the coder as a volet that
 /// counts, saying so; after it, the gates, the security agent and the final
-/// full campaign are owed again before `Verified`.
+/// campaign are owed again before `Verified`.
 #[test]
 fn the_final_campaigns_survivors_return_to_the_coder_and_the_final_campaign_is_owed_again() {
     let mut flow = at(Rigor::Critical, none());

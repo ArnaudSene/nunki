@@ -119,10 +119,10 @@ pub enum PushError {
     MutantsOwed { mission: String, owed: String },
     #[error(
         "mission {mission} is at `critical` rigor, and {why} — a `critical` mission is \
-         pushed only on a full campaign at the pushed commit that passes: `nunki mission \
-         mutants {mission} --again` runs one"
+         pushed only on a campaign at the pushed commit that passes: `nunki mission \
+         mutants {mission}` runs one"
     )]
-    NotFinal { mission: String, why: String },
+    NotAtPushed { mission: String, why: String },
     #[error(
         "mission {mission} is at `{rigor}` rigor and {file} holds no mutation campaign — \
          no campaign, no push: `nunki mission mutants {mission}` runs one, and the same \
@@ -572,9 +572,9 @@ fn nothing_owed(
     }
     if header.rigor == crate::mission::Rigor::Critical
         && let Some(campaign) = crate::mutants::read(&dir)?
-        && let Some(why) = not_final_at(tree, &header.base, &campaign)?
+        && let Some(why) = not_at_pushed(tree, &header.base, &campaign)?
     {
-        return Err(PushError::NotFinal {
+        return Err(PushError::NotAtPushed {
             mission: id.to_string(),
             why,
         });
@@ -606,11 +606,11 @@ fn nothing_owed(
     }
 }
 
-/// Why `campaign` is not the final one a `critical` mission is pushed on
-/// (SPEC 4.4, 4.5), or `None` when it is: it must have run on the content
-/// of `HEAD`, the commit being pushed — the same fingerprint gate 7 asks —
-/// and be full ([`crate::mutants::not_final`]).
-fn not_final_at(
+/// Why `campaign` is not one a `critical` mission is pushed on (SPEC 4.4,
+/// 4.5), or `None` when it is: it must have run on the content of `HEAD`,
+/// the commit being pushed — the same fingerprint gate 7 asks. Partial or
+/// full: the chain holds to the push, judged on its reconstruction.
+fn not_at_pushed(
     tree: &std::path::Path,
     base: &str,
     campaign: &crate::mutants::Campaign,
@@ -624,7 +624,7 @@ fn not_final_at(
             &want[..7.min(want.len())]
         )));
     }
-    Ok(crate::mutants::not_final(campaign))
+    Ok(None)
 }
 
 /// What the verdicts a push stands on leave to say.

@@ -2673,36 +2673,34 @@ impl World {
     }
 }
 
-/// Push at `critical` refuses a campaign at the pushed commit that is
-/// partial, however green, and names the verb that runs a full one.
+/// The chain holds to the push at `critical`: a partial campaign at the
+/// pushed commit that passes is pushed on.
 #[test]
-fn at_critical_push_refuses_a_partial_campaign_at_the_pushed_commit() {
+fn at_critical_push_takes_a_partial_campaign_at_the_pushed_commit() {
     let world = World::verified_then(nunki::mission::Rigor::Critical, |c| {
         c.chain.scope = nunki::mutants::Scope::Partial {
             since: "e".repeat(40),
         };
     });
-    let err = push::push(&world.project, "m1", true).unwrap_err();
-    assert!(matches!(err, PushError::NotFinal { .. }), "{err}");
-    let said = err.to_string();
-    assert!(said.contains("is partial since eeeeeeeeeeee"), "{said}");
-    assert!(
-        said.contains("`nunki mission mutants m1 --again`"),
-        "{said}"
-    );
-    assert!(world.on_forge("mission/x").is_none(), "nothing was pushed");
+    let pushed = push::push(&world.project, "m1", true).unwrap();
+    assert_eq!(world.on_forge("mission/x"), Some(pushed.head));
 }
 
-/// Nor does it take a full campaign that ran on other content than the
-/// pushed commit.
+/// It does not take a campaign that ran on other content than the pushed
+/// commit, and names the verb that runs one on it.
 #[test]
 fn at_critical_push_refuses_a_campaign_on_other_content() {
     let world = World::verified_then(nunki::mission::Rigor::Critical, |c| {
         c.fingerprint = "f".into();
     });
     let err = push::push(&world.project, "m1", true).unwrap_err();
-    assert!(matches!(err, PushError::NotFinal { .. }), "{err}");
-    assert!(err.to_string().contains("other content"), "{err}");
+    assert!(matches!(err, PushError::NotAtPushed { .. }), "{err}");
+    let said = err.to_string();
+    assert!(said.contains("other content"), "{said}");
+    assert!(
+        said.contains("`nunki mission mutants m1` runs one"),
+        "{said}"
+    );
     assert!(world.on_forge("mission/x").is_none(), "nothing was pushed");
 }
 
