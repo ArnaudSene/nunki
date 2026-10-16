@@ -514,10 +514,67 @@ alone:
 the content of the pushed commit and passes; its refusal names
 `nunki mission mutants <mission>`, which runs one there.
 
+### A budget, and a sample when the campaign does not fit it
+
+The mission's `mutation_minutes` (45 by default) is each campaign's
+**budget**. `nunki` hands the stack's `mutation.sh` three values:
+- the budget in seconds, `NUNKI_MUTATION_BUDGET`;
+- the seconds a mutant took on the project's last campaign that tried at
+  least five, `NUNKI_MUTATION_PACE`. It is kept in `campaign-pace.json`
+  under the project's HQ; the script assumes 60 without it;
+- for a partial campaign, the fraction of the campaign it continues,
+  `NUNKI_MUTATION_SAMPLE`.
+
+The Rust script lists the mutants its scope reaches (`cargo mutants --list
+--json`). When they do not fit the budget, it measures a fraction of them,
+1/*k*, with *k* as small as fits. The budget holds `budget / pace` mutants,
+less one for the baseline, which rebuilds the crate as a mutant does.
+
+- **The sample is chosen before the tool starts, by the key that carries
+  rulings.** That key is the file and the description, never the line. A
+  mutant is in when its key's hash is 0 modulo *k*. A mutant a return to the
+  coder did not change stays in the sample whatever moved above it, and one
+  added elsewhere does not reshuffle the others. Choosing by position
+  (`--shard`) would, and every return would bring survivors never seen.
+- **The sample reaches the tool as one `-F`,** and is checked first:
+  `--list` with that filter must name exactly the mutants chosen. A listing
+  that fails, a filter that selects otherwise, or an empty sample when the
+  scope holds mutants is a campaign that measured nothing, never a run of
+  the whole.
+- **What it ran at is recorded.** The script says it on a line before its
+  terminal one, `{"sampled":k,"listed":N,"paced":s,"pace":m}`. `MUTANTS.json`
+  keeps the fraction in the chain, and `mission status` says "a sample of
+  1/3 of 48". Under the filter the tool's own tallies are the sample's, so
+  gate 7 judges the sample whole: the threshold at `standard`, an outcome
+  for every sampled survivor at `critical`.
+- **A partial campaign runs at its chain's fraction,** even when its few
+  files would fit whole, so that the reconstruction is one sample. At
+  another fraction, it is not recorded alone. A full campaign sizes its
+  own.
+- **Rust only.** The Python and Next.js scripts ignore the budget and run
+  whole. On a project with several stacks, the Rust stack gets the whole
+  budget and the others run whole after it, under the same deadline.
+- **What is lost.** A real survivor outside the sample passes the mission.
+  The off-mission campaign SPEC 4.4 records as decided is what would find
+  it.
+
+Measured on cargo-mutants 27.1.0, in the Rust image, on this repository:
+- **The sample and its check.** The 48 mutants of a diff, with a budget
+  that fits 16 of them, gave a sample of 1/3: 18 mutants. The filter
+  checked out, only those 18 ran, and each had the outcome it had in the
+  whole campaign: 17 caught, 1 unviable.
+- **One more commit.** It added 9 mutants in another file, run at the
+  chain's fraction. The sample kept the 18, took 4 of the 9 new ones, and
+  dropped none.
+
 ### A campaign stopped short: the deadline, and `--cancel`
 
-A campaign is given the mission's `mutation_minutes` (45 by default). One
-still running past it is stopped, and it is **not** read as a campaign that
+A campaign's deadline is its budget and half of it again: 68 minutes for
+the default 45. It only guards against a campaign that hangs, and gate 7
+and the launcher read it through one function. After the upgrade, a
+campaign on file that was stopped at its old deadline, the budget itself,
+is owed once more, since the deadline is now longer. One still running past
+its deadline is stopped, and it is **not** read as a campaign that
 measured nothing: the survivors the tool had already reported are recorded
 in `MUTANTS.json`, marked as from an incomplete campaign (`"stopped"`), with
 the HQ's rulings carried as on any replay. An incomplete campaign **never**

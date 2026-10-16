@@ -90,6 +90,112 @@ pub const BASE_ENV: &str = "NUNKI_BASE";
 /// working unchanged, and one that ignores it runs as it always has.
 pub const JOBS_ENV: &str = "NUNKI_MUTATION_JOBS";
 
+/// The variable that hands a campaign its budget, in seconds: the mission's
+/// `mutation_minutes` (SPEC 4.4, gate 7: the budget). A stack whose script
+/// can measure a sample sizes it to fit; one that cannot ignores it, and
+/// runs whole as it always has.
+pub const BUDGET_ENV: &str = "NUNKI_MUTATION_BUDGET";
+
+/// The variable that hands a campaign the seconds a mutant took on the
+/// project's last campaign that measured enough of them ([`PACE_FILE`]).
+/// Absent without one, and the script then assumes its own default.
+pub const PACE_ENV: &str = "NUNKI_MUTATION_PACE";
+
+/// The variable that hands a partial campaign the fraction its chain runs
+/// at, so that the reconstruction stays one sample ([`Sample`]).
+pub const SAMPLE_ENV: &str = "NUNKI_MUTATION_SAMPLE";
+
+/// Where the project's pace is kept, under its HQ: the seconds a mutant took
+/// on its last campaign that tried at least [`PACE_TRIED`], as the stack's
+/// script measured it. Only the Rust stack's script measures it today.
+pub const PACE_FILE: &str = "campaign-pace.json";
+
+/// How many mutants a campaign must have tried for its pace to replace the
+/// one on file: fewer say more about the baseline than about a mutant.
+pub const PACE_TRIED: u32 = 5;
+
+/// How long a campaign of `budget_minutes` is given before `nunki` stops it
+/// (SPEC 4.4, gate 7: the budget): the budget and half of it again. The
+/// budget is what the campaign sizes its sample to; the deadline is only a
+/// guard against one that hangs, and gate 7 and the launcher read it through
+/// this one function, so they cannot disagree.
+pub fn deadline_minutes(budget_minutes: u32) -> u32 {
+    budget_minutes.saturating_add(budget_minutes.div_ceil(2))
+}
+
+/// The environment that sizes a campaign: its budget in seconds, the
+/// project's pace when there is one, and the chain's fraction for a partial
+/// campaign ([`SAMPLE_ENV`]).
+pub fn sizing(
+    budget_minutes: u32,
+    pace: Option<u32>,
+    sample: Option<u32>,
+) -> Vec<(String, String)> {
+    let mut env = vec![(
+        BUDGET_ENV.to_string(),
+        (u64::from(budget_minutes) * 60).to_string(),
+    )];
+    if let Some(pace) = pace.filter(|p| *p > 0) {
+        env.push((PACE_ENV.to_string(), pace.to_string()));
+    }
+    if let Some(k) = sample.filter(|k| *k > 0) {
+        env.push((SAMPLE_ENV.to_string(), k.to_string()));
+    }
+    env
+}
+
+/// The fraction a campaign of `scope` is handed ([`SAMPLE_ENV`]): for a
+/// partial one, the fraction of the campaign it continues — 1 when that one
+/// ran whole — so that the reconstruction stays one sample; for a full one,
+/// none, and its script sizes its own (SPEC 4.4, gate 7: the budget).
+pub fn fraction(scope: &Scope, previous: Option<&Campaign>) -> Option<u32> {
+    scope
+        .since()
+        .map(|_| previous.and_then(|p| p.chain.sample).map_or(1, |s| s.k))
+}
+
+/// The pace on file ([`PACE_FILE`]), or `None` when there is none or it
+/// cannot be read: the script then assumes its default, and says which pace
+/// it sized the sample with ([`Sample::paced`]).
+pub fn read_pace(hq_root: &Path) -> Option<u32> {
+    let text = std::fs::read_to_string(hq_root.join(PACE_FILE)).ok()?;
+    let pace: Pace = serde_json::from_str(&text).ok()?;
+    (pace.seconds > 0).then_some(pace.seconds)
+}
+
+/// What [`PACE_FILE`] holds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pace {
+    /// Seconds a mutant took, its build and its tests, rounded up.
+    pub seconds: u32,
+    /// How many mutants the campaign it was measured on tried.
+    pub tried: u32,
+    /// When it was measured.
+    pub date: String,
+}
+
+/// Keep the pace a finished campaign measured, when it tried enough mutants
+/// to mean something ([`PACE_TRIED`]); otherwise the one on file stays.
+pub fn keep_pace(hq_root: &Path, text: &str) -> Result<(), MutantsError> {
+    let (Some(Ok(Some(said))), Some(tried)) = (Some(sampled(text)), tried(text)) else {
+        return Ok(());
+    };
+    let Some(seconds) = said.pace.filter(|p| *p > 0) else {
+        return Ok(());
+    };
+    if tried < PACE_TRIED {
+        return Ok(());
+    }
+    let path = hq_root.join(PACE_FILE);
+    let body = serde_json::to_string_pretty(&Pace {
+        seconds,
+        tried,
+        date: crate::state::now_rfc3339(),
+    })
+    .map_err(|e| MutantsError::Io(path.clone(), std::io::Error::other(e)))?;
+    std::fs::write(&path, body + "\n").map_err(|e| MutantsError::Io(path, e))
+}
+
 /// A mutant the campaign could not kill.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Survivor {
@@ -497,6 +603,78 @@ pub struct Chain {
     /// from a record written before it was kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handed: Option<Vec<String>>,
+    /// The fraction the campaign measured, as its script said it
+    /// ([`sampled`]); absent from a campaign whose script measures no
+    /// sample, which ran whole. A partial campaign continues this one only
+    /// at the same fraction: the reconstruction is one sample, or none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample: Option<Sample>,
+}
+
+/// The fraction a campaign measured (SPEC 4.4, gate 7: the budget): one
+/// mutant in `k` of the `listed` its scope reached, chosen by the key that
+/// carries the HQ's rulings — the file and the description, never the line —
+/// so that a return to the coder leaves the same mutants in it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Sample {
+    /// The fraction's denominator: 1 is the whole.
+    pub k: u32,
+    /// How many mutants the campaign's scope reached before the sample.
+    pub listed: u32,
+    /// The seconds a mutant the script sized the sample with, when it said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paced: Option<u32>,
+}
+
+impl Sample {
+    /// "a sample of 1/3 of 48, sized at 20 s a mutant", or "the whole of 48".
+    pub fn said(&self) -> String {
+        let paced = match self.paced {
+            Some(s) => format!(", sized at {s} s a mutant"),
+            None => String::new(),
+        };
+        if self.k > 1 {
+            format!("a sample of 1/{} of {}{paced}", self.k, self.listed)
+        } else {
+            format!("the whole of {}", self.listed)
+        }
+    }
+}
+
+/// What the line a script prints before its terminal one says it ran at:
+/// `{"sampled":k,"listed":n,"paced":s,"pace":m}`, `pace` the seconds a
+/// mutant took, when any was tried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub struct Sampled {
+    pub sampled: u32,
+    pub listed: u32,
+    #[serde(default)]
+    pub paced: Option<u32>,
+    #[serde(default)]
+    pub pace: Option<u32>,
+}
+
+/// The line that says what a campaign ran at ([`Sampled`]): `Ok(None)` from
+/// a script that prints none — it measured no sample — and an error for a
+/// fraction of 0 or for more than one line, which no campaign can hold: one
+/// campaign keeps one fraction.
+pub fn sampled(text: &str) -> Result<Option<Sampled>, String> {
+    let lines: Vec<Sampled> = text
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Sampled>(l.trim()).ok())
+        .collect();
+    match lines.as_slice() {
+        [] => Ok(None),
+        [one] if one.sampled == 0 => {
+            Err("the campaign said it ran at a sample of 1/0, so it measured nothing".to_string())
+        }
+        [one] => Ok(Some(*one)),
+        several => Err(format!(
+            "the campaign said {} times what sample it ran at, and one campaign keeps one \
+             fraction, so it measured nothing",
+            several.len()
+        )),
+    }
 }
 
 /// Which files a campaign covered.
@@ -1076,10 +1254,14 @@ pub fn chain_said(campaign: &Campaign, coders: &BTreeMap<String, Triage>) -> Vec
         Some(tried) => format!("tried {tried}"),
         None => "tried: not said".to_string(),
     };
+    let sample = match &campaign.chain.sample {
+        Some(sample) if sample.k > 1 => format!(", {}", sample.said()),
+        _ => String::new(),
+    };
     let earlier = &campaign.chain.earlier;
     if earlier.is_empty() {
         return vec![format!(
-            "{} — {counts}, {listed} survivor(s), {open} without an outcome",
+            "{}{sample} — {counts}, {listed} survivor(s), {open} without an outcome",
             named(&campaign.chain.scope, &campaign.head)
         )];
     }
@@ -1097,7 +1279,7 @@ pub fn chain_said(campaign: &Campaign, coders: &BTreeMap<String, Triage>) -> Vec
         None => String::new(),
     };
     lines.push(format!(
-        "judged as one campaign at {}{files} — {counts}, {listed} survivor(s), {open} \
+        "judged as one campaign at {}{files}{sample} — {counts}, {listed} survivor(s), {open} \
          without an outcome",
         crate::text::one_line(short(&campaign.head))
     ));
@@ -1463,6 +1645,9 @@ pub fn found(text: &str) -> Option<u32> {
 /// A line without `missed` is read as before.
 pub fn unmeasured(text: &str) -> Option<String> {
     let line = terminal(text)?;
+    if let Err(why) = sampled(text) {
+        return Some(why);
+    }
     if let Some(found) = line.found
         && found > 0
         && line.tried == Some(0)
@@ -1691,6 +1876,11 @@ fn record(
     let mut chain = chain.clone();
     chain.earlier = Vec::new();
     chain.ran = None;
+    chain.sample = sampled(text).ok().flatten().map(|s| Sample {
+        k: s.sampled,
+        listed: s.listed,
+        paced: s.paced,
+    });
     let mut files = trusted_files(text, head, chain.handed.as_deref());
     let mut counted = tried(text);
     if let Some(since) = chain.scope.since() {
@@ -1698,6 +1888,18 @@ fn record(
             .as_ref()
             .filter(|p| p.head == since)
             .ok_or_else(|| MutantsError::Broken(broken(since, previous.as_ref())))?;
+        // One sample, or none: a partial campaign at another fraction than
+        // the chain's would add one sample's counts to another's.
+        let fraction = |c: &Chain| c.sample.map_or(1, |s| s.k);
+        if fraction(&previous.chain) != fraction(&chain) {
+            return Err(MutantsError::Broken(format!(
+                "the campaign ran at a sample of 1/{} and the chain it continues at 1/{} — a \
+                 partial campaign answers only at its chain's fraction, so it is not recorded \
+                 alone; `nunki mission mutants --again` runs a full one",
+                fraction(&chain),
+                fraction(&previous.chain)
+            )));
+        }
         let tree = tree.ok_or_else(|| {
             MutantsError::Broken("a partial campaign is recorded in its slot only".to_string())
         })?;
@@ -2819,10 +3021,13 @@ fn read_ended(
                 &text,
                 &running.chain,
             ) {
-                Ok(recorded) => Progress::Finished {
-                    survivors: recorded.survivors,
-                    chain: chain_on_file(dir)?,
-                },
+                Ok(recorded) => {
+                    keep_pace(&project.hq_root, &text)?;
+                    Progress::Finished {
+                        survivors: recorded.survivors,
+                        chain: chain_on_file(dir)?,
+                    }
+                }
                 // A partial campaign whose chain broke under it measured
                 // only what changed since, and is not recorded alone:
                 // forgotten, and said, rather than asked about for ever.
@@ -3193,8 +3398,9 @@ pub struct Asked<'a> {
     /// The mission's base, by **name**: [`campaign`] works out what the
     /// branch brought through the same call gate 7 makes.
     pub base: &'a str,
-    /// How long it is given before `nunki` calls it hung.
-    pub deadline_minutes: u32,
+    /// The mission's `mutation_minutes`: the budget a campaign sizes its
+    /// sample to ([`BUDGET_ENV`]); its deadline is [`deadline_minutes`] of it.
+    pub budget_minutes: u32,
     pub replay: Replay,
     /// The mission's rigor: only `standard` and `critical` chain their
     /// campaigns ([`chains`], [`scope`]).
@@ -3260,7 +3466,8 @@ pub fn campaign(
     // Nothing in flight. A campaign on this exact content is not run again:
     // SPEC 4.4 says it replays only when the touched files have changed, and
     // § 7 counts the hour it would otherwise spend.
-    if let Some(fresh) = already_answered(dir, &want, asked.replay, asked.deadline_minutes)? {
+    let deadline = deadline_minutes(asked.budget_minutes);
+    if let Some(fresh) = already_answered(dir, &want, asked.replay, deadline)? {
         return Ok(fresh);
     }
 
@@ -3316,7 +3523,12 @@ pub fn campaign(
         |previous| uncarried(&slot.tree, previous, &touched),
     );
     let paths = handed(&slot.tree, &touched, &scope)?;
-    let launched = command(&judged, &want, &paths, &fork, project.config.jobs());
+    let mut launched = command(&judged, &want, &paths, &fork, project.config.jobs());
+    launched.env.extend(sizing(
+        asked.budget_minutes,
+        read_pace(&project.hq_root),
+        fraction(&scope, read(dir)?.as_ref()),
+    ));
 
     let runs = dir.join("runs");
     std::fs::create_dir_all(&runs).map_err(|e| MutantsError::Io(runs.clone(), e))?;
@@ -3354,7 +3566,7 @@ pub fn campaign(
             container: spawned.container,
             pid: spawned.pid,
             log,
-            deadline_minutes: asked.deadline_minutes,
+            deadline_minutes: deadline,
             chain: Chain {
                 scope: scope.clone(),
                 tooling: tooling.ok(),
@@ -3362,6 +3574,7 @@ pub fn campaign(
                 ran: None,
                 fork: Some(fork.clone()),
                 handed: Some(paths),
+                sample: None,
             },
         },
     )?;
@@ -3519,6 +3732,8 @@ pub fn several_campaigns(
              (.file | tostring))' < \"$out\"\n\
              jq -R -c --arg d {prefix} 'fromjson? | select(type == \"object\" and \
              has(\"measured\")) | .measured = ($d + (.measured | tostring))' < \"$out\"\n\
+             jq -R -c 'fromjson? | select(type == \"object\" and has(\"sampled\"))' \
+             < \"$out\"\n\
              counts=$(jq -R -r 'fromjson? | select(type == \"object\" and .campaign == \
              \"done\") | (.by_file // false) | tostring' < \"$out\" | tail -n 1)\n\
              [ \"$counts\" = true ] || byfile=0\n\

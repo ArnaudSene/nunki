@@ -2098,39 +2098,81 @@ dernier lot. La première rouge arrête tout.
    `--again`, à la main ; hors mission, c'est la campagne sur tout le code
    (plus bas, « Décidé, pas encore construit »).
 
-   **Décidé, pas encore construit.** Deux règles changent la porte 7. Le
-   changement qui construit chacune l'écrit à la place de celle qu'elle
+   **Un budget de temps, mesuré sur un échantillon choisi d'avance.** Le
+   `mutation_minutes` d'une mission est le budget de chacune de ses
+   campagnes. Le délai, le budget et sa moitié encore (68 minutes pour 45),
+   ne sert plus qu'à arrêter une campagne bloquée ; la porte et le lanceur le
+   lisent par la même fonction. `nunki` passe au script le budget en
+   secondes (`NUNKI_MUTATION_BUDGET`), la durée d'un mutant sur la dernière
+   campagne du projet qui en a essayé au moins cinq (`NUNKI_MUTATION_PACE`,
+   gardée dans `campaign-pace.json`, au HQ du projet ; le script suppose 60
+   secondes sans elle), et, à une campagne partielle, la fraction de la
+   campagne qu'elle continue (`NUNKI_MUTATION_SAMPLE`). Le script Rust liste
+   les mutants que sa portée atteint (`--list --json`). S'ils ne tiennent pas
+   dans le budget — autant de mutants que de fois la durée dans le budget,
+   moins un pour la référence, qui reconstruit le crate comme un mutant —,
+   il n'en mesure qu'une fraction, 1/*k*, *k* le plus petit qui tienne.
+
+   Le choix précède la campagne, parce que les mutants essayés avant une
+   coupure ne sont pas un échantillon : ils suivent l'ordre de l'outil. Il
+   suit la clé qui reporte les avis, le même fichier et la même description,
+   jamais la ligne : un mutant est pris quand le hachage de sa clé, écrit en
+   `jq` et le même sur jq 1.6 et 1.8.2, vaut 0 modulo *k*. Un mutant qu'un
+   retour au codeur n'a pas changé reste donc dans l'échantillon, et un
+   mutant ajouté ailleurs ne redistribue pas les autres ; un choix par
+   position (`--shard`) les redistribuerait, et chaque retour amènerait des
+   survivants jamais vus. L'échantillon passe à l'outil en un seul `-F`,
+   l'alternative des noms choisis, échappés là où la syntaxe des
+   expressions de Rust les lirait, et il est vérifié avant de tourner :
+   `--list` avec ce filtre doit nommer exactement les mutants choisis.
+   Mesuré sur 27.1.0 : des noms comme `replace <impl Spawner for
+   ContainerSpawner>::alive -> io::Result<u8>` ou `vec![Box::leak(…)]`
+   reviennent exacts. Un listage qui échoue, un filtre qui ne prend pas ce
+   qui a été choisi, ou un échantillon vide quand la portée porte des
+   mutants : la campagne n'a rien mesuré, et le dit — jamais de repli sur le
+   tout. Sans budget ni fraction, comme d'un `nunki` plus ancien, elle tourne
+   entière, sans liste.
+
+   Le script dit, avant sa ligne de fin, sur quoi la campagne a tourné :
+   `{"sampled":k,"listed":N,"paced":s,"pace":m}`. Sous le filtre, les comptes
+   de l'outil sont ceux de l'échantillon (mesuré sur 27.1.0), si bien que la
+   porte 7 juge l'échantillon comme un tout : le seuil au niveau `standard`,
+   une issue pour chaque survivant de l'échantillon au niveau `critical`.
+   `MUTANTS.json` garde la fraction dans la chaîne, et `mission status` la
+   dit : « a sample of 1/3 of 48 ». **Une campagne partielle tourne à la
+   fraction de la campagne qu'elle continue**, même quand ses quelques
+   fichiers tiendraient entiers : la reconstruction reste un seul
+   échantillon. À une autre fraction, elle n'est pas enregistrée seule. Une
+   campagne complète — la première, `--again`, une chaîne rompue — fixe la
+   sienne. Changer le script change ce avec quoi la campagne tourne, et la
+   suivante est complète : un hachage changé ne redistribue jamais un
+   échantillon au milieu d'une chaîne.
+
+   Mesuré sur cargo-mutants 27.1.0, dans l'image Rust, sur ce dépôt : les
+   48 mutants d'un diff, avec un budget qui en laisse tenir 16, donnent un
+   échantillon de 1/3, 18 mutants. Le filtre est vérifié, seuls ces 18
+   tournent, et chacun a la même issue que dans la campagne entière (17
+   tués, 1 non viable). Un commit de plus, qui ajoute 9 mutants dans un
+   autre fichier, à la fraction de la chaîne : l'échantillon garde les 18
+   et en prend 4 des 9 nouveaux, aucun n'en sort. Le motif, sur un projet
+   Rust + Next.js : une campagne a compté 514 mutants à environ 47 secondes
+   chacun, soit environ 6,5 heures, quand le délai par défaut était de 45
+   minutes.
+
+   La stack Rust d'abord : rien n'est vérifié de mutmut ni de Stryker, et
+   leurs scripts ignorent le budget. Sur un projet à plusieurs stacks, la
+   stack Rust reçoit tout le budget et les autres tournent entières après
+   elle, sous le même délai : c'est une limite, écrite. Ce qu'on perd : un
+   vrai survivant hors de l'échantillon passe la mission, et c'est la
+   campagne hors mission (plus bas) qui le trouverait. Après la mise à
+   jour, une campagne enregistrée comme arrêtée à son délai d'avant — le
+   budget lui-même — est due de nouveau une fois, puisque le délai est
+   désormais plus long.
+
+   **Décidé, pas encore construit.** Une règle change encore la porte 7. Le
+   changement qui la construit l'écrit à la place de celle qu'elle
    remplace, et retire son entrée d'ici. Jusque-là, le reste de cette
    section décrit ce que `nunki` fait.
-
-   - **Un budget de temps, mesuré sur un échantillon choisi d'avance.**
-     `mutation_minutes` devient le budget d'une campagne, et le délai ne
-     sert plus qu'à arrêter une campagne bloquée. Quand le diff atteint plus
-     de mutants que le budget n'en permet, d'après la durée par mutant
-     mesurée sur le projet, la campagne n'en mesure qu'une fraction, 1/*k*,
-     choisie avant de commencer.
-
-     Le choix précède la campagne, parce que les mutants essayés avant une
-     coupure ne sont pas un échantillon : ils suivent l'ordre de l'outil.
-     Il suit la clé qui reporte les avis, le même fichier et la même
-     description, jamais la ligne. Ainsi, un mutant qu'un retour au codeur
-     n'a pas changé reste dans l'échantillon, et un mutant ajouté ailleurs
-     ne redistribue pas les autres. Un choix par position dans la liste de
-     l'outil (`--sharding round-robin` de cargo-mutants) les redistribuerait,
-     et chaque retour amènerait des survivants jamais vus. Pour la même
-     raison, *k* est fixé par la première campagne de la chaîne et gardé
-     tant que la chaîne tient.
-
-     La porte 7 juge l'échantillon comme un tout : le seuil au niveau
-     `standard`, et une issue pour chaque survivant de l'échantillon au
-     niveau `critical`. `MUTANTS.json` dit la fraction. La stack Rust
-     d'abord : rien n'est vérifié de mutmut ni de Stryker, et leurs
-     campagnes restent entières. Mesuré sur un projet Rust + Next.js : une
-     campagne a compté 514 mutants à environ 47 secondes chacun, soit
-     environ 6,5 heures, quand le délai par défaut est de 45 minutes.
-
-     Ce qu'on perd : un vrai survivant hors de l'échantillon passe la
-     mission, et c'est la campagne hors mission qui le trouve.
 
    - **Des campagnes hors mission, lancées par l'humain.** `nunki` n'a
      aucun ordonnanceur. C'est un verbe, que l'humain lance quand il le
@@ -2150,9 +2192,8 @@ dernier lot. La première rouge arrête tout.
      séparées ne remplissent plus le disque pendant une longue campagne
      (mesuré : environ 11 Go par heure).
 
-   L'ordre de construction : le disque, puis le budget, puis les campagnes
-   hors mission. D'ici là, le cas d'un fichier inchangé n'a pour remède que
-   `--again` : c'est assumé.
+   D'ici là, le cas d'un fichier inchangé n'a pour remède que `--again`, et
+   un survivant hors de l'échantillon, aucun : c'est assumé.
 
    **Le contrat de `mutation.sh` s'enrichit**, tout en restant facultatif
    pour une stack qui ne veut pas de chaîne :
@@ -2276,7 +2317,8 @@ dernier lot. La première rouge arrête tout.
    coûte l'heure que la section 7 compte.
 
    **Une campagne arrêtée court est incomplète, et c'est au HQ de choisir.**
-   Arrêtée à son délai (`mutation_minutes`), une campagne n'écrivait rien
+   Arrêtée à son délai (le budget et sa moitié, plus haut), une campagne
+   n'écrivait rien
    dans `MUTANTS.json` : la porte 7 trouvait ensuite l'échec laissé sur la
    même empreinte, renvoyait la mission au codeur avec « cette campagne a
    déjà tourné et n'a rien mesuré », et les survivants déjà rapportés ne

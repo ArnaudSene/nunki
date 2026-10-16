@@ -645,6 +645,7 @@ impl Volet {
                 survivors: vec![],
                 tried: Some(12),
                 chain: nunki::mutants::Chain {
+                    sample: None,
                     fork: Some(nunki::gate::fork_point(&self.w.slot.tree, "dev").unwrap()),
                     handed: Some(vec!["src/lib.rs".into()]),
                     ran: None,
@@ -682,7 +683,7 @@ impl Volet {
             "rust",
             &nunki::mutants::Asked {
                 base: "dev",
-                deadline_minutes: 45,
+                budget_minutes: 45,
                 replay: nunki::mutants::Replay::WhenChanged,
                 rigor,
                 threshold: 80,
@@ -697,6 +698,58 @@ impl Volet {
             .expect("the campaign is filed as in flight")
             .chain
     }
+}
+
+/// What sizes a campaign reaches the script `nunki` launches (SPEC 4.4,
+/// gate 7: the budget): the mission's budget in seconds, the project's pace
+/// on file, and — for a partial campaign — the fraction of the campaign it
+/// continues. A full one is handed no fraction.
+#[test]
+fn a_launched_campaign_is_handed_its_budget_its_pace_and_its_chains_fraction() {
+    let v = volet();
+    let script = v.project.fragment("rust").join(nunki::mutants::SCRIPT);
+    std::fs::write(
+        &script,
+        "#!/bin/sh\n# nunki-tool-version: echo stand-in 1.0\n\
+         env | grep '^NUNKI_MUTATION_' | sort > nunki-sizing.txt\n\
+         printf '%s\\n' '{\"campaign\":\"done\",\"tried\":0,\"found\":0}'\n",
+    )
+    .unwrap();
+    std::fs::write(
+        v.project.hq_root.join(nunki::mutants::PACE_FILE),
+        "{\"seconds\":47,\"tried\":40,\"date\":\"2026-10-15T10:00:00Z\"}\n",
+    )
+    .unwrap();
+    v.first_campaign_ran_with(v.tooling_now());
+    let mut on_file = nunki::mutants::read(&v.mission).unwrap().unwrap();
+    on_file.chain.sample = Some(nunki::mutants::Sample {
+        k: 3,
+        listed: 36,
+        paced: Some(60),
+    });
+    nunki::mutants::write(&v.mission, &on_file).unwrap();
+
+    let sizing = || {
+        let at = v.w.proof.join("nunki-sizing.txt");
+        let started = std::time::Instant::now();
+        while !at.exists() && started.elapsed() < std::time::Duration::from_secs(20) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let said = std::fs::read_to_string(&at).expect("the script ran");
+        std::fs::remove_file(&at).unwrap();
+        said
+    };
+    match v.launch(nunki::mission::Rigor::Standard) {
+        nunki::mutants::Progress::Started { scope, .. } => {
+            assert!(scope.since().is_some(), "{scope:?}")
+        }
+        other => panic!("the campaign was not launched: {other:?}"),
+    }
+    assert_eq!(
+        sizing(),
+        "NUNKI_MUTATION_BUDGET=2700\nNUNKI_MUTATION_JOBS=1\nNUNKI_MUTATION_PACE=47\n\
+         NUNKI_MUTATION_SAMPLE=3\n"
+    );
 }
 
 /// At standard, after a passing campaign run with the same script and tool,
@@ -806,7 +859,7 @@ fn at_critical_a_volets_campaign_asked_again_is_launched_full() {
         "rust",
         &nunki::mutants::Asked {
             base: "dev",
-            deadline_minutes: 45,
+            budget_minutes: 45,
             replay: nunki::mutants::Replay::Now,
             rigor: nunki::mission::Rigor::Critical,
             threshold: 80,

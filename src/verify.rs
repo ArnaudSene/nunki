@@ -1676,7 +1676,7 @@ pub fn campaign(
             // The base's name: `campaign` works out what this branch brought,
             // through the same call gate 7 makes.
             base: &header.base,
-            deadline_minutes: header.bounds.mutation_minutes,
+            budget_minutes: header.bounds.mutation_minutes,
             // The monitor never asks again by itself: replaying costs an
             // hour, and "ask again" is a human saying something changed that
             // the fingerprint cannot see.

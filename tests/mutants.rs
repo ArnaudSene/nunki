@@ -179,7 +179,7 @@ fn a_campaign_found_stopped_writes_no_result() {
         "rust",
         &mutants::Asked {
             base: "dev",
-            deadline_minutes: 45,
+            budget_minutes: 45,
             replay: mutants::Replay::WhenChanged,
             rigor: nunki::mission::Rigor::Critical,
             threshold: 80,
@@ -270,7 +270,7 @@ fn a_campaign_that_stopped_and_said_why_goes_back_to_the_branch() {
         "rust",
         &mutants::Asked {
             base: "dev",
-            deadline_minutes: 45,
+            budget_minutes: 45,
             replay: mutants::Replay::WhenChanged,
             rigor: nunki::mission::Rigor::Critical,
             threshold: 80,
@@ -1100,7 +1100,7 @@ fn live_a_campaign_is_launched_watched_and_read_back() {
             "rust",
             &mutants::Asked {
                 base: "dev",
-                deadline_minutes: 45,
+                budget_minutes: 45,
                 replay: mutants::Replay::WhenChanged,
                 rigor: nunki::mission::Rigor::Critical,
                 threshold: 80,
@@ -2245,6 +2245,29 @@ fn says(lines: &[&str]) -> String {
     script
 }
 
+/// Over several stacks, what the Rust stack's campaign ran at reaches
+/// `nunki`: its line passes through as it said it, and the campaign keeps
+/// its fraction (SPEC 4.4, gate 7: the budget).
+#[cfg(unix)]
+#[test]
+fn a_campaign_over_several_stacks_passes_on_what_its_sample_ran_at() {
+    let rust = says(&[
+        r#"{"sampled":3,"listed":12,"paced":60,"pace":20}"#,
+        r#"{"campaign":"done","tried":4}"#,
+    ]);
+    let next = says(&[r#"{"campaign":"done","tried":5}"#]);
+    let out = TwoStacks::new(&rust, &next).run();
+    assert!(mutants::completed(&out), "{out}");
+    let said = mutants::sampled(&out)
+        .unwrap()
+        .expect("the sample line passed on");
+    assert_eq!(
+        (said.sampled, said.listed, said.pace),
+        (3, 12, Some(20)),
+        "{out}"
+    );
+}
+
 /// Over several stacks the count is the sum of theirs, and only when every
 /// stack that ran gave one: a sum missing one stack's mutants is a share of
 /// the wrong whole.
@@ -2632,7 +2655,7 @@ fn a_finished_campaign_that_tried_nothing_of_what_it_found_is_not_recorded() {
         "rust",
         &mutants::Asked {
             base: "dev",
-            deadline_minutes: 45,
+            budget_minutes: 45,
             replay: mutants::Replay::WhenChanged,
             rigor: nunki::mission::Rigor::Critical,
             threshold: 80,
@@ -2741,7 +2764,7 @@ fn a_campaign_that_said_it_finished_twice_leaves_its_reason_and_no_result() {
         "rust",
         &mutants::Asked {
             base: "dev",
-            deadline_minutes: 45,
+            budget_minutes: 45,
             replay: mutants::Replay::WhenChanged,
             rigor: nunki::mission::Rigor::Critical,
             threshold: 80,
@@ -5735,6 +5758,7 @@ fn on_file_at(head: &str, survivors: Vec<Survivor>, tried: Option<u32>) -> Campa
         survivors,
         tried,
         chain: Chain {
+            sample: None,
             fork: Some(FORK.into()),
             handed: None,
             ran: None,
@@ -6290,6 +6314,7 @@ fn a_partial_campaign_is_read_back_with_its_chain_or_forgotten_when_it_broke() {
             &slot.name,
             &mutants::Running {
                 chain: Chain {
+                    sample: None,
                     fork: Some(FORK.into()),
                     handed: Some(vec!["src/lib.rs".into()]),
                     ran: None,
@@ -9201,4 +9226,210 @@ fn following_a_campaign_with_status_never_starts_or_touches_one() {
     let out = nunki(&["--slot", "one", "--status", "--cancel", "--because", "x"]);
     assert!(!out.status.success());
     assert_eq!(std::fs::read(&record).unwrap(), before);
+}
+
+// ---------------------------------------------------------------------------
+// A sample when the whole would not fit the budget (SPEC 4.4, gate 7).
+// ---------------------------------------------------------------------------
+
+/// The deadline is the budget and half of it again, rounded up: a guard
+/// against a campaign that hangs, never what the campaign is sized to.
+#[test]
+fn a_campaigns_deadline_is_its_budget_and_half_of_it_again() {
+    assert_eq!(mutants::deadline_minutes(45), 68);
+    assert_eq!(mutants::deadline_minutes(90), 135);
+    assert_eq!(mutants::deadline_minutes(1), 2);
+    assert_eq!(mutants::deadline_minutes(0), 0);
+    assert_eq!(mutants::deadline_minutes(u32::MAX), u32::MAX);
+}
+
+/// What sizes a campaign reaches its script: the budget in seconds always,
+/// the pace and the chain's fraction when there are, and nothing of 0.
+#[test]
+fn a_campaign_is_handed_its_budget_its_pace_and_its_chains_fraction() {
+    let env: std::collections::BTreeMap<String, String> =
+        mutants::sizing(45, Some(47), Some(3)).into_iter().collect();
+    assert_eq!(
+        env.get(mutants::BUDGET_ENV).map(String::as_str),
+        Some("2700")
+    );
+    assert_eq!(env.get(mutants::PACE_ENV).map(String::as_str), Some("47"));
+    assert_eq!(env.get(mutants::SAMPLE_ENV).map(String::as_str), Some("3"));
+    let env: std::collections::BTreeMap<String, String> =
+        mutants::sizing(45, None, None).into_iter().collect();
+    assert_eq!(env.len(), 1, "{env:?}");
+    let env: std::collections::BTreeMap<String, String> =
+        mutants::sizing(45, Some(0), Some(0)).into_iter().collect();
+    assert_eq!(env.len(), 1, "{env:?}");
+}
+
+/// A partial campaign is handed the fraction of the campaign it continues,
+/// 1 when that one ran whole or said none; a full one is handed none, and
+/// sizes its own.
+#[test]
+fn a_partial_campaign_runs_at_its_chains_fraction_and_a_full_one_sizes_its_own() {
+    let mut previous = on_file_at("aaaa", vec![], Some(10));
+    let partial = Scope::Partial {
+        since: "aaaa".into(),
+    };
+    let full = Scope::Full {
+        why: "the first campaign of this mission".into(),
+    };
+    assert_eq!(mutants::fraction(&partial, Some(&previous)), Some(1));
+    assert_eq!(mutants::fraction(&partial, None), Some(1));
+    previous.chain.sample = Some(mutants::Sample {
+        k: 3,
+        listed: 30,
+        paced: Some(47),
+    });
+    assert_eq!(mutants::fraction(&partial, Some(&previous)), Some(3));
+    assert_eq!(mutants::fraction(&full, Some(&previous)), None);
+}
+
+/// The line that says what a campaign ran at is read once: none from a
+/// script that measures no sample, one when it said one, and a fraction of
+/// 0 or two lines are a campaign that measured nothing.
+#[test]
+fn what_a_campaign_ran_at_is_one_line_or_none() {
+    let done = "{\"campaign\":\"done\",\"tried\":4,\"found\":4,\"missed\":0}\n";
+    assert_eq!(mutants::sampled(done), Ok(None));
+    let one = format!("{{\"sampled\":3,\"listed\":12,\"paced\":60,\"pace\":47}}\n{done}");
+    let said = mutants::sampled(&one).unwrap().unwrap();
+    assert_eq!(
+        (said.sampled, said.listed, said.paced, said.pace),
+        (3, 12, Some(60), Some(47))
+    );
+    assert_eq!(mutants::unmeasured(&one), None);
+    let zero = format!("{{\"sampled\":0,\"listed\":12}}\n{done}");
+    assert!(mutants::sampled(&zero).is_err());
+    assert!(mutants::unmeasured(&zero).unwrap().contains("1/0"));
+    let two = format!("{{\"sampled\":3,\"listed\":12}}\n{{\"sampled\":2,\"listed\":5}}\n{done}");
+    assert!(
+        mutants::unmeasured(&two)
+            .unwrap()
+            .contains("one campaign keeps one fraction")
+    );
+}
+
+/// A partial campaign continues its chain only at the chain's fraction: at
+/// it, it is recorded and keeps it; at another, it is not recorded alone —
+/// one sample's counts would be added to another's.
+#[test]
+fn a_partial_campaign_at_another_fraction_than_its_chains_is_not_recorded() {
+    let dir = tempfile::tempdir().unwrap();
+    let (tree, before, after) = before_and_after(dir.path());
+    let mut previous = on_file_with(&before, vec![], &[("src/lib.rs", 3), ("src/other.rs", 2)]);
+    previous.chain.sample = Some(mutants::Sample {
+        k: 3,
+        listed: 15,
+        paced: Some(60),
+    });
+    let log = |k: u32| {
+        format!(
+            "{{\"sampled\":{k},\"listed\":9,\"paced\":60,\"pace\":20}}\n{}",
+            counted_log(&[], &[("src/lib.rs", 4)])
+        )
+    };
+
+    let recorded = recorded_partial(dir.path(), &tree, &before, &after, &previous, &log(3));
+    assert_eq!(
+        recorded.chain.sample,
+        Some(mutants::Sample {
+            k: 3,
+            listed: 9,
+            paced: Some(60)
+        })
+    );
+    assert_eq!(
+        recorded.tried,
+        Some(6),
+        "the chain's reconstruction: 4 and 2"
+    );
+
+    let mission = dir.path().join("mission");
+    mutants::write(&mission, &previous).unwrap();
+    let handed = mutants::changed_between(&tree, &before, &after)
+        .unwrap()
+        .into_iter()
+        .collect();
+    let chain = Chain {
+        scope: Scope::Partial {
+            since: before.clone(),
+        },
+        tooling: Some("tools-1".into()),
+        fork: Some(FORK.into()),
+        handed: Some(handed),
+        ..Chain::default()
+    };
+    let err = mutants::record_finished_with_registry(
+        &mission,
+        &dir.path().join("hq"),
+        &tree,
+        "fp-volet",
+        &after,
+        &log(1),
+        &chain,
+    )
+    .unwrap_err();
+    match err {
+        mutants::MutantsError::Broken(why) => {
+            assert!(
+                why.contains("a sample of 1/1 and the chain it continues at 1/3"),
+                "{why}"
+            )
+        }
+        other => panic!("{other}"),
+    }
+    assert_eq!(mutants::read(&mission).unwrap(), Some(previous));
+}
+
+/// What `mission status`, the monitor and the follow-up say of a campaign
+/// that measured a sample: the fraction, of how many, and the pace it was
+/// sized with; nothing of one that ran whole.
+#[test]
+fn a_sampled_campaign_says_its_fraction() {
+    let mut campaign = on_file_at("aaaaaaaaaaaaaaaa", vec![], Some(10));
+    campaign.chain.sample = Some(mutants::Sample {
+        k: 4,
+        listed: 40,
+        paced: Some(60),
+    });
+    let said = mutants::chain_said(&campaign, &std::collections::BTreeMap::new()).join("\n");
+    assert!(
+        said.contains("a sample of 1/4 of 40, sized at 60 s a mutant"),
+        "{said}"
+    );
+    campaign.chain.sample = Some(mutants::Sample {
+        k: 1,
+        listed: 40,
+        paced: Some(60),
+    });
+    let said = mutants::chain_said(&campaign, &std::collections::BTreeMap::new()).join("\n");
+    assert!(!said.contains("sample"), "{said}");
+}
+
+/// The pace a campaign measured is kept when it tried enough mutants, and
+/// is what the next campaign is handed; a campaign that tried too few, or
+/// said no pace, leaves the one on file. A pace file that cannot be read
+/// is none.
+#[test]
+fn a_campaigns_pace_is_kept_for_the_next_when_it_tried_enough() {
+    let hq = tempfile::tempdir().unwrap();
+    let log = |tried: u32, pace: &str| {
+        format!(
+            "{{\"sampled\":1,\"listed\":{tried}{pace}}}\n\
+             {{\"campaign\":\"done\",\"tried\":{tried},\"found\":{tried},\"missed\":0}}\n"
+        )
+    };
+    assert_eq!(mutants::read_pace(hq.path()), None);
+    mutants::keep_pace(hq.path(), &log(mutants::PACE_TRIED, ",\"pace\":47")).unwrap();
+    assert_eq!(mutants::read_pace(hq.path()), Some(47));
+    mutants::keep_pace(hq.path(), &log(mutants::PACE_TRIED - 1, ",\"pace\":9")).unwrap();
+    assert_eq!(mutants::read_pace(hq.path()), Some(47), "too few tried");
+    mutants::keep_pace(hq.path(), &log(20, "")).unwrap();
+    assert_eq!(mutants::read_pace(hq.path()), Some(47), "no pace said");
+    mutants::keep_pace(hq.path(), &log(20, ",\"pace\":30")).unwrap();
+    assert_eq!(mutants::read_pace(hq.path()), Some(30));
+    std::fs::write(hq.path().join(mutants::PACE_FILE), "not json").unwrap();
+    assert_eq!(mutants::read_pace(hq.path()), None);
 }

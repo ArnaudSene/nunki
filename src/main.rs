@@ -2642,7 +2642,7 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                     // The base's name: `campaign` works out what this branch
                     // brought, through the same call gate 7 makes.
                     base: &header.base,
-                    deadline_minutes: header.bounds.mutation_minutes,
+                    budget_minutes: header.bounds.mutation_minutes,
                     // Without `--again`, as the monitor would.
                     replay: if again {
                         nunki::mutants::Replay::Now

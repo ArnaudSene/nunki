@@ -1603,7 +1603,10 @@ fn mutation(subject: &Subject, threshold: Threshold) -> Result<Outcome, GateErro
     // Stopped short (SPEC 4.4, "un délai paramétré"): never green, never a
     // volet of its own. Its survivors are on file; whether they go to the
     // coder, or the bound is raised first, is the HQ's choice.
-    match crate::mutants::stopped_short(&campaign, subject.header.bounds.mutation_minutes) {
+    match crate::mutants::stopped_short(
+        &campaign,
+        crate::mutants::deadline_minutes(subject.header.bounds.mutation_minutes),
+    ) {
         Some(crate::mutants::Standing::HqChooses(why)) => {
             return Ok(Outcome::for_the_hq(gate, &why));
         }
