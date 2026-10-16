@@ -1291,6 +1291,7 @@ fn launch_stand_in(
         pid: spawned.pid,
         log,
         deadline_minutes: u32::MAX,
+        off_mission: None,
     };
     (spawner, running)
 }
