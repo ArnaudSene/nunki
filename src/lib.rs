@@ -31,6 +31,7 @@ pub mod logs;
 pub mod mission;
 pub mod monitor;
 pub mod mutants;
+pub mod offmission;
 pub mod perimeter;
 pub mod probe;
 pub mod project;

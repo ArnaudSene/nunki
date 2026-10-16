@@ -2925,6 +2925,7 @@ fn a_battery_red_under_a_running_campaign_opens_no_volet() {
         &world.project.hq_root,
         "one",
         &nunki::mutants::Running {
+            off_mission: None,
             chain: Default::default(),
             fingerprint: "a62d271".into(),
             head: git(&world.tree, &["rev-parse", "HEAD"]),

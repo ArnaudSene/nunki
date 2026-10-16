@@ -1025,3 +1025,41 @@ fn the_slot_list_names_the_mission_that_occupies_each_slot() {
     };
     assert!(lifecycle::slot_line(&two, &[]).contains("free"));
 }
+
+/// A campaign outside missions runs only in a slot no mission holds: one a
+/// started mission occupies is refused, naming the mission and the verb
+/// that says which slots are free (SPEC 4.4, the campaigns outside missions).
+#[test]
+fn a_campaign_outside_missions_is_refused_in_a_slot_a_mission_holds() {
+    let world = World::new(1);
+    world.framed_only();
+    let slot = nunki::slot::Slot {
+        name: "one".into(),
+        tree: PathBuf::from("/slots/one"),
+    };
+    let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+        std::sync::Arc::new(nunki::engine::fake::FakeEngine::default());
+    let err = nunki::offmission::run(
+        &world.project,
+        &slot,
+        engine,
+        "rust",
+        &nunki::offmission::Asked {
+            base: "dev",
+            form: nunki::offmission::Form::Whole,
+            minutes: 720,
+        },
+    )
+    .unwrap_err();
+    match err {
+        nunki::offmission::OffMissionError::Occupied { slot, missions } => {
+            assert_eq!((slot.as_str(), missions.as_str()), ("one", "m1"));
+        }
+        other => panic!("{other}"),
+    }
+    assert!(
+        nunki::mutants::read_running(&world.project.hq_root, "one")
+            .unwrap()
+            .is_none()
+    );
+}

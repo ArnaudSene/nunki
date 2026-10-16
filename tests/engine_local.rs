@@ -194,6 +194,7 @@ fn a_campaign_in_flight_keeps_the_copy_it_is_rewriting() {
         &w.project.hq_root,
         &w.slot.name,
         &nunki::mutants::Running {
+            off_mission: None,
             chain: Default::default(),
             fingerprint: "abc1234".into(),
             head: git(&w.slot.tree, &["rev-parse", "HEAD"]),
@@ -1290,6 +1291,7 @@ fn launch_stand_in(
         pid: spawned.pid,
         log,
         deadline_minutes: u32::MAX,
+        off_mission: None,
     };
     (spawner, running)
 }
@@ -1480,4 +1482,144 @@ fn a_campaign_whose_script_was_killed_is_called_off_whole() {
             .unwrap()
             .is_none()
     );
+}
+
+/// A campaign outside missions, end to end on an engine that really runs
+/// (SPEC 4.4, the campaigns outside missions): it runs on the base as the
+/// human's repository has it — not on the slot's own branch — on the whole
+/// code with no fork point, and `status` reads it back into the debt. A
+/// second one on what changed since starts from the first one's commit, on
+/// the files changed since, and none starts when nothing did.
+#[test]
+fn a_campaign_outside_missions_runs_on_the_recorded_base_and_lands_in_the_debt() {
+    let v = volet();
+    let mut project = v.project.clone();
+    // The human's repository: the one `record_base` cloned the slot's from.
+    project.root = v.w.slot.tree.with_file_name("tree-project.git");
+    let script = project.fragment("rust").join(nunki::mutants::SCRIPT);
+    std::fs::write(
+        &script,
+        "#!/bin/sh\n\
+         { env | grep '^NUNKI_BASE=' ; printf 'arg %s\\n' \"$@\"; printf 'head %s\\n' \"$(git rev-parse HEAD)\"; } > nunki-off.tmp\n\
+         mv nunki-off.tmp nunki-off.txt\n\
+         printf '%s\\n' '{\"id\":\"a\",\"file\":\"src/lib.rs\",\"line\":2,\"description\":\"replace > with >=\"}'\n\
+         printf '%s\\n' '{\"campaign\":\"done\",\"tried\":3,\"found\":3,\"missed\":1}'\n",
+    )
+    .unwrap();
+    let dev = git(&project.root, &["rev-parse", "dev"]);
+    let slot_head = git(&v.w.slot.tree, &["rev-parse", "HEAD"]);
+    assert_ne!(dev, slot_head, "the slot's own branch is ahead of the base");
+
+    let said = || {
+        let at = v.w.proof.join("nunki-off.txt");
+        let started = std::time::Instant::now();
+        while !at.exists() && started.elapsed() < std::time::Duration::from_secs(20) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let said = std::fs::read_to_string(&at).expect("the script ran");
+        std::fs::remove_file(&at).unwrap();
+        said
+    };
+    let read_back = || {
+        let started = std::time::Instant::now();
+        loop {
+            match nunki::mutants::read_back_off_mission(&project, &v.w.slot, v.engine.clone())
+                .unwrap()
+            {
+                Some(nunki::mutants::Progress::Running { .. })
+                    if started.elapsed() < std::time::Duration::from_secs(20) =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(100))
+                }
+                other => return other,
+            }
+        }
+    };
+    let asked = |form| nunki::offmission::Asked {
+        base: "dev",
+        form,
+        minutes: 720,
+    };
+
+    let started = nunki::offmission::run(
+        &project,
+        &v.w.slot,
+        v.engine.clone(),
+        "rust",
+        &asked(nunki::offmission::Form::Whole),
+    )
+    .unwrap();
+    assert_eq!(
+        (started.commit.as_str(), started.since),
+        (dev.as_str(), None)
+    );
+    let first = said();
+    assert!(first.contains("NUNKI_BASE=\n"), "{first}");
+    assert!(first.contains(&format!("head {dev}")), "{first}");
+    assert!(first.contains("arg src/lib.rs"), "{first}");
+    assert!(
+        first.contains(&format!("arg off-mission-{}", &dev[..12])),
+        "{first}"
+    );
+    match read_back() {
+        Some(nunki::mutants::Progress::Finished { survivors: 1, .. }) => {}
+        other => panic!("not read back into the debt: {other:?}"),
+    }
+    let debt = nunki::offmission::read_debt(&project.hq_root).unwrap();
+    assert_eq!(debt.owed.len(), 1);
+    let last = debt.last.unwrap();
+    assert_eq!((last.commit.as_str(), last.whole), (dev.as_str(), true));
+
+    // Nothing changed on the base: nothing to measure.
+    let err = nunki::offmission::run(
+        &project,
+        &v.w.slot,
+        v.engine.clone(),
+        "rust",
+        &asked(nunki::offmission::Form::SinceLast),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, nunki::offmission::OffMissionError::Unchanged { .. }),
+        "{err}"
+    );
+
+    // One commit on the base, in another file.
+    let clone = v.w.slot.tree.with_file_name("human-clone");
+    git(
+        v.w.slot.tree.parent().unwrap(),
+        &[
+            "clone",
+            "-q",
+            "-b",
+            "dev",
+            project.root.to_str().unwrap(),
+            clone.to_str().unwrap(),
+        ],
+    );
+    std::fs::write(
+        clone.join("src/more.rs"),
+        "pub fn more() -> u8 {\n    1\n}\n",
+    )
+    .unwrap();
+    git(&clone, &["add", "-A"]);
+    git(&clone, &["commit", "-q", "-m", "more"]);
+    git(&clone, &["push", "-q", "origin", "dev"]);
+    let next = git(&project.root, &["rev-parse", "dev"]);
+
+    let started = nunki::offmission::run(
+        &project,
+        &v.w.slot,
+        v.engine.clone(),
+        "rust",
+        &asked(nunki::offmission::Form::SinceLast),
+    )
+    .unwrap();
+    assert_eq!(started.since.as_deref(), Some(dev.as_str()));
+    let second = said();
+    assert!(second.contains(&format!("NUNKI_BASE={dev}\n")), "{second}");
+    assert!(second.contains(&format!("head {next}")), "{second}");
+    assert!(second.contains("arg src/more.rs"), "{second}");
+    assert!(!second.contains("arg src/lib.rs"), "{second}");
+    assert!(read_back().is_some());
 }

@@ -88,7 +88,7 @@ pub fn run(
         On::Proof => {
             refuse_under_a_campaign(project, slot)?;
             let head = git::slot_head(&slot.tree)?;
-            refresh_at(&engine, &file, &compose_project, &head)?;
+            refresh_at(&engine, &file, &compose_project, "HEAD", &head)?;
             PROOF_AT.to_string()
         }
         // The working tree is the agent's, and no campaign touches it.
@@ -161,7 +161,29 @@ pub fn refresh(project: &Project, slot: &Slot, engine: Arc<dyn Engine>) -> Resul
     let compose_project = crate::compose::project_name(&project.session(), &slot.name)?;
     lift_if_down(&engine, project, &file, &compose_project)?;
     let head = git::slot_head(&slot.tree)?;
-    refresh_at(&engine, &file, &compose_project, &head)
+    refresh_at(&engine, &file, &compose_project, "HEAD", &head)
+}
+
+/// [`refresh`], to `rev` of the slot's tree rather than its `HEAD`: a ref
+/// the host wrote there, such as the base as the human's repository last
+/// had it (`refs/remotes/origin/<base>`), checked to be `commit`. The slot's
+/// own checkout is not touched; the next [`refresh`] puts the copy back on
+/// its `HEAD`. What a campaign outside missions runs on (SPEC 4.4).
+pub fn refresh_to(
+    project: &Project,
+    slot: &Slot,
+    engine: Arc<dyn Engine>,
+    rev: &str,
+    commit: &str,
+) -> Result<(), ExecError> {
+    let file = crate::run::profile_path(project, &slot.name);
+    if !file.is_file() {
+        return Err(ExecError::NoProfile(slot.name.clone()));
+    }
+    refuse_under_a_campaign(project, slot)?;
+    let compose_project = crate::compose::project_name(&project.session(), &slot.name)?;
+    lift_if_down(&engine, project, &file, &compose_project)?;
+    refresh_at(&engine, &file, &compose_project, rev, commit)
 }
 
 /// Lift the slot's containers when they are down, and leave them as they are
@@ -196,6 +218,7 @@ fn refresh_at(
     engine: &Arc<dyn Engine>,
     file: &std::path::Path,
     compose_project: &str,
+    rev: &str,
     head: &str,
 ) -> Result<(), ExecError> {
     let script = format!(
@@ -204,12 +227,13 @@ fn refresh_at(
          \x20 git clone --quiet --no-hardlinks {tree} {PROOF_AT}\n\
          fi\n\
          cd {PROOF_AT}\n\
-         git fetch --quiet {tree} HEAD\n\
+         git fetch --quiet {tree} {rev}\n\
          git checkout --quiet --detach FETCH_HEAD\n\
          git reset --quiet --hard FETCH_HEAD\n\
          git clean -qdff\n\
          test \"$(git rev-parse HEAD)\" = \"{head}\"\n",
         tree = crate::run::TREE_AT,
+        rev = crate::exec::quote(rev),
     );
     let out = engine.exec(
         file,
