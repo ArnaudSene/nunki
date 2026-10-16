@@ -2356,6 +2356,104 @@ exit 2
     );
 }
 
+/// A campaign outside missions on what changed since gives the empty tree
+/// for a fork point (SPEC 4.4, the campaigns outside missions): every line
+/// of each file handed is then a line changed, so the file is mutated
+/// whole, and a file removed gives no hunk — a campaign that found nothing,
+/// not one that could not run.
+///
+/// Run, with a real `git` and a stub `cargo`. Measured with this script and
+/// cargo-mutants 27.1.0 on a real crate: a file handed alone, 10 tried, as
+/// `--file`; beside a removed one, the same 10; a removed one alone, or a
+/// file with nothing to mutate, done with nothing tried.
+#[test]
+#[cfg(unix)]
+fn against_the_empty_tree_each_file_handed_is_mutated_whole() {
+    let (_dir, root, _nunki) = fresh();
+    let home = home(&root);
+    init(&root, &home, &["rust".to_string()]).unwrap();
+    let script = home
+        .join(nunki::project::STACKS_DIR)
+        .join("rust")
+        .join(nunki::mutants::SCRIPT);
+    let (tree, _base) = forked_tree(&root);
+    let empty = {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&tree)
+            .args(["hash-object", "-t", "tree", "/dev/null"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let asked = root.join("asked.txt");
+    let path = stub_cargo(
+        &root,
+        &format!(
+            "#!/bin/sh
+echo \"$@\" > {asked}
+out=\"\"
+diff=\"\"
+while [ $# -gt 0 ]; do
+  case \"$1\" in
+    --output) out=$2 ;;
+    --in-diff) diff=$2; cat \"$2\" >> {asked} ;;
+  esac
+  shift
+done
+if [ ! -s \"$diff\" ]; then
+  echo ' INFO Diff file is empty' >&2
+  exit 0
+fi
+echo 'MissedMutant|src/lib.rs|1|1|src/lib.rs:1:33: replace > with == in keep' \\
+  | mutants-out \"$out/mutants.out\"
+exit 2
+",
+            asked = asked.display()
+        ),
+    );
+    let run = |paths: &[&str]| {
+        let out = sh()
+            .arg(&script)
+            .arg("off-mission-abc")
+            .args(paths)
+            .env("PATH", &path)
+            .env(nunki::mutants::BASE_ENV, &empty)
+            .current_dir(&tree)
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&out.stdout).to_string();
+        assert!(
+            nunki::mutants::completed(&said),
+            "{paths:?}: {said}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        said
+    };
+
+    let said = run(&["src/gone.rs", "src/lib.rs"]);
+    assert_eq!(nunki::mutants::parse(&said).len(), 1, "{said}");
+    let asked_now = std::fs::read_to_string(&asked).unwrap();
+    assert!(asked_now.lines().next().unwrap().contains("--in-diff"));
+    // The whole file, the line the last commit left alone included.
+    for line in [
+        "+pub fn keep(a: i32) -> bool { a > 2 }",
+        "+pub fn other(a: i32) -> i32 { a + 2 }",
+    ] {
+        assert!(asked_now.contains(line), "{line}: {asked_now}");
+    }
+    assert!(
+        !asked_now
+            .lines()
+            .any(|l| l.starts_with('-') && !l.starts_with("---")),
+        "a line removed: {asked_now}"
+    );
+
+    let said = run(&["src/gone.rs"]);
+    assert_eq!(nunki::mutants::tried(&said), Some(0), "{said}");
+    assert!(nunki::mutants::parse(&said).is_empty(), "{said}");
+}
+
 /// A diff that reaches no mutant is a campaign that found nothing, not one
 /// that could not run.
 ///
