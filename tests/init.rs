@@ -35,11 +35,16 @@ fn fresh() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
 /// baseline failed and the campaign measured nothing (security round 1 on
 /// this mission). `NUNKI_MUTATION_JOBS` is removed for the same reason: a
 /// template test asserting the command a campaign runs without it would see the
-/// enclosing campaign's. A test that wants either variable sets it after this.
+/// enclosing campaign's. So is every other variable a campaign is handed
+/// ([`nunki::mutants::CAMPAIGN_ENV`]): the budget's, added after this, were
+/// not, and run with an inherited `NUNKI_MUTATION_BUDGET` eighteen tests
+/// failed, here and in `tests/mutants.rs`. A test that wants one of them sets
+/// it after this.
 fn sh() -> std::process::Command {
     let mut command = std::process::Command::new("sh");
-    command.env_remove(nunki::mutants::BASE_ENV);
-    command.env_remove(nunki::mutants::JOBS_ENV);
+    for variable in nunki::mutants::CAMPAIGN_ENV {
+        command.env_remove(variable);
+    }
     command
 }
 

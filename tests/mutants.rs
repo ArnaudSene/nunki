@@ -12,6 +12,17 @@ mod common;
 
 use nunki::mutants::{self, Campaign, Survivor, Triage};
 
+/// A command that starts without the variables a campaign is handed
+/// ([`mutants::CAMPAIGN_ENV`]): run by a campaign of `nunki` on itself, a
+/// script these tests run would read that campaign's — measured, an
+/// inherited `NUNKI_MUTATION_BUDGET` fails tests that expect none.
+fn bare(mut command: Command) -> Command {
+    for variable in mutants::CAMPAIGN_ENV {
+        command.env_remove(variable);
+    }
+    command
+}
+
 fn git(at: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
         .arg("-C")
@@ -1654,7 +1665,7 @@ fn live_the_shipped_mutation_script_reads_a_real_campaign() {
         .join(nunki::mutants::SCRIPT);
     assert!(script.is_file());
 
-    let out = std::process::Command::new(&script)
+    let out = bare(std::process::Command::new(&script))
         .arg("campaign-1")
         .arg("src/lib.rs")
         .current_dir(&root)
@@ -1781,7 +1792,7 @@ fn the_rust_campaign_carries_each_survivors_span_from_the_tools_listing() {
     )
     .unwrap();
 
-    let out = std::process::Command::new("sh")
+    let out = bare(std::process::Command::new("sh"))
         .arg(&script)
         .arg("campaign-1")
         .arg("src/lib.rs")
@@ -2104,7 +2115,7 @@ fn live_the_shipped_mutation_script_answers_for_the_changed_lines() {
         .join("nunki/stacks/rust")
         .join(nunki::mutants::SCRIPT);
 
-    let out = std::process::Command::new(&script)
+    let out = bare(std::process::Command::new(&script))
         .arg("campaign-1")
         .arg("src/lib.rs")
         .env(nunki::mutants::BASE_ENV, &base)
@@ -2234,7 +2245,7 @@ impl TwoStacks {
     fn run(&self) -> String {
         let touched = vec!["src/lib.rs".to_string(), "frontend/app/page.ts".to_string()];
         let script = mutants::several_campaigns(&self.judged, "abc1234", &touched);
-        let out = Command::new("sh")
+        let out = bare(Command::new("sh"))
             .args(["-c", &script])
             .current_dir(&self.tree)
             .output()
@@ -2553,7 +2564,7 @@ fn a_campaign_over_several_stacks_adds_up_the_survivors_each_tool_reported() {
     let judged = TwoStacks::new(&lost, &extra);
     let touched = vec!["src/lib.rs".to_string(), "frontend/app/page.ts".to_string()];
     let script = mutants::several_campaigns(&judged.judged, "abc1234", &touched);
-    let ran = Command::new("sh")
+    let ran = bare(Command::new("sh"))
         .args(["-c", &script])
         .current_dir(&judged.tree)
         .output()
@@ -8679,7 +8690,7 @@ fn the_rust_campaign_finds_the_mutants_of_every_awkward_name() {
         .join(nunki::mutants::SCRIPT);
     let mut handed: Vec<&str> = vec![":!*.rs"];
     handed.extend(awkward.iter().map(|(path, _)| *path));
-    let out = Command::new(&script)
+    let out = bare(Command::new(&script))
         .arg("campaign-1")
         .args(&handed)
         .env(nunki::mutants::BASE_ENV, &base)
@@ -8772,7 +8783,7 @@ fn the_rust_campaign_records_every_survivor_of_a_name_with_a_tab_or_a_newline() 
         .path()
         .join("nunki/stacks/rust")
         .join(nunki::mutants::SCRIPT);
-    let out = Command::new(&script)
+    let out = bare(Command::new(&script))
         .arg("campaign-1")
         .args(controlled.iter().map(|(path, _)| *path))
         .env(nunki::mutants::BASE_ENV, &base)
