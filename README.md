@@ -697,6 +697,58 @@ unloaded baseline: at 12 jobs both survivors came back as timeouts, which
 count as killed. Raise it for a project whose build leaves cores idle, and
 measure there first.
 
+### Campaigns outside missions: `nunki mutants`
+
+A mission measures what its branch changed, and a sample of it when it does
+not fit the budget. What neither sees is caught by a campaign you launch on
+the project's base, when you choose: there is no scheduler.
+
+```sh
+nunki mutants run --slot <slot>            # what changed since the last completed one
+nunki mutants run --slot <slot> --whole    # the whole code
+nunki mutants status                       # read it back, and say the debt
+```
+
+- **What it runs on.** The base as your repository has it: `--base`, `dev`
+  by default as for `mission new`, at the commit the host records, never a
+  ref of the slot. It runs in the clean copy of a slot no mission holds, put
+  on that commit; the slot's own checkout does not move. A slot a mission
+  holds is refused, and so is one no mission ever ran in, which has no
+  container yet.
+- **The two forms.**
+  - Without `--whole`, it runs on what changed since the last completed
+    campaign outside missions: that campaign's commit as the fork point, and
+    the files changed since. With none completed, it is refused and names
+    `--whole`. With nothing changed since, nothing starts.
+  - With `--whole`, it runs on every tracked file with no fork point. Each
+    stack reads the files it owns; cargo-mutants ignores the paths that are
+    not Rust (measured on 27.1.0).
+- **No sample, a long deadline.** It is where the whole is measured, so it
+  is given no budget. `--minutes` (720 by default) only stops one that hangs.
+- **Asking never starts one.** `run` refuses while a campaign is filed in
+  the slot. `status` reads it back, asking the container, unlike `nunki
+  mission mutants --status`, which reads only the record. It never starts
+  one, so a loop polling it waits.
+- **Never a mission's.** Its in-flight record is the slot's, marked outside
+  missions. A mission's reading of that slot, the launch of its campaign or
+  of its run, is refused and names `nunki mutants status`.
+- **The debt.** A campaign that said it finished and measured, by the same
+  rules as a mission's, lands in the project's debt (`mutants-debt.json`
+  under the HQ), with the registry of equivalences applied.
+  - A campaign on the whole code replaces the debt.
+  - One on what changed since adds what it found. A survivor already owed
+    under the same key keeps its entry: such a campaign measures again only
+    the lines changed since the last one.
+  - A campaign stopped short, or that measured nothing, leaves the debt as
+    it was.
+- **Not built yet:** listing and ruling the debt in one go (`nunki mutants
+  debt`), and the hardening mission that writes the tests. SPEC 4.4 records
+  both as decided.
+- **The disk.** The sweep and the 2 GiB floor apply here as in a mission.
+  What the sweep frees on a large crate is not measured, and on a nearly
+  full disk shared with other services, a whole-crate campaign will meet
+  the floor before it ends.
+
 ### What a campaign leaves behind
 
 A campaign leaves the build cache as it found it. Every mutant builds the

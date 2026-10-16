@@ -556,6 +556,7 @@ par un adaptateur (4.3), et le moteur de conteneurs que par un autre.
 | `nunki mission new/start/reframe/status/say/watch/pause/resume/stop/kill/end/accept/iterate/fetch/archive` | le cycle d'une mission, du cadrage au rapatriement des commits ; `say` dépose une consigne pour le **run suivant**, `watch` rend deux états (tourne, fini) plus un troisième que l'humain provoque (gelé), `stop` termine le run proprement (4.3), **`end` déclare la mission abandonnée** |
 | `nunki exec <slot> <cmd>` | joue une commande dans le conteneur du slot — c'est ainsi que le HQ **rejoue une preuve** sans avoir la stack sur l'hôte. Par défaut sur la **copie git propre de `HEAD`** que la porte 7 utilise, pas sur l'arbre que l'agent a habité : un `Makefile`, un `pytest.ini` ou un alias `cargo` posé par l'agent y tromperait la preuve. Jamais pendant un run sur l'arbre de travail. Un slot dont les conteneurs sont arrêtés est d'abord relevé avec le profil que le dernier lancement a écrit — sans quoi chaque porte jouée dans la copie reste injouée, et le run suivant, qui n'est lancé qu'une fois ces portes jouées, ne part jamais |
 | `nunki verify <mission>` | les portes de vérification sur la mission du codeur, puis enchaîne la mission d'intégration, puis la mission de sécurité, chacune avec ses portes ; à la première rouge, applique les règles d'itération (4.5) ; à la fin, rend la main à l'humain pour la validation du push. **Reprenable** : son état est persisté à chaque transition, et le relancer reprend au même point |
+| `nunki mutants run --slot <slot>`, `nunki mutants status` | une campagne hors mission, sur la base telle que le dépôt de l'humain l'a, dans un slot qu'aucune mission ne tient : sur ce qui a changé depuis la dernière terminée, ou sur tout le code avec `--whole` ; `status` la relit dans la dette du projet et ne lance jamais rien (4.4, porte 7) |
 | `nunki push <mission>` | après validation humaine explicite (un argument, pas un dialogue), pousse la branche depuis le dépôt principal et ouvre la pull request. C'est le seul verbe qui touche la forge en écriture, et il refuse sans `INTEGRATED` et `CLEAR` sur le dernier commit et le verdict du codeur sur son ancêtre (4.4). Il parle à l'API de la forge avec un credential de l'humain, rangé à côté des comptes (`~/.nunki/forge-token`, un jeton GitHub qui peut ouvrir des pull requests) et jamais monté dans un conteneur — un conteneur ne voit du HQ que son propre dossier de mission, un niveau plus bas. **Le même `--yes` couvre le push et l'ouverture** : un verbe, un argument. Titre et corps viennent du `PR.md` de la mission (la première ligne qui dit quelque chose est le titre) ; le corps est `PR.md` tel qu'il est écrit, suivi de la note sur les écarts puis de la section Security que `nunki` écrit à partir du verdict, sans toucher `PR.md` (4.5) ; sans `PR.md`, ou vide, la branche est poussée et aucune pull request n'est ouverte ; une pull request déjà ouverte pour la branche — second push après un volet — est retrouvée, pas signalée en échec. Sans credential, sur une remote dont la forge n'a pas d'adaptateur, ou si la forge refuse, **le push reste fait** et `nunki` rend l'adresse exacte à ouvrir avec la raison : un push rapporté rouge serait relancé, et le second `git push` ne ferait rien qu'effacer la trace du premier. **Un adaptateur par forge**, comme il y en a un par harnais (4.3) et un par moteur de conteneurs (4.2) : ce qui est propre à une forge — l'adresse de son API, la forme de ses requêtes, la façon dont une remote nomme un dépôt — vit dans son adaptateur, et rien au-dessus ne le connaît. GitHub est le seul implémenté ; une remote ailleurs est **dite ailleurs, jamais devinée**, et ajouter GitLab est un fichier à écrire, pas un remaniement. Client HTTP : `ureq` ; ses racines de confiance sont celles de Mozilla, embarquées (`webpki-roots`, données sous CDLA-Permissive-2.0, exception écrite dans `deny.toml` pour cette seule crate) — un proxy d'entreprise qui re-signe le TLS serait la raison d'y revenir |
 | `nunki check [--mission <id>]` | dit si un dépôt, ses slots et leurs conteneurs sont dans l'état que ce fichier décrit ; rouge si une restriction n'est pas tenue ; sonde le profil mission sans argument, et le profil système d'une mission donnée avec `--mission` ; **dit ce qu'il n'a pas pu vérifier** (la forge sans credential ou quand l'humain tient la protection à la main, LF quand un `.gitattributes` existant ne le force pas) |
 | `nunki logs <mission>` | rend la sortie structurée des runs, lisible |
@@ -2169,31 +2170,67 @@ dernier lot. La première rouge arrête tout.
    budget lui-même — est due de nouveau une fois, puisque le délai est
    désormais plus long.
 
+   **Des campagnes hors mission, lancées par l'humain.** `nunki` n'a aucun
+   ordonnanceur : `nunki mutants run --slot <slot>` en lance une quand
+   l'humain le veut, sous deux formes. Sans option, sur ce qui a changé
+   depuis la dernière campagne hors mission terminée — son commit pour
+   `NUNKI_BASE`, les fichiers changés depuis — qui rattrape ce que les
+   échantillons ont laissé. Avec `--whole`, sur tout le code et sans point
+   de fourche : chaque fichier suivi, que chaque stack lit à sa façon
+   (mesuré sur cargo-mutants 27.1.0 : un chemin qui n'est pas du Rust est
+   ignoré) ; seule celle-ci ferme la limite de la chaîne. Sans campagne
+   terminée, la première forme est refusée et nomme `--whole` ; sur une base
+   qui n'a pas bougé depuis, rien ne part.
+
+   Elle tourne sur la base telle que le dépôt de l'humain l'a — le commit
+   que l'hôte enregistre, jamais une ref du slot —, dans la copie propre
+   d'un slot qu'aucune mission ne tient, remise à ce commit sans que le
+   checkout du slot bouge. Un slot qu'une mission tient est refusé, en la
+   nommant ; un slot où aucune mission n'a jamais tourné aussi, faute de
+   conteneur. Pas de budget, donc pas d'échantillon : c'est ici que le tout
+   se mesure, sous un délai qui n'arrête qu'une campagne bloquée
+   (`--minutes`, 720 par défaut). Son dossier en vol est celui du slot,
+   celui que toute porte de la copie consulte, marqué hors mission : la
+   lecture d'une mission le refuse — le lancement de sa campagne, celui de
+   son run — en nommant `nunki mutants status`, si bien qu'une campagne hors
+   mission n'est jamais enregistrée comme celle d'une mission.
+
+   **Demander ne lance jamais.** `nunki mutants run` refuse tant qu'une
+   campagne est déposée dans le slot. `nunki mutants status` la relit — il
+   interroge le conteneur, au contraire de `nunki mission mutants --status`
+   — et ne lance jamais rien : une boucle qui l'interroge attend sans
+   lancer. Relue, une campagne qui a dit avoir fini et a mesuré, par les
+   mêmes règles qu'une campagne de mission, entre dans la **dette** du
+   projet (`mutants-debt.json`, au HQ), le registre des équivalences
+   appliqué. Une campagne sur tout le code la remplace. Une campagne sur ce
+   qui a changé depuis y ajoute ce qu'elle a trouvé, un survivant déjà dû
+   sous la même clé gardant son entrée : sa base bouge à chaque campagne, et
+   elle ne remesure que les lignes changées depuis. Une campagne arrêtée
+   court, ou qui n'a rien mesuré, laisse la dette telle qu'elle était.
+
+   Ce qu'on perd : ces cas ne sont rattrapés que quand l'humain lance une
+   campagne ; le minimum conseillé est une campagne sur tout le code avant
+   chaque mise en production. Limite, écrite : le disque. Le balayage et le
+   plancher de 2 Gio valent pour elle comme pour une campagne de mission,
+   mais ce que le balayage libère sur un gros crate n'est pas mesuré
+   (environ 11 Go par heure sans lui) ; sur un disque presque plein et
+   partagé, le plancher l'arrêtera avant la fin.
+
    **Décidé, pas encore construit.** Une règle change encore la porte 7. Le
    changement qui la construit l'écrit à la place de celle qu'elle
    remplace, et retire son entrée d'ici. Jusque-là, le reste de cette
    section décrit ce que `nunki` fait.
 
-   - **Des campagnes hors mission, lancées par l'humain.** `nunki` n'a
-     aucun ordonnanceur. C'est un verbe, que l'humain lance quand il le
-     veut, sur la branche de base du projet, sous deux formes :
-     - sur ce qui a changé depuis la dernière campagne hors mission, qui
-       rattrape ce que les échantillons ont laissé ;
-     - sur tout le code, seule à fermer la limite de la chaîne.
+   - **Ce qui solde la dette.** `nunki mutants debt` la liste, et le HQ la
+     tranche en une fois plutôt qu'une par mission, dans le registre des
+     équivalences que les missions lisent. Une mission de durcissement, au
+     niveau `standard`, écrit les tests qui tuent ses survivants. Une
+     mission qui n'écrit que des tests n'atteint aucun mutant par son diff :
+     ce qui la mesure, c'est de remesurer les survivants de la dette par leur
+     nom, par le filtre de la règle du budget.
 
-     Leurs survivants vont dans une liste propre au projet, dans son home.
-     Le registre des équivalences s'y applique, et le HQ tranche les
-     nouvelles en une fois, plutôt qu'une par mission. Une mission de
-     durcissement, au niveau `standard`, écrit les tests qui les tuent.
-
-     Ce qu'on perd : ces cas ne sont rattrapés que quand l'humain lance une
-     campagne. Le minimum conseillé est une campagne sur tout le code avant
-     chaque mise en production. Prérequis : les informations de débogage
-     séparées ne remplissent plus le disque pendant une longue campagne
-     (mesuré : environ 11 Go par heure).
-
-   D'ici là, le cas d'un fichier inchangé n'a pour remède que `--again`, et
-   un survivant hors de l'échantillon, aucun : c'est assumé.
+   D'ici là, la dette se lit dans `nunki mutants status` et se solde à la
+   main.
 
    **Le contrat de `mutation.sh` s'enrichit**, tout en restant facultatif
    pour une stack qui ne veut pas de chaîne :

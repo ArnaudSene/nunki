@@ -754,10 +754,45 @@ pub struct Running {
     /// wrote, which reads as a full campaign.
     #[serde(default)]
     pub chain: Chain,
+    /// Set for a campaign outside missions ([`crate::offmission`]): what it
+    /// runs on. Such a campaign is read back into the project's debt, never
+    /// into a mission's [`FILE`], and a mission's reading of the slot refuses
+    /// it ([`MutantsError::OffMission`]). Absent from a mission's campaign.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub off_mission: Option<OffMission>,
+}
+
+/// What a campaign outside missions runs on (SPEC 4.4, the campaigns
+/// outside missions).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OffMission {
+    /// The base branch, by name.
+    pub base: String,
+    /// The commit the host recorded for it ([`crate::git::SlotGit::origin_branch`]).
+    pub commit: String,
+    /// The commit of the last completed campaign outside missions, for one
+    /// on what changed since it; `None` for one on the whole code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum MutantsError {
+    #[error(
+        "a campaign outside missions, on {base} at {commit}, is in flight in slot {slot} or has \
+         ended and not been read back: `nunki mutants status` reads it back, and until then no \
+         mission's campaign or run uses this slot's clean copy"
+    )]
+    OffMission {
+        slot: String,
+        base: String,
+        commit: String,
+    },
+    #[error(
+        "the campaign filed in slot {slot} is a mission's, not one outside missions: the \
+         mission's own verbs read it back"
+    )]
+    MissionCampaign { slot: String },
     #[error(transparent)]
     Git(#[from] git::GitError),
     #[error("{0} is not a campaign `nunki` can read: {1}")]
@@ -2891,11 +2926,58 @@ pub fn read_back(
     engine: std::sync::Arc<dyn crate::engine::Engine>,
     dir: &Path,
 ) -> Result<Option<Progress>, MutantsError> {
+    read_back_into(project, slot, engine, Sink::Mission(dir))
+}
+
+/// [`read_back`] for a campaign outside missions: the same reading — the
+/// deadline, the stop confirmed, the container asked — recorded into the
+/// project's debt ([`crate::offmission`]) rather than a mission's [`FILE`].
+/// A mission's campaign filed in the slot is refused.
+pub fn read_back_off_mission(
+    project: &crate::project::Project,
+    slot: &crate::slot::Slot,
+    engine: std::sync::Arc<dyn crate::engine::Engine>,
+) -> Result<Option<Progress>, MutantsError> {
+    read_back_into(project, slot, engine, Sink::OffMission)
+}
+
+/// Where a campaign read back is recorded.
+enum Sink<'a> {
+    /// A mission's folder.
+    Mission(&'a Path),
+    /// The project's debt ([`crate::offmission`]).
+    OffMission,
+}
+
+fn read_back_into(
+    project: &crate::project::Project,
+    slot: &crate::slot::Slot,
+    engine: std::sync::Arc<dyn crate::engine::Engine>,
+    sink: Sink<'_>,
+) -> Result<Option<Progress>, MutantsError> {
     use crate::harness::spawn::{Presence, Spawned, Spawner};
 
     let Some(running) = read_running(&project.hq_root, &slot.name)? else {
         return Ok(None);
     };
+    // A campaign is read back by its own kind only: an off-mission one
+    // recorded into a mission's file would answer gate 7 for content the
+    // mission never had (SPEC 4.4, the campaigns outside missions).
+    match (&sink, &running.off_mission) {
+        (Sink::Mission(_), Some(off)) => {
+            return Err(MutantsError::OffMission {
+                slot: slot.name.clone(),
+                base: off.base.clone(),
+                commit: crate::text::one_line(short(&off.commit)).to_string(),
+            });
+        }
+        (Sink::OffMission, None) => {
+            return Err(MutantsError::MissionCampaign {
+                slot: slot.name.clone(),
+            });
+        }
+        _ => {}
+    }
     let spawner = spawner_of(project, slot, engine.clone(), &running)?;
     let spawned = Spawned {
         pid: running.pid,
@@ -2937,14 +3019,19 @@ pub fn read_back(
                     // paused campaign always is here.
                     None if halt == Halt::Paused => in_flight(None),
                     None => {
-                        let survivors = record_stopped(
-                            dir,
-                            &running,
-                            &text,
-                            Stopped::Deadline {
-                                minutes: running.deadline_minutes,
-                            },
-                        )?;
+                        // Outside missions nothing is recorded of a campaign
+                        // stopped short: the debt holds what was measured.
+                        let survivors = match &sink {
+                            Sink::Mission(dir) => record_stopped(
+                                dir,
+                                &running,
+                                &text,
+                                Stopped::Deadline {
+                                    minutes: running.deadline_minutes,
+                                },
+                            )?,
+                            Sink::OffMission => 0,
+                        };
                         forget_running(&project.hq_root, &slot.name)?;
                         Progress::Overrun {
                             minutes: running.deadline_minutes,
@@ -2971,7 +3058,10 @@ pub fn read_back(
             Halt::Paused => in_flight(None),
             halt => match unstopped_said(&halt) {
                 Some(why) => in_flight(Some(format!("its script has ended, and {why}"))),
-                None => read_ended(project, slot, dir, &running)?,
+                None => match &sink {
+                    Sink::Mission(dir) => read_ended(project, slot, dir, &running)?,
+                    Sink::OffMission => crate::offmission::read_ended(project, slot, &running)?,
+                },
             },
         },
         // A positive answer from the engine: the container has exited, or the
@@ -3180,7 +3270,7 @@ pub fn reset_said(reset: &Reset) -> String {
 ///
 /// Only once the record is forgotten — the refresh refuses a copy a
 /// campaign owns.
-fn reset_copy(
+pub(crate) fn reset_copy(
     project: &crate::project::Project,
     slot: &crate::slot::Slot,
     engine: std::sync::Arc<dyn crate::engine::Engine>,
@@ -3193,7 +3283,7 @@ fn reset_copy(
 
 /// The spawner that reaches the campaign `running` describes, in this slot's
 /// agent container.
-fn spawner_of(
+pub(crate) fn spawner_of(
     project: &crate::project::Project,
     slot: &crate::slot::Slot,
     engine: std::sync::Arc<dyn crate::engine::Engine>,
@@ -3576,6 +3666,7 @@ pub fn campaign(
                 handed: Some(paths),
                 sample: None,
             },
+            off_mission: None,
         },
     )?;
     Ok(Progress::Started {

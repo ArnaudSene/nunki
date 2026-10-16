@@ -148,6 +148,7 @@ fn a_campaign_found_stopped_writes_no_result() {
         &project.hq_root,
         &slot.name,
         &mutants::Running {
+            off_mission: None,
             chain: Default::default(),
             fingerprint: "abc1234".into(),
             head: git(&tree, &["rev-parse", "HEAD"]),
@@ -239,6 +240,7 @@ fn a_campaign_that_stopped_and_said_why_goes_back_to_the_branch() {
         &project.hq_root,
         &slot.name,
         &mutants::Running {
+            off_mission: None,
             chain: Default::default(),
             fingerprint: "abc1234".into(),
             head: git(&tree, &["rev-parse", "HEAD"]),
@@ -352,6 +354,7 @@ fn a_launch_ends_the_campaign_it_would_have_killed_anyway() {
             &project.hq_root,
             &slot.name,
             &mutants::Running {
+                off_mission: None,
                 chain: Default::default(),
                 fingerprint: "abc1234".into(),
                 head: "def5678".into(),
@@ -458,6 +461,7 @@ fn ending_a_campaign_records_no_result() {
         &project.hq_root,
         &slot.name,
         &mutants::Running {
+            off_mission: None,
             chain: Default::default(),
             fingerprint: "abc1234".into(),
             head: "def5678".into(),
@@ -733,6 +737,7 @@ fn live_a_campaign_is_stopped_whole_in_its_container() {
     }
     let started = std::fs::metadata(&grown).map(|m| m.len()).unwrap_or(0);
     let running = mutants::Running {
+        off_mission: None,
         chain: Default::default(),
         fingerprint: fingerprint.into(),
         head: "0000000".into(),
@@ -879,6 +884,7 @@ fn live_a_campaign_whose_script_was_killed_is_called_off_whole_in_its_container(
         &project.hq_root,
         &slot.name,
         &mutants::Running {
+            off_mission: None,
             chain: Default::default(),
             fingerprint: fingerprint.into(),
             head: "0000000".into(),
@@ -2626,6 +2632,7 @@ fn a_finished_campaign_that_tried_nothing_of_what_it_found_is_not_recorded() {
         &project.hq_root,
         &slot.name,
         &mutants::Running {
+            off_mission: None,
             chain: Default::default(),
             fingerprint: "abc1234".into(),
             head: git(&tree, &["rev-parse", "HEAD"]),
@@ -2735,6 +2742,7 @@ fn a_campaign_that_said_it_finished_twice_leaves_its_reason_and_no_result() {
         &project.hq_root,
         &slot.name,
         &mutants::Running {
+            off_mission: None,
             chain: Default::default(),
             fingerprint: "abc1234".into(),
             head: git(&tree, &["rev-parse", "HEAD"]),
@@ -6313,6 +6321,7 @@ fn a_partial_campaign_is_read_back_with_its_chain_or_forgotten_when_it_broke() {
             &project.hq_root,
             &slot.name,
             &mutants::Running {
+                off_mission: None,
                 chain: Chain {
                     sample: None,
                     fork: Some(FORK.into()),
@@ -7255,6 +7264,7 @@ fn in_flight_with(
         &project.hq_root,
         &slot.name,
         &mutants::Running {
+            off_mission: None,
             chain: Default::default(),
             fingerprint: "abc1234".into(),
             head: "def5678".into(),
@@ -9076,6 +9086,7 @@ fn a_campaign_in_flight_is_read_from_its_record_and_its_log_alone() {
     let log = hq_root.join("mutants.log");
     std::fs::write(&log, "a\nb\nc\n").unwrap();
     let running = |log: PathBuf| mutants::Running {
+        off_mission: None,
         fingerprint: "abc1234def".into(),
         head: "h".into(),
         started_at: "2026-10-14T12:00:00Z".into(),
@@ -9196,6 +9207,7 @@ fn following_a_campaign_with_status_never_starts_or_touches_one() {
         &hq_root,
         "one",
         &mutants::Running {
+            off_mission: None,
             fingerprint: "abc1234def".into(),
             head: "h".into(),
             started_at: "2026-10-14T12:00:00Z".into(),
@@ -9432,4 +9444,323 @@ fn a_campaigns_pace_is_kept_for_the_next_when_it_tried_enough() {
     assert_eq!(mutants::read_pace(hq.path()), Some(30));
     std::fs::write(hq.path().join(mutants::PACE_FILE), "not json").unwrap();
     assert_eq!(mutants::read_pace(hq.path()), None);
+}
+
+// ---------------------------------------------------------------------------
+// Campaigns outside missions (SPEC 4.4): `nunki mutants`.
+// ---------------------------------------------------------------------------
+
+/// A campaign outside missions, filed in `slot` as in flight, on `dev` at
+/// `commit`, since `since`, its log `log`.
+fn off_mission_filed(
+    project: &nunki::project::Project,
+    slot: &str,
+    log: &Path,
+    commit: &str,
+    since: Option<&str>,
+) {
+    mutants::write_running(
+        &project.hq_root,
+        slot,
+        &mutants::Running {
+            off_mission: Some(mutants::OffMission {
+                base: "dev".into(),
+                commit: commit.into(),
+                since: since.map(str::to_string),
+            }),
+            chain: Default::default(),
+            fingerprint: format!("off-mission-{commit}"),
+            head: commit.into(),
+            started_at: "2026-10-16T02:00:00Z".into(),
+            container: "cafe1234".into(),
+            pid: Some(41),
+            log: log.to_path_buf(),
+            deadline_minutes: 720,
+        },
+    )
+    .unwrap();
+}
+
+/// An engine whose container is up and whose campaign's script has ended,
+/// with nothing of it left: what a campaign that finished leaves.
+fn ended_engine() -> std::sync::Arc<dyn nunki::engine::Engine> {
+    use nunki::engine::{ExecOutput, fake::FakeEngine};
+    std::sync::Arc::new(
+        stops_whole(FakeEngine::default())
+            .with_liveness("cafe1234", nunki::engine::Liveness::Running)
+            .with_exec(ExecOutput {
+                status: 0,
+                stdout: "nunki-run-ended\n".into(),
+                stderr: String::new(),
+            }),
+    )
+}
+
+/// A slot with a profile, as a mission's launch leaves it.
+fn with_profile(dir: &Path) -> (nunki::project::Project, nunki::slot::Slot) {
+    let (project, slot) = context(dir);
+    let profile = nunki::run::profile_path(&project, &slot.name);
+    std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+    std::fs::write(&profile, "services: {}\n").unwrap();
+    (project, slot)
+}
+
+/// A mission never reads back a campaign outside missions: its reading of
+/// the slot, the launch of its campaign, refuse it — naming `nunki mutants
+/// status` — and leave it filed, and the mission's file untouched. The other
+/// way round, a mission's campaign is not read back as one outside missions.
+#[test]
+fn a_mission_never_reads_back_a_campaign_outside_missions() {
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot) = with_profile(dir.path());
+    let mission = dir.path().join("mission");
+    std::fs::create_dir_all(&mission).unwrap();
+    let log = dir.path().join("off.log");
+    std::fs::write(
+        &log,
+        "{\"campaign\":\"done\",\"tried\":3,\"found\":3,\"missed\":0}\n",
+    )
+    .unwrap();
+    off_mission_filed(&project, &slot.name, &log, "aaaaaaaaaaaaaaaa", None);
+    let record = mutants::running_path(&project.hq_root, &slot.name);
+    let before = std::fs::read(&record).unwrap();
+
+    let err = mutants::read_back(&project, &slot, ended_engine(), &mission).unwrap_err();
+    assert!(
+        matches!(err, mutants::MutantsError::OffMission { .. }),
+        "{err}"
+    );
+    assert!(
+        err.to_string()
+            .contains("`nunki mutants status` reads it back"),
+        "{err}"
+    );
+    let err = mutants::campaign(
+        &project,
+        &slot,
+        ended_engine(),
+        &mission,
+        "rust",
+        &mutants::Asked {
+            base: "dev",
+            budget_minutes: 45,
+            replay: mutants::Replay::WhenChanged,
+            rigor: nunki::mission::Rigor::Standard,
+            threshold: 80,
+        },
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, mutants::MutantsError::OffMission { .. }),
+        "{err}"
+    );
+    assert_eq!(std::fs::read(&record).unwrap(), before);
+    assert_eq!(mutants::read(&mission).unwrap(), None);
+
+    // A mission's campaign, the other way round.
+    mutants::forget_running(&project.hq_root, &slot.name).unwrap();
+    mutants::write_running(
+        &project.hq_root,
+        &slot.name,
+        &mutants::Running {
+            off_mission: None,
+            ..mutants::read_running(&project.hq_root, &slot.name)
+                .unwrap()
+                .unwrap_or(mutants::Running {
+                    off_mission: None,
+                    chain: Default::default(),
+                    fingerprint: "abc1234".into(),
+                    head: "h".into(),
+                    started_at: "2026-10-16T02:00:00Z".into(),
+                    container: "cafe1234".into(),
+                    pid: Some(41),
+                    log: log.clone(),
+                    deadline_minutes: 45,
+                })
+        },
+    )
+    .unwrap();
+    let err = mutants::read_back_off_mission(&project, &slot, ended_engine()).unwrap_err();
+    assert!(
+        matches!(err, mutants::MutantsError::MissionCampaign { .. }),
+        "{err}"
+    );
+    assert!(
+        mutants::read_running(&project.hq_root, &slot.name)
+            .unwrap()
+            .is_some()
+    );
+}
+
+/// A campaign outside missions that finished is read back into the debt.
+/// One on the whole code replaces the debt; one on what changed since adds
+/// what it found, a survivor already owed under the same key keeping its
+/// entry. One that never said it finished leaves the debt as it was. The
+/// record is forgotten each time.
+#[test]
+fn a_campaign_outside_missions_is_read_back_into_the_debt() {
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot) = with_profile(dir.path());
+    let log = dir.path().join("off.log");
+    let survivor = |id: &str, description: &str| {
+        format!(
+            "{{\"id\":\"{id}\",\"file\":\"src/lib.rs\",\"line\":3,\"description\":\"{description}\"}}\n"
+        )
+    };
+    let done = |tried: u32, missed: u32| {
+        format!(
+            "{{\"campaign\":\"done\",\"tried\":{tried},\"found\":{tried},\"missed\":{missed}}}\n"
+        )
+    };
+    let read = |commit: &str, since: Option<&str>, text: String| {
+        std::fs::write(&log, text).unwrap();
+        off_mission_filed(&project, &slot.name, &log, commit, since);
+        let progress = mutants::read_back_off_mission(&project, &slot, ended_engine())
+            .unwrap()
+            .expect("filed");
+        assert!(
+            mutants::read_running(&project.hq_root, &slot.name)
+                .unwrap()
+                .is_none()
+        );
+        (
+            progress,
+            nunki::offmission::read_debt(&project.hq_root).unwrap(),
+        )
+    };
+
+    let (progress, debt) = read(
+        "aaaaaaaaaaaaaaaa",
+        None,
+        survivor("a", "replace one") + &survivor("b", "replace two") + &done(10, 2),
+    );
+    assert!(
+        matches!(progress, mutants::Progress::Finished { survivors: 2, .. }),
+        "{progress:?}"
+    );
+    assert_eq!(debt.owed.len(), 2);
+    let last = debt.last.clone().unwrap();
+    assert!(last.whole);
+    assert_eq!(
+        (last.commit.as_str(), last.tried),
+        ("aaaaaaaaaaaaaaaa", Some(10))
+    );
+
+    // Since the last: one already owed, one new.
+    let (_, debt) = read(
+        "bbbbbbbbbbbbbbbb",
+        Some("aaaaaaaaaaaaaaaa"),
+        survivor("a2", "replace one") + &survivor("c", "replace three") + &done(4, 2),
+    );
+    let owed: Vec<(&str, &str)> = debt
+        .owed
+        .iter()
+        .map(|o| (o.survivor.description.as_str(), o.found_at.as_str()))
+        .collect();
+    assert_eq!(
+        owed,
+        [
+            ("replace one", "aaaaaaaaaaaaaaaa"),
+            ("replace two", "aaaaaaaaaaaaaaaa"),
+            ("replace three", "bbbbbbbbbbbbbbbb"),
+        ]
+    );
+    assert!(!debt.last.clone().unwrap().whole);
+
+    // Never said it finished: the debt stays.
+    let (progress, after) = read(
+        "cccccccccccccccc",
+        Some("bbbbbbbbbbbbbbbb"),
+        survivor("d", "x"),
+    );
+    assert!(
+        matches!(progress, mutants::Progress::CouldNotRun(_)),
+        "{progress:?}"
+    );
+    assert_eq!(after, debt);
+
+    // The whole code again: the debt is what it found.
+    let (_, debt) = read(
+        "dddddddddddddddd",
+        None,
+        survivor("e", "replace four") + &done(12, 1),
+    );
+    assert_eq!(debt.owed.len(), 1);
+    assert_eq!(debt.owed[0].survivor.description, "replace four");
+    assert!(nunki::offmission::debt_said(&debt).contains("1 survivor(s) owed"));
+}
+
+/// `run` starts nothing while a campaign is filed in the slot, and nothing
+/// in a slot no mission ever ran in: no profile, no container.
+#[test]
+fn a_campaign_outside_missions_starts_only_where_nothing_is_filed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot) = context(dir.path());
+    let asked = nunki::offmission::Asked {
+        base: "dev",
+        form: nunki::offmission::Form::Whole,
+        minutes: 720,
+    };
+    let err = nunki::offmission::run(&project, &slot, ended_engine(), "rust", &asked).unwrap_err();
+    assert!(
+        matches!(err, nunki::offmission::OffMissionError::NoProfile(_)),
+        "{err}"
+    );
+
+    let (project, slot) = with_profile(&dir.path().join("second"));
+    let log = dir.path().join("off.log");
+    std::fs::write(&log, "").unwrap();
+    off_mission_filed(&project, &slot.name, &log, "aaaaaaaaaaaaaaaa", None);
+    let record = mutants::running_path(&project.hq_root, &slot.name);
+    let before = std::fs::read(&record).unwrap();
+    for _ in 0..3 {
+        let err =
+            nunki::offmission::run(&project, &slot, ended_engine(), "rust", &asked).unwrap_err();
+        assert!(
+            matches!(err, nunki::offmission::OffMissionError::InFlight { .. }),
+            "{err}"
+        );
+        assert!(
+            err.to_string()
+                .contains("`nunki mutants status` reads it back"),
+            "{err}"
+        );
+    }
+    assert_eq!(std::fs::read(&record).unwrap(), before);
+}
+
+/// `nunki mutants status`, asked again and again with nothing filed, says
+/// the debt and files nothing: polling it never starts a campaign.
+#[test]
+fn asking_for_the_status_outside_missions_never_starts_a_campaign() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    let user_home = dir.path().join("home");
+    let home = common::project_home(&root, &user_home, "harness: claude-code\n");
+    let hq_root = home.join(nunki::project::HQ_DIR);
+    for _ in 0..3 {
+        let out = Command::new(env!("CARGO_BIN_EXE_nunki"))
+            .arg("-C")
+            .arg(&root)
+            .args(["mutants", "status"])
+            .env("HOME", &user_home)
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success(),
+            "{said}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            said.contains("no campaign outside missions has completed on this project"),
+            "{said}"
+        );
+    }
+    let campaigns = hq_root.join("campaigns");
+    let filed = std::fs::read_dir(&campaigns)
+        .map(|entries| entries.count())
+        .unwrap_or(0);
+    assert_eq!(filed, 0, "a campaign was filed by asking for the status");
+    assert!(!nunki::offmission::debt_path(&hq_root).exists());
 }

@@ -78,6 +78,11 @@ enum Command {
     #[command(subcommand)]
     Slot(SlotCommand),
 
+    /// Campaigns outside missions: on the base, launched by you, read back
+    /// into the project's debt of survivors (SPEC 4.4).
+    #[command(subcommand)]
+    Mutants(MutantsCommand),
+
     /// Push a verified mission's branch, and hand the pull request over.
     ///
     /// The one verb that touches the forge in write, and the one thing in
@@ -227,6 +232,40 @@ enum SecretCommand {
     Forget {
         /// The finding, as `nunki secret list` names it.
         id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum MutantsCommand {
+    /// Start a campaign outside missions, in a slot no mission holds, on the
+    /// base as your repository has it: on what changed since the last
+    /// completed one, or on the whole code with `--whole`. It starts nothing
+    /// while a campaign is filed in the slot; `nunki mutants status` reads
+    /// one back.
+    Run {
+        /// The slot to run it in: one no mission holds.
+        #[arg(long)]
+        slot: String,
+        /// Measure the whole code, rather than what changed since the last
+        /// completed campaign outside missions.
+        #[arg(long)]
+        whole: bool,
+        /// The branch it runs on, as `nunki mission new` defaults it.
+        #[arg(long, default_value = "dev")]
+        base: String,
+        /// Its deadline, in minutes. It measures no sample, so the deadline
+        /// only stops a campaign that hangs.
+        #[arg(long, default_value_t = nunki::offmission::DEFAULT_MINUTES)]
+        minutes: u32,
+    },
+    /// Read back the campaign outside missions in flight — asking the
+    /// container, and recording its survivors into the project's debt once
+    /// it has ended — then say the debt. It never starts a campaign: a loop
+    /// polling it waits, and starts nothing.
+    Status {
+        /// The slot to read; every slot when absent.
+        #[arg(long)]
+        slot: Option<String>,
     },
 }
 
@@ -850,6 +889,14 @@ fn main() -> ExitCode {
                     ExitCode::FAILURE
                 }
             }
+        }
+
+        Command::Mutants(command) => {
+            let project = match open(&start) {
+                Some(p) => p,
+                None => return ExitCode::FAILURE,
+            };
+            mutants_outside_missions(&project, command)
         }
 
         Command::Slot(command) => {
@@ -3409,4 +3456,120 @@ fn harness_for(
         spawner = spawner.identified_by(session);
     }
     nunki::harness::claude_code::ClaudeCode::new(Default::default(), Box::new(spawner))
+}
+
+/// `nunki mutants` (SPEC 4.4, the campaigns outside missions).
+fn mutants_outside_missions(
+    project: &nunki::project::Project,
+    command: MutantsCommand,
+) -> ExitCode {
+    let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+        std::sync::Arc::new(nunki::engine::docker::Docker::real());
+    match command {
+        MutantsCommand::Run {
+            slot,
+            whole,
+            base,
+            minutes,
+        } => {
+            let stack = project
+                .config
+                .stacks
+                .first()
+                .map(|s| s.name.clone())
+                .unwrap_or_else(|| "rust".to_string());
+            let asked = nunki::offmission::Asked {
+                base: &base,
+                form: if whole {
+                    nunki::offmission::Form::Whole
+                } else {
+                    nunki::offmission::Form::SinceLast
+                },
+                minutes,
+            };
+            let slot = match nunki::slot::find(project, &slot) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            match nunki::offmission::run(project, &slot, engine, &stack, &asked) {
+                Ok(started) => {
+                    let on = match &started.since {
+                        None => "the whole code".to_string(),
+                        Some(since) => format!(
+                            "what changed since {}",
+                            since.chars().take(12).collect::<String>()
+                        ),
+                    };
+                    println!(
+                        "campaign  started in slot {} on {} at {}: {on}, {} path(s), deadline \
+                         {} minutes",
+                        started.slot,
+                        started.base,
+                        started.commit.chars().take(12).collect::<String>(),
+                        started.paths,
+                        started.minutes
+                    );
+                    println!(
+                        "          `nunki mutants status` reads it back; asking it starts nothing"
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        MutantsCommand::Status { slot } => {
+            let slots = match slot {
+                Some(name) => match nunki::slot::find(project, &name) {
+                    Ok(s) => vec![s],
+                    Err(e) => {
+                        eprintln!("nunki: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                },
+                None => nunki::slot::list(project),
+            };
+            let mut failed = false;
+            for slot in &slots {
+                match nunki::mutants::read_running(&project.hq_root, &slot.name) {
+                    Ok(Some(running)) if running.off_mission.is_some() => {
+                        match nunki::mutants::read_back_off_mission(project, slot, engine.clone()) {
+                            Ok(Some(progress)) => println!(
+                                "{:<10}{}",
+                                slot.name,
+                                nunki::monitor::campaign_line(&progress)
+                            ),
+                            Ok(None) => {}
+                            Err(e) => {
+                                eprintln!("nunki: slot {}: {e}", slot.name);
+                                failed = true;
+                            }
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        eprintln!("nunki: slot {}: {e}", slot.name);
+                        failed = true;
+                    }
+                }
+            }
+            match nunki::offmission::read_debt(&project.hq_root) {
+                Ok(debt) => println!("debt      {}", nunki::offmission::debt_said(&debt)),
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    failed = true;
+                }
+            }
+            if failed {
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+    }
 }

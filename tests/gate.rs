@@ -2199,6 +2199,7 @@ fn the_gates_that_run_in_the_copy_stand_down_while_a_campaign_rewrites_it() {
         &project.hq_root,
         &slot.name,
         &nunki::mutants::Running {
+            off_mission: None,
             chain: Default::default(),
             fingerprint: "a62d271".into(),
             head: git(&f.tree, &["rev-parse", "HEAD"]),
@@ -2252,6 +2253,7 @@ fn gate_seven_waits_for_a_campaign_in_flight_and_never_reads_its_progress_as_a_f
         &project.hq_root,
         &slot.name,
         &nunki::mutants::Running {
+            off_mission: None,
             chain: Default::default(),
             fingerprint: "886307b".into(),
             head: git(&f.tree, &["rev-parse", "HEAD"]),

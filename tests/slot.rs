@@ -504,6 +504,7 @@ fn resetting_refuses_while_a_run_or_a_campaign_is_in_flight_in_the_slot() {
         &project.hq_root,
         "one",
         &nunki::mutants::Running {
+            off_mission: None,
             chain: Default::default(),
             fingerprint: "abc1234".into(),
             head: "def5678".into(),

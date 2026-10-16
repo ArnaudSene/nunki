@@ -528,6 +528,7 @@ fn campaign_in_flight(hq_root: &std::path::Path, slot: &str, lines: usize) -> st
         hq_root,
         slot,
         &nunki::mutants::Running {
+            off_mission: None,
             fingerprint: "abc1234def".into(),
             head: "h".into(),
             started_at: "2026-10-14T12:00:00Z".into(),
