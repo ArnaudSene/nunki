@@ -757,9 +757,58 @@ nunki mutants status                       # read it back, and say the debt
     nothing by file.
   - A campaign stopped short, or that measured nothing, leaves the debt as
     it was.
-- **Not built yet:** listing and ruling the debt in one go (`nunki mutants
-  debt`), and the hardening mission that writes the tests. SPEC 4.4 records
-  both as decided.
+- **Ruling on the debt, once for the project.** The rulings go into the
+  registry of equivalences that every mission's campaign reads, so no
+  mission meets the same mutant and asks again.
+
+  ```sh
+  nunki mutants debt                                            # list it
+  nunki mutants debt --equivalent <survivor> --because <why>    # rule one in the registry
+  nunki mutants debt --ratify <survivor>                        # ratify the registry's proposal
+  nunki mutants debt --ratify --all                             # every proposal, printed first
+  ```
+
+  - **The listing:** each survivor, the commit that found it, the
+    registry's proposal when it has one, and the survivors that share a
+    mutation.
+  - **`--equivalent`** has the same conditions as a mission's ruling. The
+    debt must hold one survivor on that file and description, and the code
+    the mutation replaces must occur once in its file. That code is read at
+    the commit that found it, in your repository, never in a slot. The
+    entry names the campaign as its mission: `off-mission-` and twelve
+    characters of the commit.
+  - **The registry first, then the debt.** Outside missions nothing else
+    holds a ruling. So when the registry cannot take one, nothing is ruled,
+    the verb says why, and the survivor stays owed until a test kills it.
+    When the debt cannot be written after the registry took the ruling,
+    the verb says so. Given again, the same command settles the debt and
+    records nothing twice.
+  - **`--ratify`** keeps the entry's origin and records the ratification
+    beside it, as on a mission. `--all` ratifies exactly the list it
+    printed, in one write of the registry, or nothing.
+  - **A proposal whose entry is gone is refused.** A proposal in the debt
+    stays on its survivor from one campaign to the next, while a mission's
+    is made again by each campaign. If its entry was lifted or replaced
+    since, ratifying it would bring back a lifted ruling, or overwrite a
+    newer one. So it is refused, the listing says so, `--all` leaves it
+    out, and `--equivalent` rules afresh. The entry counts only as it
+    stood: the same mission, commit, date and sentence. Lifted and given
+    again since, even on the same campaign, it is another ruling.
+  - **Survivors sharing a mutation are not ratified.** A proposal on a
+    survivor that shares its file and description with another of the debt
+    is refused, and left out of `--all`: the registry cannot tell the two
+    apart, and only a test settles them.
+  - **A ruled survivor leaves the debt.** The next campaign that finds it,
+    its code unchanged, brings it back as a proposal from the registry,
+    which proposes and never rules. After a campaign on the whole code,
+    `--ratify --all` settles those.
+  - **The debt has its own lock.** `status` takes it before forgetting the
+    campaign it reads back, so while a ruling holds the lock, the campaign
+    stays filed. Under it, `status` reads the record again: a campaign
+    another `status` already read back is not read back twice, and a later
+    campaign's record is not forgotten in its place.
+- **Not built yet:** the hardening mission that writes the tests. SPEC 4.4
+  records it as decided.
 - **The disk.** The sweep and the 2 GiB floor apply here as in a mission.
   What the sweep frees on a large crate is not measured, and on a nearly
   full disk shared with other services, a whole-crate campaign will meet

@@ -401,11 +401,31 @@ fn occurrences(source: &str, span: &[&str]) -> usize {
 /// doubt**: its span is known, every line of it can be read, and that text
 /// occurs exactly once in the file. Otherwise why not, in a sentence.
 pub fn identify(tree: &Path, commit: &str, survivor: &Survivor) -> Result<String, String> {
+    identify_in(tree, commit, survivor, |file| source_at(tree, commit, file))
+}
+
+/// [`identify`], read in the human's own repository at `root` rather than
+/// through a slot: where a survivor of the project's debt is identified, at
+/// the commit of the base its campaign ran on, which that repository holds.
+/// A slot is reused and reset by the next mission; the human's repository
+/// keeps the base's history, and no agent writes it.
+pub fn identify_own(root: &Path, commit: &str, survivor: &Survivor) -> Result<String, String> {
+    identify_in(root, commit, survivor, |file| {
+        source_in(&Reader::Own(root), commit, file)
+    })
+}
+
+fn identify_in(
+    tree: &Path,
+    commit: &str,
+    survivor: &Survivor,
+    source: impl Fn(&str) -> Option<String>,
+) -> Result<String, String> {
     let at = format!("{}:{}", crate::text::name(&survivor.file), survivor.line);
     let (start, end) = survivor.span().ok_or_else(|| {
         format!("{at}: the campaign does not say which lines the mutation replaces")
     })?;
-    let source = source_at(tree, commit, &survivor.file).ok_or_else(|| {
+    let source = source(&survivor.file).ok_or_else(|| {
         format!(
             "{} cannot be read at {} in {}",
             crate::text::name(&survivor.file),
@@ -532,15 +552,27 @@ const LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
 /// The registry's lock. Asked again while another verb holds it, and then
 /// refused, with why.
 fn lock(hq_root: &Path, verb: &str) -> Result<crate::state::SlotLock, String> {
+    hq_lock(hq_root, LOCK, verb)
+}
+
+/// A lock of the project's HQ called `name`, beside the slots' locks:
+/// asked again while another verb holds it, for two seconds, and then
+/// refused, with why. The registry's, and the debt's
+/// ([`crate::offmission`]).
+pub(crate) fn hq_lock(
+    hq_root: &Path,
+    name: &str,
+    verb: &str,
+) -> Result<crate::state::SlotLock, String> {
     let locks = hq_root.join("locks");
     std::fs::create_dir_all(&locks).map_err(|e| format!("{}: {e}", locks.display()))?;
     for _ in 0..LOCK_TRIES {
-        if let Ok(lock) = crate::state::SlotLock::acquire(&locks, LOCK, verb) {
+        if let Ok(lock) = crate::state::SlotLock::acquire(&locks, name, verb) {
             return Ok(lock);
         }
         std::thread::sleep(LOCK_WAIT);
     }
-    crate::state::SlotLock::acquire(&locks, LOCK, verb).map_err(|e| e.to_string())
+    crate::state::SlotLock::acquire(&locks, name, verb).map_err(|e| e.to_string())
 }
 
 /// Take the registry's lock, read it, change it with `change`, and write it
@@ -598,31 +630,70 @@ pub struct Ruling<'a> {
 /// [`identify`] reads the code its mutation replaces, once, at the
 /// campaign's commit.
 pub fn enter(ruling: &Ruling, campaign: &Campaign, id: &str) -> Registered {
+    match fresh(&campaign_given(ruling, campaign), id) {
+        Ok(fresh) => put(ruling.hq_root, "mission mutants (registry)", fresh),
+        Err(why) => Registered::Not(format!("{why}, so the ruling holds on this mission only")),
+    }
+}
+
+/// What a ruling is given among, wherever it is given: the survivors it is
+/// one of, the commit they were found at, on what it is given, and how the
+/// code each one's mutation replaces is read.
+struct Given<'a> {
+    hq_root: &'a Path,
+    /// How a refusal names `survivors`: "the campaign", "the debt".
+    among: &'a str,
+    survivors: &'a [Survivor],
+    commit: &'a str,
+    mission: &'a str,
+    by: &'a str,
+    /// Where the code is read: a mission's slot, or the human's own
+    /// repository.
+    read: Read<'a>,
+}
+
+#[derive(Clone, Copy)]
+enum Read<'a> {
+    Slot(&'a Path),
+    Own(&'a Path),
+}
+
+impl Given<'_> {
+    /// [`identify`] or [`identify_own`], at the commit the survivors were
+    /// found at.
+    fn digest(&self, survivor: &Survivor) -> Result<String, String> {
+        match self.read {
+            Read::Slot(tree) => identify(tree, self.commit, survivor),
+            Read::Own(root) => identify_own(root, self.commit, survivor),
+        }
+    }
+}
+
+/// A mission's campaign, as [`enter`] and [`ratified`] are given it.
+fn campaign_given<'a>(ruling: &'a Ruling<'a>, campaign: &'a Campaign) -> Given<'a> {
+    Given {
+        hq_root: ruling.hq_root,
+        among: "the campaign",
+        survivors: &campaign.survivors,
+        commit: &campaign.head,
+        mission: ruling.mission,
+        by: ruling.by,
+        read: Read::Slot(ruling.tree),
+    }
+}
+
+/// The entries the HQ's ruling on survivor `id` gives — every survivor `id`
+/// names that holds an `equivalent` — or why it cannot be entered: the
+/// survivor is not identified without a doubt ([`enter`]).
+fn fresh(given: &Given, id: &str) -> Result<Vec<Entry>, String> {
     let mut fresh = Vec::new();
-    for s in campaign.survivors.iter().filter(|s| s.id == id) {
+    for s in given.survivors.iter().filter(|s| s.id == id) {
         let why = match &s.outcome {
             Some(Triage::Equivalent { why, .. }) => why.clone(),
             _ => continue,
         };
-        let only = |why: String| {
-            Registered::Not(format!("{why}, so the ruling holds on this mission only"))
-        };
-        let twins = campaign
-            .survivors
-            .iter()
-            .filter(|t| pair(&t.file, &t.description) == pair(&s.file, &s.description))
-            .count();
-        if twins != 1 {
-            return only(format!(
-                "the campaign holds {twins} survivors on {} with this mutation, and the \
-                 registry cannot tell them apart",
-                crate::text::name(&s.file)
-            ));
-        }
-        let line = match identify(ruling.tree, &campaign.head, s) {
-            Ok(digest) => digest,
-            Err(why) => return only(why),
-        };
+        alone(given.among, given.survivors, s)?;
+        let line = given.digest(s)?;
         let (start, end) = s.span().expect("identify read the span");
         fresh.push(Entry {
             file: s.file.clone(),
@@ -630,17 +701,41 @@ pub fn enter(ruling: &Ruling, campaign: &Campaign, id: &str) -> Registered {
             line,
             lines: end - start + 1,
             why,
-            by: ruling.by.to_string(),
-            mission: ruling.mission.to_string(),
-            commit: campaign.head.clone(),
+            by: given.by.to_string(),
+            mission: given.mission.to_string(),
+            commit: given.commit.to_string(),
             date: crate::state::now_rfc3339(),
             ratified: Vec::new(),
         });
     }
+    Ok(fresh)
+}
+
+/// Why `survivor` cannot be ruled on among `survivors` — what `among` names
+/// — when another of them shares its file and description: the registry
+/// could not tell the two apart.
+fn alone(among: &str, survivors: &[Survivor], survivor: &Survivor) -> Result<(), String> {
+    let twins = survivors
+        .iter()
+        .filter(|t| pair(&t.file, &t.description) == pair(&survivor.file, &survivor.description))
+        .count();
+    if twins == 1 {
+        return Ok(());
+    }
+    Err(format!(
+        "{among} holds {twins} survivors on {} with this mutation, and the registry cannot tell \
+         them apart",
+        crate::text::name(&survivor.file)
+    ))
+}
+
+/// Put `fresh` in the registry, each replacing the entry on its file and
+/// description ([`enter`]).
+fn put(hq_root: &Path, verb: &str, fresh: Vec<Entry>) -> Registered {
     if fresh.is_empty() {
         return Registered::Done(0);
     }
-    under_lock(ruling.hq_root, "mission mutants (registry)", |registry| {
+    under_lock(hq_root, verb, |registry| {
         registry.entries.retain(|e| {
             !fresh
                 .iter()
@@ -664,36 +759,218 @@ pub fn ratified(
     id: &str,
     origin: (&str, &str),
 ) -> Registered {
-    let Some(survivor) = campaign.survivors.iter().find(|s| s.id == id) else {
+    match recorded(
+        &campaign_given(ruling, campaign),
+        "mission mutants --ratify (registry)",
+        id,
+        origin,
+    ) {
+        Registered::Done(0) => enter(ruling, campaign, id),
+        other => other,
+    }
+}
+
+/// The ratification of survivor `id`'s proposal from the entry given on
+/// `origin`, recorded beside that entry; `Done(0)` when no entry is there
+/// any more ([`ratified`]).
+fn recorded(given: &Given, verb: &str, id: &str, origin: (&str, &str)) -> Registered {
+    let Some(survivor) = given.survivors.iter().find(|s| s.id == id) else {
         return Registered::Done(0);
     };
     let (mission, commit) = origin;
     let ratification = Ratification {
-        by: ruling.by.to_string(),
-        mission: ruling.mission.to_string(),
-        commit: campaign.head.clone(),
+        by: given.by.to_string(),
+        mission: given.mission.to_string(),
+        commit: given.commit.to_string(),
         date: crate::state::now_rfc3339(),
     };
-    let recorded = under_lock(
-        ruling.hq_root,
-        "mission mutants --ratify (registry)",
-        |registry| {
-            let mut n = 0;
-            for e in registry.entries.iter_mut().filter(|e| {
-                e.file == survivor.file
-                    && e.description == survivor.description
-                    && e.mission == mission
-                    && e.commit == commit
-            }) {
-                e.ratified.push(ratification.clone());
-                n += 1;
+    under_lock(given.hq_root, verb, |registry| {
+        let mut n = 0;
+        for e in registry.entries.iter_mut().filter(|e| {
+            e.file == survivor.file
+                && e.description == survivor.description
+                && e.mission == mission
+                && e.commit == commit
+        }) {
+            e.ratified.push(ratification.clone());
+            n += 1;
+        }
+        Ok(n)
+    })
+}
+
+/// Where the HQ rules outside missions: on the project's debt
+/// ([`crate::offmission`]).
+#[derive(Debug, Clone)]
+pub struct Owing<'a> {
+    pub hq_root: &'a Path,
+    /// The human's own repository, which holds the base each campaign
+    /// outside missions ran on, and so each commit a survivor of the debt was
+    /// found at ([`identify_own`]).
+    pub root: &'a Path,
+    pub by: &'a str,
+}
+
+/// [`enter`], for survivor `id` of the debt — `owed`, the debt's survivors,
+/// `id`'s holding the HQ's `equivalent` — found at `commit` by the campaign
+/// outside missions called `campaign`, which stands where an entry names
+/// its mission.
+///
+/// The same rule as on a mission: nothing is entered unless the debt holds
+/// no other survivor on its file and description, and the code its mutation
+/// replaces is read once in its file at `commit`, in the human's repository.
+/// Unlike a mission, nothing else holds the ruling, so a `Not` means the HQ
+/// ruled nothing.
+pub fn enter_owed(
+    at: &Owing,
+    owed: &[Survivor],
+    id: &str,
+    commit: &str,
+    campaign: &str,
+) -> Registered {
+    let given = owing_given(at, owed, commit, campaign);
+    match fresh(&given, id) {
+        Ok(fresh) => put(at.hq_root, "mutants debt --equivalent (registry)", fresh),
+        Err(why) => Registered::Not(why),
+    }
+}
+
+/// One survivor of the debt whose proposal the HQ ratifies: its id, the
+/// commit that found it, and the campaign outside missions named after that
+/// commit, which stands where a ratification names its mission.
+#[derive(Debug, Clone)]
+pub struct Ratifying<'a> {
+    pub id: &'a str,
+    pub found_at: &'a str,
+    pub campaign: &'a str,
+}
+
+/// [`ratified`], for each of `each` among `owed`, the debt's survivors, in
+/// **one** write of the registry: each ratification recorded beside the
+/// entry its proposal came from, and only there — or none of them, and why.
+///
+/// Unlike [`ratified`], an entry that is not there any more as it was is
+/// never entered afresh. A mission's proposal is made again by each
+/// campaign and lifted with the ruling. One in the debt stays on its
+/// survivor across campaigns, however long ago the registry made it.
+/// Entering its sentence would put back a ruling the HQ lifted, or replace
+/// a newer ruling on the same mutation, under a name nobody typed it under.
+/// So the ratification is refused, and `--equivalent` rules afresh. A
+/// survivor that shares its mutation with another of the debt is refused
+/// too: the registry cannot tell the two apart ([`enter_owed`]).
+///
+/// A ratification the same human already recorded there for the same
+/// campaign is not recorded twice: given again after a debt that could not
+/// be written, the verb settles the debt and changes nothing else.
+pub fn ratified_owed(at: &Owing, owed: &[Survivor], each: &[Ratifying]) -> Registered {
+    let date = crate::state::now_rfc3339();
+    under_lock(at.hq_root, "mutants debt --ratify (registry)", |registry| {
+        let mut n = 0;
+        for r in each {
+            let Some(survivor) = owed.iter().find(|s| s.id == r.id) else {
+                return Err(format!("{} is not in the debt", crate::text::name(r.id)));
+            };
+            alone("the debt", owed, survivor)?;
+            let ratification = Ratification {
+                by: at.by.to_string(),
+                mission: r.campaign.to_string(),
+                commit: r.found_at.to_string(),
+                date: date.clone(),
+            };
+            let mut matched = 0;
+            for e in registry
+                .entries
+                .iter_mut()
+                .filter(|e| proposed_from(e, survivor))
+            {
+                if !e.ratified.iter().any(|x| {
+                    (x.by.as_str(), x.mission.as_str(), x.commit.as_str())
+                        == (at.by, r.campaign, r.found_at)
+                }) {
+                    e.ratified.push(ratification.clone());
+                }
+                matched += 1;
             }
-            Ok(n)
-        },
-    );
-    match recorded {
-        Registered::Done(0) => enter(ruling, campaign, id),
-        other => other,
+            if matched == 0 {
+                return Err(gone(survivor));
+            }
+            n += matched;
+        }
+        Ok(n)
+    })
+}
+
+/// Why the registry's proposal on `survivor` cannot be ratified: its entry
+/// was lifted or replaced since ([`ratified_owed`]).
+fn gone(survivor: &Survivor) -> String {
+    let from = match &survivor.outcome {
+        Some(Triage::ProposedByNunki {
+            from:
+                crate::mutants::ProposedFrom::Registry {
+                    mission, commit, ..
+                },
+            ..
+        }) => format!(
+            ", ruled on mission {} at {}",
+            crate::text::one_line(mission),
+            short(commit)
+        ),
+        _ => String::new(),
+    };
+    format!(
+        "the entry the registry proposed {} from{from}, was lifted or replaced since: `nunki \
+         mutants debt --equivalent <survivor> --because <why>` rules on it afresh",
+        crate::text::name(&survivor.id)
+    )
+}
+
+/// Whether the registry still holds the entry the proposal on `survivor`
+/// came from, as it was when the proposal was made ([`proposed_from`]):
+/// only such a proposal can be ratified ([`ratified_owed`]).
+pub fn holds(registry: &Registry, survivor: &Survivor) -> bool {
+    registry.entries.iter().any(|e| proposed_from(e, survivor))
+}
+
+/// Whether `entry` is the one the registry's proposal on `survivor` came
+/// from, as it stood then: the same mutation, given on the same mission and
+/// commit, on the same date, with the same sentence. An entry lifted and
+/// given again since — on the same campaign, even — is another ruling.
+fn proposed_from(entry: &Entry, survivor: &Survivor) -> bool {
+    match &survivor.outcome {
+        Some(Triage::ProposedByNunki {
+            why,
+            from:
+                crate::mutants::ProposedFrom::Registry {
+                    mission,
+                    commit,
+                    date,
+                },
+        }) => {
+            entry.file == survivor.file
+                && entry.description == survivor.description
+                && &entry.mission == mission
+                && &entry.commit == commit
+                && &entry.date == date
+                && &entry.why == why
+        }
+        _ => false,
+    }
+}
+
+fn owing_given<'a>(
+    at: &'a Owing<'a>,
+    owed: &'a [Survivor],
+    commit: &'a str,
+    campaign: &'a str,
+) -> Given<'a> {
+    Given {
+        hq_root: at.hq_root,
+        among: "the debt",
+        survivors: owed,
+        commit,
+        mission: campaign,
+        by: at.by,
+        read: Read::Own(at.root),
     }
 }
 

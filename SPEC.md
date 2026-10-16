@@ -557,6 +557,7 @@ par un adaptateur (4.3), et le moteur de conteneurs que par un autre.
 | `nunki exec <slot> <cmd>` | joue une commande dans le conteneur du slot — c'est ainsi que le HQ **rejoue une preuve** sans avoir la stack sur l'hôte. Par défaut sur la **copie git propre de `HEAD`** que la porte 7 utilise, pas sur l'arbre que l'agent a habité : un `Makefile`, un `pytest.ini` ou un alias `cargo` posé par l'agent y tromperait la preuve. Jamais pendant un run sur l'arbre de travail. Un slot dont les conteneurs sont arrêtés est d'abord relevé avec le profil que le dernier lancement a écrit — sans quoi chaque porte jouée dans la copie reste injouée, et le run suivant, qui n'est lancé qu'une fois ces portes jouées, ne part jamais |
 | `nunki verify <mission>` | les portes de vérification sur la mission du codeur, puis enchaîne la mission d'intégration, puis la mission de sécurité, chacune avec ses portes ; à la première rouge, applique les règles d'itération (4.5) ; à la fin, rend la main à l'humain pour la validation du push. **Reprenable** : son état est persisté à chaque transition, et le relancer reprend au même point |
 | `nunki mutants run --slot <slot>`, `nunki mutants status` | une campagne hors mission, sur la base telle que le dépôt de l'humain l'a, dans un slot qu'aucune mission ne tient : sur les fichiers changés depuis la dernière terminée, chacun en entier, ou sur tout le code avec `--whole` ; `status` la relit dans la dette du projet et ne lance jamais rien (4.4, porte 7) |
+| `nunki mutants debt [--equivalent <survivant> --because <pourquoi> \| --ratify <survivant> \| --ratify --all]` | liste la dette du projet, ou la tranche une fois pour le projet dans le registre des équivalences que les missions lisent ; un survivant tranché quitte la dette (4.4, porte 7) |
 | `nunki push <mission>` | après validation humaine explicite (un argument, pas un dialogue), pousse la branche depuis le dépôt principal et ouvre la pull request. C'est le seul verbe qui touche la forge en écriture, et il refuse sans `INTEGRATED` et `CLEAR` sur le dernier commit et le verdict du codeur sur son ancêtre (4.4). Il parle à l'API de la forge avec un credential de l'humain, rangé à côté des comptes (`~/.nunki/forge-token`, un jeton GitHub qui peut ouvrir des pull requests) et jamais monté dans un conteneur — un conteneur ne voit du HQ que son propre dossier de mission, un niveau plus bas. **Le même `--yes` couvre le push et l'ouverture** : un verbe, un argument. Titre et corps viennent du `PR.md` de la mission (la première ligne qui dit quelque chose est le titre) ; le corps est `PR.md` tel qu'il est écrit, suivi de la note sur les écarts puis de la section Security que `nunki` écrit à partir du verdict, sans toucher `PR.md` (4.5) ; sans `PR.md`, ou vide, la branche est poussée et aucune pull request n'est ouverte ; une pull request déjà ouverte pour la branche — second push après un volet — est retrouvée, pas signalée en échec. Sans credential, sur une remote dont la forge n'a pas d'adaptateur, ou si la forge refuse, **le push reste fait** et `nunki` rend l'adresse exacte à ouvrir avec la raison : un push rapporté rouge serait relancé, et le second `git push` ne ferait rien qu'effacer la trace du premier. **Un adaptateur par forge**, comme il y en a un par harnais (4.3) et un par moteur de conteneurs (4.2) : ce qui est propre à une forge — l'adresse de son API, la forme de ses requêtes, la façon dont une remote nomme un dépôt — vit dans son adaptateur, et rien au-dessus ne le connaît. GitHub est le seul implémenté ; une remote ailleurs est **dite ailleurs, jamais devinée**, et ajouter GitLab est un fichier à écrire, pas un remaniement. Client HTTP : `ureq` ; ses racines de confiance sont celles de Mozilla, embarquées (`webpki-roots`, données sous CDLA-Permissive-2.0, exception écrite dans `deny.toml` pour cette seule crate) — un proxy d'entreprise qui re-signe le TLS serait la raison d'y revenir |
 | `nunki check [--mission <id>]` | dit si un dépôt, ses slots et leurs conteneurs sont dans l'état que ce fichier décrit ; rouge si une restriction n'est pas tenue ; sonde le profil mission sans argument, et le profil système d'une mission donnée avec `--mission` ; **dit ce qu'il n'a pas pu vérifier** (la forge sans credential ou quand l'humain tient la protection à la main, LF quand un `.gitattributes` existant ne le force pas) |
 | `nunki logs <mission>` | rend la sortie structurée des runs, lisible |
@@ -2097,7 +2098,7 @@ dernier lot. La première rouge arrête tout.
    peut laisser revivre un mutant d'un fichier inchangé, et aucune campagne
    partielle ne le voit, à aucun niveau. Dans la mission, le seul remède est
    `--again`, à la main ; hors mission, c'est la campagne sur tout le code
-   (plus bas, « Décidé, pas encore construit »).
+   (plus bas, « Des campagnes hors mission »).
 
    **Un budget de temps, mesuré sur un échantillon choisi d'avance.** Le
    `mutation_minutes` d'une mission est le budget de chacune de ses
@@ -2228,6 +2229,52 @@ dernier lot. La première rouge arrête tout.
    que deux entrées de la dette n'ont jamais le même. Une campagne arrêtée
    court, ou qui n'a rien mesuré, laisse la dette telle qu'elle était.
 
+   **Le HQ tranche la dette une fois pour le projet, dans le registre des
+   équivalences que les missions lisent**, plutôt qu'une fois par mission
+   qui retombe sur le même mutant. `nunki mutants debt` la liste : chaque
+   survivant, le commit qui l'a trouvé, la proposition du registre s'il en
+   porte une, et les survivants qui partagent une mutation.
+   `--equivalent <survivant> --because <pourquoi>` inscrit l'avis au
+   registre, aux mêmes conditions qu'un avis de mission : la dette ne porte
+   qu'un survivant sur ce fichier et cette description, et le code que la
+   mutation remplace n'apparaît qu'une fois dans son fichier, lu au commit
+   qui l'a trouvé dans le dépôt de l'humain — jamais dans un slot, qu'une
+   mission suivante réutilise. L'entrée nomme pour mission la campagne qui
+   l'a trouvé, `off-mission-` et les douze premiers caractères de son
+   commit. Le registre d'abord, la dette ensuite : hors mission, rien
+   d'autre ne porte l'avis, si bien qu'un avis que le registre ne peut
+   prendre n'est rien — le verbe le dit, le survivant reste dû, et seul un
+   test le solde. Une dette qui ne peut être écrite une fois l'avis pris est
+   dite telle, l'avis au registre et le survivant encore listé ; la même
+   commande redonnée solde la dette sans rien inscrire deux fois — l'entrée
+   remplace la sienne, et une ratification déjà inscrite par le même
+   humain, pour la même campagne, ne l'est pas de nouveau.
+   `--ratify <survivant>` ratifie la proposition du registre, avec sa
+   phrase : l'entrée garde son origine et inscrit la ratification à côté,
+   comme sur une mission. Mais une proposition de la dette reste sur son
+   survivant d'une campagne à l'autre, quand celle d'une mission est refaite
+   à chaque campagne et levée avec l'avis : si l'entrée dont elle vient a
+   été levée ou remplacée depuis, la ratifier remettrait un avis levé, ou
+   écraserait un avis plus récent sur la même mutation. L'entrée n'est donc
+   celle de la proposition que telle qu'elle était — même mutation, même
+   mission, même commit, même date, même phrase : levée puis redonnée, sur
+   la même campagne même, c'est un autre avis. Sinon la ratification est
+   refusée, le registre et la dette laissés tels quels, la liste la dit
+   telle, et `--equivalent` tranche de nouveau. Une proposition sur un
+   survivant qui partage sa mutation avec un autre de la dette est refusée
+   aussi : le registre ne les distingue pas, et seul un test les solde.
+   `--ratify --all` imprime chaque proposition ratifiable, puis ratifie
+   exactement la liste imprimée, en une seule écriture du registre, ou
+   rien. Un survivant tranché quitte la
+   dette ; la campagne suivante qui le retrouve, son code inchangé, le
+   rapporte comme une proposition du registre, qui propose et ne tranche
+   jamais : après une campagne sur tout le code, `--ratify --all`. La dette
+   est lue et écrite sous son propre verrou ; `nunki mutants status` le
+   prend avant d'oublier la campagne qu'il relit, qui reste déposée tant
+   qu'il est tenu, et relit sous lui le dossier en vol : une campagne qu'un
+   autre `status` a déjà relue ne l'est pas deux fois, et le dossier d'une
+   campagne suivante n'est pas oublié à sa place.
+
    Ce qu'on perd : ces cas ne sont rattrapés que quand l'humain lance une
    campagne ; le minimum conseillé est une campagne sur tout le code avant
    chaque mise en production. Limite, écrite : le disque. Le balayage et le
@@ -2241,16 +2288,13 @@ dernier lot. La première rouge arrête tout.
    remplace, et retire son entrée d'ici. Jusque-là, le reste de cette
    section décrit ce que `nunki` fait.
 
-   - **Ce qui solde la dette.** `nunki mutants debt` la liste, et le HQ la
-     tranche en une fois plutôt qu'une par mission, dans le registre des
-     équivalences que les missions lisent. Une mission de durcissement, au
+   - **Ce qui solde le reste de la dette.** Une mission de durcissement, au
      niveau `standard`, écrit les tests qui tuent ses survivants. Une
      mission qui n'écrit que des tests n'atteint aucun mutant par son diff :
      ce qui la mesure, c'est de remesurer les survivants de la dette par leur
      nom, par le filtre de la règle du budget.
 
-   D'ici là, la dette se lit dans `nunki mutants status` et se solde à la
-   main.
+   D'ici là, ce que le registre ne tranche pas se solde à la main.
 
    **Le contrat de `mutation.sh` s'enrichit**, tout en restant facultatif
    pour une stack qui ne veut pas de chaîne :
