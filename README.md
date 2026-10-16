@@ -704,7 +704,7 @@ not fit the budget. What neither sees is caught by a campaign you launch on
 the project's base, when you choose: there is no scheduler.
 
 ```sh
-nunki mutants run --slot <slot>            # what changed since the last completed one
+nunki mutants run --slot <slot>            # the files changed since the last completed one
 nunki mutants run --slot <slot> --whole    # the whole code
 nunki mutants status                       # read it back, and say the debt
 ```
@@ -716,10 +716,15 @@ nunki mutants status                       # read it back, and say the debt
   holds is refused, and so is one no mission ever ran in, which has no
   container yet.
 - **The two forms.**
-  - Without `--whole`, it runs on what changed since the last completed
-    campaign outside missions: that campaign's commit as the fork point, and
-    the files changed since. With none completed, it is refused and names
-    `--whole`. With nothing changed since, nothing starts.
+  - Without `--whole`, it runs on the files changed since the last
+    completed campaign outside missions, each mutated whole: the fork point
+    is the empty tree, so every line of a file handed counts as changed
+    (measured on 27.1.0, `--in-diff` against it lists the same mutants as
+    `--file`), and a file removed, or with nothing to mutate, measures
+    nothing, where `--file` with no fork point leaves no `outcomes.json` and
+    the campaign could not run. With none
+    completed, it is refused and names `--whole`. With nothing changed
+    since, nothing starts.
   - With `--whole`, it runs on every tracked file with no fork point. Each
     stack reads the files it owns; cargo-mutants ignores the paths that are
     not Rust (measured on 27.1.0).
@@ -736,9 +741,20 @@ nunki mutants status                       # read it back, and say the debt
   rules as a mission's, lands in the project's debt (`mutants-debt.json`
   under the HQ), with the registry of equivalences applied.
   - A campaign on the whole code replaces the debt.
-  - One on what changed since adds what it found. A survivor already owed
-    under the same key keeps its entry: such a campaign measures again only
-    the lines changed since the last one.
+  - One on the files changed since replaces, for each of them (removed
+    and renamed ones included), what the debt owed there with what it found
+    there, and keeps the survivors of unchanged files as they were: the
+    chain's rule, and its assumption that a mutant measured in a file nobody
+    changed still exists and still survives. No hunk is read. Measured on
+    changed lines only, an owed survivor nobody measured again stayed owed
+    at a line an edit had moved, and a new survivor could take its entry
+    under the same key: the description names the function, not the
+    position, and `a > b && c > d` gives two `replace > with == in keep`.
+  - So a file's survivors all come from one campaign, two under one key
+    stay two, and one found again carries what its campaign said of it. No
+    two entries share an id: one found under an id already owed replaces
+    it. A campaign filed before this rule, on changed lines only, drops
+    nothing by file.
   - A campaign stopped short, or that measured nothing, leaves the debt as
     it was.
 - **Not built yet:** listing and ruling the debt in one go (`nunki mutants

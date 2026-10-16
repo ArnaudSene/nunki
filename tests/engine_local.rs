@@ -1488,8 +1488,9 @@ fn a_campaign_whose_script_was_killed_is_called_off_whole() {
 /// (SPEC 4.4, the campaigns outside missions): it runs on the base as the
 /// human's repository has it — not on the slot's own branch — on the whole
 /// code with no fork point, and `status` reads it back into the debt. A
-/// second one on what changed since starts from the first one's commit, on
-/// the files changed since, and none starts when nothing did.
+/// second one on what changed since is handed the files changed since the
+/// first one's commit, with the empty tree for a fork point so each is
+/// mutated whole, and records them; none starts when nothing changed.
 #[test]
 fn a_campaign_outside_missions_runs_on_the_recorded_base_and_lands_in_the_debt() {
     let v = volet();
@@ -1616,10 +1617,41 @@ fn a_campaign_outside_missions_runs_on_the_recorded_base_and_lands_in_the_debt()
     )
     .unwrap();
     assert_eq!(started.since.as_deref(), Some(dev.as_str()));
+    let filed = nunki::mutants::read_running(&project.hq_root, &v.w.slot.name)
+        .unwrap()
+        .and_then(|r| r.off_mission)
+        .expect("filed outside missions");
+    assert_eq!(filed.changed, Some(vec!["src/more.rs".to_string()]));
     let second = said();
-    assert!(second.contains(&format!("NUNKI_BASE={dev}\n")), "{second}");
+    let empty = git(&project.root, &["hash-object", "-t", "tree", "/dev/null"]);
+    assert!(
+        second.contains(&format!("NUNKI_BASE={empty}\n")),
+        "{second}"
+    );
     assert!(second.contains(&format!("head {next}")), "{second}");
     assert!(second.contains("arg src/more.rs"), "{second}");
     assert!(!second.contains("arg src/lib.rs"), "{second}");
+    assert!(read_back().is_some());
+
+    // A file removed is a file changed: handed, against the empty tree it
+    // gives no hunk, and recorded, so the debt drops what it owed there.
+    git(&clone, &["rm", "-q", "src/more.rs"]);
+    git(&clone, &["commit", "-q", "-m", "less"]);
+    git(&clone, &["push", "-q", "origin", "dev"]);
+    nunki::offmission::run(
+        &project,
+        &v.w.slot,
+        v.engine.clone(),
+        "rust",
+        &asked(nunki::offmission::Form::SinceLast),
+    )
+    .unwrap();
+    let filed = nunki::mutants::read_running(&project.hq_root, &v.w.slot.name)
+        .unwrap()
+        .and_then(|r| r.off_mission)
+        .expect("filed outside missions");
+    assert_eq!(filed.changed, Some(vec!["src/more.rs".to_string()]));
+    let third = said();
+    assert!(third.contains("arg src/more.rs"), "{third}");
     assert!(read_back().is_some());
 }
