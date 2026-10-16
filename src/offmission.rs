@@ -5,9 +5,9 @@
 //! of it. What neither sees — a mutant left outside a sample, a mutant of a
 //! file no partial campaign measured again after another change revived
 //! it — is caught here, by a campaign the human launches on the project's
-//! base, with no scheduler: `nunki mutants run`, on what changed since the
-//! last completed campaign outside missions, or on the whole code with
-//! `--whole`. `nunki mutants status` reads it back into the project's
+//! base, with no scheduler: `nunki mutants run`, on the files changed since
+//! the last completed campaign outside missions, each mutated whole, or on
+//! the whole code with `--whole`. `nunki mutants status` reads it back into the project's
 //! **debt**, the survivors no mission owns, kept in the project's HQ.
 //!
 //! It runs in a slot no mission holds, in that slot's clean copy, put on
@@ -48,8 +48,9 @@ pub const DEFAULT_MINUTES: u32 = 720;
 /// the last of them left them, and what that campaign ran on.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Debt {
-    /// Each survivor still owed, keyed — as rulings are carried — by its
-    /// file and its description, and dated by the commit that found it.
+    /// Each survivor still owed, dated by the commit that found it. Those of
+    /// one file all come from the last campaign that measured that file
+    /// ([`settled`]).
     #[serde(default)]
     pub owed: Vec<Owed>,
     /// The last campaign outside missions that completed: what a campaign
@@ -73,7 +74,7 @@ pub struct Measured {
     pub base: String,
     pub commit: String,
     pub date: String,
-    /// On the whole code, or on what changed since the one before.
+    /// On the whole code, or on the files changed since the one before.
     pub whole: bool,
     /// How many mutants it tried, as its script said.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -85,7 +86,8 @@ pub struct Measured {
 pub enum Form {
     /// Every file of the code at the base's commit.
     Whole,
-    /// What changed since the last completed campaign outside missions.
+    /// The files changed since the last completed campaign outside
+    /// missions, each mutated whole.
     SinceLast,
 }
 
@@ -189,44 +191,42 @@ fn write_debt(hq_root: &Path, debt: &Debt) -> Result<(), MutantsError> {
 /// The debt after a completed campaign that found `found` at `commit`.
 ///
 /// One on the whole code replaces it: it measured everything. One on what
-/// changed since **adds** to it, a survivor already owed under the same key
-/// keeping its entry: its base moves with every campaign, so it measured
-/// again only the lines changed since the last one, and replacing a file's
-/// entries would drop survivors on lines it never measured again.
+/// changed since measured each file in `changed` again **whole** ([`run`]),
+/// so the debt drops what it owed in those files — removed and renamed ones
+/// included — for what the campaign found there, and keeps the survivors of
+/// every other file as they were: the chain's rule (SPEC 4.4), and its
+/// assumption, that a mutant measured in a file nobody changed since still
+/// exists and still survives. No hunk is read. Measured again on the
+/// changed lines only, an owed survivor nobody measured again stayed owed
+/// at a line an edit had moved, and a new survivor could take its entry
+/// under the same key — the description names the function, not the
+/// position: measured on cargo-mutants 27.1.0, `src/lib.rs:2:7: replace >
+/// with == in keep` and `src/lib.rs:2:16: replace > with == in keep` both
+/// survive. So the survivors of one file all come from one campaign, and
+/// two under the same key stay two.
 ///
-/// **Each entry owed before the campaign stands for one survivor it found,
-/// never more:** the one with the same id first, then one with the same
-/// key. Two survivors of one campaign can share a key — the description
-/// names the function, not the position, so measured on cargo-mutants
-/// 27.1.0 `src/lib.rs:2:7: replace > with == in keep` and `src/lib.rs:2:16:
-/// replace > with == in keep` both survive as `replace > with == in keep` —
-/// and each is owed.
-pub fn settled(mut debt: Debt, found: Vec<Survivor>, measured: Measured) -> Debt {
-    let key = |s: &Survivor| (s.file.clone(), s.description.clone());
+/// `changed` is `None` in a record written while such a campaign measured
+/// only the lines changed: nothing is dropped by file then. Either way, a
+/// survivor found under an id already owed replaces that entry, so no two
+/// entries of the debt share an id.
+pub fn settled(
+    mut debt: Debt,
+    found: Vec<Survivor>,
+    measured: Measured,
+    changed: Option<&[String]>,
+) -> Debt {
     if measured.whole {
         debt.owed.clear();
+    } else if let Some(changed) = changed {
+        let changed: std::collections::BTreeSet<&String> = changed.iter().collect();
+        debt.owed.retain(|o| !changed.contains(&o.survivor.file));
     }
-    let mut free = vec![true; debt.owed.len()];
-    let mut take = |matches: &dyn Fn(&Survivor) -> bool| {
-        let i = (0..free.len()).find(|&i| free[i] && matches(&debt.owed[i].survivor))?;
-        free[i] = false;
-        Some(i)
-    };
-    // The same id first: with [A] owed and [B, A] found under one key, a
-    // match by key alone would let B stand for A, and A be owed twice.
-    let unmatched: Vec<Survivor> = found
-        .into_iter()
-        .filter(|s| take(&|o| o.id == s.id && key(o) == key(s)).is_none())
-        .collect();
-    let fresh: Vec<Owed> = unmatched
-        .into_iter()
-        .filter(|s| take(&|o| key(o) == key(s)).is_none())
-        .map(|survivor| Owed {
-            survivor,
-            found_at: measured.commit.clone(),
-        })
-        .collect();
-    debt.owed.extend(fresh);
+    debt.owed
+        .retain(|o| !found.iter().any(|s| s.id == o.survivor.id));
+    debt.owed.extend(found.into_iter().map(|survivor| Owed {
+        survivor,
+        found_at: measured.commit.clone(),
+    }));
     debt.last = Some(measured);
     debt
 }
@@ -288,6 +288,19 @@ pub fn run(
         None => git.names(&["ls-tree", "-r", "-z", "--name-only", &commit])?,
         Some(since) => git.names(&["diff", "--name-only", "-z", "--no-renames", since, &commit])?,
     };
+    // On the whole code, no fork point: the script reads the paths as whole
+    // files. On what changed since, the **empty tree**: every line of a file
+    // handed counts as changed, so each is mutated whole ([`settled`]) —
+    // measured on cargo-mutants 27.1.0, `--in-diff` against it lists the
+    // same mutants as `--file` — and a file removed, or with nothing to
+    // mutate, is a measurement of nothing: with no fork point, `--file` on
+    // either ends with no `outcomes.json`, which the script reads as a
+    // campaign that could not run, and the next one would measure the same
+    // range again, for ever.
+    let fork = match &since {
+        None => String::new(),
+        Some(_) => git.run_with_input(&["hash-object", "-t", "tree", "--stdin"], b"")?,
+    };
 
     crate::exec::refresh_to(
         project,
@@ -298,16 +311,8 @@ pub fn run(
     )?;
     let judged = crate::run::judged(project, stack);
     let id = format!("off-mission-{}", short(&commit));
-    // No budget, so no sample: this is where the whole is measured. The
-    // fork point is the last campaign's commit, or none for the whole code,
-    // which the script then reads as whole files.
-    let launched = mutants::command(
-        &judged,
-        &id,
-        &paths,
-        since.as_deref().unwrap_or(""),
-        project.config.jobs(),
-    );
+    // No budget, so no sample: this is where the whole is measured.
+    let launched = mutants::command(&judged, &id, &paths, &fork, project.config.jobs());
     let runs = project.hq_root.join(DIR).join("runs");
     std::fs::create_dir_all(&runs).map_err(|e| OffMissionError::Io(runs.clone(), e))?;
     let log = runs.join(format!("{id}.log"));
@@ -345,6 +350,7 @@ pub fn run(
                 base: asked.base.to_string(),
                 commit: commit.clone(),
                 since: since.clone(),
+                changed: since.as_ref().map(|_| paths.clone()),
             }),
         },
     )?;
@@ -410,6 +416,7 @@ pub(crate) fn read_ended(
             whole: off.since.is_none(),
             tried: mutants::tried(&text),
         },
+        off.changed.as_deref(),
     );
     write_debt(&project.hq_root, &debt)?;
     Ok(Progress::Finished {
@@ -432,7 +439,7 @@ pub fn debt_said(debt: &Debt) -> String {
             if last.whole {
                 "on the whole code"
             } else {
-                "on what changed since the one before"
+                "on the files changed since the one before"
             },
             last.tried
                 .map_or_else(|| "a number not said".to_string(), |t| t.to_string())

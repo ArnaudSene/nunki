@@ -774,6 +774,14 @@ pub struct OffMission {
     /// on what changed since it; `None` for one on the whole code.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<String>,
+    /// For one on what changed since: every path that changed since
+    /// [`Self::since`], removed and renamed ones included — the paths it was
+    /// handed, and the files whose survivors the debt replaces with what it
+    /// found in them ([`crate::offmission::settled`]). `None` for one on the
+    /// whole code, and in a record written while such a campaign measured
+    /// only the lines changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed: Option<Vec<String>>,
 }
 
 #[derive(Debug, thiserror::Error)]

@@ -9451,13 +9451,13 @@ fn a_campaigns_pace_is_kept_for_the_next_when_it_tried_enough() {
 // ---------------------------------------------------------------------------
 
 /// A campaign outside missions, filed in `slot` as in flight, on `dev` at
-/// `commit`, since `since`, its log `log`.
+/// `commit`, since `since` on the files `changed`, its log `log`.
 fn off_mission_filed(
     project: &nunki::project::Project,
     slot: &str,
     log: &Path,
     commit: &str,
-    since: Option<&str>,
+    since: Option<(&str, Option<&[&str]>)>,
 ) {
     mutants::write_running(
         &project.hq_root,
@@ -9466,7 +9466,10 @@ fn off_mission_filed(
             off_mission: Some(mutants::OffMission {
                 base: "dev".into(),
                 commit: commit.into(),
-                since: since.map(str::to_string),
+                since: since.map(|(s, _)| s.to_string()),
+                changed: since
+                    .and_then(|(_, changed)| changed)
+                    .map(|c| c.iter().map(|f| f.to_string()).collect()),
             }),
             chain: Default::default(),
             fingerprint: format!("off-mission-{commit}"),
@@ -9593,18 +9596,18 @@ fn a_mission_never_reads_back_a_campaign_outside_missions() {
 }
 
 /// A campaign outside missions that finished is read back into the debt.
-/// One on the whole code replaces the debt; one on what changed since adds
-/// what it found, a survivor already owed under the same key keeping its
-/// entry. One that never said it finished leaves the debt as it was. The
-/// record is forgotten each time.
+/// One on the whole code replaces the debt; one on the files changed since
+/// replaces what the debt owed in those files with what it found there, and
+/// keeps the rest. One that never said it finished leaves the debt as it
+/// was. The record is forgotten each time.
 #[test]
 fn a_campaign_outside_missions_is_read_back_into_the_debt() {
     let dir = tempfile::tempdir().unwrap();
     let (project, slot) = with_profile(dir.path());
     let log = dir.path().join("off.log");
-    let survivor = |id: &str, description: &str| {
+    let survivor = |id: &str, file: &str, description: &str| {
         format!(
-            "{{\"id\":\"{id}\",\"file\":\"src/lib.rs\",\"line\":3,\"description\":\"{description}\"}}\n"
+            "{{\"id\":\"{id}\",\"file\":\"{file}\",\"line\":3,\"description\":\"{description}\"}}\n"
         )
     };
     let done = |tried: u32, missed: u32| {
@@ -9612,7 +9615,7 @@ fn a_campaign_outside_missions_is_read_back_into_the_debt() {
             "{{\"campaign\":\"done\",\"tried\":{tried},\"found\":{tried},\"missed\":{missed}}}\n"
         )
     };
-    let read = |commit: &str, since: Option<&str>, text: String| {
+    let read = |commit: &str, since: Option<(&str, Option<&[&str]>)>, text: String| {
         std::fs::write(&log, text).unwrap();
         off_mission_filed(&project, &slot.name, &log, commit, since);
         let progress = mutants::read_back_off_mission(&project, &slot, ended_engine())
@@ -9632,7 +9635,9 @@ fn a_campaign_outside_missions_is_read_back_into_the_debt() {
     let (progress, debt) = read(
         "aaaaaaaaaaaaaaaa",
         None,
-        survivor("a", "replace one") + &survivor("b", "replace two") + &done(10, 2),
+        survivor("a", "src/lib.rs", "replace one")
+            + &survivor("b", "src/other.rs", "replace two")
+            + &done(10, 2),
     );
     assert!(
         matches!(progress, mutants::Progress::Finished { survivors: 2, .. }),
@@ -9646,23 +9651,26 @@ fn a_campaign_outside_missions_is_read_back_into_the_debt() {
         ("aaaaaaaaaaaaaaaa", Some(10))
     );
 
-    // Since the last: one already owed, one new.
+    // Since the last, on `src/lib.rs` only: what it found there replaces
+    // what was owed there, `src/other.rs` keeps its survivor.
     let (_, debt) = read(
         "bbbbbbbbbbbbbbbb",
-        Some("aaaaaaaaaaaaaaaa"),
-        survivor("a2", "replace one") + &survivor("c", "replace three") + &done(4, 2),
+        Some(("aaaaaaaaaaaaaaaa", Some(&["src/lib.rs"]))),
+        survivor("a2", "src/lib.rs", "replace one")
+            + &survivor("c", "src/lib.rs", "replace three")
+            + &done(4, 2),
     );
     let owed: Vec<(&str, &str)> = debt
         .owed
         .iter()
-        .map(|o| (o.survivor.description.as_str(), o.found_at.as_str()))
+        .map(|o| (o.survivor.id.as_str(), o.found_at.as_str()))
         .collect();
     assert_eq!(
         owed,
         [
-            ("replace one", "aaaaaaaaaaaaaaaa"),
-            ("replace two", "aaaaaaaaaaaaaaaa"),
-            ("replace three", "bbbbbbbbbbbbbbbb"),
+            ("b", "aaaaaaaaaaaaaaaa"),
+            ("a2", "bbbbbbbbbbbbbbbb"),
+            ("c", "bbbbbbbbbbbbbbbb"),
         ]
     );
     assert!(!debt.last.clone().unwrap().whole);
@@ -9670,8 +9678,8 @@ fn a_campaign_outside_missions_is_read_back_into_the_debt() {
     // Never said it finished: the debt stays.
     let (progress, after) = read(
         "cccccccccccccccc",
-        Some("bbbbbbbbbbbbbbbb"),
-        survivor("d", "x"),
+        Some(("bbbbbbbbbbbbbbbb", Some(&["src/lib.rs"]))),
+        survivor("d", "src/lib.rs", "x"),
     );
     assert!(
         matches!(progress, mutants::Progress::CouldNotRun(_)),
@@ -9683,36 +9691,36 @@ fn a_campaign_outside_missions_is_read_back_into_the_debt() {
     let (_, debt) = read(
         "dddddddddddddddd",
         None,
-        survivor("e", "replace four") + &done(12, 1),
+        survivor("e", "src/lib.rs", "replace four") + &done(12, 1),
     );
     assert_eq!(debt.owed.len(), 1);
     assert_eq!(debt.owed[0].survivor.description, "replace four");
     assert!(nunki::offmission::debt_said(&debt).contains("1 survivor(s) owed"));
 }
 
-/// Two survivors of one campaign under the same key are two entries of the
-/// debt: the description names the function, not the position, and the two
-/// names here are what cargo-mutants 27.1.0 lists for `a > b && c > d`. An
-/// entry already owed stands for one survivor found again, by id first —
-/// with [A] owed and [B, A] found, A is not owed twice and B is not lost —
-/// then by key, keeping its entry when the mutant moved.
+/// What the debt owes after each campaign outside missions (SPEC 4.4).
+///
+/// One on what changed since measured each changed file again whole: the
+/// debt replaces what it owed in those files — removed ones included — with
+/// what it found there, and keeps the other files' survivors. No survivor
+/// owed is matched to one found by its key: two found under one key are
+/// two (what cargo-mutants 27.1.0 lists for `a > b && c > d`), a new one
+/// never takes an old one's entry, and one found again carries what the
+/// campaign said of it, not what an older campaign said. No two entries
+/// share an id, even from a record that names no changed files.
 #[test]
 fn a_debt_keeps_every_survivor_its_campaigns_found() {
     use nunki::offmission::{Debt, Measured, settled};
-    let at = |id: &str| mutants::Survivor {
-        id: id.to_string(),
-        file: "src/lib.rs".into(),
-        line: 2,
-        end_line: Some(2),
+    let at = |file: &str, line: u32, col: u32| mutants::Survivor {
+        id: format!("{file}:{line}:{col}: replace > with == in keep"),
+        file: file.into(),
+        line,
+        end_line: Some(line),
         description: "replace > with == in keep".into(),
         outcome: None,
         refused: None,
         found_on: None,
     };
-    let (a, b) = (
-        "src/lib.rs:2:7: replace > with == in keep",
-        "src/lib.rs:2:16: replace > with == in keep",
-    );
     let measured = |commit: &str, whole: bool| Measured {
         base: "dev".into(),
         commit: commit.into(),
@@ -9726,24 +9734,100 @@ fn a_debt_keeps_every_survivor_its_campaigns_found() {
             .map(|o| (o.survivor.id.clone(), o.found_at.clone()))
             .collect()
     };
-    let pair = |id: &str, commit: &str| (id.to_string(), commit.to_string());
+    let pair = |s: &mutants::Survivor, commit: &str| (s.id.clone(), commit.to_string());
+    let lib = ["src/lib.rs".to_string()];
+    let (a, b) = (at("src/lib.rs", 2, 7), at("src/lib.rs", 2, 16));
 
-    let whole = settled(Debt::default(), vec![at(a), at(b)], measured("c1", true));
-    assert_eq!(owed(&whole), [pair(a, "c1"), pair(b, "c1")]);
-
-    let only_a = settled(Debt::default(), vec![at(a)], measured("c1", true));
-    let both = settled(only_a.clone(), vec![at(b), at(a)], measured("c2", false));
-    assert_eq!(owed(&both), [pair(a, "c1"), pair(b, "c2")]);
-
-    let again = settled(only_a.clone(), vec![at(a)], measured("c2", false));
-    assert_eq!(owed(&again), [pair(a, "c1")]);
-
-    let moved = settled(
-        only_a,
-        vec![at("src/lib.rs:4:7: replace > with == in keep")],
-        measured("c2", false),
+    // Two survivors under one key, from one campaign: both owed.
+    let twins = settled(
+        Debt::default(),
+        vec![a.clone(), b.clone()],
+        measured("c1", true),
+        None,
     );
-    assert_eq!(owed(&moved), [pair(a, "c1")]);
+    assert_eq!(owed(&twins), [pair(&a, "c1"), pair(&b, "c1")]);
+
+    // A new survivor under A's key, on a line added to A's file: the file is
+    // measured again whole, A found again beside it, and both are owed.
+    let only_a = settled(Debt::default(), vec![a.clone()], measured("c1", true), None);
+    let added = at("src/lib.rs", 3, 14);
+    let both = settled(
+        only_a.clone(),
+        vec![a.clone(), added.clone()],
+        measured("c2", false),
+        Some(&lib),
+    );
+    assert_eq!(owed(&both), [pair(&a, "c2"), pair(&added, "c2")]);
+
+    // A line inserted above A: a new survivor lands on A's old id, A moves
+    // to the next line, and the debt owes both, once each.
+    let shifted = at("src/lib.rs", 3, 7);
+    let below = settled(
+        Debt::default(),
+        vec![shifted.clone()],
+        measured("c1", true),
+        None,
+    );
+    let moved = at("src/lib.rs", 4, 7);
+    let after = settled(
+        below,
+        vec![shifted.clone(), moved.clone()],
+        measured("c2", false),
+        Some(&lib),
+    );
+    assert_eq!(owed(&after), [pair(&shifted, "c2"), pair(&moved, "c2")]);
+
+    // Found again under its id, A carries what this campaign said of it: an
+    // older campaign's proposal on code that has changed since is gone.
+    let mut proposed = only_a.clone();
+    proposed.owed[0].survivor.outcome = Some(mutants::Triage::ProposedByNunki {
+        why: "older code".into(),
+        from: mutants::ProposedFrom::Registry {
+            mission: "m".into(),
+            commit: "c0".into(),
+            date: "2026-10-01T00:00:00Z".into(),
+        },
+    });
+    let again = settled(proposed, vec![a.clone()], measured("c2", false), Some(&lib));
+    assert_eq!(owed(&again), [pair(&a, "c2")]);
+    assert_eq!(again.owed[0].survivor.outcome, None);
+
+    // A changed file where nothing survives any more owes nothing; a file
+    // removed, nothing; an unchanged file keeps its survivor as it was.
+    let other = at("src/other.rs", 5, 9);
+    let gone = at("src/gone.rs", 1, 3);
+    let three = settled(
+        Debt::default(),
+        vec![a.clone(), other.clone(), gone.clone()],
+        measured("c1", true),
+        None,
+    );
+    let changed = ["src/lib.rs".to_string(), "src/gone.rs".to_string()];
+    let kept = settled(three.clone(), vec![], measured("c2", false), Some(&changed));
+    assert_eq!(owed(&kept), [pair(&other, "c1")]);
+
+    // A record that names no changed files measured lines: nothing is
+    // dropped by file, and one found under an id already owed replaces it.
+    let legacy = settled(
+        three.clone(),
+        vec![added.clone()],
+        measured("c2", false),
+        None,
+    );
+    assert_eq!(
+        owed(&legacy),
+        [
+            pair(&a, "c1"),
+            pair(&other, "c1"),
+            pair(&gone, "c1"),
+            pair(&added, "c2")
+        ]
+    );
+    let legacy = settled(three, vec![a.clone()], measured("c2", false), None);
+    assert_eq!(
+        owed(&legacy),
+        [pair(&other, "c1"), pair(&gone, "c1"), pair(&a, "c2")]
+    );
 }
 
 /// `run` starts nothing while a campaign is filed in the slot, and nothing

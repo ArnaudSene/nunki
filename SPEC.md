@@ -556,7 +556,7 @@ par un adaptateur (4.3), et le moteur de conteneurs que par un autre.
 | `nunki mission new/start/reframe/status/say/watch/pause/resume/stop/kill/end/accept/iterate/fetch/archive` | le cycle d'une mission, du cadrage au rapatriement des commits ; `say` dépose une consigne pour le **run suivant**, `watch` rend deux états (tourne, fini) plus un troisième que l'humain provoque (gelé), `stop` termine le run proprement (4.3), **`end` déclare la mission abandonnée** |
 | `nunki exec <slot> <cmd>` | joue une commande dans le conteneur du slot — c'est ainsi que le HQ **rejoue une preuve** sans avoir la stack sur l'hôte. Par défaut sur la **copie git propre de `HEAD`** que la porte 7 utilise, pas sur l'arbre que l'agent a habité : un `Makefile`, un `pytest.ini` ou un alias `cargo` posé par l'agent y tromperait la preuve. Jamais pendant un run sur l'arbre de travail. Un slot dont les conteneurs sont arrêtés est d'abord relevé avec le profil que le dernier lancement a écrit — sans quoi chaque porte jouée dans la copie reste injouée, et le run suivant, qui n'est lancé qu'une fois ces portes jouées, ne part jamais |
 | `nunki verify <mission>` | les portes de vérification sur la mission du codeur, puis enchaîne la mission d'intégration, puis la mission de sécurité, chacune avec ses portes ; à la première rouge, applique les règles d'itération (4.5) ; à la fin, rend la main à l'humain pour la validation du push. **Reprenable** : son état est persisté à chaque transition, et le relancer reprend au même point |
-| `nunki mutants run --slot <slot>`, `nunki mutants status` | une campagne hors mission, sur la base telle que le dépôt de l'humain l'a, dans un slot qu'aucune mission ne tient : sur ce qui a changé depuis la dernière terminée, ou sur tout le code avec `--whole` ; `status` la relit dans la dette du projet et ne lance jamais rien (4.4, porte 7) |
+| `nunki mutants run --slot <slot>`, `nunki mutants status` | une campagne hors mission, sur la base telle que le dépôt de l'humain l'a, dans un slot qu'aucune mission ne tient : sur les fichiers changés depuis la dernière terminée, chacun en entier, ou sur tout le code avec `--whole` ; `status` la relit dans la dette du projet et ne lance jamais rien (4.4, porte 7) |
 | `nunki push <mission>` | après validation humaine explicite (un argument, pas un dialogue), pousse la branche depuis le dépôt principal et ouvre la pull request. C'est le seul verbe qui touche la forge en écriture, et il refuse sans `INTEGRATED` et `CLEAR` sur le dernier commit et le verdict du codeur sur son ancêtre (4.4). Il parle à l'API de la forge avec un credential de l'humain, rangé à côté des comptes (`~/.nunki/forge-token`, un jeton GitHub qui peut ouvrir des pull requests) et jamais monté dans un conteneur — un conteneur ne voit du HQ que son propre dossier de mission, un niveau plus bas. **Le même `--yes` couvre le push et l'ouverture** : un verbe, un argument. Titre et corps viennent du `PR.md` de la mission (la première ligne qui dit quelque chose est le titre) ; le corps est `PR.md` tel qu'il est écrit, suivi de la note sur les écarts puis de la section Security que `nunki` écrit à partir du verdict, sans toucher `PR.md` (4.5) ; sans `PR.md`, ou vide, la branche est poussée et aucune pull request n'est ouverte ; une pull request déjà ouverte pour la branche — second push après un volet — est retrouvée, pas signalée en échec. Sans credential, sur une remote dont la forge n'a pas d'adaptateur, ou si la forge refuse, **le push reste fait** et `nunki` rend l'adresse exacte à ouvrir avec la raison : un push rapporté rouge serait relancé, et le second `git push` ne ferait rien qu'effacer la trace du premier. **Un adaptateur par forge**, comme il y en a un par harnais (4.3) et un par moteur de conteneurs (4.2) : ce qui est propre à une forge — l'adresse de son API, la forme de ses requêtes, la façon dont une remote nomme un dépôt — vit dans son adaptateur, et rien au-dessus ne le connaît. GitHub est le seul implémenté ; une remote ailleurs est **dite ailleurs, jamais devinée**, et ajouter GitLab est un fichier à écrire, pas un remaniement. Client HTTP : `ureq` ; ses racines de confiance sont celles de Mozilla, embarquées (`webpki-roots`, données sous CDLA-Permissive-2.0, exception écrite dans `deny.toml` pour cette seule crate) — un proxy d'entreprise qui re-signe le TLS serait la raison d'y revenir |
 | `nunki check [--mission <id>]` | dit si un dépôt, ses slots et leurs conteneurs sont dans l'état que ce fichier décrit ; rouge si une restriction n'est pas tenue ; sonde le profil mission sans argument, et le profil système d'une mission donnée avec `--mission` ; **dit ce qu'il n'a pas pu vérifier** (la forge sans credential ou quand l'humain tient la protection à la main, LF quand un `.gitattributes` existant ne le force pas) |
 | `nunki logs <mission>` | rend la sortie structurée des runs, lisible |
@@ -2172,10 +2172,16 @@ dernier lot. La première rouge arrête tout.
 
    **Des campagnes hors mission, lancées par l'humain.** `nunki` n'a aucun
    ordonnanceur : `nunki mutants run --slot <slot>` en lance une quand
-   l'humain le veut, sous deux formes. Sans option, sur ce qui a changé
-   depuis la dernière campagne hors mission terminée — son commit pour
-   `NUNKI_BASE`, les fichiers changés depuis — qui rattrape ce que les
-   échantillons ont laissé. Avec `--whole`, sur tout le code et sans point
+   l'humain le veut, sous deux formes. Sans option, sur les fichiers
+   changés depuis la dernière campagne hors mission terminée, chacun muté en
+   entier, qui rattrape ce que les échantillons ont laissé : `NUNKI_BASE`
+   est l'arbre vide, si bien que chaque ligne d'un fichier remis compte pour
+   changée (mesuré sur cargo-mutants 27.1.0 : `--in-diff` contre lui donne
+   les mêmes mutants que `--file`), et qu'un fichier retiré, ou sans rien à
+   muter, est une mesure de rien — sans point de fourche, `--file` sur l'un
+   ou l'autre ne laisse aucun `outcomes.json`, que le script lit comme une
+   campagne qui n'a pas pu tourner, et la suivante remesurerait le même
+   intervalle sans fin (mesuré aussi). Avec `--whole`, sur tout le code et sans point
    de fourche : chaque fichier suivi, que chaque stack lit à sa façon
    (mesuré sur cargo-mutants 27.1.0 : un chemin qui n'est pas du Rust est
    ignoré) ; seule celle-ci ferme la limite de la chaîne. Sans campagne
@@ -2202,15 +2208,24 @@ dernier lot. La première rouge arrête tout.
    lancer. Relue, une campagne qui a dit avoir fini et a mesuré, par les
    mêmes règles qu'une campagne de mission, entre dans la **dette** du
    projet (`mutants-debt.json`, au HQ), le registre des équivalences
-   appliqué. Une campagne sur tout le code la remplace. Une campagne sur ce
-   qui a changé depuis y ajoute ce qu'elle a trouvé, un survivant déjà dû
-   sous la même clé gardant son entrée : sa base bouge à chaque campagne, et
-   elle ne remesure que les lignes changées depuis. Une entrée due ne tient
-   lieu que d'un survivant retrouvé — le même identifiant d'abord, puis la
-   même clé — et deux survivants d'une même campagne sous la même clé
-   restent deux : la description nomme la fonction, pas la position
-   (mesuré sur cargo-mutants 27.1.0 : `a > b && c > d` donne deux
-   survivants `replace > with == in keep`). Une campagne arrêtée
+   appliqué. Une campagne sur tout le code la remplace. Une campagne sur les
+   fichiers changés depuis y remplace, pour chacun d'eux — retirés et
+   renommés compris —, ce qui était dû par ce qu'elle y a trouvé, et laisse
+   tels quels les survivants des fichiers inchangés : la règle de la chaîne
+   (plus haut), et son hypothèse, qu'un mutant mesuré dans un fichier que
+   personne n'a changé depuis existe encore et survit encore. Aucun hunk
+   n'est lu. Remesurer les seules lignes changées laissait dû un survivant
+   que personne n'avait remesuré, à une ligne qu'une édition avait
+   déplacée, et un nouveau survivant pouvait prendre son entrée sous la
+   même clé : la description nomme la fonction, pas la position (mesuré sur
+   cargo-mutants 27.1.0 : `a > b && c > d` donne deux survivants `replace >
+   with == in keep`). Les survivants d'un fichier viennent donc tous d'une
+   même campagne, et deux sous la même clé restent deux ; un survivant
+   retrouvé porte ce que sa campagne en a dit, jamais ce qu'en disait une
+   plus ancienne. Une campagne déposée avant cette règle, sur les seules
+   lignes changées, ne retire rien par fichier ; dans tous les cas, un
+   survivant trouvé sous un identifiant déjà dû remplace son entrée, si bien
+   que deux entrées de la dette n'ont jamais le même. Une campagne arrêtée
    court, ou qui n'a rien mesuré, laisse la dette telle qu'elle était.
 
    Ce qu'on perd : ces cas ne sont rattrapés que quand l'humain lance une

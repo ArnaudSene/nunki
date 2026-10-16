@@ -238,16 +238,17 @@ enum SecretCommand {
 #[derive(Subcommand)]
 enum MutantsCommand {
     /// Start a campaign outside missions, in a slot no mission holds, on the
-    /// base as your repository has it: on what changed since the last
-    /// completed one, or on the whole code with `--whole`. It starts nothing
+    /// base as your repository has it: on the files changed since the last
+    /// completed one, each mutated whole, or on the whole code with
+    /// `--whole`. It starts nothing
     /// while a campaign is filed in the slot; `nunki mutants status` reads
     /// one back.
     Run {
         /// The slot to run it in: one no mission holds.
         #[arg(long)]
         slot: String,
-        /// Measure the whole code, rather than what changed since the last
-        /// completed campaign outside missions.
+        /// Measure the whole code, rather than the files changed since the
+        /// last completed campaign outside missions.
         #[arg(long)]
         whole: bool,
         /// The branch it runs on, as `nunki mission new` defaults it.
@@ -3499,7 +3500,7 @@ fn mutants_outside_missions(
                     let on = match &started.since {
                         None => "the whole code".to_string(),
                         Some(since) => format!(
-                            "what changed since {}",
+                            "the files changed since {}, each whole",
                             since.chars().take(12).collect::<String>()
                         ),
                     };
