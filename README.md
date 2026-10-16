@@ -662,6 +662,33 @@ from 7 s to 70 s.
   outside the tree, and are removed the same way. Measured against the real
   cargo-mutants on this repository, in place, at two jobs and stopped
   mid-run: no file the campaign added was left.
+
+  While the tool runs, every 30 seconds, a `.dwo` in `target/debug/deps`
+  is removed when its name is not on that list and no build has touched its
+  file for ten minutes; above one job, the same in the copies. The image
+  keeps debug information beside the objects
+  (`CARGO_PROFILE_DEV_SPLIT_DEBUGINFO=unpacked`), so every mutant's rebuild
+  writes them under new names: measured on a crate whose mutant takes 47 s,
+  about 11 GB an hour until the campaign ended. A rebuild links every
+  unchanged unit's `.dwo` from rustc's incremental session under a new
+  name, which moves the file's status time: a file a build still uses keeps
+  moving, and its extra names cost nothing. What fills the disk is a file
+  no build uses any more, a unit a mutant changed and the one it replaced,
+  held only by names in `deps`: its time stops, and ten minutes on, all
+  those names go. No test reads a `.dwo`, but a build in progress does:
+  swept as soon as they were written, one mutant out of 48 failed to build
+  and was counted unviable instead of caught. Hence the ten minutes, and
+  rustc's incremental directories are never swept.
+  Measured on this repository, the same 48 mutants in place: the results
+  are the same mutant by mutant with and without the sweep (40 caught,
+  8 unviable), and the sweep removed 5,946 files, about 120 MB, in
+  19 minutes. This repository's leak is small; on the crate that showed
+  it, what the sweep removes there is not measured.
+
+  Each sweep also reads the space left under `target/`: below 2 GiB, the
+  tool is stopped and the campaign fails, saying how much was left; below
+  2 GiB at the start, it does not start. A campaign that did not complete
+  names the status cargo-mutants gave, and explains only that one.
 - **Python:** what mutmut leaves per mutant is all in `mutants/`, cleared
   before the run and when the script exits.
 - **Next.js:** Stryker's sandbox, `.stryker-tmp/`, is removed by

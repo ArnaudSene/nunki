@@ -2216,7 +2216,43 @@ dernier lot. La première rouge arrête tout.
      de fichiers dans `target/debug/deps`, et un mutant passait de 7 à 70 s.
      `nunki check --slot` porte une ligne sur ce cache, **ambre** au-delà de
      250 000 fichiers ou de 50 Gio — un verdict montré et compté, jamais
-     rouge, jamais vert.
+     rouge, jamais vert ;
+   - **pendant la campagne, le script Rust balaie et surveille le disque.**
+     L'image garde les informations de débogage à côté des objets : chaque
+     reconstruction d'un mutant écrit des `.dwo` sous de nouveaux noms, et
+     rien ne les retirait avant la fin de la campagne. Mesuré sur un crate
+     dont un mutant prend 47 s : environ 240 Mo par minute, 11 Go par heure,
+     et une campagne arrêtée par `No space left on device` après 11 mutants.
+     Toutes les 30 secondes, un `.dwo` de `target/debug/deps` s'en va quand
+     son nom n'est pas sur la liste du cache et qu'aucune construction n'a
+     touché son fichier depuis dix minutes ; au-dessus d'un job, de même dans
+     les copies. Une reconstruction relie chaque unité inchangée depuis la
+     session incrémentale de rustc sous un nouveau nom, ce qui bouge l'heure
+     de changement d'état (`-cmin`) du fichier, même sous une vieille date
+     de modification : un fichier qu'une construction utilise encore la voit
+     bouger, et ses noms en trop ne coûtent rien. Ce qui remplit le disque,
+     c'est un fichier qu'aucune construction n'utilise plus — une unité
+     qu'un mutant a changée, et celle qu'elle a remplacée — que seuls des
+     noms de `deps` tiennent : son heure s'arrête, et dix minutes plus tard,
+     tous ces noms s'en vont.
+     Aucun test ne lit un `.dwo`, mais une construction en cours, si :
+     mesuré sur cargo-mutants 27.1.0 et ce dépôt, 48 mutants, balayés dès
+     leur écriture et jusque dans les dossiers incrémentaux de rustc, un
+     mutant qui compile a échoué sur `failed to build archive … No such file
+     or directory` et a été compté non viable au lieu de tué — un survivant
+     pourrait s'y cacher. D'où les dix minutes, et les dossiers
+     incrémentaux, jamais balayés. Mesuré sur ce dépôt, mêmes 48 mutants en
+     place : les résultats sont les mêmes, mutant par mutant, avec et sans
+     balayage (40 tués, 8 non viables), et le balayage a retiré 5 946
+     fichiers, environ 120 Mo, en 19 minutes. La fuite de ce dépôt est
+     faible ; sur le crate qui l'a montrée, ce que le balayage y retire
+     n'est pas mesuré.
+     Chaque balayage lit aussi l'espace restant sous `target/`. Sous 2 Gio,
+     l'outil est arrêté et la campagne échoue en le disant, avec l'espace
+     restant et le plancher ; sous 2 Gio au départ, elle ne démarre pas. Le
+     plancher est un choix, pas une mesure. Un espace illisible est dit, et
+     la campagne n'est alors pas surveillée. Une campagne qui n'est pas allée
+     au bout nomme le statut de l'outil, et n'explique que celui-là.
 
    **C'est `nunki` qui la lance, pas l'humain** : sinon le moniteur s'arrête
    pour un verbe qu'il aurait pu taper lui-même — pour la campagne que
