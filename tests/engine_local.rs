@@ -711,7 +711,8 @@ fn a_launched_campaign_is_handed_its_budget_its_pace_and_its_chains_fraction() {
     std::fs::write(
         &script,
         "#!/bin/sh\n# nunki-tool-version: echo stand-in 1.0\n\
-         env | grep '^NUNKI_MUTATION_' | sort > nunki-sizing.txt\n\
+         env | grep '^NUNKI_MUTATION_' | sort > nunki-sizing.tmp\n\
+         mv nunki-sizing.tmp nunki-sizing.txt\n\
          printf '%s\\n' '{\"campaign\":\"done\",\"tried\":0,\"found\":0}'\n",
     )
     .unwrap();
@@ -729,6 +730,8 @@ fn a_launched_campaign_is_handed_its_budget_its_pace_and_its_chains_fraction() {
     });
     nunki::mutants::write(&v.mission, &on_file).unwrap();
 
+    // Written under another name and renamed: the test waits for the name,
+    // and a file still being written read empty on Linux, where it raced.
     let sizing = || {
         let at = v.w.proof.join("nunki-sizing.txt");
         let started = std::time::Instant::now();
