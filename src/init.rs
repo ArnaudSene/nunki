@@ -1190,6 +1190,7 @@ fi
 # under `target/`, two tests failed in the unmutated baseline — their
 # temporary directories had landed inside a git repository.
 list="target/nunki-campaign.list"
+full="target/nunki-campaign.full"
 copies="${TMPDIR:-/tmp}/nunki-campaign-copies"
 cache() {
   find target \( -path "$out" -o -name 'nunki-campaign.*' \) -prune \
@@ -1205,6 +1206,7 @@ clean() (
       ! -path "$out" ! -path "$out/*" -exec rmdir {} \;
     rm -f "$list" "$list.now"
   fi
+  rm -f "$full"
   rm -rf "$copies"
   for old in target/mutants-*; do
     [ "$old" = "$out" ] || rm -rf "$old"
@@ -1235,6 +1237,7 @@ fi
 # foreground child runs its trap only when the child is done, and a shell
 # without a trap dies and leaves the tool running in the copy, orphaned.
 child=""
+sweeper=""
 stop() {
   if [ -n "$child" ]; then
     kill -TERM "$child" 2>/dev/null
@@ -1242,8 +1245,94 @@ stop() {
   fi
   exit 143
 }
-trap 'rc=$?; clean; exit $rc' EXIT
+# The sweeper below ends with the campaign, however it ends, and before the
+# cache is cleaned.
+unsweep() {
+  if [ -n "$sweeper" ]; then
+    kill -TERM "$sweeper" 2>/dev/null || true
+    wait "$sweeper" 2>/dev/null || true
+    sweeper=""
+  fi
+}
+trap 'rc=$?; unsweep; clean; exit $rc' EXIT
 trap stop INT TERM HUP
+
+# While the tool runs, what its mutants build is swept, and the disk is
+# watched (SPEC 4.4, gate 7).
+#
+# The image keeps debug information beside the objects
+# (`CARGO_PROFILE_DEV_SPLIT_DEBUGINFO=unpacked`, for the link time it saves):
+# every build writes `.dwo` files into `target/debug/deps`, a rebuild gives
+# them new names, and until the campaign ends nothing removes the old ones.
+# Measured on a crate whose mutant takes 47 s: about 240 MB a minute, 11 GB
+# an hour, and an earlier campaign stopped by `No space left on device`
+# after 11 mutants. No test reads a `.dwo`, so every `$sweep_every` seconds,
+# each `.dwo` in `target/debug/deps` goes when all of these hold:
+#
+# - its name is not on the cache's list: an earlier mutant wrote it, not the
+#   build the campaign found;
+# - no build has touched its file for `$settle_minutes` minutes (`-cmin`,
+#   the status time). A rebuild hard-links every unchanged unit's `.dwo`
+#   from rustc's incremental session under a new name, which moves that
+#   time even under an old file time: a file a build still uses keeps
+#   moving, and those extra names cost no space. What fills the disk is a
+#   file no build uses any more — a unit a mutant changed, and the unit it
+#   replaced — held only by names in `deps`. Its time stops moving, and ten
+#   minutes on, every one of those names goes.
+#
+# A build in progress does read them. Measured on cargo-mutants 27.1.0 and
+# this repository, 48 mutants: swept as soon as they were written, and in
+# the incremental directories too, one mutant that compiles failed with
+# `failed to build archive … No such file or directory` and was recorded
+# unviable instead of caught — a survivor could hide that way. So rustc's
+# incremental directories are never swept, and the settling time keeps
+# whatever a build may still read. Above one job, the same holds in the
+# copies' `target/debug/deps`.
+#
+# Each sweep also reads the space left under `target/`. Below `$floor_mib`
+# the tool is stopped, and the campaign fails saying so, rather than in a
+# write error that names nothing. The floor is a choice, not a measurement:
+# about eight minutes of the unswept growth above.
+sweep_every=30
+settle_minutes=10
+floor_mib=2048
+free_mib() {
+  df -Pk target 2>/dev/null | awk 'NR == 2 && $4 ~ /^[0-9]+$/ { print int($4 / 1024) }'
+}
+# Run in the background, so already in a subshell of its own: braces, not
+# parentheses, which would fork a second one that a signal to the first
+# does not reach.
+sweep() {
+  set +e
+  nap=""
+  trap 'if [ -n "$nap" ]; then kill "$nap" 2>/dev/null; wait "$nap"; fi; exit 0' TERM
+  while :; do
+    sleep "$sweep_every" &
+    nap=$!
+    wait "$nap"
+    nap=""
+    find target/debug/deps -name '*.dwo' -type f -cmin "+$settle_minutes" \
+      2>/dev/null | LC_ALL=C sort | LC_ALL=C comm -13 "$list" - \
+      | tr '\n' '\0' | xargs -0 rm -f
+    if [ -d "$copies" ]; then
+      find "$copies" -path '*/target/debug/deps/*' -name '*.dwo' -type f \
+        -cmin "+$settle_minutes" -exec rm -f {} + 2>/dev/null
+    fi
+    left=$(free_mib)
+    if [ -n "$left" ] && [ "$left" -lt "$floor_mib" ]; then
+      echo "$left" > "$full"
+      kill -TERM "$1" 2>/dev/null
+      exit 0
+    fi
+  done
+}
+left=$(free_mib)
+if [ -z "$left" ]; then
+  echo "nunki: the space left under target/ could not be read, so this campaign is not watched for it" >&2
+elif [ "$left" -lt "$floor_mib" ]; then
+  echo "nunki: the disk under target/ has $left MiB left, below the campaign's floor of $floor_mib MiB, so the campaign did not start and measured nothing" >&2
+  exit 1
+fi
 
 # A campaign that finds survivors exits non-zero — 2, measured on
 # cargo-mutants 27.1.0 — and that is a result, not a failure: `nunki` reads the
@@ -1275,8 +1364,15 @@ trap stop INT TERM HUP
 status=0
 cargo mutants --no-config $where --no-shuffle --exclude-re "replace main -> " --output "$out" "$@" >&2 &
 child=$!
+sweep "$child" &
+sweeper=$!
 wait "$child" || status=$?
 child=""
+unsweep
+if [ -f "$full" ]; then
+  echo "nunki: the disk under target/ had $(cat "$full") MiB left, below the campaign's floor of $floor_mib MiB, so the tool was stopped and the campaign measured nothing" >&2
+  exit 1
+fi
 
 # `--output DIR` writes into `DIR/mutants.out/`, not into `DIR` (measured on
 # 27.1.0). Reading the wrong path makes the whole campaign fail silently.
@@ -1304,7 +1400,11 @@ if [ ! -f "$outcomes" ]; then
     printf '{"campaign":"done","tried":0,"found":0,"missed":0,"by_file":true}\n'
     exit 0
   fi
-  echo "nunki: the campaign left no $outcomes" >&2
+  if [ "$status" -ne 0 ]; then
+    echo "nunki: cargo mutants exited $status and left no $outcomes, so the campaign measured nothing; what the tool said is above" >&2
+  else
+    echo "nunki: the campaign left no $outcomes" >&2
+  fi
   exit 1
 fi
 
@@ -1316,8 +1416,12 @@ fi
 # an empty `missed.txt` that would read as a campaign with no survivor).
 case "$status" in
   0|2|3) ;;
+  4)
+    echo "nunki: cargo mutants exited 4: the tests fail on the unmutated code, before any mutant is tried, so the campaign measured nothing" >&2
+    exit 1
+    ;;
   *)
-    echo "nunki: cargo mutants exited $status, so the campaign did not complete and measured nothing (4: the tests fail on the unmutated code, before any mutant is tried)" >&2
+    echo "nunki: cargo mutants exited $status, so the campaign did not complete and measured nothing; what the tool said is above" >&2
     exit 1
     ;;
 esac

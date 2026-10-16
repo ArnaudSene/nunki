@@ -3614,6 +3614,374 @@ fn a_rust_campaign_leaves_the_build_cache_as_it_found_it_however_it_ends() {
     }
 }
 
+/// A `sleep` that does not wait, so a sweep every thirty seconds runs at
+/// once; the stand-ins below wait with `/bin/sleep`.
+#[cfg(unix)]
+const SLEEP_AT_ONCE: &str = "#!/bin/sh\nexec /bin/sleep 0.05\n";
+
+/// A `df -Pk` whose free space is the number of KiB in the file `$DF_FREE`,
+/// or plenty without one.
+#[cfg(unix)]
+const DF_FROM_FILE: &str = r#"#!/bin/sh
+kib=$(cat "$DF_FREE" 2>/dev/null || echo 99999999)
+echo 'Filesystem 1024-blocks Used Available Capacity Mounted on'
+echo "/dev/stub 100000000 1 $kib 1% /"
+"#;
+
+/// A stand-in `cargo mutants` that writes what a mutant's build leaves in
+/// `deps` — a new `.dwo`, an old one hard-linked under a new name, one
+/// linked from rustc's incremental session — an object, and a `.dwo` in the
+/// incremental working directory; then lets the sweep run, and writes to
+/// `$SWEPT` what it saw. With `$SETTLED` at `yes`, the three in `deps` must
+/// go and nothing else; otherwise, nothing must go. Above one job, the same
+/// in a copy under `$TMPDIR`.
+#[cfg(unix)]
+const CARGO_THAT_WAITS_FOR_THE_SWEEP: &str = r#"#!/bin/sh
+out=""
+jobs=""
+while [ $# -gt 0 ]; do
+  if [ "$1" = --output ]; then out=$2; fi
+  if [ "$1" = --jobs ]; then jobs=$2; fi
+  shift
+done
+d=target/debug/deps
+inc=target/debug/incremental/crate-1/s-new-working
+mkdir -p "$inc"
+echo mutant > "$d/crate-mutant.rcgu.dwo"
+ln "$d/old.rcgu.dwo" "$d/old-relinked.rcgu.dwo"
+echo mutant > "$d/crate-mutant.rcgu.o"
+echo mutant > "$inc/unit.dwo"
+ln "$inc/unit.dwo" "$d/crate-session.rcgu.dwo"
+gone="$d/crate-mutant.rcgu.dwo $d/old-relinked.rcgu.dwo $d/crate-session.rcgu.dwo"
+stays="$d/old.rcgu.dwo $d/crate-mutant.rcgu.o $inc/unit.dwo"
+if [ -n "$jobs" ]; then
+  c="$TMPDIR/cargo-mutants-tree-x/target/debug/deps"
+  mkdir -p "$c"
+  echo copy > "$c/copy.rcgu.dwo"
+  echo copy > "$c/copy.rcgu.o"
+  gone="$gone $c/copy.rcgu.dwo"
+  stays="$stays $c/copy.rcgu.o"
+fi
+if [ "$SETTLED" = yes ]; then
+  i=0
+  while [ $i -lt 200 ]; do
+    left=""
+    for f in $gone; do [ -e "$f" ] && left="$left $f"; done
+    [ -z "$left" ] && break
+    /bin/sleep 0.05
+    i=$((i + 1))
+  done
+  must_go=$gone
+else
+  /bin/sleep 1
+  must_go=""
+  stays="$stays $gone"
+fi
+{
+  for f in $must_go; do [ -e "$f" ] && echo "kept $f"; done
+  for f in $stays; do [ -e "$f" ] || echo "swept $f"; done
+} > "$SWEPT"
+echo 'CaughtMutant|src/lib.rs|1|1|src/lib.rs:1:1: replace a' | mutants-out "$out/mutants.out"
+exit 0
+"#;
+
+/// While the tool runs, a `.dwo` in `target/debug/deps` that a mutant wrote
+/// goes once no build has touched its file for the settling time — a new
+/// name, an old file linked under one, one linked from the session. Nothing
+/// else goes: not a `.dwo` that was there before the campaign, not an
+/// object, not a `.dwo` in rustc's incremental directories. Within the
+/// settling time, nothing goes: a build in progress reads them. Above one
+/// job, the same in the copies. The campaign completes, and the cache is
+/// left as it was.
+///
+/// The settling time is ten minutes, and a file's status time cannot be set
+/// back: so the script's copy here is given none, to see what goes, and
+/// keeps its ten minutes to see what stays.
+#[cfg(unix)]
+#[test]
+fn a_rust_campaign_sweeps_the_debug_files_its_mutants_write_while_it_runs() {
+    for settled in [true, false] {
+        for jobs in ["1", "3"] {
+            let (dir, root, nunki) = fresh();
+            init(&root, &nunki, &["rust".to_string()]).unwrap();
+            let script = home(&root).join("stacks/rust/mutation.sh");
+            if settled {
+                let body = std::fs::read_to_string(&script).unwrap();
+                assert!(body.contains("\nsettle_minutes=10\n"), "{body}");
+                std::fs::write(
+                    &script,
+                    body.replace("\nsettle_minutes=10\n", "\nsettle_minutes=0\n"),
+                )
+                .unwrap();
+            }
+            let tree = dir.path().join("tree");
+            let target = tree.join("target");
+            aged(&tree.join("src/lib.rs"), "pub fn a() {}\n", 90);
+            aged(&target.join("debug/deps/old.rcgu.dwo"), "old", 60);
+            aged(&target.join("debug/deps/libdep-1.rlib"), "dep", 60);
+            let built = cache_of(&target);
+            let path = stubs(
+                &dir.path().join("stub-bin"),
+                &[
+                    ("cargo", CARGO_THAT_WAITS_FOR_THE_SWEEP),
+                    ("sleep", SLEEP_AT_ONCE),
+                    ("df", DF_FROM_FILE),
+                ],
+            );
+            let swept = dir.path().join("swept");
+            let tmp = dir.path().join("tmp");
+            std::fs::create_dir_all(&tmp).unwrap();
+            // Into files, not pipes: a sweep that outlived the script would
+            // hold a pipe open, and the test would hang instead of failing.
+            let (stdout, stderr) = (dir.path().join("stdout"), dir.path().join("stderr"));
+            sh().arg(&script)
+                .arg("abc123")
+                .arg("src/lib.rs")
+                .env("PATH", path)
+                .env("SWEPT", &swept)
+                .env("SETTLED", if settled { "yes" } else { "no" })
+                .env("TMPDIR", &tmp)
+                .env(nunki::mutants::JOBS_ENV, jobs)
+                .current_dir(&tree)
+                .stdout(std::fs::File::create(&stdout).unwrap())
+                .stderr(std::fs::File::create(&stderr).unwrap())
+                .status()
+                .expect("sh runs the campaign");
+            // The sweep ends with the campaign: nothing still runs this
+            // script, which `nunki` would otherwise find still in flight.
+            // Whatever does is killed before the test says so.
+            let ps = std::process::Command::new("ps")
+                .args(["-A", "-o", "pid=,command="])
+                .output()
+                .unwrap();
+            let script_at = script.display().to_string();
+            let outlived: Vec<String> = String::from_utf8_lossy(&ps.stdout)
+                .lines()
+                .filter(|l| l.contains(&script_at))
+                .map(str::to_string)
+                .collect();
+            for line in &outlived {
+                if let Some(pid) = line.split_whitespace().next() {
+                    let _ = std::process::Command::new("kill").arg(pid).status();
+                }
+            }
+            let said = std::fs::read_to_string(&stdout).unwrap();
+            let why = std::fs::read_to_string(&stderr).unwrap();
+            let case = format!("settled {settled}, at {jobs} job(s)");
+            assert!(
+                outlived.is_empty(),
+                "{case}: the sweep outlived the campaign: {outlived:?}"
+            );
+            assert!(nunki::mutants::completed(&said), "{case}: {said}\n{why}");
+            let seen = std::fs::read_to_string(&swept).expect("the stand-in ran");
+            assert_eq!(seen, "", "{case}: {seen}\n{why}");
+            let mut left = cache_of(&target);
+            left.retain(|k, _| !k.starts_with("mutants-abc123/"));
+            assert_eq!(left, built, "{case}: the cache is not as it was\n{why}");
+        }
+    }
+}
+
+/// A stand-in `cargo mutants` that runs on for thirty seconds, and first
+/// writes `$DF_LOW` into `$DF_FREE`, when set: the disk filling while it
+/// runs. It says in `$RAN` that it ran.
+#[cfg(unix)]
+const CARGO_THAT_FILLS_THE_DISK: &str = r#"#!/bin/sh
+echo ran > "$RAN"
+if [ -n "${DF_LOW:-}" ]; then echo "$DF_LOW" > "$DF_FREE"; fi
+exec /bin/sleep 30
+"#;
+
+/// The disk is watched. With less than the floor left before the tool
+/// starts, the campaign does not start; once the space left falls below it
+/// while the tool runs, the tool is stopped at once. Either way the campaign
+/// measured nothing, and says why, with the space left and the floor. And a
+/// space left that cannot be read is said, and the campaign runs.
+#[cfg(unix)]
+#[test]
+fn a_rust_campaign_stops_before_its_disk_fills_and_says_so() {
+    let run = |free_kib: &str, low: Option<&str>| {
+        let (dir, root, nunki) = fresh();
+        init(&root, &nunki, &["rust".to_string()]).unwrap();
+        let script = home(&root).join("stacks/rust/mutation.sh");
+        let tree = dir.path().join("tree");
+        aged(&tree.join("src/lib.rs"), "pub fn a() {}\n", 90);
+        let free = dir.path().join("free");
+        std::fs::write(&free, free_kib).unwrap();
+        let ran = dir.path().join("ran");
+        let path = stubs(
+            &dir.path().join("stub-bin"),
+            &[
+                ("cargo", CARGO_THAT_FILLS_THE_DISK),
+                ("sleep", SLEEP_AT_ONCE),
+                ("df", DF_FROM_FILE),
+            ],
+        );
+        let mut command = sh();
+        command
+            .arg(&script)
+            .arg("abc123")
+            .arg("src/lib.rs")
+            .env("PATH", path)
+            .env("DF_FREE", &free)
+            .env("RAN", &ran)
+            .current_dir(&tree);
+        if let Some(low) = low {
+            command.env("DF_LOW", low);
+        }
+        let started = std::time::Instant::now();
+        let out = command.output().expect("sh runs the campaign");
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+            ran.exists(),
+            started.elapsed(),
+            tree.join("target/nunki-campaign.full").exists(),
+        )
+    };
+
+    // 1 MiB left: the floor is 2,048 MiB, and the tool never starts.
+    let (status, said, why, ran, _, marker) = run("1024", None);
+    assert_eq!(status, Some(1), "{why}");
+    assert!(!nunki::mutants::completed(&said), "{said}");
+    assert!(!ran, "the tool started on a full disk: {why}");
+    assert!(
+        why.contains(
+            "has 1 MiB left, below the campaign's floor of 2048 MiB, so the campaign did not start"
+        ),
+        "{why}"
+    );
+    assert!(!marker, "{why}");
+
+    // Plenty at the start, 1 MiB once the tool runs: stopped at once, not
+    // after the stand-in's thirty seconds.
+    let (status, said, why, ran, took, marker) = run("99999999", Some("1024"));
+    assert_eq!(status, Some(1), "{why}");
+    assert!(ran, "{why}");
+    assert!(!nunki::mutants::completed(&said), "{said}");
+    assert!(
+        took < std::time::Duration::from_secs(20),
+        "the tool ran on past the floor ({took:?}): {why}"
+    );
+    assert!(
+        why.contains(
+            "had 1 MiB left, below the campaign's floor of 2048 MiB, so the tool was stopped"
+        ),
+        "{why}"
+    );
+    assert!(!marker, "the floor's marker was left in the cache: {why}");
+
+    // A space left that cannot be read: said, and the tool runs. The
+    // stand-in then runs its thirty seconds, so it is stopped as `nunki`
+    // stops a campaign past its deadline — not waited for here.
+    let (dir, root, nunki) = fresh();
+    init(&root, &nunki, &["rust".to_string()]).unwrap();
+    let script = home(&root).join("stacks/rust/mutation.sh");
+    let tree = dir.path().join("tree");
+    aged(&tree.join("src/lib.rs"), "pub fn a() {}\n", 90);
+    let ran = dir.path().join("ran");
+    let path = stubs(
+        &dir.path().join("stub-bin"),
+        &[
+            ("cargo", CARGO_THAT_FILLS_THE_DISK),
+            ("df", "#!/bin/sh\necho 'df: cannot read' >&2\nexit 1\n"),
+        ],
+    );
+    let child = sh()
+        .arg(&script)
+        .arg("abc123")
+        .arg("src/lib.rs")
+        .env("PATH", path)
+        .env("RAN", &ran)
+        .current_dir(&tree)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("sh runs the campaign");
+    let waited = std::time::Instant::now();
+    while !ran.exists() && waited.elapsed() < std::time::Duration::from_secs(10) {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(
+        ran.exists(),
+        "the tool did not start without a free space reading"
+    );
+    let _ = std::process::Command::new("kill")
+        .arg("-TERM")
+        .arg(child.id().to_string())
+        .status();
+    let out = child.wait_with_output().unwrap();
+    let why = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        why.contains(
+            "the space left under target/ could not be read, so this campaign is not watched for it"
+        ),
+        "{why}"
+    );
+}
+
+/// A stand-in `cargo mutants` that writes one outcome, then exits with
+/// `$STUB_STATUS`: a tool that got some way and stopped.
+#[cfg(unix)]
+const CARGO_THAT_EXITS: &str = r#"#!/bin/sh
+out=""
+while [ $# -gt 0 ]; do
+  if [ "$1" = --output ]; then out=$2; fi
+  shift
+done
+echo 'CaughtMutant|src/lib.rs|1|1|src/lib.rs:1:1: replace a' | mutants-out "$out/mutants.out"
+exit "$STUB_STATUS"
+"#;
+
+/// A campaign that did not complete names the status the tool gave, and
+/// explains only that one: 4 is the baseline failing, and nothing else is.
+/// A tool that left no outcomes is named with its status too.
+#[cfg(unix)]
+#[test]
+fn a_failed_rust_campaign_explains_only_the_status_it_got() {
+    let failed = |status: &str| {
+        let (said, why, code) = campaign_with(
+            "rust",
+            "src/lib.rs",
+            &[("cargo", CARGO_THAT_EXITS)],
+            &[("src/lib.rs", "pub fn a() {}\n")],
+            &[("STUB_STATUS", status)],
+        );
+        assert_eq!(code, Some(1), "{why}");
+        assert!(!nunki::mutants::completed(&said), "{said}");
+        why
+    };
+
+    let why = failed("1");
+    assert!(
+        why.contains("cargo mutants exited 1, so the campaign did not complete"),
+        "{why}"
+    );
+    assert!(!why.contains("unmutated"), "exit 1 explained as 4: {why}");
+
+    let why = failed("4");
+    assert!(
+        why.contains("cargo mutants exited 4: the tests fail on the unmutated code"),
+        "{why}"
+    );
+
+    let (_, why, code) = campaign_with(
+        "rust",
+        "src/lib.rs",
+        &[("cargo", CARGO_THAT_BUILDS)],
+        &[("src/lib.rs", "pub fn a() {}\n")],
+        &[("STUB_END", "crash")],
+    );
+    assert_eq!(code, Some(1), "{why}");
+    assert!(
+        why.contains(
+            "cargo mutants exited 1 and left no target/mutants-abc123/mutants.out/outcomes.json"
+        ),
+        "{why}"
+    );
+}
+
 /// Next.js: the sandbox a killed Stryker left, `.stryker-tmp/`, is cleared
 /// before the next run — the one thing Stryker leaves behind that
 /// `--cleanTempDir always` cannot remove, since a killed process runs nothing.
