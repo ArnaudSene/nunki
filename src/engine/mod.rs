@@ -186,6 +186,11 @@ pub trait Engine: Send + Sync {
     /// anonymous one either, which an image's `VOLUME` makes on its own.
     fn remove(&self, containers: &[String]) -> Result<(), EngineError>;
 
+    /// The command line a human runs to remove `container` and none of its
+    /// volumes, as data: what a message names as the way out when a
+    /// service's container no longer starts. Never run by nunki itself.
+    fn removal(&self, container: &str) -> crate::harness::spawn::CommandSpec;
+
     /// Remove the named volume `name`: `Ok(true)` when it was removed,
     /// `Ok(false)` when the engine has no volume by that name — a slot reset
     /// before its first run has none, and that is not a failure. A volume a

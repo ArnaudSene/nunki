@@ -331,6 +331,12 @@ impl Engine for Docker {
         Ok(())
     }
 
+    fn removal(&self, container: &str) -> CommandSpec {
+        // No `-f`: the container this names has exited, and one running
+        // after all is refused rather than stopped. No `-v` either.
+        self.engine_command(&["rm", container])
+    }
+
     fn remove_volume(&self, name: &str) -> Result<bool, EngineError> {
         // Listed first, and compared whole: `--filter name=` matches a part
         // of a name, and reading "no such volume" out of an error message

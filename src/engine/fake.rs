@@ -45,6 +45,10 @@ pub struct FakeEngine {
     volumes: Mutex<std::collections::BTreeSet<String>>,
     /// Volumes some other project's container mounts: never removable here.
     held: Mutex<std::collections::BTreeSet<String>>,
+    /// Containers the engine is asked about and does not answer for.
+    unanswered: Mutex<std::collections::BTreeSet<String>>,
+    /// Containers an `up` makes, listed from then on.
+    made_on_up: Mutex<Vec<Container>>,
 }
 
 impl Default for FakeEngine {
@@ -71,6 +75,8 @@ impl Default for FakeEngine {
             lifted: Mutex::new(Vec::new()),
             volumes: Mutex::new(Default::default()),
             held: Mutex::new(Default::default()),
+            unanswered: Mutex::new(Default::default()),
+            made_on_up: Mutex::new(Vec::new()),
         }
     }
 }
@@ -114,6 +120,23 @@ impl FakeEngine {
             .lock()
             .unwrap()
             .insert(container.to_string(), state);
+        self
+    }
+
+    /// Have the next `up` make `container`, whether it then fails or not:
+    /// what Compose does to a service it finds no container for.
+    pub fn making_on_up(self, container: Container) -> Self {
+        self.made_on_up.lock().unwrap().push(container);
+        self
+    }
+
+    /// Fail every question about `container`: an engine that cannot be
+    /// reached, rather than one that knows nothing of it.
+    pub fn with_unanswered(self, container: &str) -> Self {
+        self.unanswered
+            .lock()
+            .unwrap()
+            .insert(container.to_string());
         self
     }
 
@@ -189,6 +212,8 @@ impl Engine for FakeEngine {
 
     fn up(&self, _file: &Path, project: &str) -> Result<(), EngineError> {
         self.record(Call::Up(project.to_string()));
+        let made: Vec<Container> = std::mem::take(&mut *self.made_on_up.lock().unwrap());
+        self.lifted.lock().unwrap().extend(made);
         match self.fail_up.lock().unwrap().clone() {
             Some(stderr) => Err(EngineError::Command {
                 verb: "up",
@@ -307,6 +332,11 @@ impl Engine for FakeEngine {
 
     fn liveness(&self, container: &str) -> Result<Liveness, EngineError> {
         self.record(Call::Liveness(container.to_string()));
+        if self.unanswered.lock().unwrap().contains(container) {
+            return Err(EngineError::Unreadable(format!(
+                "no answer about {container}"
+            )));
+        }
         if let Some(queue) = self.liveness_queue.lock().unwrap().get_mut(container) {
             if queue.len() > 1 {
                 return Ok(queue.remove(0));
@@ -327,6 +357,15 @@ impl Engine for FakeEngine {
     fn containers(&self, project: &str) -> Result<Vec<Container>, EngineError> {
         self.record(Call::Containers(project.to_string()));
         Ok(self.lifted.lock().unwrap().clone())
+    }
+
+    fn removal(&self, container: &str) -> crate::harness::spawn::CommandSpec {
+        crate::harness::spawn::CommandSpec {
+            program: "fake-engine".to_string(),
+            args: vec!["rm".to_string(), container.to_string()],
+            cwd: PathBuf::from("."),
+            env: BTreeMap::new(),
+        }
     }
 
     fn remove(&self, containers: &[String]) -> Result<(), EngineError> {

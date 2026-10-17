@@ -237,6 +237,47 @@ pub enum RunError {
          `nunki slot rebuild` builds it again{1}"
     )]
     NotWritable(String, String),
+    #[error("{}", not_started_again(stuck, said))]
+    NotStartedAgain { stuck: Vec<Stuck>, said: String },
+}
+
+fn not_started_again(stuck: &[Stuck], said: &str) -> String {
+    let names: Vec<&str> = stuck.iter().map(|s| s.service.as_str()).collect();
+    let (whose, had, is) = match stuck.len() {
+        1 => ("service", "a container", "is"),
+        _ => ("services", "containers", "are"),
+    };
+    format!(
+        "the project's {whose} {}, which had {had} before this launch, {is} not running after \
+         its `up` — {}. Removing a container takes none of its volumes, and the next launch \
+         makes it anew: the file's named volumes stay, and what it kept in its own filesystem \
+         and in the image's anonymous volumes does not come back. `up` said: {said}",
+        names.join(", "),
+        stuck.iter().map(Stuck::said).collect::<Vec<_>>().join("; ")
+    )
+}
+
+/// A project's service that had a container before a launch, and whose
+/// container has exited after the launch's `up` failed (#140): what
+/// [`RunError::NotStartedAgain`] names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stuck {
+    pub service: String,
+    pub container: String,
+    /// What the engine says the container exited with: never 0.
+    pub code: i64,
+    /// The command line that removes the container and none of its volumes
+    /// ([`Engine::removal`]).
+    pub removal: String,
+}
+
+impl Stuck {
+    fn said(&self) -> String {
+        format!(
+            "{}'s container {} exited {}: its log says why, and `{}` removes it",
+            self.service, self.container, self.code, self.removal
+        )
+    }
 }
 
 /// Which account a mission spends, and the token to pass. The mission's
@@ -688,12 +729,14 @@ pub fn lift(
     plan: &Plan,
 ) -> Result<Vec<String>, RunError> {
     let approvals = crate::services::Approvals::load(&crate::services::file(project))?;
-    let stale = crate::services::stale(
-        &engine.containers(compose_project)?,
-        plan.project_services.as_ref(),
-        &approvals,
-    );
-    take_down_and_up(engine, file, compose_project, stale)
+    let listed = engine.containers(compose_project)?;
+    let stale = crate::services::stale(&listed, plan.project_services.as_ref(), &approvals);
+    let lifts = plan
+        .project_services
+        .as_ref()
+        .map(|l| l.services.services.keys().cloned().collect())
+        .unwrap_or_default();
+    take_down_and_up(engine, file, compose_project, listed, stale, lifts)
 }
 
 /// Start again the profile a launch wrote at `file`, without writing it:
@@ -715,25 +758,98 @@ pub fn relift(
 ) -> Result<Vec<String>, RunError> {
     let approvals = crate::services::Approvals::load(&crate::services::file(project))?;
     let lifting = crate::services::labels_of_profile(file, &approvals)?;
-    let stale = crate::services::stale_labelled(
-        &engine.containers(compose_project)?,
-        lifting.as_ref(),
-        &approvals,
-    );
-    take_down_and_up(engine, file, compose_project, stale)
+    let listed = engine.containers(compose_project)?;
+    let stale = crate::services::stale_labelled(&listed, lifting.as_ref(), &approvals);
+    let lifts = lifting
+        .as_ref()
+        .map(|labels| labels.keys().cloned().collect())
+        .unwrap_or_default();
+    take_down_and_up(engine, file, compose_project, listed, stale, lifts)
 }
 
+/// Take down `stale`, out of what the engine `listed` for the project, and
+/// start the profile, which lifts the project's services named in `lifts`.
+/// An `up` that fails is said as [`RunError::NotStartedAgain`] when
+/// [`not_started`] finds one of them that stopped starting, and as the
+/// engine said it otherwise.
+///
+/// Only the services this profile lifts are looked at: the approved ones
+/// it does not lift — all of them under the coder's profile, and those a
+/// mission holds back — are kept as they are, and this `up` never starts
+/// them. One found exited after a machine slept, with the code its stop
+/// gave it, would be blamed for a failure it had no part in, and a human
+/// handed the removal of its data.
 fn take_down_and_up(
     engine: &dyn Engine,
     file: &Path,
     compose_project: &str,
+    listed: Vec<crate::engine::Container>,
     stale: Vec<String>,
+    lifts: std::collections::BTreeSet<String>,
 ) -> Result<Vec<String>, RunError> {
     if !stale.is_empty() {
         engine.remove(&stale)?;
     }
-    engine.up(file, compose_project)?;
+    let kept: Vec<crate::engine::Container> = listed
+        .into_iter()
+        .filter(|c| c.digest.is_some() && !stale.contains(&c.id) && lifts.contains(&c.service))
+        .collect();
+    if let Err(failed) = engine.up(file, compose_project) {
+        if let EngineError::Command { stderr, .. } = &failed
+            && let Some(stuck) = not_started(engine, compose_project, &kept)
+        {
+            let said = stderr
+                .lines()
+                .rev()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .unwrap_or("nothing")
+                .to_string();
+            return Err(RunError::NotStartedAgain { stuck, said });
+        }
+        return Err(failed.into());
+    }
     Ok(stale)
+}
+
+/// After a failed `up`: the project's services that had a container in
+/// `before` — the lifted containers a launch found and kept — and whose
+/// container, listed again, has exited with a code other than 0 (#140).
+///
+/// By service, and not by container: a definition that changed makes
+/// Compose recreate the container, over the anonymous volumes it carries
+/// over, and the one that exited is then not the one listed before. Code 0
+/// is left out: a service whose work is done exits 0, which is no failure.
+///
+/// `None` when no such service is found, and when the engine cannot say —
+/// a listing or a liveness that fails — so that the `up`'s own error is
+/// said rather than a guess. A service that is running and not healthy,
+/// which fails an `up --wait` too, is not one: it has not exited.
+pub fn not_started(
+    engine: &dyn Engine,
+    compose_project: &str,
+    before: &[crate::engine::Container],
+) -> Option<Vec<Stuck>> {
+    if before.is_empty() {
+        return None;
+    }
+    let mut stuck = Vec::new();
+    for container in engine.containers(compose_project).ok()? {
+        if container.digest.is_none() || !before.iter().any(|b| b.service == container.service) {
+            continue;
+        }
+        if let crate::engine::Liveness::Exited(code) = engine.liveness(&container.id).ok()?
+            && code != 0
+        {
+            stuck.push(Stuck {
+                removal: engine.removal(&container.id).display(),
+                service: container.service,
+                container: container.id,
+                code,
+            });
+        }
+    }
+    (!stuck.is_empty()).then_some(stuck)
 }
 
 /// The services of `plan` whose `ports` nunki dropped: what the launch says

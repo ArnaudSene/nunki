@@ -781,7 +781,13 @@ arrêté. Trois règles, et une seule mécanique quelle que soit la forme de la 
    définition n'est pas celle qui est approuvée sont arrêtés, jamais leurs
    volumes ; l'étiquette de conteneur `nunki.services` est à `nunki`. L'état que
    l'intégrateur a posé — migrations jouées, fixtures — survit ; seul le
-   conteneur d'agent change.
+   conteneur d'agent change. Un service que le profil lève, qui avait un
+   conteneur avant le lancement et qui, après un `up` en échec, en est sorti
+   sur un code autre que 0, est dit en une ligne : son conteneur, ce code,
+   et la commande du moteur qui retire ce conteneur sans aucun de ses
+   volumes. `nunki` ne la lance jamais lui-même : ce que le conteneur
+   gardait dans son propre système de fichiers et dans les volumes anonymes
+   de son image ne reviendrait pas.
 2. **Lancer l'application n'est le travail d'aucun agent : c'est `nunki` qui la
    démarre**, par `nunki exec`, dans le profil de l'agent qui va la tester ou
    l'attaquer, avant de lancer cet agent. Il le fait à partir d'un **script

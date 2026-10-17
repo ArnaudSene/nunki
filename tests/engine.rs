@@ -1012,6 +1012,16 @@ fn removing_containers_never_takes_a_volume_with_them() {
     assert!(docker.remove(&["c1".into()]).is_err());
 }
 
+/// The removal a message names for a human (#140) takes no volume either,
+/// and does not stop a container: it names one that has exited, and one
+/// running after all is refused. It is data, and nothing runs it here.
+#[test]
+fn the_removal_named_for_a_human_takes_no_volume_and_stops_nothing() {
+    let (docker, cli) = recorded(vec![]);
+    assert_eq!(docker.removal("c1").display(), "docker rm c1");
+    assert!(cli.lines().is_empty(), "named, not run");
+}
+
 /// A named volume is removed by name, after the engine is asked whether it
 /// has one — compared whole, since `--filter name=` matches a part — and
 /// never with `-f`, which would hide why one in use stayed.
