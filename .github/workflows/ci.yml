@@ -39,6 +39,13 @@ jobs:
   check:
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    # Every job here has a deadline, because GitHub's own is six hours. On
+    # `dev` at 93659d4 a test hung (#158), and its job ran 41 minutes before
+    # anyone noticed and cancelled it. Each deadline is two to three times the
+    # job's longest run over the workflow's last hundred: room for a cold
+    # cache, and GitHub still stops a hang within the hour. This job's longest
+    # was 15 minutes, on macOS.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -119,6 +126,8 @@ jobs:
     # It is green on 24.04 and on 26.04, and this job costs several minutes,
     # which is not a price to pay twice for an answer already known.
     runs-on: ubuntu-26.04
+    # Longest run: 13 minutes. See `check` for how the deadline is set.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
 
@@ -183,6 +192,8 @@ jobs:
     # `Cargo.lock` and `deny.toml`; the answer does not depend on which
     # Ubuntu asked.
     runs-on: ubuntu-26.04
+    # Longest run: 5 minutes. See `check` for how the deadline is set.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
 
