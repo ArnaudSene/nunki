@@ -105,6 +105,14 @@ pub const PACE_ENV: &str = "NUNKI_MUTATION_PACE";
 /// at, so that the reconstruction stays one sample ([`Sample`]).
 pub const SAMPLE_ENV: &str = "NUNKI_MUTATION_SAMPLE";
 
+/// Every variable `nunki` hands a campaign. A campaign's environment reaches
+/// everything it runs, the project's own tests included — measured on
+/// cargo-mutants 27.1.0: a test that fails when a variable is set fails the
+/// unmutated baseline, and the tool exits 4 having tried nothing. So the
+/// tests that run a stack's script start without them: run by a campaign
+/// of `nunki` on itself, they would otherwise read that campaign's.
+pub const CAMPAIGN_ENV: [&str; 5] = [BASE_ENV, JOBS_ENV, BUDGET_ENV, PACE_ENV, SAMPLE_ENV];
+
 /// Where the project's pace is kept, under its HQ: the seconds a mutant took
 /// on its last campaign that tried at least [`PACE_TRIED`], as the stack's
 /// script measured it. Only the Rust stack's script measures it today.
