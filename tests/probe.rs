@@ -234,10 +234,13 @@ fn a_missing_image_is_something_to_do_not_a_crash() {
 // --- the system profile (SPEC 4.1 bis, rule 7, `nunki check --mission`) --------
 
 fn with_services(dir: &Path) -> (Project, nunki::slot::Slot, nunki::mission::Header) {
-    let tree = dir.join("repo-slots").join("one");
-    std::fs::create_dir_all(&tree).unwrap();
+    // The base holds the file, and the slot is branched from it the way a
+    // launch branches it: the host's record of that base is where a system
+    // profile reads the file.
+    let origin = dir.join("base");
+    std::fs::create_dir_all(&origin).unwrap();
     std::fs::write(
-        tree.join("compose.yaml"),
+        origin.join("compose.yaml"),
         "services:\n  db:\n    image: nginx:alpine\n    volumes: [dbdata:/data]\n  \
          cache:\n    image: nginx:alpine\nvolumes:\n  dbdata:\n",
     )
@@ -246,7 +249,16 @@ fn with_services(dir: &Path) -> (Project, nunki::slot::Slot, nunki::mission::Hea
     project.config.services_file = Some("compose.yaml".into());
     // Committed and approved: nunki reads the commit, and lifts only what
     // a human approved.
-    commit_all(&tree);
+    commit_all(&origin);
+    let slots = dir.join("repo-slots");
+    std::fs::create_dir_all(&slots).unwrap();
+    git_at(&slots, &["clone", "-q", origin.to_str().unwrap(), "one"]);
+    let tree = slots.join("one");
+    let slot = nunki::slot::Slot {
+        name: "one".into(),
+        tree: tree.clone(),
+    };
+    nunki::run::branch(&slot, &origin, "mission/x", "dev").unwrap();
     let current = nunki::services::read(&project, nunki::services::At::Slot(&tree))
         .unwrap()
         .unwrap();
@@ -275,10 +287,6 @@ fn with_services(dir: &Path) -> (Project, nunki::slot::Slot, nunki::mission::Hea
         account: None,
         model: None,
         bounds: Default::default(),
-    };
-    let slot = nunki::slot::Slot {
-        name: "one".into(),
-        tree,
     };
     (project, slot, header)
 }
@@ -527,6 +535,12 @@ fn live_a_system_profile_reaches_what_the_mission_declares_and_nothing_else() {
     let engine_bin = std::env::var("HQ_ENGINE").unwrap_or_else(|_| "docker".to_string());
     image::build(&project, "rust", &engine_bin, image::Harness::Install).expect("the images build");
     let slot = nunki::slot::add(&project, "sys").expect("the slot is cloned");
+    // On the mission's branch, made the way a launch makes it: the host's
+    // record of the base is where a system profile reads the services file.
+    let (_, _, mut header) = with_services(dir.path());
+    header.base = "main".into();
+    nunki::run::branch(&slot, &project.root, &header.branch, &header.base)
+        .expect("the slot is on the mission's branch");
     // The human approves the rendering once, as `nunki services --approve`
     // does: nothing unapproved is lifted.
     let current = nunki::services::read(&project, nunki::services::At::Slot(&slot.tree))
@@ -535,7 +549,6 @@ fn live_a_system_profile_reaches_what_the_mission_declares_and_nothing_else() {
     nunki::services::approve(&project, &current.digest, std::slice::from_ref(&current))
         .expect("the rendering is approved");
 
-    let (_, _, header) = with_services(dir.path());
     nunki::mission::dir::create(&project.hq_root, "m1", &header, "probe it").unwrap();
     nunki::state::Store::open(&project.hq_root)
         .unwrap()
@@ -672,6 +685,84 @@ fn the_verb_probes_the_system_profile_of_the_mission_it_is_given() {
     assert!(text.contains("declares no service"), "{text}");
 }
 
+/// The verbs a handover names, run as a human runs them. `nunki services
+/// --show <mission>` prints the rendering where the mission's system profile
+/// reads it, the commit its branch starts from, and not an agent's edit on
+/// the branch; `--approve <digest> <mission>` approves that digest, and
+/// refuses the edit's.
+#[test]
+fn the_services_verbs_read_where_the_mission_reads() {
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().join("repo");
+    let project_home = common::project_home(
+        &root,
+        home.path(),
+        "harness: claude-code\nstacks: [rust]\nservices_file: compose.yaml\n",
+    );
+    let (project, slot, header) = with_services(home.path());
+    let project = Project::at(root.clone(), project.config, project_home);
+    started(&project, &header);
+    let base = nunki::services::read(
+        &project,
+        nunki::services::At::Mission {
+            tree: &slot.tree,
+            base: &header.base,
+        },
+    )
+    .unwrap()
+    .unwrap();
+    std::fs::write(
+        slot.tree.join("compose.yaml"),
+        "services:\n  db:\n    image: postgres:99\n",
+    )
+    .unwrap();
+    git_at(
+        &slot.tree,
+        &[
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "user.name=T",
+            "commit",
+            "-qam",
+            "an agent's edit",
+        ],
+    );
+    let edit = nunki::services::read(&project, nunki::services::At::Slot(&slot.tree))
+        .unwrap()
+        .unwrap();
+    assert_ne!(edit.digest, base.digest);
+
+    let nunki = |args: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_nunki"))
+            .env("HOME", home.path())
+            .arg("-C")
+            .arg(&root)
+            .arg("services")
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let shown = nunki(&["--show", "m1"]);
+    let text = String::from_utf8_lossy(&shown.stdout);
+    assert!(shown.status.success(), "{shown:?}");
+    assert!(text.contains(&base.digest), "{text}");
+    assert!(!text.contains("postgres:99"), "{text}");
+
+    let refused = nunki(&["--approve", &edit.digest, "m1"]);
+    assert!(!refused.status.success(), "{refused:?}");
+
+    let approved = nunki(&["--approve", &base.digest, "m1"]);
+    assert!(approved.status.success(), "{approved:?}");
+    assert!(
+        String::from_utf8_lossy(&approved.stdout).starts_with("approved "),
+        "approved now, not found approved already: {approved:?}"
+    );
+    let approvals = nunki::services::Approvals::load(&nunki::services::file(&project)).unwrap();
+    assert!(approvals.find(&base.digest).is_some(), "{approvals:?}");
+    assert!(approvals.find(&edit.digest).is_none(), "{approvals:?}");
+}
+
 /// The mission folder a system-profile check mounts is a scratch one under
 /// `checks/`, with the agent's files present — never the mission's own.
 #[test]
@@ -698,7 +789,7 @@ fn a_system_profile_check_mounts_a_scratch_mission_folder() {
 /// Make `tree` a git repository whose one commit holds what it holds.
 fn commit_all(tree: &Path) {
     for args in [
-        &["init", "-q", "-b", "mission/x"][..],
+        &["init", "-q", "-b", "dev"][..],
         &["add", "-A"][..],
         &[
             "-c",
@@ -719,4 +810,14 @@ fn commit_all(tree: &Path) {
             .expect("git is on the path");
         assert!(out.status.success(), "git {args:?}: {out:?}");
     }
+}
+
+fn git_at(at: &Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(at)
+        .args(args)
+        .output()
+        .expect("git is on the path");
+    assert!(out.status.success(), "git {args:?}: {out:?}");
 }

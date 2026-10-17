@@ -139,6 +139,8 @@ struct Fixture {
     /// The project's `mutation_threshold`, which a `standard` mission's
     /// gate 7 is judged against.
     threshold: u32,
+    /// The project's services file, by its path in the repository.
+    services_file: Option<String>,
 }
 
 impl Fixture {
@@ -160,7 +162,30 @@ impl Fixture {
             branches: vec!["main".into(), "dev".into()],
             coder_head,
             threshold: 80,
+            services_file: None,
         }
+    }
+
+    /// A project that declares `compose.yaml` as its services file, on a
+    /// base that holds it, recorded the way a launch records it.
+    fn with_services_file() -> Self {
+        let mut f = Self::new();
+        f.services_file = Some("compose.yaml".into());
+        commit(
+            &f.tree,
+            "compose.yaml",
+            "services: {}\n",
+            "the base holds it",
+        );
+        git(&f.tree, &["branch", "-f", "dev", "HEAD"]);
+        let project = f.tree.with_file_name("tree-project.git");
+        git(&f.tree, &["push", "-q", project.to_str().unwrap(), "dev"]);
+        nunki::git::SlotGit::open(&f.tree)
+            .unwrap()
+            .fetch_origin(&project)
+            .unwrap();
+        f.coder_head = Some(git(&f.tree, &["rev-parse", "HEAD"]));
+        f
     }
 
     /// Rewrite the journal so its block names the current HEAD, which is what
@@ -223,6 +248,7 @@ impl Fixture {
                 header: &self.header,
                 protected_branches: &self.branches,
                 protected_paths: &self.protected,
+                services_file: self.services_file.as_deref(),
                 coder_head: self.coder_head.as_deref(),
             },
             &gate::Verification {
@@ -516,6 +542,112 @@ fn the_integrator_may_commit_its_wiring_and_nothing_else() {
     }
 }
 
+/// The project's services file is the human's (#141). A system profile
+/// lifts it as the mission's base holds it, so an edit on the branch would
+/// ship in the pull request without ever having been lifted: gate 4 refuses
+/// it, a revert included, since the gate reads each commit, and a deletion
+/// or a rename as well. By its exact path: a file of another name, or of the
+/// same name elsewhere, is not the services file.
+#[test]
+fn no_commit_of_the_coder_touches_the_services_file() {
+    let refused = |f: &Fixture| match f.decision(Role::Coder, Gate::Perimeter) {
+        Decision::Failed(why) => why,
+        other => panic!("the services file was let through: {other:?}"),
+    };
+    let db = "services:\n  db:\n    image: postgres:16\n";
+
+    let f = Fixture::with_services_file();
+    commit(&f.tree, "compose.yaml", db, "a db");
+    f.journal_names_head();
+    let why = refused(&f);
+    assert!(
+        why.contains("compose.yaml is the project's services file"),
+        "{why}"
+    );
+    assert!(why.contains("every commit"), "{why}");
+    assert!(why.contains("propose it in PR.md"), "{why}");
+
+    let f = Fixture::with_services_file();
+    commit(&f.tree, "compose.yaml", db, "a db");
+    commit(&f.tree, "compose.yaml", "services: {}\n", "take it back");
+    f.journal_names_head();
+    let why = refused(&f);
+    assert!(why.contains("commit"), "{why}");
+
+    let f = Fixture::with_services_file();
+    git(&f.tree, &["rm", "-q", "compose.yaml"]);
+    git(&f.tree, &["commit", "-q", "-m", "gone"]);
+    f.journal_names_head();
+    refused(&f);
+
+    let f = Fixture::with_services_file();
+    git(&f.tree, &["mv", "compose.yaml", "docker-compose.yaml"]);
+    git(&f.tree, &["commit", "-q", "-m", "renamed"]);
+    f.journal_names_head();
+    refused(&f);
+
+    let f = Fixture::with_services_file();
+    commit(
+        &f.tree,
+        "deploy/compose.yaml",
+        "services: {}\n",
+        "elsewhere",
+    );
+    commit(&f.tree, "compose.yaml.example", "services: {}\n", "beside");
+    f.journal_names_head();
+    assert_eq!(f.decision(Role::Coder, Gate::Perimeter), Decision::Passed);
+}
+
+/// The integrator is refused it too, before its wiring list is read: the
+/// mission of #141 named its services file as wiring, and a list that names
+/// the file lets nothing through. Without a services file declared, the same
+/// commit is wiring like any other.
+#[test]
+fn the_integrator_may_not_touch_the_services_file_even_as_wiring() {
+    let wired = |f: &mut Fixture| {
+        f.header.integration = Integration::Services {
+            services: vec![Service {
+                name: "db".into(),
+                reach: vec!["db".into()],
+                shared: false,
+            }],
+            wiring: vec!["compose.yaml".into(), "tests/system/**".into()],
+        };
+        commit(
+            &f.tree,
+            "tests/system/smoke.rs",
+            "// system test\n",
+            "wire it",
+        );
+        commit(
+            &f.tree,
+            "compose.yaml",
+            "services:\n  db:\n    image: postgres:16\n",
+            "a db",
+        );
+        f.journal_names_head();
+    };
+
+    let mut f = Fixture::with_services_file();
+    wired(&mut f);
+    match f.decision(Role::Integrator, Gate::Perimeter) {
+        Decision::Failed(why) => assert!(
+            why.contains("compose.yaml is the project's services file")
+                && why.contains("whatever the wiring list says"),
+            "{why}"
+        ),
+        other => panic!("the services file was let through as wiring: {other:?}"),
+    }
+
+    let mut f = Fixture::with_services_file();
+    f.services_file = None;
+    wired(&mut f);
+    assert_eq!(
+        f.decision(Role::Integrator, Gate::Perimeter),
+        Decision::Passed
+    );
+}
+
 /// A wiring list that names production code is a framing mistake, and gate 4
 /// is where it surfaces.
 ///
@@ -757,6 +889,7 @@ impl Fixture {
                 header: &self.header,
                 protected_branches: &self.branches,
                 protected_paths: &self.protected,
+                services_file: self.services_file.as_deref(),
                 coder_head: self.coder_head.as_deref(),
             },
             &gate::Verification {
@@ -1051,6 +1184,7 @@ fn live_the_battery_is_the_stacks_mounted_one_and_an_absent_one_is_red() {
                 header: &header,
                 protected_branches: &branches,
                 protected_paths: &protected,
+                services_file: None,
                 coder_head: None,
             },
             &gate::Verification {
@@ -1900,6 +2034,7 @@ impl Fixture {
                 header: &self.header,
                 protected_branches: &self.branches,
                 protected_paths: &self.protected,
+                services_file: self.services_file.as_deref(),
                 coder_head: self.coder_head.as_deref(),
             },
             &gate::Verification {
@@ -2552,6 +2687,7 @@ impl Fixture {
                 header: &self.header,
                 protected_branches: &self.branches,
                 protected_paths: &self.protected,
+                services_file: self.services_file.as_deref(),
                 coder_head: self.coder_head.as_deref(),
             },
             &gate::Verification {
@@ -3512,6 +3648,7 @@ impl Fixture {
                 header: &self.header,
                 protected_branches: &self.branches,
                 protected_paths: &self.protected,
+                services_file: self.services_file.as_deref(),
                 coder_head: self.coder_head.as_deref(),
             },
             &gate::Verification {

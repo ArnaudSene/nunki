@@ -468,12 +468,18 @@ fn approved_at_start(
     }
     forward_unstarted(slot, &project.root, &header.branch, &header.base)?;
     let brought = branch(slot, &project.root, &header.branch, &header.base)?;
-    match crate::services::approved(project, &slot.tree) {
+    let at = crate::services::At::Mission {
+        tree: &slot.tree,
+        base: &header.base,
+    };
+    match crate::services::approved(project, at) {
         Err(crate::services::ApprovalError::NotApproved { path, digest }) => {
             let approvals = crate::services::Approvals::load(&crate::services::file(project))?;
-            let from = format!("the HEAD of slot {}, where mission {id} starts", slot.name);
-            let shown = match crate::services::read(project, crate::services::At::Slot(&slot.tree))?
-            {
+            let from = format!(
+                "the commit mission {id}'s branch starts from, in slot {}",
+                slot.name
+            );
+            let shown = match crate::services::read(project, at)? {
                 Some(current) => crate::services::show(&current, &from, &approvals),
                 None => String::new(),
             };
@@ -687,7 +693,7 @@ pub fn launch(l: &Launching) -> Result<Launched, RunError> {
     // again and is the guard; this is what keeps a refusal from being
     // reported as a missing image (SPEC 4.2).
     if Profile::of(role) == Profile::System {
-        crate::services::approved(project, &slot.tree)?;
+        project_compose(project, slot, &header.base)?;
     }
 
     // Which subscription this mission spends. Checked before the machine:
@@ -1314,7 +1320,7 @@ pub fn plan(
     // takedown keeps what a human approved ([`crate::services::stale`]).
     let project_services = match profile {
         Profile::Mission => None,
-        Profile::System => project_compose(project, slot)?.map(|file| {
+        Profile::System => project_compose(project, slot, &header.base)?.map(|file| {
             crate::compose::services::Lifted::declared(file, &declared_services(header))
         }),
     };
@@ -1516,18 +1522,27 @@ fn credentials(project: &Project) -> Result<Vec<(PathBuf, PathBuf)>, RunError> {
 
 /// The project's own services, as a profile may lift them (SPEC 4.2).
 ///
-/// Read from the commit the slot's `HEAD` names, through the host's mirror,
-/// and never from the tree: what a human approves is what is committed. The
-/// file is the project's and travels with the commit, so the integrator may
-/// still amend it in its wiring — and an amended file is a new rendering,
-/// which starts nothing until a human approves it. A file the closed model
-/// refuses, or whose rendering nobody approved, lifts nothing, and the
-/// profile is not started ([`crate::services::approved`]).
+/// Read at the commit the mission's branch starts from, through the host's
+/// mirror ([`crate::services::At::Mission`]), and never from the tree or
+/// from the branch's own commits. The file is the human's: no agent amends
+/// it, not even an integrator whose wiring names it. Gate 4 refuses a
+/// commit that touches it, and until that commit is gone the profile still
+/// lifts what the human approved, rather than stopping the mission on an
+/// edit nobody will lift (#141). A file the closed model refuses, or whose
+/// rendering nobody approved, lifts nothing, and the profile is not started
+/// ([`crate::services::approved`]).
 fn project_compose(
     project: &Project,
     slot: &Slot,
+    base: &str,
 ) -> Result<Option<crate::compose::services::ServicesFile>, RunError> {
-    Ok(crate::services::approved(project, &slot.tree)?)
+    Ok(crate::services::approved(
+        project,
+        crate::services::At::Mission {
+            tree: &slot.tree,
+            base,
+        },
+    )?)
 }
 
 /// The services a mission's frozen header declares, by name.

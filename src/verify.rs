@@ -256,6 +256,7 @@ pub fn verify_as(
         // starts, `nunki` reads its own copy (SPEC 4.1).
         let header = state.flow.header().clone();
         let coder_head = state.concluded(Role::Coder).map(|c| c.head.clone());
+        let services_file = crate::services::declared_path(project);
         let subject = gate::Subject {
             role: role_of(state.flow.stage()),
             tree: &slot.tree,
@@ -266,6 +267,7 @@ pub fn verify_as(
             header: &header,
             protected_branches: &project.config.protected_branches,
             protected_paths: &project.config.protected_paths,
+            services_file: services_file.as_deref(),
             coder_head: coder_head.as_deref(),
         };
         let verification = gate::Verification {
@@ -955,8 +957,9 @@ pub fn verify_as(
     }
 }
 
-/// The system profile a role needed was not started: the services file on
-/// the slot's `HEAD` renders to `digest`, which no human approved. Said in
+/// The system profile a role needed was not started: the services file at
+/// the commit the mission's branch starts from renders to `digest`, which no
+/// human approved. Said in
 /// the follow-up first, then the mission is handed over with a handover of
 /// its own (SPEC 4.5), and nothing was spent.
 fn unapproved(
@@ -972,10 +975,10 @@ fn unapproved(
         &paths.followup,
         "nunki",
         &format!(
-            "{file} on the slot's HEAD renders to {digest}, which no human has approved, so \
-             no system profile was started. `nunki services --show {id}` prints the \
-             rendering, `nunki services --approve {digest}` approves it, and `nunki mission \
-             retry {id}` resumes."
+            "{file} on the commit the mission's branch starts from renders to {digest}, which \
+             no human has approved, so no system profile was started. `nunki services --show \
+             {id}` prints the rendering, `nunki services --approve {digest} {id}` approves it, \
+             and `nunki mission retry {id}` resumes."
         ),
     )?;
     store.apply(state, Event::ServicesUnapproved { file, digest })?;

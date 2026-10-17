@@ -1268,16 +1268,19 @@ fn only_a_system_profile_mounts_the_test_credentials() {
     );
 }
 
-/// A slot whose tree is a git repository holding `files` in its one commit.
+/// A slot on the branch `mission/x`, made the way a launch makes it from a
+/// base `dev` holding `files` in its one commit: the host's record of that
+/// base is what a system profile reads the services file at.
 fn committed_slot(dir: &Path, files: &[(&str, &str)]) -> nunki::slot::Slot {
-    let slot = slot_at(dir);
-    git(&slot.tree, &["init", "-q", "-b", "mission/x"]);
+    let origin = dir.join("slot-origin");
+    std::fs::create_dir_all(&origin).unwrap();
+    git(&origin, &["init", "-q", "-b", "dev"]);
     for (name, body) in files {
-        std::fs::write(slot.tree.join(name), body).unwrap();
+        std::fs::write(origin.join(name), body).unwrap();
     }
-    git(&slot.tree, &["add", "-A"]);
+    git(&origin, &["add", "-A"]);
     git(
-        &slot.tree,
+        &origin,
         &[
             "-c",
             "user.email=t@example.com",
@@ -1290,6 +1293,9 @@ fn committed_slot(dir: &Path, files: &[(&str, &str)]) -> nunki::slot::Slot {
             "first",
         ],
     );
+    git(dir, &["clone", "-q", origin.to_str().unwrap(), "slot"]);
+    let slot = slot_at(dir);
+    nunki::run::branch(&slot, &origin, "mission/x", "dev").unwrap();
     slot
 }
 
@@ -1373,6 +1379,42 @@ fn the_projects_services_are_merged_into_the_system_profile_only() {
     );
 }
 
+/// The system profile lifts the services file as the mission's base holds
+/// it, never from the branch (#141). An edit an agent committed — which
+/// gate 4 refuses — is not what is lifted, and its rendering, which no human
+/// approved, stops nothing: the approved one on the base is lifted instead.
+#[test]
+fn the_system_profile_lifts_the_services_file_of_the_base_not_of_the_branch() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = with_services_file(dir.path());
+    let slot = committed_slot(
+        dir.path(),
+        &[("compose.yaml", "services:\n  db:\n    image: postgres:16\n")],
+    );
+    approve_head(&project, &slot);
+    std::fs::write(
+        slot.tree.join("compose.yaml"),
+        "services:\n  db:\n    image: postgres:99\n",
+    )
+    .unwrap();
+    git(
+        &slot.tree,
+        &[
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "user.name=T",
+            "commit",
+            "-qam",
+            "an agent's edit",
+        ],
+    );
+    let header = header_with(with_services());
+
+    let (_, doc) = profile_for(&project, &slot, &header, Role::Integrator);
+    assert_eq!(doc["services"]["db"]["image"].as_str(), Some("postgres:16"));
+}
+
 /// A services file the closed model refuses lifts nothing: the profile is
 /// not planned, and the error names the file and the key.
 #[test]
@@ -1424,6 +1466,12 @@ fn a_services_file_that_is_not_on_the_commit_is_named() {
         "{err}"
     );
     assert!(err.to_string().contains("compose.yaml"), "{err}");
+    // Read where the system profile reads it, and said so: on the base.
+    assert!(
+        err.to_string()
+            .contains("the commit the mission's branch starts from, on its base"),
+        "{err}"
+    );
 }
 
 /// A project declaring a services file, three times over: `postgres:15` on
@@ -1675,6 +1723,23 @@ fn a_start_refused_then_started_again_reads_the_base_as_it_is_now() {
         git(&slot.tree, &["rev-parse", "--abbrev-ref", "HEAD"]),
         "feat/alpha"
     );
+}
+
+/// The two roles that commit are told the services file is the human's,
+/// and where a change to it goes, before gate 4 refuses one (#141). The
+/// security agent commits nothing and is not told.
+#[test]
+fn the_roles_that_commit_are_told_the_services_file_is_the_humans() {
+    for role in [Role::Coder, Role::Integrator] {
+        let text = role::prompt(role);
+        assert!(
+            text.contains("The project's services file"),
+            "{role:?}: {text}"
+        );
+        assert!(text.contains("even if your wiring list names it"), "{text}");
+        assert!(text.contains("proposed in `PR.md`"), "{text}");
+    }
+    assert!(!role::prompt(Role::Security).contains("The project's services file"));
 }
 
 /// The container is told which role it is running, and the spelling comes
@@ -2751,7 +2816,7 @@ fn a_service_the_profile_does_not_lift_is_never_blamed_for_its_up() {
 
     let (coder, _) = profile_for(&project, &slot, &header, Role::Coder);
     assert!(coder.project_services.is_none());
-    let approved = nunki::services::approved(&project, &slot.tree)
+    let approved = nunki::services::approved(&project, nunki::services::At::Slot(&slot.tree))
         .unwrap()
         .unwrap()
         .digest();
@@ -2841,7 +2906,7 @@ fn a_mission_profile_keeps_what_a_human_approved_and_nothing_else() {
         &[("compose.yaml", "services:\n  db:\n    image: postgres:16\n")],
     );
     approve_head(&project, &slot);
-    let approved = nunki::services::approved(&project, &slot.tree)
+    let approved = nunki::services::approved(&project, nunki::services::At::Slot(&slot.tree))
         .unwrap()
         .unwrap()
         .digest();

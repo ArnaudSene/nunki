@@ -177,8 +177,9 @@ enum Command {
     /// The project's services file as nunki lifts it, and your approval of
     /// it (SPEC 4.2).
     ///
-    /// Read from a commit, never from a tree: a mission's slot's `HEAD`
-    /// when one is named, the repository's otherwise. What you approve is
+    /// Read from a commit, never from a tree: for a mission you name, the
+    /// commit its branch starts from, which is what its system profile
+    /// lifts; the repository's `HEAD` otherwise. What you approve is
     /// the digest of nunki's rendering, kept in the project's HQ; a
     /// rendering nobody approved starts no service, and the mission that
     /// needed it is handed back to you.
@@ -191,7 +192,7 @@ enum Command {
         /// file's rendering as it stands now.
         #[arg(long, value_name = "DIGEST")]
         approve: Option<String>,
-        /// Read the file from this mission's slot.
+        /// Read the file where this mission's system profile reads it.
         mission: Option<String>,
     },
 
@@ -2940,6 +2941,7 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                 .as_ref()
                 .and_then(|s| s.concluded(nunki::harness::Role::Coder))
                 .map(|c| c.head.clone());
+            let services_file = nunki::services::declared_path(project);
             let subject = nunki::gate::Subject {
                 role,
                 tree: &slot.tree,
@@ -2950,6 +2952,7 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                 header: &header,
                 protected_branches: &project.config.protected_branches,
                 protected_paths: &project.config.protected_paths,
+                services_file: services_file.as_deref(),
                 coder_head: coder_head.as_deref(),
             };
             let played = {

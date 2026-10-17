@@ -3536,25 +3536,97 @@ fn record_base(tree: &Path) {
         .unwrap();
 }
 
-/// A coder's edit to the services file starts nothing: the integration is
-/// due, the slot's HEAD renders to a digest no human approved, and the
-/// mission is handed back with that digest — no profile up, no run
-/// recorded, no attempt spent. Approved and retried, it goes past that
-/// point; a later edit needs a new approval.
+impl World {
+    /// Make the mission's base hold `path`, recorded by the host the way a
+    /// launch records it. Before any commit of the mission's own: the branch
+    /// still sits on the base.
+    fn base_holds(&self, path: &str, body: &str) {
+        self.commit(path, body, "the base holds it");
+        git(&self.tree, &["branch", "-f", "dev", "HEAD"]);
+        let project = self.tree.with_file_name("one-project.git");
+        git(
+            &self.tree,
+            &["push", "-q", project.to_str().unwrap(), "dev"],
+        );
+        nunki::git::SlotGit::open(&self.tree)
+            .unwrap()
+            .fetch_origin(&project)
+            .unwrap();
+    }
+
+    /// The services file where the mission's system profile reads it.
+    fn services_at_base(&self) -> nunki::services::Current {
+        nunki::services::read(
+            &self.project,
+            nunki::services::At::Mission {
+                tree: &self.tree,
+                base: "dev",
+            },
+        )
+        .unwrap()
+        .unwrap()
+    }
+}
+
+/// An edit to the services file on the branch is never what the system
+/// profile lifts (#141): it reads the file as the mission's base holds it,
+/// and gate 4 refuses the edit. So an integration that is due goes past the
+/// approval on the base's rendering, whatever the branch did to the file —
+/// here the integrator's wiring and a coder's tuning both — and the mission
+/// is not handed back for a rendering nobody will lift.
 #[test]
-fn a_coders_edit_to_the_services_file_starts_nothing_and_hands_the_mission_back() {
-    use nunki::engine::fake::{Call, FakeEngine};
+fn an_edit_to_the_services_file_on_the_branch_is_never_lifted() {
+    use nunki::engine::fake::FakeEngine;
     let mut world = World::shaped(1, integration());
     world.project.config.services_file = Some("compose.yaml".into());
+    world.base_holds("compose.yaml", "services:\n  db:\n    image: postgres:16\n");
+    let base = world.services_at_base();
+    nunki::services::approve(&world.project, &base.digest, std::slice::from_ref(&base)).unwrap();
     world.at_integration();
     world.commit(
         "compose.yaml",
-        "services:\n  db:\n    image: postgres:16\n",
-        "the coder adds a database",
+        "services:\n  db:\n    image: postgres:16\n    command: [postgres, -c, fsync=off]\n",
+        "the coder tunes it",
     );
-    let shown = nunki::services::read(&world.project, nunki::services::At::Slot(&world.tree))
-        .unwrap()
-        .unwrap();
+    assert_ne!(
+        nunki::services::read(&world.project, nunki::services::At::Slot(&world.tree))
+            .unwrap()
+            .unwrap()
+            .digest,
+        base.digest,
+        "the branch holds another rendering"
+    );
+
+    let engine = Arc::new(FakeEngine::default());
+    match verify::verify(&world.project, "m1", engine, "docker") {
+        Err(VerifyError::Run(nunki::run::RunError::Services(e))) => {
+            panic!("the base's approved rendering was refused: {e}")
+        }
+        Err(_) => {}
+        Ok(steps) => assert!(
+            !steps.iter().any(|s| matches!(s, Step::AwaitingHuman(_))),
+            "{steps:?}"
+        ),
+    }
+    assert_eq!(
+        world.state().flow.stage(),
+        &Stage::Integration { attempt: 1 }
+    );
+}
+
+/// The base's own rendering still needs a human, and the guard still holds
+/// where the start's question was not asked: the mission is handed back
+/// with the base's digest — not the branch's — no profile up, no run
+/// recorded, no attempt spent. The verbs name the mission, so the approval
+/// reads where the profile does. Approved and retried, it goes past.
+#[test]
+fn an_unapproved_services_file_on_the_base_hands_the_mission_back() {
+    use nunki::engine::fake::{Call, FakeEngine};
+    let mut world = World::shaped(1, integration());
+    world.project.config.services_file = Some("compose.yaml".into());
+    world.base_holds("compose.yaml", "services:\n  db:\n    image: postgres:16\n");
+    world.at_integration();
+    let base = world.services_at_base();
 
     let verify = |world: &World| {
         let engine = Arc::new(FakeEngine::default());
@@ -3572,7 +3644,7 @@ fn a_coders_edit_to_the_services_file_starts_nothing_and_hands_the_mission_back(
         role: Role::Integrator,
         attempt: 1,
         file: "compose.yaml".into(),
-        digest: shown.digest.clone(),
+        digest: base.digest.clone(),
     };
     assert_eq!(
         world.state().flow.stage(),
@@ -3580,27 +3652,31 @@ fn a_coders_edit_to_the_services_file_starts_nothing_and_hands_the_mission_back(
         "{steps:?}"
     );
     assert!(world.state().run.is_none(), "no run was recorded");
-    assert!(
-        matches!(steps.last(), Some(Step::AwaitingHuman(h)) if *h == handover),
-        "{steps:?}"
-    );
     let followup = std::fs::read_to_string(world.mission().join("FOLLOWUP_HQ.md")).unwrap();
     assert!(
-        followup.contains(&format!("nunki services --approve {}", shown.digest)),
+        followup.contains(&format!("nunki services --approve {} m1", base.digest)),
+        "{followup}"
+    );
+    assert!(
+        followup.contains("the commit the mission's branch starts from"),
         "{followup}"
     );
 
-    // The human reads it, approves it and takes the mission back: the
-    // integration is due again, at the same attempt, and the launch goes
-    // past the approval — to what this machine lacks, an account.
-    nunki::services::approve(&world.project, &shown.digest, std::slice::from_ref(&shown)).unwrap();
-    nunki::lifecycle::retry(&world.project, "m1", "approved the database").unwrap();
-    assert_eq!(
-        world.state().flow.stage(),
-        &Stage::Integration { attempt: 1 }
+    // `nunki check --mission m1` reads where the profile reads, too.
+    let checks = nunki::services::checks(&world.project, None, Some("m1"));
+    assert!(
+        matches!(&checks[..], [c] if matches!(&c.verdict, nunki::check::Verdict::Red(why) if why.contains(&base.digest))),
+        "{checks:?}"
     );
-    let followup = std::fs::read_to_string(world.mission().join("FOLLOWUP_HQ.md")).unwrap();
-    assert!(followup.contains("no run was spent"), "{followup}");
+
+    // What `nunki services --approve <digest> m1` reads.
+    let current: Vec<_> = nunki::services::readings(&world.project, Some("m1"), true)
+        .unwrap()
+        .into_iter()
+        .filter_map(|r| r.current.ok())
+        .collect();
+    nunki::services::approve(&world.project, &base.digest, &current).unwrap();
+    nunki::lifecycle::retry(&world.project, "m1", "approved the database").unwrap();
     let (steps, _) = verify(&world);
     match steps {
         Err(VerifyError::Run(nunki::run::RunError::Services(e))) => {
@@ -3616,23 +3692,6 @@ fn a_coders_edit_to_the_services_file_starts_nothing_and_hands_the_mission_back(
         world.state().flow.stage(),
         &Stage::Integration { attempt: 1 }
     );
-
-    // A later edit is a new rendering, and needs a new approval.
-    world.commit(
-        "compose.yaml",
-        "services:\n  db:\n    image: postgres:16\n    command: [postgres, -c, fsync=off]\n",
-        "the coder tunes it",
-    );
-    let (steps, _) = verify(&world);
-    steps.unwrap();
-    assert!(
-        matches!(
-            world.state().flow.stage(),
-            Stage::AwaitingHuman(Handover::ServicesNotApproved { digest, .. }) if *digest != shown.digest
-        ),
-        "{:?}",
-        world.state().flow.stage()
-    );
 }
 
 /// The security agent's profile is a system profile too: the same refusal
@@ -3642,11 +3701,7 @@ fn an_unapproved_services_file_hands_the_security_run_back_as_well() {
     use nunki::engine::fake::{Call, FakeEngine};
     let mut world = with_security_agent(1);
     world.project.config.services_file = Some("compose.yaml".into());
-    world.commit(
-        "compose.yaml",
-        "services:\n  db:\n    image: postgres:16\n",
-        "a database",
-    );
+    world.base_holds("compose.yaml", "services:\n  db:\n    image: postgres:16\n");
     world.at_security();
     let engine = Arc::new(FakeEngine::default());
     let steps = verify::verify(&world.project, "m1", engine.clone(), "docker").unwrap();

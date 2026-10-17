@@ -125,6 +125,24 @@ without saying why.
         Role::Integrator | Role::Security => "",
     };
 
+    // The project's services file is the human's (SPEC 4.2, rule 1, and
+    // #141): the two roles that commit hear it before gate 4 says it. Its
+    // name is the project's, in `nunki.yaml`, which no agent reads; the gate
+    // names it.
+    let services = match role {
+        Role::Coder | Role::Integrator => {
+            "
+The project's services file, the Compose file the system profile lifts the
+project's own services from, is the human's. Do not change it, delete it or
+rename it, even if your wiring list names it: the system profile lifts it as
+the mission's base holds it, never from this branch, and gate 4 refuses every
+commit that touches it, naming the file. A change the services need is
+proposed in `PR.md`, with what to change and why, and the human makes it.
+"
+        }
+        Role::Security => "",
+    };
+
     // Never running a whole campaign holds for every role; where its
     // survivors go is said to each as it is.
     let campaign = match role {
@@ -300,7 +318,7 @@ What `nunki` checks on your work, so that none of it is a surprise:
     };
 
     format!(
-        "{particular}\n\n{common}{pull_request}{own_files}{survivors}\n{campaign}\n\n{commits}\n"
+        "{particular}\n\n{common}{pull_request}{own_files}{survivors}{services}\n{campaign}\n\n{commits}\n"
     )
 }
 

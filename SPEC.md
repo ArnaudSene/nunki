@@ -271,7 +271,7 @@ section 3.1 doit exister quel que soit l'exécutant :
 | chemins protégés | la porte de périmètre, **par commit et à la fin de chaque run** (4.4), sur le diff base..HEAD ; la relecture du HQ | entre deux runs, un commit interdit existe déjà dans le clone ; il est refusé au run suivant, pas à l'écriture. Un hook de harnais peut refuser plus tôt (confort, 4.3) |
 | réseau | le **pare-feu du conteneur** (4.1 bis) : un **sidecar** qui possède l'espace réseau et détient seul les capacités, l'agent qui le rejoint sans aucune ; règles non posées = agent qui ne démarre pas ; le port 53 détourné vers un résolveur **filtrant** qui ne relaie jamais ; aucune plage privée ouverte ; liste blanche par rôle | rien ici ne protège du contenu qu'un domaine autorisé sert. Les adresses suivent les réponses DNS, donc un CDN qui bouge reste joignable ; `nunki check` sonde de l'intérieur |
 | exécuter du code sur l'hôte par la configuration git du slot | aucun git de `nunki` ne tourne dans un slot : un **miroir** à côté du slot, hors de tout montage, écrit par l'hôte seul, reçoit ses commits par un fetch qui hache chaque objet ; ses refs sont lues dans leurs fichiers, avec une borne de taille ; configuration système et globale coupées, aucune variable `GIT_*` héritée, objets de remplacement ignorés. Aucun git n'est lancé dans l'arbre du slot : un gitlink est refusé et la descente dans les sous-modules coupée ; un slot dont le magasin d'objets nomme des alternates, ou porte autre chose que des fichiers et des répertoires ordinaires, est refusé avant d'être lu | un humain qui lance `nunki` depuis l'intérieur d'un slot y lance `git rev-parse`, qui lit sans exécuter. Un fichier spécial (une FIFO) dans un dépôt imbriqué non suivi peut bloquer la porte 1 : c'est la disponibilité, pas l'exécution |
-| démarrer un conteneur avec le pouvoir du moteur par le fichier de services du projet | le fichier est lu dans le commit que nomme le `HEAD` du slot, par le miroir, jamais dans l'arbre ; il est relu dans un **modèle fermé** dont `nunki` émet son propre rendu (aucune clé hors modèle, aucune interpolation, aucune fonctionnalité YAML qui porte un sens au-delà du parseur) ; un profil ne lève ce rendu que si un humain en a approuvé l'empreinte (`nunki services --approve`, conservée dans `hq/services.json`, jamais monté) ; les services sont clôturés par `nunki` (4.1 bis) | un humain qui approuve sans lire le rendu ; un humain malveillant qui écrit dans le HQ |
+| démarrer un conteneur avec le pouvoir du moteur par le fichier de services du projet | le fichier est à l'humain : il est lu au commit d'où part la branche de la mission, par le miroir, jamais dans l'arbre ni dans les commits de la branche, et la porte 4 refuse tout commit d'agent qui le touche ; il est relu dans un **modèle fermé** dont `nunki` émet son propre rendu (aucune clé hors modèle, aucune interpolation, aucune fonctionnalité YAML qui porte un sens au-delà du parseur) ; un profil ne lève ce rendu que si un humain en a approuvé l'empreinte (`nunki services --approve`, conservée dans `hq/services.json`, jamais monté) ; les services sont clôturés par `nunki` (4.1 bis) | un humain qui approuve sans lire le rendu ; un humain malveillant qui écrit dans le HQ |
 | question bloquante | le mode sans interface (4.3) : ce qui aurait demandé est refusé ; le contrat de run et le journal | — |
 
 Un hook, un plugin ou un réglage de harnais peut **doubler** une de ces lignes
@@ -752,9 +752,17 @@ arrêté. Trois règles, et une seule mécanique quelle que soit la forme de la 
 1. **Les services sont levés une fois par slot**, sous un nom de projet
    Compose stable, et **jamais arrêtés entre deux profils**. Seuls le sont
    ceux que la mission déclare, et ce dont ils dépendent, **dans le rendu
-   qu'un humain a approuvé** : le fichier de services est lu dans le commit
-   que nomme le `HEAD` du slot, par le miroir, jamais dans l'arbre ; il est
-   relu dans un modèle fermé (par service : `image`, `environment` en
+   qu'un humain a approuvé** : le fichier de services est à l'humain, et il
+   est lu au commit d'où part la branche de la mission — là où son `HEAD`
+   rejoint la base que l'hôte a enregistrée — par le miroir, jamais dans
+   l'arbre ni dans les commits de la branche. Aucun agent ne l'amende, pas
+   même un intégrateur dont le câblage le nomme : la porte 4 refuse tout
+   commit qui le touche, et une modification que les services demandent est
+   proposée dans `PR.md`, pour que l'humain la fasse. Tant qu'un commit
+   refusé est encore sur la branche, le profil système lève ce que l'humain a
+   approuvé, et la mission ne s'arrête pas sur un rendu que personne ne
+   lèvera. Il est relu dans un modèle fermé (par service : `image`,
+   `environment` en
    littéraux explicites, `command`, `entrypoint`, `healthcheck`,
    `depends_on`, `working_dir`, des volumes nommés ; au niveau supérieur,
    `services` et des noms de volumes, sans valeur) ; toute autre clé, un
@@ -1650,7 +1658,13 @@ dernier lot. La première rouge arrête tout.
    mission de tests ; et pour l'intégrateur, « câblage » **défini
    mécaniquement** comme la liste de chemins que sa `MISSION.md` déclare
    (configuration, tests système, migrations, fichiers d'infrastructure) —
-   tout commit hors de cette liste est hors périmètre ;
+   tout commit hors de cette liste est hors périmètre. **Le fichier de
+   services du projet est refusé à l'un comme à l'autre**, par son chemin
+   exact, avant que la liste de câblage soit lue : il est à l'humain, et le
+   profil système le lève tel que la base le porte (4.2, règle 1). Le
+   modifier, le supprimer ou le renommer est hors périmètre, même si le
+   câblage le nomme ; un commit qui le reverte ne suffit pas, et la
+   modification se propose dans `PR.md` ;
 5. livrable présent (`PR.md`) ;
 6. batterie verte — absente ou non exécutable, la porte **échoue**, elle ne
    saute pas ;
@@ -3121,7 +3135,7 @@ qu'il produit.**
 | 1 arbre propre | oui | oui | sans objet (arbre en lecture seule) |
 | 2 branche non protégée, en avance | oui | oui | sans objet |
 | 3 bloc de reprise nomme `HEAD` | oui | oui | oui (son journal) |
-| 4 périmètre | chemins protégés, zone de tests si mission de tests | **le câblage seulement** : la liste de chemins de son `MISSION.md` (tests système, configuration de test, fixtures, ordre des migrations) ; tout commit hors liste est hors périmètre | sans objet |
+| 4 périmètre | chemins protégés, zone de tests si mission de tests, jamais le fichier de services | **le câblage seulement** : la liste de chemins de son `MISSION.md` (tests système, configuration de test, fixtures, ordre des migrations) ; tout commit hors liste est hors périmètre, et le fichier de services l'est même si la liste le nomme | sans objet |
 | 5 livrable | `PR.md` | `PR.md` complété de la section intégration | le rapport, dans `VERDICT.json` |
 | 6 batterie | oui | **ses tests système verts**, dans le profil système | sans objet |
 | 7 mutation | oui | non (des tests système et de la configuration ne se mutent pas) | non |
@@ -3439,9 +3453,15 @@ Ce que la boucle veut dire, et ce qu'elle ne veut pas dire.
 - **Des services que personne n'a approuvés.** Là où un profil système est
   dû (intégration, agent de sécurité), un fichier de services dont le rendu
   n'est pas approuvé rend la mission à l'humain : la remise nomme le
-  fichier et l'empreinte, ne consomme aucune tentative, et `retry` reprend
-  le même rôle à la même tentative. `nunki check --slot` et `--mission` en
-  font une ligne rouge.
+  fichier et l'empreinte du commit d'où part la branche, ne consomme aucune
+  tentative, et `retry` reprend le même rôle à la même tentative ; ses verbes
+  nomment la mission (`nunki services --show <mission>`, `--approve
+  <empreinte> <mission>`), pour que l'approbation lise là où le profil lit.
+  `nunki check --mission` en fait une ligne rouge. `mission
+  start` pose déjà la question (4.2, règle 1), et aucune modification d'un
+  agent n'est levée : cette remise ne reste que pour un rendu que le
+  lancement n'a pas vu sans approbation — une approbation retirée depuis, ou
+  une mission lancée avant que la question y soit posée.
 - **Et la main rendue se reprend.** Hors décision attendue, les façons
   d'atteindre « rendue à l'humain » sont une borne qui s'épuise — les
   tentatives d'un lot, celles d'un rôle, les volets. `resume` lève une suspension, `iterate` et `accept`

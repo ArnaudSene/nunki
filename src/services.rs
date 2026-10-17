@@ -11,10 +11,11 @@
 //! turn.
 //!
 //! The list lives in the project's HQ ([`FILE`]), which is never mounted: no
-//! agent can approve its own edit. The file is read from the commit the
-//! slot's `HEAD` names, through the host's mirror, and never from the tree:
-//! what is approved is what is committed, and an edit left uncommitted in
-//! the tree changes nothing.
+//! agent can approve its own edit. For a mission, the file is read at the
+//! commit its branch starts from ([`At::Mission`]), through the host's
+//! mirror, and never from the tree or from the branch's own commits: the
+//! file is the human's, an agent's edit is refused at gate 4, and it is
+//! never what a system profile lifts (#141).
 
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
@@ -44,12 +45,16 @@ pub enum ApprovalError {
     #[error(transparent)]
     Git(#[from] GitError),
     #[error(
-        "{path} is not on the commit HEAD names: nunki reads the services file from the \
-         commit, never from the tree, so it has to be committed"
+        "{path} is not on {on}: nunki reads the services file from a commit, never from \
+         the tree, so it has to be committed there"
     )]
-    NotOnCommit { path: String },
-    #[error("{path} is not a regular file on the commit HEAD names (mode {mode})")]
-    NotAFile { path: String, mode: String },
+    NotOnCommit { path: String, on: &'static str },
+    #[error("{path} is not a regular file on {on} (mode {mode})")]
+    NotAFile {
+        path: String,
+        on: &'static str,
+        mode: String,
+    },
     #[error("{path} is not UTF-8 text")]
     NotText { path: String },
     #[error("{path} is not a services file nunki lifts, so no service was started: {source}")]
@@ -71,6 +76,11 @@ pub enum ApprovalError {
     Stale { digest: String, current: String },
     #[error("mission {0} has not started, so it has no slot to read the services file from")]
     NoMission(String),
+    #[error(
+        "the commit the mission's branch starts from cannot be read, so no services file \
+         was read: {0}"
+    )]
+    NoForkPoint(String),
     #[error("the mission's slot cannot be found: {0}")]
     Slot(String),
     #[error("{0} could not be read: {1}")]
@@ -163,6 +173,18 @@ pub enum At<'a> {
     Slot(&'a Path),
     /// The commit `HEAD` names in the human's own repository.
     Repository(&'a Path),
+    /// The commit a mission's branch, checked out in the slot at `tree`,
+    /// starts from: where `HEAD` meets the base `base` as the host recorded
+    /// it ([`crate::gate::fork_point`]). What a system profile lifts.
+    ///
+    /// Not the branch's `HEAD`, which holds whatever an agent committed: an
+    /// edit that gate 4 refuses would otherwise stop the next system
+    /// profile on a rendering no human approved, hours into a mission. The
+    /// fork point is an ancestor of the host's record, so it is a commit of
+    /// the human's base, and its rendering still needs a human's approval.
+    /// And no fallback to `HEAD` when the record is missing: that is the
+    /// read this replaces.
+    Mission { tree: &'a Path, base: &'a str },
 }
 
 /// The project's services file at `at`, rendered, or `None` when
@@ -175,13 +197,24 @@ pub fn read(project: &Project, at: At) -> Result<Option<Current>, ApprovalError>
     let blob = match at {
         At::Slot(tree) => crate::git::SlotGit::open(tree)?.blob_at_head(&path)?,
         At::Repository(root) => crate::git::blob_at_head(root, &path)?,
+        At::Mission { tree, base } => {
+            let fork = crate::gate::fork_point(tree, base)
+                .map_err(|e| ApprovalError::NoForkPoint(e.to_string()))?;
+            crate::git::SlotGit::open(tree)?.blob_at(&fork, &path)?
+        }
+    };
+    let on = match at {
+        At::Slot(_) => "the commit the slot's HEAD names",
+        At::Repository(_) => "the commit HEAD names in the repository",
+        At::Mission { .. } => "the commit the mission's branch starts from, on its base",
     };
     let Some(blob) = blob else {
-        return Err(ApprovalError::NotOnCommit { path });
+        return Err(ApprovalError::NotOnCommit { path, on });
     };
     if !blob.is_file() {
         return Err(ApprovalError::NotAFile {
             path,
+            on,
             mode: blob.mode,
         });
     }
@@ -201,11 +234,11 @@ pub fn read(project: &Project, at: At) -> Result<Option<Current>, ApprovalError>
     }))
 }
 
-/// The services a profile may lift from the slot's `HEAD`: `None` when the
-/// project declares no file, the model when a human approved its rendering,
-/// and [`ApprovalError::NotApproved`] otherwise.
-pub fn approved(project: &Project, tree: &Path) -> Result<Option<ServicesFile>, ApprovalError> {
-    let Some(current) = read(project, At::Slot(tree))? else {
+/// The services a profile may lift from `at`: `None` when the project
+/// declares no file, the model when a human approved its rendering, and
+/// [`ApprovalError::NotApproved`] otherwise.
+pub fn approved(project: &Project, at: At) -> Result<Option<ServicesFile>, ApprovalError> {
+    let Some(current) = read(project, at)? else {
         return Ok(None);
     };
     if Approvals::load(&file(project))?
@@ -429,6 +462,18 @@ pub fn check(project: &Project, at: At, whose: &str) -> Check {
     Check { what, verdict }
 }
 
+/// The services file's path in the repository, as gate 4 matches it: `None`
+/// when the project declares none, or declares a path outside the
+/// repository, which no commit can touch and which every read refuses on
+/// its own ([`ApprovalError::Path`]).
+pub fn declared_path(project: &Project) -> Option<String> {
+    project
+        .config
+        .services_file
+        .as_deref()
+        .and_then(|p| repository_path(p).ok())
+}
+
 /// `services_file` as a path git names inside the repository.
 fn repository_path(declared: &Path) -> Result<String, ApprovalError> {
     let mut parts = Vec::new();
@@ -456,8 +501,9 @@ pub struct Reading {
     pub current: Result<Current, ApprovalError>,
 }
 
-/// The services file where `nunki services` reads it: the slot of
-/// `mission` when one is named; otherwise the human's repository, and —
+/// The services file where `nunki services` reads it: where `mission`'s
+/// system profile reads it when one is named ([`At::Mission`]); otherwise
+/// the human's repository, and —
 /// when `every_slot`, which is what an approval looks through — every slot
 /// of the project as well, so a digest shown for any of them is one the
 /// human can approve.
@@ -469,19 +515,23 @@ pub fn readings(
     if project.config.services_file.is_none() {
         return Err(ApprovalError::NoServicesFile);
     }
-    let at_slot = |slot: &crate::slot::Slot, from: String| Reading {
+    let reading = |at: At, from: String| Reading {
         from,
-        current: read(project, At::Slot(&slot.tree))
-            .and_then(|c| c.ok_or(ApprovalError::NoServicesFile)),
+        current: read(project, at).and_then(|c| c.ok_or(ApprovalError::NoServicesFile)),
     };
     if let Some(id) = mission {
-        let state = crate::state::Store::open(&project.hq_root)
-            .and_then(|s| s.load(id))
-            .map_err(|_| ApprovalError::NoMission(id.to_string()))?;
-        let slot = crate::slot::find(project, &state.slot)
-            .map_err(|e| ApprovalError::Slot(e.to_string()))?;
-        let from = format!("the HEAD of slot {} (mission {id})", slot.name);
-        return Ok(vec![at_slot(&slot, from)]);
+        let (slot, base) = mission_slot(project, id)?;
+        let from = format!(
+            "the commit mission {id}'s branch starts from, in slot {}",
+            slot.name
+        );
+        return Ok(vec![reading(
+            At::Mission {
+                tree: &slot.tree,
+                base: &base,
+            },
+            from,
+        )]);
     }
     let mut readings = vec![Reading {
         from: "the HEAD of the repository".to_string(),
@@ -491,38 +541,52 @@ pub fn readings(
     if every_slot {
         for slot in crate::slot::list(project) {
             let from = format!("the HEAD of slot {}", slot.name);
-            readings.push(at_slot(&slot, from));
+            readings.push(reading(At::Slot(&slot.tree), from));
         }
     }
     Ok(readings)
 }
 
+/// A recorded mission's slot, and the base its frozen header names.
+fn mission_slot(project: &Project, id: &str) -> Result<(crate::slot::Slot, String), ApprovalError> {
+    let state = crate::state::Store::open(&project.hq_root)
+        .and_then(|s| s.load(id))
+        .map_err(|_| ApprovalError::NoMission(id.to_string()))?;
+    let slot =
+        crate::slot::find(project, &state.slot).map_err(|e| ApprovalError::Slot(e.to_string()))?;
+    Ok((slot, state.flow.header().base.clone()))
+}
+
 /// `nunki check`'s lines on the services files a check names: the HEAD of
-/// the slot `--slot` names, and of the slot of the mission `--mission`
-/// names. The same refusal a launch would meet, said as a red line.
+/// the slot `--slot` names, and where the system profile of the mission
+/// `--mission` names reads it. The same refusal a launch would meet, said as
+/// a red line.
 pub fn checks(project: &Project, slot: Option<&str>, mission: Option<&str>) -> Vec<Check> {
     let mut checks = Vec::new();
-    let mut named = |slot: Result<crate::slot::Slot, String>, whose: String| {
-        checks.push(match slot {
-            Ok(slot) => check(project, At::Slot(&slot.tree), &whose),
-            Err(why) => Check {
-                what: format!("the services file on {whose} is one a human approved"),
-                verdict: Verdict::NotChecked(why),
-            },
-        })
+    let not_checked = |whose: &str, why: String| Check {
+        what: format!("the services file on {whose} is one a human approved"),
+        verdict: Verdict::NotChecked(why),
     };
     if let Some(name) = slot {
-        named(
-            crate::slot::find(project, name).map_err(|e| e.to_string()),
-            format!("slot {name}'s HEAD"),
-        );
+        let whose = format!("slot {name}'s HEAD");
+        checks.push(match crate::slot::find(project, name) {
+            Ok(slot) => check(project, At::Slot(&slot.tree), &whose),
+            Err(e) => not_checked(&whose, e.to_string()),
+        });
     }
     if let Some(id) = mission {
-        let slot = crate::state::Store::open(&project.hq_root)
-            .and_then(|s| s.load(id))
-            .map_err(|_| ApprovalError::NoMission(id.to_string()).to_string())
-            .and_then(|state| crate::slot::find(project, &state.slot).map_err(|e| e.to_string()));
-        named(slot, format!("the HEAD of mission {id}'s slot"));
+        let whose = format!("the commit mission {id}'s branch starts from");
+        checks.push(match mission_slot(project, id) {
+            Ok((slot, base)) => check(
+                project,
+                At::Mission {
+                    tree: &slot.tree,
+                    base: &base,
+                },
+                &whose,
+            ),
+            Err(e) => not_checked(&whose, e.to_string()),
+        });
     }
     checks
 }
