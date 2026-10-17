@@ -198,10 +198,16 @@ looked, the approval is refused. Approvals live in the project's HQ
 itself). No container mounts that file. A definition you approved once
 serves every mission until it changes.
 
-When a change comes in — a coder's edit included — the system profile is
-not started. The mission is handed back to you with the file and the new
-digest; `nunki check --mission <id>` and `--slot <name>` show the same as a
-red line. Read the rendering, approve it, then
+**A mission with an integrator or a security agent asks when it starts.**
+`nunki mission start` reads the file on the commit the mission's branch
+starts from. If nobody approved that rendering, the mission does not start:
+nunki prints the rendering and its digest. Approve it, then run
+`nunki mission start` again.
+
+When a change comes in during the mission — a coder's edit included — the
+system profile is not started. The mission is handed back to you with the
+file and the new digest; `nunki check --mission <id>` and `--slot <name>`
+show the same as a red line. Read the rendering, approve it, then
 `nunki mission retry <id> --because <what you approved>`. Nothing was spent
 in the meantime.
 

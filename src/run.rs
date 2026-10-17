@@ -239,6 +239,34 @@ pub enum RunError {
     NotWritable(String, String),
     #[error("{}", not_started_again(stuck, said))]
     NotStartedAgain { stuck: Vec<Stuck>, said: String },
+    /// Boxed: every `Result` carrying a `RunError` would otherwise grow by
+    /// the size of what this one says.
+    #[error("{0}")]
+    NotApprovedAtStart(Box<UnapprovedAtStart>),
+}
+
+/// A mission whose integrator or security agent would find the project's
+/// services unapproved, refused at its start (#141): what
+/// [`RunError::NotApprovedAtStart`] says.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "mission {id} was not started: its {role} {needs}, and {path} \
+     on the commit its branch starts from renders to {digest}, which no human approved. \
+     Read it below; `nunki services --approve {digest}` approves it, and then \
+     `nunki mission start {id} --slot {slot}` starts the mission. Nothing was launched \
+     or recorded; the slot is on the mission's branch.\n\n{shown}"
+)]
+pub struct UnapprovedAtStart {
+    pub id: String,
+    /// Who would have asked: the integrator, or else the security agent.
+    pub role: &'static str,
+    /// Why that role needs the approval.
+    pub needs: &'static str,
+    pub path: String,
+    pub digest: String,
+    pub slot: String,
+    /// The rendering as `nunki services --show` prints it.
+    pub shown: String,
 }
 
 fn not_started_again(stuck: &[Stuck], said: &str) -> String {
@@ -349,6 +377,8 @@ pub fn start(
     let header = mission_dir::read_header(&project.hq_root, id)?;
     let paths = Paths::of(&project.hq_root, id);
 
+    let brought = approved_at_start(project, id, slot, &header)?;
+
     let lot = header
         .lots
         .first()
@@ -391,8 +421,113 @@ pub fn start(
     state.updated_at = crate::state::now_rfc3339();
     Ok(Started {
         state,
-        base: launched.base,
+        // When the check above made the branch, the launch found it made.
+        base: brought.or(launched.base),
     })
+}
+
+/// Refuse to start a mission whose integrator or security agent would find
+/// the project's services unapproved (SPEC 4.2, rule 1, and #141).
+///
+/// `launch` asks the question too, and it is the guard. But it asks when that
+/// role is launched, hours into a mission launched to run on its own, and a
+/// mission was measured stopping there after 18.5 hours with nobody to
+/// answer. Asked here, the human who launched it is still present.
+///
+/// The gate is `launch`'s own: every role on the system profile, and the
+/// security agent is one of them even with no service declared. A mission
+/// with neither never lifts that profile, and is never asked.
+///
+/// Read on the mission's branch, so the slot is branched first. That commit
+/// is the one the integrator would read when nothing changes the file
+/// before it is launched. It is also one `nunki services --approve` reads,
+/// since an approval looks through every slot's `HEAD`. The repository's own
+/// `HEAD` may sit on another commit, and approving its digest would approve
+/// something other than what the mission lifts.
+///
+/// What the branching did with the slot's base, for [`start`] to say.
+fn approved_at_start(
+    project: &Project,
+    id: &str,
+    slot: &Slot,
+    header: &crate::mission::Header,
+) -> Result<Option<git::Brought>, RunError> {
+    let (role, needs) = if header.has_integration() {
+        ("integrator", "will lift the project's services")
+    } else if header.has_security_agent() {
+        (
+            "security agent",
+            "runs on the system profile, which does not start on a services file \
+             nobody approved",
+        )
+    } else {
+        return Ok(None);
+    };
+    if project.config.services_file.is_none() {
+        return Ok(None);
+    }
+    forward_unstarted(slot, &project.root, &header.branch, &header.base)?;
+    let brought = branch(slot, &project.root, &header.branch, &header.base)?;
+    match crate::services::approved(project, &slot.tree) {
+        Err(crate::services::ApprovalError::NotApproved { path, digest }) => {
+            let approvals = crate::services::Approvals::load(&crate::services::file(project))?;
+            let from = format!("the HEAD of slot {}, where mission {id} starts", slot.name);
+            let shown = match crate::services::read(project, crate::services::At::Slot(&slot.tree))?
+            {
+                Some(current) => crate::services::show(&current, &from, &approvals),
+                None => String::new(),
+            };
+            Err(RunError::NotApprovedAtStart(Box::new(UnapprovedAtStart {
+                id: id.to_string(),
+                role,
+                needs,
+                path,
+                digest,
+                slot: slot.name.clone(),
+                shown,
+            })))
+        }
+        approved => approved.map(|_| brought).map_err(RunError::from),
+    }
+}
+
+/// Bring forward to the base the mission's branch a refused start left.
+///
+/// [`approved_at_start`] branches the slot before it reads, and a refusal
+/// leaves the slot on that branch: it holds the digest a human approves.
+/// [`branch`] then never moves a branch that exists. A human who fixes the
+/// file on the base instead, or approves after the base moved, would meet
+/// the same refusal on every start after, from the commit the first one
+/// read.
+///
+/// Only here, at a start: [`start`] has refused a mission that is
+/// recorded, so no mission owns this branch. A role switch never moves a
+/// branch under a mission that is running. Only forward, too: a branch
+/// holding a commit the base does not have is left where it is
+/// ([`git::Brought::Diverged`]).
+fn forward_unstarted(
+    slot: &Slot,
+    origin: &Path,
+    branch: &str,
+    base: &str,
+) -> Result<(), git::GitError> {
+    let repo = git::SlotGit::open(&slot.tree)?;
+    if !repo.has(&refs(branch)) {
+        return Ok(());
+    }
+    repo.fetch_origin(origin)?;
+    let Some(start) = repo.origin_branch(base) else {
+        return Ok(());
+    };
+    // `bring_branch` never moves the branch the slot is on, so the slot
+    // steps onto its base first; `branch` puts it back.
+    if repo.current_branch()? == branch {
+        if !repo.has(&refs(base)) {
+            return Ok(());
+        }
+        repo.checkout(base)?;
+    }
+    repo.bring_branch(branch, &start).map(|_| ())
 }
 
 /// Everything one launch needs that its caller already holds. Gathered as a
