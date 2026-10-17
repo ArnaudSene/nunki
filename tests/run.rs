@@ -2470,6 +2470,64 @@ fn a_service_that_does_not_start_again_is_said_with_the_way_out() {
     );
 }
 
+/// A service the profile does not lift is never blamed for its `up`: the
+/// coder's profile lifts none, and a mission holds back the file's services
+/// it does not declare. Their approved containers are kept as they are, and
+/// one found exited — a JVM stopped by a machine that slept exits 143 —
+/// had no part in the failure.
+#[test]
+fn a_service_the_profile_does_not_lift_is_never_blamed_for_its_up() {
+    use nunki::engine::fake::FakeEngine;
+    use nunki::engine::{Container, EngineError, Liveness};
+    use nunki::run::RunError;
+    let dir = tempfile::tempdir().unwrap();
+    let project = with_services_file(dir.path());
+    let slot = committed_slot(
+        dir.path(),
+        &[(
+            "compose.yaml",
+            "services:\n  db:\n    image: postgres:16\n  cache:\n    image: redis:7\n",
+        )],
+    );
+    approve_head(&project, &slot);
+    let header = header_with(with_services());
+    let lifted = |id: &str, service: &str, digest: &str| Container {
+        id: id.into(),
+        service: service.into(),
+        digest: Some(digest.to_string()),
+    };
+    let up_said = "container nunki-11111111-one-firewall-1 is unhealthy\n";
+
+    let (coder, _) = profile_for(&project, &slot, &header, Role::Coder);
+    assert!(coder.project_services.is_none());
+    let approved = nunki::services::approved(&project, &slot.tree)
+        .unwrap()
+        .unwrap()
+        .digest();
+    let engine = FakeEngine::default()
+        .with_lifted(lifted("db1", "db", &approved))
+        .with_liveness("db1", Liveness::Exited(143))
+        .failing_up(up_said);
+    match run::lift(&engine, &project, Path::new("/p.yml"), "p", &coder) {
+        Err(RunError::Engine(EngineError::Command { verb: "up", .. })) => {}
+        other => panic!("the coder's profile lifts no service: {other:?}"),
+    }
+
+    let (integrator, _) = profile_for(&project, &slot, &header, Role::Integrator);
+    let lifting = integrator.project_services.as_ref().unwrap();
+    assert_eq!(lifting.held_back, vec!["cache"]);
+    let engine = FakeEngine::default()
+        .with_lifted(lifted("db1", "db", &lifting.approved))
+        .with_liveness("db1", Liveness::Running)
+        .with_lifted(lifted("cache1", "cache", &lifting.approved))
+        .with_liveness("cache1", Liveness::Exited(143))
+        .failing_up(up_said);
+    match run::lift(&engine, &project, Path::new("/p.yml"), "p", &integrator) {
+        Err(RunError::Engine(EngineError::Command { verb: "up", .. })) => {}
+        other => panic!("cache is held back: {other:?}"),
+    }
+}
+
 /// [`run::not_started`] reads the containers by service: one recreated by
 /// the `up` that failed, over what its service kept, is named by its new
 /// id. A service with no container before, and a container nunki wrote

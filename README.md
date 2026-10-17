@@ -244,12 +244,12 @@ The coder's profile starts no service. The ones already up keep running
 across the switch: nunki never removes them for being absent from a
 profile, and only takes down definitions nobody approved.
 
-A service that had a container before a launch, and has exited after a
-failed `up` with a code other than 0, is said in one line: its container,
-that code, and the engine's command that removes the container and none of
-its volumes. nunki never runs that command itself: what the container kept
-in its own filesystem and in its image's anonymous volumes would not come
-back.
+A service the profile lifts that had a container before the launch, and has
+exited after a failed `up` with a code other than 0, is said in one line:
+its container, that code, and the engine's command that removes the
+container and none of its volumes. nunki never runs that command itself:
+what the container kept in its own filesystem and in its image's anonymous
+volumes would not come back.
 
 ## A first mission
 

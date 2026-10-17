@@ -731,7 +731,12 @@ pub fn lift(
     let approvals = crate::services::Approvals::load(&crate::services::file(project))?;
     let listed = engine.containers(compose_project)?;
     let stale = crate::services::stale(&listed, plan.project_services.as_ref(), &approvals);
-    take_down_and_up(engine, file, compose_project, listed, stale)
+    let lifts = plan
+        .project_services
+        .as_ref()
+        .map(|l| l.services.services.keys().cloned().collect())
+        .unwrap_or_default();
+    take_down_and_up(engine, file, compose_project, listed, stale, lifts)
 }
 
 /// Start again the profile a launch wrote at `file`, without writing it:
@@ -755,26 +760,39 @@ pub fn relift(
     let lifting = crate::services::labels_of_profile(file, &approvals)?;
     let listed = engine.containers(compose_project)?;
     let stale = crate::services::stale_labelled(&listed, lifting.as_ref(), &approvals);
-    take_down_and_up(engine, file, compose_project, listed, stale)
+    let lifts = lifting
+        .as_ref()
+        .map(|labels| labels.keys().cloned().collect())
+        .unwrap_or_default();
+    take_down_and_up(engine, file, compose_project, listed, stale, lifts)
 }
 
 /// Take down `stale`, out of what the engine `listed` for the project, and
-/// start the profile. An `up` that fails is said as
-/// [`RunError::NotStartedAgain`] when [`not_started`] finds a service that
-/// stopped starting, and as the engine said it otherwise.
+/// start the profile, which lifts the project's services named in `lifts`.
+/// An `up` that fails is said as [`RunError::NotStartedAgain`] when
+/// [`not_started`] finds one of them that stopped starting, and as the
+/// engine said it otherwise.
+///
+/// Only the services this profile lifts are looked at: the approved ones
+/// it does not lift — all of them under the coder's profile, and those a
+/// mission holds back — are kept as they are, and this `up` never starts
+/// them. One found exited after a machine slept, with the code its stop
+/// gave it, would be blamed for a failure it had no part in, and a human
+/// handed the removal of its data.
 fn take_down_and_up(
     engine: &dyn Engine,
     file: &Path,
     compose_project: &str,
     listed: Vec<crate::engine::Container>,
     stale: Vec<String>,
+    lifts: std::collections::BTreeSet<String>,
 ) -> Result<Vec<String>, RunError> {
     if !stale.is_empty() {
         engine.remove(&stale)?;
     }
     let kept: Vec<crate::engine::Container> = listed
         .into_iter()
-        .filter(|c| c.digest.is_some() && !stale.contains(&c.id))
+        .filter(|c| c.digest.is_some() && !stale.contains(&c.id) && lifts.contains(&c.service))
         .collect();
     if let Err(failed) = engine.up(file, compose_project) {
         if let EngineError::Command { stderr, .. } = &failed

@@ -2234,8 +2234,11 @@ mod live {
         assert!(once.stop().status.success());
         let before = lifted(&once);
         assert_eq!(before.len(), 1, "{before:?}");
-        let failed = engine.up(&once.file, &once.project);
-        assert!(failed.is_err(), "inconclusive: it started again");
+        let failed = engine
+            .up(&once.file, &once.project)
+            .expect_err("inconclusive: it started again");
+        // What the engine said, which the launch's line ends with.
+        println!("{failed}");
 
         let stuck = nunki::run::not_started(&engine, &once.project, &before)
             .expect("the service that did not start again");
