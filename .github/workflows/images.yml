@@ -49,6 +49,10 @@ jobs:
     # Pinned, not `ubuntu-latest`: see `ci.yml`. The images are built from
     # their own base, so the runner decides nothing here but the build host.
     runs-on: ubuntu-26.04
+    # Longest run: 12 minutes, for `rust+next`, over every run this workflow
+    # has had. The deadline is set the way `ci.yml` explains at its `check`
+    # job.
+    timeout-minutes: 30
     # One run per stack, because a stack ships an image and an image nobody
     # scans is the hole this workflow exists to close. The firewall and the
     # prober are the same in both and are scanned twice; that costs a minute
