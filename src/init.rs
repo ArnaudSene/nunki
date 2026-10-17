@@ -1348,11 +1348,15 @@ stop() {
   exit 143
 }
 # The sweeper below ends with the campaign, however it ends, and before the
-# cache is cleaned.
+# cache is cleaned. By KILL, which nothing loses: a TERM that reached the
+# sweeper before it had set a trap of its own was lost, and the campaign
+# waited on it for good. Measured: a tool that ends at once, under dash, and
+# 3 to 6 campaigns in 320 outlived it, as one did for 41 minutes on CI. The
+# kill and the wait are under one redirection, or bash reports on stderr
+# the job a signal ended, and that line would close the campaign's stderr.
 unsweep() {
   if [ -n "$sweeper" ]; then
-    kill -TERM "$sweeper" 2>/dev/null || true
-    wait "$sweeper" 2>/dev/null || true
+    { kill -KILL "$sweeper"; wait "$sweeper"; } 2>/dev/null || true
     sweeper=""
   fi
 }
@@ -1406,15 +1410,10 @@ free_mib() {
 # does not reach.
 sweep() {
   set +e
-  nap=""
-  # Reaped, and quietly: dash says `Terminated` for a child it waits on
-  # after a kill, and that line would close the campaign's stderr.
-  trap 'if [ -n "$nap" ]; then kill "$nap" 2>/dev/null; wait "$nap" 2>/dev/null; fi; exit 0' TERM
   while :; do
-    sleep "$sweep_every" &
-    nap=$!
-    wait "$nap"
-    nap=""
+    # None of the campaign's output: the nap the KILL leaves behind holds
+    # none of its pipes open, and ends on its own.
+    sleep "$sweep_every" </dev/null >/dev/null 2>&1
     find target/debug/deps -name '*.dwo' -type f -cmin "+$settle_minutes" \
       2>/dev/null | LC_ALL=C sort | LC_ALL=C comm -13 "$list" - \
       | tr '\n' '\0' | xargs -0 rm -f

@@ -2502,6 +2502,157 @@ fn a_diff_that_reaches_no_mutant_is_a_campaign_that_found_nothing() {
     assert_eq!(out.status.code(), Some(0), "{out:?}");
 }
 
+/// A campaign ends with its tool however soon the tool ends, the sweeper
+/// beside it included.
+///
+/// A tool that ends at once is when the sweeper was stopped before it had
+/// set its own trap, and a TERM that reaches a subshell then is lost: on
+/// CI, `a_diff_that_reaches_no_mutant_is_a_campaign_that_found_nothing`
+/// waited 41 minutes on a sweeper that outlived its TERM. So the campaign
+/// is run many times over at once, under dash when there is one — the shell
+/// of the Rust image, and the one that lost it — each in a process group of
+/// its own, killed whole if it outlives its deadline.
+#[test]
+#[cfg(unix)]
+fn a_campaign_whose_tool_ends_at_once_ends_with_it() {
+    use std::os::unix::process::CommandExt;
+    use std::time::{Duration, Instant};
+
+    const THREADS: usize = 16;
+    const RUNS: usize = 20;
+    let shell = if Path::new("/bin/dash").exists() {
+        "/bin/dash"
+    } else {
+        "sh"
+    };
+    // Each thread its own repository: two campaigns never share a copy.
+    let (outlived, reached): (Vec<Vec<String>>, Vec<usize>) = std::thread::scope(|scope| {
+        let threads: Vec<_> = (0..THREADS)
+            .map(|thread| {
+                scope.spawn(move || {
+                    let (_dir, root, _nunki) = fresh();
+                    let home = home(&root);
+                    init(&root, &home, &["rust".to_string()]).unwrap();
+                    let script = home
+                        .join(nunki::project::STACKS_DIR)
+                        .join("rust")
+                        .join(nunki::mutants::SCRIPT);
+                    let (tree, base) = forked_tree(&root);
+                    // `true` itself, and not a script: the sooner the tool
+                    // ends, the sooner the sweeper is stopped after it
+                    // started. Measured on the script before this test, with
+                    // a stand-in script that wrote a file and exited, not
+                    // one of 96 campaigns outlived its tool; with `true`, 6
+                    // of 320 did.
+                    let path = stub_cargo(&root, "#!/bin/sh\nexit 0\n");
+                    let cargo = root.join("stubs/cargo");
+                    std::fs::remove_file(&cargo).unwrap();
+                    std::os::unix::fs::symlink(true_on_the_path(), &cargo).unwrap();
+                    let mut outlived = Vec::new();
+                    let mut completed = 0;
+                    for run in 0..RUNS {
+                        let mut command = std::process::Command::new(shell);
+                        for variable in nunki::mutants::CAMPAIGN_ENV {
+                            command.env_remove(variable);
+                        }
+                        let mut child = command
+                            .arg(&script)
+                            .arg("abc123")
+                            .arg("src/lib.rs")
+                            .env("PATH", &path)
+                            .env(nunki::mutants::BASE_ENV, &base)
+                            .current_dir(&tree)
+                            .stdin(std::process::Stdio::null())
+                            // Into a file, not a pipe: what outlived the
+                            // script would hold a pipe open.
+                            .stdout(std::fs::File::create(root.join("said")).unwrap())
+                            .stderr(std::process::Stdio::null())
+                            .process_group(0)
+                            .spawn()
+                            .expect("the shell runs the campaign");
+                        let deadline = Instant::now() + Duration::from_secs(20);
+                        while child.try_wait().unwrap().is_none() {
+                            if Instant::now() > deadline {
+                                // The whole group: the sweeper with the script.
+                                let _ = std::process::Command::new("kill")
+                                    .args(["-KILL", "--", &format!("-{}", child.id())])
+                                    .status();
+                                let _ = child.wait();
+                                outlived.push(format!("thread {thread}, run {run}"));
+                                break;
+                            }
+                            std::thread::sleep(Duration::from_millis(20));
+                        }
+                        // The campaign reached its tool, and the sweeper
+                        // started beside it, only if it says it completed.
+                        let said = std::fs::read_to_string(root.join("said")).unwrap();
+                        if nunki::mutants::completed(&said) {
+                            completed += 1;
+                        }
+                    }
+                    (outlived, completed)
+                })
+            })
+            .collect();
+        threads.into_iter().map(|t| t.join().unwrap()).unzip()
+    });
+    let outlived: Vec<String> = outlived.into_iter().flatten().collect();
+    assert!(
+        outlived.is_empty(),
+        "under {shell}, {} of {} campaigns outlived their tool by 20 s: {outlived:?}",
+        outlived.len(),
+        THREADS * RUNS
+    );
+    assert_eq!(
+        reached.iter().sum::<usize>(),
+        THREADS * RUNS,
+        "every campaign reached its tool and completed"
+    );
+
+    // And nothing it leaves behind holds its output open: the sweeper's nap
+    // outlives the KILL that ends the sweeper, for as long as it naps.
+    let (_dir, root, _nunki) = fresh();
+    let home = home(&root);
+    init(&root, &home, &["rust".to_string()]).unwrap();
+    let script = home
+        .join(nunki::project::STACKS_DIR)
+        .join("rust")
+        .join(nunki::mutants::SCRIPT);
+    let (tree, base) = forked_tree(&root);
+    let path = stub_cargo(&root, "#!/bin/sh\nexit 0\n");
+    let mut command = sh();
+    command
+        .arg(&script)
+        .arg("abc123")
+        .arg("src/lib.rs")
+        .env("PATH", path)
+        .env(nunki::mutants::BASE_ENV, &base)
+        .current_dir(&tree);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(command.output());
+    });
+    let out = receiver
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the campaign's output was still open 10 s after it began")
+        .unwrap();
+    assert!(
+        nunki::mutants::completed(&String::from_utf8_lossy(&out.stdout)),
+        "{out:?}"
+    );
+    assert!(out.stderr.is_empty(), "nothing said on stderr: {out:?}");
+}
+
+/// The `true` on the path, as a file a symbolic link can point at.
+#[cfg(unix)]
+fn true_on_the_path() -> std::path::PathBuf {
+    ["/usr/bin/true", "/bin/true"]
+        .iter()
+        .map(std::path::PathBuf::from)
+        .find(|p| p.exists())
+        .expect("a `true` in /usr/bin or /bin")
+}
+
 /// A base the copy cannot diff against is a campaign that cannot run, said
 /// as one — never a silent fall back to mutating whole files.
 #[test]
