@@ -775,7 +775,11 @@ arrêté. Trois règles, et une seule mécanique quelle que soit la forme de la 
    (`nunki services --show`), haché, approuvé (`nunki services --approve
    <empreinte>`, refusé si le rendu a changé depuis qu'il a été montré) et
    levé. Un rendu que personne n'a approuvé ne lève aucun service et rend la
-   mission à l'humain. Les `ports` sont retirés du rendu : l'agent joint un
+   mission à l'humain. Une mission dont l'intégrateur ou l'agent de sécurité
+   lèvera ce profil pose la question à son lancement, quand l'humain est là :
+   `nunki mission start` lit le fichier sur la branche de la mission, au
+   commit d'où elle part, et ne démarre rien sur un rendu que personne n'a
+   approuvé, qu'il montre. Les `ports` sont retirés du rendu : l'agent joint un
    service par son nom, et un port publié entrerait en collision d'un slot
    à l'autre. Avant de lever un profil, les conteneurs du projet dont la
    définition n'est pas celle qui est approuvée sont arrêtés, jamais leurs

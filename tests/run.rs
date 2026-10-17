@@ -1426,6 +1426,257 @@ fn a_services_file_that_is_not_on_the_commit_is_named() {
     assert!(err.to_string().contains("compose.yaml"), "{err}");
 }
 
+/// A project declaring a services file, three times over: `postgres:15` on
+/// the slot, cloned from a `dev` that has moved since; `postgres:16` on
+/// `dev` now, where the mission's branch starts; and `postgres:17` on the
+/// branch the human's checkout sits on. The mission `m1` is framed with
+/// `header`.
+fn services_at_start(dir: &Path, header: &nunki::mission::Header) -> (Project, nunki::slot::Slot) {
+    let project = with_services_file(dir);
+    let root = project.root.clone();
+    let image = |tag: &str| {
+        std::fs::write(
+            root.join("compose.yaml"),
+            format!("services:\n  db:\n    image: postgres:{tag}\n"),
+        )
+        .unwrap()
+    };
+    std::fs::create_dir_all(&root).unwrap();
+    git(&root, &["init", "-q", "-b", "dev"]);
+    git(&root, &["config", "user.email", "a@b.c"]);
+    git(&root, &["config", "user.name", "t"]);
+    image("15");
+    git(&root, &["add", "-A"]);
+    git(
+        &root,
+        &["commit", "-qm", "the base the slot was cloned from"],
+    );
+
+    // Where `nunki slot add` puts it, which is where an approval looks.
+    let slots = nunki::slot::slots_dir(&project);
+    std::fs::create_dir_all(&slots).unwrap();
+    git(
+        &slots,
+        &["clone", "-q", "-b", "dev", root.to_str().unwrap(), "one"],
+    );
+    let slot = nunki::slot::find(&project, "one").unwrap();
+
+    image("16");
+    git(&root, &["commit", "-qam", "the base now"]);
+    git(&root, &["checkout", "-q", "-b", "elsewhere"]);
+    image("17");
+    git(&root, &["commit", "-qam", "what the human is looking at"]);
+    std::fs::create_dir_all(project.hq_root.join("locks")).unwrap();
+    nunki::mission::dir::create(&project.hq_root, "m1", header, "").unwrap();
+    (project, slot)
+}
+
+fn start_err(project: &Project, slot: &nunki::slot::Slot) -> run::RunError {
+    let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+        std::sync::Arc::new(nunki::engine::fake::FakeEngine::default());
+    run::start(project, "m1", slot, engine, "docker").unwrap_err()
+}
+
+/// A mission launched to run on its own asks for the services approval its
+/// integrator needs when it starts, while the human who launched it is
+/// there, and not when the integrator is due: measured once at 18.5 hours
+/// in, with nobody to answer (#141).
+///
+/// What it names is what the integrator would lift: the file on the commit
+/// the mission's branch starts from, not on the human's checkout. That is
+/// a digest `nunki services --approve` takes, and once it is approved the
+/// start goes on, here as far as the account this test does not have.
+#[test]
+fn a_mission_whose_integrator_needs_unapproved_services_does_not_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot) = services_at_start(dir.path(), &header_with(with_services()));
+
+    let err = start_err(&project, &slot);
+    let run::RunError::NotApprovedAtStart(refused) = &err else {
+        panic!("refused for another reason, or not refused: {err}");
+    };
+    let digest = &refused.digest;
+    assert_eq!(refused.role, "integrator");
+    assert_eq!(refused.path, "compose.yaml");
+
+    // The slot is on the mission's branch, made from the base.
+    assert_eq!(
+        git(&slot.tree, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "feat/alpha"
+    );
+    assert_eq!(
+        git(&slot.tree, &["rev-parse", "HEAD"]),
+        git(&project.root, &["rev-parse", "dev"])
+    );
+    let at = |at| nunki::services::read(&project, at).unwrap().unwrap().digest;
+    assert_eq!(*digest, at(nunki::services::At::Slot(&slot.tree)));
+    assert_ne!(
+        *digest,
+        at(nunki::services::At::Repository(&project.root)),
+        "the human's checkout is not what the mission lifts"
+    );
+
+    // Said whole: that the mission did not start, the rendering to read,
+    // and the two commands that come next.
+    let said = err.to_string();
+    println!("{said}");
+    assert!(said.contains("mission m1 was not started"), "{said}");
+    assert!(said.contains("image: \"postgres:16\""), "{said}");
+    assert!(!said.contains("postgres:15"), "{said}");
+    assert!(!said.contains("postgres:17"), "{said}");
+    assert!(
+        said.contains(&format!("`nunki services --approve {digest}`")),
+        "{said}"
+    );
+    assert!(
+        said.contains("`nunki mission start m1 --slot one`"),
+        "{said}"
+    );
+    assert!(
+        nunki::state::Store::open(&project.hq_root)
+            .unwrap()
+            .load("m1")
+            .is_err(),
+        "a refused start recorded a mission"
+    );
+
+    // What `nunki services --approve` does: it looks through the slots.
+    let current: Vec<_> = nunki::services::readings(&project, None, true)
+        .unwrap()
+        .into_iter()
+        .filter_map(|r| r.current.ok())
+        .collect();
+    nunki::services::approve(&project, digest, &current).unwrap();
+
+    let err = start_err(&project, &slot);
+    assert!(matches!(err, run::RunError::Account(_)), "{err}");
+}
+
+/// The security agent is on the system profile too, and `launch` asks it
+/// the same question, so a mission that has one is asked at its start even
+/// with no service declared. A mission with neither is never asked, nor is
+/// a project that declares no services file, and their slot is not branched
+/// before the rest of the start is checked.
+#[test]
+fn only_a_mission_with_a_system_profile_is_asked_at_its_start() {
+    let none = || nunki::mission::Integration::None {
+        reason: "none".to_string(),
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let (security_agent, slot) = services_at_start(dir.path(), &header_with(none()));
+    let err = start_err(&security_agent, &slot);
+    assert!(
+        matches!(
+            err,
+            run::RunError::NotApprovedAtStart(ref refused) if refused.role == "security agent"
+        ),
+        "{err}"
+    );
+    // It lifts none of them: no service is declared.
+    let said = err.to_string();
+    println!("{said}");
+    assert!(said.contains("runs on the system profile"), "{said}");
+    assert!(!said.contains("will lift"), "{said}");
+
+    let dir = tempfile::tempdir().unwrap();
+    let gates_only = nunki::mission::Header {
+        security: nunki::mission::Security::Gates,
+        ..header_with(none())
+    };
+    let (gates, slot) = services_at_start(dir.path(), &gates_only);
+    let err = start_err(&gates, &slot);
+    assert!(matches!(err, run::RunError::Account(_)), "{err}");
+    assert_eq!(
+        git(&slot.tree, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "dev"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let (_, slot) = services_at_start(dir.path(), &header_with(with_services()));
+    let declares_none = project(dir.path());
+    assert!(declares_none.config.services_file.is_none());
+    let err = start_err(&declares_none, &slot);
+    assert!(matches!(err, run::RunError::Account(_)), "{err}");
+    assert_eq!(
+        git(&slot.tree, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "dev"
+    );
+}
+
+/// The other answer to a refused start is to fix the file on the base. The
+/// refusal left the slot on the mission's branch, and a branch that exists
+/// is never moved by a launch: started again, the mission would read the
+/// first commit for good. So a start brings that branch forward to the base
+/// as it is now, and only forward: a commit of its own keeps it where it
+/// is.
+#[test]
+fn a_start_refused_then_started_again_reads_the_base_as_it_is_now() {
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot) = services_at_start(dir.path(), &header_with(with_services()));
+    let digest_of = |err: run::RunError| match err {
+        run::RunError::NotApprovedAtStart(refused) => (refused.digest.clone(), refused.to_string()),
+        other => panic!("refused for another reason, or not refused: {other}"),
+    };
+    let (first, _) = digest_of(start_err(&project, &slot));
+
+    git(&project.root, &["checkout", "-q", "dev"]);
+    std::fs::write(
+        project.root.join("compose.yaml"),
+        "services:\n  db:\n    image: postgres:18\n",
+    )
+    .unwrap();
+    git(
+        &project.root,
+        &["commit", "-qam", "the file, fixed on the base"],
+    );
+    git(&project.root, &["checkout", "-q", "elsewhere"]);
+
+    let (second, said) = digest_of(start_err(&project, &slot));
+    assert_ne!(
+        second, first,
+        "the first commit's refusal came back: {said}"
+    );
+    assert!(said.contains("image: \"postgres:18\""), "{said}");
+    assert_eq!(
+        git(&slot.tree, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "feat/alpha"
+    );
+    assert_eq!(
+        git(&slot.tree, &["rev-parse", "HEAD"]),
+        git(&project.root, &["rev-parse", "dev"])
+    );
+    let current: Vec<_> = nunki::services::readings(&project, None, true)
+        .unwrap()
+        .into_iter()
+        .filter_map(|r| r.current.ok())
+        .collect();
+    nunki::services::approve(&project, &second, &current).unwrap();
+    let err = start_err(&project, &slot);
+    assert!(matches!(err, run::RunError::Account(_)), "{err}");
+
+    // A commit of the branch's own, and the base moving again.
+    git(&slot.tree, &["config", "user.email", "a@b.c"]);
+    git(&slot.tree, &["config", "user.name", "t"]);
+    git(
+        &slot.tree,
+        &["commit", "-q", "--allow-empty", "-m", "its own"],
+    );
+    let own = git(&slot.tree, &["rev-parse", "HEAD"]);
+    git(&project.root, &["checkout", "-q", "dev"]);
+    git(
+        &project.root,
+        &["commit", "-q", "--allow-empty", "-m", "dev again"],
+    );
+    let err = start_err(&project, &slot);
+    assert!(matches!(err, run::RunError::Account(_)), "{err}");
+    assert_eq!(git(&slot.tree, &["rev-parse", "HEAD"]), own);
+    assert_eq!(
+        git(&slot.tree, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "feat/alpha"
+    );
+}
+
 /// The container is told which role it is running, and the spelling comes
 /// from one place.
 #[test]
