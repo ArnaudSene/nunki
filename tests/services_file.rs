@@ -2182,6 +2182,83 @@ mod live {
         );
     }
 
+    /// A lifted service whose container does not start again over what it
+    /// kept is found by [`nunki::run::not_started`] on the real engine, and
+    /// the removal it names is the way out: the next `up` makes it anew
+    /// (#140). The state that stops it is in the container's own
+    /// filesystem, as the anonymous volume was in #140, so removing the
+    /// container takes it away.
+    #[test]
+    #[ignore = "builds an image and lifts containers; the HQ runs it by hand"]
+    fn live_a_service_that_does_not_start_again_is_found_and_removed() {
+        use nunki::engine::Engine;
+        let _context = build_firewall();
+        let engine = nunki::engine::docker::Docker::real();
+        let lifted = |profile: &Profile| -> Vec<nunki::engine::Container> {
+            engine
+                .containers(&profile.project)
+                .unwrap()
+                .into_iter()
+                .filter(|c| c.digest.is_some())
+                .collect()
+        };
+
+        // The control: a service that fails its first start had no
+        // container before, and keeps the engine's own words.
+        let first = Profile::generate(
+            "svcfirst",
+            &["db"],
+            Lifted::whole(file(
+                "services:\n  db:\n    image: alpine:3.20\n    command: [sh, -c, \"exit 3\"]\n",
+            )),
+        );
+        let before = lifted(&first);
+        assert!(before.is_empty(), "{before:?}");
+        assert!(engine.up(&first.file, &first.project).is_err());
+        assert_eq!(
+            nunki::run::not_started(&engine, &first.project, &before),
+            None
+        );
+        drop(first);
+
+        let once = Profile::generate(
+            "svconce",
+            &["db"],
+            Lifted::whole(file(
+                "services:\n  db:\n    image: alpine:3.20\n    \
+                 command: [sh, -c, \"test ! -e /once && touch /once && exec sleep 600\"]\n",
+            )),
+        );
+        let up = once.up();
+        assert!(up.status.success(), "the first start: {}", said(&up));
+        assert!(once.stop().status.success());
+        let before = lifted(&once);
+        assert_eq!(before.len(), 1, "{before:?}");
+        let failed = engine.up(&once.file, &once.project);
+        assert!(failed.is_err(), "inconclusive: it started again");
+
+        let stuck = nunki::run::not_started(&engine, &once.project, &before)
+            .expect("the service that did not start again");
+        assert_eq!(stuck.len(), 1, "{stuck:?}");
+        assert_eq!(
+            (stuck[0].service.as_str(), stuck[0].code),
+            ("db", 1),
+            "{stuck:?}"
+        );
+        let removal = engine.removal(&stuck[0].container);
+        let removed = Command::new(&removal.program)
+            .args(&removal.args)
+            .output()
+            .unwrap();
+        assert!(removed.status.success(), "{}", said(&removed));
+        let again = once.up();
+        assert!(
+            again.status.success(),
+            "the way out did not bring it back: {}",
+            said(&again)
+        );
+    }
+
     /// The images in real use start, and pass their healthcheck, with
     /// nunki's fixed set, and start again over the data they wrote — and
     /// each capability of the set is one at least one of them cannot do

@@ -2357,6 +2357,168 @@ fn a_launch_takes_down_what_was_lifted_from_a_definition_nobody_approved() {
     );
 }
 
+/// A lifted service that had a container before a launch, and whose
+/// container has exited after the launch's `up` failed, is said in one
+/// line, with the way out the engine names (#140): the slot's next `up`
+/// starts that container again over what it kept, and an entrypoint that
+/// cannot is a mission waiting for a human.
+#[test]
+fn a_service_that_does_not_start_again_is_said_with_the_way_out() {
+    use nunki::engine::fake::FakeEngine;
+    use nunki::engine::{EngineError, Liveness};
+    use nunki::run::{RunError, Stuck};
+    let dir = tempfile::tempdir().unwrap();
+    let project = with_services_file(dir.path());
+    let slot = committed_slot(
+        dir.path(),
+        &[("compose.yaml", "services:\n  db:\n    image: postgres:16\n")],
+    );
+    approve_head(&project, &slot);
+    let header = header_with(with_services());
+    let (plan, _) = profile_for(&project, &slot, &header, Role::Integrator);
+    let approved = plan.project_services.as_ref().unwrap().approved.clone();
+    let db = |id: &str| nunki::engine::Container {
+        id: id.into(),
+        service: "db".into(),
+        digest: Some(approved.clone()),
+    };
+    let up_said = " Container nunki-11111111-one-db-1  Starting\n\
+                   container nunki-11111111-one-db-1 exited (1)\n\n";
+    let launch = |engine: &FakeEngine| {
+        run::lift(
+            engine,
+            &project,
+            Path::new("/hq/profiles/one.yml"),
+            "nunki-11111111-one",
+            &plan,
+        )
+    };
+
+    let stuck = || {
+        FakeEngine::default()
+            .with_lifted(db("old"))
+            .with_liveness("old", Liveness::Exited(1))
+            .failing_up(up_said)
+    };
+    match launch(&stuck()) {
+        Err(RunError::NotStartedAgain { stuck, said }) => {
+            assert_eq!(
+                stuck,
+                vec![Stuck {
+                    service: "db".into(),
+                    container: "old".into(),
+                    code: 1,
+                    removal: "fake-engine rm old".into(),
+                }]
+            );
+            assert_eq!(said, "container nunki-11111111-one-db-1 exited (1)");
+        }
+        other => panic!("{other:?}"),
+    }
+    let message = launch(&stuck()).unwrap_err().to_string();
+    assert!(
+        message.starts_with(
+            "the project's service db, which had a container before this launch, is not \
+             running after its `up` — db's container old exited 1: its log says why, and \
+             `fake-engine rm old` removes it. Removing a container takes none of its volumes"
+        ),
+        "{message}"
+    );
+    assert!(!message.contains('\n'), "one line: {message}");
+
+    // Each of these keeps the engine's own words.
+    let raw = |engine: FakeEngine, why: &str| match launch(&engine) {
+        Err(RunError::Engine(EngineError::Command { verb: "up", .. })) => {}
+        other => panic!("{why}: {other:?}"),
+    };
+    raw(
+        FakeEngine::default().failing_up(up_said),
+        "no service had a container",
+    );
+    raw(
+        FakeEngine::default()
+            .with_lifted(nunki::engine::Container {
+                id: "older".into(),
+                service: "db".into(),
+                digest: Some("sha256:older".into()),
+            })
+            .making_on_up(db("new"))
+            .with_liveness("new", Liveness::Exited(1))
+            .failing_up(up_said),
+        "a container this launch took down is not one it kept: the new one starts first",
+    );
+    raw(
+        FakeEngine::default()
+            .with_lifted(db("old"))
+            .with_liveness("old", Liveness::Exited(0))
+            .failing_up(up_said),
+        "a service whose work is done exits 0",
+    );
+    raw(
+        FakeEngine::default()
+            .with_lifted(db("old"))
+            .with_liveness("old", Liveness::Running)
+            .failing_up(up_said),
+        "a service running and not healthy has not exited",
+    );
+    raw(
+        FakeEngine::default()
+            .with_lifted(db("old"))
+            .with_unanswered("old")
+            .failing_up(up_said),
+        "an engine that does not answer says nothing about the service",
+    );
+}
+
+/// [`run::not_started`] reads the containers by service: one recreated by
+/// the `up` that failed, over what its service kept, is named by its new
+/// id. A service with no container before, and a container nunki wrote
+/// itself, are not.
+#[test]
+fn a_service_is_found_not_started_by_its_name_and_not_its_container() {
+    use nunki::engine::fake::FakeEngine;
+    use nunki::engine::{Container, Liveness};
+    let lifted = |id: &str, service: &str, digest: Option<&str>| Container {
+        id: id.into(),
+        service: service.into(),
+        digest: digest.map(str::to_string),
+    };
+    let before = [lifted("old", "db", Some("sha256:a"))];
+
+    let recreated = FakeEngine::default()
+        .with_lifted(lifted("new", "db", Some("sha256:a")))
+        .with_liveness("new", Liveness::Exited(1));
+    let stuck = run::not_started(&recreated, "p", &before).expect("the recreated one");
+    assert_eq!(
+        stuck
+            .iter()
+            .map(|s| (s.service.as_str(), s.container.as_str(), s.code))
+            .collect::<Vec<_>>(),
+        vec![("db", "new", 1)]
+    );
+
+    let first = FakeEngine::default()
+        .with_lifted(lifted("c", "cache", Some("sha256:a")))
+        .with_liveness("c", Liveness::Exited(1));
+    assert_eq!(
+        run::not_started(&first, "p", &before),
+        None,
+        "cache had no container before this launch"
+    );
+    assert_eq!(run::not_started(&first, "p", &[]), None);
+
+    let own = FakeEngine::default()
+        .with_lifted(lifted("old", "db", Some("sha256:a")))
+        .with_liveness("old", Liveness::Running)
+        .with_lifted(lifted("fw", "db", None))
+        .with_liveness("fw", Liveness::Exited(1));
+    assert_eq!(
+        run::not_started(&own, "p", &before),
+        None,
+        "a container without the label is nunki's own"
+    );
+}
+
 /// A mission profile lifts no service, and leaves up what a human approved:
 /// the services are kept between profiles (SPEC 4.2). What nobody approved
 /// still goes.

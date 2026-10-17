@@ -226,6 +226,16 @@ impl Engine for LocalEngine {
         Err(unsupported("remove"))
     }
 
+    /// Never named: this engine lists no container a services file lifted.
+    fn removal(&self, container: &str) -> CommandSpec {
+        CommandSpec {
+            program: "local-engine".to_string(),
+            args: vec!["rm".to_string(), container.to_string()],
+            cwd: PathBuf::from("."),
+            env: BTreeMap::new(),
+        }
+    }
+
     fn remove_volume(&self, _name: &str) -> Result<bool, EngineError> {
         Err(unsupported("volume rm"))
     }
