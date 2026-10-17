@@ -454,9 +454,14 @@ domaines pendant une campagne exige de garder une capacité qu'une règle
    mesuré : un réseau seulement `internal` laisse un service joindre un port
    que l'hôte publie, par l'adresse de la passerelle. Le pare-feu le rejoint
    à côté du réseau par défaut ; aucun port n'est publié. Toutes les
-   capacités sont retirées et un jeu fixe de trois est rendu (`CHOWN`,
-   `SETGID`, `SETUID`, mesuré comme le plus petit qui fait démarrer
-   Postgres, QuestDB et nginx), avec `no-new-privileges`, une borne de
+   capacités sont retirées et un jeu fixe de quatre est rendu (`CHOWN`,
+   `DAC_OVERRIDE`, `SETGID`, `SETUID`, mesuré comme le plus petit qui fait
+   démarrer Postgres, QuestDB et nginx, puis redémarrer chacun sur les
+   données qu'il a écrites — sans `DAC_OVERRIDE`, Postgres démarre une fois
+   et plus jamais ; `DAC_READ_SEARCH` le relancerait aussi, mais c'est à lui
+   que le profil seccomp par défaut de Docker ouvre `open_by_handle_at`, qui
+   ouvre un fichier par son handle hors de la vue du conteneur), avec
+   `no-new-privileges`, une borne de
    mémoire et une borne de processus. Le pare-feu n'a pas de chaîne
    `forward` : c'est `cap_drop` qui empêche un service de router par son
    espace réseau. L'agent tourne **sans

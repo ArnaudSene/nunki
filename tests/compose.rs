@@ -849,10 +849,11 @@ fn the_lifted_services_are_fenced_by_nunki() {
         assert_eq!(strings(&service["cap_drop"]), vec!["ALL"], "{yaml}");
         assert_eq!(
             strings(&service["cap_add"]),
-            // The set the HQ measured (Docker Engine 29.4.0): each one needed
-            // by at least one of the images in real use. Named here and not
-            // read from the constant, so a change to the set is seen.
-            vec!["CHOWN", "SETGID", "SETUID"],
+            // The set measured on Docker Engine 29.8.2: each one needed by at
+            // least one of the images in real use, started fresh or again
+            // over its data. Named here and not read from the constant, so a
+            // change to the set is seen.
+            vec!["CHOWN", "DAC_OVERRIDE", "SETGID", "SETUID"],
             "{yaml}"
         );
         assert_eq!(

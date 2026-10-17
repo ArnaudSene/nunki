@@ -230,8 +230,11 @@ nunki itself, and the file supplies none of them:
 - no port is published. The launch says in one line which `ports` it
   dropped.
 - every capability is dropped, and a fixed few are given back (`CHOWN`,
-  `SETGID`, `SETUID`), which is what the official images measured need to
-  start from root and drop to their own user.
+  `DAC_OVERRIDE`, `SETGID`, `SETUID`), which is what the official images
+  measured need to start from root, drop to their own user, and start again
+  over the data they wrote. `DAC_READ_SEARCH` would restart Postgres too;
+  it is not given, because Docker's default seccomp profile opens
+  `open_by_handle_at` to a container that holds it.
 - it gets `no-new-privileges`, a 2 GB memory limit and a 1024-process
   limit.
 - it has no CPU bound and no disk bound: a runaway service can slow the

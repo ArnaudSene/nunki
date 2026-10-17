@@ -164,9 +164,10 @@ jobs:
           # address, no outside name, only what the mission declares, and the
           # agent still reaching its service. One is left out: the
           # capability measurement lifts every image once per capability,
-          # from a fresh start (about 35 minutes); the HQ runs it when the
-          # set or its images change. The set is still exercised here: these
-          # tests lift nginx with it.
+          # from a fresh start and again after a stop (about 37 minutes on
+          # the HQ's engine); the HQ runs it when the set or its images
+          # change. The set is still exercised here: these tests lift nginx
+          # with it.
           echo "::group::services_file"
           cargo test --all-features --test services_file -- --ignored --test-threads=1 \
             --skip live_the_capability_set_is_the_smallest_the_images_need

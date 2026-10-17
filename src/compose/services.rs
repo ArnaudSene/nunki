@@ -80,21 +80,33 @@ pub const NO_GATEWAY: (&str, &str) = ("com.docker.network.bridge.inhibit_ipv4", 
 /// The capabilities a lifted service gets back, after all of them are
 /// dropped. Fixed, nunki's, never the file's: what the official images'
 /// entrypoints need to start from root and drop to their own user: change
-/// a file's owner (`CHOWN`, which nginx needs) and change user (`SETUID`,
-/// `SETGID`).
+/// a file's owner (`CHOWN`, which nginx needs), change user (`SETUID`,
+/// `SETGID`), and read a data directory root does not own
+/// (`DAC_OVERRIDE`, which Postgres needs to start again).
 ///
-/// Measured by the HQ on Docker Engine 29.4.0 with
-/// `live_the_capability_set_is_the_smallest_the_images_need`, each
-/// iteration from a fresh start: `postgres:16-alpine`, `postgres:16`,
-/// `questdb/questdb:9.4.3` and `nginx:alpine` are healthy with this set;
-/// without `CHOWN` nginx is not, without `SETGID` or `SETUID` none is.
+/// Measured by the HQ on Docker Engine 29.8.2 with
+/// `live_the_capability_set_is_the_smallest_the_images_need`, each image
+/// started fresh and then again over the data it wrote:
+/// `postgres:16-alpine`, `postgres:16`, `questdb/questdb:9.4.3` and
+/// `nginx:alpine` are healthy both times with this set; without `CHOWN`
+/// nginx is not, without `SETGID` or `SETUID` none is. Without
+/// `DAC_OVERRIDE` both Postgres images start once and never again: after
+/// `initdb` their data directory belongs to `postgres` with mode 0700, and
+/// the entrypoint's `find "$PGDATA"`, run as root, cannot read it.
+///
+/// `DAC_READ_SEARCH` starts Postgres again too, and is not the one given
+/// back: Docker's default seccomp profile allows `open_by_handle_at` only
+/// to a container that holds it, and that call opens a file by its handle,
+/// past the container's own view of the filesystem. `DAC_OVERRIDE` gates no
+/// call there, is in Docker's own default set, and reaches no file the
+/// container does not mount: its own filesystem, the file's named volumes
+/// (a services file mounts no path of the host), and the few files the
+/// engine mounts in every container.
 ///
 /// Capabilities interact, so a set is minimal only relative to itself:
-/// Postgres needs `DAC_OVERRIDE` only when `FOWNER` is granted (its
-/// entrypoint's `chmod` then succeeds and a later step needs
-/// `DAC_OVERRIDE`; without `FOWNER` the `chmod` is refused and tolerated).
-/// The test removes each capability from this set, and checks exactly that.
-pub const CAPABILITIES: [&str; 3] = ["CHOWN", "SETGID", "SETUID"];
+/// without `FOWNER` the entrypoint's `chmod` is refused and tolerated. The
+/// test removes each capability from this set, and checks exactly that.
+pub const CAPABILITIES: [&str; 4] = ["CHOWN", "DAC_OVERRIDE", "SETGID", "SETUID"];
 
 /// The memory a lifted service may use: a bound, so a service cannot take
 /// the human's machine with it. Enough for a database and a JVM under test.

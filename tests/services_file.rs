@@ -1777,6 +1777,12 @@ mod live {
             )
         }
 
+        /// Its containers stopped and kept, with their volumes: what a stack
+        /// that stopped leaves for the slot's next `up` to start again.
+        fn stop(&self) -> Output {
+            compose(&self.file, &self.project, &["stop", "--timeout", "30"])
+        }
+
         /// Down, and then every volume its containers mounted removed by
         /// name — the image's anonymous ones included — so that nothing it
         /// wrote is there for whatever is lifted next.
@@ -2177,9 +2183,9 @@ mod live {
     }
 
     /// The images in real use start, and pass their healthcheck, with
-    /// nunki's fixed set — and each capability of the set is one at least
-    /// one of them cannot do without. What it prints is the measurement
-    /// PR.md asks for.
+    /// nunki's fixed set, and start again over the data they wrote — and
+    /// each capability of the set is one at least one of them cannot do
+    /// without. What it prints is the measurement PR.md asks for.
     ///
     /// Every iteration measures a fresh start: its own Compose project,
     /// anonymous volumes renewed on `up`, and taken down with every volume
@@ -2188,6 +2194,12 @@ mod live {
     /// data volume, initialised by the first, fully capable iteration, was
     /// found ready by the later ones: it measured that state, not what an
     /// entrypoint needs on a fresh data directory.
+    ///
+    /// Every iteration then stops its stack and lifts it again with a plain
+    /// `up`, which starts the same container over the same volume, as a
+    /// slot's next role does once its stack has stopped. The second version
+    /// measured the fresh start only, and the set it found started Postgres
+    /// once and never again (#140).
     ///
     /// Capabilities interact, so a set is minimal only relative to itself:
     /// each one is removed from nunki's own set, never from another.
@@ -2244,29 +2256,40 @@ mod live {
                     caps.retain(|c| c.as_str() != Some(cap));
                 });
             }
-            let ok = profile.up_fresh().status.success();
+            let fresh = profile.up_fresh().status.success();
+            let again = fresh && profile.stop().status.success() && profile.up().status.success();
             profile.down_with_its_volumes();
-            ok
+            (fresh, again)
+        };
+        let said_of = |(fresh, again): (bool, bool)| match (fresh, again) {
+            (true, true) => "healthy, and again after a stop",
+            (true, false) => "healthy, and NOT again after a stop",
+            _ => "NOT healthy",
         };
 
         let mut failures = Vec::new();
         for (image, text) in &images {
-            let ok = healthy(text, None);
+            let measured = healthy(text, None);
             println!(
                 "{image:<24} with the whole set          {}",
-                if ok { "healthy" } else { "NOT healthy" }
+                said_of(measured)
             );
-            if !ok {
-                failures.push(format!("{image} is not healthy with {CAPABILITIES:?}"));
+            if measured != (true, true) {
+                failures.push(format!(
+                    "{image} is {} with {CAPABILITIES:?}",
+                    said_of(measured)
+                ));
             }
         }
         for cap in CAPABILITIES {
-            let needed_by: Vec<&str> = images
+            let needed_by: Vec<String> = images
                 .iter()
-                .filter(|(_, text)| !healthy(text, Some(cap)))
-                .map(|(image, _)| *image)
+                .filter_map(|(image, text)| {
+                    let measured = healthy(text, Some(cap));
+                    (measured != (true, true)).then(|| format!("{image}: {}", said_of(measured)))
+                })
                 .collect();
-            println!("without {cap:<14} not healthy: {needed_by:?}");
+            println!("without {cap:<14} {needed_by:?}");
             if needed_by.is_empty() {
                 failures.push(format!("{cap} is needed by none of the images: drop it"));
             }
