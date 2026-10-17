@@ -184,15 +184,17 @@ pub fn blob_at_head(at: &Path, path: &str) -> Result<Option<Blob>, GitError> {
             .args(args);
         raw_output(git, args, &at.display().to_string())
     };
-    read_blob(raw, path)
+    read_blob(raw, "HEAD", path)
 }
 
-/// [`blob_at_head`] for any git that answers with raw bytes.
+/// [`blob_at_head`] for any git that answers with raw bytes, at the commit
+/// `rev` names.
 fn read_blob(
     git: impl Fn(&[&str]) -> Result<Vec<u8>, GitError>,
+    rev: &str,
     path: &str,
 ) -> Result<Option<Blob>, GitError> {
-    let listing = git(&["ls-tree", "-z", "HEAD", "--", path])?;
+    let listing = git(&["ls-tree", "-z", rev, "--", path])?;
     let Some((mode, kind, id)) = tree_entry(&listing) else {
         return Ok(None);
     };
@@ -672,13 +674,20 @@ impl SlotGit {
     /// The file at `path` in the commit the slot's `HEAD` names, read in the
     /// mirror: what the slot committed, never what its tree holds now.
     pub fn blob_at_head(&self, path: &str) -> Result<Option<Blob>, GitError> {
+        self.blob_at("HEAD", path)
+    }
+
+    /// The file at `path` in the commit `rev` names, read in the mirror like
+    /// [`SlotGit::blob_at_head`]. `rev` is a commit id or a ref the mirror
+    /// resolves, never a name the slot could have written.
+    pub fn blob_at(&self, rev: &str, path: &str) -> Result<Option<Blob>, GitError> {
         let at = self.at();
         let raw = |args: &[&str]| -> Result<Vec<u8>, GitError> {
             let mut git = self.git();
             git.env("GIT_LITERAL_PATHSPECS", "1").args(args);
             raw_output(git, args, &at)
         };
-        read_blob(raw, path)
+        read_blob(raw, rev, path)
     }
 
     pub fn head(&self) -> Result<String, GitError> {

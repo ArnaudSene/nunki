@@ -340,6 +340,10 @@ pub struct Subject<'a> {
     pub header: &'a Header,
     pub protected_branches: &'a [String],
     pub protected_paths: &'a ProtectedPaths,
+    /// The project's services file, by its path in the repository
+    /// ([`crate::services::declared_path`]): the human's, which gate 4
+    /// refuses to every role that commits. `None` when there is none.
+    pub services_file: Option<&'a str>,
     /// The commit the coder's gates were green on, once they were — where the
     /// integrator's work begins. `None` until then.
     pub coder_head: Option<&'a str>,
@@ -719,12 +723,37 @@ fn perimeter(subject: &Subject) -> Result<Decision, GateError> {
             ));
         };
         let Touched { seen, commits } = touched(tree, &Rev::commit(from))?;
+        if let Some(refused) = services_file_touched(subject, &seen) {
+            return Ok(refused);
+        }
         return integrator_perimeter(subject, &seen, &commits);
     }
 
     let base = base_ref(tree, &subject.header.base)?;
     let Touched { seen, .. } = touched(tree, &base)?;
+    if let Some(refused) = services_file_touched(subject, &seen) {
+        return Ok(refused);
+    }
     coder_perimeter(subject, tree, &base, &seen)
+}
+
+/// The project's services file is the human's (SPEC 4.2, rule 1, and #141).
+/// A system profile lifts it as the mission's base holds it, never from the
+/// branch, so an edit here would ship in the pull request without ever having
+/// been lifted. Refused to the coder and the integrator alike, by its exact
+/// path, and before the integrator's wiring list is read: a list that names
+/// the file lets nothing through. A deletion or a rename is a commit that
+/// touches it too.
+fn services_file_touched(subject: &Subject, seen: &[(String, String)]) -> Option<Decision> {
+    let file = subject.services_file?;
+    let (_, where_) = seen.iter().find(|(path, _)| path == file)?;
+    Some(Decision::Failed(format!(
+        "{file} is the project's services file, and {where_} touches it. It is the human's: \
+         the system profile lifts it as the mission's base holds it, never from this branch, \
+         whatever the wiring list says. Take the change out of every commit that makes it — \
+         a commit that reverts it is not enough, since this gate reads each commit — and \
+         propose it in PR.md instead"
+    )))
 }
 
 /// Every path this branch touched, and where it was seen — the diff against

@@ -490,6 +490,7 @@ fn play(w: &World) -> Readings {
             header: &w.header,
             protected_branches: &w.project.config.protected_branches,
             protected_paths: &w.project.config.protected_paths,
+            services_file: None,
             coder_head: None,
         },
         &nunki::gate::Verification {
@@ -1152,6 +1153,7 @@ fn clean_tree_gate(w: &World) -> nunki::gate::Decision {
             header: &w.header,
             protected_branches: &w.project.config.protected_branches,
             protected_paths: &w.project.config.protected_paths,
+            services_file: None,
             coder_head: None,
         },
         &nunki::gate::Verification {
@@ -1888,6 +1890,7 @@ fn play_anything(w: &World) -> Vec<(&'static str, Result<String, String>)> {
                 header: &w.header,
                 protected_branches: &w.project.config.protected_branches,
                 protected_paths: &w.project.config.protected_paths,
+                services_file: None,
                 coder_head: None,
             },
             &nunki::gate::Verification {
@@ -2421,6 +2424,7 @@ fn perimeter_gate(w: &World) -> nunki::gate::Decision {
             header: &w.header,
             protected_branches: &w.project.config.protected_branches,
             protected_paths: &protected,
+            services_file: None,
             coder_head: None,
         },
         &nunki::gate::Verification {

@@ -53,8 +53,9 @@ pub enum Handover {
         attempt: u32,
         survivors: Vec<String>,
     },
-    /// The services file on the slot's `HEAD` renders to `digest`, which no
-    /// human approved, so the system profile the `role` needed was not
+    /// The services file at the commit the mission's branch starts from
+    /// renders to `digest`, which no human approved, so the system profile
+    /// the `role` needed was not
     /// started (SPEC 4.2). No attempt is spent: none would change it. A
     /// human reads the rendering (`nunki services --show`), approves it, and
     /// `retry` resumes the same role at the same attempt.
@@ -119,8 +120,9 @@ impl Handover {
             Handover::ServicesNotApproved {
                 role, file, digest, ..
             } => format!(
-                "the {role:?} needs the project's services, and {file} on the slot's HEAD \
-                 renders to {digest}, which no human approved: nothing was started"
+                "the {role:?} needs the project's services, and {file} on the commit the \
+                 mission's branch starts from renders to {digest}, which no human approved: \
+                 nothing was started"
             ),
         };
         one_line(&raw)
@@ -159,7 +161,7 @@ impl Handover {
                 "the human",
                 format!(
                     "read it (`nunki services --show {mission}`), approve it (`nunki services \
-                     --approve {digest}`), then {retry}"
+                     --approve {digest} {mission}`), then {retry}"
                 ),
             ),
         }
@@ -236,8 +238,9 @@ pub enum Event {
         what: String,
         survivors: Vec<String>,
     },
-    /// A system profile was due, and the services file on the slot's
-    /// `HEAD` renders to `digest`, which no human approved: the engine
+    /// A system profile was due, and the services file at the commit the
+    /// mission's branch starts from renders to `digest`, which no human
+    /// approved: the engine
     /// started nothing. Only where a system profile is lifted, before the
     /// role's run is launched.
     ServicesUnapproved { file: String, digest: String },

@@ -1175,10 +1175,12 @@ impl World {
         }
     }
 
-    /// What a coder does: change the file in the slot and commit it.
-    fn coder_commits(&self, body: &str) {
+    /// A commit that changes the file, read where the slot's HEAD is: the
+    /// reading of a commit, whoever made it. On a mission, only the base's
+    /// is ever lifted, and gate 4 refuses an agent's.
+    fn commits(&self, body: &str) {
         std::fs::write(self.slot.join("compose.yaml"), body).unwrap();
-        git(&self.slot, &["commit", "-q", "-am", "the coder's edit"]);
+        git(&self.slot, &["commit", "-q", "-am", "the file changes"]);
     }
 
     /// The slot's HEAD, read and rendered: what `--show` prints.
@@ -1198,7 +1200,7 @@ impl World {
     }
 
     fn lifted(&self) -> Result<Option<ServicesFile>, ApprovalError> {
-        nunki::services::approved(&self.project, &self.slot)
+        nunki::services::approved(&self.project, At::Slot(&self.slot))
     }
 }
 
@@ -1242,8 +1244,8 @@ fn an_approved_rendering_is_lifted() {
 fn approving_a_stale_digest_is_refused_and_records_nothing() {
     let world = World::new();
     let shown = world.shown().digest;
-    // Between `--show` and `--approve`, the coder changes the file.
-    world.coder_commits(SECOND);
+    // Between `--show` and `--approve`, the file changes.
+    world.commits(SECOND);
     match world.approve(&shown) {
         Err(ApprovalError::Stale { digest, current }) => {
             assert_eq!(digest, shown);
@@ -1261,13 +1263,13 @@ fn approving_a_stale_digest_is_refused_and_records_nothing() {
 }
 
 #[test]
-fn a_coders_later_change_needs_a_new_approval() {
+fn a_later_change_needs_a_new_approval() {
     let world = World::new();
     let first = world.shown().digest;
     world.approve(&first).unwrap();
     assert!(world.lifted().is_ok());
 
-    world.coder_commits(SECOND);
+    world.commits(SECOND);
     let second = world.shown().digest;
     assert_ne!(first, second);
     assert!(

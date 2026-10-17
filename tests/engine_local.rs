@@ -342,6 +342,7 @@ fn decision_of(s: &Several, gate: nunki::gate::Gate) -> nunki::gate::Decision {
             header: &header,
             protected_branches: &[],
             protected_paths: &Default::default(),
+            services_file: None,
             coder_head: None,
         },
         &nunki::gate::Verification {
