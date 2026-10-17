@@ -185,10 +185,15 @@ impl Engine for LocalEngine {
         let Some((program, args)) = argv.split_first() else {
             return Err(unsupported("an exec with no command"));
         };
-        let out = Command::new(self.on_the_host(program))
-            .args(args.iter().map(|a| self.on_the_host(a)))
-            .output()
-            .map_err(EngineError::Io)?;
+        let mut command = Command::new(self.on_the_host(program));
+        command.args(args.iter().map(|a| self.on_the_host(a)));
+        // A container does not inherit the host's environment, and a
+        // campaign's would reach the commands it stands in for
+        // ([`crate::mutants::CAMPAIGN_ENV`]).
+        for variable in crate::mutants::CAMPAIGN_ENV {
+            command.env_remove(variable);
+        }
+        let out = command.output().map_err(EngineError::Io)?;
         Ok(ExecOutput {
             status: out.status.code().unwrap_or(-1),
             stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -256,11 +261,19 @@ impl Engine for LocalEngine {
                 _ => {}
             }
         }
-        let mut argv = argv.iter().map(|a| self.on_the_host(a));
-        let program = argv.next().unwrap_or_default();
+        // A container does not inherit the host's environment, and the host
+        // spawner that runs this does: each campaign variable the command was
+        // not given is unset first ([`crate::mutants::CAMPAIGN_ENV`]). `env`
+        // execs the command, so its pid is the one published.
+        let mut args: Vec<String> = crate::mutants::CAMPAIGN_ENV
+            .iter()
+            .filter(|variable| !env.contains_key(**variable))
+            .flat_map(|variable| ["-u".to_string(), variable.to_string()])
+            .collect();
+        args.extend(argv.iter().map(|a| self.on_the_host(a)));
         CommandSpec {
-            program,
-            args: argv.collect(),
+            program: "env".to_string(),
+            args,
             cwd,
             env,
         }
@@ -272,7 +285,11 @@ impl Engine for LocalEngine {
 /// running while something else asks about the directory it is rewriting.
 pub fn detach(engine: &LocalEngine, spec: &CommandSpec, log: &Path) -> io::Result<u32> {
     let file = std::fs::File::create(log)?;
-    let child = Command::new(&spec.program)
+    let mut command = Command::new(&spec.program);
+    for variable in crate::mutants::CAMPAIGN_ENV {
+        command.env_remove(variable);
+    }
+    let child = command
         .args(&spec.args)
         .current_dir(&spec.cwd)
         .envs(&spec.env)

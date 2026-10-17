@@ -1687,6 +1687,7 @@ pub fn campaign(
             threshold: header
                 .mutation_threshold
                 .unwrap_or(project.config.mutation_threshold),
+            hardening: &header.hardening,
         },
     )?)
 }
@@ -1772,6 +1773,7 @@ mod tests {
             security: crate::mission::Security::Agent,
             rigor: crate::mission::Rigor::Standard,
             mutation_threshold: None,
+            hardening: Vec::new(),
             arbiter: None,
             account: None,
             model: None,

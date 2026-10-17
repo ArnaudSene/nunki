@@ -556,7 +556,8 @@ par un adaptateur (4.3), et le moteur de conteneurs que par un autre.
 | `nunki mission new/start/reframe/status/say/watch/pause/resume/stop/kill/end/accept/iterate/fetch/archive` | le cycle d'une mission, du cadrage au rapatriement des commits ; `say` dépose une consigne pour le **run suivant**, `watch` rend deux états (tourne, fini) plus un troisième que l'humain provoque (gelé), `stop` termine le run proprement (4.3), **`end` déclare la mission abandonnée** |
 | `nunki exec <slot> <cmd>` | joue une commande dans le conteneur du slot — c'est ainsi que le HQ **rejoue une preuve** sans avoir la stack sur l'hôte. Par défaut sur la **copie git propre de `HEAD`** que la porte 7 utilise, pas sur l'arbre que l'agent a habité : un `Makefile`, un `pytest.ini` ou un alias `cargo` posé par l'agent y tromperait la preuve. Jamais pendant un run sur l'arbre de travail. Un slot dont les conteneurs sont arrêtés est d'abord relevé avec le profil que le dernier lancement a écrit — sans quoi chaque porte jouée dans la copie reste injouée, et le run suivant, qui n'est lancé qu'une fois ces portes jouées, ne part jamais |
 | `nunki verify <mission>` | les portes de vérification sur la mission du codeur, puis enchaîne la mission d'intégration, puis la mission de sécurité, chacune avec ses portes ; à la première rouge, applique les règles d'itération (4.5) ; à la fin, rend la main à l'humain pour la validation du push. **Reprenable** : son état est persisté à chaque transition, et le relancer reprend au même point |
-| `nunki mutants run --slot <slot>`, `nunki mutants status` | une campagne hors mission, sur la base telle que le dépôt de l'humain l'a, dans un slot qu'aucune mission ne tient : sur les fichiers changés depuis la dernière terminée, chacun en entier, ou sur tout le code avec `--whole` ; `status` la relit dans la dette du projet et ne lance jamais rien (4.4, porte 7) |
+| `nunki mutants run --slot <slot>`, `nunki mutants status` | une campagne hors mission, sur la base telle que le dépôt de l'humain l'a, dans un slot qu'aucune mission ne tient : sur les fichiers changés depuis la dernière terminée, chacun en entier, sur tout le code avec `--whole`, ou sur les survivants de la dette par leur nom avec `--owed` ; `status` la relit dans la dette du projet et ne lance jamais rien (4.4, porte 7) |
+| `nunki mission new <mission> --branch <branche> --harden` | cadre une mission de durcissement : les tests qui tuent la dette du projet, au niveau `standard`, ses survivants figés dans l'en-tête, autant que le budget de sa campagne en mesure (4.4, porte 7) |
 | `nunki mutants debt [--equivalent <survivant> --because <pourquoi> \| --ratify <survivant> \| --ratify --all]` | liste la dette du projet, ou la tranche une fois pour le projet dans le registre des équivalences que les missions lisent ; un survivant tranché quitte la dette (4.4, porte 7) |
 | `nunki push <mission>` | après validation humaine explicite (un argument, pas un dialogue), pousse la branche depuis le dépôt principal et ouvre la pull request. C'est le seul verbe qui touche la forge en écriture, et il refuse sans `INTEGRATED` et `CLEAR` sur le dernier commit et le verdict du codeur sur son ancêtre (4.4). Il parle à l'API de la forge avec un credential de l'humain, rangé à côté des comptes (`~/.nunki/forge-token`, un jeton GitHub qui peut ouvrir des pull requests) et jamais monté dans un conteneur — un conteneur ne voit du HQ que son propre dossier de mission, un niveau plus bas. **Le même `--yes` couvre le push et l'ouverture** : un verbe, un argument. Titre et corps viennent du `PR.md` de la mission (la première ligne qui dit quelque chose est le titre) ; le corps est `PR.md` tel qu'il est écrit, suivi de la note sur les écarts puis de la section Security que `nunki` écrit à partir du verdict, sans toucher `PR.md` (4.5) ; sans `PR.md`, ou vide, la branche est poussée et aucune pull request n'est ouverte ; une pull request déjà ouverte pour la branche — second push après un volet — est retrouvée, pas signalée en échec. Sans credential, sur une remote dont la forge n'a pas d'adaptateur, ou si la forge refuse, **le push reste fait** et `nunki` rend l'adresse exacte à ouvrir avec la raison : un push rapporté rouge serait relancé, et le second `git push` ne ferait rien qu'effacer la trace du premier. **Un adaptateur par forge**, comme il y en a un par harnais (4.3) et un par moteur de conteneurs (4.2) : ce qui est propre à une forge — l'adresse de son API, la forme de ses requêtes, la façon dont une remote nomme un dépôt — vit dans son adaptateur, et rien au-dessus ne le connaît. GitHub est le seul implémenté ; une remote ailleurs est **dite ailleurs, jamais devinée**, et ajouter GitLab est un fichier à écrire, pas un remaniement. Client HTTP : `ureq` ; ses racines de confiance sont celles de Mozilla, embarquées (`webpki-roots`, données sous CDLA-Permissive-2.0, exception écrite dans `deny.toml` pour cette seule crate) — un proxy d'entreprise qui re-signe le TLS serait la raison d'y revenir |
 | `nunki check [--mission <id>]` | dit si un dépôt, ses slots et leurs conteneurs sont dans l'état que ce fichier décrit ; rouge si une restriction n'est pas tenue ; sonde le profil mission sans argument, et le profil système d'une mission donnée avec `--mission` ; **dit ce qu'il n'a pas pu vérifier** (la forge sans credential ou quand l'humain tient la protection à la main, LF quand un `.gitattributes` existant ne le force pas) |
@@ -2173,7 +2174,7 @@ dernier lot. La première rouge arrête tout.
 
    **Des campagnes hors mission, lancées par l'humain.** `nunki` n'a aucun
    ordonnanceur : `nunki mutants run --slot <slot>` en lance une quand
-   l'humain le veut, sous deux formes. Sans option, sur les fichiers
+   l'humain le veut, sous trois formes. Sans option, sur les fichiers
    changés depuis la dernière campagne hors mission terminée, chacun muté en
    entier, qui rattrape ce que les échantillons ont laissé : `NUNKI_BASE`
    est l'arbre vide, si bien que chaque ligne d'un fichier remis compte pour
@@ -2187,7 +2188,9 @@ dernier lot. La première rouge arrête tout.
    (mesuré sur cargo-mutants 27.1.0 : un chemin qui n'est pas du Rust est
    ignoré) ; seule celle-ci ferme la limite de la chaîne. Sans campagne
    terminée, la première forme est refusée et nomme `--whole` ; sur une base
-   qui n'a pas bougé depuis, rien ne part.
+   qui n'a pas bougé depuis, rien ne part. La troisième, `--owed`, sur les
+   survivants de la dette par leur nom, est plus bas : c'est ce qui solde
+   ceux qu'un test tue.
 
    Elle tourne sur la base telle que le dépôt de l'humain l'a — le commit
    que l'hôte enregistre, jamais une ref du slot —, dans la copie propre
@@ -2227,7 +2230,9 @@ dernier lot. La première rouge arrête tout.
    lignes changées, ne retire rien par fichier ; dans tous les cas, un
    survivant trouvé sous un identifiant déjà dû remplace son entrée, si bien
    que deux entrées de la dette n'ont jamais le même. Une campagne arrêtée
-   court, ou qui n'a rien mesuré, laisse la dette telle qu'elle était.
+   court, ou qui n'a rien mesuré, laisse la dette telle qu'elle était. Une
+   campagne par nom, `--owed`, n'y touche qu'aux survivants qu'elle a nommés
+   (plus bas).
 
    **Le HQ tranche la dette une fois pour le projet, dans le registre des
    équivalences que les missions lisent**, plutôt qu'une fois par mission
@@ -2283,18 +2288,73 @@ dernier lot. La première rouge arrête tout.
    (environ 11 Go par heure sans lui) ; sur un disque presque plein et
    partagé, le plancher l'arrêtera avant la fin.
 
-   **Décidé, pas encore construit.** Une règle change encore la porte 7. Le
-   changement qui la construit l'écrit à la place de celle qu'elle
-   remplace, et retire son entrée d'ici. Jusque-là, le reste de cette
-   section décrit ce que `nunki` fait.
+   **Ce qui solde le reste de la dette : une mission de durcissement, puis
+   une campagne par nom.** `nunki mission new <mission> --branch <branche>
+   --harden` cadre une mission au niveau `standard`, sous la forme code seul,
+   dont le brief tient en une ligne : tuer ces survivants. `nunki` fige dans
+   son en-tête (`hardening:`) les survivants qu'elle prend à la dette, et
+   écrit son lot et son brief, qui les nomme un à un. Figés plutôt que lus
+   dans la dette, qu'une campagne ou un avis peut changer sous une mission
+   déjà cadrée. Elle prend, dans l'ordre de la dette, les plus anciens
+   d'abord, ceux qu'une stack sait mesurer par leur nom — son `mutation.sh`
+   le dit (plus bas) — et dont le fichier n'a pas changé, dans le dépôt de
+   l'humain, entre le commit qui les a trouvés et la base : un nom porte une
+   ligne et une colonne, et un fichier changé depuis peut l'avoir déplacé.
+   Elle laisse ceux que le registre propose comme équivalents — aucun test
+   ne les tue, et `--ratify` les solde ; tous, quand le registre ne peut être
+   lu pour dire qu'une proposition est tombée — et n'en prend pas plus que
+   le budget de sa campagne n'en mesure au rythme du projet, pour que sa
+   porte 7 les mesure tous plutôt qu'un échantillon. C'est un but, pas une
+   garantie : le rythme est celui que le projet a au cadrage, et la campagne
+   mesure aussi ce que la branche change. Si le rythme monte avant le
+   lancement, ou si la branche ajoute du code à muter, l'union ne tient plus
+   dans le budget, et la campagne en mesure un échantillon, comme toute
+   autre. Le verbe dit combien restent dus, et pourquoi ; une dette qui n'a
+   rien à lui donner ne cadre rien.
 
-   - **Ce qui solde le reste de la dette.** Une mission de durcissement, au
-     niveau `standard`, écrit les tests qui tuent ses survivants. Une
-     mission qui n'écrit que des tests n'atteint aucun mutant par son diff :
-     ce qui la mesure, c'est de remesurer les survivants de la dette par leur
-     nom, par le filtre de la règle du budget.
+   Une mission qui n'écrit que des tests n'atteint aucun mutant par son
+   diff : un fichier sous `tests/` n'est jamais muté (mesuré sur
+   cargo-mutants 27.1.0). Sa porte 7 remesure donc ses survivants **par leur
+   nom**, en plus de ce que sa branche a changé, par le filtre de la règle du
+   budget. Sa campagne est toujours complète. Ses chemins sont ceux que la
+   branche a touchés et les fichiers de ses survivants, et son empreinte
+   porte leur contenu et les noms : un rebase qui change un de ces fichiers
+   est un autre contenu. Le script reçoit les noms dans
+   `NUNKI_MUTATION_NAMES`, liste ce que sa portée atteint et les mutants
+   nommés dans les fichiers donnés, et tourne sur l'union des deux listes,
+   par nom, sous un seul `-F` : mesuré sur 27.1.0, deux `-F` prennent ce que
+   l'un ou l'autre prend, et un `-F` choisit dans `--in-diff` ou `--file`,
+   jamais au-delà. L'échantillon du budget est tiré de cette union. Un nom
+   absent du code — sa ligne a bougé, ou le code qu'il remplace a changé —
+   fait une campagne qui n'a rien mesuré, et qui le dit : tournée sans lui,
+   elle compterait tué un mutant qu'elle n'a jamais essayé. Mesuré aussi : un
+   module `#[cfg(test)]` ajouté en fin de fichier laisse les noms tels quels,
+   une ligne ajoutée au-dessus les décale tous. Le brief le dit au codeur.
+   Ce que sa branche change au code est mesuré comme dans toute mission.
 
-   D'ici là, ce que le registre ne tranche pas se solde à la main.
+   Ses tests ne soldent la dette qu'une fois sur la base. `nunki mutants run
+   --owed` remesure les survivants de la dette par leur nom, et rien
+   d'autre, sur la base telle que le dépôt de l'humain l'a, ceux qui sont
+   mesurables aux mêmes conditions : le point de fourche est le commit de la
+   base lui-même, si bien que le diff est vide et que seuls les noms
+   tournent. Relue, chacun qu'un test tue quitte la dette, chacun qui survit
+   encore y revient, trouvé à ce commit, et les autres restent tels quels.
+   Ce que la dette a mesuré en dernier ne bouge pas : une campagne sur ce qui
+   a changé depuis repart de la dernière qui a mesuré des fichiers. Sans
+   elle, le survivant d'un fichier que personne ne change plus resterait dû
+   jusqu'à la prochaine campagne sur tout le code. Une campagne reçoit au
+   plus 64 Kio de noms : Linux refuse de lancer un programme dont un
+   argument ou une variable d'environnement dépasse 128 Kio — lu, pas
+   mesuré —, et entre plusieurs stacks les noms voyagent dans l'argument
+   unique de `sh -c`. Au-delà, les plus anciens d'abord, et la campagne
+   suivante prend la suite, puisqu'un survivant retrouvé revient en fin de
+   dette.
+
+   Limites, écrites : seule la stack Rust mesure par nom, et les survivants
+   des autres attendent une campagne sur tout le code ; une base qui bouge
+   après le cadrage et change le fichier d'un survivant fait une campagne qui
+   ne mesure rien, et c'est une nouvelle mission de durcissement qui le
+   reprend.
 
    **Le contrat de `mutation.sh` s'enrichit**, tout en restant facultatif
    pour une stack qui ne veut pas de chaîne :
@@ -2321,6 +2381,12 @@ dernier lot. La première rouge arrête tout.
      donnent pas ce compte : leurs outils ne tiennent pas de total à eux sur
      les fichiers touchés, et un compte tiré de la liste qui fait les lignes
      s'accorderait toujours avec elles ;
+   - une ligne `# nunki-by-name: NUNKI_MUTATION_NAMES`, qui dit que le
+     script lit les noms que `nunki` lui confie (plus haut, ce qui solde la
+     dette). `nunki` n'en confie qu'à une stack dont le script la porte, lue
+     dans le home du projet pour choisir les survivants, et de nouveau dans
+     la copie propre avant de lancer : un script qui ignorerait les noms
+     mesurerait d'autres mutants que ceux nommés, sans rien dire ;
    - un diff contre `NUNKI_BASE` lu sans détection de renommage ;
    - **des chemins pris à la lettre.** Un chemin que `nunki` confie à une
      campagne peut porter une espace, un deux-points, un guillemet, un

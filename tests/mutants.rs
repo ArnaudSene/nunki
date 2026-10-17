@@ -195,6 +195,7 @@ fn a_campaign_found_stopped_writes_no_result() {
             replay: mutants::Replay::WhenChanged,
             rigor: nunki::mission::Rigor::Critical,
             threshold: 80,
+            hardening: &[],
         },
     )
     .unwrap();
@@ -287,6 +288,7 @@ fn a_campaign_that_stopped_and_said_why_goes_back_to_the_branch() {
             replay: mutants::Replay::WhenChanged,
             rigor: nunki::mission::Rigor::Critical,
             threshold: 80,
+            hardening: &[],
         },
     )
     .unwrap();
@@ -1121,6 +1123,7 @@ fn live_a_campaign_is_launched_watched_and_read_back() {
                 replay: mutants::Replay::WhenChanged,
                 rigor: nunki::mission::Rigor::Critical,
                 threshold: 80,
+                hardening: &[],
             },
         )
         .unwrap()
@@ -1805,7 +1808,6 @@ fn the_rust_campaign_carries_each_survivors_span_from_the_tools_listing() {
                 std::env::var("PATH").unwrap_or_default()
             ),
         )
-        .env_remove(nunki::mutants::BASE_ENV)
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -2677,6 +2679,7 @@ fn a_finished_campaign_that_tried_nothing_of_what_it_found_is_not_recorded() {
             replay: mutants::Replay::WhenChanged,
             rigor: nunki::mission::Rigor::Critical,
             threshold: 80,
+            hardening: &[],
         },
     )
     .unwrap();
@@ -2787,6 +2790,7 @@ fn a_campaign_that_said_it_finished_twice_leaves_its_reason_and_no_result() {
             replay: mutants::Replay::WhenChanged,
             rigor: nunki::mission::Rigor::Critical,
             threshold: 80,
+            hardening: &[],
         },
     )
     .unwrap();
@@ -8574,6 +8578,7 @@ fn the_cancel_verb_needs_a_reason_and_says_when_there_is_nothing_to_call_off() {
             security: nunki::mission::Security::Gates,
             rigor: Default::default(),
             mutation_threshold: None,
+            hardening: Vec::new(),
             arbiter: None,
             run: None,
             account: None,
@@ -9171,6 +9176,7 @@ fn following_a_campaign_with_status_never_starts_or_touches_one() {
             security: nunki::mission::Security::Gates,
             rigor: Default::default(),
             mutation_threshold: None,
+            hardening: Vec::new(),
             arbiter: None,
             run: None,
             account: None,
@@ -9481,6 +9487,7 @@ fn off_mission_filed(
                 changed: since
                     .and_then(|(_, changed)| changed)
                     .map(|c| c.iter().map(|f| f.to_string()).collect()),
+                owed: None,
             }),
             chain: Default::default(),
             fingerprint: format!("off-mission-{commit}"),
@@ -9561,6 +9568,7 @@ fn a_mission_never_reads_back_a_campaign_outside_missions() {
             replay: mutants::Replay::WhenChanged,
             rigor: nunki::mission::Rigor::Standard,
             threshold: 80,
+            hardening: &[],
         },
     )
     .unwrap_err();
@@ -10734,4 +10742,565 @@ fn a_campaign_read_back_by_another_status_is_not_read_back_twice() {
             .is_some(),
         "the later campaign was forgotten"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The debt measured by name: a hardening mission, `nunki mutants run --owed`
+// (SPEC 4.4, the debt).
+// ---------------------------------------------------------------------------
+
+fn survivor_at(id: &str, file: &str, line: u32) -> Survivor {
+    Survivor {
+        id: id.into(),
+        file: file.into(),
+        line,
+        end_line: Some(line),
+        description: id.rsplit(": ").next().unwrap_or(id).into(),
+        outcome: None,
+        refused: None,
+        found_on: None,
+    }
+}
+
+/// A project's one stack is handed its names in the campaign's environment,
+/// as the JSON list its script reads; with none named, the variable is not
+/// set at all, and the command is the one it always was.
+#[test]
+fn a_campaign_hands_one_stack_its_names_in_its_environment() {
+    let dir = tempfile::tempdir().unwrap();
+    let (project, _slot) = context(dir.path());
+    let judged = nunki::run::judged(&project, "rust");
+    let named = vec![
+        survivor_at("src/lib.rs:1:5: replace > with == in keep", "src/lib.rs", 1),
+        survivor_at("src/lib.rs:1:9: replace > with == in keep", "src/lib.rs", 1),
+    ];
+    let names = mutants::names_by_stack(&judged, &named).unwrap();
+    let paths = vec!["src/lib.rs".to_string()];
+    let cmd = mutants::command_naming(&judged, "fp", &paths, "fork", 1, &names);
+    let handed: Vec<String> =
+        serde_json::from_str(cmd.env.get(mutants::NAMES_ENV).expect("names handed")).unwrap();
+    assert_eq!(
+        handed,
+        named.iter().map(|s| s.id.clone()).collect::<Vec<_>>()
+    );
+    let plain = mutants::command(&judged, "fp", &paths, "fork", 1);
+    assert!(!plain.env.contains_key(mutants::NAMES_ENV), "{plain:?}");
+    assert_eq!(
+        mutants::command_naming(&judged, "fp", &paths, "fork", 1, &Default::default()),
+        plain
+    );
+}
+
+/// Among several stacks, each is handed the names of the survivors in its
+/// directory, without the stack's name `nunki` put before their ids, and a
+/// stack that names one is called even when it owns no path handed: its
+/// script then says it measured nothing, rather than being left out. A
+/// survivor whose id names no stack, or another one, is named by none.
+#[cfg(unix)]
+#[test]
+fn among_several_stacks_each_is_handed_the_names_in_its_own_directory() {
+    let echo = "#!/bin/sh\nprintf '%s\\n' \"${NUNKI_MUTATION_NAMES:-none}\" >&2\n\
+                printf '{\"campaign\":\"done\"}\\n'\n";
+    let two = TwoStacks::new(echo, echo);
+    let frontend = survivor_at("next:app/page.ts:3: replace x", "frontend/app/page.ts", 3);
+    let root = survivor_at("rust:src/lib.rs:1:5: replace y", "src/lib.rs", 1);
+    let names = mutants::names_by_stack(&two.judged, &[frontend.clone(), root.clone()]).unwrap();
+    assert_eq!(names["next"], vec!["app/page.ts:3: replace x".to_string()]);
+    assert_eq!(names["rust"], vec!["src/lib.rs:1:5: replace y".to_string()]);
+
+    let only_next: std::collections::BTreeMap<String, Vec<String>> =
+        [("next".to_string(), names["next"].clone())].into();
+    let script = mutants::several_campaigns_naming(
+        &two.judged,
+        "abc1234",
+        &["src/lib.rs".to_string()],
+        &only_next,
+    );
+    let out = bare(Command::new("sh"))
+        .args(["-c", &script])
+        .current_dir(&two.tree)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let said: Vec<&str> = stderr.lines().collect();
+    assert_eq!(
+        said,
+        vec!["none", "[\"app/page.ts:3: replace x\"]"],
+        "the rust stack without names, the next stack with its own: {stderr}"
+    );
+    assert!(script.contains("NUNKI_MUTATION_NAMES="), "{script}");
+    assert_eq!(
+        mutants::several_campaigns_naming(
+            &two.judged,
+            "abc1234",
+            &["src/lib.rs".to_string()],
+            &Default::default()
+        ),
+        mutants::several_campaigns(&two.judged, "abc1234", &["src/lib.rs".to_string()])
+    );
+
+    let unprefixed = survivor_at("app/page.ts:3: replace x", "frontend/app/page.ts", 3);
+    let err = mutants::named_by(&two.judged, &unprefixed).unwrap_err();
+    assert!(err.contains("does not name that stack"), "{err}");
+    let elsewhere = survivor_at("rust:app/page.ts:3: replace x", "frontend/app/page.ts", 3);
+    assert!(mutants::named_by(&two.judged, &elsewhere).is_err());
+}
+
+/// What a mission's campaign runs on is asked through one function, by gate
+/// 7, its launcher and `nunki push`. With nothing named, its fingerprint is
+/// the one a campaign on file was recorded under. A hardening mission's is
+/// handed its survivors' files, and its fingerprint holds their content and
+/// the names: a rebase that changes one of those files, or a survivor named
+/// otherwise, is other content.
+#[test]
+fn a_hardening_campaign_runs_on_its_survivors_files_and_is_fingerprinted_by_its_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let tree = repo(dir.path());
+    write(&tree, "src/other.rs", "pub fn other() -> u8 { 1 }\n");
+    git(&tree, &["add", "-A"]);
+    git(&tree, &["commit", "-q", "-m", "other"]);
+    write(&tree, "tests/kills.rs", "#[test]\nfn kills() {}\n");
+    git(&tree, &["add", "-A"]);
+    git(&tree, &["commit", "-q", "-m", "a test"]);
+
+    let plain = nunki::gate::campaign_on(&tree, "dev", &[]).unwrap();
+    assert_eq!(plain.paths, plain.touched);
+    assert!(plain.named.is_empty());
+    assert_eq!(
+        plain.fingerprint,
+        mutants::fingerprint(&tree, &plain.touched).unwrap()
+    );
+
+    let hardened = |id: &str| nunki::mission::Hardened {
+        id: id.into(),
+        file: "src/lib.rs".into(),
+        line: 1,
+        end_line: Some(1),
+        description: "replace one -> u8 with 0".into(),
+        found_at: "f".repeat(40),
+    };
+    let one = [hardened("src/lib.rs:1:20: replace one -> u8 with 0")];
+    let on = nunki::gate::campaign_on(&tree, "dev", &one).unwrap();
+    assert_eq!(on.touched, plain.touched);
+    assert!(
+        on.paths.contains(&"src/lib.rs".to_string()),
+        "{:?}",
+        on.paths
+    );
+    assert_eq!(on.named, vec![one[0].survivor()]);
+    assert_ne!(on.fingerprint, plain.fingerprint);
+    assert_eq!(
+        nunki::gate::campaign_on(&tree, "dev", &one)
+            .unwrap()
+            .fingerprint,
+        on.fingerprint,
+        "the same names on the same content"
+    );
+    let other = [hardened("src/lib.rs:1:20: replace one -> u8 with 1")];
+    assert_ne!(
+        nunki::gate::campaign_on(&tree, "dev", &other)
+            .unwrap()
+            .fingerprint,
+        on.fingerprint
+    );
+    // The survivor's file changes: other content, though the branch's own
+    // files did not.
+    write(&tree, "src/lib.rs", "pub fn one() -> u8 { 3 }\n");
+    git(&tree, &["commit", "-q", "-am", "the base moved"]);
+    assert_ne!(
+        nunki::gate::campaign_on(&tree, "dev", &one)
+            .unwrap()
+            .fingerprint,
+        on.fingerprint
+    );
+}
+
+/// The number of mutants a budget measures is the Rust script's
+/// arithmetic: the budget over the pace, less the baseline, at least one.
+#[test]
+fn a_budget_fits_its_minutes_over_the_pace_less_the_baseline() {
+    assert_eq!(mutants::fits(45, 60), 44);
+    assert_eq!(mutants::fits(45, 47), 56);
+    assert_eq!(mutants::fits(10, 600), 1);
+    assert_eq!(mutants::fits(0, 60), 1);
+    assert_eq!(mutants::fits(45, 0), 2699);
+}
+
+/// A campaign on the debt's survivors by name settles exactly those: each
+/// one a test now kills leaves, each one still surviving comes back found
+/// at the commit it ran on, and every other survivor — and what the debt
+/// last measured — stays as it was.
+#[test]
+fn a_campaign_by_name_settles_the_survivors_it_named_and_nothing_else() {
+    let owed = |id: &str, file: &str| nunki::offmission::Owed {
+        survivor: survivor_at(id, file, 3),
+        found_at: "old".into(),
+    };
+    let last = nunki::offmission::Measured {
+        base: "dev".into(),
+        commit: "old".into(),
+        date: "2026-10-16T00:00:00Z".into(),
+        whole: true,
+        tried: Some(9),
+    };
+    let debt = nunki::offmission::Debt {
+        owed: vec![
+            owed("killed", "src/a.rs"),
+            owed("survives", "src/a.rs"),
+            owed("unnamed", "src/b.rs"),
+        ],
+        last: Some(last.clone()),
+    };
+    let settled = nunki::offmission::settled_owed(
+        debt,
+        vec![survivor_at("survives", "src/a.rs", 3)],
+        "new",
+        &["killed".to_string(), "survives".to_string()],
+    );
+    let owed: Vec<(&str, &str)> = settled
+        .owed
+        .iter()
+        .map(|o| (o.survivor.id.as_str(), o.found_at.as_str()))
+        .collect();
+    assert_eq!(owed, vec![("unnamed", "old"), ("survives", "new")]);
+    assert_eq!(settled.last, Some(last));
+}
+
+/// The debt of a project at `tree`, its stack's script in its home saying
+/// it measures by name or not.
+fn hardening_project(dir: &Path, by_name: bool) -> (nunki::project::Project, PathBuf) {
+    let (project, slot) = context(dir);
+    let script = project.fragment("rust").join(mutants::SCRIPT);
+    std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+    std::fs::write(
+        &script,
+        if by_name {
+            format!("#!/bin/sh\n{}\n", mutants::BY_NAME_MARK)
+        } else {
+            "#!/bin/sh\n".to_string()
+        },
+    )
+    .unwrap();
+    (project, slot.tree)
+}
+
+fn write_debt(project: &nunki::project::Project, owed: Vec<nunki::offmission::Owed>) {
+    let path = nunki::offmission::debt_path(&project.hq_root);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let debt = nunki::offmission::Debt { owed, last: None };
+    std::fs::write(&path, serde_json::to_string(&debt).unwrap()).unwrap();
+}
+
+/// A hardening mission takes from the debt, oldest first, what can be
+/// measured by name on the base: a survivor whose file changed since the
+/// campaign that found it is left for `nunki mutants run`, which measures
+/// its file again; one the registry proposes as equivalent is left for
+/// `--ratify` — every proposal, when the registry cannot be read to say one
+/// lapsed; and no more than its campaign's budget measures, so that its
+/// gate 7 runs every one of them.
+#[test]
+fn a_hardening_mission_takes_what_its_budget_measures_by_name_on_the_base() {
+    let dir = tempfile::tempdir().unwrap();
+    let (project, tree) = hardening_project(dir.path(), true);
+    let found = git(&tree, &["rev-parse", "dev"]);
+    write(&tree, "src/other.rs", "pub fn other() -> u8 { 1 }\n");
+    git(&tree, &["checkout", "-q", "dev"]);
+    git(&tree, &["add", "-A"]);
+    git(&tree, &["commit", "-q", "-m", "other, on the base"]);
+    let owed = |id: &str, file: &str| nunki::offmission::Owed {
+        survivor: survivor_at(id, file, 1),
+        found_at: found.clone(),
+    };
+    let mut proposed = owed("src/lib.rs:1:22: replace 1 with 2", "src/lib.rs");
+    proposed.survivor.outcome = Some(Triage::ProposedByNunki {
+        why: "nobody can tell".into(),
+        from: mutants::ProposedFrom::Registry {
+            mission: "off-mission-aaaa".into(),
+            commit: found.clone(),
+            date: "2026-10-16T00:00:00Z".into(),
+        },
+    });
+    // A registry that cannot be read cannot say a proposal lapsed: it is
+    // taken to hold, and left.
+    std::fs::create_dir_all(&project.hq_root).unwrap();
+    std::fs::write(nunki::equivalences::path(&project.hq_root), "not json").unwrap();
+    write_debt(
+        &project,
+        vec![
+            owed("src/lib.rs:1:20: replace one -> u8 with 0", "src/lib.rs"),
+            owed("src/other.rs:1:22: replace 1 with 0", "src/other.rs"),
+            proposed,
+            owed("src/lib.rs:1:20: replace one -> u8 with 1", "src/lib.rs"),
+            owed("src/lib.rs:1:20: replace one -> u8 with 2", "src/lib.rs"),
+        ],
+    );
+    // A budget of three minutes at the default pace measures two.
+    let taken = nunki::offmission::hardening(&project, "dev", 3).unwrap();
+    let ids: Vec<&str> = taken.taken.iter().map(|o| o.survivor.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec![
+            "src/lib.rs:1:20: replace one -> u8 with 0",
+            "src/lib.rs:1:20: replace one -> u8 with 1"
+        ]
+    );
+    assert_eq!(taken.beyond, 1);
+    let left: Vec<(&str, &str)> = taken
+        .left
+        .iter()
+        .map(|(id, why)| (id.as_str(), why.as_str()))
+        .collect();
+    assert_eq!(left.len(), 2, "{left:?}");
+    assert!(
+        left[0].0 == "src/other.rs:1:22: replace 1 with 0"
+            && left[0]
+                .1
+                .contains("its file changed since the campaign that found it"),
+        "{left:?}"
+    );
+    assert!(
+        left[1].0 == "src/lib.rs:1:22: replace 1 with 2" && left[1].1.contains("--ratify"),
+        "{left:?}"
+    );
+    let header = nunki::offmission::hardened(&taken);
+    assert_eq!(header[0].found_at, found);
+    assert_eq!(header[0].survivor().outcome, None);
+    let brief = nunki::offmission::hardening_brief(&taken);
+    assert!(
+        brief.contains("`src/lib.rs:1:20: replace one -> u8 with 0`")
+            && brief.contains("2 of the 5 the debt owes — 3 left"),
+        "{brief}"
+    );
+}
+
+/// What a hardening mission cannot take is said, and nothing is framed: a
+/// debt that owes nothing; a stack whose script does not measure by name; a
+/// base the repository does not hold.
+#[test]
+fn a_hardening_mission_that_can_take_nothing_is_refused_saying_why() {
+    let dir = tempfile::tempdir().unwrap();
+    let (project, tree) = hardening_project(dir.path(), true);
+    let err = nunki::offmission::hardening(&project, "dev", 45).unwrap_err();
+    assert!(
+        matches!(err, nunki::offmission::OffMissionError::NothingOwed),
+        "{err}"
+    );
+
+    let found = git(&tree, &["rev-parse", "dev"]);
+    write_debt(
+        &project,
+        vec![nunki::offmission::Owed {
+            survivor: survivor_at("src/lib.rs:1:20: replace one -> u8 with 0", "src/lib.rs", 1),
+            found_at: found,
+        }],
+    );
+    let err = nunki::offmission::hardening(&project, "nowhere", 45).unwrap_err();
+    assert!(
+        matches!(err, nunki::offmission::OffMissionError::NoBase { .. }),
+        "{err}"
+    );
+
+    let unmarked = tempfile::tempdir().unwrap();
+    let (project, tree) = hardening_project(unmarked.path(), false);
+    let found = git(&tree, &["rev-parse", "dev"]);
+    write_debt(
+        &project,
+        vec![nunki::offmission::Owed {
+            survivor: survivor_at("src/lib.rs:1:20: replace one -> u8 with 0", "src/lib.rs", 1),
+            found_at: found,
+        }],
+    );
+    let err = nunki::offmission::hardening(&project, "dev", 45).unwrap_err();
+    assert!(
+        err.to_string().contains("does not measure mutants by name"),
+        "{err}"
+    );
+}
+
+/// A campaign on the debt's survivors by name, read back: the survivors it
+/// named and did not find again leave the debt, the others stay, and what
+/// the debt last measured does not move — read as a campaign on the whole
+/// code, it would have emptied the debt.
+#[test]
+fn a_campaign_by_name_is_read_back_without_moving_what_the_debt_last_measured() {
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot) = with_profile(dir.path());
+    let log = dir.path().join("off.log");
+    let last = nunki::offmission::Measured {
+        base: "dev".into(),
+        commit: "aaaaaaaaaaaaaaaa".into(),
+        date: "2026-10-16T00:00:00Z".into(),
+        whole: true,
+        tried: Some(10),
+    };
+    let owed = |id: &str| nunki::offmission::Owed {
+        survivor: survivor_at(id, "src/lib.rs", 3),
+        found_at: "aaaaaaaaaaaaaaaa".into(),
+    };
+    let path = nunki::offmission::debt_path(&project.hq_root);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        serde_json::to_string(&nunki::offmission::Debt {
+            owed: vec![owed("killed"), owed("survives"), owed("unnamed")],
+            last: Some(last.clone()),
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        &log,
+        "{\"id\":\"survives\",\"file\":\"src/lib.rs\",\"line\":3,\"description\":\"x\"}\n\
+         {\"campaign\":\"done\",\"tried\":2,\"found\":2,\"missed\":1}\n",
+    )
+    .unwrap();
+    off_mission_filed(&project, &slot.name, &log, "bbbbbbbbbbbbbbbb", None);
+    let mut running = mutants::read_running(&project.hq_root, &slot.name)
+        .unwrap()
+        .unwrap();
+    running.off_mission.as_mut().unwrap().owed =
+        Some(vec!["killed".to_string(), "survives".to_string()]);
+    mutants::write_running(&project.hq_root, &slot.name, &running).unwrap();
+
+    let progress = mutants::read_back_off_mission(&project, &slot, ended_engine())
+        .unwrap()
+        .expect("filed");
+    assert!(
+        matches!(progress, mutants::Progress::Finished { survivors: 1, .. }),
+        "{progress:?}"
+    );
+    let debt = nunki::offmission::read_debt(&project.hq_root).unwrap();
+    let owed: Vec<(&str, &str)> = debt
+        .owed
+        .iter()
+        .map(|o| (o.survivor.id.as_str(), o.found_at.as_str()))
+        .collect();
+    assert_eq!(
+        owed,
+        vec![
+            ("unnamed", "aaaaaaaaaaaaaaaa"),
+            ("survives", "bbbbbbbbbbbbbbbb")
+        ]
+    );
+    assert_eq!(debt.last, Some(last));
+}
+
+/// The real binary frames a hardening mission from the debt: its header
+/// holds the survivors frozen, at `standard`, with the one lot nunki writes
+/// and a brief that names each survivor. With nothing owed it frames
+/// nothing; it refuses another rigor, and a lot of the human's beside it.
+#[test]
+fn the_binary_frames_a_hardening_mission_from_the_debt() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    let user_home = dir.path().join("home");
+    let home = common::project_home(&root, &user_home, "harness: claude-code\n");
+    let hq_root = home.join(nunki::project::HQ_DIR);
+    write(&root, "src/lib.rs", "pub fn one() -> u8 { 1 }\n");
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-q", "-m", "base"]);
+    git(&root, &["branch", "dev"]);
+    let found = git(&root, &["rev-parse", "dev"]);
+    let script = home.join("stacks/rust").join(mutants::SCRIPT);
+    std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+    std::fs::write(&script, format!("#!/bin/sh\n{}\n", mutants::BY_NAME_MARK)).unwrap();
+    let nunki = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_nunki"))
+            .arg("-C")
+            .arg(&root)
+            .args(["mission", "new"])
+            .args(args)
+            .env("HOME", &user_home)
+            .output()
+            .unwrap();
+        (
+            out.status.success(),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            ),
+        )
+    };
+    let frame = ["--branch", "hardening/one", "--harden", "--for", "Arbiter"];
+
+    let (ok, said) = nunki(&[&["h0"][..], &frame].concat());
+    assert!(!ok && said.contains("owes nothing"), "{said}");
+    assert!(!hq_root.join("missions/h0").exists());
+
+    let path = nunki::offmission::debt_path(&hq_root);
+    let id = "src/lib.rs:1:20: replace one -> u8 with 0";
+    std::fs::write(
+        &path,
+        serde_json::to_string(&nunki::offmission::Debt {
+            owed: vec![nunki::offmission::Owed {
+                survivor: survivor_at(id, "src/lib.rs", 1),
+                found_at: found.clone(),
+            }],
+            last: None,
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    for (args, said_what) in [
+        (&["--rigor", "critical"][..], "runs at standard"),
+        (&["--lot", "L1:mine"][..], "cannot be used with"),
+    ] {
+        let (ok, said) = nunki(&[&["h1"][..], &frame, args].concat());
+        assert!(!ok && said.contains(said_what), "{args:?}: {said}");
+    }
+    let (ok, said) = nunki(&["h2", "--branch", "b", "--for", "Arbiter"]);
+    assert!(!ok && said.contains("--lot"), "{said}");
+
+    let (ok, said) = nunki(&[&["h3"][..], &frame].concat());
+    assert!(ok, "{said}");
+    assert!(
+        said.contains("a hardening mission: 1 survivor(s) of the debt frozen into its header"),
+        "{said}"
+    );
+    let header = nunki::mission::dir::read_header(&hq_root, "h3").unwrap();
+    assert_eq!(header.rigor, nunki::mission::Rigor::Standard);
+    assert_eq!(header.lots.len(), 1);
+    assert_eq!(header.lots[0].id, "harden");
+    assert_eq!(header.hardening.len(), 1);
+    assert_eq!(
+        (
+            header.hardening[0].id.as_str(),
+            header.hardening[0].found_at.as_str()
+        ),
+        (id, found.as_str())
+    );
+    let brief = std::fs::read_to_string(hq_root.join("missions/h3/MISSION.md")).unwrap();
+    assert!(brief.contains(&format!("`{id}`")), "{brief}");
+    assert!(brief.contains("This is a hardening mission"), "{brief}");
+}
+
+/// No campaign is handed more names than fit in
+/// [`mutants::NAMES_MAX_BYTES`]: past it, the oldest go first and the rest
+/// is counted beyond, for the next campaign — never cut, which would hand
+/// the script a list it cannot read.
+#[test]
+fn no_campaign_is_handed_more_names_than_fit() {
+    let dir = tempfile::tempdir().unwrap();
+    let (project, tree) = hardening_project(dir.path(), true);
+    let found = git(&tree, &["rev-parse", "dev"]);
+    let long = "x".repeat(1000);
+    let owed: Vec<nunki::offmission::Owed> = (0..80)
+        .map(|i| nunki::offmission::Owed {
+            survivor: survivor_at(&format!("src/lib.rs:1:{i}: {long}"), "src/lib.rs", 1),
+            found_at: found.clone(),
+        })
+        .collect();
+    let judged = nunki::run::judged(&project, "rust");
+    let measured = nunki::offmission::measurable(&project, &judged, &owed, &found, None);
+    assert!(measured.beyond > 0, "{}", measured.taken.len());
+    assert_eq!(measured.taken.len() + measured.beyond, 80);
+    assert!(measured.left.is_empty(), "{:?}", measured.left);
+    let names: Vec<String> = measured
+        .taken
+        .iter()
+        .map(|o| o.survivor.id.clone())
+        .collect();
+    assert!(serde_json::to_string(&names).unwrap().len() <= mutants::NAMES_MAX_BYTES);
+    assert_eq!(names[0], owed[0].survivor.id, "the oldest first");
 }

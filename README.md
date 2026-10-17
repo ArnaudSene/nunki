@@ -489,8 +489,8 @@ killed. A volet that weakens a test can make the second false; one that
 stops compiling an unchanged file — its `mod` line removed — makes the
 first false, and that file keeps its counts. The chain will not see
 either, at any rigor, and nothing in the mission does. `--again` forces a
-full campaign, and today it is the only remedy: a campaign outside the
-mission, over the whole code, is decided in SPEC 4.4 and not yet built.
+full campaign, and it is the only remedy inside the mission; outside it,
+a campaign over the whole code (`nunki mutants run --whole`, below).
 
 **The final campaign, at `critical`.** The chain holds to the end: a
 `critical` mission is verified, and pushed, on a campaign at its final
@@ -555,7 +555,7 @@ less one for the baseline, which rebuilds the crate as a mutant does.
   whole. On a project with several stacks, the Rust stack gets the whole
   budget and the others run whole after it, under the same deadline.
 - **What is lost.** A real survivor outside the sample passes the mission.
-  The off-mission campaign SPEC 4.4 records as decided is what would find
+  A campaign outside missions (`nunki mutants run`, below) is what finds
   it.
 
 Measured on cargo-mutants 27.1.0, in the Rust image, on this repository:
@@ -706,6 +706,7 @@ the project's base, when you choose: there is no scheduler.
 ```sh
 nunki mutants run --slot <slot>            # the files changed since the last completed one
 nunki mutants run --slot <slot> --whole    # the whole code
+nunki mutants run --slot <slot> --owed     # the debt's survivors, by name
 nunki mutants status                       # read it back, and say the debt
 ```
 
@@ -715,7 +716,7 @@ nunki mutants status                       # read it back, and say the debt
   on that commit; the slot's own checkout does not move. A slot a mission
   holds is refused, and so is one no mission ever ran in, which has no
   container yet.
-- **The two forms.**
+- **The three forms.**
   - Without `--whole`, it runs on the files changed since the last
     completed campaign outside missions, each mutated whole: the fork point
     is the empty tree, so every line of a file handed counts as changed
@@ -728,6 +729,8 @@ nunki mutants status                       # read it back, and say the debt
   - With `--whole`, it runs on every tracked file with no fork point. Each
     stack reads the files it owns; cargo-mutants ignores the paths that are
     not Rust (measured on 27.1.0).
+  - With `--owed`, it runs the debt's survivors by name, and nothing else:
+    see the hardening mission, below.
 - **No sample, a long deadline.** It is where the whole is measured, so it
   is given no budget. `--minutes` (720 by default) only stops one that hangs.
 - **Asking never starts one.** `run` refuses while a campaign is filed in
@@ -755,6 +758,7 @@ nunki mutants status                       # read it back, and say the debt
     two entries share an id: one found under an id already owed replaces
     it. A campaign filed before this rule, on changed lines only, drops
     nothing by file.
+  - One by name, `--owed`, touches only the survivors it named.
   - A campaign stopped short, or that measured nothing, leaves the debt as
     it was.
 - **Ruling on the debt, once for the project.** The rulings go into the
@@ -807,8 +811,61 @@ nunki mutants status                       # read it back, and say the debt
     stays filed. Under it, `status` reads the record again: a campaign
     another `status` already read back is not read back twice, and a later
     campaign's record is not forgotten in its place.
-- **Not built yet:** the hardening mission that writes the tests. SPEC 4.4
-  records it as decided.
+- **What settles the rest: a hardening mission, then a campaign by name.**
+
+  ```sh
+  nunki mission new <mission> --branch <branch> --harden   # frame it from the debt
+  nunki mutants run --slot <slot> --owed                   # once its tests are on the base
+  ```
+
+  - **Framing.** `--harden` frames a code-only mission at `standard` whose
+    brief is one line: kill these survivors. nunki freezes them into its
+    header (`hardening:`), and writes its lot and a brief that names each
+    one. Frozen, because a campaign or a ruling can change the debt under a
+    mission already framed.
+  - **What it takes.** Oldest first, the survivors a stack can measure by
+    name (its `mutation.sh` carries `# nunki-by-name:
+    NUNKI_MUTATION_NAMES`; only the Rust stack's does), whose file has not
+    changed in your repository between the commit that found them and the
+    base: a name holds a line and a column. Not those the registry proposes
+    as equivalent, which `--ratify` settles. And no more than its campaign's
+    budget measures at the project's pace, so that its gate 7 runs every
+    one of them. That is an aim, not a promise: the pace is the one on file
+    at framing, and the campaign also measures what the branch changes. If
+    the pace rises before it runs, or the branch adds code to mutate, the
+    union no longer fits the budget and is sampled like any campaign. The
+    verb says how many it left, and why.
+  - **Its gate 7.** A mission that writes only tests reaches no mutant
+    through its diff: a file under `tests/` is never mutated (measured on
+    cargo-mutants 27.1.0). So its campaign runs its survivors by name, as
+    well as what its branch changed, and is always full. The script lists
+    both and runs the union by name under one `-F`: measured on 27.1.0, two
+    `-F` select what either selects, and an `-F` selects within `--in-diff`
+    or `--file`, never beyond. The budget's sample is drawn from that union.
+    Its fingerprint holds the survivors' files and names, so a rebase that
+    changes one of those files is other content.
+  - **A name no longer in the code measures nothing.** Its line moved, or
+    the code it replaces changed, and a campaign run without it would count
+    killed a mutant it never ran. Measured on 27.1.0: a `#[cfg(test)]`
+    module added at the end of a file keeps every name in it, and a line
+    added above them moves them all. The brief tells the coder.
+  - **Settling the debt.** The mission's tests settle nothing until they are
+    on the base. `--owed` then runs the debt's survivors by name, measurable
+    on the same conditions, with the base's own commit as the fork point, so
+    the diff is empty and only the names run. Read back, each one a test
+    kills leaves the debt, each one still surviving comes back found at that
+    commit, and the others stay as they were. What the debt last measured
+    does not move, so the next campaign on what changed since starts where
+    the last one that measured files ended.
+  - **At most 64 KiB of names a campaign.** Linux refuses to start a
+    program one of whose arguments or environment strings exceeds 128 KiB
+    (read, not measured). Beyond it, the oldest go first, and the next
+    campaign takes the rest: a survivor found again comes back at the end
+    of the debt.
+  - **Limits.** Only the Rust stack measures by name; the other stacks'
+    survivors wait for a campaign on the whole code. A base that moves after
+    framing and changes a survivor's file makes its campaign measure
+    nothing, and a new hardening mission takes it up.
 - **The disk.** The sweep and the 2 GiB floor apply here as in a mission.
   What the sweep frees on a large crate is not measured, and on a nearly
   full disk shared with other services, a whole-crate campaign will meet

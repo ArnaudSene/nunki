@@ -105,13 +105,36 @@ pub const PACE_ENV: &str = "NUNKI_MUTATION_PACE";
 /// at, so that the reconstruction stays one sample ([`Sample`]).
 pub const SAMPLE_ENV: &str = "NUNKI_MUTATION_SAMPLE";
 
+/// The variable that hands a campaign mutants **by name**, as a JSON list
+/// of the names its tool gives them (SPEC 4.4, the debt): a hardening
+/// mission's survivors, or the debt's under `nunki mutants run --owed`. The
+/// script runs them besides what its scope reaches, in the files it is
+/// handed, and measures nothing when one is not there. Handed only to a
+/// stack whose script says it reads it ([`BY_NAME_MARK`]): one that ignores
+/// it would measure other mutants than the ones named, and say nothing.
+pub const NAMES_ENV: &str = "NUNKI_MUTATION_NAMES";
+
 /// Every variable `nunki` hands a campaign. A campaign's environment reaches
 /// everything it runs, the project's own tests included — measured on
 /// cargo-mutants 27.1.0: a test that fails when a variable is set fails the
-/// unmutated baseline, and the tool exits 4 having tried nothing. So the
-/// tests that run a stack's script start without them: run by a campaign
-/// of `nunki` on itself, they would otherwise read that campaign's.
-pub const CAMPAIGN_ENV: [&str; 5] = [BASE_ENV, JOBS_ENV, BUDGET_ENV, PACE_ENV, SAMPLE_ENV];
+/// unmutated baseline, and the tool exits 4 having tried nothing. So what
+/// stands in for a container in this crate's tests, and the tests that run
+/// a stack's script, start without them: run by a campaign of `nunki` on
+/// itself, they would otherwise read that campaign's.
+pub const CAMPAIGN_ENV: [&str; 6] = [
+    BASE_ENV, JOBS_ENV, BUDGET_ENV, PACE_ENV, SAMPLE_ENV, NAMES_ENV,
+];
+
+/// The line of a stack's `mutation.sh` that says it reads [`NAMES_ENV`].
+/// The stack's to say, as with [`TOOL_VERSION_MARK`]: the Rust stack's
+/// script says it, and the Python and Next.js ones, whose tools `nunki` has
+/// not measured by name, do not.
+pub const BY_NAME_MARK: &str = "# nunki-by-name: NUNKI_MUTATION_NAMES";
+
+/// Whether a `mutation.sh` says it reads [`NAMES_ENV`] ([`BY_NAME_MARK`]).
+pub fn measures_by_name(script: &str) -> bool {
+    script.lines().any(|line| line.trim() == BY_NAME_MARK)
+}
 
 /// Where the project's pace is kept, under its HQ: the seconds a mutant took
 /// on its last campaign that tried at least [`PACE_TRIED`], as the stack's
@@ -790,6 +813,34 @@ pub struct OffMission {
     /// only the lines changed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub changed: Option<Vec<String>>,
+    /// For one on the debt's survivors by name (`--owed`): the ids it was
+    /// handed, which the debt settles with what it found
+    /// ([`crate::offmission::settled_owed`]). `None` for every other form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owed: Option<Vec<String>>,
+}
+
+/// The most a campaign is handed by name, in bytes of the JSON list
+/// ([`NAMES_ENV`]): a hardening mission takes, and `--owed` measures, no more
+/// survivors than fit, oldest first. Linux refuses to start a program one of
+/// whose arguments or environment strings exceeds 128 KiB (`MAX_ARG_STRLEN`,
+/// 32 pages) — read, not measured — and among several stacks the names
+/// travel inside the one argument of `sh -c`. Half of it leaves the rest of
+/// that argument its room.
+pub const NAMES_MAX_BYTES: usize = 64 * 1024;
+
+/// The seconds a mutant is assumed to take when the project has no pace on
+/// file ([`PACE_FILE`]): the Rust stack's script assumes the same.
+pub const DEFAULT_PACE: u32 = 60;
+
+/// How many mutants a budget of `budget_minutes` measures at `pace` seconds
+/// a mutant, less one for the baseline, which rebuilds the crate as a mutant
+/// does — and at least one: the Rust stack's script's arithmetic, which
+/// sizes its sample with it.
+pub fn fits(budget_minutes: u32, pace: u32) -> u32 {
+    (budget_minutes.saturating_mul(60) / pace.max(1))
+        .saturating_sub(1)
+        .max(1)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -882,6 +933,31 @@ pub fn fingerprint(tree: &Path, touched: &[String]) -> Result<String, MutantsErr
     lines.sort();
     let manifest = lines.join("\n");
     Ok(hash_object(tree, &manifest)?)
+}
+
+/// [`fingerprint`] for a campaign also handed `named` by name: the content of
+/// every path handed — the survivors' files among them — and each name. With
+/// nothing named it is [`fingerprint`] itself, so a campaign already on file
+/// keeps the fingerprint it was recorded under.
+pub fn fingerprint_naming(
+    tree: &Path,
+    paths: &[String],
+    named: &[Survivor],
+) -> Result<String, MutantsError> {
+    let plain = fingerprint(tree, paths)?;
+    if named.is_empty() {
+        return Ok(plain);
+    }
+    // Each name as JSON, so a name holding a newline is still one line.
+    let mut names: Vec<String> = named
+        .iter()
+        .map(|s| format!("named {}", names_json(std::slice::from_ref(&s.id))))
+        .collect();
+    names.sort();
+    Ok(hash_object(
+        tree,
+        &format!("{plain}\n{}", names.join("\n")),
+    )?)
 }
 
 /// `git hash-object --stdin` — git is already here, and this keeps the digest
@@ -2685,6 +2761,50 @@ pub fn tooling(
     }
 }
 
+/// Why a campaign cannot hand its names to a stack, or `None` when every
+/// stack `named` hands mutants to says it reads them ([`measures_by_name`]):
+/// its `mutation.sh` read in the clean copy, as the campaign will run it. A
+/// script that ignored the names would measure other mutants than the ones
+/// named, and say nothing.
+pub fn unnamed(
+    project: &crate::project::Project,
+    slot: &crate::slot::Slot,
+    engine: std::sync::Arc<dyn crate::engine::Engine>,
+    judged: &[crate::run::Judged],
+    named: &BTreeMap<String, Vec<String>>,
+) -> Result<Option<String>, MutantsError> {
+    for j in judged
+        .iter()
+        .filter(|j| named.get(&j.stack.name).is_some_and(|n| !n.is_empty()))
+    {
+        let at = format!("{}/{SCRIPT}", j.scripts_at);
+        let script = crate::exec::run(
+            project,
+            slot,
+            engine.clone(),
+            &["cat".to_string(), at.clone()],
+            crate::exec::On::Proof,
+        )?;
+        if !script.ok() {
+            return Ok(Some(format!(
+                "the `{}` stack's {at} could not be read ({}), so it cannot be handed the \
+                 survivors this campaign names",
+                j.stack.name,
+                exec_said(&script)
+            )));
+        }
+        if !measures_by_name(&script.stdout) {
+            return Ok(Some(format!(
+                "the `{}` stack's {SCRIPT} does not say it measures mutants by name \
+                 (`{BY_NAME_MARK}`), so it cannot be handed the survivors this campaign names: \
+                 `nunki init --refresh` rewrites a script nunki wrote",
+                j.stack.name
+            )));
+        }
+    }
+    Ok(None)
+}
+
 /// What a command run in the container said, for a reason on one line: its
 /// exit status and the first of its error output, or that it printed
 /// nothing.
@@ -3526,6 +3646,10 @@ pub struct Asked<'a> {
     /// The share gate 7 asks for at `standard`: the one the previous
     /// campaign is judged against before a partial one continues it.
     pub threshold: u32,
+    /// The survivors a hardening mission names, frozen in its header, which
+    /// its campaign measures by name ([`crate::gate::campaign_on`]); empty
+    /// for any other mission.
+    pub hardening: &'a [crate::mission::Hardened],
 }
 
 /// Start the campaign, or say where the one in flight is.
@@ -3565,15 +3689,16 @@ pub fn campaign(
     //
     // One call, in the place that cannot be bypassed, rather than a rule the
     // next caller has to know.
-    let touched = crate::gate::touched_since_base(&slot.tree, asked.base)
+    let on = crate::gate::campaign_on(&slot.tree, asked.base, asked.hardening)
         .map_err(|e| MutantsError::Launch(e.to_string()))?;
+    let touched = on.touched.clone();
     // The fingerprint stays over the touched files' content, not the fork
     // point: a base that moves without changing a touched file leaves the
     // diff of those files unchanged, and one that does change them changes
     // their content after the rebase.
     let fork = crate::gate::fork_point(&slot.tree, asked.base)
         .map_err(|e| MutantsError::Launch(e.to_string()))?;
-    let want = fingerprint(&slot.tree, &touched)?;
+    let want = on.fingerprint.clone();
     let compose_project = crate::compose::project_name(&project.session(), &slot.name)
         .map_err(|e| MutantsError::Exec(crate::exec::ExecError::Compose(e)))?;
 
@@ -3616,6 +3741,19 @@ pub fn campaign(
         }
     }
 
+    // A hardening mission's survivors, each by the name its stack's tool
+    // gives it, and only to a stack whose script says it reads names: one
+    // that ignored them would measure what the branch changed and nothing of
+    // what the mission was framed to kill.
+    let named = names_by_stack(&judged, &on.named).map_err(|why| {
+        MutantsError::Launch(format!(
+            "this hardening mission names a survivor no stack can be handed by name: {why}"
+        ))
+    })?;
+    if let Some(why) = unnamed(project, slot, engine.clone(), &judged, &named)? {
+        return Err(MutantsError::Launch(why));
+    }
+
     // Full or partial (SPEC 4.4, the chain). The previous campaign is judged
     // as gate 7 would judge it now, the tests its outcomes name included.
     let tooling = if chains(asked.rigor) {
@@ -3627,21 +3765,42 @@ pub fn campaign(
         ))
     };
     let coders = read_triage(dir)?;
-    let scope = scope(
-        asked.rigor,
-        asked.replay,
-        read(dir)?.as_ref(),
-        tooling.as_deref().map_err(String::as_str),
-        &fork,
-        |previous| {
-            owed(previous, &coders, asked.rigor, asked.threshold)
-                .or_else(|| crate::gate::named_test_missing(&slot.tree, None, previous, &coders))
-        },
-        |commit| git::on_slot(&slot.tree, &["merge-base", "--is-ancestor", commit, "HEAD"]).is_ok(),
-        |previous| uncarried(&slot.tree, previous, &touched),
-    );
-    let paths = handed(&slot.tree, &touched, &scope)?;
-    let mut launched = command(&judged, &want, &paths, &fork, project.config.jobs());
+    // A hardening mission's campaign is always full: the survivors it names
+    // are measured whatever its branch changed — tests, mostly, which no
+    // campaign mutates — so no earlier campaign holds what this one would
+    // carry.
+    let scope = if on.named.is_empty() {
+        scope(
+            asked.rigor,
+            asked.replay,
+            read(dir)?.as_ref(),
+            tooling.as_deref().map_err(String::as_str),
+            &fork,
+            |previous| {
+                owed(previous, &coders, asked.rigor, asked.threshold).or_else(|| {
+                    crate::gate::named_test_missing(&slot.tree, None, previous, &coders)
+                })
+            },
+            |commit| {
+                git::on_slot(&slot.tree, &["merge-base", "--is-ancestor", commit, "HEAD"]).is_ok()
+            },
+            |previous| uncarried(&slot.tree, previous, &touched),
+        )
+    } else {
+        Scope::Full {
+            why: format!(
+                "a hardening mission's campaign is always full: it measures what its branch \
+                 changed and the {} survivor(s) it names, by name",
+                on.named.len()
+            ),
+        }
+    };
+    let paths = if on.named.is_empty() {
+        handed(&slot.tree, &touched, &scope)?
+    } else {
+        on.paths.clone()
+    };
+    let mut launched = command_naming(&judged, &want, &paths, &fork, project.config.jobs(), &named);
     launched.env.extend(sizing(
         asked.budget_minutes,
         read_pace(&project.hq_root),
@@ -3746,17 +3905,41 @@ pub fn command(
     fork: &str,
     jobs: u32,
 ) -> crate::harness::spawn::CommandSpec {
+    command_naming(judged, campaign, touched, fork, jobs, &BTreeMap::new())
+}
+
+/// [`command`], handing each stack the mutants it is to run by name
+/// ([`NAMES_ENV`]): `named` maps a stack's name to the names its tool gives
+/// them ([`named_by`]). `touched` holds their files, so that each stack
+/// that names one is called on them.
+pub fn command_naming(
+    judged: &[crate::run::Judged],
+    campaign: &str,
+    touched: &[String],
+    fork: &str,
+    jobs: u32,
+    named: &BTreeMap<String, Vec<String>>,
+) -> crate::harness::spawn::CommandSpec {
+    let mut env: BTreeMap<String, String> = [
+        (BASE_ENV.to_string(), fork.to_string()),
+        (JOBS_ENV.to_string(), jobs.to_string()),
+    ]
+    .into_iter()
+    .collect();
     let (program, args) = match judged {
         [one] => {
             let mut args = vec![campaign.to_string()];
             args.extend(touched.iter().cloned());
+            if let Some(names) = named.get(&one.stack.name).filter(|n| !n.is_empty()) {
+                env.insert(NAMES_ENV.to_string(), names_json(names));
+            }
             (format!("{}/{SCRIPT}", one.scripts_at), args)
         }
         several => (
             "sh".to_string(),
             vec![
                 "-c".to_string(),
-                several_campaigns(several, campaign, touched),
+                several_campaigns_naming(several, campaign, touched, named),
             ],
         ),
     };
@@ -3764,13 +3947,64 @@ pub fn command(
         program,
         args,
         cwd: PathBuf::from(crate::exec::PROOF_AT),
-        env: [
-            (BASE_ENV.to_string(), fork.to_string()),
-            (JOBS_ENV.to_string(), jobs.to_string()),
-        ]
-        .into_iter()
-        .collect(),
+        env: env.into_iter().collect(),
     }
+}
+
+/// The names a stack is handed in [`NAMES_ENV`], as the JSON list its script
+/// reads.
+fn names_json(names: &[String]) -> String {
+    serde_json::to_string(names).expect("a list of strings always serialises")
+}
+
+/// The stack whose tool names `survivor`, and the name it gives it — what
+/// that stack's script reads in [`NAMES_ENV`] — or why there is none.
+///
+/// A project's one stack names a survivor by its id. Of several, the stack
+/// whose directory holds its file ([`owner`]) names it by its id without the
+/// stack's name, which [`several_campaigns`] puts before it: a survivor
+/// recorded otherwise — while the project carried one stack — has no name
+/// that stack's tool would know. Either way, the stack's script must say it
+/// reads names ([`measures_by_name`]); that is the caller's to check, where
+/// the script can be read.
+pub fn named_by<'a>(
+    judged: &'a [crate::run::Judged],
+    survivor: &Survivor,
+) -> Result<(&'a crate::run::Judged, String), String> {
+    match judged {
+        [one] => Ok((one, survivor.id.clone())),
+        several => {
+            let Some(j) = owner(several, &survivor.file) else {
+                return Err(format!(
+                    "{} is in no stack's directory",
+                    crate::text::one_line(&survivor.file)
+                ));
+            };
+            match survivor.id.strip_prefix(&format!("{}:", j.stack.name)) {
+                Some(name) => Ok((j, name.to_string())),
+                None => Err(format!(
+                    "{} is in the `{}` stack's directory, and its id does not name that stack",
+                    crate::text::one_line(&survivor.id),
+                    j.stack.name
+                )),
+            }
+        }
+    }
+}
+
+/// `survivors` as [`command_naming`] hands them: each stack's names, by the
+/// stack's name ([`named_by`]). The first survivor no stack names is the
+/// error.
+pub fn names_by_stack(
+    judged: &[crate::run::Judged],
+    survivors: &[Survivor],
+) -> Result<BTreeMap<String, Vec<String>>, String> {
+    let mut named: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for survivor in survivors {
+        let (j, name) = named_by(judged, survivor)?;
+        named.entry(j.stack.name.clone()).or_default().push(name);
+    }
+    Ok(named)
 }
 
 /// The campaign of a project carrying several stacks, as one shell script
@@ -3818,6 +4052,20 @@ pub fn several_campaigns(
     campaign: &str,
     touched: &[String],
 ) -> String {
+    several_campaigns_naming(judged, campaign, touched, &BTreeMap::new())
+}
+
+/// [`several_campaigns`], each stack handed its own names in [`NAMES_ENV`]
+/// (`named`, by the stack's name: [`names_by_stack`]). A stack that names a
+/// mutant is called even when it owns no path handed, so that its script,
+/// handed none of their files, says it measured nothing rather than being
+/// left out in silence.
+pub fn several_campaigns_naming(
+    judged: &[crate::run::Judged],
+    campaign: &str,
+    touched: &[String],
+    named: &BTreeMap<String, Vec<String>>,
+) -> String {
     use crate::exec::quote;
     let mut script = String::from(
         "set -u\ncomplete=1\ncounted=1\ntried=0\nsized=1\nfound=0\nreported=1\nmissed=0\nbyfile=1\nout=\"$(mktemp)\"\n",
@@ -3831,7 +4079,12 @@ pub fn several_campaigns(
                 dir => path[dir.len() + 1..].to_string(),
             })
             .collect();
-        if mine.is_empty() {
+        let names = named
+            .get(&j.stack.name)
+            .filter(|names| !names.is_empty())
+            .map(|names| format!("{NAMES_ENV}={} ", quote(&names_json(names))))
+            .unwrap_or_default();
+        if mine.is_empty() && names.is_empty() {
             continue;
         }
         let dir = if j.stack.dir.is_empty() {
@@ -3845,7 +4098,7 @@ pub fn several_campaigns(
             format!("{}/", j.stack.dir)
         };
         script.push_str(&format!(
-            "( cd {dir} && {at}/{SCRIPT} {campaign} {paths} ) > \"$out\"\n\
+            "( cd {dir} && {names}{at}/{SCRIPT} {campaign} {paths} ) > \"$out\"\n\
              jq -R -c --arg s {name} --arg d {prefix} 'fromjson? | select(type == \"object\" \
              and has(\"id\")) | .id = ($s + \":\" + (.id | tostring)) | .file = ($d + \
              (.file | tostring))' < \"$out\"\n\

@@ -800,6 +800,54 @@ pub fn touched_since_base(tree: &Path, base: &str) -> Result<Vec<String>, GateEr
     touched_paths(tree, &base)
 }
 
+/// What a mission's campaign runs on (SPEC 4.4, gate 7), as gate 7, its
+/// launcher and `nunki push` ask it.
+#[derive(Debug, Clone)]
+pub struct CampaignOn {
+    /// What the branch touched since its base ([`touched_since_base`]).
+    pub touched: Vec<String>,
+    /// The paths a full campaign is handed: the touched ones and, for a
+    /// hardening mission, the files of the survivors it names.
+    pub paths: Vec<String>,
+    /// The survivors the campaign runs by name: a hardening mission's, and
+    /// none for any other.
+    pub named: Vec<crate::mutants::Survivor>,
+    /// The fingerprint gate 7 judges a campaign on file by
+    /// ([`crate::mutants::fingerprint_naming`]).
+    pub fingerprint: String,
+}
+
+/// What a mission's campaign runs on, from the base's **name** and the
+/// survivors a hardening mission names (`hardening`, empty for any other):
+/// the one function the three callers ask, for the reason
+/// [`touched_since_base`] is one. A hardening mission's campaign measures
+/// its survivors by name besides what its branch changed, so their files are
+/// handed too, and the names and those files' content are in the
+/// fingerprint: a rebase that changes one of them is other content.
+pub fn campaign_on(
+    tree: &Path,
+    base: &str,
+    hardening: &[crate::mission::Hardened],
+) -> Result<CampaignOn, GateError> {
+    let touched = touched_since_base(tree, base)?;
+    let named: Vec<crate::mutants::Survivor> = hardening
+        .iter()
+        .map(crate::mission::Hardened::survivor)
+        .collect();
+    let mut paths = touched.clone();
+    paths.extend(named.iter().map(|s| s.file.clone()));
+    paths.sort();
+    paths.dedup();
+    let fingerprint = crate::mutants::fingerprint_naming(tree, &paths, &named)
+        .map_err(|e| GateError::Mutants(e.to_string()))?;
+    Ok(CampaignOn {
+        touched,
+        paths,
+        named,
+        fingerprint,
+    })
+}
+
 /// The paths a mutation campaign runs on: what this branch touched, once
 /// each, in a stable order.
 ///
@@ -1568,9 +1616,12 @@ fn mutation(subject: &Subject, threshold: Threshold) -> Result<Outcome, GateErro
             ),
         ));
     }
-    let paths = touched_since_base(subject.tree, &subject.header.base)?;
-    let want = crate::mutants::fingerprint(subject.tree, &paths)
-        .map_err(|e| GateError::Mutants(e.to_string()))?;
+    let want = campaign_on(
+        subject.tree,
+        &subject.header.base,
+        &subject.header.hardening,
+    )?
+    .fingerprint;
 
     let campaign =
         crate::mutants::read(subject.mission_dir).map_err(|e| GateError::Mutants(e.to_string()))?;

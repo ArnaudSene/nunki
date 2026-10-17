@@ -31,6 +31,7 @@ fn header(security: Security) -> Header {
         security,
         rigor: Rigor::Standard,
         mutation_threshold: None,
+        hardening: Vec::new(),
         arbiter: None,
         run: None,
         account: None,

@@ -92,6 +92,7 @@ fn header() -> Header {
         security: Security::Gates,
         rigor: Default::default(),
         mutation_threshold: None,
+        hardening: Vec::new(),
         arbiter: None,
         run: None,
         account: None,
@@ -3755,4 +3756,71 @@ fn a_file_named_like_a_pathspec_is_read_as_the_file_it_is() {
     assert_eq!(blob.bytes, b"pub fn magic() {}\n");
     let other = repo.blob_at_head("src/other.rs").unwrap().unwrap();
     assert_eq!(other.bytes, b"pub fn other() {}\n");
+}
+
+// ---------------------------------------------------------------------------
+// Gate 7 of a hardening mission (SPEC 4.4, the debt).
+// ---------------------------------------------------------------------------
+
+/// A hardening mission's gate 7 judges the campaign that ran on its
+/// survivors by name — the fingerprint `campaign_on` gives, which holds the
+/// names and their files — and judges it as any `standard` campaign: a
+/// campaign on what the branch changed alone is other content, never a
+/// measurement of the survivors the mission was framed to kill.
+#[test]
+fn a_hardening_missions_gate_judges_the_campaign_on_its_survivors_by_name() {
+    let mut f = standard();
+    // A survivor of the debt in a file the branch did not touch.
+    commit(
+        &f.tree,
+        "src/old.rs",
+        "pub fn old() -> u8 { 1 }\n",
+        "the debt's",
+    );
+    f.journal_names_head();
+    f.header.hardening = vec![nunki::mission::Hardened {
+        id: "src/old.rs:1:20: replace old -> u8 with 0".into(),
+        file: "src/old.rs".into(),
+        line: 1,
+        end_line: Some(1),
+        description: "replace old -> u8 with 0".into(),
+        found_at: "f".repeat(40),
+    }];
+
+    // On file under what the branch touched alone: not this mission's
+    // campaign.
+    f.campaign_tried(untriaged(1), Some(10));
+    let outcome = f.gate_seven(Role::Coder);
+    match &outcome.decision {
+        Decision::Unplayed(why) => assert!(why.contains("ran on other content"), "{why}"),
+        other => panic!("a campaign without the names is not this one: {other:?}"),
+    }
+
+    let on = nunki::gate::campaign_on(&f.tree, "dev", &f.header.hardening).unwrap();
+    assert!(
+        on.paths.contains(&"src/old.rs".to_string()),
+        "{:?}",
+        on.paths
+    );
+    nunki::mutants::write(
+        f._dir.path(),
+        &Campaign {
+            stopped: None,
+            files: None,
+            chain: Default::default(),
+            fingerprint: on.fingerprint,
+            head: git(&f.tree, &["rev-parse", "HEAD"]),
+            date: "2026-10-16T12:00:00Z".into(),
+            survivors: untriaged(1),
+            tried: Some(10),
+        },
+    )
+    .unwrap();
+    let outcome = f.gate_seven(Role::Coder);
+    assert_eq!(outcome.decision, Decision::Passed, "{outcome:?}");
+    assert!(
+        outcome
+            .note
+            .is_some_and(|n| n.contains("9 of 10 tried mutant(s) killed (90%)")),
+    );
 }

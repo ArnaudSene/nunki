@@ -4698,3 +4698,368 @@ fn init_without_a_configuration_or_a_stack_is_not_an_error() {
     let (_dir, root, nunki) = fresh();
     assert!(init(&root, &nunki, &[]).is_ok());
 }
+
+// ---------------------------------------------------------------------------
+// Mutants handed by name (SPEC 4.4, the debt).
+// ---------------------------------------------------------------------------
+
+/// A stand-in `cargo mutants` that keeps to its scope as the real one does,
+/// measured on 27.1.0: `--in-diff` reaches the names in `$REACHED`, and lists
+/// nothing at all — not `[]` — when it reaches none; `--file` reaches the
+/// mutants of the files named; and the `-F` filters select **within** that
+/// scope, each what it matches, together what any of them matches. It lists
+/// `$LISTING`, and runs what is left: a mutant whose name holds "missed"
+/// survives. Every call is written to `$CALLS`.
+#[cfg(unix)]
+const CARGO_THAT_NAMES: &str = r#"#!/bin/sh
+printf '%s\n' "$*" >> "$CALLS"
+out=""
+list=0
+diffed=0
+filters="$CALLS.filters"
+scope="$CALLS.scope"
+: > "$filters"
+: > "$scope"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --output) out=$2; shift ;;
+    -F) printf '%s\n' "$2" >> "$filters"; shift ;;
+    --file) printf '%s\n' "$2" >> "$scope"; shift ;;
+    --in-diff) diffed=1; shift ;;
+    --list) list=1 ;;
+  esac
+  shift
+done
+files=$(jq -R -s -c 'split("\n") | map(select(. != ""))' < "$scope")
+res=$(jq -R -s -c 'split("\n") | map(select(. != ""))' < "$filters")
+sel=$(jq -c --argjson files "$files" --argjson res "$res" --argjson diffed "$diffed" \
+  --argjson reached "${REACHED:-[]}" '
+  [ .[]
+    | .name as $n
+    | select(if $diffed == 1 then any($reached[]; . == $n)
+             elif ($files | length) > 0 then (.file as $f | any($files[]; . == $f))
+             else true end)
+    | select(($res | length) == 0 or any($res[]; . as $re | $n | test($re))) ]' "$LISTING")
+if [ "$diffed" = 1 ] && [ "$(printf '%s' "$sel" | jq 'length')" = 0 ]; then
+  echo ' INFO No mutants to filter' >&2
+  exit 0
+fi
+if [ "$list" = 1 ]; then
+  printf '%s\n' "$sel"
+  exit 0
+fi
+printf '%s' "$sel" | jq -r '.[]
+  | (if (.name | test("missed")) then "MissedMutant" else "CaughtMutant" end)
+    + "|" + .file + "|" + (.span.start.line | tostring)
+    + "|" + (.span.end.line | tostring) + "|" + .name' \
+  | mutants-out "$out/mutants.out"
+if printf '%s' "$sel" | jq -e 'any(.[]; .name | test("missed"))' > /dev/null; then
+  exit 2
+fi
+exit 0
+"#;
+
+/// What a campaign handed `paths`, from the branch [`forked_tree`] makes and
+/// with its fork point, said against [`CARGO_THAT_NAMES`]: its stdout, its
+/// stderr, its status and every call it made to the tool.
+#[cfg(unix)]
+fn named_campaign(
+    listing: &[serde_json::Value],
+    reached: &[&str],
+    paths: &[&str],
+    env: &[(&str, &str)],
+) -> (String, String, Option<i32>, String) {
+    let (dir, root, nunki) = fresh();
+    init(&root, &nunki, &["rust".to_string()]).unwrap();
+    let script = home(&root).join("stacks/rust/mutation.sh");
+    let (tree, base) = forked_tree(&root);
+    let file = dir.path().join("listing.json");
+    std::fs::write(&file, serde_json::to_string(listing).unwrap()).unwrap();
+    let calls = dir.path().join("calls");
+    let path = stubs(&dir.path().join("stub-bin"), &[("cargo", CARGO_THAT_NAMES)]);
+    let out = sh()
+        .arg(&script)
+        .arg("abc123")
+        .args(paths)
+        .env("PATH", path)
+        .env("LISTING", &file)
+        .env("CALLS", &calls)
+        .env("REACHED", serde_json::to_string(reached).unwrap())
+        .env(nunki::mutants::BASE_ENV, &base)
+        .envs(env.iter().copied())
+        .current_dir(&tree)
+        .output()
+        .expect("sh runs the campaign");
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        out.status.code(),
+        std::fs::read_to_string(&calls).unwrap_or_default(),
+    )
+}
+
+/// The survivors a campaign printed, by id.
+#[cfg(unix)]
+fn survivors_of(said: &str) -> std::collections::BTreeSet<String> {
+    nunki::mutants::parse(said)
+        .into_iter()
+        .map(|s| s.id)
+        .collect()
+}
+
+/// Every call to the tool hands it one filter at most: two `-F` select what
+/// either selects (measured on 27.1.0), so a second one would widen the
+/// names, or the sample, to whatever the other one matches.
+#[cfg(unix)]
+fn one_filter_each(calls: &str) {
+    for call in calls.lines() {
+        assert!(
+            call.matches(" -F ").count() <= 1,
+            "two filters in one call: {call}"
+        );
+    }
+}
+
+/// Handed names, a campaign runs them and what its scope reaches by itself
+/// — the lines the branch changed — and nothing else: listed by name in the
+/// files handed, listed by the diff, checked, then run over those files
+/// under one filter of the names the two lists hold.
+#[cfg(unix)]
+#[test]
+fn a_campaign_handed_names_runs_them_and_what_its_branch_changed() {
+    let named = "src/lib.rs:1:33: replace > with == in keep";
+    let missed = "src/lib.rs:1:33: replace > with < in keep, missed";
+    let own = "src/lib.rs:3:33: replace + with - in other";
+    let neither = "src/lib.rs:3:33: replace + with * in other";
+    let listing = vec![
+        listed("src/lib.rs", 1, "replace > with == in keep"),
+        listed("src/lib.rs", 1, "replace > with < in keep, missed"),
+        listed("src/lib.rs", 3, "replace + with - in other"),
+        listed("src/lib.rs", 3, "replace + with * in other"),
+    ]
+    .into_iter()
+    .zip([named, missed, own, neither])
+    .map(|(mut m, name)| {
+        m["name"] = name.into();
+        m
+    })
+    .collect::<Vec<_>>();
+    let names = serde_json::to_string(&[named, missed]).unwrap();
+    let (said, why, status, calls) = named_campaign(
+        &listing,
+        &[own],
+        &["src/lib.rs"],
+        &[(nunki::mutants::NAMES_ENV, names.as_str())],
+    );
+    assert_eq!(status, Some(0), "{why}");
+    assert!(nunki::mutants::completed(&said), "{said}\n{why}");
+    assert_eq!(nunki::mutants::tried(&said), Some(3), "{said}");
+    assert_eq!(
+        survivors_of(&said),
+        [missed.to_string()].into_iter().collect(),
+        "{said}"
+    );
+    one_filter_each(&calls);
+    let calls: Vec<&str> = calls.lines().collect();
+    assert_eq!(calls.len(), 4, "{calls:?}");
+    assert!(
+        calls[0].contains("--list") && calls[0].contains("--file src/lib.rs -F"),
+        "{calls:?}"
+    );
+    assert!(
+        calls[1].contains("--list") && calls[1].contains("--in-diff") && !calls[1].contains("-F"),
+        "{calls:?}"
+    );
+    assert!(
+        calls[2].contains("--list") && calls[2].contains("--file src/lib.rs -F"),
+        "{calls:?}"
+    );
+    assert!(
+        !calls[3].contains("--list")
+            && !calls[3].contains("--in-diff")
+            && calls[3].contains("--file src/lib.rs")
+            && calls[3].contains(" -F "),
+        "{calls:?}"
+    );
+    let line = said.lines().find(|l| l.contains("\"sampled\"")).unwrap();
+    let line: serde_json::Value = serde_json::from_str(line).unwrap();
+    assert_eq!(
+        (line["sampled"].as_u64(), line["listed"].as_u64()),
+        (Some(1), Some(3))
+    );
+}
+
+/// A name that is not in the code — the line it held moved, or its code
+/// changed — is a mutant the campaign cannot run, and it measured nothing:
+/// run without it, it would report killed a mutant it never ran. The tool
+/// never runs.
+#[cfg(unix)]
+#[test]
+fn a_name_not_in_the_code_is_a_campaign_that_measured_nothing() {
+    let listing = vec![listed("src/lib.rs", 1, "replace > with == in keep")];
+    let names = serde_json::to_string(&[
+        "src/lib.rs:1:5: replace > with == in keep",
+        "src/lib.rs:2:5: replace > with == in keep",
+    ])
+    .unwrap();
+    let (said, why, status, calls) = named_campaign(
+        &listing,
+        &[],
+        &["src/lib.rs"],
+        &[(nunki::mutants::NAMES_ENV, names.as_str())],
+    );
+    assert_eq!(status, Some(1), "{why}");
+    assert!(!nunki::mutants::completed(&said), "{said}");
+    assert!(
+        why.contains(
+            "1 of the 2 mutant(s) this campaign was handed by name are not in the code it runs on"
+        ) && why.contains("src/lib.rs:2:5: replace > with == in keep"),
+        "{why}"
+    );
+    assert!(
+        calls.lines().all(|c| c.contains("--list")),
+        "the tool ran: {calls}"
+    );
+}
+
+/// Names that are not a list of names, or no Rust file to find them in,
+/// measure nothing, and say so: a list read wrong would run other mutants
+/// than the ones asked for.
+#[cfg(unix)]
+#[test]
+fn names_the_campaign_cannot_read_are_a_campaign_that_measured_nothing() {
+    let listing = vec![listed("src/lib.rs", 1, "replace > with == in keep")];
+    for names in ["[]", "{\"a\":1}", "[\"a\", 1]", "not json"] {
+        let (said, why, status, calls) = named_campaign(
+            &listing,
+            &[],
+            &["src/lib.rs"],
+            &[(nunki::mutants::NAMES_ENV, names)],
+        );
+        assert_eq!(status, Some(1), "{names}: {why}");
+        assert!(!nunki::mutants::completed(&said), "{names}: {said}");
+        assert!(
+            why.contains("NUNKI_MUTATION_NAMES is a JSON list of at least one mutant's name"),
+            "{names}: {why}"
+        );
+        assert!(calls.is_empty(), "{names}: {calls}");
+    }
+    let (said, why, status, _) = named_campaign(
+        &listing,
+        &[],
+        &["README.md"],
+        &[(
+            nunki::mutants::NAMES_ENV,
+            "[\"src/lib.rs:1:5: replace > with == in keep\"]",
+        )],
+    );
+    assert_eq!(status, Some(1), "{why}");
+    assert!(!nunki::mutants::completed(&said), "{said}");
+    assert!(
+        why.contains("handed 1 mutant(s) by name and none of the Rust files they are in"),
+        "{why}"
+    );
+}
+
+/// Over its budget, a campaign handed names samples what it would run — the
+/// names and what its scope reaches — by the key, and hands the sample as
+/// its one filter: a filter of the names beside it would bring every one of
+/// them back.
+#[cfg(unix)]
+#[test]
+fn a_campaign_handed_names_over_its_budget_samples_them_under_one_filter() {
+    let listing = forty(0);
+    let names: Vec<&str> = listing
+        .iter()
+        .take(10)
+        .map(|m| m["name"].as_str().unwrap())
+        .collect();
+    let json = serde_json::to_string(&names).unwrap();
+    let (said, why, status, calls) = named_campaign(
+        &listing,
+        &[],
+        &["src/a.rs", "src/b.rs"],
+        &[
+            (nunki::mutants::NAMES_ENV, json.as_str()),
+            (nunki::mutants::BUDGET_ENV, "600"),
+        ],
+    );
+    assert_eq!(status, Some(0), "{why}");
+    assert!(nunki::mutants::completed(&said), "{said}\n{why}");
+    one_filter_each(&calls);
+    let line = said.lines().find(|l| l.contains("\"sampled\"")).unwrap();
+    let line: serde_json::Value = serde_json::from_str(line).unwrap();
+    // Ten fit nine at 60 s each in 600 s: one in two.
+    assert_eq!(
+        (line["sampled"].as_u64(), line["listed"].as_u64()),
+        (Some(2), Some(10))
+    );
+    let expected: std::collections::BTreeSet<String> = listing
+        .iter()
+        .take(10)
+        .filter(|m| {
+            let name = m["name"].as_str().unwrap();
+            let description = name.splitn(4, ':').nth(3).unwrap().trim_start();
+            key_hash(m["file"].as_str().unwrap(), description).is_multiple_of(2)
+        })
+        .map(|m| m["name"].as_str().unwrap().to_string())
+        .collect();
+    assert!(!expected.is_empty() && expected.len() < 10, "{expected:?}");
+    assert_eq!(
+        nunki::mutants::tried(&said).unwrap() as usize,
+        expected.len(),
+        "{said}"
+    );
+    assert!(ran(&said).iter().all(|s| expected.contains(s)), "{said}");
+}
+
+/// The Rust stack's script says it measures by name, and nunki hands names
+/// only to a script that says it: the Python and Next.js scripts, whose
+/// tools nunki has not measured by name, do not.
+#[test]
+fn only_the_rust_script_says_it_measures_by_name() {
+    let (_dir, root, nunki) = fresh();
+    init(&root, &nunki, &KNOWN_STACKS.map(str::to_string)).unwrap();
+    for stack in KNOWN_STACKS {
+        let script = std::fs::read_to_string(
+            home(&root)
+                .join(nunki::project::STACKS_DIR)
+                .join(stack)
+                .join(nunki::mutants::SCRIPT),
+        )
+        .unwrap();
+        assert_eq!(
+            nunki::mutants::measures_by_name(&script),
+            stack == "rust",
+            "{stack}"
+        );
+    }
+}
+
+/// Under a budget, a campaign whose diff reaches no mutant — a branch that
+/// changed only tests — is listed first, and `--list --json` then prints
+/// nothing at all, not `[]` (measured on 27.1.0, "No mutants to filter"). It
+/// is read as the empty list it means: the campaign is done with nothing
+/// tried, and the shell is not asked to compare an empty count, which it
+/// said on stderr.
+#[cfg(unix)]
+#[test]
+fn a_budgeted_campaign_whose_diff_reaches_no_mutant_reads_an_empty_listing() {
+    let (said, why, status, calls) = named_campaign(
+        &[listed("src/lib.rs", 1, "replace > with == in keep")],
+        &[],
+        &["src/lib.rs"],
+        &[(nunki::mutants::BUDGET_ENV, "600")],
+    );
+    assert_eq!(status, Some(0), "{why}");
+    assert!(nunki::mutants::completed(&said), "{said}");
+    assert_eq!(nunki::mutants::tried(&said), Some(0), "{said}");
+    assert!(
+        calls.lines().next().is_some_and(|c| c.contains("--list")),
+        "{calls}"
+    );
+    assert!(
+        !why.contains("integer expression") && !why.contains("Illegal number"),
+        "{why}"
+    );
+}

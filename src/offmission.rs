@@ -89,6 +89,11 @@ pub enum Form {
     /// The files changed since the last completed campaign outside
     /// missions, each mutated whole.
     SinceLast,
+    /// The debt's survivors, by name, and nothing else ([`measurable`]): what
+    /// settles the survivors a hardening mission's tests kill, once they are
+    /// on the base. A test file is never mutated, so no other form measures a
+    /// survivor whose own file did not change again.
+    Owed,
 }
 
 /// What a caller asks of [`run`].
@@ -111,6 +116,20 @@ pub struct Started {
     /// How many paths it was handed.
     pub paths: usize,
     pub minutes: u32,
+    /// For one on the debt's survivors by name: how many it measures.
+    pub owed: Option<Owing>,
+}
+
+/// What a campaign on the debt's survivors by name took from it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Owing {
+    /// How many survivors it measures.
+    pub named: usize,
+    /// How many it left: those it cannot measure by name, and those beyond
+    /// what one campaign is handed.
+    pub left: usize,
+    /// Why, for the first of those it cannot measure.
+    pub why: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -189,6 +208,17 @@ pub enum OffMissionError {
     DebtNotWritten { ids: String, why: String },
     #[error("the project's debt could not be locked: {0}")]
     Locked(String),
+    #[error(
+        "the project's debt owes nothing, so there is nothing to measure by name: `nunki \
+         mutants run` measures the code first"
+    )]
+    NothingOwed,
+    #[error("none of the debt's {owed} survivor(s) {what}: {why}")]
+    NoneTaken {
+        owed: usize,
+        what: &'static str,
+        why: String,
+    },
     #[error(transparent)]
     Registry(#[from] crate::equivalences::RegistryError),
 }
@@ -280,6 +310,281 @@ pub fn settled(
     debt
 }
 
+/// The debt after a completed campaign that measured the survivors `named`
+/// by name at `commit` (`nunki mutants run --owed`): each of them is dropped
+/// for what the campaign found — one still surviving comes back, found at
+/// `commit` — and every other survivor stays as it was. What the debt last
+/// measured ([`Debt::last`]) does not move: this campaign measured no file,
+/// and the next one on what changed since starts where the last one ended.
+pub fn settled_owed(mut debt: Debt, found: Vec<Survivor>, commit: &str, named: &[String]) -> Debt {
+    debt.owed.retain(|o| {
+        !named.contains(&o.survivor.id) && !found.iter().any(|s| s.id == o.survivor.id)
+    });
+    debt.owed.extend(found.into_iter().map(|survivor| Owed {
+        survivor,
+        found_at: commit.to_string(),
+    }));
+    debt
+}
+
+/// What [`measurable`] takes from the debt, and what it leaves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Measurable {
+    /// The survivors taken, in the debt's order: oldest first.
+    pub taken: Vec<Owed>,
+    /// Each survivor left, by id, and why.
+    pub left: Vec<(String, String)>,
+    /// How many more could have been taken, beyond what fits.
+    pub beyond: usize,
+}
+
+impl Measurable {
+    /// What was left, in a few words: the first three, and how many more.
+    pub fn left_said(&self) -> String {
+        let mut said: Vec<String> = self
+            .left
+            .iter()
+            .take(3)
+            .map(|(id, why)| format!("{}: {why}", crate::text::one_line(id)))
+            .collect();
+        if self.left.len() > 3 {
+            said.push(format!("and {} more", self.left.len() - 3));
+        }
+        said.join("; ")
+    }
+}
+
+/// The debt's survivors that can be measured by name at `commit`, in the
+/// debt's order, oldest first, and why each other one cannot (SPEC 4.4, the
+/// debt): what a hardening mission takes ([`hardening`]) and `nunki mutants
+/// run --owed` measures. One is taken when
+///
+/// - a stack names it ([`mutants::named_by`]) and its script, in the
+///   project's home, says it measures by name ([`mutants::measures_by_name`]).
+///   The Python and Next.js scripts do not, and their survivors wait for a
+///   campaign on the whole code;
+/// - its file is unchanged in the human's repository between the commit
+///   that found it and `commit`. A name holds a line and a column: in a file
+///   changed since, it may have moved, and a name no longer in the code makes
+///   the campaign measure nothing. Such a survivor waits for `nunki mutants
+///   run`, which measures its file whole again;
+///
+/// and as long as the names fit in [`mutants::NAMES_MAX_BYTES`], and in
+/// `count` when one is given. The rest is [`Measurable::beyond`].
+pub fn measurable(
+    project: &Project,
+    judged: &[crate::run::Judged],
+    owed: &[Owed],
+    commit: &str,
+    count: Option<usize>,
+) -> Measurable {
+    let by_name: std::collections::BTreeSet<String> = judged
+        .iter()
+        .filter(|j| {
+            std::fs::read_to_string(project.fragment(&j.stack.name).join(mutants::SCRIPT))
+                .is_ok_and(|script| mutants::measures_by_name(&script))
+        })
+        .map(|j| j.stack.name.clone())
+        .collect();
+    let mut taken = Vec::new();
+    let mut left = Vec::new();
+    let mut beyond = 0;
+    let mut bytes: usize = 2;
+    for o in owed {
+        let name = match mutants::named_by(judged, &o.survivor) {
+            Ok((j, _)) if !by_name.contains(&j.stack.name) => {
+                left.push((
+                    o.survivor.id.clone(),
+                    format!(
+                        "the `{}` stack's {} does not measure mutants by name",
+                        j.stack.name,
+                        mutants::SCRIPT
+                    ),
+                ));
+                continue;
+            }
+            Ok((_, name)) => name,
+            Err(why) => {
+                left.push((o.survivor.id.clone(), why));
+                continue;
+            }
+        };
+        match file_changed(&project.root, &o.found_at, commit, &o.survivor.file) {
+            Ok(false) => {}
+            Ok(true) => {
+                left.push((
+                    o.survivor.id.clone(),
+                    format!(
+                        "its file changed since the campaign that found it, at {}: `nunki \
+                         mutants run` measures it again",
+                        short(&o.found_at)
+                    ),
+                ));
+                continue;
+            }
+            Err(why) => {
+                left.push((
+                    o.survivor.id.clone(),
+                    format!(
+                        "whether its file changed since {} could not be read: {}",
+                        short(&o.found_at),
+                        crate::text::one_line(&why)
+                    ),
+                ));
+                continue;
+            }
+        }
+        let size = serde_json::to_string(&name).map_or(usize::MAX, |n| n.len() + 1);
+        if count.is_some_and(|n| taken.len() >= n)
+            || bytes.saturating_add(size) > mutants::NAMES_MAX_BYTES
+        {
+            beyond += 1;
+            continue;
+        }
+        bytes += size;
+        taken.push(o.clone());
+    }
+    Measurable {
+        taken,
+        left,
+        beyond,
+    }
+}
+
+/// Whether `file` differs in the human's repository at `root` between
+/// `from` and `to`, read without rename detection, and as a literal path.
+fn file_changed(root: &Path, from: &str, to: &str, file: &str) -> Result<bool, String> {
+    crate::git::run(
+        root,
+        &[
+            "--literal-pathspecs",
+            "diff",
+            "--name-only",
+            "--no-renames",
+            from,
+            to,
+            "--",
+            file,
+        ],
+    )
+    .map(|out| !out.trim().is_empty())
+    .map_err(|e| e.to_string())
+}
+
+/// What a hardening mission framed now on `base` takes from the debt (SPEC
+/// 4.4, the debt): its survivors measurable by name at `base` as the human's
+/// repository has it ([`measurable`]), less those the registry proposes as
+/// equivalent — no test kills those, and `nunki mutants debt --ratify`
+/// settles them — and no more than its campaign's budget of
+/// `budget_minutes` measures at the project's pace ([`mutants::fits`]), so
+/// that its gate 7 measures each of them rather than a sample. At the pace
+/// on file now: one that rises before the campaign runs, or code the branch
+/// adds, makes the union too big for the budget, and it is sampled like any
+/// campaign's.
+pub fn hardening(
+    project: &Project,
+    base: &str,
+    budget_minutes: u32,
+) -> Result<Measurable, OffMissionError> {
+    let debt = read_debt(&project.hq_root)?;
+    if debt.owed.is_empty() {
+        return Err(OffMissionError::NothingOwed);
+    }
+    let commit = crate::git::head_of(&project.root, base).map_err(|_| OffMissionError::NoBase {
+        root: project.root.clone(),
+        base: base.to_string(),
+    })?;
+    // A registry that cannot be read cannot say a proposal no longer holds:
+    // every proposal is then taken to hold, and left.
+    let registry = crate::equivalences::read_locked(&project.hq_root).ok();
+    let (proposed, rest): (Vec<Owed>, Vec<Owed>) =
+        debt.owed.iter().cloned().partition(|o| {
+            proposal(o).is_some() && registry.as_ref().is_none_or(|r| standing(r, o))
+        });
+    let judged = crate::run::judged(project, &crate::run::stack_of(project));
+    let pace = mutants::read_pace(&project.hq_root).unwrap_or(mutants::DEFAULT_PACE);
+    let mut measured = measurable(
+        project,
+        &judged,
+        &rest,
+        &commit,
+        Some(mutants::fits(budget_minutes, pace) as usize),
+    );
+    measured.left.extend(proposed.into_iter().map(|o| {
+        (
+            o.survivor.id,
+            "the registry proposes it equivalent: `nunki mutants debt --ratify` settles it"
+                .to_string(),
+        )
+    }));
+    if measured.taken.is_empty() {
+        return Err(OffMissionError::NoneTaken {
+            owed: debt.owed.len(),
+            what: "can be taken by a hardening mission",
+            why: measured.left_said(),
+        });
+    }
+    Ok(measured)
+}
+
+/// The survivors [`hardening`] took, as a hardening mission's header freezes
+/// them.
+pub fn hardened(measured: &Measurable) -> Vec<crate::mission::Hardened> {
+    measured
+        .taken
+        .iter()
+        .map(|o| crate::mission::Hardened {
+            id: o.survivor.id.clone(),
+            file: o.survivor.file.clone(),
+            line: o.survivor.line,
+            end_line: o.survivor.end_line,
+            description: o.survivor.description.clone(),
+            found_at: o.found_at.clone(),
+        })
+        .collect()
+}
+
+/// The brief of a hardening mission, under its header: the one line it
+/// holds — kill these survivors — what its gate 7 measures, and the
+/// survivors, each named as its campaign names it.
+pub fn hardening_brief(measured: &Measurable) -> String {
+    let mut brief = String::from(
+        "This is a hardening mission (SPEC 4.4, the debt): write the tests that kill the \
+         survivors of the project's debt listed below.\n\n\
+         Gate 7 runs them by their names, besides whatever this branch changes — a sample \
+         of them, as of any campaign, if they no longer fit its budget — and passes at the \
+         `standard` threshold. A name holds a line and a column, so:\n\n\
+         - do not change the code these mutants replace, and do not move it: a survivor whose \
+         name is no longer in the code makes the campaign measure nothing;\n\
+         - add the tests where no line above a survivor moves — under `tests/`, or in a test \
+         module at the end of a file.\n\n\
+         A survivor no test can kill is equivalent: propose it, in one sentence, as for any \
+         campaign.\n\n",
+    );
+    let left = measured.left.len() + measured.beyond;
+    brief.push_str(&format!(
+        "The survivors, {} of the {} the debt owes",
+        measured.taken.len(),
+        measured.taken.len() + left
+    ));
+    if left > 0 {
+        brief.push_str(&format!(
+            " — {left} left for a later mission or a campaign outside missions"
+        ));
+    }
+    brief.push_str(":\n\n");
+    for o in &measured.taken {
+        brief.push_str(&format!(
+            "- `{}` — {}, line {}, found at {}\n",
+            crate::text::name(&o.survivor.id),
+            crate::text::name(&o.survivor.file),
+            o.survivor.line,
+            short(&o.found_at)
+        ));
+    }
+    brief
+}
+
 /// Start a campaign outside missions in `slot` (module documentation).
 pub fn run(
     project: &Project,
@@ -320,8 +625,29 @@ pub fn run(
             base: asked.base.to_string(),
         })?;
     let debt = read_debt(&project.hq_root)?;
+    let judged = crate::run::judged(project, stack);
+    // By name: the survivors measurable at the base's commit, their files,
+    // and that commit itself as the fork point — the diff since it is empty,
+    // so the script runs the names and nothing its scope reaches.
+    let owed = match asked.form {
+        Form::Owed => {
+            if debt.owed.is_empty() {
+                return Err(OffMissionError::NothingOwed);
+            }
+            let measured = measurable(project, &judged, &debt.owed, &commit, None);
+            if measured.taken.is_empty() {
+                return Err(OffMissionError::NoneTaken {
+                    owed: debt.owed.len(),
+                    what: "can be measured by name",
+                    why: measured.left_said(),
+                });
+            }
+            Some(measured)
+        }
+        Form::Whole | Form::SinceLast => None,
+    };
     let since = match asked.form {
-        Form::Whole => None,
+        Form::Whole | Form::Owed => None,
         Form::SinceLast => {
             let last = debt.last.ok_or(OffMissionError::NoPrevious)?;
             if last.commit == commit {
@@ -333,9 +659,21 @@ pub fn run(
             Some(last.commit)
         }
     };
-    let paths = match &since {
-        None => git.names(&["ls-tree", "-r", "-z", "--name-only", &commit])?,
-        Some(since) => git.names(&["diff", "--name-only", "-z", "--no-renames", since, &commit])?,
+    let named: Vec<Survivor> = owed
+        .iter()
+        .flat_map(|m| m.taken.iter().map(|o| o.survivor.clone()))
+        .collect();
+    let paths = match (&since, &owed) {
+        (_, Some(_)) => {
+            let mut files: Vec<String> = named.iter().map(|s| s.file.clone()).collect();
+            files.sort();
+            files.dedup();
+            files
+        }
+        (None, None) => git.names(&["ls-tree", "-r", "-z", "--name-only", &commit])?,
+        (Some(since), None) => {
+            git.names(&["diff", "--name-only", "-z", "--no-renames", since, &commit])?
+        }
     };
     // On the whole code, no fork point: the script reads the paths as whole
     // files. On what changed since, the **empty tree**: every line of a file
@@ -346,10 +684,12 @@ pub fn run(
     // either ends with no `outcomes.json`, which the script reads as a
     // campaign that could not run, and the next one would measure the same
     // range again, for ever.
-    let fork = match &since {
-        None => String::new(),
-        Some(_) => git.run_with_input(&["hash-object", "-t", "tree", "--stdin"], b"")?,
+    let fork = match (&since, &owed) {
+        (_, Some(_)) => commit.clone(),
+        (None, None) => String::new(),
+        (Some(_), None) => git.run_with_input(&["hash-object", "-t", "tree", "--stdin"], b"")?,
     };
+    let names = mutants::names_by_stack(&judged, &named).map_err(MutantsError::Launch)?;
 
     crate::exec::refresh_to(
         project,
@@ -358,10 +698,15 @@ pub fn run(
         &format!("refs/remotes/origin/{}", asked.base),
         &commit,
     )?;
-    let judged = crate::run::judged(project, stack);
+    // The scripts in the home said they measure by name; the copy's are
+    // what runs, and are asked again.
+    if let Some(why) = mutants::unnamed(project, slot, engine.clone(), &judged, &names)? {
+        return Err(MutantsError::Launch(why).into());
+    }
     let id = campaign_id(&commit);
     // No budget, so no sample: this is where the whole is measured.
-    let launched = mutants::command(&judged, &id, &paths, &fork, project.config.jobs());
+    let launched =
+        mutants::command_naming(&judged, &id, &paths, &fork, project.config.jobs(), &names);
     let runs = project.hq_root.join(DIR).join("runs");
     std::fs::create_dir_all(&runs).map_err(|e| OffMissionError::Io(runs.clone(), e))?;
     let log = runs.join(format!("{id}.log"));
@@ -400,6 +745,9 @@ pub fn run(
                 commit: commit.clone(),
                 since: since.clone(),
                 changed: since.as_ref().map(|_| paths.clone()),
+                owed: owed
+                    .as_ref()
+                    .map(|_| named.iter().map(|s| s.id.clone()).collect()),
             }),
         },
     )?;
@@ -410,6 +758,11 @@ pub fn run(
         since,
         paths: paths.len(),
         minutes: asked.minutes,
+        owed: owed.as_ref().map(|m| Owing {
+            named: m.taken.len(),
+            left: m.left.len() + m.beyond,
+            why: (!m.left.is_empty()).then(|| m.left_said()),
+        }),
     })
 }
 
@@ -469,18 +822,21 @@ pub fn read_ended(
         });
     }
     let count = found.len();
-    let debt = settled(
-        read_debt(&project.hq_root)?,
-        found,
-        Measured {
-            base: off.base.clone(),
-            commit: off.commit.clone(),
-            date: crate::state::now_rfc3339(),
-            whole: off.since.is_none(),
-            tried: mutants::tried(&text),
-        },
-        off.changed.as_deref(),
-    );
+    let debt = match &off.owed {
+        Some(named) => settled_owed(read_debt(&project.hq_root)?, found, &off.commit, named),
+        None => settled(
+            read_debt(&project.hq_root)?,
+            found,
+            Measured {
+                base: off.base.clone(),
+                commit: off.commit.clone(),
+                date: crate::state::now_rfc3339(),
+                whole: off.since.is_none(),
+                tried: mutants::tried(&text),
+            },
+            off.changed.as_deref(),
+        ),
+    };
     write_debt(&project.hq_root, &debt)?;
     Ok(Some(Progress::Finished {
         survivors: count,
