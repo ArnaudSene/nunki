@@ -3494,18 +3494,10 @@ fn start_monitor(project: &Project, id: &str) {
         }
     };
     match nunki::monitor::ensure(project, id, &exe) {
-        Ok(nunki::monitor::Ensured::Started(pid)) => {
-            println!(
-                "monitor   started (pid {pid}): it watches the run, ends its turn past the \
-                 account's window, and relaunches after a wait"
-            );
-            println!(
-                "          its log: {}",
-                nunki::monitor::logfile(&project.hq_root, id).display()
-            );
-        }
-        Ok(nunki::monitor::Ensured::Running(pid)) => {
-            println!("monitor   already watching (pid {pid})")
+        Ok(ensured) => {
+            for line in nunki::monitor::ensured_said(&project.hq_root, id, ensured) {
+                println!("{line}");
+            }
         }
         Err(e) => eprintln!("nunki: the mission's monitor could not start: {e}"),
     }

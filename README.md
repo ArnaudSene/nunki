@@ -384,6 +384,16 @@ the same mission are harmless. (Opening the HQ's state creates its
 directories if they are missing; that is all it may write.) The monitor ends
 its log on the same line.
 
+The verbs that start or find the monitor — `mission start`, `verify`,
+`mission resume`, `mission retry` — name `wait` under its line, so a session
+driving the HQ learns it there, whatever assistant it is and whatever the
+repository's `AGENTS.md` says:
+
+```text
+monitor   already watching (pid 4242)
+          to be told when it stops, run `nunki mission wait m1` in the background: it returns once the mission needs someone, with one line and an exit code that says why
+```
+
 `--json` prints the same fields as the line, already made printable: what an
 agent wrote reaches it with the same `\u{1b}` escapes, then JSON's own.
 

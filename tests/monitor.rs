@@ -394,6 +394,115 @@ fn only_the_nunki_binary_starts_a_monitor() {
     assert!(running(&project.hq_root, "m1").is_none());
 }
 
+/// A verb that finds the monitor watching names `nunki mission wait`: the HQ
+/// learns from the verb itself that it can be told when the mission stops,
+/// rather than poll, whatever its harness and whatever the repository's
+/// `AGENTS.md` says. The real binary, because the decision is in what the CLI
+/// prints, on `mission resume`, whose only question to the engine is whether
+/// the run's container is frozen: a stand-in `docker` says it runs. The
+/// monitor it finds is the stand-in above, so nothing is forked.
+#[test]
+fn a_verb_that_finds_the_monitor_watching_names_mission_wait() {
+    use std::os::unix::fs::PermissionsExt;
+    for (tool, probe) in [("ps", ["-o", "pid="]), ("kill", ["-l", "1"])] {
+        if std::process::Command::new(tool)
+            .args(probe)
+            .output()
+            .is_err()
+        {
+            eprintln!(
+                "skipped: no `{tool}` on this machine, and the monitor found is what `ps` says"
+            );
+            return;
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    let home = common::project_home(&root, dir.path(), "harness: claude-code\n");
+    let hq_root = home.join(nunki::project::HQ_DIR);
+    // A run recorded: a monitor is wanted. (A wait for the harness would not
+    // do: `resume` forgets the harness's failures.)
+    nunki::state::Store::open(&hq_root)
+        .unwrap()
+        .save(&state(true))
+        .unwrap();
+    let engine_bin = dir.path().join("engine-bin");
+    std::fs::create_dir_all(&engine_bin).unwrap();
+    let docker = engine_bin.join("docker");
+    std::fs::write(&docker, "#!/bin/sh\necho 'true false 0'\n").unwrap();
+    std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        engine_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let mut fake = std::process::Command::new(fake_nunki(dir.path()))
+        .args(["-C", "elsewhere", "mission", "monitor", "m1"])
+        .spawn()
+        .unwrap();
+    let pid = fake.id();
+    std::fs::create_dir_all(nunki::monitor::pidfile(&hq_root, "m1").parent().unwrap()).unwrap();
+    std::fs::write(nunki::monitor::pidfile(&hq_root, "m1"), format!("{pid}\n")).unwrap();
+    for _ in 0..50 {
+        if running(&hq_root, "m1") == Some(pid) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(
+        running(&hq_root, "m1"),
+        Some(pid),
+        "the stand-in is seen as the monitor"
+    );
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_nunki"))
+        .arg("-C")
+        .arg(&root)
+        .args(["mission", "resume", "m1"])
+        .env("HOME", dir.path())
+        .env("PATH", &path)
+        .env_remove("HQ_NO_MONITOR")
+        .output()
+        .unwrap();
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = fake.kill();
+    let _ = fake.wait();
+    if let Some(started) = said
+        .split("started (pid ")
+        .nth(1)
+        .and_then(|rest| rest.split(')').next())
+    {
+        kill(started.parse().unwrap());
+        panic!("a real monitor was forked instead of the stand-in being found: {said}");
+    }
+    assert!(out.status.success(), "{said}");
+    assert!(
+        said.contains(&format!("already watching (pid {pid})")),
+        "{said}"
+    );
+    assert!(said.contains("`nunki mission wait m1`"), "{said}");
+}
+
+/// Both ways a verb meets the monitor, started or found, name the verb that
+/// waits for the mission's stop.
+#[test]
+fn a_monitor_started_or_found_names_mission_wait() {
+    let dir = tempfile::tempdir().unwrap();
+    for ensured in [Ensured::Started(41), Ensured::Running(41)] {
+        let said = nunki::monitor::ensured_said(dir.path(), "m1", ensured).join("\n");
+        assert!(said.contains("pid 41"), "{ensured:?}: {said}");
+        assert!(
+            said.contains("`nunki mission wait m1`"),
+            "{ensured:?}: {said}"
+        );
+    }
+}
+
 /// A mission at its integration stage with a shared provider.
 fn integrating(id: &str, with_run: bool) -> MissionState {
     use nunki::mission::flow::Event;
