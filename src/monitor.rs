@@ -198,6 +198,29 @@ pub fn ensure(project: &Project, id: &str, exe: &Path) -> Result<Ensured, Monito
     Ok(Ensured::Started(pid))
 }
 
+/// What a verb that started or found the monitor says (SPEC 4.3, 4.5): which
+/// monitor watches, and the verb that tells whoever drives the HQ when the
+/// mission stops. It is said in `nunki`'s own output because that is what the
+/// HQ reads at the moment it acts, whatever its harness: the repository's
+/// `AGENTS.md` is not `nunki`'s to write once it exists (SPEC 3.3).
+pub fn ensured_said(hq_root: &Path, id: &str, ensured: Ensured) -> Vec<String> {
+    let mut lines = match ensured {
+        Ensured::Started(pid) => vec![
+            format!(
+                "monitor   started (pid {pid}): it watches the run, ends its turn past the \
+                 account's window, and relaunches after a wait"
+            ),
+            format!("          its log: {}", logfile(hq_root, id).display()),
+        ],
+        Ensured::Running(pid) => vec![format!("monitor   already watching (pid {pid})")],
+    };
+    lines.push(format!(
+        "          to be told when it stops, run `nunki mission wait {id}` in the background: \
+         it returns once the mission needs someone, with one line and an exit code that says why"
+    ));
+    lines
+}
+
 /// What the monitor does after a `verify`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Next {

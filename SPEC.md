@@ -1294,9 +1294,13 @@ plomberie propre à chaque harnais.
 **Il y a deux harnais dans ce flux, et un seul a besoin d'un adaptateur.**
 
 - La **session du HQ** est un harnais (Claude Code aujourd'hui), mais elle ne
-  pilote rien directement : elle lance `nunki`. Son agnosticité ne coûte rien —
-  il suffit que `nunki` soit décrit dans le `AGENTS.md` du HQ pour que n'importe
-  quel assistant sache s'en servir. Pas d'adaptateur.
+  pilote rien directement : elle lance `nunki`. Son agnosticité ne coûte rien,
+  parce que ce qu'un assistant doit savoir pour s'en servir, `nunki` le dit
+  dans ses propres sorties : son aide, et le geste suivant que chaque verbe
+  nomme — dont `nunki mission wait`, pour être prévenu d'un arrêt sans sonder
+  (4.5). Pas dans le `AGENTS.md` du dépôt, qui n'est pas celui de `nunki` :
+  `init` n'en dépose un que s'il manque, laisse intact celui qui existe (3.3),
+  et celui qu'il dépose parle à l'agent du conteneur. Pas d'adaptateur.
 - L'**agent dans le conteneur** est l'autre harnais, et tout ce qui le
   concerne est propre à lui : l'installer, le connecter, le lancer avec les
   bonnes options, savoir où vit sa configuration, lire son état, l'arrêter,
@@ -1456,7 +1460,8 @@ Trois choses en découlent :
   n'a pas de service système, et un verbe rend la main ; ce qui surveille un
   run la nuit et relance après une attente est donc un processus à part, un
   par mission : `nunki mission monitor <id>`, verbe interne jamais tapé, lancé
-  par `nunki mission start`, `nunki verify` et `nunki mission resume` dès qu'il y a un
+  par `nunki mission start`, `nunki verify`, `nunki mission resume` et
+  `nunki mission retry` dès qu'il y a un
   run à surveiller ou une attente qui finira seule, détaché du terminal
   (`nohup`, son propre groupe de processus) pour lui survivre, et relancé par
   le prochain de ces verbes s'il est mort (un redémarrage). Chaque minute
@@ -3492,7 +3497,11 @@ Ce que la boucle veut dire, et ce qu'elle ne veut pas dire.
   `FINDINGS`, 11 rendue à l'humain (une décision attendue comprise), 12
   suspendue ou fenêtre du compte épuisée, 13 moniteur arrêté sur une erreur
   ou porte injouable, 14 aucun moniteur alors que l'étape n'est pas un
-  arrêt, 15 délai `--timeout` atteint. Elle **lit** et ne conduit jamais :
+  arrêt, 15 délai `--timeout` atteint. **Les verbes qui lancent ou trouvent
+  le moniteur la nomment** sous sa ligne — `mission start`, `verify`,
+  `mission resume`, `mission retry` : c'est là, au moment où il agit, que le
+  HQ apprend qu'il peut être prévenu de l'arrêt au lieu de sonder
+  `mission status`, quel que soit son harnais (4.3). Elle **lit** et ne conduit jamais :
   aucun verrou, aucun lancement (ouvrir l'état peut créer ses répertoires
   manquants). Le moniteur termine son journal sur la même ligne, construite
   par la même fonction, et son journal n'écrit que ce qui change. L'état
