@@ -474,7 +474,7 @@ fn the_allowlist_is_read_only_for_the_agent_and_every_prompt_names_it() {
     assert_eq!(paths.allowlist, paths.dir.join(ALLOWLIST_FILE));
     for role in [Role::Coder, Role::Integrator, Role::Security] {
         assert!(
-            role::prompt(role).contains(ALLOWLIST_FILE),
+            prompt(role).contains(ALLOWLIST_FILE),
             "{role:?} is not told where its allowlist is"
         );
     }
@@ -493,9 +493,9 @@ fn each_profile_is_written_where_a_restarted_hq_finds_it() {
 
 #[test]
 fn the_role_prompts_say_what_the_role_may_not_do() {
-    let coder = role::prompt(Role::Coder);
-    let integrator = role::prompt(Role::Integrator);
-    let security = role::prompt(Role::Security);
+    let coder = prompt(Role::Coder);
+    let integrator = prompt(Role::Integrator);
+    let security = prompt(Role::Security);
 
     for prompt in [&coder, &integrator, &security] {
         // The corollary that makes an autonomous run safe (SPEC 3.2).
@@ -614,7 +614,7 @@ fn the_role_prompts_say_what_the_role_may_not_do() {
 /// gates 5 and 6 on rules it had no way to learn.
 #[test]
 fn the_integrator_is_told_what_its_own_gates_require() {
-    let integrator = role::prompt(Role::Integrator);
+    let integrator = prompt(Role::Integrator);
 
     assert!(integrator.contains("wiring list"), "{integrator}");
     let battery = format!("{}/{}", nunki::run::STACK_AT, nunki::gate::SYSTEM_BATTERY);
@@ -649,7 +649,7 @@ fn the_integrator_is_told_what_its_own_gates_require() {
 /// shown.
 #[test]
 fn the_security_agent_is_told_what_its_own_gates_require() {
-    let security = role::prompt(Role::Security);
+    let security = prompt(Role::Security);
 
     assert!(security.contains("ÉTAT DE REPRISE"), "{security}");
     assert!(
@@ -702,7 +702,7 @@ fn the_security_agent_is_told_what_its_own_gates_require() {
     // starting: `nunki` launches it and does not wait for it to serve.
     for role in [Role::Integrator, Role::Security] {
         assert!(
-            role::prompt(role).contains("still be compiling"),
+            prompt(role).contains("still be compiling"),
             "{role:?} is not told the application may not answer yet"
         );
     }
@@ -1725,21 +1725,32 @@ fn a_start_refused_then_started_again_reads_the_base_as_it_is_now() {
     );
 }
 
-/// The two roles that commit are told the services file is the human's,
-/// and where a change to it goes, before gate 4 refuses one (#141). The
-/// security agent commits nothing and is not told.
+/// The two roles that commit are told the services file is the human's, by
+/// name, and where a change to it goes, before gate 4 refuses one (#141).
+/// The security agent commits nothing and is not told, and a project that
+/// declares no services file has none for the gate to refuse.
 #[test]
 fn the_roles_that_commit_are_told_the_services_file_is_the_humans() {
+    let paths = ProtectedPaths::default();
+    let declared = role::Protected {
+        branches: &[],
+        paths: &paths,
+        services_file: Some("deploy/compose.yaml"),
+    };
     for role in [Role::Coder, Role::Integrator] {
-        let text = role::prompt(role);
+        let text = flat(&role::prompt(role, &declared));
         assert!(
-            text.contains("The project's services file"),
+            text.contains("The project's services file, `deploy/compose.yaml`,"),
             "{role:?}: {text}"
         );
         assert!(text.contains("even if your wiring list names it"), "{text}");
         assert!(text.contains("proposed in `PR.md`"), "{text}");
+        assert!(
+            !prompt(role).contains("services file"),
+            "{role:?}: no file is declared, so none is talked about"
+        );
     }
-    assert!(!role::prompt(Role::Security).contains("The project's services file"));
+    assert!(!role::prompt(Role::Security, &declared).contains("services file"));
 }
 
 /// The container is told which role it is running, and the spelling comes
@@ -2071,7 +2082,7 @@ fn a_given_session_is_resumed_and_none_starts_a_fresh_one() {
 /// gate 7 spends all three attempts on a triage that cannot be won.
 #[test]
 fn the_coder_is_told_to_mock_what_its_container_cannot_reach() {
-    let coder = role::prompt(Role::Coder);
+    let coder = prompt(Role::Coder);
 
     assert!(
         coder.contains("What you cannot reach, you stand in for"),
@@ -2089,7 +2100,7 @@ fn the_coder_is_told_to_mock_what_its_container_cannot_reach() {
 
     // The other two roles are not told this: the integrator has the service,
     // and the security agent commits nothing.
-    for other in [role::prompt(Role::Integrator), role::prompt(Role::Security)] {
+    for other in [prompt(Role::Integrator), prompt(Role::Security)] {
         assert!(
             !other.contains("What you cannot reach, you stand in for"),
             "{other}"
@@ -2565,7 +2576,7 @@ fn a_database_the_host_never_filled_is_not_mounted_empty() {
 /// answer no survivor, so they are not told how to propose one.
 #[test]
 fn the_prompt_explains_the_proposal_of_an_equivalence_and_when_not_to_make_it() {
-    let coder = role::prompt(Role::Coder);
+    let coder = prompt(Role::Coder);
     assert!(
         coder.contains(
             r#"{"<survivor id>": {"kind": "equivalent_proposed", "why": "<one sentence>"}}"#
@@ -2587,7 +2598,7 @@ fn the_prompt_explains_the_proposal_of_an_equivalence_and_when_not_to_make_it() 
         "{coder}"
     );
     for role in [Role::Integrator, Role::Security] {
-        let prompt = role::prompt(role);
+        let prompt = prompt(role);
         assert!(
             !prompt.contains("equivalent_proposed"),
             "{role:?}: {prompt}"
@@ -3101,7 +3112,7 @@ fn the_base_the_slot_is_on_is_never_moved_under_it() {
 /// one is what `nunki` publishes as the pull request's Security section.
 #[test]
 fn the_security_agent_is_told_pr_md_is_read_only_and_its_report_is_published_when_clear() {
-    let security = flat(&role::prompt(Role::Security));
+    let security = flat(&prompt(Role::Security));
     for said in [
         "it is read-only for you: you write nothing there",
         "your report **is** your whole deliverable, and it lives in `VERDICT.json`",
@@ -3127,7 +3138,7 @@ fn the_security_agent_is_told_pr_md_is_read_only_and_its_report_is_published_whe
 #[test]
 fn the_coder_and_the_integrator_are_told_pr_md_is_published_as_written() {
     for role in [Role::Coder, Role::Integrator] {
-        let prompt = flat(&role::prompt(role));
+        let prompt = flat(&prompt(role));
         for said in [
             "- `PR.md`, the pull request this mission delivers",
             "It is published as written",
@@ -3145,7 +3156,7 @@ fn the_coder_and_the_integrator_are_told_pr_md_is_published_as_written() {
 #[test]
 fn every_role_is_told_the_files_its_profile_lets_it_write_and_no_other() {
     for role in Role::ALL {
-        let prompt = flat(&role::prompt(role));
+        let prompt = flat(&prompt(role));
         let start = prompt
             .find("The files you may write in the mission folder are these, and no other: ")
             .unwrap_or_else(|| panic!("{role:?} is not told which files it writes"));
@@ -3158,17 +3169,17 @@ fn every_role_is_told_the_files_its_profile_lets_it_write_and_no_other() {
             "{role:?}: {sentence}"
         );
     }
-    let coder = flat(&role::prompt(Role::Coder));
+    let coder = flat(&prompt(Role::Coder));
     assert!(
         coder.contains("`JOURNAL.md`, `PR.md`, `VERDICT.json` and `MUTANTS.triage.json`. "),
         "{coder}"
     );
-    let integrator = flat(&role::prompt(Role::Integrator));
+    let integrator = flat(&prompt(Role::Integrator));
     assert!(
         integrator.contains("`JOURNAL.md`, `PR.md` and `VERDICT.json`. "),
         "{integrator}"
     );
-    let security = flat(&role::prompt(Role::Security));
+    let security = flat(&prompt(Role::Security));
     assert!(
         security.contains("`JOURNAL.md` and `VERDICT.json`. "),
         "{security}"
@@ -3182,7 +3193,7 @@ fn every_role_is_told_the_files_its_profile_lets_it_write_and_no_other() {
 /// role about a campaign, a commit and the forge is still said to each.
 #[test]
 fn only_the_coder_is_told_to_answer_survivors_and_every_role_keeps_what_is_common() {
-    let coder = flat(&role::prompt(Role::Coder));
+    let coder = flat(&prompt(Role::Coder));
     for said in [
         "A mutation campaign's survivors are yours to answer, in `MUTANTS.triage.json`",
         "You may **propose** it instead",
@@ -3195,7 +3206,7 @@ fn only_the_coder_is_told_to_answer_survivors_and_every_role_keeps_what_is_commo
     }
 
     for role in [Role::Integrator, Role::Security] {
-        let prompt = flat(&role::prompt(role));
+        let prompt = flat(&prompt(role));
         for unsaid in [
             "MUTANTS.triage.json",
             "survivors are yours to answer",
@@ -3226,7 +3237,7 @@ fn only_the_coder_is_told_to_answer_survivors_and_every_role_keeps_what_is_commo
 #[test]
 fn every_role_is_told_that_a_run_ends_with_its_turn() {
     for role in [Role::Coder, Role::Integrator, Role::Security] {
-        let prompt = role::prompt(role).replace('\n', " ");
+        let prompt = prompt(role).replace('\n', " ");
         for said in [
             "**A run ends when your turn ends**",
             "Never end a turn while something you started is still running",
@@ -3241,4 +3252,115 @@ fn every_role_is_told_that_a_run_ends_with_its_turn() {
 /// says can be looked for whatever its lines wrap on.
 fn flat(prompt: &str) -> String {
     prompt.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// A role's prompt for a project that protects nothing and declares no
+/// services file: the part of the prompt that is the same for every project.
+fn prompt(role: Role) -> String {
+    role::prompt(
+        role,
+        &role::Protected {
+            branches: &[],
+            paths: &ProtectedPaths::default(),
+            services_file: None,
+        },
+    )
+}
+
+/// The agent cannot read `nunki.yaml`, which is never mounted in its
+/// container, so what the project protects is said in its prompt. A coder
+/// that learns a protected path from gate 4 has already spent an attempt.
+#[test]
+fn the_prompt_names_what_the_project_protects() {
+    let paths = ProtectedPaths {
+        refuse: vec![".github/**".into(), "secrets/**".into()],
+        refuse_if_exists: vec!["migrations/*.sql".into()],
+    };
+    let branches = ["main".to_string(), "dev".to_string()];
+    let protected = role::Protected {
+        branches: &branches,
+        paths: &paths,
+        services_file: None,
+    };
+
+    let coder = flat(&role::prompt(Role::Coder, &protected));
+    assert!(
+        coder.contains(
+            "The project protects these paths: `.github/**` and `secrets/**`; and \
+             `migrations/*.sql`, where the file already exists on the mission's base. \
+             Gate 4 refuses every commit that touches one"
+        ),
+        "{coder}"
+    );
+    assert!(
+        coder.contains("a commit that reverts the change is not enough"),
+        "gate 4 reads each commit, not only the diff: {coder}"
+    );
+    // One list of each kind alone reads as a sentence too.
+    let only_if_exists = ProtectedPaths {
+        refuse: vec![],
+        refuse_if_exists: vec!["Cargo.lock".into()],
+    };
+    let coder_alone = flat(&role::prompt(
+        Role::Coder,
+        &role::Protected {
+            paths: &only_if_exists,
+            ..protected
+        },
+    ));
+    assert!(
+        coder_alone.contains(
+            "The project protects these paths: `Cargo.lock`, where the file already \
+             exists on the mission's base."
+        ),
+        "{coder_alone}"
+    );
+
+    // Gate 4 holds the integrator to its wiring list, not to these paths.
+    let integrator = role::prompt(Role::Integrator, &protected);
+    assert!(!integrator.contains("secrets/**"), "{integrator}");
+
+    for role in [Role::Coder, Role::Integrator] {
+        let text = flat(&role::prompt(role, &protected));
+        assert!(
+            text.contains(
+                "Commit on the mission's branch, the one the slot is on, and on no other: \
+                 the gates judge that branch alone, and the project protects `main` and `dev`."
+            ),
+            "{role:?}: {text}"
+        );
+    }
+    // The security agent commits nothing.
+    let security = role::prompt(Role::Security, &protected);
+    assert!(
+        !security.contains("`dev`") && !security.contains("secrets/**"),
+        "{security}"
+    );
+
+    // Nothing protected, nothing named: no empty list, no dangling clause.
+    let coder = flat(&prompt(Role::Coder));
+    assert!(!coder.contains("protects these paths"), "{coder}");
+    assert!(
+        coder.contains("the gates judge that branch alone."),
+        "{coder}"
+    );
+}
+
+/// What a launch writes as `ROLE.md` is read from `nunki.yaml`: the same
+/// protected paths, branches and services file the gates are given.
+#[test]
+fn the_role_prompt_is_read_from_the_projects_configuration() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut project = project(dir.path());
+    project.config.protected_paths.refuse = vec!["infra/**".into()];
+    project.config.protected_branches = vec!["release".into()];
+    project.config.services_file = Some("deploy/compose.yaml".into());
+
+    let coder = flat(&run::role_prompt(&project, Role::Coder));
+    assert!(coder.contains("`infra/**`"), "{coder}");
+    assert!(coder.contains("the project protects `release`"), "{coder}");
+    assert!(
+        coder.contains("The project's services file, `deploy/compose.yaml`,"),
+        "{coder}"
+    );
 }

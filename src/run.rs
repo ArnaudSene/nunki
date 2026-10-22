@@ -331,6 +331,22 @@ pub fn account_for(
     Ok((name, account, token))
 }
 
+/// What a role is told for this project: its part of the run contract, and
+/// what the project protects, which the agent cannot read anywhere else —
+/// `nunki.yaml` is not in its container. Read from the values the gates read
+/// (`verify`), so the prompt and the gates cannot disagree.
+pub fn role_prompt(project: &Project, role: Role) -> String {
+    let services_file = crate::services::declared_path(project);
+    role::prompt(
+        role,
+        &role::Protected {
+            branches: &project.config.protected_branches,
+            paths: &project.config.protected_paths,
+            services_file: services_file.as_deref(),
+        },
+    )
+}
+
 /// Which model this run asks the harness for. The mission's header wins over
 /// the project's declaration, and `None` leaves the harness its own default.
 ///
@@ -737,7 +753,8 @@ pub fn launch(l: &Launching) -> Result<Launched, RunError> {
     mission_dir::ensure_writable(&paths.dir)?;
 
     let prompt = paths.dir.join(role::PROMPT_FILE);
-    std::fs::write(&prompt, role::prompt(role)).map_err(|e| RunError::Io(prompt.clone(), e))?;
+    std::fs::write(&prompt, role_prompt(project, role))
+        .map_err(|e| RunError::Io(prompt.clone(), e))?;
 
     let plan = plan(project, slot, &stack, &images, paths, &token, header, role)?;
     let ports_dropped = ports_dropped(&plan);

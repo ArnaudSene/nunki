@@ -92,8 +92,12 @@ nunki init --stack rust         # rust, python and next are the stacks shipped
 ```
 
 It creates what is absent and never overwrites a file you edit — it says what
-it left alone. In the repository, only what the agents read: `AGENTS.md` (the
-rules), `CLAUDE.md` importing it, and a `.gitattributes` entry. Everything
+it left alone. In the repository, only what the agents read: `AGENTS.md`, a
+starting point for your project's own rules, `CLAUDE.md` importing it, and a
+`.gitattributes` entry. An `AGENTS.md` you already have is kept as it is and
+misses nothing: what `nunki` asks of its agents — what a run leaves behind,
+what they may never do, the paths and branches you protect — reaches them in
+their role prompt, at every run. Everything
 else is tooling, and tooling stays out of your history — it goes into the
 project's home, named by the session `init` opens for the repository:
 

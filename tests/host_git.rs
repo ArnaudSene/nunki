@@ -966,6 +966,12 @@ fn no_plain_git_runs_on_a_slot() {
             "src/check.rs",
             "let Ok(remote) = crate::git::run(&project.root, &[\"remote\", \"get-url\", crate::push::REMOTE])",
         ),
+        // Whether the human's repository tracks a `CLAUDE.local.md`, for
+        // `check`: only a tracked one reaches a slot's clone.
+        (
+            "src/check.rs",
+            "match crate::git::run(&project.root, &[\"ls-files\", \"--\", name]) {",
+        ),
         // `nunki init`'s interview, in the human's repository.
         (
             "src/interview.rs",
