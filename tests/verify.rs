@@ -4234,3 +4234,102 @@ fn what_a_run_left_running_is_stopped_once_it_ends_and_said() {
     assert!(left[0].contains("stopped 1 process(es)"), "{}", left[0]);
     assert!(left[0].contains("77"), "{}", left[0]);
 }
+
+/// A world whose stack declares an advisory database the host has filled,
+/// and whose profile was written before that: the agent mounts its tree and
+/// no database. The coder's lot is done and the mission held, so `verify`
+/// plays the gates and launches nothing after them. Where the database lives,
+/// and the profile.
+fn filled_after_the_lift() -> (World, PathBuf, PathBuf) {
+    let world = World::new(1);
+    let db = world._dir.path().join("advisory-db");
+    std::fs::create_dir_all(&db).unwrap();
+    let fragment = world.project.fragment("rust");
+    std::fs::create_dir_all(&fragment).unwrap();
+    std::fs::write(
+        fragment.join(nunki::project::ADVISORIES_FILE),
+        format!("{}\ncargo deny check advisories\n", db.display()),
+    )
+    .unwrap();
+    let profile = nunki::run::profile_path(&world.project, "one");
+    std::fs::write(
+        &profile,
+        format!(
+            "services:\n  {}:\n    volumes:\n    - \"/slot:/work/tree:rw\"\n",
+            nunki::compose::AGENT_SERVICE
+        ),
+    )
+    .unwrap();
+    world.coder_finished_the_lot();
+    world.hold();
+    (world, db, profile)
+}
+
+/// The `nunki verify` gate 8 sends a human back to, once the database is
+/// filled, mounts it before any gate is played (#165). Before, the profile
+/// was written at the launch only, so the container kept running without the
+/// database and gate 8 stayed unplayable whatever the human did.
+#[test]
+fn verify_mounts_an_advisory_database_filled_after_the_lift_before_any_gate() {
+    let (world, db, profile) = filled_after_the_lift();
+    let engine = Arc::new(nunki::engine::fake::FakeEngine::default());
+
+    let steps = verify::verify(&world.project, "m1", engine.clone(), "docker").unwrap();
+
+    assert_eq!(
+        steps.first(),
+        Some(&Step::Remounted {
+            databases: vec![db.clone()]
+        }),
+        "{steps:?}"
+    );
+    assert!(
+        std::fs::read_to_string(&profile)
+            .unwrap()
+            .contains(&format!(
+                "{}:{}:ro",
+                db.display(),
+                nunki::run::ADVISORIES_AT
+            )),
+        "{}",
+        std::fs::read_to_string(&profile).unwrap()
+    );
+    // Lifted again before the first command the gates ran in it.
+    let calls = engine.calls();
+    let up = calls
+        .iter()
+        .position(|c| matches!(c, nunki::engine::fake::Call::Up(_)))
+        .expect("the profile was lifted again");
+    let first_exec = calls
+        .iter()
+        .position(|c| matches!(c, nunki::engine::fake::Call::Exec(..)))
+        .expect("the gates ran in the container");
+    assert!(up < first_exec, "{calls:?}");
+}
+
+/// The application a role was given lives in the agent's container, so a
+/// remount would kill it under the gates that are about to test it: nothing
+/// is remounted while one is recorded, and gate 8 says what it waits for.
+#[test]
+fn verify_mounts_nothing_while_an_application_lives_in_the_container() {
+    let (world, _, profile) = filled_after_the_lift();
+    let before = std::fs::read_to_string(&profile).unwrap();
+    let store = Store::open(&world.project.hq_root).unwrap();
+    let mut state = store.load("m1").unwrap();
+    state.app = Some(nunki::harness::RunHandle {
+        session: nunki::harness::SessionId("app".into()),
+        container: "agent".into(),
+        pid: Some(4242),
+        log: world._dir.path().join("app.log"),
+    });
+    store.save(&state).unwrap();
+    let engine = Arc::new(nunki::engine::fake::FakeEngine::default());
+
+    let steps = verify::verify(&world.project, "m1", engine.clone(), "docker").unwrap();
+
+    assert!(
+        !steps.iter().any(|s| matches!(s, Step::Remounted { .. })),
+        "{steps:?}"
+    );
+    assert_eq!(std::fs::read_to_string(&profile).unwrap(), before);
+}

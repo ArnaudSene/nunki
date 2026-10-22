@@ -369,7 +369,8 @@ fn snapshot(root: &Path) -> Vec<(String, String)> {
 }
 
 /// The two verbs in the order a human runs them, through the binary: an
-/// ordinary repository becomes one `nunki check` passes.
+/// ordinary repository becomes one `nunki check` passes, once the machine has
+/// the one thing `init` cannot give it — the stack's advisory database.
 #[test]
 fn init_then_check_is_green_on_a_repository_that_had_nothing() {
     let dir = tempfile::tempdir().unwrap();
@@ -400,13 +401,30 @@ fn init_then_check_is_green_on_a_repository_that_had_nothing() {
         String::from_utf8_lossy(&init.stderr)
     );
 
-    let check = std::process::Command::new(nunki)
-        .env("HOME", &home)
-        .args(["-C"])
-        .arg(&root)
-        .arg("check")
-        .output()
-        .unwrap();
+    let check = || {
+        std::process::Command::new(nunki)
+            .env("HOME", &home)
+            .args(["-C"])
+            .arg(&root)
+            .arg("check")
+            .output()
+            .unwrap()
+    };
+    // One thing is left, and it is the machine's: the stack's advisory
+    // database, which no `init` fills (#165). Red, with the stack's command,
+    // rather than green until gate 8 finds it missing after a whole run.
+    let first = check();
+    let text = String::from_utf8_lossy(&first.stdout);
+    assert_eq!(first.status.code(), Some(1), "{text}");
+    assert!(text.contains("1 restriction(s) not held"), "{text}");
+    assert!(
+        text.contains("RED the rust advisory database is on this machine"),
+        "{text}"
+    );
+    assert!(text.contains("`cargo deny check advisories`"), "{text}");
+
+    std::fs::create_dir_all(home.join(".cargo/advisory-db")).unwrap();
+    let check = check();
     let text = String::from_utf8_lossy(&check.stdout);
     assert_eq!(check.status.code(), Some(0), "{text}");
     assert!(

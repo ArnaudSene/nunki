@@ -1,7 +1,7 @@
 //! Starting a run (SPEC 4.3): what `nunki mission start` decides before any
 //! container exists.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use nunki::harness::Role;
 use nunki::project::{Config, Project, ProtectedPaths};
@@ -2556,6 +2556,199 @@ fn a_database_the_host_never_filled_is_not_mounted_empty() {
     let (plan, _) = profile_for(&project, &slot, &header, Role::Coder);
 
     assert_eq!(plan.advisories, vec![]);
+}
+
+/// The second line of `advisories.txt` is the command that fills the
+/// database, and the path stays the first: what an older `nunki` read is
+/// still read the same way, and a fragment with one line names no command.
+#[test]
+fn a_stack_says_how_its_advisory_database_is_filled() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    std::fs::create_dir_all(project.fragment("rust")).unwrap();
+    let file = project
+        .fragment("rust")
+        .join(nunki::project::ADVISORIES_FILE);
+
+    std::fs::write(
+        &file,
+        "# where it lives\n/var/db\n\n# and how it is filled\n  cargo deny check advisories  \n",
+    )
+    .unwrap();
+    assert_eq!(
+        project.stack_advisories("rust"),
+        Some(std::path::PathBuf::from("/var/db"))
+    );
+    assert_eq!(
+        project.stack_advisories_filled_by("rust").as_deref(),
+        Some("cargo deny check advisories")
+    );
+    assert!(
+        project
+            .how_to_fill_advisories("rust")
+            .contains("`cargo deny check advisories`"),
+        "{}",
+        project.how_to_fill_advisories("rust")
+    );
+
+    // An older fragment: the path alone. No command is made up; the human is
+    // sent to the file.
+    std::fs::write(&file, "/var/db\n").unwrap();
+    assert_eq!(project.stack_advisories_filled_by("rust"), None);
+    let said = project.how_to_fill_advisories("rust");
+    assert!(said.contains(&file.display().to_string()), "{said}");
+}
+
+/// A slot whose profile was written before the host filled its advisory
+/// database, the way #165 met it: the stack declares the database, the
+/// launch found none and mounted none, and gate 8 is unplayable in the
+/// container that is up.
+fn lifted_before_the_database(dir: &Path) -> (Project, nunki::slot::Slot, PathBuf, String) {
+    let project = project(dir);
+    std::fs::create_dir_all(project.fragment("rust")).unwrap();
+    let db = dir.join("advisory-db");
+    std::fs::write(
+        project
+            .fragment("rust")
+            .join(nunki::project::ADVISORIES_FILE),
+        format!("{}\ncargo deny check advisories\n", db.display()),
+    )
+    .unwrap();
+    let slot = slot_at(dir);
+    let header = header_with(with_services());
+    let (plan, _) = profile_for(&project, &slot, &header, Role::Coder);
+    assert_eq!(plan.advisories, vec![], "the launch found no database");
+    let engine = nunki::engine::fake::FakeEngine::default();
+    let written = nunki::compose::generate(&plan, nunki::engine::Engine::dialect(&engine)).unwrap();
+    let profile = run::profile_path(&project, &slot.name);
+    std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+    std::fs::write(&profile, &written).unwrap();
+    (project, slot, db, written)
+}
+
+/// The agent's mounts, as a set: the order of a list is not what a mount is.
+fn mounts_of(doc: &nunki::yaml::Value) -> std::collections::BTreeSet<String> {
+    doc["services"][nunki::compose::AGENT_SERVICE]["volumes"]
+        .as_sequence()
+        .expect("the agent has mounts")
+        .iter()
+        .map(|v| v.as_str().unwrap_or_default().to_string())
+        .collect()
+}
+
+/// Filled after the lift, the database is mounted into the profile that is
+/// up, and the profile is lifted again so the engine recreates the agent with
+/// it (#165). Nothing else in the profile moves: what it gains is exactly the
+/// mount a launch would write today, and the file stays the human's alone,
+/// because it carries the subscription token.
+#[test]
+fn a_database_filled_after_the_lift_is_mounted_into_the_profile_that_is_up() {
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot, db, _) = lifted_before_the_database(dir.path());
+    std::fs::create_dir_all(&db).unwrap();
+    let engine = nunki::engine::fake::FakeEngine::default();
+
+    let mounted = run::remount_advisories(&engine, &project, &slot, "rust").unwrap();
+
+    assert_eq!(mounted, vec![db.clone()]);
+    let profile = run::profile_path(&project, &slot.name);
+    let after: nunki::yaml::Value =
+        nunki::yaml::from_str(&std::fs::read_to_string(&profile).unwrap()).unwrap();
+    let (_, today) = profile_for(&project, &slot, &header_with(with_services()), Role::Coder);
+    assert_eq!(mounts_of(&after), mounts_of(&today));
+    assert!(
+        mounts_of(&after).contains(&format!("{}:{}:ro", db.display(), run::ADVISORIES_AT)),
+        "{:?}",
+        mounts_of(&after)
+    );
+    // Everything but the mounts, as a launch would write it today.
+    let without_mounts = |mut doc: nunki::yaml::Value| {
+        doc.get_mut("services")
+            .and_then(|s| s.get_mut(nunki::compose::AGENT_SERVICE))
+            .and_then(|a| a.as_mapping_mut())
+            .unwrap()
+            .remove("volumes");
+        doc
+    };
+    assert_eq!(without_mounts(after), without_mounts(today));
+    assert!(
+        engine
+            .calls()
+            .iter()
+            .any(|c| matches!(c, nunki::engine::fake::Call::Up(_))),
+        "{:?}",
+        engine.calls()
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&profile).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "{mode:o}");
+    }
+
+    // And once is enough: the next `verify` finds it mounted and lifts
+    // nothing again.
+    let lifted = engine.calls().len();
+    assert_eq!(
+        run::remount_advisories(&engine, &project, &slot, "rust").unwrap(),
+        Vec::<PathBuf>::new()
+    );
+    assert_eq!(engine.calls().len(), lifted, "{:?}", engine.calls());
+}
+
+/// A database still missing is nothing to mount: the profile is left byte
+/// for byte, and the engine is not asked to recreate anything — an empty
+/// directory mounted in its place would read as "nothing to report".
+#[test]
+fn a_database_still_missing_leaves_the_profile_and_the_container_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot, _, written) = lifted_before_the_database(dir.path());
+    let engine = nunki::engine::fake::FakeEngine::default();
+
+    let mounted = run::remount_advisories(&engine, &project, &slot, "rust").unwrap();
+
+    assert_eq!(mounted, Vec::<PathBuf>::new());
+    assert_eq!(
+        std::fs::read_to_string(run::profile_path(&project, &slot.name)).unwrap(),
+        written
+    );
+    assert_eq!(engine.calls(), vec![]);
+}
+
+/// A mutation campaign lives in the container a remount recreates, so none
+/// happens under one: the campaign is not killed for a gate that can wait for
+/// it to be read back.
+#[test]
+fn no_database_is_mounted_under_a_running_campaign() {
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot, db, written) = lifted_before_the_database(dir.path());
+    std::fs::create_dir_all(&db).unwrap();
+    nunki::mutants::write_running(
+        &project.hq_root,
+        &slot.name,
+        &nunki::mutants::Running {
+            off_mission: None,
+            chain: Default::default(),
+            fingerprint: "abc1234".into(),
+            head: "0123456789abcdef0123456789abcdef01234567".into(),
+            started_at: "2026-10-22T10:00:00Z".into(),
+            container: "agent".into(),
+            pid: None,
+            log: dir.path().join("mutants.log"),
+            deadline_minutes: 45,
+        },
+    )
+    .unwrap();
+    let engine = nunki::engine::fake::FakeEngine::default();
+
+    let mounted = run::remount_advisories(&engine, &project, &slot, "rust").unwrap();
+
+    assert_eq!(mounted, Vec::<PathBuf>::new());
+    assert_eq!(
+        std::fs::read_to_string(run::profile_path(&project, &slot.name)).unwrap(),
+        written
+    );
+    assert_eq!(engine.calls(), vec![]);
 }
 
 /// The proposal of an equivalence is explained where the coder reads the

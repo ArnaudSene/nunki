@@ -2166,7 +2166,71 @@ fn a_gate_that_could_not_consult_its_database_says_so() {
         panic!("{decision:?}");
     };
     assert!(why.contains("advisory database"), "{why}");
-    assert!(why.contains("cargo deny check advisories"), "{why}");
+    // This stack declares none, so nothing is made up: no tool is named,
+    // and the human is sent to the file that should have said.
+    assert!(why.contains("declares none"), "{why}");
+    assert!(!why.contains("cargo deny"), "{why}");
+}
+
+impl Fixture {
+    /// The rust stack's `advisories.txt`, naming a database under this
+    /// fixture's directory — filled or not — and `command` as the way to fill
+    /// it. Where it lives, so a test can fill it.
+    fn declares_a_database(&self, command: &str, filled: bool) -> PathBuf {
+        let (project, _) = self.context();
+        let db = self._dir.path().join("advisory-db");
+        if filled {
+            std::fs::create_dir_all(&db).unwrap();
+        }
+        std::fs::create_dir_all(project.fragment("rust")).unwrap();
+        std::fs::write(
+            project
+                .fragment("rust")
+                .join(nunki::project::ADVISORIES_FILE),
+            format!("{}\n{command}\n", db.display()),
+        )
+        .unwrap();
+        db
+    }
+}
+
+/// A database nobody filled: the sentence names where it lives on the host
+/// and the stack's own command, word for word — never another stack's tool
+/// (#165: a Python mission was told to run `cargo deny`). Then `nunki verify`
+/// picks the mission up, and the sentence says so.
+#[test]
+fn a_database_nobody_filled_is_sent_to_the_stacks_own_command() {
+    let f = Fixture::new();
+    let command = "osv-scanner scan source --download-offline-databases --lockfile uv.lock";
+    let db = f.declares_a_database(command, false);
+
+    let decision = f.security(Role::Coder, said(69, ""));
+
+    let Decision::Unplayed(why) = decision else {
+        panic!("{decision:?}");
+    };
+    assert!(why.contains(&db.display().to_string()), "{why}");
+    assert!(why.contains(&format!("`{command}`")), "{why}");
+    assert!(!why.contains("cargo deny"), "{why}");
+    assert!(why.contains("nunki verify"), "{why}");
+}
+
+/// A database on the host that the container does not see was filled after
+/// the container was lifted: the command would change nothing, and the
+/// sentence says that `nunki verify` remounts it instead.
+#[test]
+fn a_database_filled_after_the_lift_is_sent_to_verify_and_not_to_the_command() {
+    let f = Fixture::new();
+    let db = f.declares_a_database("cargo deny check advisories", true);
+
+    let decision = f.security(Role::Coder, said(69, ""));
+
+    let Decision::Unplayed(why) = decision else {
+        panic!("{decision:?}");
+    };
+    assert!(why.contains(&db.display().to_string()), "{why}");
+    assert!(why.contains("`nunki verify` remounts it"), "{why}");
+    assert!(!why.contains("cargo deny"), "{why}");
 }
 
 /// A stack shipping no script fails, as the battery does: a proof nobody can

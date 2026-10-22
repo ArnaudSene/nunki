@@ -243,6 +243,8 @@ pub enum RunError {
     /// the size of what this one says.
     #[error("{0}")]
     NotApprovedAtStart(Box<UnapprovedAtStart>),
+    #[error("{0} is not a profile nunki can read back ({1}) — the next launch writes it again")]
+    ProfileUnreadable(PathBuf, String),
 }
 
 /// A mission whose integrator or security agent would find the project's
@@ -906,6 +908,83 @@ pub fn relift(
         .map(|labels| labels.keys().cloned().collect())
         .unwrap_or_default();
     take_down_and_up(engine, file, compose_project, listed, stale, lifts)
+}
+
+/// Mount the advisory databases the host filled after the slot's profile was
+/// written, and give back where they live; nothing when none is missing.
+///
+/// The profile is written at a launch, and a database is mounted only when it
+/// exists then ([`advisories`]). A database filled later never reaches the
+/// container that is up, so gate 8 stays unplayable in it whatever the human
+/// did — while its sentence promised that `nunki verify` would pick the
+/// mission up (#165). So the profile that is up gains the missing mounts,
+/// and only them: not regenerated through [`plan`], which would read the
+/// account, the perimeter and the services again, and could change under a
+/// mission what no human asked to change. The line added is the one a launch
+/// would have written ([`crate::compose::mount`]), the file is restricted again
+/// because it carries the subscription token, and the profile is lifted the
+/// way [`relift`] lifts it, so the engine recreates the agent with the mount.
+///
+/// Nothing is touched while a mutation campaign is filed: it lives in the
+/// container this would recreate. The caller keeps the other inhabitant, the
+/// application a role was given, out of it the same way.
+pub fn remount_advisories(
+    engine: &dyn Engine,
+    project: &Project,
+    slot: &Slot,
+    stack: &str,
+) -> Result<Vec<PathBuf>, RunError> {
+    let file = profile_path(project, &slot.name);
+    let wanted = advisories(project, stack);
+    if wanted.is_empty() || !file.is_file() {
+        return Ok(Vec::new());
+    }
+    let text = std::fs::read_to_string(&file).map_err(|e| RunError::Io(file.clone(), e))?;
+    let mut document: crate::yaml::Value = crate::yaml::from_str(&text)
+        .map_err(|e| RunError::ProfileUnreadable(file.clone(), e.to_string()))?;
+    // A profile with no agent mounting anything is not one a launch wrote,
+    // and not one to mend: gate 8 still says what it is missing.
+    let Some(volumes) = document
+        .get_mut("services")
+        .and_then(|s| s.get_mut(AGENT_SERVICE))
+        .and_then(|a| a.get_mut("volumes"))
+        .and_then(|v| v.as_sequence_mut())
+    else {
+        return Ok(Vec::new());
+    };
+    // By where it lands, not by the whole line: a database the stack has
+    // since moved is still mounted there, and a second mount at the same
+    // path is one the engine refuses.
+    let landed: Vec<String> = volumes
+        .iter()
+        .filter_map(|v| v.as_str()?.split(':').nth(1).map(str::to_string))
+        .collect();
+    let missing: Vec<(PathBuf, PathBuf)> = wanted
+        .into_iter()
+        .filter(|(_, at)| !landed.iter().any(|l| Path::new(l) == at))
+        .collect();
+    if missing.is_empty() {
+        return Ok(Vec::new());
+    }
+    // A campaign that cannot be read is not known to be gone.
+    if !matches!(
+        crate::mutants::read_running(&project.hq_root, &slot.name),
+        Ok(None)
+    ) {
+        return Ok(Vec::new());
+    }
+    for (host, at) in &missing {
+        volumes.push(crate::yaml::Value::String(crate::compose::mount(
+            host, at, "ro",
+        )));
+    }
+    let written = crate::yaml::to_string(&document)
+        .map_err(|e| RunError::ProfileUnreadable(file.clone(), e.to_string()))?;
+    std::fs::write(&file, written).map_err(|e| RunError::Io(file.clone(), e))?;
+    restrict(&file)?;
+    let compose_project = crate::compose::project_name(&project.session(), &slot.name)?;
+    relift(engine, project, &file, &compose_project)?;
+    Ok(missing.into_iter().map(|(host, _)| host).collect())
 }
 
 /// Take down `stale`, out of what the engine `listed` for the project, and

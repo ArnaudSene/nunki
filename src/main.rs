@@ -1467,6 +1467,16 @@ fn main() -> ExitCode {
                             nunki::verify::Step::PortsDropped { services } => {
                                 println!("ports     {}", nunki::services::ports_dropped(services));
                             }
+                            nunki::verify::Step::Remounted { databases } => {
+                                for at in databases {
+                                    println!(
+                                        "mounted   the advisory database at {}, filled after \
+                                         the slot's container was lifted: the container was \
+                                         recreated with it",
+                                        at.display()
+                                    );
+                                }
+                            }
                             nunki::verify::Step::Launched { role, application } => {
                                 owed = true;
                                 println!("launched  a {role:?} run — {application}");

@@ -279,6 +279,8 @@ pub fn after_verify(mission: &str, result: &Result<Vec<Step>, VerifyError>) -> N
                 | Step::LeftBehind { .. }
                 // Said before the launch it belongs to, which is the step after.
                 | Step::PortsDropped { .. }
+                // Said before the gates it lets play, which are the steps after.
+                | Step::Remounted { .. }
                 // Always followed by `Verified` or `Findings`, which stop.
                 | Step::SecurityRoundsSpent { .. }
                 // A lift `nunki` made goes on as a human's would; one it

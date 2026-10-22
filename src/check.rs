@@ -116,8 +116,38 @@ pub fn run(project: &Project) -> Report {
     coder_perimeter(project, &mut report);
     stack_versions(project, &mut report);
     fragments_follow(project, &mut report);
+    advisory_databases(project, &mut report);
     host_runs_no_git_in_slots(project, &mut report);
     report
+}
+
+/// Whether each advisory database a stack declares is on this machine
+/// (SPEC 4.4, gate 8).
+///
+/// Red when it is not: gate 8 cannot look without it, and a mission started
+/// anyway meets that wall at the end of its first run, after the hours the
+/// run took. The sentence repeats the stack's own command, so `nunki` names
+/// no tool. Never created here: a directory `nunki` made would be an empty
+/// database, which the tool reads as "nothing to report".
+fn advisory_databases(project: &Project, report: &mut Report) {
+    for stack in &project.config.stacks {
+        let Some(at) = project.stack_advisories(&stack.name) else {
+            continue;
+        };
+        let verdict = if at.is_dir() {
+            Verdict::Green(format!("{} is there", at.display()))
+        } else {
+            Verdict::Red(format!(
+                "no advisory database at {}: gate 8 cannot look without it. {}",
+                at.display(),
+                project.how_to_fill_advisories(&stack.name)
+            ))
+        };
+        report.add(
+            format!("the {} advisory database is on this machine", stack.name),
+            verdict,
+        );
+    }
 }
 
 /// Whether each stack's fragment is today's (SPEC 4.2, "les fragments suivent

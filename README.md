@@ -133,6 +133,14 @@ nunki slot list                 # each slot, and the mission that occupies it
 nunki check                     # what is held, and what could not be checked
 ```
 
+On a new machine, `nunki check` is red for one thing `init` cannot give it:
+the stack's advisory database, which gate 8's dependency audit reads offline
+and only this machine can fill. `stacks/<stack>/advisories.txt` says where it
+lives and, on its second line, the command that fills it; the red repeats that
+command, to run from the repository's root. A database filled after a mission
+started is mounted by the next `nunki verify`, which recreates the agent's
+container with it before playing any gate.
+
 ### The project's services
 
 A mission whose integration declares services needs them lifted beside the

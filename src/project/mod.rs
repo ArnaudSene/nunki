@@ -450,8 +450,9 @@ pub const PROJECT_ADDON_FILE: &str = "Dockerfile.project";
 /// Its stages, for a `COPY --from` an official image named by a version.
 pub const PROJECT_STAGES_FILE: &str = "Dockerfile.project.stages";
 /// Where a stack fragment declares the advisory database its auditor reads,
-/// as a path **on the host**. `nunki` mounts it read-only and never fills it
-/// (SPEC 4.4, gate 8).
+/// as a path **on the host**, and on the next line the command that fills it.
+/// `nunki` mounts it read-only, never fills it, and repeats the command to a
+/// human who has to (SPEC 4.4, gate 8).
 pub const ADVISORIES_FILE: &str = "advisories.txt";
 
 #[derive(Debug, thiserror::Error)]
@@ -733,17 +734,54 @@ impl Project {
     /// comes back is absolute or nothing — a relative advisory database would
     /// resolve against whatever directory `nunki` happened to be started in.
     pub fn stack_advisories(&self, stack: &str) -> Option<PathBuf> {
-        let file = self.fragment(stack).join(ADVISORIES_FILE);
-        let text = std::fs::read_to_string(file).ok()?;
-        let line = text
-            .lines()
-            .map(str::trim)
-            .find(|l| !l.is_empty() && !l.starts_with('#'))?;
+        let lines = self.advisories_lines(stack);
+        let line = lines.first()?;
         let path = match line.strip_prefix("~/") {
             Some(rest) => PathBuf::from(std::env::var_os("HOME")?).join(rest),
             None => PathBuf::from(line),
         };
         path.is_absolute().then_some(path)
+    }
+
+    /// The command that fills this stack's advisory database on the host, as
+    /// the stack writes it: the line after the path, or `None` for a fragment
+    /// that names none — one an older `nunki` wrote, before the line existed.
+    ///
+    /// Read from the fragment and never written here: `nunki` is agnostic to
+    /// the stack, so the sentence that sends a human to fill the database
+    /// repeats the stack's own words rather than naming a tool (SPEC 4.4,
+    /// gate 8).
+    pub fn stack_advisories_filled_by(&self, stack: &str) -> Option<String> {
+        self.advisories_lines(stack).into_iter().nth(1)
+    }
+
+    /// How a human fills this stack's advisory database: the stack's own
+    /// command when its fragment gives one, and where to read it otherwise.
+    /// One sentence, for `nunki check` and gate 8 alike.
+    pub fn how_to_fill_advisories(&self, stack: &str) -> String {
+        match self.stack_advisories_filled_by(stack) {
+            Some(command) => {
+                format!("Fill it on this machine, from the project's root: `{command}`")
+            }
+            None => format!(
+                "Fill it on this machine with the command its stack names in {}",
+                self.fragment(stack).join(ADVISORIES_FILE).display()
+            ),
+        }
+    }
+
+    /// The lines of a stack's `advisories.txt` that are neither blank nor a
+    /// comment, trimmed: the path first, then the command.
+    fn advisories_lines(&self, stack: &str) -> Vec<String> {
+        let file = self.fragment(stack).join(ADVISORIES_FILE);
+        let Ok(text) = std::fs::read_to_string(file) else {
+            return Vec::new();
+        };
+        text.lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(str::to_string)
+            .collect()
     }
 
     /// The top level of the repository containing `start`, as git reports it.
