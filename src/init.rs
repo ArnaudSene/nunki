@@ -181,9 +181,20 @@ pub fn init_as(
         home,
         crate::project::CONFIG_FILE,
         &nunki_yaml(root, stacks, answers),
+        HUMANS,
         &mut actions,
     )?;
-    create_if_absent(root, "AGENTS.md", AGENTS_MD, &mut actions)?;
+    // The project's own, and nothing of `nunki`'s needs it: a human who
+    // finds one kept wonders whether the agents miss nunki's rules, and the
+    // answer is said where the question arises.
+    create_if_absent(
+        root,
+        "AGENTS.md",
+        AGENTS_MD,
+        "it exists, and it is the project's: agents read it at every run, and nunki's \
+         own rules reach them in their role prompt",
+        &mut actions,
+    )?;
     claude_md(root, &mut actions)?;
     gitattributes(root, &mut actions)?;
 
@@ -371,18 +382,19 @@ fn declares(home: &Path) -> Result<Vec<crate::project::Stack>, InitError> {
         .map_err(|e| InitError::UnreadableConfig(path, e.to_string()))
 }
 
+/// Why a file that exists is left as it is, when nothing more is to be said.
+const HUMANS: &str = "it exists, and nunki never overwrites a file a human edits";
+
 fn create_if_absent(
     root: &Path,
     name: &str,
     body: &str,
+    kept_because: &str,
     actions: &mut Vec<Action>,
 ) -> Result<(), InitError> {
     let path = root.join(name);
     if path.exists() {
-        actions.push(Action::LeftAlone(
-            path,
-            "it exists, and nunki never overwrites a file a human edits".to_string(),
-        ));
+        actions.push(Action::LeftAlone(path, kept_because.to_string()));
         return Ok(());
     }
     std::fs::write(&path, body).map_err(|e| InitError::Io(path.clone(), e))?;
@@ -390,8 +402,12 @@ fn create_if_absent(
     Ok(())
 }
 
-/// `CLAUDE.md` is the one file whose *content* matters to another tool:
-/// Claude Code reads it and not `AGENTS.md`, so it must import it (SPEC 4.1).
+/// `CLAUDE.md` is the one file whose *content* matters to another tool
+/// (SPEC 4.1). Claude Code reads `AGENTS.md` on its own, but only where no
+/// `CLAUDE.md` stands in front of it: one that exists is read in its place.
+/// So an existing one has to import `AGENTS.md`, and an absent one is
+/// written as that import alone — which serves a Claude Code too old to
+/// read `AGENTS.md` itself, and is never read twice by one that does.
 fn claude_md(root: &Path, actions: &mut Vec<Action>) -> Result<(), InitError> {
     let path = root.join("CLAUDE.md");
     if !path.exists() {
@@ -414,11 +430,11 @@ fn claude_md(root: &Path, actions: &mut Vec<Action>) -> Result<(), InitError> {
     let why = if text.contains("AGENTS.md") {
         "it already imports AGENTS.md".to_string()
     } else {
-        // Not rewritten, and not silently accepted either: `nunki check` is red
-        // until a human adds the import, because otherwise the rules of the
-        // place are never read by this harness.
-        "it does not import AGENTS.md — add `@AGENTS.md` to it; `nunki check` is \
-         red until you do"
+        // Not rewritten, and not silently accepted either: Claude Code reads
+        // this file in place of AGENTS.md, so the project's rules never load,
+        // and `nunki check` is red until a human adds the import.
+        "it does not import AGENTS.md, and Claude Code reads it in place of \
+         AGENTS.md — add `@AGENTS.md` to it; `nunki check` is red until you do"
             .to_string()
     };
     actions.push(Action::LeftAlone(path, why));
@@ -591,62 +607,27 @@ protected_paths:
     )
 }
 
+/// A starting point for the project's own rules, and nothing of `nunki`'s:
+/// what `nunki` asks of its agents travels in their role prompt, at every
+/// run (SPEC 4.1), so a project that keeps its own `AGENTS.md` loses none of
+/// it, and a copy here would only drift from the prompt.
 const AGENTS_MD: &str = "# Working here
 
-The rules of this place, read by whichever harness is driving. `CLAUDE.md`
-imports this file; there is one set of rules, not one per tool.
+The rules of this project, for every agent and every human who works in it,
+whichever tool is driving. Coding agents read this file on their own, Claude
+Code included; `CLAUDE.md` imports it for those that read only that one.
+There is one set of rules, not one per tool.
 
-Written by `nunki init` as a starting point — replace it with the rules that
-actually hold in this project.
+Written by `nunki init` as a starting point: replace it with the rules that
+hold here — how to build and test, the conventions the code follows, what
+must not change without a human.
 
-## What an agent may not do
+What `nunki` asks of its own agents — what a run leaves behind, what they may
+never do, how a lot ends — is not written here: it reaches each of them in
+its role prompt, at every run. This file is the project's.
 
-- Never push, never merge, never reach the forge. The human pushes.
-- Never touch a protected path (see `nunki.yaml`), and never a protected branch.
-- Never ask a blocking question: in an autonomous run there is nobody to
-  answer. Refusing is safe; asking is not.
-
-## What a run must leave behind
-
-- The lot committed and proved, or the failure stated plainly.
-- A commitable tree.
-- A `ÉTAT DE REPRISE` block at the top of `JOURNAL.md`, rewritten at every
-  checkpoint and before stopping. It names the commit it describes: `nunki`
-  refuses a block that does not carry the current `HEAD`.
-- `PR.md`, the pull request the mission delivers, written as the work goes.
-  It is a deliverable a gate looks for, and an empty one is a red gate.
-- For the coder, that block ends with `Lot: <lot> — done`, or
-  `Lot: <lot> — failed: <why>`: the line `nunki` reads to know the lot is done.
-  `nunki` reads it **inside** the block — between its heading and the next one —
-  so a line left further down the file is one `nunki` will not see.
-  There is a third line, for one case only: `Lot: <lot> — awaits ruling: <what>`,
-  when the lot is done but for survivors whose equivalence only the HQ may
-  rule on, each named in `<what>` between backquotes as `MUTANTS.json`
-  spells its id. Every backquoted span in `<what>` is read as a survivor id,
-  so nothing else is quoted. `nunki` checks every one is a survivor with no
-  outcome — a line naming none is a failed attempt — and hands the mission
-  over at once. It is not a way out of a hard lot.
-- A survivor the coder believes equivalent may instead be **proposed** so in
-  `MUTANTS.triage.json` (`\"kind\": \"equivalent_proposed\"`, with its reason in
-  `why`): only when its mutation cannot change any observable behaviour,
-  never because it is hard to test. The mission goes on; `nunki push` waits
-  for the HQ to ratify or refuse each one.
-
-## Infrastructure an agent cannot reach
-
-The coder's container has no database, no queue and no third-party API, and
-never will. Code that talks to one is written against a seam — a trait, a
-function, an interface — and proved with a stand-in behind it: the query
-built, the rows mapped, what an empty answer means. Nothing is left unproved
-because the service is absent, and no test is `#[ignore]`d to make a battery
-green. The real thing is the integrator's, against the service itself, in the
-system tests.
-
-## Commit messages
-
-What changed and why it had to, and nothing about the tooling: no
-`Co-Authored-By`, no session link, no trailer naming a harness, a model or a
-tool. The commit's author already says which role wrote it.
+An agent `nunki` runs has nobody to ask. A rule here that tells it to ask
+first, or to wait for an answer, stops it: say what it should do instead.
 ";
 
 /// Where the repository pins what the Rust image is built with (SPEC 4.2):

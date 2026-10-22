@@ -6,9 +6,22 @@
 //! file the harness is pointed at, never written into the slot (SPEC 3.3).
 
 use crate::harness::Role;
+use crate::project::ProtectedPaths;
+
+/// What the project protects, said in the prompt because the agent has no
+/// other way to learn it: `nunki.yaml` is never mounted in its container.
+/// The values the gates read, so the prompt cannot name a rule they do not
+/// hold, nor miss one they do.
+pub struct Protected<'a> {
+    pub branches: &'a [String],
+    pub paths: &'a ProtectedPaths,
+    /// The project's services file, as gate 4 matches it; `None` when the
+    /// project declares none in the repository.
+    pub services_file: Option<&'a str>,
+}
 
 /// The prompt for a role, as it is written into the mission folder.
-pub fn prompt(role: Role) -> String {
+pub fn prompt(role: Role, protected: &Protected) -> String {
     let common = "\
 You are running autonomously. Nobody is watching, and nobody can answer a
 question: **refusing is safe, asking is not**. If a tool refuses you, treat it
@@ -126,21 +139,33 @@ without saying why.
     };
 
     // The project's services file is the human's (SPEC 4.2, rule 1, and
-    // #141): the two roles that commit hear it before gate 4 says it. Its
-    // name is the project's, in `nunki.yaml`, which no agent reads; the gate
-    // names it.
-    let services = match role {
-        Role::Coder | Role::Integrator => {
+    // #141): the two roles that commit hear it, by name, before gate 4 says
+    // it. A project that declares none has no file for the gate to refuse,
+    // and nothing is said.
+    let services = match (role, protected.services_file) {
+        (Role::Coder | Role::Integrator, Some(file)) => format!(
             "
-The project's services file, the Compose file the system profile lifts the
-project's own services from, is the human's. Do not change it, delete it or
-rename it, even if your wiring list names it: the system profile lifts it as
-the mission's base holds it, never from this branch, and gate 4 refuses every
-commit that touches it, naming the file. A change the services need is
-proposed in `PR.md`, with what to change and why, and the human makes it.
+The project's services file, `{file}`, the Compose file the system profile
+lifts the project's own services from, is the human's. Do not change it,
+delete it or rename it, even if your wiring list names it: the system profile
+lifts it as the mission's base holds it, never from this branch, and gate 4
+refuses every commit that touches it. A change the services need is proposed
+in `PR.md`, with what to change and why, and the human makes it.
 "
-        }
-        Role::Security => "",
+        ),
+        _ => String::new(),
+    };
+
+    // The branch is judged for the two roles that commit. The protected
+    // paths are the coder's alone: gate 4 holds the integrator to the
+    // mission's wiring list instead, which `MISSION.md` gives it.
+    let branches = match role {
+        Role::Coder | Role::Integrator => branch_rule(protected.branches),
+        Role::Security => String::new(),
+    };
+    let paths = match role {
+        Role::Coder => path_rule(protected.paths),
+        Role::Integrator | Role::Security => String::new(),
     };
 
     // Never running a whole campaign holds for every role; where its
@@ -318,8 +343,53 @@ What `nunki` checks on your work, so that none of it is a surprise:
     };
 
     format!(
-        "{particular}\n\n{common}{pull_request}{own_files}{survivors}{services}\n{campaign}\n\n{commits}\n"
+        "{particular}\n\n{common}{pull_request}{own_files}{survivors}{services}{branches}{paths}\n{campaign}\n\n{commits}\n"
     )
+}
+
+/// The branch the gates judge, and the ones the project protects.
+fn branch_rule(protected: &[String]) -> String {
+    let named = match listed(protected) {
+        list if list.is_empty() => String::new(),
+        list => format!(", and the project protects {list}"),
+    };
+    format!(
+        "
+Commit on the mission's branch, the one the slot is on, and on no other: the
+gates judge that branch alone{named}.
+"
+    )
+}
+
+/// The coder's gate 4 is the project's protected paths (SPEC 4.4).
+fn path_rule(paths: &ProtectedPaths) -> String {
+    const ON_BASE: &str = "where the file already exists on the mission's base";
+    let refuse = listed(&paths.refuse);
+    let if_exists = listed(&paths.refuse_if_exists);
+    let named = match (refuse.is_empty(), if_exists.is_empty()) {
+        (true, true) => return String::new(),
+        (false, true) => refuse,
+        (true, false) => format!("{if_exists}, {ON_BASE}"),
+        (false, false) => format!("{refuse}; and {if_exists}, {ON_BASE}"),
+    };
+    format!(
+        "
+The project protects these paths: {named}. Gate 4 refuses every commit that
+touches one, in the branch's diff and in each commit on it, so a commit that
+reverts the change is not enough. A change one of them needs is proposed in
+`PR.md`, with what to change and why, and the human makes it.
+"
+    )
+}
+
+/// `` `a` ``, `` `a` and `b` ``, `` `a`, `b` and `c` ``; nothing for none.
+fn listed(items: &[String]) -> String {
+    let quoted: Vec<String> = items.iter().map(|i| format!("`{i}`")).collect();
+    match quoted.split_last() {
+        None => String::new(),
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+    }
 }
 
 /// The file the prompt is written to, inside the mission folder — read-only

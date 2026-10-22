@@ -86,56 +86,89 @@ fn a_fresh_repository_gets_everything_it_needs() {
         "a fragment must not carry a forge domain: {allow}"
     );
     assert!(home(&root).join("stacks/rust/prepush.sh").exists());
-    // CLAUDE.md must import AGENTS.md or Claude Code never reads the rules.
+    // The import alone: a Claude Code that reads AGENTS.md by itself never
+    // reads it twice, and one that does not reads it through this.
     assert_eq!(
         std::fs::read_to_string(root.join("CLAUDE.md")).unwrap(),
         "@AGENTS.md\n"
     );
 }
 
-/// The rules an agent reads have to name what the gates actually refuse.
-///
-/// A coder never told that gate 3 wants `HEAD` named in the resume block,
-/// nor that gate 5 wants `PR.md` written, loses one attempt to each, on
-/// rules it has no way to learn. A gate that enforces what nothing
-/// states is a gate that grades an agent on a secret.
+/// The AGENTS.md `init` writes is a starting point for the project's own
+/// rules, and carries nothing of `nunki`'s. What the gates require reaches
+/// every agent in its role prompt, at every run (SPEC 4.1), so a project
+/// that keeps an AGENTS.md of its own loses none of it — and a copy here
+/// only drifted from the prompt: the last one sent agents to `nunki.yaml`,
+/// which no container mounts.
 #[test]
-fn the_rules_it_writes_name_what_the_gates_require() {
+fn the_rules_it_writes_are_the_projects_and_leave_nunkis_to_the_role_prompt() {
+    use nunki::harness::Role;
+    use nunki::project::ProtectedPaths;
+
     let (_d, root, nunki) = fresh();
     init(&root, &nunki, &["rust".to_string()]).unwrap();
     let rules = std::fs::read_to_string(root.join("AGENTS.md")).unwrap();
+    let coder = nunki::role::prompt(
+        Role::Coder,
+        &nunki::role::Protected {
+            branches: &[],
+            paths: &ProtectedPaths::default(),
+            services_file: None,
+        },
+    );
 
+    // What the gates require, each said in the prompt and nowhere here.
+    for contract in [
+        "ÉTAT DE REPRISE",
+        "Lot: <lot>",
+        "PR.md",
+        "VERDICT.json",
+        "MUTANTS.triage.json",
+        "no database, no queue",
+        "Co-Authored-By",
+    ] {
+        assert!(
+            !rules.contains(contract),
+            "{contract:?} is the role prompt's, not the project's: {rules}"
+        );
+        assert!(
+            coder.contains(contract),
+            "{contract:?} left the template, so the prompt has to carry it: {coder}"
+        );
+    }
     assert!(
-        rules.contains("names the commit it describes"),
-        "gate 3 refuses a resume block that does not carry HEAD: {rules}"
+        !rules.contains("nunki.yaml"),
+        "no agent can read it: {rules}"
+    );
+
+    let flat = rules.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        flat.contains("it reaches each of them in its role prompt, at every run"),
+        "the human editing it is told where nunki's rules went: {rules}"
     );
     assert!(
-        rules.contains("an empty one is a red gate"),
-        "gate 5 asks for PR.md, so the rules have to ask for it: {rules}"
+        flat.contains("An agent `nunki` runs has nobody to ask"),
+        "a project rule that says to ask first stops an agent: {rules}"
     );
+}
+
+/// A kept AGENTS.md is the project's, and the summary says why nothing of
+/// nunki's is missing from it — the question a human asks on reading
+/// "kept".
+#[test]
+fn a_kept_agents_md_is_said_to_be_the_projects() {
+    let (_d, root, nunki) = fresh();
+    std::fs::write(root.join("AGENTS.md"), "# ours\n").unwrap();
+    let actions = init(&root, &nunki, &[]).unwrap();
+
+    let why = kept(&actions, "AGENTS.md").expect("AGENTS.md should be reported");
+    assert!(why.contains("it is the project's"), "{why}");
+    assert!(why.contains("role prompt"), "{why}");
+    // nunki.yaml keeps the plain reason.
+    let why = kept(&init(&root, &nunki, &[]).unwrap(), "nunki.yaml").unwrap();
     assert!(
-        rules.contains("**inside** the block"),
-        "nunki reads the block and not the whole file, so a line further down is \
-         one it never sees: {rules}"
-    );
-    // The third lot line, and the case it is for (the mission that added it).
-    assert!(
-        rules.contains("`Lot: <lot> — awaits ruling: <what>`")
-            && rules.contains("not a way out of a hard lot")
-            && rules.contains("Every backquoted span in `<what>` is read as a survivor id"),
-        "the rules state every line nunki reads, and when the third is not one: {rules}"
-    );
-    // Not a gate, and said so in the pull request: the rules of the place are
-    // where a house style lives, and this one is a house style.
-    // The same rule the coder's prompt carries: a project's rules say it
-    // too, for whoever reads them first.
-    assert!(
-        rules.contains("no database, no queue"),
-        "the rules say what an agent cannot reach, and what to do about it: {rules}"
-    );
-    assert!(
-        rules.contains("Co-Authored-By"),
-        "the rules name the trailer they forbid rather than describe it: {rules}"
+        why.contains("never overwrites a file a human edits"),
+        "{why}"
     );
 }
 

@@ -584,38 +584,92 @@ fn known_harness(project: &Project, report: &mut Report) {
     );
 }
 
-/// The rules of the place have to be read by the harness that is driving.
-/// Claude Code reads `CLAUDE.md` and not `AGENTS.md`, so one must import the
-/// other — SPEC 4.1 makes this check red until it does, because otherwise a
-/// mission starts without the rules.
+/// The files Claude Code reads in place of `AGENTS.md` when one of them
+/// stands at the root of the tree it works in. The last is personal and kept
+/// out of the history by convention, so it counts only when it is committed:
+/// a slot is a clone, and an uncommitted one never reaches an agent.
+const CLAUDE_FILES: [&str; 3] = ["CLAUDE.md", ".claude/CLAUDE.md", CLAUDE_LOCAL];
+const CLAUDE_LOCAL: &str = "CLAUDE.local.md";
+
+/// The project's rules, `AGENTS.md`, have to reach the harness that is
+/// driving (SPEC 4.1). Claude Code reads `AGENTS.md` on its own, but only
+/// where no `CLAUDE.md` stands in front of it: where one does, it is read in
+/// place of `AGENTS.md`, which then loads only if one of them imports it or
+/// is a link to it. Red for that case alone, because a mission would start
+/// with the project's rules unread.
+///
+/// No `AGENTS.md` is not red: the project then states no rules of its own,
+/// and what `nunki` asks of its agents reaches them in their role prompt.
 fn rules_are_reachable(project: &Project, report: &mut Report) {
+    report.add(
+        "the rules of the place reach the harness",
+        rules_verdict(project),
+    );
+}
+
+fn rules_verdict(project: &Project) -> Verdict {
     let agents = project.root.join("AGENTS.md");
-    let claude = project.root.join("CLAUDE.md");
-    let verdict = if !agents.is_file() {
-        Verdict::Red(format!(
-            "no {} — the rules of the place have to be written somewhere",
+    if !agents.is_file() {
+        return Verdict::Green(format!(
+            "no {} — the project states no rules of its own, and nunki's reach its agents \
+             in their role prompt",
             agents.display()
-        ))
-    } else if !claude.exists() {
-        Verdict::Red(format!(
-            "no {}: Claude Code reads that file and not AGENTS.md, so the              rules would never be read",
-            claude.display()
-        ))
-    } else if claude.is_symlink() {
-        Verdict::Green(format!("{} is a link to AGENTS.md", claude.display()))
-    } else {
-        match std::fs::read_to_string(&claude) {
-            Ok(text) if text.contains("AGENTS.md") => {
-                Verdict::Green(format!("{} imports AGENTS.md", claude.display()))
-            }
-            Ok(_) => Verdict::Red(format!(
-                "{} does not import AGENTS.md — add `@AGENTS.md` to it",
-                claude.display()
-            )),
-            Err(e) => Verdict::NotChecked(format!("{} could not be read: {e}", claude.display())),
+        ));
+    }
+    let mut in_front = Vec::new();
+    for name in CLAUDE_FILES {
+        let path = project.root.join(name);
+        if path.symlink_metadata().is_err() {
+            continue;
         }
-    };
-    report.add("the rules of the place reach the harness", verdict);
+        if name == CLAUDE_LOCAL {
+            match crate::git::run(&project.root, &["ls-files", "--", name]) {
+                Ok(listed) if listed.is_empty() => continue,
+                Ok(_) => {}
+                Err(e) => {
+                    return Verdict::NotChecked(format!(
+                        "whether git tracks {} could not be read: {e}",
+                        path.display()
+                    ));
+                }
+            }
+        }
+        if path.is_symlink()
+            && std::fs::canonicalize(&path).ok() == std::fs::canonicalize(&agents).ok()
+        {
+            return Verdict::Green(format!("{} is a link to AGENTS.md", path.display()));
+        }
+        match std::fs::read_to_string(&path) {
+            Ok(text) if text.contains("AGENTS.md") => {
+                return Verdict::Green(format!("{} imports AGENTS.md", path.display()));
+            }
+            Ok(_) => in_front.push(path),
+            Err(e) => {
+                return Verdict::NotChecked(format!("{} could not be read: {e}", path.display()));
+            }
+        }
+    }
+    match in_front.as_slice() {
+        [] => Verdict::Green(format!(
+            "no CLAUDE.md in front of it: Claude Code reads {} directly",
+            agents.display()
+        )),
+        [one] => Verdict::Red(format!(
+            "{} does not import AGENTS.md, and Claude Code reads it in place of AGENTS.md, so \
+             the project's rules never load — add `@AGENTS.md` to it",
+            one.display()
+        )),
+        [first, ..] => Verdict::Red(format!(
+            "{} stand in front of AGENTS.md and none imports it: Claude Code reads them in its \
+             place, so the project's rules never load — add `@AGENTS.md` to {}",
+            in_front
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
+            first.display()
+        )),
+    }
 }
 
 /// Which account this project's missions spend, and whether it can actually

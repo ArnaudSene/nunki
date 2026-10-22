@@ -63,6 +63,10 @@ fn is_red(v: &Verdict) -> bool {
     matches!(v, Verdict::Red(_))
 }
 
+fn is_green(v: &Verdict) -> bool {
+    matches!(v, Verdict::Green(_))
+}
+
 #[test]
 fn a_sound_project_is_green_and_says_so() {
     let dir = tempfile::tempdir().unwrap();
@@ -452,8 +456,11 @@ fn a_report_holding_a_violation_is_red_and_says_how_many() {
 fn the_verb_exits_non_zero_when_a_restriction_is_not_held() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("repo");
-    // A project whose rules no harness would read: no AGENTS.md, no import.
+    // A project whose rules Claude Code would not read: a CLAUDE.md of its
+    // own in front of AGENTS.md, with no import.
     common::project_home(&root, dir.path(), "harness: claude-code\n");
+    std::fs::write(root.join("AGENTS.md"), "# rules\n").unwrap();
+    std::fs::write(root.join("CLAUDE.md"), "# my own\n").unwrap();
 
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_nunki"))
         .env("HOME", dir.path())
@@ -594,24 +601,99 @@ fn the_home_holds_the_hq_and_sits_under_nunkis_own_directory() {
     assert_eq!(project.nunki_home(), dir.path().join(".nunki"));
 }
 
+/// Claude Code reads AGENTS.md on its own, but only where no CLAUDE.md
+/// stands in front of it (SPEC 4.1): one that does is read in its place.
+/// Red for a CLAUDE.md that neither imports nor links to AGENTS.md, and for
+/// that case alone.
 #[test]
 fn rules_the_harness_cannot_read_are_red() {
     let dir = tempfile::tempdir().unwrap();
     let project = sound(dir.path());
+    let root = project.root.clone();
+    let rules = || verdict(&run(&project), "rules of the place");
 
-    // Claude Code reads CLAUDE.md and not AGENTS.md: without the import, a
-    // mission starts without the rules of the place (SPEC 4.1).
-    std::fs::write(project.root.join("CLAUDE.md"), "# my own\n").unwrap();
-    assert!(is_red(&verdict(&run(&project), "rules of the place")));
+    // A CLAUDE.md of the project's own, read in place of AGENTS.md.
+    std::fs::write(root.join("CLAUDE.md"), "# my own\n").unwrap();
+    let red = rules();
+    assert!(is_red(&red), "{red:?}");
+    assert!(format!("{red:?}").contains("add `@AGENTS.md`"), "{red:?}");
+    // The same file importing it: both are read.
+    std::fs::write(root.join("CLAUDE.md"), "# my own\n@AGENTS.md\n").unwrap();
+    assert!(is_green(&rules()), "{:?}", rules());
 
-    std::fs::remove_file(project.root.join("CLAUDE.md")).unwrap();
-    assert!(is_red(&verdict(&run(&project), "rules of the place")));
+    // None at all: Claude Code reads AGENTS.md directly, and nothing is
+    // missing.
+    std::fs::remove_file(root.join("CLAUDE.md")).unwrap();
+    let green = rules();
+    assert!(is_green(&green), "{green:?}");
+    assert!(format!("{green:?}").contains("reads"), "{green:?}");
 
-    std::fs::write(project.root.join("CLAUDE.md"), "@AGENTS.md\n").unwrap();
-    assert!(!is_red(&verdict(&run(&project), "rules of the place")));
+    // The one under `.claude/` stands in front of it the same way, and
+    // imports it from one directory down.
+    std::fs::create_dir_all(root.join(".claude")).unwrap();
+    std::fs::write(root.join(".claude/CLAUDE.md"), "# my own\n").unwrap();
+    let red = rules();
+    assert!(is_red(&red), "{red:?}");
+    assert!(format!("{red:?}").contains(".claude/CLAUDE.md"), "{red:?}");
+    std::fs::write(root.join(".claude/CLAUDE.md"), "@../AGENTS.md\n").unwrap();
+    assert!(is_green(&rules()), "{:?}", rules());
+    std::fs::remove_dir_all(root.join(".claude")).unwrap();
 
-    std::fs::remove_file(project.root.join("AGENTS.md")).unwrap();
-    assert!(is_red(&verdict(&run(&project), "rules of the place")));
+    // A link to AGENTS.md is the other documented shape; a link to anything
+    // else is a file of its own.
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink("AGENTS.md", root.join("CLAUDE.md")).unwrap();
+        assert!(is_green(&rules()), "{:?}", rules());
+        std::fs::remove_file(root.join("CLAUDE.md")).unwrap();
+        std::fs::write(root.join("OTHER.md"), "# elsewhere\n").unwrap();
+        std::os::unix::fs::symlink("OTHER.md", root.join("CLAUDE.md")).unwrap();
+        assert!(is_red(&rules()), "{:?}", rules());
+        std::fs::remove_file(root.join("CLAUDE.md")).unwrap();
+    }
+
+    // No AGENTS.md: the project states no rules of its own, and what nunki
+    // asks of its agents reaches them in their role prompt.
+    std::fs::remove_file(root.join("AGENTS.md")).unwrap();
+    let green = rules();
+    assert!(is_green(&green), "{green:?}");
+    assert!(format!("{green:?}").contains("role prompt"), "{green:?}");
+}
+
+/// `CLAUDE.local.md` stands in front of AGENTS.md too, but it is personal
+/// and kept out of the history: a slot is a clone, so only one git tracks
+/// ever reaches an agent.
+#[test]
+fn a_claude_local_md_counts_only_once_git_tracks_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = sound(dir.path());
+    let root = project.root.clone();
+    std::fs::remove_dir_all(root.join(".git")).unwrap();
+    std::fs::remove_file(root.join("CLAUDE.md")).unwrap();
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}: {out:?}");
+    };
+    git(&["init", "-q"]);
+    std::fs::write(root.join("CLAUDE.local.md"), "# mine\n").unwrap();
+
+    let untracked = verdict(&run(&project), "rules of the place");
+    assert!(is_green(&untracked), "{untracked:?}");
+
+    // Forced: an ignore file, this machine's or the project's, usually
+    // keeps it out, and the case here is the project that commits it anyway.
+    git(&["add", "-f", "CLAUDE.local.md"]);
+    let tracked = verdict(&run(&project), "rules of the place");
+    assert!(is_red(&tracked), "{tracked:?}");
+    assert!(
+        format!("{tracked:?}").contains("CLAUDE.local.md"),
+        "{tracked:?}"
+    );
 }
 
 #[test]
