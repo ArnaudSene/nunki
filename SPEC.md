@@ -888,7 +888,9 @@ tous et celui dans lequel le projet écrit ses propres services ; **`nunki`
 génère le fichier** de chaque profil à chaque lancement, à partir de
 `nunki.yaml`, du fragment de stack et de l'en-tête du `MISSION.md` (image,
 utilisateur et uid, montages, variables, réseau, capacité donnée à
-l'entrypoint, liste blanche calculée, services du projet inclus) ; puis un
+l'entrypoint, liste blanche calculée, services du projet inclus) — et n'y
+touche plus jusqu'au lancement suivant, à une exception près : `nunki verify`
+y ajoute une base d'avis que l'hôte a remplie après coup (porte 8, 4.4) ; puis un
 **adaptateur de moteur** l'exécute — `docker compose` ou
 `podman-compose`, et le chemin de la socket — et ne fait rien d'autre. `nunki`
 n'invente aucun format, et la frontière de moteur subsiste, réduite à ce
@@ -1035,9 +1037,10 @@ chemin absolu par ligne, chacun gardé comme volume nommé par slot ; c'est la
 stack qui les nomme, parce qu'un chemin comme `/home/agent/.cargo/registry`
 monté par le cœur pour toute stack donnerait à un projet Python un volume
 `cargo` vide et aucun pour pip), `perimeter.yaml` (zone de
-tests pour une mission de tests), le chemin de la base d'avis de la stack
-(fichier plat, jamais monté ; la base elle-même vit sous `~/.nunki/advisories/`
-et est rafraîchie par l'hôte — voir la porte 8 en 4.4), `security.sh`
+tests pour une mission de tests), `advisories.txt` (où la base d'avis de la
+stack vit **sur l'hôte**, puis la commande qui la remplit ; fichier plat,
+jamais monté ; la base est à l'outil et remplie par l'hôte, jamais par
+`nunki` — voir la porte 8 en 4.4), `security.sh`
 (audit de dépendances, scan de secrets, analyse statique — la sécurité
 mécanique, porte 8, définie en 4.4), `versions.txt` (où le dépôt épingle les
 versions de sa chaîne d'outils — ci-dessous). Un
@@ -2756,7 +2759,12 @@ dernier lot. La première rouge arrête tout.
    Mesuré : `git -C <dir> log -1 --format=%cI` rend la date de la dernière
    publication, les bases d'avis étant de simples dépôts git. La stack déclare le chemin de sa base dans un fichier
    plat de son fragment — même famille qu'`allow.txt` et `caches.txt` — et le
-   script y pointe son outil.
+   script y pointe son outil. **Deux lignes** : le chemin, puis la commande de
+   l'outil qui la remplit. `nunki` répète cette commande mot pour mot à qui
+   doit remplir la base, et n'en nomme aucune lui-même : une phrase écrite
+   dans le cœur pour une stack est fausse pour les autres — mesuré (#165), une
+   mission Python s'est vu dire de lancer `cargo deny`. Un fragment d'avant la
+   seconde ligne n'en nomme pas : la phrase renvoie alors à son fichier.
 
    **Absente ou illisible, la porte est `Unplayed` et non rouge.** C'est un
    verdict sur la machine et non sur l'agent, la distinction que la batterie
@@ -2764,6 +2772,27 @@ dernier lot. La première rouge arrête tout.
    s'arrête, ce qui est honnête : une porte de sécurité qui n'a pas pu
    consulter sa base ne doit pas rendre vert, et le remède tient en une
    commande sur l'hôte.
+
+   **Et ce remède suffit, parce que `nunki verify` monte ce que l'hôte a
+   rempli depuis.** Le profil est écrit au lancement, et la base n'y est
+   montée que si elle existe alors — absente, le moteur créerait un répertoire
+   vide à sa place, lu comme « rien à signaler ». Remplie après, elle
+   n'atteint donc jamais le conteneur levé, et la porte restait injouable quoi
+   que fasse l'humain. `nunki verify` ajoute au profil levé les montages de
+   base qui lui manquent, **et eux seuls**, puis le relève comme tout relevage
+   (4.2) : le moteur recrée l'agent avec la base. Pas une régénération : elle
+   relirait le compte, le périmètre et les services, et changerait en pleine
+   mission ce que personne n'a demandé. Le fichier reste à l'humain seul,
+   puisqu'il porte le jeton. Rien n'est recréé tant qu'une campagne de
+   mutation ou l'application lancée pour un rôle vit dans ce conteneur. La
+   porte dit lequel des deux remèdes vaut : la commande de la stack quand
+   l'hôte n'a pas la base, `nunki verify` quand il l'a.
+
+   **Et `nunki check` le dit avant.** Une base qu'une stack déclare et que la
+   machine n'a pas est rouge, avec la commande de la stack : trouvée à la
+   porte 8, elle coûte le premier run entier du codeur, au bout duquel le
+   moniteur s'arrête. Le contrôle ne crée jamais le répertoire, pour la même
+   raison que le montage.
 
    Écarté pour l'instant, et nommé pour qu'on sache qu'il l'a été : un verbe
    qui lancerait la commande de rafraîchissement de la stack **sur l'hôte**.

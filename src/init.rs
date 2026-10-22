@@ -4060,15 +4060,17 @@ pub fn fragment(stack: &str) -> Vec<(&'static str, String, bool)> {
             ),
             (
                 crate::project::ADVISORIES_FILE,
-                "# Where this toolchain's advisory database lives **on the host**.\n\
-                 # One path, and nunki mounts it read-only for gate 8.\n\
+                "# Where this toolchain's advisory database lives **on the host**,\n\
+                 # and nunki mounts it read-only for gate 8. Two lines: the path,\n\
+                 # then the command that fills it.\n\
                  #\n\
                  # nunki does not fill it: the tool owns its own layout, and\n\
                  # cargo-deny refuses a path that is not the one it builds from\n\
-                 # the database's URL. Refresh it with the tool itself, on this\n\
-                 # machine — `cargo deny check advisories` once is enough — and\n\
-                 # nunki will say how old it is.\n\
-                 ~/.cargo/advisory-db\n"
+                 # the database's URL. The tool fills it, on this machine, from\n\
+                 # the project's root — once is enough — and nunki repeats that\n\
+                 # command, word for word, whenever the database is missing.\n\
+                 ~/.cargo/advisory-db\n\
+                 cargo deny check advisories\n"
                     .to_string(),
                 false,
             ),
@@ -4128,20 +4130,21 @@ pub fn fragment(stack: &str) -> Vec<(&'static str, String, bool)> {
             ),
             (
                 crate::project::ADVISORIES_FILE,
-                "# Where this toolchain's advisory database lives **on the host**.\n\
-                 # One path, and nunki mounts it read-only for gate 8.\n\
+                "# Where this toolchain's advisory database lives **on the host**,\n\
+                 # and nunki mounts it read-only for gate 8. Two lines: the path,\n\
+                 # then the command that fills it.\n\
                  #\n\
                  # nunki does not fill it: the tool owns its own layout, and\n\
                  # osv-scanner reads it from `$XDG_CACHE_HOME/osv-scalibr` and\n\
                  # nowhere else — there is no path flag (measured on 2.6.0).\n\
-                 # Refresh it with the tool itself, on this machine:\n\
-                 #\n\
-                 #   osv-scanner scan source --download-offline-databases \\\n\
-                 #     --offline-vulnerabilities --lockfile uv.lock\n\
+                 # The tool fills it, on this machine, from the project's root,\n\
+                 # and nunki repeats that command, word for word, whenever the\n\
+                 # database is missing.\n\
                  #\n\
                  # This names that one directory rather than the whole of\n\
                  # `~/.cache`, which holds everything else this machine caches.\n\
-                 ~/.cache/osv-scalibr\n"
+                 ~/.cache/osv-scalibr\n\
+                 osv-scanner scan source --download-offline-databases --offline-vulnerabilities --lockfile uv.lock\n"
                     .to_string(),
                 false,
             ),
@@ -4202,19 +4205,20 @@ pub fn fragment(stack: &str) -> Vec<(&'static str, String, bool)> {
             ),
             (
                 crate::project::ADVISORIES_FILE,
-                "# Where this toolchain's advisory database lives **on the host**.\n\
-                 # One path, and nunki mounts it read-only for gate 8.\n\
+                "# Where this toolchain's advisory database lives **on the host**,\n\
+                 # and nunki mounts it read-only for gate 8. Two lines: the path,\n\
+                 # then the command that fills it.\n\
                  #\n\
                  # The same directory the Python stack names: osv-scanner keeps one\n\
                  # database per ecosystem side by side — `npm/` beside `PyPI/` — and\n\
                  # reads them from `$XDG_CACHE_HOME/osv-scalibr` and nowhere else\n\
                  # (there is no path flag; measured on 2.6.0).\n\
                  #\n\
-                 # Refresh it with the tool itself, on this machine:\n\
-                 #\n\
-                 #   osv-scanner scan source --download-offline-databases \\\n\
-                 #     --offline-vulnerabilities --lockfile pnpm-lock.yaml\n\
-                 ~/.cache/osv-scalibr\n"
+                 # The tool fills it, on this machine, from the project's root,\n\
+                 # and nunki repeats that command, word for word, whenever the\n\
+                 # database is missing.\n\
+                 ~/.cache/osv-scalibr\n\
+                 osv-scanner scan source --download-offline-databases --offline-vulnerabilities --lockfile pnpm-lock.yaml\n"
                     .to_string(),
                 false,
             ),

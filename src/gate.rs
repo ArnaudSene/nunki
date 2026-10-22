@@ -1242,14 +1242,7 @@ fn mechanical_security_in(
         // a security gate that could not consult its database must not report
         // green (SPEC 4.4).
         68 => return Ok(not_in_the_copy(&judged.stack)),
-        69 => {
-            return Ok(Decision::Unplayed(format!(
-                "no advisory database at {}: the stack declares where it lives on the \
-                 host, and the host fills it — `cargo deny check advisories` once is \
-                 enough",
-                judged.advisories_at
-            )));
-        }
+        69 => return Ok(no_database(verification.project, judged)),
         // The script's word for "the base is not here". `nunki` resolves it to
         // a commit above and should never hand over one the copy lacks, so
         // this is the second lock: unplayed rather than a comparison against
@@ -1394,6 +1387,42 @@ fn into(stack: &crate::project::Stack) -> String {
     } else {
         format!("cd {} || exit 68\n", crate::exec::quote(&stack.dir))
     }
+}
+
+/// The script's 69, "I have no advisory database", sent where it is cured.
+/// Unplayed and not red: a verdict on the machine rather than on the agent,
+/// and a security gate that could not consult its database must not report
+/// green (SPEC 4.4).
+///
+/// The host is looked at, because the same 69 has two causes a human fixes
+/// in two places: a database nobody filled, and one filled after the slot's
+/// container was lifted without it — `nunki verify` remounts that one. The
+/// command is the stack's own, read from its fragment: gate 8 names no tool.
+fn no_database(project: &crate::project::Project, judged: &crate::run::Judged) -> Decision {
+    let stack = &judged.stack.name;
+    Decision::Unplayed(match project.stack_advisories(stack) {
+        Some(host) if host.is_dir() => format!(
+            "the {stack} advisory database at {} is on this machine but not in the slot's \
+             container, which was lifted before it was filled. `nunki verify` remounts it \
+             once no mutation campaign and no application is running there",
+            host.display()
+        ),
+        Some(host) => format!(
+            "no {stack} advisory database at {}: gate 8 cannot look without it. {}, then \
+             `nunki verify` picks the mission up",
+            host.display(),
+            project.how_to_fill_advisories(stack)
+        ),
+        None => format!(
+            "the {stack} security script found no advisory database at {}, and the stack \
+             declares none in {}",
+            judged.advisories_at,
+            project
+                .fragment(stack)
+                .join(crate::project::ADVISORIES_FILE)
+                .display()
+        ),
+    })
 }
 
 fn not_in_the_copy(stack: &crate::project::Stack) -> Decision {

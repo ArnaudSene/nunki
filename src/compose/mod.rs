@@ -525,7 +525,10 @@ fn agent(plan: &Plan, dialect: &Dialect) -> Result<Service, ComposeError> {
     })
 }
 
-fn mount(host: &Path, at: &Path, mode: &str) -> String {
+/// A bind mount as the profile spells it. Public for the one caller that adds
+/// one to a profile already written ([`crate::run::remount_advisories`]), so
+/// the line it adds is the line a launch would have written.
+pub fn mount(host: &Path, at: &Path, mode: &str) -> String {
     format!("{}:{}:{mode}", display(host), display(at))
 }
 

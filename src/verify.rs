@@ -83,6 +83,10 @@ pub enum Step {
     /// campaign dies either way. Said rather than not — a slot that went
     /// quiet for an hour with nothing to show for it is worth a sentence.
     CampaignEnded { since: String },
+    /// The host filled these advisory databases after the slot's profile was
+    /// written, and `verify` mounted them before playing a gate: the agent's
+    /// container was recreated with them (SPEC 4.4, gate 8).
+    Remounted { databases: Vec<std::path::PathBuf> },
     /// A run ended and left processes behind in its container — started in
     /// the background, and orphaned when it ended. `said` is what was done:
     /// the pids stopped, or why nobody could look. Said, never decided on:
@@ -251,6 +255,17 @@ pub fn verify_as(
     let now = crate::state::now_secs();
 
     let mut steps = Vec::new();
+    // A database the host filled after the profile was written, mounted
+    // before any gate reads it (SPEC 4.4, gate 8; #165): this is the
+    // `nunki verify` the unplayable gate sends a human back to. Not while the
+    // application a role was given is up — it lives in the container this
+    // recreates, and gate 8 says why it is still waiting.
+    if state.app.is_none() {
+        let databases = crate::run::remount_advisories(engine.as_ref(), project, &slot, &stack)?;
+        if !databases.is_empty() {
+            steps.push(Step::Remounted { databases });
+        }
+    }
     loop {
         // The frozen header, never the file: from the moment a mission
         // starts, `nunki` reads its own copy (SPEC 4.1).

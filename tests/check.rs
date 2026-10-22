@@ -535,6 +535,9 @@ fn the_verb_is_green_on_this_very_repository() {
     for (name, body, _) in nunki::init::fragment("rust") {
         std::fs::write(project_home.join("stacks/rust").join(name), body).unwrap();
     }
+    // And a machine that has filled the stack's advisory database, which no
+    // `init` can do for it: without it the check is red, and rightly (#165).
+    std::fs::create_dir_all(home.path().join(".cargo/advisory-db")).unwrap();
 
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_nunki"))
         .env("HOME", home.path())
@@ -1413,4 +1416,104 @@ fn a_declaration_that_cannot_be_read_is_a_red_line_naming_the_file_and_why() {
         }
         other => panic!("{other:?}"),
     }
+}
+
+/// A project whose stack declares an advisory database, at `db` and filled
+/// by `command`.
+fn declaring_a_database(dir: &Path, db: &Path, command: Option<&str>) -> Project {
+    let sound = sound(dir);
+    let project = Project::at(
+        sound.root.clone(),
+        Config {
+            stacks: vec!["python".into()],
+            ..config()
+        },
+        dir.join("nunki"),
+    );
+    std::fs::create_dir_all(project.fragment("python")).unwrap();
+    let mut file = format!("# where it lives\n{}\n", db.display());
+    if let Some(command) = command {
+        file.push_str(&format!("{command}\n"));
+    }
+    std::fs::write(
+        project
+            .fragment("python")
+            .join(nunki::project::ADVISORIES_FILE),
+        file,
+    )
+    .unwrap();
+    project
+}
+
+/// An advisory database the stack declares and this machine lacks is red
+/// before any mission starts, with the stack's own command (#165): found at
+/// gate 8 instead, it costs the coder's whole first run, and the monitor
+/// stops on it. Green once it is there. Never created by the check — an
+/// empty directory would read as a database with nothing to report.
+#[test]
+fn an_advisory_database_this_machine_lacks_is_red_with_the_stacks_command() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("osv-scalibr");
+    let command = "osv-scanner scan source --download-offline-databases --lockfile uv.lock";
+    let project = declaring_a_database(dir.path(), &db, Some(command));
+
+    let missing = verdict(&run(&project), "the python advisory database");
+    let Verdict::Red(why) = &missing else {
+        panic!("{missing:?}");
+    };
+    assert!(why.contains(&db.display().to_string()), "{why}");
+    assert!(why.contains(&format!("`{command}`")), "{why}");
+    assert!(
+        !db.exists(),
+        "the check made the directory it was asked about"
+    );
+
+    std::fs::create_dir_all(&db).unwrap();
+    assert!(
+        matches!(
+            verdict(&run(&project), "the python advisory database"),
+            Verdict::Green(_)
+        ),
+        "{}",
+        run(&project).render()
+    );
+}
+
+/// A fragment an older `nunki` wrote names the path and no command: the red
+/// sends the human to the file rather than making a command up.
+#[test]
+fn an_older_fragment_without_a_command_sends_the_human_to_its_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = declaring_a_database(dir.path(), &dir.path().join("db"), None);
+
+    let missing = verdict(&run(&project), "the python advisory database");
+    let Verdict::Red(why) = &missing else {
+        panic!("{missing:?}");
+    };
+    let file = project
+        .fragment("python")
+        .join(nunki::project::ADVISORIES_FILE);
+    assert!(why.contains(&file.display().to_string()), "{why}");
+}
+
+/// A stack that declares no advisory database is not asked about one.
+#[test]
+fn a_stack_that_declares_no_advisory_database_is_not_asked_about_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = declaring_a_database(dir.path(), &dir.path().join("db"), None);
+    std::fs::remove_file(
+        project
+            .fragment("python")
+            .join(nunki::project::ADVISORIES_FILE),
+    )
+    .unwrap();
+
+    assert!(
+        !run(&project)
+            .checks
+            .iter()
+            .any(|c| c.what.contains("advisory database")),
+        "{}",
+        run(&project).render()
+    );
 }
