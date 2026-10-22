@@ -312,8 +312,8 @@ impl Stuck {
 
 /// Which account a mission spends, and the token to pass. The mission's
 /// header wins over the project's declaration, which wins over the index's
-/// default — and the token reaches the container as an environment variable
-/// at launch, never written into a slot (SPEC 3.3, 4.3).
+/// default — and the token reaches the harness as an environment variable of
+/// the exec that starts it, written into no file (SPEC 3.3, 4.3; #170).
 pub fn account_for(
     project: &Project,
     from_mission: Option<&str>,
@@ -758,7 +758,7 @@ pub fn launch(l: &Launching) -> Result<Launched, RunError> {
     std::fs::write(&prompt, role_prompt(project, role))
         .map_err(|e| RunError::Io(prompt.clone(), e))?;
 
-    let plan = plan(project, slot, &stack, &images, paths, &token, header, role)?;
+    let plan = plan(project, slot, &stack, &images, paths, header, role)?;
     let ports_dropped = ports_dropped(&plan);
     // The perimeter the firewall is about to enforce, written where the agent
     // reads: an autonomous agent cannot ask why a name does not resolve.
@@ -779,9 +779,10 @@ pub fn launch(l: &Launching) -> Result<Launched, RunError> {
 
     std::fs::write(&file, crate::compose::generate(&plan, engine.dialect())?)
         .map_err(|e| RunError::Io(file.clone(), e))?;
-    // The generated profile carries the subscription token in the agent's
-    // environment, so the file is the human's alone. It lives at the HQ and
-    // never in the repository, and it is not readable by anyone else.
+    // The human's alone. It no longer carries the subscription token
+    // (#170), but it is the HQ's — the human's paths and mounts — and this
+    // rewrite is also what takes the token out of a profile an older nunki
+    // wrote. It lives at the HQ and never in the repository.
     restrict(&file)?;
 
     // A volume can only be mounted at a path the read-only bind already
@@ -820,13 +821,24 @@ pub fn launch(l: &Launching) -> Result<Launched, RunError> {
 
     // Step 4. The agent.
     let (session, resume) = session_for(l.session.as_ref());
+    // The one secret that enters a container, and the only exec that needs
+    // it: the harness's (SPEC 3.3, 4.3). Passed by name at that exec, its
+    // value in the client's environment, and written into no file — not the
+    // profile, which a human reads to understand a slot (#170). Which
+    // variable carries it is the harness's business, not this module's.
+    let token_env = claude_code::ClaudeCode::new(
+        Default::default(),
+        Box::new(crate::harness::spawn::LocalSpawner),
+    )
+    .token_env();
     let spawner = ContainerSpawner::new(
         engine.clone(),
         file.clone(),
         &compose_project,
         AGENT_SERVICE,
     )
-    .identified_by(&session.0);
+    .identified_by(&session.0)
+    .passing_secret(token_env, &token);
     let harness = claude_code::ClaudeCode::new(
         claude_code::Config {
             model: model_for(project, header),
@@ -939,7 +951,8 @@ pub fn relift(
 /// account, the perimeter and the services again, and could change under a
 /// mission what no human asked to change. The line added is the one a launch
 /// would have written ([`crate::compose::mount`]), the file is restricted again
-/// because it carries the subscription token, and the profile is lifted the
+/// — it is the human's, and one an older nunki wrote still carries the token
+/// until the next launch rewrites it (#170) — and the profile is lifted the
 /// way [`relift`] lifts it, so the engine recreates the agent with the mount.
 ///
 /// Nothing is touched while a mutation campaign is filed: it lives in the
@@ -1300,16 +1313,18 @@ fn refs(branch: &str) -> String {
 }
 
 /// The profile a run lifts, as data. Public because it **is** the run's
-/// perimeter, its mounts and its secret: a test that cannot read it can only
-/// check that the file was written, not what it says.
-#[allow(clippy::too_many_arguments)]
+/// perimeter and its mounts: a test that cannot read it can only check that
+/// the file was written, not what it says.
+///
+/// It takes no token, so no profile can carry one (#170): the subscription
+/// token reaches the run through [`ContainerSpawner::passing_secret`], at the
+/// exec that starts the harness, and is written into no file.
 pub fn plan(
     project: &Project,
     slot: &Slot,
     stack: &str,
     images: &image::Images,
     paths: &Paths,
-    token: &str,
     header: &crate::mission::Header,
     role: Role,
 ) -> Result<Plan, RunError> {
@@ -1337,14 +1352,7 @@ pub fn plan(
     let (uid, gid) = image::host_ids();
 
     let mut environment = BTreeMap::new();
-    // The one secret that enters a container, and it enters at launch, never
-    // through a file in the slot (SPEC 3.3, 4.3). Which variable carries it
-    // is the harness's business, not this module's.
-    let harness = claude_code::ClaudeCode::new(
-        Default::default(),
-        Box::new(crate::harness::spawn::LocalSpawner),
-    );
-    environment.insert(harness.token_env().to_string(), token.to_string());
+    // Not the token, which no profile carries (#170): see `launch`.
     environment.insert("HQ_ROLE".to_string(), role::slug(role).to_string());
     environment.insert("HQ_BRANCH".to_string(), header.branch.clone());
 

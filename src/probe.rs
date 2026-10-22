@@ -260,7 +260,8 @@ pub fn scratch_paths(
 /// volume by name only (see `compose::services`).
 ///
 /// No token: a check must not spend a subscription, and nothing here runs
-/// the harness — the agent's container only sleeps.
+/// the harness — the agent's container only sleeps. No profile carries one
+/// anyway (#170).
 pub fn system_plan(
     project: &Project,
     slot: &Slot,
@@ -279,7 +280,6 @@ pub fn system_plan(
         stack,
         images,
         paths,
-        "nunki-check-spends-no-subscription",
         header,
         Role::Integrator,
     )?;
