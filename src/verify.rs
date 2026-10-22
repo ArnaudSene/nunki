@@ -364,10 +364,7 @@ pub fn verify_as(
                                 // `nunki verify` reads it back and plays the
                                 // gate again.
                                 gate::Verdict::CampaignOwed(why) => {
-                                    steps.push(Step::CampaignOwed {
-                                        role: Role::Coder,
-                                        why,
-                                    });
+                                    steps.push(campaign_owed(&state, Role::Coder, why));
                                     return Ok(steps);
                                 }
                                 gate::Verdict::Wall(why) => {
@@ -408,10 +405,7 @@ pub fn verify_as(
                         match verdict {
                             gate::Verdict::Red(reason) => Some(Event::GatesFailed { reason }),
                             gate::Verdict::CampaignOwed(why) => {
-                                steps.push(Step::CampaignOwed {
-                                    role: Role::Coder,
-                                    why,
-                                });
+                                steps.push(campaign_owed(&state, Role::Coder, why));
                                 return Ok(steps);
                             }
                             gate::Verdict::Wall(why) => {
@@ -526,10 +520,7 @@ pub fn verify_as(
                     // here — the flow stays at the gates and the sentence
                     // goes to the human, who has the verb.
                     gate::Verdict::CampaignOwed(why) => {
-                        steps.push(Step::CampaignOwed {
-                            role: subject.role,
-                            why,
-                        });
+                        steps.push(campaign_owed(&state, subject.role, why));
                         return Ok(steps);
                     }
                     gate::Verdict::Wall(why) => {
@@ -634,10 +625,7 @@ pub fn verify_as(
                                     // `nunki verify` reads it back and plays
                                     // the gate again.
                                     gate::Verdict::CampaignOwed(why) => {
-                                        steps.push(Step::CampaignOwed {
-                                            role: Role::Integrator,
-                                            why,
-                                        });
+                                        steps.push(campaign_owed(&state, Role::Integrator, why));
                                         return Ok(steps);
                                     }
                                     gate::Verdict::Wall(why) => {
@@ -922,10 +910,7 @@ pub fn verify_as(
                         Event::GatesFailed { reason }
                     }
                     gate::Verdict::CampaignOwed(why) => {
-                        steps.push(Step::CampaignOwed {
-                            role: Role::Coder,
-                            why,
-                        });
+                        steps.push(campaign_owed(&state, Role::Coder, why));
                         return Ok(steps);
                     }
                     gate::Verdict::Wall(why) => {
@@ -1015,6 +1000,16 @@ fn last_round_since(
     };
     let head = crate::git::slot_head(tree)?;
     Ok(crate::push::not_attacked(tree, &last.head, &head)?)
+}
+
+/// What a gate waiting on a mutation campaign answers: the campaign is owed,
+/// unless the mission is held. A campaign is up to an hour of work in the
+/// slot's container, and both callers of a [`Step::CampaignOwed`] — the
+/// monitor and a human's `nunki verify` — start it at once; a hold is a human
+/// saying "start nothing" (#166). `nunki mission mutants` still starts one: it
+/// is that human asking for it by name.
+fn campaign_owed(state: &MissionState, role: Role, why: String) -> Step {
+    held(state, role).unwrap_or(Step::CampaignOwed { role, why })
 }
 
 /// The step a held mission answers with instead of a launch, or `None` if it
@@ -1469,10 +1464,7 @@ fn security_concluded(
                 };
             }
             gate::Verdict::CampaignOwed(why) => {
-                steps.push(Step::CampaignOwed {
-                    role: Role::Security,
-                    why,
-                });
+                steps.push(campaign_owed(state, Role::Security, why));
                 return Ok(ReadBack::Stopped);
             }
             gate::Verdict::Wall(why) => {

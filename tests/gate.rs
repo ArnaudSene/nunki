@@ -1354,6 +1354,140 @@ fn a_campaign_that_has_already_measured_nothing_is_a_red_gate() {
     }
 }
 
+impl Fixture {
+    /// A campaign on file from earlier content — the first campaign of the
+    /// mission, before a volet's commit moved the fingerprint — recorded on
+    /// `date`, with one survivor.
+    fn earlier_campaign(&self, date: &str) {
+        nunki::mutants::write(
+            self._dir.path(),
+            &Campaign {
+                stopped: None,
+                files: None,
+                chain: Default::default(),
+                fingerprint: "b326371".repeat(6),
+                head: git(&self.tree, &["rev-parse", "HEAD"]),
+                date: date.into(),
+                survivors: vec![Survivor {
+                    found_on: None,
+                    id: "src/visit.py:12: replace set() with None".into(),
+                    file: "src/visit.py".into(),
+                    line: 12,
+                    end_line: None,
+                    description: "replace set() with None".into(),
+                    outcome: None,
+                    refused: None,
+                }],
+                tried: None,
+            },
+        )
+        .unwrap();
+    }
+
+    /// Where the stderr of a campaign on the current content lands.
+    fn campaign_stderr(&self) -> PathBuf {
+        let touched = nunki::gate::touched_since_base(&self.tree, "dev").unwrap();
+        let fingerprint = nunki::mutants::fingerprint(&self.tree, &touched).unwrap();
+        self._dir
+            .path()
+            .join("runs")
+            .join(format!("mutants-{}.err", &fingerprint[..7]))
+    }
+}
+
+/// #166 as it was met. The first campaign left survivors and went back to
+/// the coder; the volet's commit moved the content; the campaign on the new
+/// content could not run and said why. Gate 7 used to read that stderr only
+/// when no `MUTANTS.json` existed, so it answered "ran on other content", and
+/// the monitor started the same doomed campaign every few minutes for hours.
+/// It is a red gate, with what the campaign said, and the coder gets it.
+#[test]
+fn a_campaign_that_could_not_run_after_a_volet_is_a_red_gate_not_another_campaign() {
+    let f = Fixture::new();
+    f.journal_names_head();
+    f.earlier_campaign("2026-01-01T00:00:00Z");
+
+    assert!(
+        matches!(f.gate_seven(Role::Coder).decision, Decision::Unplayed(ref why) if why.contains("other content")),
+        "before any attempt on today's content, a campaign is owed"
+    );
+
+    f.campaign_said(
+        "UnitTestDidNotEnd: still running after 10.0 s\n\
+         failed to collect stats. runner returned 1\n\
+         nunki: it stopped without saying it had finished\n",
+    );
+
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => {
+            assert!(why.contains("already run and measured nothing"), "{why}");
+            assert!(why.contains("UnitTestDidNotEnd"), "{why}");
+        }
+        other => panic!("the same campaign would be started again: {other:?}"),
+    }
+}
+
+/// The stderr counts only when it was written after the campaign on file was
+/// recorded. A campaign that measured leaves a stderr too, full of its
+/// progress; content brought back to what it measured — a reverted commit —
+/// must not read that stderr as a campaign that could not run.
+#[test]
+fn a_stderr_older_than_the_campaign_on_file_is_not_a_campaign_that_could_not_run() {
+    let f = Fixture::new();
+    f.journal_names_head();
+    f.campaign_said("⠙ 2764/2764  🎉 2764 🫥 0  ⏰ 0  🤔 0  🙁 0\n");
+    let stderr = f.campaign_stderr();
+    std::fs::File::options()
+        .write(true)
+        .open(&stderr)
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_767_225_600))
+        .unwrap(); // 2026-01-01T00:00:00Z
+    f.earlier_campaign("2026-03-01T00:00:00Z");
+
+    assert!(
+        matches!(f.gate_seven(Role::Coder).decision, Decision::Unplayed(_)),
+        "{:?}",
+        f.gate_seven(Role::Coder).decision
+    );
+
+    // In the same second is not after: a campaign that measured writes its
+    // last progress frame and is recorded within one second, and that
+    // stderr is its own, not a failure's.
+    f.earlier_campaign("2026-01-01T00:00:00Z");
+    assert!(
+        matches!(f.gate_seven(Role::Coder).decision, Decision::Unplayed(_)),
+        "{:?}",
+        f.gate_seven(Role::Coder).decision
+    );
+
+    // Recorded before the stderr was written, the same file is the failure.
+    f.earlier_campaign("2025-12-01T00:00:00Z");
+    assert!(
+        matches!(f.gate_seven(Role::Coder).decision, Decision::Failed(_)),
+        "{:?}",
+        f.gate_seven(Role::Coder).decision
+    );
+}
+
+/// A campaign whose date is not in the form `nunki` writes cannot be put in
+/// order against the stderr, and the stderr counts: one volet that shows the
+/// coder what the campaign said costs less than the same campaign started at
+/// every tick.
+#[test]
+fn a_campaign_date_nunki_cannot_read_lets_the_stderr_count() {
+    let f = Fixture::new();
+    f.journal_names_head();
+    f.earlier_campaign("the day before");
+    f.campaign_said("ImportError: no module named visit\n");
+
+    assert!(
+        matches!(f.gate_seven(Role::Coder).decision, Decision::Failed(_)),
+        "{:?}",
+        f.gate_seven(Role::Coder).decision
+    );
+}
+
 /// The cause a campaign that could not run hands back is what a terminal
 /// would have shown, not every frame of its progress bar.
 ///

@@ -1603,9 +1603,19 @@ fn read(path: &Path) -> Result<String, GateError> {
 /// chooses ([`crate::mutants::stopped_short`]). Read as "measured nothing",
 /// it went back to the coder as if running it again changed nothing — when
 /// raising its bound does.
+///
+/// `since` is the date of the campaign on file, when one is — a campaign on
+/// other content, which a volet's commit has overtaken (#166). The stderr
+/// counts only if it was written after that campaign was recorded. A
+/// campaign that did measure leaves a stderr too, full of its progress, and
+/// content brought back to what it measured — a reverted commit — would
+/// otherwise read that stderr as a campaign that could not run. The date the
+/// campaign recorded, and not the file's: a ruling rewrites the file, and
+/// would make the stderr of the campaign that failed after it look older.
 fn campaign_that_could_not_run(
     mission_dir: &Path,
     fingerprint: &str,
+    since: Option<&str>,
 ) -> Result<Option<String>, GateError> {
     let short = &fingerprint[..7.min(fingerprint.len())];
     let err = mission_dir
@@ -1616,6 +1626,11 @@ fn campaign_that_could_not_run(
     if said.trim().is_empty() {
         return Ok(None);
     }
+    if let Some(since) = since
+        && !written_after(&err, since)?
+    {
+        return Ok(None);
+    }
     Ok(Some(format!(
         "a campaign on this exact content has already run and measured nothing, so \
          running it again changes nothing — the branch has to. What it said, from \
@@ -1623,6 +1638,29 @@ fn campaign_that_could_not_run(
         err.display(),
         tail(&said, "")
     )))
+}
+
+/// Whether `path` was last written after `date`, a campaign's recorded date
+/// (`YYYY-MM-DDTHH:MM:SSZ`, as `nunki` writes it). Both are put in that one
+/// form, in which the order of the text is the order of time.
+///
+/// A date not in that form counts the file as written after it. The two
+/// errors are not worth the same: a stderr wrongly read sends the coder one
+/// volet that shows it the stderr, while one wrongly ignored starts the same
+/// doomed campaign at every tick, for ever (#166).
+fn written_after(path: &Path, date: &str) -> Result<bool, GateError> {
+    let modified = std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .map_err(|e| GateError::Unreadable(path.to_path_buf(), e))?;
+    let secs = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let in_form = date.len() == 20
+        && date.ends_with('Z')
+        && date.as_bytes().get(4) == Some(&b'-')
+        && date.as_bytes().get(10) == Some(&b'T');
+    Ok(!in_form || crate::state::rfc3339(secs).as_str() > date)
 }
 
 /// Gate 7: every mutant that survived has received an outcome (SPEC 4.4) —
@@ -1684,7 +1722,7 @@ fn mutation(subject: &Subject, threshold: Threshold) -> Result<Outcome, GateErro
     let campaign =
         crate::mutants::read(subject.mission_dir).map_err(|e| GateError::Mutants(e.to_string()))?;
     let Some(campaign) = campaign else {
-        if let Some(why) = campaign_that_could_not_run(subject.mission_dir, &want)? {
+        if let Some(why) = campaign_that_could_not_run(subject.mission_dir, &want, None)? {
             return Ok(Outcome::of(gate, Decision::Failed(why)));
         }
         return Ok(Outcome::of(
@@ -1697,6 +1735,16 @@ fn mutation(subject: &Subject, threshold: Threshold) -> Result<Outcome, GateErro
         ));
     };
     if campaign.fingerprint != want {
+        // The campaign on file is an earlier one, and the content has moved
+        // since — a volet's commit, typically. If a campaign on today's
+        // content has already failed, that is what is said, as when no file
+        // is there: otherwise the next `verify` asks for the same campaign
+        // again, it fails the same way, and the monitor loops (#166).
+        if let Some(why) =
+            campaign_that_could_not_run(subject.mission_dir, &want, Some(&campaign.date))?
+        {
+            return Ok(Outcome::of(gate, Decision::Failed(why)));
+        }
         return Ok(Outcome::of(
             gate,
             Decision::Unplayed(format!(

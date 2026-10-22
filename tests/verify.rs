@@ -4333,3 +4333,101 @@ fn verify_mounts_nothing_while_an_application_lives_in_the_container() {
     );
     assert_eq!(std::fs::read_to_string(&profile).unwrap(), before);
 }
+
+/// A world at the gates after the coder's lot, the way #166 met it: a
+/// profile up, and an engine whose every command answers green, so the only
+/// gate with something to say is gate 7.
+fn at_the_gates() -> (World, Arc<dyn nunki::engine::Engine>) {
+    use nunki::engine::{ExecOutput, fake::FakeEngine};
+    let world = World::new(1);
+    world.commit("src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    world.journal_names_head();
+    std::fs::write(
+        world.mission().join("PR.md"),
+        "# What this changes\n\nL1, and nothing else.\n",
+    )
+    .unwrap();
+    world.coder_finished_the_lot();
+    let file = nunki::run::profile_path(&world.project, "one");
+    std::fs::write(&file, "services:\n  agent:\n    image: alpine:3.20\n").unwrap();
+    let engine: Arc<dyn nunki::engine::Engine> =
+        Arc::new(FakeEngine::default().with_exec(ExecOutput {
+            status: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+    (world, engine)
+}
+
+/// #166 end to end. The campaign on file is the first one, on content a volet
+/// has since changed, and the campaign on today's content could not run and
+/// said why. `verify` used to answer `CampaignOwed`, and the monitor started
+/// it again every few minutes; now the coder is sent the reason as a volet.
+#[test]
+fn a_campaign_that_could_not_run_after_a_volet_goes_back_to_the_coder() {
+    let (world, engine) = at_the_gates();
+    nunki::mutants::write(
+        &world.mission(),
+        &nunki::mutants::Campaign {
+            stopped: None,
+            files: None,
+            chain: Default::default(),
+            fingerprint: "b326371".repeat(6),
+            head: git(&world.tree, &["rev-parse", "HEAD"]),
+            date: "2026-01-01T00:00:00Z".into(),
+            survivors: Vec::new(),
+            tried: None,
+        },
+    )
+    .unwrap();
+    let touched = nunki::gate::touched_since_base(&world.tree, "dev").unwrap();
+    let fingerprint = nunki::mutants::fingerprint(&world.tree, &touched).unwrap();
+    let runs = world.mission().join("runs");
+    std::fs::create_dir_all(&runs).unwrap();
+    std::fs::write(
+        runs.join(format!("mutants-{}.err", &fingerprint[..7])),
+        "UnitTestDidNotEnd: still running after 10.0 s\n\
+         failed to collect stats. runner returned 1\n",
+    )
+    .unwrap();
+    // Held, so the volet is opened and no run is launched for it.
+    world.hold();
+
+    let steps = verify::verify(&world.project, "m1", engine, "docker").unwrap();
+
+    assert!(
+        !steps.iter().any(|s| matches!(s, Step::CampaignOwed { .. })),
+        "the same campaign is asked for again: {steps:?}"
+    );
+    match world.state().flow.stage() {
+        Stage::Coding {
+            work: Work::Volet { cause, .. },
+            ..
+        } => assert!(cause.contains("UnitTestDidNotEnd"), "{cause}"),
+        other => panic!("not sent back to the coder: {other:?} after {steps:?}"),
+    }
+}
+
+/// A held mission starts no campaign (#166): `verify` answers that it is
+/// held where it would have owed one, so neither the monitor nor a human's
+/// `nunki verify` starts an hour of work in the slot, and the monitor stops
+/// on it — which is what `nunki mission wait` reports.
+#[test]
+fn a_held_mission_owes_no_campaign_and_the_monitor_stops_on_it() {
+    let (world, engine) = at_the_gates();
+
+    let steps = verify::verify(&world.project, "m1", engine.clone(), "docker").unwrap();
+    assert!(
+        matches!(steps.last(), Some(Step::CampaignOwed { .. })),
+        "unheld, this world owes a campaign: {steps:?}"
+    );
+
+    world.hold();
+    let steps = verify::verify(&world.project, "m1", engine, "docker").unwrap();
+
+    assert!(matches!(steps.last(), Some(Step::Held { .. })), "{steps:?}");
+    match nunki::monitor::after_verify("m1", &Ok(steps)) {
+        nunki::monitor::Next::Exit(why) => assert!(why.contains("held by"), "{why}"),
+        other => panic!("the monitor would go on: {other:?}"),
+    }
+}
