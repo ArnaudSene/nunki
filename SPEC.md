@@ -3365,6 +3365,24 @@ Ce que la boucle veut dire, et ce qu'elle ne veut pas dire.
     pour la dernière pousserait sur un rapport que personne n'a fini de lire.
     Sans `--finding`, c'est ce que le rapport porte encore qui est levé, et
     la mission conclut.
+  - `nunki mission accept <mission> --fixed-by <commit> --because <comment
+    le HQ l'a vérifié>` lève le rapport entier **comme corrigé**, et non
+    comme un risque accepté : le codeur l'a corrigé après le dernier tour,
+    l'agent sécurité n'a pas attaqué la correction, et le HQ l'a vérifiée.
+    Mesuré (#162) : sur une mission `critical`, le troisième tour rapporte
+    un `MEDIUM`, le codeur le corrige, et la seule levée possible était
+    l'acceptation d'un risque — la pull request disait « accepted, not
+    fixed » d'un constat corrigé, et le HQ a dû y ajouter un paragraphe à
+    lui. Seulement une fois les tours épuisés : tant qu'il en reste un, il
+    attaque la correction, et c'est le chemin d'`iterate`. Le commit doit
+    venir après celui que le dernier tour a attaqué et être sur la branche
+    poussée. Il n'est lu qu'en hexadécimal, si bien que rien de ce qui est
+    passé là ne peut se lire comme une option de git, et il est inscrit par
+    son identifiant complet. Le HQ l'apprend où il lit quoi faire :
+    `mission wait`, `verify` et le `FOLLOWUP_HQ.md` du plafond des tours le
+    nomment à côté d'`accept` dès que les tours sont épuisés. Si plusieurs
+    levées suivent le dernier rapport, la plus récente décide entre corrigé
+    et accepté.
   - `nunki mission iterate <mission>` renvoie au codeur en volet. C'est un
     **geste**, pas un défaut : un `verify` qui renverrait de lui-même
     dépenserait un volet que l'humain voulait peut-être dépenser en
@@ -3468,6 +3486,14 @@ Ce que la boucle veut dire, et ce qu'elle ne veut pas dire.
       et que leur détail est retenu jusqu'à leur correction — aucun mot du
       rapport, d'un titre de constat ni d'un `why_acceptable`, ni dans le
       titre ni dans le corps ;
+    - sur un `FINDINGS` levé comme corrigé (`--fixed-by`), retenu : combien
+      de constats par sévérité, le commit qui les a corrigés, que l'agent
+      sécurité ne l'a pas attaqué et qui l'a vérifié — mais ni la raison du
+      HQ, qui peut décrire le constat autant que la correction, ni la
+      promesse de publier « une fois corrigé » : une correction que l'agent
+      n'a pas attaquée n'ouvre pas le rapport ;
+    - sur un `FINDINGS` levé comme corrigé, publié : le commit, qui l'a
+      vérifié et comment, puis les constats et le rapport ;
     - sur un `FINDINGS` levé, publié, qui l'a accepté, chaque constat avec
       sa sévérité, son titre et sa raison, puis le rapport.
 

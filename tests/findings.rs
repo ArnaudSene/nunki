@@ -341,6 +341,7 @@ fn only_a_lift_by_nunki_is_listed_as_one() {
         head: "abc".into(),
         date: "2026-10-05T00:00:00Z".into(),
         by_nunki: true,
+        fixed_by: None,
     };
     assert_eq!(
         nunki::findings::lifted_by_nunki(&lift),

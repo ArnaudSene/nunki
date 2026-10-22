@@ -352,6 +352,18 @@ fn settled(id: &str, state: &MissionState) -> Option<Status> {
                     ),
                 ),
             };
+            // The rounds spent: the mission is back on its last report, and
+            // a commit after it may be the fix. The HQ learns the lift that
+            // says so here, where it reads what to do (#162).
+            let what = if flow.security_rounds() >= flow.max_security_rounds() {
+                format!(
+                    "{what}; the rounds are spent, so if a commit after the last one fixed \
+                     it and you checked it, `nunki mission accept {id} --fixed-by <commit> \
+                     --because <how>` lifts it as fixed rather than as an accepted risk"
+                )
+            } else {
+                what
+            };
             return Some(Status::new(
                 id,
                 stage,

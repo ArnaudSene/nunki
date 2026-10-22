@@ -71,7 +71,8 @@ pub enum PushError {
     Red { role: Role, verdict: Verdict },
     #[error(
         "the security agent concluded FINDINGS and nobody lifted it on {0} — \
-         `nunki mission accept` records who took the risk, and why"
+         `nunki mission accept` records who took the risk, and why; once the rounds are \
+         spent, `--fixed-by <commit>` records a fix made after the last round instead"
     )]
     NotLifted(String),
     #[error(
@@ -650,6 +651,20 @@ struct Attacked {
     /// when it is a `FINDINGS`: its findings are not fixed. `None` on a
     /// `CLEAR`.
     lifted_by: Option<Vec<String>>,
+    /// The fix the lift names, when the lift that decides says its findings
+    /// were fixed after the last round rather than accepted (#162).
+    fixed: Option<Fixed>,
+}
+
+/// A fix a human named when lifting the last `FINDINGS`: made after the
+/// security agent's last round, never attacked by it, checked by the HQ.
+struct Fixed {
+    /// The fixing commit, its full id.
+    commit: String,
+    /// Who checked it, as the pull request names them.
+    by: String,
+    /// How they checked it: their `--because`.
+    why: String,
 }
 
 impl Attacked {
@@ -658,6 +673,25 @@ impl Attacked {
             on: concluded.head.clone(),
             said: concluded.said.clone(),
             lifted_by,
+            fixed: None,
+        }
+    }
+
+    /// The same, lifted by `lifts`: the latest decides whether its findings
+    /// were fixed or accepted. A plain `accept`, then a volet from
+    /// `Verified`, then `accept --fixed-by` on the same last report is a
+    /// reachable path, and the fix is the later word (#162).
+    fn lifted(concluded: &crate::state::Concluded, lifts: &[&crate::state::Accepted]) -> Self {
+        let latest = lifts.iter().max_by(|a, b| a.date.cmp(&b.date));
+        Attacked {
+            fixed: latest.and_then(|lift| {
+                lift.fixed_by.as_ref().map(|commit| Fixed {
+                    commit: commit.clone(),
+                    by: lifted_by(&[lift]).join(" and "),
+                    why: crate::text::one_line(&lift.why),
+                })
+            }),
+            ..Attacked::of(concluded, Some(lifted_by(lifts)))
         }
     }
 }
@@ -769,7 +803,7 @@ fn security_holds(
                 return Err(PushError::NotLifted(head.to_string()));
             }
             held.lifted_by_nunki = by_nunki(&lifts);
-            held.attacked = Some(Attacked::of(concluded, Some(lifted_by(&lifts))));
+            held.attacked = Some(Attacked::lifted(concluded, &lifts));
         } else {
             green(Role::Security, concluded.verdict)?;
             held.attacked = Some(Attacked::of(concluded, None));
@@ -790,7 +824,7 @@ fn security_holds(
             return Err(PushError::NotLifted(head.to_string()));
         }
         held.lifted_by_nunki = by_nunki(&lifts);
-        held.attacked = Some(Attacked::of(concluded, Some(lifted_by(&lifts))));
+        held.attacked = Some(Attacked::lifted(concluded, &lifts));
     } else {
         green(Role::Security, concluded.verdict)?;
         held.attacked = Some(Attacked::of(concluded, None));
@@ -831,7 +865,7 @@ fn lifted_after<'s>(
 
 /// Whether `older` is `newer` or one of its ancestors. Anything git cannot
 /// answer — an unknown commit — is a no.
-fn is_ancestor(tree: &std::path::Path, older: &str, newer: &str) -> bool {
+pub(crate) fn is_ancestor(tree: &std::path::Path, older: &str, newer: &str) -> bool {
     crate::git::on_slot(tree, &["merge-base", "--is-ancestor", older, newer]).is_ok()
 }
 
@@ -1017,6 +1051,45 @@ pub fn withheld_note(
     findings: Option<&crate::mission::FindingList>,
     by: &[String],
 ) -> (String, Option<usize>) {
+    let (counted, count) = counted(findings);
+    let note = format!(
+        "The security review of this branch reported {counted}. They were accepted, not \
+         fixed — by {} — and their details are withheld from this pull request until they \
+         are fixed.",
+        accepted_by(by)
+    );
+    (note, count)
+}
+
+/// The note for withheld findings that a human lifted as fixed after the last
+/// round (#162): the count, the fixing commit, that the security agent did
+/// not attack it and who checked it. Not the reason they gave, which can
+/// describe the finding as well as the fix — the rule that withholds a
+/// finding's words withholds those too — and no promise of publication once
+/// fixed: a fix the agent never attacked does not open the report.
+fn withheld_fixed_note(
+    findings: Option<&crate::mission::FindingList>,
+    fixed: &Fixed,
+) -> (String, Option<usize>) {
+    let (counted, count) = counted(findings);
+    let note = format!(
+        "The security review of this branch reported {counted}. They were fixed after the \
+         security agent's last round, by commit `{}`, which the agent did not attack; {} \
+         checked the fix. Their details are withheld from this pull request.",
+        short(&fixed.commit),
+        fixed.by
+    );
+    (note, count)
+}
+
+/// A commit as the pull request names it.
+fn short(commit: &str) -> &str {
+    commit.get(..12).unwrap_or(commit)
+}
+
+/// How many findings per severity, as the notes say it, and how many in all
+/// when `nunki` kept a list it can read.
+fn counted(findings: Option<&crate::mission::FindingList>) -> (String, Option<usize>) {
     use crate::mission::{FindingList, Severity};
     let listed = match findings {
         Some(FindingList::Listed(findings)) => Some(findings),
@@ -1056,13 +1129,7 @@ pub fn withheld_note(
                  verdict"
             .to_string(),
     };
-    let note = format!(
-        "The security review of this branch reported {counted}. They were accepted, not \
-         fixed — by {} — and their details are withheld from this pull request until they \
-         are fixed.",
-        accepted_by(by)
-    );
-    (note, listed.map(Vec::len))
+    (counted, listed.map(Vec::len))
 }
 
 /// Who accepted a `FINDINGS`, as the pull request names them.
@@ -1100,19 +1167,33 @@ fn security_section(
     let mut parts: Vec<String> = Vec::new();
     let mut withheld = None;
     let findings = attacked.said.as_ref().and_then(|s| s.findings.as_ref());
-    match &attacked.lifted_by {
-        Some(by) if withhold => {
+    match (&attacked.lifted_by, &attacked.fixed) {
+        (Some(_), Some(fixed)) if withhold => {
+            let (note, count) = withheld_fixed_note(findings, fixed);
+            parts.push(note);
+            withheld = Some(Withheld { findings: count });
+        }
+        (Some(_), Some(fixed)) => parts.push(format!(
+            "The security agent attacked commit `{}` and concluded FINDINGS. They were fixed \
+             after its last round, by commit `{}`, which it did not attack; {} checked the \
+             fix: {}",
+            attacked.on,
+            short(&fixed.commit),
+            fixed.by,
+            fixed.why
+        )),
+        (Some(by), None) if withhold => {
             let (note, count) = withheld_note(findings, by);
             parts.push(note);
             withheld = Some(Withheld { findings: count });
         }
-        Some(by) => parts.push(format!(
+        (Some(by), None) => parts.push(format!(
             "The security agent attacked commit `{}` and concluded FINDINGS. They were \
              accepted, not fixed — by {}.",
             attacked.on,
             accepted_by(by)
         )),
-        None => parts.push(format!(
+        (None, _) => parts.push(format!(
             "The security agent attacked commit `{}` and concluded CLEAR.",
             attacked.on
         )),
