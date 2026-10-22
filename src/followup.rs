@@ -97,6 +97,32 @@ pub fn lifted_all(file: &Path, who: &str, why: &str, head: &str) -> Result<(), F
     )
 }
 
+/// Record that a human lifted the security verdict as fixed by `fix`, a commit
+/// after the security agent's last round that it did not attack, and how
+/// they checked the fix (#162).
+pub fn lifted_as_fixed(
+    file: &Path,
+    who: &str,
+    why: &str,
+    fix: &str,
+    head: &str,
+) -> Result<(), FollowupError> {
+    append(
+        file,
+        &format!(
+            "## {date} — {who} lifted the security verdict on {short}, as fixed\n\n\
+             **Fixed by:** `{fix}`, after the security agent's last round, which did\n\
+             not attack it.\n\n\
+             **Checked because:** {why}\n\n\
+             `nunki push` says the findings were fixed by that commit, not attacked by\n\
+             the agent and checked by {who} — not that a risk was accepted.\n",
+            date = today(),
+            short = short(head),
+            fix = short(fix),
+        ),
+    )
+}
+
 /// Record that `nunki` lifted a security verdict itself, every finding in it
 /// being `LOW` or `INFO`: the findings, one per line, with the agent's
 /// reason for each (SPEC 4.5).
@@ -380,7 +406,10 @@ pub fn security_capped_on_findings(
              concluded FINDINGS, and the fix made after it has not been attacked\n\
              again: the gates are green on it, and that is all that was played.\n\
              The mission is back on those findings — `nunki mission accept`\n\
-             lifts them, `nunki mission iterate` sends one more volet.\n{commits}",
+             lifts them, `nunki mission iterate` sends one more volet. If a commit\n\
+             below fixed them and you checked it, `nunki mission accept --fixed-by\n\
+             <commit> --because <how you checked it>` lifts them as fixed rather than\n\
+             as an accepted risk, and the pull request says so.\n{commits}",
             date = today(),
             commits = unattacked(not_attacked),
         ),

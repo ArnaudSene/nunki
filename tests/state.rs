@@ -447,12 +447,26 @@ fn an_old_lift_reads_as_a_humans_and_a_humans_is_written_as_before() {
 
     let ours = nunki::state::Accepted {
         by_nunki: true,
+        fixed_by: None,
         ..old
     };
     let written = serde_json::to_string(&ours).unwrap();
     assert!(written.contains("\"by_nunki\":true"), "{written}");
     let back: nunki::state::Accepted = serde_json::from_str(&written).unwrap();
     assert_eq!(back, ours);
+
+    // Nor does a lift name a fix it was not given (#162): absent from an old
+    // file, and not written for a plain one, so an older `nunki` still reads
+    // a newer file; written and read back when it was given.
+    assert_eq!(old.fixed_by, None);
+    assert!(!written.contains("fixed_by"), "{written}");
+    let fixed = nunki::state::Accepted {
+        fixed_by: Some("0123456789abcdef0123456789abcdef01234567".into()),
+        ..ours
+    };
+    let written = serde_json::to_string(&fixed).unwrap();
+    let back: nunki::state::Accepted = serde_json::from_str(&written).unwrap();
+    assert_eq!(back, fixed);
 }
 
 /// The verbs through the binary: `mission stop` asks why before anything

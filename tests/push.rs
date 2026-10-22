@@ -447,6 +447,7 @@ fn findings_nobody_lifted_do_not_reach_the_forge() {
         head: head.clone(),
         date: "2026-09-10T00:00:00Z".into(),
         by_nunki: false,
+        fixed_by: None,
     });
     world.store().save(&state).unwrap();
     push::push(&world.project, "m1", true).unwrap();
@@ -928,6 +929,7 @@ impl World {
             head: head.to_string(),
             date: date.to_string(),
             by_nunki: false,
+            fixed_by: None,
         });
         self.store().save(&state).unwrap();
         if matches!(self.stage(), Stage::Findings { .. }) && finding.is_none() {
@@ -3688,4 +3690,138 @@ fn the_stated_limit_an_html_or_underlined_security_heading_is_sent_as_written() 
         );
         assert_eq!(pushed.withheld, Some(push::Withheld { findings: Some(3) }));
     }
+}
+
+impl World {
+    /// A human's lift of the verdict as a whole on `head` at `date`, as
+    /// `nunki mission accept --fixed-by <fix>` records it, or as a plain
+    /// `accept` when `fix` is `None` (#162). The flow moves when it is on the
+    /// findings.
+    fn lifted_as(&self, fix: Option<&str>, head: &str, date: &str) {
+        let mut state = self.state();
+        state.accepted.push(nunki::state::Accepted {
+            finding: None,
+            why: match fix {
+                Some(_) => "probed the redirect on the host: it is refused".into(),
+                None => "behind the VPN".into(),
+            },
+            who: "Alex Martin".into(),
+            head: head.to_string(),
+            date: date.to_string(),
+            by_nunki: false,
+            fixed_by: fix.map(str::to_string),
+        });
+        self.store().save(&state).unwrap();
+        if matches!(self.stage(), Stage::Findings { .. }) {
+            self.event(Event::HumanAccepted);
+        }
+    }
+
+    /// #162's path at `standard`: the one round concludes FINDINGS, the HQ
+    /// sends it back, the coder fixes it, and the mission is back on that
+    /// report with no round left. The fix.
+    fn fixed_after_the_last_round(&self) -> String {
+        self.on_github();
+        self.with_token();
+        self.pr_says(PR_AS_WRITTEN);
+        self.coded("pub fn one() -> u8 { 2 }\n", "the lot");
+        self.security(Verdict::Findings, T1);
+        self.said(findings_said());
+        self.event(Event::Iterate);
+        let fix = self.coded("pub fn one() -> u8 { 3 }\n", "the fix");
+        assert!(
+            matches!(self.stage(), Stage::Findings { .. }),
+            "{:?}",
+            self.stage()
+        );
+        fix
+    }
+}
+
+/// #162. A finding fixed after the last round and lifted as such is pushed
+/// as fixed by its commit, not attacked by the agent and checked by the HQ —
+/// never as "accepted, not fixed". Withheld, as the project withholds every
+/// finding by default: the count, the commit and who checked it, and no word
+/// of the report, of a finding or of the HQ's reason, which can describe the
+/// finding as well as the fix; and no promise to publish "once fixed". The
+/// fixing commit is still named as not attacked.
+#[test]
+fn a_finding_fixed_after_the_last_round_is_pushed_as_fixed_and_still_withheld() {
+    let world = World::at(nunki::mission::Rigor::Standard);
+    let fix = world.fixed_after_the_last_round();
+    world.lifted_as(Some(&fix), &fix, T2);
+
+    let (pushed, _, body) = pushed_request(&world);
+
+    assert_eq!(pushed.not_attacked, vec![named(&fix, "the fix")]);
+    assert_eq!(
+        body,
+        format!(
+            "{BODY_AS_WRITTEN}\n\n## Security\n\n\
+             The security review of this branch reported 3 finding(s) — 1 MEDIUM, 2 LOW. They \
+             were fixed after the security agent's last round, by commit `{}`, which the agent \
+             did not attack; the HQ (Alex Martin) checked the fix. Their details are withheld \
+             from this pull request.\n\n\
+             The security agent's rounds were spent, and it did not attack the commits pushed \
+             after it:\n\n\
+             - {}",
+            &fix[..12],
+            named(&fix, "the fix")
+        )
+    );
+    for word in SECRETS.iter().chain(&["probed the redirect"]) {
+        assert!(!body.contains(word), "{word:?}:\n{body}");
+    }
+}
+
+/// Published, the same lift says how the HQ checked the fix, then the
+/// findings and the report, as any published section does.
+#[test]
+fn a_published_finding_fixed_after_the_last_round_says_how_the_hq_checked_it() {
+    let mut world = World::at(nunki::mission::Rigor::Standard);
+    world.project.config.security_findings = nunki::project::SecurityFindings::Publish;
+    let fix = world.fixed_after_the_last_round();
+    world.lifted_as(Some(&fix), &fix, T2);
+
+    let (_, _, body) = pushed_request(&world);
+
+    assert!(
+        body.contains(&format!(
+            "They were fixed after its last round, by commit `{}`, which it did not attack; \
+             the HQ (Alex Martin) checked the fix: probed the redirect on the host: it is \
+             refused",
+            &fix[..12]
+        )),
+        "{body}"
+    );
+    assert!(!body.contains("accepted, not fixed"), "{body}");
+    assert!(
+        body.contains("zanzibar"),
+        "the published findings follow:\n{body}"
+    );
+}
+
+/// When more than one lift follows the last report, the latest decides
+/// whether it was fixed or accepted: a fix named after a plain `accept` is
+/// the later word, and a plain `accept` after a fix takes the risk back.
+#[test]
+fn the_latest_lift_after_the_last_round_decides_fixed_or_accepted() {
+    let world = World::at(nunki::mission::Rigor::Standard);
+    let fix = world.fixed_after_the_last_round();
+    world.lifted_as(None, &fix, T2);
+    world.lifted_as(Some(&fix), &fix, T3);
+    let (_, _, body) = pushed_request(&world);
+    assert!(
+        body.contains("They were fixed after the security agent's last round"),
+        "{body}"
+    );
+    assert!(!body.contains("accepted, not fixed"), "{body}");
+
+    let world = World::at(nunki::mission::Rigor::Standard);
+    let fix = world.fixed_after_the_last_round();
+    world.lifted_as(Some(&fix), &fix, T2);
+    world.lifted_as(None, &fix, T3);
+    let (_, _, body) = pushed_request(&world);
+    assert!(body.contains("accepted, not fixed"), "{body}");
+    assert!(!body.contains("They were fixed"), "{body}");
 }

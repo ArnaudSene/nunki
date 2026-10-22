@@ -4445,3 +4445,135 @@ fn a_held_mission_owes_no_campaign_and_the_monitor_stops_on_it() {
         other => panic!("the monitor would go on: {other:?}"),
     }
 }
+
+/// #162. Once the security rounds are spent, a finding the coder fixed after
+/// the last round can be lifted as **fixed by that commit**, not as an
+/// accepted risk: the commit is resolved to its full id and recorded, the
+/// mission concludes as any lift of the whole verdict does, and
+/// `FOLLOWUP_HQ.md` says it was fixed and how the HQ checked it.
+#[test]
+fn a_fix_after_the_last_round_is_lifted_as_fixed_by_its_commit() {
+    let world = with_security_agent_at(nunki::mission::Rigor::Standard);
+    world.at_findings();
+    assert_eq!(world.state().flow.security_rounds(), 1);
+    world.commit("src/lib.rs", "pub fn one() -> u8 { 2 }\n", "the fix");
+    let fix = world.head();
+
+    let state = nunki::findings::accept_fixed(
+        &world.project,
+        "m1",
+        &fix[..10],
+        "probed /auth/callback on the host: the redirect is refused",
+    )
+    .unwrap();
+
+    let lift = state.accepted.last().unwrap();
+    assert_eq!(lift.fixed_by.as_deref(), Some(fix.as_str()));
+    assert_eq!(lift.finding, None);
+    assert!(
+        !matches!(state.flow.stage(), Stage::Findings { .. }),
+        "{:?}",
+        state.flow.stage()
+    );
+    let carried = world.followup();
+    assert!(
+        carried.contains(&format!("**Fixed by:** `{}`", &fix[..12])),
+        "{carried}"
+    );
+    assert!(carried.contains("redirect is refused"), "{carried}");
+}
+
+/// What `--fixed-by` refuses, each with its own sentence: a round still to
+/// play (it would attack the fix), what is not a hexadecimal commit id (and
+/// so never reaches git as an option), a commit the slot does not have, the
+/// commit the last round attacked, and a commit off the branch being pushed.
+/// None of them records anything or moves the mission.
+#[test]
+fn a_fix_is_refused_with_rounds_left_off_the_branch_or_not_after_the_report() {
+    // At `critical`, the first round leaves two.
+    let world = with_security_agent(1);
+    world.at_findings();
+    world.commit("src/lib.rs", "pub fn one() -> u8 { 2 }\n", "the fix");
+    let err =
+        nunki::findings::accept_fixed(&world.project, "m1", &world.head(), "checked").unwrap_err();
+    assert!(
+        matches!(
+            err,
+            nunki::findings::FindingsError::FixWithRoundsLeft {
+                rounds: 1,
+                max: 3,
+                ..
+            }
+        ),
+        "{err}"
+    );
+
+    let world = with_security_agent_at(nunki::mission::Rigor::Standard);
+    world.at_findings();
+    let attacked = world.head();
+    // Off the branch: a commit after the report, on another one.
+    git(&world.tree, &["checkout", "-q", "-b", "elsewhere"]);
+    world.commit("src/lib.rs", "pub fn one() -> u8 { 7 }\n", "not pushed");
+    let elsewhere = world.head();
+    git(&world.tree, &["checkout", "-q", "mission/x"]);
+    world.commit("src/lib.rs", "pub fn one() -> u8 { 2 }\n", "the fix");
+
+    let refused = |commit: &str| {
+        nunki::findings::accept_fixed(&world.project, "m1", commit, "checked").unwrap_err()
+    };
+    let err = refused("--upload-pack=touch");
+    assert!(
+        matches!(err, nunki::findings::FindingsError::FixNotACommit(_)),
+        "{err}"
+    );
+    let err = refused("HEAD");
+    assert!(
+        matches!(err, nunki::findings::FindingsError::FixNotACommit(_)),
+        "{err}"
+    );
+    let err = refused("deadbeefdeadbeef");
+    assert!(
+        matches!(err, nunki::findings::FindingsError::FixUnknown(_)),
+        "{err}"
+    );
+    let err = refused(&attacked);
+    assert!(
+        matches!(err, nunki::findings::FindingsError::FixNotAfter { .. }),
+        "{err}"
+    );
+    let err = refused(&elsewhere);
+    assert!(
+        matches!(err, nunki::findings::FindingsError::FixNotOnBranch { .. }),
+        "{err}"
+    );
+
+    let state = world.state();
+    assert!(state.accepted.is_empty(), "{:?}", state.accepted);
+    assert!(matches!(state.flow.stage(), Stage::Findings { .. }));
+}
+
+/// The HQ learns the lift where it reads what to do: once the rounds are
+/// spent and the mission is back on its last report, `nunki mission wait`
+/// names `--fixed-by` beside `accept` and `iterate`; while a round is left it
+/// does not, since the fix would be attacked (#162).
+#[test]
+fn wait_names_fixed_by_only_once_the_rounds_are_spent() {
+    let context = nunki::wait::Context {
+        watcher: nunki::wait::Watcher::Gone,
+        window: None,
+        proposals: Ok(Vec::new()),
+    };
+    let spent = with_security_agent_at(nunki::mission::Rigor::Standard);
+    spent.at_findings();
+    let status = nunki::wait::status("m1", &spent.state(), &context).unwrap();
+    assert!(
+        status.line().contains("--fixed-by <commit>"),
+        "{}",
+        status.line()
+    );
+
+    let left = with_security_agent(1);
+    left.at_findings();
+    let status = nunki::wait::status("m1", &left.state(), &context).unwrap();
+    assert!(!status.line().contains("--fixed-by"), "{}", status.line());
+}

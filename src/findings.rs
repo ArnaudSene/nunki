@@ -9,6 +9,9 @@
 //!   default because a session that iterates by itself spends a volet the
 //!   human might have wanted to spend on an acceptance instead;
 //! - **lifted as a risk**, by a human, with a reason. That is [`accept`].
+//!   Once the security rounds are spent, a human may also lift it as
+//!   **fixed by a commit the agent did not attack** ([`accept_fixed`]): the
+//!   coder fixed it after the last round, and the HQ checked the fix (#162).
 //!
 //! A mission that came through verified is still read by the HQ before it is
 //! pushed, and what the HQ refuses goes back the same way, as a volet:
@@ -40,6 +43,33 @@ pub enum Lift {
 pub enum FindingsError {
     #[error("mission {0} has not started — nothing has reported a finding yet")]
     NotStarted(String),
+    #[error(
+        "mission {mission} has security round(s) left ({rounds} of {max} played): a fix made \
+         now is attacked by the next one, which `nunki mission iterate {mission}` sends it \
+         to. `--fixed-by` is for a fix the spent rounds can no longer reach"
+    )]
+    FixWithRoundsLeft {
+        mission: String,
+        rounds: u32,
+        max: u32,
+    },
+    #[error(
+        "`{0}` is not a commit id: `--fixed-by` takes the commit that fixed the findings, \
+         in hexadecimal, as `git log` names it"
+    )]
+    FixNotACommit(String),
+    #[error("{0} is not a commit of the slot's repository")]
+    FixUnknown(String),
+    #[error(
+        "{fix} does not come after {on}, the commit the security agent's last round \
+         attacked: a fix comes after the report it answers"
+    )]
+    FixNotAfter { fix: String, on: String },
+    #[error(
+        "{fix} is not on the branch at {head}: what `nunki push` pushes would not carry \
+         the fix"
+    )]
+    FixNotOnBranch { fix: String, head: String },
     #[error(
         "mission {mission} is at {stage:?}: not on a security verdict, not verified, and not at \
          the gates over an incomplete mutation campaign — there is nothing to lift or to \
@@ -136,6 +166,39 @@ pub fn accept(
     lift: Lift,
     why: &str,
 ) -> Result<MissionState, FindingsError> {
+    record(project, id, lift, why, None)
+}
+
+/// Lift the verdict as a whole as **fixed by `commit`**, a commit after the
+/// security agent's last round that it never attacked, the HQ having checked
+/// the fix: `why` says how (#162).
+///
+/// Before this, the only lift was an accepted risk, and `nunki push` wrote
+/// "accepted, not fixed" over a finding the coder had fixed — the HQ had to
+/// add a bullet of its own to the pull request so that nobody took it for an
+/// open risk.
+///
+/// Only once the rounds are spent: while one is left, a fix is attacked by
+/// it, and that is `iterate`'s road. The commit must come after the commit
+/// the last round attacked and be on the branch being pushed; it is taken as
+/// hexadecimal only, so nothing given here can read as an option to git, and
+/// recorded by its full id.
+pub fn accept_fixed(
+    project: &Project,
+    id: &str,
+    commit: &str,
+    why: &str,
+) -> Result<MissionState, FindingsError> {
+    record(project, id, Lift::Verdict, why, Some(commit))
+}
+
+fn record(
+    project: &Project,
+    id: &str,
+    lift: Lift,
+    why: &str,
+    fixed_by: Option<&str>,
+) -> Result<MissionState, FindingsError> {
     if why.trim().is_empty() {
         return Err(FindingsError::NoReason);
     }
@@ -157,12 +220,19 @@ pub fn accept(
     let slot = crate::slot::find(project, &state.slot)?;
     let head = crate::git::slot_head(&slot.tree)?;
     let paths = Paths::of(&project.hq_root, id);
+    let fixed_by = match fixed_by {
+        Some(commit) => Some(the_fix(id, &state, &slot.tree, commit, &head)?),
+        None => None,
+    };
 
-    match &lift {
-        Lift::Finding(finding) => {
+    match (&lift, &fixed_by) {
+        (Lift::Finding(finding), _) => {
             crate::followup::lifted(&paths.followup, &who, finding, why, &head)?;
         }
-        Lift::Verdict => {
+        (Lift::Verdict, Some(fix)) => {
+            crate::followup::lifted_as_fixed(&paths.followup, &who, why, fix, &head)?;
+        }
+        (Lift::Verdict, None) => {
             crate::followup::lifted_all(&paths.followup, &who, why, &head)?;
         }
     }
@@ -176,6 +246,7 @@ pub fn accept(
         head,
         date: crate::state::now_rfc3339(),
         by_nunki: false,
+        fixed_by,
     });
     // The file is written before the state, and the state before the
     // transition: a session that dies in between leaves a record of what the
@@ -185,6 +256,57 @@ pub fn accept(
         store.apply(&mut state, Event::HumanAccepted)?;
     }
     Ok(state)
+}
+
+/// The commit `--fixed-by` names, checked and resolved to its full id: the
+/// rounds spent, hexadecimal, a commit of the slot, after the commit the last
+/// round attacked, and on the branch at `head`.
+fn the_fix(
+    id: &str,
+    state: &MissionState,
+    tree: &std::path::Path,
+    commit: &str,
+    head: &str,
+) -> Result<String, FindingsError> {
+    let (rounds, max) = (
+        state.flow.security_rounds(),
+        state.flow.max_security_rounds(),
+    );
+    if rounds < max {
+        return Err(FindingsError::FixWithRoundsLeft {
+            mission: id.to_string(),
+            rounds,
+            max,
+        });
+    }
+    if !(4..=40).contains(&commit.len()) || !commit.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(FindingsError::FixNotACommit(commit.to_string()));
+    }
+    let fix = crate::git::on_slot(
+        tree,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{commit}^{{commit}}"),
+        ],
+    )
+    .map(|out| out.trim().to_string())
+    .map_err(|_| FindingsError::FixUnknown(commit.to_string()))?;
+    let on = state
+        .concluded(crate::harness::Role::Security)
+        .map(|c| c.head.clone())
+        .unwrap_or_default();
+    if fix == on || !crate::push::is_ancestor(tree, &on, &fix) {
+        return Err(FindingsError::FixNotAfter { fix, on });
+    }
+    if !crate::push::is_ancestor(tree, &fix, head) {
+        return Err(FindingsError::FixNotOnBranch {
+            fix,
+            head: head.to_string(),
+        });
+    }
+    Ok(fix)
 }
 
 /// Record `nunki`'s own lift of a `FINDINGS` whose every finding is `LOW` or
@@ -219,6 +341,7 @@ pub fn lift_by_nunki(
         head: head.to_string(),
         date: crate::state::now_rfc3339(),
         by_nunki: true,
+        fixed_by: None,
     });
     store.save(state)?;
     store.apply(state, Event::HumanAccepted)?;

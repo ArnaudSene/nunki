@@ -226,6 +226,13 @@ pub struct Accepted {
     /// from older state files, which only ever held a human's lifts.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub by_nunki: bool,
+    /// The commit that fixed what was lifted, after the security agent's last
+    /// round, when the lift says so (`nunki mission accept --fixed-by`): a
+    /// finding fixed and checked by the HQ, but not attacked by the agent,
+    /// whose rounds were spent (#162). Its full id. `None` for a risk
+    /// accepted as it stands, and absent from older state files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixed_by: Option<String>,
 }
 
 /// Who an automatic lift names.

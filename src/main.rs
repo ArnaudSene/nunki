@@ -619,8 +619,15 @@ enum MissionCommand {
         /// still carries is lifted and the mission concludes.
         #[arg(long, value_name = "NAME")]
         finding: Option<String>,
-        /// Why the risk is acceptable. Required: a risk accepted without a
-        /// reason is not accepted, it is forgotten.
+        /// The commit that fixed the findings after the security agent's last
+        /// round, which it did not attack. The pull request then says they
+        /// were fixed by it and checked by you, not accepted as a risk. Only
+        /// once the rounds are spent, and for the report as a whole.
+        #[arg(long = "fixed-by", value_name = "COMMIT", conflicts_with = "finding")]
+        fixed_by: Option<String>,
+        /// Why the risk is acceptable — or, with `--fixed-by`, how you
+        /// checked the fix. Required: a risk accepted without a reason is not
+        /// accepted, it is forgotten.
         #[arg(long = "because", value_name = "WHY")]
         why: String,
     },
@@ -1346,6 +1353,16 @@ fn main() -> ExitCode {
             {
                 Ok(steps) => {
                     let mut owed = false;
+                    // The rounds spent, read from the state rather than from a
+                    // step: the step is said once, when the cap is met, and a
+                    // later `verify` on the same report would not repeat it.
+                    // What makes `--fixed-by` the lift to name (#162).
+                    let spent = nunki::state::Store::open(&project.hq_root)
+                        .and_then(|store| store.load(&mission))
+                        .map(|state| {
+                            state.flow.security_rounds() >= state.flow.max_security_rounds()
+                        })
+                        .unwrap_or(false);
                     for step in &steps {
                         match step {
                             nunki::verify::Step::Gates { role, report } => {
@@ -1528,6 +1545,14 @@ fn main() -> ExitCode {
                                     "          `nunki mission accept {mission} --because <why>` \
                                      lifts what remains."
                                 );
+                                if spent {
+                                    println!(
+                                        "          the rounds are spent: if a commit after the \
+                                         last one fixed it and you checked it, `nunki mission \
+                                         accept {mission} --fixed-by <commit> --because <how>` \
+                                         lifts it as fixed, not as an accepted risk."
+                                    );
+                                }
                             }
                         }
                     }
@@ -2499,14 +2524,32 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             }
         },
 
-        MissionCommand::Accept { id, finding, why } => {
+        MissionCommand::Accept {
+            id,
+            finding,
+            fixed_by,
+            why,
+        } => {
             let lift = match finding {
                 Some(name) => nunki::findings::Lift::Finding(name),
                 None => nunki::findings::Lift::Verdict,
             };
-            match nunki::findings::accept(project, &id, lift, &why) {
+            let accepted = match &fixed_by {
+                Some(commit) => nunki::findings::accept_fixed(project, &id, commit, &why),
+                None => nunki::findings::accept(project, &id, lift, &why),
+            };
+            match accepted {
                 Ok(state) => {
-                    println!("accepted  written to FOLLOWUP_HQ.md and to nunki's state");
+                    match state.accepted.last().and_then(|a| a.fixed_by.as_ref()) {
+                        Some(fix) => println!(
+                            "accepted  as fixed by {}, not attacked by the security agent — \
+                             written to FOLLOWUP_HQ.md and to nunki's state",
+                            fix.get(..12).unwrap_or(fix)
+                        ),
+                        None => {
+                            println!("accepted  written to FOLLOWUP_HQ.md and to nunki's state")
+                        }
+                    }
                     println!("stage     {:?}", state.flow.stage());
                     if matches!(
                         state.flow.stage(),

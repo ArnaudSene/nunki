@@ -373,14 +373,14 @@ state again every 30 seconds (`--every`). It prints one line — what stopped,
 and who it waits on —
 
 ```text
-m1 · findings · security round 1 of 1 found: … · awaits the HQ: `nunki mission iterate m1` sends it back to the coder, or `nunki mission accept m1 --because <why>` lifts it
+m1 · findings · security round 1 of 1 found: … · awaits the HQ: `nunki mission iterate m1` sends it back to the coder, or `nunki mission accept m1 --because <why>` lifts it; the rounds are spent, so if a commit after the last one fixed it and you checked it, `nunki mission accept m1 --fixed-by <commit> --because <how>` lifts it as fixed rather than as an accepted risk
 ```
 
 A report the rigor does not count as blocking says so, and names `accept`
 first:
 
 ```text
-m1 · findings · security round 1 of 1 found: … — it does not block: at standard, security round 1, a report whose worst finding is MEDIUM does not block — only a HIGH does · awaits the HQ: `nunki mission accept m1 --because <why>` lifts it, or `nunki mission iterate m1 --override --because <why>` sends it back as a departure from the rigor
+m1 · findings · security round 1 of 1 found: … — it does not block: at standard, security round 1, a report whose worst finding is MEDIUM does not block — only a HIGH does · awaits the HQ: `nunki mission accept m1 --because <why>` lifts it, or `nunki mission iterate m1 --override --because <why>` sends it back as a departure from the rigor; the rounds are spent, so if a commit after the last one fixed it and you checked it, `nunki mission accept m1 --fixed-by <commit> --because <how>` lifts it as fixed rather than as an accepted risk
 ```
 
 and exits with a code that says which stop it is:
@@ -995,7 +995,13 @@ shows a change of it. Once the security rounds are spent, the agent is not
 called again. A spent cap never verifies a red verdict: if the last round
 concluded `FINDINGS`, green gates bring the mission back to those findings,
 where `mission accept` lifts them or `mission iterate` spends a volet, and
-`FOLLOWUP_HQ.md` says the fix was not attacked again. A lifted report stays
+`FOLLOWUP_HQ.md` says the fix was not attacked again. When a commit after
+that round fixed them and you checked it, `mission accept --fixed-by <commit>
+--because <how you checked it>` lifts them as fixed rather than as an
+accepted risk: the pull request then says they were fixed by that commit,
+which the security agent did not attack, and who checked it. It is refused
+while a round is left — that round attacks the fix — and for a commit that
+does not come after the last round's or is not on the branch. A lifted report stays
 lifted: a later review whose volet comes through the gates green is verified
 without bringing it back. `nunki mission status` prints the rigor and the rounds played.
 
@@ -1051,6 +1057,10 @@ departures from the rigor, then that section, last:
   many findings per severity, accepted by whom, and that their details are
   withheld until they are fixed. No word of the report, of a finding's
   title or of its reason reaches the forge, in the title or the body;
+- on a `FINDINGS` lifted as fixed (`mission accept --fixed-by`), the count,
+  the fixing commit, that the security agent did not attack it and who
+  checked it — still no word of the report, and not the HQ's reason either,
+  which can describe the finding as well as the fix;
 - with no security agent, no section.
 
 Where the rounds were spent, the section also names the commits the
