@@ -1522,7 +1522,12 @@ un `kill`, le lot en cours est une tentative échouée et la relance repart du
 dernier état de reprise écrit.
 
 **`stop` dit deux choses, et la première est inconditionnelle.** Toujours,
-la mission est **retenue** : `nunki` ne lance plus aucun run pour elle. C'est une
+la mission est **retenue** : `nunki` ne lance plus aucun run pour elle, **ni
+aucune campagne de mutation** — jusqu'à une heure de travail dans le
+conteneur du slot, que le moniteur et `verify` lanceraient sinon d'eux-mêmes
+pour la porte 7 (mesuré, #166 : retenue, la mission en relançait une au tic
+suivant). `nunki mission mutants`, qu'un humain tape par son nom, en lance
+toujours une. C'est une
 écriture dans l'état, pas un signal — l'ancien fichier `STOP` était un
 marqueur et pas un geste, et une mission peut être retenue **entre deux
 runs**, quand il n'y a précisément aucun processus à interrompre. `--now`
@@ -1925,6 +1930,22 @@ dernier lot. La première rouge arrête tout.
    la vérité. Une porte 7 qui ne peut pas dire « je n'ai
    pas pu mesurer » ment — c'est la règle du 4.4 sur la base d'avis, ici pour
    la campagne.
+
+   **Et elle n'est pas redemandée sur le même contenu.** Ce qu'elle a dit
+   sur sa sortie d'erreur, à côté du journal nommé par l'empreinte, est ce
+   que la porte 7 rend : rouge, et le codeur reçoit la raison en volet —
+   relancer la même campagne sur le même contenu échouerait pareil, c'est la
+   branche qui doit changer. Cela vaut aussi quand `MUTANTS.json` tient une
+   campagne plus ancienne, sur un contenu qu'un volet a depuis changé.
+   Mesuré (#166) : la porte n'y regardait que lorsqu'aucun `MUTANTS.json`
+   n'existait. Elle répondait donc « la campagne a tourné sur un autre
+   contenu », le moniteur en relançait une, qui échouait pareil, 37 fois en
+   deux heures, sans que `wait` dise rien. La sortie d'erreur ne compte alors
+   que si elle est **postérieure à la date que cette campagne a enregistrée** :
+   une campagne qui a mesuré laisse elle aussi une sortie d'erreur, pleine de
+   sa progression, et un contenu ramené à ce qu'elle a mesuré — un commit
+   annulé — la lirait comme un échec. La date enregistrée, et non celle du
+   fichier, qu'une décision sur un survivant réécrit.
 
    Un test live joue le script **tel que `nunki init` le dépose** sur un crate
    d'exemple dont une fonction n'a aucun test, et lit ses survivants avec le

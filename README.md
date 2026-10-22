@@ -1296,8 +1296,9 @@ MISSION  (one branch off its base, one slot)
 
 ### Waiting and holding
 
-- **Hold** — `nunki` launches no further run until a human lifts it with
-  `nunki mission resume`. Set by `nunki mission stop`, or by `nunki` itself when a cap
+- **Hold** — `nunki` launches no further run, and no mutation campaign, until
+  a human lifts it with `nunki mission resume`; `nunki mission mutants` still
+  starts a campaign when a human asks for one by name. Set by `nunki mission stop`, or by `nunki` itself when a cap
   is reached or the harness keeps failing past its ceiling.
 - **Wait** — a pause that ends by itself: the harness backing off after a
   failure, the account's five-hour or weekly window past its threshold, or a
