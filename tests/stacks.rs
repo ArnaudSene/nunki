@@ -174,29 +174,102 @@ fn a_stack_and_its_add_on_share_their_steps_byte_for_byte() {
         let j = text[i..].find(to).unwrap_or_else(|| panic!("no {to:?}")) + i + to.len();
         text[i..j].to_string()
     };
-    for (stack, from, to) in [
+    let addon = nunki::project::ADDON_FILE;
+    // The stage that builds the dependency audit is a stage in the add-on, so
+    // it is read from the add-on's stages, beside the image's own.
+    let stages = nunki::project::ADDON_STAGES_FILE;
+    for (stack, added_to, from, to) in [
         (
             "rust",
+            addon,
             "ENV RUSTUP_HOME=",
             "rm -rf /home/agent/.cargo/registry/*\n",
         ),
-        ("python", "ARG OSV_SCANNER=", "osv-scanner --version\n"),
         (
             "python",
+            stages,
+            "# `osv-scanner`, built from its tagged source",
+            "@v${OSV_SCANNER}\n",
+        ),
+        (
+            "python",
+            addon,
+            "COPY --from=nunki-python-osv-scanner",
+            "osv-scanner --version\n",
+        ),
+        (
+            "python",
+            addon,
             "# `UV_PYTHON_DOWNLOADS=never`",
             "/home/agent/.harness\n",
         ),
-        ("next", "ARG OSV_SCANNER=", "osv-scanner --version\n"),
-        ("next", "# pnpm, baked in", "! command -v npm\n"),
         (
             "next",
+            stages,
+            "# `osv-scanner`, built from its tagged source",
+            "@v${OSV_SCANNER}\n",
+        ),
+        (
+            "next",
+            addon,
+            "COPY --from=nunki-next-osv-scanner",
+            "osv-scanner --version\n",
+        ),
+        ("next", addon, "# pnpm, baked in", "! command -v npm\n"),
+        (
+            "next",
+            addon,
             "# `NEXT_TELEMETRY_DISABLED`",
             "/home/agent/.harness\n",
         ),
     ] {
         let own = cut(&read(stack, "Dockerfile"), from, to);
-        let added = cut(&read(stack, nunki::project::ADDON_FILE), from, to);
+        let added = cut(&read(stack, added_to), from, to);
         assert_eq!(own, added, "{stack}: {from}");
+    }
+}
+
+/// No image declares one stage twice, whichever stacks it carries: Docker
+/// refuses a Dockerfile whose stage names repeat ("duplicate stage name").
+/// The stage that builds `osv-scanner` is the one at risk, since Python and
+/// Next.js both carry the tool: each names its own, in its image and in its
+/// add-on alike. And every `COPY --from` names a stage the same Dockerfile
+/// declares, so a stage left out of an add-on's stages is found here rather
+/// than by a build that cannot find it.
+#[test]
+fn no_composed_image_declares_one_stage_twice() {
+    let known = nunki::init::KNOWN_STACKS;
+    for primary in known {
+        let others: Vec<&str> = known.iter().copied().filter(|s| *s != primary).collect();
+        // Every set of the others, added onto `primary` in declared order.
+        for mask in 0..(1u32 << others.len()) {
+            let mut stacks = vec![primary.to_string()];
+            for (i, other) in others.iter().enumerate() {
+                if mask & (1 << i) != 0 {
+                    stacks.push(format!("{other}=dir-{other}"));
+                }
+            }
+            let dir = tempfile::tempdir().unwrap();
+            let named: Vec<&str> = stacks.iter().map(String::as_str).collect();
+            let p = project(dir.path(), &named);
+            let text = image::dockerfile(&p, &p.config.stacks).unwrap();
+            let mut seen = std::collections::BTreeSet::new();
+            for line in text.lines().filter(|l| l.starts_with("FROM ")) {
+                if let Some((_, name)) = line.rsplit_once(" AS ") {
+                    assert!(seen.insert(name.to_string()), "{stacks:?}: {name} twice");
+                }
+            }
+            for line in text.lines().filter(|l| l.starts_with("COPY --from=")) {
+                let from = line["COPY --from=".len()..]
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or_default();
+                assert!(
+                    seen.contains(from),
+                    "{stacks:?}: `{line}` names no stage of this Dockerfile"
+                );
+            }
+        }
     }
 }
 
@@ -217,8 +290,10 @@ fn the_composed_dockerfile_is_the_primary_with_stages_first_and_add_ons_last() {
         froms,
         [
             "FROM node:${NODE}-bookworm-slim AS nunki-next-node",
+            "FROM golang:1.27.3-bookworm AS nunki-next-osv-scanner",
             "FROM python:${PYTHON}-slim-bookworm AS nunki-python-runtime",
             "FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS nunki-python-uv",
+            "FROM golang:1.27.3-bookworm AS nunki-python-osv-scanner",
             "FROM ${BASE}",
         ]
     );

@@ -12,8 +12,44 @@ ARG NODE=22
 ARG PYTHON=3.12
 ARG UV_VERSION=0.12.17
 FROM node:${NODE}-bookworm-slim AS nunki-next-node
+
+# `osv-scanner`, built from its tagged source rather than downloaded. A
+# release carries the Go it was built with, and 2.7.0's is 1.27.0, whose
+# standard library the image scan reports four high advisories against, each
+# with a fix (CVE-2026-78667, -78669 and -97031 in 1.27.2, CVE-2026-111943
+# in 1.27.3). Built with a Go that carries them, the binary carries none.
+#
+# `go install` checks every module it fetches against Go's checksum
+# database, which is what a release's SHA256SUMS were checked for.
+# `GOTOOLCHAIN=local` keeps this image's Go: a module asking for a newer one
+# would otherwise download it, advisories and all. `CGO_ENABLED=0` makes the
+# binary static, so it runs on any base. Raising Go is raising the tag below;
+# raising osv-scanner is raising `OSV_SCANNER`.
+FROM golang:1.27.3-bookworm AS nunki-next-osv-scanner
+ARG OSV_SCANNER=2.7.0
+RUN CGO_ENABLED=0 GOTOOLCHAIN=local GOBIN=/out \
+    go install -trimpath -ldflags='-s -w' \
+      github.com/google/osv-scanner/v2/cmd/osv-scanner@v${OSV_SCANNER}
 FROM python:${PYTHON}-slim-bookworm AS nunki-python-runtime
 FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS nunki-python-uv
+
+# `osv-scanner`, built from its tagged source rather than downloaded. A
+# release carries the Go it was built with, and 2.7.0's is 1.27.0, whose
+# standard library the image scan reports four high advisories against, each
+# with a fix (CVE-2026-78667, -78669 and -97031 in 1.27.2, CVE-2026-111943
+# in 1.27.3). Built with a Go that carries them, the binary carries none.
+#
+# `go install` checks every module it fetches against Go's checksum
+# database, which is what a release's SHA256SUMS were checked for.
+# `GOTOOLCHAIN=local` keeps this image's Go: a module asking for a newer one
+# would otherwise download it, advisories and all. `CGO_ENABLED=0` makes the
+# binary static, so it runs on any base. Raising Go is raising the tag below;
+# raising osv-scanner is raising `OSV_SCANNER`.
+FROM golang:1.27.3-bookworm AS nunki-python-osv-scanner
+ARG OSV_SCANNER=2.7.0
+RUN CGO_ENABLED=0 GOTOOLCHAIN=local GOBIN=/out \
+    go install -trimpath -ldflags='-s -w' \
+      github.com/google/osv-scanner/v2/cmd/osv-scanner@v${OSV_SCANNER}
 FROM ${BASE}
 
 # Passed by nunki at build time: the human's own ids, so that what the agent
@@ -165,18 +201,8 @@ RUN ln -sf ../lib/node_modules/corepack/dist/corepack.js /usr/local/bin/corepack
  && ln -sf ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
  && ln -sf ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
  && node --version
-ARG OSV_SCANNER=2.6.0
-RUN set -eu; \
-    case "$(dpkg --print-architecture)" in \
-      amd64) arch=amd64; sum=ca69b3d3cd08f889a49dc0a383122f71cc528b83803671df5fd874d97485b108 ;; \
-      arm64) arch=arm64; sum=2c71403eb443d05891c4f268c3ad771cf4f16e5443463fd7851ef8f454d3c7e4 ;; \
-      *) echo "osv-scanner ships no build for $(dpkg --print-architecture)" >&2; exit 1 ;; \
-    esac; \
-    curl -fsSL -o /usr/local/bin/osv-scanner \
-      "https://github.com/google/osv-scanner/releases/download/v${OSV_SCANNER}/osv-scanner_linux_${arch}"; \
-    echo "${sum}  /usr/local/bin/osv-scanner" | sha256sum -c -; \
-    chmod 0755 /usr/local/bin/osv-scanner; \
-    osv-scanner --version
+COPY --from=nunki-next-osv-scanner /out/osv-scanner /usr/local/bin/osv-scanner
+RUN osv-scanner --version
 # pnpm, baked in rather than fetched on first use.
 #
 # `corepack enable` only enables it: the binary is downloaded from
@@ -251,18 +277,8 @@ RUN apt-get -qq update \
 COPY --from=nunki-python-runtime /usr/local/ /usr/local/
 RUN ldconfig && python3 --version
 COPY --from=nunki-python-uv /uv /uvx /usr/local/bin/
-ARG OSV_SCANNER=2.6.0
-RUN set -eu; \
-    case "$(dpkg --print-architecture)" in \
-      amd64) arch=amd64; sum=ca69b3d3cd08f889a49dc0a383122f71cc528b83803671df5fd874d97485b108 ;; \
-      arm64) arch=arm64; sum=2c71403eb443d05891c4f268c3ad771cf4f16e5443463fd7851ef8f454d3c7e4 ;; \
-      *) echo "osv-scanner ships no build for $(dpkg --print-architecture)" >&2; exit 1 ;; \
-    esac; \
-    curl -fsSL -o /usr/local/bin/osv-scanner \
-      "https://github.com/google/osv-scanner/releases/download/v${OSV_SCANNER}/osv-scanner_linux_${arch}"; \
-    echo "${sum}  /usr/local/bin/osv-scanner" | sha256sum -c -; \
-    chmod 0755 /usr/local/bin/osv-scanner; \
-    osv-scanner --version
+COPY --from=nunki-python-osv-scanner /out/osv-scanner /usr/local/bin/osv-scanner
+RUN osv-scanner --version
 USER agent
 
 # `UV_PYTHON_DOWNLOADS=never` is a perimeter rule, not a preference: without
