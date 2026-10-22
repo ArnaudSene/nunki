@@ -1629,7 +1629,24 @@ quelle mission dépense lequel. Donc :
   périmètre ;
 - **quel nom de variable porte le jeton est la connaissance du harnais**, pas
   celle du moteur : l'adaptateur le déclare (`token_env`), et `nunki` ne connaît
-  que le nom du compte.
+  que le nom du compte ;
+- **le jeton n'est écrit dans aucun fichier** que `nunki` produit. Ni dans le
+  profil : c'est le fichier qu'on lit pour comprendre un slot, et le lire
+  en partie a imprimé le jeton dans la transcription d'une session (#170).
+  Ni sur la ligne de commande du moteur, que tout utilisateur de la machine
+  lit avec `ps`. Il entre au seul `exec` qui en a besoin, celui qui lance le
+  harnais : la ligne dit `-e <nom>` sans valeur, et la valeur est dans
+  l'environnement du client que `nunki` lance, d'où Compose la prend —
+  mesuré avec Compose v5.5.0, et un nom que le client ne porte pas laisse la
+  variable absente dans le conteneur, pas vide. Il n'est pas non plus dans
+  la configuration du conteneur : `docker inspect` ne le montre pas, et une
+  porte ou une campagne, lancées par d'autres `exec`, ne le reçoivent pas.
+  Ce que cela ne tient pas, dit honnêtement : le harnais lit son jeton dans
+  son environnement et nulle part ailleurs — Claude Code n'offre ni fichier
+  ni descripteur pour `CLAUDE_CODE_OAUTH_TOKEN`, et `apiKeyHelper` sert une
+  clé d'API —, donc ce que l'agent lance en hérite. Un profil écrit par un
+  `nunki` plus ancien le porte encore jusqu'au lancement suivant, qui le
+  réécrit.
 
 `nunki check` vérifie que le compte nommé existe, qu'il authentifie bien le
 harnais du projet, que son fichier est hors du dépôt et qu'il n'est pas
@@ -2803,8 +2820,9 @@ dernier lot. La première rouge arrête tout.
    base qui lui manquent, **et eux seuls**, puis le relève comme tout relevage
    (4.2) : le moteur recrée l'agent avec la base. Pas une régénération : elle
    relirait le compte, le périmètre et les services, et changerait en pleine
-   mission ce que personne n'a demandé. Le fichier reste à l'humain seul,
-   puisqu'il porte le jeton. Rien n'est recréé tant qu'une campagne de
+   mission ce que personne n'a demandé. Le fichier reste à l'humain seul :
+   il est au HQ, et celui qu'un `nunki` plus ancien a écrit porte encore le
+   jeton (4.3). Rien n'est recréé tant qu'une campagne de
    mutation ou l'application lancée pour un rôle vit dans ce conteneur. La
    porte dit lequel des deux remèdes vaut : la commande de la stack quand
    l'hôte n'a pas la base, `nunki verify` quand il l'a.

@@ -66,8 +66,12 @@ nunki --version
 ```
 
 Declare the subscription `nunki` spends. The token is written under `~/.nunki`,
-never in a repository, and reaches a container as an environment variable at
-launch:
+never in a repository, and that file is the only one that holds it: it reaches
+the agent as an environment variable of the command that starts its harness,
+named on the engine's command line and valued only in that command's own
+environment. No slot profile carries it, and `docker inspect` does not show
+it. The agent's own processes inherit it, because the harness reads it from
+its environment and nowhere else:
 
 ```sh
 mkdir -p ~/.nunki/accounts

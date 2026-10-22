@@ -14,6 +14,7 @@
 //! the HQ's
 //! own directory and never in the container.
 
+use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -150,6 +151,10 @@ pub struct ContainerSpawner {
     /// How long to wait for the wrapper to publish its pid.
     patience: Duration,
     host: LocalSpawner,
+    /// Variables the run needs and no file may hold: the subscription token
+    /// (#170). Named on the engine's command line, valued only in the
+    /// client's own environment ([`ContainerSpawner::passing_secret`]).
+    secrets: BTreeMap<String, String>,
 }
 
 impl ContainerSpawner {
@@ -162,7 +167,29 @@ impl ContainerSpawner {
             patience: Duration::from_secs(10),
             host: LocalSpawner,
             identity: None,
+            secrets: BTreeMap::new(),
         }
+    }
+
+    /// Hand the run `name` set to `value`, through the one channel that
+    /// writes it nowhere (SPEC 3.3, 4.3; #170).
+    ///
+    /// Not in the profile: a profile is the file a human reads to understand
+    /// a slot, and reading it printed the token into a session's transcript.
+    /// Not as `-e NAME=value` either: the engine's command line is the
+    /// client's argv, which any user of this machine reads with `ps`. The
+    /// command line says `-e NAME` alone, and the value is in the
+    /// environment of the client `nunki` starts, from which Compose takes it
+    /// — measured with Compose v5.5.0, and a name the client does not carry
+    /// leaves the variable unset in the container, not empty. Nor is it in
+    /// the container's configuration, so `docker inspect` does not show it.
+    ///
+    /// What this cannot do is keep it from the run's own processes: the
+    /// harness reads its token from its environment and from nowhere else,
+    /// so what it starts inherits it.
+    pub fn passing_secret(mut self, name: &str, value: &str) -> Self {
+        self.secrets.insert(name.to_string(), value.to_string());
+        self
     }
 
     /// Say what the run's command line carries — its session id — so that
@@ -308,6 +335,10 @@ impl ContainerSpawner {
             options.push("-e".to_string());
             options.push(format!("{key}={value}"));
         }
+        for name in self.secrets.keys() {
+            options.push("-e".to_string());
+            options.push(name.clone());
+        }
         let mut argv = Vec::new();
         argv.extend([
             "sh".to_string(),
@@ -317,8 +348,11 @@ impl ContainerSpawner {
             cmd.program.clone(),
         ]);
         argv.extend(cmd.args.iter().cloned());
-        self.engine
-            .detached_command(&self.file, &self.project, &self.service, &options, &argv)
+        let mut client =
+            self.engine
+                .detached_command(&self.file, &self.project, &self.service, &options, &argv);
+        client.env.extend(self.secrets.clone());
+        client
     }
 
     fn in_container(&self, argv: &[&str]) -> io::Result<crate::engine::ExecOutput> {

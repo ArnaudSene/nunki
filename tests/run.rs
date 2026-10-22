@@ -316,7 +316,6 @@ fn a_run_profile_carries_the_clean_copy_of_head() {
         "rust",
         &images,
         &paths,
-        "stand-in-token",
         &nunki::mission::Header {
             branch: "feat/alpha".to_string(),
             base: "dev".to_string(),
@@ -435,7 +434,6 @@ fn the_agent_reads_the_perimeter_its_firewall_enforces() {
             "rust",
             &images,
             &paths,
-            "stand-in-token",
             &header(integration),
             role,
         )
@@ -783,7 +781,7 @@ fn live_a_mission_starts_and_its_run_is_read_back() {
              ARG RUST_VERSION\n\
              ARG RUST_COMPONENTS\n\
              ARG RUST_TARGETS\n\
-             RUN printf '#!/bin/sh\\necho \\x27{{\"type\":\"system\",\"subtype\":\"init\"}}\\x27\\n\
+             RUN printf '#!/bin/sh\\n[ \"$CLAUDE_CODE_OAUTH_TOKEN\" = stand-in-token ] || exit 3\\necho \\x27{{\"type\":\"system\",\"subtype\":\"init\"}}\\x27\\n\
              echo \\x27{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\
              \"usage\":{{\"input_tokens\":11,\"output_tokens\":7}}}}\\x27\\n' \
              > /usr/local/bin/claude \\\n\
@@ -895,16 +893,16 @@ fn live_a_mission_starts_and_its_run_is_read_back() {
         "feat/alpha"
     );
 
-    // The token reaches the agent through the profile's environment, and
-    // nowhere else: not a file in the slot, not a layer in the image.
+    // The token is in no file (#170): not the profile, which a human reads
+    // to understand a slot, not the slot, not a layer in the image. That it
+    // reached the run is proved below: the stand-in harness exits 3 without
+    // it, and the run is read back finished, with its own numbers.
     let written = std::fs::read_to_string(&profile).unwrap();
-    let doc: nunki::yaml::Value = nunki::yaml::from_str(&written).unwrap();
-    assert_eq!(
-        doc["services"][nunki::compose::AGENT_SERVICE]["environment"]["CLAUDE_CODE_OAUTH_TOKEN"]
-            .as_str(),
-        Some("stand-in-token"),
-        "the run would have nothing to authenticate with"
+    assert!(
+        !written.contains("stand-in-token"),
+        "the profile holds the token:\n{written}"
     );
+    assert!(!written.contains("CLAUDE_CODE_OAUTH_TOKEN"), "{written}");
 
     assert!(
         !std::fs::read_to_string(slot.tree.join(".git/config"))
@@ -919,12 +917,20 @@ fn live_a_mission_starts_and_its_run_is_read_back() {
         assert_eq!(
             mode & 0o077,
             0,
-            "a file holding the token is the human's alone, got {mode:o}"
+            "the profile is the human's alone, got {mode:o}"
         );
     }
 
     let handle = state.run.clone().expect("a run was launched");
     assert!(!handle.container.is_empty(), "it runs in a container");
+    // Nor in the container's configuration, which `docker inspect` prints.
+    let inspected = std::process::Command::new(&engine_bin)
+        .args(["inspect", "-f", "{{json .Config.Env}}", &handle.container])
+        .output()
+        .unwrap();
+    assert!(inspected.status.success(), "{inspected:?}");
+    let config = String::from_utf8_lossy(&inspected.stdout);
+    assert!(!config.contains("stand-in-token"), "{config}");
     // Counted when `nunki verify` reads it back, like every other run; and its
     // session is the one the next lot resumes.
     assert_eq!(state.spent.runs, 0);
@@ -1166,17 +1172,7 @@ fn profile_for(
         prober: "img/probe".into(),
     };
     let paths = nunki::mission::dir::Paths::of(&project.hq_root, "m1");
-    let plan = run::plan(
-        project,
-        slot,
-        "rust",
-        &images,
-        &paths,
-        "stand-in-token",
-        header,
-        role,
-    )
-    .unwrap();
+    let plan = run::plan(project, slot, "rust", &images, &paths, header, role).unwrap();
     let engine = nunki::engine::fake::FakeEngine::default();
     let written = nunki::compose::generate(&plan, nunki::engine::Engine::dialect(&engine)).unwrap();
     (plan, nunki::yaml::from_str(&written).unwrap())
@@ -1327,7 +1323,6 @@ fn plan_err(project: &Project, slot: &nunki::slot::Slot) -> run::RunError {
         "rust",
         &images,
         &paths,
-        "t",
         &header_with(with_services()),
         Role::Integrator,
     )
@@ -3556,4 +3551,36 @@ fn the_role_prompt_is_read_from_the_projects_configuration() {
         coder.contains("The project's services file, `deploy/compose.yaml`,"),
         "{coder}"
     );
+}
+
+/// No profile carries the subscription token, whatever the role (#170). A
+/// profile is the file a human reads to understand a slot, and reading a
+/// slice of one printed the token into a session's transcript. The token
+/// travels at the exec that starts the harness, and `plan` does not take
+/// one.
+#[test]
+fn no_profile_carries_the_subscription_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    let slot = slot_at(dir.path());
+    let header = header_with(with_services());
+    let token_env =
+        nunki::harness::Harness::token_env(&nunki::harness::claude_code::ClaudeCode::new(
+            Default::default(),
+            Box::new(nunki::harness::spawn::LocalSpawner),
+        ));
+
+    for role in [Role::Coder, Role::Integrator, Role::Security] {
+        let (plan, doc) = profile_for(&project, &slot, &header, role);
+        assert!(
+            !plan.environment.contains_key(token_env),
+            "{role:?}: {:?}",
+            plan.environment
+        );
+        let environment = &doc["services"][nunki::compose::AGENT_SERVICE]["environment"];
+        assert!(
+            environment.get(token_env).is_none(),
+            "{role:?}: {environment:?}"
+        );
+    }
 }

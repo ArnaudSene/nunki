@@ -1084,6 +1084,50 @@ fn a_run_is_started_tagged_with_its_session() {
     assert!(line.contains("-e NUNKI_RUN=session-1"), "{line}");
 }
 
+/// The token reaches the run named on the engine's command line and valued
+/// only in the client's environment (#170). The command line is the
+/// client's argv, which any user of the machine reads with `ps`; Compose
+/// takes the value of `-e NAME` from the environment it was started with.
+#[test]
+fn a_secret_is_named_on_the_command_line_and_valued_only_in_the_clients_environment() {
+    let fake = std::sync::Arc::new(nunki::engine::fake::FakeEngine::default());
+    let spawner = nunki::engine::spawn::ContainerSpawner::new(
+        fake,
+        file(),
+        "nunki-demo",
+        nunki::compose::AGENT_SERVICE,
+    )
+    .passing_secret("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-secret");
+    let command = spawner.command(
+        &CommandSpec {
+            program: "claude".into(),
+            args: vec![],
+            cwd: PathBuf::from("/work/tree"),
+            env: Default::default(),
+        },
+        Path::new("/hq/runs/session-1.jsonl"),
+    );
+
+    let line = command.display();
+    assert!(line.contains("-e CLAUDE_CODE_OAUTH_TOKEN "), "{line}");
+    assert!(!line.contains("sk-ant-oat01-secret"), "{line}");
+    assert!(
+        command
+            .args
+            .iter()
+            .all(|a| !a.contains("sk-ant-oat01-secret")),
+        "{:?}",
+        command.args
+    );
+    assert_eq!(
+        command
+            .env
+            .get("CLAUDE_CODE_OAUTH_TOKEN")
+            .map(String::as_str),
+        Some("sk-ant-oat01-secret")
+    );
+}
+
 /// What the reaping answers, read from the container: the pids it stopped
 /// after the marker; nothing asked of a container that is not running; and
 /// an answer without the marker is a check that did not run, never "none".
