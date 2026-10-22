@@ -6,49 +6,11 @@
 # its expiry date it stops applying and the scan is red again, so nothing
 # here outlives the reason it was written for.
 #
-# The three entries below are one class: Go fixes (Go 1.27.2, and
-# golang.org/x/net 0.60.0 for the third) that osv-scanner 2.6.0, built with
-# Go 1.27.0 and x/net 0.58.0, does not carry yet. They are accepted for one
-# reason, the same for all three: the images run osv-scanner only from
-# security.sh, with `--offline --offline-vulnerabilities`, which opens no
-# connection at all and serves nothing (measured on 2.6.0, src/init.rs). The
-# HTTP and TLS code these advisories are about is not reached. Its offline
-# database is downloaded on the host, by the human's own osv-scanner, never
-# by the one in an image.
-#
-# This file first said that a third entry would mean building osv-scanner
-# from source with a current Go. The third came, and that remedy no longer
-# clears the class: the third fix is also in golang.org/x/net, which
-# osv-scanner pins in its go.mod (v0.58.0, on its main branch too on
-# 2026-10-11), so a current Go alone leaves it in place. The rule is now the
-# shared expiry: the three entries expire together, and if no osv-scanner
-# release carries the fixes by then, the images build it from source with
-# its dependencies brought current, rather than gain a fourth entry.
-vulnerabilities:
-  - id: CVE-2026-78667
-    paths:
-      - "usr/local/bin/osv-scanner"
-    statement: >-
-      A denial of service in net/http, fixed in Go 1.27.2, which osv-scanner
-      2.6.0 (Go 1.27.0, the latest release, 2026-09-14) does not carry yet.
-      Not reached: the images run osv-scanner offline only. Remove when a
-      newer osv-scanner is pinned in src/init.rs.
-    expired_at: 2026-11-08
-  - id: CVE-2026-97031
-    paths:
-      - "usr/local/bin/osv-scanner"
-    statement: >-
-      Same class as the entry above: a denial of service in crypto/tls, fixed
-      in Go 1.27.2, which osv-scanner 2.6.0 (Go 1.27.0) does not carry yet.
-      Not reached, for the same reason. Remove with it.
-    expired_at: 2026-11-08
-  - id: CVE-2026-78669
-    paths:
-      - "usr/local/bin/osv-scanner"
-    statement: >-
-      Same class: a denial of service through HTTP/2 SETTINGS frames, in both
-      the standard library's bundled HTTP/2 (fixed in Go 1.27.2) and
-      golang.org/x/net (fixed in 0.60.0), which osv-scanner 2.6.0 carries at
-      Go 1.27.0 and x/net 0.58.0. Not reached, for the same reason. Remove
-      with the other two.
-    expired_at: 2026-11-08
+# Empty today. The three entries that stood here were one class: Go fixes
+# that osv-scanner's releases did not carry, because a release carries the
+# Go it was built with. A fourth came (CVE-2026-111943, fixed in Go 1.27.3),
+# and this file's rule held: rather than a fourth entry, the images now build
+# osv-scanner from its tagged source with a Go that carries the fixes
+# (src/init.rs, `osv_scanner_stage`). Measured with trivy 0.74.0: four high
+# advisories with a fix in the released 2.7.0 binary, none in the one built.
+vulnerabilities: []
