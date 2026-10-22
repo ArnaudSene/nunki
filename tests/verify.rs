@@ -220,6 +220,14 @@ impl World {
             .unwrap();
     }
 
+    /// What `nunki mission resume` does to a held mission: the hold is lifted.
+    fn release(&self) {
+        let store = Store::open(&self.project.hq_root).unwrap();
+        let mut state = store.load("m1").unwrap();
+        state.release();
+        store.save(&state).unwrap();
+    }
+
     /// What `nunki mission stop` writes: the mission is held.
     fn hold(&self) {
         let store = Store::open(&self.project.hq_root).unwrap();
@@ -533,6 +541,11 @@ fn live_a_mission_is_driven_from_its_first_lot_to_verified() {
     assert!(matches!(world.state().flow.stage(), Stage::Gates));
 
     // 3. All seven: the battery is green, and gate 7 has nothing to read.
+    // Lifted for this step: a held mission starts no campaign (#166), and
+    // this one is held only because the world has no account to launch a
+    // run with. Nothing is launched at the gates, and the hold is put back
+    // before the volet below would launch the coder.
+    world.release();
     let steps = go();
     let report = gates_of(&steps);
     assert_eq!(
@@ -565,6 +578,7 @@ fn live_a_mission_is_driven_from_its_first_lot_to_verified() {
         steps.iter().any(|s| matches!(s, Step::CampaignOwed { .. })),
         "{steps:?}"
     );
+    world.hold();
 
     // 4. The campaign runs — through the flow's own entry point, the one the
     // monitor calls on that step, so this proves it against a real engine
