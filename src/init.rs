@@ -910,11 +910,16 @@ COPY --from=nunki-python-uv /uv /uvx /usr/local/bin/
 fn addon_python() -> String {
     [
         ADDON_PYTHON_HEAD,
-        OSV_SCANNER_INSTALL,
+        &osv_scanner_install(OSV_STAGE_PYTHON),
         "USER agent\n",
         PYTHON_AGENT,
     ]
     .concat()
+}
+
+/// Python's stages, and the one that builds its dependency audit.
+fn addon_stages_python() -> String {
+    [ADDON_STAGES_PYTHON, &osv_scanner_stage(OSV_STAGE_PYTHON)].concat()
 }
 
 /// Node's stage: the official image, copied from rather than reinstalled —
@@ -950,12 +955,17 @@ RUN ln -sf ../lib/node_modules/corepack/dist/corepack.js /usr/local/bin/corepack
 fn addon_next() -> String {
     [
         ADDON_NEXT_HEAD,
-        OSV_SCANNER_INSTALL,
+        &osv_scanner_install(OSV_STAGE_NEXT),
         NEXT_TOOLS,
         "USER agent\n",
         NEXT_AGENT,
     ]
     .concat()
+}
+
+/// Node's stage, and the one that builds the dependency audit.
+fn addon_stages_next() -> String {
+    [ADDON_STAGES_NEXT, &osv_scanner_stage(OSV_STAGE_NEXT)].concat()
 }
 
 fn addon_rust() -> String {
@@ -2036,12 +2046,14 @@ if [ "$ran" -eq 0 ]; then
 fi
 "##;
 
-/// The coder's image for a Python project.
+/// The coder's image for a Python project: its globals and its first stage,
+/// up to the stage that builds `osv-scanner`.
 ///
-/// Two binaries come in pinned and checksummed rather than through a script
-/// nobody reads: `osv-scanner`, which `security.sh` runs offline, and
+/// Two binaries come in pinned rather than through a script nobody reads:
 /// `trufflehog`, which is the same tool the Rust image installs because a
-/// secret has no ecosystem. `uv` is copied out of its own published image,
+/// secret has no ecosystem, checksummed; and `osv-scanner`, which
+/// `security.sh` runs offline, built from its tagged source
+/// ([`osv_scanner_stage`]). `uv` is copied out of its own published image,
 /// which pins it by digest without a checksum dance.
 ///
 /// The battery's tools — ruff, mypy, pytest, mutmut — are **not** here. They
@@ -2050,8 +2062,8 @@ const DOCKERFILE_PYTHON_HEAD: &str = r##"# The coder's image for a Python projec
 #
 # Both `ARG`s are declared before the first `FROM` because that is the only
 # place a build argument is global. Declared after it, `BASE` belongs to the
-# `uv` stage and the second `FROM` reads it as empty — "base name (${BASE})
-# should not be blank".
+# `uv` stage and the `FROM ${BASE}` below reads it as empty — "base name
+# (${BASE}) should not be blank".
 #
 # glibc and not musl, as SPEC 4.2 bis requires of every stack image: the
 # `manylinux` wheels Python ships are glibc, and a musl base sends every
@@ -2064,6 +2076,10 @@ ARG PYTHON=3.12
 ARG BASE=python:${PYTHON}-slim-bookworm
 
 FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
+"##;
+
+/// The Python image from its base on, once the stages above it are declared.
+const DOCKERFILE_PYTHON_BASE: &str = r##"
 FROM ${BASE}
 
 # Passed by nunki at build time: the human's own ids, so that what the agent
@@ -2109,28 +2125,60 @@ RUN set -eu; \
 # in the project's lock for the reason cargo-deny is in the Rust image: what
 # judges the agent is not the agent's to weaken. It reads a database the host
 # fills and nunki mounts read-only, and it needs no network to do it —
-# measured on 2.6.0, with `--network none`, against a read-only copy.
-#
-# Checksummed against the release's own `osv-scanner_SHA256SUMS`, as
-# trufflehog is.
+# measured on 2.6.0, and on 2.7.0 as built above, with `--network none`,
+# against a read-only copy.
 "##;
 
-/// The dependency audit gates 8 runs for Python and Next.js, one text for
-/// every image that carries it — a stack's own, and the add-on another
-/// stack's image receives (SPEC 4.2, "plusieurs stacks").
-const OSV_SCANNER_INSTALL: &str = r##"ARG OSV_SCANNER=2.6.0
-RUN set -eu; \
-    case "$(dpkg --print-architecture)" in \
-      amd64) arch=amd64; sum=ca69b3d3cd08f889a49dc0a383122f71cc528b83803671df5fd874d97485b108 ;; \
-      arm64) arch=arm64; sum=2c71403eb443d05891c4f268c3ad771cf4f16e5443463fd7851ef8f454d3c7e4 ;; \
-      *) echo "osv-scanner ships no build for $(dpkg --print-architecture)" >&2; exit 1 ;; \
-    esac; \
-    curl -fsSL -o /usr/local/bin/osv-scanner \
-      "https://github.com/google/osv-scanner/releases/download/v${OSV_SCANNER}/osv-scanner_linux_${arch}"; \
-    echo "${sum}  /usr/local/bin/osv-scanner" | sha256sum -c -; \
-    chmod 0755 /usr/local/bin/osv-scanner; \
-    osv-scanner --version
-"##;
+/// What the stage that builds `osv-scanner` is called in the Python image and
+/// its add-on, and in the Next.js ones. One name per stack, so an image that
+/// carries both — Python added onto Next.js, or both onto Rust — never
+/// declares one stage twice; and the same name in a stack's own image and in
+/// its add-on, so the two share their text byte for byte.
+const OSV_STAGE_PYTHON: &str = "nunki-python-osv-scanner";
+const OSV_STAGE_NEXT: &str = "nunki-next-osv-scanner";
+
+/// The stage that builds `osv-scanner` from its tagged source, named `stage`:
+/// one text for every image that carries it — a stack's own, and the add-on
+/// another stack's image receives (SPEC 4.2, "plusieurs stacks").
+///
+/// Built rather than downloaded because a release carries the Go it was built
+/// with, and the image scan reads that Go's advisories as the image's own.
+/// Measured on 2.7.0: the released binary reads go1.27.0 and trivy 0.74.0
+/// finds four high advisories with fixes in it; this stage's reads go1.27.3
+/// and golang.org/x/net v0.61.0, and trivy finds none.
+fn osv_scanner_stage(stage: &str) -> String {
+    format!(
+        r##"
+# `osv-scanner`, built from its tagged source rather than downloaded. A
+# release carries the Go it was built with, and 2.7.0's is 1.27.0, whose
+# standard library the image scan reports four high advisories against, each
+# with a fix (CVE-2026-78667, -78669 and -97031 in 1.27.2, CVE-2026-111943
+# in 1.27.3). Built with a Go that carries them, the binary carries none.
+#
+# `go install` checks every module it fetches against Go's checksum
+# database, which is what a release's SHA256SUMS were checked for.
+# `GOTOOLCHAIN=local` keeps this image's Go: a module asking for a newer one
+# would otherwise download it, advisories and all. `CGO_ENABLED=0` makes the
+# binary static, so it runs on any base. Raising Go is raising the tag below;
+# raising osv-scanner is raising `OSV_SCANNER`.
+FROM golang:1.27.3-bookworm AS {stage}
+ARG OSV_SCANNER=2.7.0
+RUN CGO_ENABLED=0 GOTOOLCHAIN=local GOBIN=/out \
+    go install -trimpath -ldflags='-s -w' \
+      github.com/google/osv-scanner/v2/cmd/osv-scanner@v${{OSV_SCANNER}}
+"##
+    )
+}
+
+/// The dependency audit gate 8 runs for Python and Next.js, copied out of the
+/// stage [`osv_scanner_stage`] named `stage` built, and run once so a binary
+/// that cannot start fails the build rather than the gate.
+fn osv_scanner_install(stage: &str) -> String {
+    format!(
+        "COPY --from={stage} /out/osv-scanner /usr/local/bin/osv-scanner\n\
+         RUN osv-scanner --version\n"
+    )
+}
 
 const DOCKERFILE_PYTHON_USER: &str = r##"
 # From the image astral publishes rather than `curl | sh`: the tag pins it,
@@ -2176,7 +2224,9 @@ RUN mkdir -p /home/agent/.cache/uv /home/agent/.harness
 fn dockerfile_python() -> String {
     [
         DOCKERFILE_PYTHON_HEAD,
-        OSV_SCANNER_INSTALL,
+        &osv_scanner_stage(OSV_STAGE_PYTHON),
+        DOCKERFILE_PYTHON_BASE,
+        &osv_scanner_install(OSV_STAGE_PYTHON),
         DOCKERFILE_PYTHON_USER,
         PYTHON_AGENT,
     ]
@@ -2632,12 +2682,19 @@ printf '{"campaign":"done"}\n'
 /// the stack, launched by `nunki`, and mounted read-only — what judges the
 /// agent is not the agent's to weaken.
 ///
-/// Checked against osv-scanner 2.6.0 before it shipped:
+/// Checked against osv-scanner 2.6.0 before it shipped, and again on 2.7.0
+/// as [`osv_scanner_stage`] builds it, against a `uv.lock` holding
+/// `requests` 2.19.0:
 /// `--offline --offline-vulnerabilities` really does run with no network at
 /// all, against a **read-only** database; there is no `--local-db-path`, so
 /// `XDG_CACHE_HOME` is the only way to say where it is; and the finding to
 /// report is the **group**, not the vulnerability — reading the latter
-/// reports one advisory twice, once as PYSEC and once as GHSA.
+/// reports one advisory twice, once as PYSEC and once as GHSA (2.7.0: ten
+/// vulnerabilities, five groups). The script's two other measurements held
+/// on 2.7.0 as well: the tree's `osv-scanner.toml` is loaded with no
+/// `--config` ("Loaded filter from: /w/osv-scanner.toml"), and an ignore
+/// written against GHSA-x84v-xcm2-53pg filtered the whole PYSEC-2018-28
+/// group, while `--config` with an empty file kept all five.
 const SECURITY_PYTHON: &str = r##"#!/bin/sh
 # The mechanical security of a Python project (SPEC 4.4, gate 8).
 #
@@ -3077,6 +3134,10 @@ const DOCKERFILE_NEXT_HEAD: &str = r##"# The coder's image for a Next.js project
 # `versions.txt` beside this file (SPEC 4.2); `PNPM` below is read the same way.
 ARG NODE=22
 ARG BASE=node:${NODE}-bookworm-slim
+"##;
+
+/// The Next.js image from its base on, once the stage above it is declared.
+const DOCKERFILE_NEXT_BASE: &str = r##"
 FROM ${BASE}
 
 # Passed by nunki at build time: the human's own ids, so that what the agent
@@ -3116,7 +3177,8 @@ RUN set -eu; \
 
 # `osv-scanner` is this stack's dependency audit, reading a database the host
 # fills and nunki mounts read-only. It needs no network to do it — measured
-# on 2.6.0 against `pnpm-lock.yaml`, with `--network none`.
+# on 2.6.0 against `pnpm-lock.yaml`, and on 2.7.0 as built above against a
+# `uv.lock`, both with `--network none`.
 "##;
 
 const DOCKERFILE_NEXT_BETWEEN: &str = r##"
@@ -3218,7 +3280,9 @@ RUN mkdir -p /home/agent/.local/share/pnpm/store /home/agent/.harness
 fn dockerfile_next() -> String {
     [
         DOCKERFILE_NEXT_HEAD,
-        OSV_SCANNER_INSTALL,
+        &osv_scanner_stage(OSV_STAGE_NEXT),
+        DOCKERFILE_NEXT_BASE,
+        &osv_scanner_install(OSV_STAGE_NEXT),
         DOCKERFILE_NEXT_BETWEEN,
         NEXT_TOOLS,
         DOCKERFILE_NEXT_USER,
@@ -4064,7 +4128,7 @@ pub fn fragment(stack: &str) -> Vec<(&'static str, String, bool)> {
             (crate::project::ADDON_FILE, addon_python(), false),
             (
                 crate::project::ADDON_STAGES_FILE,
-                ADDON_STAGES_PYTHON.to_string(),
+                addon_stages_python(),
                 false,
             ),
             (crate::versions::FILE, VERSIONS_PYTHON.to_string(), false),
@@ -4138,7 +4202,7 @@ pub fn fragment(stack: &str) -> Vec<(&'static str, String, bool)> {
             (crate::project::ADDON_FILE, addon_next(), false),
             (
                 crate::project::ADDON_STAGES_FILE,
-                ADDON_STAGES_NEXT.to_string(),
+                addon_stages_next(),
                 false,
             ),
             (crate::versions::FILE, VERSIONS_NEXT.to_string(), false),
