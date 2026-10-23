@@ -933,6 +933,15 @@ fn revision(project: &Project) -> u64 {
         .revision
 }
 
+/// A mission waiting on the harness until `not_before`. The sleeps below go
+/// to that deadline, so it is a wait the state holds, as the monitor's
+/// always is: [`next_wake`] gives it.
+fn waiting(not_before: u64) -> MissionState {
+    let mut waiting = state(false);
+    waiting.harness_down = down_until(not_before);
+    waiting
+}
+
 /// A sleep to a deadline hours off — a window's reset — ends at the first
 /// minute after anyone writes the mission's state: a `verify` typed meanwhile
 /// may have launched a run, and a run is looked at every minute (#179).
@@ -940,17 +949,17 @@ fn revision(project: &Project) -> u64 {
 fn a_sleep_to_the_reset_ends_once_the_state_is_written() {
     let dir = tempfile::tempdir().unwrap();
     let project = project(dir.path());
-    save(&project, &state(false));
+    save(&project, &waiting(1_000 + 3 * 3_600));
     let read_at = revision(&project);
-    let mut clock = Ticks::at(1_000, || save(&project, &state(true)));
+    // A run recorded, and the wait left as it was: only the write can end
+    // the sleep.
+    let mut clock = Ticks::at(1_000, || {
+        let mut launched = waiting(1_000 + 3 * 3_600);
+        launched.run = state(true).run;
+        save(&project, &launched)
+    });
 
-    nunki::monitor::doze(
-        &project.hq_root,
-        "m1",
-        read_at,
-        1_000 + 3 * 3_600,
-        &mut clock,
-    );
+    nunki::monitor::doze(&project, "m1", read_at, 1_000 + 3 * 3_600, &mut clock);
 
     assert_eq!(clock.slept, vec![60]);
 }
@@ -961,13 +970,56 @@ fn a_sleep_to_the_reset_ends_once_the_state_is_written() {
 fn a_sleep_nobody_interrupts_lasts_to_its_deadline() {
     let dir = tempfile::tempdir().unwrap();
     let project = project(dir.path());
-    save(&project, &state(false));
+    save(&project, &waiting(1_000 + 150));
     let read_at = revision(&project);
     let mut clock = Ticks::at(1_000, || {});
 
-    nunki::monitor::doze(&project.hq_root, "m1", read_at, 1_000 + 150, &mut clock);
+    nunki::monitor::doze(&project, "m1", read_at, 1_000 + 150, &mut clock);
 
     assert_eq!(clock.slept, vec![60, 60, 30]);
+}
+
+/// The wait is read again every minute: here the window's measure is
+/// replaced by one below the threshold, with nothing written to the state.
+/// The sleep ends, rather than lasting to a reset that no longer holds
+/// anything back (SPEC 4.3).
+#[test]
+fn a_sleep_ends_once_nothing_holds_the_launch_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    let reset = 1_000 + 3 * 3_600;
+    let measured = |per_mille: u32, at: u64| {
+        nunki::consumption::record(
+            &project.nunki_home(),
+            "main",
+            &nunki::consumption::Measure {
+                windows: nunki::consumption::Windows {
+                    five_hour: Some(nunki::consumption::Window {
+                        per_mille,
+                        resets_at: reset,
+                    }),
+                    weekly: None,
+                },
+                measured_at: at,
+                harness: "claude-code".into(),
+            },
+        )
+        .unwrap()
+    };
+    std::fs::write(
+        project.nunki_home().join("accounts.yaml"),
+        "accounts:\n  main:\n    harness: claude-code\n    token_file: accounts/main.token\n",
+    )
+    .unwrap();
+    measured(950, 1_000);
+    save(&project, &state(false));
+    let read_at = revision(&project);
+    assert_eq!(next_wake(&project, &state(false), 1_000), reset);
+    let mut clock = Ticks::at(1_000, || measured(100, 1_030));
+
+    nunki::monitor::doze(&project, "m1", read_at, reset, &mut clock);
+
+    assert_eq!(clock.slept, vec![60]);
 }
 
 /// A state that can no longer be read ends the sleep too: the tick that
@@ -976,13 +1028,13 @@ fn a_sleep_nobody_interrupts_lasts_to_its_deadline() {
 fn a_sleep_ends_once_the_state_cannot_be_read() {
     let dir = tempfile::tempdir().unwrap();
     let project = project(dir.path());
-    save(&project, &state(false));
+    save(&project, &waiting(1_000 + 3_600));
     let read_at = revision(&project);
     let path = project.hq_root.join("state/missions/m1.json");
     assert!(path.is_file(), "{}", path.display());
     let mut clock = Ticks::at(1_000, || std::fs::write(&path, "not json").unwrap());
 
-    nunki::monitor::doze(&project.hq_root, "m1", read_at, 1_000 + 3_600, &mut clock);
+    nunki::monitor::doze(&project, "m1", read_at, 1_000 + 3_600, &mut clock);
 
     assert_eq!(clock.slept, vec![60]);
 }

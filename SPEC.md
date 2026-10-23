@@ -1478,7 +1478,14 @@ Trois choses en découlent :
   pendant un run, il mesure les deux fenêtres et arrête le run au seuil ;
   sans run, il appelle `verify` — qui relit, attend ou relance — puis dort
   jusqu'à la prochaine échéance connue (attente du harnais, remise à zéro
-  d'une fenêtre). Il prend le verrou du slot au nom de `nunki mission monitor`,
+  d'une fenêtre). Ce sommeil prend fin plus tôt dès que l'état de la mission
+  est écrit — un `verify` tapé entre-temps a pu lancer un run — ou que
+  l'attente ne tient plus, relue chaque minute. Il relit `nunki.yaml` à
+  chaque tour, comme un verbe tapé à ce moment : une mission basculée sur un
+  autre compte (plus bas) repart dans la minute, sans attendre la remise à
+  zéro de l'ancien, et sans que personne tape `verify`. Un `nunki.yaml`
+  illisible ne l'arrête pas : il garde la dernière copie lue et le dit dans
+  son journal. Il prend le verrou du slot au nom de `nunki mission monitor`,
   si bien qu'un `nunki verify` tapé pendant ce temps dit qui le tient ; un
   verrou pris est un humain qui conduit, et le moniteur attend son tour. Il
   s'arrête dès que la mission attend un humain ou n'a plus rien que `nunki`
@@ -1630,9 +1637,17 @@ quelle mission dépense lequel. Donc :
 - le choix se fait par ordre de précision — l'en-tête de la mission, puis
   `nunki.yaml`, puis le `default:` de l'index ; et **quand il n'existe qu'un
   compte, c'est la réponse et non une question** ;
-- le compte est **figé avec le reste de l'en-tête** : une mission ne change
-  pas d'abonnement en cours de route, pas plus qu'elle ne change de
-  périmètre ;
+- un compte que l'en-tête nomme est **figé avec lui**. Quand l'en-tête n'en
+  nomme aucun — le cas par défaut, `mission new` ne l'écrit qu'avec
+  `--account` —, chaque lancement reprend `nunki.yaml`, puis le `default:`.
+  Qui détient plusieurs abonnements peut donc **basculer une mission d'un
+  compte à l'autre entre deux runs**, sans attendre la remise à zéro de la
+  fenêtre du premier : il change `account:` dans `nunki.yaml`, et le
+  lancement suivant, de `verify` comme du moniteur, part sur le nouveau. Un
+  run en cours garde le compte qui l'a lancé : c'est son jeton qu'il
+  dépense, et sa mesure est rangée sous ce compte. La bascule lève l'attente
+  d'une fenêtre, pas celle du harnais : un 429 attend son délai, quel que
+  soit le compte ;
 - **quel nom de variable porte le jeton est la connaissance du harnais**, pas
   celle du moteur : l'adaptateur le déclare (`token_env`), et `nunki` ne connaît
   que le nom du compte ;

@@ -2848,6 +2848,117 @@ fn a_monitor_asleep_until_the_reset_wakes_for_a_run_launched_meanwhile() {
     assert!(why.starts_with("held by"), "{why}\n{log}");
 }
 
+impl World {
+    /// The project's `nunki.yaml` on disk, naming `account`: this world's
+    /// configuration, which is what a monitor reads again at every tick.
+    fn config_on_disk(&self, account: Option<&str>) {
+        let mut config = self.project.config.clone();
+        config.root = Some(self.project.root.clone());
+        config.account = account.map(str::to_string);
+        // `mutation_jobs` unset is a key left out: the file refuses a null
+        // there, and nunki never writes one.
+        let text: String = nunki::yaml::to_string(&config)
+            .unwrap()
+            .lines()
+            .filter(|line| *line != "mutation_jobs: null")
+            .map(|line| format!("{line}\n"))
+            .collect();
+        std::fs::write(self.project.home.join(nunki::project::CONFIG_FILE), text).unwrap();
+    }
+}
+
+/// The monitor read the spared turn back and went to sleep until `main`'s
+/// reset, an hour off. Meanwhile a human switched the project to `other`,
+/// below its threshold, and typed nothing else. Within the minute the
+/// monitor launches the replay on `other` (SPEC 4.3): this world has no
+/// token for it, so the launch fails naming `other`, which is how the test
+/// tells it was tried there.
+#[test]
+fn a_monitor_asleep_until_the_reset_launches_on_the_account_switched_to() {
+    let world = World::new(2);
+    world.journal_names_head();
+    write(&world.tree, "src/half.rs", "pub fn half() {}\n");
+    world.coder_session("s-coder");
+    world.run_recorded(Some(41), FINISHED);
+    world.spared();
+    world.with_two_accounts();
+    world.config_on_disk(None);
+    let reopened =
+        Project::open_at(world.project.root.clone(), world.project.home.clone()).unwrap();
+    let mut written = world.project.config.clone();
+    written.root = Some(world.project.root.clone());
+    assert_eq!(
+        reopened.config, written,
+        "the file reads back as this world's configuration"
+    );
+    let now = nunki::state::now_secs();
+    world.five_hours_at(970, now + 3_600);
+    let mut clock = Pauses {
+        now,
+        slept: Vec::new(),
+        meanwhile: Some(Box::new(|| world.config_on_disk(Some("other")))),
+    };
+    let engine: Arc<dyn nunki::engine::Engine> =
+        Arc::new(nunki::engine::fake::FakeEngine::default());
+    let mut log: Vec<u8> = Vec::new();
+
+    let why = nunki::monitor::watch(&world.project, "m1", engine, "docker", &mut clock, &mut log);
+
+    let log = String::from_utf8(log).unwrap();
+    assert!(log.contains("verify: Saving"), "{log}");
+    assert!(log.contains("account: \"main\""), "{log}");
+    assert_eq!(
+        clock.slept,
+        vec![60],
+        "woken within the minute, not at main's reset: {log}"
+    );
+    assert!(
+        why.contains("account \"other\" has no token"),
+        "{why}\n{log}"
+    );
+}
+
+/// `nunki.yaml` that cannot be read mid-mission — an editor halfway through
+/// saving it — does not stop the monitor: it goes on with the copy it last
+/// read, and says so in its log.
+#[test]
+fn a_monitor_goes_on_with_its_copy_when_nunki_yaml_cannot_be_read() {
+    let world = World::new(2);
+    world.journal_names_head();
+    write(&world.tree, "src/half.rs", "pub fn half() {}\n");
+    world.coder_session("s-coder");
+    world.run_recorded(Some(41), FINISHED);
+    world.spared();
+    world.with_two_accounts();
+    world.config_on_disk(None);
+    let now = nunki::state::now_secs();
+    world.five_hours_at(970, now + 3_600);
+    let config = world.project.home.join(nunki::project::CONFIG_FILE);
+    let mut clock = Pauses {
+        now,
+        slept: Vec::new(),
+        // Broken, then the mission held, so that the monitor's next `verify`
+        // stops it.
+        meanwhile: Some(Box::new(|| {
+            std::fs::write(&config, "root: [").unwrap();
+            world.hold();
+        })),
+    };
+    let engine: Arc<dyn nunki::engine::Engine> =
+        Arc::new(nunki::engine::fake::FakeEngine::default());
+    let mut log: Vec<u8> = Vec::new();
+
+    let why = nunki::monitor::watch(&world.project, "m1", engine, "docker", &mut clock, &mut log);
+
+    let log = String::from_utf8(log).unwrap();
+    assert!(why.starts_with("held by"), "{why}\n{log}");
+    let said = log
+        .lines()
+        .filter(|line| line.contains("nunki.yaml could not be read again"))
+        .count();
+    assert_eq!(said, 1, "{log}");
+}
+
 /// The coder's launch site answers to the account's window like the others.
 #[test]
 fn the_window_holds_at_the_coder_launch_site_too() {
