@@ -10,7 +10,9 @@
 //! the run's turn past the threshold ([`crate::gesture::spare`]). When no run
 //! goes, it calls `verify` — which reads the run back, waits, or launches the
 //! next one — and sleeps to the next deadline it knows: the harness wait, or
-//! the window's reset. It stops when the mission needs a human or has
+//! the window's reset. That sleep ends sooner once anyone writes the
+//! mission's state, a `verify` typed meanwhile that launched a run among
+//! them ([`doze`]). It stops when the mission needs a human or has
 //! nothing left that `nunki` can launch: verified, handed over, held, findings
 //! to lift, or a coder run owed, which `nunki` does not launch yet.
 //!
@@ -495,7 +497,10 @@ pub fn watch(
             .and_then(|store| store.load(id))
             .ok();
         let wake = wake_after_reading(project, after.as_ref(), clock.now());
-        sleep_until(clock, wake);
+        match after {
+            Some(after) => doze(&project.hq_root, id, after.revision, wake, clock),
+            None => sleep_until(clock, wake),
+        }
     }
 }
 
@@ -503,6 +508,36 @@ fn sleep_until(clock: &mut dyn crate::wait::Clock, epoch: u64) {
     let now = clock.now();
     if epoch > now {
         clock.sleep(epoch - now);
+    }
+}
+
+/// Sleep until `wake`, a minute at a time, and wake sooner once the
+/// mission's state has been written since the monitor read it at `revision`.
+///
+/// A deadline can be hours off — a window's reset — and a `verify` typed
+/// meanwhile can launch a run: #179's was on another account. That run is
+/// measured every minute and read back when it ends, not at the deadline.
+/// Any write ends the sleep, whoever made it: the tick that follows reads
+/// what it says. So does a state that cannot be read, and that tick says why.
+pub fn doze(
+    hq_root: &Path,
+    id: &str,
+    revision: u64,
+    wake: u64,
+    clock: &mut dyn crate::wait::Clock,
+) {
+    loop {
+        let now = clock.now();
+        if now >= wake {
+            return;
+        }
+        clock.sleep((wake - now).min(TICK_SECONDS));
+        let unmoved = Store::open(hq_root)
+            .and_then(|store| store.load(id))
+            .is_ok_and(|state| state.revision == revision);
+        if !unmoved {
+            return;
+        }
     }
 }
 

@@ -2784,6 +2784,70 @@ fn red_gates_and_a_held_launch_still_spend_one_attempt() {
     assert_eq!(coding(&world.state()), (Work::Lot(0), 2));
 }
 
+/// A clock for the monitor's loop that starts at the real time, since the
+/// `verify` it calls reads that one. It never sleeps: it remembers each pause
+/// and, at the first, does what the test says the world did meanwhile.
+struct Pauses<'a> {
+    now: u64,
+    slept: Vec<u64>,
+    meanwhile: Option<Box<dyn FnOnce() + 'a>>,
+}
+
+impl nunki::wait::Clock for Pauses<'_> {
+    fn now(&mut self) -> u64 {
+        self.now
+    }
+    fn sleep(&mut self, seconds: u64) {
+        assert!(self.slept.len() < 10, "the monitor should have stopped");
+        self.slept.push(seconds);
+        self.now += seconds;
+        if let Some(meanwhile) = self.meanwhile.take() {
+            meanwhile();
+        }
+    }
+}
+
+/// The monitor read the spared turn back and went to sleep until the
+/// window's reset, an hour off. A human's `verify` launched a run meanwhile —
+/// on another account, in #179: the monitor looks at it within the minute,
+/// not at the reset.
+#[test]
+fn a_monitor_asleep_until_the_reset_wakes_for_a_run_launched_meanwhile() {
+    let world = World::new(2);
+    world.journal_names_head();
+    write(&world.tree, "src/half.rs", "pub fn half() {}\n");
+    world.coder_session("s-coder");
+    world.run_recorded(Some(41), FINISHED);
+    world.spared();
+    world.with_account();
+    let now = nunki::state::now_secs();
+    world.five_hours_at(970, now + 3_600);
+    let mut clock = Pauses {
+        now,
+        slept: Vec::new(),
+        // What the human's `verify` leaves: a run recorded. And a hold, so
+        // that the monitor stops at its next `verify` rather than ticking on.
+        meanwhile: Some(Box::new(|| {
+            world.run_recorded(Some(42), FINISHED);
+            world.hold();
+        })),
+    };
+    let engine: Arc<dyn nunki::engine::Engine> =
+        Arc::new(nunki::engine::fake::FakeEngine::default());
+    let mut log: Vec<u8> = Vec::new();
+
+    let why = nunki::monitor::watch(&world.project, "m1", engine, "docker", &mut clock, &mut log);
+
+    let log = String::from_utf8(log).unwrap();
+    assert!(log.contains("verify: Saving"), "{log}");
+    assert_eq!(
+        clock.slept,
+        vec![60],
+        "woken within the minute, not at the reset: {log}"
+    );
+    assert!(why.starts_with("held by"), "{why}\n{log}");
+}
+
 /// The coder's launch site answers to the account's window like the others.
 #[test]
 fn the_window_holds_at_the_coder_launch_site_too() {

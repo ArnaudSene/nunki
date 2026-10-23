@@ -925,6 +925,68 @@ fn a_tick_that_outlasts_its_minute_goes_on_without_a_pause() {
     assert_eq!(clock.slept, Vec::<u64>::new(), "{log}");
 }
 
+fn revision(project: &Project) -> u64 {
+    nunki::state::Store::open(&project.hq_root)
+        .unwrap()
+        .load("m1")
+        .unwrap()
+        .revision
+}
+
+/// A sleep to a deadline hours off — a window's reset — ends at the first
+/// minute after anyone writes the mission's state: a `verify` typed meanwhile
+/// may have launched a run, and a run is looked at every minute (#179).
+#[test]
+fn a_sleep_to_the_reset_ends_once_the_state_is_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    save(&project, &state(false));
+    let read_at = revision(&project);
+    let mut clock = Ticks::at(1_000, || save(&project, &state(true)));
+
+    nunki::monitor::doze(
+        &project.hq_root,
+        "m1",
+        read_at,
+        1_000 + 3 * 3_600,
+        &mut clock,
+    );
+
+    assert_eq!(clock.slept, vec![60]);
+}
+
+/// Nobody writes: the sleep lasts to its deadline, a minute at a time, and
+/// the last piece is what is left of it.
+#[test]
+fn a_sleep_nobody_interrupts_lasts_to_its_deadline() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    save(&project, &state(false));
+    let read_at = revision(&project);
+    let mut clock = Ticks::at(1_000, || {});
+
+    nunki::monitor::doze(&project.hq_root, "m1", read_at, 1_000 + 150, &mut clock);
+
+    assert_eq!(clock.slept, vec![60, 60, 30]);
+}
+
+/// A state that can no longer be read ends the sleep too: the tick that
+/// follows reads it again, and stops there saying why.
+#[test]
+fn a_sleep_ends_once_the_state_cannot_be_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    save(&project, &state(false));
+    let read_at = revision(&project);
+    let path = project.hq_root.join("state/missions/m1.json");
+    assert!(path.is_file(), "{}", path.display());
+    let mut clock = Ticks::at(1_000, || std::fs::write(&path, "not json").unwrap());
+
+    nunki::monitor::doze(&project.hq_root, "m1", read_at, 1_000 + 3_600, &mut clock);
+
+    assert_eq!(clock.slept, vec![60]);
+}
+
 /// The monitor's log says whether a campaign started full or partial, and
 /// from which commit; and once it ended, each campaign of the chain with
 /// its counts.
