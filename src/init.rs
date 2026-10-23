@@ -2523,7 +2523,13 @@ touched = {p[2:] if p.startswith("./") else p for p in sys.argv[1:]}
 # and a campaign that read only `survived` would report them green.
 ANSWERED = {"killed", "caught by type check", "skipped"}
 
-NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*__mutmut_[0-9]+$")
+# A mutant's name: anything but whitespace, then `__mutmut_` and a number.
+# Not narrower, because a method's name carries mutmut's own separator —
+# `pkg.mod.xǁCartǁadd__mutmut_2`, measured on 3.8.0 — and an identifier may
+# hold any Unicode letter. A pattern of ASCII letters read every method's
+# survivor as a line that was not a result: one survivor of a file's seven
+# reached gate 7, and the other six were green on nothing.
+NAME = re.compile(r"^\S+__mutmut_[0-9]+$")
 
 
 def mutmut(*args):
@@ -2603,25 +2609,48 @@ def in_file(path, head, at, removed_raw):
     whose `at`-th line really is the line the diff removed. A file with the
     same signature twice — an overload, a method of two classes — is why the
     text is checked rather than the first match taken.
+
+    A method comes back **dedented**: mutmut prints it as a function of its
+    own, so every line of its diff has lost the class body's indentation —
+    measured on 3.8.0, `def add(self, price):` for a method the file indents
+    by four spaces. So the lines are looked for behind each indentation the
+    file holds, none first: a top-level function is found exactly as before.
     """
     try:
         with open(path) as stream:
             lines = stream.read().splitlines()
     except OSError:
         return None
-    starts = [i for i, text in enumerate(lines) if text == head]
-    for start in starts:
-        line = start + at
-        if 0 < line <= len(lines) and lines[line - 1] == removed_raw:
-            return line
-    return starts[0] + at if starts else None
+
+    def behind(indent, text):
+        return indent + text if text.strip() else text
+
+    indents = sorted({text[: len(text) - len(text.lstrip())] for text in lines}, key=len)
+    guess = None
+    for indent in indents:
+        starts = [i for i, text in enumerate(lines) if text == behind(indent, head)]
+        for start in starts:
+            line = start + at
+            if 0 < line <= len(lines) and lines[line - 1] == behind(indent, removed_raw):
+                return line
+        if guess is None and starts:
+            guess = starts[0] + at
+    return guess
 
 
 survivors = []
 for text in mutmut("results").splitlines():
+    if not text.strip():
+        continue
     name, _, status = text.strip().rpartition(":")
     name, status = name.strip(), status.strip()
-    if not NAME.match(name) or status in ANSWERED:
+    # Refused rather than skipped: skipping a line this script could not read
+    # is how the methods' survivors went unseen. `mutmut results` prints
+    # nothing else on stdout (3.8.0), so a line that is not a result is a
+    # tool that changed, and a campaign that cannot read it measured nothing.
+    if not NAME.match(name):
+        sys.exit("nunki: mutmut results printed a line this campaign cannot read: {!r}".format(text))
+    if status in ANSWERED:
         continue
     survivors.append((name, status))
 
