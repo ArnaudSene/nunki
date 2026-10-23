@@ -90,6 +90,7 @@ impl World {
                     pid: Some(41),
                     log: PathBuf::from("/dev/null"),
                 }),
+                run_account: None,
                 app: None,
                 verdicts: Vec::new(),
                 accepted: Vec::new(),
@@ -516,6 +517,52 @@ fn a_run_past_the_threshold_is_told_to_end_its_turn_once() {
     )
     .unwrap();
     assert_eq!(harness.stopped().len(), 1);
+}
+
+/// The account judged is the one the run was launched on. The mission names
+/// none, so it spends `main` now — below its threshold — while the run holds
+/// `other`'s token, and `other` is past it: that run's turn is ended, under
+/// `other`'s name (#179).
+#[test]
+fn a_run_is_judged_on_the_account_it_was_launched_on() {
+    let world = World::new(true);
+    world.measured(100);
+    let nunki_home = world.project.nunki_home();
+    std::fs::write(
+        nunki_home.join("accounts.yaml"),
+        "default: main\naccounts:\n  main:\n    harness: claude-code\n    token_file: \
+         accounts/main.token\n  other:\n    harness: claude-code\n    token_file: \
+         accounts/other.token\n",
+    )
+    .unwrap();
+    let now = nunki::state::now_secs();
+    nunki::consumption::record(
+        &nunki_home,
+        "other",
+        &nunki::consumption::Measure {
+            windows: nunki::consumption::Windows {
+                five_hour: Some(nunki::consumption::Window {
+                    per_mille: 950,
+                    resets_at: now + 3_600,
+                }),
+                weekly: None,
+            },
+            measured_at: now,
+            harness: "claude-code".into(),
+        },
+    )
+    .unwrap();
+    let store = Store::open(&world.project.hq_root).unwrap();
+    let mut state = store.load("m1").unwrap();
+    state.run_account = Some("other".into());
+    store.save(&state).unwrap();
+    let harness = running();
+
+    let spared = gesture::spare(&world.project, "m1", &harness, now, "mission monitor")
+        .unwrap()
+        .expect("past 90 % on the run's account");
+    assert_eq!((spared.account.as_str(), spared.per_mille), ("other", 950));
+    assert_eq!(harness.stopped(), vec![SessionId("s1".into())]);
 }
 
 #[test]

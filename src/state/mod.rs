@@ -48,6 +48,15 @@ pub struct MissionState {
     /// The run launched for the current stage, if one is (or was) running.
     /// Kept so a restarted `nunki` can ask the engine whether it is still alive.
     pub run: Option<RunHandle>,
+    /// The account that run was launched on: the one whose token it holds,
+    /// so the one its stream measures (SPEC 4.3). Kept beside the run rather
+    /// than resolved again, because what resolves it — `nunki.yaml`, a
+    /// long-lived monitor's copy of it — can name another account by the
+    /// time the run is measured (#179). Set and forgotten with `run`. Absent
+    /// from a run an older `nunki` recorded, which is measured under the
+    /// account the mission spends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_account: Option<String>,
     /// The application `nunki` started for the current stage, if the mission
     /// has one (SPEC 4.2, "les services et le lancement de l'application").
     /// Its own field and not the run's: "the agent is up" and "the
@@ -480,13 +489,15 @@ impl Store {
     }
 
     /// Record the run launched for the current stage (or clear it), and
-    /// persist.
+    /// persist. The account it was launched on is not known here, and is
+    /// forgotten: the run is measured under the account the mission spends.
     pub fn set_run(
         &self,
         state: &mut MissionState,
         run: Option<RunHandle>,
     ) -> Result<(), StateError> {
         state.run = run;
+        state.run_account = None;
         state.updated_at = now_rfc3339();
         state.revision = self.write(state)?;
         Ok(())

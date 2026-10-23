@@ -199,6 +199,7 @@ fn world() -> World {
             slot: "one".into(),
             flow: Flow::new(header.clone()).unwrap(),
             run: None,
+            run_account: None,
             app: None,
             verdicts: Vec::new(),
             accepted: Vec::new(),

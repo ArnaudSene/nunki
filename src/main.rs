@@ -1999,12 +1999,7 @@ fn watch(project: &Project, id: &str, every: u64) -> ExitCode {
         // threshold the run is told to end its turn. The mission's monitor
         // does the same with no terminal; this is the one a human watches.
         let at = nunki::state::now_secs();
-        if let Err(e) = nunki::consumption::note(
-            project,
-            state.flow.header().account.as_deref(),
-            harness.windows(handle),
-            at,
-        ) {
+        if let Err(e) = nunki::consumption::note(project, &state, harness.windows(handle), at) {
             eprintln!("nunki: {e}");
         }
         match nunki::gesture::spare(project, id, &harness, at, "mission watch") {
@@ -3474,12 +3469,13 @@ fn print_hold(state: &nunki::state::MissionState, id: &str) {
 
 /// How far the account the mission spends has used its two windows, as last
 /// measured — or that it has not been, in those words: a supervisor reading
-/// "0" where nothing was measured would read that nothing was spent.
+/// "0" where nothing was measured would read that nothing was spent. While a
+/// run goes, the account is the one it was launched on.
 fn print_usage(project: &Project, state: &nunki::state::MissionState) {
     use nunki::consumption::{Window, percent};
     let header = state.flow.header();
     let bounds = &header.bounds;
-    let account = match nunki::consumption::account_of(project, header.account.as_deref()) {
+    let account = match nunki::consumption::spending(project, state) {
         Ok(account) => account,
         Err(e) => {
             println!("usage     not measured — {e}");

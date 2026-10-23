@@ -155,18 +155,18 @@ pub fn over(measure: &Measure, bounds: &Bounds, now: u64) -> Option<Over> {
     }
 }
 
-/// Keep what a run's stream said of the windows, under the account the
-/// mission spends. Nothing to keep when the harness said nothing.
+/// Keep what a run's stream said of the windows, under the account that run
+/// spends ([`spending`]). Nothing to keep when the harness said nothing.
 pub fn note(
     project: &crate::project::Project,
-    from_mission: Option<&str>,
+    state: &crate::state::MissionState,
     windows: Option<Windows>,
     now: u64,
 ) -> Result<(), String> {
     let Some(windows) = windows else {
         return Ok(());
     };
-    let account = account_of(project, from_mission)?;
+    let account = spending(project, state)?;
     record(
         &project.nunki_home(),
         &account,
@@ -184,6 +184,20 @@ pub fn percent(per_mille: u32) -> String {
         format!("{}", per_mille / 10)
     } else {
         format!("{}.{}", per_mille / 10, per_mille % 10)
+    }
+}
+
+/// The account a mission is spending: while a run is recorded, the one it
+/// was launched on, whose token its stream measures (SPEC 4.3); otherwise,
+/// and for a run an older `nunki` recorded without it, the one the mission
+/// spends ([`account_of`]).
+pub fn spending(
+    project: &crate::project::Project,
+    state: &crate::state::MissionState,
+) -> Result<String, String> {
+    match (&state.run, &state.run_account) {
+        (Some(_), Some(account)) => Ok(account.clone()),
+        _ => account_of(project, state.flow.header().account.as_deref()),
     }
 }
 
