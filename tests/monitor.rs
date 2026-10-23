@@ -78,6 +78,7 @@ fn state(with_run: bool) -> MissionState {
             pid: Some(41),
             log: PathBuf::from("/dev/null"),
         }),
+        run_account: None,
         app: None,
         verdicts: Vec::new(),
         accepted: Vec::new(),

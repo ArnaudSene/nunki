@@ -417,12 +417,9 @@ pub fn watch(
             );
             match harness.state(handle) {
                 Ok(RunState::Running(_)) => {
-                    if let Err(e) = crate::consumption::note(
-                        project,
-                        state.flow.header().account.as_deref(),
-                        harness.windows(handle),
-                        now,
-                    ) {
+                    if let Err(e) =
+                        crate::consumption::note(project, &state, harness.windows(handle), now)
+                    {
                         said.note(
                             out,
                             now,

@@ -154,6 +154,7 @@ impl World {
                 slot: "one".into(),
                 flow: Flow::new(header_of(lots, integration)).unwrap(),
                 run: None,
+                run_account: None,
                 app: None,
                 verdicts: Vec::new(),
                 accepted: Vec::new(),
@@ -1088,6 +1089,7 @@ fn with_security_agent(lots: usize) -> World {
             slot: "one".into(),
             flow: Flow::new(header).unwrap(),
             run: None,
+            run_account: None,
             app: None,
             verdicts: Vec::new(),
             accepted: Vec::new(),
@@ -2345,6 +2347,53 @@ fn a_security_run_read_back_leaves_its_measure_too() {
         .unwrap()
         .expect("measured");
     assert_eq!(kept.windows.five_hour.map(|w| w.per_mille), Some(370));
+}
+
+impl World {
+    /// Two accounts, and the mission names neither: it spends `main`, the
+    /// index's default, until someone names `other`.
+    fn with_two_accounts(&self) {
+        std::fs::write(
+            self.project.nunki_home().join("accounts.yaml"),
+            "default: main\naccounts:\n  main:\n    harness: claude-code\n    token_file: \
+             accounts/main.token\n  other:\n    harness: claude-code\n    token_file: \
+             accounts/other.token\n",
+        )
+        .unwrap();
+    }
+
+    /// What a launch records beside its run: the account it was launched on.
+    fn launched_on(&self, account: &str) {
+        let store = Store::open(&self.project.hq_root).unwrap();
+        let mut state = store.load("m1").unwrap();
+        state.run_account = Some(account.into());
+        store.save(&state).unwrap();
+    }
+}
+
+/// A run's stream measures the account it was launched on, and its read-back
+/// keeps the measure there — not under the account the mission would spend
+/// now, which a human may have switched since the launch (#179).
+#[test]
+fn a_run_read_back_measures_the_account_it_was_launched_on() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.with_two_accounts();
+    world.run_recorded(Some(41), MEASURED);
+    world.launched_on("other");
+    world.verdict("Integrator", "INTEGRATED", &world.head(), "wired");
+
+    world.verify().unwrap();
+    let home = world.project.nunki_home();
+    let kept = nunki::consumption::read(&home, "other")
+        .unwrap()
+        .expect("measured under the run's account");
+    assert_eq!(kept.windows.five_hour.map(|w| w.per_mille), Some(370));
+    assert!(
+        nunki::consumption::read(&home, "main").unwrap().is_none(),
+        "the account the mission would spend now is left alone"
+    );
+    assert_eq!(world.state().run_account, None, "forgotten with the run");
 }
 
 // --- a run nunki stopped for the window (SPEC 4.3) -----------------------------

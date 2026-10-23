@@ -46,6 +46,7 @@ fn state_of(flow: Flow) -> MissionState {
         slot: "one".into(),
         flow,
         run: None,
+        run_account: None,
         app: None,
         verdicts: Vec::new(),
         accepted: Vec::new(),

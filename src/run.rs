@@ -422,6 +422,7 @@ pub fn start(
         slot: slot.name.clone(),
         flow: Flow::new(header).map_err(crate::state::StateError::Flow)?,
         run: Some(launched.run),
+        run_account: Some(launched.account),
         app: launched.app,
         verdicts: Vec::new(),
         accepted: Vec::new(),
@@ -579,6 +580,9 @@ pub struct Launching<'a> {
 /// What a launch left behind, for the caller to persist.
 pub struct Launched {
     pub run: RunHandle,
+    /// The account it was launched on, whose token it holds (SPEC 4.3): what
+    /// its stream measures, kept with the run.
+    pub account: String,
     /// The application `nunki` started for this role, when the mission has one
     /// to start. Kept apart from the run: "the agent is up" and "the
     /// deliverable is up" are two facts, and a single handle would report
@@ -719,7 +723,7 @@ pub fn launch(l: &Launching) -> Result<Launched, RunError> {
     // what the project declares is cheap to check and belongs to the
     // mission, while a missing image belongs to this machine. Saying "build
     // your images" to someone whose account is wrong helps nobody.
-    let (_account_name, _account, token) = account_for(project, header.account.as_deref())?;
+    let (account, _, token) = account_for(project, header.account.as_deref())?;
 
     let stack = stack_of(project);
     let images = image::names(project, &stack);
@@ -876,6 +880,7 @@ pub fn launch(l: &Launching) -> Result<Launched, RunError> {
 
     Ok(Launched {
         run,
+        account,
         app,
         launch: declared,
         campaign_ended,

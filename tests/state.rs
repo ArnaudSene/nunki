@@ -45,6 +45,7 @@ fn state(id: &str) -> MissionState {
         slot: "s1".into(),
         flow: Flow::new(header()).unwrap(),
         run: None,
+        run_account: None,
         app: None,
         verdicts: Vec::new(),
         accepted: Vec::new(),

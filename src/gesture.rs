@@ -122,14 +122,11 @@ pub(crate) fn spare_under_lock(
         return Ok(None);
     }
     let header = state.flow.header().clone();
-    crate::consumption::note(
-        project,
-        header.account.as_deref(),
-        harness.windows(&handle),
-        now,
-    )
-    .map_err(GestureError::Usage)?;
-    let Ok(account) = crate::consumption::account_of(project, header.account.as_deref()) else {
+    crate::consumption::note(project, &state, harness.windows(&handle), now)
+        .map_err(GestureError::Usage)?;
+    // The account the run was launched on, whatever the project names now:
+    // its measure is the one just kept, and its turn is the one to end.
+    let Ok(account) = crate::consumption::spending(project, &state) else {
         return Ok(None);
     };
     let Some(measure) =

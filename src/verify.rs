@@ -443,6 +443,7 @@ pub fn verify_as(
                     // and the stage it lands on is decided, whichever
                     // `verify` launches its run.
                     state.run = None;
+                    state.run_account = None;
                     state.app = None;
                     store.apply_decided(&mut state, event)?;
                     steps.push(Step::Moved {
@@ -483,6 +484,7 @@ pub fn verify_as(
                 })?;
                 state.coder_session = Some(launched.run.session.clone());
                 state.run = Some(launched.run);
+                state.run_account = Some(launched.account);
                 state.app = launched.app;
                 state.decided = None;
                 store.save(&state)?;
@@ -666,6 +668,7 @@ pub fn verify_as(
                             // attempt that stays recorded is a run the next
                             // `verify` would read back a second time.
                             state.run = None;
+                            state.run_account = None;
                             state.app = None;
                             store.apply(&mut state, event)?;
                             steps.push(Step::Moved {
@@ -730,6 +733,7 @@ pub fn verify_as(
                 let application = describe(&launched);
                 let launched_ports = launched.ports_dropped.clone();
                 state.run = Some(launched.run);
+                state.run_account = Some(launched.account);
                 state.app = launched.app;
                 store.save(&state)?;
                 // Before the launch is announced, because it happened first.
@@ -837,6 +841,7 @@ pub fn verify_as(
                 let application = describe(&launched);
                 let launched_ports = launched.ports_dropped.clone();
                 state.run = Some(launched.run);
+                state.run_account = Some(launched.account);
                 state.app = launched.app;
                 store.save(&state)?;
                 // Before the launch is announced, because it happened first.
@@ -1240,8 +1245,7 @@ fn tally(
 ) -> Result<Option<crate::state::Spared>, VerifyError> {
     let spared = state.spared.take();
     state.spent.record(usage);
-    crate::consumption::note(project, header.account.as_deref(), windows, now)
-        .map_err(VerifyError::Usage)?;
+    crate::consumption::note(project, state, windows, now).map_err(VerifyError::Usage)?;
     let fault = if spared.is_some() {
         None
     } else {
@@ -1519,6 +1523,7 @@ fn security_concluded(
             .rank(concluded_file.as_ref().and_then(|f| f.worst()));
     }
     state.run = None;
+    state.run_account = None;
     state.app = None;
     store.apply(state, event)?;
     steps.push(Step::Moved {
@@ -1807,6 +1812,7 @@ mod tests {
             slot: "one".into(),
             flow: crate::mission::flow::Flow::new(header).expect("a valid header"),
             run: None,
+            run_account: None,
             app: None,
             verdicts: Vec::new(),
             accepted: Vec::new(),
