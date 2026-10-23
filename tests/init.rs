@@ -2946,10 +2946,11 @@ fn campaign_with(
         std::fs::write(at, body).unwrap();
     }
     let path = stubs(&dir.path().join("stub-bin"), stub);
+    // One argument per path, as `nunki` passes them.
     let out = sh()
         .arg(&script)
         .arg("abc123")
-        .arg(touched)
+        .args(touched.split_whitespace())
         .env("PATH", path)
         .envs(env.iter().copied())
         .current_dir(&tree)
@@ -3495,7 +3496,11 @@ exit 0
 
     let (said, why, status) = run(&[]);
     assert_eq!(status, Some(0), "{why}");
-    assert_eq!(asked(&why), today, "without the variable");
+    assert_eq!(
+        asked(&why),
+        format!("{today} pkg.thing.x*"),
+        "without the variable"
+    );
     assert_eq!(
         said.lines().last(),
         Some(r#"{"campaign":"done"}"#),
@@ -3504,7 +3509,10 @@ exit 0
     for n in ["1", "6"] {
         let (said, why, status) = run(&[(nunki::mutants::JOBS_ENV, n)]);
         assert_eq!(status, Some(0), "{why}");
-        assert_eq!(asked(&why), format!("{today} --max-children {n}"));
+        assert_eq!(
+            asked(&why),
+            format!("{today} --max-children {n} pkg.thing.x*")
+        );
         assert_eq!(
             said.lines().last(),
             Some(r#"{"campaign":"done"}"#),
@@ -3623,6 +3631,22 @@ fn present(program: &str, test: &str) -> bool {
     here
 }
 
+/// The shell line a stubbed `mutmut run` uses to leave mutmut's record of
+/// `path`, `mutants/<path>.meta`, naming `keys`: where the Python campaign
+/// reads a touched file's mutants from.
+#[cfg(unix)]
+fn record(path: &str, keys: &[&str]) -> String {
+    let keys: Vec<String> = keys.iter().map(|key| format!("\"{key}\":null")).collect();
+    let dir = std::path::Path::new(path)
+        .parent()
+        .map(|dir| dir.display().to_string())
+        .unwrap_or_default();
+    format!(
+        "mkdir -p 'mutants/{dir}' && printf '%s' '{{\"exit_code_by_key\":{{{}}}}}' > 'mutants/{path}.meta'",
+        keys.join(",")
+    )
+}
+
 /// The survivors' spans a campaign printed, by id.
 #[cfg(unix)]
 fn spans(said: &str) -> std::collections::BTreeMap<String, Option<(u32, u32)>> {
@@ -3647,6 +3671,9 @@ fn the_python_campaign_carries_each_survivors_span_from_mutmuts_diff() {
     let thing = "def x_a(a, b):\n    return a > b\n\n\ndef x_b(n):\n    y = n + 1\n    return y\n";
     let uv = r#"#!/bin/sh
 case "$*" in
+  *"mutmut run"*)
+    RECORD
+    ;;
   *"mutmut results"*)
     printf 'pkg.thing.x_a__mutmut_1: survived\npkg.thing.x_b__mutmut_2: survived\npkg.thing.x_b__mutmut_3: survived\n'
     ;;
@@ -3661,11 +3688,22 @@ case "$*" in
     ;;
 esac
 exit 0
-"#;
+"#
+    .replace(
+        "RECORD",
+        &record(
+            "src/pkg/thing.py",
+            &[
+                "pkg.thing.x_a__mutmut_1",
+                "pkg.thing.x_b__mutmut_2",
+                "pkg.thing.x_b__mutmut_3",
+            ],
+        ),
+    );
     let (said, why, code) = campaign_in(
         "python",
         "src/pkg/thing.py",
-        &[("uv", uv)],
+        &[("uv", &uv)],
         &[("src/pkg/thing.py", thing)],
     );
     assert_eq!(code, Some(0), "{said}\n{why}");
@@ -3696,6 +3734,9 @@ fn the_python_campaign_reports_a_methods_survivor_on_its_own_line() {
     let thing = "def x_a(a, b):\n    return a > b\n\n\nclass Count:\n    def up(self, n):\n        if n < 0:\n            n = 0\n        return n + 1\n";
     let uv = r#"#!/bin/sh
 case "$*" in
+  *"mutmut run"*)
+    RECORD
+    ;;
   *"mutmut results"*)
     printf '    pkg.thing.x_a__mutmut_1: survived\n    pkg.thing.xǁCountǁup__mutmut_2: survived\n'
     ;;
@@ -3707,11 +3748,18 @@ case "$*" in
     ;;
 esac
 exit 0
-"#;
+"#
+    .replace(
+        "RECORD",
+        &record(
+            "src/pkg/thing.py",
+            &["pkg.thing.x_a__mutmut_1", "pkg.thing.xǁCountǁup__mutmut_2"],
+        ),
+    );
     let (said, why, code) = campaign_in(
         "python",
         "src/pkg/thing.py",
-        &[("uv", uv)],
+        &[("uv", &uv)],
         &[("src/pkg/thing.py", thing)],
     );
     assert_eq!(code, Some(0), "{said}\n{why}");
@@ -3757,6 +3805,268 @@ exit 0
         why.contains("cannot read: '    pkg.thing.x_a mutant 2: survived'"),
         "{why}"
     );
+}
+
+/// Python: mutmut tests only the touched files' mutants, through one pattern
+/// per touched source, spelt as mutmut names a mutant (measured on 3.8.0):
+/// the dotted path without a leading `src.` or a trailing `.__init__`, then
+/// `x*`, which takes every function and method. A test is no source, a path
+/// written `./` is the same file, and what is not Python is left out.
+#[cfg(unix)]
+#[test]
+fn the_python_campaign_tests_only_the_touched_files_mutants() {
+    let uv = r#"#!/bin/sh
+case "$*" in
+  *"mutmut run"*) echo "asked: $*" >&2 ;;
+esac
+exit 0
+"#;
+    let python = "#!/bin/sh\ncat > /dev/null\n";
+    let (said, why, status) = campaign_in(
+        "python",
+        "src/pkg/thing.py src/pkg/__init__.py lib/tool.py tests/test_thing.py \
+         src/pkg/sub/__init__.py __init__.py ./src/pkg/other.py README.md",
+        &[("uv", uv), ("python3", python)],
+        &[],
+    );
+    assert_eq!(status, Some(0), "{why}");
+    assert_eq!(
+        asked(&why),
+        "run --frozen --no-sync mutmut run pkg.thing.x* pkg.x* lib.tool.x* pkg.sub.x* \
+         __init__.x* pkg.other.x*"
+    );
+    assert!(nunki::mutants::completed(&said), "{said}\n{why}");
+}
+
+/// Python: patterns that match no mutant are a branch with nothing mutable,
+/// not a campaign that could not run. mutmut refuses them, status 1
+/// (measured on 3.8.0), when no touched file holds a mutant — a module of
+/// constants, a script outside `source_paths` — and the campaign tells that
+/// from a real failure by what mutmut left: its stats, written once every
+/// file is generated, and no touched file's record naming a mutant.
+#[cfg(unix)]
+#[test]
+fn a_python_campaign_whose_touched_files_hold_no_mutant_says_it_finished() {
+    if !present(
+        "python3",
+        "a_python_campaign_whose_touched_files_hold_no_mutant_says_it_finished",
+    ) {
+        return;
+    }
+    let uv = |left: &str| {
+        format!(
+            "#!/bin/sh\ncase \"$*\" in\n  *\"mutmut run\"*)\n    mkdir -p mutants\n    {left}\n    \
+             echo 'AssertionError: Filtered for specific mutants, but nothing matches' >&2\n    \
+             exit 1\n    ;;\nesac\nexit 0\n"
+        )
+    };
+    let run = |left: &str| {
+        campaign_in(
+            "python",
+            "src/pkg/consts.py scripts/tool.py",
+            &[("uv", &uv(left))],
+            &[],
+        )
+    };
+    let stats = "touch mutants/mutmut-stats.json";
+
+    // A module of constants leaves a record naming no mutant; a script
+    // outside `source_paths` leaves none at all.
+    for left in [
+        format!("{stats} && {}", record("src/pkg/consts.py", &[])),
+        stats.to_string(),
+    ] {
+        let (said, why, code) = run(&left);
+        assert_eq!(code, Some(0), "{left}: {why}");
+        assert_eq!(
+            said.lines().last(),
+            Some(r#"{"campaign":"done","tried":0,"found":0}"#),
+            "{left}: {said}\n{why}"
+        );
+    }
+
+    // Anything else could not run: no stats, as when the run died before
+    // every file was generated; a touched file's record naming a mutant; and
+    // a record that cannot be read.
+    for left in [
+        record("src/pkg/consts.py", &[]),
+        format!(
+            "{stats} && {}",
+            record("src/pkg/consts.py", &["pkg.consts.x_a__mutmut_1"])
+        ),
+        format!(
+            "{stats} && mkdir -p mutants/src/pkg && echo nonsense > mutants/src/pkg/consts.py.meta"
+        ),
+    ] {
+        let (said, why, code) = run(&left);
+        assert!(!nunki::mutants::completed(&said), "{left}: {said}\n{why}");
+        assert_ne!(code, Some(0), "{left}: {why}");
+        assert!(why.contains("the campaign could not run"), "{left}: {why}");
+    }
+}
+
+/// Python: only the touched files' survivors are shown. After a filtered run
+/// `mutmut results` lists every other file's mutant too, `not checked` — a
+/// project of 13,733 mutants had 12,091 of them — and showing each, one
+/// process at a time, would spend the campaign's deadline on files nobody
+/// touched.
+#[cfg(unix)]
+#[test]
+fn the_python_campaign_shows_only_the_touched_files_survivors() {
+    if !present(
+        "python3",
+        "the_python_campaign_shows_only_the_touched_files_survivors",
+    ) {
+        return;
+    }
+    let uv = r#"#!/bin/sh
+case "$*" in
+  *"mutmut run"*)
+    RECORD
+    ;;
+  *"mutmut results"*)
+    printf '    pkg.other.x_b__mutmut_1: not checked\n    pkg.thing.x_a__mutmut_1: survived\n'
+    ;;
+  *"mutmut show pkg.thing.x_a__mutmut_1"*)
+    printf -- '--- src/pkg/thing.py\n+++ src/pkg/thing.py\n@@ -1,2 +1,2 @@\n def x_a(a, b):\n-    return a > b\n+    return a >= b\n'
+    ;;
+  *"mutmut show"*)
+    echo "shown: $*" >&2
+    printf -- '--- src/pkg/other.py\n+++ src/pkg/other.py\n@@ -1,2 +1,2 @@\n def x_b(n):\n-    return n\n+    return None\n'
+    ;;
+esac
+exit 0
+"#
+    .replace(
+        "RECORD",
+        &record("src/pkg/thing.py", &["pkg.thing.x_a__mutmut_1"]),
+    );
+    let (said, why, code) = campaign_in(
+        "python",
+        "src/pkg/thing.py",
+        &[("uv", &uv)],
+        &[
+            ("src/pkg/thing.py", "def x_a(a, b):\n    return a > b\n"),
+            ("src/pkg/other.py", "def x_b(n):\n    return n\n"),
+        ],
+    );
+    assert_eq!(code, Some(0), "{said}\n{why}");
+    assert_eq!(
+        spans(&said).into_keys().collect::<Vec<_>>(),
+        ["pkg.thing.x_a__mutmut_1"],
+        "{said}"
+    );
+    assert!(
+        !why.contains("shown: "),
+        "an untouched file's mutant was shown: {why}"
+    );
+}
+
+/// Python: code in `src/__init__.py` is a module whose own name is
+/// `__init__`, and mutmut records its results under a second name, less the
+/// `__init__.` (measured on 3.8.0). Both names are read, as they were before
+/// the campaign was filtered, and the second is not refused for being no
+/// pattern's: refused, such a branch could never finish a campaign.
+#[cfg(unix)]
+#[test]
+fn a_python_campaign_reads_both_names_mutmut_gives_a_module_called_init() {
+    if !present(
+        "python3",
+        "a_python_campaign_reads_both_names_mutmut_gives_a_module_called_init",
+    ) {
+        return;
+    }
+    let uv = r#"#!/bin/sh
+case "$*" in
+  *"mutmut run"*)
+    RECORD
+    ;;
+  *"mutmut results"*)
+    printf '    __init__.x_top__mutmut_1: not checked\n    x_top__mutmut_1: no tests\n'
+    ;;
+  *"mutmut show"*)
+    printf -- '--- src/__init__.py\n+++ src/__init__.py\n@@ -1,2 +1,2 @@\n def top(a):\n-    return a + 1\n+    return a - 1\n'
+    ;;
+esac
+exit 0
+"#
+    .replace(
+        "RECORD",
+        &record(
+            "src/__init__.py",
+            &["__init__.x_top__mutmut_1", "x_top__mutmut_1"],
+        ),
+    );
+    let (said, why, code) = campaign_in(
+        "python",
+        "src/__init__.py",
+        &[("uv", &uv)],
+        &[("src/__init__.py", "def top(a):\n    return a + 1\n")],
+    );
+    assert_eq!(code, Some(0), "{said}\n{why}");
+    assert_eq!(
+        spans(&said).into_keys().collect::<Vec<_>>(),
+        ["__init__.x_top__mutmut_1", "x_top__mutmut_1"],
+        "{said}"
+    );
+}
+
+/// Python: a touched file's mutant that no pattern takes was never tested,
+/// and the campaign says so rather than report it `not checked`: the coder
+/// would be asked to answer for a mutant nothing ran. And a survivor whose
+/// diff names another file than the record it was read from is refused, not
+/// dropped: dropped, it would be a touched file's survivor gone.
+#[cfg(unix)]
+#[test]
+fn a_python_campaign_refuses_a_touched_mutant_it_cannot_account_for() {
+    if !present(
+        "python3",
+        "a_python_campaign_refuses_a_touched_mutant_it_cannot_account_for",
+    ) {
+        return;
+    }
+    let uv = |name: &str, file: &str| {
+        r#"#!/bin/sh
+case "$*" in
+  *"mutmut run"*)
+    RECORD
+    ;;
+  *"mutmut results"*)
+    printf '    NAME: not checked\n'
+    ;;
+  *"mutmut show"*)
+    printf -- '--- FILE\n+++ FILE\n@@ -1,2 +1,2 @@\n def x_a(a, b):\n-    return a > b\n+    return a >= b\n'
+    ;;
+esac
+exit 0
+"#
+        .replace("RECORD", &record("src/pkg/thing.py", &[name]))
+        .replace("NAME", name)
+        .replace("FILE", file)
+    };
+    let thing = "def x_a(a, b):\n    return a > b\n";
+    for (name, file, why_not) in [
+        (
+            "elsewhere.x_a__mutmut_1",
+            "src/pkg/thing.py",
+            "so it was never tested",
+        ),
+        (
+            "pkg.thing.x_a__mutmut_1",
+            "src/pkg/other.py",
+            "named src/pkg/other.py, and its record is src/pkg/thing.py's",
+        ),
+    ] {
+        let (said, why, code) = campaign_in(
+            "python",
+            "src/pkg/thing.py",
+            &[("uv", &uv(name, file))],
+            &[("src/pkg/thing.py", thing), ("src/pkg/other.py", thing)],
+        );
+        assert!(!nunki::mutants::completed(&said), "{name}: {said}\n{why}");
+        assert_ne!(code, Some(0), "{name}: {why}");
+        assert!(why.contains(why_not), "{name}: {why}");
+    }
 }
 
 /// Next.js: the span is the report's `location.end.line` when it is a whole

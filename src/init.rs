@@ -2307,9 +2307,9 @@ uv run --frozen --no-sync pytest --ignore=mutants -m "not system"
 /// mounted read-only — not an agent's to weaken while it is being gated by it.
 ///
 /// Checked against mutmut 3.8.0 before it shipped, as the Rust fragment
-/// was: `mutmut run` refuses every
-/// filter but an exact mutant name, and a function no test covers comes back
-/// `not checked` rather than `survived` — so a campaign that reads only
+/// was: `mutmut run` takes glob patterns over mutant names and refuses
+/// patterns that match nothing, and a function no test covers comes back
+/// `no tests` rather than `survived` — so a campaign that reads only
 /// "survived" calls untested code green.
 const MUTATION_PYTHON: &str = r##"#!/bin/sh
 # The mutation campaign for a Python project (SPEC 4.4, gate 7).
@@ -2335,8 +2335,8 @@ const MUTATION_PYTHON: &str = r##"#!/bin/sh
 #   {"campaign":"done"}
 # with **no** `tried` and no `found`. A `standard` mission's gate 7 divides
 # the killed mutants by `tried`, and the share means something only over the
-# lines this branch changed (SPEC 4.4). mutmut mutates every file under its
-# `source_paths` and cannot be told to do less (see below), so whatever this
+# lines this branch changed (SPEC 4.4). mutmut tests the touched files'
+# mutants (see below), but every one of each file's, so whatever this
 # script could count would be over whole files: a well-tested file would
 # hide the new untested lines in it. Without a count `nunki` judges gate 7 as
 # `critical` does — an outcome for every survivor — which the survivors,
@@ -2404,14 +2404,19 @@ for path in "$@"; do
     *.py) files="$files $path" ;;
   esac
 done
-if [ -z "$files" ]; then
-  # Nothing this branch touched is mutable, so there are no mutants and no
-  # survivors — and that is a measurement, not a campaign that failed to
-  # happen. The terminal line is printed **before** leaving, because `nunki`
-  # reads its absence as a campaign that was killed and asks for another:
-  # a branch touching only tests or documentation would be asked for ever.
+# Nothing this branch touched is mutable, so there are no mutants and no
+# survivors — and that is a measurement, not a campaign that failed to
+# happen. The terminal line is printed **before** leaving, because `nunki`
+# reads its absence as a campaign that was killed and asks for another:
+# a branch touching only tests or documentation would be asked for ever.
+# Said from two places: here, for a branch that touched no Python source,
+# and after mutmut, for one whose touched sources hold no mutant.
+nothing_mutable() {
   printf '{"campaign":"done","tried":0,"found":0}\n'
   exit 0
+}
+if [ -z "$files" ]; then
+  nothing_mutable
 fi
 
 # The campaign runs the **whole** suite in its copy, and this stack's system
@@ -2463,25 +2468,44 @@ fi
 # since — and a replay of the same fingerprint reaches exactly that path.
 rm -rf mutants
 
+# mutmut still mutates every file under its `source_paths`, but it **tests**
+# only the mutants its arguments name. Those are glob patterns over mutant
+# names, not exact names: measured on 3.8.0, `mutmut run "<module>.*"`
+# tested one module's 1,642 mutants out of a project's 13,733, left the
+# others `not checked`, ran only the tests that reach them, and found the
+# same survivors in that module as a full run. The names given without a `*`
+# — a module, a function prefix, a file path — match nothing, which is what
+# an earlier draft measured before concluding that mutmut could not be told
+# to do less.
+#
+# `only_mutate`, the other restriction it offers, lives in the project's own
+# `pyproject.toml`, and this script will not rewrite that file. The clean copy
+# of HEAD is where gate 6's battery runs too, and `nunki exec` resets it
+# between calls: a campaign that edits the project's configuration there
+# either races the battery or measures a project that does not exist.
+#
+# A mutant's name is its file's dotted path, the function, and a number:
+# `src/pkg/mod.py` gives `pkg.mod.x_total__mutmut_3`, a method
+# `pkg.mod.xǁCartǁadd__mutmut_1`. mutmut drops the `.py`, a leading `src.`
+# and an `.__init__`, so a package's own code is named after the package, and
+# every function and method starts with an `x`. So each touched file gives
+# `<dotted path>.x*`, which takes all of its mutants. For a package it also
+# takes those of a submodule whose name starts with an `x`: more campaign
+# time, never a wrong answer, since the survivors below are read from the
+# touched files' own records.
+#
+# The patterns go to mutmut as arguments, never through the shell's globbing.
+set --
+for path in $files; do
+  module="${path#./}"
+  module="$(printf '%s' "${module%.py}" | tr / .)"
+  module="${module#src.}"
+  case "$module" in
+    *.__init__) module="${module%.__init__}" ;;
+  esac
+  set -- "$@" "$module.x*"
+done
 
-# mutmut mutates every file under its `source_paths` and cannot be told to do
-# less. Measured on 3.8.0: `mutmut run` takes exact mutant names only — a
-# module (`keeper`), a function prefix (`keeper.x_label`) and a file path
-# (`src/keeper/__init__.py`) all come back "Filtered for specific mutants,
-# but nothing matches" — and the only restriction it offers, `only_mutate`,
-# lives in the project's own `pyproject.toml`.
-#
-# This script will not rewrite that file. The clean copy of HEAD is where
-# gate 6's battery runs too, and `nunki exec` resets it between calls: a
-# campaign that edits the project's configuration there either races the
-# battery or measures a project that does not exist. Rust's `--file` is a
-# flag and touches nothing on disk; there is no equivalent here.
-#
-# So everything under `source_paths` is mutated and the **survivors** are
-# filtered, below, to what the branch touched. It costs campaign time on
-# untouched code, and it keeps the copy honest. The restriction belongs in
-# mutmut, not in this script.
-#
 # Its status is the discriminator here, and it is not cargo-mutants'.
 # Measured on 3.8.0: `mutmut run` exits **0** whether every mutant was killed
 # or two survived, and **1** when it could not run at all — a source file it
@@ -2494,8 +2518,40 @@ rm -rf mutants
 # campaign died on the first file. Taken as a guard, it lets the script print
 # `{"campaign":"done"}` with no survivor — gate 7 green on nothing,
 # which is the one failure this contract exists to prevent.
+#
+# One failure is a measurement: patterns that match no mutant at all.
+# mutmut refuses them — "Filtered for specific mutants, but nothing
+# matches", status 1 — when every touched file is one it made no mutant in:
+# a module of constants, an `__init__.py` of imports, a script outside
+# `source_paths`. That is a branch with nothing mutable, and saying it could
+# not run would have gate 7 ask for ever. It is told from a real failure by
+# what mutmut left, not by its message: `mutants/mutmut-stats.json` is
+# written once every file is generated and the tests have run, just before
+# the patterns are matched (3.8.0), and each mutated file's record,
+# `mutants/<path>.meta`, names every mutant made in it. With the first
+# there and no touched file's record naming one, there was nothing to test.
+# Anything else — a record that cannot be read among them — is a campaign
+# that could not run.
 # shellcheck disable=SC2086
-if ! uv run --frozen --no-sync mutmut run $children >&2; then
+if ! uv run --frozen --no-sync mutmut run $children "$@" >&2; then
+  # shellcheck disable=SC2086
+  if [ -f mutants/mutmut-stats.json ] && python3 - $files <<'PY'
+import json
+import sys
+
+for path in sys.argv[1:]:
+    path = path[2:] if path.startswith("./") else path
+    try:
+        with open("mutants/" + path + ".meta") as stream:
+            record = json.load(stream)
+    except FileNotFoundError:
+        continue
+    if record["exit_code_by_key"]:
+        sys.exit(1)
+PY
+  then
+    nothing_mutable
+  fi
   echo "nunki: the campaign could not run, so no mutant was tested" >&2
   exit 1
 fi
@@ -2505,16 +2561,25 @@ fi
 # with sed because the diff has to be counted, not matched — and because the
 # interpreter is the one tool this stack is certain to have.
 #
+# Which mutants are the touched files' is read from mutmut's record of each
+# file, `mutants/<path>.meta`, which names every mutant made in it, and only
+# those are shown. Not from `mutmut show` itself, one process per mutant:
+# `results` also lists every untouched file's mutant, `not checked` after a
+# filtered run, and a project of 13,733 mutants had 12,091 of them.
+#
 # Under `set -e`, a failure here ends the script **before** the terminal line,
 # which is what it should do: results nobody could read are not a measurement.
 # shellcheck disable=SC2086
-python3 - $files <<'PY' || exit 1
+python3 - $files -- "$@" <<'PY' || exit 1
+import fnmatch
 import json
 import re
 import subprocess
 import sys
 
-touched = {p[2:] if p.startswith("./") else p for p in sys.argv[1:]}
+cut = sys.argv.index("--")
+touched = {p[2:] if p.startswith("./") else p for p in sys.argv[1:cut]}
+patterns = sys.argv[cut + 1 :]
 
 # What counts as answered. Everything else — `survived`, but also `no tests`,
 # `not checked`, `timeout`, `suspicious`, `segfault` — is a mutant nothing
@@ -2638,6 +2703,32 @@ def in_file(path, head, at, removed_raw):
     return guess
 
 
+# The touched files' mutants, each with its file. A touched file without a
+# record is one mutmut made no mutant in: outside `source_paths`, or one its
+# configuration leaves out.
+mine = {}
+for path in sorted(touched):
+    try:
+        with open("mutants/" + path + ".meta") as stream:
+            keys = json.load(stream)["exit_code_by_key"]
+    except FileNotFoundError:
+        continue
+    # mutmut records each result under the mutant's name less any
+    # `__init__.`. For a module whose own name is `__init__` — code in
+    # `src/__init__.py` — that is a second key of the same record, measured
+    # on 3.8.0: `x_top__mutmut_1: no tests` beside a
+    # `__init__.x_top__mutmut_1` left `not checked`. Both are read, as they
+    # were before the campaign was filtered; the copy is no pattern's to take.
+    copies = {key.replace("__init__.", "") for key in keys if "__init__." in key}
+    for key in keys:
+        # The patterns are this script's reading of how mutmut names a
+        # mutant. A touched file's mutant none of them takes was never tested,
+        # and is refused here rather than reported `not checked`: the coder
+        # would be asked to answer for a mutant nothing ran.
+        if key not in copies and not any(fnmatch.fnmatch(key, pattern) for pattern in patterns):
+            sys.exit("nunki: no pattern of {} takes {}, a mutant of {}, so it was never tested".format(patterns, key, path))
+        mine[key] = path
+
 survivors = []
 for text in mutmut("results").splitlines():
     if not text.strip():
@@ -2650,7 +2741,7 @@ for text in mutmut("results").splitlines():
     # tool that changed, and a campaign that cannot read it measured nothing.
     if not NAME.match(name):
         sys.exit("nunki: mutmut results printed a line this campaign cannot read: {!r}".format(text))
-    if status in ANSWERED:
+    if status in ANSWERED or name not in mine:
         continue
     survivors.append((name, status))
 
@@ -2661,8 +2752,10 @@ for name, status in survivors:
     # spend the triage on nothing.
     if path is None or line is None:
         sys.exit("nunki: mutmut show {} named no file".format(name))
-    if path not in touched:
-        continue
+    # And loudly when the diff names another file than the record the mutant
+    # was read from: dropped, it would be a touched file's survivor gone.
+    if path != mine[name]:
+        sys.exit("nunki: mutmut show {} named {}, and its record is {}'s".format(name, path, mine[name]))
     what = status if not removed else "{}: {} -> {}".format(status, removed, added)
     end = line + span - 1 if span else 0
     print(json.dumps({"id": name, "file": path, "line": line, "end_line": end, "description": what}))

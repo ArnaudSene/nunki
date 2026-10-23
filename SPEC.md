@@ -1221,13 +1221,19 @@ eux-mêmes plutôt que tus :
   sources`, trois étapes sans réseau ; `osv-scanner --licenses` passe par
   deps.dev, que la liste blanche du codeur ne nomme pas. La stack le dit plutôt
   que de laisser croire à une vérification qui n'a pas lieu.
-- **La campagne mute tout et filtre les survivants.** `mutmut run` n'accepte
-  que des noms de mutants exacts — ni module, ni préfixe, ni chemin de fichier
-  (mesuré sur 3.8.0) — et sa seule restriction, `only_mutate`, vit dans le
-  `pyproject.toml` du projet, que la campagne ne réécrira pas : la copie propre
-  de `HEAD` est aussi celle où tourne la porte 6. Le `--file` de Rust est un
-  drapeau et ne touche à rien ; il n'y a pas d'équivalent ici. Le coût est du
-  temps de campagne sur du code non touché.
+- **La campagne ne teste que les fichiers touchés, mais entiers.** `mutmut
+  run` prend des motifs glob sur les noms de mutants (mesuré sur 3.8.0) : un
+  motif par fichier touché, `<chemin pointé>.x*`, fait tester les mutants de ce
+  fichier et eux seuls, avec les seuls tests qui les atteignent. La génération
+  et les statistiques couvrent toujours tout l'arbre, et rien ne restreint la
+  campagne aux lignes changées : c'est pourquoi elle ne donne aucun compte
+  (4.4). Des motifs qui ne prennent aucun mutant — un module de constantes, un
+  script hors de `source_paths` — sont refusés par mutmut ; la campagne y lit
+  une branche sans rien de mutable, d'après ce que mutmut a laissé sur disque,
+  et non une campagne qui n'a pas pu tourner. L'autre restriction de mutmut,
+  `only_mutate`, vit dans le `pyproject.toml` du projet, que la campagne ne
+  réécrira pas : la copie propre de `HEAD` est aussi celle où tourne la
+  porte 6.
 
 **Ce que la stack Next.js rend** (mesuré avant livraison) :
 `pnpm` pour le verrou, `prettier`, `eslint`, `tsc` et `vitest` pour la
