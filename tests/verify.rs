@@ -286,13 +286,15 @@ fn a_forbidden_commit_costs_a_run_now_and_not_the_mission_later() {
 }
 
 /// Bounded like any other attempt: a lot whose gates keep failing goes to the
-/// human rather than round for ever.
+/// human rather than round for ever. Each attempt is a run read back on the
+/// red tree — this world cannot launch one, so each is recorded by hand.
 #[test]
 fn a_gate_that_keeps_failing_reaches_the_human() {
     let world = World::new(1);
     world.commit("AGENTS.md", "rewritten\n", "loosen");
     world.journal_names_head();
     for _ in 0..3 {
+        world.run_recorded(Some(41), FINISHED);
         let _ = world.verify();
     }
     match world.state().flow.stage() {
