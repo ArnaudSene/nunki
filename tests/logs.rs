@@ -103,6 +103,7 @@ impl World {
                 harness_down: None,
                 spent: Default::default(),
                 spared: None,
+                decided: None,
                 coder_session: None,
                 pushed: None,
                 updated_at: when.into(),

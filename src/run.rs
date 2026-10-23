@@ -430,6 +430,7 @@ pub fn start(
         // Counted when `nunki verify` reads it back, like every other run.
         spent: Default::default(),
         spared: None,
+        decided: None,
         coder_session: Some(session),
         pushed: None,
         updated_at: String::new(),

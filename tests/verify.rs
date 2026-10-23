@@ -161,6 +161,7 @@ impl World {
                 harness_down: None,
                 spent: Default::default(),
                 spared: None,
+                decided: None,
                 coder_session: None,
                 pushed: None,
                 updated_at: String::new(),
@@ -1094,6 +1095,7 @@ fn with_security_agent(lots: usize) -> World {
             harness_down: None,
             spent: Default::default(),
             spared: None,
+            decided: None,
             coder_session: None,
             pushed: None,
             updated_at: String::new(),
@@ -2661,6 +2663,76 @@ fn a_coder_harness_failure_is_waited_out_and_keeps_its_session() {
         state.coder_session,
         Some(nunki::harness::SessionId("s-coder".into()))
     );
+}
+
+/// A spared turn waits for the window it was spared for, so its replay is
+/// launched by a later `verify` than the one that read it back. That one
+/// launches it on the tree the turn left, uncommitted work and all, and
+/// spends nothing: the tree was not to be judged, and still is not (#177).
+#[test]
+fn a_spared_coder_turn_is_still_replayed_once_the_window_resets() {
+    let world = World::new(2);
+    world.journal_names_head();
+    write(&world.tree, "src/half.rs", "pub fn half() {}\n");
+    world.coder_session("s-coder");
+    world.run_recorded(Some(41), FINISHED);
+    world.spared();
+    world.with_account();
+    world.five_hours_at(970, nunki::state::now_secs() + 3_600);
+
+    let steps = world.verify().unwrap();
+    assert!(
+        matches!(steps.last(), Some(Step::Saving { role, .. }) if *role == Role::Coder),
+        "{steps:?}"
+    );
+    assert_eq!(coding(&world.state()), (Work::Lot(0), 1));
+
+    world.five_hours_at(970, nunki::state::now_secs() - 1);
+    assert!(world.verify().is_err(), "the replay is launched");
+    let state = world.state();
+    assert_eq!(coding(&state), (Work::Lot(0), 1));
+    assert_eq!(
+        state.coder_session,
+        Some(nunki::harness::SessionId("s-coder".into()))
+    );
+}
+
+/// The same for a harness failure, whose replay always waits: the tree it
+/// left is not judged when the wait is over.
+#[test]
+fn a_coder_harness_failure_is_replayed_once_the_wait_is_over() {
+    let world = World::new(2);
+    world.journal_names_head();
+    write(&world.tree, "src/half.rs", "pub fn half() {}\n");
+    world.coder_session("s-coder");
+    world.run_recorded(Some(41), QUOTA);
+
+    let steps = world.verify().unwrap();
+    assert!(
+        matches!(steps.last(), Some(Step::Waiting { role, .. }) if *role == Role::Coder),
+        "{steps:?}"
+    );
+    let mut down = world.state().harness_down.expect("the failure is counted");
+    down.not_before = nunki::state::now_secs() - 1;
+    world.harness_down(Some(down));
+
+    assert!(world.verify().is_err(), "the replay is launched");
+    assert_eq!(coding(&world.state()), (Work::Lot(0), 1));
+}
+
+/// Red gates spend their run's attempt once, even when the next run is not
+/// launched by the same `verify`: the tree is not judged again on its way to
+/// the launch.
+#[test]
+fn red_gates_and_a_held_launch_still_spend_one_attempt() {
+    let world = World::new(2);
+    world.commit("AGENTS.md", "rewritten by the agent\n", "loosen the rules");
+    world.coder_ran("Lot: L1 — done");
+    assert_eq!(coding(&world.state()), (Work::Lot(0), 2));
+
+    world.release();
+    assert!(world.verify().is_err(), "the next attempt is launched");
+    assert_eq!(coding(&world.state()), (Work::Lot(0), 2));
 }
 
 /// The coder's launch site answers to the account's window like the others.

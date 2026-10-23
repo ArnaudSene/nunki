@@ -53,6 +53,7 @@ fn state_of(flow: Flow) -> MissionState {
         harness_down: None,
         spent: Default::default(),
         spared: None,
+        decided: None,
         coder_session: None,
         pushed: None,
         updated_at: "2026-10-05T10:00:00Z".into(),
