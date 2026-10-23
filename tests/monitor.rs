@@ -933,6 +933,15 @@ fn revision(project: &Project) -> u64 {
         .revision
 }
 
+/// A mission waiting on the harness until `not_before`. The sleeps below go
+/// to that deadline, so it is a wait the state holds, as the monitor's
+/// always is: [`next_wake`] gives it.
+fn waiting(not_before: u64) -> MissionState {
+    let mut waiting = state(false);
+    waiting.harness_down = down_until(not_before);
+    waiting
+}
+
 /// A sleep to a deadline hours off — a window's reset — ends at the first
 /// minute after anyone writes the mission's state: a `verify` typed meanwhile
 /// may have launched a run, and a run is looked at every minute (#179).
@@ -940,9 +949,15 @@ fn revision(project: &Project) -> u64 {
 fn a_sleep_to_the_reset_ends_once_the_state_is_written() {
     let dir = tempfile::tempdir().unwrap();
     let project = project(dir.path());
-    save(&project, &state(false));
+    save(&project, &waiting(1_000 + 3 * 3_600));
     let read_at = revision(&project);
-    let mut clock = Ticks::at(1_000, || save(&project, &state(true)));
+    // A run recorded, and the wait left as it was: only the write can end
+    // the sleep.
+    let mut clock = Ticks::at(1_000, || {
+        let mut launched = waiting(1_000 + 3 * 3_600);
+        launched.run = state(true).run;
+        save(&project, &launched)
+    });
 
     nunki::monitor::doze(
         &project.hq_root,
@@ -961,7 +976,7 @@ fn a_sleep_to_the_reset_ends_once_the_state_is_written() {
 fn a_sleep_nobody_interrupts_lasts_to_its_deadline() {
     let dir = tempfile::tempdir().unwrap();
     let project = project(dir.path());
-    save(&project, &state(false));
+    save(&project, &waiting(1_000 + 150));
     let read_at = revision(&project);
     let mut clock = Ticks::at(1_000, || {});
 
@@ -976,7 +991,7 @@ fn a_sleep_nobody_interrupts_lasts_to_its_deadline() {
 fn a_sleep_ends_once_the_state_cannot_be_read() {
     let dir = tempfile::tempdir().unwrap();
     let project = project(dir.path());
-    save(&project, &state(false));
+    save(&project, &waiting(1_000 + 3_600));
     let read_at = revision(&project);
     let path = project.hq_root.join("state/missions/m1.json");
     assert!(path.is_file(), "{}", path.display());
