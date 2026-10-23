@@ -3679,6 +3679,86 @@ exit 0
     );
 }
 
+/// Python: a method's survivor reaches gate 7, on the line the file has it.
+/// mutmut names a method with its own separator, `xǁCountǁup`, and prints
+/// its diff dedented, as a function of its own (both measured on 3.8.0): a
+/// name pattern of ASCII letters skipped every method's survivor, and a
+/// search for the signature as the diff spells it found none.
+#[cfg(unix)]
+#[test]
+fn the_python_campaign_reports_a_methods_survivor_on_its_own_line() {
+    if !present(
+        "python3",
+        "the_python_campaign_reports_a_methods_survivor_on_its_own_line",
+    ) {
+        return;
+    }
+    let thing = "def x_a(a, b):\n    return a > b\n\n\nclass Count:\n    def up(self, n):\n        if n < 0:\n            n = 0\n        return n + 1\n";
+    let uv = r#"#!/bin/sh
+case "$*" in
+  *"mutmut results"*)
+    printf '    pkg.thing.x_a__mutmut_1: survived\n    pkg.thing.xǁCountǁup__mutmut_2: survived\n'
+    ;;
+  *"mutmut show pkg.thing.x_a__mutmut_1"*)
+    printf -- '--- src/pkg/thing.py\n+++ src/pkg/thing.py\n@@ -1,2 +1,2 @@\n def x_a(a, b):\n-    return a > b\n+    return a >= b\n'
+    ;;
+  *"mutmut show pkg.thing.xǁCountǁup__mutmut_2"*)
+    printf -- '--- src/pkg/thing.py\n+++ src/pkg/thing.py\n@@ -1,4 +1,4 @@\n def up(self, n):\n-    if n < 0:\n+    if n <= 0:\n         n = 0\n     return n + 1\n'
+    ;;
+esac
+exit 0
+"#;
+    let (said, why, code) = campaign_in(
+        "python",
+        "src/pkg/thing.py",
+        &[("uv", uv)],
+        &[("src/pkg/thing.py", thing)],
+    );
+    assert_eq!(code, Some(0), "{said}\n{why}");
+    let spans = spans(&said);
+    assert_eq!(spans.len(), 2, "every survivor, the method's too: {said}");
+    assert_eq!(spans["pkg.thing.x_a__mutmut_1"], Some((2, 2)), "{said}");
+    assert_eq!(
+        spans["pkg.thing.xǁCountǁup__mutmut_2"],
+        Some((7, 7)),
+        "the method's line in the file, not in its dedented diff: {said}"
+    );
+}
+
+/// Python: a line of `mutmut results` the campaign cannot read is a
+/// campaign that measured nothing, not a line to skip — skipping is how
+/// every method's survivor went unseen.
+#[cfg(unix)]
+#[test]
+fn the_python_campaign_refuses_a_result_it_cannot_read() {
+    if !present(
+        "python3",
+        "the_python_campaign_refuses_a_result_it_cannot_read",
+    ) {
+        return;
+    }
+    let uv = r#"#!/bin/sh
+case "$*" in
+  *"mutmut results"*)
+    printf '    pkg.thing.x_a__mutmut_1: killed\n    pkg.thing.x_a mutant 2: survived\n'
+    ;;
+esac
+exit 0
+"#;
+    let (said, why, code) = campaign_in(
+        "python",
+        "src/pkg/thing.py",
+        &[("uv", uv)],
+        &[("src/pkg/thing.py", "def x_a(a, b):\n    return a > b\n")],
+    );
+    assert!(!nunki::mutants::completed(&said), "{said}\n{why}");
+    assert_ne!(code, Some(0), "{why}");
+    assert!(
+        why.contains("cannot read: '    pkg.thing.x_a mutant 2: survived'"),
+        "{why}"
+    );
+}
+
 /// Next.js: the span is the report's `location.end.line` when it is a whole
 /// number from 1 up, and 0 — unknown — when it is anything else, as the
 /// Rust template does with what jq reads.
