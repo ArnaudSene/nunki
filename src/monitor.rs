@@ -12,7 +12,10 @@
 //! next one — and sleeps to the next deadline it knows: the harness wait, or
 //! the window's reset. That sleep ends sooner once anyone writes the
 //! mission's state, a `verify` typed meanwhile that launched a run among
-//! them ([`doze`]). It stops when the mission needs a human or has
+//! them, or once the wait no longer holds ([`doze`]). Each tick reads
+//! `nunki.yaml` again, as a verb typed then would: a mission switched to
+//! another account between two runs is launched on it by the monitor too
+//! (SPEC 4.3). It stops when the mission needs a human or has
 //! nothing left that `nunki` can launch: verified, handed over, held, findings
 //! to lift, or a coder run owed, which `nunki` does not launch yet.
 //!
@@ -128,6 +131,18 @@ fn window_reset(project: &Project, state: &MissionState, now: u64) -> Option<u64
     crate::consumption::over(&measure, &header.bounds, now).map(|over| over.until)
 }
 
+/// What holds the next launch back, and until when: the later of the
+/// harness wait and the window's reset, each only while it is still ahead.
+fn deadline(project: &Project, state: &MissionState, now: u64) -> Option<u64> {
+    let harness_wait = state
+        .harness_down
+        .as_ref()
+        .map(|down| down.not_before)
+        .filter(|&not_before| not_before > now);
+    let reset = window_reset(project, state, now);
+    harness_wait.into_iter().chain(reset).max()
+}
+
 /// The next moment worth looking again: a minute while a run goes;
 /// otherwise the harness wait or the window's reset, when one is further off
 /// than that.
@@ -136,13 +151,16 @@ pub fn next_wake(project: &Project, state: &MissionState, now: u64) -> u64 {
     if state.run.is_some() {
         return tick;
     }
-    let harness_wait = state.harness_down.as_ref().map(|down| down.not_before);
-    let reset = window_reset(project, state, now);
-    [Some(tick), harness_wait, reset]
-        .into_iter()
-        .flatten()
-        .max()
-        .unwrap_or(tick)
+    deadline(project, state, now).map_or(tick, |deadline| deadline.max(tick))
+}
+
+/// The project as a verb typed now would open it, `nunki.yaml` read again.
+/// A monitor lives for days, and a human may switch the mission to another
+/// account between two runs (SPEC 4.3). The copy it started with would go on
+/// waiting for the old account's window and launch on it, while their
+/// `verify` launched on the new one.
+fn reopen(project: &Project) -> Result<Project, crate::project::ProjectError> {
+    Project::open_at(project.root.clone(), project.home.clone())
 }
 
 /// [`next_wake`] for the state as the monitor read it back after `verify`,
@@ -399,8 +417,27 @@ pub fn watch(
 ) -> String {
     // The log is for what changed: a tick that changed nothing writes nothing.
     let mut said = Changes::default();
+    // The project each tick works with: as it reads now, or the last copy
+    // read when `nunki.yaml` cannot be. A file an editor is halfway through
+    // saving is no reason to stop watching a run.
+    let mut current = project.clone();
     loop {
         let now = clock.now();
+        match reopen(&current) {
+            Ok(fresh) => current = fresh,
+            Err(e) => {
+                said.note(
+                    out,
+                    now,
+                    "project",
+                    &format!(
+                        "nunki.yaml could not be read again, so the monitor goes on with the \
+                         copy it last read: {e}"
+                    ),
+                );
+            }
+        }
+        let project = &current;
         let state = match Store::open(&project.hq_root).and_then(|store| store.load(id)) {
             Ok(state) => state,
             Err(e) => return format!("the mission's state cannot be read: {e}"),
@@ -498,7 +535,7 @@ pub fn watch(
             .ok();
         let wake = wake_after_reading(project, after.as_ref(), clock.now());
         match after {
-            Some(after) => doze(&project.hq_root, id, after.revision, wake, clock),
+            Some(after) => doze(project, id, after.revision, wake, clock),
             None => sleep_until(clock, wake),
         }
     }
@@ -512,18 +549,24 @@ fn sleep_until(clock: &mut dyn crate::wait::Clock, epoch: u64) {
 }
 
 /// Sleep until `wake`, a minute at a time, and wake sooner once the
-/// mission's state has been written since the monitor read it at `revision`.
+/// mission's state has been written since the monitor read it at `revision`,
+/// or once what held the launch back no longer does.
 ///
 /// A deadline can be hours off — a window's reset — and a `verify` typed
 /// meanwhile can launch a run: #179's was on another account. That run is
 /// measured every minute and read back when it ends, not at the deadline.
 /// Any write ends the sleep, whoever made it: the tick that follows reads
 /// what it says. So does a state that cannot be read, and that tick says why.
+///
+/// And the wait is read again every minute, from the project as it reads
+/// then: a mission switched to an account below its threshold is launched
+/// within the minute, not at the old account's reset (SPEC 4.3). A wait
+/// that moved further off is left to the tick that follows.
 pub fn doze(
-    hq_root: &Path,
+    project: &Project,
     id: &str,
     revision: u64,
-    wake: u64,
+    mut wake: u64,
     clock: &mut dyn crate::wait::Clock,
 ) {
     loop {
@@ -532,11 +575,16 @@ pub fn doze(
             return;
         }
         clock.sleep((wake - now).min(TICK_SECONDS));
-        let unmoved = Store::open(hq_root)
-            .and_then(|store| store.load(id))
-            .is_ok_and(|state| state.revision == revision);
-        if !unmoved {
+        let Ok(state) = Store::open(&project.hq_root).and_then(|store| store.load(id)) else {
             return;
+        };
+        if state.revision != revision {
+            return;
+        }
+        let current = reopen(project).unwrap_or_else(|_| project.clone());
+        match deadline(&current, &state, clock.now()) {
+            Some(deadline) => wake = wake.min(deadline),
+            None => return,
         }
     }
 }

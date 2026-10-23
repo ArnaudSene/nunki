@@ -334,14 +334,15 @@ pub struct Header {
     /// second person works on the project (SPEC 4.5).
     #[serde(default)]
     pub arbiter: Option<String>,
-    /// Which account this mission spends. Frozen with the rest of the
-    /// header: a mission cannot change the subscription it runs on halfway
-    /// through, any more than it can change its perimeter (SPEC 4.3).
+    /// Which account this mission spends, when the header names one: then
+    /// frozen with the rest of it. When it names none, each launch takes
+    /// `nunki.yaml`'s, then the index's default, so a human holding several
+    /// subscriptions can switch the mission between two runs (SPEC 4.3).
     #[serde(default)]
     pub account: Option<String>,
     /// Which model this mission's agents run on, refining `nunki.yaml`. Frozen
     /// with the rest of the header: a mission does not change model halfway
-    /// through, any more than it changes the subscription it spends.
+    /// through.
     #[serde(default)]
     pub model: Option<String>,
     /// How the application is started for this mission, refining `nunki.yaml`
