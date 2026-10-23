@@ -52,6 +52,7 @@ fn state(id: &str) -> MissionState {
         harness_down: None,
         spent: Default::default(),
         spared: None,
+        decided: None,
         coder_session: None,
         pushed: None,
         updated_at: String::new(),
@@ -111,6 +112,32 @@ fn apply_persists_only_a_valid_transition() {
             attempt: 1
         }
     );
+}
+
+/// A decision is written with its transition and names the stage it landed
+/// on. The next transition that is not one forgets it, as it forgets a push,
+/// even when it lands on that same stage: it got there for another reason.
+#[test]
+fn a_decision_is_forgotten_by_the_next_transition() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let mut st = state("m4");
+    let replayed = || Event::RunEnded {
+        outcome: Outcome::HarnessFailure(nunki::harness::Fault::transient("rate limit")),
+        lot_done: false,
+    };
+    let first = Stage::Coding {
+        work: Work::Lot(0),
+        attempt: 1,
+    };
+
+    store.apply_decided(&mut st, replayed()).unwrap();
+    assert_eq!(store.load("m4").unwrap().decided, Some(first.clone()));
+
+    store.apply(&mut st, replayed()).unwrap();
+    let back = store.load("m4").unwrap();
+    assert_eq!(back.flow.stage(), &first);
+    assert_eq!(back.decided, None);
 }
 
 /// Every write advances the revision, whatever it changed and whoever holds

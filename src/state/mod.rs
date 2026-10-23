@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::harness::RunHandle;
-use crate::mission::flow::{Event, Flow, FlowError};
+use crate::mission::flow::{Event, Flow, FlowError, Stage};
 
 pub use lock::{LockError, SlotLock};
 
@@ -91,6 +91,16 @@ pub struct MissionState {
     /// has not been measured.
     #[serde(default)]
     pub spared: Option<Spared>,
+    /// The stage the coder's last read-back or judgement moved the flow to,
+    /// until the run it owes is launched (SPEC 4.3). That read-back judged
+    /// the tree, or chose not to — a turn `nunki` ended, a harness failure —
+    /// and when a hold, the harness's wait or the account's window puts the
+    /// launch off, a later `verify` makes it: on the same tree, without
+    /// judging it again, since that would spend an attempt on a run that
+    /// never happened. Written by [`Store::apply_decided`] with the
+    /// transition, forgotten by any other transition and by the launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decided: Option<Stage>,
     /// The coder's harness session, resumed by its next run (SPEC 4.3):
     /// kept from one lot to the next and
     /// across a harness failure or a spared turn, dropped when an attempt
@@ -442,10 +452,28 @@ impl Store {
     /// returning it. The flow is only changed if the event is valid; a
     /// rejected event writes nothing.
     pub fn apply(&self, state: &mut MissionState, event: Event) -> Result<(), StateError> {
+        self.transition(state, event, false)
+    }
+
+    /// [`Store::apply`], for the coder's read-back or judgement: the stage
+    /// the flow lands on is recorded as [`MissionState::decided`], in the
+    /// same write, so that no crash keeps the transition and loses what it
+    /// decided.
+    pub fn apply_decided(&self, state: &mut MissionState, event: Event) -> Result<(), StateError> {
+        self.transition(state, event, true)
+    }
+
+    fn transition(
+        &self,
+        state: &mut MissionState,
+        event: Event,
+        decided: bool,
+    ) -> Result<(), StateError> {
         state.flow.advance(event)?;
         // A push describes the stage it was made at, and the flow just left
-        // it.
+        // it. So does a decision.
         state.pushed = None;
+        state.decided = decided.then(|| state.flow.stage().clone());
         state.updated_at = now_rfc3339();
         state.revision = self.write(state)?;
         Ok(())

@@ -387,6 +387,12 @@ pub fn verify_as(
                             })
                         }
                     }
+                    // No run recorded, and the stage is one a read-back
+                    // decided: the `verify` that decided it did not launch
+                    // its run — a hold, the harness's wait, the account's
+                    // window — and this one does, on the tree that read-back
+                    // judged or chose not to judge (#177).
+                    None if state.decided.as_ref() == Some(state.flow.stage()) => None,
                     // No run recorded: a tree someone left, judged before a
                     // run is launched on it. A red gate here is one more run
                     // on the same lot, like any other.
@@ -433,10 +439,12 @@ pub fn verify_as(
                         )?;
                         state.coder_session = None;
                     }
-                    // Forgotten with the transition, as at every read-back.
+                    // Forgotten with the transition, as at every read-back;
+                    // and the stage it lands on is decided, whichever
+                    // `verify` launches its run.
                     state.run = None;
                     state.app = None;
-                    store.apply(&mut state, event)?;
+                    store.apply_decided(&mut state, event)?;
                     steps.push(Step::Moved {
                         to: state.flow.stage().clone(),
                     });
@@ -476,6 +484,7 @@ pub fn verify_as(
                 state.coder_session = Some(launched.run.session.clone());
                 state.run = Some(launched.run);
                 state.app = launched.app;
+                state.decided = None;
                 store.save(&state)?;
                 // Before the launch is announced, because it happened first.
                 if let Some(since) = launched.campaign_ended {
@@ -1805,6 +1814,7 @@ mod tests {
             harness_down: None,
             spent: Default::default(),
             spared: None,
+            decided: None,
             coder_session: None,
             pushed: None,
             updated_at: String::new(),
