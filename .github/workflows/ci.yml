@@ -25,6 +25,9 @@ on:
   pull_request:
   push:
     branches: [dev, main]
+  # `release.yml` plays the whole of this file again on a tag, before it
+  # publishes anything.
+  workflow_call:
 
 env:
   CARGO_TERM_COLOR: always
@@ -84,6 +87,12 @@ jobs:
 
       - name: Formatting
         run: cargo fmt --all -- --check
+
+      - name: The changelog has the notes of the version Cargo.toml names
+        # Here and not only at the tag: a version raised without its
+        # section goes red in the pull request that raised it, rather than
+        # after the owner has tagged it.
+        run: scripts/release-notes.sh > /dev/null
 
       - name: Clippy, warnings included
         run: cargo clippy --all-targets --all-features -- -D warnings

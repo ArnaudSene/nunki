@@ -56,14 +56,18 @@ What you need:
   to mint a long-lived token. The agents' own CLI lives in their image, not
   here.
 
-Build and install the binary:
+Build and install the latest release, whose notes, like every earlier
+release's, are in [`CHANGELOG.md`](CHANGELOG.md):
 
 ```sh
-git clone https://github.com/ArnaudSene/nunki
-cd nunki
-cargo install --path .       # puts `nunki` in ~/.cargo/bin
-nunki --version
+cargo install --locked --git https://github.com/ArnaudSene/nunki --tag v0.1.0
+nunki --version              # installed in ~/.cargo/bin
 ```
+
+`--locked` builds with the dependencies `Cargo.lock` pins, the ones CI
+audits. Without it, cargo resolves them again to the newest versions
+`Cargo.toml` allows. To build what `dev` holds now, unreleased, run
+`cargo install --locked --path .` from a clone.
 
 Declare the subscription `nunki` spends. The token is written under `~/.nunki`,
 never in a repository, and that file is the only one that holds it: it reaches

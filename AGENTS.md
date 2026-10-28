@@ -54,6 +54,38 @@ this repository, under `hq/` in this project's own home — the one
   link on its own line — that is a trailer in the repository's own history,
   not something published on the forge.
 
+### Releases
+
+A release is a `v<version>` tag on a commit `dev` holds, and **only the
+owner tags**: no agent creates, moves or pushes a tag. Pushing the tag is
+the whole gesture. `.github/workflows/release.yml` checks it, plays `ci.yml`
+again on the tagged commit, and publishes the release with the version's
+section of `CHANGELOG.md` as its notes. A tag that fails a check publishes
+nothing, and the run's log says why.
+
+To cut one:
+
+1. On a branch, raise `version` in `Cargo.toml` (`cargo build` carries it
+   into `Cargo.lock`) and the tag in the README's install line. In
+   `CHANGELOG.md`, write the new version's section under `## [Unreleased]`,
+   headed `## [<version>] - <date>`, from what `[Unreleased]` holds and the
+   pull requests merged since the last tag
+   (`git log --merges v<last>..origin/dev`). Write it for someone who uses
+   `nunki`, not by copying titles. Empty `[Unreleased]` and update the
+   links at the bottom. CI reads the changelog, and goes red when the
+   version `Cargo.toml` names has no dated section.
+2. A new version renames the firewall and prober images
+   (`nunki/firewall:<version>`), and a launch refuses until
+   `nunki slot rebuild` has built them. Say so in the version's section.
+3. Once the pull request is merged, the owner tags its merge commit and
+   pushes the tag:
+
+   ```sh
+   git fetch origin
+   git tag -a v<version> "$(gh pr view <number> --json mergeCommit --jq .mergeCommit.oid)" -m "nunki <version>"
+   git push origin v<version>
+   ```
+
 ## 4. Proof
 
 The doctrine of this project is that **a restriction is worth what its proof
