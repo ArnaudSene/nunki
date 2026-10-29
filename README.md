@@ -69,8 +69,8 @@ nunki --version              # installed in ~/.cargo/bin
 ```
 
 To work on `nunki`, clone it and build what `dev` holds, unreleased. The
-clone names `dev` because the repository's default branch, `main`, holds
-no code:
+clone names `dev`, where work lands: the repository's default branch,
+`main`, holds only what is released:
 
 ```sh
 git clone --branch dev https://github.com/ArnaudSene/nunki
