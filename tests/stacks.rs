@@ -424,7 +424,7 @@ fn check_reads_a_secondary_stack_against_its_add_on() {
     let addon = p.fragment("next").join(nunki::project::ADDON_FILE);
     let text = std::fs::read_to_string(&addon)
         .unwrap()
-        .replace("ARG PNPM=12.5.1\n", "");
+        .replace("ARG PNPM=12.16.1\n", "");
     std::fs::write(&addon, text).unwrap();
     match find(&nunki::check::run(&p), "the next image follows") {
         nunki::check::Verdict::Red(why) => {

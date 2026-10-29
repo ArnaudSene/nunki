@@ -211,7 +211,7 @@ RUN osv-scanner --version
 # cache is the wrong user's, and the agent fetches it again — which fails
 # outright when the network is closed. `COREPACK_HOME`
 # puts it somewhere both users read.
-ARG PNPM=12.5.1
+ARG PNPM=12.16.1
 ENV COREPACK_HOME=/opt/corepack
 RUN corepack enable pnpm \
  && corepack prepare pnpm@${PNPM} --activate \
