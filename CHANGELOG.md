@@ -11,6 +11,11 @@ merged since the last one. `AGENTS.md`, under "Releases", says how.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-29
+
+A security release: the Next.js stack's default pnpm bundled an undici
+with three high advisories.
+
 ### Security
 
 - **The Next.js stack's pnpm is now 12.16.1 by default, up from 12.5.1.**
@@ -22,6 +27,13 @@ merged since the last one. `AGENTS.md`, under "Releases", says how.
   - In a project set up before, `nunki init --refresh` replaces the
     Dockerfile if nobody has touched it, and `nunki slot rebuild` then
     rebuilds the image.
+
+### Changed
+
+- **The firewall and prober images are tagged `0.1.1`**, as every
+  version tags them with its own number. After upgrading, run
+  `nunki slot rebuild` in each project before its next launch. Until
+  then a launch refuses, saying the images are missing.
 
 ## [0.1.0] - 2026-10-28
 
@@ -97,5 +109,6 @@ result, and hands the push back to the human.
 - **No prebuilt binary.** `nunki` is built from source, with Rust 1.89 or
   later and a C compiler.
 
-[Unreleased]: https://github.com/ArnaudSene/nunki/compare/v0.1.0...dev
+[Unreleased]: https://github.com/ArnaudSene/nunki/compare/v0.1.1...dev
+[0.1.1]: https://github.com/ArnaudSene/nunki/releases/tag/v0.1.1
 [0.1.0]: https://github.com/ArnaudSene/nunki/releases/tag/v0.1.0
