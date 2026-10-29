@@ -1,0 +1,1070 @@
+//! Re-framing a mission, and closing one (SPEC 4.1 rule 3, 4.2 verb table).
+
+use std::path::PathBuf;
+
+use nunki::lifecycle::{self, LifecycleError};
+use nunki::mission::flow::{Event, Flow, Stage, Work};
+use nunki::mission::{Bounds, Header, Integration, Lot, Rigor, Security, Service};
+use nunki::project::{Config, Project, ProtectedPaths};
+use nunki::state::{MissionState, Store};
+
+fn header(lots: usize) -> Header {
+    Header {
+        branch: "mission/x".into(),
+        base: "dev".into(),
+        lots: (1..=lots)
+            .map(|n| Lot {
+                id: format!("L{n}"),
+                title: format!("lot {n}"),
+            })
+            .collect(),
+        integration: Integration::None {
+            reason: "none".into(),
+        },
+        security: Security::Gates,
+        rigor: Default::default(),
+        mutation_threshold: None,
+        hardening: Vec::new(),
+        arbiter: None,
+        run: None,
+        account: None,
+        model: None,
+        bounds: Bounds::default(),
+    }
+}
+
+struct World {
+    _dir: tempfile::TempDir,
+    project: Project,
+}
+
+impl World {
+    fn new(lots: usize) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let hq_root = dir.path().join("nunki").join(nunki::project::HQ_DIR);
+        for d in ["locks", "missions", "state/missions"] {
+            std::fs::create_dir_all(hq_root.join(d)).unwrap();
+        }
+        let project = Project::at(
+            dir.path().join("repo"),
+            Config {
+                root: None,
+                harness: "claude-code".into(),
+                forge: vec![],
+                stacks: vec!["rust".into()],
+                protected_branches: vec!["main".into()],
+                protected_paths: ProtectedPaths::default(),
+                account: None,
+                model: None,
+                bounds: Default::default(),
+                credentials: None,
+                run: None,
+                services_file: None,
+                permission_mode: "auto".to_string(),
+                rigor: None,
+                mutation_threshold: 80,
+                mutation_jobs: None,
+                forge_protection: Default::default(),
+                security_findings: Default::default(),
+            },
+            hq_root.parent().unwrap().to_path_buf(),
+        );
+        nunki::mission::dir::create(&hq_root, "m1", &header(lots), "do it").unwrap();
+        Store::open(&hq_root)
+            .unwrap()
+            .save(&MissionState {
+                id: "m1".into(),
+                slot: "one".into(),
+                flow: Flow::new(header(lots)).unwrap(),
+                run: None,
+                run_account: None,
+                app: None,
+                verdicts: Vec::new(),
+                accepted: Vec::new(),
+                stopped: None,
+                harness_down: None,
+                spent: Default::default(),
+                spared: None,
+                decided: None,
+                coder_session: None,
+                pushed: None,
+                updated_at: "2026-09-10T00:00:00Z".into(),
+                revision: 0,
+            })
+            .unwrap();
+        Self { _dir: dir, project }
+    }
+
+    /// Rewrite `MISSION.md` with a different framing, the way a human edits it.
+    fn reframe_file(&self, header: &Header) {
+        nunki::mission::dir::create(&self.project.hq_root, "m2", header, "x").unwrap();
+        let from = self.project.hq_root.join("missions/m2/MISSION.md");
+        let to = self.project.hq_root.join("missions/m1/MISSION.md");
+        let fresh = std::fs::read_to_string(&from).unwrap();
+        // Keep the human's prose, replace the framing: that is what editing
+        // the file means.
+        std::fs::write(to, fresh).unwrap();
+        std::fs::remove_dir_all(self.project.hq_root.join("missions/m2")).unwrap();
+    }
+
+    fn state(&self) -> MissionState {
+        Store::open(&self.project.hq_root)
+            .unwrap()
+            .load("m1")
+            .unwrap()
+    }
+
+    fn running(&self) {
+        let store = Store::open(&self.project.hq_root).unwrap();
+        let mut state = store.load("m1").unwrap();
+        state.run = Some(nunki::harness::RunHandle {
+            session: nunki::harness::SessionId("s1".into()),
+            container: "cafe".into(),
+            pid: Some(41),
+            log: PathBuf::from("/dev/null"),
+        });
+        store.save(&state).unwrap();
+    }
+
+    fn at(&self, events: &[Event]) {
+        let store = Store::open(&self.project.hq_root).unwrap();
+        let mut state = store.load("m1").unwrap();
+        for event in events {
+            store.apply(&mut state, event.clone()).unwrap();
+        }
+    }
+}
+
+/// Editing `MISSION.md` changes nothing until the verb says so: `nunki` never
+/// re-reads the header during a mission. The verb puts the framing back in
+/// front of the human first — it says what would change and does nothing.
+#[test]
+fn reframing_says_what_would_change_and_freezes_nothing_until_told() {
+    let world = World::new(2);
+    let mut fresh = header(2);
+    fresh.security = Security::Agent;
+    fresh.integration = Integration::Services {
+        services: vec![Service {
+            name: "db".into(),
+            reach: vec!["db".into()],
+            shared: false,
+        }],
+        wiring: vec!["compose.yaml".into()],
+    };
+    world.reframe_file(&fresh);
+
+    let seen = lifecycle::reframe(&world.project, "m1", false).unwrap();
+    assert!(!seen.applied);
+    let what: Vec<&str> = seen.changes.iter().map(|c| c.what).collect();
+    assert_eq!(what, vec!["integration", "security"], "{:?}", seen.changes);
+    // And the frozen header has not moved.
+    assert!(!world.state().flow.header().has_security_agent());
+
+    let done = lifecycle::reframe(&world.project, "m1", true).unwrap();
+    assert!(done.applied);
+    assert!(world.state().flow.header().has_security_agent());
+    assert!(world.state().flow.header().has_integration());
+}
+
+/// A framing that says the same thing is not a change, and saying so is
+/// better than a diff of a file that was reformatted.
+#[test]
+fn an_unchanged_framing_is_reported_as_unchanged() {
+    let world = World::new(2);
+    let seen = lifecycle::reframe(&world.project, "m1", true).unwrap();
+    assert!(seen.changes.is_empty(), "{:?}", seen.changes);
+    assert!(!seen.applied);
+}
+
+/// A change of rigor is a change of what verification will ask, and reframe
+/// names it with both values, so the human decides on the move and not on
+/// the fact that something moved. Applied, the frozen header carries it.
+#[test]
+fn reframing_names_a_changed_rigor() {
+    let world = World::new(2);
+    let mut fresh = header(2);
+    fresh.rigor = Rigor::Standard;
+    world.reframe_file(&fresh);
+
+    let seen = lifecycle::reframe(&world.project, "m1", false).unwrap();
+    assert_eq!(seen.changes.len(), 1, "{:?}", seen.changes);
+    let change = &seen.changes[0];
+    assert_eq!(change.what, "rigor");
+    assert_eq!(change.from, "critical");
+    assert_eq!(change.to, "standard");
+    assert_eq!(world.state().flow.header().rigor, Rigor::Critical);
+
+    lifecycle::reframe(&world.project, "m1", true).unwrap();
+    assert_eq!(world.state().flow.header().rigor, Rigor::Standard);
+}
+
+/// Reframing under a running agent would change the perimeter the agent is
+/// inside. Refused, and the message names the verb that ends its turn.
+#[test]
+fn reframing_under_a_running_agent_is_refused() {
+    let world = World::new(2);
+    world.running();
+    let err = lifecycle::reframe(&world.project, "m1", true).unwrap_err();
+    assert!(matches!(err, LifecycleError::RunInProgress { .. }), "{err}");
+    assert!(err.to_string().contains("nunki mission stop"), "{err}");
+}
+
+/// The flow may be standing on a lot the new framing does not have.
+/// Re-numbering under it would leave the state pointing at work nobody
+/// described, and there is no honest guess about which lot was meant.
+#[test]
+fn a_framing_that_removes_the_lot_being_worked_on_is_refused() {
+    let world = World::new(3);
+    // Finish the first lot, so the flow stands on the second.
+    world.at(&[Event::RunEnded {
+        outcome: nunki::harness::Outcome::Finished(Default::default()),
+        lot_done: true,
+    }]);
+    assert!(matches!(
+        world.state().flow.stage(),
+        Stage::Coding {
+            work: Work::Lot(1),
+            ..
+        }
+    ));
+
+    world.reframe_file(&header(1));
+    let err = lifecycle::reframe(&world.project, "m1", true).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            LifecycleError::Flow(nunki::mission::flow::FlowError::LotGone { .. })
+        ),
+        "{err}"
+    );
+    assert!(err.to_string().contains("L2"), "{err}");
+    // Refused means refused: the frozen header still has three lots.
+    assert_eq!(world.state().flow.header().lots.len(), 3);
+}
+
+/// Archiving moves; it never deletes. The journals, the pull request text and
+/// the verdicts are the record of what was done.
+#[test]
+fn archiving_moves_a_finished_mission_and_keeps_everything_in_it() {
+    let world = World::new(1);
+    world.at(&[
+        Event::RunEnded {
+            outcome: nunki::harness::Outcome::Finished(Default::default()),
+            lot_done: true,
+        },
+        Event::GatesPassed,
+        // The final campaign, green: `critical` is the default rigor.
+        Event::GatesPassed,
+    ]);
+    assert!(matches!(world.state().flow.stage(), Stage::Verified));
+    std::fs::write(
+        world.project.hq_root.join("missions/m1/JOURNAL.md"),
+        "what was done\n",
+    )
+    .unwrap();
+
+    let archived = lifecycle::archive(&world.project, "m1").unwrap();
+    assert_eq!(
+        archived.at,
+        lifecycle::archive_dir(&world.project).join("m1")
+    );
+    assert!(!world.project.hq_root.join("missions/m1").exists());
+    assert_eq!(
+        std::fs::read_to_string(archived.at.join("JOURNAL.md")).unwrap(),
+        "what was done\n"
+    );
+    // The state goes with the folder, in the folder: one thing to keep or to
+    // move, not two that have to be found again.
+    assert!(archived.at.join("state.json").is_file());
+    assert!(
+        !world
+            .project
+            .hq_root
+            .join("state/missions/m1.json")
+            .exists()
+    );
+}
+
+/// A mission still being worked on is not archived: that would hide it rather
+/// than close it.
+#[test]
+fn a_mission_still_being_worked_on_is_not_archived() {
+    let world = World::new(1);
+    let err = lifecycle::archive(&world.project, "m1").unwrap_err();
+    assert!(matches!(err, LifecycleError::NotFinished { .. }), "{err}");
+    assert!(err.to_string().contains("Coding"), "{err}");
+    assert!(world.project.hq_root.join("missions/m1").is_dir());
+}
+
+/// A mission handed back to the human and left there is finished too — it
+/// ended, badly, and hiding it behind "not verified" would leave the HQ with
+/// missions nobody can close.
+#[test]
+fn a_mission_handed_back_to_the_human_can_be_archived() {
+    let world = World::new(1);
+    let store = Store::open(&world.project.hq_root).unwrap();
+    let mut state = store.load("m1").unwrap();
+    for _ in 0..3 {
+        store
+            .apply(
+                &mut state,
+                Event::Stalled {
+                    reason: "no progress".into(),
+                },
+            )
+            .unwrap();
+    }
+    assert!(matches!(state.flow.stage(), Stage::AwaitingHuman(_)));
+    lifecycle::archive(&world.project, "m1").unwrap();
+}
+
+/// Archiving twice is a mistake worth naming rather than a second folder.
+#[test]
+fn archiving_twice_says_so() {
+    let world = World::new(1);
+    world.at(&[
+        Event::RunEnded {
+            outcome: nunki::harness::Outcome::Finished(Default::default()),
+            lot_done: true,
+        },
+        Event::GatesPassed,
+        // The final campaign, green: `critical` is the default rigor.
+        Event::GatesPassed,
+    ]);
+    lifecycle::archive(&world.project, "m1").unwrap();
+
+    nunki::mission::dir::create(&world.project.hq_root, "m1", &header(1), "again").unwrap();
+    Store::open(&world.project.hq_root)
+        .unwrap()
+        .save(&MissionState {
+            id: "m1".into(),
+            slot: "one".into(),
+            flow: Flow::new(header(1)).unwrap(),
+            run: None,
+            run_account: None,
+            app: None,
+            verdicts: Vec::new(),
+            accepted: Vec::new(),
+            stopped: None,
+            harness_down: None,
+            spent: Default::default(),
+            spared: None,
+            decided: None,
+            coder_session: None,
+            pushed: None,
+            updated_at: String::new(),
+            revision: 0,
+        })
+        .unwrap();
+    world.at(&[
+        Event::RunEnded {
+            outcome: nunki::harness::Outcome::Finished(Default::default()),
+            lot_done: true,
+        },
+        Event::GatesPassed,
+        // The final campaign, green: `critical` is the default rigor.
+        Event::GatesPassed,
+    ]);
+
+    let err = lifecycle::archive(&world.project, "m1").unwrap_err();
+    assert!(matches!(err, LifecycleError::AlreadyArchived(_)), "{err}");
+}
+
+/// Every decision in the header is compared, and the comparison is field by
+/// field rather than a diff of the serialised text: what matters is which
+/// **decision** moved, and a text diff would report a reordered list as a
+/// change and a renumbered lot as two.
+#[test]
+fn every_decision_in_the_framing_is_compared() {
+    let world = World::new(2);
+    let mut fresh = header(2);
+    fresh.branch = "mission/y".into();
+    fresh.base = "main".into();
+    fresh.lots[1].title = "something else entirely".into();
+    fresh.security = Security::Agent;
+    fresh.rigor = Rigor::Standard;
+    fresh.arbiter = Some("Sam".into());
+    fresh.account = Some("pro".into());
+    fresh.run = Some("none".into());
+    fresh.bounds.max_volets = 7;
+    world.reframe_file(&fresh);
+
+    let seen = lifecycle::reframe(&world.project, "m1", false).unwrap();
+    let what: Vec<&str> = seen.changes.iter().map(|c| c.what).collect();
+    assert_eq!(
+        what,
+        vec![
+            "branch", "base", "lots", "security", "rigor", "arbiter", "account", "run", "bounds"
+        ],
+        "{:?}",
+        seen.changes
+    );
+    // And each says what it was and what it becomes, so the reader decides on
+    // the change rather than on the fact that there is one.
+    let lots = seen.changes.iter().find(|c| c.what == "lots").unwrap();
+    assert!(lots.from.contains("lot 2"), "{lots:?}");
+    assert!(lots.to.contains("something else entirely"), "{lots:?}");
+}
+
+/// `end` is the one verb in SPEC's list that the list never explains, and the
+/// definition here is derived rather than quoted: `stop` ends a run,
+/// `archive` closes a finished mission, and between them sat a mission a
+/// human has given up on — still `Coding`, never to be verified, impossible
+/// to close. `end` closes it, and after it `archive` will.
+#[test]
+fn ending_a_mission_makes_it_closable() {
+    let world = World::new(2);
+    assert!(matches!(world.state().flow.stage(), Stage::Coding { .. }));
+    // Before: it cannot be archived, because it is still being worked on.
+    assert!(matches!(
+        lifecycle::archive(&world.project, "m1").unwrap_err(),
+        LifecycleError::NotFinished { .. }
+    ));
+
+    let lifecycle::Ended::Started(state) =
+        lifecycle::end(&world.project, "m1", "the approach was wrong").unwrap()
+    else {
+        panic!("a started mission was ended as one never started");
+    };
+    assert!(
+        matches!(
+            state.flow.stage(),
+            Stage::AwaitingHuman(nunki::mission::flow::Handover::Abandoned { reason })
+                if reason == "the approach was wrong"
+        ),
+        "{:?}",
+        state.flow.stage()
+    );
+
+    // The reason is where a human reads it, not only in the state.
+    let followup =
+        std::fs::read_to_string(world.project.hq_root.join("missions/m1/FOLLOWUP_HQ.md")).unwrap();
+    assert!(followup.contains("the approach was wrong"), "{followup}");
+
+    lifecycle::archive(&world.project, "m1").unwrap();
+}
+
+/// A mission called off without a reason is a puzzle for whoever finds it six
+/// months from now.
+#[test]
+fn ending_a_mission_without_a_reason_is_refused() {
+    let world = World::new(1);
+    let err = lifecycle::end(&world.project, "m1", " \n\t").unwrap_err();
+    assert!(matches!(err, LifecycleError::NoReason), "{err}");
+    assert!(matches!(world.state().flow.stage(), Stage::Coding { .. }));
+}
+
+/// "Call it off" is not a thing to say twice, and a mission that is verified
+/// is not one to call off at all — it is one to push.
+#[test]
+fn a_mission_that_is_already_over_is_not_ended_again() {
+    let world = World::new(1);
+    world.at(&[
+        Event::RunEnded {
+            outcome: nunki::harness::Outcome::Finished(Default::default()),
+            lot_done: true,
+        },
+        Event::GatesPassed,
+        // The final campaign, green: `critical` is the default rigor.
+        Event::GatesPassed,
+    ]);
+    assert!(matches!(world.state().flow.stage(), Stage::Verified));
+
+    let err = lifecycle::end(&world.project, "m1", "changed my mind").unwrap_err();
+    assert!(
+        matches!(
+            err,
+            LifecycleError::State(nunki::state::StateError::Flow(
+                nunki::mission::flow::FlowError::AlreadyOver
+            ))
+        ),
+        "{err}"
+    );
+    assert!(err.to_string().contains("nunki mission archive"), "{err}");
+    assert!(matches!(world.state().flow.stage(), Stage::Verified));
+}
+
+/// It works from anywhere a mission can still be worked on. A verb that
+/// worked in five stages out of seven is one the human cannot rely on when
+/// they want out.
+#[test]
+fn ending_works_wherever_a_mission_can_still_be_worked_on() {
+    for reach in [
+        vec![],
+        vec![Event::RunEnded {
+            outcome: nunki::harness::Outcome::Finished(Default::default()),
+            lot_done: true,
+        }],
+    ] {
+        let world = World::new(2);
+        world.at(&reach);
+        lifecycle::end(&world.project, "m1", "not worth finishing").unwrap();
+        assert!(matches!(
+            world.state().flow.stage(),
+            Stage::AwaitingHuman(nunki::mission::flow::Handover::Abandoned { .. })
+        ));
+    }
+}
+
+/// And not under a running agent: the agent is still writing, and a mission
+/// declared over while its run is going is a tree nobody chose the moment of.
+#[test]
+fn ending_under_a_running_agent_is_refused() {
+    let world = World::new(1);
+    world.running();
+    let err = lifecycle::end(&world.project, "m1", "enough").unwrap_err();
+    assert!(matches!(err, LifecycleError::RunInProgress { .. }), "{err}");
+}
+
+/// A retry that tells the agent nothing hands it back the work it already
+/// failed, on the same tree and the same cause, and spends the budget
+/// reaching the same handover. So `--because` is not paperwork: it lands in
+/// `FOLLOWUP_HQ.md`, the file every role reads before anything else.
+#[test]
+fn taking_a_mission_back_tells_the_next_run_what_changed() {
+    let world = World::new(1);
+    // Drive it into a handover the way the bounds do.
+    let mut state = world.state();
+    let store = Store::open(&world.project.hq_root).unwrap();
+    for _ in 0..state.flow.header().bounds.attempts_per_lot {
+        store
+            .apply(
+                &mut state,
+                nunki::mission::flow::Event::Stalled {
+                    reason: "the container went away".into(),
+                },
+            )
+            .unwrap();
+    }
+    assert!(
+        matches!(world.state().flow.stage(), Stage::AwaitingHuman(_)),
+        "{:?}",
+        world.state().flow.stage()
+    );
+
+    let state = lifecycle::retry(
+        &world.project,
+        "m1",
+        "the engine had no disk; it has room now",
+    )
+    .unwrap();
+
+    assert!(
+        matches!(state.flow.stage(), Stage::Coding { attempt: 1, .. }),
+        "{:?}",
+        state.flow.stage()
+    );
+    let followup =
+        std::fs::read_to_string(world.project.hq_root.join("missions/m1/FOLLOWUP_HQ.md")).unwrap();
+    assert!(
+        followup.contains("the engine had no disk; it has room now"),
+        "what changed never reached the agent:\n{followup}"
+    );
+    // And it says what had stopped it, so the reason has something to attach
+    // to six months from now.
+    assert!(followup.contains("attempt(s)"), "{followup}");
+}
+
+/// The record the agent reads is prose. A run of four spaces renders as a
+/// Markdown code block, which is how the two sentences that matter arrive
+/// monospaced and unread.
+#[test]
+fn the_record_a_retry_leaves_is_prose_and_not_a_code_block() {
+    let world = World::new(1);
+    let mut state = world.state();
+    let store = Store::open(&world.project.hq_root).unwrap();
+    for _ in 0..state.flow.header().bounds.attempts_per_lot {
+        store
+            .apply(
+                &mut state,
+                nunki::mission::flow::Event::Stalled {
+                    reason: "gone".into(),
+                },
+            )
+            .unwrap();
+    }
+    lifecycle::retry(&world.project, "m1", "the fixture is in place").unwrap();
+
+    let followup =
+        std::fs::read_to_string(world.project.hq_root.join("missions/m1/FOLLOWUP_HQ.md")).unwrap();
+    let section = followup
+        .split("## ")
+        .find(|s| s.contains("took this mission back"))
+        .expect("the section is there");
+    for line in section.lines() {
+        assert!(
+            !line.starts_with("    "),
+            "renders as a code block: {line:?}"
+        );
+        assert!(
+            !line.contains("  "),
+            "a run of spaces inside a line: {line:?}"
+        );
+    }
+}
+
+/// A retry the flow refuses leaves no record of having happened.
+///
+/// `FOLLOWUP_HQ.md` is the file every role reads before anything else, and
+/// what `retry` writes there is a statement of fact: somebody took this
+/// mission back, and the bounds are handed back whole. A mission called off is
+/// not taken back, and the next run must not be told it was.
+///
+/// Playing every exit from `AwaitingHuman` through the verb against a real
+/// HQ is how the failure shows: more records than retries, the extra ones
+/// being the refusals.
+#[test]
+fn a_retry_the_flow_refuses_leaves_no_record() {
+    let world = World::new(1);
+    let mut state = world.state();
+    let store = Store::open(&world.project.hq_root).unwrap();
+    store
+        .apply(
+            &mut state,
+            nunki::mission::flow::Event::Ended {
+                reason: "the approach was wrong".into(),
+            },
+        )
+        .unwrap();
+    let followup = world.project.hq_root.join("missions/m1/FOLLOWUP_HQ.md");
+    let before = std::fs::read_to_string(&followup).unwrap_or_default();
+
+    let err = lifecycle::retry(&world.project, "m1", "I changed my mind").unwrap_err();
+
+    assert!(format!("{err}").contains("the approach was wrong"), "{err}");
+    let after = std::fs::read_to_string(&followup).unwrap_or_default();
+    assert_eq!(
+        before, after,
+        "the HQ says the mission was taken back, and it was not"
+    );
+    // And the mission is where it was.
+    assert!(
+        matches!(
+            world.state().flow.stage(),
+            Stage::AwaitingHuman(nunki::mission::flow::Handover::Abandoned { .. })
+        ),
+        "{:?}",
+        world.state().flow.stage()
+    );
+}
+
+/// `retry` takes back a mission the bounds stopped. A mission that is running
+/// fine is told that, rather than moved.
+#[test]
+fn a_mission_that_never_stopped_is_not_taken_back() {
+    let world = World::new(1);
+    let err = lifecycle::retry(&world.project, "m1", "no reason").unwrap_err();
+    assert!(matches!(err, LifecycleError::NotHandedOver { .. }), "{err}");
+    assert!(matches!(world.state().flow.stage(), Stage::Coding { .. }));
+}
+
+/// Say what changed, or the verb is a way of spending the budget twice.
+#[test]
+fn taking_a_mission_back_without_saying_what_changed_is_refused() {
+    let world = World::new(1);
+    let err = lifecycle::retry(&world.project, "m1", " \n\t").unwrap_err();
+    assert!(matches!(err, LifecycleError::NoChange), "{err}");
+}
+
+/// A changed frozen threshold is a change of what a `standard` gate 7
+/// asks, and reframe names it.
+#[test]
+fn reframing_names_a_changed_mutation_threshold() {
+    let world = World::new(2);
+    let mut fresh = header(2);
+    fresh.mutation_threshold = Some(90);
+    world.reframe_file(&fresh);
+    let seen = lifecycle::reframe(&world.project, "m1", false).unwrap();
+    assert_eq!(seen.changes.len(), 1, "{:?}", seen.changes);
+    assert_eq!(seen.changes[0].what, "mutation threshold");
+    assert_eq!(seen.changes[0].from, "—");
+    assert_eq!(seen.changes[0].to, "90%");
+}
+
+/// A lot that awaited a ruling is taken back at its next attempt, not its
+/// first: a ruling is not a bound, and the retry hands none back. The record
+/// says what was awaited, so the next run knows the ruling is what changed.
+#[test]
+fn taking_back_a_lot_that_awaited_a_ruling_resumes_at_its_next_attempt() {
+    let world = World::new(1);
+    world.at(&[
+        Event::Stalled {
+            reason: "silent".into(),
+        },
+        Event::RulingAwaited {
+            what: "`m1` is equivalent".into(),
+            survivors: vec!["m1".into()],
+        },
+    ]);
+
+    let state = lifecycle::retry(&world.project, "m1", "m1 ruled equivalent").unwrap();
+
+    assert_eq!(
+        state.flow.stage(),
+        &Stage::Coding {
+            work: Work::Lot(0),
+            attempt: 3
+        }
+    );
+    let followup =
+        std::fs::read_to_string(world.project.hq_root.join("missions/m1/FOLLOWUP_HQ.md")).unwrap();
+    assert!(followup.contains("m1 ruled equivalent"), "{followup}");
+    assert!(
+        followup.contains("L1, attempt 2, awaiting the HQ's ruling on `m1`"),
+        "{followup}"
+    );
+    assert!(followup.contains("this is attempt 3 of 3"), "{followup}");
+    // The record is read as a statement of fact, and for a ruling this one
+    // would be false: no bound is handed back.
+    assert!(!followup.contains("handed back whole"), "{followup}");
+}
+
+/// Asked on the last attempt, the retry hands the lot over as out of
+/// attempts rather than run past the bound, and the record says so — not
+/// that the lot resumes.
+#[test]
+fn taking_back_a_ruling_asked_on_the_last_attempt_hands_it_over_as_exhausted() {
+    let world = World::new(1);
+    let stalled = Event::Stalled {
+        reason: "silent".into(),
+    };
+    world.at(&[
+        stalled.clone(),
+        stalled,
+        Event::RulingAwaited {
+            what: "`m1` is equivalent".into(),
+            survivors: vec!["m1".into()],
+        },
+    ]);
+
+    let state = lifecycle::retry(&world.project, "m1", "m1 ruled equivalent").unwrap();
+
+    assert_eq!(
+        state.flow.stage(),
+        &Stage::AwaitingHuman(nunki::mission::flow::Handover::LotAttemptsExhausted {
+            lot: "L1".into(),
+            attempts: 3
+        })
+    );
+    let followup =
+        std::fs::read_to_string(world.project.hq_root.join("missions/m1/FOLLOWUP_HQ.md")).unwrap();
+    assert!(
+        followup.contains("L1, attempt 3, awaiting the HQ's ruling on `m1`"),
+        "{followup}"
+    );
+    assert!(followup.contains("that was the last attempt"), "{followup}");
+    assert!(!followup.contains("this is attempt"), "{followup}");
+    assert!(
+        !followup.contains("They are handed back whole"),
+        "{followup}"
+    );
+}
+
+/// Drive `m1` to 3 / 3 volets and the cause that found none left.
+fn at_the_volet_cap(world: &World) {
+    let mut events = vec![Event::RunEnded {
+        outcome: nunki::harness::Outcome::Finished(Default::default()),
+        lot_done: true,
+    }];
+    for n in 1..=4 {
+        events.push(Event::GatesFailed {
+            reason: format!("red {n}"),
+        });
+        if n < 4 {
+            events.push(Event::RunEnded {
+                outcome: nunki::harness::Outcome::Finished(Default::default()),
+                lot_done: true,
+            });
+        }
+    }
+    world.at(&events);
+    assert!(
+        matches!(
+            world.state().flow.stage(),
+            Stage::AwaitingHuman(nunki::mission::flow::Handover::VoletsExhausted { .. })
+        ),
+        "{:?}",
+        world.state().flow.stage()
+    );
+}
+
+/// A retry on spent volets grants one, and the grant is written, dated, in
+/// `FOLLOWUP_HQ.md` with the new count and the HQ's reason on one line — so
+/// a reader sees every volet the mission went past its cap, and why.
+#[test]
+fn a_volet_granted_by_a_retry_is_written_with_its_count_and_its_reason() {
+    let world = World::new(1);
+    at_the_volet_cap(&world);
+
+    let state = lifecycle::retry(&world.project, "m1", "the gate read a stale log").unwrap();
+
+    assert!(
+        matches!(
+            state.flow.stage(),
+            Stage::Coding {
+                work: Work::Volet { n: 4, .. },
+                attempt: 1
+            }
+        ),
+        "{:?}",
+        state.flow.stage()
+    );
+    let followup =
+        std::fs::read_to_string(world.project.hq_root.join("missions/m1/FOLLOWUP_HQ.md")).unwrap();
+    assert!(
+        followup.contains("Volet 4 of 3, granted by the HQ: the gate read a stale log\n"),
+        "{followup}"
+    );
+    let heading = followup
+        .lines()
+        .find(|l| l.contains("took this mission back"))
+        .expect("the record has its heading");
+    let date: Vec<char> = heading.trim_start_matches("## ").chars().take(10).collect();
+    assert!(
+        date.len() == 10
+            && date.iter().enumerate().all(|(i, c)| match i {
+                4 | 7 => *c == '-',
+                _ => c.is_ascii_digit(),
+            }),
+        "the grant is not dated: {heading}"
+    );
+    // Said once: the reason is the grant's, not a second paragraph.
+    assert_eq!(
+        followup.matches("the gate read a stale log").count(),
+        1,
+        "{followup}"
+    );
+    // And never the old promise.
+    assert!(!followup.contains("handed back whole"), "{followup}");
+}
+
+impl World {
+    /// A second mission, `m2`, framed and never started: a folder and no
+    /// state.
+    fn framed_only(&self) {
+        nunki::mission::dir::create(&self.project.hq_root, "m2", &header(1), "later").unwrap();
+    }
+}
+
+/// A mission framed and never started can be called off, and archived: both
+/// verbs refused it, which left a folder nobody could close but by hand.
+/// `end` writes the reason where a human reads it; `archive` moves the folder
+/// as it moves any mission's, and there is no state to move with it.
+#[test]
+fn a_mission_that_never_started_can_be_called_off_and_archived() {
+    let world = World::new(1);
+    world.framed_only();
+
+    let err = lifecycle::end(&world.project, "m2", "  ").unwrap_err();
+    assert!(matches!(err, LifecycleError::NoReason), "{err}");
+
+    let ended = lifecycle::end(&world.project, "m2", "the need went away").unwrap();
+    assert_eq!(ended, lifecycle::Ended::NeverStarted);
+    let followup =
+        std::fs::read_to_string(world.project.hq_root.join("missions/m2/FOLLOWUP_HQ.md")).unwrap();
+    assert!(followup.contains("called this mission off"), "{followup}");
+    assert!(followup.contains("the need went away"), "{followup}");
+    // Nothing started on the way.
+    assert!(
+        Store::open(&world.project.hq_root)
+            .unwrap()
+            .load("m2")
+            .is_err()
+    );
+
+    let archived = lifecycle::archive(&world.project, "m2").unwrap();
+    assert_eq!(
+        archived.at,
+        lifecycle::archive_dir(&world.project).join("m2")
+    );
+    assert!(!world.project.hq_root.join("missions/m2").exists());
+    assert!(archived.at.join("MISSION.md").is_file());
+    assert!(archived.at.join("FOLLOWUP_HQ.md").is_file());
+    assert!(!archived.at.join("state.json").exists());
+}
+
+/// Archived directly, without being called off first: "as for any mission".
+#[test]
+fn a_mission_that_never_started_is_archived_without_being_ended_first() {
+    let world = World::new(1);
+    world.framed_only();
+    lifecycle::archive(&world.project, "m2").unwrap();
+    assert!(
+        lifecycle::archive_dir(&world.project)
+            .join("m2/MISSION.md")
+            .is_file()
+    );
+}
+
+/// Only a **missing** state is a mission never started. One that cannot be
+/// read is something to look at, and neither verb takes it for an unstarted
+/// mission; and a mission nobody framed is not one to close at all.
+#[test]
+fn a_state_that_cannot_be_read_is_not_a_mission_that_never_started() {
+    let world = World::new(1);
+    world.framed_only();
+    std::fs::write(
+        world.project.hq_root.join("state/missions/m2.json"),
+        "{ not json",
+    )
+    .unwrap();
+
+    let err = lifecycle::end(&world.project, "m2", "why").unwrap_err();
+    assert!(matches!(err, LifecycleError::State(_)), "{err}");
+    let err = lifecycle::archive(&world.project, "m2").unwrap_err();
+    assert!(matches!(err, LifecycleError::State(_)), "{err}");
+    assert!(world.project.hq_root.join("missions/m2").is_dir());
+    let followup =
+        std::fs::read_to_string(world.project.hq_root.join("missions/m2/FOLLOWUP_HQ.md")).unwrap();
+    assert!(!followup.contains("called this mission off"), "{followup}");
+
+    // Refused as a mission nobody framed, not as a follow-up it could not write.
+    let err = lifecycle::end(&world.project, "nobody", "why").unwrap_err();
+    assert!(matches!(err, LifecycleError::Mission(_)), "{err}");
+    assert!(!world.project.hq_root.join("missions/nobody").exists());
+    let err = lifecycle::archive(&world.project, "nobody").unwrap_err();
+    assert!(matches!(err, LifecycleError::Mission(_)), "{err}");
+    assert!(
+        !lifecycle::archive_dir(&world.project)
+            .join("nobody")
+            .exists()
+    );
+}
+
+/// `mission list` says each mission's stage in a word, and `--active` keeps
+/// only those started: a mission archived has left the list already.
+#[test]
+fn the_mission_list_says_each_stage_in_a_word_and_active_keeps_the_started() {
+    let world = World::new(1);
+    world.framed_only();
+
+    let all = lifecycle::listing(&world.project, false).unwrap();
+    let words: Vec<(&str, &str, bool)> = all
+        .iter()
+        .map(|l| (l.id.as_str(), l.stage.as_str(), l.started))
+        .collect();
+    assert_eq!(words, [("m1", "coding", true), ("m2", "framed", false)]);
+    let line = all[0].line();
+    assert!(line.contains("coding"), "{line}");
+    assert!(line.contains("mission/x"), "{line}");
+    assert!(line.contains("1 lot(s)"), "{line}");
+
+    let active = lifecycle::listing(&world.project, true).unwrap();
+    let ids: Vec<&str> = active.iter().map(|l| l.id.as_str()).collect();
+    assert_eq!(ids, ["m1"]);
+
+    // The word follows the stage.
+    world.at(&[
+        Event::RunEnded {
+            outcome: nunki::harness::Outcome::Finished(Default::default()),
+            lot_done: true,
+        },
+        Event::GatesPassed,
+        Event::GatesPassed,
+    ]);
+    let all = lifecycle::listing(&world.project, false).unwrap();
+    assert_eq!(all[0].stage, "verified");
+    // Pushed is said apart from verified: the one still waits on a human.
+    let store = Store::open(&world.project.hq_root).unwrap();
+    let mut state = store.load("m1").unwrap();
+    state.pushed = Some(nunki::state::PushedAt {
+        head: "abc".into(),
+        date: "2026-10-11T00:00:00Z".into(),
+    });
+    store.save(&state).unwrap();
+    let all = lifecycle::listing(&world.project, false).unwrap();
+    assert_eq!(all[0].stage, "pushed");
+    lifecycle::archive(&world.project, "m1").unwrap();
+    let active = lifecycle::listing(&world.project, true).unwrap();
+    assert!(active.is_empty(), "{active:?}");
+}
+
+/// Every stage has its own word: a column that said the same thing for two
+/// stages would be a column nobody can scan.
+#[test]
+fn every_stage_has_a_word_of_its_own() {
+    let world = World::new(1);
+    let mut seen = std::collections::BTreeSet::new();
+    let mut flow = Flow::new(header(1)).unwrap();
+    seen.insert(nunki::wait::stage_word(&flow));
+    for event in [
+        Event::RunEnded {
+            outcome: nunki::harness::Outcome::Finished(Default::default()),
+            lot_done: true,
+        },
+        Event::GatesPassed,
+        Event::GatesPassed,
+    ] {
+        flow.advance(event).unwrap();
+        seen.insert(nunki::wait::stage_word(&flow));
+    }
+    assert_eq!(
+        seen.into_iter().collect::<Vec<_>>(),
+        ["campaign", "coding", "gates", "verified"]
+    );
+    let _ = world;
+}
+
+/// `slot list` says which mission occupies each slot: a started mission holds
+/// its slot's tree and branch until it is archived.
+#[test]
+fn the_slot_list_names_the_mission_that_occupies_each_slot() {
+    let world = World::new(1);
+    world.framed_only();
+    let occupants = lifecycle::occupants(&world.project).unwrap();
+    assert_eq!(
+        occupants.into_iter().collect::<Vec<_>>(),
+        [("one".to_string(), vec!["m1".to_string()])]
+    );
+
+    let one = nunki::slot::Slot {
+        name: "one".into(),
+        tree: PathBuf::from("/slots/one"),
+    };
+    let line = lifecycle::slot_line(&one, &["m1".to_string()]);
+    assert!(line.contains("mission m1"), "{line}");
+    assert!(line.contains("/slots/one"), "{line}");
+    let two = nunki::slot::Slot {
+        name: "two".into(),
+        tree: PathBuf::from("/slots/two"),
+    };
+    assert!(lifecycle::slot_line(&two, &[]).contains("free"));
+}
+
+/// A campaign outside missions runs only in a slot no mission holds: one a
+/// started mission occupies is refused, naming the mission and the verb
+/// that says which slots are free (SPEC 4.4, the campaigns outside missions).
+#[test]
+fn a_campaign_outside_missions_is_refused_in_a_slot_a_mission_holds() {
+    let world = World::new(1);
+    world.framed_only();
+    let slot = nunki::slot::Slot {
+        name: "one".into(),
+        tree: PathBuf::from("/slots/one"),
+    };
+    let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+        std::sync::Arc::new(nunki::engine::fake::FakeEngine::default());
+    let err = nunki::offmission::run(
+        &world.project,
+        &slot,
+        engine,
+        "rust",
+        &nunki::offmission::Asked {
+            base: "dev",
+            form: nunki::offmission::Form::Whole,
+            minutes: 720,
+        },
+    )
+    .unwrap_err();
+    match err {
+        nunki::offmission::OffMissionError::Occupied { slot, missions } => {
+            assert_eq!((slot.as_str(), missions.as_str()), ("one", "m1"));
+        }
+        other => panic!("{other}"),
+    }
+    assert!(
+        nunki::mutants::read_running(&world.project.hq_root, "one")
+            .unwrap()
+            .is_none()
+    );
+}

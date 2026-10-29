@@ -1,0 +1,1761 @@
+//! Starting a run (SPEC 4.3, "un run par lot").
+//!
+//! What this module does, in order, and every step is a decision written
+//! down somewhere: take the slot's lock; put the slot on the mission's
+//! branch; freeze the header into the state, because from here on `nunki` reads
+//! its own copy and never the file again; lift the role's profile; and launch
+//! the harness **inside** the agent's container, recording the handle so a
+//! restarted `nunki` can find the run again.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use crate::compose::{AGENT_SERVICE, FIREWALL_SERVICE, NamedVolume, Plan, UserIds};
+use crate::engine::spawn::ContainerSpawner;
+use crate::engine::{Engine, EngineError};
+use crate::git;
+use crate::harness::{
+    Exposure, Harness, Role, RunHandle, RunRequest, SessionId, Workspace, claude_code,
+};
+use crate::image;
+use crate::mission::dir::{self as mission_dir, Paths};
+use crate::mission::flow::Flow;
+use crate::perimeter::{Profile, Sources, compute};
+use crate::project::Project;
+use crate::role;
+use crate::slot::Slot;
+use crate::state::{MissionState, Store, lock::SlotLock};
+
+/// Where the mission folder and the tree are mounted, in every profile.
+pub const TREE_AT: &str = "/work/tree";
+pub const MISSION_AT: &str = "/work/mission";
+/// Where the stack's scripts are mounted, read-only, in every profile. They
+/// live in the project's home and never in the tree: they judge the agent,
+/// and the agent cannot write what is mounted read-only.
+pub const STACK_AT: &str = "/work/stack";
+
+/// The stack scripts a container runs: the coder's battery, the integrator's,
+/// the mutation campaign, the mechanical security and the default launch.
+/// `Dockerfile`, `allow.txt`, `writable.txt`, `caches.txt` and
+/// `advisories.txt` are read on the host and never mounted — an agent has no
+/// reason to see its own raw allowlist, nor the recipe for its image.
+pub const STACK_SCRIPTS: [&str; 5] = [
+    crate::gate::BATTERY,
+    crate::gate::SYSTEM_BATTERY,
+    crate::gate::SECURITY,
+    crate::mutants::SCRIPT,
+    crate::launch::SCRIPT,
+];
+
+/// Where `nunki` mounts what judges the agent and the agent must not be able
+/// to forge.
+///
+/// A top-level directory the image never creates, and deliberately not under
+/// `/work`, which the Dockerfile gives to the agent. Anything mounted **only
+/// when it exists on the host** needs this: on the day it is not mounted, a
+/// path under `/work` is a path the agent writes, and it would be writing the
+/// thing it is judged by.
+///
+/// In a container, as the agent, `mkdir -p
+/// /work/advisories` succeeds and `mkdir /nunki` is refused — `/` is root's.
+/// A bind mount under it makes Docker create the parent owned by root, so the
+/// directory exists only when `nunki` put something in it.
+pub const NUNKI_AT: &str = "/nunki";
+
+/// Where the advisory database gate 8 reads is mounted, read-only.
+///
+/// Fixed, and not something the stack chooses: the stack says where it lives
+/// **on the host**, and `nunki` decides where it lands. A path the agent could
+/// influence would let it point the audit at an empty directory — no findings,
+/// and a green gate (SPEC 4.4, gate 8).
+///
+/// `/work/advisories` would be the same green gate by another road: the mount
+/// is conditional, so on a machine whose advisory database is not filled the
+/// agent could `mkdir` it. With no mount and the agent's own directory in its
+/// place, `security.sh` answers `exit=0` and no findings where it owes "I
+/// could not look". Under
+/// [`NUNKI_AT`] there is nothing to make.
+pub const ADVISORIES_AT: &str = "/nunki/advisories";
+
+/// The effective allowlist of a run, as the agent reads it in the mission
+/// folder.
+///
+/// What the firewall enforces for this role — the stack's registries, the
+/// harness's API, and the mission's services for the integrator and the
+/// security agent — and not the stack's `allow.txt`, which is one source of
+/// three. An agent that cannot ask why a name does not resolve reads a
+/// refusal as a flaky network and retries; one that has the list reads it as
+/// the list.
+pub fn allowlist(role: Role, perimeter: &crate::perimeter::Perimeter) -> String {
+    let list = |items: &std::collections::BTreeSet<String>| {
+        if items.is_empty() {
+            "(none)\n".to_string()
+        } else {
+            items.iter().map(|i| format!("{i}\n")).collect()
+        }
+    };
+    format!(
+        "# What this run may reach, as the {} it runs as.\n\
+         #\n\
+         # The firewall beside this container enforces it; this file only says it.\n\
+         # A name outside it does not resolve and an address outside it is refused:\n\
+         # that is this list, not a flaky network. Retrying will not change it —\n\
+         # say in the journal what you needed, and why.\n\
+         \n\
+         domains:\n\
+         {}\n\
+         addresses:\n\
+         {}",
+        role::slug(role),
+        list(&perimeter.domains),
+        list(&perimeter.addresses)
+    )
+}
+
+/// The stack scripts to mount, as (host path, path in the container): those
+/// that exist and no other. A bind mount of a missing file makes the engine
+/// create an empty directory in its place, which would turn "the stack ships
+/// no system battery" into a gate reading a directory.
+///
+/// Every stack the image carries has its scripts mounted: the primary's at
+/// [`STACK_AT`], each other's beside it (SPEC 4.2, "plusieurs stacks").
+pub fn stack_scripts(project: &Project, stack: &str) -> Vec<(PathBuf, PathBuf)> {
+    judged(project, stack)
+        .into_iter()
+        .flat_map(|j| {
+            let dir = project.fragment(&j.stack.name);
+            STACK_SCRIPTS
+                .iter()
+                .map(move |name| (dir.join(name), PathBuf::from(&j.scripts_at).join(name)))
+        })
+        .filter(|(host, _)| host.is_file())
+        .collect()
+}
+
+/// A stack the gates play: where it lives in the tree, where its scripts and
+/// its advisory database are mounted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Judged {
+    pub stack: crate::project::Stack,
+    pub scripts_at: String,
+    pub advisories_at: String,
+}
+
+/// Every stack the gates play, the primary first: its own directory, its own
+/// scripts, its own advisory database (SPEC 4.2, "plusieurs stacks"). The
+/// primary keeps the paths a single stack has always had, so a project with
+/// one stack sees nothing move.
+pub fn judged(project: &Project, stack: &str) -> Vec<Judged> {
+    let stacks = if project.config.stacks.is_empty() {
+        vec![crate::project::Stack::root(stack)]
+    } else {
+        project.config.stacks.clone()
+    };
+    stacks
+        .into_iter()
+        .enumerate()
+        .map(|(i, stack)| {
+            let (scripts_at, advisories_at) = if i == 0 {
+                (STACK_AT.to_string(), ADVISORIES_AT.to_string())
+            } else {
+                (
+                    format!("{STACK_AT}-{}", stack.name),
+                    format!("{ADVISORIES_AT}-{}", stack.name),
+                )
+            };
+            Judged {
+                stack,
+                scripts_at,
+                advisories_at,
+            }
+        })
+        .collect()
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RunError {
+    #[error("mission {0} has already started; `nunki mission status {0}` says where it is")]
+    AlreadyStarted(String),
+    #[error(transparent)]
+    Account(#[from] crate::account::AccountError),
+    #[error(
+        "account {account:?} authenticates {has}, but this project runs {wants} — \
+         name an account for {wants}, or change the project's harness"
+    )]
+    WrongHarness {
+        account: String,
+        has: String,
+        wants: String,
+    },
+    #[error("no home directory: accounts live under ~/.nunki")]
+    NoHome,
+    #[error("the images are missing — `nunki slot rebuild` builds them ({0})")]
+    NoImages(String),
+    #[error(
+        "{image} does not carry what this branch pins — {}. Inside the run the toolchain \
+         would try to fetch it from behind the firewall, so no agent was started; \
+         `nunki slot rebuild --slot {slot}` builds the image with what this slot's \
+         branch pins",
+        drift.join("; ")
+    )]
+    StaleImage {
+        image: String,
+        slot: String,
+        drift: Vec<String>,
+    },
+    #[error(transparent)]
+    Versions(#[from] crate::versions::SourcesError),
+    #[error(transparent)]
+    Image(#[from] image::ImageError),
+    #[error(transparent)]
+    Engine(#[from] EngineError),
+    #[error(transparent)]
+    Git(#[from] git::GitError),
+    #[error(transparent)]
+    Mission(#[from] mission_dir::MissionDirError),
+    #[error(transparent)]
+    State(#[from] crate::state::StateError),
+    #[error(transparent)]
+    Lock(#[from] crate::state::LockError),
+    #[error(transparent)]
+    Compose(#[from] crate::compose::ComposeError),
+    #[error(transparent)]
+    Perimeter(#[from] crate::perimeter::PerimeterError),
+    #[error("{0}: {1}")]
+    Io(PathBuf, std::io::Error),
+    #[error("the run could not be launched: {0}")]
+    Launch(String),
+    #[error(transparent)]
+    Services(#[from] crate::services::ApprovalError),
+    #[error(transparent)]
+    Application(#[from] crate::launch::LaunchError),
+    #[error(
+        "the security profile is up but {0:?} is not writable in it — the stack declares \
+         it in writable.txt, and a named volume takes its ownership from the image, so \
+         an image built before that line yields a root-owned directory. \
+         `nunki slot rebuild` builds it again{1}"
+    )]
+    NotWritable(String, String),
+    #[error("{}", not_started_again(stuck, said))]
+    NotStartedAgain { stuck: Vec<Stuck>, said: String },
+    /// Boxed: every `Result` carrying a `RunError` would otherwise grow by
+    /// the size of what this one says.
+    #[error("{0}")]
+    NotApprovedAtStart(Box<UnapprovedAtStart>),
+    #[error("{0} is not a profile nunki can read back ({1}) — the next launch writes it again")]
+    ProfileUnreadable(PathBuf, String),
+}
+
+/// A mission whose integrator or security agent would find the project's
+/// services unapproved, refused at its start (#141): what
+/// [`RunError::NotApprovedAtStart`] says.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "mission {id} was not started: its {role} {needs}, and {path} \
+     on the commit its branch starts from renders to {digest}, which no human approved. \
+     Read it below; `nunki services --approve {digest}` approves it, and then \
+     `nunki mission start {id} --slot {slot}` starts the mission. Nothing was launched \
+     or recorded; the slot is on the mission's branch.\n\n{shown}"
+)]
+pub struct UnapprovedAtStart {
+    pub id: String,
+    /// Who would have asked: the integrator, or else the security agent.
+    pub role: &'static str,
+    /// Why that role needs the approval.
+    pub needs: &'static str,
+    pub path: String,
+    pub digest: String,
+    pub slot: String,
+    /// The rendering as `nunki services --show` prints it.
+    pub shown: String,
+}
+
+fn not_started_again(stuck: &[Stuck], said: &str) -> String {
+    let names: Vec<&str> = stuck.iter().map(|s| s.service.as_str()).collect();
+    let (whose, had, is) = match stuck.len() {
+        1 => ("service", "a container", "is"),
+        _ => ("services", "containers", "are"),
+    };
+    format!(
+        "the project's {whose} {}, which had {had} before this launch, {is} not running after \
+         its `up` — {}. Removing a container takes none of its volumes, and the next launch \
+         makes it anew: the file's named volumes stay, and what it kept in its own filesystem \
+         and in the image's anonymous volumes does not come back. `up` said: {said}",
+        names.join(", "),
+        stuck.iter().map(Stuck::said).collect::<Vec<_>>().join("; ")
+    )
+}
+
+/// A project's service that had a container before a launch, and whose
+/// container has exited after the launch's `up` failed (#140): what
+/// [`RunError::NotStartedAgain`] names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stuck {
+    pub service: String,
+    pub container: String,
+    /// What the engine says the container exited with: never 0.
+    pub code: i64,
+    /// The command line that removes the container and none of its volumes
+    /// ([`Engine::removal`]).
+    pub removal: String,
+}
+
+impl Stuck {
+    fn said(&self) -> String {
+        format!(
+            "{}'s container {} exited {}: its log says why, and `{}` removes it",
+            self.service, self.container, self.code, self.removal
+        )
+    }
+}
+
+/// Which account a mission spends, and the token to pass. The mission's
+/// header wins over the project's declaration, which wins over the index's
+/// default — and the token reaches the harness as an environment variable of
+/// the exec that starts it, written into no file (SPEC 3.3, 4.3; #170).
+pub fn account_for(
+    project: &Project,
+    from_mission: Option<&str>,
+) -> Result<(String, crate::account::Account, String), RunError> {
+    let nunki_home = project.nunki_home();
+    let accounts = crate::account::Accounts::load(&nunki_home)?;
+    let (name, account) =
+        accounts.choose(&nunki_home, from_mission, project.config.account.as_deref())?;
+    if account.harness != project.config.harness {
+        return Err(RunError::WrongHarness {
+            account: name,
+            has: account.harness,
+            wants: project.config.harness.clone(),
+        });
+    }
+    let token = account.token(&nunki_home, &name)?;
+    Ok((name, account, token))
+}
+
+/// What a role is told for this project: its part of the run contract, and
+/// what the project protects, which the agent cannot read anywhere else —
+/// `nunki.yaml` is not in its container. Read from the values the gates read
+/// (`verify`), so the prompt and the gates cannot disagree.
+pub fn role_prompt(project: &Project, role: Role) -> String {
+    let services_file = crate::services::declared_path(project);
+    role::prompt(
+        role,
+        &role::Protected {
+            branches: &project.config.protected_branches,
+            paths: &project.config.protected_paths,
+            services_file: services_file.as_deref(),
+        },
+    )
+}
+
+/// Which model this run asks the harness for. The mission's header wins over
+/// the project's declaration, and `None` leaves the harness its own default.
+///
+/// Nothing here checks the name. `nunki` knows harnesses, not models (SPEC
+/// 4.3): a list of accepted names would rot with every release, and the
+/// harness itself refuses what it does not know — in the container, where
+/// its message is the one worth reading.
+pub fn model_for(project: &Project, header: &crate::mission::Header) -> Option<String> {
+    header
+        .model
+        .clone()
+        .or_else(|| project.config.model.clone())
+}
+
+/// What [`start`] started, and what it did with the slot's own base branch.
+#[derive(Debug)]
+pub struct Started {
+    pub state: MissionState,
+    /// The slot's base branch, brought to the project's base when the
+    /// mission's branch was made ([`branch`]).
+    pub base: Option<git::Brought>,
+}
+
+/// Start the mission's first run: the coder, on its first lot.
+pub fn start(
+    project: &Project,
+    id: &str,
+    slot: &Slot,
+    engine: Arc<dyn Engine>,
+    engine_bin: &str,
+) -> Result<Started, RunError> {
+    let store = Store::open(&project.hq_root)?;
+    if store.load(id).is_ok() {
+        return Err(RunError::AlreadyStarted(id.to_string()));
+    }
+
+    // The lock is taken before anything is changed: two `nunki` on one slot is
+    // two agents in one tree (SPEC 4.2).
+    let _lock = SlotLock::acquire(&project.hq_root.join("locks"), &slot.name, "mission start")?;
+
+    // The header is read once, here, and frozen: from now on `nunki` uses its
+    // own copy, so nothing an agent writes can change the perimeter, the
+    // bounds or the lots (SPEC 4.1).
+    let header = mission_dir::read_header(&project.hq_root, id)?;
+    let paths = Paths::of(&project.hq_root, id);
+
+    let brought = approved_at_start(project, id, slot, &header)?;
+
+    let lot = header
+        .lots
+        .first()
+        .map(|l| l.id.clone())
+        .unwrap_or_else(|| "L1".to_string());
+
+    let launched = launch(&Launching {
+        project,
+        slot,
+        engine,
+        engine_bin,
+        paths: &paths,
+        header: &header,
+        role: Role::Coder,
+        lot,
+        attempt: 1,
+        session: None,
+    })?;
+    let session = launched.run.session.clone();
+
+    let mut state = MissionState {
+        id: id.to_string(),
+        slot: slot.name.clone(),
+        flow: Flow::new(header).map_err(crate::state::StateError::Flow)?,
+        run: Some(launched.run),
+        run_account: Some(launched.account),
+        app: launched.app,
+        verdicts: Vec::new(),
+        accepted: Vec::new(),
+        stopped: None,
+        harness_down: None,
+        // Counted when `nunki verify` reads it back, like every other run.
+        spent: Default::default(),
+        spared: None,
+        decided: None,
+        coder_session: Some(session),
+        pushed: None,
+        updated_at: String::new(),
+        revision: 0,
+    };
+    store.save(&state)?;
+    state.updated_at = crate::state::now_rfc3339();
+    Ok(Started {
+        state,
+        // When the check above made the branch, the launch found it made.
+        base: brought.or(launched.base),
+    })
+}
+
+/// Refuse to start a mission whose integrator or security agent would find
+/// the project's services unapproved (SPEC 4.2, rule 1, and #141).
+///
+/// `launch` asks the question too, and it is the guard. But it asks when that
+/// role is launched, hours into a mission launched to run on its own, and a
+/// mission was measured stopping there after 18.5 hours with nobody to
+/// answer. Asked here, the human who launched it is still present.
+///
+/// The gate is `launch`'s own: every role on the system profile, and the
+/// security agent is one of them even with no service declared. A mission
+/// with neither never lifts that profile, and is never asked.
+///
+/// Read on the mission's branch, so the slot is branched first. That commit
+/// is the one the integrator would read when nothing changes the file
+/// before it is launched. It is also one `nunki services --approve` reads,
+/// since an approval looks through every slot's `HEAD`. The repository's own
+/// `HEAD` may sit on another commit, and approving its digest would approve
+/// something other than what the mission lifts.
+///
+/// What the branching did with the slot's base, for [`start`] to say.
+fn approved_at_start(
+    project: &Project,
+    id: &str,
+    slot: &Slot,
+    header: &crate::mission::Header,
+) -> Result<Option<git::Brought>, RunError> {
+    let (role, needs) = if header.has_integration() {
+        ("integrator", "will lift the project's services")
+    } else if header.has_security_agent() {
+        (
+            "security agent",
+            "runs on the system profile, which does not start on a services file \
+             nobody approved",
+        )
+    } else {
+        return Ok(None);
+    };
+    if project.config.services_file.is_none() {
+        return Ok(None);
+    }
+    forward_unstarted(slot, &project.root, &header.branch, &header.base)?;
+    let brought = branch(slot, &project.root, &header.branch, &header.base)?;
+    let at = crate::services::At::Mission {
+        tree: &slot.tree,
+        base: &header.base,
+    };
+    match crate::services::approved(project, at) {
+        Err(crate::services::ApprovalError::NotApproved { path, digest }) => {
+            let approvals = crate::services::Approvals::load(&crate::services::file(project))?;
+            let from = format!(
+                "the commit mission {id}'s branch starts from, in slot {}",
+                slot.name
+            );
+            let shown = match crate::services::read(project, at)? {
+                Some(current) => crate::services::show(&current, &from, &approvals),
+                None => String::new(),
+            };
+            Err(RunError::NotApprovedAtStart(Box::new(UnapprovedAtStart {
+                id: id.to_string(),
+                role,
+                needs,
+                path,
+                digest,
+                slot: slot.name.clone(),
+                shown,
+            })))
+        }
+        approved => approved.map(|_| brought).map_err(RunError::from),
+    }
+}
+
+/// Bring forward to the base the mission's branch a refused start left.
+///
+/// [`approved_at_start`] branches the slot before it reads, and a refusal
+/// leaves the slot on that branch: it holds the digest a human approves.
+/// [`branch`] then never moves a branch that exists. A human who fixes the
+/// file on the base instead, or approves after the base moved, would meet
+/// the same refusal on every start after, from the commit the first one
+/// read.
+///
+/// Only here, at a start: [`start`] has refused a mission that is
+/// recorded, so no mission owns this branch. A role switch never moves a
+/// branch under a mission that is running. Only forward, too: a branch
+/// holding a commit the base does not have is left where it is
+/// ([`git::Brought::Diverged`]).
+fn forward_unstarted(
+    slot: &Slot,
+    origin: &Path,
+    branch: &str,
+    base: &str,
+) -> Result<(), git::GitError> {
+    let repo = git::SlotGit::open(&slot.tree)?;
+    if !repo.has(&refs(branch)) {
+        return Ok(());
+    }
+    repo.fetch_origin(origin)?;
+    let Some(start) = repo.origin_branch(base) else {
+        return Ok(());
+    };
+    // `bring_branch` never moves the branch the slot is on, so the slot
+    // steps onto its base first; `branch` puts it back.
+    if repo.current_branch()? == branch {
+        if !repo.has(&refs(base)) {
+            return Ok(());
+        }
+        repo.checkout(base)?;
+    }
+    repo.bring_branch(branch, &start).map(|_| ())
+}
+
+/// Everything one launch needs that its caller already holds. Gathered as a
+/// struct because `launch` takes no lock and asks the store nothing: the
+/// caller has both, and a second `SlotLock::acquire` under `nunki verify` would
+/// be `nunki` refusing itself (SPEC 4.2, "`nunki exec` lancé par `verify`
+/// s'exécute **sous** son verrou").
+pub struct Launching<'a> {
+    pub project: &'a Project,
+    pub slot: &'a Slot,
+    pub engine: Arc<dyn Engine>,
+    pub engine_bin: &'a str,
+    pub paths: &'a Paths,
+    /// The **frozen** header, never the file.
+    pub header: &'a crate::mission::Header,
+    pub role: Role,
+    /// What this run is for, as the harness records it.
+    pub lot: String,
+    pub attempt: u32,
+    /// The harness session to resume, or `None` for a fresh one.
+    pub session: Option<SessionId>,
+}
+
+/// What a launch left behind, for the caller to persist.
+pub struct Launched {
+    pub run: RunHandle,
+    /// The account it was launched on, whose token it holds (SPEC 4.3): what
+    /// its stream measures, kept with the run.
+    pub account: String,
+    /// The application `nunki` started for this role, when the mission has one
+    /// to start. Kept apart from the run: "the agent is up" and "the
+    /// deliverable is up" are two facts, and a single handle would report
+    /// them as one.
+    pub app: Option<RunHandle>,
+    /// How the application was declared, so the caller can say it. `None`
+    /// for the coder, who has nothing to start.
+    pub launch: Option<crate::launch::Launch>,
+    /// A mutation campaign this launch ended, and since when it had been
+    /// running. `None` when there was none, which is the normal case.
+    pub campaign_ended: Option<String>,
+    /// The lifted services whose `ports` nunki dropped from the file, for
+    /// the launch to say so in one line: the agent reaches a service by its
+    /// name, and a published port would collide between slots.
+    pub ports_dropped: Vec<String>,
+    /// What the launch did with the slot's own base branch, when it made
+    /// the mission's branch ([`branch`]): `None` on every launch after the
+    /// first.
+    pub base: Option<git::Brought>,
+}
+
+/// End the mutation campaign this launch is about to kill, and say since
+/// when it had been running.
+///
+/// `launch` recreates the agent's container, and a campaign is a detached
+/// process inside it: it dies either way. What this adds is that it dies
+/// **on purpose**, and that a slot going quiet for an hour with nothing to
+/// show leaves a sentence.
+///
+/// Reading it back is most of the work, and most of what this does: a record
+/// outlives its campaign whenever something stopped before reading it, and
+/// then there is nothing to end at all.
+///
+/// One genuinely running here is not part of the flow. `verify` starts a
+/// campaign only at `Stage::Gates`, only with gates 1 to 5 already green, and
+/// nothing a campaign does can turn those red — it rewrites the clean copy of
+/// `HEAD`, and they read the slot's tree. So the mission stays at
+/// `Stage::Gates` until the campaign is read back, and no run is launched.
+/// What can put one here is a verb typed outside the flow.
+///
+/// Ended rather than waited for: this launch changes `HEAD`, so gate 7 would
+/// reject the campaign's fingerprint anyway. What it measured is already
+/// worth nothing.
+///
+/// Its own function so that the decision can be played without lifting a
+/// container: `launch` below is only ever exercised against a real engine.
+///
+/// The campaign is stopped whole ([`crate::mutants::end`]), and its record
+/// is **kept**: whatever the stop left — or could not confirm — ends when
+/// [`switch_out`] removes the container, and only then is the record
+/// forgotten. So a leftover does not fail the switch, and no door into the
+/// copy opens while anything of the campaign may still be running.
+pub fn end_campaign_before_switching(
+    project: &Project,
+    slot: &Slot,
+    engine: Arc<dyn Engine>,
+    mission_dir: &std::path::Path,
+) -> Result<Option<String>, RunError> {
+    let read = crate::mutants::read_back(project, slot, engine.clone(), mission_dir)
+        .map_err(|e| RunError::Launch(e.to_string()))?;
+    match read {
+        Some(crate::mutants::Progress::Running { started_at, .. }) => {
+            crate::mutants::end(project, slot, engine)
+                .map_err(|e| RunError::Launch(e.to_string()))?;
+            Ok(Some(started_at))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Step 2 of [`launch`], the profile switch: stop and remove the agent and
+/// its sidecar ([`SERVICES`]), read from the file that is up — and, once the
+/// agent's container is removed, forget the campaign that lived in it.
+///
+/// In that order and no other. A campaign the stop of
+/// [`end_campaign_before_switching`] did not end whole is still running
+/// until the container goes, and every process in it goes with it; its
+/// record is what keeps every door into the copy shut until then. If the
+/// removal fails, the record stays.
+///
+/// Without a profile file nothing is removed, and nothing is forgotten: a
+/// campaign still filed then is read back by the next caller, as any is.
+pub fn switch_out(
+    engine: &dyn Engine,
+    project: &Project,
+    slot: &Slot,
+    file: &Path,
+    compose_project: &str,
+) -> Result<(), RunError> {
+    // `stop` and never `down`: `down` would take the project's services
+    // with it.
+    if file.is_file() {
+        engine.stop(file, compose_project, &SERVICES)?;
+        crate::mutants::forget_running(&project.hq_root, &slot.name)
+            .map_err(|e| RunError::Launch(e.to_string()))?;
+    }
+    Ok(())
+}
+
+/// Lift the role's profile and launch its run, on a slot whose lock the
+/// caller already holds.
+///
+/// The order is the one SPEC 4.2 fixes and it is not interchangeable:
+///
+/// 1. resolve the launch script — **before** anything is taken down, so a
+///    mission that cannot start its application says so while the previous
+///    role's container is still up;
+/// 2. switch the profile: stop and remove the agent and its sidecar, and
+///    **only** those. The project's services were lifted once for the slot
+///    and keep the state the previous role left in them — migrations played,
+///    fixtures laid (rule 1);
+/// 3. start the application, in the new profile, **before** the agent (rule
+///    2);
+/// 4. launch the agent.
+pub fn launch(l: &Launching) -> Result<Launched, RunError> {
+    let Launching {
+        project,
+        slot,
+        engine,
+        engine_bin,
+        paths,
+        header,
+        role,
+        ..
+    } = l;
+    let role = *role;
+
+    // First of all, for a profile that lifts the project's services: a
+    // rendering no human approved starts nothing, and is said before an
+    // account, an image or a branch is so much as looked at. `plan` reads it
+    // again and is the guard; this is what keeps a refusal from being
+    // reported as a missing image (SPEC 4.2).
+    if Profile::of(role) == Profile::System {
+        project_compose(project, slot, &header.base)?;
+    }
+
+    // Which subscription this mission spends. Checked before the machine:
+    // what the project declares is cheap to check and belongs to the
+    // mission, while a missing image belongs to this machine. Saying "build
+    // your images" to someone whose account is wrong helps nobody.
+    let (account, _, token) = account_for(project, header.account.as_deref())?;
+
+    let stack = stack_of(project);
+    let images = image::names(project, &stack);
+    for image in [&images.agent, &images.firewall] {
+        if !image::present(engine_bin, image) {
+            return Err(RunError::NoImages(image.clone()));
+        }
+    }
+
+    // The slot on the mission's branch, before anything is written into it.
+    // Idempotent: a role that follows another finds the branch already
+    // checked out and this does nothing.
+    let base = branch(slot, &project.root, &header.branch, &header.base)?;
+
+    // The image against what **this branch** pins, read from the slot's tree
+    // now that it is on it (SPEC 4.2). `slot rebuild` read the repository as
+    // it stood then; the mission's base, or a coder's commit on its branch,
+    // may pin another toolchain since, and the first `cargo` of the run would
+    // then spend it on a download the firewall refuses.
+    image_serves(project, &slot.tree, &stack, engine_bin, &images.agent)?;
+
+    // Step 1. The coder starts nothing: there is nothing to test or attack
+    // yet, and SPEC 4.2's table says so for the "code seul" shape.
+    let declared = match role {
+        Role::Coder => None,
+        Role::Integrator | Role::Security => {
+            Some(crate::launch::resolve(project, slot, &stack, header)?)
+        }
+    };
+
+    // Before the profile is generated, and so before anything is mounted: the
+    // files the agent writes are bind-mounted one at a time, and an
+    // engine given a source that is missing creates a directory there.
+    mission_dir::ensure_writable(&paths.dir)?;
+
+    let prompt = paths.dir.join(role::PROMPT_FILE);
+    std::fs::write(&prompt, role_prompt(project, role))
+        .map_err(|e| RunError::Io(prompt.clone(), e))?;
+
+    let plan = plan(project, slot, &stack, &images, paths, header, role)?;
+    let ports_dropped = ports_dropped(&plan);
+    // The perimeter the firewall is about to enforce, written where the agent
+    // reads: an autonomous agent cannot ask why a name does not resolve.
+    std::fs::write(&paths.allowlist, allowlist(role, &plan.perimeter))
+        .map_err(|e| RunError::Io(paths.allowlist.clone(), e))?;
+    let file = profile_path(project, &slot.name);
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| RunError::Io(dir.to_path_buf(), e))?;
+    }
+    let compose_project = crate::compose::project_name(&project.session(), &slot.name)?;
+
+    let campaign_ended = end_campaign_before_switching(project, slot, engine.clone(), &paths.dir)?;
+
+    // Step 2. The switch, read from the file that is up — the one that names
+    // the services to remove — and the campaign ended above forgotten only
+    // once its container is gone.
+    switch_out(engine.as_ref(), project, slot, &file, &compose_project)?;
+
+    std::fs::write(&file, crate::compose::generate(&plan, engine.dialect())?)
+        .map_err(|e| RunError::Io(file.clone(), e))?;
+    // The human's alone. It no longer carries the subscription token
+    // (#170), but it is the HQ's — the human's paths and mounts — and this
+    // rewrite is also what takes the token out of a profile an older nunki
+    // wrote. It lives at the HQ and never in the repository.
+    restrict(&file)?;
+
+    // A volume can only be mounted at a path the read-only bind already
+    // carries: runc creates the mount point in the assembled root filesystem,
+    // and under a `:ro` bind it cannot ("create mountpoint for
+    // /work/tree/target: read-only file system"). So the
+    // directory is made in the slot's tree first. It is empty and, being
+    // whatever the project ignores, invisible to `git status` — gate 1 stays
+    // green.
+    let writable = match role {
+        Role::Security => writable(project, &stack),
+        _ => Vec::new(),
+    };
+    seed_writable(slot, &writable)?;
+
+    lift(engine.as_ref(), project, &file, &compose_project, &plan)?;
+    // And the ownership of that volume comes from the **image**, not from the
+    // tree: an image built before the stack declared this directory yields a
+    // root-owned volume, silently, and the first build inside the container
+    // fails on a permission nobody is watching. `image::present` cannot see
+    // that — the tag is the same — so the only honest check is to ask the
+    // container that is now up.
+    if !writable.is_empty() {
+        writable_or_rebuild(engine.clone(), &file, &compose_project, &writable)?;
+    }
+
+    // Step 3. The application, in the profile of the role that will test or
+    // attack it, before that role is launched.
+    let runs = paths.dir.join("runs");
+    let app = match &declared {
+        Some(declared) => {
+            crate::launch::start(project, slot, engine.clone(), role, &runs, declared)?
+        }
+        None => None,
+    };
+
+    // Step 4. The agent.
+    let (session, resume) = session_for(l.session.as_ref());
+    // The one secret that enters a container, and the only exec that needs
+    // it: the harness's (SPEC 3.3, 4.3). Passed by name at that exec, its
+    // value in the client's environment, and written into no file — not the
+    // profile, which a human reads to understand a slot (#170). Which
+    // variable carries it is the harness's business, not this module's.
+    let token_env = claude_code::ClaudeCode::new(
+        Default::default(),
+        Box::new(crate::harness::spawn::LocalSpawner),
+    )
+    .token_env();
+    let spawner = ContainerSpawner::new(
+        engine.clone(),
+        file.clone(),
+        &compose_project,
+        AGENT_SERVICE,
+    )
+    .identified_by(&session.0)
+    .passing_secret(token_env, &token);
+    let harness = claude_code::ClaudeCode::new(
+        claude_code::Config {
+            model: model_for(project, header),
+            permission_mode: project.config.permission_mode.clone(),
+            ..Default::default()
+        },
+        Box::new(spawner),
+    );
+    std::fs::create_dir_all(&runs).map_err(|e| RunError::Io(runs.clone(), e))?;
+    let request = RunRequest {
+        role,
+        workspace: Workspace {
+            tree: PathBuf::from(TREE_AT),
+            mission_dir: PathBuf::from(MISSION_AT),
+        },
+        lot: l.lot.clone(),
+        attempt: l.attempt,
+        session,
+        resume,
+        // On the host: the container has nowhere to write a log, and the
+        // mission folder is read-only but for the agent's own files
+        // (SPEC 4.1).
+        runs_dir: runs,
+    };
+    let run = harness
+        .launch(
+            &request,
+            // What the role may do through the harness. The container is
+            // what restrains it; this only keeps the ordinary work possible.
+            &harness.guards(role),
+            &Exposure::SystemPromptFile(PathBuf::from(MISSION_AT).join(role::PROMPT_FILE)),
+        )
+        .map_err(|e| RunError::Launch(e.to_string()))?;
+
+    Ok(Launched {
+        run,
+        account,
+        app,
+        launch: declared,
+        campaign_ended,
+        ports_dropped,
+        base,
+    })
+}
+
+/// Start the profile `plan` describes, written at `file` — and first take
+/// down what the project's file lifted before whose definition is not the
+/// approved one ([`crate::services::stale`]): an older approved version, one
+/// lifted before approvals existed, a service the file no longer names.
+/// Taken down by container, never with a volume, before anything is started
+/// beside it (SPEC 4.2). Returns what was taken down.
+///
+/// Public because it is the one thing a launch takes down on its own, and a
+/// test should be able to hold it, and its order, to account without an
+/// agent.
+pub fn lift(
+    engine: &dyn Engine,
+    project: &Project,
+    file: &Path,
+    compose_project: &str,
+    plan: &Plan,
+) -> Result<Vec<String>, RunError> {
+    let approvals = crate::services::Approvals::load(&crate::services::file(project))?;
+    let listed = engine.containers(compose_project)?;
+    let stale = crate::services::stale(&listed, plan.project_services.as_ref(), &approvals);
+    let lifts = plan
+        .project_services
+        .as_ref()
+        .map(|l| l.services.services.keys().cloned().collect())
+        .unwrap_or_default();
+    take_down_and_up(engine, file, compose_project, listed, stale, lifts)
+}
+
+/// Start again the profile a launch wrote at `file`, without writing it:
+/// what `nunki exec` and the gates do when the slot's containers are down.
+///
+/// It goes through what [`lift`] goes through, so it is not a second way to
+/// lift. Every project service of the profile must carry the label of a
+/// rendering a human approved, or nothing is started
+/// ([`crate::services::labels_of_profile`]): a profile written before
+/// approvals lifts its services unlabelled and unfenced. Then what the
+/// profile does not lift under that label is taken down, by container and
+/// never with a volume, before anything is started. Returns what was taken
+/// down.
+pub fn relift(
+    engine: &dyn Engine,
+    project: &Project,
+    file: &Path,
+    compose_project: &str,
+) -> Result<Vec<String>, RunError> {
+    let approvals = crate::services::Approvals::load(&crate::services::file(project))?;
+    let lifting = crate::services::labels_of_profile(file, &approvals)?;
+    let listed = engine.containers(compose_project)?;
+    let stale = crate::services::stale_labelled(&listed, lifting.as_ref(), &approvals);
+    let lifts = lifting
+        .as_ref()
+        .map(|labels| labels.keys().cloned().collect())
+        .unwrap_or_default();
+    take_down_and_up(engine, file, compose_project, listed, stale, lifts)
+}
+
+/// Mount the advisory databases the host filled after the slot's profile was
+/// written, and give back where they live; nothing when none is missing.
+///
+/// The profile is written at a launch, and a database is mounted only when it
+/// exists then ([`advisories`]). A database filled later never reaches the
+/// container that is up, so gate 8 stays unplayable in it whatever the human
+/// did — while its sentence promised that `nunki verify` would pick the
+/// mission up (#165). So the profile that is up gains the missing mounts,
+/// and only them: not regenerated through [`plan`], which would read the
+/// account, the perimeter and the services again, and could change under a
+/// mission what no human asked to change. The line added is the one a launch
+/// would have written ([`crate::compose::mount`]), the file is restricted again
+/// — it is the human's, and one an older nunki wrote still carries the token
+/// until the next launch rewrites it (#170) — and the profile is lifted the
+/// way [`relift`] lifts it, so the engine recreates the agent with the mount.
+///
+/// Nothing is touched while a mutation campaign is filed: it lives in the
+/// container this would recreate. The caller keeps the other inhabitant, the
+/// application a role was given, out of it the same way.
+pub fn remount_advisories(
+    engine: &dyn Engine,
+    project: &Project,
+    slot: &Slot,
+    stack: &str,
+) -> Result<Vec<PathBuf>, RunError> {
+    let file = profile_path(project, &slot.name);
+    let wanted = advisories(project, stack);
+    if wanted.is_empty() || !file.is_file() {
+        return Ok(Vec::new());
+    }
+    let text = std::fs::read_to_string(&file).map_err(|e| RunError::Io(file.clone(), e))?;
+    let mut document: crate::yaml::Value = crate::yaml::from_str(&text)
+        .map_err(|e| RunError::ProfileUnreadable(file.clone(), e.to_string()))?;
+    // A profile with no agent mounting anything is not one a launch wrote,
+    // and not one to mend: gate 8 still says what it is missing.
+    let Some(volumes) = document
+        .get_mut("services")
+        .and_then(|s| s.get_mut(AGENT_SERVICE))
+        .and_then(|a| a.get_mut("volumes"))
+        .and_then(|v| v.as_sequence_mut())
+    else {
+        return Ok(Vec::new());
+    };
+    // By where it lands, not by the whole line: a database the stack has
+    // since moved is still mounted there, and a second mount at the same
+    // path is one the engine refuses.
+    let landed: Vec<String> = volumes
+        .iter()
+        .filter_map(|v| v.as_str()?.split(':').nth(1).map(str::to_string))
+        .collect();
+    let missing: Vec<(PathBuf, PathBuf)> = wanted
+        .into_iter()
+        .filter(|(_, at)| !landed.iter().any(|l| Path::new(l) == at))
+        .collect();
+    if missing.is_empty() {
+        return Ok(Vec::new());
+    }
+    // A campaign that cannot be read is not known to be gone.
+    if !matches!(
+        crate::mutants::read_running(&project.hq_root, &slot.name),
+        Ok(None)
+    ) {
+        return Ok(Vec::new());
+    }
+    for (host, at) in &missing {
+        volumes.push(crate::yaml::Value::String(crate::compose::mount(
+            host, at, "ro",
+        )));
+    }
+    let written = crate::yaml::to_string(&document)
+        .map_err(|e| RunError::ProfileUnreadable(file.clone(), e.to_string()))?;
+    std::fs::write(&file, written).map_err(|e| RunError::Io(file.clone(), e))?;
+    restrict(&file)?;
+    let compose_project = crate::compose::project_name(&project.session(), &slot.name)?;
+    relift(engine, project, &file, &compose_project)?;
+    Ok(missing.into_iter().map(|(host, _)| host).collect())
+}
+
+/// Take down `stale`, out of what the engine `listed` for the project, and
+/// start the profile, which lifts the project's services named in `lifts`.
+/// An `up` that fails is said as [`RunError::NotStartedAgain`] when
+/// [`not_started`] finds one of them that stopped starting, and as the
+/// engine said it otherwise.
+///
+/// Only the services this profile lifts are looked at: the approved ones
+/// it does not lift — all of them under the coder's profile, and those a
+/// mission holds back — are kept as they are, and this `up` never starts
+/// them. One found exited after a machine slept, with the code its stop
+/// gave it, would be blamed for a failure it had no part in, and a human
+/// handed the removal of its data.
+fn take_down_and_up(
+    engine: &dyn Engine,
+    file: &Path,
+    compose_project: &str,
+    listed: Vec<crate::engine::Container>,
+    stale: Vec<String>,
+    lifts: std::collections::BTreeSet<String>,
+) -> Result<Vec<String>, RunError> {
+    if !stale.is_empty() {
+        engine.remove(&stale)?;
+    }
+    let kept: Vec<crate::engine::Container> = listed
+        .into_iter()
+        .filter(|c| c.digest.is_some() && !stale.contains(&c.id) && lifts.contains(&c.service))
+        .collect();
+    if let Err(failed) = engine.up(file, compose_project) {
+        if let EngineError::Command { stderr, .. } = &failed
+            && let Some(stuck) = not_started(engine, compose_project, &kept)
+        {
+            let said = stderr
+                .lines()
+                .rev()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .unwrap_or("nothing")
+                .to_string();
+            return Err(RunError::NotStartedAgain { stuck, said });
+        }
+        return Err(failed.into());
+    }
+    Ok(stale)
+}
+
+/// After a failed `up`: the project's services that had a container in
+/// `before` — the lifted containers a launch found and kept — and whose
+/// container, listed again, has exited with a code other than 0 (#140).
+///
+/// By service, and not by container: a definition that changed makes
+/// Compose recreate the container, over the anonymous volumes it carries
+/// over, and the one that exited is then not the one listed before. Code 0
+/// is left out: a service whose work is done exits 0, which is no failure.
+///
+/// `None` when no such service is found, and when the engine cannot say —
+/// a listing or a liveness that fails — so that the `up`'s own error is
+/// said rather than a guess. A service that is running and not healthy,
+/// which fails an `up --wait` too, is not one: it has not exited.
+pub fn not_started(
+    engine: &dyn Engine,
+    compose_project: &str,
+    before: &[crate::engine::Container],
+) -> Option<Vec<Stuck>> {
+    if before.is_empty() {
+        return None;
+    }
+    let mut stuck = Vec::new();
+    for container in engine.containers(compose_project).ok()? {
+        if container.digest.is_none() || !before.iter().any(|b| b.service == container.service) {
+            continue;
+        }
+        if let crate::engine::Liveness::Exited(code) = engine.liveness(&container.id).ok()?
+            && code != 0
+        {
+            stuck.push(Stuck {
+                removal: engine.removal(&container.id).display(),
+                service: container.service,
+                container: container.id,
+                code,
+            });
+        }
+    }
+    (!stuck.is_empty()).then_some(stuck)
+}
+
+/// The services of `plan` whose `ports` nunki dropped: what the launch says
+/// in one line, since nothing the file publishes is published.
+pub fn ports_dropped(plan: &Plan) -> Vec<String> {
+    plan.project_services
+        .as_ref()
+        .map(|l| {
+            l.services
+                .dropped_ports()
+                .into_iter()
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The session a run is launched in, and whether the harness resumes it: the
+/// one given, resumed, or a fresh one (SPEC 4.3). Which one the caller gives
+/// is its rule to keep — `nunki verify` carries the coder's from one lot to the
+/// next and drops it after a failed attempt.
+pub fn session_for(given: Option<&SessionId>) -> (SessionId, bool) {
+    match given {
+        Some(session) => (session.clone(), true),
+        None => (SessionId(session_id()), false),
+    }
+}
+
+/// Make the declared directories exist in the slot's tree, so the profile can
+/// mount a volume over each of them.
+///
+/// Public because it is a write into a slot, and a write into a slot is
+/// something a test should be able to hold to account. What it writes is an
+/// empty directory that the project already ignores — git tracks files, not
+/// directories, so gate 1 stays green — and it writes nothing else.
+pub fn seed_writable(slot: &Slot, writable: &[String]) -> Result<(), RunError> {
+    for path in writable {
+        let at = slot.tree.join(path);
+        std::fs::create_dir_all(&at).map_err(|e| RunError::Io(at, e))?;
+    }
+    Ok(())
+}
+
+/// Ask the container that is up whether it can really write where the stack
+/// says it must. Named here rather than discovered later: this is the one
+/// failure of the security profile that produces no error of its own.
+///
+/// Public because it is the enforcement of a measurement, and a test that
+/// cannot lift a stale image beside a good one cannot prove it enforces
+/// anything.
+pub fn writable_or_rebuild(
+    engine: Arc<dyn Engine>,
+    file: &std::path::Path,
+    compose_project: &str,
+    writable: &[String],
+) -> Result<(), RunError> {
+    let mut argv = vec![
+        "sh".to_string(),
+        "-c".to_string(),
+        "for d in \"$@\"; do test -w \"$d\" || { echo \"$d\"; exit 1; }; done".to_string(),
+        "sh".to_string(),
+    ];
+    argv.extend(writable.iter().map(|p| format!("{TREE_AT}/{p}")));
+    let out = engine.exec(file, compose_project, AGENT_SERVICE, &argv)?;
+    if out.ok() {
+        return Ok(());
+    }
+    Err(RunError::NotWritable(
+        out.stdout.trim().to_string(),
+        [out.stderr.trim()]
+            .iter()
+            .filter(|s| !s.is_empty())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" "),
+    ))
+}
+
+/// The stack a project's profiles are built from. One place, because three
+/// modules had begun to each spell the same fallback.
+///
+/// The **primary** stack when there are several: the image is its own with the
+/// others added onto it, and is named after it (SPEC 4.2, "plusieurs stacks").
+pub fn stack_of(project: &Project) -> String {
+    project
+        .config
+        .stacks
+        .first()
+        .map(|s| s.name.clone())
+        .unwrap_or_else(|| "rust".to_string())
+}
+
+/// Refuse a launch whose image does not carry what `tree` — the slot's, on
+/// the mission's branch — pins.
+pub fn image_serves(
+    project: &Project,
+    tree: &Path,
+    stack: &str,
+    engine_bin: &str,
+    image: &str,
+) -> Result<(), RunError> {
+    let wanted = image::pinned_now(project, tree, stack)?;
+    let recorded = image::recorded(engine_bin, image)?;
+    // And the Dockerfile it was built from, when it recorded one: a template
+    // refreshed or a project step added since is an image that does not
+    // carry what the project now says it should.
+    if let image::Recorded::Pinned {
+        dockerfile: Some(built),
+        ..
+    } = &recorded
+    {
+        let now = image::dockerfile(project, &image::image_stacks(project, stack)?)?;
+        if let Some(why) =
+            crate::check::dockerfile_drift(built, &crate::init::sha256(now.as_bytes()))
+        {
+            return Err(RunError::StaleImage {
+                image: image.to_string(),
+                slot: slot_of(tree),
+                drift: vec![why],
+            });
+        }
+    }
+    crate::check::serves(&recorded, &wanted).map_err(|drift| RunError::StaleImage {
+        image: image.to_string(),
+        slot: slot_of(tree),
+        drift,
+    })
+}
+
+/// A slot's name, as the directory its tree is: what the rebuild command
+/// takes.
+fn slot_of(tree: &Path) -> String {
+    tree.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// Where a slot's current profile is written. One file per slot, regenerated
+/// at every launch (SPEC 4.2).
+pub fn profile_path(project: &Project, slot: &str) -> PathBuf {
+    project.hq_root.join("profiles").join(format!("{slot}.yml"))
+}
+
+/// The services a mission's profile lifts, for a caller taking them down.
+pub const SERVICES: [&str; 2] = [AGENT_SERVICE, FIREWALL_SERVICE];
+
+/// Put the slot on the mission's branch, from its base, and bring the slot's
+/// own base branch to the project's base when the mission branch is made —
+/// that is, at the mission's start.
+///
+/// Public for the same reason [`plan`] is: what a mission starts from is the
+/// decision, and a test that cannot call this can only check that a launch
+/// happened, never what it branched off.
+///
+/// `origin` is the human's repository the slot was cloned from, as the
+/// caller knows it — never the slot's `remote.origin.url`, which its agent
+/// may have pointed anywhere. Everything here is played from the slot's host
+/// mirror ([`git::SlotGit`]); no git runs in the slot.
+///
+/// Returns what was done with the slot's base branch, when the mission's
+/// branch was made: `None` when it already existed, or when the project has
+/// no such branch to bring it to.
+pub fn branch(
+    slot: &Slot,
+    origin: &Path,
+    branch: &str,
+    base: &str,
+) -> Result<Option<git::Brought>, git::GitError> {
+    let repo = git::SlotGit::open(&slot.tree)?;
+    if repo.current_branch()? == branch {
+        return Ok(None);
+    }
+    // A branch that already exists is **checked out and never moved**. `-B`
+    // repoints a branch at its start: `checkout -B mission/x dev` on a branch
+    // holding one commit of work leaves it holding none. Any launch that
+    // found the slot on another branch — a human looking at something, a role
+    // switch that did not come back — would spend the mission's work to get
+    // back to it.
+    if repo.has(&refs(branch)) {
+        return repo.checkout(branch).map(|()| None);
+    }
+
+    // A slot's `origin` is the project on this machine, not the forge, so
+    // refreshing it is a local operation that needs no network. Without it
+    // the slot branched from its **own** `dev`, which a clone writes once and
+    // nothing ever moves again: every mission after the first started from
+    // the base as it stood the day the slot was made, and the pull request
+    // opened against a base that had moved.
+    //
+    // The failure is said rather than swallowed: branching from a base that
+    // could not be refreshed is exactly the silence this replaces.
+    repo.fetch_origin(origin)?;
+    let Some(start) = repo.origin_branch(base) else {
+        // No such branch in the repository: the slot's own base is all
+        // there is, and it is better than nothing.
+        repo.create_branch(branch, &refs(base))?;
+        return Ok(None);
+    };
+    repo.create_branch(branch, &start)?;
+    // And the slot's own base, which a clone writes once and nothing moved
+    // since: an agent or a human reading `dev` in the slot read the base as
+    // it stood the day the slot was made. After the branch is made, so that
+    // the slot is no longer on it — a fresh clone sits on its base.
+    repo.bring_branch(base, &start).map(Some)
+}
+
+/// A local branch, spelled so that `rev-parse --verify` cannot match a tag or
+/// a remote-tracking branch of the same name.
+fn refs(branch: &str) -> String {
+    format!("refs/heads/{branch}")
+}
+
+/// The profile a run lifts, as data. Public because it **is** the run's
+/// perimeter and its mounts: a test that cannot read it can only check that
+/// the file was written, not what it says.
+///
+/// It takes no token, so no profile can carry one (#170): the subscription
+/// token reaches the run through [`ContainerSpawner::passing_secret`], at the
+/// exec that starts the harness, and is written into no file.
+pub fn plan(
+    project: &Project,
+    slot: &Slot,
+    stack: &str,
+    images: &image::Images,
+    paths: &Paths,
+    header: &crate::mission::Header,
+    role: Role,
+) -> Result<Plan, RunError> {
+    let profile = Profile::of(role);
+    // By name, through the one place a name becomes an adapter: the core
+    // named this one directly, which is the same leak as the volume above.
+    let harness_domains = crate::image::harness_provisioning(&project.config.harness).domains;
+    // A mission profile carries no service, whatever the header declares:
+    // the coder has nothing to reach, and `compute` refuses one anyway. The
+    // system profile adds exactly the services the frozen header declared,
+    // address by address (SPEC 4.1 bis, rule 6).
+    let declared: &[crate::mission::Service] = match (profile, &header.integration) {
+        (Profile::System, crate::mission::Integration::Services { services, .. }) => services,
+        _ => &[],
+    };
+    let perimeter = compute(
+        role,
+        &Sources {
+            stack: &stack_domains(project, stack),
+            harness: &harness_domains,
+            services: declared,
+            forge: &project.config.forge,
+        },
+    )?;
+    let (uid, gid) = image::host_ids();
+
+    let mut environment = BTreeMap::new();
+    // Not the token, which no profile carries (#170): see `launch`.
+    environment.insert("HQ_ROLE".to_string(), role::slug(role).to_string());
+    environment.insert("HQ_BRANCH".to_string(), header.branch.clone());
+
+    // Who a commit says wrote it — in the run's environment, where git reads
+    // it before anything in a config file and where no agent can change it
+    // for the next one.
+    //
+    // Without it, the agents set an identity themselves in the slot's config
+    // — and it is the slot's, not the run's. An integrator that writes
+    // `nunki integrator` there leaves the **coder** of the next mission
+    // committing under it. A commit that names the wrong role is worse than
+    // one that names none: it is read, and believed.
+    //
+    // Git carries **two** identities, and they answer two different
+    // questions. The committer says which role made the commit — that is the
+    // line the paragraph above is about, and it has not moved. The author
+    // says whose work it is, and that is the human's: they framed the
+    // mission, they authorise the push, they merge it, and they answer for
+    // what it does.
+    //
+    // It is also the only line a forge reads. GitHub resolves a commit's
+    // author email to an account and leaves `author` null when it cannot, so
+    // commits authored as `coder@nunki.local` are attributed to nobody —
+    // absent from the contribution graph of the person who owns the
+    // repository and merged them. The role is not lost by this: the forge shows both lines, and
+    // `git log --format=%cn` still answers with it.
+    //
+    // No email, no author. A name alone resolves to no account, and inventing
+    // one would look like attribution while attributing to nobody — so when
+    // nothing says who the human is, the role signs both lines, as it did
+    // before, and that is visibly wrong rather than quietly wrong.
+    let who = role::slug(role);
+    let mut identity = vec![
+        ("GIT_COMMITTER_NAME", format!("nunki {who}")),
+        ("GIT_COMMITTER_EMAIL", format!("{who}@nunki.local")),
+    ];
+    let human = crate::human::me(&project.nunki_home(), Some(&project.root));
+    match (human.name, human.email) {
+        (Some(name), Some(email)) => {
+            identity.push(("GIT_AUTHOR_NAME", name));
+            identity.push(("GIT_AUTHOR_EMAIL", email));
+        }
+        _ => {
+            identity.push(("GIT_AUTHOR_NAME", format!("nunki {who}")));
+            identity.push(("GIT_AUTHOR_EMAIL", format!("{who}@nunki.local")));
+        }
+    }
+    for (var, value) in identity {
+        environment.insert(var.to_string(), value);
+    }
+
+    // The test credentials, on the system profile and nowhere else (SPEC
+    // 3.1). `compose::build` refuses them on a mission profile, so this is
+    // two guards on one rule and that is deliberate: one of them is a type
+    // error away from being deleted, the other is not.
+    let credentials = match profile {
+        Profile::Mission => Vec::new(),
+        Profile::System => credentials(project)?,
+    };
+
+    // The project's own services, read into the closed model and lifted
+    // into the system profile as nunki renders them — those the frozen
+    // header declares, and those they depend on; the others are not
+    // started. Not into the mission profile: the coder reaches no service,
+    // so lifting a database beside it would be lifting what its allowlist
+    // forbids it to talk to, and re-declaring them there would need the file
+    // approved while the coder may be the one changing it. They stay up
+    // across the switch all the same: nunki never removes orphans, and the
+    // takedown keeps what a human approved ([`crate::services::stale`]).
+    let project_services = match profile {
+        Profile::Mission => None,
+        Profile::System => project_compose(project, slot, &header.base)?.map(|file| {
+            crate::compose::services::Lifted::declared(file, &declared_services(header))
+        }),
+    };
+
+    Ok(Plan {
+        session: project.session(),
+        slot: slot.name.clone(),
+        role,
+        image: images.agent.clone(),
+        firewall_image: images.firewall.clone(),
+        user: UserIds { uid, gid },
+        tree: slot.tree.clone(),
+        tree_at: PathBuf::from(TREE_AT),
+        mission_dir: paths.dir.clone(),
+        mission_dir_at: PathBuf::from(MISSION_AT),
+        stack_scripts: stack_scripts(project, stack),
+        advisories: advisories(project, stack),
+        secrets: secrets(project),
+        credentials,
+        volumes: volumes(project, slot, stack, role),
+        environment,
+        // The container stays up between runs; the harness is exec'd into it.
+        command: vec!["sleep".to_string(), "infinity".to_string()],
+        perimeter,
+        project_services,
+        prober: None,
+    })
+}
+
+/// The named volumes a role's profile carries.
+///
+/// The first three are every profile's: the clean copy of `HEAD` with its
+/// build cache, the harness's sessions, the package cache. The rest exist
+/// only for the security agent, whose tree is mounted read-only — the stack
+/// declares what an execution must still be able to write and it is mounted
+/// as a volume of its own (SPEC 4.2, rule 3). What is not declared stays
+/// closed.
+fn volumes(project: &Project, slot: &Slot, stack: &str, role: Role) -> Vec<NamedVolume> {
+    let mut volumes = vec![
+        // The clean copy of HEAD that `nunki exec` replays proofs on, and its
+        // build cache with it: warmed once per slot and kept (SPEC 4.2,
+        // 4.4 gate 7).
+        crate::exec::volume(&slot.name),
+    ];
+    // The harness keeps its sessions somewhere, so resuming survives a
+    // rebuilt container (SPEC 4.3) — and **the adapter says where**. This was
+    // `/home/agent/.claude`, one harness's default written into the core.
+    if let Some(at) = crate::image::harness_provisioning(&project.config.harness).config_dir {
+        volumes.push(NamedVolume {
+            name: format!("nunki-{}-harness", slot.name),
+            at,
+        });
+    }
+    // The caches the stack declares. This was `/home/agent/.cargo/registry`,
+    // mounted for every stack and every role: a Python project carried an
+    // empty `cargo` volume and none for pip. A cache belongs to a toolchain
+    // (SPEC, "agnostique à la stack": caches are a declared fragment).
+    let mut caches: Vec<String> = Vec::new();
+    for j in judged(project, stack) {
+        for path in project.stack_caches(&j.stack.name) {
+            if !caches.contains(&path) {
+                caches.push(path);
+            }
+        }
+    }
+    for path in caches {
+        volumes.push(NamedVolume {
+            name: cache_volume(&slot.name, &path),
+            at: PathBuf::from(&path),
+        });
+    }
+    if role != Role::Security {
+        return volumes;
+    }
+    for path in writable(project, stack) {
+        volumes.push(NamedVolume {
+            name: writable_volume(&slot.name, &path),
+            at: PathBuf::from(TREE_AT).join(&path),
+        });
+    }
+    volumes
+}
+
+/// The volume behind one writable directory. Named per profile, not per
+/// slot: SPEC 4.2 says "montés comme volumes propres au profil", and a
+/// `target/` shared with the coder's would hand the security agent a build
+/// tree it is meant to attack from the outside.
+pub fn writable_volume(slot: &str, path: &str) -> String {
+    format!("nunki-{slot}-security-{}", sanitise(path))
+}
+
+/// The volume a declared cache is kept in, named after its path so two caches
+/// of one stack cannot collide.
+pub fn cache_volume(slot: &str, path: &str) -> String {
+    format!("nunki-{slot}-cache-{}", sanitise(path))
+}
+
+/// A path as a volume name: anything a name cannot hold becomes `-`.
+fn sanitise(path: &str) -> String {
+    path.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+/// The advisory database to mount, as (host path, path in the container), or
+/// `None` when the stack declares none or the host has not filled it.
+///
+/// Absent rather than mounted empty: a bind mount of a missing source makes
+/// the engine create a directory in its place, and gate 8 would then read an
+/// empty database as "nothing to report" instead of saying it has none.
+///
+/// One per stack that declares one, each where that stack's gate 8 reads it.
+pub fn advisories(project: &Project, stack: &str) -> Vec<(PathBuf, PathBuf)> {
+    judged(project, stack)
+        .into_iter()
+        .filter_map(|j| {
+            let host = project.stack_advisories(&j.stack.name)?;
+            host.is_dir()
+                .then(|| (host, PathBuf::from(&j.advisories_at)))
+        })
+        .collect()
+}
+
+/// The directories every stack the image carries declares writable, relative
+/// to the tree — each stack's already prefixed with its own directory.
+pub fn writable(project: &Project, stack: &str) -> Vec<String> {
+    judged(project, stack)
+        .iter()
+        .flat_map(|j| project.stack_writable(&j.stack.name))
+        .collect()
+}
+
+/// What every stack the image carries lets the coder reach, once each, in
+/// the order the stacks are declared (SPEC 4.1 bis, rule 6).
+pub fn stack_domains(project: &Project, stack: &str) -> Vec<String> {
+    let mut all: Vec<String> = Vec::new();
+    for j in judged(project, stack) {
+        for domain in project.stack_domains(&j.stack.name).unwrap_or_default() {
+            if !all.contains(&domain) {
+                all.push(domain);
+            }
+        }
+    }
+    all
+}
+
+/// The secrets a human has ruled on, from the project's HQ, or `None` when
+/// nobody has ruled on any (SPEC 4.4, gate 8).
+///
+/// Absent rather than mounted empty, and this is safe only because of where
+/// it lands: `crate::secrets::AT` is not under `/work`, which the image gives
+/// to the agent. Under `/work` an unmounted path would be a file the agent
+/// could write, and it would be writing its own exceptions.
+pub fn secrets(project: &Project) -> Option<(PathBuf, PathBuf)> {
+    let host = crate::secrets::file(project);
+    host.is_file()
+        .then(|| (host, PathBuf::from(crate::secrets::AT)))
+}
+
+/// Where the test credentials are mounted, read-only, on a system profile.
+/// Under the agent's own tmpfs: it is the one writable place in a container
+/// whose tree and mission folder are both restrained, and a file bound
+/// underneath it stays read-only while the tmpfs above stays the agent's.
+pub const CREDENTIALS_AT: &str = "/run/nunki/credentials";
+
+/// The credential files a system profile mounts: every file the project's
+/// declared directory holds, sorted, so the generated profile is stable.
+///
+/// A directory that does not exist is not an error here. `nunki check` is where
+/// a missing credential is a finding; refusing to launch would turn "the
+/// human has not put the files there yet" into "the mission cannot run",
+/// which is a different sentence.
+fn credentials(project: &Project) -> Result<Vec<(PathBuf, PathBuf)>, RunError> {
+    let Some(dir) = &project.config.credentials else {
+        return Ok(Vec::new());
+    };
+    if !dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let entries = std::fs::read_dir(dir).map_err(|e| RunError::Io(dir.clone(), e))?;
+    let mut files = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| RunError::Io(dir.clone(), e))?;
+        if !entry.path().is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        files.push((entry.path(), PathBuf::from(CREDENTIALS_AT).join(&name)));
+    }
+    files.sort();
+    Ok(files)
+}
+
+/// The project's own services, as a profile may lift them (SPEC 4.2).
+///
+/// Read at the commit the mission's branch starts from, through the host's
+/// mirror ([`crate::services::At::Mission`]), and never from the tree or
+/// from the branch's own commits. The file is the human's: no agent amends
+/// it, not even an integrator whose wiring names it. Gate 4 refuses a
+/// commit that touches it, and until that commit is gone the profile still
+/// lifts what the human approved, rather than stopping the mission on an
+/// edit nobody will lift (#141). A file the closed model refuses, or whose
+/// rendering nobody approved, lifts nothing, and the profile is not started
+/// ([`crate::services::approved`]).
+fn project_compose(
+    project: &Project,
+    slot: &Slot,
+    base: &str,
+) -> Result<Option<crate::compose::services::ServicesFile>, RunError> {
+    Ok(crate::services::approved(
+        project,
+        crate::services::At::Mission {
+            tree: &slot.tree,
+            base,
+        },
+    )?)
+}
+
+/// The services a mission's frozen header declares, by name.
+fn declared_services(header: &crate::mission::Header) -> Vec<String> {
+    match &header.integration {
+        crate::mission::Integration::Services { services, .. } => {
+            services.iter().map(|s| s.name.clone()).collect()
+        }
+        crate::mission::Integration::None { .. } => Vec::new(),
+    }
+}
+
+/// A v4-shaped identifier. `nunki` imposes it rather than reading one back
+/// (SPEC 4.3), so it only has to be unique — but it has to be unique across
+/// its **whole** length, because the identity check greps a container's
+/// `/proc/<pid>/cmdline` for it and a prefix everybody shares tells nothing
+/// apart.
+///
+/// From `/dev/urandom` when there is one. The clock-and-pid mix that came
+/// before left the top 48 bits at zero — every identifier began
+/// `00000000-0000-` — because
+/// nanoseconds since 1970 need 61 bits and a pid shifted by 64 reaches 80,
+/// and nothing filled the rest.
+pub fn session_id() -> String {
+    let bytes = random_bytes().unwrap_or_else(|| {
+        // No `/dev/urandom`: the clock and the process, spread over the
+        // whole width rather than heaped at one end.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let pid = std::process::id() as u128;
+        let mix =
+            now ^ (now.rotate_left(67)) ^ (pid.wrapping_mul(0x9e37_79b9_7f4a_7c15) << 32) ^ pid;
+        mix.to_be_bytes()
+    });
+
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    // Version 4 and the RFC 4122 variant, so the string is one a harness
+    // will accept wherever it validates the shape.
+    format!(
+        "{}-{}-4{}-{}{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[13..16],
+        // The variant nibble: one of 8, 9, a, b.
+        match &hex[16..17] {
+            "0" | "4" | "8" | "c" => "8",
+            "1" | "5" | "9" | "d" => "9",
+            "2" | "6" | "a" | "e" => "a",
+            _ => "b",
+        },
+        &hex[17..20],
+        &hex[20..32]
+    )
+}
+
+fn random_bytes() -> Option<[u8; 16]> {
+    use std::io::Read;
+    let mut bytes = [0u8; 16];
+    std::fs::File::open("/dev/urandom")
+        .ok()?
+        .read_exact(&mut bytes)
+        .ok()?;
+    Some(bytes)
+}
+
+#[cfg(unix)]
+fn restrict(path: &PathBuf) -> Result<(), RunError> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .map_err(|e| RunError::Io(path.clone(), e))
+}
+
+#[cfg(not(unix))]
+fn restrict(_path: &PathBuf) -> Result<(), RunError> {
+    Ok(())
+}
+
+/// What `nunki mission start` says of the slot's own `base` branch
+/// ([`branch`]).
+pub fn base_said(base: &str, brought: &git::Brought) -> String {
+    let short = |c: &str| c.get(..12).unwrap_or(c).to_string();
+    match brought {
+        git::Brought::Created { at } => {
+            format!(
+                "the slot's {base} is created at the project's, {}",
+                short(at)
+            )
+        }
+        git::Brought::Moved { from, to } => format!(
+            "the slot's {base} is brought to the project's, from {} to {}",
+            short(from),
+            short(to)
+        ),
+        git::Brought::Already => format!("the slot's {base} is already the project's"),
+        git::Brought::CheckedOut => {
+            format!("the slot's {base} is checked out, and was left where it is")
+        }
+        git::Brought::Diverged { at } => format!(
+            "the slot's {base} holds commits the project's does not, and was left at {} — the \
+             mission branched from the project's all the same",
+            short(at)
+        ),
+    }
+}

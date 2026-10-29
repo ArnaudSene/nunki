@@ -1,0 +1,74 @@
+# A release: what pushing a `v<version>` tag to the forge turns into.
+#
+# The tag is the owner's gesture and the only way a release is made
+# (AGENTS.md, "Releases"). Before anything is published, three things are
+# checked, and a tag that fails any of them publishes nothing:
+#
+# - the tag names the version `Cargo.toml` holds, and `main` already holds
+#   the tagged commit, so the release is of what its pull request to `main`
+#   brought there; `CHANGELOG.md` has that version's section, which becomes
+#   the release's notes (`scripts/release-notes.sh`);
+# - the whole of `ci.yml` passes again, on the tagged commit itself.
+#   `ci.yml` does not run on tags, and a branch's green is no proof for a
+#   commit that branch has since moved past.
+#
+# The release is made with the runner's own `gh`, not with a release action:
+# an action nobody reads is a dependency nobody reviews (see `ci.yml`). It
+# carries the notes and the source archives the forge attaches to every
+# release. No binary is built: `nunki` is installed from source, at the tag.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  # First and alone, because it takes seconds: a mistyped tag is told so
+  # before the gate below spends a quarter of an hour on it.
+  tag:
+    name: tag
+    runs-on: ubuntu-26.04
+    # Seconds of work: a checkout and a script.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Every branch and its whole history, so the script can tell
+          # whether `main` holds the tagged commit.
+          fetch-depth: 0
+
+      - name: The tag, its commit and its notes
+        run: scripts/release-notes.sh "$GITHUB_REF_NAME"
+
+  gate:
+    needs: tag
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: publish
+    needs: gate
+    runs-on: ubuntu-26.04
+    # Seconds of work: a checkout and one call to the forge.
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          scripts/release-notes.sh "$GITHUB_REF_NAME" > "$RUNNER_TEMP/notes.md"
+          version="${GITHUB_REF_NAME#v}"
+          set -- --verify-tag --title "nunki $version" --notes-file "$RUNNER_TEMP/notes.md"
+          # A version with a pre-release part, such as 0.2.0-rc.1, is
+          # published as one.
+          case "$version" in *-*) set -- "$@" --prerelease ;; esac
+          gh release create "$GITHUB_REF_NAME" "$@"

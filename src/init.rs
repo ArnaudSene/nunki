@@ -1,0 +1,4374 @@
+//! `nunki init` — make an existing repository orchestrable (SPEC 4.2).
+//!
+//! Three rules, all from SPEC 3.3, and they are what makes this verb
+//! replayable: it **creates what is absent**, it **never overwrites a file a
+//! human is meant to edit** — it deposits its version beside it — and it
+//! **keeps no manifest** and uninstalls nothing. Running it twice changes
+//! nothing the second time.
+
+use std::path::{Path, PathBuf};
+
+/// What `init` did, or would do. Every path it touched, and every one it
+/// deliberately did not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Action {
+    Created(PathBuf),
+    /// It exists and belongs to a human; here is why it was left alone.
+    LeftAlone(PathBuf, String),
+    /// It exists and differs from what `nunki` would write, so the suggestion
+    /// went next to it under this name.
+    DepositedBeside {
+        kept: PathBuf,
+        suggestion: PathBuf,
+    },
+    /// An older nunki wrote it and nobody has touched it since, so today's
+    /// version replaced it (`nunki init --refresh`).
+    Replaced(PathBuf),
+}
+
+impl Action {
+    pub fn render(&self) -> String {
+        match self {
+            Action::Created(p) => format!("created  {}", p.display()),
+            Action::LeftAlone(p, why) => format!("kept     {} — {why}", p.display()),
+            Action::DepositedBeside { kept, suggestion } => format!(
+                "kept     {} — its replacement is beside it, at {}",
+                kept.display(),
+                suggestion.display()
+            ),
+            Action::Replaced(p) => {
+                format!("replaced {} — an older nunki's, untouched", p.display())
+            }
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum InitError {
+    #[error("{0} is not a directory")]
+    NotADirectory(PathBuf),
+    #[error("{0}: {1}")]
+    Io(PathBuf, std::io::Error),
+    #[error("no stack fragment for {0:?}; known: {1}")]
+    UnknownStack(String, String),
+    #[error("--stack {0:?}: {1}")]
+    BadStack(String, String),
+    #[error("stack {0} is named twice")]
+    TwiceNamed(String),
+    #[error(
+        "{0} is not a configuration nunki can read, so the stacks it declares are not \
+         known and no fragment was examined: {1}"
+    )]
+    UnreadableConfig(PathBuf, String),
+}
+
+/// The stacks `nunki init` can write a fragment for: the three SPEC 4.2
+/// promised. Asking for another says so rather than leaving an empty
+/// directory that reads as configured.
+pub const KNOWN_STACKS: [&str; 3] = ["rust", "python", "next"];
+
+/// Make the repository at `root` orchestrable, with its home at `home`.
+///
+/// Into the repository go only the rules an agent reads — `AGENTS.md`, the
+/// import that makes Claude Code read them, and `.gitattributes` when none
+/// exists. The configuration, the HQ and the stack fragments go into the
+/// home: development tooling is not a project's to carry in its history.
+pub fn init(root: &Path, home: &Path, stacks: &[String]) -> Result<Vec<Action>, InitError> {
+    init_with(root, home, stacks, &Answers::default())
+}
+
+/// What a fresh `nunki.yaml` declares beyond its stacks: what the interview
+/// asked, or the defaults a non-interactive `init` has always written
+/// (SPEC 4.2, `nunki init`). Read only when `nunki.yaml` is written, which is
+/// only when there is none — nunki never rewrites a file a human edits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Answers {
+    pub forge: Vec<String>,
+    pub forge_protection: crate::project::ForgeProtection,
+    pub permission_mode: String,
+    pub protected_branches: Vec<String>,
+}
+
+impl Default for Answers {
+    fn default() -> Self {
+        Self {
+            forge: Vec::new(),
+            forge_protection: crate::project::ForgeProtection::Forge,
+            permission_mode: "auto".to_string(),
+            protected_branches: vec!["main".to_string(), "dev".to_string()],
+        }
+    }
+}
+
+/// [`init`], with what the interview decided for a fresh `nunki.yaml`.
+pub fn init_with(
+    root: &Path,
+    home: &Path,
+    stacks: &[String],
+    answers: &Answers,
+) -> Result<Vec<Action>, InitError> {
+    init_as(root, home, stacks, answers, Fragments::Keep)
+}
+
+/// What `init` does with a fragment file an older nunki wrote and nobody has
+/// touched since (SPEC 4.2, "les fragments suivent nunki").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fragments {
+    /// Keep it, and say that `--refresh` would replace it.
+    Keep,
+    /// Replace it with today's version. The caller has made sure no container
+    /// of the project has it mounted.
+    Refresh,
+}
+
+/// [`init_with`], saying what to do with fragments an older nunki wrote.
+pub fn init_as(
+    root: &Path,
+    home: &Path,
+    stacks: &[String],
+    answers: &Answers,
+    fragments: Fragments,
+) -> Result<Vec<Action>, InitError> {
+    if !root.is_dir() {
+        return Err(InitError::NotADirectory(root.to_path_buf()));
+    }
+    // `name`, or `name=dir` for a stack that lives in a directory of the
+    // repository (SPEC 4.2, "plusieurs stacks").
+    let mut asked: Vec<crate::project::Stack> = Vec::new();
+    for text in stacks {
+        let stack = crate::project::Stack::parse(text)
+            .map_err(|why| InitError::BadStack(text.clone(), why))?;
+        if !KNOWN_STACKS.contains(&stack.name.as_str()) {
+            return Err(InitError::UnknownStack(
+                stack.name.clone(),
+                KNOWN_STACKS.join(", "),
+            ));
+        }
+        if asked.iter().any(|s| s.name == stack.name) {
+            return Err(InitError::TwiceNamed(stack.name));
+        }
+        asked.push(stack);
+    }
+
+    // Re-run on a project that already has a configuration: top up the
+    // stacks it declares, rather than looking at none.
+    //
+    // `--stack` has no default, so without this a bare `nunki init` would
+    // skip the fragment loop entirely and say nothing about it: a project
+    // missing a fragment file a release had added would get only "kept"
+    // lines and no hint that its fragments were never examined, and the
+    // remedy (`nunki init --stack rust`) would stay undiscoverable.
+    let stacks = if asked.is_empty() {
+        declares(home)?
+    } else {
+        asked
+    };
+    let stacks = stacks.as_slice();
+
+    let mut actions = Vec::new();
+
+    // The HQ first: everything nunki owns lives there, outside the tree.
+    let hq_root = home.join(crate::project::HQ_DIR);
+    for dir in ["state", "locks", "missions"] {
+        let path = hq_root.join(dir);
+        if !path.is_dir() {
+            std::fs::create_dir_all(&path).map_err(|e| InitError::Io(path.clone(), e))?;
+            actions.push(Action::Created(path));
+        }
+    }
+
+    create_if_absent(
+        home,
+        crate::project::CONFIG_FILE,
+        &nunki_yaml(root, stacks, answers),
+        HUMANS,
+        &mut actions,
+    )?;
+    // The project's own, and nothing of `nunki`'s needs it: a human who
+    // finds one kept wonders whether the agents miss nunki's rules, and the
+    // answer is said where the question arises.
+    create_if_absent(
+        root,
+        "AGENTS.md",
+        AGENTS_MD,
+        "it exists, and it is the project's: agents read it at every run, and nunki's \
+         own rules reach them in their role prompt",
+        &mut actions,
+    )?;
+    claude_md(root, &mut actions)?;
+    gitattributes(root, &mut actions)?;
+
+    for stack in stacks {
+        // A stack `nunki` ships no fragment for gets no directory. Only an
+        // explicit `--stack` is checked against the known list; the declared
+        // ones come from a configuration a human wrote, and one naming a
+        // stack this release does not carry yet would otherwise leave an
+        // empty folder behind.
+        let files = fragment(&stack.name);
+        if files.is_empty() {
+            continue;
+        }
+        let dir = home.join(crate::project::STACKS_DIR).join(&stack.name);
+        std::fs::create_dir_all(&dir).map_err(|e| InitError::Io(dir.clone(), e))?;
+        let states: Vec<Kept> = files
+            .iter()
+            .map(|(name, body, _)| kept(&stack.name, name, &dir.join(name), body))
+            .collect();
+        // The files that describe the image and what it is built with move
+        // together: today's `versions.txt` beside a Dockerfile the project
+        // rewrote could name an argument that Dockerfile no longer declares.
+        let held = files.iter().zip(&states).any(|((name, _, _), state)| {
+            COUPLED.contains(name) && matches!(state, Kept::Edited | Kept::LineEndings)
+        });
+        for ((name, body, executable), state) in files.into_iter().zip(states) {
+            let path = dir.join(name);
+            match state {
+                Kept::Absent => {
+                    write_fragment(&path, &body, executable)?;
+                    actions.push(Action::Created(path));
+                }
+                Kept::Current => actions.push(Action::LeftAlone(
+                    path,
+                    "a stack fragment belongs to the project; it is today's".to_string(),
+                )),
+                Kept::Older
+                    if fragments == Fragments::Refresh && !(held && COUPLED.contains(&name)) =>
+                {
+                    write_fragment(&path, &body, executable)?;
+                    actions.push(Action::Replaced(path));
+                }
+                Kept::Older if fragments == Fragments::Refresh => actions.push(Action::LeftAlone(
+                    path,
+                    format!(
+                        "an older nunki's, untouched — held back, since the project rewrote \
+                         one of {} and they move together",
+                        COUPLED.join(", ")
+                    ),
+                )),
+                Kept::Older => actions.push(Action::LeftAlone(
+                    path,
+                    "an older nunki's, untouched — `nunki init --refresh` replaces it".to_string(),
+                )),
+                Kept::LineEndings => actions.push(Action::LeftAlone(
+                    path,
+                    "nunki's own text with CRLF line endings — a script ending in `\\r` \
+                     does not run; convert it to LF"
+                        .to_string(),
+                )),
+                Kept::Edited => {
+                    let suggestion = dir.join(format!("{name}{SUGGESTION}"));
+                    // Written again when it is stale, so what lies beside a
+                    // file is always today's version and never an older one.
+                    let current = std::fs::read_to_string(&suggestion).ok();
+                    if current.as_deref() != Some(body.as_str()) {
+                        write_fragment(&suggestion, &body, false)?;
+                    }
+                    actions.push(Action::DepositedBeside {
+                        kept: path,
+                        suggestion,
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(actions)
+}
+
+/// What sits beside a fragment file the project rewrote: today's version,
+/// for the human to read and carry over (SPEC 3.3, rule 3).
+pub const SUGGESTION: &str = ".nunki";
+
+/// The fragment files that describe the image and what it is built with.
+const COUPLED: [&str; 4] = [
+    "Dockerfile",
+    crate::project::ADDON_FILE,
+    crate::project::ADDON_STAGES_FILE,
+    crate::versions::FILE,
+];
+
+/// Every stack fragment file a nunki has ever written, as `<sha256>
+/// <stack>/<file>` lines, rebuilt from the history by
+/// `scripts/shipped-fragments.sh` (SPEC 4.2, "les fragments suivent nunki").
+///
+/// What lets nunki tell a file an older release wrote and nobody touched from
+/// a file the project rewrote, **without keeping any record of its own**: a
+/// file is nunki's to replace only if its bytes are bytes nunki shipped. A
+/// record read from disk could claim a human's edit; this list cannot, and a
+/// hash missing from it can only err toward keeping the file.
+const SHIPPED: &str = include_str!("shipped-fragments.txt");
+
+/// Where a fragment file stands against what nunki writes today.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kept {
+    Absent,
+    /// Byte for byte today's.
+    Current,
+    /// Byte for byte what an older nunki shipped, so nobody touched it.
+    Older,
+    /// nunki's own text, today's or an older one, but with CRLF endings.
+    LineEndings,
+    /// Anything else: the project's.
+    Edited,
+}
+
+/// Where the fragment file at `path` stands, for `stack`'s `name`, against
+/// `today`'s text.
+pub fn kept(stack: &str, name: &str, path: &Path, today: &str) -> Kept {
+    let Ok(bytes) = std::fs::read(path) else {
+        return Kept::Absent;
+    };
+    if bytes == today.as_bytes() {
+        return Kept::Current;
+    }
+    let file = format!("{stack}/{name}");
+    let shipped = |bytes: &[u8]| {
+        let hash = sha256(bytes);
+        SHIPPED
+            .lines()
+            .any(|l| l.split_once(' ') == Some((hash.as_str(), file.as_str())))
+    };
+    if shipped(&bytes) {
+        return Kept::Older;
+    }
+    let lf: Vec<u8> = String::from_utf8_lossy(&bytes)
+        .replace("\r\n", "\n")
+        .into_bytes();
+    if lf != bytes && (lf == today.as_bytes() || shipped(&lf)) {
+        return Kept::LineEndings;
+    }
+    Kept::Edited
+}
+
+/// `bytes`' SHA-256, in hex.
+pub fn sha256(bytes: &[u8]) -> String {
+    ring::digest::digest(&ring::digest::SHA256, bytes)
+        .as_ref()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Write a fragment file whole, then move it into place, with the mode
+/// `fragment()` gives it: a script replaced must still run.
+fn write_fragment(path: &Path, body: &str, executable: bool) -> Result<(), InitError> {
+    let mut staged = path.as_os_str().to_owned();
+    staged.push(".nunki-writing");
+    let staged = PathBuf::from(staged);
+    std::fs::write(&staged, body).map_err(|e| InitError::Io(staged.clone(), e))?;
+    if executable {
+        make_executable(&staged)?;
+    }
+    std::fs::rename(&staged, path).map_err(|e| InitError::Io(path.to_path_buf(), e))
+}
+
+/// The stacks a project already declares, or none when it has no
+/// configuration yet.
+///
+/// Read here rather than through [`crate::project::Project::open`] because
+/// `init` is the one verb that runs before a project exists: an absent
+/// configuration is the ordinary case on a first run, not an error. One that
+/// exists and cannot be read is: taken for "no stacks", it would leave every
+/// fragment unexamined and say only "kept".
+fn declares(home: &Path) -> Result<Vec<crate::project::Stack>, InitError> {
+    let path = home.join(crate::project::CONFIG_FILE);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(InitError::UnreadableConfig(path, e.to_string())),
+    };
+    crate::yaml::from_str::<crate::project::Config>(&text)
+        .map(|config| config.stacks)
+        .map_err(|e| InitError::UnreadableConfig(path, e.to_string()))
+}
+
+/// Why a file that exists is left as it is, when nothing more is to be said.
+const HUMANS: &str = "it exists, and nunki never overwrites a file a human edits";
+
+fn create_if_absent(
+    root: &Path,
+    name: &str,
+    body: &str,
+    kept_because: &str,
+    actions: &mut Vec<Action>,
+) -> Result<(), InitError> {
+    let path = root.join(name);
+    if path.exists() {
+        actions.push(Action::LeftAlone(path, kept_because.to_string()));
+        return Ok(());
+    }
+    std::fs::write(&path, body).map_err(|e| InitError::Io(path.clone(), e))?;
+    actions.push(Action::Created(path));
+    Ok(())
+}
+
+/// `CLAUDE.md` is the one file whose *content* matters to another tool
+/// (SPEC 4.1). Claude Code reads `AGENTS.md` on its own, but only where no
+/// `CLAUDE.md` stands in front of it: one that exists is read in its place.
+/// So an existing one has to import `AGENTS.md`, and an absent one is
+/// written as that import alone — which serves a Claude Code too old to
+/// read `AGENTS.md` itself, and is never read twice by one that does.
+fn claude_md(root: &Path, actions: &mut Vec<Action>) -> Result<(), InitError> {
+    let path = root.join("CLAUDE.md");
+    if !path.exists() {
+        std::fs::write(&path, "@AGENTS.md\n").map_err(|e| InitError::Io(path.clone(), e))?;
+        actions.push(Action::Created(path));
+        return Ok(());
+    }
+    // A symlink to AGENTS.md is the other documented shape, and reading
+    // through it would ask whether AGENTS.md mentions its own name — which is
+    // not the question. `nunki check` already knew this; `init` did not, and
+    // said so on this very repository.
+    if path.is_symlink() {
+        actions.push(Action::LeftAlone(
+            path,
+            "it is a link to AGENTS.md".to_string(),
+        ));
+        return Ok(());
+    }
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let why = if text.contains("AGENTS.md") {
+        "it already imports AGENTS.md".to_string()
+    } else {
+        // Not rewritten, and not silently accepted either: Claude Code reads
+        // this file in place of AGENTS.md, so the project's rules never load,
+        // and `nunki check` is red until a human adds the import.
+        "it does not import AGENTS.md, and Claude Code reads it in place of \
+         AGENTS.md — add `@AGENTS.md` to it; `nunki check` is red until you do"
+            .to_string()
+    };
+    actions.push(Action::LeftAlone(path, why));
+    Ok(())
+}
+
+/// LF, whatever the machine that writes it (SPEC 4.2 bis). Absent, `nunki`
+/// writes it; present, `nunki` does not decide for the project.
+fn gitattributes(root: &Path, actions: &mut Vec<Action>) -> Result<(), InitError> {
+    let path = root.join(".gitattributes");
+    const BODY: &str =
+        "# LF everywhere, whatever the machine that writes it.\n* text=auto eol=lf\n";
+    if !path.exists() {
+        std::fs::write(&path, BODY).map_err(|e| InitError::Io(path.clone(), e))?;
+        actions.push(Action::Created(path));
+        return Ok(());
+    }
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    if text.contains("eol=lf") {
+        actions.push(Action::LeftAlone(path, "it already pins LF".to_string()));
+        return Ok(());
+    }
+    let suggestion = root.join(".gitattributes.nunki");
+    if !suggestion.exists() {
+        std::fs::write(&suggestion, BODY).map_err(|e| InitError::Io(suggestion.clone(), e))?;
+    }
+    actions.push(Action::DepositedBeside {
+        kept: path,
+        suggestion,
+    });
+    Ok(())
+}
+
+fn nunki_yaml(root: &Path, stacks: &[crate::project::Stack], answers: &Answers) -> String {
+    let list_of = |items: &[String], empty: &str| {
+        if items.is_empty() {
+            format!(" {empty}")
+        } else {
+            items
+                .iter()
+                .map(|i| format!("\n  - {i}"))
+                .collect::<String>()
+        }
+    };
+    let forge = if answers.forge.is_empty() {
+        "forge: []".to_string()
+    } else {
+        format!("forge:{}", list_of(&answers.forge, "[]"))
+    };
+    let branches = format!(
+        "protected_branches:{}",
+        list_of(&answers.protected_branches, "[]")
+    );
+    let protection = match answers.forge_protection {
+        crate::project::ForgeProtection::Forge => "# forge_protection: by_hand",
+        crate::project::ForgeProtection::ByHand => "forge_protection: by_hand",
+    };
+    let permission_mode = &answers.permission_mode;
+    let list = if stacks.is_empty() {
+        "stacks: []".to_string()
+    } else {
+        format!(
+            "stacks:\n{}",
+            stacks
+                .iter()
+                .map(|s| {
+                    if s.dir.is_empty() {
+                        format!("  - {}", s.name)
+                    } else {
+                        format!("  - {}: {}", s.name, s.dir)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    };
+    format!(
+        "# What this project declares to nunki (SPEC 4.1). A mission header beats
+# this file for what it redeclares. It lives in the project's home, outside the
+# repository, and is never mounted into a container.
+
+# The repository this file belongs to. The home is named after the
+# repository's directory, so another repository of the same name is refused
+# here rather than handed this configuration.
+root: {root}
+
+harness: claude-code
+
+# No agent may reach the forge: a slot's origin is unreachable, and an
+# allowlist naming it would undo that. Put your forge's domain here.
+{forge}
+
+{list}
+
+# How nunki starts the application for the integrator and the security agent
+# (SPEC 4.2). Absent, the stack's own `run.sh` is used; `none` for a library,
+# whose security agent works on the code and the build artefact. A mission
+# header may refine it.
+# run: none
+
+# Which model the agents run on, when the harness takes one. Absent, the
+# harness keeps its own default — `nunki logs` names the one a run used. A
+# mission header may refine it. nunki checks no name: what a name means is the
+# harness's business, and the harness refuses what it does not know.
+# model: claude-opus-5-5
+
+# How much verification asks of a mission framed without `--rigor`:
+# `prototype` (coder and mechanical gates only), `standard` (gate 7 on a share
+# of killed mutants, one security round) or `critical`, the default.
+# rigor: critical
+
+# The percentage of tried mutants a `standard` mission must kill for gate 7 to
+# pass, a whole number from 1 to 100.
+# mutation_threshold: 80
+
+# How many mutants gate 7's campaign runs at once, a whole number of at least
+# 1. At 1 a Rust campaign runs in place, one mutant at a time; above it, each
+# job builds in a copy of the tree of its own. Measured on nunki's own
+# repository, more jobs were barely faster and, at one per core, turned
+# survivors into timeouts counted as killed: raise it only after measuring.
+# mutation_jobs: 1
+
+# What the harness does with a permission it would otherwise ask about.
+# Nobody is there to ask in an autonomous container, so the only question is
+# which way the silence falls. `auto` lets the harness's own safety checks
+# decide and nudges the agent to keep working rather than stop for a
+# clarification; `dontAsk` allows only what is pre-approved and denies
+# everything else. Whatever the mode, nunki refuses the prompt itself, so a run
+# never waits for a human who is not there.
+permission_mode: {permission_mode}
+
+# The project's own services file, read into a closed model and lifted into
+# every system profile as nunki renders it — the README section on the
+# project's services says what it may hold. Its services are lifted once per
+# slot and never stopped between two profiles, so what the integrator laid
+# down survives.
+# services_file: compose.yaml
+
+{branches}
+
+# Who refuses a push to a protected branch besides nunki's own gate: `forge`
+# (the default) — `nunki check` asks the forge, and an unprotected branch is red.
+# `by_hand` when the forge cannot, as on a private repository on GitHub's
+# free plan, and you hold the rule yourself: `nunki check` does not ask, and
+# says so.
+{protection}
+
+# What the Security section `nunki push` writes in the pull request says when
+# the security agent's findings were accepted rather than fixed: `withhold`
+# (the default) gives how many were accepted, and by whom, and no word of the
+# report or of a finding; `publish` gives the report and every finding, for a
+# repository only its owners read. The security agent cannot write PR.md: what
+# the coder and the integrator write there is published as written. A push
+# that must withhold refuses a PR.md holding a line such as `## Security
+# review`, the section an older nunki's security agent wrote there. PR.md
+# itself is never changed, and the security agent's VERDICT.json keeps the
+# findings in full.
+# security_findings: publish
+
+protected_paths:
+  # Refused outright. The battery, the allowlist and the Dockerfile are not
+  # here: they live in this home, out of the tree, and reach the container
+  # read-only. Add the project's own paths — CI workflows, the rules an agent
+  # reads.
+  refuse: []
+  # Refused only where the file already exists on the base.
+  refuse_if_exists: []
+",
+        root = root.display()
+    )
+}
+
+/// A starting point for the project's own rules, and nothing of `nunki`'s:
+/// what `nunki` asks of its agents travels in their role prompt, at every
+/// run (SPEC 4.1), so a project that keeps its own `AGENTS.md` loses none of
+/// it, and a copy here would only drift from the prompt.
+const AGENTS_MD: &str = "# Working here
+
+The rules of this project, for every agent and every human who works in it,
+whichever tool is driving. Coding agents read this file on their own, Claude
+Code included; `CLAUDE.md` imports it for those that read only that one.
+There is one set of rules, not one per tool.
+
+Written by `nunki init` as a starting point: replace it with the rules that
+hold here — how to build and test, the conventions the code follows, what
+must not change without a human.
+
+What `nunki` asks of its own agents — what a run leaves behind, what they may
+never do, how a lot ends — is not written here: it reaches each of them in
+its role prompt, at every run. This file is the project's.
+
+An agent `nunki` runs has nobody to ask. A rule here that tells it to ask
+first, or to wait for an answer, stops it: say what it should do instead.
+";
+
+/// Where the repository pins what the Rust image is built with (SPEC 4.2):
+/// one line per build argument of the Dockerfile beside it. The legacy
+/// `rust-toolchain` file, without extension, is not read — it may be plain
+/// text or TOML, and nothing says which.
+const VERSIONS_RUST: &str =
+    "# Where the repository pins what this stack's image is built with (SPEC 4.2).
+# `nunki slot rebuild` reads each line from the repository and passes the value
+# as a build argument of the Dockerfile beside this file, which must declare it.
+# Columns: ARG, file in the repository, key into a .toml or .json (`-` for the
+# whole of a plain file), and an optional pattern whose `{}` is the version.
+# Several lines for one ARG are tried in order; only an exact version is taken,
+# never a range. Nothing exact, and the Dockerfile's default stands.
+RUST_VERSION rust-toolchain.toml toolchain.channel
+RUST_COMPONENTS rust-toolchain.toml toolchain.components
+RUST_TARGETS rust-toolchain.toml toolchain.targets
+";
+
+/// The Python counterpart. `requires-python` is not read: it is a range.
+const VERSIONS_PYTHON: &str =
+    "# Where the repository pins what this stack's image is built with (SPEC 4.2).
+# `nunki slot rebuild` reads each line from the repository and passes the value
+# as a build argument of the Dockerfile beside this file, which must declare it.
+# Columns: ARG, file in the repository, key into a .toml or .json (`-` for the
+# whole of a plain file), and an optional pattern whose `{}` is the version.
+# Several lines for one ARG are tried in order; only an exact version is taken,
+# never a range. Nothing exact, and the Dockerfile's default stands.
+PYTHON .python-version
+";
+
+/// The Next.js counterpart: Node from the version files the ecosystem uses,
+/// then `engines.node` when it is exact, and pnpm from `packageManager`.
+const VERSIONS_NEXT: &str =
+    "# Where the repository pins what this stack's image is built with (SPEC 4.2).
+# `nunki slot rebuild` reads each line from the repository and passes the value
+# as a build argument of the Dockerfile beside this file, which must declare it.
+# Columns: ARG, file in the repository, key into a .toml or .json (`-` for the
+# whole of a plain file), and an optional pattern whose `{}` is the version.
+# Several lines for one ARG are tried in order; only an exact version is taken,
+# never a range. Nothing exact, and the Dockerfile's default stands.
+NODE .nvmrc - v{}
+NODE .nvmrc
+NODE .node-version - v{}
+NODE .node-version
+NODE package.json engines.node
+PNPM package.json packageManager pnpm@{}
+# The browsers the image carries are Playwright's, and they must be the ones the
+# project resolved: the battery refuses to start on a mismatch, and inside a
+# run Playwright cannot fetch others. The lockfile holds the exact version;
+# `package.json` holds a range.
+PLAYWRIGHT pnpm-lock.yaml - '@playwright/test@{}':
+PLAYWRIGHT package-lock.json packages.node_modules/@playwright/test.version
+";
+
+/// The agent image for a Rust project.
+///
+/// Debian and not Alpine: musl costs too much where the work happens —
+/// manylinux-style prebuilt artefacts, a different target triple, and a
+/// default thread stack of 128 KiB against glibc's 8 MiB (SPEC 4.2). The
+/// firewall sidecar is the one image on Alpine, for reasons that apply to it
+/// alone.
+///
+/// Two things it must do that are easy to forget: run as the **host's** uid,
+/// or a file it writes is unreadable on the host and git refuses the tree;
+/// and **pre-create the mount points**, or a named volume is born owned by
+/// root and the toolchain cannot write in it (SPEC 4.2 bis).
+const DOCKERFILE_RUST_HEAD: &str = r#"# The coder's image for a Rust project, built by `nunki slot rebuild`.
+ARG BASE=debian:bookworm-slim
+FROM ${BASE}
+
+# Passed by nunki at build time: the human's own ids, so that what the agent
+# writes belongs to the human on the host.
+ARG UID=1000
+ARG GID=1000
+# What the repository pins, passed by nunki at build time from `versions.txt`
+# beside this file (SPEC 4.2). The defaults stand when the repository pins
+# nothing: `stable`, and no component or target beyond the battery's own.
+ARG RUST_VERSION=stable
+ARG RUST_COMPONENTS=
+ARG RUST_TARGETS=
+
+# `upgrade`, and not only `update`. The packages inherited from the base tag
+# keep the versions that tag was cut with, so a security fix Debian published
+# since would never reach a freshly built image — pulling the tag again does
+# not help while the tag itself has not been rebuilt.
+#
+# A package that arrives with the base image and is installed by no line
+# here — `libpcre2-8-0` 10.42-1, for instance, carrying CVE-2026-86145 and
+# CVE-2026-89161, both HIGH, both with a fix published — is moved by nothing
+# but this one. `apt-get upgrade` takes that one to 10.42-1+deb12u1 in the
+# base image itself.
+RUN apt-get -qq update \
+ && apt-get -qq -y upgrade \
+ && apt-get -qq install --no-install-recommends -y \
+      ca-certificates curl git build-essential pkg-config tmux jq \
+ && rm -rf /var/lib/apt/lists/*
+
+# `trufflehog` is what finds the secrets gate 8 reports (SPEC 4.4). It is not
+# a stack fragment but a tool of the scan itself — the same for Rust, Python or
+# Next.js, since a secret has no ecosystem — and it enters here, at build time
+# on the host, never downloaded from inside an agent's container.
+#
+# Pinned and checked against the checksums its release publishes: a binary
+# nobody verifies is a dependency nobody reviewed (section 7). Raising the
+# version means raising the two sums with it, and the build fails loudly if
+# they disagree.
+#
+# `gitleaks` is not the tool here because the image scan refuses it, rightly:
+# its 8.30.1 binary carries 33 critical or high advisories **with fixes
+# published**, from `golang.org/x/crypto v0.35.0` — thirteen months stale at
+# its own release. This one is current at the pinned version, and being a Go
+# binary the scan keeps looking inside it at every build. A tool the gate cannot inspect would not be safer,
+# it would only stop being asked about.
+ARG TRUFFLEHOG=3.97.5
+RUN set -eu; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) arch=amd64; sum=e3d97199c565c37ca6152750197f667e08ae6a1edf5911fbdec168622b28620c ;; \
+      arm64) arch=arm64; sum=e5c8b2418b0a7c78cf4c47ac783c52c63f989e4e536cfe328b5271e819b6d52d ;; \
+      *) echo "trufflehog ships no build for $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /tmp/trufflehog.tgz \
+      "https://github.com/trufflesecurity/trufflehog/releases/download/v${TRUFFLEHOG}/trufflehog_${TRUFFLEHOG}_linux_${arch}.tar.gz"; \
+    echo "${sum}  /tmp/trufflehog.tgz" | sha256sum -c -; \
+    tar -xzf /tmp/trufflehog.tgz -C /usr/local/bin trufflehog; \
+    rm /tmp/trufflehog.tgz; \
+    trufflehog --version
+
+# The group may already exist under that id (on macOS, gid 20 is `dialout`
+# here); either way the agent ends up in it.
+RUN groupadd -g ${GID} agent || true \
+ && useradd -m -u ${UID} -g ${GID} -s /bin/bash agent
+
+# Mount points, created by root because they sit at the filesystem root, then
+# handed to the agent: a named volume mounted over a root-owned directory is
+# born root-owned, and the toolchain cannot write in it (SPEC 4.2 bis). The
+# agent cannot create them itself — it is not root, which is the point.
+RUN mkdir -p /work/tree /work/mission /run/nunki \
+ && chown -R ${UID}:${GID} /work /run/nunki
+
+USER agent
+"#;
+
+/// The Rust toolchain itself, as the agent: the part of the Rust image a
+/// project whose primary stack is another adds onto its own (SPEC 4.2,
+/// "plusieurs stacks"). One text for both, so the two cannot drift.
+const RUST_TOOLCHAIN: &str = r#"ENV RUSTUP_HOME=/home/agent/.rustup \
+    CARGO_HOME=/home/agent/.cargo \
+    PATH=/home/agent/.cargo/bin:${PATH}
+
+# The toolchain the repository's `rust-toolchain.toml` names, with its
+# components and targets, installed here because inside a run rustup cannot
+# fetch one: `static.rust-lang.org` is on no allowlist. `clippy` and `rustfmt`
+# whatever the repository says, since the battery calls both. With
+# `--network none`, an image built this way for `1.98.0` and
+# `wasm32-unknown-unknown,x86_64-unknown-linux-musl` answers `rustc 1.98.0`
+# under a `rust-toolchain.toml` pinning it, and lists all three targets.
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+  | sh -s -- -y --no-modify-path --profile minimal \
+      --default-toolchain ${RUST_VERSION} \
+      --component clippy,rustfmt${RUST_COMPONENTS:+,${RUST_COMPONENTS}} \
+      ${RUST_TARGETS:+--target ${RUST_TARGETS}}
+
+RUN mkdir -p /home/agent/.cargo/registry /home/agent/.harness
+
+# The two commands the battery and the campaign call, installed in the
+# project's own image because they are what this stack declares and not
+# something nunki brings. `prepush.sh` beside this file runs
+# `cargo deny check`; an image without it fails gate 6 for a reason no
+# agent can repair — the image is built from this file, on the host, and no
+# agent can reach it. A coder can diagnose that hole correctly and still
+# spend every attempt on it.
+#
+# The mutation campaign gate 7 plays (SPEC 4.4). Installed here, in the
+# project's own image, because the campaign is what this stack declares and
+# not something nunki brings: `mutation.sh` beside this file is what calls it.
+# cargo-mutants 27.1.0 costs this image 20 s and 115 MB at build time and
+# none at campaign time — which is the right way round, since
+# `nunki slot rebuild` is rare and a campaign is not.
+#
+# What stays of the build is the binary and the lockfile it was built from,
+# kept where an image scanner finds it. The registry is emptied: it held the
+# sources of every dependency — 117 MB, each with its own development
+# lockfile, which describes nothing installed here and which Trivy read as a
+# vulnerable `regex`. The kept lockfile is named
+# `Cargo.lock`, in a folder of its own: a scanner recognises it by that name
+# and no other. The registry directory stays, empty, as the mount point of the
+# slot's cargo cache.
+RUN cargo install cargo-mutants --locked \
+ && cargo install cargo-deny --locked \
+ && mkdir -p /home/agent/.cargo/installed/cargo-mutants \
+              /home/agent/.cargo/installed/cargo-deny \
+ && cp /home/agent/.cargo/registry/src/*/cargo-mutants-*/Cargo.lock \
+       /home/agent/.cargo/installed/cargo-mutants/Cargo.lock \
+ && cp /home/agent/.cargo/registry/src/*/cargo-deny-*/Cargo.lock \
+       /home/agent/.cargo/installed/cargo-deny/Cargo.lock \
+ && rm -rf /home/agent/.cargo/registry/*
+
+# Debug info stays in the object files instead of being copied into every
+# linked binary. `cargo test` links the crate into one binary per test target,
+# several at once, and with the debug info inside each link can exhaust the
+# container's memory: measured on a 170,000-line crate with 17 test targets,
+# GNU ld reached 13.6 GB across concurrent links and the kernel killed it. It
+# is also time: an incremental `cargo test --no-run` there took 51 s with the
+# default and 18 s with this, which is what a mutation campaign pays per
+# mutant. Set here, in the environment of every cargo the agent, the battery
+# and the campaign run, rather than in the repository's `Cargo.toml`: it is a
+# property of this image, and the project's own profile is the project's.
+# Debuggers and backtraces still read the full info from `target/`.
+ENV CARGO_PROFILE_DEV_SPLIT_DEBUGINFO=unpacked
+"#;
+
+/// The Rust toolchain added onto another stack's image (SPEC 4.2, "plusieurs
+/// stacks"). No stage: rustup installs it, as the agent, as the Rust image
+/// itself does.
+const ADDON_RUST: &str = r#"# Rust, added by nunki onto the image of this project's primary stack
+# (SPEC 4.2, "plusieurs stacks"). Starts as the agent, ends as the agent.
+# The versions the repository pins arrive as in the Rust image: from
+# `versions.txt` beside this file, read in the stack's own directory.
+USER root
+RUN apt-get -qq update \
+ && apt-get -qq install --no-install-recommends -y build-essential pkg-config \
+ && rm -rf /var/lib/apt/lists/*
+USER agent
+ARG RUST_VERSION=stable
+ARG RUST_COMPONENTS=
+ARG RUST_TARGETS=
+"#;
+
+/// The Python runtime's stages: the official image, and uv's.
+const ADDON_STAGES_PYTHON: &str = r#"# Python's stages, for adding it onto another stack's image (SPEC 4.2,
+# "plusieurs stacks"): the interpreter comes from the official image rather
+# than being reinstalled, so its OpenSSL stays the one Debian patches and the
+# image scan sees. `COPY --from` does not expand a variable, hence a stage.
+ARG PYTHON=3.12
+ARG UV_VERSION=0.12.17
+FROM python:${PYTHON}-slim-bookworm AS nunki-python-runtime
+FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS nunki-python-uv
+"#;
+
+/// Python added onto another stack's image.
+///
+/// `/usr/local` from the official image is the interpreter; the libraries it
+/// links against dynamically are Debian's, installed here, and `ldconfig`
+/// makes them found. On `debian:bookworm-slim` with 3.12:
+/// without the libraries `sqlite3` fails to import; with them the copy
+/// behaves as the official image — ssl, sqlite3, ctypes, lzma, bz2, venv —
+/// and the image scan reports nothing fixable.
+const ADDON_PYTHON_HEAD: &str = r#"# Python, added by nunki onto the image of this project's primary stack
+# (SPEC 4.2, "plusieurs stacks"). Starts as the agent, ends as the agent.
+USER root
+RUN apt-get -qq update \
+ && apt-get -qq install --no-install-recommends -y \
+      libsqlite3-0 libreadline8 libncursesw6 netbase tzdata \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=nunki-python-runtime /usr/local/ /usr/local/
+RUN ldconfig && python3 --version
+COPY --from=nunki-python-uv /uv /uvx /usr/local/bin/
+"#;
+
+fn addon_python() -> String {
+    [
+        ADDON_PYTHON_HEAD,
+        &osv_scanner_install(OSV_STAGE_PYTHON),
+        "USER agent\n",
+        PYTHON_AGENT,
+    ]
+    .concat()
+}
+
+/// Python's stages, and the one that builds its dependency audit.
+fn addon_stages_python() -> String {
+    [ADDON_STAGES_PYTHON, &osv_scanner_stage(OSV_STAGE_PYTHON)].concat()
+}
+
+/// Node's stage: the official image, copied from rather than reinstalled —
+/// its build is signature-checked, and a version written `22` keeps meaning
+/// what it means on the Node image's tags.
+const ADDON_STAGES_NEXT: &str = r#"# Node's stage, for adding Next.js onto another stack's image (SPEC 4.2,
+# "plusieurs stacks"). `COPY --from` does not expand a variable, hence a stage.
+ARG NODE=22
+FROM node:${NODE}-bookworm-slim AS nunki-next-node
+"#;
+
+/// Next.js added onto another stack's image. Node's runtime is the official
+/// image's `/usr/local` pieces — the binary, its modules (npm and corepack
+/// among them) and its headers, for a native module to build against — and
+/// the three links the Node image carries. Then the same tools, as root, and
+/// the same environment, as the agent, as the Next.js image.
+const ADDON_NEXT_HEAD: &str = r#"# Next.js, added by nunki onto the image of this project's primary stack
+# (SPEC 4.2, "plusieurs stacks"). Starts as the agent, ends as the agent.
+USER root
+# `procps`: Stryker spawns `ps` to find its children (see the Next.js image).
+RUN apt-get -qq update \
+ && apt-get -qq install --no-install-recommends -y procps \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=nunki-next-node /usr/local/bin/node /usr/local/bin/node
+COPY --from=nunki-next-node /usr/local/lib/node_modules /usr/local/lib/node_modules
+COPY --from=nunki-next-node /usr/local/include/node /usr/local/include/node
+RUN ln -sf ../lib/node_modules/corepack/dist/corepack.js /usr/local/bin/corepack \
+ && ln -sf ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+ && ln -sf ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
+ && node --version
+"#;
+
+fn addon_next() -> String {
+    [
+        ADDON_NEXT_HEAD,
+        &osv_scanner_install(OSV_STAGE_NEXT),
+        NEXT_TOOLS,
+        "USER agent\n",
+        NEXT_AGENT,
+    ]
+    .concat()
+}
+
+/// Node's stage, and the one that builds the dependency audit.
+fn addon_stages_next() -> String {
+    [ADDON_STAGES_NEXT, &osv_scanner_stage(OSV_STAGE_NEXT)].concat()
+}
+
+fn addon_rust() -> String {
+    [ADDON_RUST, RUST_TOOLCHAIN].concat()
+}
+
+/// The coder's image for a Rust project: its head, then the toolchain.
+fn dockerfile_rust() -> String {
+    [DOCKERFILE_RUST_HEAD, RUST_TOOLCHAIN].concat()
+}
+
+/// The mutation campaign a Rust project runs (SPEC 4.4, gate 7): declared by
+/// the stack, launched by `nunki`, and — living in the project's home, mounted
+/// read-only — not an agent's to weaken while it is being gated by it.
+const MUTATION_RUST: &str = r#"#!/bin/sh
+# The mutation campaign for a Rust project (SPEC 4.4, gate 7).
+#
+# `nunki` calls this as `mutation.sh <campaign-id> <path>...`, from the clean
+# copy of HEAD inside the slot's container. The id comes first so the campaign
+# is identifiable from its own command line; this script does not need it.
+#
+# The next line tells `nunki` how to read the tool's version (SPEC 4.4, the
+# chain of campaigns). A later campaign of a `standard` mission covers only
+# what changed since the previous one, and only when this script and that
+# version are what the previous one ran with; without the line, every
+# campaign is full.
+# nunki-tool-version: cargo mutants --version
+#
+# The next line tells `nunki` that this script measures mutants **by name**
+# (SPEC 4.4, the debt): given `NUNKI_MUTATION_NAMES`, a JSON list of the
+# names cargo-mutants gives them, it runs those mutants as well as the ones
+# its scope reaches, in the files it is handed. A hardening mission and
+# `nunki mutants run --owed` measure the debt's survivors that way; without
+# the line, `nunki` hands this stack no name.
+# nunki-by-name: NUNKI_MUTATION_NAMES
+#
+# The campaign answers for the lines this branch **changed**, not for every
+# line of the files it touched (SPEC 4.4). `nunki` sets `NUNKI_BASE` to the
+# commit the branch forked from, and cargo-mutants' `--in-diff` keeps only the
+# mutants the diff since that commit reaches. A twenty-line fix in a file of
+# two thousand lines owes answers for its own mutants, not for the file's
+# history. Without `NUNKI_BASE` the whole of each touched file is mutated.
+#
+# It prints **one JSON object per line** on stdout, one per surviving mutant:
+#   {"id":"…","file":"…","line":12,"end_line":14,"description":"…"}
+# then one per file the tool reached, with that file's counts:
+#   {"measured":"src/lib.rs","tried":12,"found":13}
+# and, last of all and exactly once, the line that says it got to the end:
+#   {"campaign":"done","tried":42,"found":45,"missed":3,"by_file":true}
+# `by_file` says the files were counted, and their counts add up to the
+# totals: a later partial campaign is rebuilt from them, file by file
+# (SPEC 4.4, the chain). A file with no line has nothing tried in it.
+# `end_line` is the last line of the code the mutation replaces, from the
+# tool's own account of the mutant: a function body replaced whole spans
+# every line of it, and a ruling on it is about all of them.
+# `tried` is how many mutants were run against the tests, unviable ones left
+# out: what a `standard` mission's gate 7 divides by. `found` is how many
+# testable mutants the tool listed; `tried` 0 beside a `found` above 0 is a
+# campaign that measured nothing. `missed` is how many survivors the tool
+# reported, which `nunki` compares with the survivor lines it reads. All
+# three come from the tool's own tallies, never from counting lines, and
+# `--in-diff` scopes them to the lines the branch changed whenever `nunki`
+# gives `NUNKI_BASE`, as it always does.
+# `nunki` reads no other line as a result, so progress may go to stdout freely —
+# though this script keeps the tool's own chatter on stderr. A campaign that
+# stops before that last line has measured nothing, whatever else it printed.
+#
+# `--in-place` is not a detail: cargo-mutants only reuses a build cache in
+# place, and the copy this runs in has its own, warmed once per slot and kept.
+# Without it every campaign recompiles from cold, and SPEC section 7 counts
+# that hour. It is what the campaign runs at one job, the default
+# (`mutation_jobs` in `nunki.yaml`, handed over in `NUNKI_MUTATION_JOBS`).
+# Above one, see `jobs` below.
+set -eu
+
+campaign="$1"
+shift
+
+# Only Rust sources are worth mutating; the touched list holds whatever the
+# branch touched.
+#
+# Each path stays **one argument**, whatever it holds — a space, a colon, a
+# quote, a character outside ASCII: the list is rebuilt in the positional
+# parameters, and never in a string split on spaces again. Measured on
+# cargo-mutants 27.1.0 with the list in a string, `src/with space.rs` became
+# two paths, and the campaign mutated neither.
+for path in "$@"; do
+  shift
+  case "$path" in
+    *.rs) set -- "$@" "$path" ;;
+  esac
+done
+
+# The mutants `nunki` names, if it names any: a JSON list of at least one
+# name, each a name cargo-mutants gives — `src/lib.rs:2:7: replace > with ==
+# in keep` — and each in one of the files handed. Anything else measured
+# nothing, and says so: a list read wrong would run other mutants than the
+# ones asked for.
+names="${NUNKI_MUTATION_NAMES:-}"
+if [ -n "$names" ]; then
+  if ! named=$(printf '%s' "$names" | jq -e '
+    if type == "array" and length > 0 and all(.[]; type == "string")
+    then length
+    else error("not a list of names")
+    end' 2>/dev/null); then
+    echo "nunki: NUNKI_MUTATION_NAMES is a JSON list of at least one mutant's name, and it is not, so the campaign measured nothing" >&2
+    exit 1
+  fi
+  if [ "$#" -eq 0 ]; then
+    echo "nunki: the campaign was handed $named mutant(s) by name and none of the Rust files they are in, so it measured nothing" >&2
+    exit 1
+  fi
+fi
+if [ "$#" -eq 0 ]; then
+  # Nothing this branch touched is mutable, so there are no mutants and no
+  # survivors — and that is a measurement, not a campaign that failed to
+  # happen. The terminal line is printed **before** leaving, because `nunki`
+  # reads its absence as a campaign that was killed and asks for another:
+  # a branch touching only tests or documentation would be asked for ever.
+  printf '{"campaign":"done","tried":0,"found":0,"missed":0,"by_file":true}\n'
+  exit 0
+fi
+
+out="target/mutants-$campaign"
+# Cleared, and then made. Not because a campaign that runs would leave the
+# previous one's answer — measured on cargo-mutants 27.1.0, a run that reaches
+# the mutants rotates `mutants.out` to `mutants.out.old` and writes a fresh
+# one, so a second campaign that kills everything leaves `missed.txt` empty,
+# as it should.
+#
+# It is a campaign that **cannot run** that lies. On a crate that does not
+# parse, cargo-mutants fails before it creates an output
+# directory, `mutants.out` is still the previous campaign's, and this script's
+# `|| true` then reads survivors from a campaign that never happened — on code
+# that has changed since. A replay of the same fingerprint reuses the same
+# path, so it is reachable.
+#
+# Cleared first, the same failure leaves nothing, and the `[ ! -f "$outcomes" ]`
+# below says "the campaign left no outcomes.json" — which is the truth.
+#
+# The parent has to exist: `--output` creates its own directory and not the
+# path above it, and a clean copy of HEAD that has never been built has no
+# `target/` at all (it fails with "create output parent directory").
+rm -rf "$out"
+mkdir -p "$out"
+
+# What to mutate. `--relative` writes the diff's paths from here, which is
+# where cargo-mutants reads them: the stack's own directory, even when the
+# stack lives below the repository's root. A base the copy does not hold is
+# a campaign that cannot run, said as one, rather than a silent fall back to
+# every line of every file.
+#
+# `--no-renames`, as `nunki` compares files from one campaign to the next
+# (SPEC 4.4, the chain): a file renamed is a file removed — its survivors
+# and counts dropped — and a file added whole, every line of it mutated
+# again. With git's rename detection, a pure rename gave cargo-mutants no
+# hunk at all ("No mutants to filter", 27.1.0): the survivors went and
+# nothing was tried in their place.
+#
+# The paths go to git after `--`, and as **literal** paths
+# (`--literal-pathspecs`): a file the branch commits under a name that reads
+# as a pathspec — `:!*.rs` — would otherwise be read as one, and exclude
+# every Rust file from the diff. Measured: the diff came out empty, and the
+# campaign said it had tried nothing. `core.quotePath=false` keeps a name
+# outside ASCII as it is in the diff's headers, rather than in octal escapes.
+#
+# The scope replaces the paths in the positional parameters: `--in-diff`
+# and the diff, or a `--file` for each path when there is no base.
+#
+# Mutants named are run by one filter of their exact names (`-F`), and
+# measured on cargo-mutants 27.1.0, that filter is the one thing that can
+# carry them: two `-F` select what either selects, and an `-F` selects
+# within `--in-diff` or `--file`, never beyond. So a campaign handed names
+# lists what its scope reaches by itself and the named mutants in the files
+# handed, and runs the two together, by name, over those files: the sample
+# below is drawn from that list and handed as the one filter.
+#
+# A name that is not listed is a mutant no longer in the code — its line
+# moved, or the code it replaces changed — and the campaign measured
+# nothing: run without it, it would report killed a mutant it never ran.
+# Measured on 27.1.0: a `#[cfg(test)]` module added at the end of a file
+# leaves every name in it as it was, and a line added above them moves
+# them all.
+#
+# `--list --json` over a diff that reaches no mutant prints nothing at all,
+# not `[]` (measured on 27.1.0, "No mutants to filter"), and is read as the
+# empty list it means.
+listed="$out/listed.json"
+alternation='"^(?:" + (map(gsub("(?<c>[\\\\.+*?()|\\[\\]{}^$#&~-])"; "\\\(.c)")) | join("|")) + ")$"'
+listed_in() {
+  only="$1"
+  shift
+  for path in "$@"; do
+    shift
+    set -- "$@" --file "$path"
+  done
+  if [ -n "$only" ]; then
+    set -- "$@" -F "$only"
+  fi
+  cargo mutants --no-config --list --json --exclude-re "replace main -> " "$@"
+}
+if [ -n "${NUNKI_BASE:-}" ]; then
+  diff="$out/touched.diff"
+  if ! git -c core.quotePath=false --literal-pathspecs \
+    diff --relative --no-renames "$NUNKI_BASE" HEAD -- "$@" > "$diff"; then
+    echo "nunki: cannot diff against the base $NUNKI_BASE" >&2
+    exit 1
+  fi
+fi
+if [ -n "$names" ]; then
+  if ! by_name=$(printf '%s' "$names" | jq -r "$alternation") \
+    || ! listed_in "$by_name" "$@" > "$out/named.json" 2> "$out/named.err"; then
+    echo "nunki: cargo mutants could not list the $named mutant(s) this campaign was handed by name, so it measured nothing:" >&2
+    tail -n 20 "$out/named.err" >&2
+    exit 1
+  fi
+  if [ -n "${NUNKI_BASE:-}" ]; then
+    reached=0
+    cargo mutants --no-config --list --json --exclude-re "replace main -> " \
+      --in-diff "$diff" > "$out/own.json" 2> "$out/own.err" || reached=$?
+  else
+    reached=0
+    listed_in "" "$@" > "$out/own.json" 2> "$out/own.err" || reached=$?
+  fi
+  if [ "$reached" -ne 0 ]; then
+    echo "nunki: cargo mutants could not list this campaign's mutants, so it measured nothing:" >&2
+    tail -n 20 "$out/own.err" >&2
+    exit 1
+  fi
+  [ -s "$out/named.json" ] || printf '[]\n' > "$out/named.json"
+  [ -s "$out/own.json" ] || printf '[]\n' > "$out/own.json"
+  if ! missing=$(jq -c --argjson want "$names" '$want - map(.name)' "$out/named.json"); then
+    echo "nunki: cannot read the list of the mutants this campaign was handed by name, so it measured nothing" >&2
+    exit 1
+  fi
+  if [ "$missing" != "[]" ]; then
+    echo "nunki: $(printf '%s' "$missing" | jq 'length') of the $named mutant(s) this campaign was handed by name are not in the code it runs on — the code they mutate moved or changed since they were measured — so it measured nothing: $(printf '%s' "$missing" | jq -c '.[:5]')" >&2
+    exit 1
+  fi
+  if ! jq -s -c '(.[0] + .[1]) | unique_by(.name)' "$out/own.json" "$out/named.json" > "$listed"; then
+    echo "nunki: cannot join the mutants this campaign reaches and the ones it was handed by name, so it measured nothing" >&2
+    exit 1
+  fi
+  for path in "$@"; do
+    shift
+    set -- "$@" --file "$path"
+  done
+elif [ -n "${NUNKI_BASE:-}" ]; then
+  set -- --in-diff "$diff"
+else
+  for path in "$@"; do
+    shift
+    set -- "$@" --file "$path"
+  done
+fi
+
+# How many mutants run at once. At 1 — the default, and what a campaign runs
+# without the variable — the command is today's, `--in-place` and one mutant
+# at a time. Above 1, cargo-mutants cannot run in place: each job builds in a
+# copy of the tree of its own, under `$TMPDIR`, from a cold cache, and the
+# copies are what it pays for the cores.
+#
+# Measured on nunki's own repository with cargo-mutants 27.1.0, 53 mutants,
+# 12 cores, every run from an emptied cache: in place 533 s (9.5 s a
+# mutant); 2 jobs 463 s (15.8 s a mutant, 4.8 GB on disk at the peak);
+# 4 jobs 492 s (32 s, 9.1 GB); 12 jobs 607 s (121 s, 27 GB). Building one
+# mutant already uses every core, so jobs mostly queue for them. And at 12
+# the answer changed: the two mutants that survive in place came back as
+# timeouts — counted tried and killed — because the test timeout is set from
+# a baseline run alone and the loaded machine overran it. Raise it only for
+# a crate whose build leaves cores idle, and measure it there first.
+#
+# `--copy-vcs true` because in place the tests run beside `.git`, and a
+# project's tests may read it: measured on that same repository, without it
+# the unmutated baseline fails in the copy and cargo-mutants exits 4 having
+# tried nothing.
+# A value that is not a whole number of at least 1 is refused here rather
+# than handed to the tool, and before any mutant is tried.
+jobs="${NUNKI_MUTATION_JOBS:-1}"
+case "$jobs" in
+  ''|*[!0-9]*|0*)
+    echo "nunki: NUNKI_MUTATION_JOBS is a whole number of at least 1, and $jobs is not" >&2
+    exit 1
+    ;;
+esac
+if [ "$jobs" -eq 1 ]; then
+  where="--in-place"
+else
+  where="--jobs $jobs --copy-vcs true"
+fi
+
+# The campaign leaves the build cache as it found it.
+#
+# Every mutant builds the crate from its mutated source, and what it builds
+# stays in `target/` — measured on a slot after about thirty campaigns,
+# 6.8 million files in `target/debug/deps` and several hundred gigabytes.
+# Cargo scans that directory at every build, so a mutant went from 7 s to
+# 70 s, campaign after campaign, and the disk filled.
+#
+# So the cache's file list is recorded before the tool runs, and when the
+# campaign ends — whether it completes, fails, or is told to stop — two
+# things in `target/` are removed:
+#
+# - every file whose name is not on the list. Most of what a mutant leaves
+#   is new names with **old** times: measured on cargo-mutants 27.1.0 and
+#   this crate, each rebuild hard-links its unchanged codegen units' `.dwo`
+#   files into `deps` under new names, and a hard link keeps the time of the
+#   file it links — from before the campaign. With a marker's time alone,
+#   a cache of 11,010 files held 68,655 after a campaign of 23 mutants;
+# - every file on the list written since: a mutant rebuilds the crate under
+#   the file names the baseline used, so the crate's own library and test
+#   binaries hold a mutant's build at the end. They cannot be told apart
+#   from the baseline's, and go with it.
+#
+# What stays is what was there before and untouched: the dependencies,
+# and whatever the battery built. The next build recompiles the crate
+# itself once, and nothing else.
+#
+# A campaign that is killed outright (SIGKILL, its container gone) runs no
+# trap, so the list outlives it. The next campaign finds it and cleans up
+# first; whatever the battery built since is removed with it, and rebuilt
+# once.
+#
+# The campaign's own output, `$out`, stays: `nunki` reads it, and it is
+# small. Older `target/mutants-*` directories, earlier campaigns' answers,
+# go.
+#
+# Above one job, each job builds in a copy of the tree under `$TMPDIR`, which
+# cargo-mutants removes when it finishes and leaves behind when it is killed.
+# They go to one directory of their own there, `nunki-campaign-copies`,
+# removed when the campaign ends and, after a kill, by the next one. Outside
+# the tree and not in `target/`: the project's tests run in those copies
+# with the same `$TMPDIR`, and measured on this repository with the copies
+# under `target/`, two tests failed in the unmutated baseline — their
+# temporary directories had landed inside a git repository.
+list="target/nunki-campaign.list"
+full="target/nunki-campaign.full"
+copies="${TMPDIR:-/tmp}/nunki-campaign-copies"
+cache() {
+  find target \( -path "$out" -o -name 'nunki-campaign.*' \) -prune \
+    -o ! -type d "$@" -print
+}
+clean() (
+  set +e
+  if [ -f "$list" ]; then
+    cache | LC_ALL=C sort > "$list.now"
+    LC_ALL=C comm -13 "$list" "$list.now" | tr '\n' '\0' | xargs -0 rm -f
+    cache -newer "$list" | tr '\n' '\0' | xargs -0 rm -f
+    find target -mindepth 1 -depth -type d -empty -newer "$list" \
+      ! -path "$out" ! -path "$out/*" -exec rmdir {} \;
+    rm -f "$list" "$list.now"
+  fi
+  rm -f "$full"
+  rm -rf "$copies"
+  for old in target/mutants-*; do
+    [ "$old" = "$out" ] || rm -rf "$old"
+  done
+)
+# What a killed campaign left, before this one records anything.
+clean
+mkdir -p target
+cache | LC_ALL=C sort > "$list.new"
+mv "$list.new" "$list"
+# File times move in steps of the kernel's coarse clock, a few milliseconds,
+# and `-newer` is strict: a file written within the list's own step is not
+# newer than it, and would be kept. So the tool starts only once the clock
+# has moved past the list. Seen without it: a stand-in that writes at once
+# kept one of its artefacts, once in about three hundred campaigns.
+tick="target/nunki-campaign.tick"
+touch "$tick"
+until [ -n "$(find "$tick" -newer "$list")" ]; do touch "$tick"; done
+rm -f "$tick"
+if [ "$jobs" -gt 1 ]; then
+  mkdir -p "$copies"
+  export TMPDIR="$copies"
+fi
+
+# Told to stop — `nunki` sends SIGTERM to this script past the deadline —
+# the tool is stopped too, and only then is the cache cleaned. The tool runs
+# in the background so the signal is handled at once: a shell waiting on a
+# foreground child runs its trap only when the child is done, and a shell
+# without a trap dies and leaves the tool running in the copy, orphaned.
+child=""
+sweeper=""
+stop() {
+  if [ -n "$child" ]; then
+    kill -TERM "$child" 2>/dev/null
+    wait "$child" 2>/dev/null
+  fi
+  exit 143
+}
+# The sweeper below ends with the campaign, however it ends, and before the
+# cache is cleaned. By KILL, which nothing loses: a TERM that reached the
+# sweeper before it had set a trap of its own was lost, and the campaign
+# waited on it for good. Measured: a tool that ends at once, under dash, and
+# 3 to 6 campaigns in 320 outlived it, as one did for 41 minutes on CI. The
+# kill and the wait are under one redirection, or bash reports on stderr
+# the job a signal ended, and that line would close the campaign's stderr.
+unsweep() {
+  if [ -n "$sweeper" ]; then
+    { kill -KILL "$sweeper"; wait "$sweeper"; } 2>/dev/null || true
+    sweeper=""
+  fi
+}
+trap 'rc=$?; unsweep; clean; exit $rc' EXIT
+trap stop INT TERM HUP
+
+# While the tool runs, what its mutants build is swept, and the disk is
+# watched (SPEC 4.4, gate 7).
+#
+# The image keeps debug information beside the objects
+# (`CARGO_PROFILE_DEV_SPLIT_DEBUGINFO=unpacked`, for the link time it saves):
+# every build writes `.dwo` files into `target/debug/deps`, a rebuild gives
+# them new names, and until the campaign ends nothing removes the old ones.
+# Measured on a crate whose mutant takes 47 s: about 240 MB a minute, 11 GB
+# an hour, and an earlier campaign stopped by `No space left on device`
+# after 11 mutants. No test reads a `.dwo`, so every `$sweep_every` seconds,
+# each `.dwo` in `target/debug/deps` goes when all of these hold:
+#
+# - its name is not on the cache's list: an earlier mutant wrote it, not the
+#   build the campaign found;
+# - no build has touched its file for `$settle_minutes` minutes (`-cmin`,
+#   the status time). A rebuild hard-links every unchanged unit's `.dwo`
+#   from rustc's incremental session under a new name, which moves that
+#   time even under an old file time: a file a build still uses keeps
+#   moving, and those extra names cost no space. What fills the disk is a
+#   file no build uses any more — a unit a mutant changed, and the unit it
+#   replaced — held only by names in `deps`. Its time stops moving, and ten
+#   minutes on, every one of those names goes.
+#
+# A build in progress does read them. Measured on cargo-mutants 27.1.0 and
+# this repository, 48 mutants: swept as soon as they were written, and in
+# the incremental directories too, one mutant that compiles failed with
+# `failed to build archive … No such file or directory` and was recorded
+# unviable instead of caught — a survivor could hide that way. So rustc's
+# incremental directories are never swept, and the settling time keeps
+# whatever a build may still read. Above one job, the same holds in the
+# copies' `target/debug/deps`.
+#
+# Each sweep also reads the space left under `target/`. Below `$floor_mib`
+# the tool is stopped, and the campaign fails saying so, rather than in a
+# write error that names nothing. The floor is a choice, not a measurement:
+# about eight minutes of the unswept growth above.
+sweep_every=30
+settle_minutes=10
+floor_mib=2048
+free_mib() {
+  df -Pk target 2>/dev/null | awk 'NR == 2 && $4 ~ /^[0-9]+$/ { print int($4 / 1024) }'
+}
+# Run in the background, so already in a subshell of its own: braces, not
+# parentheses, which would fork a second one that a signal to the first
+# does not reach.
+sweep() {
+  set +e
+  while :; do
+    # None of the campaign's output: the nap the KILL leaves behind holds
+    # none of its pipes open, and ends on its own.
+    sleep "$sweep_every" </dev/null >/dev/null 2>&1
+    find target/debug/deps -name '*.dwo' -type f -cmin "+$settle_minutes" \
+      2>/dev/null | LC_ALL=C sort | LC_ALL=C comm -13 "$list" - \
+      | tr '\n' '\0' | xargs -0 rm -f
+    if [ -d "$copies" ]; then
+      find "$copies" -path '*/target/debug/deps/*' -name '*.dwo' -type f \
+        -cmin "+$settle_minutes" -exec rm -f {} + 2>/dev/null
+    fi
+    left=$(free_mib)
+    if [ -n "$left" ] && [ "$left" -lt "$floor_mib" ]; then
+      echo "$left" > "$full"
+      kill -TERM "$1" 2>/dev/null
+      exit 0
+    fi
+  done
+}
+left=$(free_mib)
+if [ -z "$left" ]; then
+  echo "nunki: the space left under target/ could not be read, so this campaign is not watched for it" >&2
+elif [ "$left" -lt "$floor_mib" ]; then
+  echo "nunki: the disk under target/ has $left MiB left, below the campaign's floor of $floor_mib MiB, so the campaign did not start and measured nothing" >&2
+  exit 1
+fi
+
+# A sample when the whole would not fit the budget (SPEC 4.4, gate 7).
+#
+# `nunki` gives the campaign its budget in seconds (`NUNKI_MUTATION_BUDGET`,
+# the mission's `mutation_minutes`), the seconds a mutant took on this
+# project's last campaign (`NUNKI_MUTATION_PACE`, 60 without one), and, for
+# a campaign that continues a chain, the fraction the chain runs at
+# (`NUNKI_MUTATION_SAMPLE`). The mutants the scope reaches are listed first.
+# Unless the chain fixed it, the fraction is 1/k with k as small as fits:
+# the budget holds `budget / pace` mutants, less one for the baseline, which
+# rebuilds the crate as a mutant does.
+#
+# Which mutants make the sample is chosen before the tool starts, and by the
+# key that carries the HQ's rulings — the file and the description, never
+# the line — hashed: a mutant kept is one whose key's hash `% k` is 0. So a
+# mutant a return to the coder did not change stays in the sample whatever
+# moved above it, and one added elsewhere does not reshuffle the others. A
+# choice by position, as `--shard` makes it, would: every return would bring
+# survivors never seen. The hash is written in `jq`, kept below 2^31 at each
+# step so that every `jq` computes it alike (measured on 1.6 and 1.8.2).
+#
+# The sample reaches the tool as one `-F`, an alternation of the names it
+# holds, escaped where Rust's regex syntax would read them, and is checked
+# before it runs: `--list` with that filter must name exactly the mutants
+# chosen. Measured on 27.1.0: names such as
+# `replace <impl Spawner for ContainerSpawner>::alive -> io::Result<u8>`
+# and `vec![Box::leak(Box::new(Default::default()))]` come back exactly,
+# and the tool's own tallies and `mutants.json` then count the sample alone.
+# A listing that fails, a filter that does not select what was chosen, or a
+# sample that came out empty while the scope holds mutants measured
+# nothing, and says so: never a fallback to the whole. Given no budget and
+# no fraction, as by an older `nunki`, the campaign runs whole, unlisted.
+budget="${NUNKI_MUTATION_BUDGET:-}"
+pace="${NUNKI_MUTATION_PACE:-}"
+fixed="${NUNKI_MUTATION_SAMPLE:-}"
+for value in "$budget" "$pace" "$fixed"; do
+  case "$value" in
+    *[!0-9]*|0*)
+      echo "nunki: the campaign's budget, pace and sample are whole numbers of at least 1, and '$value' is not" >&2
+      exit 1
+      ;;
+  esac
+done
+[ -n "$pace" ] || pace=60
+k=1
+n=""
+# A campaign handed names was listed above, and always runs under a filter:
+# its scope is the files, whole, and the filter is what keeps it to the
+# mutants listed.
+if [ -n "$names" ] || [ -n "$budget" ] || [ -n "$fixed" ]; then
+  if [ -z "$names" ]; then
+    if ! cargo mutants --no-config --list --json --exclude-re "replace main -> " "$@" > "$listed" 2> "$listed.err"; then
+      echo "nunki: cargo mutants could not list this campaign's mutants, so it measured nothing:" >&2
+      tail -n 20 "$listed.err" >&2
+      exit 1
+    fi
+    [ -s "$listed" ] || printf '[]\n' > "$listed"
+  fi
+  if ! n=$(jq 'length' "$listed"); then
+    echo "nunki: cannot read the list of this campaign's mutants, so it measured nothing" >&2
+    exit 1
+  fi
+  if [ -n "$fixed" ]; then
+    k=$fixed
+  elif [ -n "$budget" ] && [ "$n" -gt 0 ]; then
+    fit=$((budget / pace - 1))
+    [ "$fit" -ge 1 ] || fit=1
+    k=$(((n + fit - 1) / fit))
+  fi
+  if [ "$n" -gt 0 ] && [ "$k" -gt "$n" ]; then
+    k=$n
+  fi
+  # shellcheck disable=SC2016
+  sampled='
+    def key:
+      (.file + ":") as $at
+      | (if (.name | startswith($at))
+         then .name | ltrimstr($at) | sub("^[0-9]+:[0-9]+: "; "")
+         else .name
+         end) as $description
+      | [.file, $description] | tojson;
+    def hash: explode | reduce .[] as $c (5381; (. * 33 + $c) % 1000003);
+    [.[] | select((key | hash) % $k == 0) | .name] | sort'
+  if [ "$k" -gt 1 ] || [ -n "$names" ]; then
+    if ! chosen=$(jq -c --argjson k "$k" "$sampled" "$listed") \
+      || ! m=$(printf '%s' "$chosen" | jq 'length') \
+      || ! re=$(printf '%s' "$chosen" | jq -r "$alternation"); then
+      echo "nunki: cannot choose this campaign's sample, so it measured nothing" >&2
+      exit 1
+    fi
+    if [ "$m" -eq 0 ]; then
+      echo "nunki: a sample of 1/$k of the $n mutants this campaign reaches holds none of them, so it measured nothing: a budget of $budget s at $pace s a mutant is too small for them; raise mutation_minutes" >&2
+      exit 1
+    fi
+    if ! cargo mutants --no-config --list --json --exclude-re "replace main -> " "$@" -F "$re" > "$listed.check" 2> "$listed.err" \
+      || [ "$(jq -c '[.[].name] | sort' "$listed.check")" != "$chosen" ]; then
+      echo "nunki: the filter for this campaign's sample of 1/$k did not select the $m mutants chosen, so it measured nothing" >&2
+      exit 1
+    fi
+    set -- "$@" -F "$re"
+  fi
+fi
+
+# A campaign that finds survivors exits non-zero — 2, measured on
+# cargo-mutants 27.1.0 — and that is a result, not a failure: `nunki` reads the
+# survivors rather than the status.
+#
+# `--exclude-re "replace main -> "` drops one survivor nobody could ever
+# answer. cargo-mutants replaces a whole function body with
+# `Default::default()` whenever the return type allows it, and
+# `fn main() -> ExitCode` always allows it — but no unit test calls `main`,
+# so that mutant cannot be killed by any test the coder is able to write.
+# Left in, it costs a lot for nothing: a coder can spend a run extracting
+# `main`'s body into a testable function, and the mutant simply reappears on
+# the thin wrapper that is left.
+#
+# On a crate with a binary and a library, it takes exactly one mutant away:
+# it removes `src/main.rs`'s whole body and keeps
+# `src/lib.rs`'s `replace run -> ExitCode` — the same shape, in the function
+# `main` delegates to, and that one a test can and must kill. The exclusion
+# is on the mutation, never on the file: a `main.rs` carrying real code still
+# owes every mutant in it.
+#
+# `--no-config` keeps the campaign from reading its configuration out of the
+# tree it mutates. Without it a `.cargo/mutants.toml` the branch commits
+# applies: measured on 27.1.0, `timeout_multiplier = 0.0` turned 7 survivors
+# and 4 caught into 11 timeouts — every one counted tried and killed — and an
+# exclusion empties the campaign instead. What this script passes on its own
+# command line is the whole of the campaign's configuration.
+# shellcheck disable=SC2086
+status=0
+cargo mutants --no-config $where --no-shuffle --exclude-re "replace main -> " --output "$out" "$@" >&2 &
+child=$!
+sweep "$child" &
+sweeper=$!
+wait "$child" || status=$?
+child=""
+unsweep
+if [ -f "$full" ]; then
+  echo "nunki: the disk under target/ had $(cat "$full") MiB left, below the campaign's floor of $floor_mib MiB, so the tool was stopped and the campaign measured nothing" >&2
+  exit 1
+fi
+
+# `--output DIR` writes into `DIR/mutants.out/`, not into `DIR` (measured on
+# 27.1.0). Reading the wrong path makes the whole campaign fail silently.
+#
+# Everything below is read from `outcomes.json`, the tool's own account of
+# what it did with each mutant, in JSON: each outcome names its mutant —
+# its `name`, its `file`, its `span` — and the file closes on the tool's
+# tallies (`missed`, `caught`, `timeout`, `unviable`, `total_mutants`).
+# Never from `missed.txt` and its siblings: they hold one mutant per line,
+# and a file whose name holds a newline — `#[path]` reaches one — turns
+# each of its mutants into two lines there. Measured on 27.1.0 with a tab
+# in one file's name and a newline in another's, and the lines escaped by
+# hand: the tool missed 10, the tab's 5 lines were not JSON and were
+# dropped, the newline's 5 became 10 lines that were, and `nunki` read 10
+# survivors of which none was one the tool had found.
+outcomes="$out/mutants.out/outcomes.json"
+listing="$out/mutants.out/mutants.json"
+if [ ! -f "$outcomes" ]; then
+  # A diff that reaches no mutant, a comment or a test changed, say, makes
+  # cargo-mutants exit 0 without writing `mutants.out` at all ("No mutants
+  # to filter", measured on 27.1.0). That is a measurement: nothing to mutate.
+  # A crate that does not parse also leaves no `mutants.out`, but exits 1,
+  # so only the status tells the two apart.
+  if [ -n "${NUNKI_BASE:-}" ] && [ "$status" -eq 0 ]; then
+    printf '{"campaign":"done","tried":0,"found":0,"missed":0,"by_file":true}\n'
+    exit 0
+  fi
+  if [ "$status" -ne 0 ]; then
+    echo "nunki: cargo mutants exited $status and left no $outcomes, so the campaign measured nothing; what the tool said is above" >&2
+  else
+    echo "nunki: the campaign left no $outcomes" >&2
+  fi
+  exit 1
+fi
+
+# The tool's own status says whether the campaign completed, and only three
+# answers do: 0, every mutant caught; 2, some missed; 3, some timed out
+# (cargo-mutants 27.1.0). Anything else measured nothing, whatever files it
+# left — 4 is a baseline whose tests fail before any mutant is tried, and
+# leaves every outcome file empty (measured: 12 mutants found, none tested,
+# an empty `missed.txt` that would read as a campaign with no survivor).
+case "$status" in
+  0|2|3) ;;
+  4)
+    echo "nunki: cargo mutants exited 4: the tests fail on the unmutated code, before any mutant is tried, so the campaign measured nothing" >&2
+    exit 1
+    ;;
+  *)
+    echo "nunki: cargo mutants exited $status, so the campaign did not complete and measured nothing; what the tool said is above" >&2
+    exit 1
+    ;;
+esac
+
+# One line per survivor: each outcome whose summary is `MissedMutant`.
+#
+# **Its `name` is the identifier**, and nothing shorter will do. Measured
+# on 27.1.0: a single position carries several mutants — `> ==`, `> <` and
+# `> >=` are all at `src/lib.rs:2:7` — so `file:line` and even
+# `file:line:col` hand the coder survivors it cannot tell apart, in a file
+# whose whole purpose is answering them one by one. The name reads
+# `file:line:col: what it replaced`:
+#   src/lib.rs:2:7: replace > with == in keep
+# and the description is what follows the file and the position.
+#
+# The file and the span are the outcome's own: a path holding a colon is
+# never cut at it, and `end_line` is the last line of the code replaced —
+# `replace body -> u8 with 0` on a two-line body spans lines 6 to 7.
+#
+# Written by `jq`, never by hand: a tab, a newline, a quote, any control
+# character in a name comes out escaped, and each survivor is one line.
+if ! jq -c '
+  .outcomes[]
+  | select(.summary == "MissedMutant")
+  | .scenario.Mutant
+  | (.file + ":") as $at
+  | {
+      id: .name,
+      file: .file,
+      line: (.span.start.line // 0),
+      end_line: (.span.end.line // 0),
+      description: (
+        if (.name | startswith($at))
+        then .name | ltrimstr($at) | sub("^[0-9]+:[0-9]+: "; "")
+        else .name
+        end
+      )
+    }' "$outcomes"; then
+  echo "nunki: cannot read the survivors out of $outcomes" >&2
+  exit 1
+fi
+
+# Each file's counts, keyed by the file each mutant names: `tried` from the
+# outcomes, unviable ones left out as from the totals; `found` from the
+# tool's listing of every mutant it made, `mutants.json`, less the file's
+# unviable ones. `nunki` trusts a count only under a path it handed this
+# campaign, and checks that they add up to the totals; a listing `jq` cannot
+# read, and there are no per-file counts: no `by_file`, and the next
+# campaign is full.
+byfile=false
+if counts=$(jq -c --slurpfile listed "$listing" '
+  [ ($listed[0][] | {file: .file, n: 1, t: 0, u: 0}),
+    ( .outcomes[]
+      | select(.scenario | type == "object")
+      | {
+          file: .scenario.Mutant.file,
+          n: 0,
+          t: (if .summary == "CaughtMutant" or .summary == "MissedMutant"
+                or .summary == "Timeout" then 1 else 0 end),
+          u: (if .summary == "Unviable" then 1 else 0 end)
+        } ) ]
+  | group_by(.file)[]
+  | {
+      measured: .[0].file,
+      tried: (map(.t) | add),
+      found: ((map(.n) | add) - (map(.u) | add))
+    }' "$outcomes" 2>/dev/null); then
+  if [ -n "$counts" ]; then
+    printf '%s\n' "$counts"
+  fi
+  byfile=true
+fi
+
+# What the campaign ran at, for `nunki` to record and to keep through the
+# chain: the fraction's denominator, how many mutants the scope reached
+# before the sample, the pace the sample was sized with, and the seconds a
+# mutant took — each mutant's build and test, the baseline left out,
+# rounded up — when any was tried. Said only of a campaign that was listed.
+if [ -n "$n" ] && ! jq -c --argjson k "$k" --argjson n "$n" --argjson paced "$pace" '
+  [ .outcomes[]
+    | select(.scenario | type == "object")
+    | [.phase_results[]?.duration // 0] | add // 0 ] as $took
+  | {sampled: $k, listed: $n, paced: $paced}
+    + (if ($took | length) > 0 then {pace: (($took | add) / ($took | length) | ceil)} else {} end)
+  ' "$outcomes"; then
+  echo "nunki: cannot read what this campaign ran at out of $outcomes" >&2
+  exit 1
+fi
+
+# The last thing it prints, and the only line that says the campaign got to
+# the end. Without it `nunki` cannot tell "no survivor" from "no answer": a
+# campaign killed halfway, one whose container went away and one that never
+# compiled all leave a log that parses to zero survivors — and gate 7 would
+# go green on a measurement nobody made.
+#
+# A line and not an exit status, because the status does not survive. The
+# spawner `exec`s the command so that the pid it published is the campaign's
+# own, and a shell that has been replaced cannot write `$?`. A truncated log
+# loses its last line, which is this one, so the three failures fail alike.
+#
+# Its counts are the tool's own tallies, closing `outcomes.json`, and never
+# a count of the lines above: `nunki` compares `missed` with the survivor
+# lines it reads, and a count taken from those lines would always agree
+# with them. `tried` is every mutant the tests ran against — caught, missed
+# or timed out, unviable ones left out — what a `standard` mission's gate 7
+# divides by; `found` every testable mutant, `tried` 0 beside a `found`
+# above 0 being a campaign that measured nothing. A tally missing is a
+# campaign this script cannot account for, and it says so rather than
+# concluding.
+if ! jq -c --argjson byfile "$byfile" '
+  if [.caught, .missed, .timeout, .unviable, .total_mutants] | all(type == "number")
+  then {
+      campaign: "done",
+      tried: (.caught + .missed + .timeout),
+      found: (.total_mutants - .unviable),
+      missed: .missed
+    } + (if $byfile then {by_file: true} else {} end)
+  else error("the tallies are not all there")
+  end' "$outcomes"; then
+  echo "nunki: cannot read the tool's tallies out of $outcomes" >&2
+  exit 1
+fi
+"#;
+
+/// How a Rust application is started (SPEC 4.2, rule 2). Shipped by the
+/// stack because starting an application is a property of the stack, not of
+/// the mission; replaceable by `nunki.yaml`, refinable by a mission header, and
+/// amendable by the integrator as part of its wiring.
+/// The mechanical security of a Rust project (SPEC 4.4, gate 8): the
+/// dependency audit and the secret scan. Like the campaign, it is
+/// declared by the stack, launched by `nunki`, and mounted read-only — what
+/// judges the agent is not the agent's to weaken.
+///
+/// Checked against the real tool before it shipped, as `mutation.sh` was:
+/// cargo-deny writes its JSON to
+/// **stderr**, and `recurse(.parents[0]?)` never terminates because a node
+/// without `parents` yields `null` rather than nothing.
+const SECURITY_RUST: &str = r##"#!/bin/sh
+# The mechanical security of a Rust project (SPEC 4.4, gate 8).
+#
+# `nunki` calls this as `security.sh <base-commit> [advisory-db] [mission-dir]
+# [secrets-file]`, from the clean copy of HEAD inside the slot's container. A
+# commit and not a branch name: the copy is a detached clone and carries no
+# branch, so a name would resolve to nothing. It prints **one JSON object per line** on
+# stdout, one per finding:
+#
+#   {"id":"…","kind":"…","where":"…","via":"…","fix":"…",
+#    "accepted":"…","was_at_base":false}
+#
+# `nunki` reads those seven fields and nothing else — it knows no tool, no
+# lockfile and no advisory database. Anything that is not one of these lines
+# is ignored, so progress may go to stdout freely, though this script keeps
+# its chatter on stderr.
+#
+# SPEC 4.4 gives gate 8 three families: the dependency audit (`cargo-deny`),
+# the secret scan (`trufflehog`), and the static analysis — which is `clippy`,
+# already run by the battery at gate 6, so nothing here repeats it.
+set -eu
+
+base="${1:?usage: security.sh <base-commit> [advisory-db] [mission-dir] [secrets]}"
+# Second argument and not an environment variable: the agent owns its own
+# environment inside the container, and a variable would let it point this at
+# an empty directory — no findings, and a green gate. `nunki` is what invokes
+# the gate, so `nunki` is what says where the database is.
+db="${2:-/nunki/advisories}"
+mission="${3:-/work/mission}"
+secrets="${4:-/nunki/secrets.txt}"
+
+[ -d "$db" ] || { echo "nunki: no advisory database at $db" >&2; exit 69; }
+
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+
+# A configuration with **no `ignore`**: this is the unfiltered view, the one
+# that still reports what the project has accepted. `--config` is what makes
+# it possible without a sandbox: cargo-deny reads the file it is given and
+# no other.
+printf '[advisories]\ndb-path = "%s"\n' "$db" > "$work/none.toml"
+
+# `--offline` keeps it from fetching the database, which lives on a forge no
+# agent may reach (SPEC 4.1 bis). It also keeps cargo from downloading crates,
+# so the slot's registry cache must be warm — the battery has already built by
+# the time this runs.
+#
+# **The JSON goes to stderr**, not stdout (with `2>/dev/null` the output
+# is empty). Findings make it exit non-zero, and that
+# is a result rather than a failure.
+audit() {
+  cargo deny --offline --config "$2" --manifest-path "$1/Cargo.toml" \
+    --format json check advisories 2>&1 >/dev/null || true
+}
+
+ids() { grep '"type":"diagnostic"' | sed -n 's/.*"id":"\([^"]*\)".*/\1/p' | sort -u; }
+
+# What the base already carried. A worktree and not a bare lockfile:
+# cargo-deny goes through cargo metadata and refuses a directory
+# holding only a manifest and a lockfile ("no targets specified in the
+# manifest"). Nothing is compiled here.
+: > "$work/base.ids"
+#
+# The worktree holds the whole repository, and this stack may live in a
+# directory of it (SPEC 4.2, "plusieurs stacks"): the base is audited where
+# this stack is, `git rev-parse --show-prefix` — empty at the root.
+if git worktree add -q --detach "$work/base" "$base" 2>/dev/null; then
+  audit "$work/base/$(git rev-parse --show-prefix)" "$work/none.toml" | ids > "$work/base.ids" || true
+  git worktree remove --force "$work/base" 2>/dev/null || true
+else
+  # 70, and not a warning followed by the audit. Without the base there is no
+  # "what this branch brought": every finding would come back new, and the gate
+  # would block on what was already there. `nunki` reads this as unplayed — a
+  # verdict on the machine rather than on the agent, exactly as 69 is.
+  echo "nunki: base $base is not in this repository, so nothing can be compared" >&2
+  exit 70
+fi
+
+# What the project accepts, as the difference between the two views: an id the
+# unfiltered run reports and the project's own configuration does not is one
+# `deny.toml` ignores. The reason is read from that file, best effort.
+audit . "$work/none.toml" > "$work/all.json"
+: > "$work/kept.ids"
+if [ -f deny.toml ]; then
+  audit . deny.toml | ids > "$work/kept.ids"
+fi
+
+reason() {
+  sed -n "s/.*id *= *\"$1\".*reason *= *\"\([^\"]*\)\".*/\1/p" deny.toml 2>/dev/null |
+    head -1
+}
+
+grep '"type":"diagnostic"' "$work/all.json" | while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"advisory":{.*"id":"\([^"]*\)".*/\1/p')
+  [ -n "$id" ] || continue
+  printf '%s' "$line" > "$work/one.json"
+
+  kind=$(jq -r '.fields.advisory.informational // .fields.code' "$work/one.json")
+  where=$(jq -r '.fields.graphs[0].Krate | "\(.name) \(.version)"' "$work/one.json")
+  # The chain from the finding up to the root crate. Two names means the
+  # finding is on a direct dependency and there is nothing to name; more, and
+  # `via` is the last one before the root — the direct dependency that brought
+  # it in, and the only one this project can actually replace.
+  # `.parents[0]?` is not a stopping condition: on a node without `parents`
+  # it yields `null` rather than nothing, and the recursion never ends —
+  # jq spins until it is killed. `has` is the guard.
+  via=$(jq -r '[.fields.graphs[0]
+                | recurse(if has("parents") then .parents[0] else empty end)
+                | .Krate.name]
+               | if length > 2 then .[-2] else "" end' "$work/one.json")
+  fix=$(jq -r '[.fields.notes[] | select(startswith("Solution: Upgrade to "))]
+               | if length == 0 then "" else .[0] end' "$work/one.json" |
+        sed -e 's/^Solution: Upgrade to //' -e 's/ *(try .*$//')
+
+  # Reported unfiltered and **not** reported through the project's own
+  # configuration: that is an id `deny.toml` ignores, and the only reliable
+  # way to know it without parsing TOML in a shell.
+  accepted=""
+  if [ -f deny.toml ] && ! grep -qx "$id" "$work/kept.ids"; then
+    accepted="$(reason "$id")"
+    [ -n "$accepted" ] || accepted="accepted in deny.toml"
+  fi
+
+  was_at_base=false
+  grep -qx "$id" "$work/base.ids" 2>/dev/null && was_at_base=true
+
+  jq -cn --arg id "$id" --arg kind "$kind" --arg where "$where" \
+     --arg via "$via" --arg fix "$fix" --arg accepted "$accepted" \
+     --argjson was_at_base "$was_at_base" \
+     '{id:$id, kind:$kind, where:$where, via:$via, fix:$fix,
+       accepted:$accepted, was_at_base:$was_at_base}'
+done
+
+# --- secrets ---------------------------------------------------------------
+#
+# A secret has no `fix` and no `via`: it is revoked, not upgraded, and nothing
+# brought it in but the commit that wrote it. `nunki` stops on one and hands it
+# to a human, because no action of an agent closes it — removing it in a later
+# commit leaves it in the branch's history, and nunki rewrites none.
+#
+# `--no-ignore-tag` is a rule and not a setting. trufflehog's own exception is
+# a `trufflehog:ignore` comment **in the source line**, which the agent edits
+# legitimately: without this flag it could silence its own secret with six
+# characters. Everything is reported, and what is accepted is decided outside
+# the container.
+leaks="$work/leaks.jsonl"
+# The whole repository's history, wherever in it this stack lives.
+trufflehog git "file://$(git rev-parse --show-toplevel)" --json --no-update --no-ignore-tag \
+  > "$leaks" 2>/dev/null || true
+
+# What a human has already ruled is not a secret. It comes from the project's
+# HQ, mounted read-only: declared out of the agent's reach, readable by it all
+# the same. Absent, nothing is accepted — and absent means absent, because the
+# path is not one the agent could create (SPEC 4.4, gate 8).
+#
+# An exact match on the first field, because a prefix match reads the ruling
+# for `…:src/a.rs:Postgres:10` as the ruling for `…:src/a.rs:Postgres:1`, and
+# because a file path carries regex metacharacters a pattern would read.
+reason_for() {
+  [ -f "$secrets" ] || return 0
+  awk -v id="$1" '
+    /^[[:space:]]*#/ { next }
+    $1 == id { $1 = ""; sub(/^[[:space:]]+/, ""); print; exit }
+  ' "$secrets"
+}
+
+while IFS= read -r line; do
+  [ -n "$line" ] || continue
+  printf '%s' "$line" > "$work/leak.json"
+  git_meta=$(jq -r '.SourceMetadata.Data.Git // empty | @json' "$work/leak.json")
+  [ -n "$git_meta" ] || continue
+  commit=$(printf '%s' "$git_meta" | jq -r '.commit // ""')
+  file=$(printf '%s' "$git_meta" | jq -r '.file // ""')
+  ln=$(printf '%s' "$git_meta" | jq -r '.line // 0')
+  rule=$(jq -r '.DetectorName // "secret"' "$work/leak.json")
+  [ -n "$commit" ] && [ -n "$file" ] || continue
+
+  # trufflehog publishes no fingerprint, and a finding must be nameable to be
+  # accepted. Built the way gitleaks built its own, so an exception written
+  # once keeps naming the same thing.
+  id="$commit:$file:$rule:$ln"
+
+  was=false
+  git merge-base --is-ancestor "$commit" "$base" 2>/dev/null && was=true
+
+  jq -cn --arg id "$id" --arg where "$file:$ln" \
+     --arg accepted "$(reason_for "$id")" --argjson was_at_base "$was" \
+     '{id:$id, kind:"secret", where:$where, via:"", fix:"",
+       accepted:$accepted, was_at_base:$was_at_base}'
+done < "$leaks"
+"##;
+
+const RUN_RUST: &str = r#"#!/bin/sh
+# How an application of this stack is started (SPEC 4.2, "les services et le
+# lancement de l'application").
+#
+# `nunki` runs this, detached, from the root of the tree, inside the container
+# of the role that will test or attack the application — before that role is
+# launched. No agent starts the application; this script is how the project
+# says what starting it means.
+#
+# It is called as `run.sh <id>`. Three things it must do, and the first two
+# are how `nunki` knows the application is up at all:
+#
+#  - keep the id on its command line. `nunki` recognises this process by it, and
+#    that is why the command below is **not** `exec`ed: replacing the process
+#    replaces its command line, and the application would be reported as
+#    stopped one second after it started.
+#  - stay in the foreground. A script that forks and exits reports an
+#    application that is not running.
+#  - listen on the address the mission's services can reach, not only on
+#    127.0.0.1, when something outside the container has to reach it.
+#
+# Replace the command below with whatever starting this project means. A
+# project with nothing to start says `run: none` in nunki.yaml instead.
+set -eu
+
+cargo run --release
+"#;
+
+/// The integrator's battery for a Rust project (SPEC 4.4, gate 6 for the
+/// integrator: its system tests, in the system profile).
+///
+/// Shipped by the stack because the gate reads it from there, and a stack that
+/// ships none holds that gate red for a reason no agent is told.
+const SYSTEM_RUST: &str = r##"#!/bin/sh
+# The integrator's battery for a Rust project: its system tests, green, in the
+# system profile (SPEC 4.4, gate 6 for the integrator).
+#
+# `nunki` runs this from the clean copy of HEAD inside the integrator's
+# container, where the mission's services are reachable. The coder's battery
+# (`prepush.sh`) runs where they are not, and so does CI: a system test must
+# therefore never run under a plain `cargo test`, or it goes red in both.
+#
+# The convention that keeps them apart: every system test carries
+#
+#     #[ignore = "system test: needs the services"]
+#
+# A plain `cargo test` skips it and says so; `-- --ignored` below runs those
+# tests and only those. Ignore nothing else: an ignored test that is not a
+# system test would run here and nowhere else.
+#
+# `--tests` leaves the doc-tests out: an `ignore` code block in a doc comment
+# is usually one that does not compile, and `--ignored` would try it.
+#
+# Pointing the tests at the services is the integrator's wiring, committed with
+# them. This script is the stack's: it lives in the project's home and reaches
+# the container read-only, so a project whose system tests need more changes
+# it there, not in a commit.
+set -eu
+
+# Beside the build rather than under /tmp: `target/` is what the copy of HEAD
+# is certain to let an execution write.
+mkdir -p target
+log=target/nunki-system-tests.log
+
+status=0
+cargo test --all-features --tests -- --ignored >"$log" 2>&1 || status=$?
+cat "$log" >&2
+if [ "$status" -ne 0 ]; then
+  exit "$status"
+fi
+
+# A battery that ran nothing proved nothing (SPEC 4.4): no system test is red,
+# not green.
+ran=$(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' "$log" | awk '{ n += $1 } END { print n + 0 }')
+if [ "$ran" -eq 0 ]; then
+  echo "nunki: no system test ran — mark each one #[ignore = \"system test: needs the services\"]" >&2
+  exit 1
+fi
+"##;
+
+/// The coder's image for a Python project: its globals and its first stage,
+/// up to the stage that builds `osv-scanner`.
+///
+/// Two binaries come in pinned rather than through a script nobody reads:
+/// `trufflehog`, which is the same tool the Rust image installs because a
+/// secret has no ecosystem, checksummed; and `osv-scanner`, which
+/// `security.sh` runs offline, built from its tagged source
+/// ([`osv_scanner_stage`]). `uv` is copied out of its own published image,
+/// which pins it by digest without a checksum dance.
+///
+/// The battery's tools — ruff, mypy, pytest, mutmut — are **not** here. They
+/// are the project's, pinned by its lock, for the reason `prepush.sh` gives.
+const DOCKERFILE_PYTHON_HEAD: &str = r##"# The coder's image for a Python project, built by `nunki slot rebuild`.
+#
+# Both `ARG`s are declared before the first `FROM` because that is the only
+# place a build argument is global. Declared after it, `BASE` belongs to the
+# `uv` stage and the `FROM ${BASE}` below reads it as empty — "base name
+# (${BASE}) should not be blank".
+#
+# glibc and not musl, as SPEC 4.2 bis requires of every stack image: the
+# `manylinux` wheels Python ships are glibc, and a musl base sends every
+# dependency without one back to compiling from source.
+ARG UV_VERSION=0.12.17
+# The interpreter the repository's `.python-version` names, passed by nunki at
+# build time from `versions.txt` beside this file (SPEC 4.2). A global `ARG`
+# may build on the one above it: `PYTHON=3.13` gives `Python 3.13.15`.
+ARG PYTHON=3.12
+ARG BASE=python:${PYTHON}-slim-bookworm
+
+FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
+"##;
+
+/// The Python image from its base on, once the stages above it are declared.
+const DOCKERFILE_PYTHON_BASE: &str = r##"
+FROM ${BASE}
+
+# Passed by nunki at build time: the human's own ids, so that what the agent
+# writes belongs to the human on the host.
+ARG UID=1000
+ARG GID=1000
+
+# `upgrade`, and not only `update`. The packages inherited from the base tag
+# keep the versions that tag was cut with, so a security fix Debian published
+# since would never reach a freshly built image — pulling the tag again does
+# not help while the tag itself has not been rebuilt. The Rust image carries
+# the same line, and its comment gives an example.
+RUN apt-get -qq update \
+ && apt-get -qq -y upgrade \
+ && apt-get -qq install --no-install-recommends -y \
+      ca-certificates curl git build-essential pkg-config tmux jq \
+ && rm -rf /var/lib/apt/lists/*
+
+# `trufflehog` is what finds the secrets gate 8 reports (SPEC 4.4). It is not
+# a stack fragment but a tool of the scan itself — the same for Rust, Python or
+# Next.js, since a secret has no ecosystem — and it enters here, at build time
+# on the host, never downloaded from inside an agent's container.
+#
+# Pinned and checked against the checksums its release publishes: a binary
+# nobody verifies is a dependency nobody reviewed (section 7). Raising the
+# version means raising the two sums with it, and the build fails loudly if
+# they disagree.
+ARG TRUFFLEHOG=3.97.5
+RUN set -eu; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) arch=amd64; sum=e3d97199c565c37ca6152750197f667e08ae6a1edf5911fbdec168622b28620c ;; \
+      arm64) arch=arm64; sum=e5c8b2418b0a7c78cf4c47ac783c52c63f989e4e536cfe328b5271e819b6d52d ;; \
+      *) echo "trufflehog ships no build for $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /tmp/trufflehog.tgz \
+      "https://github.com/trufflesecurity/trufflehog/releases/download/v${TRUFFLEHOG}/trufflehog_${TRUFFLEHOG}_linux_${arch}.tar.gz"; \
+    echo "${sum}  /tmp/trufflehog.tgz" | sha256sum -c -; \
+    tar -xzf /tmp/trufflehog.tgz -C /usr/local/bin trufflehog; \
+    rm /tmp/trufflehog.tgz; \
+    trufflehog --version
+
+# `osv-scanner` is this stack's dependency audit, and it is here rather than
+# in the project's lock for the reason cargo-deny is in the Rust image: what
+# judges the agent is not the agent's to weaken. It reads a database the host
+# fills and nunki mounts read-only, and it needs no network to do it —
+# measured on 2.6.0, and on 2.7.0 as built above, with `--network none`,
+# against a read-only copy.
+"##;
+
+/// What the stage that builds `osv-scanner` is called in the Python image and
+/// its add-on, and in the Next.js ones. One name per stack, so an image that
+/// carries both — Python added onto Next.js, or both onto Rust — never
+/// declares one stage twice; and the same name in a stack's own image and in
+/// its add-on, so the two share their text byte for byte.
+const OSV_STAGE_PYTHON: &str = "nunki-python-osv-scanner";
+const OSV_STAGE_NEXT: &str = "nunki-next-osv-scanner";
+
+/// The stage that builds `osv-scanner` from its tagged source, named `stage`:
+/// one text for every image that carries it — a stack's own, and the add-on
+/// another stack's image receives (SPEC 4.2, "plusieurs stacks").
+///
+/// Built rather than downloaded because a release carries the Go it was built
+/// with, and the image scan reads that Go's advisories as the image's own.
+/// Measured on 2.7.0: the released binary reads go1.27.0 and trivy 0.74.0
+/// finds four high advisories with fixes in it; this stage's reads go1.27.3
+/// and golang.org/x/net v0.61.0, and trivy finds none.
+fn osv_scanner_stage(stage: &str) -> String {
+    format!(
+        r##"
+# `osv-scanner`, built from its tagged source rather than downloaded. A
+# release carries the Go it was built with, and 2.7.0's is 1.27.0, whose
+# standard library the image scan reports four high advisories against, each
+# with a fix (CVE-2026-78667, -78669 and -97031 in 1.27.2, CVE-2026-111943
+# in 1.27.3). Built with a Go that carries them, the binary carries none.
+#
+# `go install` checks every module it fetches against Go's checksum
+# database, which is what a release's SHA256SUMS were checked for.
+# `GOTOOLCHAIN=local` keeps this image's Go: a module asking for a newer one
+# would otherwise download it, advisories and all. `CGO_ENABLED=0` makes the
+# binary static, so it runs on any base. Raising Go is raising the tag below;
+# raising osv-scanner is raising `OSV_SCANNER`.
+FROM golang:1.27.3-bookworm AS {stage}
+ARG OSV_SCANNER=2.7.0
+RUN CGO_ENABLED=0 GOTOOLCHAIN=local GOBIN=/out \
+    go install -trimpath -ldflags='-s -w' \
+      github.com/google/osv-scanner/v2/cmd/osv-scanner@v${{OSV_SCANNER}}
+"##
+    )
+}
+
+/// The dependency audit gate 8 runs for Python and Next.js, copied out of the
+/// stage [`osv_scanner_stage`] named `stage` built, and run once so a binary
+/// that cannot start fails the build rather than the gate.
+fn osv_scanner_install(stage: &str) -> String {
+    format!(
+        "COPY --from={stage} /out/osv-scanner /usr/local/bin/osv-scanner\n\
+         RUN osv-scanner --version\n"
+    )
+}
+
+const DOCKERFILE_PYTHON_USER: &str = r##"
+# From the image astral publishes rather than `curl | sh`: the tag pins it,
+# and nothing is fetched by a script at build time.
+COPY --from=uv /uv /uvx /usr/local/bin/
+
+# The group may already exist under that id (on macOS, gid 20 is `dialout`
+# here); either way the agent ends up in it.
+RUN groupadd -g ${GID} agent || true \
+ && useradd -m -u ${UID} -g ${GID} -s /bin/bash agent
+
+# Mount points, created by root because they sit at the filesystem root, then
+# handed to the agent: a named volume mounted over a root-owned directory is
+# born root-owned, and the toolchain cannot write in it (SPEC 4.2 bis). The
+# agent cannot create them itself — it is not root, which is the point.
+RUN mkdir -p /work/tree /work/mission /run/nunki \
+ && chown -R ${UID}:${GID} /work /run/nunki
+
+USER agent
+"##;
+
+/// What the agent runs Python with: shared by the Python image and the
+/// Python add-on, so the two cannot drift.
+const PYTHON_AGENT: &str = r##"
+# `UV_PYTHON_DOWNLOADS=never` is a perimeter rule, not a preference: without
+# it `uv` fetches an interpreter from a forge the coder's allowlist does not
+# name (SPEC 4.1 bis, rule 6), and the failure would read as a flaky network
+# rather than as the rule it is. The base image's Python is the one this
+# stack runs.
+#
+# `UV_LINK_MODE=copy` because the cache is a named volume and the tree is a
+# bind mount: hardlinking across the two filesystems cannot work, and uv
+# warns and falls back on every sync without it.
+ENV UV_PYTHON_DOWNLOADS=never \
+    UV_LINK_MODE=copy \
+    UV_CACHE_DIR=/home/agent/.cache/uv \
+    PATH=/home/agent/.local/bin:${PATH}
+
+RUN mkdir -p /home/agent/.cache/uv /home/agent/.harness
+"##;
+
+/// The coder's image for a Python project.
+fn dockerfile_python() -> String {
+    [
+        DOCKERFILE_PYTHON_HEAD,
+        &osv_scanner_stage(OSV_STAGE_PYTHON),
+        DOCKERFILE_PYTHON_BASE,
+        &osv_scanner_install(OSV_STAGE_PYTHON),
+        DOCKERFILE_PYTHON_USER,
+        PYTHON_AGENT,
+    ]
+    .concat()
+}
+
+/// The battery for a Python project (SPEC 4.4, gate 6).
+///
+/// Its tools are the project's own rather than the image's, which is the one
+/// place this stack departs from Rust's — and the script says why.
+const PREPUSH_PYTHON: &str = r##"#!/bin/sh
+# The battery for a Python project: what must be silent before anything
+# leaves a slot (SPEC 4.4).
+#
+# The tools are the **project's own**, declared in its `pyproject.toml` and
+# pinned by its lock, not installed in the image. This is where this stack
+# departs from Rust's, and the reason is that a tool in the image and a tool
+# in the lock drift apart: the battery a human runs and the battery the gate
+# runs would then be two different batteries, and the second one is the one
+# that decides. `uv sync --frozen` below is what makes them one.
+#
+# A project that declares none of them fails here, with the names of what is
+# missing and the command that adds them. That failure is an agent's to
+# repair — `pypi.org` is on the coder's allowlist, so adding a development
+# dependency is work it can do. The Rust battery's equivalent hole is not:
+# `cargo-deny` lives in an image no agent can reach, and a coder can only
+# diagnose that, never repair it.
+#
+# **A known absence.** Rust's battery also runs `cargo deny check bans
+# licenses sources` — three stages that need no network. This stack checks no
+# licence: `osv-scanner --licenses` resolves through deps.dev, which the
+# coder's allowlist does not name, and there is no offline equivalent to put
+# here. Said rather than left out, so that a reader does not take a passing
+# battery for a licence that was checked.
+set -eu
+
+uv sync --frozen --all-groups
+
+missing=""
+for tool in ruff mypy pytest; do
+  uv run --frozen --no-sync "$tool" --version >/dev/null 2>&1 || missing="$missing $tool"
+done
+if [ -n "$missing" ]; then
+  echo "nunki: this stack's battery needs$missing, which this project does not declare." >&2
+  echo "nunki: add them where the lock can pin them: uv add --dev$missing" >&2
+  exit 1
+fi
+
+# `mutants/` is excluded from all three, and it is not housekeeping.
+#
+# Gate 7's campaign runs `mutmut` in this very copy of HEAD, and mutmut
+# copies the whole tree into `mutants/` before it generates anything. That
+# directory is ignored by git, so the `git clean -fd` `nunki exec` performs
+# leaves it exactly where it is — and the next battery then type-checks two
+# copies of every module:
+#
+#   error: Duplicate module named "pygrep"
+#          (also at "./mutants/src/pygrep/__init__.py")
+#
+# Without the exclusion, gate 6 is green before the campaign and red after
+# it, on a tree the coder has not touched, and nunki opens a volet sending
+# the agent to repair code that was never broken. The first campaign of a
+# project would poison every battery after it.
+#
+# `ruff` reads `.gitignore` and had skipped it already; it is named here
+# anyway, because a project that does not ignore `mutants/` fails for the
+# same reason, and the directory is the stack's own doing — `writable.txt`
+# names it.
+#
+# **Every** tool that walks the tree, and the list is the point: excluding
+# it from ruff and mypy alone leaves pytest to collide on the same copy one
+# command further down —
+#
+#   import file mismatch: imported module 'test_pygrep' has this __file__
+#   attribute: /work/proof/mutants/tests/test_pygrep.py
+#
+# — and the battery is red again, for a second reason wearing the same exit
+# status. A directory this tree carries and this stack put there has to be
+# taken out of every walk, not out of the ones that happen to fail first.
+uv run --frozen --no-sync ruff format --check --exclude mutants .
+uv run --frozen --no-sync ruff check --exclude mutants .
+uv run --frozen --no-sync mypy --exclude '^mutants/' .
+
+# `-m "not system"` is the counterpart of Rust's `#[ignore]` convention: a
+# system test needs the mission's services, which are not up here, and it
+# would go red in this battery and in CI alike. `system.sh` runs those, and
+# only those. Register the marker in `pyproject.toml` so an unmarked typo is
+# not silently deselected:
+#
+#     [tool.pytest.ini_options]
+#     markers = ["system: needs the mission's services"]
+uv run --frozen --no-sync pytest --ignore=mutants -m "not system"
+"##;
+
+/// The mutation campaign a Python project runs (SPEC 4.4, gate 7): declared
+/// by the stack, launched by `nunki`, and — living in the project's home,
+/// mounted read-only — not an agent's to weaken while it is being gated by it.
+///
+/// Checked against mutmut 3.8.0 before it shipped, as the Rust fragment
+/// was: `mutmut run` takes glob patterns over mutant names and refuses
+/// patterns that match nothing, and a function no test covers comes back
+/// `no tests` rather than `survived` — so a campaign that reads only
+/// "survived" calls untested code green.
+const MUTATION_PYTHON: &str = r##"#!/bin/sh
+# The mutation campaign for a Python project (SPEC 4.4, gate 7).
+#
+# `nunki` calls this as `mutation.sh <campaign-id> <path>...`, from the clean
+# copy of HEAD inside the slot's container. The id comes first so the campaign
+# is identifiable from its own command line; this script does not need it.
+#
+# The next line tells `nunki` how to read the tool's version (SPEC 4.4, the
+# chain of campaigns). A later campaign of a `standard` mission covers only
+# what changed since the previous one, and only when this script and that
+# version are what the previous one ran with; without the line, every
+# campaign is full.
+# nunki-tool-version: uv run --frozen --no-sync python -c "import importlib.metadata as m; print('mutmut', m.version('mutmut'))"
+#
+# It prints **one JSON object per line** on stdout, one per surviving mutant:
+#   {"id":"…","file":"…","line":12,"end_line":12,"description":"…"}
+# `end_line` is the last line of the code the mutation replaces: the diff
+# mutmut shows removes that code, one `-` line per line of it. 0 when the
+# removed lines are not one run — a span nobody knows, which no ruling is
+# tied to.
+# and, last of all and exactly once, the line that says it got to the end:
+#   {"campaign":"done"}
+# with **no** `tried` and no `found`. A `standard` mission's gate 7 divides
+# the killed mutants by `tried`, and the share means something only over the
+# lines this branch changed (SPEC 4.4). mutmut tests the touched files'
+# mutants (see below), but every one of each file's, so whatever this
+# script could count would be over whole files: a well-tested file would
+# hide the new untested lines in it. Without a count `nunki` judges gate 7 as
+# `critical` does — an outcome for every survivor — which the survivors,
+# filtered to the touched files, can carry. A branch that touched nothing
+# mutable is the one exact count this script has, and says `tried` 0.
+# For the same reason it gives no per-file counts and never says `by_file`:
+# a campaign after one of this stack's is always full, never rebuilt from
+# counts nobody made (SPEC 4.4, the chain of campaigns).
+# `nunki` reads no other line as a result, so progress may go to stdout freely —
+# though this script keeps the tool's own chatter on stderr. A campaign that
+# stops before that last line has measured nothing, whatever else it printed.
+set -eu
+
+campaign="$1"
+shift
+
+# `mutants/` is cleared however this script leaves, and not only when it
+# reaches the end. It is a copy of the tree: untracked, gitignored nowhere,
+# and written by this script rather than by the agent. Left behind, **gate 1
+# reads it as the agent's own uncommitted change** — a red clean-tree gate
+# for a directory the agent never created and, with `.gitignore` outside a
+# mission's perimeter, cannot ignore either.
+#
+# A campaign that dies during mutmut's baseline collection leaves `mutants/`
+# behind, and the next gate run comes back "the tree holds 1 uncommitted
+# change(s): ?? mutants/".
+#
+# A trap, and set before anything can create the directory, because the exits
+# that matter are the early ones — `set -eu` leaves through most of them. It
+# is still not a guarantee: a campaign that is *killed* runs no trap, and one
+# often is, the deadline being 45 minutes. What covers that is the `rm -rf`
+# further down, which clears the previous campaign's copy before this one
+# runs, and the battery excluding the directory for the same reason.
+#
+# It is also everything mutmut leaves per mutant (SPEC 4.4, the build cache
+# a campaign leaves as it found it): each mutant lives in that copy's
+# sources, its result in the copy's `.meta` files, and pytest's caches for it
+# under the copy too, since mutmut runs the tests from there. Nothing goes
+# into the project's own tree or `.venv`, which `uv sync --frozen` keeps to
+# the lockfile. Clearing `mutants/` is the whole of the cleaning.
+trap 'rm -rf mutants' EXIT
+
+# Only Python sources are worth mutating; the touched list holds whatever the
+# branch touched.
+#
+# Test files are left out, the way the Next.js fragment leaves its own out: a
+# mutated test proves nothing about the code. It is not a nicety here — mutmut
+# mutates what `source_paths` names and not what it is handed, so a branch
+# that touched only tests would leave nothing to mutate, and mutmut answers
+# that with `Stopping early, because we could not find any test case for any
+# mutant` and a non-zero status. `nunki` reads that as a campaign that could
+# not run, and gate 7 asks for ever.
+#
+# pytest's own shapes, and no others: anything under a `tests/` directory, a
+# `test_*.py`, a `*_test.py`, and `conftest.py`.
+files=""
+for path in "$@"; do
+  case "$path" in
+    tests/*|*/tests/*) continue ;;
+    test_*.py|*/test_*.py) continue ;;
+    *_test.py) continue ;;
+    conftest.py|*/conftest.py) continue ;;
+  esac
+  case "$path" in
+    *.py) files="$files $path" ;;
+  esac
+done
+# Nothing this branch touched is mutable, so there are no mutants and no
+# survivors — and that is a measurement, not a campaign that failed to
+# happen. The terminal line is printed **before** leaving, because `nunki`
+# reads its absence as a campaign that was killed and asks for another:
+# a branch touching only tests or documentation would be asked for ever.
+# Said from two places: here, for a branch that touched no Python source,
+# and after mutmut, for one whose touched sources hold no mutant.
+nothing_mutable() {
+  printf '{"campaign":"done","tried":0,"found":0}\n'
+  exit 0
+}
+if [ -z "$files" ]; then
+  nothing_mutable
+fi
+
+# The campaign runs the **whole** suite in its copy, and this stack's system
+# tests are the ones `prepush.sh` deselects with `-m "not system"`: they reach
+# services, and neither the coder's profile nor this campaign carries any.
+# mutmut drives pytest itself and takes no flag for it — measured on 3.8.0,
+# `mutmut run` accepts `--max-children` and nothing else — so the deselection
+# goes through pytest's own environment variable, which it honours wherever it
+# is invoked from.
+#
+# Set before anything runs, because what it protects is collection. Without
+# it the campaign dies there, and what it leaves behind is the driver's
+# connection error and "the campaign could not run" — true, unhelpful, and
+# three layers away from the cause — typically a system test that opens a
+# database.
+export PYTEST_ADDOPTS="${PYTEST_ADDOPTS:+$PYTEST_ADDOPTS }-m \"not system\""
+
+# How many mutants run at once: the project's `mutation_jobs`, which `nunki`
+# hands over in `NUNKI_MUTATION_JOBS`, passed as mutmut's own
+# `--max-children` — the one option `mutmut run` takes (measured on 3.8.0).
+# It is safe: mutmut already runs its mutants in forked children, and the
+# setting only caps how many; not run against a real mutmut when it was
+# added, as none was at hand. Without the variable — a run by hand — nothing
+# is passed and mutmut keeps its own default, as it always has. A value that
+# is not a whole number of at least 1 is refused rather than handed to the
+# tool.
+children=""
+if [ -n "${NUNKI_MUTATION_JOBS:-}" ]; then
+  case "$NUNKI_MUTATION_JOBS" in
+    *[!0-9]*|0*)
+      echo "nunki: NUNKI_MUTATION_JOBS is a whole number of at least 1, and $NUNKI_MUTATION_JOBS is not" >&2
+      exit 1
+      ;;
+  esac
+  children="--max-children $NUNKI_MUTATION_JOBS"
+fi
+
+uv sync --frozen --all-groups >&2
+if ! uv run --frozen --no-sync mutmut --version >/dev/null 2>&1; then
+  echo "nunki: this stack's campaign needs mutmut, which this project does not declare." >&2
+  echo "nunki: add it where the lock can pin it: uv add --dev mutmut" >&2
+  exit 1
+fi
+
+# Cleared before the run, and for the reason the Rust fragment's own comment
+# records: it is a campaign that **cannot** run that lies. One that runs and
+# fails leaves its own empty answer, which is the truth; one that dies before
+# writing anything leaves the previous campaign's, on code that has changed
+# since — and a replay of the same fingerprint reaches exactly that path.
+rm -rf mutants
+
+# mutmut still mutates every file under its `source_paths`, but it **tests**
+# only the mutants its arguments name. Those are glob patterns over mutant
+# names, not exact names: measured on 3.8.0, `mutmut run "<module>.*"`
+# tested one module's 1,642 mutants out of a project's 13,733, left the
+# others `not checked`, ran only the tests that reach them, and found the
+# same survivors in that module as a full run. The names given without a `*`
+# — a module, a function prefix, a file path — match nothing, which is what
+# an earlier draft measured before concluding that mutmut could not be told
+# to do less.
+#
+# `only_mutate`, the other restriction it offers, lives in the project's own
+# `pyproject.toml`, and this script will not rewrite that file. The clean copy
+# of HEAD is where gate 6's battery runs too, and `nunki exec` resets it
+# between calls: a campaign that edits the project's configuration there
+# either races the battery or measures a project that does not exist.
+#
+# A mutant's name is its file's dotted path, the function, and a number:
+# `src/pkg/mod.py` gives `pkg.mod.x_total__mutmut_3`, a method
+# `pkg.mod.xǁCartǁadd__mutmut_1`. mutmut drops the `.py`, a leading `src.`
+# and an `.__init__`, so a package's own code is named after the package, and
+# every function and method starts with an `x`. So each touched file gives
+# `<dotted path>.x*`, which takes all of its mutants. For a package it also
+# takes those of a submodule whose name starts with an `x`: more campaign
+# time, never a wrong answer, since the survivors below are read from the
+# touched files' own records.
+#
+# The patterns go to mutmut as arguments, never through the shell's globbing.
+set --
+for path in $files; do
+  module="${path#./}"
+  module="$(printf '%s' "${module%.py}" | tr / .)"
+  module="${module#src.}"
+  case "$module" in
+    *.__init__) module="${module%.__init__}" ;;
+  esac
+  set -- "$@" "$module.x*"
+done
+
+# Its status is the discriminator here, and it is not cargo-mutants'.
+# Measured on 3.8.0: `mutmut run` exits **0** whether every mutant was killed
+# or two survived, and **1** when it could not run at all — a source file it
+# cannot parse raises `InvalidGeneratedSyntaxException` before a single
+# mutant is tested. So the status is not swallowed, where the Rust fragment
+# swallows cargo-mutants' (which answers 2 for "there are survivors").
+#
+# The existence of `mutants/` is no guard: mutmut copies the tree into it
+# *before* it generates anything, so the directory is there even when the
+# campaign died on the first file. Taken as a guard, it lets the script print
+# `{"campaign":"done"}` with no survivor — gate 7 green on nothing,
+# which is the one failure this contract exists to prevent.
+#
+# One failure is a measurement: patterns that match no mutant at all.
+# mutmut refuses them — "Filtered for specific mutants, but nothing
+# matches", status 1 — when every touched file is one it made no mutant in:
+# a module of constants, an `__init__.py` of imports, a script outside
+# `source_paths`. That is a branch with nothing mutable, and saying it could
+# not run would have gate 7 ask for ever. It is told from a real failure by
+# what mutmut left, not by its message: `mutants/mutmut-stats.json` is
+# written once every file is generated and the tests have run, just before
+# the patterns are matched (3.8.0), and each mutated file's record,
+# `mutants/<path>.meta`, names every mutant made in it. With the first
+# there and no touched file's record naming one, there was nothing to test.
+# Anything else — a record that cannot be read among them — is a campaign
+# that could not run.
+# shellcheck disable=SC2086
+if ! uv run --frozen --no-sync mutmut run $children "$@" >&2; then
+  # shellcheck disable=SC2086
+  if [ -f mutants/mutmut-stats.json ] && python3 - $files <<'PY'
+import json
+import sys
+
+for path in sys.argv[1:]:
+    path = path[2:] if path.startswith("./") else path
+    try:
+        with open("mutants/" + path + ".meta") as stream:
+            record = json.load(stream)
+    except FileNotFoundError:
+        continue
+    if record["exit_code_by_key"]:
+        sys.exit(1)
+PY
+  then
+    nothing_mutable
+  fi
+  echo "nunki: the campaign could not run, so no mutant was tested" >&2
+  exit 1
+fi
+
+# `mutmut results` says `<name>: <status>`, and `mutmut show <name>` prints a
+# unified diff carrying the file and the line. Read with python rather than
+# with sed because the diff has to be counted, not matched — and because the
+# interpreter is the one tool this stack is certain to have.
+#
+# Which mutants are the touched files' is read from mutmut's record of each
+# file, `mutants/<path>.meta`, which names every mutant made in it, and only
+# those are shown. Not from `mutmut show` itself, one process per mutant:
+# `results` also lists every untouched file's mutant, `not checked` after a
+# filtered run, and a project of 13,733 mutants had 12,091 of them.
+#
+# Under `set -e`, a failure here ends the script **before** the terminal line,
+# which is what it should do: results nobody could read are not a measurement.
+# shellcheck disable=SC2086
+python3 - $files -- "$@" <<'PY' || exit 1
+import fnmatch
+import json
+import re
+import subprocess
+import sys
+
+cut = sys.argv.index("--")
+touched = {p[2:] if p.startswith("./") else p for p in sys.argv[1:cut]}
+patterns = sys.argv[cut + 1 :]
+
+# What counts as answered. Everything else — `survived`, but also `no tests`,
+# `not checked`, `timeout`, `suspicious`, `segfault` — is a mutant nothing
+# proved dead, and gate 7 exists to make a human say so. `no tests` and
+# `not checked` are the ones that matter most: they are code no test reaches,
+# and a campaign that read only `survived` would report them green.
+ANSWERED = {"killed", "caught by type check", "skipped"}
+
+# A mutant's name: anything but whitespace, then `__mutmut_` and a number.
+# Not narrower, because a method's name carries mutmut's own separator —
+# `pkg.mod.xǁCartǁadd__mutmut_2`, measured on 3.8.0 — and an identifier may
+# hold any Unicode letter. A pattern of ASCII letters read every method's
+# survivor as a line that was not a result: one survivor of a file's seven
+# reached gate 7, and the other six were green on nothing.
+NAME = re.compile(r"^\S+__mutmut_[0-9]+$")
+
+
+def mutmut(*args):
+    done = subprocess.run(
+        ["uv", "run", "--frozen", "--no-sync", "mutmut", *args],
+        capture_output=True,
+        text=True,
+    )
+    if done.returncode != 0:
+        sys.exit("nunki: mutmut {} failed:\n{}".format(" ".join(args), done.stderr[-800:]))
+    return done.stdout
+
+
+def where(diff):
+    """The file, and the line **of that file**, a mutmut diff changed.
+
+    The diff's own hunk header counts from the start of the mutated
+    function, not of the file: measured on 3.8.0, a `return` on line 8 of a
+    two-function module came back as `@@ -1,4 +1,4 @@` line 4. Reported as
+    it stands, it sends the coder to a blank line — so the function's own
+    first line is found in the file and the offset added to it.
+    """
+    path = None
+    started = False
+    within = 0
+    head = ""
+    removed = ""
+    removed_raw = ""
+    added = ""
+    at = None
+    gone = []
+    # Each hunk counts its own lines from its own first line: the position,
+    # and the function's first line it is counted from, start again at every
+    # `@@` until the hunk holding the first removed line has been read. A
+    # removal in a later hunk makes the span unknown rather than mixing two
+    # counts.
+    hunks = 0
+    first = None
+    for text in diff.splitlines():
+        if text.startswith("--- "):
+            path = text[4:].strip()
+        elif text.startswith("@@"):
+            started = True
+            hunks += 1
+            within = 0
+            if at is None:
+                head = ""
+        elif started:
+            if at is None and not head and text[:1] in (" ", "-"):
+                head = text[1:]
+            if text.startswith("-"):
+                if at is None:
+                    removed_raw = text[1:]
+                    removed = removed_raw.strip()
+                    at = within + 1
+                    first = hunks
+                gone.append((hunks, within + 1))
+            elif text.startswith("+") and not added and first in (None, hunks):
+                added = text[1:].strip()
+            if text[:1] in (" ", "-"):
+                within += 1
+    # How many lines the mutation replaced: the removed lines, when they are
+    # one run in one hunk; 0 when they are not, which says the span is not
+    # known.
+    lines = [n for hunk, n in gone if hunk == first]
+    one_run = lines == list(range(at, at + len(lines))) if lines else False
+    span = len(lines) if one_run and len(lines) == len(gone) else 0
+    if path is None or at is None:
+        return path, None, removed, added, span
+    return path, in_file(path, head, at, removed_raw), removed, added, span
+
+
+def in_file(path, head, at, removed_raw):
+    """`at`, counted from the function, turned into a line of the file.
+
+    The function's signature is looked for, and the candidate kept is the one
+    whose `at`-th line really is the line the diff removed. A file with the
+    same signature twice — an overload, a method of two classes — is why the
+    text is checked rather than the first match taken.
+
+    A method comes back **dedented**: mutmut prints it as a function of its
+    own, so every line of its diff has lost the class body's indentation —
+    measured on 3.8.0, `def add(self, price):` for a method the file indents
+    by four spaces. So the lines are looked for behind each indentation the
+    file holds, none first: a top-level function is found exactly as before.
+    """
+    try:
+        with open(path) as stream:
+            lines = stream.read().splitlines()
+    except OSError:
+        return None
+
+    def behind(indent, text):
+        return indent + text if text.strip() else text
+
+    indents = sorted({text[: len(text) - len(text.lstrip())] for text in lines}, key=len)
+    guess = None
+    for indent in indents:
+        starts = [i for i, text in enumerate(lines) if text == behind(indent, head)]
+        for start in starts:
+            line = start + at
+            if 0 < line <= len(lines) and lines[line - 1] == behind(indent, removed_raw):
+                return line
+        if guess is None and starts:
+            guess = starts[0] + at
+    return guess
+
+
+# The touched files' mutants, each with its file. A touched file without a
+# record is one mutmut made no mutant in: outside `source_paths`, or one its
+# configuration leaves out.
+mine = {}
+for path in sorted(touched):
+    try:
+        with open("mutants/" + path + ".meta") as stream:
+            keys = json.load(stream)["exit_code_by_key"]
+    except FileNotFoundError:
+        continue
+    # mutmut records each result under the mutant's name less any
+    # `__init__.`. For a module whose own name is `__init__` — code in
+    # `src/__init__.py` — that is a second key of the same record, measured
+    # on 3.8.0: `x_top__mutmut_1: no tests` beside a
+    # `__init__.x_top__mutmut_1` left `not checked`. Both are read, as they
+    # were before the campaign was filtered; the copy is no pattern's to take.
+    copies = {key.replace("__init__.", "") for key in keys if "__init__." in key}
+    for key in keys:
+        # The patterns are this script's reading of how mutmut names a
+        # mutant. A touched file's mutant none of them takes was never tested,
+        # and is refused here rather than reported `not checked`: the coder
+        # would be asked to answer for a mutant nothing ran.
+        if key not in copies and not any(fnmatch.fnmatch(key, pattern) for pattern in patterns):
+            sys.exit("nunki: no pattern of {} takes {}, a mutant of {}, so it was never tested".format(patterns, key, path))
+        mine[key] = path
+
+survivors = []
+for text in mutmut("results").splitlines():
+    if not text.strip():
+        continue
+    name, _, status = text.strip().rpartition(":")
+    name, status = name.strip(), status.strip()
+    # Refused rather than skipped: skipping a line this script could not read
+    # is how the methods' survivors went unseen. `mutmut results` prints
+    # nothing else on stdout (3.8.0), so a line that is not a result is a
+    # tool that changed, and a campaign that cannot read it measured nothing.
+    if not NAME.match(name):
+        sys.exit("nunki: mutmut results printed a line this campaign cannot read: {!r}".format(text))
+    if status in ANSWERED or name not in mine:
+        continue
+    survivors.append((name, status))
+
+for name, status in survivors:
+    path, line, removed, added, span = where(mutmut("show", name))
+    # Loudly, rather than a survivor with an empty file: a line nunki cannot
+    # place is a line the coder cannot answer, and printing it anyway would
+    # spend the triage on nothing.
+    if path is None or line is None:
+        sys.exit("nunki: mutmut show {} named no file".format(name))
+    # And loudly when the diff names another file than the record the mutant
+    # was read from: dropped, it would be a touched file's survivor gone.
+    if path != mine[name]:
+        sys.exit("nunki: mutmut show {} named {}, and its record is {}'s".format(name, path, mine[name]))
+    what = status if not removed else "{}: {} -> {}".format(status, removed, added)
+    end = line + span - 1 if span else 0
+    print(json.dumps({"id": name, "file": path, "line": line, "end_line": end, "description": what}))
+PY
+
+# Behind itself, once the survivors have been read out of it. A courtesy
+# and not a guard: a campaign that is killed — and one often is, the
+# deadline is 45 minutes — never reaches this line, which is why the
+# battery excludes the directory rather than trusting it to be gone.
+rm -rf mutants
+
+# The last thing it prints, and the only line that says the campaign got to
+# the end. Without it `nunki` cannot tell "no survivor" from "no answer": a
+# campaign killed halfway, one whose container went away and one that never
+# imported leave a log that parses to zero survivors — and gate 7 would go
+# green on a measurement nobody made.
+#
+# A line and not an exit status, because the status does not survive. The
+# spawner `exec`s the command so that the pid it published is the campaign's
+# own, and a shell that has been replaced cannot write `$?`. A truncated log
+# loses its last line, which is this one, so the three failures fail alike.
+printf '{"campaign":"done"}\n'
+"##;
+
+/// The mechanical security of a Python project (SPEC 4.4, gate 8): the
+/// dependency audit and the secret scan. Like the campaign, it is declared by
+/// the stack, launched by `nunki`, and mounted read-only — what judges the
+/// agent is not the agent's to weaken.
+///
+/// Checked against osv-scanner 2.6.0 before it shipped, and again on 2.7.0
+/// as [`osv_scanner_stage`] builds it, against a `uv.lock` holding
+/// `requests` 2.19.0:
+/// `--offline --offline-vulnerabilities` really does run with no network at
+/// all, against a **read-only** database; there is no `--local-db-path`, so
+/// `XDG_CACHE_HOME` is the only way to say where it is; and the finding to
+/// report is the **group**, not the vulnerability — reading the latter
+/// reports one advisory twice, once as PYSEC and once as GHSA (2.7.0: ten
+/// vulnerabilities, five groups). The script's two other measurements held
+/// on 2.7.0 as well: the tree's `osv-scanner.toml` is loaded with no
+/// `--config` ("Loaded filter from: /w/osv-scanner.toml"), and an ignore
+/// written against GHSA-x84v-xcm2-53pg filtered the whole PYSEC-2018-28
+/// group, while `--config` with an empty file kept all five.
+const SECURITY_PYTHON: &str = r##"#!/bin/sh
+# The mechanical security of a Python project (SPEC 4.4, gate 8).
+#
+# `nunki` calls this as `security.sh <base-commit> [advisory-db] [mission-dir]
+# [secrets-file]`, from the clean copy of HEAD inside the slot's container. A
+# commit and not a branch name: the copy is a detached clone and carries no
+# branch, so a name would resolve to nothing. It prints **one JSON object per
+# line** on stdout, one per finding:
+#
+#   {"id":"…","kind":"…","where":"…","via":"…","fix":"…",
+#    "accepted":"…","was_at_base":false}
+#
+# `nunki` reads those seven fields and nothing else — it knows no tool, no
+# lockfile and no advisory database. Anything that is not one of these lines
+# is ignored, so progress may go to stdout freely, though this script keeps
+# its chatter on stderr.
+#
+# SPEC 4.4 gives gate 8 three families: the dependency audit (`osv-scanner`),
+# the secret scan (`trufflehog`), and the static analysis — which is `ruff`,
+# already run by the battery at gate 6, so nothing here repeats it.
+set -eu
+
+base="${1:?usage: security.sh <base-commit> [advisory-db] [mission-dir] [secrets]}"
+# Second argument and not an environment variable: the agent owns its own
+# environment inside the container, and a variable would let it point this at
+# an empty directory — no findings, and a green gate. `nunki` is what invokes
+# the gate, so `nunki` is what says where the database is.
+db="${2:-/nunki/advisories}"
+mission="${3:-/work/mission}"
+secrets="${4:-/nunki/secrets.txt}"
+
+[ -d "$db" ] || { echo "nunki: no advisory database at $db" >&2; exit 69; }
+
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+
+# osv-scanner reads its offline database from `$XDG_CACHE_HOME/osv-scalibr`,
+# and there is no flag for it: measured on 2.6.0, no `--local-db-path`
+# exists and the cache directory is the only knob. `advisories.txt` names the
+# host's `~/.cache/osv-scalibr` and nunki mounts **that one directory** at
+# $db — not the whole of `~/.cache`, which holds everything else this machine
+# caches. A cache directory made here, with that one name linked into it, is
+# how the tool finds its database without being handed the rest.
+mkdir -p "$work/cache"
+ln -s "$db" "$work/cache/osv-scalibr"
+XDG_CACHE_HOME="$work/cache"
+export XDG_CACHE_HOME
+
+# A configuration with **no ignore**, for the runs that must see everything.
+#
+# osv-scanner loads `osv-scanner.toml` from the scanned tree on its own —
+# "Loaded filter from: /w/osv-scanner.toml", measured on 2.6.0 with no
+# `--config` at all. So the run meant to be unfiltered was filtered by the
+# very file whose effect it exists to measure: every acceptance would come
+# back empty, and an agent could silence any finding by writing that file.
+# `--config` is what makes a view without it possible, exactly as it is for
+# cargo-deny on the Rust side.
+printf '# nothing is ignored here: this is the unfiltered view\n' > "$work/none.toml"
+
+lock=""
+for candidate in uv.lock poetry.lock requirements.txt; do
+  if [ -f "$candidate" ]; then
+    lock="$candidate"
+    break
+  fi
+done
+
+# A dependency audit with nothing to read is not an audit that found nothing.
+# Reported as a finding rather than as an exit status, because a non-zero
+# status here is not read as red: `nunki` maps 66, 67, 69 and 70 and takes
+# everything else as "the scan ran". A finding the branch brought and nobody
+# accepted is what makes the gate red, which is what this is.
+if [ -z "$lock" ]; then
+  printf '%s\n' '{"id":"nunki:no-lockfile","kind":"other","where":"uv.lock","via":"","fix":"","accepted":"","was_at_base":false}'
+  echo "nunki: no uv.lock, poetry.lock or requirements.txt, so nothing could be audited" >&2
+else
+  # `--offline` keeps it from fetching anything, including the package
+  # metadata it would otherwise ask deps.dev for; `--offline-vulnerabilities`
+  # is what points it at the database above. Findings make it exit non-zero,
+  # and that is a result rather than a failure.
+  #
+  # stderr is kept rather than discarded: it is where the tool says it could
+  # not load the database, and a scan that silently found nothing is exactly
+  # the failure this gate must not have.
+  osv-scanner scan source --lockfile "$lock" --offline --offline-vulnerabilities \
+    --config "$work/none.toml" --format json > "$work/all.json" \
+    2>>"$work/scan.err" || true
+
+  # What the base already carried, audited in a worktree of the base commit.
+  : > "$work/base.json"
+  #
+  # The worktree holds the whole repository, and this stack may live in a
+  # directory of it (SPEC 4.2, "plusieurs stacks"): the base's lockfile is the
+  # one at this stack's place, `git rev-parse --show-prefix` — empty at the
+  # root. Without it, a stack in a subdirectory such as `frontend/` finds no
+  # lockfile at the base, and a finding the base already carried comes back
+  # as brought by the branch.
+  prefix="$(git rev-parse --show-prefix)"
+  if git worktree add -q --detach "$work/base" "$base" 2>/dev/null; then
+    if [ -f "$work/base/$prefix$lock" ]; then
+      osv-scanner scan source --lockfile "$work/base/$prefix$lock" --offline \
+        --offline-vulnerabilities --config "$work/none.toml" --format json \
+        > "$work/base.json" 2>>"$work/scan.err" || true
+    fi
+    git worktree remove --force "$work/base" 2>/dev/null || true
+  else
+    # 70, and not a warning followed by the audit. Without the base there is
+    # no "what this branch brought": every finding would come back new, and
+    # the gate would block on what was already there. `nunki` reads this as
+    # unplayed — a verdict on the machine rather than on the agent, exactly
+    # as 69 is.
+    echo "nunki: base $base is not in this repository, so nothing can be compared" >&2
+    exit 70
+  fi
+
+  # What the project accepts, as the difference between two views: a group
+  # the unfiltered run reports and the project's own configuration does not
+  # is one `osv-scanner.toml` ignores. Measured on 2.6.0: an `[[IgnoredVulns]]`
+  # written against any alias filters the whole group — the config named
+  # GHSA-q2x7-8rv6-6q7h and the group whose first id is PYSEC-2026-1475
+  # disappeared — so this is the only reliable way to know it without
+  # matching ids by hand.
+  : > "$work/kept.json"
+  if [ -f osv-scanner.toml ]; then
+    osv-scanner scan source --lockfile "$lock" --offline --offline-vulnerabilities \
+      --config osv-scanner.toml --format json > "$work/kept.json" \
+      2>>"$work/scan.err" || true
+  fi
+
+  python3 - "$work" "$lock" <<'PY'
+import json
+import os
+import re
+import subprocess
+import sys
+
+work, lock = sys.argv[1], sys.argv[2]
+
+
+def groups(path):
+    """One entry per advisory, keyed by the id nunki will report.
+
+    `results[].packages[].groups[]` is what collapses the aliases: osv-scanner
+    reports the same advisory once as PYSEC and once as GHSA, and a finding
+    reported twice is a finding answered twice.
+    """
+    found = {}
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        return found
+    with open(path) as stream:
+        try:
+            report = json.load(stream)
+        except ValueError:
+            sys.exit("nunki: osv-scanner wrote no readable JSON to {}".format(path))
+    for result in report.get("results", []):
+        for package in result.get("packages", []):
+            named = package.get("package", {})
+            by_id = {v.get("id"): v for v in package.get("vulnerabilities", [])}
+            for group in package.get("groups", []):
+                ids = group.get("ids") or []
+                if not ids:
+                    continue
+                found[ids[0]] = (named, [by_id.get(i) for i in ids if by_id.get(i)])
+    return found
+
+
+def fixed_in(advisories, name):
+    """The first ecosystem version that fixes it, or "" when none does.
+
+    Empty is the discriminator nunki turns on: an advisory with no fix is a
+    decision to relitigate, not a debt to pay down (SPEC 4.4).
+    """
+    for advisory in advisories:
+        for affected in advisory.get("affected", []):
+            if affected.get("package", {}).get("name", "").lower() != name.lower():
+                continue
+            for span in affected.get("ranges", []):
+                if span.get("type") != "ECOSYSTEM":
+                    continue
+                for event in span.get("events", []):
+                    if event.get("fixed"):
+                        return event["fixed"]
+    return ""
+
+
+def brought_by(name):
+    """The direct dependency that pulled `name` in, or "" when it is one.
+
+    A transitive dependency is replaceable by nobody but its parent, so what
+    is named is the last link before the project itself (SPEC 4.4). Only uv
+    is asked, and only offline: the other lockfiles this script reads have no
+    equivalent question, and `via` is allowed to be empty.
+    """
+    if lock != "uv.lock":
+        return ""
+    done = subprocess.run(
+        ["uv", "tree", "--frozen", "--offline", "--invert", "--package", name],
+        capture_output=True,
+        text=True,
+    )
+    if done.returncode != 0:
+        return ""
+    chain = [
+        re.sub(r"^[^A-Za-z0-9_.-]*", "", line).split(" ")[0]
+        for line in done.stdout.splitlines()
+        if line.strip() and not line.startswith("Using ")
+    ]
+    chain = [link for link in chain if link]
+    return chain[-2] if len(chain) > 2 else ""
+
+
+def accepted_reasons():
+    """Every id `osv-scanner.toml` ignores, with the reason beside it."""
+    if not os.path.exists("osv-scanner.toml"):
+        return {}
+    try:
+        import tomllib
+    except ImportError:
+        return {}
+    with open("osv-scanner.toml", "rb") as stream:
+        try:
+            config = tomllib.load(stream)
+        except Exception:
+            return {}
+    return {
+        entry["id"]: entry.get("reason", "")
+        for entry in config.get("IgnoredVulns", [])
+        if entry.get("id")
+    }
+
+
+everything = groups(os.path.join(work, "all.json"))
+at_base = set(groups(os.path.join(work, "base.json")))
+kept = set(groups(os.path.join(work, "kept.json")))
+reasons = accepted_reasons()
+
+for id_, (named, advisories) in sorted(everything.items()):
+    name = named.get("name", "")
+    version = named.get("version", "")
+    accepted = ""
+    if os.path.exists("osv-scanner.toml") and id_ not in kept:
+        # The group is ignored; the reason may be written against any of its
+        # aliases, so every id and alias is tried before falling back.
+        for advisory in advisories:
+            for alias in [advisory.get("id", "")] + list(advisory.get("aliases", [])):
+                if alias in reasons:
+                    accepted = reasons[alias] or "accepted in osv-scanner.toml"
+                    break
+            if accepted:
+                break
+        accepted = accepted or "accepted in osv-scanner.toml"
+    print(
+        json.dumps(
+            {
+                "id": id_,
+                "kind": "vulnerability",
+                "where": "{} {}".format(name, version).strip(),
+                "via": brought_by(name),
+                "fix": fixed_in(advisories, name),
+                "accepted": accepted,
+                "was_at_base": id_ in at_base,
+            }
+        )
+    )
+PY
+fi
+
+# --- secrets ---------------------------------------------------------------
+#
+# A secret has no `fix` and no `via`: it is revoked, not upgraded, and nothing
+# brought it in but the commit that wrote it. `nunki` stops on one and hands it
+# to a human, because no action of an agent closes it — removing it in a later
+# commit leaves it in the branch's history, and nunki rewrites none.
+#
+# `--no-ignore-tag` is a rule and not a setting. trufflehog's own exception is
+# a `trufflehog:ignore` comment **in the source line**, which the agent edits
+# legitimately: without this flag it could silence its own secret with six
+# characters. Everything is reported, and what is accepted is decided outside
+# the container.
+leaks="$work/leaks.jsonl"
+# The whole repository's history, wherever in it this stack lives.
+trufflehog git "file://$(git rev-parse --show-toplevel)" --json --no-update --no-ignore-tag \
+  > "$leaks" 2>/dev/null || true
+
+# What a human has already ruled is not a secret. It comes from the project's
+# HQ, mounted read-only: declared out of the agent's reach, readable by it all
+# the same. Absent, nothing is accepted — and absent means absent, because the
+# path is not one the agent could create (SPEC 4.4, gate 8).
+#
+# An exact match on the first field, because a prefix match reads the ruling
+# for `…:src/a.rs:Postgres:10` as the ruling for `…:src/a.rs:Postgres:1`, and
+# because a file path carries regex metacharacters a pattern would read.
+reason_for() {
+  [ -f "$secrets" ] || return 0
+  awk -v id="$1" '
+    /^[[:space:]]*#/ { next }
+    $1 == id { $1 = ""; sub(/^[[:space:]]+/, ""); print; exit }
+  ' "$secrets"
+}
+
+while IFS= read -r line; do
+  [ -n "$line" ] || continue
+  printf '%s' "$line" > "$work/leak.json"
+  git_meta=$(jq -r '.SourceMetadata.Data.Git // empty | @json' "$work/leak.json")
+  [ -n "$git_meta" ] || continue
+  commit=$(printf '%s' "$git_meta" | jq -r '.commit // ""')
+  file=$(printf '%s' "$git_meta" | jq -r '.file // ""')
+  ln=$(printf '%s' "$git_meta" | jq -r '.line // 0')
+  rule=$(jq -r '.DetectorName // "secret"' "$work/leak.json")
+  [ -n "$commit" ] && [ -n "$file" ] || continue
+
+  # trufflehog publishes no fingerprint, and a finding must be nameable to be
+  # accepted. Built the way gitleaks built its own, so an exception written
+  # once keeps naming the same thing.
+  id="$commit:$file:$rule:$ln"
+
+  was=false
+  git merge-base --is-ancestor "$commit" "$base" 2>/dev/null && was=true
+
+  jq -cn --arg id "$id" --arg where "$file:$ln" \
+     --arg accepted "$(reason_for "$id")" --argjson was_at_base "$was" \
+     '{id:$id, kind:"secret", where:$where, via:"", fix:"",
+       accepted:$accepted, was_at_base:$was_at_base}'
+done < "$leaks"
+"##;
+
+/// How a Python application is started (SPEC 4.2, rule 2).
+const RUN_PYTHON: &str = r##"#!/bin/sh
+# How an application of this stack is started (SPEC 4.2, "les services et le
+# lancement de l'application").
+#
+# `nunki` runs this, detached, from the root of the tree, inside the container
+# of the role that will test or attack the application — before that role is
+# launched. No agent starts the application; this script is how the project
+# says what starting it means.
+#
+# It is called as `run.sh <id>`. Three things it must do, and the first two
+# are how `nunki` knows the application is up at all:
+#
+#  - keep the id on its command line. `nunki` recognises this process by it, and
+#    that is why the command below is **not** `exec`ed: replacing the process
+#    replaces its command line, and the application would be reported as
+#    stopped one second after it started.
+#  - stay in the foreground. A script that forks and exits reports an
+#    application that is not running.
+#  - listen on the address the mission's services can reach, not only on
+#    127.0.0.1, when something outside the container has to reach it.
+#
+# Replace the command below with whatever starting this project means — a
+# web framework wants its own server, and `--host 0.0.0.0` with it. A project
+# with nothing to start says `run: none` in nunki.yaml instead.
+set -eu
+
+uv sync --frozen --all-groups
+
+# The project's own name, as its module: the guess that is right for a
+# `src/<name>/` layout and wrong for everything else, which is why the line
+# above this one says to replace it.
+module=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["name"].replace("-", "_"))')
+
+uv run --frozen --no-sync python -m "$module"
+"##;
+
+/// The integrator's battery for a Python project (SPEC 4.4, gate 6 for the
+/// integrator: its system tests, in the system profile).
+const SYSTEM_PYTHON: &str = r##"#!/bin/sh
+# The integrator's battery for a Python project: its system tests, green, in
+# the system profile (SPEC 4.4, gate 6 for the integrator).
+#
+# `nunki` runs this from the clean copy of HEAD inside the integrator's
+# container, where the mission's services are reachable. The coder's battery
+# (`prepush.sh`) runs where they are not, and so does CI: a system test must
+# therefore never run under a plain `pytest`, or it goes red in both.
+#
+# The convention that keeps them apart: every system test carries
+#
+#     @pytest.mark.system
+#
+# `prepush.sh` deselects them with `-m "not system"`; the line below runs
+# those and only those. Mark nothing else with it: a marked test that is not
+# a system test would run here and nowhere else.
+#
+# Pointing the tests at the services is the integrator's wiring, committed
+# with them. This script is the stack's: it lives in the project's home and
+# reaches the container read-only, so a project whose system tests need more
+# changes it there, not in a commit.
+set -eu
+
+uv sync --frozen --all-groups
+
+# Inside the virtual environment rather than under /tmp, for the reason the
+# Rust fragment writes beside its build: `uv sync` has just created `.venv`,
+# so it is the one directory in the copy of HEAD an execution is certain to
+# be able to write.
+log=.venv/nunki-system-tests.log
+
+status=0
+uv run --frozen --no-sync pytest --ignore=mutants -m system >"$log" 2>&1 || status=$?
+cat "$log" >&2
+
+# 5 is pytest's "no tests were collected", which is this gate's own failure
+# rather than a test's: a battery that ran nothing proved nothing (SPEC 4.4).
+# It is named here because pytest's own message for it does not say what to
+# do about it.
+if [ "$status" -eq 5 ]; then
+  echo "nunki: no system test ran — mark each one @pytest.mark.system" >&2
+  exit 1
+fi
+if [ "$status" -ne 0 ]; then
+  exit "$status"
+fi
+
+# And the same failure when pytest does collect them and skips them all:
+# it exits 0, having proved nothing.
+ran=$(sed -n 's/.*[^0-9]\([0-9][0-9]*\) passed.*/\1/p' "$log" | tail -1)
+[ -n "$ran" ] || ran=0
+if [ "$ran" -eq 0 ]; then
+  echo "nunki: no system test ran — mark each one @pytest.mark.system" >&2
+  exit 1
+fi
+"##;
+
+/// The coder's image for a Next.js project.
+///
+/// Three things it carries that the other two stacks do not, each for a
+/// reason: `procps`, without which Stryker dies on `spawn ps ENOENT`;
+/// a shared `COREPACK_HOME`, without which the agent re-downloads pnpm on
+/// first use and cannot when the network is closed; and Chromium, because
+/// the integrator's battery drives a browser and no allowlist names
+/// Playwright's CDN.
+const DOCKERFILE_NEXT_HEAD: &str = r##"# The coder's image for a Next.js project, built by `nunki slot rebuild`.
+#
+# glibc and not musl, as SPEC 4.2 bis requires of every stack image: Node's
+# prebuilt native binaries target glibc, and Playwright ships no musl build
+# of Chromium at all.
+# The Node the repository names, passed by nunki at build time from
+# `versions.txt` beside this file (SPEC 4.2); `PNPM` below is read the same way.
+ARG NODE=22
+ARG BASE=node:${NODE}-bookworm-slim
+"##;
+
+/// The Next.js image from its base on, once the stage above it is declared.
+const DOCKERFILE_NEXT_BASE: &str = r##"
+FROM ${BASE}
+
+# Passed by nunki at build time: the human's own ids, so that what the agent
+# writes belongs to the human on the host.
+ARG UID=1000
+ARG GID=1000
+
+# `upgrade`, and not only `update`. The packages inherited from the base tag
+# keep the versions that tag was cut with, so a security fix Debian published
+# since would never reach a freshly built image.
+#
+# `procps` is not decoration: Stryker spawns `ps -o pid --no-headers --ppid`
+# to find its children, and a slim image has no `ps`: without it the
+# campaign dies with `spawn ps ENOENT` before testing a single mutant.
+RUN apt-get -qq update \
+ && apt-get -qq -y upgrade \
+ && apt-get -qq install --no-install-recommends -y \
+      ca-certificates curl git build-essential pkg-config tmux jq procps \
+ && rm -rf /var/lib/apt/lists/*
+
+# `trufflehog` is what finds the secrets gate 8 reports (SPEC 4.4). The same
+# tool as the Rust and Python images, since a secret has no ecosystem, and
+# checked against the checksums its release publishes.
+ARG TRUFFLEHOG=3.97.5
+RUN set -eu; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) arch=amd64; sum=e3d97199c565c37ca6152750197f667e08ae6a1edf5911fbdec168622b28620c ;; \
+      arm64) arch=arm64; sum=e5c8b2418b0a7c78cf4c47ac783c52c63f989e4e536cfe328b5271e819b6d52d ;; \
+      *) echo "trufflehog ships no build for $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /tmp/trufflehog.tgz \
+      "https://github.com/trufflesecurity/trufflehog/releases/download/v${TRUFFLEHOG}/trufflehog_${TRUFFLEHOG}_linux_${arch}.tar.gz"; \
+    echo "${sum}  /tmp/trufflehog.tgz" | sha256sum -c -; \
+    tar -xzf /tmp/trufflehog.tgz -C /usr/local/bin trufflehog; \
+    rm /tmp/trufflehog.tgz; \
+    trufflehog --version
+
+# `osv-scanner` is this stack's dependency audit, reading a database the host
+# fills and nunki mounts read-only. It needs no network to do it — measured
+# on 2.6.0 against `pnpm-lock.yaml`, and on 2.7.0 as built above against a
+# `uv.lock`, both with `--network none`.
+"##;
+
+const DOCKERFILE_NEXT_BETWEEN: &str = r##"
+"##;
+
+/// pnpm, Chromium and the removal of npm, as root: shared by the Next.js
+/// image and the Next.js add-on, so the two cannot drift.
+const NEXT_TOOLS: &str = r##"# pnpm, baked in rather than fetched on first use.
+#
+# `corepack enable` only enables it: the binary is downloaded from
+# `registry.npmjs.org` the first time it runs, into the **calling user's**
+# `~/.cache/node/corepack`. Prepared as root and then handed to `agent`, that
+# cache is the wrong user's, and the agent fetches it again — which fails
+# outright when the network is closed. `COREPACK_HOME`
+# puts it somewhere both users read.
+ARG PNPM=12.16.1
+ENV COREPACK_HOME=/opt/corepack
+RUN corepack enable pnpm \
+ && corepack prepare pnpm@${PNPM} --activate \
+ && chmod -R a+rX /opt/corepack \
+ && pnpm --version
+
+# Chromium for the integrator's battery, installed here and nowhere else.
+#
+# Playwright downloads its browsers from its own CDN, which no role's
+# allowlist names and none should: the coder has no use for a browser, and
+# the integrator must not be able to fetch one mid-run. So they come with the
+# image, in a path both users read.
+#
+# The version is pinned and **written down**, because a project whose
+# `@playwright/test` does not match gets "Looks like Playwright was just
+# installed or updated. Please run `playwright install`" — advice it cannot
+# follow in here. `system.sh` reads this file and says so instead.
+#
+# The version is the project's: `versions.txt` reads the one its lockfile
+# resolved, and `nunki slot rebuild` passes it here. The default below serves
+# only a project that locks no `@playwright/test`.
+ARG PLAYWRIGHT=1.63.0
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
+RUN npx --yes playwright@${PLAYWRIGHT} install --with-deps chromium \
+ && printf '%s\n' "${PLAYWRIGHT}" > /opt/playwright/nunki-version \
+ && chmod -R a+rX /opt/playwright
+
+# And then npm goes, with the cache the line above left behind.
+#
+# This stack installs with pnpm, through corepack, and never calls npm — but
+# npm ships inside the Node image with a dependency tree of its own, and that
+# tree is what the image scan reports: critical or high advisories **with
+# fixes published**, `tar` 7.5.11 among them, none of them from a line of
+# this file. Upgrading npm to its latest does not clear them: its bundled
+# tree is always a patch or two behind whatever the advisory database knows.
+#
+# So it is removed rather than chased. It is the last line that needs it —
+# `npx` above is how Playwright arrives — and corepack, which is a separate
+# package, is what keeps pnpm working. The scan comes back clean.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx /root/.npm \
+ && pnpm --version \
+ && node --version \
+ && ! command -v npm
+
+"##;
+
+const DOCKERFILE_NEXT_USER: &str = r##"# The official Node image ships a `node` user at uid and gid 1000 — the id the
+# first user of a Linux or WSL machine has. `useradd -u 1000` then fails with
+# "UID 1000 is not unique", and the image does not build for that human at all
+# (macOS, where the first uid is 501, never meets it). Whoever holds the
+# human's uid in the base image goes first: nothing in this image runs as
+# `node`, and the agent must be the one owning what it writes (SPEC 4.2 bis).
+RUN holder="$(getent passwd ${UID} | cut -d: -f1)" \
+ && if [ -n "$holder" ]; then userdel -r "$holder" 2>/dev/null || userdel "$holder"; fi
+
+# The group may already exist under that id (on macOS, gid 20 is `dialout`
+# here); either way the agent ends up in it.
+RUN groupadd -g ${GID} agent || true \
+ && useradd -m -u ${UID} -g ${GID} -s /bin/bash agent
+
+# Mount points, created by root because they sit at the filesystem root, then
+# handed to the agent: a named volume mounted over a root-owned directory is
+# born root-owned, and the toolchain cannot write in it (SPEC 4.2 bis).
+RUN mkdir -p /work/tree /work/mission /run/nunki \
+ && chown -R ${UID}:${GID} /work /run/nunki
+
+USER agent
+"##;
+
+/// What the agent runs Next.js with, shared the same way.
+const NEXT_AGENT: &str = r##"
+# `NEXT_TELEMETRY_DISABLED` is a perimeter rule, not a preference: Next.js
+# phones home to a domain rule 6 does not name, and the refusal would read as
+# a flaky network rather than as the rule it is.
+ENV NEXT_TELEMETRY_DISABLED=1 \
+    PNPM_HOME=/home/agent/.local/share/pnpm \
+    PATH=/home/agent/.local/share/pnpm:${PATH}
+
+RUN mkdir -p /home/agent/.local/share/pnpm/store /home/agent/.harness
+"##;
+
+/// The coder's image for a Next.js project.
+fn dockerfile_next() -> String {
+    [
+        DOCKERFILE_NEXT_HEAD,
+        &osv_scanner_stage(OSV_STAGE_NEXT),
+        DOCKERFILE_NEXT_BASE,
+        &osv_scanner_install(OSV_STAGE_NEXT),
+        DOCKERFILE_NEXT_BETWEEN,
+        NEXT_TOOLS,
+        DOCKERFILE_NEXT_USER,
+        NEXT_AGENT,
+    ]
+    .concat()
+}
+
+/// The battery for a Next.js project (SPEC 4.4, gate 6).
+const PREPUSH_NEXT: &str = r##"#!/bin/sh
+# The battery for a Next.js project: what must be silent before anything
+# leaves a slot (SPEC 4.4).
+#
+# The tools are the **project's own**, declared in its `package.json` and
+# pinned by `pnpm-lock.yaml`, not installed in the image — the same choice
+# the Python stack makes, for the same reason: a tool in the image and a tool
+# in the lock drift apart, and the battery the gate runs is the one that
+# decides. `pnpm install --frozen-lockfile` below is what makes them one.
+#
+# A project that declares none of them fails here with the names of what is
+# missing and the command that adds them. That failure is an agent's to
+# repair — `registry.npmjs.org` is on the coder's allowlist.
+set -eu
+
+pnpm install --frozen-lockfile
+
+missing=""
+for tool in prettier eslint tsc vitest; do
+  pnpm exec "$tool" --version >/dev/null 2>&1 || missing="$missing $tool"
+done
+if [ -n "$missing" ]; then
+  echo "nunki: this stack's battery needs$missing, which this project does not declare." >&2
+  echo "nunki: add them where the lock can pin them: pnpm add -D$missing" >&2
+  exit 1
+fi
+
+# `reports` and `.stryker-tmp` are left out of every walk that can be told
+# to skip them. Gate 7's campaign writes both, and a battery that walks into
+# them does what the Python stack's battery comment describes: it checks the
+# copy the campaign left beside the tree and goes red on code nobody touched.
+#
+# The campaign here clears its own sandbox — `--cleanTempDir always`, which
+# holds even when it is killed — and deletes its report once it has read it.
+# These exclusions are the second lock, for the run that never reaches either.
+#
+# `tsc` is the exception and it is said rather than hidden: it is driven by
+# the project's `tsconfig.json` and takes no exclusion on the command line.
+# It reads only the files that configuration includes, so a project whose
+# `include` reaches generated directories has to say so there. Nothing this
+# script can pass would change it.
+# Prettier takes no `--ignore-pattern`: measured on 3.x, it answers
+# "Ignored unknown option" and carries on. It reads `.gitignore` and
+# `.prettierignore` instead, and a project that ignores neither `reports`
+# nor `.stryker-tmp` will have it read the campaign's report — so those two
+# belong in one of those files, which is where a Next.js project puts them
+# anyway.
+pnpm exec prettier --check .
+pnpm exec eslint --ignore-pattern reports --ignore-pattern .stryker-tmp .
+pnpm exec tsc --noEmit
+
+# `--exclude` for the same reason, and the system tests are deselected for
+# the reason `system.sh` gives: they need the mission's services, which are
+# not up here, and they would go red in this battery and in CI alike.
+pnpm exec vitest run --exclude '**/reports/**' --exclude '**/.stryker-tmp/**' \
+  --exclude '**/*.system.test.*' --exclude '**/e2e/**'
+"##;
+
+/// The mutation campaign a Next.js project runs (SPEC 4.4, gate 7).
+///
+/// Checked against Stryker 9.6.1 before it shipped: an exit status of 0
+/// says little — 0 with survivors, 0 on a file that does not exist, 0 on a
+/// source that does not parse — so the report is the guard for those, while
+/// any other status is a campaign that did not complete; and its
+/// mutant ids are per-file sequential integers, so they are not the ids
+/// `nunki` can hand back to a coder.
+const MUTATION_NEXT: &str = r##"#!/bin/sh
+# The mutation campaign for a Next.js project (SPEC 4.4, gate 7).
+#
+# `nunki` calls this as `mutation.sh <campaign-id> <path>...`, from the clean
+# copy of HEAD inside the slot's container. The id comes first so the campaign
+# is identifiable from its own command line; this script does not need it.
+#
+# The next line tells `nunki` how to read the tool's version (SPEC 4.4, the
+# chain of campaigns). A later campaign of a `standard` mission covers only
+# what changed since the previous one, and only when this script and that
+# version are what the previous one ran with; without the line, every
+# campaign is full.
+# nunki-tool-version: pnpm exec stryker --version
+#
+# It prints **one JSON object per line** on stdout, one per surviving mutant:
+#   {"id":"…","file":"…","line":12,"end_line":12,"description":"…"}
+# `end_line` is the last line of the code the mutation replaces, from the
+# location Stryker's report gives each mutant; 0 when it gives none — a span
+# nobody knows, which no ruling is tied to.
+# and, last of all and exactly once, the line that says it got to the end:
+#   {"campaign":"done"}
+# with **no** `tried` and no `found`. A `standard` mission's gate 7 divides
+# the killed mutants by `tried`, and the share means something only over the
+# lines this branch changed (SPEC 4.4). `--mutate` below names whole touched
+# files, so whatever this script could count would be over those files: a
+# well-tested file would hide the new untested lines in it. Stryker takes
+# line ranges, but nothing here has been measured against a real Stryker
+# doing so, and a count is not shipped on a reading of its documentation.
+# Without a count `nunki` judges gate 7 as `critical` does — an outcome for
+# every survivor. A branch that touched nothing mutable is the one exact
+# count this script has, and says `tried` 0.
+# For the same reason it gives no per-file counts and never says `by_file`:
+# Stryker's report does name each mutant's file, but over whole files, so a
+# campaign after one of this stack's is always full, never rebuilt from
+# counts that are not the branch's (SPEC 4.4, the chain of campaigns).
+# `nunki` reads no other line as a result, so progress may go to stdout freely —
+# though this script keeps the tool's own chatter on stderr. A campaign that
+# stops before that last line has measured nothing, whatever else it printed.
+set -eu
+
+campaign="$1"
+shift
+
+# The sources the branch touched, and only those: Stryker's `--mutate` takes
+# them as a flag and touches nothing on disk, which is what the Python stack
+# could not do and had to pay for in campaign time.
+#
+# Test files are left out: a mutated test proves nothing about the code, and
+# Stryker would report it as uncovered for ever.
+files=""
+for path in "$@"; do
+  case "$path" in
+    *.test.*|*.spec.*|*/__tests__/*|*/e2e/*) continue ;;
+  esac
+  case "$path" in
+    *.ts|*.tsx|*.js|*.jsx|*.mjs|*.cjs) files="$files --mutate $path" ;;
+  esac
+done
+if [ -z "$files" ]; then
+  # Nothing this branch touched is mutable, so there are no mutants and no
+  # survivors — and that is a measurement, not a campaign that failed to
+  # happen. The terminal line is printed **before** leaving, because `nunki`
+  # reads its absence as a campaign that was killed and asks for another:
+  # a branch touching only tests or documentation would be asked for ever.
+  printf '{"campaign":"done","tried":0,"found":0}\n'
+  exit 0
+fi
+
+# How many mutants run at once: the project's `mutation_jobs`, which `nunki`
+# hands over in `NUNKI_MUTATION_JOBS`, passed as Stryker's own
+# `--concurrency`, the number of test runner processes it starts. It is safe:
+# Stryker already runs several when it is not told, each in a process of its
+# own, so the setting only says how many. Read from Stryker's documentation
+# and not run here — no Stryker was at hand when it was added; an option it
+# refused would make it exit non-zero, which the guard below reads as a
+# campaign that did not complete, never as a green one. Without the variable
+# — a run by hand — nothing is passed and Stryker keeps its default. A value
+# that is not a whole number of at least 1 is refused rather than handed on.
+concurrency=""
+if [ -n "${NUNKI_MUTATION_JOBS:-}" ]; then
+  case "$NUNKI_MUTATION_JOBS" in
+    *[!0-9]*|0*)
+      echo "nunki: NUNKI_MUTATION_JOBS is a whole number of at least 1, and $NUNKI_MUTATION_JOBS is not" >&2
+      exit 1
+      ;;
+  esac
+  concurrency="--concurrency $NUNKI_MUTATION_JOBS"
+fi
+
+pnpm install --frozen-lockfile >&2
+if ! pnpm exec stryker --version >/dev/null 2>&1; then
+  echo "nunki: this stack's campaign needs @stryker-mutator/core, which this project does not declare." >&2
+  echo "nunki: add it where the lock can pin it: pnpm add -D @stryker-mutator/core" >&2
+  exit 1
+fi
+
+# Where the project's configuration puts the json report. There is no command
+# line flag for it (measured on 9.6.1), so it is read from the file that owns
+# it, with Stryker's own default when it says nothing.
+report=$(node -e '
+const fs = require("fs");
+let where = "reports/mutation/mutation.json";
+try {
+  const c = JSON.parse(fs.readFileSync("stryker.config.json", "utf8"));
+  if (c.jsonReporter && c.jsonReporter.fileName) where = c.jsonReporter.fileName;
+} catch {}
+process.stdout.write(where);
+')
+
+# Cleared before the run, for the reason the Rust fragment's own comment
+# records: it is a campaign that **cannot** run that lies. One that runs and
+# fails leaves its own empty answer, which is the truth; one that dies before
+# writing anything leaves the previous campaign's, on code that has changed
+# since — and a replay of the same fingerprint reaches exactly that path.
+rm -f "$report"
+
+# What Stryker leaves behind (SPEC 4.4, the build cache a campaign leaves as
+# it found it): its sandbox, `.stryker-tmp/`, a copy of the project its
+# mutants run in, which `--cleanTempDir always` below removes when Stryker
+# ends, failure included, and which is left only when Stryker is killed — so
+# it is cleared here first, for that case. Per mutant, it writes nothing else
+# that outlives a run: by its documentation every mutant is compiled into
+# the one sandbox and switched on at run time, and the report, one file, is
+# removed once read. Not run against a real Stryker: none is in the image
+# this was written in.
+rm -rf .stryker-tmp
+
+# `--cleanTempDir always` and not the default: the sandbox is then removed
+# even when the run fails, so a killed campaign leaves no copy of the project
+# beside the tree for the next battery to walk into.
+#
+# Stryker is otherwise driven by the project's own configuration — its test
+# runner among it — which it reads from the working directory.
+#
+# The status is not enough on its own, because 0 says little: measured on
+# 9.6.1, it is 0 with survivors, 0 when `--mutate` names a file that does
+# not exist, and 0 on a source file that does not parse. So the report
+# below is the guard for those. But anything **other** than 0 is a campaign
+# that did not complete — a failing initial test run among them — and is
+# never read as one that did, whatever report it left.
+# shellcheck disable=SC2086
+status=0
+pnpm exec stryker run $files $concurrency --cleanTempDir always --reporters json >&2 || status=$?
+if [ "$status" -ne 0 ]; then
+  echo "nunki: stryker exited $status, so the campaign did not complete and measured nothing" >&2
+  exit 1
+fi
+
+# The counterpart of the Rust fragment's `[ ! -f "$outcomes" ]`. On a source
+# that does not parse, Stryker writes no report at all.
+if [ ! -f "$report" ]; then
+  echo "nunki: the campaign left no report at $report, so nothing was measured" >&2
+  exit 1
+fi
+
+node -e '
+const fs = require("fs");
+const report = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+
+// What counts as answered, in the vocabulary Stryker uses. `Killed` and
+// `Timeout` are what it calls detected — a mutant that hangs the suite is one
+// the suite noticed. `CompileError` and `RuntimeError` are what it calls
+// invalid: nothing **could** prove them dead, which is not the same as nobody
+// having tried. `Ignored` was excluded on purpose.
+//
+// So the survivors are `Survived`, `NoCoverage` and `Pending`: the second is
+// code no test reaches, and the third was never run at all. A campaign that
+// read only `Survived` would call both of them green.
+const ANSWERED = new Set(["Killed", "Timeout", "CompileError", "RuntimeError", "Ignored"]);
+
+for (const [file, entry] of Object.entries(report.files ?? {})) {
+  for (const mutant of entry.mutants ?? []) {
+    if (ANSWERED.has(mutant.status)) continue;
+    const at = mutant.location?.start ?? {};
+    const was = (mutant.replacement ?? "").replace(/\s+/g, " ").trim();
+    // The id Stryker gives is a per-file sequential integer that moves between
+    // runs, so a coder answering "#7" would name something else next time.
+    // The position, the mutator and what it wrote are what stay the same —
+    // and the replacement is in it because one position carries several
+    // mutants: `ConditionalExpression` to `true` and to `false` sit on the
+    // very same column.
+    const id = [file, at.line, at.column, mutant.mutatorName, was].join(":");
+    const what = `${mutant.status}: ${mutant.mutatorName} -> ${was}`;
+    // A whole number from 1 up, or 0: anything else in the report is a span
+    // nobody knows, and says so rather than reaching nunki as text, a
+    // fraction or a negative, as the rust template does with its `case`.
+    // (No apostrophe in this script: it sits inside single quotes.)
+    const end = mutant.location?.end?.line;
+    const end_line = Number.isInteger(end) && end > 0 ? end : 0;
+    process.stdout.write(JSON.stringify({ id, file, line: at.line, end_line, description: what }) + "\n");
+  }
+}
+' "$report"
+
+# Behind itself, once the survivors have been read out of it — the file and
+# the directory Stryker made for it, because an empty `reports/` left in the
+# tree is still something the next walk has to be told about. A courtesy and
+# not a guard: a campaign that is killed never reaches this line, which is
+# why the battery excludes the directory rather than trusting it to be gone.
+rm -f "$report"
+holder=$(dirname "$report")
+[ "$holder" = "." ] || rmdir -p "$holder" 2>/dev/null || true
+
+# The last thing it prints, and the only line that says the campaign got to
+# the end. Without it `nunki` cannot tell "no survivor" from "no answer": a
+# campaign killed halfway, one whose container went away and one that never
+# compiled leave a log that parses to zero survivors — and gate 7 would go
+# green on a measurement nobody made.
+#
+# A line and not an exit status, because the status does not survive. The
+# spawner `exec`s the command so that the pid it published is the campaign's
+# own, and a shell that has been replaced cannot write `$?`.
+printf '{"campaign":"done"}\n'
+"##;
+
+/// The mechanical security of a Next.js project (SPEC 4.4, gate 8): the
+/// dependency audit and the secret scan. The same contract the Python stack
+/// speaks, over `pnpm-lock.yaml` and the npm database, which osv-scanner
+/// keeps beside the PyPI one under the very same directory.
+const SECURITY_NEXT: &str = r##"#!/bin/sh
+# The mechanical security of a Next.js project (SPEC 4.4, gate 8).
+#
+# `nunki` calls this as `security.sh <base-commit> [advisory-db] [mission-dir]
+# [secrets-file]`, from the clean copy of HEAD inside the slot's container. A
+# commit and not a branch name: the copy is a detached clone and carries no
+# branch, so a name would resolve to nothing. It prints **one JSON object per
+# line** on stdout, one per finding:
+#
+#   {"id":"…","kind":"…","where":"…","via":"…","fix":"…",
+#    "accepted":"…","was_at_base":false}
+#
+# `nunki` reads those seven fields and nothing else — it knows no tool, no
+# lockfile and no advisory database. Anything that is not one of these lines
+# is ignored, so progress may go to stdout freely, though this script keeps
+# its chatter on stderr.
+#
+# SPEC 4.4 gives gate 8 three families: the dependency audit (`osv-scanner`),
+# the secret scan (`trufflehog`), and the static analysis — which is `eslint`,
+# already run by the battery at gate 6, so nothing here repeats it.
+set -eu
+
+base="${1:?usage: security.sh <base-commit> [advisory-db] [mission-dir] [secrets]}"
+# Second argument and not an environment variable: the agent owns its own
+# environment inside the container, and a variable would let it point this at
+# an empty directory — no findings, and a green gate. `nunki` is what invokes
+# the gate, so `nunki` is what says where the database is.
+db="${2:-/nunki/advisories}"
+mission="${3:-/work/mission}"
+secrets="${4:-/nunki/secrets.txt}"
+
+[ -d "$db" ] || { echo "nunki: no advisory database at $db" >&2; exit 69; }
+
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+
+# osv-scanner reads its offline database from `$XDG_CACHE_HOME/osv-scalibr`,
+# and there is no flag for it: measured on 2.6.0, no `--local-db-path`
+# exists and the cache directory is the only knob. `advisories.txt` names the
+# host's `~/.cache/osv-scalibr` and nunki mounts **that one directory** at
+# $db — not the whole of `~/.cache`, which holds everything else this machine
+# caches. A cache directory made here, with that one name linked into it, is
+# how the tool finds its database without being handed the rest.
+mkdir -p "$work/cache"
+ln -s "$db" "$work/cache/osv-scalibr"
+XDG_CACHE_HOME="$work/cache"
+export XDG_CACHE_HOME
+
+# A configuration with **no ignore**, for the runs that must see everything.
+#
+# osv-scanner loads `osv-scanner.toml` from the scanned tree on its own —
+# "Loaded filter from: /w/osv-scanner.toml", measured on 2.6.0 with no
+# `--config` at all. So the run meant to be unfiltered was filtered by the
+# very file whose effect it exists to measure: every acceptance would come
+# back empty, and an agent could silence any finding by writing that file.
+# `--config` is what makes a view without it possible, exactly as it is for
+# cargo-deny on the Rust side.
+printf '# nothing is ignored here: this is the unfiltered view\n' > "$work/none.toml"
+
+lock=""
+for candidate in pnpm-lock.yaml package-lock.json yarn.lock; do
+  if [ -f "$candidate" ]; then
+    lock="$candidate"
+    break
+  fi
+done
+
+# A dependency audit with nothing to read is not an audit that found nothing.
+# Reported as a finding rather than as an exit status, because a non-zero
+# status here is not read as red: `nunki` maps 66, 67, 69 and 70 and takes
+# everything else as "the scan ran". A finding the branch brought and nobody
+# accepted is what makes the gate red, which is what this is.
+if [ -z "$lock" ]; then
+  printf '%s\n' '{"id":"nunki:no-lockfile","kind":"other","where":"pnpm-lock.yaml","via":"","fix":"","accepted":"","was_at_base":false}'
+  echo "nunki: no pnpm-lock.yaml, package-lock.json or yarn.lock, so nothing could be audited" >&2
+else
+  # `--offline` keeps it from fetching anything, including the package
+  # metadata it would otherwise ask deps.dev for; `--offline-vulnerabilities`
+  # is what points it at the database above. Findings make it exit non-zero,
+  # and that is a result rather than a failure.
+  #
+  # stderr is kept rather than discarded: it is where the tool says it could
+  # not load the database, and a scan that silently found nothing is exactly
+  # the failure this gate must not have.
+  osv-scanner scan source --lockfile "$lock" --offline --offline-vulnerabilities \
+    --config "$work/none.toml" --format json > "$work/all.json" \
+    2>>"$work/scan.err" || true
+
+  # What the base already carried, audited in a worktree of the base commit.
+  : > "$work/base.json"
+  #
+  # The worktree holds the whole repository, and this stack may live in a
+  # directory of it (SPEC 4.2, "plusieurs stacks"): the base's lockfile is the
+  # one at this stack's place, `git rev-parse --show-prefix` — empty at the
+  # root. Without it, a stack in a subdirectory such as `frontend/` finds no
+  # lockfile at the base, and a finding the base already carried comes back
+  # as brought by the branch.
+  prefix="$(git rev-parse --show-prefix)"
+  if git worktree add -q --detach "$work/base" "$base" 2>/dev/null; then
+    if [ -f "$work/base/$prefix$lock" ]; then
+      osv-scanner scan source --lockfile "$work/base/$prefix$lock" --offline \
+        --offline-vulnerabilities --config "$work/none.toml" --format json \
+        > "$work/base.json" 2>>"$work/scan.err" || true
+    fi
+    git worktree remove --force "$work/base" 2>/dev/null || true
+  else
+    # 70, and not a warning followed by the audit. Without the base there is
+    # no "what this branch brought": every finding would come back new, and
+    # the gate would block on what was already there. `nunki` reads this as
+    # unplayed — a verdict on the machine rather than on the agent, exactly
+    # as 69 is.
+    echo "nunki: base $base is not in this repository, so nothing can be compared" >&2
+    exit 70
+  fi
+
+  # What the project accepts, as the difference between two views: a group
+  # the unfiltered run reports and the project's own configuration does not
+  # is one `osv-scanner.toml` ignores. Measured on 2.6.0: an `[[IgnoredVulns]]`
+  # written against any alias filters the whole group — the config named
+  # GHSA-q2x7-8rv6-6q7h and the group whose first id is PYSEC-2026-1475
+  # disappeared — so this is the only reliable way to know it without
+  # matching ids by hand.
+  : > "$work/kept.json"
+  if [ -f osv-scanner.toml ]; then
+    osv-scanner scan source --lockfile "$lock" --offline --offline-vulnerabilities \
+      --config osv-scanner.toml --format json > "$work/kept.json" \
+      2>>"$work/scan.err" || true
+  fi
+
+  # Read with node rather than with jq, because the shape is nested and
+  # because node is the one interpreter this stack is certain to have — the
+  # Python fragment uses python for the same reason. Written to the work
+  # directory instead of being mounted: a fragment is what nunki mounts, and
+  # adding an eleventh file to that list to hold a helper would make the
+  # contract about files rather than about scripts.
+  cat > "$work/audit.cjs" <<'JS'
+const fs = require("fs");
+const { execFileSync } = require("child_process");
+
+const work = process.argv[2];
+const lock = process.argv[3];
+
+// One entry per advisory, keyed by the id nunki will report.
+//
+// `results[].packages[].groups[]` is what collapses the aliases: osv-scanner
+// reports the same advisory once as GHSA and once as the ecosystem's own id,
+// and a finding reported twice is a finding answered twice.
+function groups(path) {
+  const found = new Map();
+  let report;
+  try {
+    const text = fs.readFileSync(path, "utf8");
+    if (!text.trim()) return found;
+    report = JSON.parse(text);
+  } catch (e) {
+    process.stderr.write("nunki: osv-scanner wrote no readable JSON to " + path + "\n");
+    process.exit(1);
+  }
+  for (const result of report.results ?? []) {
+    for (const pkg of result.packages ?? []) {
+      const named = pkg.package ?? {};
+      const byId = new Map((pkg.vulnerabilities ?? []).map((v) => [v.id, v]));
+      for (const group of pkg.groups ?? []) {
+        const ids = group.ids ?? [];
+        if (!ids.length) continue;
+        found.set(ids[0], { named, advisories: ids.map((i) => byId.get(i)).filter(Boolean) });
+      }
+    }
+  }
+  return found;
+}
+
+// The first published version that fixes it, or "" when none does. Empty is
+// the discriminator nunki turns on: an advisory with no fix is a decision to
+// relitigate, not a debt to pay down (SPEC 4.4).
+//
+// **Both** `SEMVER` and `ECOSYSTEM`, and the first is the one that matters
+// here. npm advisories publish their ranges as `SEMVER` — `qs` fixed in
+// 6.16.0 sits in one — and a reader that looks only at `ECOSYSTEM`, which
+// is what the PyPI database uses, reports every npm finding as having no
+// fix at all. That is not a cosmetic difference: an
+// empty `fix` tells a human nothing can be done, and it is what stops nunki
+// calling an accepted finding an exception a fix has overtaken.
+//
+// `GIT` ranges are left out: they name a commit of the upstream repository,
+// which is not a version anybody can depend on.
+function fixedIn(advisories, name) {
+  for (const advisory of advisories) {
+    for (const affected of advisory.affected ?? []) {
+      if ((affected.package?.name ?? "").toLowerCase() !== name.toLowerCase()) continue;
+      for (const span of affected.ranges ?? []) {
+        if (span.type !== "SEMVER" && span.type !== "ECOSYSTEM") continue;
+        for (const event of span.events ?? []) {
+          if (event.fixed) return event.fixed;
+        }
+      }
+    }
+  }
+  return "";
+}
+
+// The direct dependency that pulled `name` in, or "" when it is one. A
+// transitive dependency is replaceable by nobody but its parent, so what is
+// named is the last link before the project itself (SPEC 4.4). Only pnpm is
+// asked, and only offline: `pnpm why <pkg> --offline` prints the chain
+// with no network at all.
+function broughtBy(name) {
+  if (lock !== "pnpm-lock.yaml") return "";
+  let out;
+  try {
+    out = execFileSync("pnpm", ["why", name, "--offline"], { encoding: "utf8" });
+  } catch {
+    return "";
+  }
+  const chain = [];
+  for (const line of out.split("\n")) {
+    const text = line.replace(/^[^A-Za-z@]*/, "").trim();
+    if (!text || text.startsWith("Found ") || text.startsWith("Legend")) continue;
+    const link = text.split(" ")[0].replace(/@[^@]*$/, "");
+    if (link && chain[chain.length - 1] !== link) chain.push(link);
+  }
+  return chain.length > 2 ? chain[chain.length - 2] : "";
+}
+
+// Every id `osv-scanner.toml` ignores, with the reason beside it.
+//
+// Read with a reader of its own and not a TOML library: node ships none, and
+// the file this looks at has one shape — a list of `[[IgnoredVulns]]` tables
+// with an `id` and a `reason`. Anything it cannot read leaves the reason
+// empty, and the acceptance still stands, because whether a group is
+// accepted is decided by the two views and not by this.
+function reasons() {
+  const found = new Map();
+  let text;
+  try {
+    text = fs.readFileSync("osv-scanner.toml", "utf8");
+  } catch {
+    return found;
+  }
+  for (const block of text.split(/\[\[\s*IgnoredVulns\s*\]\]/).slice(1)) {
+    const id = /(^|\n)\s*id\s*=\s*"([^"]*)"/.exec(block);
+    const why = /(^|\n)\s*reason\s*=\s*"([^"]*)"/.exec(block);
+    if (id) found.set(id[2], why ? why[2] : "");
+  }
+  return found;
+}
+
+const everything = groups(work + "/all.json");
+const atBase = new Set(groups(work + "/base.json").keys());
+const kept = new Set(groups(work + "/kept.json").keys());
+const why = reasons();
+const filtered = fs.existsSync("osv-scanner.toml");
+
+for (const id of [...everything.keys()].sort()) {
+  const { named, advisories } = everything.get(id);
+  const name = named.name ?? "";
+  let accepted = "";
+  if (filtered && !kept.has(id)) {
+    // The group is ignored; the reason may be written against any of its
+    // aliases, so every id and alias is tried before falling back.
+    for (const advisory of advisories) {
+      for (const alias of [advisory.id ?? "", ...(advisory.aliases ?? [])]) {
+        if (why.has(alias)) {
+          accepted = why.get(alias) || "accepted in osv-scanner.toml";
+          break;
+        }
+      }
+      if (accepted) break;
+    }
+    accepted = accepted || "accepted in osv-scanner.toml";
+  }
+  process.stdout.write(
+    JSON.stringify({
+      id,
+      kind: "vulnerability",
+      where: `${name} ${named.version ?? ""}`.trim(),
+      via: broughtBy(name),
+      fix: fixedIn(advisories, name),
+      accepted,
+      was_at_base: atBase.has(id),
+    }) + "\n",
+  );
+}
+JS
+  node "$work/audit.cjs" "$work" "$lock"
+fi
+
+# --- secrets ---------------------------------------------------------------
+#
+# A secret has no `fix` and no `via`: it is revoked, not upgraded, and nothing
+# brought it in but the commit that wrote it. `nunki` stops on one and hands it
+# to a human, because no action of an agent closes it — removing it in a later
+# commit leaves it in the branch's history, and nunki rewrites none.
+#
+# `--no-ignore-tag` is a rule and not a setting. trufflehog's own exception is
+# a `trufflehog:ignore` comment **in the source line**, which the agent edits
+# legitimately: without this flag it could silence its own secret with six
+# characters. Everything is reported, and what is accepted is decided outside
+# the container.
+leaks="$work/leaks.jsonl"
+# The whole repository's history, wherever in it this stack lives.
+trufflehog git "file://$(git rev-parse --show-toplevel)" --json --no-update --no-ignore-tag \
+  > "$leaks" 2>/dev/null || true
+
+# What a human has already ruled is not a secret. It comes from the project's
+# HQ, mounted read-only: declared out of the agent's reach, readable by it all
+# the same. Absent, nothing is accepted — and absent means absent, because the
+# path is not one the agent could create (SPEC 4.4, gate 8).
+#
+# An exact match on the first field, because a prefix match reads the ruling
+# for `…:src/a.rs:Postgres:10` as the ruling for `…:src/a.rs:Postgres:1`, and
+# because a file path carries regex metacharacters a pattern would read.
+reason_for() {
+  [ -f "$secrets" ] || return 0
+  awk -v id="$1" '
+    /^[[:space:]]*#/ { next }
+    $1 == id { $1 = ""; sub(/^[[:space:]]+/, ""); print; exit }
+  ' "$secrets"
+}
+
+while IFS= read -r line; do
+  [ -n "$line" ] || continue
+  printf '%s' "$line" > "$work/leak.json"
+  git_meta=$(jq -r '.SourceMetadata.Data.Git // empty | @json' "$work/leak.json")
+  [ -n "$git_meta" ] || continue
+  commit=$(printf '%s' "$git_meta" | jq -r '.commit // ""')
+  file=$(printf '%s' "$git_meta" | jq -r '.file // ""')
+  ln=$(printf '%s' "$git_meta" | jq -r '.line // 0')
+  rule=$(jq -r '.DetectorName // "secret"' "$work/leak.json")
+  [ -n "$commit" ] && [ -n "$file" ] || continue
+
+  # trufflehog publishes no fingerprint, and a finding must be nameable to be
+  # accepted. Built the way gitleaks built its own, so an exception written
+  # once keeps naming the same thing.
+  id="$commit:$file:$rule:$ln"
+
+  was=false
+  git merge-base --is-ancestor "$commit" "$base" 2>/dev/null && was=true
+
+  jq -cn --arg id "$id" --arg where "$file:$ln" \
+     --arg accepted "$(reason_for "$id")" --argjson was_at_base "$was" \
+     '{id:$id, kind:"secret", where:$where, via:"", fix:"",
+       accepted:$accepted, was_at_base:$was_at_base}'
+done < "$leaks"
+"##;
+
+/// How a Next.js application is started (SPEC 4.2, rule 2).
+const RUN_NEXT: &str = r##"#!/bin/sh
+# How an application of this stack is started (SPEC 4.2, "les services et le
+# lancement de l'application").
+#
+# `nunki` runs this, detached, from the root of the tree, inside the container
+# of the role that will test or attack the application — before that role is
+# launched. No agent starts the application; this script is how the project
+# says what starting it means.
+#
+# It is called as `run.sh <id>`. Three things it must do, and the first two
+# are how `nunki` knows the application is up at all:
+#
+#  - keep the id on its command line. `nunki` recognises this process by it, and
+#    that is why the command below is **not** `exec`ed: replacing the process
+#    replaces its command line, and the application would be reported as
+#    stopped one second after it started.
+#  - stay in the foreground. A script that forks and exits reports an
+#    application that is not running.
+#  - listen on the address the mission's services can reach: `-H 0.0.0.0`,
+#    and not the loopback `next start` would otherwise pick.
+#
+# A production build first, because `next dev` recompiles on every request
+# and a system test would measure the compiler. Replace all of it with
+# whatever starting this project means; a project with nothing to start says
+# `run: none` in nunki.yaml instead.
+set -eu
+
+pnpm install --frozen-lockfile
+pnpm exec next build
+
+pnpm exec next start -H 0.0.0.0 -p "${PORT:-3000}"
+"##;
+
+/// The integrator's battery for a Next.js project (SPEC 4.4, gate 6 for the
+/// integrator): its system tests, driven through a real browser.
+const SYSTEM_NEXT: &str = r##"#!/bin/sh
+# The integrator's battery for a Next.js project: its system tests, green, in
+# the system profile (SPEC 4.4, gate 6 for the integrator).
+#
+# `nunki` runs this from the clean copy of HEAD inside the integrator's
+# container, where the mission's services are reachable and where `run.sh`
+# has already started the application. Playwright drives a real browser
+# against it, which is the point: the integrator's gate tests the application
+# and not a module.
+#
+# The coder's battery (`prepush.sh`) deselects these — it has no services and
+# no application — so a system test must never run under a plain `vitest`.
+set -eu
+
+pnpm install --frozen-lockfile
+
+if ! pnpm exec playwright --version >/dev/null 2>&1; then
+  echo "nunki: this stack's system battery needs @playwright/test, which this project does not declare." >&2
+  echo "nunki: add it where the lock can pin it: pnpm add -D @playwright/test" >&2
+  exit 1
+fi
+
+# The browsers live in the image and the project's Playwright has to match
+# them. On a mismatch Playwright says "Looks like Playwright was just
+# installed or updated. Please run `playwright install`" — advice that cannot
+# be followed in here, because its CDN is on no allowlist and should not be
+# (SPEC 4.1 bis, rule 6). With browsers from one version and a project on
+# another, every test fails on that message.
+#
+# So the versions are compared first, and the answer names the one the image
+# ships. A run that cannot start a browser has proved nothing, and saying why
+# is the difference between a fixable pin and an afternoon.
+shipped="$(cat "${PLAYWRIGHT_BROWSERS_PATH:-/opt/playwright}/nunki-version" 2>/dev/null || echo unknown)"
+declared="$(pnpm exec playwright --version | sed -n 's/^Version //p')"
+if [ "$shipped" != "unknown" ] && [ "$shipped" != "$declared" ]; then
+  echo "nunki: this image ships the browsers of Playwright $shipped and the project pins $declared." >&2
+  echo "nunki: the image follows the project's lockfile, so it was built before the project moved: \`nunki slot rebuild\` builds it against $declared." >&2
+  echo "nunki: do not change the project's Playwright to fit the image; the image is what is out of date." >&2
+  echo "nunki: playwright install cannot help here: its CDN is outside the perimeter." >&2
+  exit 1
+fi
+
+log=/tmp/nunki-system-tests.log
+status=0
+pnpm exec playwright test >"$log" 2>&1 || status=$?
+cat "$log" >&2
+if [ "$status" -ne 0 ]; then
+  exit "$status"
+fi
+
+# A battery that ran nothing proved nothing (SPEC 4.4). Playwright answers 0
+# when it collected no test at all, so the count is read rather than the
+# status.
+ran=$(sed -n 's/.*[^0-9]\([0-9][0-9]*\) passed.*/\1/p' "$log" | tail -1)
+[ -n "$ran" ] || ran=0
+if [ "$ran" -eq 0 ]; then
+  echo "nunki: no system test ran — Playwright's testDir holds none" >&2
+  exit 1
+fi
+"##;
+
+/// The files of a stack fragment: `(name, body, executable)`.
+/// The files `nunki init` writes for `stack`: name, text, executable.
+pub fn fragment(stack: &str) -> Vec<(&'static str, String, bool)> {
+    match stack {
+        "rust" => vec![
+            (
+                "allow.txt",
+                "# What a Rust build must reach, and nothing else (SPEC 4.1 bis, rule 6).\n\
+                 # One name per line; `#` comments. No forge: nunki check is red if one appears.\n\
+                 static.crates.io\n\
+                 index.crates.io\n\
+                 crates.io\n"
+                    .to_string(),
+                false,
+            ),
+            (
+                "prepush.sh",
+                "#!/bin/sh\n\
+                 # The battery for a Rust project: what must be silent before anything\n\
+                 # leaves a slot (SPEC 4.4).\n\
+                 set -eu\n\n\
+                 cargo fmt --all -- --check\n\
+                 cargo clippy --all-targets --all-features -- -D warnings\n\
+                 cargo test --all-features\n\
+                 # Not `cargo deny check` alone: its `advisories` stage fetches\n\
+                 # its database from github.com, and the coder's allowlist names\n\
+                 # no forge (SPEC 4.1 bis, rule 6), so the bare command fails\n\
+                 # here for a reason no agent can repair.\n\
+                 #\n\
+                 # Not because the audit is impossible in a container: gate 8\n\
+                 # runs it, `--offline`, against the database the host filled\n\
+                 # and `nunki` mounts read-only, and it finds the advisory with\n\
+                 # no network at all.\n\
+                 #\n\
+                 # It is a division of labour: the advisories question needs the\n\
+                 # mounted database, the unfiltered view and the comparison\n\
+                 # against the base, and gate 8 has all three. The battery asks\n\
+                 # for the three stages it can answer on its own.\n\
+                 cargo deny check bans licenses sources\n"
+                    .to_string(),
+                true,
+            ),
+            ("mutation.sh", MUTATION_RUST.to_string(), true),
+            (crate::gate::SECURITY, SECURITY_RUST.to_string(), true),
+            ("run.sh", RUN_RUST.to_string(), true),
+            (crate::gate::SYSTEM_BATTERY, SYSTEM_RUST.to_string(), true),
+            ("Dockerfile", dockerfile_rust(), false),
+            (crate::project::ADDON_FILE, addon_rust(), false),
+            (crate::versions::FILE, VERSIONS_RUST.to_string(), false),
+            (
+                crate::project::WRITABLE_FILE,
+                "# Directories an execution must be able to write when the tree is\n\
+                 # mounted read-only (SPEC 4.2). One relative path per line.\n\
+                 target\n"
+                    .to_string(),
+                false,
+            ),
+            (
+                crate::project::ADVISORIES_FILE,
+                "# Where this toolchain's advisory database lives **on the host**,\n\
+                 # and nunki mounts it read-only for gate 8. Two lines: the path,\n\
+                 # then the command that fills it.\n\
+                 #\n\
+                 # nunki does not fill it: the tool owns its own layout, and\n\
+                 # cargo-deny refuses a path that is not the one it builds from\n\
+                 # the database's URL. The tool fills it, on this machine, from\n\
+                 # the project's root — once is enough — and nunki repeats that\n\
+                 # command, word for word, whenever the database is missing.\n\
+                 ~/.cargo/advisory-db\n\
+                 cargo deny check advisories\n"
+                    .to_string(),
+                false,
+            ),
+            (
+                crate::project::CACHES_FILE,
+                "# Caches this toolchain keeps outside the tree, kept as a named\n\
+                 # volume per slot so a rebuilt container does not download the\n\
+                 # world again. One absolute container path per line.\n\
+                 #\n\
+                 # Declared here and not in nunki: a cache belongs to a toolchain,\n\
+                 # and nunki is agnostic to the stack.\n\
+                 /home/agent/.cargo/registry\n"
+                    .to_string(),
+                false,
+            ),
+        ],
+        "python" => vec![
+            (
+                "allow.txt",
+                "# What a Python build must reach, and nothing else (SPEC 4.1 bis, rule 6).\n\
+                 # One name per line; `#` comments. No forge: nunki check is red if one appears.\n\
+                 #\n\
+                 # The interpreter is not fetched: the image sets\n\
+                 # `UV_PYTHON_DOWNLOADS=never`, so uv never asks a forge for one.\n\
+                 pypi.org\n\
+                 files.pythonhosted.org\n"
+                    .to_string(),
+                false,
+            ),
+            ("prepush.sh", PREPUSH_PYTHON.to_string(), true),
+            ("mutation.sh", MUTATION_PYTHON.to_string(), true),
+            (crate::gate::SECURITY, SECURITY_PYTHON.to_string(), true),
+            ("run.sh", RUN_PYTHON.to_string(), true),
+            (crate::gate::SYSTEM_BATTERY, SYSTEM_PYTHON.to_string(), true),
+            ("Dockerfile", dockerfile_python(), false),
+            (crate::project::ADDON_FILE, addon_python(), false),
+            (
+                crate::project::ADDON_STAGES_FILE,
+                addon_stages_python(),
+                false,
+            ),
+            (crate::versions::FILE, VERSIONS_PYTHON.to_string(), false),
+            (
+                crate::project::WRITABLE_FILE,
+                "# Directories an execution must be able to write when the tree is\n\
+                 # mounted read-only (SPEC 4.2). One relative path per line.\n\
+                 #\n\
+                 # `.venv` first because everything else needs it: `uv sync` writes it,\n\
+                 # and the battery, the campaign and the system tests all run through it.\n\
+                 .venv\n\
+                 mutants\n\
+                 .pytest_cache\n\
+                 .mypy_cache\n\
+                 .ruff_cache\n"
+                    .to_string(),
+                false,
+            ),
+            (
+                crate::project::ADVISORIES_FILE,
+                "# Where this toolchain's advisory database lives **on the host**,\n\
+                 # and nunki mounts it read-only for gate 8. Two lines: the path,\n\
+                 # then the command that fills it.\n\
+                 #\n\
+                 # nunki does not fill it: the tool owns its own layout, and\n\
+                 # osv-scanner reads it from `$XDG_CACHE_HOME/osv-scalibr` and\n\
+                 # nowhere else — there is no path flag (measured on 2.6.0).\n\
+                 # The tool fills it, on this machine, from the project's root,\n\
+                 # and nunki repeats that command, word for word, whenever the\n\
+                 # database is missing.\n\
+                 #\n\
+                 # This names that one directory rather than the whole of\n\
+                 # `~/.cache`, which holds everything else this machine caches.\n\
+                 ~/.cache/osv-scalibr\n\
+                 osv-scanner scan source --download-offline-databases --offline-vulnerabilities --lockfile uv.lock\n"
+                    .to_string(),
+                false,
+            ),
+            (
+                crate::project::CACHES_FILE,
+                "# Caches this toolchain keeps outside the tree, kept as a named\n\
+                 # volume per slot so a rebuilt container does not download the\n\
+                 # world again. One absolute container path per line.\n\
+                 #\n\
+                 # Declared here and not in nunki: a cache belongs to a toolchain,\n\
+                 # and nunki is agnostic to the stack.\n\
+                 /home/agent/.cache/uv\n"
+                    .to_string(),
+                false,
+            ),
+        ],
+        "next" => vec![
+            (
+                "allow.txt",
+                "# What a Next.js build must reach, and nothing else (SPEC 4.1 bis, rule 6).\n\
+                 # One name per line; `#` comments. No forge: nunki check is red if one appears.\n\
+                 #\n\
+                 # No browser CDN: Playwright's browsers come with the image, and\n\
+                 # Next.js telemetry is off — both are perimeter rules, and both are\n\
+                 # written where the image sets them.\n\
+                 registry.npmjs.org\n"
+                    .to_string(),
+                false,
+            ),
+            ("prepush.sh", PREPUSH_NEXT.to_string(), true),
+            ("mutation.sh", MUTATION_NEXT.to_string(), true),
+            (crate::gate::SECURITY, SECURITY_NEXT.to_string(), true),
+            ("run.sh", RUN_NEXT.to_string(), true),
+            (crate::gate::SYSTEM_BATTERY, SYSTEM_NEXT.to_string(), true),
+            ("Dockerfile", dockerfile_next(), false),
+            (crate::project::ADDON_FILE, addon_next(), false),
+            (
+                crate::project::ADDON_STAGES_FILE,
+                addon_stages_next(),
+                false,
+            ),
+            (crate::versions::FILE, VERSIONS_NEXT.to_string(), false),
+            (
+                crate::project::WRITABLE_FILE,
+                "# Directories an execution must be able to write when the tree is\n\
+                 # mounted read-only (SPEC 4.2). One relative path per line.\n\
+                 #\n\
+                 # `node_modules` first because everything else needs it: the battery,\n\
+                 # the campaign and the system tests all run through what it holds.\n\
+                 node_modules\n\
+                 .next\n\
+                 reports\n\
+                 .stryker-tmp\n\
+                 test-results\n\
+                 playwright-report\n"
+                    .to_string(),
+                false,
+            ),
+            (
+                crate::project::ADVISORIES_FILE,
+                "# Where this toolchain's advisory database lives **on the host**,\n\
+                 # and nunki mounts it read-only for gate 8. Two lines: the path,\n\
+                 # then the command that fills it.\n\
+                 #\n\
+                 # The same directory the Python stack names: osv-scanner keeps one\n\
+                 # database per ecosystem side by side — `npm/` beside `PyPI/` — and\n\
+                 # reads them from `$XDG_CACHE_HOME/osv-scalibr` and nowhere else\n\
+                 # (there is no path flag; measured on 2.6.0).\n\
+                 #\n\
+                 # The tool fills it, on this machine, from the project's root,\n\
+                 # and nunki repeats that command, word for word, whenever the\n\
+                 # database is missing.\n\
+                 ~/.cache/osv-scalibr\n\
+                 osv-scanner scan source --download-offline-databases --offline-vulnerabilities --lockfile pnpm-lock.yaml\n"
+                    .to_string(),
+                false,
+            ),
+            (
+                crate::project::CACHES_FILE,
+                "# Caches this toolchain keeps outside the tree, kept as a named\n\
+                 # volume per slot so a rebuilt container does not download the\n\
+                 # world again. One absolute container path per line.\n\
+                 #\n\
+                 # Declared here and not in nunki: a cache belongs to a toolchain,\n\
+                 # and nunki is agnostic to the stack.\n\
+                 /home/agent/.local/share/pnpm/store\n"
+                    .to_string(),
+                false,
+            ),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+#[cfg(unix)]
+fn make_executable(path: &Path) -> Result<(), InitError> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+        .map_err(|e| InitError::Io(path.to_path_buf(), e))
+}
+
+#[cfg(not(unix))]
+fn make_executable(_path: &Path) -> Result<(), InitError> {
+    Ok(())
+}

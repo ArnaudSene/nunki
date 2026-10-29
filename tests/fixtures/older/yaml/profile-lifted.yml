@@ -1,0 +1,99 @@
+name: nunki-11111111-demo-1
+services:
+  firewall:
+    image: nunki/firewall:1
+    cap_drop:
+    - ALL
+    cap_add:
+    - NET_ADMIN
+    - NET_RAW
+    - SETUID
+    - SETGID
+    security_opt:
+    - no-new-privileges:true
+    networks:
+    - default
+    - nunki-services
+    healthcheck:
+      test:
+      - CMD
+      - /usr/local/bin/fw-ready
+      interval: 1s
+      timeout: 2s
+      retries: 30
+      start_period: 1s
+    environment:
+      HQ_ALLOW_ADDRESSES: 10.4.0.7
+      HQ_ALLOW_DOMAINS: api.anthropic.com,db,index.crates.io,static.crates.io,statsig.anthropic.com
+    init: true
+    restart: no
+  agent:
+    image: nunki/rust:1
+    user: 501:20
+    working_dir: /work/tree
+    network_mode: service:firewall
+    cap_drop:
+    - ALL
+    security_opt:
+    - no-new-privileges:true
+    depends_on:
+      firewall:
+        condition: service_healthy
+    volumes:
+    - /Users/h/code/demo-slot-1:/work/tree:rw
+    - /Users/h/.nunki/demo/hq/missions/m1:/work/mission:ro
+    - /Users/h/.nunki/demo/hq/missions/m1/JOURNAL.md:/work/mission/JOURNAL.md:rw
+    - /Users/h/.nunki/demo/hq/missions/m1/PR.md:/work/mission/PR.md:rw
+    - /Users/h/.nunki/demo/hq/missions/m1/VERDICT.json:/work/mission/VERDICT.json:rw
+    - /Users/h/.nunki/demo/hq/missions/m1/MUTANTS.triage.json:/work/mission/MUTANTS.triage.json:rw
+    - /Users/h/.nunki/demo/stacks/rust/prepush.sh:/work/stack/prepush.sh:ro
+    - /Users/h/.nunki/demo/credentials/db.env:/run/nunki/credentials/db.env:ro
+    - nunki-demo-1-harness:/home/agent/.harness
+    tmpfs:
+    - /run/nunki:uid=501,gid=20,mode=0700
+    environment:
+      HQ_ROLE: integrator
+    init: true
+    restart: no
+    command:
+    - sleep
+    - infinity
+  db:
+    image: postgres:16
+    command:
+    - postgres
+    - 1_000
+    - yes
+    environment:
+      BUILD: 1_000
+      RELEASE: 2026-10-13
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - pg_isready
+      retries: 30
+    volumes:
+    - dbdata:/var/lib/postgresql/data
+    labels:
+      nunki.services: sha256:0a546879286eec11973b5294006095c35cf68ac3d3bcba4116ca2e0aea0e5a02
+    networks:
+    - nunki-services
+    cap_drop:
+    - ALL
+    cap_add:
+    - CHOWN
+    - SETGID
+    - SETUID
+    security_opt:
+    - no-new-privileges:true
+    mem_limit: 2g
+    pids_limit: 1024
+volumes:
+  nunki-demo-1-harness: null
+  dbdata: null
+networks:
+  nunki-services:
+    internal: true
+    driver_opts:
+      com.docker.network.bridge.inhibit_ipv4: 'true'
+    enable_ipv6: false

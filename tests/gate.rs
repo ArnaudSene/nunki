@@ -1,0 +1,4161 @@
+//! The verification gates 1 to 4 (SPEC 4.4), against real git repositories.
+//!
+//! Every test here builds an actual repository in a temporary directory and
+//! makes actual commits. A gate that reads git is worth what it reads, and a
+//! fake would only prove that the fake agrees with the code.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use nunki::gate::{self, Decision, Gate, Subject};
+use nunki::harness::Role;
+use nunki::mission::{Bounds, Header, Integration, Lot, Rigor, Security, Service};
+use nunki::project::ProtectedPaths;
+
+/// Run git in `at`, with an identity so commits work on a bare machine.
+fn git(at: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(at)
+        .args(["-c", "user.name=Gate Test", "-c", "user.email=gate@test"])
+        .args(args)
+        .output()
+        .expect("git is on the path");
+    assert!(
+        out.status.success(),
+        "git {args:?} in {}: {}",
+        at.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+fn write(at: &Path, path: &str, body: &str) {
+    let full = at.join(path);
+    if let Some(dir) = full.parent() {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    std::fs::write(full, body).unwrap();
+}
+
+/// A repository with a `dev` base holding `AGENTS.md` and one source file,
+/// and a mission branch checked out from it.
+fn repo(dir: &Path) -> PathBuf {
+    let tree = dir.join("tree");
+    std::fs::create_dir_all(&tree).unwrap();
+    git(&tree, &["init", "-q", "-b", "dev"]);
+    write(&tree, "AGENTS.md", "the rules of this place\n");
+    write(&tree, "deny.toml", "[bans]\n");
+    write(&tree, ".github/workflows/ci.yml", "name: ci\n");
+    write(&tree, "src/lib.rs", "pub fn one() -> u8 { 1 }\n");
+    git(&tree, &["add", "-A"]);
+    git(&tree, &["commit", "-q", "-m", "base"]);
+    git(&tree, &["checkout", "-q", "-b", "mission/x"]);
+    record_base(&tree);
+    tree
+}
+
+/// What `run::branch` does at launch: the host records the mission's base
+/// from the project's repository (`refs/nunki/origin/*` in the slot's
+/// mirror), and the gates judge against that record alone. A bare copy of
+/// the slot, taken now, before any agent commit, stands in for the project.
+fn record_base(tree: &Path) {
+    let name = tree.file_name().unwrap().to_string_lossy().into_owned();
+    let project = tree.with_file_name(format!("{name}-project.git"));
+    git(
+        tree.parent().unwrap(),
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            tree.to_str().unwrap(),
+            project.to_str().unwrap(),
+        ],
+    );
+    nunki::git::SlotGit::open(tree)
+        .unwrap()
+        .fetch_origin(&project)
+        .unwrap();
+}
+
+fn header() -> Header {
+    Header {
+        branch: "mission/x".into(),
+        base: "dev".into(),
+        lots: vec![Lot {
+            id: "L1".into(),
+            title: "do the thing".into(),
+        }],
+        integration: Integration::None {
+            reason: "no external service is involved".into(),
+        },
+        security: Security::Gates,
+        rigor: Default::default(),
+        mutation_threshold: None,
+        hardening: Vec::new(),
+        arbiter: None,
+        run: None,
+        account: None,
+        model: None,
+        bounds: Bounds::default(),
+    }
+}
+
+fn protected() -> ProtectedPaths {
+    ProtectedPaths {
+        refuse: vec![
+            ".github/workflows/**".into(),
+            "vendor/**".into(),
+            "AGENTS.md".into(),
+            "deny.toml".into(),
+        ],
+        refuse_if_exists: vec!["src/*.rs".into()],
+    }
+}
+
+/// A journal whose resume block names `head`.
+fn journal(dir: &Path, head: &str) -> PathBuf {
+    let path = dir.join("JOURNAL.md");
+    std::fs::write(
+        &path,
+        format!("# Journal\n\n## ÉTAT DE REPRISE\n\nHEAD is `{head}`. Lot L1 done.\n\n## Notes\n\nolder work\n"),
+    )
+    .unwrap();
+    path
+}
+
+struct Fixture {
+    _dir: tempfile::TempDir,
+    tree: PathBuf,
+    journal: PathBuf,
+    pr: PathBuf,
+    verdict: PathBuf,
+    header: Header,
+    protected: ProtectedPaths,
+    branches: Vec<String>,
+    /// Where the coder's gates were green. The base by default: a coder
+    /// that added nothing, so every commit on the branch is the integrator's.
+    coder_head: Option<String>,
+    /// The project's `mutation_threshold`, which a `standard` mission's
+    /// gate 7 is judged against.
+    threshold: u32,
+    /// The project's services file, by its path in the repository.
+    services_file: Option<String>,
+}
+
+impl Fixture {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let tree = repo(dir.path());
+        let journal = journal(dir.path(), "0000000");
+        let pr = dir.path().join("PR.md");
+        let verdict = dir.path().join("VERDICT.json");
+        let coder_head = Some(git(&tree, &["rev-parse", "HEAD"]));
+        Self {
+            pr,
+            verdict,
+            _dir: dir,
+            tree,
+            journal,
+            header: header(),
+            protected: protected(),
+            branches: vec!["main".into(), "dev".into()],
+            coder_head,
+            threshold: 80,
+            services_file: None,
+        }
+    }
+
+    /// A project that declares `compose.yaml` as its services file, on a
+    /// base that holds it, recorded the way a launch records it.
+    fn with_services_file() -> Self {
+        let mut f = Self::new();
+        f.services_file = Some("compose.yaml".into());
+        commit(
+            &f.tree,
+            "compose.yaml",
+            "services: {}\n",
+            "the base holds it",
+        );
+        git(&f.tree, &["branch", "-f", "dev", "HEAD"]);
+        let project = f.tree.with_file_name("tree-project.git");
+        git(&f.tree, &["push", "-q", project.to_str().unwrap(), "dev"]);
+        nunki::git::SlotGit::open(&f.tree)
+            .unwrap()
+            .fetch_origin(&project)
+            .unwrap();
+        f.coder_head = Some(git(&f.tree, &["rev-parse", "HEAD"]));
+        f
+    }
+
+    /// Rewrite the journal so its block names the current HEAD, which is what
+    /// an agent honouring the run contract does.
+    fn journal_names_head(&self) {
+        let head = git(&self.tree, &["rev-parse", "HEAD"]);
+        std::fs::write(
+            &self.journal,
+            format!("# Journal\n\n## ÉTAT DE REPRISE\n\nHEAD is `{head}`. Lot L1 done.\n"),
+        )
+        .unwrap();
+    }
+
+    /// The project and slot a `Verification` borrows. Built here because
+    /// gate 8 needs a container at the end of **every** run, not only at the
+    /// final verification — so both phases carry the same context.
+    fn context(&self) -> (nunki::project::Project, nunki::slot::Slot) {
+        let nunki = self._dir.path().join("nunki");
+        let project = nunki::project::Project::at(
+            self._dir.path().join("repo"),
+            nunki::project::Config {
+                root: None,
+                harness: "claude-code".into(),
+                forge: vec![],
+                stacks: vec!["rust".into()],
+                protected_branches: self.branches.clone(),
+                protected_paths: Default::default(),
+                account: None,
+                model: None,
+                bounds: Default::default(),
+                credentials: None,
+                run: None,
+                services_file: None,
+                permission_mode: "auto".to_string(),
+                rigor: None,
+                mutation_threshold: self.threshold,
+                mutation_jobs: None,
+                forge_protection: Default::default(),
+                security_findings: Default::default(),
+            },
+            nunki,
+        );
+        let slot = nunki::slot::Slot {
+            name: "nowhere".into(),
+            tree: self.tree.clone(),
+        };
+        (project, slot)
+    }
+
+    fn gates(&self, role: Role) -> gate::Report {
+        let (project, slot) = self.context();
+        gate::after_run(
+            &Subject {
+                role,
+                tree: &self.tree,
+                journal: &self.journal,
+                pr: &self.pr,
+                verdict: &self.verdict,
+                mission_dir: self._dir.path(),
+                header: &self.header,
+                protected_branches: &self.branches,
+                protected_paths: &self.protected,
+                services_file: self.services_file.as_deref(),
+                coder_head: self.coder_head.as_deref(),
+            },
+            &gate::Verification {
+                project: &project,
+                slot: &slot,
+                engine: std::sync::Arc::new(nunki::engine::fake::FakeEngine::default()),
+                stack: "rust",
+            },
+        )
+        .unwrap()
+    }
+
+    fn decision(&self, role: Role, gate: Gate) -> Decision {
+        self.gates(role)
+            .outcomes
+            .into_iter()
+            .find(|o| o.gate == gate)
+            .expect("every gate is reported")
+            .decision
+    }
+}
+
+fn commit(tree: &Path, path: &str, body: &str, message: &str) {
+    write(tree, path, body);
+    git(tree, &["add", "-A"]);
+    git(tree, &["commit", "-q", "-m", message]);
+}
+
+#[test]
+fn a_run_that_honoured_its_contract_passes_the_gates_of_its_end() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.journal_names_head();
+    let report = f.gates(Role::Coder);
+
+    // 1 to 4, and 8 — the gates SPEC 4.4 owes at the end of every run.
+    assert_eq!(report.outcomes.len(), 5, "{:?}", report.outcomes);
+    for gate in [
+        Gate::CleanTree,
+        Gate::BranchAhead,
+        Gate::ResumeNamesHead,
+        Gate::Perimeter,
+    ] {
+        let one = report.outcomes.iter().find(|o| o.gate == gate).unwrap();
+        assert_eq!(one.decision, Decision::Passed, "{gate:?}");
+    }
+
+    // Gate 8 needs a container, and there is none here. `Unplayed` and not
+    // red: a verdict on the machine rather than on the agent, and a security
+    // gate that could not look must not report green either.
+    let eight = report
+        .outcomes
+        .iter()
+        .find(|o| o.gate == Gate::MechanicalSecurity)
+        .expect("gate 8 is played at the end of a run");
+    assert!(
+        matches!(eight.decision, Decision::Unplayed(_)),
+        "{:?}",
+        eight.decision
+    );
+    assert!(!report.passed(), "an unplayed gate is not a green report");
+}
+
+#[test]
+fn an_uncommitted_change_is_red_and_the_reason_names_it() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.journal_names_head();
+    write(&f.tree, "src/half.rs", "fn unfinished(\n");
+    match f.decision(Role::Coder, Gate::CleanTree) {
+        Decision::Failed(why) => assert!(why.contains("src/half.rs"), "{why}"),
+        other => panic!("a half-written file is not a clean tree: {other:?}"),
+    }
+}
+
+#[test]
+fn a_protected_branch_is_refused_and_so_is_one_that_is_not_ahead() {
+    let f = Fixture::new();
+    // Not ahead: the branch exists but carries nothing.
+    f.journal_names_head();
+    match f.decision(Role::Coder, Gate::BranchAhead) {
+        Decision::Failed(why) => assert!(why.contains("no commit"), "{why}"),
+        other => panic!("a branch with nothing on it is not ahead: {other:?}"),
+    }
+
+    // On a protected branch, whatever it carries.
+    git(&f.tree, &["checkout", "-q", "dev"]);
+    commit(
+        &f.tree,
+        "src/new.rs",
+        "pub fn two() -> u8 { 2 }\n",
+        "on dev",
+    );
+    f.journal_names_head();
+    match f.decision(Role::Coder, Gate::BranchAhead) {
+        Decision::Failed(why) => assert!(why.contains("dev"), "{why}"),
+        other => panic!("dev is protected: {other:?}"),
+    }
+}
+
+/// The gate reads **the block**, not the file. A journal that names an older
+/// commit further down is exactly the stale-resume case it exists to catch.
+#[test]
+fn the_hash_must_be_in_the_resume_block_and_not_merely_in_the_file() {
+    let f = Fixture::new();
+    let first = git(&f.tree, &["rev-parse", "HEAD"]);
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    let head = git(&f.tree, &["rev-parse", "HEAD"]);
+
+    // The block names the base commit; the current HEAD is further down,
+    // outside the block. A file-wide search would call this green.
+    std::fs::write(
+        &f.journal,
+        format!(
+            "# Journal\n\n## ÉTAT DE REPRISE\n\nHEAD is `{first}`.\n\n## History\n\nlater work at {head}\n"
+        ),
+    )
+    .unwrap();
+    match f.decision(Role::Coder, Gate::ResumeNamesHead) {
+        Decision::Failed(why) => assert!(why.contains(&head[..12]), "{why}"),
+        other => panic!("a stale resume block must be caught: {other:?}"),
+    }
+
+    // Abbreviated is how an agent writes it, and it counts.
+    std::fs::write(
+        &f.journal,
+        format!(
+            "# Journal\n\n## ÉTAT DE REPRISE\n\nHEAD is {}.\n",
+            &head[..8]
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        f.decision(Role::Coder, Gate::ResumeNamesHead),
+        Decision::Passed
+    );
+
+    // No block at all: the run contract was not honoured.
+    std::fs::write(&f.journal, "# Journal\n\nI did some work.\n").unwrap();
+    assert!(matches!(
+        f.decision(Role::Coder, Gate::ResumeNamesHead),
+        Decision::Failed(_)
+    ));
+}
+
+/// The gate that only a per-commit pass can catch, and the reason SPEC 4.4
+/// says "and commit by commit": a forbidden commit that is reverted leaves a
+/// clean tree, an empty diff, and a dirty history.
+#[test]
+fn a_forbidden_commit_that_was_reverted_still_fails_the_perimeter() {
+    let f = Fixture::new();
+    commit(
+        &f.tree,
+        "AGENTS.md",
+        "the rules, rewritten by the agent\n",
+        "loosen the rules",
+    );
+    let bad = git(&f.tree, &["rev-parse", "HEAD"]);
+    git(&f.tree, &["revert", "--no-edit", &bad]);
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.journal_names_head();
+
+    // The diff is innocent: the file is back as it was.
+    let diff = git(&f.tree, &["diff", "--name-only", "dev...HEAD"]);
+    assert!(
+        !diff.contains("AGENTS.md"),
+        "the diff really is clean: {diff:?}"
+    );
+
+    let revert = git(&f.tree, &["rev-parse", "HEAD~1"]);
+    match f.decision(Role::Coder, Gate::Perimeter) {
+        Decision::Failed(why) => {
+            assert!(why.contains("AGENTS.md"), "{why}");
+            // Which of the two it names is not pinned: the revert touches the
+            // file as surely as the commit it undoes, and either answer sends
+            // the human to the same place in the history.
+            assert!(
+                why.contains(&bad[..7]) || why.contains(&revert[..7]),
+                "it must name the commit that touched it: {why}"
+            );
+        }
+        other => panic!("a reverted forbidden commit is still a forbidden commit: {other:?}"),
+    }
+}
+
+#[test]
+fn a_protected_directory_is_protected_at_every_depth() {
+    let f = Fixture::new();
+    commit(
+        &f.tree,
+        ".github/workflows/nested/evil.yml",
+        "name: mine\n",
+        "add a workflow",
+    );
+    f.journal_names_head();
+    match f.decision(Role::Coder, Gate::Perimeter) {
+        Decision::Failed(why) => assert!(why.contains("nested/evil.yml"), "{why}"),
+        other => panic!("`.github/workflows/**` covers what is under it: {other:?}"),
+    }
+}
+
+/// `refuse_if_exists` asks the **base**, not the slot's tree: a file the
+/// agent has just created is not one that already existed.
+/// `**` spans zero segments too. A project writing `vendor/**` means the
+/// directory and everything under it — including the day `vendor` is a file
+/// rather than a directory, which is exactly when a glob quietly stops
+/// matching and a protected path stops being protected.
+#[test]
+fn a_protected_directory_pattern_also_covers_the_name_itself() {
+    let f = Fixture::new();
+    commit(
+        &f.tree,
+        "vendor",
+        "not a directory today\n",
+        "add a file named vendor",
+    );
+    f.journal_names_head();
+    match f.decision(Role::Coder, Gate::Perimeter) {
+        Decision::Failed(why) => assert!(why.contains("vendor"), "{why}"),
+        other => panic!("`vendor/**` must cover `vendor`: {other:?}"),
+    }
+}
+
+#[test]
+fn refuse_if_exists_asks_the_base_and_not_the_working_tree() {
+    let f = Fixture::new();
+    // `src/*.rs` is refuse_if_exists, and `src/new.rs` is not on dev.
+    commit(
+        &f.tree,
+        "src/new.rs",
+        "pub fn two() -> u8 { 2 }\n",
+        "a new file",
+    );
+    f.journal_names_head();
+    assert_eq!(f.decision(Role::Coder, Gate::Perimeter), Decision::Passed);
+
+    // `src/lib.rs` is on dev, so touching it is refused.
+    commit(
+        &f.tree,
+        "src/lib.rs",
+        "pub fn one() -> u8 { 9 }\n",
+        "change an old file",
+    );
+    f.journal_names_head();
+    match f.decision(Role::Coder, Gate::Perimeter) {
+        Decision::Failed(why) => assert!(why.contains("src/lib.rs"), "{why}"),
+        other => panic!("a file that exists on the base is protected there: {other:?}"),
+    }
+}
+
+/// The integrator's gate 4 is the inverse of the coder's: an allowlist made
+/// of the mission's wiring, and everything outside it is out of perimeter.
+#[test]
+fn the_integrator_may_commit_its_wiring_and_nothing_else() {
+    let mut f = Fixture::new();
+    f.header.integration = Integration::Services {
+        services: vec![Service {
+            name: "db".into(),
+            reach: vec!["db".into()],
+            shared: false,
+        }],
+        wiring: vec!["tests/system/**".into(), "config/*.yml".into()],
+    };
+    commit(
+        &f.tree,
+        "tests/system/smoke.rs",
+        "// system test\n",
+        "wire it",
+    );
+    commit(&f.tree, "config/test.yml", "url: db\n", "configure it");
+    f.journal_names_head();
+    assert_eq!(
+        f.decision(Role::Integrator, Gate::Perimeter),
+        Decision::Passed
+    );
+
+    // The coder's file is not the integrator's to touch, protected or not.
+    commit(
+        &f.tree,
+        "src/new.rs",
+        "pub fn two() -> u8 { 2 }\n",
+        "rewrite the code",
+    );
+    f.journal_names_head();
+    match f.decision(Role::Integrator, Gate::Perimeter) {
+        Decision::Failed(why) => assert!(
+            why.contains("src/new.rs") && why.contains("wiring"),
+            "{why}"
+        ),
+        other => panic!("outside the wiring list is out of perimeter: {other:?}"),
+    }
+}
+
+/// The project's services file is the human's (#141). A system profile
+/// lifts it as the mission's base holds it, so an edit on the branch would
+/// ship in the pull request without ever having been lifted: gate 4 refuses
+/// it, a revert included, since the gate reads each commit, and a deletion
+/// or a rename as well. By its exact path: a file of another name, or of the
+/// same name elsewhere, is not the services file.
+#[test]
+fn no_commit_of_the_coder_touches_the_services_file() {
+    let refused = |f: &Fixture| match f.decision(Role::Coder, Gate::Perimeter) {
+        Decision::Failed(why) => why,
+        other => panic!("the services file was let through: {other:?}"),
+    };
+    let db = "services:\n  db:\n    image: postgres:16\n";
+
+    let f = Fixture::with_services_file();
+    commit(&f.tree, "compose.yaml", db, "a db");
+    f.journal_names_head();
+    let why = refused(&f);
+    assert!(
+        why.contains("compose.yaml is the project's services file"),
+        "{why}"
+    );
+    assert!(why.contains("every commit"), "{why}");
+    assert!(why.contains("propose it in PR.md"), "{why}");
+
+    let f = Fixture::with_services_file();
+    commit(&f.tree, "compose.yaml", db, "a db");
+    commit(&f.tree, "compose.yaml", "services: {}\n", "take it back");
+    f.journal_names_head();
+    let why = refused(&f);
+    assert!(why.contains("commit"), "{why}");
+
+    let f = Fixture::with_services_file();
+    git(&f.tree, &["rm", "-q", "compose.yaml"]);
+    git(&f.tree, &["commit", "-q", "-m", "gone"]);
+    f.journal_names_head();
+    refused(&f);
+
+    let f = Fixture::with_services_file();
+    git(&f.tree, &["mv", "compose.yaml", "docker-compose.yaml"]);
+    git(&f.tree, &["commit", "-q", "-m", "renamed"]);
+    f.journal_names_head();
+    refused(&f);
+
+    let f = Fixture::with_services_file();
+    commit(
+        &f.tree,
+        "deploy/compose.yaml",
+        "services: {}\n",
+        "elsewhere",
+    );
+    commit(&f.tree, "compose.yaml.example", "services: {}\n", "beside");
+    f.journal_names_head();
+    assert_eq!(f.decision(Role::Coder, Gate::Perimeter), Decision::Passed);
+}
+
+/// The integrator is refused it too, before its wiring list is read: the
+/// mission of #141 named its services file as wiring, and a list that names
+/// the file lets nothing through. Without a services file declared, the same
+/// commit is wiring like any other.
+#[test]
+fn the_integrator_may_not_touch_the_services_file_even_as_wiring() {
+    let wired = |f: &mut Fixture| {
+        f.header.integration = Integration::Services {
+            services: vec![Service {
+                name: "db".into(),
+                reach: vec!["db".into()],
+                shared: false,
+            }],
+            wiring: vec!["compose.yaml".into(), "tests/system/**".into()],
+        };
+        commit(
+            &f.tree,
+            "tests/system/smoke.rs",
+            "// system test\n",
+            "wire it",
+        );
+        commit(
+            &f.tree,
+            "compose.yaml",
+            "services:\n  db:\n    image: postgres:16\n",
+            "a db",
+        );
+        f.journal_names_head();
+    };
+
+    let mut f = Fixture::with_services_file();
+    wired(&mut f);
+    match f.decision(Role::Integrator, Gate::Perimeter) {
+        Decision::Failed(why) => assert!(
+            why.contains("compose.yaml is the project's services file")
+                && why.contains("whatever the wiring list says"),
+            "{why}"
+        ),
+        other => panic!("the services file was let through as wiring: {other:?}"),
+    }
+
+    let mut f = Fixture::with_services_file();
+    f.services_file = None;
+    wired(&mut f);
+    assert_eq!(
+        f.decision(Role::Integrator, Gate::Perimeter),
+        Decision::Passed
+    );
+}
+
+/// A wiring list that names production code is a framing mistake, and gate 4
+/// is where it surfaces.
+///
+/// SPEC 4.4's row 7 excuses the integrator from the mutation campaign
+/// *because* row 4 limits it to wiring — system tests, test configuration,
+/// fixtures, migration order — none of which is mutable. A mission that
+/// declares `src/**` as wiring breaks that agreement without saying so: the
+/// integrator writes production code, gate 4 waves it through because the
+/// mission listed the path, and gate 7 never looks at it again.
+///
+/// A mission that names `src/infrastructure/postgres/**` as wiring gets a
+/// whole adapter written there, and nothing mutates it until a *coder*
+/// touches the file missions later — by then with hundreds of survivors, in
+/// a serialisation layer that may carry money.
+///
+/// The three cases below come from that layout, and the middle one is the only
+/// one that may fail: a migration under `src/` is wiring by SPEC 4.4's own
+/// words, and a rule keyed on the `src/` prefix would refuse it.
+#[test]
+fn wiring_that_names_production_code_is_refused_although_the_mission_declared_it() {
+    let mut f = Fixture::new();
+    f.header.integration = Integration::Services {
+        services: vec![Service {
+            name: "db".into(),
+            reach: vec!["db".into()],
+            shared: false,
+        }],
+        wiring: vec![
+            "tests/system/**".into(),
+            "src/infrastructure/postgres/**".into(),
+        ],
+    };
+
+    // Declared, under `src/`, and legitimately the integrator's: SPEC 4.4
+    // names migration order as wiring.
+    commit(
+        &f.tree,
+        "src/infrastructure/postgres/schema/0002_orders.sql",
+        "CREATE TABLE register_rows (identity TEXT PRIMARY KEY);\n",
+        "add the register schema",
+    );
+    // A system test, under `tests/`, whatever its extension.
+    commit(
+        &f.tree,
+        "tests/system/smoke.py",
+        "def test_smoke():\n    assert True\n",
+        "wire it",
+    );
+    f.journal_names_head();
+    assert_eq!(
+        f.decision(Role::Integrator, Gate::Perimeter),
+        Decision::Passed,
+        "a migration and a system test are wiring, and stay wiring"
+    );
+
+    // The case that exists to be caught: production source, inside the
+    // declared wiring list.
+    commit(
+        &f.tree,
+        "src/infrastructure/postgres/order_store.py",
+        "class PostgresRegisterStore:\n    pass\n",
+        "implement the adapter",
+    );
+    f.journal_names_head();
+    match f.decision(Role::Integrator, Gate::Perimeter) {
+        Decision::Failed(why) => {
+            assert!(why.contains("order_store.py"), "{why}");
+            assert!(
+                why.contains("gate 7"),
+                "the message has to name the consequence, not just the path: {why}"
+            );
+        }
+        other => panic!("production code in the wiring list is still production code: {other:?}"),
+    }
+}
+
+/// The integrator works on the coder's branch (SPEC 2), so the coder's
+/// commits come first on it — and none of them is wiring.
+///
+/// A gate 4 that judges the whole branch against its base holds every
+/// integrator red on the coder's `src/`, on a perimeter it never crossed —
+/// `src/new.rs is not in this mission's wiring list, and the diff against
+/// the base touches it`.
+#[test]
+fn the_integrator_is_judged_on_what_it_added_after_the_coder() {
+    let mut f = Fixture::new();
+    f.header.integration = Integration::Services {
+        services: vec![Service {
+            name: "db".into(),
+            reach: vec!["db".into()],
+            shared: false,
+        }],
+        wiring: vec!["tests/system/**".into()],
+    };
+    commit(
+        &f.tree,
+        "src/new.rs",
+        "pub fn two() -> u8 { 2 }\n",
+        "the coder's lot",
+    );
+    f.coder_head = Some(git(&f.tree, &["rev-parse", "HEAD"]));
+    commit(
+        &f.tree,
+        "tests/system/smoke.rs",
+        "// system test\n",
+        "wire it",
+    );
+    f.journal_names_head();
+    assert_eq!(
+        f.decision(Role::Integrator, Gate::Perimeter),
+        Decision::Passed,
+        "the coder's src/new.rs is not the integrator's commit"
+    );
+
+    // Not an exemption for the coder's files: one the integrator commits
+    // after the coder is still outside its wiring.
+    commit(
+        &f.tree,
+        "src/new.rs",
+        "pub fn two() -> u8 { 3 }\n",
+        "rewrite the coder's decision",
+    );
+    f.journal_names_head();
+    match f.decision(Role::Integrator, Gate::Perimeter) {
+        Decision::Failed(why) => assert!(why.contains("src/new.rs"), "{why}"),
+        other => panic!("a coder's file the integrator rewrites is out of perimeter: {other:?}"),
+    }
+}
+
+/// Without the commit the coder's gates were green on, nothing separates the
+/// two roles' commits. That is the machine's gap, not the integrator's fault,
+/// so the gate is not played rather than red.
+#[test]
+fn without_the_coders_green_commit_the_integrators_perimeter_is_not_played() {
+    let mut f = Fixture::new();
+    f.header.integration = Integration::Services {
+        services: vec![Service {
+            name: "db".into(),
+            reach: vec!["db".into()],
+            shared: false,
+        }],
+        wiring: vec!["tests/system/**".into()],
+    };
+    f.coder_head = None;
+    commit(
+        &f.tree,
+        "tests/system/smoke.rs",
+        "// system test\n",
+        "wire it",
+    );
+    f.journal_names_head();
+    match f.decision(Role::Integrator, Gate::Perimeter) {
+        Decision::Unplayed(why) => assert!(why.contains("coder"), "{why}"),
+        other => panic!("nothing tells the two roles' commits apart: {other:?}"),
+    }
+}
+
+#[test]
+fn an_integration_mission_with_no_wiring_declared_lets_the_integrator_commit_nothing() {
+    let mut f = Fixture::new();
+    f.header.integration = Integration::Services {
+        services: vec![Service {
+            name: "db".into(),
+            reach: vec!["db".into()],
+            shared: false,
+        }],
+        wiring: Vec::new(),
+    };
+    commit(&f.tree, "config/test.yml", "url: db\n", "configure it");
+    f.journal_names_head();
+    match f.decision(Role::Integrator, Gate::Perimeter) {
+        Decision::Failed(why) => {
+            assert!(why.contains("--wiring"), "it must say how to fix it: {why}")
+        }
+        other => panic!("nothing declared means nothing allowed: {other:?}"),
+    }
+}
+
+/// Three of the four say nothing about a role that commits nothing, and
+/// "not applicable" is reported as itself — a skipped gate called green is
+/// how a report stops being worth reading.
+#[test]
+fn the_security_agent_is_not_asked_the_gates_it_cannot_answer() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    // A dirty tree and a forbidden path, neither of which is its business.
+    write(&f.tree, "AGENTS.md", "touched by something else\n");
+    f.journal_names_head();
+
+    let report = f.gates(Role::Security);
+    assert!(report.passed(), "{:?}", report.failure());
+    for gate in [Gate::CleanTree, Gate::BranchAhead, Gate::Perimeter] {
+        match f.decision(Role::Security, gate) {
+            Decision::NotApplicable(why) => assert!(why.contains("read-only"), "{why}"),
+            other => panic!("{gate:?} does not apply to the security agent: {other:?}"),
+        }
+    }
+    // Its journal, however, is its own, and gate 3 holds for it.
+    assert_eq!(
+        f.decision(Role::Security, Gate::ResumeNamesHead),
+        Decision::Passed
+    );
+}
+
+#[test]
+fn the_report_names_the_first_red_gate_in_specification_order() {
+    let f = Fixture::new();
+    // Two reds at once: an uncommitted change (1) and a forbidden commit (4).
+    commit(
+        &f.tree,
+        "deny.toml",
+        "[bans]\ndeny = []\n",
+        "loosen the bans",
+    );
+    write(&f.tree, "src/half.rs", "fn unfinished(\n");
+    f.journal_names_head();
+    let failure = f.gates(Role::Coder).failure().expect("it is red");
+    assert!(failure.starts_with("gate 1 "), "{failure}");
+}
+
+// ---------------------------------------------------------------------------
+// Gates 5 and 6, the final verification's own (SPEC 4.4).
+// ---------------------------------------------------------------------------
+
+impl Fixture {
+    /// The gates of the final verification, against a slot whose profile is
+    /// not up. Gate 6 cannot be played then, and says so — which is exactly
+    /// what these tests need in order to judge gate 5 on its own.
+    fn verification(&self, role: Role) -> gate::Report {
+        let (project, slot) = self.context();
+        gate::at_verification(
+            &Subject {
+                role,
+                tree: &self.tree,
+                journal: &self.journal,
+                pr: &self.pr,
+                verdict: &self.verdict,
+                mission_dir: self._dir.path(),
+                header: &self.header,
+                protected_branches: &self.branches,
+                protected_paths: &self.protected,
+                services_file: self.services_file.as_deref(),
+                coder_head: self.coder_head.as_deref(),
+            },
+            &gate::Verification {
+                project: &project,
+                slot: &slot,
+                engine: std::sync::Arc::new(nunki::engine::fake::FakeEngine::default()),
+                stack: "rust",
+            },
+        )
+        .unwrap()
+    }
+
+    fn at_verification(&self, role: Role, gate: Gate) -> Decision {
+        self.verification(role)
+            .outcomes
+            .into_iter()
+            .find(|o| o.gate == gate)
+            .expect("every gate is reported")
+            .decision
+    }
+}
+
+#[test]
+fn the_deliverable_is_the_pull_request_and_an_empty_one_is_not_one() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.journal_names_head();
+
+    // Never written at all, and written empty, are the same thing.
+    match f.at_verification(Role::Coder, Gate::Deliverable) {
+        Decision::Failed(why) => assert!(why.contains("PR.md"), "{why}"),
+        other => panic!("a mission with no pull request has no deliverable: {other:?}"),
+    }
+    std::fs::write(&f.pr, "   \n\n").unwrap();
+    assert!(matches!(
+        f.at_verification(Role::Coder, Gate::Deliverable),
+        Decision::Failed(_)
+    ));
+
+    std::fs::write(&f.pr, "# What this changes\n\nA thing.\n").unwrap();
+    assert_eq!(
+        f.at_verification(Role::Coder, Gate::Deliverable),
+        Decision::Passed
+    );
+}
+
+/// The integrator completes the coder's pull request, and "completed" is
+/// decided by a heading — a gate that needs a reader is not a gate.
+#[test]
+fn the_integrator_owes_its_own_section_of_the_pull_request() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.journal_names_head();
+    std::fs::write(&f.pr, "# What this changes\n\nA thing.\n").unwrap();
+    match f.at_verification(Role::Integrator, Gate::Deliverable) {
+        Decision::Failed(why) => assert!(why.contains("Integration"), "{why}"),
+        other => panic!("the coder's pull request alone is not the integrator's: {other:?}"),
+    }
+    std::fs::write(
+        &f.pr,
+        "# What this changes\n\nA thing.\n\n## Integration\n\nWired to the database.\n",
+    )
+    .unwrap();
+    assert_eq!(
+        f.at_verification(Role::Integrator, Gate::Deliverable),
+        Decision::Passed
+    );
+}
+
+/// The security agent commits nothing, so its deliverable is its report —
+/// and a verdict without one is a verdict about nothing.
+#[test]
+fn the_security_agents_deliverable_is_its_report_not_a_pull_request() {
+    let f = Fixture::new();
+    f.journal_names_head();
+    std::fs::write(&f.pr, "# a pull request it did not write\n").unwrap();
+    match f.at_verification(Role::Security, Gate::Deliverable) {
+        Decision::Failed(why) => assert!(why.contains("VERDICT.json"), "{why}"),
+        other => panic!("a pull request is not the security agent's deliverable: {other:?}"),
+    }
+
+    std::fs::write(
+        &f.verdict,
+        r#"{"role":"Security","verdict":"CLEAR","head":"abc","date":"2026-09-10","report":""}"#,
+    )
+    .unwrap();
+    match f.at_verification(Role::Security, Gate::Deliverable) {
+        Decision::Failed(why) => assert!(why.contains("report"), "{why}"),
+        other => panic!("a verdict without a report is not a report: {other:?}"),
+    }
+
+    std::fs::write(
+        &f.verdict,
+        r#"{"role":"Security","verdict":"CLEAR","head":"abc","date":"2026-09-10",
+            "report":"Nothing reachable was exploitable; the admin panel was not looked at."}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        f.at_verification(Role::Security, Gate::Deliverable),
+        Decision::Passed
+    );
+}
+
+/// A battery nobody could run is not a battery that passed, and it is not a
+/// battery that failed either. The distinction is the whole point: red blames
+/// the agent, and a profile that is not up is not the agent's doing.
+#[test]
+fn a_battery_that_could_not_be_run_is_neither_green_nor_red() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.journal_names_head();
+    std::fs::write(&f.pr, "# What this changes\n").unwrap();
+
+    match f.at_verification(Role::Coder, Gate::Battery) {
+        Decision::Unplayed(why) => assert!(why.contains("nunki mission start"), "{why}"),
+        other => panic!("no profile is up, so nothing ran: {other:?}"),
+    }
+    // And a report with a gate nobody played is not a green report.
+    let report = f.verification(Role::Coder);
+    assert!(!report.passed());
+    assert!(
+        report.failure().unwrap().contains("could not be played"),
+        "{:?}",
+        report.failure()
+    );
+    // And told apart, which is what the caller deciding the next move needs.
+    // `failure()` folds the two on purpose — "is this green" has one answer —
+    // but "what do I do about it" has two: a red gate is the agent's to fix,
+    // and a gate nobody could play is not, so sending an agent back at it
+    // spends a run to be told the same thing again. `verdict()` is that
+    // second question, and the flow asks it and nothing else.
+    let nunki::gate::Verdict::Wall(why) = report.verdict() else {
+        panic!(
+            "a gate nobody could play is not a red one: {:?}",
+            report.verdict()
+        );
+    };
+    assert!(why.contains("could not be played"), "{why}");
+}
+
+#[test]
+fn the_security_agent_owes_findings_and_not_a_green_battery() {
+    let f = Fixture::new();
+    f.journal_names_head();
+    match f.at_verification(Role::Security, Gate::Battery) {
+        Decision::NotApplicable(why) => assert!(why.contains("findings"), "{why}"),
+        other => panic!("gate 6 does not apply to the security agent: {other:?}"),
+    }
+}
+
+/// Gate 6 against a real container, which is the only place it means
+/// anything: the battery runs on the clean copy of `HEAD`, and the script
+/// that runs is the stack's, mounted read-only from the project's home.
+///
+/// ```text
+/// cargo test --test gate -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "lifts real containers; run by hand"]
+fn live_the_battery_is_the_stacks_mounted_one_and_an_absent_one_is_red() {
+    let dir = tempfile::tempdir().unwrap();
+    let tree = dir.path().join("tree");
+    std::fs::create_dir_all(&tree).unwrap();
+    git(&tree, &["init", "-q", "-b", "work"]);
+    write(&tree, "src/lib.rs", "pub fn one() -> u8 { 1 }\n");
+    git(&tree, &["add", "-A"]);
+    git(&tree, &["commit", "-q", "-m", "base"]);
+    git(&tree, &["branch", "-q", "dev"]);
+    git(&tree, &["checkout", "-q", "-b", "mission/x"]);
+    record_base(&tree);
+
+    let project = nunki::project::Project::at(
+        dir.path().join("repo"),
+        nunki::project::Config {
+            root: None,
+            harness: "claude-code".into(),
+            forge: vec![],
+            stacks: vec!["rust".into()],
+            protected_branches: vec!["main".into(), "dev".into()],
+            protected_paths: Default::default(),
+            account: None,
+            model: None,
+            bounds: Default::default(),
+            credentials: None,
+            run: None,
+            services_file: None,
+            permission_mode: "auto".to_string(),
+            rigor: None,
+            mutation_threshold: 80,
+            mutation_jobs: None,
+            forge_protection: Default::default(),
+            security_findings: Default::default(),
+        },
+        dir.path().join("nunki"),
+    );
+    let slot = nunki::slot::Slot {
+        name: "gatelive".into(),
+        tree: tree.clone(),
+    };
+    // The same shape as `tests/exec.rs`: alpine plus git, because the copy of
+    // HEAD is made with git inside the container. What is being proved here
+    // is which script runs, not what a stack image carries.
+    //
+    // And the same `safe.directory` as there, for the same reason: this
+    // fixture runs as root because `apk` needs to, so on Linux git refuses
+    // the mounted tree — "detected dubious ownership", measured on the
+    // ubuntu runner — while macOS's file sharing hides the mismatch. A real profile runs as
+    // the host's uid and never asks.
+    let volume = nunki::exec::proof_volume(&slot.name);
+    let file = nunki::run::profile_path(&project, &slot.name);
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let script = project.fragment("rust").join(gate::BATTERY);
+    std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+
+    let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+        std::sync::Arc::new(nunki::engine::docker::Docker::real());
+    let compose_project = nunki::compose::project_name(&project.session(), &slot.name).unwrap();
+    // The profile as `nunki` writes it: the battery mounted when it exists and
+    // not otherwise — a bind mount of a missing file would be a directory.
+    let lift = |with_battery: bool| {
+        let mount = if with_battery {
+            format!(
+                "\x20     - {}:{}/{}:ro\n",
+                script.display(),
+                nunki::run::STACK_AT,
+                gate::BATTERY
+            )
+        } else {
+            String::new()
+        };
+        std::fs::write(
+            &file,
+            format!(
+                "services:\n\
+                 \x20 agent:\n\
+                 \x20   image: alpine:3.20\n\
+                 \x20   volumes:\n\
+                 \x20     - {tree}:{tree_at}\n\
+                 \x20     - {volume}:{proof}\n\
+                 {mount}\
+                 \x20   command: [\"sh\", \"-c\", \"apk add --no-cache git > /dev/null && \
+                 git config --global --add safe.directory '*' && sleep 600\"]\n\
+                 \x20   healthcheck:\n\
+                 \x20     test: [\"CMD-SHELL\", \"command -v git > /dev/null\"]\n\
+                 \x20     interval: 1s\n\
+                 \x20     timeout: 2s\n\
+                 \x20     retries: 60\n\
+                 \x20     start_period: 1s\n\
+                 volumes:\n\
+                 \x20 {volume}:\n",
+                tree = tree.display(),
+                tree_at = nunki::run::TREE_AT,
+                proof = nunki::exec::PROOF_AT,
+            ),
+        )
+        .unwrap();
+        engine.up(&file, &compose_project).unwrap();
+    };
+    std::fs::write(&file, "services: {}\n").unwrap();
+    let _ = engine.down(&file, &compose_project, true);
+    lift(false);
+
+    let journal = dir.path().join("JOURNAL.md");
+    let pr = dir.path().join("PR.md");
+    std::fs::write(&pr, "# What this changes\n").unwrap();
+    let verdict = dir.path().join("VERDICT.json");
+    let header = header();
+    let branches = vec!["main".to_string(), "dev".to_string()];
+    let protected = ProtectedPaths::default();
+
+    // Rewritten in place: the mount follows the file, and nothing is committed
+    // — the battery is not the commit's.
+    let battery = |body: &str, executable: bool| {
+        std::fs::write(&script, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = if executable { 0o755 } else { 0o644 };
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+    };
+
+    let played = |role: Role| {
+        gate::at_verification(
+            &Subject {
+                role,
+                tree: &tree,
+                journal: &journal,
+                pr: &pr,
+                verdict: &verdict,
+                mission_dir: dir.path(),
+                header: &header,
+                protected_branches: &branches,
+                protected_paths: &protected,
+                services_file: None,
+                coder_head: None,
+            },
+            &gate::Verification {
+                project: &project,
+                slot: &slot,
+                engine: engine.clone(),
+                stack: "rust",
+            },
+        )
+        .unwrap()
+        .outcomes
+        .into_iter()
+        .find(|o| o.gate == Gate::Battery)
+        .unwrap()
+        .decision
+    };
+
+    // No battery in the stack at all.
+    write(&tree, "note.md", "a lot\n");
+    git(&tree, &["add", "-A"]);
+    git(&tree, &["commit", "-q", "-m", "a lot"]);
+    std::fs::write(
+        &journal,
+        format!(
+            "# Journal\n\n## ÉTAT DE REPRISE\n\nHEAD is `{}`.\n",
+            git(&tree, &["rev-parse", "HEAD"])
+        ),
+    )
+    .unwrap();
+    match played(Role::Coder) {
+        Decision::Failed(why) => assert!(why.contains("no battery"), "{why}"),
+        other => panic!("a proof nobody can run is not one that passed: {other:?}"),
+    }
+
+    // Present and executable and green — and the profile lifted again, now
+    // that there is a file to mount.
+    battery("#!/bin/sh\nset -eu\ntest -f src/lib.rs\n", true);
+    lift(true);
+    assert_eq!(played(Role::Coder), Decision::Passed);
+
+    // Present, executable and red — and the reason carries what it said.
+    battery("#!/bin/sh\necho 'two tests failed' >&2\nexit 1\n", true);
+    match played(Role::Coder) {
+        Decision::Failed(why) => {
+            assert!(why.contains("came back 1"), "{why}");
+            assert!(why.contains("two tests failed"), "{why}");
+        }
+        other => panic!("a red battery is red: {other:?}"),
+    }
+
+    // Present and not executable: red, and said differently, because it
+    // sends a human somewhere else (SPEC 4.4).
+    battery("#!/bin/sh\nexit 0\n", false);
+    match played(Role::Coder) {
+        Decision::Failed(why) => assert!(why.contains("not executable"), "{why}"),
+        other => panic!("nothing ran, so nothing passed: {other:?}"),
+    }
+
+    // The integrator's battery is not the coder's, and this stack declares
+    // none — red by the same rule.
+    battery("#!/bin/sh\nexit 0\n", true);
+    match played(Role::Integrator) {
+        Decision::Failed(why) => assert!(why.contains("system.sh"), "{why}"),
+        other => panic!("the integrator's gate 6 is its system tests: {other:?}"),
+    }
+
+    engine.down(&file, &compose_project, true).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Gate 7, the mutation campaign (SPEC 4.4).
+// ---------------------------------------------------------------------------
+
+use nunki::mutants::{Campaign, Survivor, Triage};
+use std::collections::BTreeMap;
+
+impl Fixture {
+    /// The campaign file this mission holds, written on the current content.
+    fn campaign(&self, survivors: Vec<Survivor>) {
+        self.campaign_tried(survivors, None);
+    }
+
+    /// The same, saying how many mutants it tried, as a script that counts
+    /// does on its terminal line.
+    fn campaign_tried(&self, survivors: Vec<Survivor>, tried: Option<u32>) {
+        // Through the one function that resolves the base, and not a copy of
+        // its rule: a fixture that reads the name its own way is a fixture
+        // that can agree with a gate which has stopped agreeing with itself.
+        let touched = nunki::gate::touched_since_base(&self.tree, "dev").unwrap();
+        let fingerprint = nunki::mutants::fingerprint(&self.tree, &touched).unwrap();
+        nunki::mutants::write(
+            self._dir.path(),
+            &Campaign {
+                stopped: None,
+                files: None,
+                chain: Default::default(),
+                fingerprint,
+                head: git(&self.tree, &["rev-parse", "HEAD"]),
+                date: "2026-09-10T12:00:00Z".into(),
+                survivors,
+                tried,
+            },
+        )
+        .unwrap();
+    }
+
+    fn gate_seven(&self, role: Role) -> nunki::gate::Outcome {
+        self.verification(role)
+            .outcomes
+            .into_iter()
+            .find(|o| o.gate == Gate::Mutation)
+            .expect("gate 7 is reported")
+    }
+}
+
+impl Fixture {
+    /// The stderr a campaign on the current content left behind when it got
+    /// nowhere — what `runs/mutants-<fingerprint>.err` holds after an attempt
+    /// that never wrote `MUTANTS.json`.
+    fn campaign_said(&self, stderr: &str) {
+        let touched = nunki::gate::touched_since_base(&self.tree, "dev").unwrap();
+        let fingerprint = nunki::mutants::fingerprint(&self.tree, &touched).unwrap();
+        let short = &fingerprint[..7.min(fingerprint.len())];
+        let runs = self._dir.path().join("runs");
+        std::fs::create_dir_all(&runs).unwrap();
+        std::fs::write(runs.join(format!("mutants-{short}.err")), stderr).unwrap();
+    }
+}
+
+/// A campaign that has already run on this content and measured nothing makes
+/// gate 7 **red**, not unplayed — and the reason it gave is the cause.
+///
+/// `Unplayed` opens no volet, so the mission is wedged: nothing is
+/// dispatched, and `nunki verify` only starts the identical campaign again.
+/// The typical cause is a test the branch carries failing inside `mutants/`:
+/// a one-line fix, found only by a person reading a log by hand.
+#[test]
+fn a_campaign_that_has_already_measured_nothing_is_a_red_gate() {
+    let f = Fixture::new();
+    f.journal_names_head();
+
+    // Nothing has run yet: still unplayed, and the first attempt gets to be
+    // the transient one.
+    assert!(
+        matches!(f.gate_seven(Role::Coder).decision, Decision::Unplayed(_)),
+        "with no attempt on file, gate 7 asks for a campaign rather than failing"
+    );
+
+    f.campaign_said(
+        "FileNotFoundError: '/work/proof/mutants/config.toml'\n\
+         FAILED tests/test_bootstrap_config.py::test_the_tracked_config_file_parses\n\
+         nunki: the campaign could not run, so no mutant was tested\n",
+    );
+
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => {
+            assert!(
+                why.contains("already run and measured nothing"),
+                "the cause has to say that running it again changes nothing: {why}"
+            );
+            assert!(
+                why.contains("config.toml"),
+                "the cause has to carry what the campaign said, not just that it failed: {why}"
+            );
+        }
+        other => panic!("a campaign that cannot run is the branch's defect: {other:?}"),
+    }
+}
+
+impl Fixture {
+    /// A campaign on file from earlier content — the first campaign of the
+    /// mission, before a volet's commit moved the fingerprint — recorded on
+    /// `date`, with one survivor.
+    fn earlier_campaign(&self, date: &str) {
+        nunki::mutants::write(
+            self._dir.path(),
+            &Campaign {
+                stopped: None,
+                files: None,
+                chain: Default::default(),
+                fingerprint: "b326371".repeat(6),
+                head: git(&self.tree, &["rev-parse", "HEAD"]),
+                date: date.into(),
+                survivors: vec![Survivor {
+                    found_on: None,
+                    id: "src/visit.py:12: replace set() with None".into(),
+                    file: "src/visit.py".into(),
+                    line: 12,
+                    end_line: None,
+                    description: "replace set() with None".into(),
+                    outcome: None,
+                    refused: None,
+                }],
+                tried: None,
+            },
+        )
+        .unwrap();
+    }
+
+    /// Where the stderr of a campaign on the current content lands.
+    fn campaign_stderr(&self) -> PathBuf {
+        let touched = nunki::gate::touched_since_base(&self.tree, "dev").unwrap();
+        let fingerprint = nunki::mutants::fingerprint(&self.tree, &touched).unwrap();
+        self._dir
+            .path()
+            .join("runs")
+            .join(format!("mutants-{}.err", &fingerprint[..7]))
+    }
+}
+
+/// #166 as it was met. The first campaign left survivors and went back to
+/// the coder; the volet's commit moved the content; the campaign on the new
+/// content could not run and said why. Gate 7 used to read that stderr only
+/// when no `MUTANTS.json` existed, so it answered "ran on other content", and
+/// the monitor started the same doomed campaign every few minutes for hours.
+/// It is a red gate, with what the campaign said, and the coder gets it.
+#[test]
+fn a_campaign_that_could_not_run_after_a_volet_is_a_red_gate_not_another_campaign() {
+    let f = Fixture::new();
+    f.journal_names_head();
+    f.earlier_campaign("2026-01-01T00:00:00Z");
+
+    assert!(
+        matches!(f.gate_seven(Role::Coder).decision, Decision::Unplayed(ref why) if why.contains("other content")),
+        "before any attempt on today's content, a campaign is owed"
+    );
+
+    f.campaign_said(
+        "UnitTestDidNotEnd: still running after 10.0 s\n\
+         failed to collect stats. runner returned 1\n\
+         nunki: it stopped without saying it had finished\n",
+    );
+
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => {
+            assert!(why.contains("already run and measured nothing"), "{why}");
+            assert!(why.contains("UnitTestDidNotEnd"), "{why}");
+        }
+        other => panic!("the same campaign would be started again: {other:?}"),
+    }
+}
+
+/// The stderr counts only when it was written after the campaign on file was
+/// recorded. A campaign that measured leaves a stderr too, full of its
+/// progress; content brought back to what it measured — a reverted commit —
+/// must not read that stderr as a campaign that could not run.
+#[test]
+fn a_stderr_older_than_the_campaign_on_file_is_not_a_campaign_that_could_not_run() {
+    let f = Fixture::new();
+    f.journal_names_head();
+    f.campaign_said("⠙ 2764/2764  🎉 2764 🫥 0  ⏰ 0  🤔 0  🙁 0\n");
+    let stderr = f.campaign_stderr();
+    std::fs::File::options()
+        .write(true)
+        .open(&stderr)
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_767_225_600))
+        .unwrap(); // 2026-01-01T00:00:00Z
+    f.earlier_campaign("2026-03-01T00:00:00Z");
+
+    assert!(
+        matches!(f.gate_seven(Role::Coder).decision, Decision::Unplayed(_)),
+        "{:?}",
+        f.gate_seven(Role::Coder).decision
+    );
+
+    // In the same second is not after: a campaign that measured writes its
+    // last progress frame and is recorded within one second, and that
+    // stderr is its own, not a failure's.
+    f.earlier_campaign("2026-01-01T00:00:00Z");
+    assert!(
+        matches!(f.gate_seven(Role::Coder).decision, Decision::Unplayed(_)),
+        "{:?}",
+        f.gate_seven(Role::Coder).decision
+    );
+
+    // Recorded before the stderr was written, the same file is the failure.
+    f.earlier_campaign("2025-12-01T00:00:00Z");
+    assert!(
+        matches!(f.gate_seven(Role::Coder).decision, Decision::Failed(_)),
+        "{:?}",
+        f.gate_seven(Role::Coder).decision
+    );
+}
+
+/// A campaign whose date is not in the form `nunki` writes cannot be put in
+/// order against the stderr, and the stderr counts: one volet that shows the
+/// coder what the campaign said costs less than the same campaign started at
+/// every tick.
+#[test]
+fn a_campaign_date_nunki_cannot_read_lets_the_stderr_count() {
+    let f = Fixture::new();
+    f.journal_names_head();
+    f.earlier_campaign("the day before");
+    f.campaign_said("ImportError: no module named visit\n");
+
+    assert!(
+        matches!(f.gate_seven(Role::Coder).decision, Decision::Failed(_)),
+        "{:?}",
+        f.gate_seven(Role::Coder).decision
+    );
+}
+
+/// The cause a campaign that could not run hands back is what a terminal
+/// would have shown, not every frame of its progress bar.
+///
+/// mutmut redraws its spinner with `\r` and never ends the line, so a
+/// line-based tail keeps all of it: a cause of hundreds of kilobytes, stored
+/// in the mission's state and sent to the coder as the reason for its volet.
+#[test]
+fn a_campaigns_progress_bar_is_not_carried_into_the_cause() {
+    let f = Fixture::new();
+    f.journal_names_head();
+
+    let mut stderr = String::from("Checked 54 packages in 0.28ms\n");
+    for n in 0..5_000 {
+        stderr.push_str(&format!("\r⠋ {n}/2764  🎉 {n} 🫥 0  ⏰ 0  🤔 0  🙁 0"));
+    }
+    stderr.push_str("\r⠙ 2764/2764  🎉 2764 🫥 0  ⏰ 0  🤔 0  🙁 0\n");
+    stderr.push_str("FAILED tests/test_register_delivery_boundaries.py::test_br16\n");
+    stderr.push_str("nunki: the campaign could not run, so no mutant was tested\n");
+    assert!(
+        stderr.len() > 200_000,
+        "the fixture has to be the size measured"
+    );
+    f.campaign_said(&stderr);
+
+    let Decision::Failed(why) = f.gate_seven(Role::Coder).decision else {
+        panic!("a campaign that could not run is a red gate");
+    };
+    assert!(
+        why.len() < 4_000,
+        "a cause of {} bytes carries the progress bar",
+        why.len()
+    );
+    assert!(
+        why.contains("2764/2764"),
+        "the last frame is what was on screen: {why}"
+    );
+    assert!(
+        !why.contains("⠋ 17/2764"),
+        "an overwritten frame was kept: {why}"
+    );
+    assert!(
+        why.contains("FAILED tests/test_register_delivery_boundaries.py"),
+        "{why}"
+    );
+}
+
+/// One line with no carriage return, however long, is still cut: a cause is
+/// read by a person and a run, and neither reads 100 KB of one line.
+#[test]
+fn a_single_endless_line_is_cut_in_the_cause() {
+    let f = Fixture::new();
+    f.journal_names_head();
+    f.campaign_said(&format!("{}\nthe reason\n", "x".repeat(100_000)));
+
+    let Decision::Failed(why) = f.gate_seven(Role::Coder).decision else {
+        panic!("a campaign that could not run is a red gate");
+    };
+    assert!(why.len() < 4_000, "{} bytes", why.len());
+    assert!(why.contains("[…]"), "a cut line says it was cut: {why}");
+    assert!(why.contains("the reason"), "{why}");
+}
+
+impl Fixture {
+    /// What the coder wrote, in its own file.
+    fn coder_answers(&self, answers: &[(&str, Triage)]) {
+        let map: BTreeMap<String, Triage> = answers
+            .iter()
+            .map(|(id, t)| ((*id).to_string(), t.clone()))
+            .collect();
+        nunki::mutants::write_triage(self._dir.path(), &map).unwrap();
+    }
+}
+
+fn survivor(line: u32, outcome: Option<Triage>) -> Survivor {
+    Survivor {
+        found_on: None,
+        id: format!("src/new.rs:{line}"),
+        file: "src/new.rs".into(),
+        line,
+        end_line: None,
+        description: "replace two with 0".into(),
+        outcome,
+        refused: None,
+    }
+}
+
+/// No campaign is not a green gate, and it is not a red one either: nobody
+/// has asked the question yet.
+#[test]
+fn a_mission_with_no_campaign_has_not_passed_gate_seven() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.journal_names_head();
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Unplayed(why) => assert!(why.contains("nunki mission mutants"), "{why}"),
+        other => panic!("no campaign has run: {other:?}"),
+    }
+}
+
+/// A campaign that ran on other content says nothing about the code as it
+/// stands — and saying nothing is not saying yes.
+#[test]
+fn a_campaign_overtaken_by_a_commit_is_not_an_answer_about_this_one() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.campaign(vec![]);
+    f.journal_names_head();
+    assert_eq!(f.gate_seven(Role::Coder).decision, Decision::Passed);
+
+    // The code moves; the campaign does not.
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 3 }\n", "L2");
+    f.journal_names_head();
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Unplayed(why) => assert!(why.contains("other content"), "{why}"),
+        other => panic!("the campaign is stale: {other:?}"),
+    }
+}
+
+/// There is no threshold to hide behind: one survivor without an outcome is
+/// a red gate, whatever the other ninety-nine did.
+#[test]
+fn one_survivor_without_an_outcome_is_a_red_gate() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.campaign(vec![
+        survivor(
+            1,
+            Some(Triage::Killed {
+                test: "a_run_that_honoured_its_contract_passes_all_four".into(),
+            }),
+        ),
+        survivor(2, None),
+    ]);
+    f.journal_names_head();
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => {
+            assert!(why.contains("src/new.rs:2"), "{why}");
+            assert!(why.contains("no threshold"), "{why}");
+        }
+        other => panic!("an untriaged survivor is unanswered: {other:?}"),
+    }
+}
+
+/// "A test covers this" is not an outcome. A test called `x` is, and whether
+/// `x` exists is a fact.
+#[test]
+fn a_named_test_has_to_exist() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    commit(
+        &f.tree,
+        "tests/thing.rs",
+        "#[test]\nfn the_thing_holds() {}\n",
+        "a test",
+    );
+    f.campaign(vec![survivor(
+        1,
+        Some(Triage::Killed {
+            test: "a_test_nobody_wrote".into(),
+        }),
+    )]);
+    f.journal_names_head();
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => assert!(why.contains("a_test_nobody_wrote"), "{why}"),
+        other => panic!("a test that does not exist kills nothing: {other:?}"),
+    }
+
+    f.campaign(vec![survivor(
+        1,
+        Some(Triage::Killed {
+            test: "the_thing_holds".into(),
+        }),
+    )]);
+    assert_eq!(f.gate_seven(Role::Coder).decision, Decision::Passed);
+}
+
+/// The split: the coder answers with the two
+/// outcomes that rest on a committed test, and the one nobody can check is
+/// not its to give. What decides who wrote a line is the mount, so an
+/// `equivalent` in the coder's file is not a mistake to tolerate — it is
+/// somebody granting themselves the gate.
+#[test]
+fn the_coder_may_not_call_a_survivor_equivalent() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.campaign(vec![survivor(1, None)]);
+    f.coder_answers(&[(
+        "src/new.rs:1",
+        Triage::Equivalent {
+            why: "nothing reads it, honest".into(),
+            carried_from: None,
+        },
+    )]);
+    f.journal_names_head();
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => {
+            assert!(why.contains("not the coder's to give"), "{why}");
+            assert!(
+                why.contains("MUTANTS.json"),
+                "it must say where it goes: {why}"
+            );
+        }
+        other => panic!("the graded may not fill in the box nobody can check: {other:?}"),
+    }
+
+    // The same ruling from the HQ's own file is accepted.
+    f.coder_answers(&[]);
+    f.campaign(vec![survivor(
+        1,
+        Some(Triage::Equivalent {
+            why: "no caller can reach that branch".into(),
+            carried_from: None,
+        }),
+    )]);
+    assert_eq!(f.gate_seven(Role::Coder).decision, Decision::Passed);
+}
+
+/// The coder's own file answers, and it is enough on its own.
+#[test]
+fn the_coder_answers_with_the_two_outcomes_that_rest_on_a_test() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    commit(
+        &f.tree,
+        "tests/thing.rs",
+        "#[test]\nfn the_thing_holds() {}\n#[test]\nfn the_known_hole() {}\n",
+        "tests",
+    );
+    f.campaign(vec![survivor(1, None), survivor(2, None)]);
+    f.coder_answers(&[
+        (
+            "src/new.rs:1",
+            Triage::Killed {
+                test: "the_thing_holds".into(),
+            },
+        ),
+        (
+            "src/new.rs:2",
+            Triage::Bug {
+                test: "the_known_hole".into(),
+            },
+        ),
+    ]);
+    f.journal_names_head();
+    let outcome = f.gate_seven(Role::Coder);
+    assert_eq!(outcome.decision, Decision::Passed);
+    assert!(outcome.note.is_none(), "nothing rode on a judgement");
+
+    // And a test it names still has to exist.
+    f.coder_answers(&[(
+        "src/new.rs:1",
+        Triage::Killed {
+            test: "a_test_nobody_wrote".into(),
+        },
+    )]);
+    assert!(matches!(
+        f.gate_seven(Role::Coder).decision,
+        Decision::Failed(_)
+    ));
+}
+
+/// The outcome no gate can check must not be silent, or it becomes the escape
+/// hatch that empties the gate.
+#[test]
+fn the_equivalences_are_counted_out_loud() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.campaign(vec![
+        survivor(
+            1,
+            Some(Triage::Equivalent {
+                why: "no caller can reach that branch".into(),
+                carried_from: None,
+            }),
+        ),
+        survivor(
+            2,
+            Some(Triage::Equivalent {
+                why: "the constant is never read".into(),
+                carried_from: None,
+            }),
+        ),
+    ]);
+    f.journal_names_head();
+    let outcome = f.gate_seven(Role::Coder);
+    assert_eq!(outcome.decision, Decision::Passed);
+    let note = outcome
+        .note
+        .expect("a green gate that owes the reader a number");
+    assert!(note.contains("2 of 2"), "{note}");
+    assert!(note.contains("HQ"), "{note}");
+}
+
+/// A ruling carried from an earlier campaign was given on code that has
+/// changed since, so the green gate names it apart and says how to take it
+/// back.
+#[test]
+fn a_carried_equivalence_is_named_apart_from_one_given_on_this_campaign() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.campaign(vec![
+        survivor(
+            1,
+            Some(Triage::Equivalent {
+                why: "no caller can reach that branch".into(),
+                carried_from: Some("def5678".into()),
+            }),
+        ),
+        survivor(
+            2,
+            Some(Triage::Equivalent {
+                why: "the constant is never read".into(),
+                carried_from: None,
+            }),
+        ),
+    ]);
+    f.journal_names_head();
+    let outcome = f.gate_seven(Role::Coder);
+    assert_eq!(outcome.decision, Decision::Passed);
+    let note = outcome
+        .note
+        .expect("a green gate that owes the reader a number");
+    assert!(note.contains("2 of 2"), "{note}");
+    assert!(note.contains("1 of those were carried"), "{note}");
+    assert!(note.contains("--lift"), "{note}");
+}
+
+/// What `nunki` proposes from a ruling it matched — in the registry, or by
+/// file and mutation — is counted as a proposal, by source, and never as
+/// one of the HQ's rulings (HQ review 2). A file an older `nunki` wrote, with
+/// a ruling it applied from the registry, reads as a proposal from it.
+#[test]
+fn a_proposal_from_the_registry_or_carried_is_counted_as_a_proposal() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.campaign(vec![
+        survivor(
+            1,
+            Some(Triage::EquivalentRegistered {
+                why: "no caller can reach that branch".into(),
+                mission: "earlier".into(),
+                commit: "def5678".into(),
+            }),
+        ),
+        survivor(
+            2,
+            Some(Triage::ProposedByNunki {
+                why: "the constant is never read".into(),
+                from: nunki::mutants::ProposedFrom::Carried {
+                    commit: "abc1234".into(),
+                },
+            }),
+        ),
+        survivor(
+            3,
+            Some(Triage::Equivalent {
+                why: "the value is overwritten before use".into(),
+                carried_from: None,
+            }),
+        ),
+    ]);
+    f.journal_names_head();
+    let outcome = f.gate_seven(Role::Coder);
+    assert_eq!(outcome.decision, Decision::Passed);
+    let note = outcome
+        .note
+        .expect("a green gate that owes the reader a number");
+    assert!(note.contains("1 of 3 rode on `equivalent`"), "{note}");
+    assert!(
+        note.contains(
+            "2 of 3 rode on an equivalence proposed (1 from the registry, 1 carried by file \
+             and mutation)"
+        ),
+        "{note}"
+    );
+    assert!(note.contains("`nunki push` refuses"), "{note}");
+}
+
+/// Nor can it write what `nunki` proposes.
+#[test]
+fn a_proposal_by_nunki_written_by_the_coder_is_refused() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.campaign(vec![survivor(1, None)]);
+    f.coder_answers(&[(
+        "src/new.rs:1",
+        Triage::ProposedByNunki {
+            why: "trust me".into(),
+            from: nunki::mutants::ProposedFrom::Carried {
+                commit: "def5678".into(),
+            },
+        },
+    )]);
+    f.journal_names_head();
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => assert!(why.contains("proposed_by_nunki"), "{why}"),
+        other => panic!("the coder gave nunki's outcome: {other:?}"),
+    }
+}
+
+/// The coder cannot answer a survivor with a ruling from the registry: it
+/// is the HQ's, like the `equivalent` it stands for, and one written in the
+/// coder's file turns the gate red by name.
+#[test]
+fn a_registry_ruling_written_by_the_coder_is_refused() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.campaign(vec![survivor(1, None)]);
+    f.coder_answers(&[(
+        "src/new.rs:1",
+        Triage::EquivalentRegistered {
+            why: "trust me".into(),
+            mission: "earlier".into(),
+            commit: "def5678".into(),
+        },
+    )]);
+    f.journal_names_head();
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => assert!(why.contains("equivalent_registered"), "{why}"),
+        other => panic!("the coder gave the HQ's outcome: {other:?}"),
+    }
+}
+
+#[test]
+fn system_tests_and_configuration_are_not_mutated() {
+    let f = Fixture::new();
+    f.journal_names_head();
+    for role in [Role::Integrator, Role::Security] {
+        match f.gate_seven(role).decision {
+            Decision::NotApplicable(why) => assert!(why.contains("not mutated"), "{why}"),
+            other => panic!("gate 7 is the coder's: {other:?}"),
+        }
+    }
+}
+
+/// Built by hand rather than from the fixture: what is asked here is which
+/// unplayed gates mean what, and the fixture leaves gate 6 unplayed too —
+/// it has no profile up — so it can only ever show the case where the
+/// campaign is *not* owed. In a real mission the battery is green in the
+/// container and gate 7 stands alone, which is the case that matters.
+fn report_of(decisions: &[(Gate, Decision)]) -> gate::Report {
+    gate::Report {
+        role: Role::Coder,
+        head: "0123456789ab".into(),
+        outcomes: decisions
+            .iter()
+            .map(|(gate, decision)| nunki::gate::Outcome {
+                gate: *gate,
+                decision: decision.clone(),
+                note: None,
+                waits_on_campaign: false,
+                awaits_hq: false,
+            })
+            .collect(),
+    }
+}
+
+/// A mission's base by name and a revision are different things, and the
+/// compiler is what says so now.
+///
+/// With the same signature — `(&Path, &str)` — `touched_paths` and
+/// `touched_since_base` would differ only by a doc comment telling the
+/// caller which to use. In a slot the name `dev` has two readings, `dev` and
+/// `origin/dev`, and they diverge from the second mission onwards. One
+/// caller reading the name where the other reads the ref means gate 7's
+/// fingerprint never matches the campaign's, and `verify` goes round it
+/// indefinitely.
+///
+/// A `Rev` cannot be made from a mission's base here — only `base_ref` makes
+/// one from a name, and it is private — so the two calls can no longer be
+/// swapped by a caller who did not read the comment.
+#[test]
+fn what_a_branch_brought_and_what_it_brought_since_a_commit_are_asked_differently() {
+    let dir = tempfile::tempdir().unwrap();
+    let origin = dir.path().join("origin");
+    std::fs::create_dir_all(&origin).unwrap();
+    git(&origin, &["init", "-q", "-b", "dev"]);
+    write(&origin, "AGENTS.md", "the rules of this place\n");
+    write(&origin, "src/lib.rs", "pub fn one() -> u8 { 1 }\n");
+    git(&origin, &["add", "-A"]);
+    git(&origin, &["commit", "-q", "-m", "base"]);
+
+    let tree = dir.path().join("slot");
+    git(
+        dir.path(),
+        &["clone", "-q", origin.to_str().unwrap(), "slot"],
+    );
+
+    // The base moves on, and the clone's own `dev` stays where it was.
+    write(&origin, "src/theirs.rs", "pub fn two() -> u8 { 2 }\n");
+    git(&origin, &["add", "-A"]);
+    git(
+        &origin,
+        &["commit", "-q", "-m", "what the last mission merged"],
+    );
+
+    git(&tree, &["fetch", "-q", "origin"]);
+    nunki::git::SlotGit::open(&tree)
+        .unwrap()
+        .fetch_origin(&origin)
+        .unwrap();
+    git(&tree, &["checkout", "-q", "-b", "mission/x", "origin/dev"]);
+    write(&tree, "src/first.rs", "pub fn three() -> u8 { 3 }\n");
+    git(&tree, &["add", "-A"]);
+    git(&tree, &["commit", "-q", "-m", "feat(L1): the coder's"]);
+    let coder = git(&tree, &["rev-parse", "HEAD"]);
+    write(&tree, "src/second.rs", "pub fn four() -> u8 { 4 }\n");
+    git(&tree, &["add", "-A"]);
+    git(&tree, &["commit", "-q", "-m", "test: the integrator's"]);
+
+    // By name: everything this branch brought, against the base it came from.
+    assert_eq!(
+        gate::touched_since_base(&tree, "dev").unwrap(),
+        vec!["src/first.rs".to_string(), "src/second.rs".to_string()]
+    );
+    // By commit: what came after it, which is what `nunki push` asks about
+    // the integrator.
+    assert_eq!(
+        gate::touched_paths(&tree, &gate::Rev::commit(&coder)).unwrap(),
+        vec!["src/second.rs".to_string()]
+    );
+}
+
+/// The four answers a report can give the flow, and the order they are asked
+/// in — which is the doctrine, not a detail.
+///
+/// They used to be three questions recombined by hand at five sites in
+/// `verify`, and the recombination is where the defects were: a new reason
+/// for a gate to be unplayed changed what the old rule meant at all five,
+/// silently. This is the whole decision, in one place, so a fifth reason
+/// meets one rule.
+#[test]
+fn a_report_says_one_thing_to_the_flow() {
+    use nunki::gate::Verdict;
+
+    let green = report_of(&[
+        (Gate::Battery, Decision::Passed),
+        (Gate::Mutation, Decision::Passed),
+    ]);
+    assert_eq!(green.verdict(), Verdict::Green);
+
+    // Red first: it is the agent's to fix, and it outranks a gate nobody
+    // could play, because then there is something to send an agent back for.
+    let red = report_of(&[
+        (
+            Gate::Battery,
+            Decision::Failed("the battery came back 101".into()),
+        ),
+        (
+            Gate::Mutation,
+            Decision::Unplayed("no mutation campaign has run on this mission".into()),
+        ),
+    ]);
+    let Verdict::Red(why) = red.verdict() else {
+        panic!("{:?}", red.verdict());
+    };
+    assert!(why.contains("gate 6"), "{why}");
+
+    // Gate 7 without a usable campaign is a campaign to run, and the gate's
+    // own sentence is what the flow acts on — not one written a second time.
+    let owed = report_of(&[
+        (Gate::Battery, Decision::Passed),
+        (
+            Gate::Mutation,
+            Decision::Unplayed("no mutation campaign has run on this mission".into()),
+        ),
+    ]);
+    assert_eq!(
+        owed.verdict(),
+        Verdict::CampaignOwed("no mutation campaign has run on this mission".into())
+    );
+
+    // A gate nobody could play *beside* gate 7 is a wall, and an hour of
+    // mutation in front of it would be an hour spent for nothing.
+    let wall = report_of(&[
+        (
+            Gate::Battery,
+            Decision::Unplayed("the profile did not come up".into()),
+        ),
+        (
+            Gate::Mutation,
+            Decision::Unplayed("no mutation campaign has run on this mission".into()),
+        ),
+    ]);
+    let Verdict::Wall(why) = wall.verdict() else {
+        panic!(
+            "an hour of mutation in front of a wall: {:?}",
+            wall.verdict()
+        );
+    };
+    assert!(why.contains("gate 6"), "{why}");
+
+    // And a gate 7 that is answered leaves nothing owed.
+    for decision in [
+        Decision::Passed,
+        Decision::NotApplicable("system tests are not mutated".into()),
+    ] {
+        let report = report_of(&[
+            (Gate::Battery, Decision::Passed),
+            (Gate::Mutation, decision),
+        ]);
+        assert_eq!(report.verdict(), Verdict::Green, "{:?}", report.outcomes);
+    }
+}
+
+/// A gate standing down **while** a campaign runs is the same obstacle seen
+/// from the other side, in every phase — including the one where gate 7 is
+/// not played at all.
+///
+/// After a run, `nunki` plays gates 1 to 4 and 8, never 7. So gate 8 standing
+/// down for a campaign was the only unplayed gate in the report, gate 7 was
+/// not there to name the obstacle, and the old rule read it as a wall: the
+/// flow stopped, nothing read the campaign back, and the gate stood down for
+/// ever. The same for a gate 7 that has already answered while gates 6 and 8
+/// wait.
+#[test]
+fn a_gate_standing_down_for_a_campaign_is_never_a_wall() {
+    use nunki::gate::Verdict;
+
+    // After a run: gate 7 is not in the report at all.
+    let mut after_run = report_of(&[(Gate::MechanicalSecurity, Decision::Passed)]);
+    after_run.outcomes[0].decision = Decision::Unplayed("a campaign has been rewriting".into());
+    after_run.outcomes[0].waits_on_campaign = true;
+    assert_eq!(
+        after_run.verdict(),
+        Verdict::CampaignOwed("a campaign has been rewriting".into()),
+        "{:?}",
+        after_run.outcomes
+    );
+
+    // And at the final gates, with gate 7 already answered.
+    let mut answered = report_of(&[
+        (Gate::Battery, Decision::Passed),
+        (Gate::Mutation, Decision::Passed),
+    ]);
+    answered.outcomes[0].decision = Decision::Unplayed("a campaign has been rewriting".into());
+    answered.outcomes[0].waits_on_campaign = true;
+    assert!(
+        matches!(answered.verdict(), Verdict::CampaignOwed(_)),
+        "{:?}",
+        answered.verdict()
+    );
+}
+
+// --- gate 8: the mechanical security ---------------------------------------
+
+impl Fixture {
+    /// Gate 8 with a container that answers what `security.sh` printed.
+    fn security(&self, role: Role, out: nunki::engine::ExecOutput) -> Decision {
+        self.security_seen(role, out).0
+    }
+
+    /// The same, and what the container was actually asked to run — the probe
+    /// is half of gate 8, and a test that only reads the decision cannot see
+    /// what was handed to the script.
+    fn security_seen(
+        &self,
+        role: Role,
+        out: nunki::engine::ExecOutput,
+    ) -> (Decision, Vec<nunki::engine::fake::Call>) {
+        // The refresh of the clean copy answers first, and green: what this
+        // asks about is the script's own status, not the refresh's.
+        let outs = vec![said(0, ""), out];
+        let (project, slot) = self.context();
+        let profile = nunki::run::profile_path(&project, &slot.name);
+        std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+        std::fs::write(&profile, "services: {}\n").unwrap();
+        let engine =
+            std::sync::Arc::new(nunki::engine::fake::FakeEngine::default().with_execs(outs));
+        let decision = gate::after_run(
+            &Subject {
+                role,
+                tree: &self.tree,
+                journal: &self.journal,
+                pr: &self.pr,
+                verdict: &self.verdict,
+                mission_dir: self._dir.path(),
+                header: &self.header,
+                protected_branches: &self.branches,
+                protected_paths: &self.protected,
+                services_file: self.services_file.as_deref(),
+                coder_head: self.coder_head.as_deref(),
+            },
+            &gate::Verification {
+                project: &project,
+                slot: &slot,
+                engine: engine.clone(),
+                stack: "rust",
+            },
+        )
+        .unwrap()
+        .outcomes
+        .into_iter()
+        .find(|o| o.gate == Gate::MechanicalSecurity)
+        .expect("gate 8 is played")
+        .decision;
+        (decision, engine.calls())
+    }
+}
+
+/// What the container was asked to run, last first: the refresh of the clean
+/// copy goes through the same engine, so the probe is the one that follows it.
+fn probe_of(calls: &[nunki::engine::fake::Call]) -> String {
+    calls
+        .iter()
+        .filter_map(|c| match c {
+            nunki::engine::fake::Call::Exec(_, _, argv) => Some(argv.join(" ")),
+            _ => None,
+        })
+        .find(|argv| argv.contains("security.sh"))
+        .expect("the probe runs security.sh")
+}
+
+fn said(status: i32, stdout: &str) -> nunki::engine::ExecOutput {
+    nunki::engine::ExecOutput {
+        status,
+        stdout: stdout.to_string(),
+        stderr: String::new(),
+    }
+}
+
+/// What the branch brought and nobody ruled on stops it. The finding is
+/// named, because a gate that says only "red" sends nobody anywhere.
+#[test]
+fn a_finding_this_branch_brought_is_red_and_the_reason_names_it() {
+    let f = Fixture::new();
+    let decision = f.security(
+        Role::Coder,
+        said(
+            0,
+            r#"{"id":"RUSTSEC-2020-0071","kind":"vulnerability","where":"time 0.1.45","via":"chrono","fix":">=0.2.23","accepted":"","was_at_base":false}"#,
+        ),
+    );
+
+    let Decision::Failed(why) = decision else {
+        panic!("{decision:?}");
+    };
+    assert!(why.contains("RUSTSEC-2020-0071"), "{why}");
+    assert!(
+        why.contains("via chrono"),
+        "the parent is what can be replaced: {why}"
+    );
+    assert!(why.contains(">=0.2.23"), "{why}");
+}
+
+/// What the repository already carried is not this branch's to answer.
+/// Blocking on it would punish the wrong change, for a cause outside the
+/// agent's reach (SPEC 4.4).
+#[test]
+fn what_the_base_already_carried_does_not_stop_this_branch() {
+    let f = Fixture::new();
+    let decision = f.security(
+        Role::Coder,
+        said(
+            0,
+            r#"{"id":"RUSTSEC-2020-0071","kind":"vulnerability","where":"time 0.1.45","via":"","fix":">=0.2.23","accepted":"","was_at_base":true}"#,
+        ),
+    );
+
+    assert_eq!(decision, Decision::Passed);
+}
+
+/// An acceptance a fix has overtaken is red: the exception was written when
+/// nothing could be done, and something can now. This is what replaces an
+/// expiry date.
+#[test]
+fn an_exception_a_fix_has_overtaken_is_red() {
+    let f = Fixture::new();
+    let decision = f.security(
+        Role::Coder,
+        said(
+            0,
+            r#"{"id":"RUSTSEC-2020-0159","kind":"vulnerability","where":"chrono 0.4.19","via":"","fix":">=0.4.20","accepted":"pas atteignable","was_at_base":true}"#,
+        ),
+    );
+
+    let Decision::Failed(why) = decision else {
+        panic!("{decision:?}");
+    };
+    assert!(why.contains("overtaken"), "{why}");
+    assert!(why.contains("RUSTSEC-2020-0159"), "{why}");
+}
+
+/// An acceptance no fix can overtake lets the mission through, and the
+/// `alloy`/`paste` case SPEC 4.4 cites is exactly that shape.
+#[test]
+fn an_acceptance_no_fix_can_overtake_lets_it_through() {
+    let f = Fixture::new();
+    let decision = f.security(
+        Role::Coder,
+        said(
+            0,
+            r#"{"id":"RUSTSEC-2024-0436","kind":"unmaintained","where":"paste 1.0.15","via":"alloy","fix":"","accepted":"archivé en amont","was_at_base":true}"#,
+        ),
+    );
+
+    assert_eq!(decision, Decision::Passed);
+}
+
+/// No advisory database: the script's own 69. `Unplayed` and not red — a
+/// verdict on the machine rather than on the agent, and a security gate that
+/// could not consult its database must not report green either.
+#[test]
+fn a_gate_that_could_not_consult_its_database_says_so() {
+    let f = Fixture::new();
+
+    let decision = f.security(Role::Coder, said(69, ""));
+
+    let Decision::Unplayed(why) = decision else {
+        panic!("{decision:?}");
+    };
+    assert!(why.contains("advisory database"), "{why}");
+    // This stack declares none, so nothing is made up: no tool is named,
+    // and the human is sent to the file that should have said.
+    assert!(why.contains("declares none"), "{why}");
+    assert!(!why.contains("cargo deny"), "{why}");
+}
+
+impl Fixture {
+    /// The rust stack's `advisories.txt`, naming a database under this
+    /// fixture's directory — filled or not — and `command` as the way to fill
+    /// it. Where it lives, so a test can fill it.
+    fn declares_a_database(&self, command: &str, filled: bool) -> PathBuf {
+        let (project, _) = self.context();
+        let db = self._dir.path().join("advisory-db");
+        if filled {
+            std::fs::create_dir_all(&db).unwrap();
+        }
+        std::fs::create_dir_all(project.fragment("rust")).unwrap();
+        std::fs::write(
+            project
+                .fragment("rust")
+                .join(nunki::project::ADVISORIES_FILE),
+            format!("{}\n{command}\n", db.display()),
+        )
+        .unwrap();
+        db
+    }
+}
+
+/// A database nobody filled: the sentence names where it lives on the host
+/// and the stack's own command, word for word — never another stack's tool
+/// (#165: a Python mission was told to run `cargo deny`). Then `nunki verify`
+/// picks the mission up, and the sentence says so.
+#[test]
+fn a_database_nobody_filled_is_sent_to_the_stacks_own_command() {
+    let f = Fixture::new();
+    let command = "osv-scanner scan source --download-offline-databases --lockfile uv.lock";
+    let db = f.declares_a_database(command, false);
+
+    let decision = f.security(Role::Coder, said(69, ""));
+
+    let Decision::Unplayed(why) = decision else {
+        panic!("{decision:?}");
+    };
+    assert!(why.contains(&db.display().to_string()), "{why}");
+    assert!(why.contains(&format!("`{command}`")), "{why}");
+    assert!(!why.contains("cargo deny"), "{why}");
+    assert!(why.contains("nunki verify"), "{why}");
+}
+
+/// A database on the host that the container does not see was filled after
+/// the container was lifted: the command would change nothing, and the
+/// sentence says that `nunki verify` remounts it instead.
+#[test]
+fn a_database_filled_after_the_lift_is_sent_to_verify_and_not_to_the_command() {
+    let f = Fixture::new();
+    let db = f.declares_a_database("cargo deny check advisories", true);
+
+    let decision = f.security(Role::Coder, said(69, ""));
+
+    let Decision::Unplayed(why) = decision else {
+        panic!("{decision:?}");
+    };
+    assert!(why.contains(&db.display().to_string()), "{why}");
+    assert!(why.contains("`nunki verify` remounts it"), "{why}");
+    assert!(!why.contains("cargo deny"), "{why}");
+}
+
+/// A stack shipping no script fails, as the battery does: a proof nobody can
+/// run is not a proof that passed. And the message says how to get one.
+#[test]
+fn a_stack_with_no_security_script_is_red_and_says_how_to_get_one() {
+    let f = Fixture::new();
+
+    let decision = f.security(Role::Coder, said(66, ""));
+
+    let Decision::Failed(why) = decision else {
+        panic!("{decision:?}");
+    };
+    assert!(why.contains("nunki init --stack"), "{why}");
+}
+
+/// The script runs in the clean copy of `HEAD`, a detached clone that holds no
+/// branch at all, so a base named `dev` resolves to nothing there and the
+/// script reports every finding as new — a gate red on what the branch never
+/// brought.
+///
+/// Measured against a real container: `git rev-parse --verify dev` in the
+/// copy answers "Needed a single revision", and a finding the base already
+/// carries — a test credential, say — comes back `was_at_base: false`. The
+/// same script, in the same container, given the commit instead, comes back
+/// `was_at_base: true`.
+#[test]
+fn the_base_reaches_the_script_as_a_commit_and_not_a_branch_name() {
+    let f = Fixture::new();
+    let fork = git(&f.tree, &["merge-base", "HEAD", "dev"]);
+
+    let (_, calls) = f.security_seen(Role::Coder, said(0, ""));
+    let probe = probe_of(&calls);
+
+    assert!(probe.contains(&fork), "the probe names no commit: {probe}");
+    assert!(
+        !probe.contains(" dev "),
+        "the probe hands over a branch name the copy cannot resolve: {probe}"
+    );
+}
+
+/// The fork point, and not the base's tip. Gate 2 has already said the branch
+/// is ahead of its base, so the fork point is an ancestor of `HEAD` and is in
+/// the copy by construction; a base that has moved since the copy was cloned
+/// has a tip that is not.
+#[test]
+fn the_commit_is_the_fork_point_and_not_wherever_the_base_has_got_to() {
+    let f = Fixture::new();
+    let fork = git(&f.tree, &["rev-parse", "HEAD"]);
+    // The base moves on, as a base does while a mission runs.
+    git(&f.tree, &["checkout", "-q", "dev"]);
+    write(&f.tree, "src/other.rs", "pub fn two() -> u8 { 2 }\n");
+    git(&f.tree, &["add", "-A"]);
+    git(&f.tree, &["commit", "-q", "-m", "the base moves"]);
+    let tip = git(&f.tree, &["rev-parse", "HEAD"]);
+    git(&f.tree, &["checkout", "-q", "mission/x"]);
+
+    let (_, calls) = f.security_seen(Role::Coder, said(0, ""));
+    let probe = probe_of(&calls);
+
+    assert!(probe.contains(&fork), "not the fork point: {probe}");
+    assert!(
+        !probe.contains(&tip),
+        "the base's tip is not in the copy: {probe}"
+    );
+}
+
+/// A slot's own `dev` is written once, when the clone is made, and nothing
+/// moves it again. The mission branch comes from `origin/dev`, which
+/// `run::branch` fetches first — so from the second mission onwards the two
+/// disagree, and every gate that reads "what this branch touched" reads the
+/// wrong answer.
+///
+/// On a slot with a branch that has touched nothing, `dev...HEAD` can name
+/// several files, every one of them the previous mission's, while
+/// `origin/dev...HEAD` names none. Gate 7 would then run a mutation campaign
+/// over source files the mission never opened, and hand the coder survivors
+/// in code it had not written; gate 8's fork point would be one merge early,
+/// so what the previous mission brought would count as brought by this one;
+/// and gate 4 turns red the moment anything on the base
+/// between the two is a protected path — which is what this test uses,
+/// because it is the one of the three that answers in a decision.
+#[test]
+fn the_gates_judge_against_the_base_the_branch_came_from() {
+    let dir = tempfile::tempdir().unwrap();
+    let origin = dir.path().join("origin");
+    std::fs::create_dir_all(&origin).unwrap();
+    git(&origin, &["init", "-q", "-b", "dev"]);
+    write(&origin, "AGENTS.md", "the rules of this place\n");
+    write(&origin, "deny.toml", "[bans]\n");
+    write(&origin, "src/lib.rs", "pub fn one() -> u8 { 1 }\n");
+    git(&origin, &["add", "-A"]);
+    git(&origin, &["commit", "-q", "-m", "base"]);
+
+    // The slot: a clone, so it has its own `dev`, here, for good.
+    let tree = dir.path().join("slot");
+    git(
+        dir.path(),
+        &["clone", "-q", origin.to_str().unwrap(), "slot"],
+    );
+
+    // The base moves on, and what lands on it touches a protected path — a
+    // human tightening `deny.toml`, which no agent may edit and every agent
+    // inherits.
+    write(
+        &origin,
+        "deny.toml",
+        "[bans]\nmultiple-versions = \"deny\"\n",
+    );
+    git(&origin, &["add", "-A"]);
+    git(
+        &origin,
+        &["commit", "-q", "-m", "a human tightens the bans"],
+    );
+
+    // This mission's branch, from `origin/dev` as `run::branch` makes it, and
+    // one commit of its own, well inside its perimeter.
+    git(&tree, &["fetch", "-q", "origin"]);
+    nunki::git::SlotGit::open(&tree)
+        .unwrap()
+        .fetch_origin(&origin)
+        .unwrap();
+    git(&tree, &["checkout", "-q", "-b", "mission/x", "origin/dev"]);
+    write(&tree, "src/mine.rs", "pub fn three() -> u8 { 3 }\n");
+    git(&tree, &["add", "-A"]);
+    git(&tree, &["commit", "-q", "-m", "feat(L1): mine"]);
+
+    let mut f = Fixture::new();
+    f.tree = tree;
+    f.journal = journal(dir.path(), &git(&f.tree, &["rev-parse", "HEAD"]));
+
+    let report = f.gates(Role::Coder);
+
+    let perimeter = report
+        .outcomes
+        .iter()
+        .find(|o| o.gate == Gate::Perimeter)
+        .expect("gate 4 is played");
+    assert_eq!(
+        perimeter.decision,
+        Decision::Passed,
+        "the gate judged against the slot's stale `dev`, and blamed this branch \
+         for a protected path the base already carried"
+    );
+}
+
+/// A campaign in flight owns the clean copy of `HEAD`, and every gate that
+/// runs there stands down while it does.
+///
+/// Gate 7's campaign is `cargo mutants --in-place` in that copy; gates 6 and 8
+/// reach it through `exec::run(On::Proof)`, which refreshes it first — `git
+/// reset --hard`, `git clean`. Run together they wreck each other both ways:
+/// the gate judges a mutant, and the reset pulls the tree out from under the
+/// campaign.
+///
+/// The symptom: the battery comes back 101 on `warning: unused variable:
+/// value` in a function whose body cargo-mutants has replaced, and which
+/// uses its argument in the coder's own code. Gate 6 red, a volet, and again
+/// until the volets are spent — and neither the integrator nor the security
+/// agent ever runs.
+#[test]
+fn the_gates_that_run_in_the_copy_stand_down_while_a_campaign_rewrites_it() {
+    let f = Fixture::new();
+    let (project, slot) = f.context();
+    nunki::mutants::write_running(
+        &project.hq_root,
+        &slot.name,
+        &nunki::mutants::Running {
+            off_mission: None,
+            chain: Default::default(),
+            fingerprint: "a62d271".into(),
+            head: git(&f.tree, &["rev-parse", "HEAD"]),
+            started_at: "2026-09-18T20:56:38Z".into(),
+            container: "64e0796ca1de".into(),
+            pid: Some(2736),
+            log: f._dir.path().join("mutants.log"),
+            deadline_minutes: 45,
+        },
+    )
+    .unwrap();
+
+    let report = f.verification(Role::Coder);
+
+    for gate in [Gate::Battery, Gate::MechanicalSecurity] {
+        let outcome = report
+            .outcomes
+            .iter()
+            .find(|o| o.gate == gate)
+            .unwrap_or_else(|| panic!("{gate:?} is played"));
+        let Decision::Unplayed(why) = &outcome.decision else {
+            panic!(
+                "{gate:?} ran in a copy a campaign is rewriting: {:?}",
+                outcome.decision
+            );
+        };
+        assert!(why.contains("2026-09-18T20:56:38Z"), "{why}");
+    }
+}
+
+/// Gate 7 waits for a campaign in flight like the gates beside it, and never
+/// reads the campaign's progress as a campaign that could not run.
+///
+/// A campaign writes its stderr while it runs. mutmut prints its progress
+/// there on every campaign, so until the campaign is read back there is no
+/// `MUTANTS.json` and there is a non-empty `.err`. A gate 7 played anyway
+/// takes that pair for a campaign that has already measured nothing. The
+/// verdict is red, a red outranks a wait, and a volet goes to the coder.
+///
+/// So a campaign can end with `{"campaign":"done"}` and no survivor, the
+/// gates play before the read-back, and the mission goes to a second volet
+/// whose cause says "measured nothing": a coder run spent on a green branch.
+#[test]
+fn gate_seven_waits_for_a_campaign_in_flight_and_never_reads_its_progress_as_a_failure() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.journal_names_head();
+    std::fs::write(&f.pr, "# The pull request\n").unwrap();
+    let (project, slot) = f.context();
+    nunki::mutants::write_running(
+        &project.hq_root,
+        &slot.name,
+        &nunki::mutants::Running {
+            off_mission: None,
+            chain: Default::default(),
+            fingerprint: "886307b".into(),
+            head: git(&f.tree, &["rev-parse", "HEAD"]),
+            started_at: "2026-09-25T04:57:48Z".into(),
+            container: "c5a93c0b0d07".into(),
+            pid: Some(7),
+            log: f._dir.path().join("mutants.log"),
+            deadline_minutes: 45,
+        },
+    )
+    .unwrap();
+    f.campaign_said("Generating mutants\nRunning mutation testing\n193.48 mutations/second\n");
+
+    let report = f.verification(Role::Coder);
+    let seven = report
+        .outcomes
+        .iter()
+        .find(|o| o.gate == Gate::Mutation)
+        .expect("gate 7 is reported");
+    let Decision::Unplayed(why) = &seven.decision else {
+        panic!(
+            "gate 7 judged a campaign that is still running: {:?}",
+            seven.decision
+        );
+    };
+    assert!(why.contains("2026-09-25T04:57:48Z"), "{why}");
+    assert!(
+        matches!(report.verdict(), nunki::gate::Verdict::CampaignOwed(_)),
+        "a campaign in flight is waited on, never sent back to the coder: {:?}",
+        report.verdict()
+    );
+}
+
+/// Gate 7 and the campaign it judges read one set, and there is one call that
+/// can produce it.
+///
+/// The base has two readings in a slot, `dev` and `origin/dev`, and from the
+/// second mission onwards they differ. Gate 7 resolved the name; `nunki
+/// verify` and `nunki mission mutants` worked the paths out themselves and
+/// passed them in raw. So the campaign ran on one set and the gate judged
+/// another, their fingerprints could never agree, and gate 7 asked for a
+/// campaign that had just run.
+///
+/// The launcher's side and the gate's side then name different paths, and
+/// `verify` goes round the mismatch turn after turn.
+///
+/// `mutants::campaign` takes the base's **name** now and makes the call
+/// itself, so there is no second reading to get wrong — which is why this
+/// test asserts on the paths that call gives, and not on two callers agreeing.
+#[test]
+fn what_a_branch_brought_has_one_reading() {
+    let dir = tempfile::tempdir().unwrap();
+    let origin = dir.path().join("origin");
+    std::fs::create_dir_all(&origin).unwrap();
+    git(&origin, &["init", "-q", "-b", "dev"]);
+    write(&origin, "AGENTS.md", "the rules of this place\n");
+    write(&origin, "src/lib.rs", "pub fn one() -> u8 { 1 }\n");
+    git(&origin, &["add", "-A"]);
+    git(&origin, &["commit", "-q", "-m", "base"]);
+
+    let tree = dir.path().join("slot");
+    git(
+        dir.path(),
+        &["clone", "-q", origin.to_str().unwrap(), "slot"],
+    );
+
+    // The base moves on, as it does between two missions, and the slot's own
+    // `dev` stays where the clone wrote it.
+    write(&origin, "src/theirs.rs", "pub fn two() -> u8 { 2 }\n");
+    git(&origin, &["add", "-A"]);
+    git(
+        &origin,
+        &["commit", "-q", "-m", "what the last mission merged"],
+    );
+
+    git(&tree, &["fetch", "-q", "origin"]);
+    nunki::git::SlotGit::open(&tree)
+        .unwrap()
+        .fetch_origin(&origin)
+        .unwrap();
+    git(&tree, &["checkout", "-q", "-b", "mission/x", "origin/dev"]);
+    write(&tree, "src/mine.rs", "pub fn three() -> u8 { 3 }\n");
+    git(&tree, &["add", "-A"]);
+    git(&tree, &["commit", "-q", "-m", "feat(L1): mine"]);
+
+    let asked = gate::touched_since_base(&tree, "dev").unwrap();
+
+    assert_eq!(
+        asked,
+        vec!["src/mine.rs".to_string()],
+        "the campaign would run on what the branch never opened: {asked:?}"
+    );
+}
+
+/// The rulings a human left reach the script as an argument, at the path
+/// `nunki` fixes. An environment variable would be the agent's to set, and a
+/// path it could set is a file it could write.
+#[test]
+fn the_script_is_told_where_the_rulings_are() {
+    let f = Fixture::new();
+
+    let (_, calls) = f.security_seen(Role::Coder, said(0, ""));
+    let probe = probe_of(&calls);
+
+    assert!(probe.contains(nunki::secrets::AT), "{probe}");
+}
+
+/// A secret is the one finding no agent can close: taking it out in a later
+/// commit leaves it in the branch's history, and `nunki` rewrites none. So
+/// the line says whose move it is and what the move is, with the id it names
+/// as that move's argument.
+#[test]
+fn a_secret_that_stops_the_gate_names_the_gesture_that_lifts_it() {
+    let f = Fixture::new();
+
+    let decision = f.security(
+        Role::Coder,
+        said(
+            0,
+            r#"{"id":"abc123:src/store.rs:Postgres:22","kind":"secret","where":"src/store.rs:22","via":"","fix":"","accepted":"","was_at_base":false}"#,
+        ),
+    );
+
+    let Decision::Failed(why) = decision else {
+        panic!("{decision:?}");
+    };
+    assert!(why.contains("abc123:src/store.rs:Postgres:22"), "{why}");
+    assert!(why.contains("nunki secret accept"), "{why}");
+}
+
+/// And an advisory does not, because that gesture is not the one: an advisory
+/// with a fix is an agent's to apply, and one without is `deny.toml`'s.
+#[test]
+fn an_advisory_that_stops_the_gate_does_not_send_a_human_to_the_secret_verb() {
+    let f = Fixture::new();
+
+    let decision = f.security(
+        Role::Coder,
+        said(
+            0,
+            r#"{"id":"RUSTSEC-2020-0071","kind":"vulnerability","where":"time 0.1.45","via":"chrono","fix":">=0.2.23","accepted":"","was_at_base":false}"#,
+        ),
+    );
+
+    let Decision::Failed(why) = decision else {
+        panic!("{decision:?}");
+    };
+    assert!(!why.contains("nunki secret accept"), "{why}");
+}
+
+/// And the script's own word for it, for the same reason. `nunki` resolves the
+/// commit above and should never hand over one the copy lacks — this is the
+/// second lock, not the first.
+#[test]
+fn a_script_that_cannot_read_the_base_is_unplayed_and_not_red() {
+    let f = Fixture::new();
+
+    let decision = f.security(Role::Coder, said(70, ""));
+
+    let Decision::Unplayed(why) = decision else {
+        panic!("{decision:?}");
+    };
+    assert!(why.contains("clean copy of HEAD"), "{why}");
+}
+
+/// The security agent attacks what is built and owes findings, not a tool's
+/// report — the per-role table, and the battery two gates above.
+#[test]
+fn the_security_agent_owes_findings_and_not_a_tools_report() {
+    let f = Fixture::new();
+
+    let decision = f.security(Role::Security, said(0, ""));
+
+    assert!(
+        matches!(decision, Decision::NotApplicable(_)),
+        "{decision:?}"
+    );
+}
+
+/// A resume block may name its commit in its heading.
+///
+/// A coder may write `## ÉTAT DE REPRISE — commit c638a331…`, which is a fair
+/// reading of the rule it is given ("it names the commit it describes"). A
+/// gate that answers the journal **has no block** — about a journal whose
+/// block is at the top, naming `HEAD` — costs an attempt out of three, and
+/// sends the agent looking for the wrong thing.
+///
+/// What still has to hold: a heading that merely begins with the same
+/// letters opens nothing, and the block still ends at the next heading, so
+/// a hash further down the file is still not the block's.
+#[test]
+fn a_resume_block_may_carry_its_commit_in_its_heading() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    let head = git(&f.tree, &["rev-parse", "HEAD"]);
+
+    for heading in [
+        format!("## ÉTAT DE REPRISE — commit {head}"),
+        format!("## ÉTAT DE REPRISE ({})", &head[..8]),
+        "## ÉTAT DE REPRISE".to_string(),
+    ] {
+        std::fs::write(
+            &f.journal,
+            format!("# Journal\n\n{heading}\n\nLot: L1 — done\n"),
+        )
+        .unwrap();
+        // The last one names HEAD nowhere in the heading, so the body does.
+        if !heading.contains(&head[..8]) {
+            std::fs::write(
+                &f.journal,
+                format!("# Journal\n\n{heading}\n\nHEAD is {head}.\n"),
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            f.decision(Role::Coder, Gate::ResumeNamesHead),
+            Decision::Passed,
+            "{heading}"
+        );
+    }
+
+    // A heading that only starts with the same letters opens no block: the
+    // name has to end there, or be followed by something that is not a word.
+    std::fs::write(
+        &f.journal,
+        format!("# Journal\n\n## ÉTAT DE REPRISES PASSÉES\n\nHEAD is {head}.\n"),
+    )
+    .unwrap();
+    match f.decision(Role::Coder, Gate::ResumeNamesHead) {
+        Decision::Failed(why) => assert!(why.contains("no `ÉTAT DE REPRISE` block"), "{why}"),
+        other => panic!("that heading opens no block: {other:?}"),
+    }
+
+    // And the block still stops at the next heading, heading-hash or not.
+    let first = git(&f.tree, &["rev-parse", "HEAD~1"]);
+    std::fs::write(
+        &f.journal,
+        format!(
+            "# Journal\n\n## ÉTAT DE REPRISE — commit {first}\n\nstale.\n\n## History\n\n{head}\n"
+        ),
+    )
+    .unwrap();
+    match f.decision(Role::Coder, Gate::ResumeNamesHead) {
+        Decision::Failed(why) => assert!(why.contains(&head[..12]), "{why}"),
+        other => panic!("a stale block with a fresh hash below it: {other:?}"),
+    }
+}
+
+/// And when there really is no block, the gate says what the journal does
+/// carry — "there is none" sent a reader looking for a file that was in
+/// front of them under another heading.
+#[test]
+fn a_journal_without_a_block_is_told_what_it_has_instead() {
+    let f = Fixture::new();
+    std::fs::write(&f.journal, "# Journal\n\n## Notes\n\nI did some work.\n").unwrap();
+
+    match f.decision(Role::Coder, Gate::ResumeNamesHead) {
+        Decision::Failed(why) => {
+            assert!(why.contains("# Journal"), "{why}");
+            assert!(why.contains("## Notes"), "{why}");
+        }
+        other => panic!("{other:?}"),
+    }
+
+    std::fs::write(&f.journal, "I did some work.\n").unwrap();
+    match f.decision(Role::Coder, Gate::ResumeNamesHead) {
+        Decision::Failed(why) => assert!(why.contains("no heading at all"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+// --- what a red gate says --------------------------------------------------
+
+impl Fixture {
+    /// Gate 6 with a container that answers what the battery printed.
+    fn battery(&self, out: nunki::engine::ExecOutput) -> Decision {
+        // The refresh of the clean copy answers first, and green: what this
+        // asks about is the battery's own status, not the refresh's.
+        let outs = vec![said(0, ""), out];
+        let (project, slot) = self.context();
+        let profile = nunki::run::profile_path(&project, &slot.name);
+        std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+        std::fs::write(&profile, "services: {}\n").unwrap();
+        let engine =
+            std::sync::Arc::new(nunki::engine::fake::FakeEngine::default().with_execs(outs));
+        // Gate 6 belongs to the final verification, not to what follows a run.
+        gate::at_verification(
+            &Subject {
+                role: Role::Coder,
+                tree: &self.tree,
+                journal: &self.journal,
+                pr: &self.pr,
+                verdict: &self.verdict,
+                mission_dir: self._dir.path(),
+                header: &self.header,
+                protected_branches: &self.branches,
+                protected_paths: &self.protected,
+                services_file: self.services_file.as_deref(),
+                coder_head: self.coder_head.as_deref(),
+            },
+            &gate::Verification {
+                project: &project,
+                slot: &slot,
+                engine,
+                stack: "rust",
+            },
+        )
+        .unwrap()
+        .outcomes
+        .into_iter()
+        .find(|o| o.gate == Gate::Battery)
+        .expect("gate 6 is played")
+        .decision
+    }
+}
+
+/// A red gate 6 says what **both** streams said.
+///
+/// Preferring stderr and dropping stdout fails on a Python stack: `uv sync`
+/// writes its one-line chatter to stderr and `mypy` writes the diagnosis to
+/// stdout, so the gate comes back "the battery came back 2: Checked 26
+/// packages in 0.18ms" — and `nunki` opens a volet whose cause says nothing
+/// at all. The agent is sent to repair a tree against a diagnosis it never
+/// saw.
+#[test]
+fn a_red_battery_says_what_both_streams_said() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.journal_names_head();
+    std::fs::write(&f.pr, "# What this changes\n").unwrap();
+
+    let both = nunki::engine::ExecOutput {
+        status: 2,
+        stdout: "src/store.rs:2: error: Duplicate module named \"store\"\n".into(),
+        stderr: "Checked 26 packages in 0.18ms\n".into(),
+    };
+    match f.battery(both) {
+        Decision::Failed(why) => {
+            assert!(
+                why.contains("Duplicate module"),
+                "the diagnosis is lost: {why}"
+            );
+            assert!(why.contains("Checked 26 packages"), "{why}");
+            // And labelled, because a reader has to know which said which.
+            assert!(why.contains("stdout:") && why.contains("stderr:"), "{why}");
+        }
+        other => panic!("a battery that came back 2 is red: {other:?}"),
+    }
+
+    // One stream alone is reported as it always was, with no labelling to
+    // read past: the common case does not pay for the rare one.
+    let only_stderr = nunki::engine::ExecOutput {
+        status: 101,
+        stdout: String::new(),
+        stderr: "thread 'main' panicked\n".into(),
+    };
+    match f.battery(only_stderr) {
+        Decision::Failed(why) => {
+            assert!(why.contains("panicked"), "{why}");
+            assert!(!why.contains("stderr:"), "nothing to disambiguate: {why}");
+        }
+        other => panic!("{other:?}"),
+    }
+
+    let only_stdout = nunki::engine::ExecOutput {
+        status: 1,
+        stdout: "FAILED tests/test_one.py::test_it\n".into(),
+        stderr: String::new(),
+    };
+    match f.battery(only_stdout) {
+        Decision::Failed(why) => {
+            assert!(why.contains("FAILED tests/test_one.py"), "{why}");
+            assert!(!why.contains("stdout:"), "nothing to disambiguate: {why}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Gate 7 by rigor: a prototype owes no campaign, and a standard mission is
+// judged on the share of tried mutants killed.
+// ---------------------------------------------------------------------------
+
+/// A `standard` fixture with the source the survivors live in, and two
+/// tests an outcome can name.
+fn standard() -> Fixture {
+    let mut f = Fixture::new();
+    f.header.rigor = Rigor::Standard;
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    commit(
+        &f.tree,
+        "tests/thing.rs",
+        "#[test]\nfn the_thing_holds() {}\n#[test]\nfn the_known_hole() {}\n",
+        "tests",
+    );
+    f.journal_names_head();
+    f
+}
+
+fn untriaged(n: u32) -> Vec<Survivor> {
+    (1..=n).map(|line| survivor(line, None)).collect()
+}
+
+/// At the threshold it passes; one survivor more and it is red, and the
+/// reason gives the share, the threshold and how many more must be killed.
+/// Survivors left without an outcome do not turn a passing gate red, and the
+/// note counts them so the pull request shows them.
+#[test]
+fn at_standard_a_campaign_at_the_threshold_passes_and_one_just_below_is_red() {
+    let f = standard();
+    // 8 of 10 killed is 80%: exactly the default threshold.
+    f.campaign_tried(untriaged(2), Some(10));
+    let outcome = f.gate_seven(Role::Coder);
+    assert_eq!(outcome.decision, Decision::Passed);
+    let note = outcome.note.expect("a passing standard gate still counts");
+    assert!(
+        note.contains("8 of 10 tried mutant(s) killed (80%)"),
+        "{note}"
+    );
+    assert!(note.contains("threshold of 80%"), "{note}");
+    assert!(
+        note.contains("2 survivor(s) left without an outcome"),
+        "{note}"
+    );
+    assert!(note.contains("src/new.rs:1"), "{note}");
+
+    // 7 of 10 is 70%: one more must be killed.
+    f.campaign_tried(untriaged(3), Some(10));
+    let outcome = f.gate_seven(Role::Coder);
+    match &outcome.decision {
+        Decision::Failed(why) => {
+            assert!(
+                why.contains("7 of 10 tried mutant(s) killed (70%)"),
+                "{why}"
+            );
+            assert!(why.contains("threshold of 80%"), "{why}");
+            assert!(why.contains("1 more must be killed"), "{why}");
+        }
+        other => panic!("70% is below 80%: {other:?}"),
+    }
+    let note = outcome
+        .note
+        .expect("a red standard gate counts the survivors too");
+    assert!(
+        note.contains("3 survivor(s) left without an outcome"),
+        "{note}"
+    );
+}
+
+/// The share is compared in whole numbers: 7 of 9 is 77.7%, which no
+/// rounding may carry to a pass at 78%, and the count still owed rounds up.
+#[test]
+fn at_standard_a_share_just_short_of_the_threshold_is_not_rounded_up() {
+    let mut f = standard();
+    f.threshold = 78;
+    f.campaign_tried(untriaged(2), Some(9));
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => {
+            assert!(why.contains("7 of 9 tried mutant(s) killed (77%)"), "{why}");
+            assert!(why.contains("1 more must be killed"), "{why}");
+        }
+        other => panic!("77.7% is below 78%: {other:?}"),
+    }
+    // The threshold is the project's: the same campaign at 77% passes.
+    f.threshold = 77;
+    assert_eq!(f.gate_seven(Role::Coder).decision, Decision::Passed);
+    // And the count owed is the whole gap: at 100%, both survivors.
+    f.threshold = 100;
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => assert!(why.contains("2 more must be killed"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A survivor answered by a named test, frozen as a bug, or ruled
+/// equivalent by the HQ counts as killed.
+#[test]
+fn at_standard_a_survivor_with_an_outcome_counts_as_killed() {
+    let f = standard();
+    f.campaign_tried(
+        vec![
+            survivor(1, None),
+            survivor(
+                2,
+                Some(Triage::Equivalent {
+                    why: "no caller can reach that branch".into(),
+                    carried_from: None,
+                }),
+            ),
+            survivor(3, None),
+            survivor(4, None),
+        ],
+        Some(10),
+    );
+    f.coder_answers(&[
+        (
+            "src/new.rs:3",
+            Triage::Killed {
+                test: "the_thing_holds".into(),
+            },
+        ),
+        (
+            "src/new.rs:4",
+            Triage::Bug {
+                test: "the_known_hole".into(),
+            },
+        ),
+    ]);
+    // 4 survivors, 3 answered: 9 of 10 killed.
+    let outcome = f.gate_seven(Role::Coder);
+    assert_eq!(outcome.decision, Decision::Passed);
+    let note = outcome.note.unwrap();
+    assert!(note.contains("9 of 10"), "{note}");
+    assert!(
+        note.contains("1 survivor(s) left without an outcome"),
+        "{note}"
+    );
+    // The equivalence is still counted out loud.
+    assert!(note.contains("1 of 4 rode on `equivalent`"), "{note}");
+}
+
+/// Who may give which outcome, and that a named test exists, hold at
+/// `standard` as at `critical` — even when the share would pass anyway.
+#[test]
+fn at_standard_a_named_test_must_exist_and_the_coder_may_not_rule() {
+    let f = standard();
+    f.campaign_tried(untriaged(1), Some(100));
+    f.coder_answers(&[(
+        "src/new.rs:1",
+        Triage::Killed {
+            test: "a_test_nobody_wrote".into(),
+        },
+    )]);
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => assert!(why.contains("a_test_nobody_wrote"), "{why}"),
+        other => panic!("99% does not excuse a test that does not exist: {other:?}"),
+    }
+
+    f.coder_answers(&[(
+        "src/new.rs:1",
+        Triage::Equivalent {
+            why: "trust me".into(),
+            carried_from: None,
+        },
+    )]);
+    // The coder's `equivalent` is no outcome (HQ review 3): the survivor
+    // counts as not killed, the share of 99% passes on its own, and the note
+    // names the entry refused.
+    let outcome = f.gate_seven(Role::Coder);
+    assert_eq!(outcome.decision, Decision::Passed);
+    let note = outcome.note.unwrap();
+    assert!(note.contains("99 of 100"), "{note}");
+    assert!(
+        note.contains("1 survivor(s) left without an outcome"),
+        "{note}"
+    );
+    assert!(note.contains("not the coder's to give"), "{note}");
+    assert!(note.contains("refused and read as no outcome"), "{note}");
+}
+
+/// A campaign that does not say how many it tried — an older script, an
+/// older file — is judged as `critical` judges it, and the note says why.
+#[test]
+fn at_standard_a_campaign_without_a_count_is_judged_as_critical() {
+    let f = standard();
+    f.campaign_tried(untriaged(1), None);
+    let outcome = f.gate_seven(Role::Coder);
+    match &outcome.decision {
+        Decision::Failed(why) => assert!(why.contains("no threshold to hide behind"), "{why}"),
+        other => panic!("judged as critical, one survivor is red: {other:?}"),
+    }
+    let note = outcome.note.expect("the fallback is said");
+    assert!(
+        note.contains("does not say how many mutants it tried"),
+        "{note}"
+    );
+
+    f.coder_answers(&[(
+        "src/new.rs:1",
+        Triage::Killed {
+            test: "the_thing_holds".into(),
+        },
+    )]);
+    let outcome = f.gate_seven(Role::Coder);
+    assert_eq!(outcome.decision, Decision::Passed);
+    assert!(
+        outcome
+            .note
+            .unwrap()
+            .contains("judged as `critical` judges it"),
+        "a green fallback still says it was one"
+    );
+
+    // And when the critical judgement has a note of its own, both are said.
+    f.coder_answers(&[]);
+    f.campaign_tried(
+        vec![survivor(
+            1,
+            Some(Triage::Equivalent {
+                why: "no caller can reach that branch".into(),
+                carried_from: None,
+            }),
+        )],
+        None,
+    );
+    let outcome = f.gate_seven(Role::Coder);
+    assert_eq!(outcome.decision, Decision::Passed);
+    let note = outcome.note.unwrap();
+    assert!(note.contains("judged as `critical` judges it"), "{note}");
+    assert!(note.contains("1 of 1 rode on `equivalent`"), "{note}");
+}
+
+/// A count smaller than the survivors named cannot be true, and a share
+/// built on it would be a lie; that campaign is judged as `critical`.
+#[test]
+fn at_standard_a_count_below_the_survivors_is_judged_as_critical() {
+    let f = standard();
+    f.campaign_tried(untriaged(2), Some(1));
+    let outcome = f.gate_seven(Role::Coder);
+    assert!(
+        matches!(outcome.decision, Decision::Failed(_)),
+        "{outcome:?}"
+    );
+    assert!(
+        outcome.note.unwrap().contains("cannot both be true"),
+        "the fallback is said"
+    );
+    // At the boundary, as many tried as survived is a share of 0%.
+    f.campaign_tried(untriaged(2), Some(2));
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => assert!(why.contains("0 of 2"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// No mutant on the lines the branch changed: nothing was tried, and that
+/// passes.
+#[test]
+fn at_standard_a_campaign_that_tried_nothing_passes() {
+    let f = standard();
+    f.campaign_tried(vec![], Some(0));
+    let outcome = f.gate_seven(Role::Coder);
+    assert_eq!(outcome.decision, Decision::Passed);
+    assert!(outcome.note.unwrap().contains("tried no mutant"));
+}
+
+/// `critical` does not read the count: one survivor without an outcome is
+/// red, however many mutants were killed beside it.
+#[test]
+fn at_critical_the_count_changes_nothing() {
+    let mut f = standard();
+    f.header.rigor = Rigor::Critical;
+    f.campaign_tried(untriaged(1), Some(1000));
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => assert!(why.contains("no threshold"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A prototype owes no campaign: gate 7 is not applicable, never unplayed —
+/// an unplayed gate 7 is a campaign owed, which the monitor would start.
+#[test]
+fn a_prototype_owes_no_mutation_campaign() {
+    let mut f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.journal_names_head();
+    assert!(
+        matches!(f.gate_seven(Role::Coder).decision, Decision::Unplayed(_)),
+        "the same mission at critical owes one"
+    );
+
+    f.header.rigor = Rigor::Prototype;
+    let outcome = f.gate_seven(Role::Coder);
+    match &outcome.decision {
+        Decision::NotApplicable(why) => assert!(why.contains("prototype"), "{why}"),
+        other => panic!("a prototype owes no campaign: {other:?}"),
+    }
+    assert!(!outcome.waits_on_campaign);
+    // Read the way the flow reads it: with every other gate green, nothing
+    // is owed and nothing is in the way.
+    let mut decisions: Vec<(Gate, Decision)> = vec![
+        (Gate::CleanTree, Decision::Passed),
+        (Gate::Battery, Decision::Passed),
+    ];
+    decisions.push((Gate::Mutation, outcome.decision));
+    assert_eq!(report_of(&decisions).verdict(), gate::Verdict::Green);
+}
+
+/// A campaign that said it finished and measured nothing — mutants found,
+/// none tried — is not green at any rigor: it is settled as one that could
+/// not run, and gate 7 is red with its reason, at `critical` as at
+/// `standard` (security round 1 on the rigor mission, HQ ruling).
+#[test]
+fn a_campaign_that_measured_nothing_is_red_at_every_rigor() {
+    let mut f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.journal_names_head();
+    let touched = nunki::gate::touched_since_base(&f.tree, "dev").unwrap();
+    let fingerprint = nunki::mutants::fingerprint(&f.tree, &touched).unwrap();
+    let runs = f._dir.path().join("runs");
+    std::fs::create_dir_all(&runs).unwrap();
+    let log = runs.join(format!("mutants-{}.log", &fingerprint[..7]));
+    let settled = nunki::mutants::settle_unmeasured(
+        &log,
+        "{\"campaign\":\"done\",\"tried\":0,\"found\":78}\n",
+    )
+    .unwrap();
+    assert!(settled.is_some());
+
+    for rigor in [Rigor::Critical, Rigor::Standard] {
+        f.header.rigor = rigor;
+        match f.gate_seven(Role::Coder).decision {
+            Decision::Failed(why) => {
+                assert!(why.contains("measured nothing"), "{rigor}: {why}")
+            }
+            other => panic!("{rigor}: a campaign that tried nothing of 78 is not green: {other:?}"),
+        }
+    }
+}
+
+/// Gate 7 names a survivor whose id and file hold a tab or a newline with
+/// each shown as its escape, never folded into a space nor printed raw.
+#[test]
+fn gate_seven_names_a_survivor_with_a_tab_or_a_newline_escaped() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    let mut s = survivor(1, None);
+    s.id = "src/with\ttab.rs:1:1: replace".into();
+    s.file = "src/with\nnewline.rs".into();
+    f.campaign(vec![s]);
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => {
+            assert!(
+                why.contains("src/with\\u{a}newline.rs:1 src/with\\u{9}tab.rs:1:1: replace"),
+                "{why}"
+            );
+            assert!(
+                !why.contains("with\ttab") && !why.contains("with\nnewline"),
+                "{why}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A campaign whose tool reported more survivors than the lines nunki read
+/// — a survivor lost to a name the script could not carry — is settled the
+/// same way, and gate 7 is red at every rigor with both numbers. Measured
+/// before the fix: 4 tried, every survivor line lost, and a `standard`
+/// gate 7 green at 100% killed.
+#[test]
+fn a_campaign_that_lost_a_survivor_is_red_at_every_rigor() {
+    let mut f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.journal_names_head();
+    let touched = nunki::gate::touched_since_base(&f.tree, "dev").unwrap();
+    let fingerprint = nunki::mutants::fingerprint(&f.tree, &touched).unwrap();
+    let runs = f._dir.path().join("runs");
+    std::fs::create_dir_all(&runs).unwrap();
+    let log = runs.join(format!("mutants-{}.log", &fingerprint[..7]));
+    let settled = nunki::mutants::settle_unmeasured(
+        &log,
+        "{\"id\":\"src/new.rs\tx:1:1: y\",\"file\":\"src/new.rs\tx\",\"line\":1}\n\
+         {\"campaign\":\"done\",\"tried\":4,\"found\":4,\"missed\":4}\n",
+    )
+    .unwrap();
+    assert!(settled.is_some());
+
+    for rigor in [Rigor::Critical, Rigor::Standard] {
+        f.header.rigor = rigor;
+        match f.gate_seven(Role::Coder).decision {
+            Decision::Failed(why) => assert!(
+                why.contains("reported 4 survivor(s)") && why.contains("read 0 survivor"),
+                "{rigor}: {why}"
+            ),
+            other => panic!("{rigor}: a campaign that lost its survivors is not green: {other:?}"),
+        }
+    }
+}
+
+/// The threshold frozen in the header is the one gate 7 reads; a header
+/// framed before it was frozen reads the project's.
+#[test]
+fn at_standard_the_threshold_frozen_in_the_header_beats_the_projects() {
+    let mut f = standard();
+    f.campaign_tried(untriaged(2), Some(10));
+    // 80% killed: green at the project's 80, red at a frozen 90 — and the
+    // message says whose threshold it was (HQ review).
+    let outcome = f.gate_seven(Role::Coder);
+    assert_eq!(outcome.decision, Decision::Passed);
+    let note = outcome.note.unwrap_or_default();
+    assert!(note.contains("project's threshold of 80%"), "{note}");
+    f.header.mutation_threshold = Some(90);
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => assert!(why.contains("mission's threshold of 90%"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    // And the project's changing afterwards moves nothing.
+    f.threshold = 50;
+    assert!(matches!(
+        f.gate_seven(Role::Coder).decision,
+        Decision::Failed(_)
+    ));
+    f.header.mutation_threshold = None;
+    assert_eq!(f.gate_seven(Role::Coder).decision, Decision::Passed);
+}
+
+/// Rulings the HQ gave on this very campaign are counted, and none of them
+/// is called carried: the sentence that sends the HQ to `--lift` is for a
+/// ruling given on code that has changed since, and naming "0 of those"
+/// would send it looking for nothing.
+#[test]
+fn an_equivalence_given_on_this_campaign_is_not_called_carried() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.campaign(vec![survivor(
+        1,
+        Some(Triage::Equivalent {
+            why: "no caller can reach that branch".into(),
+            carried_from: None,
+        }),
+    )]);
+    f.journal_names_head();
+    let outcome = f.gate_seven(Role::Coder);
+    assert_eq!(outcome.decision, Decision::Passed);
+    let note = outcome.note.expect("an equivalence is counted out loud");
+    assert!(note.contains("1 of 1 rode on `equivalent`"), "{note}");
+    assert!(!note.contains("carried"), "{note}");
+    assert!(!note.contains("--lift"), "{note}");
+}
+
+// ---------------------------------------------------------------------------
+// Gate 7 and the coder's proposal of an equivalence (SPEC 4.4).
+// ---------------------------------------------------------------------------
+
+fn proposed(why: &str) -> Triage {
+    Triage::EquivalentProposed { why: why.into() }
+}
+
+/// A critical mission whose coder proposed two equivalences passes gate 7:
+/// a proposal is an outcome, so nothing stops for the HQ here. The note
+/// counts the proposals apart from the HQ's rulings, so a reader sees which
+/// outcomes nobody has ruled on yet.
+#[test]
+fn a_critical_mission_with_two_proposals_passes_gate_seven_and_counts_them_apart() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    commit(
+        &f.tree,
+        "tests/thing.rs",
+        "#[test]\nfn the_thing_holds() {}\n",
+        "tests",
+    );
+    f.campaign(vec![
+        survivor(1, None),
+        survivor(2, None),
+        survivor(3, None),
+        survivor(
+            4,
+            Some(Triage::Equivalent {
+                why: "no caller can reach that branch".into(),
+                carried_from: None,
+            }),
+        ),
+    ]);
+    f.coder_answers(&[
+        ("src/new.rs:1", proposed("the value is only ever logged")),
+        (
+            "src/new.rs:2",
+            proposed("both arms return the same constant"),
+        ),
+        (
+            "src/new.rs:3",
+            Triage::Killed {
+                test: "the_thing_holds".into(),
+            },
+        ),
+    ]);
+    f.journal_names_head();
+    let outcome = f.gate_seven(Role::Coder);
+    assert_eq!(outcome.decision, Decision::Passed);
+    let note = outcome.note.expect("proposals are counted out loud");
+    assert!(
+        note.contains("2 of 4 rode on an equivalence proposed (2 from the coder)"),
+        "{note}"
+    );
+    assert!(note.contains("`nunki push` refuses"), "{note}");
+    // And the HQ's own ruling is counted on its own.
+    assert!(note.contains("1 of 4 rode on `equivalent`"), "{note}");
+}
+
+/// A proposal is one sentence, and a blank one — whitespace, or characters
+/// nobody can see — says nothing: it is no outcome, and the gate says why
+/// the line was not read.
+#[test]
+fn a_proposal_with_a_blank_reason_is_no_outcome() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.campaign(vec![survivor(1, None)]);
+    f.journal_names_head();
+    for blank in ["", "   ", "\u{200b}\u{200d}"] {
+        f.coder_answers(&[("src/new.rs:1", proposed(blank))]);
+        match f.gate_seven(Role::Coder).decision {
+            Decision::Failed(why) => {
+                assert!(why.contains("src/new.rs:1"), "{blank:?}: {why}");
+                assert!(why.contains("gives no reason"), "{blank:?}: {why}");
+            }
+            other => panic!("{blank:?} is no reason: {other:?}"),
+        }
+    }
+    f.coder_answers(&[("src/new.rs:1", proposed("only a log line reads it"))]);
+    assert_eq!(f.gate_seven(Role::Coder).decision, Decision::Passed);
+}
+
+/// A proposal the HQ refused is no outcome, even written again: the HQ has
+/// said no on that survivor, and only a test answers it now.
+#[test]
+fn a_proposal_the_hq_refused_is_no_outcome() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    let mut refused = survivor(1, None);
+    refused.refused = Some(nunki::mutants::Refusal {
+        proposed: "nothing reads it".into(),
+        because: "the CLI prints it".into(),
+    });
+    f.campaign(vec![refused]);
+    f.coder_answers(&[("src/new.rs:1", proposed("nothing reads it, really"))]);
+    f.journal_names_head();
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => {
+            assert!(why.contains("the HQ refused its proposal"), "{why}");
+            assert!(why.contains("the CLI prints it"), "{why}");
+        }
+        other => panic!("a refused proposal is no outcome: {other:?}"),
+    }
+}
+
+/// Once the HQ has ruled, the ruling is what answers, whatever the coder's
+/// file still says: the note counts an equivalence, and no proposal.
+#[test]
+fn a_ratified_proposal_answers_as_the_hqs_ruling() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.campaign(vec![survivor(
+        1,
+        Some(Triage::Equivalent {
+            why: "only a log line reads it".into(),
+            carried_from: None,
+        }),
+    )]);
+    f.coder_answers(&[("src/new.rs:1", proposed("only a log line reads it"))]);
+    f.journal_names_head();
+    let outcome = f.gate_seven(Role::Coder);
+    assert_eq!(outcome.decision, Decision::Passed);
+    let note = outcome.note.unwrap();
+    assert!(note.contains("1 of 1 rode on `equivalent`"), "{note}");
+    assert!(!note.contains("the coder proposed"), "{note}");
+}
+
+/// The coder's own `equivalent` stays a red gate, and the refusal points at
+/// what the coder may write instead.
+#[test]
+fn the_coders_own_equivalent_is_still_red_and_points_at_the_proposal() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.campaign(vec![survivor(1, None), survivor(2, None)]);
+    f.coder_answers(&[
+        ("src/new.rs:1", proposed("only a log line reads it")),
+        (
+            "src/new.rs:2",
+            Triage::Equivalent {
+                why: "trust me".into(),
+                carried_from: None,
+            },
+        ),
+    ]);
+    f.journal_names_head();
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => {
+            assert!(why.contains("not the coder's to give"), "{why}");
+            assert!(why.contains("equivalent_proposed"), "{why}");
+        }
+        other => panic!("the coder's `equivalent` is never an outcome: {other:?}"),
+    }
+}
+
+/// At `standard`, a proposal counts in the share as a killed mutant, like a
+/// ruled equivalence: 3 survivors of 10 is 70%, and proposing one brings it
+/// to the threshold.
+#[test]
+fn at_standard_a_proposal_counts_in_the_share() {
+    let f = standard();
+    f.campaign_tried(untriaged(3), Some(10));
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => assert!(why.contains("7 of 10"), "{why}"),
+        other => panic!("70% is below 80%: {other:?}"),
+    }
+    f.coder_answers(&[("src/new.rs:1", proposed("only a log line reads it"))]);
+    let outcome = f.gate_seven(Role::Coder);
+    assert_eq!(outcome.decision, Decision::Passed);
+    let note = outcome.note.unwrap();
+    assert!(note.contains("8 of 10"), "{note}");
+    assert!(
+        note.contains("1 of 3 rode on an equivalence proposed (1 from the coder)"),
+        "{note}"
+    );
+
+    // A blank one counts for nothing.
+    f.coder_answers(&[("src/new.rs:1", proposed(" "))]);
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => assert!(why.contains("7 of 10"), "{why}"),
+        other => panic!("a blank proposal kills nothing: {other:?}"),
+    }
+}
+
+/// A named test is a name (HQ review 4): blank, a space, or a word of two
+/// letters answers nothing, and says why beside the survivor; a part of a
+/// real name is not that name; the real name, as a whole word, answers.
+#[test]
+fn gate_seven_takes_no_test_name_that_is_not_a_name() {
+    let f = Fixture::new();
+    commit(
+        &f.tree,
+        "src/new.rs",
+        "pub fn two() -> u8 { 2 }\n#[test]\nfn two_is_two() {}\n",
+        "L1",
+    );
+    f.campaign(vec![survivor(1, None)]);
+    f.journal_names_head();
+    for name in ["", " ", "fn", "u8"] {
+        f.coder_answers(&[("src/new.rs:1", Triage::Killed { test: name.into() })]);
+        match f.gate_seven(Role::Coder).decision {
+            Decision::Failed(why) => {
+                assert!(
+                    why.contains("1 survivor(s) have no outcome"),
+                    "{name:?}: {why}"
+                );
+                assert!(why.contains("is not a test name"), "{name:?}: {why}");
+            }
+            other => panic!("{name:?} answered a survivor: {other:?}"),
+        }
+    }
+    f.coder_answers(&[(
+        "src/new.rs:1",
+        Triage::Killed {
+            test: "two_is".into(),
+        },
+    )]);
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => assert!(why.contains("names the test \"two_is\""), "{why}"),
+        other => panic!("a part of a name was taken for it: {other:?}"),
+    }
+    f.coder_answers(&[(
+        "src/new.rs:1",
+        Triage::Killed {
+            test: "two_is_two".into(),
+        },
+    )]);
+    assert_eq!(f.gate_seven(Role::Coder).decision, Decision::Passed);
+}
+
+// ---------------------------------------------------------------------------
+// Gate 7 on a chain of campaigns: at `standard`, each judged on its own
+// mutants (SPEC 4.4).
+// ---------------------------------------------------------------------------
+
+impl Fixture {
+    /// A partial campaign on the current content, continuing a full one at
+    /// an earlier commit, as recorded: `src/kept.rs` unchanged since, its
+    /// count `kept_tried` and `kept_open` survivors as the earlier campaign
+    /// measured them; `src/new.rs` measured again, `tried` and `open`; the
+    /// campaign's `tried` their sum — or, `trusted` false, no count at all.
+    fn chained(&self, kept_tried: u32, kept_open: u32, tried: u32, open: u32, trusted: bool) {
+        use nunki::mutants::{Chain, Link, Measured, Scope};
+        let touched = nunki::gate::touched_since_base(&self.tree, "dev").unwrap();
+        let fingerprint = nunki::mutants::fingerprint(&self.tree, &touched).unwrap();
+        let earlier = "e".repeat(40);
+        let head = git(&self.tree, &["rev-parse", "HEAD"]);
+        let mut survivors: Vec<Survivor> = (1..=kept_open)
+            .map(|line| Survivor {
+                found_on: Some(earlier.clone()),
+                id: format!("src/kept.rs:{line}"),
+                file: "src/kept.rs".into(),
+                ..survivor(line, None)
+            })
+            .collect();
+        survivors.extend((1..=open).map(|line| survivor(line + 100, None)));
+        let measured = |tried: u32, on: &str| Measured {
+            tried,
+            found: None,
+            on: on.to_string(),
+        };
+        let files: std::collections::BTreeMap<String, Measured> = [
+            ("src/kept.rs".to_string(), measured(kept_tried, &earlier)),
+            ("src/new.rs".to_string(), measured(tried, &head)),
+            ("src/also.rs".to_string(), measured(0, &head)),
+        ]
+        .into_iter()
+        .collect();
+        nunki::mutants::write(
+            self._dir.path(),
+            &Campaign {
+                stopped: None,
+                tried: trusted.then(|| nunki::mutants::tried_in(&files)).flatten(),
+                files: trusted.then_some(files),
+                fingerprint,
+                head,
+                date: "2026-10-01T12:00:00Z".into(),
+                survivors,
+                chain: Chain {
+                    sample: None,
+                    fork: None,
+                    handed: None,
+                    ran: Some(tried),
+                    scope: Scope::Partial {
+                        since: earlier.clone(),
+                    },
+                    tooling: Some("tools".into()),
+                    earlier: vec![Link {
+                        head: earlier,
+                        date: "2026-10-01T10:00:00Z".into(),
+                        scope: Scope::Full {
+                            why: "the first campaign of this mission".into(),
+                        },
+                        tried: Some(kept_tried + 40),
+                    }],
+                },
+            },
+        )
+        .unwrap();
+    }
+}
+
+/// A chain is judged **once**, on its reconstruction (HQ review of
+/// c4f2533): the file kept from before counts as it was measured, the file
+/// measured again counts as now, and the share is over their sum. Here the
+/// kept file tried 50 and left 20 open, the measured one 60 and 10 open:
+/// each passes 80% on its own — what c4f2533 judged — and one full campaign
+/// would try 110 and leave 30 open, 72%: red.
+#[test]
+fn at_standard_a_chain_is_judged_once_on_its_reconstruction() {
+    let f = standard();
+    f.chained(50, 20, 60, 10, true);
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => {
+            assert!(why.contains("80 of 110 tried mutant(s) killed"), "{why}");
+        }
+        other => panic!("80 of 110 is below 80%: {other:?}"),
+    }
+}
+
+/// At the threshold, green — and the note says how the campaign judged was
+/// rebuilt: which files this campaign measured, which were kept.
+#[test]
+fn at_standard_a_chain_at_the_threshold_is_green_and_says_how_it_was_rebuilt() {
+    let f = standard();
+    f.chained(10, 2, 10, 2, true);
+    let outcome = f.gate_seven(Role::Coder);
+    assert_eq!(outcome.decision, Decision::Passed);
+    let note = outcome.note.expect("a chain is said");
+    assert!(
+        note.contains(
+            "judged once, as one campaign at this commit: 3 file(s), 2 measured by this \
+             campaign and 1 kept from the 1 before it"
+        ),
+        "{note}"
+    );
+    assert!(note.contains("16 of 20 tried mutant(s) killed"), "{note}");
+}
+
+/// At critical, a chain is judged as `critical` judges any campaign: no
+/// threshold, and every survivor listed needs an outcome — one kept from a
+/// file unchanged since an earlier campaign as much as one the latest found.
+/// Here 109 of 110 tried are killed, a share that passes any threshold, and
+/// the gate is red on the one kept survivor until it is answered.
+#[test]
+fn at_critical_a_survivor_kept_from_an_unchanged_file_still_needs_an_outcome() {
+    let mut f = standard();
+    f.header.rigor = Rigor::Critical;
+    f.chained(50, 1, 60, 0, true);
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => {
+            assert!(why.contains("1 survivor(s) have no outcome"), "{why}");
+            assert!(why.contains("src/kept.rs:1"), "{why}");
+            assert!(!why.contains("threshold of"), "no threshold: {why}");
+        }
+        other => panic!("a kept survivor without an outcome is red: {other:?}"),
+    }
+    f.coder_answers(&[(
+        "src/kept.rs:1",
+        Triage::Killed {
+            test: "the_thing_holds".into(),
+        },
+    )]);
+    let outcome = f.gate_seven(Role::Coder);
+    assert_eq!(outcome.decision, Decision::Passed);
+    let note = outcome.note.expect("a chain is said");
+    assert!(note.contains("judged once, as one campaign"), "{note}");
+}
+
+/// A chain whose counts could not be trusted carries no count, and is
+/// judged as `critical` judges: every survivor needs an outcome.
+#[test]
+fn at_standard_a_chain_without_a_trusted_count_is_judged_as_critical() {
+    let f = standard();
+    f.chained(10, 0, 10, 1, false);
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => assert!(why.contains("1 survivor(s) have no outcome"), "{why}"),
+        other => panic!("an open survivor without a count is red: {other:?}"),
+    }
+}
+
+/// Gate 2 judges a slot on the mission's branch only: a `HEAD` detached
+/// from it, or on another branch, is refused, naming what it found — what
+/// nunki publishes is that branch (security round 3).
+#[test]
+fn gate_two_refuses_a_head_that_is_not_on_the_missions_branch() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.journal_names_head();
+    assert_eq!(f.decision(Role::Coder, Gate::BranchAhead), Decision::Passed);
+
+    let head = git(&f.tree, &["rev-parse", "HEAD"]);
+    git(&f.tree, &["checkout", "-q", "--detach"]);
+    match f.decision(Role::Coder, Gate::BranchAhead) {
+        Decision::Failed(said) => {
+            assert!(said.contains(&format!("detached at {head}")), "{said}");
+            assert!(said.contains("\"mission/x\""), "{said}");
+        }
+        other => panic!("{other:?}"),
+    }
+
+    git(&f.tree, &["checkout", "-q", "-b", "elsewhere"]);
+    match f.decision(Role::Coder, Gate::BranchAhead) {
+        Decision::Failed(said) => assert!(said.contains("on \"elsewhere\""), "{said}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The final campaign of a `critical` mission (SPEC 4.4, 4.5).
+// ---------------------------------------------------------------------------
+
+impl Fixture {
+    /// Gate 7 as the final stage of a `critical` mission plays it.
+    fn final_campaign(&self) -> gate::Report {
+        let (project, slot) = self.context();
+        gate::final_campaign(
+            &Subject {
+                role: Role::Coder,
+                tree: &self.tree,
+                journal: &self.journal,
+                pr: &self.pr,
+                verdict: &self.verdict,
+                mission_dir: self._dir.path(),
+                header: &self.header,
+                protected_branches: &self.branches,
+                protected_paths: &self.protected,
+                services_file: self.services_file.as_deref(),
+                coder_head: self.coder_head.as_deref(),
+            },
+            &gate::Verification {
+                project: &project,
+                slot: &slot,
+                engine: std::sync::Arc::new(nunki::engine::fake::FakeEngine::default()),
+                stack: "rust",
+            },
+        )
+        .unwrap()
+    }
+}
+
+/// A `critical` fixture with the lot and its tests committed.
+fn critical() -> Fixture {
+    let mut f = standard();
+    f.header.rigor = Rigor::Critical;
+    f
+}
+
+/// The chain holds to the end: a partial campaign at `HEAD` that passes is
+/// what a `critical` mission is verified on, and no full one is owed.
+#[test]
+fn a_partial_campaign_that_passes_at_head_verifies_a_critical_mission() {
+    let f = critical();
+    f.chained(10, 0, 10, 0, true);
+    let report = f.final_campaign();
+    assert_eq!(report.outcomes.len(), 1, "gate 7 alone: {report:?}");
+    assert_eq!(
+        report.verdict(),
+        nunki::gate::Verdict::Green,
+        "a partial campaign that passes owed a full one: {report:?}"
+    );
+}
+
+/// A full campaign at `HEAD` that passes is the final one, whatever made it
+/// full: no second full campaign on the same content.
+#[test]
+fn a_full_campaign_that_passes_at_head_is_the_final_one() {
+    let f = critical();
+    f.campaign(vec![]);
+    assert_eq!(f.final_campaign().verdict(), nunki::gate::Verdict::Green);
+}
+
+/// The final campaign's survivors are red: they go back to the coder, as any
+/// campaign's survivors do.
+#[test]
+fn the_final_campaigns_survivors_are_red() {
+    let f = critical();
+    f.campaign(vec![survivor(1, None)]);
+    match f.final_campaign().verdict() {
+        nunki::gate::Verdict::Red(why) => {
+            assert!(why.contains("1 survivor(s) have no outcome"), "{why}")
+        }
+        other => panic!("an open survivor verified a critical mission: {other:?}"),
+    }
+}
+
+/// A partial campaign with a survivor left open is red too: the survivor is
+/// the coder's to answer.
+#[test]
+fn a_partial_campaign_with_an_open_survivor_is_red_rather_than_owed() {
+    let f = critical();
+    f.chained(10, 1, 10, 0, true);
+    assert!(
+        matches!(f.final_campaign().verdict(), nunki::gate::Verdict::Red(_)),
+        "{:?}",
+        f.final_campaign()
+    );
+}
+
+/// No campaign on file, or one on other content: the final stage owes one.
+#[test]
+fn the_final_stage_with_no_campaign_at_head_owes_one() {
+    let f = critical();
+    assert!(matches!(
+        f.final_campaign().verdict(),
+        nunki::gate::Verdict::CampaignOwed(_)
+    ));
+    f.campaign(vec![]);
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 3 }\n", "volet");
+    f.journal_names_head();
+    match f.final_campaign().verdict() {
+        nunki::gate::Verdict::CampaignOwed(why) => assert!(why.contains("other content"), "{why}"),
+        other => panic!("a campaign on other content verified the mission: {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Gate 7 over a campaign that stopped short (SPEC 4.4, "un délai paramétré").
+// ---------------------------------------------------------------------------
+
+impl Fixture {
+    /// A campaign on the current content that tried a thousand mutants and
+    /// left no survivor — green, finished — then marked as stopped short.
+    fn campaign_stopped(&self, stopped: Option<nunki::mutants::Stopped>) {
+        self.campaign_tried(vec![], Some(1000));
+        let mut campaign = nunki::mutants::read(self._dir.path()).unwrap().unwrap();
+        campaign.stopped = stopped;
+        nunki::mutants::write(self._dir.path(), &campaign).unwrap();
+    }
+
+    /// What the flow reads of gate 7 alone: the other gates of this fixture
+    /// are unplayable without an engine, and would make any report a wall.
+    fn gate_seven_alone(&self) -> nunki::gate::Verdict {
+        gate::Report {
+            role: Role::Coder,
+            head: "0123456789ab".into(),
+            outcomes: vec![self.gate_seven(Role::Coder)],
+        }
+        .verdict()
+    }
+}
+
+/// A campaign stopped at its deadline is not green whatever it found — it
+/// did not reach the rest — and it is not a campaign that measured nothing
+/// either: gate 7 says so in its own words and leaves the choice to the HQ,
+/// as a wall, rather than opening a volet or starting the same campaign
+/// against the same deadline.
+#[test]
+fn a_campaign_stopped_at_its_deadline_is_the_hqs_to_choose_and_never_green() {
+    let f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.journal_names_head();
+
+    // The control: the same campaign, finished, is green.
+    f.campaign_stopped(None);
+    assert_eq!(f.gate_seven(Role::Coder).decision, Decision::Passed);
+
+    // Stopped at the deadline the fixture's 45-minute budget gives: 68.
+    f.campaign_stopped(Some(nunki::mutants::Stopped::Deadline {
+        minutes: nunki::mutants::deadline_minutes(45),
+    }));
+    let outcome = f.gate_seven(Role::Coder);
+    let Decision::Unplayed(why) = &outcome.decision else {
+        panic!("an incomplete campaign was judged: {outcome:?}");
+    };
+    assert!(outcome.awaits_hq, "{outcome:?}");
+    assert!(why.contains("68-minute deadline"), "{why}");
+    assert!(why.contains("incomplete"), "{why}");
+    assert!(!why.contains("measured nothing"), "{why}");
+    assert!(why.contains("nunki mission reframe"), "{why}");
+    assert!(why.contains("nunki mission iterate --because"), "{why}");
+    match f.gate_seven_alone() {
+        nunki::gate::Verdict::Wall(said) => assert!(said.contains("deadline"), "{said}"),
+        other => panic!("the HQ's choice became {other:?}"),
+    }
+}
+
+/// Raising the bound with `reframe` is one of the HQ's two ways on, and it
+/// is enough: past the deadline the campaign was stopped at, a campaign is
+/// owed again and the monitor starts it. Not at the same bound — that is
+/// the same wall — and never for one the HQ called off.
+#[test]
+fn a_raised_deadline_owes_a_new_campaign_and_the_same_one_does_not() {
+    let mut f = Fixture::new();
+    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    f.journal_names_head();
+    f.campaign_stopped(Some(nunki::mutants::Stopped::Deadline {
+        minutes: nunki::mutants::deadline_minutes(45),
+    }));
+
+    f.header.bounds.mutation_minutes = 45;
+    assert!(
+        matches!(f.gate_seven_alone(), nunki::gate::Verdict::Wall(_)),
+        "the same deadline owes the same campaign"
+    );
+
+    // The deadline is the budget's (SPEC 4.4, gate 7: the budget): a budget
+    // of 90 minutes gives 135.
+    f.header.bounds.mutation_minutes = 90;
+    let outcome = f.gate_seven(Role::Coder);
+    assert!(!outcome.awaits_hq, "{outcome:?}");
+    match f.gate_seven_alone() {
+        nunki::gate::Verdict::CampaignOwed(why) => {
+            assert!(why.contains("raised to 135 minutes"), "{why}")
+        }
+        other => panic!("a raised deadline owes a campaign: {other:?}"),
+    }
+
+    f.campaign_stopped(Some(nunki::mutants::Stopped::Cancelled {
+        because: "the coder is rewriting this file".into(),
+    }));
+    let outcome = f.gate_seven(Role::Coder);
+    assert!(outcome.awaits_hq, "{outcome:?}");
+    let Decision::Unplayed(why) = &outcome.decision else {
+        panic!("{outcome:?}");
+    };
+    assert!(why.contains("the coder is rewriting this file"), "{why}");
+    assert!(why.contains("--again"), "{why}");
+}
+
+/// The names a branch may give its files that git does not print as they
+/// are, or reads as something else: a space, a colon, a quote, a character
+/// outside ASCII, and a name that reads as an excluding pathspec.
+const AWKWARD: [&str; 5] = [
+    ":!*.rs",
+    "src/with space.rs",
+    "src/with:colon.rs",
+    "src/with\"quote.rs",
+    "src/é.rs",
+];
+
+/// Gate 7's touched list holds each name as the tree holds it — the list
+/// the campaign is handed and the fingerprint is read from. Read line by
+/// line, git quoted two of them (`"src/with\"quote.rs"`, `"src/\303\251.rs"`)
+/// and those quoted strings named files that do not exist.
+#[test]
+fn every_awkward_name_a_branch_touches_is_in_the_touched_list_as_it_is() {
+    let f = Fixture::new();
+    for (n, path) in AWKWARD.iter().enumerate() {
+        commit(&f.tree, path, &format!("pub fn f{n}() {{}}\n"), "L1");
+    }
+    let touched = nunki::gate::touched_since_base(&f.tree, "dev").unwrap();
+    let mut expected: Vec<String> = AWKWARD.iter().map(|p| p.to_string()).collect();
+    expected.sort();
+    assert_eq!(touched, expected);
+
+    // And the fingerprint reads each one's content: changing any of them
+    // changes it, which a path git could not find ("absent") would not.
+    let before = nunki::mutants::fingerprint(&f.tree, &touched).unwrap();
+    for (n, path) in AWKWARD.iter().enumerate() {
+        commit(&f.tree, path, &format!("pub fn g{n}() {{}}\n"), "volet");
+        let after = nunki::mutants::fingerprint(&f.tree, &touched).unwrap();
+        assert_ne!(before, after, "{path} is not read by the fingerprint");
+    }
+}
+
+/// A file named like an excluding pathspec (`:!*.rs`) is read as the file
+/// it is when `nunki` hands its path to git: here, the blob a slot's file is
+/// read from, which a pathspec excluding every Rust file would have missed.
+#[test]
+fn a_file_named_like_a_pathspec_is_read_as_the_file_it_is() {
+    let f = Fixture::new();
+    commit(&f.tree, ":!*.rs", "pub fn magic() {}\n", "L1");
+    commit(&f.tree, "src/other.rs", "pub fn other() {}\n", "L1");
+    let repo = nunki::git::SlotGit::open(&f.tree).unwrap();
+    let blob = repo
+        .blob_at_head(":!*.rs")
+        .unwrap()
+        .expect("the file is there");
+    assert_eq!(blob.bytes, b"pub fn magic() {}\n");
+    let other = repo.blob_at_head("src/other.rs").unwrap().unwrap();
+    assert_eq!(other.bytes, b"pub fn other() {}\n");
+}
+
+// ---------------------------------------------------------------------------
+// Gate 7 of a hardening mission (SPEC 4.4, the debt).
+// ---------------------------------------------------------------------------
+
+/// A hardening mission's gate 7 judges the campaign that ran on its
+/// survivors by name — the fingerprint `campaign_on` gives, which holds the
+/// names and their files — and judges it as any `standard` campaign: a
+/// campaign on what the branch changed alone is other content, never a
+/// measurement of the survivors the mission was framed to kill.
+#[test]
+fn a_hardening_missions_gate_judges_the_campaign_on_its_survivors_by_name() {
+    let mut f = standard();
+    // A survivor of the debt in a file the branch did not touch.
+    commit(
+        &f.tree,
+        "src/old.rs",
+        "pub fn old() -> u8 { 1 }\n",
+        "the debt's",
+    );
+    f.journal_names_head();
+    f.header.hardening = vec![nunki::mission::Hardened {
+        id: "src/old.rs:1:20: replace old -> u8 with 0".into(),
+        file: "src/old.rs".into(),
+        line: 1,
+        end_line: Some(1),
+        description: "replace old -> u8 with 0".into(),
+        found_at: "f".repeat(40),
+    }];
+
+    // On file under what the branch touched alone: not this mission's
+    // campaign.
+    f.campaign_tried(untriaged(1), Some(10));
+    let outcome = f.gate_seven(Role::Coder);
+    match &outcome.decision {
+        Decision::Unplayed(why) => assert!(why.contains("ran on other content"), "{why}"),
+        other => panic!("a campaign without the names is not this one: {other:?}"),
+    }
+
+    let on = nunki::gate::campaign_on(&f.tree, "dev", &f.header.hardening).unwrap();
+    assert!(
+        on.paths.contains(&"src/old.rs".to_string()),
+        "{:?}",
+        on.paths
+    );
+    nunki::mutants::write(
+        f._dir.path(),
+        &Campaign {
+            stopped: None,
+            files: None,
+            chain: Default::default(),
+            fingerprint: on.fingerprint,
+            head: git(&f.tree, &["rev-parse", "HEAD"]),
+            date: "2026-10-16T12:00:00Z".into(),
+            survivors: untriaged(1),
+            tried: Some(10),
+        },
+    )
+    .unwrap();
+    let outcome = f.gate_seven(Role::Coder);
+    assert_eq!(outcome.decision, Decision::Passed, "{outcome:?}");
+    assert!(
+        outcome
+            .note
+            .is_some_and(|n| n.contains("9 of 10 tried mutant(s) killed (90%)")),
+    );
+}

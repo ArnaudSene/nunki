@@ -1,0 +1,285 @@
+//! The mission folder, at the HQ (SPEC 4.1).
+//!
+//! It lives under `~/.nunki/<project>/hq/missions/<id>/`, outside the git tree,
+//! and is mounted into the container. That is what lets the HQ and the agent
+//! talk through files without a channel, while the tree stays clean and the
+//! folder survives `nunki slot rm`.
+//!
+//! Five files, and the split between them is a restriction, not a
+//! convention. `MISSION.md` and `FOLLOWUP_HQ.md` belong to the human and the
+//! HQ, and are mounted read-only: an agent that could rewrite its own header
+//! could grant itself a domain and a credentials file for the next run.
+//! `JOURNAL.md`, `PR.md` and `VERDICT.json` are the agent's three.
+
+use std::path::{Path, PathBuf};
+
+use crate::mission::Header;
+
+/// What the run in progress may reach, written by `nunki` at every launch and
+/// read-only for the agent.
+pub const ALLOWLIST_FILE: &str = "ALLOWLIST.txt";
+
+/// The HQ's follow-up, which every role reads first and `nunki` appends to.
+pub const FOLLOWUP_FILE: &str = "FOLLOWUP_HQ.md";
+
+/// The files of one mission. `MUTANTS.json` is `nunki`'s and is written only
+/// when a campaign ends, so it is not created here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Paths {
+    pub dir: PathBuf,
+    pub mission: PathBuf,
+    pub followup: PathBuf,
+    pub journal: PathBuf,
+    pub pr: PathBuf,
+    pub verdict: PathBuf,
+    /// The coder's answers to a mutation campaign's survivors (SPEC 4.4,
+    /// gate 7). Separate from `MUTANTS.json`, which is the HQ's.
+    pub triage: PathBuf,
+    /// The campaign itself, written by `nunki` and read-only for the agent.
+    pub mutants: PathBuf,
+    /// The effective allowlist of the run in progress: what the firewall
+    /// enforces for its role, so that a refused name reads as the list and
+    /// not as a flaky network. Rewritten at every launch.
+    pub allowlist: PathBuf,
+}
+
+impl Paths {
+    pub fn of(hq_root: &Path, id: &str) -> Self {
+        let dir = hq_root.join("missions").join(id);
+        Self {
+            mission: dir.join("MISSION.md"),
+            followup: dir.join(FOLLOWUP_FILE),
+            journal: dir.join("JOURNAL.md"),
+            pr: dir.join("PR.md"),
+            verdict: dir.join("VERDICT.json"),
+            triage: dir.join(crate::mutants::TRIAGE_FILE),
+            mutants: dir.join(crate::mutants::FILE),
+            allowlist: dir.join(ALLOWLIST_FILE),
+            dir,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum MissionDirError {
+    #[error("mission {0:?} already exists at {1}")]
+    Exists(String, PathBuf),
+    #[error("no mission {0:?} at {1}")]
+    Unknown(String, PathBuf),
+    #[error("a mission id may hold letters, digits, - and _ only, and {0:?} does not")]
+    BadId(String),
+    #[error("{0} has no header: a mission starts with a `---` block")]
+    NoHeader(PathBuf),
+    #[error("the header of {path} is not valid: {source}")]
+    BadHeader {
+        path: PathBuf,
+        source: crate::yaml::Error,
+    },
+    #[error("{0}: {1}")]
+    Io(PathBuf, std::io::Error),
+    #[error(
+        "{path} is a directory, and the agent writes a file there. An engine \
+         makes one when it bind-mounts a source that is missing, and nunki \
+         removes that empty placeholder — this one is not empty, so nothing \
+         was touched: look at what is in it, then remove it ({source})"
+    )]
+    EngineLeftADirectory {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+}
+
+/// Write a new mission folder. Refuses to touch one that exists: a mission is
+/// reframed by a verb, never by writing over it (SPEC 4.1).
+pub fn create(
+    hq_root: &Path,
+    id: &str,
+    header: &Header,
+    prose: &str,
+) -> Result<Paths, MissionDirError> {
+    check_id(id)?;
+    let paths = Paths::of(hq_root, id);
+    if paths.dir.exists() {
+        return Err(MissionDirError::Exists(id.to_string(), paths.dir));
+    }
+    std::fs::create_dir_all(&paths.dir).map_err(|e| MissionDirError::Io(paths.dir.clone(), e))?;
+
+    write(&paths.mission, &render(header, prose))?;
+    write(&paths.followup, &followup(header))?;
+    write(&paths.journal, &journal(id))?;
+    write(&paths.pr, "")?;
+    // Not `{}`: an empty verdict is the absence of one, and `nunki` refuses a
+    // verdict whose `head` is not the branch's (SPEC 4.1).
+    write(&paths.verdict, "")?;
+    // Created empty, and that is not cosmetic: a bind mount whose source
+    // does not exist makes the engine create a **directory** there, and the
+    // agent would find a directory where its file should be.
+    write(&paths.triage, "")?;
+    Ok(paths)
+}
+
+/// Make sure every file the agent writes exists, empty when it does not.
+///
+/// [`create`] writes them once, but that alone is no guard: a
+/// `MUTANTS.triage.json` removed by hand comes back as a **directory** on the
+/// next launch (`verify: the mutation campaign could not be read:
+/// …/MUTANTS.triage.json: Is a directory (os error 21)`). These files,
+/// every one some role writes, whichever role is about to be lifted,
+/// are bind-mounted one file at a time, so that the rest of the folder stays
+/// read-only, and a bind mount whose source is missing makes the engine
+/// create a directory in its place — after which the file is unreadable and
+/// the message names the symptom rather than the cause.
+///
+/// The mission folder belongs to the human, who may reasonably remove a file
+/// from it: clearing a `VERDICT.json` that froze wrong is a repair, not a
+/// mistake. So the guard belongs at every lift and not only at creation —
+/// which is what [`crate::probe`] already did for a check's scratch folder,
+/// and this is the same restriction, in one place.
+///
+/// A directory found where a file belongs is the engine's, and it is removed
+/// with `remove_dir` and never `remove_dir_all`: that call succeeds on an
+/// empty directory and on nothing else, so this can undo the engine's
+/// placeholder and can never destroy what someone put there. A directory
+/// with anything in it is not the engine's, and it is said rather than
+/// touched.
+///
+/// Idempotent: a file that is there is left exactly as it is, content and
+/// modification time included.
+pub fn ensure_writable(dir: &Path) -> Result<(), MissionDirError> {
+    for file in crate::compose::any_agent_writable() {
+        let path = dir.join(file);
+        if path.is_file() {
+            continue;
+        }
+        if path.is_dir() {
+            std::fs::remove_dir(&path).map_err(|source| MissionDirError::EngineLeftADirectory {
+                path: path.clone(),
+                source,
+            })?;
+        }
+        write(&path, "")?;
+    }
+    Ok(())
+}
+
+/// The header of a mission, read back from its folder. `nunki` reads this once,
+/// when the human validates the framing, and freezes it in its state; during
+/// the mission it never reads it again.
+pub fn read_header(hq_root: &Path, id: &str) -> Result<Header, MissionDirError> {
+    let paths = Paths::of(hq_root, id);
+    if !paths.mission.is_file() {
+        return Err(MissionDirError::Unknown(id.to_string(), paths.dir));
+    }
+    let text = std::fs::read_to_string(&paths.mission)
+        .map_err(|e| MissionDirError::Io(paths.mission.clone(), e))?;
+    let yaml =
+        front_matter(&text).ok_or_else(|| MissionDirError::NoHeader(paths.mission.clone()))?;
+    crate::yaml::from_str(yaml).map_err(|source| MissionDirError::BadHeader {
+        path: paths.mission.clone(),
+        // The header starts below the `---` that opens the file.
+        source: source.below(1),
+    })
+}
+
+/// The missions a project's HQ holds, in name order.
+pub fn list(hq_root: &Path) -> Vec<String> {
+    let mut ids: Vec<String> = std::fs::read_dir(hq_root.join("missions"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().join("MISSION.md").is_file())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    ids.sort();
+    ids
+}
+
+/// Every name under `missions/`, for a caller to which a list that cannot be
+/// read is not an empty one: `missions/` unreadable, or an entry of it, is an
+/// error naming the directory. A `missions/` that does not exist holds no
+/// mission. In no particular order.
+///
+/// Unlike [`list`], a folder is named whether or not it holds a
+/// `MISSION.md`: a folder whose `MISSION.md` is gone may still be a mission
+/// in flight, and the caller asks the state store about each name.
+pub fn list_checked(hq_root: &Path) -> Result<Vec<String>, MissionDirError> {
+    let dir = hq_root.join("missions");
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(MissionDirError::Io(dir, e)),
+    };
+    let mut ids = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| MissionDirError::Io(dir.clone(), e))?;
+        ids.push(entry.file_name().to_string_lossy().into_owned());
+    }
+    Ok(ids)
+}
+
+/// The YAML between the first two `---` lines.
+fn front_matter(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix("---\n")?;
+    let end = rest.find("\n---")?;
+    Some(&rest[..end])
+}
+
+fn render(header: &Header, prose: &str) -> String {
+    let yaml = crate::yaml::to_string(header).expect("a header serialises");
+    format!("---\n{yaml}---\n\n# Mission\n\n{}\n", prose.trim_end())
+}
+
+fn write(path: &Path, body: &str) -> Result<(), MissionDirError> {
+    std::fs::write(path, body).map_err(|e| MissionDirError::Io(path.to_path_buf(), e))
+}
+
+fn journal(id: &str) -> String {
+    format!(
+        "# Journal — {id}\n\n\
+         ## ÉTAT DE REPRISE\n\n\
+         Nothing has run yet.\n\n\
+         > Rewrite the block above at every checkpoint and before stopping. A\n\
+         > run that ends without it has not honoured the run contract. The\n\
+         > coder ends it with `Lot: <lot> — done`, or `Lot: <lot> — failed: <why>`;\n\
+         > or, only when the lot is done but for survivors whose equivalence is\n\
+         > the HQ's to rule, `Lot: <lot> — awaits ruling: <what>`, each survivor\n\
+         > id between backquotes: every backquoted span in <what>\n\
+         > is read as a survivor id, so nothing else is quoted.\n"
+    )
+}
+
+/// Addressed to somebody by name when the mission says who: an arbitration
+/// is for a person, and "waiting on the human" stops being enough as soon as
+/// there are two.
+fn followup(header: &Header) -> String {
+    let who = header
+        .arbiter
+        .clone()
+        .unwrap_or_else(|| "the human".to_string());
+    // A raw string, and not a `\`-continued one: `cargo fmt` joins a
+    // continued literal onto one line and keeps its indentation as real
+    // spaces, which would write this file with nine-space indents —
+    // Markdown renders those as a code block.
+    const TEMPLATE: &str = r#"# Follow-up — for {who}
+
+For {who} and the HQ. The agent reads this file and never writes it.
+
+Anything this mission cannot decide on its own is written here, dated and
+addressed to {who}. `nunki` appends to it too: a verdict another role concluded
+on, and a finding {who} has lifted (SPEC 4.5).
+"#;
+    TEMPLATE.replace("{who}", &who)
+}
+
+fn check_id(id: &str) -> Result<(), MissionDirError> {
+    let ok = !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        && id.chars().next().is_some_and(|c| c.is_ascii_alphanumeric());
+    if ok {
+        Ok(())
+    } else {
+        Err(MissionDirError::BadId(id.to_string()))
+    }
+}

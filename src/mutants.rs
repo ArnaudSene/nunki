@@ -1,0 +1,4204 @@
+//! The mutation campaign and its file (SPEC 4.4, gate 7).
+//!
+//! Gate 7 is deterministic and reads a file — SPEC says so in as many words:
+//! *"Son résultat est un fichier du dossier de mission que le HQ lit."* The
+//! campaign that produces that file is a separate, long thing: it runs in the
+//! slot's container, on the clean copy of `HEAD`, launched detached and
+//! watched like a run. This module owns both halves; the gate itself lives in
+//! [`crate::gate`].
+//!
+//! **No threshold at `critical`**, the default rigor. The gate is green when
+//! every survivor has received one of three outcomes, not when a score clears
+//! a bar. A threshold and a triage pull in opposite directions, and Google,
+//! whose practice this borrows, keeps neither score nor bar. A `standard`
+//! mission trades the triage for the project's `mutation_threshold`, and that
+//! is why a campaign also records how many mutants it [`Campaign::tried`].
+//!
+//! **A campaign replays only when the touched files have changed**, and
+//! "changed" means their content: the fingerprint is over git blob ids, not
+//! over `HEAD`. A rebase moves `HEAD` while every touched file is byte for
+//! byte the same, and re-running the campaign then spends an hour SPEC § 7 is
+//! counting.
+//!
+//! **And at `standard` and `critical`, a replay covers what changed since
+//! the last one.**
+//! A mission's campaigns form a [`Chain`]: the first is full, and a later one
+//! is partial — the touched files whose content changed since the previous
+//! campaign's `HEAD` — whenever [`scope`] finds every condition for it met.
+//! The chain keeps each file's latest counts, and gate 7 judges it once, as
+//! one campaign at `HEAD` ([`owed`]).
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+use crate::engine::spawn::Halt;
+use crate::git;
+
+/// The campaign's result, in the mission folder. **The HQ's file**, mounted
+/// read-only in the container: it carries the survivors, and the one outcome
+/// no machine can check — `equivalent`.
+pub const FILE: &str = "MUTANTS.json";
+
+/// The coder's answers, beside it. **The coder's file**, and the only one of
+/// the two it can write; no other role can write it at all — it is mounted
+/// read-write in the coder's profile alone, since survivors only ever go
+/// back to the coder (SPEC 4.4).
+///
+/// Two files rather than one field, because what decides who wrote a line is
+/// the **mount**, not the content: `nunki` cannot read a file and tell whose
+/// hand a line came from (SPEC 4.1). The agent may write
+/// the two outcomes that rest on a committed test, and physically cannot
+/// write the third: it may only **propose** it
+/// ([`Triage::EquivalentProposed`]), and the HQ rules.
+pub const TRIAGE_FILE: &str = "MUTANTS.triage.json";
+
+/// Where the campaigns in flight are filed, under the HQ.
+///
+/// Its own record on purpose: the mission state holds one run handle and that
+/// one belongs to the agent — a campaign filed there would show up in `nunki
+/// mission status` as an agent's run.
+///
+/// And **keyed by slot, not by mission**, because the thing it speaks for is
+/// the slot's: `cargo mutants` rewrites the clean copy of `HEAD` in place, and
+/// everything that reaches that copy — `exec::run(On::Proof)`, `nunki exec`,
+/// `nunki mission gates`, the battery — knows which slot it is working in and
+/// not which mission asked. Filed per mission, the record could not be found
+/// by the code that has to respect it, and four callers walked over a running
+/// campaign because of it (SPEC 4.4).
+pub const CAMPAIGNS_DIR: &str = "campaigns";
+
+/// What the stack fragment declares. It prints the survivors on stdout, one
+/// JSON object per line, and `nunki` never parses a mutation tool itself: which
+/// tool, and how it is invoked in place on the copy, is the stack's business
+/// (SPEC 4.4: "une commande déterministe déclarée par le fragment de stack").
+pub const SCRIPT: &str = "mutation.sh";
+
+/// The variable that hands a campaign the commit its branch forked from.
+///
+/// Gate 7 answers for what the branch **changed**, not for every line of the
+/// files it touched (SPEC 4.4): a script that can restrict itself to the
+/// changed lines diffs against this commit. An environment variable rather
+/// than an argument, so a project's own `mutation.sh`, which reads
+/// `<campaign-id> <path>...`, keeps working unchanged.
+pub const BASE_ENV: &str = "NUNKI_BASE";
+
+/// The variable that hands a campaign how many mutants it may run at once:
+/// the project's `mutation_jobs` (`nunki.yaml`). An environment variable for
+/// the reason [`BASE_ENV`] is one: a project's own `mutation.sh` keeps
+/// working unchanged, and one that ignores it runs as it always has.
+pub const JOBS_ENV: &str = "NUNKI_MUTATION_JOBS";
+
+/// The variable that hands a campaign its budget, in seconds: the mission's
+/// `mutation_minutes` (SPEC 4.4, gate 7: the budget). A stack whose script
+/// can measure a sample sizes it to fit; one that cannot ignores it, and
+/// runs whole as it always has.
+pub const BUDGET_ENV: &str = "NUNKI_MUTATION_BUDGET";
+
+/// The variable that hands a campaign the seconds a mutant took on the
+/// project's last campaign that measured enough of them ([`PACE_FILE`]).
+/// Absent without one, and the script then assumes its own default.
+pub const PACE_ENV: &str = "NUNKI_MUTATION_PACE";
+
+/// The variable that hands a partial campaign the fraction its chain runs
+/// at, so that the reconstruction stays one sample ([`Sample`]).
+pub const SAMPLE_ENV: &str = "NUNKI_MUTATION_SAMPLE";
+
+/// The variable that hands a campaign mutants **by name**, as a JSON list
+/// of the names its tool gives them (SPEC 4.4, the debt): a hardening
+/// mission's survivors, or the debt's under `nunki mutants run --owed`. The
+/// script runs them besides what its scope reaches, in the files it is
+/// handed, and measures nothing when one is not there. Handed only to a
+/// stack whose script says it reads it ([`BY_NAME_MARK`]): one that ignores
+/// it would measure other mutants than the ones named, and say nothing.
+pub const NAMES_ENV: &str = "NUNKI_MUTATION_NAMES";
+
+/// Every variable `nunki` hands a campaign. A campaign's environment reaches
+/// everything it runs, the project's own tests included — measured on
+/// cargo-mutants 27.1.0: a test that fails when a variable is set fails the
+/// unmutated baseline, and the tool exits 4 having tried nothing. So what
+/// stands in for a container in this crate's tests, and the tests that run
+/// a stack's script, start without them: run by a campaign of `nunki` on
+/// itself, they would otherwise read that campaign's.
+pub const CAMPAIGN_ENV: [&str; 6] = [
+    BASE_ENV, JOBS_ENV, BUDGET_ENV, PACE_ENV, SAMPLE_ENV, NAMES_ENV,
+];
+
+/// The line of a stack's `mutation.sh` that says it reads [`NAMES_ENV`].
+/// The stack's to say, as with [`TOOL_VERSION_MARK`]: the Rust stack's
+/// script says it, and the Python and Next.js ones, whose tools `nunki` has
+/// not measured by name, do not.
+pub const BY_NAME_MARK: &str = "# nunki-by-name: NUNKI_MUTATION_NAMES";
+
+/// Whether a `mutation.sh` says it reads [`NAMES_ENV`] ([`BY_NAME_MARK`]).
+pub fn measures_by_name(script: &str) -> bool {
+    script.lines().any(|line| line.trim() == BY_NAME_MARK)
+}
+
+/// Where the project's pace is kept, under its HQ: the seconds a mutant took
+/// on its last campaign that tried at least [`PACE_TRIED`], as the stack's
+/// script measured it. Only the Rust stack's script measures it today.
+pub const PACE_FILE: &str = "campaign-pace.json";
+
+/// How many mutants a campaign must have tried for its pace to replace the
+/// one on file: fewer say more about the baseline than about a mutant.
+pub const PACE_TRIED: u32 = 5;
+
+/// How long a campaign of `budget_minutes` is given before `nunki` stops it
+/// (SPEC 4.4, gate 7: the budget): the budget and half of it again. The
+/// budget is what the campaign sizes its sample to; the deadline is only a
+/// guard against one that hangs, and gate 7 and the launcher read it through
+/// this one function, so they cannot disagree.
+pub fn deadline_minutes(budget_minutes: u32) -> u32 {
+    budget_minutes.saturating_add(budget_minutes.div_ceil(2))
+}
+
+/// The environment that sizes a campaign: its budget in seconds, the
+/// project's pace when there is one, and the chain's fraction for a partial
+/// campaign ([`SAMPLE_ENV`]).
+pub fn sizing(
+    budget_minutes: u32,
+    pace: Option<u32>,
+    sample: Option<u32>,
+) -> Vec<(String, String)> {
+    let mut env = vec![(
+        BUDGET_ENV.to_string(),
+        (u64::from(budget_minutes) * 60).to_string(),
+    )];
+    if let Some(pace) = pace.filter(|p| *p > 0) {
+        env.push((PACE_ENV.to_string(), pace.to_string()));
+    }
+    if let Some(k) = sample.filter(|k| *k > 0) {
+        env.push((SAMPLE_ENV.to_string(), k.to_string()));
+    }
+    env
+}
+
+/// The fraction a campaign of `scope` is handed ([`SAMPLE_ENV`]): for a
+/// partial one, the fraction of the campaign it continues — 1 when that one
+/// ran whole — so that the reconstruction stays one sample; for a full one,
+/// none, and its script sizes its own (SPEC 4.4, gate 7: the budget).
+pub fn fraction(scope: &Scope, previous: Option<&Campaign>) -> Option<u32> {
+    scope
+        .since()
+        .map(|_| previous.and_then(|p| p.chain.sample).map_or(1, |s| s.k))
+}
+
+/// The pace on file ([`PACE_FILE`]), or `None` when there is none or it
+/// cannot be read: the script then assumes its default, and says which pace
+/// it sized the sample with ([`Sample::paced`]).
+pub fn read_pace(hq_root: &Path) -> Option<u32> {
+    let text = std::fs::read_to_string(hq_root.join(PACE_FILE)).ok()?;
+    let pace: Pace = serde_json::from_str(&text).ok()?;
+    (pace.seconds > 0).then_some(pace.seconds)
+}
+
+/// What [`PACE_FILE`] holds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pace {
+    /// Seconds a mutant took, its build and its tests, rounded up.
+    pub seconds: u32,
+    /// How many mutants the campaign it was measured on tried.
+    pub tried: u32,
+    /// When it was measured.
+    pub date: String,
+}
+
+/// Keep the pace a finished campaign measured, when it tried enough mutants
+/// to mean something ([`PACE_TRIED`]); otherwise the one on file stays.
+pub fn keep_pace(hq_root: &Path, text: &str) -> Result<(), MutantsError> {
+    let (Some(Ok(Some(said))), Some(tried)) = (Some(sampled(text)), tried(text)) else {
+        return Ok(());
+    };
+    let Some(seconds) = said.pace.filter(|p| *p > 0) else {
+        return Ok(());
+    };
+    if tried < PACE_TRIED {
+        return Ok(());
+    }
+    let path = hq_root.join(PACE_FILE);
+    let body = serde_json::to_string_pretty(&Pace {
+        seconds,
+        tried,
+        date: crate::state::now_rfc3339(),
+    })
+    .map_err(|e| MutantsError::Io(path.clone(), std::io::Error::other(e)))?;
+    std::fs::write(&path, body + "\n").map_err(|e| MutantsError::Io(path, e))
+}
+
+/// A mutant the campaign could not kill.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Survivor {
+    /// What the tool calls it — enough to find it again.
+    pub id: String,
+    pub file: String,
+    pub line: u32,
+    /// The last line of the code the mutation replaces, from the tool's own
+    /// listing: a function body replaced whole spans every line of it.
+    /// Absent for a tool that gives no span, which is then the single
+    /// [`Self::line`]; a value before `line` — what a stack's script prints
+    /// when the tool's listing did not name the mutant once — is a span
+    /// nobody knows ([`Survivor::span`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_line: Option<u32>,
+    /// What the mutation did, in the tool's words.
+    #[serde(default)]
+    pub description: String,
+    /// The coder's answer, absent until one is written.
+    #[serde(default)]
+    pub outcome: Option<Triage>,
+    /// The HQ's refusal of an equivalence the coder proposed, when it gave
+    /// one ([`refuse`]). A proposal on a survivor carrying one is no outcome:
+    /// the HQ has already said no, and the survivor is open again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused: Option<Refusal>,
+    /// The commit of the earlier campaign of the chain that found it, when a
+    /// partial campaign kept it because its file did not change since
+    /// ([`Chain`]); absent for a survivor this campaign found itself. Said,
+    /// never judged on: gate 7 judges the chain once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub found_on: Option<String>,
+}
+
+impl Survivor {
+    /// The first and last line of the code the mutation replaces: the one
+    /// line when the tool gives no span, and `None` when the span is not
+    /// known — an end before the start, which no ruling may be tied to.
+    pub fn span(&self) -> Option<(u32, u32)> {
+        match self.end_line {
+            None => Some((self.line, self.line)),
+            Some(end) if end >= self.line => Some((self.line, end)),
+            Some(_) => None,
+        }
+    }
+}
+
+/// The HQ said no to an equivalence the coder proposed, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Refusal {
+    /// The coder's sentence, as it stood when it was refused.
+    pub proposed: String,
+    /// The HQ's reason, which the next coder run reads in `FOLLOWUP_HQ.md`.
+    pub because: String,
+}
+
+/// The three outcomes SPEC 4.4 allows, and there is no fourth — and the
+/// coder's proposal of the third, which is not that outcome until the HQ
+/// ratifies it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Triage {
+    /// Killed by a test that is named. The name has to exist in the tree —
+    /// "a test covers this" is not an outcome, a test called `x` is.
+    Killed { test: String },
+    /// Shown equivalent, in one sentence. The one outcome no machine can
+    /// check — which is why it is not the agent's to give: it lives in the
+    /// HQ's file, and one found in the agent's makes the gate red. Letting
+    /// the graded fill in the only box nobody can check is a gate that
+    /// empties itself (SPEC 4.4).
+    Equivalent {
+        why: String,
+        /// The commit of the campaign this ruling was first given on, when it
+        /// was carried here from there rather than given on this one. Absent
+        /// on a ruling the HQ gave on this very campaign.
+        ///
+        /// Said, because a carried ruling is a judgement about code that has
+        /// since changed around it: the mutation is the same, its neighbours
+        /// may not be. Gate 7 counts them apart, and the HQ can lift one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        carried_from: Option<String>,
+    },
+    /// Recognised as a bug and frozen in a named test.
+    Bug { test: String },
+    /// The coder believes the survivor equivalent, and says why in one
+    /// sentence. **Never a ruling**: gate 7 counts it as an outcome so the
+    /// mission goes on, `nunki push` refuses while one is neither ratified
+    /// nor refused, and it is never carried to the next campaign nor written
+    /// in [`FILE`] as `equivalent` — only [`ratify`], the HQ's verb, turns it
+    /// into one. A blank `why` is no outcome at all ([`answer`]).
+    EquivalentProposed { why: String },
+    /// An equivalence `nunki` proposes, because it matched the survivor to a
+    /// ruling the HQ gave elsewhere — on another mission, through the
+    /// project's registry ([`crate::equivalences`]), or on another survivor
+    /// of this mission, by file and description alone ([`carry`]). **Never a
+    /// ruling** (HQ review 2): which mutant a ruling was about is a heuristic
+    /// across campaigns, and three rounds of review each found a narrower way
+    /// for one to land on a mutant the HQ never ruled on. So a match only
+    /// proposes, exactly as the coder does: gate 7 counts it as a proposal,
+    /// the mission goes on, and `nunki push` refuses until the HQ ratifies
+    /// or refuses it. A wrong match costs one refusal, never a wrong ruling.
+    ///
+    /// Written in [`FILE`] by `nunki` alone, and never the coder's to give.
+    ProposedByNunki {
+        /// The HQ's own sentence, from the ruling matched.
+        why: String,
+        /// Where the ruling it matched was given.
+        from: ProposedFrom,
+    },
+    /// What an older `nunki` wrote for a ruling it applied from the registry.
+    /// Only ever read, and read as what it is now: a proposal from the
+    /// registry ([`read`] turns it into [`Triage::ProposedByNunki`]).
+    EquivalentRegistered {
+        why: String,
+        mission: String,
+        commit: String,
+    },
+}
+
+/// Where the ruling behind a [`Triage::ProposedByNunki`] was given.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum ProposedFrom {
+    /// The project's registry of equivalences: a ruling given on another
+    /// mission, on code that reads the same.
+    Registry {
+        mission: String,
+        commit: String,
+        /// When it was given; empty for an entry an older file carried.
+        #[serde(default)]
+        date: String,
+    },
+    /// A ruling given on this mission, on a survivor of the previous
+    /// campaign with the same file and description but another id — the
+    /// looser tier of [`carry`].
+    Carried {
+        /// The commit of the campaign the ruling was given on.
+        commit: String,
+    },
+}
+
+impl ProposedFrom {
+    /// How a listing names this source.
+    pub fn said(&self) -> String {
+        match self {
+            ProposedFrom::Registry {
+                mission, commit, ..
+            } => format!(
+                "from the registry: ruled on mission {} at {}",
+                crate::text::one_line(mission),
+                crate::text::one_line(commit.get(..12).unwrap_or(commit))
+            ),
+            ProposedFrom::Carried { commit } => format!(
+                "carried by file and mutation: ruled at {} on a survivor of another id",
+                crate::text::one_line(commit.get(..12).unwrap_or(commit))
+            ),
+        }
+    }
+}
+
+impl Triage {
+    /// Whether the coder may write this outcome itself. The two that rest on
+    /// a committed test, yes, and the proposal of the third; the judgement
+    /// itself, no.
+    pub fn is_the_coders_to_give(&self) -> bool {
+        match self {
+            Triage::Killed { .. } | Triage::Bug { .. } | Triage::EquivalentProposed { .. } => true,
+            Triage::Equivalent { .. }
+            | Triage::ProposedByNunki { .. }
+            | Triage::EquivalentRegistered { .. } => false,
+        }
+    }
+
+    /// The name this outcome goes by in a refusal.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Triage::Killed { .. } => "killed",
+            Triage::Equivalent { .. } => "equivalent",
+            Triage::Bug { .. } => "bug",
+            Triage::EquivalentProposed { .. } => "equivalent_proposed",
+            Triage::ProposedByNunki { .. } => "proposed_by_nunki",
+            Triage::EquivalentRegistered { .. } => "equivalent_registered",
+        }
+    }
+
+    /// Whether this is the HQ's `equivalent` ruling: what `--refuse` will not
+    /// undo and `--lift` takes back. A proposal — the coder's or `nunki`'s —
+    /// never is.
+    pub fn is_a_ruling(&self) -> bool {
+        matches!(self, Triage::Equivalent { .. })
+    }
+
+    /// Whether this is a proposal awaiting the HQ, and from whom: `None`
+    /// inside for the coder's own.
+    pub fn proposal(&self) -> Option<(&str, Option<&ProposedFrom>)> {
+        match self {
+            Triage::EquivalentProposed { why } => Some((why, None)),
+            Triage::ProposedByNunki { why, from } => Some((why, Some(from))),
+            _ => None,
+        }
+    }
+
+    /// The test this outcome rests on, when it rests on one.
+    pub fn test(&self) -> Option<&str> {
+        match self {
+            Triage::Killed { test } | Triage::Bug { test } => Some(test),
+            Triage::Equivalent { .. }
+            | Triage::EquivalentProposed { .. }
+            | Triage::ProposedByNunki { .. }
+            | Triage::EquivalentRegistered { .. } => None,
+        }
+    }
+}
+
+/// `MUTANTS.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Campaign {
+    /// The content fingerprint of the touched files this campaign ran on.
+    /// A campaign whose fingerprint is not the current one has been overtaken
+    /// and says nothing about the code as it stands.
+    pub fingerprint: String,
+    /// The commit it ran on, for a human reading the file later.
+    pub head: String,
+    pub date: String,
+    #[serde(default)]
+    pub survivors: Vec<Survivor>,
+    /// How many mutants the campaign tried — every mutant it ran the tests
+    /// against, survivors included, unviable ones not — as the stack's script
+    /// said on its terminal line. What a `standard` mission's gate 7 divides
+    /// by (SPEC 4.4). Absent from a campaign written by an older script or
+    /// before the count existed, and then gate 7 judges it as `critical`
+    /// does; never worked out from the survivors, which would make every
+    /// campaign look perfect.
+    ///
+    /// For a partial campaign, the sum of [`Campaign::files`]: what one full
+    /// campaign at this `HEAD` would have tried, each file counted as the
+    /// campaign that last measured it measured it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tried: Option<u32>,
+    /// Each touched file's counts, as the latest campaign of the chain that
+    /// measured it gave them ([`by_file`]). `None` when the stack's script
+    /// gives no per-file counts, or gave ones that do not add up — and then
+    /// the next campaign is full: a partial one is rebuilt from these.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<BTreeMap<String, Measured>>,
+    /// Where this campaign stands in the mission's chain of campaigns: full
+    /// or partial, what it ran with, and the earlier campaigns it continues.
+    /// Absent from a file written before campaigns formed a chain, which
+    /// then reads as a full campaign with nothing before it.
+    #[serde(default)]
+    pub chain: Chain,
+    /// Why the campaign ended before it said it had finished, when `nunki` or
+    /// the HQ stopped it ([`Stopped`]); absent for a campaign that finished.
+    /// Its survivors are the ones the tool had already reported, and they
+    /// **never** make gate 7 green: an incomplete campaign measured part of
+    /// what it was handed, and the rest is not known to be killed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped: Option<Stopped>,
+}
+
+/// Why a campaign on file is incomplete (SPEC 4.4, gate 7: "un délai
+/// paramétré").
+///
+/// Kept apart from a campaign that could not run: one stopped here was
+/// measuring, and running it again **does** change something once its bound
+/// is raised. So it does not go back to the coder on its own; the HQ chooses
+/// ([`stopped_short`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "by", rename_all = "snake_case")]
+pub enum Stopped {
+    /// Past the mission's `mutation_minutes`, stopped by `nunki`.
+    Deadline { minutes: u32 },
+    /// Called off by the HQ (`nunki mission mutants --cancel`), and why.
+    Cancelled { because: String },
+}
+
+impl Stopped {
+    /// How a sentence names it: "stopped at its 45-minute deadline".
+    pub fn said(&self) -> String {
+        match self {
+            Stopped::Deadline { minutes } => format!("stopped at its {minutes}-minute deadline"),
+            Stopped::Cancelled { because } => {
+                format!("called off by the HQ ({})", crate::text::one_line(because))
+            }
+        }
+    }
+}
+
+/// What an incomplete campaign on file asks for, now that the mission's
+/// deadline is what it is ([`stopped_short`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Standing {
+    /// The HQ's to choose, and the sentence names both ways on.
+    HqChooses(String),
+    /// A new campaign is owed: the bound it was stopped at has been raised
+    /// since (`nunki mission reframe`), so running it again no longer runs
+    /// into the same wall.
+    Owed(String),
+}
+
+/// What `campaign` asks for when it is incomplete, the mission's deadline
+/// being `deadline_minutes`; `None` for a campaign that finished.
+///
+/// Gate 7 and [`already_answered`] both ask it here, so the gate and the
+/// launcher cannot disagree on whether a campaign is owed: a gate saying
+/// "owed" over a launcher answering "on file" would leave the monitor
+/// starting nothing, tick after tick.
+pub fn stopped_short(campaign: &Campaign, deadline_minutes: u32) -> Option<Standing> {
+    let stopped = campaign.stopped.as_ref()?;
+    let found = campaign.survivors.len();
+    Some(match stopped {
+        Stopped::Deadline { minutes } if deadline_minutes > *minutes => Standing::Owed(format!(
+            "{}. The deadline has been raised to {deadline_minutes} minutes since, so a new \
+             campaign is owed",
+            what_stopped(stopped, found)
+        )),
+        _ => Standing::HqChooses(stopped_said(stopped, found)),
+    })
+}
+
+/// What a campaign stopped short says, wherever it is said — gate 7, the
+/// monitor, `nunki mission mutants` — with the two ways on the HQ has.
+pub fn stopped_said(stopped: &Stopped, survivors: usize) -> String {
+    let what = what_stopped(stopped, survivors);
+    match stopped {
+        Stopped::Deadline { .. } => format!(
+            "{what}. The HQ chooses: raise `mutation_minutes` in MISSION.md and `nunki mission \
+             reframe --yes`, which owes a new campaign; or send these survivors to the coder \
+             with `nunki mission iterate --because`"
+        ),
+        Stopped::Cancelled { .. } => format!(
+            "{what}. The HQ chooses: send these survivors to the coder with `nunki mission \
+             iterate --because`, or run a new campaign with `nunki mission mutants --again`"
+        ),
+    }
+}
+
+fn what_stopped(stopped: &Stopped, survivors: usize) -> String {
+    format!(
+        "the mutation campaign was {} before it finished, having already reported \
+         {survivors} survivor(s), kept in {FILE} as from an incomplete campaign: they never \
+         make gate 7 green",
+        stopped.said()
+    )
+}
+
+/// One file's counts, and the campaign that measured them (SPEC 4.4, the
+/// chain of campaigns).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Measured {
+    /// The mutants tried in this file, unviable ones left out.
+    pub tried: u32,
+    /// The testable mutants found in it, when the script said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub found: Option<u32>,
+    /// The `HEAD` of the campaign that measured it.
+    pub on: String,
+}
+
+/// A mission's campaigns form a chain (SPEC 4.4, gate 7). The first is
+/// **full**: every touched file, mutated where the branch changed it since
+/// its fork point. At `standard`, a later one may be **partial** — the same
+/// campaign, restricted to the touched files whose content changed since the
+/// previous campaign's `HEAD` — when that campaign passed gate 7, ran with
+/// the same script and tool, and counted each file ([`scope`]).
+///
+/// The granularity is the file, and no diff hunk is ever read: a file
+/// unchanged since keeps its counts and its survivors as they were; a file
+/// changed, removed or renamed is measured again whole, or is gone. Gate 7
+/// judges **once**, on that reconstruction ([`Campaign::files`]): what one
+/// full campaign at `HEAD` would give, under the README's assumption that a
+/// mutant measured in an unchanged file still exists and is still killed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Chain {
+    #[serde(default)]
+    pub scope: Scope,
+    /// A digest of what the campaign ran with — the `mutation.sh` and the
+    /// tool's version of each stack it called ([`tooling`]) — or `None` when
+    /// that could not be read. A later campaign continues this one only when
+    /// both are known and equal: the fingerprint covers the touched files,
+    /// and says nothing of a script or a tool that changed under them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tooling: Option<String>,
+    /// The earlier campaigns of the chain, oldest first, each as it was
+    /// recorded. Their survivors still standing are listed among
+    /// [`Campaign::survivors`], with [`Survivor::found_on`] naming the one
+    /// that found them. Empty for a full campaign.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub earlier: Vec<Link>,
+    /// What a partial campaign itself tried, as its terminal line said —
+    /// [`Campaign::tried`] being the chain's reconstruction. Absent for a
+    /// full campaign, whose own count is the whole.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ran: Option<u32>,
+    /// The commit the branch forked from when the campaign ran — its
+    /// `NUNKI_BASE`. A later campaign continues this one only from the same
+    /// fork point: a file's counts are the mutants of what the branch
+    /// changed in it since the fork, and a fork point that moved (the base
+    /// merged in, a hunk cherry-picked onto it) moves them, file unchanged
+    /// or not. Absent from a record written before it was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork: Option<String>,
+    /// The paths the campaign was handed, as the repository names them: the
+    /// only keys its per-file counts may have ([`trusted_files`]). Absent
+    /// from a record written before it was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handed: Option<Vec<String>>,
+    /// The fraction the campaign measured, as its script said it
+    /// ([`sampled`]); absent from a campaign whose script measures no
+    /// sample, which ran whole. A partial campaign continues this one only
+    /// at the same fraction: the reconstruction is one sample, or none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample: Option<Sample>,
+}
+
+/// The fraction a campaign measured (SPEC 4.4, gate 7: the budget): one
+/// mutant in `k` of the `listed` its scope reached, chosen by the key that
+/// carries the HQ's rulings — the file and the description, never the line —
+/// so that a return to the coder leaves the same mutants in it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Sample {
+    /// The fraction's denominator: 1 is the whole.
+    pub k: u32,
+    /// How many mutants the campaign's scope reached before the sample.
+    pub listed: u32,
+    /// The seconds a mutant the script sized the sample with, when it said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paced: Option<u32>,
+}
+
+impl Sample {
+    /// "a sample of 1/3 of 48, sized at 20 s a mutant", or "the whole of 48".
+    pub fn said(&self) -> String {
+        let paced = match self.paced {
+            Some(s) => format!(", sized at {s} s a mutant"),
+            None => String::new(),
+        };
+        if self.k > 1 {
+            format!("a sample of 1/{} of {}{paced}", self.k, self.listed)
+        } else {
+            format!("the whole of {}", self.listed)
+        }
+    }
+}
+
+/// What the line a script prints before its terminal one says it ran at:
+/// `{"sampled":k,"listed":n,"paced":s,"pace":m}`, `pace` the seconds a
+/// mutant took, when any was tried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub struct Sampled {
+    pub sampled: u32,
+    pub listed: u32,
+    #[serde(default)]
+    pub paced: Option<u32>,
+    #[serde(default)]
+    pub pace: Option<u32>,
+}
+
+/// The line that says what a campaign ran at ([`Sampled`]): `Ok(None)` from
+/// a script that prints none — it measured no sample — and an error for a
+/// fraction of 0 or for more than one line, which no campaign can hold: one
+/// campaign keeps one fraction.
+pub fn sampled(text: &str) -> Result<Option<Sampled>, String> {
+    let lines: Vec<Sampled> = text
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Sampled>(l.trim()).ok())
+        .collect();
+    match lines.as_slice() {
+        [] => Ok(None),
+        [one] if one.sampled == 0 => {
+            Err("the campaign said it ran at a sample of 1/0, so it measured nothing".to_string())
+        }
+        [one] => Ok(Some(*one)),
+        several => Err(format!(
+            "the campaign said {} times what sample it ran at, and one campaign keeps one \
+             fraction, so it measured nothing",
+            several.len()
+        )),
+    }
+}
+
+/// Which files a campaign covered.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Scope {
+    /// Every file the branch touched, and why the campaign was not partial
+    /// — empty in a file written before the chain existed.
+    Full {
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        why: String,
+    },
+    /// The touched files whose content changed since `since`, the previous
+    /// campaign's `HEAD`.
+    Partial { since: String },
+}
+
+impl Default for Scope {
+    fn default() -> Self {
+        Scope::Full { why: String::new() }
+    }
+}
+
+impl Scope {
+    /// How a listing names it: `full`, or `partial since <commit>`.
+    pub fn said(&self) -> String {
+        match self {
+            Scope::Full { .. } => "full".to_string(),
+            Scope::Partial { since } => {
+                format!("partial since {}", crate::text::one_line(short(since)))
+            }
+        }
+    }
+
+    /// The commit a partial campaign continues from, when it is one.
+    pub fn since(&self) -> Option<&str> {
+        match self {
+            Scope::Full { .. } => None,
+            Scope::Partial { since } => Some(since),
+        }
+    }
+}
+
+/// An earlier campaign of the chain, as it was recorded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Link {
+    pub head: String,
+    pub date: String,
+    #[serde(default)]
+    pub scope: Scope,
+    /// What it itself tried, as its terminal line said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tried: Option<u32>,
+}
+
+/// The first twelve characters of a commit, as `nunki` names one.
+fn short(commit: &str) -> &str {
+    commit.get(..12).unwrap_or(commit)
+}
+
+/// `MUTANTS.run.json`: a campaign in flight.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Running {
+    pub fingerprint: String,
+    pub head: String,
+    pub started_at: String,
+    pub container: String,
+    pub pid: Option<u32>,
+    /// Where the campaign's stdout lands, on the host.
+    pub log: PathBuf,
+    /// How long it is given before `nunki` calls it hung (SPEC 4.4, "un délai
+    /// paramétré").
+    pub deadline_minutes: u32,
+    /// Full or partial, and what it runs with: what the campaign is recorded
+    /// with once it ends. The earlier links are taken from the campaign on
+    /// file then, never kept here. Absent from a record an older `nunki`
+    /// wrote, which reads as a full campaign.
+    #[serde(default)]
+    pub chain: Chain,
+    /// Set for a campaign outside missions ([`crate::offmission`]): what it
+    /// runs on. Such a campaign is read back into the project's debt, never
+    /// into a mission's [`FILE`], and a mission's reading of the slot refuses
+    /// it ([`MutantsError::OffMission`]). Absent from a mission's campaign.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub off_mission: Option<OffMission>,
+}
+
+/// What a campaign outside missions runs on (SPEC 4.4, the campaigns
+/// outside missions).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OffMission {
+    /// The base branch, by name.
+    pub base: String,
+    /// The commit the host recorded for it ([`crate::git::SlotGit::origin_branch`]).
+    pub commit: String,
+    /// The commit of the last completed campaign outside missions, for one
+    /// on what changed since it; `None` for one on the whole code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+    /// For one on what changed since: every path that changed since
+    /// [`Self::since`], removed and renamed ones included — the paths it was
+    /// handed, and the files whose survivors the debt replaces with what it
+    /// found in them ([`crate::offmission::settled`]). `None` for one on the
+    /// whole code, and in a record written while such a campaign measured
+    /// only the lines changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed: Option<Vec<String>>,
+    /// For one on the debt's survivors by name (`--owed`): the ids it was
+    /// handed, which the debt settles with what it found
+    /// ([`crate::offmission::settled_owed`]). `None` for every other form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owed: Option<Vec<String>>,
+}
+
+/// The most a campaign is handed by name, in bytes of the JSON list
+/// ([`NAMES_ENV`]): a hardening mission takes, and `--owed` measures, no more
+/// survivors than fit, oldest first. Linux refuses to start a program one of
+/// whose arguments or environment strings exceeds 128 KiB (`MAX_ARG_STRLEN`,
+/// 32 pages) — read, not measured — and among several stacks the names
+/// travel inside the one argument of `sh -c`. Half of it leaves the rest of
+/// that argument its room.
+pub const NAMES_MAX_BYTES: usize = 64 * 1024;
+
+/// The seconds a mutant is assumed to take when the project has no pace on
+/// file ([`PACE_FILE`]): the Rust stack's script assumes the same.
+pub const DEFAULT_PACE: u32 = 60;
+
+/// How many mutants a budget of `budget_minutes` measures at `pace` seconds
+/// a mutant, less one for the baseline, which rebuilds the crate as a mutant
+/// does — and at least one: the Rust stack's script's arithmetic, which
+/// sizes its sample with it.
+pub fn fits(budget_minutes: u32, pace: u32) -> u32 {
+    (budget_minutes.saturating_mul(60) / pace.max(1))
+        .saturating_sub(1)
+        .max(1)
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum MutantsError {
+    #[error(
+        "a campaign outside missions, on {base} at {commit}, is in flight in slot {slot} or has \
+         ended and not been read back: `nunki mutants status` reads it back, and until then no \
+         mission's campaign or run uses this slot's clean copy"
+    )]
+    OffMission {
+        slot: String,
+        base: String,
+        commit: String,
+    },
+    #[error(
+        "the campaign filed in slot {slot} is a mission's, not one outside missions: the \
+         mission's own verbs read it back"
+    )]
+    MissionCampaign { slot: String },
+    #[error(
+        "the project's debt could not be locked ({0}): the campaign outside missions stays \
+         filed, and `nunki mutants status` reads it back once the debt is free"
+    )]
+    DebtLocked(String),
+    #[error(transparent)]
+    Git(#[from] git::GitError),
+    #[error("{0} is not a campaign `nunki` can read: {1}")]
+    Unreadable(PathBuf, String),
+    #[error("{0}: {1}")]
+    Io(PathBuf, std::io::Error),
+    #[error(transparent)]
+    Exec(#[from] crate::exec::ExecError),
+    #[error("the campaign could not be launched: {0}")]
+    Launch(String),
+    #[error("{0}")]
+    NoProposal(String),
+    #[error(transparent)]
+    Followup(#[from] crate::followup::FollowupError),
+    #[error("the chain of campaigns is broken: {0}")]
+    Broken(String),
+    #[error("the campaign is not recorded: {0}")]
+    Unmeasured(String),
+    #[error(
+        "a campaign is called off with a reason: `--because` says why, and the HQ and the \
+         next coder run read it in FOLLOWUP_HQ.md"
+    )]
+    NoReason,
+    #[error(
+        "the campaign's container is paused, so it cannot be stopped: `nunki mission resume` \
+         unfreezes it, and `--cancel` then calls it off"
+    )]
+    Paused,
+    /// The stop did not take, or could not be confirmed ([`unstopped_said`]).
+    #[error("{0}")]
+    NotStopped(String),
+}
+
+/// Where a mission's campaign result lives.
+pub fn paths(dir: &Path) -> PathBuf {
+    dir.join(FILE)
+}
+
+/// Where the record of the campaign rewriting **this slot's** clean copy
+/// lives, whether or not one is in flight.
+pub fn running_path(hq_root: &Path, slot: &str) -> PathBuf {
+    hq_root.join(CAMPAIGNS_DIR).join(format!("{slot}.json"))
+}
+
+/// The fingerprint of what a campaign would run on: the **content** of the
+/// touched files, as git names it.
+///
+/// `git rev-parse HEAD:<path>` gives a blob id, so two commits holding the
+/// same bytes fingerprint the same — which is the point. A path that no
+/// longer exists at `HEAD` (touched and then deleted) contributes its absence
+/// rather than an error. The digest is `git hash-object`, so it needs no
+/// crate and a human can reproduce it by hand.
+pub fn fingerprint(tree: &Path, touched: &[String]) -> Result<String, MutantsError> {
+    let repo = git::SlotGit::open(tree)?;
+    let mut lines: Vec<String> = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for path in touched {
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        let blob = repo
+            .run(&["rev-parse", &format!("HEAD:{path}")])
+            .unwrap_or_else(|_| "absent".to_string());
+        lines.push(format!("{blob} {path}"));
+    }
+    lines.sort();
+    let manifest = lines.join("\n");
+    Ok(hash_object(tree, &manifest)?)
+}
+
+/// [`fingerprint`] for a campaign also handed `named` by name: the content of
+/// every path handed — the survivors' files among them — and each name. With
+/// nothing named it is [`fingerprint`] itself, so a campaign already on file
+/// keeps the fingerprint it was recorded under.
+pub fn fingerprint_naming(
+    tree: &Path,
+    paths: &[String],
+    named: &[Survivor],
+) -> Result<String, MutantsError> {
+    let plain = fingerprint(tree, paths)?;
+    if named.is_empty() {
+        return Ok(plain);
+    }
+    // Each name as JSON, so a name holding a newline is still one line.
+    let mut names: Vec<String> = named
+        .iter()
+        .map(|s| format!("named {}", names_json(std::slice::from_ref(&s.id))))
+        .collect();
+    names.sort();
+    Ok(hash_object(
+        tree,
+        &format!("{plain}\n{}", names.join("\n")),
+    )?)
+}
+
+/// `git hash-object --stdin` — git is already here, and this keeps the digest
+/// something a human can check with one command. Run in the slot's host
+/// mirror, like every git on a slot (`git::SlotGit`).
+fn hash_object(tree: &Path, text: &str) -> Result<String, git::GitError> {
+    git::SlotGit::open(tree)?.run_with_input(&["hash-object", "--stdin"], text.as_bytes())
+}
+
+/// Read the campaign a mission holds, if it holds one.
+pub fn read(dir: &Path) -> Result<Option<Campaign>, MutantsError> {
+    let file = paths(dir);
+    let text = match std::fs::read_to_string(&file) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(MutantsError::Io(file, e)),
+    };
+    if text.trim().is_empty() {
+        return Ok(None);
+    }
+    let mut campaign: Campaign =
+        serde_json::from_str(&text).map_err(|e| MutantsError::Unreadable(file, e.to_string()))?;
+    for survivor in &mut campaign.survivors {
+        survivor.outcome = survivor.outcome.take().map(as_now);
+    }
+    Ok(Some(campaign))
+}
+
+/// An outcome an older file holds, as it reads now: a ruling an older
+/// `nunki` applied from the registry is a proposal from the registry (HQ
+/// review 2). Everything else as it is.
+fn as_now(outcome: Triage) -> Triage {
+    match outcome {
+        Triage::EquivalentRegistered {
+            why,
+            mission,
+            commit,
+        } => Triage::ProposedByNunki {
+            why,
+            from: ProposedFrom::Registry {
+                mission,
+                commit,
+                date: String::new(),
+            },
+        },
+        other => other,
+    }
+}
+
+/// The coder's answers, by survivor id. Absent until it writes one, and an
+/// unreadable one is an error rather than an empty triage: a file the coder
+/// wrote and `nunki` cannot parse must be said, not silently ignored. The
+/// coder is the only role that can write it: the integrator and the security
+/// agent see it read-only ([`crate::compose::agent_writable`]), so no other
+/// role's run can put a line here.
+///
+/// **Only the outcomes the coder may give are ever read from it** —
+/// `killed`, `bug`, `equivalent_proposed` (HQ review 3, the class rule) —
+/// and [`answer`] is where: every reader of an outcome goes through it, and
+/// it reads nothing else from this map. Anything else found there —
+/// `equivalent`, `equivalent_registered`, `proposed_by_nunki` — is no
+/// outcome and never shadows what [`FILE`] holds; an entry that does not
+/// parse, a kind nobody knows among them, is left out here and refuses
+/// nothing but itself. [`foreign`] names them all, for gate 7 and `nunki
+/// push` to say.
+pub fn read_triage(dir: &Path) -> Result<BTreeMap<String, Triage>, MutantsError> {
+    triage_entries(dir).map(|(read, _)| read)
+}
+
+/// An entry of the coder's file that `nunki` does not read: an outcome
+/// that is not the coder's to give, or one it cannot make out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Foreign {
+    pub id: String,
+    /// The kind it claims, as written.
+    pub kind: String,
+    /// Why it is not read: not the coder's to give, or not readable.
+    pub why: String,
+}
+
+/// The entries of the coder's file `nunki` does not read ([`read_triage`]).
+pub fn foreign(dir: &Path) -> Result<Vec<Foreign>, MutantsError> {
+    let (read, unreadable) = triage_entries(dir)?;
+    let mut foreign: Vec<Foreign> = read
+        .into_iter()
+        .filter(|(_, outcome)| !outcome.is_the_coders_to_give())
+        .map(|(id, outcome)| Foreign {
+            id,
+            kind: outcome.kind().to_string(),
+            why: "is not the coder's to give".to_string(),
+        })
+        .collect();
+    foreign.extend(unreadable);
+    Ok(foreign)
+}
+
+/// What gate 7 and `nunki push` say of [`foreign`] entries — nothing when
+/// there are none.
+pub fn foreign_said(foreign: &[Foreign]) -> Option<String> {
+    (!foreign.is_empty()).then(|| {
+        let listed = foreign
+            .iter()
+            .map(|f| {
+                format!(
+                    "{} (`{}`, which {})",
+                    crate::text::name(&f.id),
+                    crate::text::one_line(&f.kind),
+                    crate::text::one_line(&f.why)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "{TRIAGE_FILE} answers {listed}, so each is refused and read as no outcome: \
+             rulings and `nunki`'s own proposals live in {FILE}, and the coder proposes \
+             with `equivalent_proposed` and its reason"
+        )
+    })
+}
+
+/// The coder's file, split into the entries that parse as an outcome and
+/// those that do not. A file that is not a JSON object of entries is an
+/// error — said, never read as empty; an entry within it that does not
+/// parse is only foreign.
+fn triage_entries(dir: &Path) -> Result<(BTreeMap<String, Triage>, Vec<Foreign>), MutantsError> {
+    let mut read = BTreeMap::new();
+    let mut foreign = Vec::new();
+    for (id, value) in triage_raw(dir)? {
+        match serde_json::from_value::<Triage>(value.clone()) {
+            Ok(outcome) => {
+                read.insert(id, outcome);
+            }
+            Err(e) => foreign.push(Foreign {
+                id,
+                kind: value
+                    .get("kind")
+                    .and_then(|k| k.as_str())
+                    .map_or_else(|| "unreadable".to_string(), str::to_string),
+                why: format!("cannot be read: {e}"),
+            }),
+        }
+    }
+    Ok((read, foreign))
+}
+
+/// The coder's file as the coder wrote it, entry by entry: empty when it is
+/// absent or blank, an error naming it when it cannot be read or is not a
+/// JSON object of entries — never read as empty. The one reader of the
+/// file, for [`triage_entries`] and [`remove_triage_entry`] alike.
+fn triage_raw(dir: &Path) -> Result<BTreeMap<String, serde_json::Value>, MutantsError> {
+    let file = dir.join(TRIAGE_FILE);
+    let text = match std::fs::read_to_string(&file) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(e) => return Err(MutantsError::Io(file, e)),
+    };
+    if text.trim().is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    serde_json::from_str(&text).map_err(|e| MutantsError::Unreadable(file, e.to_string()))
+}
+
+/// Take survivor `id`'s entry out of the coder's file, leaving every other
+/// entry as the coder wrote it — those `nunki` does not read included.
+fn remove_triage_entry(dir: &Path, id: &str) -> Result<(), MutantsError> {
+    let mut entries = triage_raw(dir)?;
+    if entries.remove(id).is_none() {
+        return Ok(());
+    }
+    let file = dir.join(TRIAGE_FILE);
+    let body = serde_json::to_string_pretty(&entries).expect("a triage serialises");
+    std::fs::write(&file, format!("{body}\n")).map_err(|e| MutantsError::Io(file, e))
+}
+
+/// The ids of the survivors still waiting for an outcome: in the mission's
+/// campaign, answered neither there (the HQ's file) nor in the coder's
+/// triage. The only survivors a coder may hand a lot over for, awaiting a
+/// ruling ([`crate::mission::journal::awaitable`]). No campaign, none.
+///
+/// A survivor with a valid proposal is not open: it cannot be awaited and
+/// proposed at once. One whose proposal gives no reason, or that the HQ
+/// already refused, is.
+pub fn open(dir: &Path) -> Result<Vec<String>, MutantsError> {
+    let Some(campaign) = read(dir)? else {
+        return Ok(Vec::new());
+    };
+    let coders = read_triage(dir)?;
+    Ok(campaign
+        .survivors
+        .iter()
+        .filter(|s| answer(s, &coders).is_none())
+        .map(|s| s.id.clone())
+        .collect())
+}
+
+/// The outcome a survivor holds, from the two files together.
+///
+/// The coder's two outcomes that rest on a test come first, then what the
+/// HQ's file holds — its own ruling, or `nunki`'s proposal — then the coder's
+/// proposal — so a ratified proposal answers as the HQ's `equivalent`,
+/// whatever the coder's file still says. A proposal is
+/// an outcome only when it says why ([`crate::text::blank`] says it does
+/// not) and the HQ has not refused it on this survivor. Anything else in the
+/// coder's map — an `equivalent` of its own, `nunki`'s proposal — is no
+/// outcome, and the HQ's file answers ([`read_triage`]).
+pub fn answer(survivor: &Survivor, coders: &BTreeMap<String, Triage>) -> Option<Triage> {
+    // Only what the coder may give, whoever built the map: anything else
+    // would shadow the HQ's file (HQ review 3).
+    match coders.get(&survivor.id).filter(|outcome| {
+        outcome.is_the_coders_to_give() && outcome.test().is_none_or(is_test_name)
+    }) {
+        Some(Triage::EquivalentProposed { why }) => survivor.outcome.clone().or_else(|| {
+            (!crate::text::blank(why) && survivor.refused.is_none())
+                .then(|| Triage::EquivalentProposed { why: why.clone() })
+        }),
+        Some(other) => Some(other.clone()),
+        None => survivor.outcome.clone(),
+    }
+}
+
+/// Whether `name` can be what an outcome names as its test: an identifier
+/// — letters, digits and underscores — of three characters at least (HQ
+/// review 4). A blank name, or one of a letter or two, is matched by
+/// nearly any line of a tree, and would answer a survivor with nothing; a
+/// name with spaces or punctuation is not one a test is called by. Gate 7
+/// and `nunki push` then look for it as a whole word
+/// ([`crate::gate::named_test_missing`]).
+pub fn is_test_name(name: &str) -> bool {
+    name.chars().count() >= 3 && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Why a survivor the coder answered still has no outcome, when that is the
+/// case: a proposal with no reason, or one the HQ refused. Said beside the
+/// survivor in gate 7's message, so the coder is not left wondering why a
+/// line it wrote was not read.
+pub fn not_an_outcome(survivor: &Survivor, coders: &BTreeMap<String, Triage>) -> Option<String> {
+    if answer(survivor, coders).is_some() {
+        return None;
+    }
+    match coders.get(&survivor.id) {
+        Some(outcome @ (Triage::Killed { test } | Triage::Bug { test })) if !is_test_name(test) => {
+            Some(format!(
+                "its `{}` names {test:?}, which is not a test name: letters, digits and \
+                 underscores, three at least",
+                outcome.kind()
+            ))
+        }
+        Some(Triage::EquivalentProposed { why }) if crate::text::blank(why) => {
+            Some("its proposal gives no reason, and a proposal is one sentence".to_string())
+        }
+        Some(Triage::EquivalentProposed { .. }) => survivor.refused.as_ref().map(|r| {
+            format!(
+                "the HQ refused its proposal: {}",
+                crate::text::one_line(&r.because)
+            )
+        }),
+        _ => None,
+    }
+}
+
+/// An equivalence proposed — by the coder, or by `nunki` from a ruling it
+/// matched — that the HQ has neither ratified nor refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Proposal {
+    pub id: String,
+    pub file: String,
+    pub line: u32,
+    /// The proposal's sentence: the coder's, or the HQ's own from the ruling
+    /// matched.
+    pub why: String,
+    /// Where it comes from: `None` for the coder.
+    pub from: Option<ProposedFrom>,
+}
+
+impl Proposal {
+    /// Who proposed it, as `mission status`, `mission wait`, `nunki push`
+    /// and the follow-up name it.
+    pub fn source(&self) -> String {
+        match &self.from {
+            None => "the coder's".to_string(),
+            Some(from) => format!("nunki's, {}", from.said()),
+        }
+    }
+}
+
+/// How many of `proposals` come from each source, as one phrase: "2 from
+/// the coder, 1 from the registry".
+pub fn by_source(proposals: &[Proposal]) -> String {
+    let count = |which: fn(&Option<ProposedFrom>) -> bool| {
+        proposals.iter().filter(|p| which(&p.from)).count()
+    };
+    [
+        (count(|f| f.is_none()), "from the coder"),
+        (
+            count(|f| matches!(f, Some(ProposedFrom::Registry { .. }))),
+            "from the registry",
+        ),
+        (
+            count(|f| matches!(f, Some(ProposedFrom::Carried { .. }))),
+            "carried by file and mutation",
+        ),
+    ]
+    .into_iter()
+    .filter(|(n, _)| *n > 0)
+    .map(|(n, what)| format!("{n} {what}"))
+    .collect::<Vec<_>>()
+    .join(", ")
+}
+
+/// Whether `killed` of `tried` reaches `threshold` percent, compared in
+/// whole numbers so that 79.5% is never rounded up to a pass. Gate 7 at
+/// `standard` and [`owed`] both ask it here, so they cannot disagree.
+pub fn share_reached(killed: u64, tried: u64, threshold: u64) -> bool {
+    killed * 100 >= threshold * tried
+}
+
+/// What gate 7's rule still owes on `campaign`, read with the coder's
+/// answers, as a sentence naming the survivors left open — `None` when
+/// nothing is owed.
+///
+/// The rule as the gate plays it (SPEC 4.4): nothing at `prototype`; at
+/// `standard`, the share of tried mutants killed reaches `threshold` (a
+/// campaign that gives no usable count is judged as `critical`); at
+/// `critical`, every survivor has an outcome. A proposal still pending is an
+/// outcome here, as at the gate — `nunki push` refuses it on its own.
+///
+/// `nunki push` asks it again on the campaign as it stands, because the HQ
+/// can reopen a survivor after the gates were green: a refused proposal
+/// leaves one without an outcome, and the gates are not replayed before the
+/// push (security round 1, MEDIUM).
+///
+/// **Once**, on the campaign on file. For a partial campaign that is the
+/// chain's reconstruction ([`Chain`]): its `tried` the sum of each touched
+/// file's latest count, its survivors those of the files unchanged since the
+/// previous campaign and the new campaign's — what one full campaign at
+/// `HEAD` would be judged on. Never each campaign on its own: a volet that
+/// measures a well-killed file again would otherwise pad its own share.
+pub fn owed(
+    campaign: &Campaign,
+    coders: &BTreeMap<String, Triage>,
+    rigor: crate::mission::Rigor,
+    threshold: u32,
+) -> Option<String> {
+    use crate::mission::Rigor;
+    if rigor == Rigor::Prototype {
+        return None;
+    }
+    // Whatever its share: what it did not reach is not known to be killed.
+    if let Some(stopped) = &campaign.stopped {
+        return Some(format!(
+            "the campaign was {} before it finished, and an incomplete campaign is never an \
+             answer — {} survivor(s) reported so far",
+            stopped.said(),
+            campaign.survivors.len()
+        ));
+    }
+    let open: Vec<String> = campaign
+        .survivors
+        .iter()
+        .filter(|s| answer(s, coders).is_none())
+        .map(|s| {
+            format!(
+                "{}:{} {}",
+                crate::text::name(&s.file),
+                s.line,
+                crate::text::name(&s.id)
+            )
+        })
+        .collect();
+    let listed = open.join("; ");
+    match campaign.tried {
+        Some(tried) if rigor == Rigor::Standard && tried as usize >= campaign.survivors.len() => {
+            let (tried, killed) = (u64::from(tried), u64::from(tried) - open.len() as u64);
+            if share_reached(killed, tried, u64::from(threshold)) {
+                return None;
+            }
+            Some(format!(
+                "{killed} of {tried} tried mutant(s) killed, below the threshold of \
+                 {threshold}%, with {} survivor(s) left without an outcome: {listed}",
+                open.len()
+            ))
+        }
+        _ if open.is_empty() => None,
+        _ => Some(format!(
+            "{} survivor(s) have no outcome: {listed}",
+            open.len()
+        )),
+    }
+}
+
+/// The campaigns of the chain in one line each, oldest first — full or
+/// partial and from which commit, and what it itself tried — and, for a
+/// chain, one line more for what gate 7 judges: the reconstruction, tried,
+/// killed and left. What `mission status`, the monitor's log and the
+/// follow-up say of a mission's campaigns. Killed is counted as gate 7
+/// counts it: tried, less the survivors left without an outcome.
+pub fn chain_said(campaign: &Campaign, coders: &BTreeMap<String, Triage>) -> Vec<String> {
+    let listed = campaign.survivors.len();
+    let open = campaign
+        .survivors
+        .iter()
+        .filter(|s| answer(s, coders).is_none())
+        .count();
+    let counts = match (&campaign.stopped, campaign.tried) {
+        (Some(stopped), _) => format!("incomplete, {}", stopped.said()),
+        (None, Some(tried)) => format!(
+            "tried {tried}, killed {}",
+            (tried as usize).saturating_sub(open)
+        ),
+        (None, None) => "tried: not said".to_string(),
+    };
+    let named = |scope: &Scope, head: &str| {
+        let why = match scope {
+            Scope::Full { why } if !crate::text::blank(why) => {
+                format!(" ({})", crate::text::one_line(why))
+            }
+            _ => String::new(),
+        };
+        format!(
+            "{} at {}{why}",
+            scope.said(),
+            crate::text::one_line(short(head))
+        )
+    };
+    let own = |tried: Option<u32>| match tried {
+        Some(tried) => format!("tried {tried}"),
+        None => "tried: not said".to_string(),
+    };
+    let sample = match &campaign.chain.sample {
+        Some(sample) if sample.k > 1 => format!(", {}", sample.said()),
+        _ => String::new(),
+    };
+    let earlier = &campaign.chain.earlier;
+    if earlier.is_empty() {
+        return vec![format!(
+            "{}{sample} — {counts}, {listed} survivor(s), {open} without an outcome",
+            named(&campaign.chain.scope, &campaign.head)
+        )];
+    }
+    let mut lines: Vec<String> = earlier
+        .iter()
+        .map(|link| format!("{} — {}", named(&link.scope, &link.head), own(link.tried)))
+        .collect();
+    lines.push(format!(
+        "{} — {}",
+        named(&campaign.chain.scope, &campaign.head),
+        own(campaign.chain.ran)
+    ));
+    let files = match &campaign.files {
+        Some(files) => format!(" over {} file(s)", files.len()),
+        None => String::new(),
+    };
+    lines.push(format!(
+        "judged as one campaign at {}{files}{sample} — {counts}, {listed} survivor(s), {open} \
+         without an outcome",
+        crate::text::one_line(short(&campaign.head))
+    ));
+    lines
+}
+
+/// [`chain_said`] on the mission folder's own files; nothing when no
+/// campaign is on file.
+pub fn chain_on_file(dir: &Path) -> Result<Vec<String>, MutantsError> {
+    let Some(campaign) = read(dir)? else {
+        return Ok(Vec::new());
+    };
+    Ok(chain_said(&campaign, &read_triage(dir)?))
+}
+
+/// [`owed`], on the mission folder's own two files. No campaign, nothing
+/// owed here: whether one is due is the caller's question — `nunki push`
+/// refuses a mission that owes one and has none before it asks this.
+pub fn owed_on_file(
+    dir: &Path,
+    rigor: crate::mission::Rigor,
+    threshold: u32,
+) -> Result<Option<String>, MutantsError> {
+    let Some(campaign) = read(dir)? else {
+        return Ok(None);
+    };
+    Ok(owed(&campaign, &read_triage(dir)?, rigor, threshold))
+}
+
+/// How `mission status` and `mission wait` say that `proposals` await the
+/// HQ, by source — nothing when none does.
+pub fn proposals_await(proposals: &[Proposal]) -> Option<String> {
+    (!proposals.is_empty()).then(|| {
+        format!(
+            "{} equivalence proposal(s) await the HQ's ruling ({}), and `nunki push` \
+             refuses until each is ratified or refused",
+            proposals.len(),
+            by_source(proposals)
+        )
+    })
+}
+
+/// The proposals of the current campaign that await the HQ — exactly those
+/// [`answer`] reads as a proposal. What `nunki push` refuses on while any is
+/// left, and what `mission status`, `mission wait` and the follow-up count.
+/// No campaign, none.
+pub fn awaiting_ruling(dir: &Path) -> Result<Vec<Proposal>, MutantsError> {
+    let Some(campaign) = read(dir)? else {
+        return Ok(Vec::new());
+    };
+    let coders = read_triage(dir)?;
+    Ok(campaign
+        .survivors
+        .iter()
+        .filter_map(|s| {
+            let answered = answer(s, &coders)?;
+            let (why, from) = answered.proposal()?;
+            Some(Proposal {
+                id: s.id.clone(),
+                file: s.file.clone(),
+                line: s.line,
+                why: why.to_string(),
+                from: from.cloned(),
+            })
+        })
+        .collect())
+}
+
+pub fn write_triage(dir: &Path, triage: &BTreeMap<String, Triage>) -> Result<(), MutantsError> {
+    let file = dir.join(TRIAGE_FILE);
+    let body = serde_json::to_string_pretty(triage).expect("a triage serialises");
+    std::fs::write(&file, format!("{body}\n")).map_err(|e| MutantsError::Io(file, e))
+}
+
+pub fn read_running(hq_root: &Path, slot: &str) -> Result<Option<Running>, MutantsError> {
+    let file = running_path(hq_root, slot);
+    let text = match std::fs::read_to_string(&file) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(MutantsError::Io(file, e)),
+    };
+    serde_json::from_str(&text)
+        .map(Some)
+        .map_err(|e| MutantsError::Unreadable(file, e.to_string()))
+}
+
+pub fn write(dir: &Path, campaign: &Campaign) -> Result<(), MutantsError> {
+    let file = paths(dir);
+    let body = serde_json::to_string_pretty(campaign).expect("a campaign serialises");
+    std::fs::write(&file, format!("{body}\n")).map_err(|e| MutantsError::Io(file, e))
+}
+
+pub fn write_running(hq_root: &Path, slot: &str, running: &Running) -> Result<(), MutantsError> {
+    let file = running_path(hq_root, slot);
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| MutantsError::Io(dir.to_path_buf(), e))?;
+    }
+    let body = serde_json::to_string_pretty(running).expect("a record serialises");
+    std::fs::write(&file, format!("{body}\n")).map_err(|e| MutantsError::Io(file, e))
+}
+
+pub fn forget_running(hq_root: &Path, slot: &str) -> Result<(), MutantsError> {
+    let file = running_path(hq_root, slot);
+    match std::fs::remove_file(&file) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(MutantsError::Io(file, e)),
+    }
+}
+
+/// A campaign in flight, as its record and its log say: what
+/// `nunki mission mutants <id> --status` and `nunki mission status` print.
+///
+/// Read without asking the container anything and without reading the
+/// campaign back, so that following a campaign can never start one. The
+/// bare `nunki mission mutants <id>` starts a campaign whenever none is in
+/// flight: a loop polling it to wait for the end started a new full one
+/// minutes after the previous one crashed (#139). What this says is the
+/// record's word — a campaign that died is still in flight here until a
+/// reading asks the container, which the monitor and the bare verb do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InFlight {
+    pub fingerprint: String,
+    pub started_at: String,
+    pub deadline_minutes: u32,
+    pub scope: Scope,
+    /// The lines its log holds so far, or why the log could not be read.
+    pub lines: Result<usize, String>,
+}
+
+/// The campaign the slot's record says is in flight, or `None` when there
+/// is no record.
+pub fn in_flight(hq_root: &Path, slot: &str) -> Result<Option<InFlight>, MutantsError> {
+    let Some(running) = read_running(hq_root, slot)? else {
+        return Ok(None);
+    };
+    let lines = std::fs::read_to_string(&running.log)
+        .map(|text| text.lines().count())
+        .map_err(|e| format!("{}: {e}", running.log.display()));
+    Ok(Some(InFlight {
+        fingerprint: running.fingerprint,
+        started_at: running.started_at,
+        deadline_minutes: running.deadline_minutes,
+        scope: running.chain.scope,
+        lines,
+    }))
+}
+
+/// One line for a campaign in flight: which, since when, how far into its
+/// deadline, full or partial, and how much its log holds.
+pub fn in_flight_said(campaign: &InFlight) -> String {
+    format!(
+        "{} in flight since {}, {} of {} minute(s), {} — {}",
+        crate::text::one_line(
+            campaign
+                .fingerprint
+                .get(..7)
+                .unwrap_or(&campaign.fingerprint)
+        ),
+        crate::text::one_line(&campaign.started_at),
+        minutes_since(&campaign.started_at),
+        campaign.deadline_minutes,
+        campaign.scope.said(),
+        match &campaign.lines {
+            Ok(lines) => format!("{lines} line(s) in its log so far"),
+            Err(why) => format!("its log could not be read: {}", crate::text::one_line(why)),
+        }
+    )
+}
+
+/// The survivors a campaign printed: one JSON object per line, and anything
+/// that is not one is ignored — a mutation tool writes progress on the same
+/// stream, and a campaign that produced a hundred good lines and one banner
+/// is not a campaign that failed.
+/// The line a campaign prints, last of all, to say it got to the end.
+///
+/// Without it `nunki` cannot tell "no survivor" from "no answer": a campaign
+/// killed halfway, one whose container went away and one that never compiled
+/// all leave a log that parses to zero survivors, and gate 7 would go green
+/// on a measurement nobody made. SPEC 4.4 forbids exactly that — "une porte 7
+/// qui ne peut pas dire « je n'ai pas pu mesurer » ment".
+///
+/// A line the script prints rather than an exit status, because the status
+/// does not survive: the spawner `exec`s the command so that the pid it
+/// published is the campaign's own, and a shell that has been replaced cannot
+/// write `$?`. Dropping the `exec` would take the identity check for every
+/// harness run with it (`engine/spawn.rs`).
+#[derive(serde::Deserialize)]
+struct Terminal {
+    campaign: String,
+    /// How many mutants the campaign tried, unviable ones left out. Optional:
+    /// a script written before the count still says it finished, and is
+    /// read exactly as it was.
+    #[serde(default)]
+    tried: Option<u32>,
+    /// How many testable mutants the tool found — unviable ones left out, as
+    /// they are from `tried`. A campaign that found some and tried none did
+    /// not measure: a failing baseline leaves exactly that, with every
+    /// mutant found and none tested ([`unmeasured`]).
+    #[serde(default)]
+    found: Option<u32>,
+    /// How many survivors the tool reported, from its own account of its
+    /// outcomes — never from the survivor lines the script printed, nor from
+    /// the lines it read to print them: a count taken from those lines always
+    /// agrees with them. Compared with the survivor lines `nunki` read
+    /// ([`unmeasured`]). Absent from a script that does not say it, which is
+    /// read as before.
+    #[serde(default)]
+    missed: Option<u32>,
+    /// Whether the script counted each file, on its own lines before this
+    /// one ([`by_file`]). Absent from a script that does not: no per-file
+    /// count is then read, even from lines that look like one.
+    #[serde(default)]
+    by_file: bool,
+}
+
+/// One per-file line of a campaign's log: `{"measured":"<path>","tried":3,
+/// "found":4}`, printed before the terminal line.
+#[derive(serde::Deserialize)]
+struct FileLine {
+    measured: String,
+    tried: u32,
+    #[serde(default)]
+    found: Option<u32>,
+}
+
+/// Each file's counts, from a log whose terminal line says the script
+/// counted each file — `None` otherwise, and `None` too when the counts
+/// cannot be trusted: a file named twice, a `found` given for some files and
+/// not others, or counts that do not add up to the terminal line's totals.
+/// `on` is the commit the campaign ran on.
+///
+/// What a later partial campaign is rebuilt from ([`Campaign::files`]), so
+/// it fails closed: counts that are not all there make the next campaign
+/// full rather than a chain built on a guess.
+pub fn by_file(text: &str, on: &str) -> Option<BTreeMap<String, Measured>> {
+    let line = terminal(text)?;
+    if !line.by_file {
+        return None;
+    }
+    let mut files = BTreeMap::new();
+    for counted in text
+        .lines()
+        .filter_map(|l| serde_json::from_str::<FileLine>(l.trim()).ok())
+    {
+        let measured = Measured {
+            tried: counted.tried,
+            found: counted.found,
+            on: on.to_string(),
+        };
+        if files.insert(counted.measured, measured).is_some() {
+            return None;
+        }
+    }
+    let tried: u64 = files.values().map(|m: &Measured| u64::from(m.tried)).sum();
+    if line.tried.map(u64::from) != Some(tried) {
+        return None;
+    }
+    // `found` adds up only when every file gives one (an empty set adds up
+    // to 0). With no `found` anywhere — neither in total nor for any file —
+    // there is nothing to compare. Anything else — a `found` for some files
+    // and not others, per file and not in total, or the reverse — is a
+    // script that does not say the same thing twice.
+    let found: Option<u64> = files
+        .values()
+        .map(|m: &Measured| m.found.map(u64::from))
+        .sum();
+    match (line.found, found) {
+        (Some(total), Some(sum)) if u64::from(total) == sum => Some(files),
+        (None, _) if files.values().all(|m| m.found.is_none()) => Some(files),
+        _ => None,
+    }
+}
+
+/// What a set of per-file counts adds up to.
+pub fn tried_in(files: &BTreeMap<String, Measured>) -> Option<u32> {
+    u32::try_from(files.values().map(|m| u64::from(m.tried)).sum::<u64>()).ok()
+}
+
+/// Every line of the log that says the campaign is done.
+fn done_lines(text: &str) -> impl Iterator<Item = Terminal> + '_ {
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<Terminal>(line.trim()).ok())
+        .filter(|t| t.campaign == "done")
+}
+
+/// The terminal line, if the campaign printed exactly one.
+///
+/// A script says it once, last. A second done line is something else
+/// writing to the campaign's output — a test reaching the script's stdout,
+/// say — and nothing tells which of the two is the script's, so neither is
+/// taken: the first would let a forged line sit before the real one, the
+/// last would let it sit after. [`several_campaigns`] reads each stack's
+/// output by the same rule.
+fn terminal(text: &str) -> Option<Terminal> {
+    let mut done = done_lines(text);
+    let only = done.next()?;
+    done.next().is_none().then_some(only)
+}
+
+/// Whether the campaign said it finished, exactly once.
+///
+/// The whole log, not its last line: a campaign is read back through a file
+/// the engine is still writing, and asking for the last line would turn a
+/// half-flushed newline into "it did not finish". The line is printed last,
+/// so a truncated log has lost it either way.
+pub fn completed(text: &str) -> bool {
+    terminal(text).is_some()
+}
+
+/// Why a log that says the campaign finished more than once is not read,
+/// if it does: such a log is not a finished campaign ([`completed`]), and
+/// this is the sentence that says so rather than "it stopped".
+pub fn repeated(text: &str) -> Option<String> {
+    let count = done_lines(text).count();
+    (count > 1).then(|| {
+        format!(
+            "the campaign said it had finished {count} times, and a campaign says it once, \
+             last — something else wrote to its output, so nothing it printed is read"
+        )
+    })
+}
+
+/// How many mutants the campaign says it tried, from its terminal line.
+///
+/// `None` when the line carries no count — an older `mutation.sh` — or when
+/// there is no terminal line at all. Only the script's own word is taken:
+/// counting the survivors would make a campaign that tried a hundred and
+/// lost three look like one that tried three and lost them all.
+pub fn tried(text: &str) -> Option<u32> {
+    terminal(text).and_then(|t| t.tried)
+}
+
+/// How many testable mutants the campaign says it found, from its terminal
+/// line; `None` when the line does not say.
+pub fn found(text: &str) -> Option<u32> {
+    terminal(text).and_then(|t| t.found)
+}
+
+/// Why a campaign that said it finished still measured nothing, if it did:
+/// it found mutants and tried none.
+///
+/// The terminal line says the script got to its end, not that the tool
+/// tested anything. A baseline that fails before the first mutant —
+/// cargo-mutants exits 4, measured on 27.1.0, with 12 mutants found and
+/// none tested — would otherwise be recorded as a campaign with no
+/// survivor, and gate 7 green at every rigor on a measurement nobody made.
+/// The stack's script refuses such a run itself; this is the same rule kept
+/// on `nunki`'s side, for a script that does not.
+///
+/// Both counts are needed: a `found` without a `tried` is a line that gives
+/// no count — which gate 7 judges as `critical` does — and not a campaign
+/// that said it tried nothing.
+///
+/// Nor did a campaign measure when the survivors the tool reported — the
+/// terminal line's `missed`, from the tool's own account — are not as many
+/// as the survivor lines `nunki` reads ([`parse`]), **in either direction**.
+/// Fewer lines is a survivor lost: a line that is not JSON, which [`parse`]
+/// skips as it skips the tool's chatter — measured on cargo-mutants 27.1.0
+/// with a tab in a file's name and a script that escaped its lines by hand.
+/// More lines is a line something else wrote, or a name split in two by a
+/// newline. Either way what is on file would not be what the tool found.
+/// A line without `missed` is read as before.
+pub fn unmeasured(text: &str) -> Option<String> {
+    let line = terminal(text)?;
+    if let Err(why) = sampled(text) {
+        return Some(why);
+    }
+    if let Some(found) = line.found
+        && found > 0
+        && line.tried == Some(0)
+    {
+        return Some(format!(
+            "the campaign found {found} mutant(s) and tried none, so it measured nothing — \
+             a baseline whose tests fail before any mutant is tried leaves exactly this"
+        ));
+    }
+    let missed = line.missed?;
+    let read = parse(text).len();
+    (read != missed as usize).then(|| {
+        format!(
+            "the mutation tool reported {missed} survivor(s) and nunki read {read} survivor \
+             line(s) from the campaign, so what it would record is not what the tool found \
+             and it measured nothing — fewer lines is a survivor lost, a line that is not \
+             JSON or a name the script could not carry; more is a line something else \
+             wrote, or a name split in two"
+        )
+    })
+}
+
+/// Settle a campaign that said it finished and measured nothing: its reason
+/// is appended to the campaign's stderr, beside the log, where gate 7 reads
+/// the cause of a campaign that could not run — so the gate is red and says
+/// why, rather than asking for the same campaign again. Returns the reason,
+/// or `None` for a campaign that did measure.
+pub fn settle_unmeasured(log: &Path, text: &str) -> Result<Option<String>, MutantsError> {
+    match unmeasured(text) {
+        Some(why) => settle(log, &why).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// Settle a campaign whose log says it finished more than once
+/// ([`repeated`]) the way [`settle_unmeasured`] settles one that measured
+/// nothing: its reason beside the log, where gate 7 reads it. Returns the
+/// reason, or `None` for a log that says it at most once.
+pub fn settle_repeated(log: &Path, text: &str) -> Result<Option<String>, MutantsError> {
+    match repeated(text) {
+        Some(why) => settle(log, &why).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// Append `why` to the campaign's stderr, and say where it went.
+fn settle(log: &Path, why: &str) -> Result<String, MutantsError> {
+    use std::io::Write;
+    let stderr = log.with_extension("err");
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&stderr)
+        .and_then(|mut file| writeln!(file, "nunki: {why}"))
+        .map_err(|e| MutantsError::Io(stderr.clone(), e))?;
+    Ok(format!("{why}. What it said is in {}", stderr.display()))
+}
+
+/// The survivors a campaign's log names, **with no outcome** and no refusal.
+///
+/// An outcome is never read from the log. The log is what the stack's script
+/// printed inside the agent's container, and an `equivalent` in it would land
+/// in the HQ's file with no human having given it — the one outcome no
+/// machine may give (SPEC 4.4). The rulings a new campaign carries come from
+/// the HQ's previous file, in [`record_finished`], and from nowhere else.
+pub fn parse(text: &str) -> Vec<Survivor> {
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<Survivor>(line.trim()).ok())
+        .map(|survivor| Survivor {
+            outcome: None,
+            refused: None,
+            // Which campaign of the chain found it is `nunki`'s to record:
+            // a log claiming an earlier one would move a survivor out of the
+            // count it belongs to.
+            found_on: None,
+            ..survivor
+        })
+        .collect()
+}
+
+/// Write the campaign a finished log describes, carrying over the HQ's
+/// rulings from the campaign it replaces.
+///
+/// A new campaign runs whenever a touched file changes, and a commit that
+/// only adds a line above a ruled survivor would otherwise lose the ruling
+/// with the file it lived in, sending the mission back to the HQ to be told
+/// the same thing again.
+///
+/// Returns how many survivors the new campaign holds. The project's
+/// registry is not asked: [`record_finished_with_registry`] is what a
+/// campaign read back in its slot records through.
+pub fn record_finished(
+    dir: &Path,
+    fingerprint: &str,
+    head: &str,
+    text: &str,
+) -> Result<usize, MutantsError> {
+    record(
+        dir,
+        None,
+        fingerprint,
+        head,
+        text,
+        &Chain::default(),
+        |_| true,
+        |_| {},
+    )
+}
+
+/// What [`record_finished_with_registry`] did with the project's registry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Recorded {
+    /// How many survivors the new campaign holds.
+    pub survivors: usize,
+    /// How many of them received a proposal from the registry.
+    pub from_registry: usize,
+    /// Why the registry could not be read, when it could not: nothing was
+    /// proposed from it, and `FOLLOWUP_HQ.md` says so.
+    pub registry_unread: Option<String>,
+}
+
+/// [`record_finished`], and then the project's registry of equivalences
+/// ([`crate::equivalences`]) matched against every survivor still without
+/// an outcome — a match **proposes**, never rules (HQ review 2) — reading
+/// each survivor's code at `head` in the repository at `tree`: the slot,
+/// which holds the campaign's commit.
+///
+/// After [`carry`], so that a ruling given on this mission keeps its own
+/// origin. **Fails closed**: a registry that cannot be read applies nothing,
+/// and the reason is appended to the mission's `FOLLOWUP_HQ.md`, the file the
+/// HQ reads, rather than lost in a log. The registry is read under its lock
+/// ([`crate::equivalences::read_locked`]).
+///
+/// With the source at hand, the class rule filters [`carry`]'s proposals
+/// too: its looser tier — the same file and description under another id —
+/// proposes nothing unless the code its mutation replaces occurs once in the
+/// file ([`crate::equivalences::identify`]). A refusal is carried whatever
+/// that says.
+///
+/// `chain` is what the campaign was launched as ([`Running::chain`]): a
+/// partial one continues the campaign on file ([`continued`]), file by
+/// file, its kept survivors carried by the same rules as any other.
+#[allow(clippy::too_many_arguments)]
+pub fn record_finished_with_registry(
+    dir: &Path,
+    hq_root: &Path,
+    tree: &Path,
+    fingerprint: &str,
+    head: &str,
+    text: &str,
+    chain: &Chain,
+) -> Result<Recorded, MutantsError> {
+    let registry = crate::equivalences::read_locked(hq_root);
+    let identified = |s: &Survivor| crate::equivalences::identify(tree, head, s).ok();
+    let mut from_registry = 0;
+    let survivors = record(
+        dir,
+        Some(tree),
+        fingerprint,
+        head,
+        text,
+        chain,
+        |s| identified(s).is_some(),
+        |survivors| {
+            if let Ok(registry) = &registry {
+                from_registry = crate::equivalences::apply(registry, survivors, identified);
+            }
+        },
+    )?;
+    let registry_unread = match registry {
+        Ok(_) => None,
+        Err(why) => {
+            crate::followup::registry_unread(&dir.join(crate::mission::dir::FOLLOWUP_FILE), &why)?;
+            Some(why)
+        }
+    };
+    Ok(Recorded {
+        survivors,
+        from_registry,
+        registry_unread,
+    })
+}
+
+/// Parse, continue the chain when `chain` is partial, carry ([`carry`] with
+/// `identified`), let `then` add what it has, write.
+///
+/// A partial campaign continues the campaign on file, and only that one: one
+/// whose `HEAD` is not the commit it ran since is a chain broken under it,
+/// and nothing is written — a partial campaign alone would answer for the
+/// files changed since, and say nothing of the rest.
+///
+/// Continuing it is a matter of files, never of lines ([`Chain`]). The files
+/// whose content changed between the two commits — `git diff --name-only
+/// --no-renames`, no hunk read — are the new campaign's: their counts and
+/// their survivors come from it alone, and a file removed or renamed is
+/// gone. Every other file keeps its counts and its survivors as the campaign
+/// on file had them, unchanged since: the same file, the same lines. Kept
+/// survivors are given back nothing the HQ said on them here; that comes
+/// through [`carry`], as it does from one campaign to the next.
+///
+/// **Fails closed.** When the new campaign's own per-file counts are
+/// missing or do not add up, or it counted or named a survivor in a file
+/// that did not change, the reconstruction cannot be trusted: the campaign
+/// is recorded with every survivor listed and **no** count, so gate 7
+/// judges it as `critical` does, and the next campaign is full.
+#[allow(clippy::too_many_arguments)]
+fn record(
+    dir: &Path,
+    tree: Option<&Path>,
+    fingerprint: &str,
+    head: &str,
+    text: &str,
+    chain: &Chain,
+    identified: impl Fn(&Survivor) -> bool,
+    then: impl FnOnce(&mut [Survivor]),
+) -> Result<usize, MutantsError> {
+    // What [`settle_unmeasured`] refuses before a campaign is read back is
+    // refused here too, by the one writer of a finished campaign: a log that
+    // did not measure never becomes the campaign gate 7 and `nunki push`
+    // judge, whoever hands it over.
+    if let Some(why) = unmeasured(text) {
+        return Err(MutantsError::Unmeasured(why));
+    }
+    let mut survivors = parse(text);
+    let previous = read(dir)?;
+    let mut chain = chain.clone();
+    chain.earlier = Vec::new();
+    chain.ran = None;
+    chain.sample = sampled(text).ok().flatten().map(|s| Sample {
+        k: s.sampled,
+        listed: s.listed,
+        paced: s.paced,
+    });
+    let mut files = trusted_files(text, head, chain.handed.as_deref());
+    let mut counted = tried(text);
+    if let Some(since) = chain.scope.since() {
+        let previous = previous
+            .as_ref()
+            .filter(|p| p.head == since)
+            .ok_or_else(|| MutantsError::Broken(broken(since, previous.as_ref())))?;
+        // One sample, or none: a partial campaign at another fraction than
+        // the chain's would add one sample's counts to another's.
+        let fraction = |c: &Chain| c.sample.map_or(1, |s| s.k);
+        if fraction(&previous.chain) != fraction(&chain) {
+            return Err(MutantsError::Broken(format!(
+                "the campaign ran at a sample of 1/{} and the chain it continues at 1/{} — a \
+                 partial campaign answers only at its chain's fraction, so it is not recorded \
+                 alone; `nunki mission mutants --again` runs a full one",
+                fraction(&chain),
+                fraction(&previous.chain)
+            )));
+        }
+        let tree = tree.ok_or_else(|| {
+            MutantsError::Broken("a partial campaign is recorded in its slot only".to_string())
+        })?;
+        let changed = changed_between(tree, since, head)?;
+        let (earlier, kept, before) = continued(previous, &changed);
+        chain.earlier = earlier;
+        chain.ran = counted;
+        let within = |file: &str| changed.contains(file);
+        let trusted = survivors.iter().all(|s| within(&s.file))
+            && files
+                .as_ref()
+                .is_some_and(|f| f.keys().all(|file| within(file)));
+        (files, counted) = match (trusted, before, files) {
+            (true, Some(mut before), Some(new)) => {
+                before.extend(new);
+                let total = tried_in(&before);
+                (total.map(|_| before), total)
+            }
+            _ => (None, None),
+        };
+        survivors.extend(kept);
+    }
+    if let Some(previous) = &previous {
+        carry(previous, &mut survivors, identified);
+    }
+    then(&mut survivors);
+    let count = survivors.len();
+    write(
+        dir,
+        &Campaign {
+            fingerprint: fingerprint.to_string(),
+            head: head.to_string(),
+            date: crate::state::now_rfc3339(),
+            survivors,
+            tried: counted,
+            files,
+            chain,
+            stopped: None,
+        },
+    )?;
+    Ok(count)
+}
+
+/// Why a partial campaign since `since` does not continue `previous`, the
+/// campaign on file.
+fn broken(since: &str, previous: Option<&Campaign>) -> String {
+    format!(
+        "the campaign ran since {}, and {} — a partial campaign answers only for what \
+         changed since the one it continues, so it is not recorded alone; `nunki mission \
+         mutants --again` runs a full one",
+        short(since),
+        match previous {
+            Some(p) => format!("the campaign on file is at {}", short(&p.head)),
+            None => "no campaign is on file".to_string(),
+        }
+    )
+}
+
+/// What a partial campaign takes from the campaign it continues, given the
+/// files `changed` since it: the chain so far with that campaign appended;
+/// the survivors of the files that did not change, as they stood, each
+/// naming the campaign that found it — what the HQ said on it is then
+/// [`carry`]'s to decide, which finds each kept survivor's own twin and
+/// sets its outcome and refusal from it;
+/// and those files' counts — `None` when the campaign on file kept none, in
+/// which case nothing can be rebuilt.
+///
+/// A survivor of a changed file is dropped: that file is the new campaign's,
+/// which measures it again whole. A survivor of a file removed or renamed is
+/// dropped with it.
+pub fn continued(
+    previous: &Campaign,
+    changed: &BTreeSet<String>,
+) -> (Vec<Link>, Vec<Survivor>, Option<BTreeMap<String, Measured>>) {
+    let mut earlier = previous.chain.earlier.clone();
+    earlier.push(Link {
+        head: previous.head.clone(),
+        date: previous.date.clone(),
+        scope: previous.chain.scope.clone(),
+        tried: previous.chain.ran.or(previous.tried),
+    });
+    let kept = previous
+        .survivors
+        .iter()
+        .filter(|s| !changed.contains(&s.file))
+        .map(|s| Survivor {
+            found_on: s.found_on.clone().or_else(|| Some(previous.head.clone())),
+            ..s.clone()
+        })
+        .collect();
+    let before = previous.files.as_ref().map(|files| {
+        files
+            .iter()
+            .filter(|(file, _)| !changed.contains(*file))
+            .map(|(file, m)| (file.clone(), m.clone()))
+            .collect()
+    });
+    (earlier, kept, before)
+}
+
+/// Every path whose content differs between `from` and `to`: added, removed
+/// or modified, a file renamed counting as its old path removed and its new
+/// one added (`--no-renames`). Compared by git as blobs; no hunk is read.
+pub fn changed_between(
+    tree: &Path,
+    from: &str,
+    to: &str,
+) -> Result<BTreeSet<String>, MutantsError> {
+    let names = git::SlotGit::open(tree)?.names(&[
+        "diff",
+        "--name-only",
+        "--no-renames",
+        "-z",
+        from,
+        to,
+    ])?;
+    Ok(names.into_iter().collect())
+}
+
+/// Give each new survivor what the HQ said on its twin in the previous
+/// campaign: its ruling, as a **proposal**; or its refusal.
+///
+/// **Carry never rules** (HQ review 4). Which mutant a ruling was about is
+/// a heuristic across campaigns on both tiers — an id is a position, and
+/// other code, even identical code, can land on it. So between campaigns a
+/// ruling is only ever carried as a [`Triage::ProposedByNunki`] proposal
+/// marked as carried, with its sentence and the commit it was given on, for
+/// the HQ to ratify (`--ratify --all` takes them all). The only
+/// equivalences in a campaign's [`FILE`] are the ones the HQ typed on that
+/// campaign.
+///
+/// **The line is never part of the match**: it is exactly what a commit
+/// above the mutant moves. The mutation itself — its file and what it
+/// changed, the `description` — is what the ruling was about. Two tiers,
+/// each over **every** survivor of the previous campaign, whatever it held:
+///
+/// - **the same id, file and description**: the same mutant, by the tool's
+///   own name for it. Tried first, and when it finds one, it decides: the
+///   twin's ruling is proposed, a proposal this tier made on it is carried
+///   as that proposal, its refusal as a refusal — or nothing, for a twin
+///   that held none of them. A proposal from the registry is not carried:
+///   the registry is asked again;
+/// - otherwise **the same file and description**, when that pair names
+///   exactly one survivor of the whole previous campaign and exactly one
+///   now, and `identified` says the survivor is told apart by its source —
+///   the code its mutation replaces occurs once in its file: the same.
+///
+/// **A refusal is always carried** (HQ review 2, C): when no survivor of
+/// the same id stood before, a refusal the HQ gave on any survivor of the
+/// same file and description reaches the new one, whatever the uniqueness
+/// of either. Carrying one too many reopens a survivor the coder must then
+/// kill, freeze or have ruled; carrying one too few lets a proposal the HQ
+/// said no to count as an outcome again. A refused survivor is given no
+/// proposal.
+///
+/// The coder's own proposals are not carried here: they live in its own
+/// file, by id. A changed description — including a status that moved from
+/// `survived` to `no tests` — is a different mutant, and nothing is carried.
+/// No id is parsed: which tool named it is the stack's business, not
+/// `nunki`'s.
+pub fn carry(
+    previous: &Campaign,
+    survivors: &mut [Survivor],
+    identified: impl Fn(&Survivor) -> bool,
+) {
+    let from = |old: &Survivor| match &old.outcome {
+        Some(Triage::Equivalent {
+            carried_from: Some(first),
+            ..
+        }) => first.clone(),
+        _ => previous.head.clone(),
+    };
+    // What a twin's outcome becomes in the new campaign: a ruling, a
+    // proposal of it; a proposal this function made, itself.
+    let proposed = |old: &Survivor| match &old.outcome {
+        Some(Triage::Equivalent { why, .. }) => Some(Triage::ProposedByNunki {
+            why: why.clone(),
+            from: ProposedFrom::Carried { commit: from(old) },
+        }),
+        Some(made) if carried(made) => Some(made.clone()),
+        _ => None,
+    };
+    let mut now: BTreeMap<(String, String), usize> = BTreeMap::new();
+    for s in survivors.iter() {
+        *now.entry(pair(s)).or_default() += 1;
+    }
+    for survivor in survivors.iter_mut() {
+        if let Some(old) = previous.survivors.iter().find(|old| {
+            old.id == survivor.id
+                && old.file == survivor.file
+                && old.description == survivor.description
+        }) {
+            survivor.outcome = proposed(old);
+            survivor.refused = old.refused.clone();
+            continue;
+        }
+        let same: Vec<&Survivor> = previous
+            .survivors
+            .iter()
+            .filter(|old| pair(old) == pair(survivor))
+            .collect();
+        if let Some(refused) = same.iter().find_map(|old| old.refused.clone()) {
+            survivor.refused = Some(refused);
+            continue;
+        }
+        let [old] = same.as_slice() else {
+            continue;
+        };
+        if now.get(&pair(survivor)) != Some(&1) || !identified(survivor) {
+            continue;
+        }
+        survivor.outcome = proposed(old);
+    }
+}
+
+/// Whether `outcome` is a proposal [`carry`] made, which it carries again
+/// while the HQ has not ruled on it. One from the registry is not: the
+/// registry is asked again by the next campaign, against the code as it
+/// stands then, and an entry lifted since proposes nothing more.
+fn carried(outcome: &Triage) -> bool {
+    matches!(
+        outcome,
+        Triage::ProposedByNunki {
+            from: ProposedFrom::Carried { .. },
+            ..
+        }
+    )
+}
+
+/// What [`carry`] matches a mutation on when the id has changed: its file
+/// and what it changed, never its line.
+fn pair(s: &Survivor) -> (String, String) {
+    (s.file.clone(), s.description.clone())
+}
+
+/// Record the HQ's own ruling on a survivor: this mutant changes nothing
+/// observable, and here is why in one sentence.
+///
+/// A verb rather than an invitation to hand-edit JSON, because this is the
+/// one outcome no machine can check and the person giving it should have to
+/// say so on purpose. It writes into [`FILE`], which the agent cannot.
+pub fn rule_equivalent(dir: &Path, id: &str, why: &str) -> Result<(), MutantsError> {
+    let mut campaign = read(dir)?.ok_or_else(|| {
+        MutantsError::Unreadable(
+            dir.join(FILE),
+            "there is no campaign to rule on — `nunki mission mutants` runs one".to_string(),
+        )
+    })?;
+    // Every survivor the id names: a ruling given on one id and read on all
+    // of them (`answer` goes by id) must be written on all of them.
+    for found in called(&mut campaign, dir, id)? {
+        found.outcome = Some(Triage::Equivalent {
+            why: why.to_string(),
+            carried_from: None,
+        });
+        // A ruling supersedes a refusal the HQ gave earlier on the same
+        // survivor.
+        found.refused = None;
+    }
+    write(dir, &campaign)
+}
+
+/// Every survivor of `campaign` called `id`, or an error naming the id when
+/// none is.
+///
+/// Every one, not the first: an id is what the coder's file answers by
+/// ([`answer`]), so one line there answers every survivor carrying it, and a
+/// ruling or a refusal written on only the first would leave its twin
+/// answered by a proposal nobody ruled on — and `nunki push` would pass it.
+fn called<'a>(
+    campaign: &'a mut Campaign,
+    dir: &Path,
+    id: &str,
+) -> Result<Vec<&'a mut Survivor>, MutantsError> {
+    let found: Vec<&mut Survivor> = campaign
+        .survivors
+        .iter_mut()
+        .filter(|s| s.id == id)
+        .collect();
+    if found.is_empty() {
+        return Err(MutantsError::Unreadable(
+            dir.join(FILE),
+            format!("no survivor is called {id:?} in this campaign"),
+        ));
+    }
+    Ok(found)
+}
+
+/// The sentence of the proposal pending on survivor `id` — the coder's, or
+/// `nunki`'s from a ruling it matched — or an error that says why there is
+/// none to rule on.
+fn proposal_on(dir: &Path, id: &str) -> Result<String, MutantsError> {
+    let coders = read_triage(dir)?;
+    let pending = read(dir)?
+        .into_iter()
+        .flat_map(|c| c.survivors)
+        .filter(|s| s.id == id)
+        .find_map(|s| {
+            answer(&s, &coders).and_then(|a| a.proposal().map(|(why, _)| why.to_string()))
+        });
+    if let Some(why) = pending {
+        return Ok(why);
+    }
+    match coders.get(id) {
+        // Written again after the HQ refused it: no outcome for gate 7, but
+        // the HQ may still change its mind and rule on it.
+        Some(Triage::EquivalentProposed { why }) if !crate::text::blank(why) => Ok(why.clone()),
+        // What is left of a proposal here is a blank one.
+        Some(Triage::EquivalentProposed { .. }) => Err(MutantsError::NoProposal(format!(
+            "the coder's proposal on {id:?} gives no reason, so it is no proposal — \
+                 `--equivalent {id} --because <why>` rules on the survivor yourself"
+        ))),
+        _ => Err(MutantsError::NoProposal(format!(
+            "{TRIAGE_FILE} proposes no equivalence on {id:?}, and `nunki` proposes none"
+        ))),
+    }
+}
+
+/// The HQ ratifies the proposal pending on survivor `id` — the coder's, or
+/// `nunki`'s: exactly the `equivalent` [`rule_equivalent`] writes, with the
+/// proposal's sentence as its reason unless `because` replaces it. The proposal is taken out of the
+/// coder's file, since it is now a ruling — and [`carry`] proposes it again
+/// to the next campaign, for the HQ to ratify there.
+///
+/// Returns the reason the ruling was written with.
+pub fn ratify(dir: &Path, id: &str, because: Option<&str>) -> Result<String, MutantsError> {
+    let proposed = proposal_on(dir, id)?;
+    let why = match because {
+        Some(because) if crate::text::blank(because) => {
+            return Err(MutantsError::NoProposal(
+                "--because is blank: a ruling nobody can check must say what it rests on"
+                    .to_string(),
+            ));
+        }
+        Some(because) => because.to_string(),
+        None => proposed,
+    };
+    rule_equivalent(dir, id, &why)?;
+    remove_triage_entry(dir, id)?;
+    Ok(why)
+}
+
+/// The HQ refuses the proposal pending on survivor `id` — the coder's, or
+/// `nunki`'s — because of `because`: the proposal is taken out of whichever
+/// file held it, the refusal is recorded on the survivor in [`FILE`], and the
+/// survivor is open again — a proposal written again on it is no outcome
+/// ([`answer`]), and [`carry`] takes the refusal to every later campaign.
+///
+/// Returns the refusal, for the follow-up the next coder run reads.
+pub fn refuse(dir: &Path, id: &str, because: &str) -> Result<Refusal, MutantsError> {
+    if crate::text::blank(because) {
+        return Err(MutantsError::NoProposal(
+            "--refuse needs --because: the next coder run reads why, and a refusal that \
+             says nothing teaches it nothing"
+                .to_string(),
+        ));
+    }
+    let mut campaign = read(dir)?.ok_or_else(|| {
+        MutantsError::Unreadable(
+            dir.join(FILE),
+            "there is no campaign to rule on — `nunki mission mutants` runs one".to_string(),
+        )
+    })?;
+    let found = called(&mut campaign, dir, id)?;
+    // The HQ already ruled on it: its ruling answers the survivor whatever
+    // the coder's file says, so a refusal would change nothing and send a
+    // verified mission back for a survivor that is answered. Taking a ruling
+    // back is `--lift`'s (HQ review of the pull request, item 5).
+    if found
+        .iter()
+        .any(|s| s.outcome.as_ref().is_some_and(Triage::is_a_ruling))
+    {
+        return Err(MutantsError::NoProposal(format!(
+            "{id:?} holds the HQ's own `equivalent` ruling, and a refusal cannot undo a \
+             ruling — `nunki mission mutants <id> --lift {id}` takes it back first"
+        )));
+    }
+    let proposed = proposal_on(dir, id)?;
+    let refusal = Refusal {
+        proposed,
+        because: because.to_string(),
+    };
+    for found in found {
+        found.refused = Some(refusal.clone());
+        if matches!(found.outcome, Some(Triage::ProposedByNunki { .. })) {
+            found.outcome = None;
+        }
+    }
+    write(dir, &campaign)?;
+    remove_triage_entry(dir, id)?;
+    Ok(refusal)
+}
+
+/// [`refuse`], and the refusal written in `FOLLOWUP_HQ.md` as `who`'s — the
+/// file the next coder run reads first, so the survivor it finds open again
+/// comes with the reason it is.
+pub fn refuse_and_say(
+    paths: &crate::mission::dir::Paths,
+    who: &str,
+    id: &str,
+    because: &str,
+) -> Result<(), MutantsError> {
+    let refusal = refuse(&paths.dir, id, because)?;
+    crate::followup::proposal_refused(&paths.followup, who, id, &refusal)?;
+    Ok(())
+}
+
+/// Lift the HQ's `equivalent` ruling from a survivor, so that it needs an
+/// outcome again.
+///
+/// The way back from a ruling that was wrong, or that a changed neighbour
+/// made wrong. Rulings are carried from one campaign to the next
+/// ([`carry`]), so without this a mistaken one would outlive every replay.
+/// Only an `equivalent` is lifted — and with it a proposal `nunki` made from
+/// a ruling it matched, whose ruling is what is being taken back: the
+/// coder's outcomes live in its own file, and this one never held them.
+/// Taking it out of the registry too is the caller's
+/// ([`crate::equivalences::remove`]), from the campaign as it stood before
+/// the lift.
+pub fn lift_equivalent(dir: &Path, id: &str) -> Result<(), MutantsError> {
+    let mut campaign = read(dir)?.ok_or_else(|| {
+        MutantsError::Unreadable(
+            dir.join(FILE),
+            "there is no campaign to lift a ruling from".to_string(),
+        )
+    })?;
+    let found = called(&mut campaign, dir, id)?;
+    if !found.iter().any(|s| liftable(s.outcome.as_ref())) {
+        return Err(MutantsError::Unreadable(
+            dir.join(FILE),
+            format!("{id:?} holds no `equivalent` ruling to lift"),
+        ));
+    }
+    for survivor in found {
+        if liftable(survivor.outcome.as_ref()) {
+            survivor.outcome = None;
+        }
+    }
+    write(dir, &campaign)
+}
+
+/// What `--lift` takes off a survivor: the HQ's ruling, or `nunki`'s
+/// proposal of one.
+pub fn liftable(outcome: Option<&Triage>) -> bool {
+    matches!(
+        outcome,
+        Some(Triage::Equivalent { .. } | Triage::ProposedByNunki { .. })
+    )
+}
+
+/// Whether a campaign already on file is enough.
+///
+/// A campaign is expensive — SPEC § 7 counts the hour — so the default is
+/// that one on the same content is not run again. But "the same content" is
+/// the fingerprint over the touched files, and a campaign's answer also
+/// depends on what it ran *with*: the stack's `mutation.sh`, the tool's
+/// version, an exclusion added since. None of those move the fingerprint.
+///
+/// Without it the only way past is to delete `MUTANTS.json` by hand, which
+/// can take `MUTANTS.triage.json` with it — a file the engine then replaces
+/// with a directory, which brings the mission down. A verb is cheaper than
+/// the workaround it replaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Replay {
+    /// Only when the touched files have changed. The default (SPEC 4.4).
+    WhenChanged,
+    /// Now, whatever is on file. Never touches a campaign in flight: one
+    /// already running is reported as running, and asking again does not
+    /// start a second.
+    Now,
+}
+
+/// Whether the next campaign may be partial, and when not, why (SPEC 4.4,
+/// gate 7: the chain of a mission's campaigns).
+///
+/// Partial — the touched files whose content changed since the previous
+/// campaign's `HEAD`, each measured as a full campaign would measure it —
+/// only when **every** condition holds, asked in this order; the first that
+/// does not makes the campaign full, and its reason is recorded:
+///
+/// - the mission's rigor chains its campaigns ([`chains`]): `standard` and
+///   `critical` do, and a `prototype`, which owes none, does not;
+/// - the human did not ask `--again`, which is a full campaign by
+///   definition: it is asked for what the chain cannot see;
+/// - a previous campaign of this mission is on file — only a completed one
+///   ever is;
+/// - gate 7 passed on it: `owed` says what it still owes, as the gate
+///   judges the whole chain it closes ([`owed`]);
+/// - its `HEAD` is an ancestor of the current one (`is_ancestor`): a history
+///   rewritten under it leaves no diff to continue from;
+/// - it ran from the same fork point as this one will (`fork`,
+///   [`Chain::fork`]): a moved fork point moves what the branch changed in
+///   every file, unchanged files included;
+/// - it counted each file ([`Campaign::files`]), and those counts add up to
+///   its total: a partial campaign is rebuilt from them, and a script that
+///   gives none — the Python and Next.js ones, a project's own — or gave
+///   ones that do not add up leaves nothing to rebuild from;
+/// - its counts can be carried (`carried`, which says why when they cannot,
+///   [`uncarried`]): the files changed since it could be listed, and every
+///   file it counted that did not change is one the branch touches at
+///   `HEAD`, there to be counted;
+/// - it ran with the same `mutation.sh` and tool as this one will: both
+///   digests known ([`tooling`]) and equal. `tooling` is that digest, or why
+///   it could not be read — the stack and what its command said, which the
+///   full campaign's reason then carries.
+///
+/// **Fails closed**: a condition that cannot be checked is one that does not
+/// hold. A partial campaign assumes that a mutant measured earlier in a file
+/// nobody changed still exists and is still killed, and the README says so;
+/// `--again` does not assume it.
+#[allow(clippy::too_many_arguments)]
+pub fn scope(
+    rigor: crate::mission::Rigor,
+    replay: Replay,
+    previous: Option<&Campaign>,
+    tooling: Result<&str, &str>,
+    fork: &str,
+    owed: impl Fn(&Campaign) -> Option<String>,
+    is_ancestor: impl Fn(&str) -> bool,
+    carried: impl Fn(&Campaign) -> Option<String>,
+) -> Scope {
+    let full = |why: String| Scope::Full { why };
+    if !chains(rigor) {
+        return full(format!(
+            "a `{rigor}` mission's campaigns are all full: only `standard` and `critical` \
+             chain them"
+        ));
+    }
+    match replay {
+        Replay::Now => return full("asked `--again`, which is a full campaign".to_string()),
+        Replay::WhenChanged => {}
+    }
+    let Some(previous) = previous else {
+        return full("the first campaign of this mission".to_string());
+    };
+    let at = crate::text::one_line(short(&previous.head)).to_string();
+    if let Some(owed) = owed(previous) {
+        return full(format!(
+            "gate 7 did not pass on the previous campaign, at {at}: {}",
+            crate::text::one_line(&owed)
+        ));
+    }
+    if !is_ancestor(&previous.head) {
+        return full(format!(
+            "the previous campaign's commit {at} is not an ancestor of HEAD"
+        ));
+    }
+    match previous.chain.fork.as_deref() {
+        Some(then) if then == fork => {}
+        Some(then) => {
+            return full(format!(
+                "the branch's fork point moved since the previous campaign, at {at}: from {} \
+                 to {}",
+                crate::text::one_line(short(then)),
+                crate::text::one_line(short(fork))
+            ));
+        }
+        None => {
+            return full(format!(
+                "the previous campaign, at {at}, recorded no fork point"
+            ));
+        }
+    }
+    let Some(files) = &previous.files else {
+        return full(format!(
+            "the previous campaign, at {at}, did not count each file — its stack's \
+             mutation.sh gives no per-file counts, or they did not add up — so there is \
+             nothing to rebuild a partial campaign from"
+        ));
+    };
+    if tried_in(files) != previous.tried {
+        return full(format!(
+            "the previous campaign's per-file counts, at {at}, do not add up to its total"
+        ));
+    }
+    if let Some(why) = carried(previous) {
+        return full(format!(
+            "the previous campaign's counts, at {at}, cannot be carried: {}",
+            crate::text::one_line(&why)
+        ));
+    }
+    match (tooling, previous.chain.tooling.as_deref()) {
+        (Err(why), _) => full(format!(
+            "what this campaign runs with could not be read: {}",
+            crate::text::one_line(why)
+        )),
+        (Ok(_), None) => full(format!(
+            "the previous campaign, at {at}, recorded nothing of what it ran with"
+        )),
+        (Ok(now), Some(then)) if now != then => full(format!(
+            "a stack's mutation.sh or its tool's version changed since the previous \
+             campaign, at {at}"
+        )),
+        (Ok(_), Some(_)) => Scope::Partial {
+            since: previous.head.clone(),
+        },
+    }
+}
+
+/// Whether a mission at `rigor` chains its campaigns (SPEC 4.4, gate 7):
+/// `standard` and `critical` do, a later campaign partial whenever [`scope`]
+/// finds every condition met; a `prototype` owes no campaign to chain.
+///
+/// At `critical`, gate 7 judges the chain's reconstruction as it judges any
+/// campaign: every survivor listed — kept from an unchanged file or found by
+/// the latest campaign — needs an outcome, and no threshold applies.
+pub fn chains(rigor: crate::mission::Rigor) -> bool {
+    rigor != crate::mission::Rigor::Prototype
+}
+
+/// The line of a stack's `mutation.sh` that says how to read its tool's
+/// version: `# nunki-tool-version: <command>`, run in the clean copy where
+/// the campaign runs that stack's script ([`runs_in`]) — its own directory,
+/// when the project carries several stacks.
+///
+/// The stack's to say, since `nunki` knows no mutation tool (SPEC 4.4): a
+/// script that says nothing — a project's own, written before this — runs
+/// full campaigns only, which is today's behaviour.
+pub const TOOL_VERSION_MARK: &str = "# nunki-tool-version:";
+
+/// The command a `mutation.sh` names after [`TOOL_VERSION_MARK`], if it
+/// names one.
+pub fn tool_version_command(script: &str) -> Option<&str> {
+    script
+        .lines()
+        .find_map(|line| line.trim().strip_prefix(TOOL_VERSION_MARK))
+        .map(str::trim)
+        .filter(|command| !command.is_empty())
+}
+
+/// What a campaign runs with, stack by stack — its name, its `mutation.sh`
+/// as the container reads it, and what its tool said of its version — as
+/// the text [`tooling`] digests. `None` when a stack's version is unknown:
+/// what cannot be compared does not match.
+pub fn tooling_manifest(stacks: &[(String, String, Option<String>)]) -> Option<String> {
+    let mut manifest = String::new();
+    for (stack, script, version) in stacks {
+        let version = version
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())?;
+        manifest.push_str(&format!(
+            "stack {stack}\nversion {version}\nscript {}\n{script}\n",
+            script.len()
+        ));
+    }
+    Some(manifest)
+}
+
+/// The digest of what a campaign about to run will run with: the
+/// `mutation.sh` of each stack it calls ([`called_stacks`]) and that
+/// stack's tool version, read in the clean copy through the slot's
+/// container ([`tooling_manifest`]).
+///
+/// The inner `Err` says why it could not be read, naming the stack: a script
+/// that cannot be read or names no version command, or a command that fails
+/// or says nothing. A campaign whose tooling cannot be read is full
+/// ([`scope`]), and that reason is what it records.
+///
+/// Only the stacks the campaign calls count (#139). A stack the branch did
+/// not touch is not called by [`several_campaigns`], so its tool is not what
+/// the campaign runs with — and when its version could not be read, every
+/// campaign of the project was full, on every stack. Measured on a project
+/// with a `rust` stack and a `next: frontend` one, on a branch that touched
+/// no file under `frontend/`: `pnpm exec stryker --version` failed, and a
+/// campaign after a volet that only added tests ran full, 514 mutants for
+/// about 6.5 hours.
+///
+/// Each version command runs where the campaign runs that stack's script
+/// ([`runs_in`]): run at the copy's root, the `next` stack's command failed
+/// with `ERR_PNPM_RECURSIVE_EXEC_NO_PACKAGE` whatever was installed.
+///
+/// The stacks counted are those owning a **touched** path, not only the
+/// paths a partial campaign is handed: which campaign runs depends on this
+/// digest, and the touched set does not.
+pub fn tooling(
+    project: &crate::project::Project,
+    slot: &crate::slot::Slot,
+    engine: std::sync::Arc<dyn crate::engine::Engine>,
+    judged: &[crate::run::Judged],
+    touched: &[String],
+) -> Result<Result<String, String>, MutantsError> {
+    let mut stacks = Vec::new();
+    for j in called_stacks(judged, touched) {
+        let run = |argv: &[&str]| {
+            crate::exec::run(
+                project,
+                slot,
+                engine.clone(),
+                &argv.iter().map(|a| a.to_string()).collect::<Vec<_>>(),
+                crate::exec::On::Proof,
+            )
+        };
+        let name = &j.stack.name;
+        let at = format!("{}/{SCRIPT}", j.scripts_at);
+        let script = run(&["cat", &at])?;
+        if !script.ok() {
+            return Ok(Err(format!(
+                "the `{name}` stack's {at} could not be read ({})",
+                exec_said(&script)
+            )));
+        }
+        let Some(command) = tool_version_command(&script.stdout) else {
+            return Ok(Err(format!(
+                "the `{name}` stack's {SCRIPT} names no `{TOOL_VERSION_MARK}` command"
+            )));
+        };
+        let dir = runs_in(judged, j);
+        let said = run(&[
+            "sh",
+            "-c",
+            &format!("cd {} && {command}", crate::exec::quote(&dir)),
+        ])?;
+        if !said.ok() || said.stdout.trim().is_empty() {
+            return Ok(Err(format!(
+                "the `{name}` stack's tool version could not be read: `{command}`, run in \
+                 `{dir}`, {}",
+                exec_said(&said)
+            )));
+        }
+        stacks.push((name.clone(), script.stdout, Some(said.stdout)));
+    }
+    match tooling_manifest(&stacks) {
+        Some(manifest) => Ok(Ok(hash_object(&slot.tree, &manifest)?)),
+        // Every version was checked above; kept rather than unwrapped.
+        None => Ok(Err("a stack's tool version said nothing".to_string())),
+    }
+}
+
+/// Why a campaign cannot hand its names to a stack, or `None` when every
+/// stack `named` hands mutants to says it reads them ([`measures_by_name`]):
+/// its `mutation.sh` read in the clean copy, as the campaign will run it. A
+/// script that ignored the names would measure other mutants than the ones
+/// named, and say nothing.
+pub fn unnamed(
+    project: &crate::project::Project,
+    slot: &crate::slot::Slot,
+    engine: std::sync::Arc<dyn crate::engine::Engine>,
+    judged: &[crate::run::Judged],
+    named: &BTreeMap<String, Vec<String>>,
+) -> Result<Option<String>, MutantsError> {
+    for j in judged
+        .iter()
+        .filter(|j| named.get(&j.stack.name).is_some_and(|n| !n.is_empty()))
+    {
+        let at = format!("{}/{SCRIPT}", j.scripts_at);
+        let script = crate::exec::run(
+            project,
+            slot,
+            engine.clone(),
+            &["cat".to_string(), at.clone()],
+            crate::exec::On::Proof,
+        )?;
+        if !script.ok() {
+            return Ok(Some(format!(
+                "the `{}` stack's {at} could not be read ({}), so it cannot be handed the \
+                 survivors this campaign names",
+                j.stack.name,
+                exec_said(&script)
+            )));
+        }
+        if !measures_by_name(&script.stdout) {
+            return Ok(Some(format!(
+                "the `{}` stack's {SCRIPT} does not say it measures mutants by name \
+                 (`{BY_NAME_MARK}`), so it cannot be handed the survivors this campaign names: \
+                 `nunki init --refresh` rewrites a script nunki wrote",
+                j.stack.name
+            )));
+        }
+    }
+    Ok(None)
+}
+
+/// What a command run in the container said, for a reason on one line: its
+/// exit status and the first of its error output, or that it printed
+/// nothing.
+fn exec_said(out: &crate::engine::ExecOutput) -> String {
+    let stderr = crate::text::brief(&out.stderr, 200);
+    match (out.ok(), stderr.is_empty()) {
+        (true, _) => "it exited 0 and printed nothing".to_string(),
+        (false, true) => format!("it exited {}, with nothing on stderr", out.status),
+        (false, false) => format!("it exited {}: {stderr}", out.status),
+    }
+}
+
+/// The stacks a campaign over `touched` calls ([`command`]): a project's one
+/// stack, whatever was touched; of several, each that owns a touched path —
+/// [`several_campaigns`] does not call the others.
+pub fn called_stacks<'a>(
+    judged: &'a [crate::run::Judged],
+    touched: &[String],
+) -> Vec<&'a crate::run::Judged> {
+    match judged {
+        [one] => vec![one],
+        several => several
+            .iter()
+            .filter(|j| {
+                touched
+                    .iter()
+                    .any(|path| owner(several, path).is_some_and(|o| o.stack == j.stack))
+            })
+            .collect(),
+    }
+}
+
+/// Where a campaign runs `j`'s script, relative to the clean copy: its root
+/// for a project's one stack ([`command`]), the stack's own directory among
+/// several ([`several_campaigns`]).
+pub fn runs_in(judged: &[crate::run::Judged], j: &crate::run::Judged) -> String {
+    match judged {
+        [_] => ".".to_string(),
+        _ if j.stack.dir.is_empty() => ".".to_string(),
+        _ => j.stack.dir.clone(),
+    }
+}
+
+/// Why the counts of `previous` cannot be carried into a partial campaign,
+/// or `None` when they can (HQ review of 00f8e51): the files changed since
+/// it must be listable, and every file it counted that did not change —
+/// a count the partial campaign would keep as it is — must be one the
+/// branch `touched` at `HEAD`, present there. A key that names no such file
+/// — a path a script mis-cut, a file gone without a change nunki saw —
+/// would stay in the chain for ever, counted and never measured again.
+pub fn uncarried(tree: &Path, previous: &Campaign, touched: &[String]) -> Option<String> {
+    let changed = match changed_between(tree, &previous.head, "HEAD") {
+        Ok(changed) => changed,
+        Err(e) => {
+            return Some(format!(
+                "the files changed since it could not be listed ({e})"
+            ));
+        }
+    };
+    let present = match files_at(tree, "HEAD") {
+        Ok(present) => present,
+        Err(e) => return Some(format!("the files at HEAD could not be listed ({e})")),
+    };
+    previous
+        .files
+        .as_ref()?
+        .keys()
+        .filter(|key| !changed.contains(*key))
+        .find(|key| !touched.contains(key) || !present.contains(*key))
+        .map(|key| format!("{key}, which it counted, is no file the branch touches at HEAD"))
+}
+
+/// Every file in `commit`'s tree, by path.
+fn files_at(tree: &Path, commit: &str) -> Result<BTreeSet<String>, MutantsError> {
+    let names = git::SlotGit::open(tree)?.names(&["ls-tree", "-r", "--name-only", "-z", commit])?;
+    Ok(names.into_iter().collect())
+}
+
+/// A campaign's per-file counts ([`by_file`]), trusted only when every key
+/// is exactly one of the paths it was `handed` (HQ review of 00f8e51): a
+/// key that is not names no file nunki gave it — a path a script cut at a
+/// colon, say — and a chain rebuilt from it would carry a count no file
+/// answers for. `None` when it was handed nothing nunki recorded.
+pub fn trusted_files(
+    text: &str,
+    on: &str,
+    handed: Option<&[String]>,
+) -> Option<BTreeMap<String, Measured>> {
+    let handed = handed?;
+    by_file(text, on).filter(|files| files.keys().all(|key| handed.contains(key)))
+}
+
+/// The paths a partial campaign since `since` hands its stack: those the
+/// branch touched whose content changed since then ([`changed_between`]).
+/// A path changed since and back to the base's content is not the branch's,
+/// and is not given.
+pub fn touched_since(
+    tree: &Path,
+    since: &str,
+    touched: &[String],
+) -> Result<Vec<String>, MutantsError> {
+    let changed = changed_between(tree, since, "HEAD")?;
+    Ok(touched
+        .iter()
+        .filter(|path| changed.contains(*path))
+        .cloned()
+        .collect())
+}
+
+/// The campaign on file, when it answers for this content and the caller is
+/// willing to take it.
+///
+/// Public, and its own function, because it **is** the whole of [`Replay`]:
+/// reaching it through [`campaign`] needs a container, so a test that cannot
+/// call it could only check that a campaign started, never why. A campaign costs
+/// an hour (SPEC § 7), so one on the same content is not run again — unless a
+/// human says something changed that the fingerprint cannot see, since the
+/// fingerprint is over the touched files and not over `mutation.sh`, the
+/// tool's version, or an exclusion added since.
+///
+/// An incomplete one on this content ([`Stopped`]) answers with what it is,
+/// and the HQ chooses — unless the deadline it was stopped at has been
+/// raised to `deadline_minutes` since ([`stopped_short`]).
+pub fn already_answered(
+    dir: &Path,
+    want: &str,
+    replay: Replay,
+    deadline_minutes: u32,
+) -> Result<Option<Progress>, MutantsError> {
+    if replay == Replay::Now {
+        return Ok(None);
+    }
+    let Some(existing) = read(dir)? else {
+        return Ok(None);
+    };
+    if existing.fingerprint != want {
+        return Ok(None);
+    }
+    match (
+        stopped_short(&existing, deadline_minutes),
+        &existing.stopped,
+    ) {
+        (Some(Standing::Owed(_)), _) => return Ok(None),
+        (Some(Standing::HqChooses(_)), Some(stopped)) => {
+            return Ok(Some(Progress::Incomplete {
+                survivors: existing.survivors.len(),
+                stopped: stopped.clone(),
+            }));
+        }
+        _ => {}
+    }
+    Ok(Some(Progress::Fresh {
+        survivors: existing.survivors.len(),
+    }))
+}
+
+/// Where a campaign is at, as a caller reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Progress {
+    /// Nothing to do: a campaign on this exact content is already on file.
+    Fresh { survivors: usize },
+    /// Launched just now, full or partial.
+    Started { fingerprint: String, scope: Scope },
+    /// Still going, or not known to have stopped. `unstopped` says why it
+    /// is held as in flight when it should not be running: past its
+    /// deadline, or its script ended, and the stop did not take or could not
+    /// be confirmed ([`unstopped_said`]); or whether it runs could not be
+    /// told at all. Its record stays filed, and the next reading tries again.
+    Running {
+        started_at: String,
+        lines: usize,
+        unstopped: Option<String>,
+    },
+    /// Ended, and `MUTANTS.json` is written. `chain` says each campaign of
+    /// the chain in one line ([`chain_said`]).
+    Finished {
+        survivors: usize,
+        chain: Vec<String>,
+    },
+    /// Past its deadline and stopped (SPEC 4.4, "un délai paramétré"), and
+    /// recorded as incomplete with the `survivors` the tool had already
+    /// reported ([`Stopped::Deadline`]). The HQ's to choose: raise the bound,
+    /// or send them to the coder.
+    ///
+    /// Reported only once nothing of the campaign is left running, and
+    /// `reset` says whether the clean copy was put back to its commit.
+    Overrun {
+        minutes: u32,
+        survivors: usize,
+        reset: Reset,
+    },
+    /// An incomplete campaign on this content is on file ([`Stopped`]), and
+    /// nothing is launched over it: the HQ chooses ([`stopped_short`]).
+    Incomplete { survivors: usize, stopped: Stopped },
+    /// Ended without the line that says it finished, and its stderr says
+    /// why: a test the branch carries failing inside `mutants/`, a crate that
+    /// does not compile. That is the branch's to fix, and gate 7 reads the
+    /// same stderr on the next `verify` and goes red, which sends a volet —
+    /// so nothing here is waiting on a human.
+    ///
+    /// Kept apart from [`Progress::Lost`] because the monitor goes on after
+    /// this one and stops after that one. A campaign that left no word on
+    /// stderr leaves gate 7 unplayed, and a monitor that went on would start
+    /// the same campaign on every tick.
+    CouldNotRun(String),
+    /// The container went away under it, or the engine could not be asked,
+    /// or it ended having said nothing at all.
+    Lost(String),
+}
+
+/// What a campaign that has ended says, once `FILE` is written.
+///
+/// Two sentences and not one: with nothing alive there is nobody to triage,
+/// and "each needs one of the three outcomes" would then be a sentence about
+/// no one. A clean campaign must not ask for outcomes it does not need — a
+/// line that says the same thing whatever happened is a line a reader
+/// learns to skip.
+pub fn ended(survivors: usize) -> String {
+    if survivors == 0 {
+        return format!("finished — no survivor in {FILE}: gate 7 has nothing left to ask");
+    }
+    format!(
+        "finished — {survivors} survivor(s) in {FILE}; each needs one of the three \
+         outcomes before gate 7 is green"
+    )
+}
+
+/// What a campaign that has just been launched says to the human whose verb
+/// launched it.
+///
+/// Here rather than in `main.rs` for the same reason [`ended`] is: a sentence
+/// a test can read is a sentence a test can catch. `cargo fmt` can join a
+/// multi-line literal and keep the indentation inside the string, printing
+/// fifty spaces in the middle of it, and only a test notices.
+pub fn started(mission: &str) -> String {
+    format!("started; it runs detached, and `nunki verify {mission}` reads it back")
+}
+
+/// Read back the campaign that owns this slot's clean copy, if one is filed.
+///
+/// `None` when nothing is filed. Otherwise what it is now — and the reading
+/// **clears the record** whenever the campaign is over, however it ended, so
+/// a caller that asks cannot be misled by a stale file.
+///
+/// A campaign still running past its deadline is stopped here, whole
+/// ([`stop_whole`]), and is over only once the stop is confirmed: then it
+/// is recorded as incomplete ([`Stopped::Deadline`]), forgotten, and the
+/// clean copy reset ([`Progress::Overrun`]). A stop that did not take, or
+/// could not be confirmed, keeps the record filed and reports the campaign
+/// as in flight with what is left ([`Progress::Running`]'s `unstopped`), and
+/// the next reading tries again (SPEC 4.4, "Une campagne arrêtée court est
+/// incomplète").
+///
+/// Its own function because two callers need the answer and only one of them
+/// may launch: [`campaign`] below, and `run::launch`, which recreates the
+/// container a campaign lives in and would otherwise kill it blind.
+pub fn read_back(
+    project: &crate::project::Project,
+    slot: &crate::slot::Slot,
+    engine: std::sync::Arc<dyn crate::engine::Engine>,
+    dir: &Path,
+) -> Result<Option<Progress>, MutantsError> {
+    read_back_into(project, slot, engine, Sink::Mission(dir))
+}
+
+/// [`read_back`] for a campaign outside missions: the same reading — the
+/// deadline, the stop confirmed, the container asked — recorded into the
+/// project's debt ([`crate::offmission`]) rather than a mission's [`FILE`].
+/// A mission's campaign filed in the slot is refused. `None` too when
+/// another `nunki mutants status` read it back first
+/// ([`crate::offmission::read_ended`]).
+pub fn read_back_off_mission(
+    project: &crate::project::Project,
+    slot: &crate::slot::Slot,
+    engine: std::sync::Arc<dyn crate::engine::Engine>,
+) -> Result<Option<Progress>, MutantsError> {
+    read_back_into(project, slot, engine, Sink::OffMission)
+}
+
+/// Where a campaign read back is recorded.
+enum Sink<'a> {
+    /// A mission's folder.
+    Mission(&'a Path),
+    /// The project's debt ([`crate::offmission`]).
+    OffMission,
+}
+
+fn read_back_into(
+    project: &crate::project::Project,
+    slot: &crate::slot::Slot,
+    engine: std::sync::Arc<dyn crate::engine::Engine>,
+    sink: Sink<'_>,
+) -> Result<Option<Progress>, MutantsError> {
+    use crate::harness::spawn::{Presence, Spawned, Spawner};
+
+    let Some(running) = read_running(&project.hq_root, &slot.name)? else {
+        return Ok(None);
+    };
+    // A campaign is read back by its own kind only: an off-mission one
+    // recorded into a mission's file would answer gate 7 for content the
+    // mission never had (SPEC 4.4, the campaigns outside missions).
+    match (&sink, &running.off_mission) {
+        (Sink::Mission(_), Some(off)) => {
+            return Err(MutantsError::OffMission {
+                slot: slot.name.clone(),
+                base: off.base.clone(),
+                commit: crate::text::one_line(short(&off.commit)).to_string(),
+            });
+        }
+        (Sink::OffMission, None) => {
+            return Err(MutantsError::MissionCampaign {
+                slot: slot.name.clone(),
+            });
+        }
+        _ => {}
+    }
+    let spawner = spawner_of(project, slot, engine.clone(), &running)?;
+    let spawned = Spawned {
+        pid: running.pid,
+        container: running.container.clone(),
+    };
+    let presence = spawner
+        .alive(&spawned)
+        .map_err(|e| MutantsError::Launch(e.to_string()))?;
+    let text = std::fs::read_to_string(&running.log).unwrap_or_default();
+    let in_flight = |unstopped| Progress::Running {
+        started_at: running.started_at.clone(),
+        lines: text.lines().count(),
+        unstopped,
+    };
+    let progress = match presence {
+        // A frozen campaign is still in flight, and its deadline must not run
+        // against a clock the human stopped on purpose. Reported as running,
+        // with the freeze named, rather than counted as an overrun.
+        Presence::Paused => in_flight(None),
+        Presence::Running => {
+            if minutes_since(&running.started_at) > running.deadline_minutes {
+                // Stopped rather than left: SPEC 4.4 gives the campaign a
+                // configured delay, and a campaign past it is holding a slot,
+                // not working in it. What it had found is kept, as from an
+                // incomplete campaign, rather than left inside a log.
+                //
+                // Stopped whole, and recorded only once that is confirmed
+                // ([`stop_whole`]). A stop that did not take keeps the record
+                // filed, so every door into the copy stays shut, and the
+                // campaign is reported as still in flight: the next reading
+                // comes back here and tries again.
+                let halt = stop_whole(&spawner, &running);
+                match unstopped_said(&halt) {
+                    Some(why) => in_flight(Some(format!(
+                        "past its {}-minute deadline, {why}",
+                        running.deadline_minutes
+                    ))),
+                    // Frozen between the two questions: in flight, as a
+                    // paused campaign always is here.
+                    None if halt == Halt::Paused => in_flight(None),
+                    None => {
+                        // Outside missions nothing is recorded of a campaign
+                        // stopped short: the debt holds what was measured.
+                        let survivors = match &sink {
+                            Sink::Mission(dir) => record_stopped(
+                                dir,
+                                &running,
+                                &text,
+                                Stopped::Deadline {
+                                    minutes: running.deadline_minutes,
+                                },
+                            )?,
+                            Sink::OffMission => 0,
+                        };
+                        forget_running(&project.hq_root, &slot.name)?;
+                        Progress::Overrun {
+                            minutes: running.deadline_minutes,
+                            survivors,
+                            reset: reset_copy(project, slot, engine),
+                        }
+                    }
+                }
+            } else {
+                in_flight(None)
+            }
+        }
+        // The script has ended, which says nothing of what it started:
+        // `cargo-mutants`, its builds and its test binaries are reparented
+        // when it goes, and go on rewriting the copy — killed on purpose by
+        // something the campaign ran, or left behind by a script that died.
+        // So what still carries the campaign's tag is stopped and the stop
+        // confirmed ([`stop_whole`]) before the campaign is read back and
+        // forgotten. A stop that did not take keeps the record filed, every
+        // door into the copy shut, and the next reading tries again.
+        Presence::Ended => match stop_whole(&spawner, &running) {
+            // Frozen under the stop: in flight, as a paused campaign always
+            // is here.
+            Halt::Paused => in_flight(None),
+            halt => match unstopped_said(&halt) {
+                Some(why) => in_flight(Some(format!("its script has ended, and {why}"))),
+                None => match &sink {
+                    Sink::Mission(dir) => read_ended(project, slot, dir, &running)?,
+                    Sink::OffMission => {
+                        match crate::offmission::read_ended(project, slot, &running)? {
+                            Some(progress) => progress,
+                            None => return Ok(None),
+                        }
+                    }
+                },
+            },
+        },
+        // A positive answer from the engine: the container has exited, or the
+        // engine no longer knows it. Nothing in it can be running.
+        Presence::Vanished(why) => {
+            forget_running(&project.hq_root, &slot.name)?;
+            Progress::Lost(why)
+        }
+        // No answer at all: the campaign may be running as well as not. Its
+        // record stays filed, so no door into the copy opens on a question
+        // nobody answered, and the next reading asks again.
+        Presence::Unknown(why) => in_flight(Some(format!(
+            "whether it is still running could not be told: {why}. Its record stays \
+             filed, so no door into the clean copy of HEAD opens, and nothing is \
+             recorded; the next reading asks again"
+        ))),
+    };
+    Ok(Some(progress))
+}
+
+/// Read back a campaign whose script has ended and of which nothing is left
+/// running — confirmed by [`stop_whole`] — and forget it.
+///
+/// Ended, and it said so: recorded, or its reason left where gate 7 reads
+/// it. Anything else is a campaign that stopped: nothing is written, so gate
+/// 7 keeps asking rather than passing on a log that happens to hold no
+/// survivor.
+fn read_ended(
+    project: &crate::project::Project,
+    slot: &crate::slot::Slot,
+    dir: &Path,
+    running: &Running,
+) -> Result<Progress, MutantsError> {
+    // Read after the stop: whatever the campaign printed until then counts.
+    let text = std::fs::read_to_string(&running.log).unwrap_or_default();
+    if completed(&text) {
+        // Finished, and still measured nothing: not recorded, and its
+        // reason left where gate 7 reads it.
+        let progress = match settle_unmeasured(&running.log, &text)? {
+            Some(why) => Progress::CouldNotRun(why),
+            None => match record_finished_with_registry(
+                dir,
+                &project.hq_root,
+                &slot.tree,
+                &running.fingerprint,
+                &running.head,
+                &text,
+                &running.chain,
+            ) {
+                Ok(recorded) => {
+                    keep_pace(&project.hq_root, &text)?;
+                    Progress::Finished {
+                        survivors: recorded.survivors,
+                        chain: chain_on_file(dir)?,
+                    }
+                }
+                // A partial campaign whose chain broke under it measured
+                // only what changed since, and is not recorded alone:
+                // forgotten, and said, rather than asked about for ever.
+                Err(MutantsError::Broken(why)) => Progress::Lost(why),
+                Err(e) => return Err(e),
+            },
+        };
+        forget_running(&project.hq_root, &slot.name)?;
+        return Ok(progress);
+    }
+    forget_running(&project.hq_root, &slot.name)?;
+    // Said it finished more than once: not a campaign that stopped, and its
+    // reason is left where gate 7 reads it.
+    if let Some(why) = settle_repeated(&running.log, &text)? {
+        return Ok(Progress::CouldNotRun(why));
+    }
+    // The **stderr** file, not the log. A campaign that got nowhere wrote
+    // nothing to stdout — that is what "after 0 line(s)" says — so naming
+    // the log sends whoever reads this to an empty file, precisely when they
+    // need the reason. Typically the log is 0 bytes and the sibling `.err`
+    // holds the traceback that explains it, which otherwise has to be found
+    // by hand.
+    //
+    // The log is still named when it holds something: a campaign that
+    // printed survivors and then died says more there than in its stderr.
+    let stderr = running.log.with_extension("err");
+    let said_why = std::fs::read_to_string(&stderr)
+        .map(|t| !t.trim().is_empty())
+        .unwrap_or(false);
+    let diagnosis = if text.trim().is_empty() {
+        stderr
+    } else {
+        running.log.clone()
+    };
+    let why = format!(
+        "it stopped without saying it had finished, after {} line(s): a campaign \
+         that was killed, whose container went away, or that never compiled \
+         leaves exactly this, and none of them measured anything. What it said \
+         is in {}",
+        text.lines().count(),
+        diagnosis.display()
+    );
+    // A campaign whose stderr explains the failure (a guard failing inside
+    // `mutants/`, say) is one gate 7 can go red on. Reporting it as lost
+    // instead stops the monitor here, and the volet waits for someone to
+    // type `nunki verify`.
+    Ok(if said_why {
+        Progress::CouldNotRun(why)
+    } else {
+        Progress::Lost(why)
+    })
+}
+
+/// End the campaign that owns this slot's clean copy, before a profile
+/// switch removes its container, and say what the stop found ([`stop_whole`]).
+/// `None` when no campaign is filed.
+///
+/// It does **not** forget the campaign. Its one caller, `run::launch`,
+/// removes the agent's container right after, and every process in it ends
+/// with it — so a leftover here does not fail the switch, and the record is
+/// forgotten only once that container is removed (`run::switch_out`), never
+/// before: until then, something of the campaign may still be writing in
+/// the copy.
+///
+/// Nothing is written to [`FILE`]: a campaign cut short measured nothing, and
+/// gate 7 must ask for another rather than read this one (SPEC 4.4).
+pub fn end(
+    project: &crate::project::Project,
+    slot: &crate::slot::Slot,
+    engine: std::sync::Arc<dyn crate::engine::Engine>,
+) -> Result<Option<Halt>, MutantsError> {
+    let Some(running) = read_running(&project.hq_root, &slot.name)? else {
+        return Ok(None);
+    };
+    let spawner = spawner_of(project, slot, engine, &running)?;
+    Ok(Some(stop_whole(&spawner, &running)))
+}
+
+/// The stop every path that ends a campaign goes through — [`cancel`], the
+/// deadline in [`read_back`], [`end`], and a campaign whose script has ended
+/// before [`read_back`] forgets it — so that none keeps a copy of its own
+/// (SPEC 4.4, "Le HQ peut annuler une campagne en vol").
+///
+/// The campaign is stopped **whole**: every process in its container that
+/// carries its [`RUN_TAG`](crate::engine::spawn::RUN_TAG) — its log's stem,
+/// which the wrapper sets and every process it starts inherits: the script,
+/// `cargo-mutants`, the builds, the test binaries, at whatever depth. Not by
+/// the pid on file: that is the script's alone, and a script that is told to
+/// end leaves the rest reparented and rewriting the copy in place.
+///
+/// And confirmed: the container is asked again, after the stop, what still
+/// carries the tag. Only [`Halt::Done`] and [`Halt::NotRunning`] mean that
+/// nothing of the campaign runs; a caller forgets its record on nothing
+/// else ([`unstopped_said`]).
+///
+/// A process that clears its own environment is not found by its tag. What
+/// contains such a process is its container.
+pub fn stop_whole(spawner: &crate::engine::spawn::ContainerSpawner, running: &Running) -> Halt {
+    spawner.halt(&running.container, &running.log)
+}
+
+/// What a stop that did not take says — what is left, or why that could not
+/// be told — or `None` when nothing of the campaign can be running, or when
+/// its container is paused (each caller says that its own way).
+pub fn unstopped_said(halt: &Halt) -> Option<String> {
+    let what = match halt {
+        Halt::Done { .. } | Halt::NotRunning(_) | Halt::Paused => return None,
+        Halt::Left(pids) => format!(
+            "the campaign was stopped, but processes carrying its tag are still running in \
+             its container: pid(s) {}",
+            pids.iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
+        Halt::Unknown(why) => format!(
+            "whether anything of the campaign is still running in its container could not be \
+             told: {why}"
+        ),
+    };
+    Some(format!(
+        "{what}. Its record stays filed, so no door into the clean copy of HEAD opens, and \
+         nothing is recorded as stopped; running the same verb again tries the stop again"
+    ))
+}
+
+/// Whether the clean copy of `HEAD` was put back to its commit after a stop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reset {
+    Done,
+    /// It was not, and why.
+    Failed(String),
+}
+
+/// What a stop says of the copy it reset ([`Reset`]).
+pub fn reset_said(reset: &Reset) -> String {
+    match reset {
+        Reset::Done => "the clean copy of HEAD was reset to its commit".to_string(),
+        Reset::Failed(why) => format!(
+            "the clean copy of HEAD could NOT be reset to its commit, and may still hold a \
+             mutated file: {}. Every door into it resets it before working there",
+            crate::text::one_line(why)
+        ),
+    }
+}
+
+/// Put the clean copy back to its commit after a confirmed stop, by the
+/// refresh every door into it already uses ([`crate::exec::refresh`]): a
+/// campaign stopped midway may have left a mutated file in place.
+///
+/// Only once the record is forgotten — the refresh refuses a copy a
+/// campaign owns.
+pub(crate) fn reset_copy(
+    project: &crate::project::Project,
+    slot: &crate::slot::Slot,
+    engine: std::sync::Arc<dyn crate::engine::Engine>,
+) -> Reset {
+    match crate::exec::refresh(project, slot, engine) {
+        Ok(()) => Reset::Done,
+        Err(e) => Reset::Failed(e.to_string()),
+    }
+}
+
+/// The spawner that reaches the campaign `running` describes, in this slot's
+/// agent container.
+pub(crate) fn spawner_of(
+    project: &crate::project::Project,
+    slot: &crate::slot::Slot,
+    engine: std::sync::Arc<dyn crate::engine::Engine>,
+    running: &Running,
+) -> Result<crate::engine::spawn::ContainerSpawner, MutantsError> {
+    Ok(crate::engine::spawn::ContainerSpawner::new(
+        engine,
+        crate::run::profile_path(project, &slot.name),
+        &crate::compose::project_name(&project.session(), &slot.name)
+            .map_err(|e| MutantsError::Exec(crate::exec::ExecError::Compose(e)))?,
+        crate::compose::AGENT_SERVICE,
+    )
+    .identified_by(&running.fingerprint))
+}
+
+/// Record the campaign `running` describes as incomplete, from what its log
+/// `text` holds so far: the survivors the tool had already reported, the
+/// HQ's rulings carried from the campaign on file by the same rules as any
+/// replay, and why it stopped. Returns how many survivors it holds.
+///
+/// No count is kept, and no per-file counts: a campaign stopped midway
+/// tried part of what it was handed, and a share over that part would be a
+/// share of the wrong whole. Gate 7 never judges it anyway ([`owed`],
+/// [`stopped_short`]).
+///
+/// Only the exact twin of a ruled survivor is given its proposal here: the
+/// looser tier of [`carry`] needs the code read at `HEAD`, which this
+/// recording does not do, and fails closed without it.
+pub fn record_stopped(
+    dir: &Path,
+    running: &Running,
+    text: &str,
+    stopped: Stopped,
+) -> Result<usize, MutantsError> {
+    let mut survivors = parse(text);
+    if let Some(previous) = read(dir)? {
+        carry(&previous, &mut survivors, |_| false);
+    }
+    let count = survivors.len();
+    write(
+        dir,
+        &Campaign {
+            fingerprint: running.fingerprint.clone(),
+            head: running.head.clone(),
+            date: crate::state::now_rfc3339(),
+            survivors,
+            tried: None,
+            files: None,
+            chain: Chain {
+                earlier: Vec::new(),
+                ran: None,
+                ..running.chain.clone()
+            },
+            stopped: Some(stopped),
+        },
+    )?;
+    Ok(count)
+}
+
+/// What [`cancel`] found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Cancelled {
+    /// No campaign is in flight on this slot.
+    Nothing,
+    /// The campaign had already ended, or could not be asked: read back as
+    /// any call would, and nothing was cancelled.
+    Ended(Progress),
+    /// Stopped whole, and recorded as incomplete with the survivors it had
+    /// found; `reset` says whether the clean copy was put back.
+    Stopped { survivors: usize, reset: Reset },
+}
+
+/// The HQ calls off the campaign in flight on this slot, because it knows it
+/// is wasted: stopped the way the deadline stops one, and recorded as
+/// incomplete with `because` ([`Stopped::Cancelled`]), so that the mission
+/// stays where `nunki mission iterate` or `nunki verify` can take it.
+///
+/// Stopped whole ([`stop_whole`]), and only once nothing of it is left
+/// running is it recorded, forgotten, and the clean copy reset to its
+/// commit. A stop that did not take, or could not be confirmed, is an error
+/// that says what is left or why it could not tell: the record stays filed,
+/// so no door into the copy opens, nothing is recorded as stopped, and the
+/// same verb tries again.
+///
+/// A campaign whose script has already ended is read back instead
+/// ([`read_back`], which first stops and confirms what the script left
+/// carrying the tag), and its result kept: calling off a campaign that
+/// finished would throw a measurement away. What `read_back` still holds as
+/// in flight — a leftover, an answer nobody gave — is an error, as a stop
+/// that did not take is. A **paused** one is refused: its container is
+/// frozen, the stop would not reach it, and forgetting it would leave a
+/// campaign nobody follows rewriting the copy once it is unfrozen.
+pub fn cancel(
+    project: &crate::project::Project,
+    slot: &crate::slot::Slot,
+    engine: std::sync::Arc<dyn crate::engine::Engine>,
+    dir: &Path,
+    because: &str,
+) -> Result<Cancelled, MutantsError> {
+    use crate::harness::spawn::{Presence, Spawned, Spawner};
+
+    let because = because.trim();
+    if because.is_empty() {
+        return Err(MutantsError::NoReason);
+    }
+    let Some(running) = read_running(&project.hq_root, &slot.name)? else {
+        return Ok(Cancelled::Nothing);
+    };
+    let spawner = spawner_of(project, slot, engine.clone(), &running)?;
+    let spawned = Spawned {
+        pid: running.pid,
+        container: running.container.clone(),
+    };
+    match spawner
+        .alive(&spawned)
+        .map_err(|e| MutantsError::Launch(e.to_string()))?
+    {
+        Presence::Running => {
+            let text = std::fs::read_to_string(&running.log).unwrap_or_default();
+            let halt = stop_whole(&spawner, &running);
+            if halt == Halt::Paused {
+                return Err(MutantsError::Paused);
+            }
+            if let Some(why) = unstopped_said(&halt) {
+                return Err(MutantsError::NotStopped(why));
+            }
+            let survivors = record_stopped(
+                dir,
+                &running,
+                &text,
+                Stopped::Cancelled {
+                    because: because.to_string(),
+                },
+            )?;
+            forget_running(&project.hq_root, &slot.name)?;
+            Ok(Cancelled::Stopped {
+                survivors,
+                reset: reset_copy(project, slot, engine),
+            })
+        }
+        Presence::Paused => Err(MutantsError::Paused),
+        // Not running, as far as the first question goes: read back, which
+        // stops whatever an ended script left carrying the tag before it
+        // forgets anything. A campaign it still holds as in flight was not
+        // called off, and is never said to have ended.
+        _ => match read_back(project, slot, engine, dir)? {
+            Some(Progress::Running {
+                unstopped: Some(why),
+                ..
+            }) => Err(MutantsError::NotStopped(why)),
+            Some(Progress::Running { .. }) => Err(MutantsError::NotStopped(
+                "the campaign is still in flight — frozen, or found running on a second \
+                 look — and nothing was called off. Its record stays filed, so no door into \
+                 the clean copy of HEAD opens, and nothing is recorded as stopped; running \
+                 the same verb again tries again"
+                    .to_string(),
+            )),
+            Some(progress) => Ok(Cancelled::Ended(progress)),
+            None => Ok(Cancelled::Nothing),
+        },
+    }
+}
+
+/// What `nunki mission mutants --cancel` says of what [`cancel`] found.
+pub fn cancelled_said(cancelled: &Cancelled) -> String {
+    match cancelled {
+        Cancelled::Nothing => "no campaign is in flight on this slot: nothing to call off".into(),
+        Cancelled::Ended(progress) => format!(
+            "the campaign had already ended, and nothing was called off: {}",
+            crate::monitor::campaign_line(progress)
+        ),
+        Cancelled::Stopped { survivors, reset } => format!(
+            "campaign called off — nothing of it is left running, {survivors} survivor(s) \
+             kept in {FILE} as from an incomplete campaign, and the reason written to \
+             FOLLOWUP_HQ.md; {}. `nunki mission iterate --because` sends them to the coder; \
+             `nunki mission mutants --again` runs a new campaign",
+            reset_said(reset)
+        ),
+    }
+}
+
+/// [`cancel`], and the reason written in `FOLLOWUP_HQ.md` as `who`'s, when a
+/// campaign was stopped: the file the HQ and the next coder run read.
+pub fn cancel_and_say(
+    project: &crate::project::Project,
+    slot: &crate::slot::Slot,
+    engine: std::sync::Arc<dyn crate::engine::Engine>,
+    paths: &crate::mission::dir::Paths,
+    who: &str,
+    because: &str,
+) -> Result<Cancelled, MutantsError> {
+    let cancelled = cancel(project, slot, engine, &paths.dir, because)?;
+    if let Cancelled::Stopped { survivors, .. } = &cancelled {
+        crate::followup::campaign_cancelled(&paths.followup, who, because, *survivors)?;
+    }
+    Ok(cancelled)
+}
+
+/// What a caller asks of [`campaign`], beyond where it runs.
+#[derive(Debug, Clone, Copy)]
+pub struct Asked<'a> {
+    /// The mission's base, by **name**: [`campaign`] works out what the
+    /// branch brought through the same call gate 7 makes.
+    pub base: &'a str,
+    /// The mission's `mutation_minutes`: the budget a campaign sizes its
+    /// sample to ([`BUDGET_ENV`]); its deadline is [`deadline_minutes`] of it.
+    pub budget_minutes: u32,
+    pub replay: Replay,
+    /// The mission's rigor: only `standard` and `critical` chain their
+    /// campaigns ([`chains`], [`scope`]).
+    pub rigor: crate::mission::Rigor,
+    /// The share gate 7 asks for at `standard`: the one the previous
+    /// campaign is judged against before a partial one continues it.
+    pub threshold: u32,
+    /// The survivors a hardening mission names, frozen in its header, which
+    /// its campaign measures by name ([`crate::gate::campaign_on`]); empty
+    /// for any other mission.
+    pub hardening: &'a [crate::mission::Hardened],
+}
+
+/// Start the campaign, or say where the one in flight is.
+///
+/// Long by nature, so it is launched **detached** and watched like a run: one
+/// call starts it, later calls report on it, and the call that finds it ended
+/// writes [`FILE`].
+///
+/// The stack's script is invoked as `mutation.sh <campaign-id> <path>…`. The
+/// id is the content fingerprint, and it is first so that the campaign is
+/// identifiable from its own command line — process ids inside a container
+/// are recycled within seconds, and liveness here means "this campaign", not
+/// "something holds that number". The fork point travels in [`BASE_ENV`].
+///
+/// A partial campaign has the same base, and as paths those the branch
+/// touched whose content changed since the previous campaign's `HEAD`
+/// ([`scope`], [`touched_since`]).
+pub fn campaign(
+    project: &crate::project::Project,
+    slot: &crate::slot::Slot,
+    engine: std::sync::Arc<dyn crate::engine::Engine>,
+    dir: &Path,
+    stack: &str,
+    asked: &Asked<'_>,
+) -> Result<Progress, MutantsError> {
+    use crate::harness::spawn::Spawner;
+
+    let head = git::slot_head(&slot.tree)?;
+    // The base's **name**, and the paths worked out here — not handed in.
+    //
+    // Gate 7 judges a campaign by the fingerprint of what it ran on, so the
+    // gate and the launcher have to mean the same thing by "what this branch
+    // brought". They were two calls in two files, and in a slot the base has
+    // two readings. When the launcher and the gate computed the touched set
+    // separately, their fingerprints could disagree, and gate 7 kept asking
+    // for a campaign that had just run.
+    //
+    // One call, in the place that cannot be bypassed, rather than a rule the
+    // next caller has to know.
+    let on = crate::gate::campaign_on(&slot.tree, asked.base, asked.hardening)
+        .map_err(|e| MutantsError::Launch(e.to_string()))?;
+    let touched = on.touched.clone();
+    // The fingerprint stays over the touched files' content, not the fork
+    // point: a base that moves without changing a touched file leaves the
+    // diff of those files unchanged, and one that does change them changes
+    // their content after the rebase.
+    let fork = crate::gate::fork_point(&slot.tree, asked.base)
+        .map_err(|e| MutantsError::Launch(e.to_string()))?;
+    let want = on.fingerprint.clone();
+    let compose_project = crate::compose::project_name(&project.session(), &slot.name)
+        .map_err(|e| MutantsError::Exec(crate::exec::ExecError::Compose(e)))?;
+
+    if let Some(progress) = read_back(project, slot, engine.clone(), dir)? {
+        return Ok(progress);
+    }
+
+    // Nothing in flight. A campaign on this exact content is not run again:
+    // SPEC 4.4 says it replays only when the touched files have changed, and
+    // § 7 counts the hour it would otherwise spend.
+    let deadline = deadline_minutes(asked.budget_minutes);
+    if let Some(fresh) = already_answered(dir, &want, asked.replay, deadline)? {
+        return Ok(fresh);
+    }
+
+    let judged = crate::run::judged(project, stack);
+    crate::exec::refresh(project, slot, engine.clone())?;
+    // Absent or not executable is said here, where the message can be about
+    // the campaign, rather than as a launch that times out waiting for a pid.
+    for j in &judged {
+        let script = format!("{}/{SCRIPT}", j.scripts_at);
+        let probe = crate::exec::run(
+            project,
+            slot,
+            engine.clone(),
+            &[
+                "sh".to_string(),
+                "-c".to_string(),
+                format!("test -x {script}"),
+            ],
+            crate::exec::On::Proof,
+        )?;
+        if !probe.ok() {
+            return Err(MutantsError::Launch(format!(
+                "there is no executable {script} in the container — the mutation campaign \
+                 is a deterministic command the `{}` stack declares, in the project's home \
+                 (SPEC 4.4)",
+                j.stack.name
+            )));
+        }
+    }
+
+    // A hardening mission's survivors, each by the name its stack's tool
+    // gives it, and only to a stack whose script says it reads names: one
+    // that ignored them would measure what the branch changed and nothing of
+    // what the mission was framed to kill.
+    let named = names_by_stack(&judged, &on.named).map_err(|why| {
+        MutantsError::Launch(format!(
+            "this hardening mission names a survivor no stack can be handed by name: {why}"
+        ))
+    })?;
+    if let Some(why) = unnamed(project, slot, engine.clone(), &judged, &named)? {
+        return Err(MutantsError::Launch(why));
+    }
+
+    // Full or partial (SPEC 4.4, the chain). The previous campaign is judged
+    // as gate 7 would judge it now, the tests its outcomes name included.
+    let tooling = if chains(asked.rigor) {
+        tooling(project, slot, engine.clone(), &judged, &touched)?
+    } else {
+        Err(format!(
+            "not read: a `{}` mission chains no campaign",
+            asked.rigor
+        ))
+    };
+    let coders = read_triage(dir)?;
+    // A hardening mission's campaign is always full: the survivors it names
+    // are measured whatever its branch changed — tests, mostly, which no
+    // campaign mutates — so no earlier campaign holds what this one would
+    // carry.
+    let scope = if on.named.is_empty() {
+        scope(
+            asked.rigor,
+            asked.replay,
+            read(dir)?.as_ref(),
+            tooling.as_deref().map_err(String::as_str),
+            &fork,
+            |previous| {
+                owed(previous, &coders, asked.rigor, asked.threshold).or_else(|| {
+                    crate::gate::named_test_missing(&slot.tree, None, previous, &coders)
+                })
+            },
+            |commit| {
+                git::on_slot(&slot.tree, &["merge-base", "--is-ancestor", commit, "HEAD"]).is_ok()
+            },
+            |previous| uncarried(&slot.tree, previous, &touched),
+        )
+    } else {
+        Scope::Full {
+            why: format!(
+                "a hardening mission's campaign is always full: it measures what its branch \
+                 changed and the {} survivor(s) it names, by name",
+                on.named.len()
+            ),
+        }
+    };
+    let paths = if on.named.is_empty() {
+        handed(&slot.tree, &touched, &scope)?
+    } else {
+        on.paths.clone()
+    };
+    let mut launched = command_naming(&judged, &want, &paths, &fork, project.config.jobs(), &named);
+    launched.env.extend(sizing(
+        asked.budget_minutes,
+        read_pace(&project.hq_root),
+        fraction(&scope, read(dir)?.as_ref()),
+    ));
+
+    let runs = dir.join("runs");
+    std::fs::create_dir_all(&runs).map_err(|e| MutantsError::Io(runs.clone(), e))?;
+    let log = runs.join(format!("mutants-{}.log", &want[..7.min(want.len())]));
+    // Emptied first. The spawner opens a log **in append mode**, which is
+    // right for a harness run — one resumes into the same file and its
+    // earlier turns must survive — and wrong for a campaign, which is one
+    // measurement and not a stream. The name carries the fingerprint, so a
+    // campaign replayed over content that has not changed writes into the
+    // same file as the one before it, and `parse` reads the union.
+    //
+    // Appending instead, several campaigns on one fingerprint (5 survivors,
+    // then 1, then none) leave `MUTANTS.json` reporting six, every one of
+    // them dead. Gate 7 then sends a coder back for mutants that no longer
+    // exist, and nothing in the flow can tell: the file says what it says.
+    std::fs::write(&log, "").map_err(|e| MutantsError::Io(log.clone(), e))?;
+    let spawner = crate::engine::spawn::ContainerSpawner::new(
+        engine,
+        crate::run::profile_path(project, &slot.name),
+        &compose_project,
+        crate::compose::AGENT_SERVICE,
+    )
+    .identified_by(&want);
+    let spawned = spawner
+        .spawn(&launched, &log)
+        .map_err(|e| MutantsError::Launch(e.to_string()))?;
+
+    write_running(
+        &project.hq_root,
+        &slot.name,
+        &Running {
+            fingerprint: want.clone(),
+            head,
+            started_at: crate::state::now_rfc3339(),
+            container: spawned.container,
+            pid: spawned.pid,
+            log,
+            deadline_minutes: deadline,
+            chain: Chain {
+                scope: scope.clone(),
+                tooling: tooling.ok(),
+                earlier: Vec::new(),
+                ran: None,
+                fork: Some(fork.clone()),
+                handed: Some(paths),
+                sample: None,
+            },
+            off_mission: None,
+        },
+    )?;
+    Ok(Progress::Started {
+        fingerprint: want,
+        scope,
+    })
+}
+
+/// What a campaign of `scope` runs ([`command`]): a full one on every path
+/// the branch touched; a partial one on those whose content changed since
+/// the previous campaign's `HEAD` ([`touched_since`]). Both with the fork
+/// point in [`BASE_ENV`]: in each file it is given, a partial campaign
+/// mutates everything the branch changed, exactly as a full one would, so
+/// the file's counts are the ones a full campaign would give.
+pub fn launch_command(
+    tree: &Path,
+    judged: &[crate::run::Judged],
+    campaign: &str,
+    touched: &[String],
+    fork: &str,
+    scope: &Scope,
+    jobs: u32,
+) -> Result<crate::harness::spawn::CommandSpec, MutantsError> {
+    let paths = handed(tree, touched, scope)?;
+    Ok(command(judged, campaign, &paths, fork, jobs))
+}
+
+/// The paths a campaign of `scope` is handed: every touched path for a full
+/// one; for a partial one, those whose content changed since the previous
+/// campaign's `HEAD` ([`touched_since`]).
+pub fn handed(tree: &Path, touched: &[String], scope: &Scope) -> Result<Vec<String>, MutantsError> {
+    match scope.since() {
+        Some(since) => touched_since(tree, since, touched),
+        None => Ok(touched.to_vec()),
+    }
+}
+
+/// What a campaign runs in the container: each stack's `mutation.sh` on the
+/// touched paths, from the clean copy, with the fork point in [`BASE_ENV`]
+/// and the project's `mutation_jobs` in [`JOBS_ENV`].
+///
+/// `campaign` is the fingerprint, `fork` the commit the branch forked from.
+/// One stack runs its script directly, as it always has; several run through
+/// [`several_campaigns`], whose child scripts inherit the same environment.
+pub fn command(
+    judged: &[crate::run::Judged],
+    campaign: &str,
+    touched: &[String],
+    fork: &str,
+    jobs: u32,
+) -> crate::harness::spawn::CommandSpec {
+    command_naming(judged, campaign, touched, fork, jobs, &BTreeMap::new())
+}
+
+/// [`command`], handing each stack the mutants it is to run by name
+/// ([`NAMES_ENV`]): `named` maps a stack's name to the names its tool gives
+/// them ([`named_by`]). `touched` holds their files, so that each stack
+/// that names one is called on them.
+pub fn command_naming(
+    judged: &[crate::run::Judged],
+    campaign: &str,
+    touched: &[String],
+    fork: &str,
+    jobs: u32,
+    named: &BTreeMap<String, Vec<String>>,
+) -> crate::harness::spawn::CommandSpec {
+    let mut env: BTreeMap<String, String> = [
+        (BASE_ENV.to_string(), fork.to_string()),
+        (JOBS_ENV.to_string(), jobs.to_string()),
+    ]
+    .into_iter()
+    .collect();
+    let (program, args) = match judged {
+        [one] => {
+            let mut args = vec![campaign.to_string()];
+            args.extend(touched.iter().cloned());
+            if let Some(names) = named.get(&one.stack.name).filter(|n| !n.is_empty()) {
+                env.insert(NAMES_ENV.to_string(), names_json(names));
+            }
+            (format!("{}/{SCRIPT}", one.scripts_at), args)
+        }
+        several => (
+            "sh".to_string(),
+            vec![
+                "-c".to_string(),
+                several_campaigns_naming(several, campaign, touched, named),
+            ],
+        ),
+    };
+    crate::harness::spawn::CommandSpec {
+        program,
+        args,
+        cwd: PathBuf::from(crate::exec::PROOF_AT),
+        env: env.into_iter().collect(),
+    }
+}
+
+/// The names a stack is handed in [`NAMES_ENV`], as the JSON list its script
+/// reads.
+fn names_json(names: &[String]) -> String {
+    serde_json::to_string(names).expect("a list of strings always serialises")
+}
+
+/// The stack whose tool names `survivor`, and the name it gives it — what
+/// that stack's script reads in [`NAMES_ENV`] — or why there is none.
+///
+/// A project's one stack names a survivor by its id. Of several, the stack
+/// whose directory holds its file ([`owner`]) names it by its id without the
+/// stack's name, which [`several_campaigns`] puts before it: a survivor
+/// recorded otherwise — while the project carried one stack — has no name
+/// that stack's tool would know. Either way, the stack's script must say it
+/// reads names ([`measures_by_name`]); that is the caller's to check, where
+/// the script can be read.
+pub fn named_by<'a>(
+    judged: &'a [crate::run::Judged],
+    survivor: &Survivor,
+) -> Result<(&'a crate::run::Judged, String), String> {
+    match judged {
+        [one] => Ok((one, survivor.id.clone())),
+        several => {
+            let Some(j) = owner(several, &survivor.file) else {
+                return Err(format!(
+                    "{} is in no stack's directory",
+                    crate::text::one_line(&survivor.file)
+                ));
+            };
+            match survivor.id.strip_prefix(&format!("{}:", j.stack.name)) {
+                Some(name) => Ok((j, name.to_string())),
+                None => Err(format!(
+                    "{} is in the `{}` stack's directory, and its id does not name that stack",
+                    crate::text::one_line(&survivor.id),
+                    j.stack.name
+                )),
+            }
+        }
+    }
+}
+
+/// `survivors` as [`command_naming`] hands them: each stack's names, by the
+/// stack's name ([`named_by`]). The first survivor no stack names is the
+/// error.
+pub fn names_by_stack(
+    judged: &[crate::run::Judged],
+    survivors: &[Survivor],
+) -> Result<BTreeMap<String, Vec<String>>, String> {
+    let mut named: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for survivor in survivors {
+        let (j, name) = named_by(judged, survivor)?;
+        named.entry(j.stack.name.clone()).or_default().push(name);
+    }
+    Ok(named)
+}
+
+/// The campaign of a project carrying several stacks, as one shell script
+/// (SPEC 4.2, "plusieurs stacks").
+///
+/// Each touched path goes to the stack whose directory holds it — the
+/// deepest one, so `frontend/` beats the root — relative to that directory,
+/// and each stack's `mutation.sh` runs there on its own paths; a stack this
+/// branch did not touch has nothing to mutate and is not called. What each
+/// prints keeps the contract `nunki` reads, made the project's: an id
+/// prefixed with the stack's name, since two tools number their mutants
+/// independently, and a file relative to the repository, like the touched
+/// list. `{"campaign":"done"}` is said once, at the end, and only if every
+/// stack said it: a campaign one stack did not finish measured nothing for it.
+/// A stack that said it more than once did not finish either, by the rule
+/// [`completed`] reads a log with.
+/// A stack that found mutants and tried none measured nothing, and the
+/// campaign is then not finished either, whatever the other stacks did.
+/// It carries `tried`, `found` and `missed`, each the stacks' counts added
+/// up, and each only when every stack that ran gave one: a sum missing a
+/// stack's mutants would be a share of the wrong whole. Without `tried` gate 7
+/// judges as `critical` does; without `found` the not-measured rule has
+/// nothing to compare, and the stacks' own scripts are what refuse.
+/// A stack whose `missed` is not as many as the survivor lines it printed
+/// measured nothing ([`unmeasured`]), and the campaign is not finished,
+/// with both numbers on stderr: compared only in the sum, one stack's lost
+/// line and another's extra one would cancel out.
+///
+/// Each stack's per-file counts pass through, their paths made the
+/// repository's like the survivors' files, and the line says `by_file` only
+/// when every stack that ran said it: one stack that counts no file leaves
+/// the project's campaign with nothing a later partial one could be rebuilt
+/// from.
+///
+/// Whether a stack said it finished is read from what `jq` **printed**, not
+/// from `jq -e`: jq 1.6 — Debian bookworm's — exits 0 under `-e` on an
+/// empty input, so a stack that printed nothing at all was counted as
+/// finished.
+///
+/// `jq` reads the lines, as every stack image carries it; a line that is not
+/// JSON is progress and is dropped from the result, which is where the
+/// contract already puts it.
+pub fn several_campaigns(
+    judged: &[crate::run::Judged],
+    campaign: &str,
+    touched: &[String],
+) -> String {
+    several_campaigns_naming(judged, campaign, touched, &BTreeMap::new())
+}
+
+/// [`several_campaigns`], each stack handed its own names in [`NAMES_ENV`]
+/// (`named`, by the stack's name: [`names_by_stack`]). A stack that names a
+/// mutant is called even when it owns no path handed, so that its script,
+/// handed none of their files, says it measured nothing rather than being
+/// left out in silence.
+pub fn several_campaigns_naming(
+    judged: &[crate::run::Judged],
+    campaign: &str,
+    touched: &[String],
+    named: &BTreeMap<String, Vec<String>>,
+) -> String {
+    use crate::exec::quote;
+    let mut script = String::from(
+        "set -u\ncomplete=1\ncounted=1\ntried=0\nsized=1\nfound=0\nreported=1\nmissed=0\nbyfile=1\nout=\"$(mktemp)\"\n",
+    );
+    for j in judged {
+        let mine: Vec<String> = touched
+            .iter()
+            .filter(|path| owner(judged, path).is_some_and(|o| o.stack == j.stack))
+            .map(|path| match j.stack.dir.as_str() {
+                "" => path.clone(),
+                dir => path[dir.len() + 1..].to_string(),
+            })
+            .collect();
+        let names = named
+            .get(&j.stack.name)
+            .filter(|names| !names.is_empty())
+            .map(|names| format!("{NAMES_ENV}={} ", quote(&names_json(names))))
+            .unwrap_or_default();
+        if mine.is_empty() && names.is_empty() {
+            continue;
+        }
+        let dir = if j.stack.dir.is_empty() {
+            ".".to_string()
+        } else {
+            j.stack.dir.clone()
+        };
+        let prefix = if j.stack.dir.is_empty() {
+            String::new()
+        } else {
+            format!("{}/", j.stack.dir)
+        };
+        script.push_str(&format!(
+            "( cd {dir} && {names}{at}/{SCRIPT} {campaign} {paths} ) > \"$out\"\n\
+             jq -R -c --arg s {name} --arg d {prefix} 'fromjson? | select(type == \"object\" \
+             and has(\"id\")) | .id = ($s + \":\" + (.id | tostring)) | .file = ($d + \
+             (.file | tostring))' < \"$out\"\n\
+             jq -R -c --arg d {prefix} 'fromjson? | select(type == \"object\" and \
+             has(\"measured\")) | .measured = ($d + (.measured | tostring))' < \"$out\"\n\
+             jq -R -c 'fromjson? | select(type == \"object\" and has(\"sampled\"))' \
+             < \"$out\"\n\
+             counts=$(jq -R -r 'fromjson? | select(type == \"object\" and .campaign == \
+             \"done\") | (.by_file // false) | tostring' < \"$out\" | tail -n 1)\n\
+             [ \"$counts\" = true ] || byfile=0\n\
+             dones=$(jq -R -c 'fromjson? | select(type == \"object\" and .campaign == \"done\")' \
+             < \"$out\" | grep -c .)\n\
+             said=$(jq -R -r 'fromjson? | select(type == \"object\" and .campaign == \"done\") \
+             | (.tried // \"none\") | tostring' < \"$out\" | tail -n 1)\n\
+             [ \"$dones\" = 1 ] || said=''\n\
+             case \"$said\" in\n\
+             '') complete=0 ;;\n\
+             *[!0-9]*) counted=0 ;;\n\
+             *) tried=$((tried + said)) ;;\n\
+             esac\n\
+             seen=$(jq -R -r 'fromjson? | select(type == \"object\" and .campaign == \"done\") \
+             | (.found // \"none\") | tostring' < \"$out\" | tail -n 1)\n\
+             case \"$seen\" in\n\
+             ''|*[!0-9]*) sized=0 ;;\n\
+             *) found=$((found + seen)) ;;\n\
+             esac\n\
+             lost=$(jq -R -r 'fromjson? | select(type == \"object\" and .campaign == \"done\") \
+             | (.missed // \"none\") | tostring' < \"$out\" | tail -n 1)\n\
+             case \"$lost\" in\n\
+             ''|*[!0-9]*) reported=0 ;;\n\
+             *) missed=$((missed + lost))\n\
+             kept=$(jq -R -c 'fromjson? | select(type == \"object\" and has(\"id\"))' \
+             < \"$out\" | grep -c .)\n\
+             if [ \"$kept\" != \"$lost\" ]; then\n\
+             printf 'nunki: the %s stack'\"'\"'s tool reported %s survivor(s) and its \
+             script printed %s survivor line(s), so its campaign measured nothing\\n' \
+             {name} \"$lost\" \"$kept\" >&2\n\
+             complete=0\n\
+             fi ;;\n\
+             esac\n\
+             case \"$said:$seen\" in 0:[1-9]*) complete=0 ;; esac\n",
+            dir = quote(&dir),
+            at = j.scripts_at,
+            campaign = quote(campaign),
+            paths = mine.iter().map(|p| quote(p)).collect::<Vec<_>>().join(" "),
+            name = quote(&j.stack.name),
+            prefix = quote(&prefix),
+        ));
+    }
+    script.push_str(
+        "rm -f \"$out\"\n\
+         if [ \"$complete\" = 1 ]; then\n\
+         line='{\"campaign\":\"done\"'\n\
+         if [ \"$counted\" = 1 ]; then line=\"$line,\\\"tried\\\":$tried\"; fi\n\
+         if [ \"$sized\" = 1 ]; then line=\"$line,\\\"found\\\":$found\"; fi\n\
+         if [ \"$reported\" = 1 ]; then line=\"$line,\\\"missed\\\":$missed\"; fi\n\
+         if [ \"$counted\" = 1 ] && [ \"$byfile\" = 1 ]; then line=\"$line,\\\"by_file\\\":true\"; fi\n\
+         printf '%s}\\n' \"$line\"\n\
+         fi\n",
+    );
+    script
+}
+
+/// The stack a path of the repository belongs to: the one with the deepest
+/// directory holding it, the root holding everything.
+fn owner<'a>(judged: &'a [crate::run::Judged], path: &str) -> Option<&'a crate::run::Judged> {
+    judged
+        .iter()
+        .filter(|j| {
+            j.stack.dir.is_empty()
+                || path
+                    .strip_prefix(&j.stack.dir)
+                    .is_some_and(|rest| rest.starts_with('/'))
+        })
+        .max_by_key(|j| j.stack.dir.len())
+}
+
+/// Minutes since an RFC 3339 stamp, read the way `nunki` writes them. A stamp it
+/// cannot read counts as zero rather than as an overrun: the campaign is not
+/// killed because a clock was unreadable.
+fn minutes_since(stamp: &str) -> u32 {
+    let now = crate::state::now_rfc3339();
+    let (Some(then), Some(now)) = (epoch_minutes(stamp), epoch_minutes(&now)) else {
+        return 0;
+    };
+    now.saturating_sub(then)
+}
+
+/// `YYYY-MM-DDTHH:MM:SSZ` into minutes, on a calendar simple enough to be
+/// right for a difference of hours.
+fn epoch_minutes(stamp: &str) -> Option<u32> {
+    let bytes = stamp.as_bytes();
+    if bytes.len() < 16 {
+        return None;
+    }
+    let n = |from: usize, to: usize| stamp.get(from..to)?.parse::<u32>().ok();
+    let (y, mo, d) = (n(0, 4)?, n(5, 7)?, n(8, 10)?);
+    let (h, mi) = (n(11, 13)?, n(14, 16)?);
+    // Days since an arbitrary epoch, counting months as they come. Leap years
+    // matter only across a February, and a campaign does not run for a month.
+    let days = y * 366 + mo * 31 + d;
+    Some(days * 24 * 60 + h * 60 + mi)
+}

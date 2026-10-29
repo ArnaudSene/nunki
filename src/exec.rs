@@ -1,0 +1,271 @@
+//! `nunki exec <slot> <cmd>` (SPEC 4.2): run a command in a slot's container.
+//!
+//! This is how the HQ **replays a proof** without having the stack on the
+//! host — and, later, how gates 6 and 7 run at all (SPEC 4.4).
+//!
+//! It runs by default on a **clean git copy of `HEAD`**, never on the tree
+//! the agent has been living in. The reason is written in SPEC 4.2 and it is
+//! not hypothetical: a battery replayed in a tree where an agent left a
+//! `Makefile`, a `pytest.ini` or a cargo alias proves what that tree does,
+//! not what the commit does. The copy is a fresh checkout of a commit, which
+//! is the whole answer: nothing uncommitted can reach it.
+//!
+//! The copy keeps **its own build cache**, warmed once per slot and kept
+//! (SPEC 4.4, gate 7). It lives in a named volume, so it survives the
+//! container, and the refresh deliberately does not use `git clean -x`:
+//! that would delete `target/` and every campaign would recompile from cold.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use crate::compose::AGENT_SERVICE;
+use crate::engine::{Engine, EngineError, ExecOutput};
+use crate::git;
+use crate::project::Project;
+use crate::slot::Slot;
+
+/// Where the clean copy of `HEAD` is mounted, in every profile.
+pub const PROOF_AT: &str = "/work/proof";
+
+/// The named volume that holds it, per slot: the copy and its build cache
+/// outlive the container, which is what "warmed once per slot" means.
+pub fn proof_volume(slot: &str) -> String {
+    format!("nunki-{slot}-proof")
+}
+
+/// Which tree a command runs against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum On {
+    /// The clean copy of `HEAD` — the default, and the only one a proof
+    /// should ever be replayed on.
+    Proof,
+    /// The working tree the agent inhabits. Never during a run (SPEC 4.2).
+    Tree,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ExecError {
+    #[error(
+        "slot {0:?} has no profile up — `nunki mission start` lifts one, or \
+         `nunki slot rebuild` if its images are stale"
+    )]
+    NoProfile(String),
+    #[error("the copy of HEAD could not be refreshed:\n{0}")]
+    Refresh(String),
+    #[error(
+        "a mutation campaign has owned slot {slot:?}'s copy of HEAD since {since}: running \
+         here would `git reset --hard` the tree it is mutating, and read a mutant back as \
+         this project's code. Wait for it, or end it — `nunki mission mutants <id>` says \
+         where it is"
+    )]
+    CampaignInFlight { slot: String, since: String },
+    #[error(transparent)]
+    Engine(#[from] EngineError),
+    #[error(transparent)]
+    Git(#[from] git::GitError),
+    #[error(transparent)]
+    Compose(#[from] crate::compose::ComposeError),
+    #[error(transparent)]
+    Run(#[from] Box<crate::run::RunError>),
+}
+
+/// Run `argv` in the slot's agent container and give back what it said.
+pub fn run(
+    project: &Project,
+    slot: &Slot,
+    engine: Arc<dyn Engine>,
+    argv: &[String],
+    on: On,
+) -> Result<ExecOutput, ExecError> {
+    let file = crate::run::profile_path(project, &slot.name);
+    if !file.is_file() {
+        return Err(ExecError::NoProfile(slot.name.clone()));
+    }
+    let compose_project = crate::compose::project_name(&project.session(), &slot.name)?;
+    lift_if_down(&engine, project, &file, &compose_project)?;
+
+    let at = match on {
+        On::Proof => {
+            refuse_under_a_campaign(project, slot)?;
+            let head = git::slot_head(&slot.tree)?;
+            refresh_at(&engine, &file, &compose_project, "HEAD", &head)?;
+            PROOF_AT.to_string()
+        }
+        // The working tree is the agent's, and no campaign touches it.
+        On::Tree => crate::run::TREE_AT.to_string(),
+    };
+    // The engine's `exec` has no working directory of its own, and adding
+    // one to the trait for this would put a shell's job in the boundary.
+    // Arguments travel as arguments — `"$@"` — so nothing is quoted into a
+    // script.
+    let mut wrapped = vec![
+        "sh".to_string(),
+        "-c".to_string(),
+        "cd \"$0\" && exec \"$@\"".to_string(),
+        at,
+    ];
+    wrapped.extend(argv.iter().cloned());
+    Ok(engine.exec(&file, &compose_project, AGENT_SERVICE, &wrapped)?)
+}
+
+/// Bring the slot's copy of `HEAD` up to date, creating it the first time.
+/// Public because a caller that launches something **detached** in the copy —
+/// a mutation campaign (SPEC 4.4, gate 7) — has to refresh it first and then
+/// spawn, rather than go through [`run`], which waits.
+///
+/// Bring the copy to `head`, creating it the first time.
+///
+/// `git fetch <path> HEAD` rather than a named branch: what has to be
+/// replayed is the commit the slot is on, whatever branch holds it, and a
+/// detached checkout of `FETCH_HEAD` says exactly that.
+///
+/// `git clean` without `-x`: it removes what a previous `nunki exec` left
+/// untracked in the copy, and keeps everything the project ignores — which
+/// is where the build cache lives. With `-x` the cache would go and gate 7
+/// would recompile from cold every campaign, which SPEC 4.4 explicitly
+/// refuses.
+/// A campaign in flight owns the clean copy of `HEAD`.
+///
+/// `mutation.sh` runs `cargo mutants --in-place` there, for up to an hour,
+/// while [`refresh_at`] below opens with `git reset --hard` and `git clean`.
+/// Whoever gets there second wrecks the other: the caller reads a mutant back
+/// as the project's code, and the campaign loses the tree under it.
+///
+/// Here rather than in each caller, because "the caller must remember" was
+/// the guard, and four of them did not: the battery, gate 8, `nunki exec` and
+/// `nunki mission gates`. This is the one door they all go through (SPEC 4.4,
+/// "toute porte qui travaille dans cette copie y arrive par
+/// `exec::run(On::Proof)`").
+///
+/// It does not refuse the campaign's own launch: `mutants::campaign` refreshes
+/// and probes **before** it files the record, and never touches the copy
+/// after.
+fn refuse_under_a_campaign(project: &Project, slot: &Slot) -> Result<(), ExecError> {
+    let running = crate::mutants::read_running(&project.hq_root, &slot.name)
+        .map_err(|e| ExecError::Refresh(e.to_string()))?;
+    match running {
+        Some(running) => Err(ExecError::CampaignInFlight {
+            slot: slot.name.clone(),
+            since: running.started_at,
+        }),
+        None => Ok(()),
+    }
+}
+
+pub fn refresh(project: &Project, slot: &Slot, engine: Arc<dyn Engine>) -> Result<(), ExecError> {
+    let file = crate::run::profile_path(project, &slot.name);
+    if !file.is_file() {
+        return Err(ExecError::NoProfile(slot.name.clone()));
+    }
+    refuse_under_a_campaign(project, slot)?;
+    let compose_project = crate::compose::project_name(&project.session(), &slot.name)?;
+    lift_if_down(&engine, project, &file, &compose_project)?;
+    let head = git::slot_head(&slot.tree)?;
+    refresh_at(&engine, &file, &compose_project, "HEAD", &head)
+}
+
+/// [`refresh`], to `rev` of the slot's tree rather than its `HEAD`: a ref
+/// the host wrote there, such as the base as the human's repository last
+/// had it (`refs/remotes/origin/<base>`), checked to be `commit`. The slot's
+/// own checkout is not touched; the next [`refresh`] puts the copy back on
+/// its `HEAD`. What a campaign outside missions runs on (SPEC 4.4).
+pub fn refresh_to(
+    project: &Project,
+    slot: &Slot,
+    engine: Arc<dyn Engine>,
+    rev: &str,
+    commit: &str,
+) -> Result<(), ExecError> {
+    let file = crate::run::profile_path(project, &slot.name);
+    if !file.is_file() {
+        return Err(ExecError::NoProfile(slot.name.clone()));
+    }
+    refuse_under_a_campaign(project, slot)?;
+    let compose_project = crate::compose::project_name(&project.session(), &slot.name)?;
+    lift_if_down(&engine, project, &file, &compose_project)?;
+    refresh_at(&engine, &file, &compose_project, rev, commit)
+}
+
+/// Lift the slot's containers when they are down, and leave them as they are
+/// otherwise.
+///
+/// They may be down: taken down for a refresh of the fragments, or by a
+/// restart of the machine. The copy lives in the agent's container, so
+/// without it every gate played there is unplayed, and no run can change
+/// that: the run is only launched once the gates have been played. Lifting
+/// the profile the last launch wrote is what a launch would do.
+///
+/// And it is lifted the way a launch lifts it ([`crate::run::relift`]): only
+/// if every service it starts from the project's file is one a human
+/// approved, and after what it does not lift is taken down. A profile written
+/// before approvals is not started again here, unfenced.
+fn lift_if_down(
+    engine: &Arc<dyn Engine>,
+    project: &Project,
+    file: &std::path::Path,
+    compose_project: &str,
+) -> Result<(), ExecError> {
+    if engine
+        .container_of(file, compose_project, AGENT_SERVICE)?
+        .is_none()
+    {
+        crate::run::relift(engine.as_ref(), project, file, compose_project).map_err(Box::new)?;
+    }
+    Ok(())
+}
+
+fn refresh_at(
+    engine: &Arc<dyn Engine>,
+    file: &std::path::Path,
+    compose_project: &str,
+    rev: &str,
+    head: &str,
+) -> Result<(), ExecError> {
+    let script = format!(
+        "set -eu\n\
+         if [ ! -d {PROOF_AT}/.git ]; then\n\
+         \x20 git clone --quiet --no-hardlinks {tree} {PROOF_AT}\n\
+         fi\n\
+         cd {PROOF_AT}\n\
+         git fetch --quiet {tree} {rev}\n\
+         git checkout --quiet --detach FETCH_HEAD\n\
+         git reset --quiet --hard FETCH_HEAD\n\
+         git clean -qdff\n\
+         test \"$(git rev-parse HEAD)\" = \"{head}\"\n",
+        tree = crate::run::TREE_AT,
+        rev = crate::exec::quote(rev),
+    );
+    let out = engine.exec(
+        file,
+        compose_project,
+        AGENT_SERVICE,
+        &["sh".to_string(), "-c".to_string(), script],
+    )?;
+    if out.ok() {
+        Ok(())
+    } else {
+        Err(ExecError::Refresh(
+            [out.stdout.trim(), out.stderr.trim()]
+                .iter()
+                .filter(|s| !s.is_empty())
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ))
+    }
+}
+
+/// The volume a slot's profile must carry for `nunki exec` to have somewhere to
+/// put the copy, as the plan wants it.
+pub fn volume(slot: &str) -> crate::compose::NamedVolume {
+    crate::compose::NamedVolume {
+        name: proof_volume(slot),
+        at: PathBuf::from(PROOF_AT),
+    }
+}
+
+/// `text` as one word of a POSIX shell, whatever it holds: single-quoted,
+/// with every single quote closed, escaped and reopened.
+pub fn quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', r"'\''"))
+}

@@ -1,0 +1,3586 @@
+//! Starting a run (SPEC 4.3): what `nunki mission start` decides before any
+//! container exists.
+
+use std::path::{Path, PathBuf};
+
+use nunki::harness::Role;
+use nunki::project::{Config, Project, ProtectedPaths};
+use nunki::role;
+use nunki::run;
+
+fn project(dir: &Path) -> Project {
+    Project::at(
+        dir.join("repo"),
+        Config {
+            root: None,
+            harness: "claude-code".to_string(),
+            forge: vec!["github.com".to_string()],
+            stacks: vec!["rust".into()],
+            protected_branches: vec!["main".to_string()],
+            protected_paths: ProtectedPaths::default(),
+            account: None,
+            model: None,
+            bounds: Default::default(),
+            credentials: None,
+            run: None,
+            services_file: None,
+            permission_mode: "auto".to_string(),
+            rigor: None,
+            mutation_threshold: 80,
+            mutation_jobs: None,
+            forge_protection: Default::default(),
+            security_findings: Default::default(),
+        },
+        dir.join("nunki"),
+    )
+}
+
+/// The same layering as the account, and for the same reason: what the
+/// project declares holds until a mission says otherwise, and the choice is
+/// frozen with the header rather than read again mid-mission.
+///
+/// No name is checked here. `nunki` knows harnesses, not models: the harness
+/// refuses what it does not know, in the container.
+#[test]
+fn a_model_is_chosen_by_the_mission_then_the_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let coding = nunki::mission::Integration::None {
+        reason: "no external service is involved".to_string(),
+    };
+
+    // Neither declares one: the harness keeps its own default, and nunki adds
+    // no `--model` at all.
+    let project = project(dir.path());
+    assert_eq!(run::model_for(&project, &header_with(coding.clone())), None);
+
+    // The project declares one, and no mission refines it.
+    let mut declared = project;
+    declared.config.model = Some("claude-sonnet-5".to_string());
+    assert_eq!(
+        run::model_for(&declared, &header_with(coding.clone())),
+        Some("claude-sonnet-5".to_string())
+    );
+
+    // The mission declares another: its header wins over nunki.yaml.
+    let mut header = header_with(coding);
+    header.model = Some("claude-opus-5".to_string());
+    assert_eq!(
+        run::model_for(&declared, &header),
+        Some("claude-opus-5".to_string())
+    );
+}
+
+#[test]
+fn an_account_is_chosen_by_the_mission_then_the_project_then_the_default() {
+    use nunki::account::{Account, Accounts};
+    use std::collections::BTreeMap;
+
+    let dir = tempfile::tempdir().unwrap();
+    let nunki_home = dir.path();
+    let mut accounts = BTreeMap::new();
+    for name in ["perso", "pro"] {
+        accounts.insert(
+            name.to_string(),
+            Account {
+                harness: "claude-code".to_string(),
+                token_file: std::path::PathBuf::from(format!("accounts/{name}")),
+                note: None,
+            },
+        );
+    }
+    let index = Accounts {
+        accounts,
+        default: Some("perso".to_string()),
+    };
+
+    // The mission wins over the project, which wins over the default.
+    assert_eq!(
+        index
+            .choose(nunki_home, Some("pro"), Some("perso"))
+            .unwrap()
+            .0,
+        "pro"
+    );
+    assert_eq!(
+        index.choose(nunki_home, None, Some("pro")).unwrap().0,
+        "pro"
+    );
+    assert_eq!(index.choose(nunki_home, None, None).unwrap().0, "perso");
+
+    // A name nobody declared is an error that lists what exists.
+    let err = index.choose(nunki_home, Some("ghost"), None).unwrap_err();
+    assert!(err.to_string().contains("perso, pro"), "{err}");
+
+    // With exactly one account and no default, that one is the answer rather
+    // than a question.
+    let only = Accounts {
+        accounts: index
+            .accounts
+            .iter()
+            .take(1)
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+        default: None,
+    };
+    assert_eq!(only.choose(nunki_home, None, None).unwrap().0, "perso");
+
+    // With none at all, nunki says where to declare one.
+    let empty = Accounts::default();
+    let err = empty.choose(nunki_home, None, None).unwrap_err();
+    assert!(err.to_string().contains("accounts.yaml"), "{err}");
+}
+
+#[test]
+fn a_token_lives_beside_the_accounts_and_whitespace_is_not_part_of_it() {
+    use nunki::account::{Account, Accounts};
+
+    let dir = tempfile::tempdir().unwrap();
+    let nunki_home = dir.path();
+    std::fs::create_dir_all(nunki_home.join("accounts")).unwrap();
+    let account = Account {
+        harness: "claude-code".to_string(),
+        token_file: std::path::PathBuf::from("accounts/perso"),
+        note: None,
+    };
+
+    // Relative to ~/.nunki, so an index can be written without absolute
+    // paths — and never inside a repository.
+    assert_eq!(
+        account.token_path(nunki_home),
+        nunki_home.join("accounts/perso")
+    );
+
+    assert!(account.token(nunki_home, "perso").is_err());
+    std::fs::write(nunki_home.join("accounts/perso"), "  sk-ant-oat-example\n").unwrap();
+    assert_eq!(
+        account.token(nunki_home, "perso").unwrap(),
+        "sk-ant-oat-example"
+    );
+
+    // An empty file is no token, not an empty one.
+    std::fs::write(nunki_home.join("accounts/perso"), "\n").unwrap();
+    let err = account.token(nunki_home, "perso").unwrap_err();
+    assert!(err.to_string().contains("claude setup-token"), "{err}");
+
+    // And the index reads back what was written.
+    let index = Accounts {
+        accounts: [("perso".to_string(), account)].into_iter().collect(),
+        default: None,
+    };
+    std::fs::write(
+        nunki_home.join("accounts.yaml"),
+        nunki::yaml::to_string(&index).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(Accounts::load(nunki_home).unwrap(), index);
+}
+
+#[test]
+fn starting_a_mission_on_the_wrong_kind_of_account_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut project = project(dir.path());
+    project.config.account = Some("openai".to_string());
+    let nunki_home = project.nunki_home();
+    std::fs::create_dir_all(nunki_home.join("accounts")).unwrap();
+    std::fs::write(nunki_home.join("accounts/openai"), "sk-openai-example\n").unwrap();
+    std::fs::write(
+        nunki_home.join("accounts.yaml"),
+        "accounts:\n  openai:\n    harness: codex\n    token_file: accounts/openai\n",
+    )
+    .unwrap();
+
+    // An OpenAI subscription does not authenticate Claude Code. Passing it
+    // along would fail inside a container, with nobody there to read the
+    // error (SPEC 3.2: refusing is safe, asking is not).
+    let err = run::account_for(&project, None).unwrap_err();
+    assert!(matches!(err, run::RunError::WrongHarness { .. }), "{err}");
+    let text = err.to_string();
+    assert!(
+        text.contains("codex") && text.contains("claude-code"),
+        "{text}"
+    );
+
+    // And the mission's own choice is what is checked, not the project's.
+    let index = concat!(
+        "accounts:\n",
+        "  openai:\n",
+        "    harness: codex\n",
+        "    token_file: accounts/openai\n",
+        "  perso:\n",
+        "    harness: claude-code\n",
+        "    token_file: accounts/perso\n",
+    );
+    std::fs::write(nunki_home.join("accounts.yaml"), index).unwrap();
+    std::fs::write(nunki_home.join("accounts/perso"), "sk-ant-oat-example\n").unwrap();
+    let (name, _, token) = run::account_for(&project, Some("perso")).unwrap();
+    assert_eq!(name, "perso");
+    assert_eq!(token, "sk-ant-oat-example");
+}
+
+#[test]
+fn an_account_for_another_harness_is_refused_rather_than_passed_along() {
+    use nunki::account::{Account, Accounts};
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut project = project(dir.path());
+    project.config.account = Some("openai".to_string());
+    let index = Accounts {
+        accounts: [(
+            "openai".to_string(),
+            Account {
+                harness: "codex".to_string(),
+                token_file: std::path::PathBuf::from("accounts/openai"),
+                note: None,
+            },
+        )]
+        .into_iter()
+        .collect(),
+        default: None,
+    };
+    // An OpenAI subscription does not authenticate Claude Code, and passing
+    // it along would fail inside a container with nobody to read the error.
+    let (name, account) = index.choose(dir.path(), None, Some("openai")).unwrap();
+    assert_eq!(name, "openai");
+    assert_ne!(account.harness, project.config.harness);
+}
+
+#[test]
+fn a_mission_that_cannot_authenticate_does_not_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    std::fs::create_dir_all(project.hq_root.join("locks")).unwrap();
+    let slot = nunki::slot::Slot {
+        name: "one".to_string(),
+        tree: dir.path().join("slot"),
+    };
+    let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+        std::sync::Arc::new(nunki::engine::fake::FakeEngine::default());
+
+    let err = run::start(&project, "m1", &slot, engine, "docker").unwrap_err();
+    // The mission does not exist, so that is what it says — and it says it
+    // before looking at this machine's images, because a missing image is
+    // this machine's business and a missing mission is the mission's.
+    assert!(matches!(err, run::RunError::Mission(_)), "{err}");
+
+    // With the mission there but no account declared, the account is what is
+    // named — still without a word about images.
+    let header = nunki::mission::Header {
+        branch: "feat/x".to_string(),
+        base: "dev".to_string(),
+        lots: vec![nunki::mission::Lot {
+            id: "L1".to_string(),
+            title: "one".to_string(),
+        }],
+        integration: nunki::mission::Integration::None {
+            reason: "none".to_string(),
+        },
+        security: nunki::mission::Security::Gates,
+        rigor: Default::default(),
+        mutation_threshold: None,
+        hardening: Vec::new(),
+        arbiter: None,
+        run: None,
+        account: None,
+        model: None,
+        bounds: Default::default(),
+    };
+    nunki::mission::dir::create(&project.hq_root, "m1", &header, "").unwrap();
+    let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+        std::sync::Arc::new(nunki::engine::fake::FakeEngine::default());
+    let err = run::start(&project, "m1", &slot, engine, "docker").unwrap_err();
+    assert!(matches!(err, run::RunError::Account(_)), "{err}");
+    assert!(!err.to_string().contains("rebuild"), "{err}");
+}
+
+/// A run's profile carries the clean copy of `HEAD` that `nunki exec` replays
+/// proofs on, and its build cache with it — warmed once per slot and kept
+/// (SPEC 4.2, and gate 7 of 4.4). Without it there is nowhere to put the
+/// copy, and every proof would run in the tree the agent has been living in.
+#[test]
+fn a_run_profile_carries_the_clean_copy_of_head() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    let slot = nunki::slot::Slot {
+        name: "one".to_string(),
+        tree: dir.path().join("slot"),
+    };
+    let images = nunki::image::Images {
+        agent: "img/agent".into(),
+        firewall: "img/fw".into(),
+        prober: "img/probe".into(),
+    };
+    let paths = nunki::mission::dir::Paths::of(&project.hq_root, "m1");
+    let plan = run::plan(
+        &project,
+        &slot,
+        "rust",
+        &images,
+        &paths,
+        &nunki::mission::Header {
+            branch: "feat/alpha".to_string(),
+            base: "dev".to_string(),
+            lots: vec![nunki::mission::Lot {
+                id: "L1".to_string(),
+                title: "one".to_string(),
+            }],
+            integration: nunki::mission::Integration::None {
+                reason: "none".to_string(),
+            },
+            security: nunki::mission::Security::Gates,
+            rigor: Default::default(),
+            mutation_threshold: None,
+            hardening: Vec::new(),
+            arbiter: None,
+            run: None,
+            account: None,
+            model: None,
+            bounds: Default::default(),
+        },
+        nunki::harness::Role::Coder,
+    )
+    .unwrap();
+    let engine = nunki::engine::fake::FakeEngine::default();
+    let written = nunki::compose::generate(&plan, nunki::engine::Engine::dialect(&engine)).unwrap();
+    let doc: nunki::yaml::Value = nunki::yaml::from_str(&written).unwrap();
+
+    let mounts: Vec<String> = doc["services"][nunki::compose::AGENT_SERVICE]["volumes"]
+        .as_sequence()
+        .expect("the agent has mounts")
+        .iter()
+        .map(|v| v.as_str().unwrap_or_default().to_string())
+        .collect();
+    let expected = format!(
+        "{}:{}",
+        nunki::exec::proof_volume("one"),
+        nunki::exec::PROOF_AT
+    );
+    assert!(mounts.contains(&expected), "{mounts:?}");
+    let declared = doc["volumes"]
+        .as_mapping()
+        .expect("the document declares its named volumes");
+    assert!(
+        declared.contains_key(&nunki::yaml::Value::from(nunki::exec::proof_volume("one"))),
+        "a named volume is declared as well as mounted: {written}"
+    );
+}
+
+/// The allowlist a run reads is the perimeter its firewall enforces, role by
+/// role — not the stack's `allow.txt`, which is one source of three. An
+/// autonomous agent cannot ask why a name does not resolve; it reads the
+/// list, or it retries a wall.
+#[test]
+fn the_agent_reads_the_perimeter_its_firewall_enforces() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    let slot = nunki::slot::Slot {
+        name: "one".to_string(),
+        tree: dir.path().join("slot"),
+    };
+    let images = nunki::image::Images {
+        agent: "img/agent".into(),
+        firewall: "img/fw".into(),
+        prober: "img/probe".into(),
+    };
+    let paths = nunki::mission::dir::Paths::of(&project.hq_root, "m1");
+    let header = |integration| nunki::mission::Header {
+        branch: "feat/alpha".to_string(),
+        base: "dev".to_string(),
+        lots: vec![nunki::mission::Lot {
+            id: "L1".to_string(),
+            title: "one".to_string(),
+        }],
+        integration,
+        security: nunki::mission::Security::Gates,
+        rigor: Default::default(),
+        mutation_threshold: None,
+        hardening: Vec::new(),
+        arbiter: None,
+        run: None,
+        account: None,
+        model: None,
+        bounds: Default::default(),
+    };
+    let lines = |text: &str, section: &str| -> std::collections::BTreeSet<String> {
+        text.lines()
+            .skip_while(|l| *l != section)
+            .skip(1)
+            .take_while(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect()
+    };
+
+    for (role, integration) in [
+        (
+            Role::Coder,
+            nunki::mission::Integration::None {
+                reason: "none".to_string(),
+            },
+        ),
+        (
+            Role::Integrator,
+            nunki::mission::Integration::Services {
+                services: vec![nunki::mission::Service {
+                    name: "db".to_string(),
+                    reach: vec!["db".to_string(), "10.4.0.7".to_string()],
+                    shared: false,
+                }],
+                wiring: vec!["tests/**".to_string()],
+            },
+        ),
+    ] {
+        let plan = run::plan(
+            &project,
+            &slot,
+            "rust",
+            &images,
+            &paths,
+            &header(integration),
+            role,
+        )
+        .unwrap();
+        let text = run::allowlist(role, &plan.perimeter);
+
+        assert!(text.contains(role::slug(role)), "{text}");
+        assert_eq!(lines(&text, "domains:"), plan.perimeter.domains, "{text}");
+        if plan.perimeter.addresses.is_empty() {
+            assert!(lines(&text, "addresses:").contains("(none)"), "{text}");
+        } else {
+            assert_eq!(
+                lines(&text, "addresses:"),
+                plan.perimeter.addresses,
+                "{text}"
+            );
+        }
+        // The service is the integrator's, and never the coder's.
+        assert_eq!(
+            text.lines().any(|l| l == "db"),
+            role == Role::Integrator,
+            "{role:?}: {text}"
+        );
+    }
+}
+
+/// The list is `nunki`'s, like `MISSION.md`: in the mission folder, which the
+/// agent reads, and among none of the files it may write — an agent that could
+/// edit its allowlist would only mislead itself, but a list that lies is worse
+/// than no list.
+#[test]
+fn the_allowlist_is_read_only_for_the_agent_and_every_prompt_names_it() {
+    use nunki::mission::dir::ALLOWLIST_FILE;
+    assert!(!nunki::compose::any_agent_writable().contains(&ALLOWLIST_FILE));
+    let paths = nunki::mission::dir::Paths::of(Path::new("/hq"), "m1");
+    assert_eq!(paths.allowlist, paths.dir.join(ALLOWLIST_FILE));
+    for role in [Role::Coder, Role::Integrator, Role::Security] {
+        assert!(
+            prompt(role).contains(ALLOWLIST_FILE),
+            "{role:?} is not told where its allowlist is"
+        );
+    }
+}
+
+#[test]
+fn each_profile_is_written_where_a_restarted_hq_finds_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    let path = run::profile_path(&project, "lot2");
+    // At the HQ, one per slot, regenerated at every launch (SPEC 4.2).
+    assert!(path.starts_with(&project.hq_root));
+    assert!(path.ends_with("lot2.yml"));
+    assert!(!path.starts_with(&project.root));
+}
+
+#[test]
+fn the_role_prompts_say_what_the_role_may_not_do() {
+    let coder = prompt(Role::Coder);
+    let integrator = prompt(Role::Integrator);
+    let security = prompt(Role::Security);
+
+    for prompt in [&coder, &integrator, &security] {
+        // The corollary that makes an autonomous run safe (SPEC 3.2).
+        assert!(prompt.contains("refusing is safe"), "{prompt}");
+        assert!(prompt.contains("ÉTAT DE REPRISE"), "{prompt}");
+        assert!(prompt.contains("never push"), "{prompt}");
+        // Its own files, named, and the one that is not its to write said
+        // in the same breath (SPEC 4.1, 4.4).
+        assert!(prompt.contains("JOURNAL.md"), "{prompt}");
+        assert!(prompt.contains("VERDICT.json"), "{prompt}");
+        // A campaign is `nunki`'s to run, whoever reads this.
+        assert!(
+            flat(prompt).contains("**Never run a whole mutation campaign yourself**"),
+            "{prompt}"
+        );
+        // A commit that names the tool that typed it says nothing about
+        // the change, and the author already says which role wrote it.
+        assert!(
+            prompt.contains("Co-Authored-By"),
+            "the prompt names the trailer it forbids, so there is nothing to \
+             interpret: {prompt}"
+        );
+        assert!(
+            prompt.contains("no trailer naming a harness, a model or a tool"),
+            "{prompt}"
+        );
+        // Three outcomes and no fourth (SPEC 4.4). A prompt that sanctions
+        // "unanswered" sends the agent at a gate that refuses it, and the
+        // agent obeys the prompt.
+        assert!(
+            !prompt.contains("left unanswered"),
+            "the prompt must not offer an outcome gate 7 refuses: {prompt}"
+        );
+        assert!(!prompt.contains("the way your role is told to"), "{prompt}");
+        // What the gates actually require, said where the agent reads it and
+        // not only where `nunki` checks it.
+        assert!(
+            prompt.contains("names the commit it describes"),
+            "gate 3 refuses a resume block that does not carry HEAD: {prompt}"
+        );
+        // Gate 5 asks the coder and the integrator for PR.md, and the
+        // security agent, which cannot write it, for its report.
+        let owed = if std::ptr::eq(prompt, &security) {
+            "it lives in `VERDICT.json`. An empty one is a red gate"
+        } else {
+            "`PR.md`, the pull request this mission delivers, written as you go. It is \
+             the deliverable a gate looks for, and an empty one is a red gate"
+        };
+        assert!(
+            flat(prompt).contains(owed),
+            "gate 5 asks for a deliverable, so the run contract has to ask for it: {prompt}"
+        );
+        assert!(
+            prompt.contains("inside the block"),
+            "nunki reads the block, not the file: a line further down is unseen: {prompt}"
+        );
+    }
+
+    // Survivors only ever go back to the coder, so how to answer one is said
+    // to the coder alone (SPEC 4.4).
+    assert!(
+        coder.contains("MUTANTS.triage.json"),
+        "the coder's own file, named: {coder}"
+    );
+    assert!(
+        coder.contains("not yours to give"),
+        "the outcome nobody can check must be refused where the agent reads \
+         its rules, not only where nunki checks them: {coder}"
+    );
+    // The shape of the answer, not just its name. A coder left to guess
+    // it writes MUTANTS.json's shape instead, and `nunki` refuses the file
+    // with a serde error that stops the whole verification rather than
+    // reddening one gate.
+    assert!(
+        coder.contains(r#"{"<survivor id>": {"kind": "killed", "test":"#),
+        "the triage file's shape belongs where the agent reads its rules: {coder}"
+    );
+    assert!(coder.contains("no third answer of your own"), "{coder}");
+    // A survivor nobody can answer points at the line that hands it to
+    // the HQ, not at a line the role has to guess.
+    assert!(
+        coder.contains("`Lot: <lot> — awaits ruling: <what>`, with the survivor's"),
+        "{coder}"
+    );
+
+    // And each says the thing that is its own.
+    assert!(coder.contains("break the decision and check the test goes red"));
+    // The coder is told when and how to use the third lot line, and what
+    // bounds it: a line that names no open survivor is a failed attempt.
+    assert!(
+        coder.contains("`Lot: <lot> — awaits ruling: <what>`"),
+        "{coder}"
+    );
+    assert!(coder.contains("not a way out of a hard lot"), "{coder}");
+    assert!(
+        coder.contains("read as a survivor id, so quote nothing else"),
+        "{coder}"
+    );
+    // The how-to is the coder's alone: the other roles end no lot.
+    assert!(
+        !integrator.contains("read as a survivor id"),
+        "{integrator}"
+    );
+    assert!(!security.contains("read as a survivor id"), "{security}");
+    assert!(integrator.contains("not a reviewer"));
+    assert!(security.contains("read-only"));
+    assert!(
+        security.contains("findings, not fixes"),
+        "the security agent must not repair what it finds"
+    );
+}
+
+/// The integrator is graded by gates of its own — the wiring list, a system
+/// battery, a completed `PR.md`, a verdict pinned to `HEAD` — and each has to
+/// be said where it reads its rules. Otherwise its first run goes red at
+/// gates 5 and 6 on rules it had no way to learn.
+#[test]
+fn the_integrator_is_told_what_its_own_gates_require() {
+    let integrator = prompt(Role::Integrator);
+
+    assert!(integrator.contains("wiring list"), "{integrator}");
+    let battery = format!("{}/{}", nunki::run::STACK_AT, nunki::gate::SYSTEM_BATTERY);
+    assert!(
+        integrator.contains(&battery),
+        "gate 6 runs {battery}, so the prompt has to name it: {integrator}"
+    );
+    assert!(
+        integrator.contains("`Integration`"),
+        "gate 5 looks for that heading in PR.md: {integrator}"
+    );
+
+    // The verdict's shape, and one `nunki` actually reads. A shape given only
+    // in prose drifts from the struct that parses it, and the agent obeys the
+    // prose, as the triage file shows.
+    let line = integrator
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("{\"role\""))
+        .expect("the prompt shows the verdict's shape");
+    let file: nunki::mission::VerdictFile = serde_json::from_str(line)
+        .unwrap_or_else(|e| panic!("the shape in the prompt is not one nunki reads: {e}\n{line}"));
+    assert_eq!(file.role, Role::Integrator);
+    assert_eq!(file.verdict, nunki::mission::Verdict::Integrated);
+    assert!(integrator.contains("`BROKEN`"), "{integrator}");
+}
+
+/// The security agent commits nothing, so its gates are its journal and its
+/// report — and its verdict has a shape `nunki` refuses when it is wrong.
+/// A prompt that names neither `CLEAR`, nor `FINDINGS`, nor the file the
+/// verdict goes in gets its first run refused for a verdict it was never
+/// shown.
+#[test]
+fn the_security_agent_is_told_what_its_own_gates_require() {
+    let security = prompt(Role::Security);
+
+    assert!(security.contains("ÉTAT DE REPRISE"), "{security}");
+    assert!(
+        security.contains("VERDICT.json"),
+        "its report is its deliverable, and that is where it goes: {security}"
+    );
+
+    let line = security
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("{\"role\""))
+        .expect("the prompt shows the verdict's shape");
+    let file: nunki::mission::VerdictFile = serde_json::from_str(line)
+        .unwrap_or_else(|e| panic!("the shape in the prompt is not one nunki reads: {e}\n{line}"));
+    assert_eq!(file.role, Role::Security);
+    assert_eq!(file.verdict, nunki::mission::Verdict::Clear);
+    assert_eq!(
+        file.findings,
+        Some(nunki::mission::FindingList::Listed(Vec::new())),
+        "CLEAR has an empty list"
+    );
+    assert!(security.contains("`FINDINGS`"), "{security}");
+
+    // The ranked shape, read by the very rule that decides the lift: its
+    // MEDIUM is the human's, and its LOW carries the reason nunki would need.
+    let ranked = security
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("{\"role\"") && l.contains("\"FINDINGS\""))
+        .expect("the prompt shows a FINDINGS with its ranked list");
+    let file: nunki::mission::VerdictFile = serde_json::from_str(ranked)
+        .unwrap_or_else(|e| panic!("the ranked shape is not one nunki reads: {e}\n{ranked}"));
+    let Some(nunki::mission::FindingList::Listed(findings)) = &file.findings else {
+        panic!("the ranked shape lists its findings: {ranked}");
+    };
+    assert_eq!(findings.len(), 2, "{ranked}");
+    assert!(
+        matches!(
+            file.automatic_lift(),
+            Err(nunki::mission::Withheld::TooSevere { .. })
+        ),
+        "{ranked}"
+    );
+    assert!(findings[1].why_acceptable.is_some(), "{ranked}");
+    for severity in ["`HIGH`", "`MEDIUM`", "`LOW`", "`INFO`", "why_acceptable"] {
+        assert!(security.contains(severity), "{severity}: {security}");
+    }
+
+    // And both roles that meet a running application are told it may still be
+    // starting: `nunki` launches it and does not wait for it to serve.
+    for role in [Role::Integrator, Role::Security] {
+        assert!(
+            prompt(role).contains("still be compiling"),
+            "{role:?} is not told the application may not answer yet"
+        );
+    }
+}
+
+#[test]
+fn the_prompt_travels_as_a_file_and_never_into_the_slot() {
+    // It is written into the mission folder, which is mounted read-only but
+    // for the agent's own files — so the agent reads it and nothing in the
+    // repository is touched (SPEC 3.3).
+    assert_eq!(role::PROMPT_FILE, "ROLE.md");
+    let writable = nunki::compose::any_agent_writable();
+    assert!(
+        !writable.contains(&role::PROMPT_FILE),
+        "the role prompt is not the agent's to rewrite"
+    );
+    // Nor is the campaign the gate reads: the coder answers in its own file
+    // (SPEC 4.1, 4.4).
+    assert!(
+        !writable.contains(&nunki::mutants::FILE),
+        "the HQ's campaign file is not the agent's to rewrite"
+    );
+    assert!(nunki::compose::agent_writable(Role::Coder).contains(&nunki::mutants::TRIAGE_FILE));
+}
+
+#[test]
+fn the_mounts_are_the_ones_every_profile_agrees_on() {
+    // The paths the agent is told about, and the paths the generator mounts,
+    // must be the same or the agent is told where nothing is.
+    assert_eq!(run::TREE_AT, "/work/tree");
+    assert_eq!(run::MISSION_AT, "/work/mission");
+}
+
+/// The whole path, with a real engine and a stand-in for the harness: the
+/// slot goes on its branch, the profile lifts, a run starts **inside** the
+/// agent's container, its stream is captured on the host, and `nunki` reads it
+/// back.
+///
+/// The image carries a `claude` that prints one captured-looking stream and
+/// exits. That is deliberate: what is being proved here is the plumbing, and
+/// spending the subscription would prove the same thing more slowly. The real
+/// CLI has its own live test (`tests/claude_code.rs`).
+///
+/// ```text
+/// cargo test --test run -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "builds images and lifts containers; run by hand"]
+fn live_a_mission_starts_and_its_run_is_read_back() {
+    use nunki::harness::{Harness, RunState};
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    let home = dir.path().join("nunki");
+    std::fs::create_dir_all(&root).unwrap();
+    git(&root, &["init", "-q", "-b", "dev"]);
+    git(&root, &["config", "user.email", "t@example.com"]);
+    git(&root, &["config", "user.name", "Test"]);
+
+    nunki::init::init(&root, &home, &["rust".to_string()]).unwrap();
+    // A stand-in for the harness: it prints a result event and exits.
+    //
+    // It ends on `USER agent`, as every stack image must (SPEC 4.2 bis): the
+    // agent runs under the human's own id, and nunki's harness layer is built
+    // on top of whatever user the stack image leaves. A fixture that ends
+    // as root runs this whole live test as root, and proves a shape no stack
+    // image is allowed to have.
+    let (uid, gid) = nunki::image::host_ids();
+    std::fs::write(
+        home.join("stacks/rust/Dockerfile"),
+        format!(
+            "FROM alpine:3.22\n\
+             RUN addgroup -g {gid} agent 2>/dev/null || true\n\
+             RUN adduser -D -u {uid} -G $(getent group {gid} | cut -d: -f1) agent \
+             2>/dev/null || true\n\
+             RUN mkdir -p /work/tree /work/mission /run/nunki \\\n\
+              && chown -R {uid}:{gid} /work /run/nunki\n\
+             ARG RUST_VERSION\n\
+             ARG RUST_COMPONENTS\n\
+             ARG RUST_TARGETS\n\
+             RUN printf '#!/bin/sh\\n[ \"$CLAUDE_CODE_OAUTH_TOKEN\" = stand-in-token ] || exit 3\\necho \\x27{{\"type\":\"system\",\"subtype\":\"init\"}}\\x27\\n\
+             echo \\x27{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\
+             \"usage\":{{\"input_tokens\":11,\"output_tokens\":7}}}}\\x27\\n' \
+             > /usr/local/bin/claude \\\n\
+              && chmod 0755 /usr/local/bin/claude\n\
+             USER {uid}:{gid}\n"
+        ),
+    )
+    .unwrap();
+    // The repository pins a toolchain, which the stand-in declares and does
+    // not install: what is under test is the label the build writes and the
+    // launch reads back, not rustup. A second base pins another, as a base
+    // that moved after the image was built would.
+    let pin = |channel: &str| {
+        std::fs::write(
+            root.join("rust-toolchain.toml"),
+            format!("[toolchain]\nchannel = \"{channel}\"\n"),
+        )
+        .unwrap()
+    };
+    pin("1.98.0");
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-qm", "first"]);
+    git(&root, &["checkout", "-q", "-b", "moved"]);
+    pin("1.99.0");
+    git(&root, &["commit", "-qam", "a newer toolchain"]);
+    git(&root, &["checkout", "-q", "dev"]);
+
+    let project = Project::open_at(root.clone(), home.clone()).unwrap();
+    let hq_root = project.hq_root.clone();
+    let engine_bin = std::env::var("HQ_ENGINE").unwrap_or_else(|_| "docker".to_string());
+    nunki::image::build(
+        &project,
+        "rust",
+        &engine_bin,
+        nunki::image::Harness::KeepWhatTheImageCarries,
+    )
+    .expect("the images build");
+
+    let slot = nunki::slot::add(&project, "one").expect("the slot is cloned");
+    let header = nunki::mission::Header {
+        branch: "feat/alpha".to_string(),
+        base: "dev".to_string(),
+        lots: vec![nunki::mission::Lot {
+            id: "L1".to_string(),
+            title: "the first lot".to_string(),
+        }],
+        integration: nunki::mission::Integration::None {
+            reason: "nothing external".to_string(),
+        },
+        security: nunki::mission::Security::Gates,
+        rigor: Default::default(),
+        mutation_threshold: None,
+        hardening: Vec::new(),
+        arbiter: None,
+        run: None,
+        account: None,
+        model: None,
+        bounds: Default::default(),
+    };
+    nunki::mission::dir::create(&hq_root, "alpha", &header, "Do the thing.").unwrap();
+    // An account of this test's own, under its own ~/.nunki: nothing here
+    // reads the machine's.
+    let nunki_home = project.nunki_home();
+    std::fs::create_dir_all(nunki_home.join("accounts")).unwrap();
+    std::fs::write(nunki_home.join("accounts/stand-in"), "stand-in-token\n").unwrap();
+    std::fs::write(
+        nunki_home.join("accounts.yaml"),
+        "default: stand-in\naccounts:\n  stand-in:\n    harness: claude-code\n    token_file: accounts/stand-in\n",
+    )
+    .unwrap();
+
+    let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+        std::sync::Arc::new(nunki::engine::docker::Docker::real());
+    let compose_project = nunki::compose::project_name(&project.session(), "one").unwrap();
+    let profile = run::profile_path(&project, "one");
+    let _ = engine.down(&profile, &compose_project, true);
+
+    // On the base that moved, the image no longer serves, and no agent starts:
+    // nothing is recorded, so the mission can be started again once rebuilt.
+    let stale = nunki::mission::Header {
+        branch: "feat/stale".to_string(),
+        base: "moved".to_string(),
+        ..header.clone()
+    };
+    nunki::mission::dir::create(&hq_root, "stale", &stale, "Do the thing.").unwrap();
+    match run::start(&project, "stale", &slot, engine.clone(), &engine_bin) {
+        Err(run::RunError::StaleImage { drift, .. }) => {
+            assert_eq!(drift.len(), 1, "{drift:?}");
+            assert!(drift[0].contains("\"1.99.0\""), "{drift:?}");
+        }
+        Err(other) => panic!("refused for another reason: {other}"),
+        Ok(_) => panic!("an agent started on an image built for another toolchain"),
+    }
+    assert!(
+        nunki::state::Store::open(&hq_root)
+            .unwrap()
+            .load("stale")
+            .is_err(),
+        "a launch that was refused recorded a mission"
+    );
+
+    let state = run::start(&project, "alpha", &slot, engine.clone(), &engine_bin)
+        .expect("the mission starts")
+        .state;
+
+    // The slot is on the mission's branch, taken from its base.
+    assert_eq!(
+        git(&slot.tree, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "feat/alpha"
+    );
+
+    // The token is in no file (#170): not the profile, which a human reads
+    // to understand a slot, not the slot, not a layer in the image. That it
+    // reached the run is proved below: the stand-in harness exits 3 without
+    // it, and the run is read back finished, with its own numbers.
+    let written = std::fs::read_to_string(&profile).unwrap();
+    assert!(
+        !written.contains("stand-in-token"),
+        "the profile holds the token:\n{written}"
+    );
+    assert!(!written.contains("CLAUDE_CODE_OAUTH_TOKEN"), "{written}");
+
+    assert!(
+        !std::fs::read_to_string(slot.tree.join(".git/config"))
+            .unwrap_or_default()
+            .contains("stand-in-token"),
+        "and it never reaches the slot"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&profile).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o077,
+            0,
+            "the profile is the human's alone, got {mode:o}"
+        );
+    }
+
+    let handle = state.run.clone().expect("a run was launched");
+    assert!(!handle.container.is_empty(), "it runs in a container");
+    // Nor in the container's configuration, which `docker inspect` prints.
+    let inspected = std::process::Command::new(&engine_bin)
+        .args(["inspect", "-f", "{{json .Config.Env}}", &handle.container])
+        .output()
+        .unwrap();
+    assert!(inspected.status.success(), "{inspected:?}");
+    let config = String::from_utf8_lossy(&inspected.stdout);
+    assert!(!config.contains("stand-in-token"), "{config}");
+    // Counted when `nunki verify` reads it back, like every other run; and its
+    // session is the one the next lot resumes.
+    assert_eq!(state.spent.runs, 0);
+    assert_eq!(state.coder_session.as_ref(), Some(&handle.session));
+    // The log is on the host, where nunki reads it — the container has nowhere
+    // to write it.
+    assert!(handle.log.starts_with(&hq_root), "{:?}", handle.log);
+
+    let spawner = nunki::engine::spawn::ContainerSpawner::new(
+        engine.clone(),
+        profile.clone(),
+        &compose_project,
+        nunki::compose::AGENT_SERVICE,
+    );
+    let harness =
+        nunki::harness::claude_code::ClaudeCode::new(Default::default(), Box::new(spawner));
+
+    let mut outcome = None;
+    for _ in 0..50 {
+        match harness.state(&handle).unwrap() {
+            RunState::Finished(o) => {
+                outcome = Some(o);
+                break;
+            }
+            RunState::Running(_) | RunState::Paused(_) => {
+                std::thread::sleep(std::time::Duration::from_millis(200))
+            }
+        }
+    }
+    match outcome.expect("the run ended") {
+        nunki::harness::Outcome::Finished(usage) => {
+            println!("read back: {usage:?}");
+            assert_eq!(usage.output_tokens, 7, "nunki read the run's own numbers");
+        }
+        other => panic!("expected a finished run, got {other:?}"),
+    }
+
+    // Starting it twice is refused: the state already says where it is.
+    let again = run::start(&project, "alpha", &slot, engine.clone(), &engine_bin);
+    assert!(matches!(again, Err(run::RunError::AlreadyStarted(_))));
+
+    engine.down(&profile, &compose_project, true).unwrap();
+    let _ = nunki::slot::rm(&project, "one", true);
+}
+
+fn git(at: &Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(at)
+        .args(args)
+        .output()
+        .expect("git is on the path");
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+#[test]
+fn a_slot_already_driven_by_another_hq_is_not_driven_twice() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    let locks = project.hq_root.join("locks");
+    std::fs::create_dir_all(&locks).unwrap();
+    std::fs::create_dir_all(&project.hq_root).unwrap();
+    // A token exists, so a refusal here can only be the lock.
+
+    let held = nunki::state::SlotLock::acquire(&locks, "one", "something else").unwrap();
+    let slot = nunki::slot::Slot {
+        name: "one".to_string(),
+        tree: dir.path().join("slot"),
+    };
+    let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+        std::sync::Arc::new(nunki::engine::fake::FakeEngine::default());
+
+    let err = run::start(&project, "m1", &slot, engine, "docker").unwrap_err();
+    // Two `nunki` on one slot is two agents in one tree (SPEC 4.2).
+    assert!(matches!(err, run::RunError::Lock(_)), "{err}");
+    drop(held);
+}
+
+/// Liveness must be about **this** run — not about whatever holds its
+/// number, and not about the container it needed to ask through.
+///
+/// Process ids inside a container are low and recycled within seconds, so a
+/// finished run reads as running the moment an unrelated `exec` takes its
+/// pid — measured on a real container, where the very shell asking the
+/// question had become pid 7. And the check has to be able to fail to
+/// answer: a container taken down under a run is not a run that died, and
+/// answering "not alive" for it is how `nunki` came to blame an agent for its
+/// engine.
+///
+/// Three assertions, in the three directions: a live run reads as running,
+/// an impostor pid does not, and a container that went away is neither.
+///
+/// ```text
+/// cargo test --test run -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "lifts real containers; run by hand"]
+fn live_liveness_tells_this_run_from_a_stranger_and_from_a_lost_container() {
+    use nunki::engine::spawn::ContainerSpawner;
+    use nunki::harness::spawn::{CommandSpec, Presence, Spawned, Spawner};
+
+    let dir = tempfile::tempdir().unwrap();
+    let engine_bin = std::env::var("HQ_ENGINE").unwrap_or_else(|_| "docker".to_string());
+    let profile = dir.path().join("probe.yml");
+    let project = "nunki-pidprobe";
+    std::fs::write(
+        &profile,
+        concat!(
+            "services:\n",
+            "  agent:\n",
+            "    image: alpine:3.20\n",
+            // The agent's own writable directory, where a run publishes its
+            // pid. Without it the wrapper has nowhere to write and the
+            // launch times out — which is what a real profile mounts.
+            "    tmpfs:\n      - /run/nunki\n",
+            "    command: [\"sleep\", \"600\"]\n",
+        ),
+    )
+    .unwrap();
+
+    let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+        std::sync::Arc::new(nunki::engine::docker::Docker::real());
+    let _ = engine.down(&profile, project, true);
+    engine.up(&profile, project).unwrap();
+
+    let session = "11111111-2222-4333-8444-555555555555";
+    let spawner = ContainerSpawner::new(engine.clone(), profile.clone(), project, "agent")
+        .identified_by(session);
+
+    let log = dir.path().join("runs").join(format!("{session}.jsonl"));
+    let spawned = spawner
+        .spawn(
+            &CommandSpec {
+                program: "sh".to_string(),
+                // A loop, not `sleep`: a shell whose script ends in one
+                // simple command execs it and its own command line
+                // disappears. The real harness is exec'd directly by the
+                // wrapper, so its `--session-id` is right there in
+                // /proc/<pid>/cmdline; this stands in for that.
+                args: vec![
+                    "-c".to_string(),
+                    "while :; do sleep 1; done".to_string(),
+                    session.to_string(),
+                ],
+                cwd: std::path::PathBuf::from("/"),
+                env: Default::default(),
+            },
+            &log,
+        )
+        .unwrap();
+    let pid = spawned.pid.expect("a pid was published");
+    println!("in-container pid {pid}");
+    assert_eq!(
+        spawner.alive(&spawned).unwrap(),
+        Presence::Running,
+        "it is running, and a liveness check that cannot say so about a live \
+         run is worth nothing"
+    );
+
+    // A pid that is not this run — pid 1 is always there, and is never the
+    // harness. `kill -0` alone would call it alive.
+    let impostor = Spawned {
+        pid: Some(1),
+        container: spawned.container.clone(),
+    };
+    assert_eq!(
+        spawner.alive(&impostor).unwrap(),
+        Presence::Ended,
+        "pid 1 is alive and is not the run; liveness must be about identity"
+    );
+
+    // The container goes away under the run. That is not the process ending
+    // — SPEC 4.2 makes it an interruption the agent does not pay for — and
+    // the answer must say so in its own words, naming the container.
+    engine.down(&profile, project, true).unwrap();
+    match spawner.alive(&spawned).unwrap() {
+        Presence::Vanished(why) => {
+            println!("vanished, and it says why: {why}");
+            assert!(
+                why.contains(&spawned.container[..12]),
+                "it must name the container: {why}"
+            );
+        }
+        other => panic!("a container that went away is not the run ending: {other:?}"),
+    }
+
+    let _ = engine_bin;
+}
+
+// --- the profile of a role (SPEC 4.1, mounts per profile; 4.2, services) ---
+
+fn header_with(integration: nunki::mission::Integration) -> nunki::mission::Header {
+    nunki::mission::Header {
+        branch: "feat/alpha".to_string(),
+        base: "dev".to_string(),
+        lots: vec![nunki::mission::Lot {
+            id: "L1".to_string(),
+            title: "one".to_string(),
+        }],
+        integration,
+        security: nunki::mission::Security::Agent,
+        rigor: Default::default(),
+        mutation_threshold: None,
+        hardening: Vec::new(),
+        arbiter: None,
+        run: None,
+        account: None,
+        model: None,
+        bounds: Default::default(),
+    }
+}
+
+fn with_services() -> nunki::mission::Integration {
+    nunki::mission::Integration::Services {
+        services: vec![nunki::mission::Service {
+            name: "db".to_string(),
+            reach: vec!["db".to_string(), "10.4.0.7".to_string()],
+            shared: false,
+        }],
+        wiring: vec!["compose.yaml".to_string()],
+    }
+}
+
+/// Build a profile for one role and give back the plan and the YAML.
+fn profile_for(
+    project: &Project,
+    slot: &nunki::slot::Slot,
+    header: &nunki::mission::Header,
+    role: Role,
+) -> (nunki::compose::Plan, nunki::yaml::Value) {
+    let images = nunki::image::Images {
+        agent: "img/agent".into(),
+        firewall: "img/fw".into(),
+        prober: "img/probe".into(),
+    };
+    let paths = nunki::mission::dir::Paths::of(&project.hq_root, "m1");
+    let plan = run::plan(project, slot, "rust", &images, &paths, header, role).unwrap();
+    let engine = nunki::engine::fake::FakeEngine::default();
+    let written = nunki::compose::generate(&plan, nunki::engine::Engine::dialect(&engine)).unwrap();
+    (plan, nunki::yaml::from_str(&written).unwrap())
+}
+
+fn slot_at(dir: &Path) -> nunki::slot::Slot {
+    let tree = dir.join("slot");
+    std::fs::create_dir_all(&tree).unwrap();
+    nunki::slot::Slot {
+        name: "one".to_string(),
+        tree,
+    }
+}
+
+/// The mission's declared services reach the system profile's allowlist and
+/// never the coder's — SPEC 4.1 bis, rule 6: the coder's list is what his
+/// stack and his harness need, and nothing else.
+#[test]
+fn only_a_system_profile_carries_the_missions_services() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    let slot = slot_at(dir.path());
+    let header = header_with(with_services());
+
+    let (coder, _) = profile_for(&project, &slot, &header, Role::Coder);
+    assert!(
+        !coder.perimeter.addresses.contains("10.4.0.7"),
+        "the coder reaches no service: {:?}",
+        coder.perimeter
+    );
+
+    let (integrator, _) = profile_for(&project, &slot, &header, Role::Integrator);
+    assert!(
+        integrator.perimeter.addresses.contains("10.4.0.7"),
+        "{:?}",
+        integrator.perimeter
+    );
+    assert!(
+        integrator.perimeter.domains.contains("db"),
+        "{:?}",
+        integrator.perimeter
+    );
+}
+
+/// The test credentials are mounted read-only on a system profile and on no
+/// other (SPEC 3.1). Two guards say this — `compose::build` refuses them on a
+/// mission profile as well — and that is deliberate.
+#[test]
+fn only_a_system_profile_mounts_the_test_credentials() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = project(dir.path()).config;
+    let credentials = dir.path().join("credentials");
+    std::fs::create_dir_all(&credentials).unwrap();
+    std::fs::write(credentials.join("db.env"), "PGPASSWORD=x\n").unwrap();
+    std::fs::write(credentials.join("api.env"), "TOKEN=y\n").unwrap();
+    config.credentials = Some(credentials.clone());
+    let project = Project::at(dir.path().join("repo"), config, dir.path().join("nunki"));
+    let slot = slot_at(dir.path());
+    let header = header_with(with_services());
+
+    let (coder, _) = profile_for(&project, &slot, &header, Role::Coder);
+    assert!(coder.credentials.is_empty(), "{:?}", coder.credentials);
+
+    let (integrator, doc) = profile_for(&project, &slot, &header, Role::Integrator);
+    // Sorted, because the profile is regenerated at every launch and a diff
+    // must mean a real change.
+    assert_eq!(
+        integrator
+            .credentials
+            .iter()
+            .map(|(_, at)| at.display().to_string())
+            .collect::<Vec<_>>(),
+        vec![
+            format!("{}/api.env", run::CREDENTIALS_AT),
+            format!("{}/db.env", run::CREDENTIALS_AT),
+        ]
+    );
+    let mounts: Vec<String> = doc["services"][nunki::compose::AGENT_SERVICE]["volumes"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(
+        mounts
+            .iter()
+            .any(|m| m.ends_with(&format!("{}/db.env:ro", run::CREDENTIALS_AT))),
+        "read-only, and nothing else: {mounts:?}"
+    );
+}
+
+/// A slot on the branch `mission/x`, made the way a launch makes it from a
+/// base `dev` holding `files` in its one commit: the host's record of that
+/// base is what a system profile reads the services file at.
+fn committed_slot(dir: &Path, files: &[(&str, &str)]) -> nunki::slot::Slot {
+    let origin = dir.join("slot-origin");
+    std::fs::create_dir_all(&origin).unwrap();
+    git(&origin, &["init", "-q", "-b", "dev"]);
+    for (name, body) in files {
+        std::fs::write(origin.join(name), body).unwrap();
+    }
+    git(&origin, &["add", "-A"]);
+    git(
+        &origin,
+        &[
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "user.name=T",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "first",
+        ],
+    );
+    git(dir, &["clone", "-q", origin.to_str().unwrap(), "slot"]);
+    let slot = slot_at(dir);
+    nunki::run::branch(&slot, &origin, "mission/x", "dev").unwrap();
+    slot
+}
+
+/// A project declaring `compose.yaml` as its services file.
+fn with_services_file(dir: &Path) -> Project {
+    let mut config = project(dir).config;
+    config.services_file = Some(std::path::PathBuf::from("compose.yaml"));
+    Project::at(dir.join("repo"), config, dir.join("nunki"))
+}
+
+/// What a human does with `nunki services --approve`, for the slot's HEAD.
+fn approve_head(project: &Project, slot: &nunki::slot::Slot) {
+    let current = nunki::services::read(project, nunki::services::At::Slot(&slot.tree))
+        .unwrap()
+        .unwrap();
+    nunki::services::approve(project, &current.digest, std::slice::from_ref(&current)).unwrap();
+}
+
+fn plan_err(project: &Project, slot: &nunki::slot::Slot) -> run::RunError {
+    let images = nunki::image::Images {
+        agent: "img/agent".into(),
+        firewall: "img/fw".into(),
+        prober: "img/probe".into(),
+    };
+    let paths = nunki::mission::dir::Paths::of(&project.hq_root, "m1");
+    run::plan(
+        project,
+        slot,
+        "rust",
+        &images,
+        &paths,
+        &header_with(with_services()),
+        Role::Integrator,
+    )
+    .unwrap_err()
+}
+
+/// The project's own services are lifted into the system profile as nunki
+/// renders them — `include:` is unusable on one of the two engines (SPEC
+/// 4.2, engine table), and the file's bytes are never what is lifted — and
+/// into no mission profile: the coder's allowlist forbids it to talk to them.
+#[test]
+fn the_projects_services_are_merged_into_the_system_profile_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = with_services_file(dir.path());
+    let slot = committed_slot(
+        dir.path(),
+        &[(
+            "compose.yaml",
+            "services:\n  db:\n    image: postgres:16\n    environment:\n      PGPASSWORD: pa$$word\n    \
+             volumes:\n      - dbdata:/var/lib/postgresql/data\nvolumes:\n  dbdata: null\n",
+        )],
+    );
+    approve_head(&project, &slot);
+    let header = header_with(with_services());
+
+    let (_, coder) = profile_for(&project, &slot, &header, Role::Coder);
+    assert!(coder["services"]["db"].is_null(), "{coder:?}");
+
+    let (_, doc) = profile_for(&project, &slot, &header, Role::Integrator);
+    assert_eq!(doc["services"]["db"]["image"].as_str(), Some("postgres:16"));
+    assert_eq!(
+        doc["services"]["db"]["volumes"][0].as_str(),
+        Some("dbdata:/var/lib/postgresql/data")
+    );
+    // nunki's rendering, not the file's bytes: every `$` doubled again, so
+    // what Compose reads back is the literal the file wrote.
+    assert_eq!(
+        doc["services"]["db"]["environment"]["PGPASSWORD"].as_str(),
+        Some("pa$$$$word")
+    );
+    // The volumes travel with them: a service naming a volume the document
+    // does not declare makes the whole project invalid (measured).
+    assert!(
+        doc["volumes"]
+            .as_mapping()
+            .unwrap()
+            .contains_key(&nunki::yaml::Value::from("dbdata")),
+        "{doc:?}"
+    );
+}
+
+/// The system profile lifts the services file as the mission's base holds
+/// it, never from the branch (#141). An edit an agent committed — which
+/// gate 4 refuses — is not what is lifted, and its rendering, which no human
+/// approved, stops nothing: the approved one on the base is lifted instead.
+#[test]
+fn the_system_profile_lifts_the_services_file_of_the_base_not_of_the_branch() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = with_services_file(dir.path());
+    let slot = committed_slot(
+        dir.path(),
+        &[("compose.yaml", "services:\n  db:\n    image: postgres:16\n")],
+    );
+    approve_head(&project, &slot);
+    std::fs::write(
+        slot.tree.join("compose.yaml"),
+        "services:\n  db:\n    image: postgres:99\n",
+    )
+    .unwrap();
+    git(
+        &slot.tree,
+        &[
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "user.name=T",
+            "commit",
+            "-qam",
+            "an agent's edit",
+        ],
+    );
+    let header = header_with(with_services());
+
+    let (_, doc) = profile_for(&project, &slot, &header, Role::Integrator);
+    assert_eq!(doc["services"]["db"]["image"].as_str(), Some("postgres:16"));
+}
+
+/// A services file the closed model refuses lifts nothing: the profile is
+/// not planned, and the error names the file and the key.
+#[test]
+fn a_services_file_the_model_refuses_plans_no_profile() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = with_services_file(dir.path());
+    let slot = committed_slot(
+        dir.path(),
+        &[(
+            "compose.yaml",
+            "services:\n  db:\n    image: postgres:16\n    privileged: true\n",
+        )],
+    );
+    let err = plan_err(&project, &slot);
+    assert!(
+        matches!(
+            err,
+            run::RunError::Services(nunki::services::ApprovalError::Refused { .. })
+        ),
+        "{err}"
+    );
+    let said = err.to_string();
+    assert!(
+        said.contains("compose.yaml") && said.contains("privileged"),
+        "{said}"
+    );
+}
+
+/// A services file that `nunki.yaml` names and the commit does not carry is
+/// said by name, before a profile is lifted without the services the
+/// integrator was called to wire — even when the tree holds one: what is
+/// read is the commit.
+#[test]
+fn a_services_file_that_is_not_on_the_commit_is_named() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = with_services_file(dir.path());
+    let slot = committed_slot(dir.path(), &[]);
+    std::fs::write(
+        slot.tree.join("compose.yaml"),
+        "services:\n  db:\n    image: postgres:16\n",
+    )
+    .unwrap();
+    let err = plan_err(&project, &slot);
+    assert!(
+        matches!(
+            err,
+            run::RunError::Services(nunki::services::ApprovalError::NotOnCommit { .. })
+        ),
+        "{err}"
+    );
+    assert!(err.to_string().contains("compose.yaml"), "{err}");
+    // Read where the system profile reads it, and said so: on the base.
+    assert!(
+        err.to_string()
+            .contains("the commit the mission's branch starts from, on its base"),
+        "{err}"
+    );
+}
+
+/// A project declaring a services file, three times over: `postgres:15` on
+/// the slot, cloned from a `dev` that has moved since; `postgres:16` on
+/// `dev` now, where the mission's branch starts; and `postgres:17` on the
+/// branch the human's checkout sits on. The mission `m1` is framed with
+/// `header`.
+fn services_at_start(dir: &Path, header: &nunki::mission::Header) -> (Project, nunki::slot::Slot) {
+    let project = with_services_file(dir);
+    let root = project.root.clone();
+    let image = |tag: &str| {
+        std::fs::write(
+            root.join("compose.yaml"),
+            format!("services:\n  db:\n    image: postgres:{tag}\n"),
+        )
+        .unwrap()
+    };
+    std::fs::create_dir_all(&root).unwrap();
+    git(&root, &["init", "-q", "-b", "dev"]);
+    git(&root, &["config", "user.email", "a@b.c"]);
+    git(&root, &["config", "user.name", "t"]);
+    image("15");
+    git(&root, &["add", "-A"]);
+    git(
+        &root,
+        &["commit", "-qm", "the base the slot was cloned from"],
+    );
+
+    // Where `nunki slot add` puts it, which is where an approval looks.
+    let slots = nunki::slot::slots_dir(&project);
+    std::fs::create_dir_all(&slots).unwrap();
+    git(
+        &slots,
+        &["clone", "-q", "-b", "dev", root.to_str().unwrap(), "one"],
+    );
+    let slot = nunki::slot::find(&project, "one").unwrap();
+
+    image("16");
+    git(&root, &["commit", "-qam", "the base now"]);
+    git(&root, &["checkout", "-q", "-b", "elsewhere"]);
+    image("17");
+    git(&root, &["commit", "-qam", "what the human is looking at"]);
+    std::fs::create_dir_all(project.hq_root.join("locks")).unwrap();
+    nunki::mission::dir::create(&project.hq_root, "m1", header, "").unwrap();
+    (project, slot)
+}
+
+fn start_err(project: &Project, slot: &nunki::slot::Slot) -> run::RunError {
+    let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+        std::sync::Arc::new(nunki::engine::fake::FakeEngine::default());
+    run::start(project, "m1", slot, engine, "docker").unwrap_err()
+}
+
+/// A mission launched to run on its own asks for the services approval its
+/// integrator needs when it starts, while the human who launched it is
+/// there, and not when the integrator is due: measured once at 18.5 hours
+/// in, with nobody to answer (#141).
+///
+/// What it names is what the integrator would lift: the file on the commit
+/// the mission's branch starts from, not on the human's checkout. That is
+/// a digest `nunki services --approve` takes, and once it is approved the
+/// start goes on, here as far as the account this test does not have.
+#[test]
+fn a_mission_whose_integrator_needs_unapproved_services_does_not_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot) = services_at_start(dir.path(), &header_with(with_services()));
+
+    let err = start_err(&project, &slot);
+    let run::RunError::NotApprovedAtStart(refused) = &err else {
+        panic!("refused for another reason, or not refused: {err}");
+    };
+    let digest = &refused.digest;
+    assert_eq!(refused.role, "integrator");
+    assert_eq!(refused.path, "compose.yaml");
+
+    // The slot is on the mission's branch, made from the base.
+    assert_eq!(
+        git(&slot.tree, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "feat/alpha"
+    );
+    assert_eq!(
+        git(&slot.tree, &["rev-parse", "HEAD"]),
+        git(&project.root, &["rev-parse", "dev"])
+    );
+    let at = |at| nunki::services::read(&project, at).unwrap().unwrap().digest;
+    assert_eq!(*digest, at(nunki::services::At::Slot(&slot.tree)));
+    assert_ne!(
+        *digest,
+        at(nunki::services::At::Repository(&project.root)),
+        "the human's checkout is not what the mission lifts"
+    );
+
+    // Said whole: that the mission did not start, the rendering to read,
+    // and the two commands that come next.
+    let said = err.to_string();
+    println!("{said}");
+    assert!(said.contains("mission m1 was not started"), "{said}");
+    assert!(said.contains("image: \"postgres:16\""), "{said}");
+    assert!(!said.contains("postgres:15"), "{said}");
+    assert!(!said.contains("postgres:17"), "{said}");
+    assert!(
+        said.contains(&format!("`nunki services --approve {digest}`")),
+        "{said}"
+    );
+    assert!(
+        said.contains("`nunki mission start m1 --slot one`"),
+        "{said}"
+    );
+    assert!(
+        nunki::state::Store::open(&project.hq_root)
+            .unwrap()
+            .load("m1")
+            .is_err(),
+        "a refused start recorded a mission"
+    );
+
+    // What `nunki services --approve` does: it looks through the slots.
+    let current: Vec<_> = nunki::services::readings(&project, None, true)
+        .unwrap()
+        .into_iter()
+        .filter_map(|r| r.current.ok())
+        .collect();
+    nunki::services::approve(&project, digest, &current).unwrap();
+
+    let err = start_err(&project, &slot);
+    assert!(matches!(err, run::RunError::Account(_)), "{err}");
+}
+
+/// The security agent is on the system profile too, and `launch` asks it
+/// the same question, so a mission that has one is asked at its start even
+/// with no service declared. A mission with neither is never asked, nor is
+/// a project that declares no services file, and their slot is not branched
+/// before the rest of the start is checked.
+#[test]
+fn only_a_mission_with_a_system_profile_is_asked_at_its_start() {
+    let none = || nunki::mission::Integration::None {
+        reason: "none".to_string(),
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let (security_agent, slot) = services_at_start(dir.path(), &header_with(none()));
+    let err = start_err(&security_agent, &slot);
+    assert!(
+        matches!(
+            err,
+            run::RunError::NotApprovedAtStart(ref refused) if refused.role == "security agent"
+        ),
+        "{err}"
+    );
+    // It lifts none of them: no service is declared.
+    let said = err.to_string();
+    println!("{said}");
+    assert!(said.contains("runs on the system profile"), "{said}");
+    assert!(!said.contains("will lift"), "{said}");
+
+    let dir = tempfile::tempdir().unwrap();
+    let gates_only = nunki::mission::Header {
+        security: nunki::mission::Security::Gates,
+        ..header_with(none())
+    };
+    let (gates, slot) = services_at_start(dir.path(), &gates_only);
+    let err = start_err(&gates, &slot);
+    assert!(matches!(err, run::RunError::Account(_)), "{err}");
+    assert_eq!(
+        git(&slot.tree, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "dev"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let (_, slot) = services_at_start(dir.path(), &header_with(with_services()));
+    let declares_none = project(dir.path());
+    assert!(declares_none.config.services_file.is_none());
+    let err = start_err(&declares_none, &slot);
+    assert!(matches!(err, run::RunError::Account(_)), "{err}");
+    assert_eq!(
+        git(&slot.tree, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "dev"
+    );
+}
+
+/// The other answer to a refused start is to fix the file on the base. The
+/// refusal left the slot on the mission's branch, and a branch that exists
+/// is never moved by a launch: started again, the mission would read the
+/// first commit for good. So a start brings that branch forward to the base
+/// as it is now, and only forward: a commit of its own keeps it where it
+/// is.
+#[test]
+fn a_start_refused_then_started_again_reads_the_base_as_it_is_now() {
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot) = services_at_start(dir.path(), &header_with(with_services()));
+    let digest_of = |err: run::RunError| match err {
+        run::RunError::NotApprovedAtStart(refused) => (refused.digest.clone(), refused.to_string()),
+        other => panic!("refused for another reason, or not refused: {other}"),
+    };
+    let (first, _) = digest_of(start_err(&project, &slot));
+
+    git(&project.root, &["checkout", "-q", "dev"]);
+    std::fs::write(
+        project.root.join("compose.yaml"),
+        "services:\n  db:\n    image: postgres:18\n",
+    )
+    .unwrap();
+    git(
+        &project.root,
+        &["commit", "-qam", "the file, fixed on the base"],
+    );
+    git(&project.root, &["checkout", "-q", "elsewhere"]);
+
+    let (second, said) = digest_of(start_err(&project, &slot));
+    assert_ne!(
+        second, first,
+        "the first commit's refusal came back: {said}"
+    );
+    assert!(said.contains("image: \"postgres:18\""), "{said}");
+    assert_eq!(
+        git(&slot.tree, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "feat/alpha"
+    );
+    assert_eq!(
+        git(&slot.tree, &["rev-parse", "HEAD"]),
+        git(&project.root, &["rev-parse", "dev"])
+    );
+    let current: Vec<_> = nunki::services::readings(&project, None, true)
+        .unwrap()
+        .into_iter()
+        .filter_map(|r| r.current.ok())
+        .collect();
+    nunki::services::approve(&project, &second, &current).unwrap();
+    let err = start_err(&project, &slot);
+    assert!(matches!(err, run::RunError::Account(_)), "{err}");
+
+    // A commit of the branch's own, and the base moving again.
+    git(&slot.tree, &["config", "user.email", "a@b.c"]);
+    git(&slot.tree, &["config", "user.name", "t"]);
+    git(
+        &slot.tree,
+        &["commit", "-q", "--allow-empty", "-m", "its own"],
+    );
+    let own = git(&slot.tree, &["rev-parse", "HEAD"]);
+    git(&project.root, &["checkout", "-q", "dev"]);
+    git(
+        &project.root,
+        &["commit", "-q", "--allow-empty", "-m", "dev again"],
+    );
+    let err = start_err(&project, &slot);
+    assert!(matches!(err, run::RunError::Account(_)), "{err}");
+    assert_eq!(git(&slot.tree, &["rev-parse", "HEAD"]), own);
+    assert_eq!(
+        git(&slot.tree, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "feat/alpha"
+    );
+}
+
+/// The two roles that commit are told the services file is the human's, by
+/// name, and where a change to it goes, before gate 4 refuses one (#141).
+/// The security agent commits nothing and is not told, and a project that
+/// declares no services file has none for the gate to refuse.
+#[test]
+fn the_roles_that_commit_are_told_the_services_file_is_the_humans() {
+    let paths = ProtectedPaths::default();
+    let declared = role::Protected {
+        branches: &[],
+        paths: &paths,
+        services_file: Some("deploy/compose.yaml"),
+    };
+    for role in [Role::Coder, Role::Integrator] {
+        let text = flat(&role::prompt(role, &declared));
+        assert!(
+            text.contains("The project's services file, `deploy/compose.yaml`,"),
+            "{role:?}: {text}"
+        );
+        assert!(text.contains("even if your wiring list names it"), "{text}");
+        assert!(text.contains("proposed in `PR.md`"), "{text}");
+        assert!(
+            !prompt(role).contains("services file"),
+            "{role:?}: no file is declared, so none is talked about"
+        );
+    }
+    assert!(!role::prompt(Role::Security, &declared).contains("services file"));
+}
+
+/// The container is told which role it is running, and the spelling comes
+/// from one place.
+#[test]
+fn the_profile_names_its_role() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    let slot = slot_at(dir.path());
+    let header = header_with(with_services());
+    for (role, said) in [
+        (Role::Coder, "coder"),
+        (Role::Integrator, "integrator"),
+        (Role::Security, "security"),
+    ] {
+        let (plan, _) = profile_for(&project, &slot, &header, role);
+        assert_eq!(
+            plan.environment.get("HQ_ROLE").map(String::as_str),
+            Some(said)
+        );
+        assert_eq!(plan.role, role);
+
+        // And a commit made in that container says the same role, from the
+        // run's environment — git reads these before any config file, so the
+        // slot's config cannot answer for them.
+        //
+        // If nunki sets no identity, the agents set one in the slot's config,
+        // and the coder of a second mission commits as `nunki integrator` —
+        // the identity the previous mission's integrator left there.
+        //
+        // The **committer** carries it. The author is the human's, and
+        // `a_commit_is_attributed_to_the_human_who_owns_it` covers that.
+        for (var, value) in [
+            ("GIT_COMMITTER_NAME", format!("nunki {said}")),
+            ("GIT_COMMITTER_EMAIL", format!("{said}@nunki.local")),
+        ] {
+            assert_eq!(
+                plan.environment.get(var),
+                Some(&value),
+                "{var} on the {role:?} profile"
+            );
+        }
+    }
+}
+
+/// A commit an agent makes is **authored** by the human whose project it is.
+///
+/// Not a nicety: a forge reads the author line and nothing else. GitHub
+/// resolves a commit's author email to an account and leaves `author` null
+/// when it cannot, so every commit authored as `coder@nunki.local` is
+/// attributed to nobody, absent from the
+/// contribution graph of the person who owns the repository, framed the
+/// mission, authorised the push and merged it.
+///
+/// The role is not lost: it moves to the committer, which the test above
+/// pins, and which a forge shows beside the author.
+#[test]
+fn a_commit_is_attributed_to_the_human_who_owns_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    let slot = slot_at(dir.path());
+    let header = header_with(with_services());
+
+    std::fs::create_dir_all(project.nunki_home()).unwrap();
+    std::fs::write(
+        project.nunki_home().join(nunki::human::ME_FILE),
+        "name: Ada Lovelace\nemail: ada@example.org\n",
+    )
+    .unwrap();
+
+    for role in [Role::Coder, Role::Integrator, Role::Security] {
+        let (plan, _) = profile_for(&project, &slot, &header, role);
+        assert_eq!(
+            plan.environment.get("GIT_AUTHOR_NAME").map(String::as_str),
+            Some("Ada Lovelace"),
+            "{role:?}"
+        );
+        assert_eq!(
+            plan.environment.get("GIT_AUTHOR_EMAIL").map(String::as_str),
+            Some("ada@example.org"),
+            "{role:?}: a forge resolves this address to an account, or to nobody"
+        );
+        // And the role is still on the commit, in the other line.
+        assert_eq!(
+            plan.environment
+                .get("GIT_COMMITTER_EMAIL")
+                .map(String::as_str),
+            Some(format!("{}@nunki.local", nunki::role::slug(role)).as_str()),
+            "{role:?}"
+        );
+    }
+}
+
+/// A name with no address attributes to nobody, so `nunki` does not pretend.
+///
+/// An invented address — `ada@localhost`, the machine's hostname, anything —
+/// would read as attribution on every commit and resolve to no account on
+/// any forge. The role signs both lines instead, which is visibly wrong
+/// rather than quietly wrong.
+#[test]
+fn a_human_without_an_address_does_not_get_an_invented_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    let slot = slot_at(dir.path());
+    let header = header_with(with_services());
+
+    std::fs::create_dir_all(project.nunki_home()).unwrap();
+    std::fs::write(
+        project.nunki_home().join(nunki::human::ME_FILE),
+        "name: Ada Lovelace\n",
+    )
+    .unwrap();
+
+    let (plan, _) = profile_for(&project, &slot, &header, Role::Coder);
+    assert_eq!(
+        plan.environment.get("GIT_AUTHOR_EMAIL").map(String::as_str),
+        Some("coder@nunki.local"),
+    );
+    assert_eq!(
+        plan.environment.get("GIT_AUTHOR_NAME").map(String::as_str),
+        Some("nunki coder"),
+    );
+}
+
+/// The security agent's tree is read-only, and what an execution must still
+/// write is declared by the stack and mounted as a volume of its own (SPEC
+/// 4.2, rule 3). The other two roles write the tree, so they carry none.
+#[test]
+fn only_the_security_profile_carries_the_stacks_writable_volumes() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    std::fs::create_dir_all(project.fragment("rust")).unwrap();
+    std::fs::write(
+        project.fragment("rust").join(nunki::project::WRITABLE_FILE),
+        "# what a build writes\ntarget\n\npackages/web/node_modules\n",
+    )
+    .unwrap();
+    let slot = slot_at(dir.path());
+    let header = header_with(with_services());
+
+    for role in [Role::Coder, Role::Integrator] {
+        let (plan, _) = profile_for(&project, &slot, &header, role);
+        assert!(
+            !plan.volumes.iter().any(|v| v.at.ends_with("target")),
+            "{role:?} writes the tree itself: {:?}",
+            plan.volumes
+        );
+    }
+
+    let (plan, doc) = profile_for(&project, &slot, &header, Role::Security);
+    let at: Vec<String> = plan
+        .volumes
+        .iter()
+        .map(|v| v.at.display().to_string())
+        .collect();
+    assert!(at.contains(&"/work/tree/target".to_string()), "{at:?}");
+    assert!(
+        at.contains(&"/work/tree/packages/web/node_modules".to_string()),
+        "{at:?}"
+    );
+    // Named per profile, not per slot: a `target/` shared with the coder's
+    // would hand the security agent the build tree it is meant to attack
+    // from outside.
+    assert_eq!(
+        run::writable_volume("one", "target"),
+        "nunki-one-security-target"
+    );
+    assert_eq!(
+        run::writable_volume("one", "packages/web/node_modules"),
+        "nunki-one-security-packages-web-node_modules"
+    );
+    // Declared as well as mounted, or Compose refuses the whole project.
+    let declared = doc["volumes"].as_mapping().unwrap();
+    assert!(
+        declared.contains_key(&nunki::yaml::Value::from(
+            "nunki-one-security-target".to_string()
+        )),
+        "{declared:?}"
+    );
+    // And the tree stays read-only around them.
+    let mounts: Vec<String> = doc["services"][nunki::compose::AGENT_SERVICE]["volumes"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(
+        mounts.iter().any(|m| m.ends_with("/work/tree:ro")),
+        "{mounts:?}"
+    );
+}
+
+/// `writable.txt` is a list a human edits, and what it may not do is escape
+/// the tree it describes.
+#[test]
+fn a_writable_declaration_may_not_climb_out_of_the_tree() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    std::fs::create_dir_all(project.fragment("rust")).unwrap();
+    std::fs::write(
+        project.fragment("rust").join(nunki::project::WRITABLE_FILE),
+        "# a comment\n\n  target  \n/.next/\n..\n../../etc\nsrc/../..\n.\n",
+    )
+    .unwrap();
+    assert_eq!(
+        project.stack_writable("rust"),
+        vec!["target".to_string(), ".next".to_string()]
+    );
+}
+
+/// A volume can only be mounted at a path the read-only bind already carries:
+/// runc creates the mount point in the assembled root filesystem, and under a
+/// `:ro` bind it cannot — `create mountpoint for /work/tree/target: read-only
+/// file system`, measured. So `nunki` makes the directory in the
+/// slot's tree first, and nothing else: an empty directory the project
+/// ignores, invisible to `git status`, so gate 1 stays green.
+#[test]
+fn the_declared_directories_are_made_in_the_tree_before_the_profile_is_lifted() {
+    let dir = tempfile::tempdir().unwrap();
+    let slot = slot_at(dir.path());
+    let git = |args: &[&str]| {
+        assert!(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&slot.tree)
+                .args(["-c", "user.name=T", "-c", "user.email=t@example.com"])
+                .args(args)
+                .status()
+                .unwrap()
+                .success(),
+            "git {args:?}"
+        );
+    };
+    git(&["init", "-q", "-b", "x"]);
+    std::fs::write(slot.tree.join(".gitignore"), "target\n").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "base"]);
+
+    let declared = vec![
+        "target".to_string(),
+        "packages/web/node_modules".to_string(),
+    ];
+    run::seed_writable(&slot, &declared).unwrap();
+    assert!(slot.tree.join("target").is_dir());
+    assert!(slot.tree.join("packages/web/node_modules").is_dir());
+
+    // Twice changes nothing — a role that follows another finds them there.
+    run::seed_writable(&slot, &declared).unwrap();
+
+    // And the tree gate does not see them. `packages/` is not ignored and is
+    // still invisible: git tracks files, not directories.
+    let dirty = String::from_utf8(
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&slot.tree)
+            .args(["status", "--porcelain"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    assert!(dirty.trim().is_empty(), "gate 1 would go red on: {dirty}");
+}
+
+/// A session identifier has to be unique across its **whole** length.
+///
+/// The identity check greps a container's `/proc/<pid>/cmdline` for it (see
+/// `engine::spawn`), and a prefix everybody shares tells nothing apart. The
+/// mix that came before left the top 48 bits at zero — every identifier began
+/// `00000000-0000-`, as this project's own run logs show — because
+/// nanoseconds since 1970 need 61 bits, a pid shifted by 64 reaches 80, and
+/// nothing filled the rest.
+#[test]
+fn a_session_identifier_is_unique_over_its_whole_length() {
+    let ids: Vec<String> = (0..64).map(|_| run::session_id()).collect();
+
+    for id in &ids {
+        assert_eq!(id.len(), 36, "{id}");
+        let parts: Vec<&str> = id.split('-').collect();
+        assert_eq!(
+            parts.iter().map(|p| p.len()).collect::<Vec<_>>(),
+            vec![8, 4, 4, 4, 12],
+            "{id}"
+        );
+        assert!(
+            id.chars().all(|c| c.is_ascii_hexdigit() || c == '-'),
+            "{id}"
+        );
+        // v4, and the RFC 4122 variant, so a harness that validates the shape
+        // accepts it.
+        assert!(parts[2].starts_with('4'), "{id}");
+        assert!(
+            matches!(parts[3].chars().next(), Some('8' | '9' | 'a' | 'b')),
+            "{id}"
+        );
+    }
+
+    // No shared prefix: the head of the identifier must carry entropy, not a
+    // constant. Sixteen distinct first-halves out of sixty-four is far below
+    // what randomness gives and far above what a constant gives.
+    let heads: std::collections::BTreeSet<&str> = ids.iter().map(|id| &id[..18]).collect();
+    assert!(
+        heads.len() > 16,
+        "the first half of every identifier is nearly the same: {:?}",
+        heads.iter().take(4).collect::<Vec<_>>()
+    );
+    let whole: std::collections::BTreeSet<&String> = ids.iter().collect();
+    assert_eq!(whole.len(), ids.len(), "two runs share an identifier");
+}
+
+/// A session given is resumed; none given is a fresh one, never the same
+/// twice.
+#[test]
+fn a_given_session_is_resumed_and_none_starts_a_fresh_one() {
+    let given = nunki::harness::SessionId("s-coder".into());
+    assert_eq!(run::session_for(Some(&given)), (given.clone(), true));
+    let (fresh, resume) = run::session_for(None);
+    assert!(!resume);
+    assert_ne!(fresh, given);
+    assert_ne!(run::session_for(None).0, fresh, "a fresh one each time");
+}
+
+/// The coder is told to stand in for what it cannot reach, because a gate
+/// that requires what nothing states grades an agent on a secret.
+///
+/// SPEC 4.4 says "stubbed, or a disposable local component"; the prompt has
+/// to say it too. A coder that writes a PostgreSQL store with no seam leaves
+/// the mutation campaign survivors nobody in that container can kill, and
+/// gate 7 spends all three attempts on a triage that cannot be won.
+#[test]
+fn the_coder_is_told_to_mock_what_its_container_cannot_reach() {
+    let coder = prompt(Role::Coder);
+
+    assert!(
+        coder.contains("What you cannot reach, you stand in for"),
+        "{coder}"
+    );
+    assert!(
+        coder.contains("seam"),
+        "the rule names what to write against, not only what not to do: {coder}"
+    );
+    // The half that is not the coder's, named in the same breath, so the
+    // rule does not read as "test the database yourself".
+    assert!(coder.contains("is the integrator's"), "{coder}");
+    // And the escape hatch is closed where an agent would reach for it.
+    assert!(coder.contains("`#[ignore]`"), "{coder}");
+
+    // The other two roles are not told this: the integrator has the service,
+    // and the security agent commits nothing.
+    for other in [prompt(Role::Integrator), prompt(Role::Security)] {
+        assert!(
+            !other.contains("What you cannot reach, you stand in for"),
+            "{other}"
+        );
+    }
+}
+
+/// A slot is a clone, and a clone writes its own `dev` once. Nothing moves it
+/// again — so without a refresh every mission after the first branches from
+/// the base as it stood the day the slot was made, and its pull request
+/// opens against a base that has moved.
+///
+/// A slot's `origin` is the project on this machine rather than the forge, so
+/// refreshing it is local and needs no network.
+#[test]
+fn a_second_mission_branches_from_a_base_the_slot_refreshed() {
+    let dir = tempfile::tempdir().unwrap();
+    let origin = dir.path().join("origin");
+    std::fs::create_dir_all(&origin).unwrap();
+    git(&origin, &["init", "-q", "-b", "dev"]);
+    git(&origin, &["config", "user.email", "a@b.c"]);
+    git(&origin, &["config", "user.name", "t"]);
+    std::fs::write(origin.join("f"), "one").unwrap();
+    git(&origin, &["add", "-A"]);
+    git(&origin, &["commit", "-qm", "base"]);
+
+    let tree = dir.path().join("slot");
+    git(
+        dir.path(),
+        &["clone", "-q", origin.to_str().unwrap(), "slot"],
+    );
+    git(&tree, &["config", "user.email", "a@b.c"]);
+    git(&tree, &["config", "user.name", "t"]);
+    let slot = nunki::slot::Slot {
+        name: "one".into(),
+        tree: tree.clone(),
+    };
+
+    // The first mission, then the base moves the way a merged pull request
+    // moves it.
+    nunki::run::branch(&slot, &origin, "mission/first", "dev").unwrap();
+    std::fs::write(origin.join("f"), "two").unwrap();
+    git(&origin, &["add", "-A"]);
+    git(&origin, &["commit", "-qm", "what the first mission merged"]);
+    let moved = git(&origin, &["rev-parse", "HEAD"]);
+
+    nunki::run::branch(&slot, &origin, "mission/second", "dev").unwrap();
+
+    assert_eq!(
+        git(&tree, &["rev-parse", "HEAD"]),
+        moved,
+        "the second mission started from the slot's own stale dev"
+    );
+}
+
+/// `checkout -B` repoints a branch at its start: `checkout -B mission/x dev`
+/// on a branch holding one commit of work leaves it holding none. Any launch that found the slot on another branch — a human
+/// looking at something, a role switch that did not come back — spent the
+/// mission's work to get back to it.
+#[test]
+fn a_branch_that_already_holds_work_is_checked_out_and_never_moved() {
+    let dir = tempfile::tempdir().unwrap();
+    let origin = dir.path().join("origin");
+    std::fs::create_dir_all(&origin).unwrap();
+    git(&origin, &["init", "-q", "-b", "dev"]);
+    git(&origin, &["config", "user.email", "a@b.c"]);
+    git(&origin, &["config", "user.name", "t"]);
+    std::fs::write(origin.join("f"), "one").unwrap();
+    git(&origin, &["add", "-A"]);
+    git(&origin, &["commit", "-qm", "base"]);
+
+    let tree = dir.path().join("slot");
+    git(
+        dir.path(),
+        &["clone", "-q", origin.to_str().unwrap(), "slot"],
+    );
+    git(&tree, &["config", "user.email", "a@b.c"]);
+    git(&tree, &["config", "user.name", "t"]);
+    let slot = nunki::slot::Slot {
+        name: "one".into(),
+        tree: tree.clone(),
+    };
+
+    nunki::run::branch(&slot, &origin, "mission/x", "dev").unwrap();
+    std::fs::write(tree.join("w"), "the agent's work").unwrap();
+    git(&tree, &["add", "-A"]);
+    git(&tree, &["commit", "-qm", "the agent's work"]);
+    let work = git(&tree, &["rev-parse", "HEAD"]);
+
+    // Someone leaves the slot somewhere else, and the next role launches.
+    git(&tree, &["checkout", "-q", "dev"]);
+    nunki::run::branch(&slot, &origin, "mission/x", "dev").unwrap();
+
+    assert_eq!(
+        git(&tree, &["rev-parse", "HEAD"]),
+        work,
+        "the mission's commit was thrown away getting back to its branch"
+    );
+    assert_eq!(
+        git(&tree, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "mission/x"
+    );
+}
+
+/// A cache belongs to a toolchain, and `nunki` is agnostic to the stack: the
+/// principle (SPEC, section 1) names caches among the declared fragments,
+/// beside the battery and the domains.
+///
+/// It was not. `/home/agent/.cargo/registry` was mounted from `nunki`'s own
+/// code for **every stack and every role**, so a Python project would have
+/// carried an empty `cargo` volume and none for pip — the first wall the
+/// second stack would have hit.
+#[test]
+fn the_caches_a_slot_keeps_are_the_ones_its_stack_declares() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    std::fs::create_dir_all(project.fragment("rust")).unwrap();
+    std::fs::write(
+        project.fragment("rust").join(nunki::project::CACHES_FILE),
+        "# what this toolchain keeps outside the tree\n\
+         /home/agent/.cache/pip\n\n\
+         /home/agent/.venv\n",
+    )
+    .unwrap();
+    let slot = slot_at(dir.path());
+    let header = header_with(with_services());
+
+    for role in [Role::Coder, Role::Integrator, Role::Security] {
+        let (plan, _) = profile_for(&project, &slot, &header, role);
+        let at: Vec<String> = plan
+            .volumes
+            .iter()
+            .map(|v| v.at.display().to_string())
+            .collect();
+        assert!(at.contains(&"/home/agent/.cache/pip".to_string()), "{at:?}");
+        assert!(at.contains(&"/home/agent/.venv".to_string()), "{at:?}");
+        // And nothing the core invented: this stack declares no cargo.
+        assert!(
+            !at.iter().any(|p| p.contains("cargo")),
+            "the core named a cache the stack did not declare: {at:?}"
+        );
+        // Named after the path, so two caches of one stack cannot collide.
+        let names: Vec<String> = plan.volumes.iter().map(|v| v.name.clone()).collect();
+        assert!(
+            names.contains(&run::cache_volume("one", "/home/agent/.cache/pip")),
+            "{names:?}"
+        );
+        assert_ne!(
+            run::cache_volume("one", "/home/agent/.cache/pip"),
+            run::cache_volume("one", "/home/agent/.venv")
+        );
+    }
+}
+
+/// A stack that declares no cache gets none, rather than one `nunki` chose.
+#[test]
+fn a_stack_that_declares_no_cache_carries_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    std::fs::create_dir_all(project.fragment("rust")).unwrap();
+    let slot = slot_at(dir.path());
+    let header = header_with(with_services());
+
+    let (plan, _) = profile_for(&project, &slot, &header, Role::Coder);
+
+    // The exact set, not the absence of one spelling: the cache this replaces
+    // was named `-cargo`, so a test looking for `-cache-` would have watched
+    // the old code put it back and called it green.
+    let names: Vec<String> = plan.volumes.iter().map(|v| v.name.clone()).collect();
+    assert_eq!(
+        names,
+        vec![
+            nunki::exec::proof_volume("one"),
+            format!("nunki-{}-harness", slot.name),
+        ],
+        "the core carried a volume nothing declared"
+    );
+}
+
+/// Where a harness keeps its sessions is the harness's to say, through the one
+/// place a name becomes an adapter. `nunki` wrote `/home/agent/.claude` in its
+/// own volume list — one harness's default, spelled out in the core, for a
+/// system that claims to be agnostic to the harness (SPEC, section 1).
+///
+/// This one pins the wiring and **cannot fail today**: the literal it replaced
+/// is the same path this adapter declares, and there is only one adapter. It
+/// is [`a_harness_that_keeps_nothing_carries_no_volume`] that bites — measured,
+/// by putting the literal back and watching that one go red. Said here rather
+/// than left for a reader to discover.
+#[test]
+fn the_harness_says_where_it_keeps_its_sessions() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    std::fs::create_dir_all(project.fragment("rust")).unwrap();
+    let slot = slot_at(dir.path());
+    let header = header_with(with_services());
+
+    let (plan, _) = profile_for(&project, &slot, &header, Role::Coder);
+
+    let declared = nunki::image::harness_provisioning(&project.config.harness)
+        .config_dir
+        .expect("the harness says where it keeps its sessions");
+    let volume = plan
+        .volumes
+        .iter()
+        .find(|v| v.name == format!("nunki-{}-harness", slot.name))
+        .expect("the harness volume is there");
+    assert_eq!(
+        volume.at, declared,
+        "the core chose the path, not the adapter"
+    );
+}
+
+/// A harness that keeps nothing gets no volume — and the answer comes from the
+/// adapter, not from a name the core recognises.
+#[test]
+fn a_harness_that_keeps_nothing_carries_no_volume() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut project = project(dir.path());
+    std::fs::create_dir_all(project.fragment("rust")).unwrap();
+    // The stack carries the perimeter here: an unknown harness declares no
+    // domain, and `nunki` refuses an empty perimeter rather than lifting a
+    // container that can reach nothing.
+    std::fs::write(
+        project.fragment("rust").join("allow.txt"),
+        "index.crates.io\n",
+    )
+    .unwrap();
+    project.config.harness = "a-harness-nunki-has-no-adapter-for".into();
+    let slot = slot_at(dir.path());
+    let header = header_with(with_services());
+
+    let (plan, _) = profile_for(&project, &slot, &header, Role::Coder);
+
+    assert!(
+        !plan.volumes.iter().any(|v| v.name.ends_with("-harness")),
+        "{:?}",
+        plan.volumes
+    );
+}
+
+/// Where the advisory database lives is the stack's to say, as a path on the
+/// host: `nunki` mounts it read-only and never fills it, because the tool owns
+/// its own layout (SPEC 4.4, gate 8).
+#[test]
+fn a_stack_says_where_its_advisory_database_lives() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    std::fs::create_dir_all(project.fragment("rust")).unwrap();
+    let file = project
+        .fragment("rust")
+        .join(nunki::project::ADVISORIES_FILE);
+
+    // Absent: the stack declares none, and that is not an error here — the
+    // gate is what says a database is missing.
+    assert_eq!(project.stack_advisories("rust"), None);
+
+    // A path a human can type, tilde and all.
+    std::fs::write(&file, "# where it lives\n~/.cargo/advisory-db\n").unwrap();
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+    assert_eq!(
+        project.stack_advisories("rust"),
+        Some(home.join(".cargo/advisory-db"))
+    );
+
+    // Relative is refused rather than resolved against whatever directory
+    // `nunki` happened to be started in.
+    std::fs::write(&file, "advisory-db\n").unwrap();
+    assert_eq!(project.stack_advisories("rust"), None);
+
+    // Comments and blank lines are not a path.
+    std::fs::write(&file, "# only a comment\n\n").unwrap();
+    assert_eq!(project.stack_advisories("rust"), None);
+}
+
+/// Gate 8's script reaches the container the way every script that judges the
+/// agent does: read-only, one file at a time, at `/work/stack`.
+#[test]
+fn the_security_script_reaches_the_container_read_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    std::fs::create_dir_all(project.fragment("rust")).unwrap();
+    let script = project.fragment("rust").join(nunki::gate::SECURITY);
+    std::fs::write(&script, "#!/bin/sh\n").unwrap();
+    let slot = slot_at(dir.path());
+    let header = header_with(with_services());
+
+    for role in [Role::Coder, Role::Integrator, Role::Security] {
+        let (_, doc) = profile_for(&project, &slot, &header, role);
+        let mounts: Vec<String> = doc["services"][nunki::compose::AGENT_SERVICE]["volumes"]
+            .as_sequence()
+            .expect("the agent has mounts")
+            .iter()
+            .map(|v| v.as_str().unwrap_or_default().to_string())
+            .collect();
+        let at = format!("{}/{}", run::STACK_AT, nunki::gate::SECURITY);
+        assert!(
+            mounts.iter().any(|m| m.contains(&at) && m.ends_with(":ro")),
+            "{role:?} does not carry {at} read-only: {mounts:?}"
+        );
+    }
+}
+
+/// A stack that ships no `security.sh` mounts none. A bind mount of a missing
+/// source makes the engine create a directory in its place, and the gate would
+/// read a directory instead of saying the script is absent.
+#[test]
+fn a_stack_without_a_security_script_mounts_nothing_in_its_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    std::fs::create_dir_all(project.fragment("rust")).unwrap();
+    let slot = slot_at(dir.path());
+    let header = header_with(with_services());
+
+    let (plan, _) = profile_for(&project, &slot, &header, Role::Coder);
+
+    assert!(
+        !plan
+            .stack_scripts
+            .iter()
+            .any(|(_, at)| at.ends_with(nunki::gate::SECURITY)),
+        "{:?}",
+        plan.stack_scripts
+    );
+}
+
+/// The advisory database is the host's, mounted read-only at a path `nunki`
+/// fixes. The stack says where it lives; `nunki` says where it lands, because
+/// a path the agent could influence would let it point the audit at an empty
+/// directory — no findings, and a green gate.
+#[test]
+fn the_advisory_database_is_mounted_read_only_where_nunki_says() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    std::fs::create_dir_all(project.fragment("rust")).unwrap();
+    let db = dir.path().join("advisory-db");
+    std::fs::create_dir_all(&db).unwrap();
+    std::fs::write(
+        project
+            .fragment("rust")
+            .join(nunki::project::ADVISORIES_FILE),
+        format!("{}\n", db.display()),
+    )
+    .unwrap();
+    let slot = slot_at(dir.path());
+    let header = header_with(with_services());
+
+    let (plan, doc) = profile_for(&project, &slot, &header, Role::Coder);
+
+    assert_eq!(
+        plan.advisories,
+        vec![(db.clone(), std::path::PathBuf::from(run::ADVISORIES_AT))]
+    );
+    let mounts: Vec<String> = doc["services"][nunki::compose::AGENT_SERVICE]["volumes"]
+        .as_sequence()
+        .expect("the agent has mounts")
+        .iter()
+        .map(|v| v.as_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(
+        mounts
+            .iter()
+            .any(|m| m.contains(run::ADVISORIES_AT) && m.ends_with(":ro")),
+        "{mounts:?}"
+    );
+}
+
+/// Everything mounted **only when it exists** lands under `NUNKI_AT`, where
+/// the agent cannot make it.
+///
+/// Measured in a container: as the agent, `mkdir -p
+/// /work/advisories` succeeds — the Dockerfile chowns `/work` — and `mkdir
+/// /nunki` is refused. A conditional mount under `/work` is therefore, on the
+/// day it is absent, a path the agent writes: its own exceptions for the
+/// secrets file, and for the advisory database a forged empty directory that
+/// turns gate 8's 69 into a green gate (`exit=0`, no findings, measured).
+#[test]
+fn what_is_mounted_only_when_it_exists_lands_where_no_agent_could_make_it() {
+    let root = format!("{}/", run::NUNKI_AT);
+    for at in [run::ADVISORIES_AT, nunki::secrets::AT] {
+        assert!(at.starts_with(&root), "{at} is not under {}", run::NUNKI_AT);
+    }
+    assert!(
+        !run::NUNKI_AT.starts_with("/work"),
+        "{} is the agent's to write",
+        run::NUNKI_AT
+    );
+    // And it is a top level, so the agent cannot create it either: only `/`
+    // is above it, and `/` is root's.
+    assert_eq!(
+        run::NUNKI_AT.matches('/').count(),
+        1,
+        "{} has a parent the agent might own",
+        run::NUNKI_AT
+    );
+}
+
+/// The secrets a human ruled on reach the container read-only, from the HQ,
+/// at a path `nunki` fixes.
+#[test]
+fn the_rulings_reach_the_container_read_only_where_no_agent_could_write_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    std::fs::create_dir_all(project.fragment("rust")).unwrap();
+    let at = nunki::secrets::file(&project);
+    nunki::secrets::accept(&at, "abc:src/store.rs:Postgres:22", "a disposable test DSN").unwrap();
+    let slot = slot_at(dir.path());
+    let header = header_with(with_services());
+
+    let (plan, doc) = profile_for(&project, &slot, &header, Role::Coder);
+
+    assert_eq!(
+        plan.secrets,
+        Some((at, std::path::PathBuf::from(nunki::secrets::AT)))
+    );
+    let mounts: Vec<String> = doc["services"][nunki::compose::AGENT_SERVICE]["volumes"]
+        .as_sequence()
+        .expect("the agent has mounts")
+        .iter()
+        .map(|v| v.as_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(
+        mounts
+            .iter()
+            .any(|m| m.contains(nunki::secrets::AT) && m.ends_with(":ro")),
+        "{mounts:?}"
+    );
+}
+
+/// A project nobody has ruled on for mounts nothing, rather than an empty
+/// file: the engine would make a **directory** at that path, and the script
+/// would be reading a folder.
+#[test]
+fn a_project_that_has_ruled_on_nothing_mounts_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    std::fs::create_dir_all(project.fragment("rust")).unwrap();
+    let slot = slot_at(dir.path());
+    let header = header_with(with_services());
+
+    let (plan, _) = profile_for(&project, &slot, &header, Role::Coder);
+
+    assert_eq!(plan.secrets, None);
+}
+
+/// A database the host has not filled is not mounted at all. The engine would
+/// create an empty directory in its place, and gate 8 would read "nothing to
+/// report" where it should say it has no database.
+#[test]
+fn a_database_the_host_never_filled_is_not_mounted_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    std::fs::create_dir_all(project.fragment("rust")).unwrap();
+    std::fs::write(
+        project
+            .fragment("rust")
+            .join(nunki::project::ADVISORIES_FILE),
+        format!("{}/never-fetched\n", dir.path().display()),
+    )
+    .unwrap();
+    let slot = slot_at(dir.path());
+    let header = header_with(with_services());
+
+    let (plan, _) = profile_for(&project, &slot, &header, Role::Coder);
+
+    assert_eq!(plan.advisories, vec![]);
+}
+
+/// The second line of `advisories.txt` is the command that fills the
+/// database, and the path stays the first: what an older `nunki` read is
+/// still read the same way, and a fragment with one line names no command.
+#[test]
+fn a_stack_says_how_its_advisory_database_is_filled() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    std::fs::create_dir_all(project.fragment("rust")).unwrap();
+    let file = project
+        .fragment("rust")
+        .join(nunki::project::ADVISORIES_FILE);
+
+    std::fs::write(
+        &file,
+        "# where it lives\n/var/db\n\n# and how it is filled\n  cargo deny check advisories  \n",
+    )
+    .unwrap();
+    assert_eq!(
+        project.stack_advisories("rust"),
+        Some(std::path::PathBuf::from("/var/db"))
+    );
+    assert_eq!(
+        project.stack_advisories_filled_by("rust").as_deref(),
+        Some("cargo deny check advisories")
+    );
+    assert!(
+        project
+            .how_to_fill_advisories("rust")
+            .contains("`cargo deny check advisories`"),
+        "{}",
+        project.how_to_fill_advisories("rust")
+    );
+
+    // An older fragment: the path alone. No command is made up; the human is
+    // sent to the file.
+    std::fs::write(&file, "/var/db\n").unwrap();
+    assert_eq!(project.stack_advisories_filled_by("rust"), None);
+    let said = project.how_to_fill_advisories("rust");
+    assert!(said.contains(&file.display().to_string()), "{said}");
+}
+
+/// A slot whose profile was written before the host filled its advisory
+/// database, the way #165 met it: the stack declares the database, the
+/// launch found none and mounted none, and gate 8 is unplayable in the
+/// container that is up.
+fn lifted_before_the_database(dir: &Path) -> (Project, nunki::slot::Slot, PathBuf, String) {
+    let project = project(dir);
+    std::fs::create_dir_all(project.fragment("rust")).unwrap();
+    let db = dir.join("advisory-db");
+    std::fs::write(
+        project
+            .fragment("rust")
+            .join(nunki::project::ADVISORIES_FILE),
+        format!("{}\ncargo deny check advisories\n", db.display()),
+    )
+    .unwrap();
+    let slot = slot_at(dir);
+    let header = header_with(with_services());
+    let (plan, _) = profile_for(&project, &slot, &header, Role::Coder);
+    assert_eq!(plan.advisories, vec![], "the launch found no database");
+    let engine = nunki::engine::fake::FakeEngine::default();
+    let written = nunki::compose::generate(&plan, nunki::engine::Engine::dialect(&engine)).unwrap();
+    let profile = run::profile_path(&project, &slot.name);
+    std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+    std::fs::write(&profile, &written).unwrap();
+    (project, slot, db, written)
+}
+
+/// The agent's mounts, as a set: the order of a list is not what a mount is.
+fn mounts_of(doc: &nunki::yaml::Value) -> std::collections::BTreeSet<String> {
+    doc["services"][nunki::compose::AGENT_SERVICE]["volumes"]
+        .as_sequence()
+        .expect("the agent has mounts")
+        .iter()
+        .map(|v| v.as_str().unwrap_or_default().to_string())
+        .collect()
+}
+
+/// Filled after the lift, the database is mounted into the profile that is
+/// up, and the profile is lifted again so the engine recreates the agent with
+/// it (#165). Nothing else in the profile moves: what it gains is exactly the
+/// mount a launch would write today, and the file stays the human's alone,
+/// because it carries the subscription token.
+#[test]
+fn a_database_filled_after_the_lift_is_mounted_into_the_profile_that_is_up() {
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot, db, _) = lifted_before_the_database(dir.path());
+    std::fs::create_dir_all(&db).unwrap();
+    let engine = nunki::engine::fake::FakeEngine::default();
+
+    let mounted = run::remount_advisories(&engine, &project, &slot, "rust").unwrap();
+
+    assert_eq!(mounted, vec![db.clone()]);
+    let profile = run::profile_path(&project, &slot.name);
+    let after: nunki::yaml::Value =
+        nunki::yaml::from_str(&std::fs::read_to_string(&profile).unwrap()).unwrap();
+    let (_, today) = profile_for(&project, &slot, &header_with(with_services()), Role::Coder);
+    assert_eq!(mounts_of(&after), mounts_of(&today));
+    assert!(
+        mounts_of(&after).contains(&format!("{}:{}:ro", db.display(), run::ADVISORIES_AT)),
+        "{:?}",
+        mounts_of(&after)
+    );
+    // Everything but the mounts, as a launch would write it today.
+    let without_mounts = |mut doc: nunki::yaml::Value| {
+        doc.get_mut("services")
+            .and_then(|s| s.get_mut(nunki::compose::AGENT_SERVICE))
+            .and_then(|a| a.as_mapping_mut())
+            .unwrap()
+            .remove("volumes");
+        doc
+    };
+    assert_eq!(without_mounts(after), without_mounts(today));
+    assert!(
+        engine
+            .calls()
+            .iter()
+            .any(|c| matches!(c, nunki::engine::fake::Call::Up(_))),
+        "{:?}",
+        engine.calls()
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&profile).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "{mode:o}");
+    }
+
+    // And once is enough: the next `verify` finds it mounted and lifts
+    // nothing again.
+    let lifted = engine.calls().len();
+    assert_eq!(
+        run::remount_advisories(&engine, &project, &slot, "rust").unwrap(),
+        Vec::<PathBuf>::new()
+    );
+    assert_eq!(engine.calls().len(), lifted, "{:?}", engine.calls());
+}
+
+/// A database still missing is nothing to mount: the profile is left byte
+/// for byte, and the engine is not asked to recreate anything — an empty
+/// directory mounted in its place would read as "nothing to report".
+#[test]
+fn a_database_still_missing_leaves_the_profile_and_the_container_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot, _, written) = lifted_before_the_database(dir.path());
+    let engine = nunki::engine::fake::FakeEngine::default();
+
+    let mounted = run::remount_advisories(&engine, &project, &slot, "rust").unwrap();
+
+    assert_eq!(mounted, Vec::<PathBuf>::new());
+    assert_eq!(
+        std::fs::read_to_string(run::profile_path(&project, &slot.name)).unwrap(),
+        written
+    );
+    assert_eq!(engine.calls(), vec![]);
+}
+
+/// A mutation campaign lives in the container a remount recreates, so none
+/// happens under one: the campaign is not killed for a gate that can wait for
+/// it to be read back.
+#[test]
+fn no_database_is_mounted_under_a_running_campaign() {
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot, db, written) = lifted_before_the_database(dir.path());
+    std::fs::create_dir_all(&db).unwrap();
+    nunki::mutants::write_running(
+        &project.hq_root,
+        &slot.name,
+        &nunki::mutants::Running {
+            off_mission: None,
+            chain: Default::default(),
+            fingerprint: "abc1234".into(),
+            head: "0123456789abcdef0123456789abcdef01234567".into(),
+            started_at: "2026-10-22T10:00:00Z".into(),
+            container: "agent".into(),
+            pid: None,
+            log: dir.path().join("mutants.log"),
+            deadline_minutes: 45,
+        },
+    )
+    .unwrap();
+    let engine = nunki::engine::fake::FakeEngine::default();
+
+    let mounted = run::remount_advisories(&engine, &project, &slot, "rust").unwrap();
+
+    assert_eq!(mounted, Vec::<PathBuf>::new());
+    assert_eq!(
+        std::fs::read_to_string(run::profile_path(&project, &slot.name)).unwrap(),
+        written
+    );
+    assert_eq!(engine.calls(), vec![]);
+}
+
+/// The proposal of an equivalence is explained where the coder reads the
+/// triage outcomes: its shape, that it needs a reason, what it is for — a
+/// mutation that cannot change anything observable — and what it is never
+/// for. And a survivor proposed is never also awaited. The two other roles
+/// answer no survivor, so they are not told how to propose one.
+#[test]
+fn the_prompt_explains_the_proposal_of_an_equivalence_and_when_not_to_make_it() {
+    let coder = prompt(Role::Coder);
+    assert!(
+        coder.contains(
+            r#"{"<survivor id>": {"kind": "equivalent_proposed", "why": "<one sentence>"}}"#
+        ),
+        "{coder}"
+    );
+    assert!(
+        coder.contains("cannot change any observable\nbehaviour"),
+        "{coder}"
+    );
+    assert!(
+        coder.contains("never for a survivor that is merely"),
+        "{coder}"
+    );
+    assert!(coder.contains("it is not a ruling"), "{coder}");
+    assert!(coder.contains("blank `why`\nis no outcome"), "{coder}");
+    assert!(
+        coder.contains("propose it, or await a ruling on it, not\nboth"),
+        "{coder}"
+    );
+    for role in [Role::Integrator, Role::Security] {
+        let prompt = prompt(role);
+        assert!(
+            !prompt.contains("equivalent_proposed"),
+            "{role:?}: {prompt}"
+        );
+    }
+}
+
+/// Before a profile is started, what the project's file lifted before and
+/// is not the approved definition is taken down — by container, never with
+/// a volume, and never one of nunki's own.
+#[test]
+fn a_launch_takes_down_what_was_lifted_from_a_definition_nobody_approved() {
+    use nunki::engine::fake::{Call, FakeEngine};
+    let dir = tempfile::tempdir().unwrap();
+    let project = with_services_file(dir.path());
+    let slot = committed_slot(
+        dir.path(),
+        &[("compose.yaml", "services:\n  db:\n    image: postgres:16\n")],
+    );
+    approve_head(&project, &slot);
+    let header = header_with(with_services());
+    let (plan, _) = profile_for(&project, &slot, &header, Role::Integrator);
+    let lifting = plan.project_services.as_ref().unwrap().approved.clone();
+
+    let lifted = |id: &str, service: &str, digest: Option<&str>| nunki::engine::Container {
+        id: id.into(),
+        service: service.into(),
+        digest: digest.map(str::to_string),
+    };
+    let engine = FakeEngine::default()
+        .with_lifted(lifted("keep", "db", Some(&lifting)))
+        .with_lifted(lifted("privileged", "db", None))
+        .with_lifted(lifted("orphan", "miner", Some("sha256:nobody")))
+        .with_lifted(lifted("fw", "firewall", None));
+    let removed = run::lift(
+        &engine,
+        &project,
+        Path::new("/hq/profiles/one.yml"),
+        "nunki-11111111-one",
+        &plan,
+    )
+    .unwrap();
+    assert_eq!(removed, vec!["privileged", "orphan"]);
+    let calls = engine.calls.lock().unwrap().clone();
+    assert_eq!(
+        calls,
+        vec![
+            Call::Containers("nunki-11111111-one".into()),
+            Call::Remove(vec!["privileged".into(), "orphan".into()]),
+            Call::Up("nunki-11111111-one".into()),
+        ],
+        "taken down first, then started"
+    );
+    // What was taken down is gone, so the next launch takes nothing more
+    // down: what stayed is the approved definition and nunki's own.
+    assert!(
+        run::lift(
+            &engine,
+            &project,
+            Path::new("/hq/profiles/one.yml"),
+            "nunki-11111111-one",
+            &plan,
+        )
+        .unwrap()
+        .is_empty()
+    );
+
+    // With nothing stale, nothing is asked to go.
+    let quiet = FakeEngine::default().with_lifted(lifted("keep", "db", Some(&lifting)));
+    assert!(
+        run::lift(&quiet, &project, Path::new("/p.yml"), "p", &plan)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !quiet
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|c| matches!(c, Call::Remove(_))),
+        "nothing to remove is no call at all"
+    );
+}
+
+/// A lifted service that had a container before a launch, and whose
+/// container has exited after the launch's `up` failed, is said in one
+/// line, with the way out the engine names (#140): the slot's next `up`
+/// starts that container again over what it kept, and an entrypoint that
+/// cannot is a mission waiting for a human.
+#[test]
+fn a_service_that_does_not_start_again_is_said_with_the_way_out() {
+    use nunki::engine::fake::FakeEngine;
+    use nunki::engine::{EngineError, Liveness};
+    use nunki::run::{RunError, Stuck};
+    let dir = tempfile::tempdir().unwrap();
+    let project = with_services_file(dir.path());
+    let slot = committed_slot(
+        dir.path(),
+        &[("compose.yaml", "services:\n  db:\n    image: postgres:16\n")],
+    );
+    approve_head(&project, &slot);
+    let header = header_with(with_services());
+    let (plan, _) = profile_for(&project, &slot, &header, Role::Integrator);
+    let approved = plan.project_services.as_ref().unwrap().approved.clone();
+    let db = |id: &str| nunki::engine::Container {
+        id: id.into(),
+        service: "db".into(),
+        digest: Some(approved.clone()),
+    };
+    let up_said = " Container nunki-11111111-one-db-1  Starting\n\
+                   container nunki-11111111-one-db-1 exited (1)\n\n";
+    let launch = |engine: &FakeEngine| {
+        run::lift(
+            engine,
+            &project,
+            Path::new("/hq/profiles/one.yml"),
+            "nunki-11111111-one",
+            &plan,
+        )
+    };
+
+    let stuck = || {
+        FakeEngine::default()
+            .with_lifted(db("old"))
+            .with_liveness("old", Liveness::Exited(1))
+            .failing_up(up_said)
+    };
+    match launch(&stuck()) {
+        Err(RunError::NotStartedAgain { stuck, said }) => {
+            assert_eq!(
+                stuck,
+                vec![Stuck {
+                    service: "db".into(),
+                    container: "old".into(),
+                    code: 1,
+                    removal: "fake-engine rm old".into(),
+                }]
+            );
+            assert_eq!(said, "container nunki-11111111-one-db-1 exited (1)");
+        }
+        other => panic!("{other:?}"),
+    }
+    let message = launch(&stuck()).unwrap_err().to_string();
+    assert!(
+        message.starts_with(
+            "the project's service db, which had a container before this launch, is not \
+             running after its `up` — db's container old exited 1: its log says why, and \
+             `fake-engine rm old` removes it. Removing a container takes none of its volumes"
+        ),
+        "{message}"
+    );
+    assert!(!message.contains('\n'), "one line: {message}");
+
+    // Each of these keeps the engine's own words.
+    let raw = |engine: FakeEngine, why: &str| match launch(&engine) {
+        Err(RunError::Engine(EngineError::Command { verb: "up", .. })) => {}
+        other => panic!("{why}: {other:?}"),
+    };
+    raw(
+        FakeEngine::default().failing_up(up_said),
+        "no service had a container",
+    );
+    raw(
+        FakeEngine::default()
+            .with_lifted(nunki::engine::Container {
+                id: "older".into(),
+                service: "db".into(),
+                digest: Some("sha256:older".into()),
+            })
+            .making_on_up(db("new"))
+            .with_liveness("new", Liveness::Exited(1))
+            .failing_up(up_said),
+        "a container this launch took down is not one it kept: the new one starts first",
+    );
+    raw(
+        FakeEngine::default()
+            .with_lifted(db("old"))
+            .with_liveness("old", Liveness::Exited(0))
+            .failing_up(up_said),
+        "a service whose work is done exits 0",
+    );
+    raw(
+        FakeEngine::default()
+            .with_lifted(db("old"))
+            .with_liveness("old", Liveness::Running)
+            .failing_up(up_said),
+        "a service running and not healthy has not exited",
+    );
+    raw(
+        FakeEngine::default()
+            .with_lifted(db("old"))
+            .with_unanswered("old")
+            .failing_up(up_said),
+        "an engine that does not answer says nothing about the service",
+    );
+}
+
+/// A service the profile does not lift is never blamed for its `up`: the
+/// coder's profile lifts none, and a mission holds back the file's services
+/// it does not declare. Their approved containers are kept as they are, and
+/// one found exited — a JVM stopped by a machine that slept exits 143 —
+/// had no part in the failure.
+#[test]
+fn a_service_the_profile_does_not_lift_is_never_blamed_for_its_up() {
+    use nunki::engine::fake::FakeEngine;
+    use nunki::engine::{Container, EngineError, Liveness};
+    use nunki::run::RunError;
+    let dir = tempfile::tempdir().unwrap();
+    let project = with_services_file(dir.path());
+    let slot = committed_slot(
+        dir.path(),
+        &[(
+            "compose.yaml",
+            "services:\n  db:\n    image: postgres:16\n  cache:\n    image: redis:7\n",
+        )],
+    );
+    approve_head(&project, &slot);
+    let header = header_with(with_services());
+    let lifted = |id: &str, service: &str, digest: &str| Container {
+        id: id.into(),
+        service: service.into(),
+        digest: Some(digest.to_string()),
+    };
+    let up_said = "container nunki-11111111-one-firewall-1 is unhealthy\n";
+
+    let (coder, _) = profile_for(&project, &slot, &header, Role::Coder);
+    assert!(coder.project_services.is_none());
+    let approved = nunki::services::approved(&project, nunki::services::At::Slot(&slot.tree))
+        .unwrap()
+        .unwrap()
+        .digest();
+    let engine = FakeEngine::default()
+        .with_lifted(lifted("db1", "db", &approved))
+        .with_liveness("db1", Liveness::Exited(143))
+        .failing_up(up_said);
+    match run::lift(&engine, &project, Path::new("/p.yml"), "p", &coder) {
+        Err(RunError::Engine(EngineError::Command { verb: "up", .. })) => {}
+        other => panic!("the coder's profile lifts no service: {other:?}"),
+    }
+
+    let (integrator, _) = profile_for(&project, &slot, &header, Role::Integrator);
+    let lifting = integrator.project_services.as_ref().unwrap();
+    assert_eq!(lifting.held_back, vec!["cache"]);
+    let engine = FakeEngine::default()
+        .with_lifted(lifted("db1", "db", &lifting.approved))
+        .with_liveness("db1", Liveness::Running)
+        .with_lifted(lifted("cache1", "cache", &lifting.approved))
+        .with_liveness("cache1", Liveness::Exited(143))
+        .failing_up(up_said);
+    match run::lift(&engine, &project, Path::new("/p.yml"), "p", &integrator) {
+        Err(RunError::Engine(EngineError::Command { verb: "up", .. })) => {}
+        other => panic!("cache is held back: {other:?}"),
+    }
+}
+
+/// [`run::not_started`] reads the containers by service: one recreated by
+/// the `up` that failed, over what its service kept, is named by its new
+/// id. A service with no container before, and a container nunki wrote
+/// itself, are not.
+#[test]
+fn a_service_is_found_not_started_by_its_name_and_not_its_container() {
+    use nunki::engine::fake::FakeEngine;
+    use nunki::engine::{Container, Liveness};
+    let lifted = |id: &str, service: &str, digest: Option<&str>| Container {
+        id: id.into(),
+        service: service.into(),
+        digest: digest.map(str::to_string),
+    };
+    let before = [lifted("old", "db", Some("sha256:a"))];
+
+    let recreated = FakeEngine::default()
+        .with_lifted(lifted("new", "db", Some("sha256:a")))
+        .with_liveness("new", Liveness::Exited(1));
+    let stuck = run::not_started(&recreated, "p", &before).expect("the recreated one");
+    assert_eq!(
+        stuck
+            .iter()
+            .map(|s| (s.service.as_str(), s.container.as_str(), s.code))
+            .collect::<Vec<_>>(),
+        vec![("db", "new", 1)]
+    );
+
+    let first = FakeEngine::default()
+        .with_lifted(lifted("c", "cache", Some("sha256:a")))
+        .with_liveness("c", Liveness::Exited(1));
+    assert_eq!(
+        run::not_started(&first, "p", &before),
+        None,
+        "cache had no container before this launch"
+    );
+    assert_eq!(run::not_started(&first, "p", &[]), None);
+
+    let own = FakeEngine::default()
+        .with_lifted(lifted("old", "db", Some("sha256:a")))
+        .with_liveness("old", Liveness::Running)
+        .with_lifted(lifted("fw", "db", None))
+        .with_liveness("fw", Liveness::Exited(1));
+    assert_eq!(
+        run::not_started(&own, "p", &before),
+        None,
+        "a container without the label is nunki's own"
+    );
+}
+
+/// A mission profile lifts no service, and leaves up what a human approved:
+/// the services are kept between profiles (SPEC 4.2). What nobody approved
+/// still goes.
+#[test]
+fn a_mission_profile_keeps_what_a_human_approved_and_nothing_else() {
+    use nunki::engine::fake::FakeEngine;
+    let dir = tempfile::tempdir().unwrap();
+    let project = with_services_file(dir.path());
+    let slot = committed_slot(
+        dir.path(),
+        &[("compose.yaml", "services:\n  db:\n    image: postgres:16\n")],
+    );
+    approve_head(&project, &slot);
+    let approved = nunki::services::approved(&project, nunki::services::At::Slot(&slot.tree))
+        .unwrap()
+        .unwrap()
+        .digest();
+    let header = header_with(with_services());
+    let (plan, _) = profile_for(&project, &slot, &header, Role::Coder);
+    assert!(plan.project_services.is_none());
+    let engine = FakeEngine::default()
+        .with_lifted(nunki::engine::Container {
+            id: "kept".into(),
+            service: "db".into(),
+            digest: Some(approved),
+        })
+        .with_lifted(nunki::engine::Container {
+            id: "gone".into(),
+            service: "db".into(),
+            digest: None,
+        });
+    assert_eq!(
+        run::lift(&engine, &project, Path::new("/p.yml"), "p", &plan).unwrap(),
+        vec!["gone"]
+    );
+}
+
+/// A system profile lifts the services its frozen header declares, and
+/// those they depend on; the file's others are not started, and the probes
+/// know them as held back (SPEC 4.2).
+#[test]
+fn a_system_profile_lifts_only_the_services_the_mission_declares() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = with_services_file(dir.path());
+    let slot = committed_slot(
+        dir.path(),
+        &[(
+            "compose.yaml",
+            "services:\n  db:\n    image: postgres:16\n    ports: [\"5432:5432\"]\n  \
+             miner:\n    image: coin\n",
+        )],
+    );
+    approve_head(&project, &slot);
+    let header = header_with(with_services());
+    let (plan, doc) = profile_for(&project, &slot, &header, Role::Integrator);
+    assert!(doc["services"]["db"].as_mapping().is_some(), "{doc:?}");
+    assert!(doc["services"]["miner"].is_null(), "{doc:?}");
+    let lifted = plan.project_services.as_ref().unwrap();
+    assert_eq!(lifted.held_back, vec!["miner".to_string()]);
+    assert_eq!(lifted.services.dropped_ports(), vec!["db"]);
+    // What the launch says in one line: the ports it did not publish.
+    assert_eq!(run::ports_dropped(&plan), vec!["db".to_string()]);
+    let (coder, _) = profile_for(&project, &slot, &header, Role::Coder);
+    assert!(run::ports_dropped(&coder).is_empty());
+    assert_eq!(
+        doc["services"]["db"]["labels"][nunki::compose::services::LABEL].as_str(),
+        Some(
+            nunki::services::read(&project, nunki::services::At::Slot(&slot.tree))
+                .unwrap()
+                .unwrap()
+                .digest
+                .as_str()
+        ),
+        "labelled with the digest a human approved"
+    );
+}
+
+/// An origin on `dev` with one commit, and a slot cloned from it.
+fn origin_and_slot(dir: &Path) -> (std::path::PathBuf, nunki::slot::Slot) {
+    let origin = dir.join("origin");
+    std::fs::create_dir_all(&origin).unwrap();
+    git(&origin, &["init", "-q", "-b", "dev"]);
+    git(&origin, &["config", "user.email", "a@b.c"]);
+    git(&origin, &["config", "user.name", "t"]);
+    std::fs::write(origin.join("f"), "one").unwrap();
+    git(&origin, &["add", "-A"]);
+    git(&origin, &["commit", "-qm", "base"]);
+    let tree = dir.join("slot");
+    git(dir, &["clone", "-q", origin.to_str().unwrap(), "slot"]);
+    git(&tree, &["config", "user.email", "a@b.c"]);
+    git(&tree, &["config", "user.name", "t"]);
+    (
+        origin,
+        nunki::slot::Slot {
+            name: "one".into(),
+            tree,
+        },
+    )
+}
+
+/// A mission starts from a fresh base, and so does the slot's own `dev`: a
+/// clone writes it once, and an agent or a human reading `dev` in the slot
+/// read the base as it stood the day the slot was made. At the mission's
+/// start it is brought to the project's.
+#[test]
+fn starting_a_mission_brings_the_slots_own_base_to_the_projects() {
+    let dir = tempfile::tempdir().unwrap();
+    let (origin, slot) = origin_and_slot(dir.path());
+    nunki::run::branch(&slot, &origin, "mission/first", "dev").unwrap();
+    let stale = git(&slot.tree, &["rev-parse", "dev"]);
+
+    std::fs::write(origin.join("f"), "two").unwrap();
+    git(
+        &origin,
+        &["commit", "-qam", "what the first mission merged"],
+    );
+    let moved = git(&origin, &["rev-parse", "HEAD"]);
+
+    let brought = nunki::run::branch(&slot, &origin, "mission/second", "dev").unwrap();
+    assert_eq!(
+        brought,
+        Some(nunki::git::Brought::Moved {
+            from: stale,
+            to: moved.clone()
+        })
+    );
+    assert_eq!(git(&slot.tree, &["rev-parse", "dev"]), moved);
+    assert_eq!(
+        git(&slot.tree, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "mission/second"
+    );
+    let said = nunki::run::base_said("dev", brought.as_ref().unwrap());
+    assert!(said.contains("brought to the project's"), "{said}");
+
+    // A later launch of the same mission leaves the base alone: only the
+    // start brings it.
+    assert_eq!(
+        nunki::run::branch(&slot, &origin, "mission/second", "dev").unwrap(),
+        None
+    );
+}
+
+/// Only forward: a slot's `dev` holding a commit the project does not have
+/// is left where it is and said, never moved off that commit. The mission
+/// branches from the project's base all the same.
+#[test]
+fn a_slots_base_holding_its_own_commit_is_left_and_said() {
+    let dir = tempfile::tempdir().unwrap();
+    let (origin, slot) = origin_and_slot(dir.path());
+    std::fs::write(slot.tree.join("local"), "x").unwrap();
+    git(&slot.tree, &["add", "-A"]);
+    git(&slot.tree, &["commit", "-qm", "a commit only the slot has"]);
+    let local = git(&slot.tree, &["rev-parse", "dev"]);
+    let project_base = git(&origin, &["rev-parse", "HEAD"]);
+
+    let brought = nunki::run::branch(&slot, &origin, "mission/x", "dev").unwrap();
+
+    assert_eq!(
+        brought,
+        Some(nunki::git::Brought::Diverged { at: local.clone() })
+    );
+    assert_eq!(git(&slot.tree, &["rev-parse", "dev"]), local);
+    assert_eq!(git(&slot.tree, &["rev-parse", "HEAD"]), project_base);
+    let said = nunki::run::base_said("dev", brought.as_ref().unwrap());
+    assert!(said.contains("left at"), "{said}");
+}
+
+/// The branch the slot is on is never moved under its tree, and one already
+/// at the target is left as it is.
+#[test]
+fn the_base_the_slot_is_on_is_never_moved_under_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (origin, slot) = origin_and_slot(dir.path());
+    std::fs::write(origin.join("f"), "two").unwrap();
+    git(&origin, &["commit", "-qam", "moved"]);
+    let repo = nunki::git::SlotGit::open(&slot.tree).unwrap();
+    repo.fetch_origin(&origin).unwrap();
+    let target = repo.origin_branch("dev").unwrap();
+    let before = git(&slot.tree, &["rev-parse", "dev"]);
+
+    assert_eq!(
+        repo.bring_branch("dev", &target).unwrap(),
+        nunki::git::Brought::CheckedOut
+    );
+    assert_eq!(git(&slot.tree, &["rev-parse", "dev"]), before);
+
+    git(&slot.tree, &["checkout", "-q", "-b", "elsewhere"]);
+    let repo = nunki::git::SlotGit::open(&slot.tree).unwrap();
+    assert!(matches!(
+        repo.bring_branch("dev", &target).unwrap(),
+        nunki::git::Brought::Moved { .. }
+    ));
+    assert_eq!(
+        repo.bring_branch("dev", &target).unwrap(),
+        nunki::git::Brought::Already
+    );
+    assert!(matches!(
+        repo.bring_branch("fresh", &target).unwrap(),
+        nunki::git::Brought::Created { .. }
+    ));
+    assert_eq!(git(&slot.tree, &["rev-parse", "fresh"]), target);
+}
+
+/// The security agent cannot write `PR.md` (SPEC 4.5), and is told so: its
+/// report in `VERDICT.json` is the whole of its deliverable, and a `CLEAR`
+/// one is what `nunki` publishes as the pull request's Security section.
+#[test]
+fn the_security_agent_is_told_pr_md_is_read_only_and_its_report_is_published_when_clear() {
+    let security = flat(&prompt(Role::Security));
+    for said in [
+        "it is read-only for you: you write nothing there",
+        "your report **is** your whole deliverable, and it lives in `VERDICT.json`",
+        "**When you conclude `CLEAR`, `nunki` publishes your report as the pull \
+         request's Security section**",
+        "write it for that reader",
+    ] {
+        assert!(security.contains(said), "not told {said:?}: {security}");
+    }
+    // Nothing left of the old rule: no section of its own in PR.md.
+    assert!(
+        !security.contains("heading of your own that begins with `Security`"),
+        "{security}"
+    );
+    assert!(
+        !security.contains("- `PR.md`, the pull request this mission delivers"),
+        "PR.md is not its deliverable: {security}"
+    );
+}
+
+/// The two roles that write `PR.md` are told it is published as written, and
+/// that the Security section is `nunki`'s.
+#[test]
+fn the_coder_and_the_integrator_are_told_pr_md_is_published_as_written() {
+    for role in [Role::Coder, Role::Integrator] {
+        let prompt = flat(&prompt(role));
+        for said in [
+            "- `PR.md`, the pull request this mission delivers",
+            "It is published as written",
+            "a security finding that is not fixed is not described in it",
+            "no heading in it opens with the word `Security`",
+            "that section is `nunki`'s",
+        ] {
+            assert!(prompt.contains(said), "{role:?} is not told {said:?}");
+        }
+    }
+}
+
+/// What a prompt says the role may write is what compose mounts for it, and
+/// nothing more: the common part does not hand `PR.md` to every role.
+#[test]
+fn every_role_is_told_the_files_its_profile_lets_it_write_and_no_other() {
+    for role in Role::ALL {
+        let prompt = flat(&prompt(role));
+        let start = prompt
+            .find("The files you may write in the mission folder are these, and no other: ")
+            .unwrap_or_else(|| panic!("{role:?} is not told which files it writes"));
+        let sentence = &prompt[start..];
+        let sentence = &sentence[..sentence.find(". ").unwrap()];
+        let named: Vec<&str> = sentence.split('`').skip(1).step_by(2).collect();
+        assert_eq!(
+            named,
+            nunki::compose::agent_writable(role),
+            "{role:?}: {sentence}"
+        );
+    }
+    let coder = flat(&prompt(Role::Coder));
+    assert!(
+        coder.contains("`JOURNAL.md`, `PR.md`, `VERDICT.json` and `MUTANTS.triage.json`. "),
+        "{coder}"
+    );
+    let integrator = flat(&prompt(Role::Integrator));
+    assert!(
+        integrator.contains("`JOURNAL.md`, `PR.md` and `VERDICT.json`. "),
+        "{integrator}"
+    );
+    let security = flat(&prompt(Role::Security));
+    assert!(
+        security.contains("`JOURNAL.md` and `VERDICT.json`. "),
+        "{security}"
+    );
+}
+
+/// Survivors only ever go back to the coder (SPEC 4.4): the integrator does
+/// not play gate 7 and the security agent commits nothing. So the coder is
+/// told how to answer them, in the file it alone writes, and the two others
+/// are told nothing that has them write it — while what holds for every
+/// role about a campaign, a commit and the forge is still said to each.
+#[test]
+fn only_the_coder_is_told_to_answer_survivors_and_every_role_keeps_what_is_common() {
+    let coder = flat(&prompt(Role::Coder));
+    for said in [
+        "A mutation campaign's survivors are yours to answer, in `MUTANTS.triage.json`",
+        "You may **propose** it instead",
+        "There is no third answer of your own",
+        "and hands you its survivors",
+        "To check that a test kills a survivor",
+        "`VERDICT.json` and `MUTANTS.triage.json`. ",
+    ] {
+        assert!(coder.contains(said), "the coder is not told {said:?}");
+    }
+
+    for role in [Role::Integrator, Role::Security] {
+        let prompt = flat(&prompt(role));
+        for unsaid in [
+            "MUTANTS.triage.json",
+            "survivors are yours to answer",
+            "equivalent_proposed",
+            "awaits ruling",
+            "hands you its survivors",
+            "To check that a test kills a survivor",
+        ] {
+            assert!(!prompt.contains(unsaid), "{role:?} is told {unsaid:?}");
+        }
+        for said in [
+            "Running the campaign is `nunki`'s work, not yours. \
+             **Never run a whole mutation campaign yourself**, over the branch or over a file",
+            "its survivors go back to the coder, never to you",
+            "A campaign of your own costs an hour or more of your run",
+            "**no trailer naming a harness, a model or a tool**",
+            "You never push, never merge, never reach the forge.",
+            "`MUTANTS.json` included",
+        ] {
+            assert!(prompt.contains(said), "{role:?} is not told {said:?}");
+        }
+    }
+}
+
+/// A headless run is over when the agent's turn ends, a command still
+/// running in the background included: every role is told so, and told to
+/// wait for such a command with a foreground one rather than end its turn.
+#[test]
+fn every_role_is_told_that_a_run_ends_with_its_turn() {
+    for role in [Role::Coder, Role::Integrator, Role::Security] {
+        let prompt = prompt(role).replace('\n', " ");
+        for said in [
+            "**A run ends when your turn ends**",
+            "Never end a turn while something you started is still running",
+            "wait for a background command with a foreground one",
+        ] {
+            assert!(prompt.contains(said), "{role:?} is not told {said:?}");
+        }
+    }
+}
+
+/// A prompt with every run of whitespace made one space, so that what it
+/// says can be looked for whatever its lines wrap on.
+fn flat(prompt: &str) -> String {
+    prompt.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// A role's prompt for a project that protects nothing and declares no
+/// services file: the part of the prompt that is the same for every project.
+fn prompt(role: Role) -> String {
+    role::prompt(
+        role,
+        &role::Protected {
+            branches: &[],
+            paths: &ProtectedPaths::default(),
+            services_file: None,
+        },
+    )
+}
+
+/// The agent cannot read `nunki.yaml`, which is never mounted in its
+/// container, so what the project protects is said in its prompt. A coder
+/// that learns a protected path from gate 4 has already spent an attempt.
+#[test]
+fn the_prompt_names_what_the_project_protects() {
+    let paths = ProtectedPaths {
+        refuse: vec![".github/**".into(), "secrets/**".into()],
+        refuse_if_exists: vec!["migrations/*.sql".into()],
+    };
+    let branches = ["main".to_string(), "dev".to_string()];
+    let protected = role::Protected {
+        branches: &branches,
+        paths: &paths,
+        services_file: None,
+    };
+
+    let coder = flat(&role::prompt(Role::Coder, &protected));
+    assert!(
+        coder.contains(
+            "The project protects these paths: `.github/**` and `secrets/**`; and \
+             `migrations/*.sql`, where the file already exists on the mission's base. \
+             Gate 4 refuses every commit that touches one"
+        ),
+        "{coder}"
+    );
+    assert!(
+        coder.contains("a commit that reverts the change is not enough"),
+        "gate 4 reads each commit, not only the diff: {coder}"
+    );
+    // One list of each kind alone reads as a sentence too.
+    let only_if_exists = ProtectedPaths {
+        refuse: vec![],
+        refuse_if_exists: vec!["Cargo.lock".into()],
+    };
+    let coder_alone = flat(&role::prompt(
+        Role::Coder,
+        &role::Protected {
+            paths: &only_if_exists,
+            ..protected
+        },
+    ));
+    assert!(
+        coder_alone.contains(
+            "The project protects these paths: `Cargo.lock`, where the file already \
+             exists on the mission's base."
+        ),
+        "{coder_alone}"
+    );
+
+    // Gate 4 holds the integrator to its wiring list, not to these paths.
+    let integrator = role::prompt(Role::Integrator, &protected);
+    assert!(!integrator.contains("secrets/**"), "{integrator}");
+
+    for role in [Role::Coder, Role::Integrator] {
+        let text = flat(&role::prompt(role, &protected));
+        assert!(
+            text.contains(
+                "Commit on the mission's branch, the one the slot is on, and on no other: \
+                 the gates judge that branch alone, and the project protects `main` and `dev`."
+            ),
+            "{role:?}: {text}"
+        );
+    }
+    // The security agent commits nothing.
+    let security = role::prompt(Role::Security, &protected);
+    assert!(
+        !security.contains("`dev`") && !security.contains("secrets/**"),
+        "{security}"
+    );
+
+    // Nothing protected, nothing named: no empty list, no dangling clause.
+    let coder = flat(&prompt(Role::Coder));
+    assert!(!coder.contains("protects these paths"), "{coder}");
+    assert!(
+        coder.contains("the gates judge that branch alone."),
+        "{coder}"
+    );
+}
+
+/// What a launch writes as `ROLE.md` is read from `nunki.yaml`: the same
+/// protected paths, branches and services file the gates are given.
+#[test]
+fn the_role_prompt_is_read_from_the_projects_configuration() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut project = project(dir.path());
+    project.config.protected_paths.refuse = vec!["infra/**".into()];
+    project.config.protected_branches = vec!["release".into()];
+    project.config.services_file = Some("deploy/compose.yaml".into());
+
+    let coder = flat(&run::role_prompt(&project, Role::Coder));
+    assert!(coder.contains("`infra/**`"), "{coder}");
+    assert!(coder.contains("the project protects `release`"), "{coder}");
+    assert!(
+        coder.contains("The project's services file, `deploy/compose.yaml`,"),
+        "{coder}"
+    );
+}
+
+/// No profile carries the subscription token, whatever the role (#170). A
+/// profile is the file a human reads to understand a slot, and reading a
+/// slice of one printed the token into a session's transcript. The token
+/// travels at the exec that starts the harness, and `plan` does not take
+/// one.
+#[test]
+fn no_profile_carries_the_subscription_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    let slot = slot_at(dir.path());
+    let header = header_with(with_services());
+    let token_env =
+        nunki::harness::Harness::token_env(&nunki::harness::claude_code::ClaudeCode::new(
+            Default::default(),
+            Box::new(nunki::harness::spawn::LocalSpawner),
+        ));
+
+    for role in [Role::Coder, Role::Integrator, Role::Security] {
+        let (plan, doc) = profile_for(&project, &slot, &header, role);
+        assert!(
+            !plan.environment.contains_key(token_env),
+            "{role:?}: {:?}",
+            plan.environment
+        );
+        let environment = &doc["services"][nunki::compose::AGENT_SERVICE]["environment"];
+        assert!(
+            environment.get(token_env).is_none(),
+            "{role:?}: {environment:?}"
+        );
+    }
+}

@@ -1,0 +1,2013 @@
+//! `nunki verify <mission>` (SPEC 4.2, 4.4, 4.5).
+//!
+//! One verb for a whole phase, because it is one state machine: the coder's
+//! gates, then the integration mission, then the security mission, each with
+//! its own gates, iteration rules applied at the first red, and the hand
+//! back to the human for the push. It is **resumable** — the state is
+//! persisted at every transition, and running it again picks up where it
+//! stopped.
+//!
+//! What it launches, and what it does not. It launches every role's run —
+//! the coder's next lot, the integrator's and the security agent's missions,
+//! lifting the role's profile and starting the application where the role
+//! needs one — then returns: a run takes hours and `verify` never waits on
+//! one. The next `verify` reads that run back — the coder's `Lot:` line, a
+//! role's verdict, or why there is none — and moves. What it does not do is
+//! lift a `FINDINGS` verdict: that is a human's (`nunki mission iterate`,
+//! `nunki mission accept`).
+//!
+//! The slot's lock is taken **once**, here, at the top: everything under it
+//! — gate 6, gate 7, every `nunki exec` — runs inside it and never asks again
+//! (SPEC 4.2).
+
+use std::sync::Arc;
+
+use crate::backoff;
+use crate::engine::Engine;
+use crate::gate;
+use crate::harness::{Fault, Outcome, Role, RunHandle, RunState, Usage};
+use crate::mission::Bounds;
+use crate::mission::dir::Paths;
+use crate::mission::flow::{Event, Handover, Stage, Work};
+use crate::project::Project;
+use crate::state::{MissionState, Spent, Store, lock::SlotLock};
+
+/// One thing `verify` did, in the order it did it. The caller prints them;
+/// the state file is what actually carries the mission forward.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Step {
+    /// The gates were played, and what they said.
+    Gates {
+        role: Role,
+        report: Box<gate::Report>,
+    },
+    /// A gate could not be played at all, and no agent can change that: the
+    /// campaign nobody has started, the profile that is not up. The flow
+    /// does not move — there is nothing to send an agent back for, and
+    /// nothing green to move on from — and `why` carries the gate's own
+    /// sentence, which names the verb that unblocks it. A later `nunki verify`
+    /// plays the gate again.
+    ///
+    /// It is a step and not a `Handover` because `AwaitingHuman` is where a
+    /// mission ends: `advance` answers every event from it with
+    /// `AlreadyOver`, so a mission sent there for a gate 7 nobody had run
+    /// yet — that is, every mission on its first pass — could never be
+    /// picked up again.
+    GateUnplayable { role: Role, why: String },
+    /// Gate 7 has no usable mutation campaign, and that is the one obstacle
+    /// `nunki` clears itself: the caller runs the campaign and looks again.
+    ///
+    /// Not a [`Step::GateUnplayable`], because that one means the flow waits
+    /// on a human. This one waits on nothing — a mission used to stop twice
+    /// on its way through, once for the campaign nobody had started and once
+    /// for the one that had gone stale under a volet, and both times the verb
+    /// a human typed was the verb `nunki` could have typed itself
+    /// (SPEC 4.2, `nunki mission mutants`; SPEC 4.4, gate 7).
+    CampaignOwed { role: Role, why: String },
+    /// The flow moved.
+    Moved { to: Stage },
+    /// A run was launched for this role, and `verify` returned: a run takes
+    /// hours, and nothing here waits on one.
+    Launched {
+        role: Role,
+        /// What the coder's run is for; for the integrator and the security
+        /// agent, how the application was started for it, or why it was not.
+        application: String,
+    },
+    /// The launch dropped the `ports` of these lifted services: the agent
+    /// reaches a service by its name, and a published port would collide
+    /// between slots. Said in one line, before the launch it belongs to.
+    PortsDropped { services: Vec<String> },
+    /// A launch ended a mutation campaign that was still running: the switch
+    /// it performs recreates the container the campaign lives in, so the
+    /// campaign dies either way. Said rather than not — a slot that went
+    /// quiet for an hour with nothing to show for it is worth a sentence.
+    CampaignEnded { since: String },
+    /// The host filled these advisory databases after the slot's profile was
+    /// written, and `verify` mounted them before playing a gate: the agent's
+    /// container was recreated with them (SPEC 4.4, gate 8).
+    Remounted { databases: Vec<std::path::PathBuf> },
+    /// A run ended and left processes behind in its container — started in
+    /// the background, and orphaned when it ended. `said` is what was done:
+    /// the pids stopped, or why nobody could look. Said, never decided on:
+    /// what a run leaves behind is not its verdict.
+    LeftBehind { role: Role, said: String },
+    /// A run was recorded and the engine could not be asked about it.
+    /// Nothing is decided on a silence (SPEC 4.2, "la reprise re-dérive
+    /// avant de décider").
+    Unreachable { role: Role, why: String },
+    /// The security agent was not launched: the rounds the mission's rigor
+    /// allows are spent, `rounds` of `max` (SPEC 4.5). Always followed by
+    /// [`Step::Verified`], or by [`Step::Findings`] when the last verdict
+    /// concluded was `FINDINGS`.
+    SecurityRoundsSpent { rounds: u32, max: u32 },
+    /// Every declared stage is green; the human validates and `nunki push`
+    /// pushes.
+    Verified,
+    /// The flow stopped and the human decides (SPEC 4.5).
+    AwaitingHuman(Handover),
+    /// The mission is held (`nunki mission stop`), so no run was launched.
+    /// The gates still ran and the flow still moved: holding a mission stops
+    /// `nunki` from starting work, not from reading what is already there.
+    Held {
+        role: Role,
+        who: String,
+        date: String,
+        /// Why, when `nunki` held it itself.
+        reason: Option<String>,
+    },
+    /// The subscription's window is past its threshold, and `nunki` launches
+    /// nothing before it resets (SPEC 4.3).
+    Saving {
+        role: Role,
+        account: String,
+        window: String,
+        per_mille: u32,
+        stop_at_percent: u32,
+        until: String,
+    },
+    /// The harness keeps failing, and `nunki` waits it out before launching
+    /// again (SPEC 4.3): nothing is launched before `until`.
+    Waiting {
+        role: Role,
+        until: String,
+        failures: u32,
+        last: String,
+    },
+    /// A real provider this role shares is held by another mission's
+    /// integration run (SPEC 7): nothing is launched until it is free — a
+    /// wait, not a hold, and the mission's monitor looks again.
+    Busy {
+        role: Role,
+        provider: String,
+        by: String,
+    },
+    /// The security agent concluded `FINDINGS`, every finding `LOW` or
+    /// `INFO`, and `nunki` lifted the verdict itself (SPEC 4.5): the
+    /// findings, one line each. Always followed by the flow moving on, as
+    /// after a human's `accept`.
+    LiftedByNunki { findings: Vec<String> },
+    /// The security agent concluded `FINDINGS` and `nunki` did not lift it,
+    /// for this reason: a finding at `MEDIUM` or above, or a ranking it
+    /// cannot read. Always followed by [`Step::Findings`].
+    LeftToHuman { why: String },
+    /// The security agent came back with findings: `nunki mission iterate` sends
+    /// them back to the coder, `nunki mission accept` lifts them.
+    Findings {
+        report: String,
+        /// What a human has already lifted **on this commit**. An acceptance
+        /// given on another one is not shown, because it does not hold: a
+        /// verdict, and its lift, are worth one commit and no other.
+        lifted: Vec<String>,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum VerifyError {
+    #[error("mission {0} has not started — `nunki mission start {0} --slot <slot>` does that")]
+    NotStarted(String),
+    #[error(
+        "a run is still going in slot {slot}: verifying now would judge a tree the \
+         agent is still writing — `nunki mission stop {mission} --now` ends its turn first"
+    )]
+    RunInProgress { mission: String, slot: String },
+    #[error(transparent)]
+    Gate(#[from] gate::GateError),
+    #[error(transparent)]
+    State(#[from] crate::state::StateError),
+    #[error(transparent)]
+    Lock(#[from] crate::state::LockError),
+    #[error(transparent)]
+    Slot(#[from] crate::slot::SlotError),
+    #[error(transparent)]
+    Run(#[from] crate::run::RunError),
+    #[error(transparent)]
+    Git(#[from] crate::git::GitError),
+    #[error(transparent)]
+    Followup(#[from] crate::followup::FollowupError),
+    #[error(transparent)]
+    Findings(#[from] crate::findings::FindingsError),
+    /// The subscription's measure could not be kept or read.
+    #[error("the subscription's usage: {0}")]
+    Usage(String),
+    #[error(transparent)]
+    Gesture(#[from] crate::gesture::GestureError),
+    #[error("the mutation campaign gate 7 waits on: {0}")]
+    Mutants(#[from] crate::mutants::MutantsError),
+    #[error(transparent)]
+    Provider(#[from] crate::provider::ProviderError),
+    #[error(
+        "mission {mission}'s run was told to end its turn: account {account}'s \
+         {window} is at {percent}% — nunki launches nothing before {until}, then goes on; \
+         `nunki verify {mission}` once the turn has ended reads it back without spending an attempt"
+    )]
+    Spared {
+        mission: String,
+        account: String,
+        window: String,
+        percent: String,
+        until: String,
+    },
+}
+
+/// Play the phase as far as it goes, and say what happened.
+pub fn verify(
+    project: &Project,
+    id: &str,
+    engine: Arc<dyn Engine>,
+    engine_bin: &str,
+) -> Result<Vec<Step>, VerifyError> {
+    verify_as(project, id, engine, engine_bin, "verify")
+}
+
+/// [`verify`], taking the slot's lock under `verb`: the mission's monitor
+/// takes it as itself, so a human who types `verify` meanwhile is told what
+/// holds it rather than a `verify` they never started.
+pub fn verify_as(
+    project: &Project,
+    id: &str,
+    engine: Arc<dyn Engine>,
+    engine_bin: &str,
+    verb: &str,
+) -> Result<Vec<Step>, VerifyError> {
+    let store = Store::open(&project.hq_root)?;
+    let mut state = store
+        .load(id)
+        .map_err(|_| VerifyError::NotStarted(id.to_string()))?;
+
+    // Once, at the top. Everything underneath runs under it (SPEC 4.2).
+    let _lock = SlotLock::acquire(&project.hq_root.join("locks"), &state.slot, verb)?;
+
+    // Gates read a tree. A tree an agent is still writing is not a tree to
+    // judge — this is the interlock `nunki exec --tree` deliberately does not
+    // have, and this is where it belongs.
+    refuse_while_running(
+        project,
+        engine.clone(),
+        id,
+        &state,
+        crate::state::now_secs(),
+    )?;
+
+    let slot = crate::slot::find(project, &state.slot)?;
+    let paths = Paths::of(&project.hq_root, id);
+    let stack = crate::run::stack_of(project);
+    let now = crate::state::now_secs();
+
+    let mut steps = Vec::new();
+    // A database the host filled after the profile was written, mounted
+    // before any gate reads it (SPEC 4.4, gate 8; #165): this is the
+    // `nunki verify` the unplayable gate sends a human back to. Not while the
+    // application a role was given is up — it lives in the container this
+    // recreates, and gate 8 says why it is still waiting.
+    if state.app.is_none() {
+        let databases = crate::run::remount_advisories(engine.as_ref(), project, &slot, &stack)?;
+        if !databases.is_empty() {
+            steps.push(Step::Remounted { databases });
+        }
+    }
+    loop {
+        // The frozen header, never the file: from the moment a mission
+        // starts, `nunki` reads its own copy (SPEC 4.1).
+        let header = state.flow.header().clone();
+        let coder_head = state.concluded(Role::Coder).map(|c| c.head.clone());
+        let services_file = crate::services::declared_path(project);
+        let subject = gate::Subject {
+            role: role_of(state.flow.stage()),
+            tree: &slot.tree,
+            journal: &paths.journal,
+            pr: &paths.pr,
+            verdict: &paths.verdict,
+            mission_dir: &paths.dir,
+            header: &header,
+            protected_branches: &project.config.protected_branches,
+            protected_paths: &project.config.protected_paths,
+            services_file: services_file.as_deref(),
+            coder_head: coder_head.as_deref(),
+        };
+        let verification = gate::Verification {
+            project,
+            slot: &slot,
+            engine: engine.clone(),
+            stack: &stack,
+        };
+
+        match state.flow.stage().clone() {
+            // The coder, one run per lot (SPEC 4.3). A run recorded for the
+            // stage is read back first; then, while the work is still the
+            // coder's, the next run is launched — the same attempt replayed,
+            // the next attempt, or the next lot — and `verify` returns.
+            Stage::Coding { work, attempt } => {
+                let label = state.flow.label(&work);
+                let event = match state.run.clone() {
+                    Some(handle) => {
+                        let (outcome, usage, windows) = match read_back(
+                            project,
+                            engine.clone(),
+                            &state,
+                            &handle,
+                            Role::Coder,
+                            &mut steps,
+                        ) {
+                            Ended::Unreachable(why) => {
+                                steps.push(Step::Unreachable {
+                                    role: Role::Coder,
+                                    why,
+                                });
+                                return Ok(steps);
+                            }
+                            Ended::With(outcome, usage, windows) => (outcome, usage, windows),
+                        };
+                        let spared = tally(
+                            project,
+                            &mut state,
+                            &header,
+                            usage.as_ref(),
+                            windows,
+                            &outcome,
+                            now,
+                        )?;
+                        // A turn `nunki` ended is replayed, whatever the run
+                        // left, and nothing is judged on a tree it did not
+                        // finish — a resume block one commit behind would
+                        // turn a replay into a spent attempt. Only a run
+                        // that finished on its own is judged; a harness
+                        // failure falls to the last branch, which the flow
+                        // replays as well.
+                        if spared.is_some() {
+                            Some(spare_event(
+                                spared.as_ref(),
+                                Event::RunEnded {
+                                    outcome,
+                                    lot_done: false,
+                                },
+                            ))
+                        } else if let Outcome::Finished(_) = &outcome {
+                            // Gates 1 to 4 at the end of every run (SPEC
+                            // 4.4): a forbidden commit found after the first
+                            // lot costs one run, found at the end it costs
+                            // the mission. Then the run's own word on its
+                            // lot, and only the resume block's.
+                            let report = gate::after_run(&subject, &verification)?;
+                            let verdict = report.verdict();
+                            steps.push(Step::Gates {
+                                role: Role::Coder,
+                                report: Box::new(report),
+                            });
+                            match verdict {
+                                gate::Verdict::Red(reason) => Some(Event::GatesFailed { reason }),
+                                // Nothing red, but a gate nobody could play:
+                                // the run is not at fault and another one
+                                // would meet the same wall. Nothing is
+                                // decided, so nothing is forgotten either —
+                                // the run stays recorded, and the next
+                                // `nunki verify` reads it back and plays the
+                                // gate again.
+                                gate::Verdict::CampaignOwed(why) => {
+                                    steps.push(campaign_owed(&state, Role::Coder, why));
+                                    return Ok(steps);
+                                }
+                                gate::Verdict::Wall(why) => {
+                                    steps.push(Step::GateUnplayable {
+                                        role: Role::Coder,
+                                        why,
+                                    });
+                                    return Ok(steps);
+                                }
+                                gate::Verdict::Green => {
+                                    let journal =
+                                        std::fs::read_to_string(&paths.journal).unwrap_or_default();
+                                    Some(lot_said(&paths, &journal, &label, outcome))
+                                }
+                            }
+                        } else {
+                            Some(Event::RunEnded {
+                                outcome,
+                                lot_done: false,
+                            })
+                        }
+                    }
+                    // No run recorded, and the stage is one a read-back
+                    // decided: the `verify` that decided it did not launch
+                    // its run — a hold, the harness's wait, the account's
+                    // window — and this one does, on the tree that read-back
+                    // judged or chose not to judge (#177).
+                    None if state.decided.as_ref() == Some(state.flow.stage()) => None,
+                    // No run recorded: a tree someone left, judged before a
+                    // run is launched on it. A red gate here is one more run
+                    // on the same lot, like any other.
+                    None => {
+                        let report = gate::after_run(&subject, &verification)?;
+                        let verdict = report.verdict();
+                        steps.push(Step::Gates {
+                            role: Role::Coder,
+                            report: Box::new(report),
+                        });
+                        // A red gate first: it is the agent's to fix, and it
+                        // outranks a gate nobody could play. Only when
+                        // nothing is red does an unplayable one stop the
+                        // mission, because then there is nothing to send an
+                        // agent back for.
+                        match verdict {
+                            gate::Verdict::Red(reason) => Some(Event::GatesFailed { reason }),
+                            gate::Verdict::CampaignOwed(why) => {
+                                steps.push(campaign_owed(&state, Role::Coder, why));
+                                return Ok(steps);
+                            }
+                            gate::Verdict::Wall(why) => {
+                                steps.push(Step::GateUnplayable {
+                                    role: Role::Coder,
+                                    why,
+                                });
+                                return Ok(steps);
+                            }
+                            gate::Verdict::Green => None,
+                        }
+                    }
+                };
+
+                if let Some(event) = event {
+                    // The next attempt is told why this one failed, in the
+                    // file every run reads first, and starts a fresh
+                    // session: a context that failed is not the one to
+                    // carry on with.
+                    if let Some(why) = attempt_failed(&event) {
+                        crate::followup::said(
+                            &paths.followup,
+                            "nunki",
+                            &format!("{label}, attempt {attempt}: {why}"),
+                        )?;
+                        state.coder_session = None;
+                    }
+                    // Forgotten with the transition, as at every read-back;
+                    // and the stage it lands on is decided, whichever
+                    // `verify` launches its run.
+                    state.run = None;
+                    state.run_account = None;
+                    state.app = None;
+                    store.apply_decided(&mut state, event)?;
+                    steps.push(Step::Moved {
+                        to: state.flow.stage().clone(),
+                    });
+                }
+                // Launched from here and never by looping back: a second
+                // pass would judge the same tree again and spend a second
+                // attempt on a run that never happened.
+                let Stage::Coding { work, attempt } = state.flow.stage().clone() else {
+                    continue;
+                };
+                if let Some(step) =
+                    held(&state, Role::Coder).or_else(|| waiting(&state, Role::Coder, now))
+                {
+                    steps.push(step);
+                    return Ok(steps);
+                }
+                if let Some(step) = saving(project, Role::Coder, &header, now)? {
+                    steps.push(step);
+                    return Ok(steps);
+                }
+                if let Some(step) = capped(&store, &mut state, Role::Coder, &header.bounds, id)? {
+                    steps.push(step);
+                    return Ok(steps);
+                }
+                let launched = crate::run::launch(&crate::run::Launching {
+                    project,
+                    slot: &slot,
+                    engine: engine.clone(),
+                    engine_bin,
+                    paths: &paths,
+                    header: &header,
+                    role: Role::Coder,
+                    lot: state.flow.label(&work),
+                    attempt,
+                    session: state.coder_session.clone(),
+                })?;
+                state.coder_session = Some(launched.run.session.clone());
+                state.run = Some(launched.run);
+                state.run_account = Some(launched.account);
+                state.app = launched.app;
+                state.decided = None;
+                store.save(&state)?;
+                // Before the launch is announced, because it happened first.
+                if let Some(since) = launched.campaign_ended {
+                    steps.push(Step::CampaignEnded { since });
+                }
+                steps.push(Step::Launched {
+                    role: Role::Coder,
+                    application: format!("{}, attempt {attempt}", what_for(&work, &header)),
+                });
+                return Ok(steps);
+            }
+
+            // The final verification: every gate, including the deliverable,
+            // the battery and the mutation campaign.
+            Stage::Gates => {
+                let head = crate::git::slot_head(&slot.tree)?;
+                let report = gate::at_verification(&subject, &verification)?;
+                let verdict = report.verdict();
+                steps.push(Step::Gates {
+                    role: subject.role,
+                    report: Box::new(report),
+                });
+                // Every arm left here moves the flow: the one that does
+                // not has returned above.
+                let event = match verdict {
+                    gate::Verdict::Red(reason) => {
+                        // The volet this opens is told why, like every
+                        // attempt the coder is sent back to.
+                        crate::followup::said(
+                            &paths.followup,
+                            "nunki",
+                            &format!(
+                                "the final gates were red on {}: {reason}",
+                                &head[..head.len().min(12)]
+                            ),
+                        )?;
+                        Event::GatesFailed { reason }
+                    }
+                    // Nothing red, and a gate nobody could play. It is not
+                    // written to the followup, unlike a red one: that file is
+                    // what the next run reads first, and there is no next run
+                    // here — the flow stays at the gates and the sentence
+                    // goes to the human, who has the verb.
+                    gate::Verdict::CampaignOwed(why) => {
+                        steps.push(campaign_owed(&state, subject.role, why));
+                        return Ok(steps);
+                    }
+                    gate::Verdict::Wall(why) => {
+                        steps.push(Step::GateUnplayable {
+                            role: subject.role,
+                            why,
+                        });
+                        return Ok(steps);
+                    }
+                    gate::Verdict::Green => {
+                        // The coder's verdict is implicit — its gates were
+                        // green (SPEC 4.4) — so this is where it is recorded,
+                        // with the commit it was green on. `nunki push` needs
+                        // that commit: everything after it must be the
+                        // integrator's wiring and nothing else.
+                        state.conclude(Role::Coder, None, &head);
+                        gate_seven_said(&paths, id)?;
+                        Event::GatesPassed
+                    }
+                };
+                store.apply(&mut state, event)?;
+                steps.push(Step::Moved {
+                    to: state.flow.stage().clone(),
+                });
+            }
+
+            // The integration mission. Two branches, and which one applies
+            // is decided by whether a run was already launched for this
+            // stage — never by a timer, and never by launching a second one
+            // to see.
+            Stage::Integration { attempt } => {
+                if let Some(handle) = state.run.clone() {
+                    match read_back(
+                        project,
+                        engine.clone(),
+                        &state,
+                        &handle,
+                        Role::Integrator,
+                        &mut steps,
+                    ) {
+                        Ended::Unreachable(why) => {
+                            steps.push(Step::Unreachable {
+                                role: Role::Integrator,
+                                why,
+                            });
+                            return Ok(steps);
+                        }
+                        Ended::With(outcome, usage, windows) => {
+                            let head = crate::git::slot_head(&slot.tree)?;
+                            let spared = tally(
+                                project,
+                                &mut state,
+                                &header,
+                                usage.as_ref(),
+                                windows,
+                                &outcome,
+                                now,
+                            )?;
+                            let mut event = concluded(
+                                Role::Integrator,
+                                outcome,
+                                paths.verdict.as_path(),
+                                &head,
+                            );
+                            // A verdict is the integrator's word, and an
+                            // agent's report is never the truth (SPEC 2): its
+                            // gates are what the word is worth.
+                            // An `INTEGRATED` owes all of them — its system
+                            // tests green in this profile, its section of
+                            // `PR.md` — and a `BROKEN` owes the four every
+                            // run owes. Judged even on a turn `nunki` ended:
+                            // a verdict written before that still stands, and
+                            // it stands on its gates like any other.
+                            if let Event::Verdict { verdict, .. } = &event {
+                                let report = if verdict.is_green() {
+                                    gate::at_verification(&subject, &verification)?
+                                } else {
+                                    gate::after_run(&subject, &verification)?
+                                };
+                                let verdict = report.verdict();
+                                steps.push(Step::Gates {
+                                    role: Role::Integrator,
+                                    report: Box::new(report),
+                                });
+                                match verdict {
+                                    // The wiring, the environment and the
+                                    // system tests are the integrator's to fix,
+                                    // run after run, before it concludes (SPEC
+                                    // 4.5): a red gate is one more attempt,
+                                    // never a volet on the coder.
+                                    gate::Verdict::Red(reason) => {
+                                        event = Event::RunEnded {
+                                            outcome: Outcome::MissionFailure(format!(
+                                                "the gates were red: {reason}"
+                                            )),
+                                            lot_done: false,
+                                        };
+                                    }
+                                    // Nothing red, but a gate nobody could
+                                    // play: another run would meet the same
+                                    // wall. The run stays recorded, so the next
+                                    // `nunki verify` reads it back and plays
+                                    // the gate again.
+                                    gate::Verdict::CampaignOwed(why) => {
+                                        steps.push(campaign_owed(&state, Role::Integrator, why));
+                                        return Ok(steps);
+                                    }
+                                    gate::Verdict::Wall(why) => {
+                                        steps.push(Step::GateUnplayable {
+                                            role: Role::Integrator,
+                                            why,
+                                        });
+                                        return Ok(steps);
+                                    }
+                                    gate::Verdict::Green => {}
+                                }
+                            }
+                            let event = spare_event(spared.as_ref(), event);
+                            // The next attempt is told why this one failed,
+                            // in the file every run reads first — as the
+                            // coder's is.
+                            if let Some(why) = attempt_failed(&event) {
+                                crate::followup::said(
+                                    &paths.followup,
+                                    "nunki",
+                                    &format!("integration, attempt {attempt}: {why}"),
+                                )?;
+                            }
+                            carry(&paths.followup, Role::Integrator, &event, &head)?;
+                            if let Event::Verdict { verdict, .. } = &event {
+                                state.conclude(Role::Integrator, Some(*verdict), &head);
+                            }
+                            // Forgotten before the transition is written: an
+                            // attempt that stays recorded is a run the next
+                            // `verify` would read back a second time.
+                            state.run = None;
+                            state.run_account = None;
+                            state.app = None;
+                            store.apply(&mut state, event)?;
+                            steps.push(Step::Moved {
+                                to: state.flow.stage().clone(),
+                            });
+                            continue;
+                        }
+                    }
+                }
+
+                if let Some(step) = held(&state, Role::Integrator)
+                    .or_else(|| waiting(&state, Role::Integrator, now))
+                {
+                    steps.push(step);
+                    return Ok(steps);
+                }
+                if let Some(step) = saving(project, Role::Integrator, &header, now)? {
+                    steps.push(step);
+                    return Ok(steps);
+                }
+                if let Some(step) =
+                    capped(&store, &mut state, Role::Integrator, &header.bounds, id)?
+                {
+                    steps.push(step);
+                    return Ok(steps);
+                }
+                // A real provider another mission's integration run holds is
+                // waited for, not shared (SPEC 7). The guards are held until
+                // the run is recorded; from then on, that record is the lock.
+                let _providers =
+                    match crate::provider::claim(&store, &project.hq_root, id, &header, verb)? {
+                        crate::provider::Claim::Free(guards) => guards,
+                        crate::provider::Claim::Busy { provider, by } => {
+                            steps.push(Step::Busy {
+                                role: Role::Integrator,
+                                provider,
+                                by,
+                            });
+                            return Ok(steps);
+                        }
+                    };
+                let launched = match crate::run::launch(&crate::run::Launching {
+                    project,
+                    slot: &slot,
+                    engine: engine.clone(),
+                    engine_bin,
+                    paths: &paths,
+                    header: &header,
+                    role: Role::Integrator,
+                    lot: "integration".to_string(),
+                    attempt,
+                    session: None,
+                }) {
+                    Err(crate::run::RunError::Services(
+                        crate::services::ApprovalError::NotApproved { path, digest },
+                    )) => {
+                        unapproved(&store, &mut state, &paths, id, path, digest, &mut steps)?;
+                        continue;
+                    }
+                    launched => launched?,
+                };
+                let application = describe(&launched);
+                let launched_ports = launched.ports_dropped.clone();
+                state.run = Some(launched.run);
+                state.run_account = Some(launched.account);
+                state.app = launched.app;
+                store.save(&state)?;
+                // Before the launch is announced, because it happened first.
+                if let Some(since) = launched.campaign_ended {
+                    steps.push(Step::CampaignEnded { since });
+                }
+                steps.extend(ports_step(launched_ports));
+                steps.push(Step::Launched {
+                    role: Role::Integrator,
+                    application,
+                });
+                return Ok(steps);
+            }
+            // The security mission, on the same two branches as the
+            // integration one — the profile differs, the reading does not.
+            Stage::SecurityAgent { attempt } => {
+                if let Some(handle) = state.run.clone() {
+                    match read_back(
+                        project,
+                        engine.clone(),
+                        &state,
+                        &handle,
+                        Role::Security,
+                        &mut steps,
+                    ) {
+                        Ended::Unreachable(why) => {
+                            steps.push(Step::Unreachable {
+                                role: Role::Security,
+                                why,
+                            });
+                            return Ok(steps);
+                        }
+                        Ended::With(outcome, usage, windows) => {
+                            let head = crate::git::slot_head(&slot.tree)?;
+                            let spared = tally(
+                                project,
+                                &mut state,
+                                &header,
+                                usage.as_ref(),
+                                windows,
+                                &outcome,
+                                now,
+                            )?;
+                            // The gates are played by the closure, between
+                            // the single parse of the verdict and the lift
+                            // decided on it ([`security_concluded`]).
+                            let gates = || -> Result<gate::Report, VerifyError> {
+                                Ok(gate::at_verification(&subject, &verification)?)
+                            };
+                            match security_concluded(
+                                &store,
+                                &mut state,
+                                &paths,
+                                &head,
+                                Concluding {
+                                    attempt,
+                                    outcome,
+                                    spared: spared.as_ref(),
+                                },
+                                gates,
+                                &mut steps,
+                            )? {
+                                ReadBack::Moved => continue,
+                                ReadBack::Stopped => return Ok(steps),
+                            }
+                        }
+                    }
+                }
+
+                if let Some(step) =
+                    held(&state, Role::Security).or_else(|| waiting(&state, Role::Security, now))
+                {
+                    steps.push(step);
+                    return Ok(steps);
+                }
+                if let Some(step) = saving(project, Role::Security, &header, now)? {
+                    steps.push(step);
+                    return Ok(steps);
+                }
+                if let Some(step) = capped(&store, &mut state, Role::Security, &header.bounds, id)?
+                {
+                    steps.push(step);
+                    return Ok(steps);
+                }
+                let launched = match crate::run::launch(&crate::run::Launching {
+                    project,
+                    slot: &slot,
+                    engine: engine.clone(),
+                    engine_bin,
+                    paths: &paths,
+                    header: &header,
+                    role: Role::Security,
+                    lot: "security".to_string(),
+                    attempt,
+                    session: None,
+                }) {
+                    Err(crate::run::RunError::Services(
+                        crate::services::ApprovalError::NotApproved { path, digest },
+                    )) => {
+                        unapproved(&store, &mut state, &paths, id, path, digest, &mut steps)?;
+                        continue;
+                    }
+                    launched => launched?,
+                };
+                let application = describe(&launched);
+                let launched_ports = launched.ports_dropped.clone();
+                state.run = Some(launched.run);
+                state.run_account = Some(launched.account);
+                state.app = launched.app;
+                store.save(&state)?;
+                // Before the launch is announced, because it happened first.
+                if let Some(since) = launched.campaign_ended {
+                    steps.push(Step::CampaignEnded { since });
+                }
+                steps.extend(ports_step(launched_ports));
+                steps.push(Step::Launched {
+                    role: Role::Security,
+                    application,
+                });
+                return Ok(steps);
+            }
+            // A security verdict closes three ways, and two of them are a
+            // human's gesture (SPEC 4.5). `verify` makes neither for them:
+            // iterating by itself would spend a volet the human might have
+            // wanted to spend on an acceptance, and lifting a risk is never
+            // a machine's to do.
+            Stage::Findings { report } => {
+                // Back on the last findings because the rounds are spent
+                // (SPEC 4.5): said once, like the cap on the way to
+                // `Verified`, and saying that the volet which answered them
+                // was not attacked again.
+                if let Some(cap) = state.flow.take_security_cap() {
+                    crate::followup::security_capped_on_findings(
+                        &paths.followup,
+                        cap.rounds,
+                        cap.max,
+                        &last_round_since(&state, &slot.tree)?,
+                    )?;
+                    store.save(&state)?;
+                    steps.push(Step::SecurityRoundsSpent {
+                        rounds: cap.rounds,
+                        max: cap.max,
+                    });
+                }
+                let head = crate::git::slot_head(&slot.tree)?;
+                steps.push(Step::Findings {
+                    report,
+                    lifted: state
+                        .accepted_on(&head)
+                        .iter()
+                        .map(|a| match &a.finding {
+                            Some(finding) => format!("{finding} — {}", a.why),
+                            None => format!("the verdict, as a whole — {}", a.why),
+                        })
+                        .collect(),
+                });
+                return Ok(steps);
+            }
+            Stage::AwaitingHuman(handover) => {
+                steps.push(Step::AwaitingHuman(handover));
+                return Ok(steps);
+            }
+            // A `critical` mission whose every other stage is green: gate 7
+            // alone, and `Verified` only on a campaign at `HEAD` that passes,
+            // partial when the chain allows it (SPEC 4.4, 4.5). A `HEAD` that
+            // moved since owes one, which the caller runs as it runs any
+            // campaign owed ([`campaign`]).
+            Stage::FinalCampaign => {
+                let head = crate::git::slot_head(&slot.tree)?;
+                let report = gate::final_campaign(&subject, &verification)?;
+                let verdict = report.verdict();
+                steps.push(Step::Gates {
+                    role: Role::Coder,
+                    report: Box::new(report),
+                });
+                let event = match verdict {
+                    gate::Verdict::Red(reason) => {
+                        // Its survivors go back to the coder, told why, as a
+                        // red gate 7 at the final gates sends them.
+                        crate::followup::said(
+                            &paths.followup,
+                            "nunki",
+                            &format!(
+                                "the final campaign was red on {}: {reason}",
+                                &head[..head.len().min(12)]
+                            ),
+                        )?;
+                        Event::GatesFailed { reason }
+                    }
+                    gate::Verdict::CampaignOwed(why) => {
+                        steps.push(campaign_owed(&state, Role::Coder, why));
+                        return Ok(steps);
+                    }
+                    gate::Verdict::Wall(why) => {
+                        steps.push(Step::GateUnplayable {
+                            role: Role::Coder,
+                            why,
+                        });
+                        return Ok(steps);
+                    }
+                    gate::Verdict::Green => {
+                        gate_seven_said(&paths, id)?;
+                        Event::GatesPassed
+                    }
+                };
+                store.apply(&mut state, event)?;
+                steps.push(Step::Moved {
+                    to: state.flow.stage().clone(),
+                });
+            }
+            Stage::Verified => {
+                // Reached without the security agent because its rounds were
+                // spent: said once, in the follow-up and to the caller, and
+                // the note taken from the state so a later `verify` does not
+                // say it again.
+                if let Some(cap) = state.flow.take_security_cap() {
+                    crate::followup::security_capped(
+                        &paths.followup,
+                        cap.rounds,
+                        cap.max,
+                        &last_round_since(&state, &slot.tree)?,
+                    )?;
+                    store.save(&state)?;
+                    steps.push(Step::SecurityRoundsSpent {
+                        rounds: cap.rounds,
+                        max: cap.max,
+                    });
+                }
+                // Persisted before anything is printed: a session that dies
+                // after the print must not lose the verdict.
+                steps.push(Step::Verified);
+                return Ok(steps);
+            }
+        }
+    }
+}
+
+/// The system profile a role needed was not started: the services file at
+/// the commit the mission's branch starts from renders to `digest`, which no
+/// human approved. Said in
+/// the follow-up first, then the mission is handed over with a handover of
+/// its own (SPEC 4.5), and nothing was spent.
+fn unapproved(
+    store: &Store,
+    state: &mut MissionState,
+    paths: &Paths,
+    id: &str,
+    file: String,
+    digest: String,
+    steps: &mut Vec<Step>,
+) -> Result<(), VerifyError> {
+    crate::followup::said(
+        &paths.followup,
+        "nunki",
+        &format!(
+            "{file} on the commit the mission's branch starts from renders to {digest}, which \
+             no human has approved, so no system profile was started. `nunki services --show \
+             {id}` prints the rendering, `nunki services --approve {digest} {id}` approves it, \
+             and `nunki mission retry {id}` resumes."
+        ),
+    )?;
+    store.apply(state, Event::ServicesUnapproved { file, digest })?;
+    steps.push(Step::Moved {
+        to: state.flow.stage().clone(),
+    });
+    Ok(())
+}
+
+/// The commits after the security agent's last concluded round, named as
+/// `nunki push` names them (SPEC 4.5): what a spent round cap leaves
+/// unattacked. Nothing when the agent never concluded.
+fn last_round_since(
+    state: &MissionState,
+    tree: &std::path::Path,
+) -> Result<Vec<String>, VerifyError> {
+    let Some(last) = state.concluded(Role::Security) else {
+        return Ok(Vec::new());
+    };
+    let head = crate::git::slot_head(tree)?;
+    Ok(crate::push::not_attacked(tree, &last.head, &head)?)
+}
+
+/// What a gate waiting on a mutation campaign answers: the campaign is owed,
+/// unless the mission is held. A campaign is up to an hour of work in the
+/// slot's container, and both callers of a [`Step::CampaignOwed`] — the
+/// monitor and a human's `nunki verify` — start it at once; a hold is a human
+/// saying "start nothing" (#166). `nunki mission mutants` still starts one: it
+/// is that human asking for it by name.
+fn campaign_owed(state: &MissionState, role: Role, why: String) -> Step {
+    held(state, role).unwrap_or(Step::CampaignOwed { role, why })
+}
+
+/// The step a held mission answers with instead of a launch, or `None` if it
+/// is not held. One place decides it, because "nunki launches no further run"
+/// must mean the same thing at every launch site (SPEC 4.5).
+fn held(state: &MissionState, role: Role) -> Option<Step> {
+    state.stopped.as_ref().map(|s| Step::Held {
+        role,
+        who: s.who.clone(),
+        date: s.date.clone(),
+        reason: s.reason.clone(),
+    })
+}
+
+/// The step a launch site answers with while the harness is being waited
+/// out, or `None` if a run may be launched now.
+fn waiting(state: &MissionState, role: Role, now: u64) -> Option<Step> {
+    let down = state.harness_down.as_ref()?;
+    if backoff::due(Some(down), now) {
+        return None;
+    }
+    Some(Step::Waiting {
+        role,
+        until: crate::state::rfc3339(down.not_before),
+        failures: down.failures,
+        last: down.last.clone(),
+    })
+}
+
+/// Keep count of the harness's failures in a row (SPEC 4.3): a failure
+/// pushes the next launch back, or holds the mission once waiting no longer
+/// serves; any other ending means the harness carried the run, and the count
+/// starts over. The caller saves this with the transition, in one write, so
+/// a crash between the two can neither drop a failure nor count one twice.
+fn note_harness(state: &mut MissionState, fault: Option<&Fault>, bounds: &Bounds, now: u64) {
+    let Some(fault) = fault else {
+        state.harness_down = None;
+        return;
+    };
+    let (record, next) = backoff::after(
+        state.harness_down.as_ref(),
+        fault,
+        now,
+        bounds.harness_wait_hours,
+    );
+    state.harness_down = Some(record);
+    if let backoff::Next::Human { why } = next {
+        state.hold_for("nunki", why);
+    }
+}
+
+/// The step a launch site answers with while the subscription's windows are
+/// past their threshold (SPEC 4.3): nothing is launched until the window
+/// resets, and then `nunki` goes on by itself — a wait, not a hold. A mission
+/// whose account cannot be named is not judged here: the launch that follows
+/// says what is wrong with it.
+fn saving(
+    project: &Project,
+    role: Role,
+    header: &crate::mission::Header,
+    now: u64,
+) -> Result<Option<Step>, VerifyError> {
+    let Ok(account) = crate::consumption::account_of(project, header.account.as_deref()) else {
+        return Ok(None);
+    };
+    let Some(measure) =
+        crate::consumption::read(&project.nunki_home(), &account).map_err(VerifyError::Usage)?
+    else {
+        return Ok(None);
+    };
+    Ok(
+        crate::consumption::over(&measure, &header.bounds, now).map(|over| Step::Saving {
+            role,
+            account,
+            window: over.kind.name().to_string(),
+            per_mille: over.per_mille,
+            stop_at_percent: over.stop_at_percent,
+            until: crate::state::rfc3339(over.until),
+        }),
+    )
+}
+
+/// Hold the mission if it has spent its cap (SPEC 7), and answer with the
+/// hold. Checked between two runs, at the launch site: a run in progress is
+/// never killed for the cap, so a mission may pass it by one run at most.
+fn capped(
+    store: &Store,
+    state: &mut MissionState,
+    role: Role,
+    bounds: &Bounds,
+    id: &str,
+) -> Result<Option<Step>, VerifyError> {
+    let Some(why) = over_cap(&state.spent, bounds, id) else {
+        return Ok(None);
+    };
+    state.hold_for("nunki", why);
+    store.save(state)?;
+    Ok(held(state, role))
+}
+
+fn over_cap(spent: &Spent, bounds: &Bounds, id: &str) -> Option<String> {
+    let raise = format!(
+        "raise it in the mission's header, then `nunki mission reframe {id} --yes` and \
+         `nunki mission resume {id}`"
+    );
+    if let Some(max) = bounds.max_runs
+        && spent.runs >= max
+    {
+        return Some(format!(
+            "the mission has spent {} run(s), and its cap is {max} (`max_runs`) — {raise}",
+            spent.runs
+        ));
+    }
+    if let Some(max) = bounds.max_tokens
+        && spent.usage.total() >= max
+    {
+        return Some(format!(
+            "the mission has spent {} tokens, and its cap is {max} (`max_tokens`, the four \
+             kinds summed) — {raise}",
+            spent.usage.total()
+        ));
+    }
+    None
+}
+
+fn fault_of(outcome: &Outcome) -> Option<Fault> {
+    match outcome {
+        Outcome::HarnessFailure(fault) => Some(fault.clone()),
+        _ => None,
+    }
+}
+
+/// Which role the current stage belongs to, for the gates that role owes.
+fn role_of(stage: &Stage) -> Role {
+    match stage {
+        Stage::Integration { .. } => Role::Integrator,
+        Stage::SecurityAgent { .. } => Role::Security,
+        _ => Role::Coder,
+    }
+}
+
+fn what_for(work: &Work, header: &crate::mission::Header) -> String {
+    match work {
+        Work::Lot(i) => match header.lots.get(*i) {
+            Some(lot) => format!("lot {} — {}", lot.id, lot.title),
+            None => "a lot".to_string(),
+        },
+        Work::Volet { n, cause } => format!("volet {n} — {cause}"),
+    }
+}
+
+/// The coder run's word on its lot, as the event the flow is fed: done, a
+/// ruling awaited on open survivors, or a failed attempt that says why.
+///
+/// A ruling line is checked here, against the mission's campaign, because
+/// the flow reads no file: a line naming no open survivor is a failed
+/// attempt, like any other line that does not say the lot is done.
+fn lot_said(paths: &Paths, journal: &str, label: &str, outcome: Outcome) -> Event {
+    use crate::mission::journal::{Judgement, awaitable, judge};
+    let failed = |why: String| Event::RunEnded {
+        outcome: Outcome::MissionFailure(why),
+        lot_done: false,
+    };
+    match judge(journal, label) {
+        Judgement::Done => Event::RunEnded {
+            outcome,
+            lot_done: true,
+        },
+        Judgement::Failed(why) => failed(why),
+        Judgement::AwaitsRuling { what, survivors } => {
+            let open = match crate::mutants::open(&paths.dir) {
+                Ok(open) => open,
+                Err(e) => {
+                    return failed(format!(
+                        "the run said lot {label} awaits a ruling, and the campaign it \
+                         would be on could not be read: {e}"
+                    ));
+                }
+            };
+            match awaitable(label, &survivors, &open) {
+                Ok(()) => Event::RulingAwaited { what, survivors },
+                Err(why) => failed(why),
+            }
+        }
+    }
+}
+
+/// Why a coder attempt failed, when the event says it did: the words the
+/// next attempt is given, and the sign that its session is not carried on.
+/// A harness failure is not one — the same attempt is replayed.
+///
+/// A ruling awaited is not a failure either, and is written all the same:
+/// the attempt that follows the ruling starts afresh too, and reads what
+/// its predecessor asked for and the HQ answered in the same file.
+fn attempt_failed(event: &Event) -> Option<String> {
+    match event {
+        Event::RulingAwaited { what, .. } => Some(format!("awaits the HQ's ruling: {what}")),
+        Event::RunEnded {
+            outcome: Outcome::MissionFailure(why),
+            ..
+        } => Some(why.clone()),
+        Event::GatesFailed { reason } => Some(format!("the gates were red: {reason}")),
+        _ => None,
+    }
+}
+
+/// What every read-back records, whatever the role: the run and what it
+/// spent, the account's windows as it last saw them, and the harness's
+/// failures in a row. Returns the spared mark, spent by this read-back — a
+/// turn `nunki` ended is no fault of the harness's, and is not counted as one.
+fn tally(
+    project: &Project,
+    state: &mut MissionState,
+    header: &crate::mission::Header,
+    usage: Option<&Usage>,
+    windows: Option<crate::consumption::Windows>,
+    outcome: &Outcome,
+    now: u64,
+) -> Result<Option<crate::state::Spared>, VerifyError> {
+    let spared = state.spared.take();
+    state.spent.record(usage);
+    crate::consumption::note(project, state, windows, now).map_err(VerifyError::Usage)?;
+    let fault = if spared.is_some() {
+        None
+    } else {
+        fault_of(outcome)
+    };
+    note_harness(state, fault.as_ref(), &header.bounds, now);
+    Ok(spared)
+}
+
+/// What a recorded run came to, as the engine answers it.
+enum Ended {
+    /// How it ended, what it spent, and how far the subscription's windows
+    /// were used — each as far as the harness said.
+    With(Outcome, Option<Usage>, Option<crate::consumption::Windows>),
+    /// The question could not be put. A run `nunki` cannot reach is not a run
+    /// that failed, and turning one into the other would consume an attempt
+    /// on a machine that was asleep.
+    Unreachable(String),
+}
+
+fn read_back(
+    project: &Project,
+    engine: Arc<dyn Engine>,
+    state: &MissionState,
+    handle: &RunHandle,
+    role: Role,
+    steps: &mut Vec<Step>,
+) -> Ended {
+    let harness = crate::harness::claude_code::ClaudeCode::new(
+        Default::default(),
+        Box::new(harness_spawner(
+            project,
+            engine.clone(),
+            &state.slot,
+            &handle.session.0,
+        )),
+    );
+    match crate::harness::Harness::state(&harness, handle) {
+        Ok(RunState::Finished(outcome)) => {
+            // No process outlives its run: what it started in the background
+            // is stopped now that it has ended, before anything else reads
+            // the container — the gates, the next run, a campaign.
+            let spawner = harness_spawner(project, engine, &state.slot, &handle.session.0);
+            match spawner.reap(&handle.container, &handle.log) {
+                Ok(Some(pids)) if !pids.is_empty() => steps.push(Step::LeftBehind {
+                    role,
+                    said: format!(
+                        "stopped {} process(es) the run left running: {}",
+                        pids.len(),
+                        pids.iter()
+                            .map(u32::to_string)
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    ),
+                }),
+                Ok(_) => {}
+                Err(e) => steps.push(Step::LeftBehind {
+                    role,
+                    said: format!("what the run left running could not be looked for: {e}"),
+                }),
+            }
+            Ended::With(
+                outcome,
+                crate::harness::Harness::usage(&harness, handle),
+                crate::harness::Harness::windows(&harness, handle),
+            )
+        }
+        // A frozen run is a run in progress that a human stopped on purpose.
+        // Nothing is concluded from it, and the message says whose doing it
+        // is rather than leaving `verify` looking stuck.
+        Ok(RunState::Paused(_)) => Ended::Unreachable(
+            "the run is paused — `nunki mission resume` unfreezes it exactly where it is"
+                .to_string(),
+        ),
+        // `refuse_while_running` already returned for a running run, so this
+        // is a run that started running between the two questions.
+        Ok(RunState::Running(_)) => Ended::Unreachable(
+            "the run started again between two questions; ask once more".to_string(),
+        ),
+        Err(e) => Ended::Unreachable(e.to_string()),
+    }
+}
+
+/// The event a finished role run yields.
+///
+/// A run that finished on its own has to have left a verdict: SPEC 4.4 makes
+/// the verdict the role's conclusion and pins it to a `HEAD`. Finished
+/// without one, or with one that names another commit or another role, is a
+/// run that did not honour the contract — a mission failure, which costs an
+/// attempt. A harness failure costs none, and that distinction is the whole
+/// of SPEC 4.3 on this point.
+fn concluded(role: Role, outcome: Outcome, verdict: &std::path::Path, head: &str) -> Event {
+    concluded_on(role, outcome, verdict, head).0
+}
+
+/// [`concluded`], with the verdict file it read when it read one: what the
+/// security stage decides its lift on, so that the lift rests on exactly the
+/// verdict that was concluded and never on a second read of a file the
+/// application may have rewritten in between (SPEC 4.5).
+fn concluded_on(
+    role: Role,
+    outcome: Outcome,
+    verdict: &std::path::Path,
+    head: &str,
+) -> (Event, Option<crate::mission::VerdictFile>) {
+    let Outcome::Finished(_) = &outcome else {
+        return (
+            Event::RunEnded {
+                outcome,
+                lot_done: false,
+            },
+            None,
+        );
+    };
+    match read_verdict(verdict, role, head) {
+        Ok(file) => (
+            Event::Verdict {
+                verdict: file.verdict,
+                report: file.report.clone(),
+            },
+            Some(file),
+        ),
+        Err(why) => (
+            Event::RunEnded {
+                outcome: Outcome::MissionFailure(why),
+                lot_done: false,
+            },
+            None,
+        ),
+    }
+}
+
+fn read_verdict(
+    path: &std::path::Path,
+    role: Role,
+    head: &str,
+) -> Result<crate::mission::VerdictFile, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("{} could not be read: {e}", path.display()))?;
+    if text.trim().is_empty() {
+        return Err(format!(
+            "the run finished and {} is empty: a role concludes with its verdict",
+            path.display()
+        ));
+    }
+    let file: crate::mission::VerdictFile = serde_json::from_str(&text)
+        .map_err(|e| format!("{} is not a verdict `nunki` can read: {e}", path.display()))?;
+    if file.role != role {
+        return Err(format!(
+            "{} carries {:?}'s verdict, and this run was {role:?}'s",
+            path.display(),
+            file.role
+        ));
+    }
+    // "Un verdict vaut pour un HEAD" (SPEC 4.4): a verdict on another commit
+    // is a verdict on other work, and accepting it would carry a green over
+    // a change nobody judged.
+    if file.head != head {
+        return Err(format!(
+            "{} concludes on {}, and the slot is on {head} — a verdict is worth one \
+             commit and no other",
+            path.display(),
+            file.head
+        ));
+    }
+    // A CLEAR says nothing was found, and a list says something was: a
+    // verdict that says both is malformed, and refused as one rather than
+    // read as whichever half suits (fail closed, SPEC 4.5).
+    if let Some(why) = file.contradiction() {
+        return Err(format!("{} is {why}", path.display()));
+    }
+    Ok(file)
+}
+
+/// What the read-back of a finished security run asks of the loop: go on
+/// with the stage the flow moved to, or stop and return the steps.
+enum ReadBack {
+    Moved,
+    Stopped,
+}
+
+/// The finished security run being read back: its attempt, its outcome, and
+/// whether `nunki` ended its turn.
+struct Concluding<'a> {
+    attempt: u32,
+    outcome: Outcome,
+    spared: Option<&'a crate::state::Spared>,
+}
+
+/// Conclude a finished security run (SPEC 4.4, 4.5): parse its verdict
+/// **once**, play its `gates`, move the flow, and decide `nunki`'s own lift
+/// on that same parse.
+///
+/// The gates run between the parse and the lift, and while they run code
+/// from the tree may still be writing `VERDICT.json`. So the verdict is
+/// read here once, at the top, and everything after — the event, the record,
+/// the lift — rests on that parse; nothing below reads the file again. The
+/// gates are a parameter so that a test can stand exactly there and rewrite
+/// the file, and see that the lift does not follow.
+fn security_concluded(
+    store: &Store,
+    state: &mut MissionState,
+    paths: &Paths,
+    head: &str,
+    run: Concluding,
+    gates: impl FnOnce() -> Result<gate::Report, VerifyError>,
+    steps: &mut Vec<Step>,
+) -> Result<ReadBack, VerifyError> {
+    let (mut event, verdict_file) =
+        concluded_on(Role::Security, run.outcome, paths.verdict.as_path(), head);
+    // The security agent commits nothing, so its gates are the two things it
+    // does leave: a resume block naming the commit it attacked, and a report
+    // (SPEC 4.4, the per-role table). `CLEAR` and `FINDINGS` owe them both —
+    // a verdict with no report is a verdict about nothing.
+    if let Event::Verdict { .. } = &event {
+        let report = gates()?;
+        let verdict = report.verdict();
+        steps.push(Step::Gates {
+            role: Role::Security,
+            report: Box::new(report),
+        });
+        match verdict {
+            // Its own to fix, in one more attempt: the journal and the report
+            // are the agent's, and nothing else was asked of it.
+            gate::Verdict::Red(reason) => {
+                event = Event::RunEnded {
+                    outcome: Outcome::MissionFailure(format!("the gates were red: {reason}")),
+                    lot_done: false,
+                };
+            }
+            gate::Verdict::CampaignOwed(why) => {
+                steps.push(campaign_owed(state, Role::Security, why));
+                return Ok(ReadBack::Stopped);
+            }
+            gate::Verdict::Wall(why) => {
+                steps.push(Step::GateUnplayable {
+                    role: Role::Security,
+                    why,
+                });
+                return Ok(ReadBack::Stopped);
+            }
+            gate::Verdict::Green => {}
+        }
+    }
+    let event = spare_event(run.spared, event);
+    if let Some(why) = attempt_failed(&event) {
+        crate::followup::said(
+            &paths.followup,
+            "nunki",
+            &format!("security, attempt {}: {why}", run.attempt),
+        )?;
+    }
+    carry(&paths.followup, Role::Security, &event, head)?;
+    // The parsed verdict stands only if the flow is about to move on it: a
+    // verdict its gates refused is no verdict, and nothing is lifted on it.
+    let concluded_file = match &event {
+        Event::Verdict { .. } => verdict_file,
+        _ => None,
+    };
+    if let Event::Verdict { verdict, .. } = &event {
+        // What it said is kept from the same parse, for the Security
+        // section `nunki push` writes: `VERDICT.json` is rewritten by every
+        // role after this, and the flow forgets a report once it moves on
+        // (SPEC 4.5).
+        state.conclude_saying(
+            Role::Security,
+            Some(*verdict),
+            head,
+            concluded_file.as_ref().map(crate::state::Said::of),
+        );
+        // On the same parse as the lift below: what the rigor reads when
+        // the HQ sends this report back (SPEC 4.5).
+        state
+            .flow
+            .rank(concluded_file.as_ref().and_then(|f| f.worst()));
+    }
+    state.run = None;
+    state.run_account = None;
+    state.app = None;
+    store.apply(state, event)?;
+    steps.push(Step::Moved {
+        to: state.flow.stage().clone(),
+    });
+    // A report whose every finding is LOW or INFO is lifted by `nunki`
+    // itself, as a human's `accept` would lift it; anything else stays on
+    // `Findings` for a human, as before (SPEC 4.5).
+    if let Some(decision) = lift_on(concluded_file.as_ref(), state.flow.stage()) {
+        match decision {
+            Ok(lifted) => {
+                crate::findings::lift_by_nunki(store, state, &paths.followup, &lifted, head)?;
+                steps.push(Step::LiftedByNunki {
+                    findings: lifted.iter().map(|f| f.line()).collect(),
+                });
+            }
+            Err(why) => steps.push(Step::LeftToHuman { why }),
+        }
+    }
+    Ok(ReadBack::Moved)
+}
+
+/// The lift `nunki` decides on a security verdict just concluded: `None`
+/// when there is nothing to decide — no verdict concluded, or the flow not
+/// on `Findings` — else the findings it lifts, or why it lifts nothing
+/// (SPEC 4.5).
+///
+/// It takes the verdict [`concluded_on`] parsed and no path: the lift rests
+/// on exactly the verdict that was concluded, and there is no file here to
+/// read a second time, whatever was written to it since.
+fn lift_on(
+    concluded: Option<&crate::mission::VerdictFile>,
+    stage: &Stage,
+) -> Option<Result<Vec<crate::mission::LowFinding>, String>> {
+    match (concluded, stage) {
+        (Some(file), Stage::Findings { .. }) => {
+            Some(file.automatic_lift().map_err(|why| why.to_string()))
+        }
+        _ => None,
+    }
+}
+
+/// Carry a red verdict to the coder before the flow moves on it.
+///
+/// Only a red one: an `INTEGRATED` or a `CLEAR` is not something the coder
+/// has to act on, and a follow-up file that fills with green is one nobody
+/// reads (SPEC 4.5, "le constat vit dans le journal du rôle qui l'a fait").
+fn carry(file: &std::path::Path, from: Role, event: &Event, head: &str) -> Result<(), VerifyError> {
+    let Event::Verdict { verdict, report } = event else {
+        return Ok(());
+    };
+    if verdict.is_green() {
+        return Ok(());
+    }
+    crate::followup::carry(file, from, *verdict, report, head)?;
+    Ok(())
+}
+
+/// What to tell the human about the application `nunki` started.
+fn describe(launched: &crate::run::Launched) -> String {
+    match (&launched.launch, &launched.app) {
+        (Some(crate::launch::Launch::Script { path, declared }), Some(_)) => {
+            format!(
+                "the application was started from {path} ({})",
+                declared.where_from()
+            )
+        }
+        (Some(crate::launch::Launch::Nothing { declared }), _) => {
+            format!("nothing was started: {} says `none`", declared.where_from())
+        }
+        _ => "nothing was started".to_string(),
+    }
+}
+
+/// Refuse while the agent is still writing. A gate that reads a tree
+/// mid-run reads a tree that is not finished, and its verdict would be about
+/// a moment nobody chose.
+///
+/// And the moment to judge the account's windows while a run is under way:
+/// `verify` is what gets invoked, again and again, and a run past the
+/// threshold is told to end its turn here rather than waited on (SPEC 4.3).
+/// Public because `nunki mission mutants` needs the same rule: a campaign
+/// lifts nothing, but it rewrites the clean copy of `HEAD` in the container
+/// an agent is working in, and the agent's next launch recreates that
+/// container and ends it. Two verbs, one rule, one implementation.
+pub fn refuse_while_running(
+    project: &Project,
+    engine: Arc<dyn Engine>,
+    id: &str,
+    state: &MissionState,
+    now: u64,
+) -> Result<(), VerifyError> {
+    let Some(handle) = &state.run else {
+        return Ok(());
+    };
+    let harness = crate::harness::claude_code::ClaudeCode::new(
+        Default::default(),
+        Box::new(harness_spawner(
+            project,
+            engine,
+            &state.slot,
+            &handle.session.0,
+        )),
+    );
+    // A run `nunki` cannot reach is not a run in progress: it says so elsewhere
+    // (`nunki mission status`), and refusing to verify because the engine is
+    // down would be the same lie in another place.
+    if let Ok(RunState::Running(_)) = crate::harness::Harness::state(&harness, handle) {
+        if let Some(spared) = crate::gesture::spare_under_lock(project, id, &harness, now)? {
+            return Err(VerifyError::Spared {
+                mission: id.to_string(),
+                account: spared.account,
+                window: spared.window,
+                percent: crate::consumption::percent(spared.per_mille),
+                until: crate::state::rfc3339(spared.until),
+            });
+        }
+        return Err(VerifyError::RunInProgress {
+            mission: id.to_string(),
+            slot: state.slot.clone(),
+        });
+    }
+    Ok(())
+}
+
+/// A run `nunki` stopped for the account's window costs no attempt, whatever it
+/// left: the flow reads it as a harness cause, which replays the same
+/// attempt. A verdict it managed to write before its turn ended still
+/// stands — it is a conclusion, and the window has nothing to say about it.
+fn spare_event(spared: Option<&crate::state::Spared>, event: Event) -> Event {
+    match (spared, event) {
+        (Some(spared), Event::RunEnded { .. }) => Event::RunEnded {
+            outcome: Outcome::HarnessFailure(Fault::transient(format!(
+                "nunki ended the turn: account {}'s {} was at {}%",
+                spared.account,
+                spared.window,
+                crate::consumption::percent(spared.per_mille)
+            ))),
+            lot_done: false,
+        },
+        (_, event) => event,
+    }
+}
+
+/// Run the mutation campaign gate 7 is waiting on, or say where the one in
+/// flight is (SPEC 4.4).
+///
+/// The action a [`Step::CampaignOwed`] asks for, written once so the monitor
+/// and a human's `nunki verify` do the same thing. It launches detached and
+/// returns at once, like every long thing here: the next `verify` reads the
+/// campaign back, and the call that finds it ended writes `MUTANTS.json`.
+///
+/// No slot lock, as `nunki mission mutants` takes none: `verify` refuses to
+/// judge a slot a run is writing, so nothing reaches here while an agent
+/// works.
+pub fn campaign(
+    project: &Project,
+    id: &str,
+    engine: Arc<dyn Engine>,
+) -> Result<crate::mutants::Progress, VerifyError> {
+    let store = Store::open(&project.hq_root)?;
+    let state = store
+        .load(id)
+        .map_err(|_| VerifyError::NotStarted(id.to_string()))?;
+    let header = state.flow.header();
+    let slot = crate::slot::find(project, &state.slot)?;
+    Ok(crate::mutants::campaign(
+        project,
+        &slot,
+        engine,
+        &Paths::of(&project.hq_root, id).dir,
+        &crate::run::stack_of(project),
+        &crate::mutants::Asked {
+            // The base's name: `campaign` works out what this branch brought,
+            // through the same call gate 7 makes.
+            base: &header.base,
+            budget_minutes: header.bounds.mutation_minutes,
+            // The monitor never asks again by itself: replaying costs an
+            // hour, and "ask again" is a human saying something changed that
+            // the fingerprint cannot see.
+            replay: crate::mutants::Replay::WhenChanged,
+            rigor: header.rigor,
+            // The threshold gate 7 judges with: frozen in the header, or the
+            // project's for a header framed before it was frozen.
+            threshold: header
+                .mutation_threshold
+                .unwrap_or(project.config.mutation_threshold),
+            hardening: &header.hardening,
+        },
+    )?)
+}
+
+/// The spawner that can ask about a run: the engine `verify` was given, not
+/// one of its own. A second engine here would answer about another machine's
+/// containers on any caller that passed a fake or a Podman adapter — and
+/// nothing in the type would have said so.
+pub fn harness_spawner(
+    project: &Project,
+    engine: Arc<dyn Engine>,
+    slot: &str,
+    session: &str,
+) -> crate::engine::spawn::ContainerSpawner {
+    let file = crate::run::profile_path(project, slot);
+    // `project.session()` and not the `session` above: that one is the
+    // harness run's, and the Compose project is the nunki session's.
+    let compose_project = crate::compose::project_name(&project.session(), slot)
+        .unwrap_or_else(|_| format!("nunki-{}-{slot}", project.session()));
+    crate::engine::spawn::ContainerSpawner::new(
+        engine,
+        file,
+        &compose_project,
+        crate::compose::AGENT_SERVICE,
+    )
+    .identified_by(session)
+}
+
+/// What the coder's green final gates leave in `FOLLOWUP_HQ.md` for the HQ
+/// (SPEC 4.4, gate 7): the equivalences proposed and not yet ruled on, with
+/// their reasons, long before `nunki push` refuses on them; and, when gate 7
+/// judged several campaigns, each of them — full or partial, from which
+/// commit, with its counts.
+pub fn gate_seven_said(paths: &Paths, id: &str) -> Result<(), VerifyError> {
+    crate::followup::proposals_await(
+        &paths.followup,
+        id,
+        &crate::mutants::awaiting_ruling(&paths.dir)?,
+    )?;
+    crate::followup::campaigns(&paths.followup, &crate::mutants::chain_on_file(&paths.dir)?)?;
+    Ok(())
+}
+
+/// The line a launch owes when it dropped some services' `ports`, and none
+/// when it dropped nothing.
+fn ports_step(services: Vec<String>) -> Option<Step> {
+    (!services.is_empty()).then_some(Step::PortsDropped { services })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const HEAD: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    fn ranked(findings: &str) -> String {
+        format!(
+            "{{\"role\":\"Security\",\"verdict\":\"FINDINGS\",\"head\":\"{HEAD}\",\
+             \"date\":\"2026-10-05T00:00:00Z\",\"report\":\"what was found\",\
+             \"findings\":{findings}}}"
+        )
+    }
+
+    fn findings() -> Stage {
+        Stage::Findings {
+            report: "what was found".into(),
+        }
+    }
+
+    /// A mission framed at `standard` with the security agent, at the stage
+    /// where its run is read back, in a fresh HQ under `dir`.
+    fn at_security(dir: &std::path::Path) -> (Store, MissionState, Paths) {
+        let header = crate::mission::Header {
+            branch: "mission/x".into(),
+            base: "dev".into(),
+            lots: vec![crate::mission::Lot {
+                id: "L1".into(),
+                title: "one".into(),
+            }],
+            integration: crate::mission::Integration::None {
+                reason: "none".into(),
+            },
+            security: crate::mission::Security::Agent,
+            rigor: crate::mission::Rigor::Standard,
+            mutation_threshold: None,
+            hardening: Vec::new(),
+            arbiter: None,
+            account: None,
+            model: None,
+            run: None,
+            bounds: Default::default(),
+        };
+        let paths =
+            crate::mission::dir::create(dir, "m1", &header, "do it").expect("the mission folder");
+        let store = Store::open(dir).expect("the state directory");
+        let mut state = MissionState {
+            id: "m1".into(),
+            slot: "one".into(),
+            flow: crate::mission::flow::Flow::new(header).expect("a valid header"),
+            run: None,
+            run_account: None,
+            app: None,
+            verdicts: Vec::new(),
+            accepted: Vec::new(),
+            stopped: None,
+            harness_down: None,
+            spent: Default::default(),
+            spared: None,
+            decided: None,
+            coder_session: None,
+            pushed: None,
+            updated_at: String::new(),
+            revision: 0,
+        };
+        for event in [
+            Event::RunEnded {
+                outcome: Outcome::Finished(Default::default()),
+                lot_done: true,
+            },
+            Event::GatesPassed,
+        ] {
+            store.apply(&mut state, event).expect("the flow moves");
+        }
+        assert!(matches!(state.flow.stage(), Stage::SecurityAgent { .. }));
+        (store, state, paths)
+    }
+
+    fn green(head: &str) -> gate::Report {
+        gate::Report {
+            role: Role::Security,
+            head: head.into(),
+            outcomes: Vec::new(),
+        }
+    }
+
+    fn finished() -> Concluding<'static> {
+        Concluding {
+            attempt: 1,
+            outcome: Outcome::Finished(Default::default()),
+            spared: None,
+        }
+    }
+
+    /// The lift is decided on the verdict concluded, not on the file as it
+    /// stands after (SPEC 4.5). The honest MEDIUM report is parsed; the gates
+    /// — which run between the parse and the lift, while code from the tree
+    /// may still be writing — rewrite it LOW-only; the decision is the
+    /// MEDIUM's: left to a human, nothing accepted. Any read of the file put
+    /// back after the gates would see the forged list and lift it.
+    #[test]
+    fn the_lift_is_decided_on_the_verdict_concluded_not_on_the_file_rewritten_after_it() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let (store, mut state, paths) = at_security(dir.path());
+        std::fs::write(
+            &paths.verdict,
+            ranked(r#"[{"severity":"MEDIUM","title":"an open redirect"}]"#),
+        )
+        .expect("the verdict is written");
+        let forged = ranked(
+            r#"[{"severity":"LOW","title":"an open redirect","why_acceptable":"nothing to see"}]"#,
+        );
+
+        let mut rewritten = false;
+        let gates = || {
+            std::fs::write(&paths.verdict, &forged).expect("the verdict is rewritten");
+            rewritten = true;
+            Ok(green(HEAD))
+        };
+        let mut steps = Vec::new();
+        let next = security_concluded(
+            &store,
+            &mut state,
+            &paths,
+            HEAD,
+            finished(),
+            gates,
+            &mut steps,
+        )
+        .expect("the run is concluded");
+
+        assert!(rewritten, "the gates ran, between the parse and the lift");
+        assert!(matches!(next, ReadBack::Moved));
+        assert!(
+            steps.iter().any(|s| matches!(s, Step::LeftToHuman { why }
+                if why.contains("an open redirect") && why.contains("MEDIUM"))),
+            "{steps:?}"
+        );
+        assert!(
+            !steps
+                .iter()
+                .any(|s| matches!(s, Step::LiftedByNunki { .. })),
+            "{steps:?}"
+        );
+        assert!(matches!(state.flow.stage(), Stage::Findings { .. }));
+        assert!(state.accepted.is_empty(), "{:?}", state.accepted);
+        assert!(store.load("m1").expect("the state").accepted.is_empty());
+
+        // The forged file is one that would have been lifted, had it been
+        // read: the test stands where a second read would make a difference.
+        let reread = read_verdict(&paths.verdict, Role::Security, HEAD).expect("it reads");
+        assert!(lift_on(Some(&reread), &findings()).is_some_and(|d| d.is_ok()));
+    }
+
+    /// The same seam, nothing rewritten: a LOW-only verdict is lifted, so
+    /// the test above is red for the reason it says and not because the
+    /// seam lifts nothing at all.
+    #[test]
+    fn through_the_same_seam_a_low_only_verdict_is_lifted() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let (store, mut state, paths) = at_security(dir.path());
+        std::fs::write(
+            &paths.verdict,
+            ranked(r#"[{"severity":"LOW","title":"a","why_acceptable":"x"}]"#),
+        )
+        .expect("the verdict is written");
+        let mut steps = Vec::new();
+        security_concluded(
+            &store,
+            &mut state,
+            &paths,
+            HEAD,
+            finished(),
+            || Ok(green(HEAD)),
+            &mut steps,
+        )
+        .expect("the run is concluded");
+        assert!(
+            steps
+                .iter()
+                .any(|s| matches!(s, Step::LiftedByNunki { .. })),
+            "{steps:?}"
+        );
+        assert_eq!(state.flow.stage(), &Stage::Verified);
+        assert_eq!(state.accepted.len(), 1);
+    }
+
+    /// What the security verdict said is kept in the state with it, from
+    /// the parse it was concluded on: the report and findings `nunki push`
+    /// lays into the Security section (SPEC 4.5), not the file as another
+    /// writer left it after.
+    #[test]
+    fn what_the_security_verdict_said_is_kept_from_the_verdict_concluded() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let (store, mut state, paths) = at_security(dir.path());
+        let honest = ranked(r#"[{"severity":"MEDIUM","title":"an open redirect"}]"#);
+        std::fs::write(&paths.verdict, &honest).expect("the verdict is written");
+        let concluded: crate::mission::VerdictFile =
+            serde_json::from_str(&honest).expect("the verdict parses");
+        let gates = || {
+            std::fs::write(&paths.verdict, r#"{"role":"Integrator"}"#)
+                .expect("the verdict is rewritten");
+            Ok(green(HEAD))
+        };
+        security_concluded(
+            &store,
+            &mut state,
+            &paths,
+            HEAD,
+            finished(),
+            gates,
+            &mut Vec::new(),
+        )
+        .expect("the run is concluded");
+
+        let expected = Some(crate::state::Said {
+            report: concluded.report.clone(),
+            findings: concluded.findings.clone(),
+        });
+        assert!(!concluded.report.is_empty());
+        for state in [state, store.load("m1").expect("the state")] {
+            let security = state.concluded(Role::Security).expect("it concluded");
+            assert_eq!(security.said, expected);
+        }
+    }
+
+    /// Nothing is decided without a verdict concluded, or off `Findings`.
+    #[test]
+    fn no_lift_is_decided_without_a_concluded_verdict_or_off_findings() {
+        let low: crate::mission::VerdictFile = serde_json::from_str(&ranked(
+            r#"[{"severity":"LOW","title":"a","why_acceptable":"x"}]"#,
+        ))
+        .expect("the verdict parses");
+        assert!(lift_on(None, &findings()).is_none());
+        assert!(lift_on(Some(&low), &Stage::Verified).is_none());
+        assert!(lift_on(Some(&low), &Stage::SecurityAgent { attempt: 1 }).is_none());
+        assert!(lift_on(Some(&low), &findings()).is_some_and(|d| d.is_ok()));
+    }
+
+    #[test]
+    fn a_launch_says_which_ports_it_dropped_and_nothing_when_none() {
+        assert_eq!(
+            ports_step(vec!["db".to_string()]),
+            Some(Step::PortsDropped {
+                services: vec!["db".to_string()]
+            })
+        );
+        assert_eq!(ports_step(Vec::new()), None);
+    }
+}

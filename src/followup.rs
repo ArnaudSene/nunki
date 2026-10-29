@@ -1,0 +1,660 @@
+//! `FOLLOWUP_HQ.md` — what the HQ carries to the coder (SPEC 4.5).
+//!
+//! Two facts about a mission never travel from one agent to another:
+//!
+//! - **the constat lives in the journal of the role that made it**, and it is
+//!   the HQ that carries it to the coder, dated, in this file. An agent never
+//!   speaks to another agent — everything goes through the HQ and through
+//!   files, so that losing a session loses nothing;
+//! - **a security finding is only ever lifted by a human**, through a verb,
+//!   and the lift is written here as well as into `nunki`'s state.
+//!   `VERDICT.json` stays `FINDINGS`: the verdict says what the agent found,
+//!   the state says what the human decided, and confusing the two would let a
+//!   red verdict be edited into a green one.
+//!
+//! This module only appends. The head of the file belongs to the human who
+//! framed the mission, and nothing here rewrites it.
+
+use std::path::Path;
+
+use crate::harness::Role;
+use crate::mission::Verdict;
+
+#[derive(Debug, thiserror::Error)]
+pub enum FollowupError {
+    #[error("{0} could not be written: {1}")]
+    Io(std::path::PathBuf, std::io::Error),
+}
+
+/// Carry a role's verdict to the coder.
+///
+/// Written whether or not the coder is about to be relaunched: the record is
+/// what a later run reads, and a mission that stops at the bound must still
+/// say why in the file the human reads.
+pub fn carry(
+    file: &Path,
+    from: Role,
+    verdict: Verdict,
+    report: &str,
+    head: &str,
+) -> Result<(), FollowupError> {
+    let report = match report.trim() {
+        "" => "The verdict carried no report.",
+        text => text,
+    };
+    append(
+        file,
+        &format!(
+            "## {date} — {who} concluded {verdict:?} on {short}\n\n\
+             {report}\n",
+            date = today(),
+            who = crate::role::slug(from),
+            short = short(head),
+        ),
+    )
+}
+
+/// Record that a human lifted a finding, with the reason they gave.
+///
+/// The reason is not optional anywhere it can be helped: a risk accepted
+/// without one is not accepted, it is forgotten.
+pub fn lifted(
+    file: &Path,
+    who: &str,
+    finding: &str,
+    why: &str,
+    head: &str,
+) -> Result<(), FollowupError> {
+    append(
+        file,
+        &format!(
+            "## {date} — {who} lifted a security finding on {short}\n\n\
+             **Finding:** {finding}\n\n\
+             **Accepted because:** {why}\n\n\
+             `VERDICT.json` stays `FINDINGS`. This file and `nunki`'s state are what\n\
+             record that a human lifted it, and `nunki push` reads it there.\n",
+            date = today(),
+            short = short(head),
+        ),
+    )
+}
+
+/// Record that the human lifted what remained of a verdict.
+pub fn lifted_all(file: &Path, who: &str, why: &str, head: &str) -> Result<(), FollowupError> {
+    append(
+        file,
+        &format!(
+            "## {date} — {who} lifted the security verdict on {short}\n\n\
+             **Accepted because:** {why}\n\n\
+             Everything the report still carried is lifted from here on. A new\n\
+             commit makes this stale: a verdict, and its lift, are worth one\n\
+             commit and no other (SPEC 4.5) — unless the security rounds are\n\
+             spent, when no verdict can follow and this lift stands for the\n\
+             commits after it, which `nunki push` names as not attacked.\n",
+            date = today(),
+            short = short(head),
+        ),
+    )
+}
+
+/// Record that a human lifted the security verdict as fixed by `fix`, a commit
+/// after the security agent's last round that it did not attack, and how
+/// they checked the fix (#162).
+pub fn lifted_as_fixed(
+    file: &Path,
+    who: &str,
+    why: &str,
+    fix: &str,
+    head: &str,
+) -> Result<(), FollowupError> {
+    append(
+        file,
+        &format!(
+            "## {date} — {who} lifted the security verdict on {short}, as fixed\n\n\
+             **Fixed by:** `{fix}`, after the security agent's last round, which did\n\
+             not attack it.\n\n\
+             **Checked because:** {why}\n\n\
+             `nunki push` says the findings were fixed by that commit, not attacked by\n\
+             the agent and checked by {who} — not that a risk was accepted.\n",
+            date = today(),
+            short = short(head),
+            fix = short(fix),
+        ),
+    )
+}
+
+/// Record that `nunki` lifted a security verdict itself, every finding in it
+/// being `LOW` or `INFO`: the findings, one per line, with the agent's
+/// reason for each (SPEC 4.5).
+///
+/// Said as `nunki`'s, never as a human's: the HQ reads here which lifts it
+/// did not make, and can still send the mission back with `iterate`.
+pub fn lifted_by_nunki(file: &Path, findings: &[String], head: &str) -> Result<(), FollowupError> {
+    let listed = findings
+        .iter()
+        .map(|line| format!("- {}", crate::text::one_line(line)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    append(
+        file,
+        &format!(
+            "## {date} — nunki lifted the security verdict on {short} (LOW/INFO)\n\n\
+             Every finding the security agent ranked is LOW or INFO, so nunki\n\
+             accepted them itself, with the agent's own reasons:\n\n\
+             {listed}\n\n\
+             `VERDICT.json` stays `FINDINGS`. This lift obeys the rules of a\n\
+             human's: it is worth this commit, and a later `FINDINGS` is not\n\
+             covered by it. `nunki mission iterate` still sends the mission back.\n",
+            date = today(),
+            short = short(head),
+        ),
+    )
+}
+
+/// A mission called off, and why.
+pub fn ended(file: &Path, who: &str, why: &str) -> Result<(), FollowupError> {
+    append(
+        file,
+        &format!(
+            "## {date} — {who} called this mission off\n\n\
+             **Because:** {why}\n\n\
+             Nothing here is deleted. `nunki mission archive` moves this folder\n\
+             under `archive/`, and what it holds is the record of what was done.\n",
+            date = today(),
+        ),
+    )
+}
+
+/// What a retry took the mission back from, for the record it leaves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Retaken<'a> {
+    /// A bound ran out — `was` says which, in one clause — and the retry
+    /// hands it back whole.
+    Bound { was: &'a str },
+    /// The volets ran out. They are counted over the mission's life, so
+    /// the retry grants one — volet `n` of a cap of `cap` — and never the
+    /// cap again.
+    Volet { n: u32, cap: u32 },
+    /// The coder awaited the HQ's ruling on `survivors` at `asked` of `of`
+    /// attempts. A ruling is not a bound, so none is handed back: the lot
+    /// resumes at the next attempt.
+    Ruling {
+        lot: &'a str,
+        survivors: &'a [String],
+        asked: u32,
+        of: u32,
+    },
+    /// The same, asked on the last attempt: there is no next one, so the
+    /// retry hands the lot over as out of attempts instead.
+    RulingOnTheLastAttempt {
+        lot: &'a str,
+        survivors: &'a [String],
+        asked: u32,
+    },
+    /// The services file rendered to `digest`, which no human had approved,
+    /// so nothing was started. No run was spent, so none is handed back: the
+    /// role resumes at the attempt it was on.
+    Services {
+        file: &'a str,
+        digest: &'a str,
+        attempt: u32,
+    },
+}
+
+/// The human took the mission back from a handover, and said what changed.
+///
+/// It lands here and not only in the state, because this is the file every
+/// role reads before anything else: a retry that tells the agent nothing
+/// hands it back the work it already failed, with the same tree and the same
+/// cause, and spends the budget reaching the same handover. What changed is
+/// the whole point of the verb.
+///
+/// What it says about the bounds depends on what stopped the mission, and is
+/// read by the next run as a statement of fact: attempts are handed back
+/// whole, volets one at a time (the HQ grants each, dated, with its reason),
+/// and a ruling hands nothing back.
+pub fn retried(file: &Path, who: &str, why: &str, taken: &Retaken) -> Result<(), FollowupError> {
+    let head = format!(
+        "## {date} \u{2014} {who} took this mission back",
+        date = today()
+    );
+    let quoted = |ids: &[String]| {
+        ids.iter()
+            .map(|id| format!("`{id}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let body = match taken {
+        Retaken::Bound { was } => format!(
+            "It had stopped on its own bounds: {was}. They are handed back whole, and this is what changed since:"
+        ),
+        // The grant and its reason on one line, so that a reader counting
+        // how far past its cap a mission went finds each grant whole.
+        Retaken::Volet { n, cap } => format!(
+            "It had stopped on its own bounds: its volets were spent. Volets are counted over \
+             the mission's life, and a retry grants one, not the cap again: the next red \
+             verdict hands the mission back.\n\nVolet {n} of {cap}, granted by the HQ: {why}"
+        ),
+        Retaken::Ruling {
+            lot,
+            survivors,
+            asked,
+            of,
+        } => format!(
+            "It had stopped on {lot}, attempt {asked}, awaiting the HQ's ruling on {}. A ruling \
+             is not a bound, and none is handed back: this is attempt {} of {of}. What the HQ \
+             ruled, or what changed since:",
+            quoted(survivors),
+            asked + 1
+        ),
+        Retaken::RulingOnTheLastAttempt {
+            lot,
+            survivors,
+            asked,
+        } => format!(
+            "It had stopped on {lot}, attempt {asked}, awaiting the HQ's ruling on {}. A ruling \
+             is not a bound, and none is handed back — and that was the last attempt, so {lot} \
+             is handed over as out of attempts rather than run past the bound. A further \
+             `nunki mission retry` hands the attempts back whole. What the HQ ruled, or what \
+             changed since:",
+            quoted(survivors)
+        ),
+        Retaken::Services {
+            file,
+            digest,
+            attempt,
+        } => format!(
+            "It had stopped before a system profile was started: {file} rendered to {digest}, \
+             which no human had approved, so nothing was lifted and no run was spent. It \
+             resumes at attempt {attempt}; a rendering still not approved stops it there \
+             again. What changed since:"
+        ),
+    };
+    // A grant carries its reason in its own line; every other record asks
+    // the question and gives the answer its own paragraph.
+    let body = match taken {
+        Retaken::Volet { .. } => body,
+        _ => format!("{body}\n\n{why}"),
+    };
+    append(
+        file,
+        &format!(
+            "{head}\n\n{body}\n\nRead it before the journal. Nothing in the tree moved on its own.\n"
+        ),
+    )
+}
+
+/// The HQ read the verified branch and sends it back to the coder.
+///
+/// Here, because this is what the coder reads first: a volet whose cause is
+/// only in `nunki`'s state reaches the coder as a sentence in its prompt, and
+/// the record of what the human refused belongs with the others.
+pub fn reviewed(file: &Path, who: &str, why: &str) -> Result<(), FollowupError> {
+    append(
+        file,
+        &format!(
+            "## {date} — {who} read the verified branch and sends it back\n\n\
+             **What to change:** {why}\n\n\
+             This is a volet: change what is asked, prove it as for any lot, and\n\
+             the verification runs again from the gates.\n",
+            date = today(),
+        ),
+    )
+}
+
+/// The HQ called off the mutation campaign in flight, and said why
+/// (`nunki mission mutants --cancel`): `survivors` is how many it had already
+/// reported, kept in `MUTANTS.json` as from an incomplete campaign.
+pub fn campaign_cancelled(
+    file: &Path,
+    who: &str,
+    why: &str,
+    survivors: usize,
+) -> Result<(), FollowupError> {
+    append(
+        file,
+        &format!(
+            "## {date} — {who} called off the mutation campaign\n\n\
+             **Because:** {why}\n\n\
+             It had reported {survivors} survivor(s), kept in MUTANTS.json as from an\n\
+             incomplete campaign: they never make gate 7 green. `nunki mission iterate\n\
+             --because` sends them to the coder; `nunki mission mutants --again` runs a\n\
+             new campaign.\n",
+            date = today(),
+        ),
+    )
+}
+
+/// The HQ sent the survivors of an incomplete campaign to the coder
+/// (`nunki mission iterate --because`, at the gates): the coder answers
+/// them as it would a red gate 7's, knowing the campaign did not finish.
+pub fn partial_survivors_sent(file: &Path, who: &str, why: &str) -> Result<(), FollowupError> {
+    append(
+        file,
+        &format!(
+            "## {date} — {who} sends the survivors of an incomplete campaign\n\n\
+             **Why:** {why}\n\n\
+             The mutation campaign did not finish: MUTANTS.json holds the survivors it\n\
+             had reported when it stopped. Give each one of its outcomes, as for any\n\
+             campaign; the next campaign runs once the touched files have changed.\n",
+            date = today(),
+        ),
+    )
+}
+
+/// The HQ set the mission's rigor aside to send it back, and said why
+/// (SPEC 4.5): written, dated, as a departure from the rigor, so that
+/// whoever reads the follow-up sees how often the rule was set aside and
+/// on what grounds. `departure` is what the rigor said, as
+/// [`crate::mission::flow::Departure`] says it.
+pub fn overridden(file: &Path, who: &str, departure: &str, why: &str) -> Result<(), FollowupError> {
+    append(
+        file,
+        &format!(
+            "## {date} — {who} departed from the rigor\n\n\
+             The rigor says: {departure}. The HQ sends the mission back all the same.\n\n\
+             **Why:** {why}\n",
+            date = today(),
+        ),
+    )
+}
+
+/// The mission was verified without the security agent, after a `CLEAR` or
+/// a lifted `FINDINGS`, because the rounds its rigor allows were spent
+/// (SPEC 4.5): `rounds` played of `max`, and `not_attacked` the commits
+/// after the last round, as [`crate::push::not_attacked`] names them.
+///
+/// Written here, beside the verdicts the rounds concluded, so that whoever
+/// validates the push reads that the last commit was not seen by the agent,
+/// and why — a verified mission otherwise reads as if every stage had run.
+pub fn security_capped(
+    file: &Path,
+    rounds: u32,
+    max: u32,
+    not_attacked: &[String],
+) -> Result<(), FollowupError> {
+    append(
+        file,
+        &format!(
+            "## {date} — nunki did not call the security agent again\n\n\
+             The security round cap was reached: {rounds} / {max}. The gates are\n\
+             green on the code as it stands, and the mission is verified without\n\
+             another round: what the last commits changed has not been read by\n\
+             the security agent.\n{commits}",
+            date = today(),
+            commits = unattacked(not_attacked),
+        ),
+    )
+}
+
+/// The security agent was not called again because its rounds were spent,
+/// and the last verdict it concluded was `FINDINGS`: the mission is back on
+/// that report rather than verified (SPEC 4.5). What the coder changed after
+/// it has not been attacked, and whoever accepts or iterates must know it:
+/// `not_attacked` names those commits.
+pub fn security_capped_on_findings(
+    file: &Path,
+    rounds: u32,
+    max: u32,
+    not_attacked: &[String],
+) -> Result<(), FollowupError> {
+    append(
+        file,
+        &format!(
+            "## {date} — nunki did not call the security agent again\n\n\
+             The security round cap was reached: {rounds} / {max}. The last round\n\
+             concluded FINDINGS, and the fix made after it has not been attacked\n\
+             again: the gates are green on it, and that is all that was played.\n\
+             The mission is back on those findings — `nunki mission accept`\n\
+             lifts them, `nunki mission iterate` sends one more volet. If a commit\n\
+             below fixed them and you checked it, `nunki mission accept --fixed-by\n\
+             <commit> --because <how you checked it>` lifts them as fixed rather than\n\
+             as an accepted risk, and the pull request says so.\n{commits}",
+            date = today(),
+            commits = unattacked(not_attacked),
+        ),
+    )
+}
+
+/// The commits after the last round, as a list a human can check against
+/// `git log`; nothing when there are none to name.
+fn unattacked(commits: &[String]) -> String {
+    if commits.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\nNot attacked by the security agent:\n\n");
+    for commit in commits {
+        out.push_str(&format!("- {commit}\n"));
+    }
+    out
+}
+
+/// The HQ refused an equivalence the coder proposed on `survivor`.
+///
+/// Here because this is the file the next coder run reads first: the
+/// survivor is open again, and a refusal it cannot read would send it back to
+/// propose the same sentence.
+pub fn proposal_refused(
+    file: &Path,
+    who: &str,
+    survivor: &str,
+    refusal: &crate::mutants::Refusal,
+) -> Result<(), FollowupError> {
+    append(
+        file,
+        &format!(
+            "## {date} — {who} refused an equivalence the coder proposed\n\n\
+             **Survivor:** `{survivor}`\n\n\
+             **Proposed:** {proposed}\n\n\
+             **Refused because:** {because}\n\n\
+             The survivor needs an outcome again: killed by a named test, or a bug\n\
+             frozen in one. A proposal written again on it is no outcome.\n",
+            date = today(),
+            survivor = crate::text::one_line(survivor),
+            proposed = crate::text::one_line(&refusal.proposed),
+            because = refusal.because.trim(),
+        ),
+    )
+}
+
+/// The project's registry of equivalences could not be read when a campaign
+/// was recorded, so nothing was proposed from it ([`crate::equivalences`]).
+///
+/// Said here because the registry fails closed: the survivors it would have
+/// answered are open, and whoever reads gate 7 asking for them again should
+/// find why without reading a log.
+pub fn registry_unread(file: &Path, why: &str) -> Result<(), FollowupError> {
+    append(
+        file,
+        &format!(
+            "## {date} — the registry of equivalences could not be read\n\n\
+             {why}\n\n\
+             The campaign was recorded without it: no ruling given on another\n\
+             mission was proposed, and the survivors it would have matched need\n\
+             an outcome here.\n",
+            date = today(),
+            why = why.trim(),
+        ),
+    )
+}
+
+/// Gate 7 passed with equivalence proposals the HQ has not ruled on — the
+/// coder's, and `nunki`'s from rulings it matched: each listed with its
+/// source and reason, for the HQ to ratify or refuse before `nunki push`,
+/// which refuses until it has.
+///
+/// Nothing is written when there are none.
+pub fn proposals_await(
+    file: &Path,
+    mission: &str,
+    proposals: &[crate::mutants::Proposal],
+) -> Result<(), FollowupError> {
+    if proposals.is_empty() {
+        return Ok(());
+    }
+    let listed = proposals
+        .iter()
+        .map(|p| {
+            format!(
+                "- `{}` ({}:{}, {}) — {}",
+                crate::text::name(&p.id),
+                crate::text::name(&p.file),
+                p.line,
+                p.source(),
+                crate::text::one_line(&p.why)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let body = format!(
+        "Gate 7 counted them as outcomes, and the mission went on. They are\n\
+         not rulings, and `nunki push` refuses until each is ratified or refused:\n\n\
+         {listed}\n\n\
+         `nunki mission mutants {mission} --ratify <survivor>` ratifies one,\n\
+         `--ratify --all` every one, `--refuse <survivor> --because <why>`\n\
+         refuses one.\n"
+    );
+    // One section per change, not one per pass of the final gates: a mission
+    // that passes them again on the same proposals has nothing new to say,
+    // and a file every role reads first fills with copies nobody needs (HQ
+    // review of the pull request, item 5).
+    let existing = std::fs::read_to_string(file).unwrap_or_default();
+    if last_proposals(&existing) == Some(crate::text::printable(&body).trim()) {
+        return Ok(());
+    }
+    append(
+        file,
+        &format!(
+            "## {date} — {count} {PROPOSALS_HEADING}\n\n{body}",
+            date = today(),
+            count = proposals.len(),
+        ),
+    )
+}
+
+/// How the heading of a [`proposals_await`] section ends.
+const PROPOSALS_HEADING: &str = "equivalence proposal(s) await the HQ";
+
+/// The body of the last [`proposals_await`] section of `text`, trimmed: what
+/// follows its heading, up to the next heading or the end of the file.
+fn last_proposals(text: &str) -> Option<&str> {
+    last_section(text, PROPOSALS_HEADING)
+}
+
+/// Gate 7 passed on a chain of campaigns (SPEC 4.4): each campaign in one
+/// line ([`crate::mutants::chain_said`]) — full or partial, from which
+/// commit, what it itself tried — then the one campaign gate 7 judged, so
+/// the HQ reading the pull request's follow-up sees which files were
+/// measured when, and what passed.
+///
+/// Nothing is written for a single campaign, whose counts gate 7's note
+/// already gives — a chain is two campaigns at least, and the judged line
+/// after them — nor when the last such section said the same.
+pub fn campaigns(file: &Path, chain: &[String]) -> Result<(), FollowupError> {
+    if chain.len() < 3 {
+        return Ok(());
+    }
+    let (judged, campaigns) = chain.split_last().expect("three lines at least");
+    let listed = campaigns
+        .iter()
+        .enumerate()
+        .map(|(n, said)| format!("{}. {}", n + 1, crate::text::one_line(said)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let body = format!(
+        "A partial campaign measured again only the files whose content changed\n\
+         since the campaign before it, and kept the other files' counts and\n\
+         survivors as they were. Gate 7 judged them once, as one campaign:\n\n\
+         {listed}\n\n\
+         Then {}\n",
+        crate::text::one_line(judged)
+    );
+    let existing = std::fs::read_to_string(file).unwrap_or_default();
+    if last_section(&existing, CAMPAIGNS_HEADING) == Some(crate::text::printable(&body).trim()) {
+        return Ok(());
+    }
+    append(
+        file,
+        &format!(
+            "## {date} — {count} {CAMPAIGNS_HEADING}\n\n{body}",
+            date = today(),
+            count = campaigns.len(),
+        ),
+    )
+}
+
+/// How the heading of a [`campaigns`] section ends.
+const CAMPAIGNS_HEADING: &str = "mutation campaigns in this mission's chain";
+
+/// The body of the last section of `text` whose heading ends with
+/// `heading`, trimmed: what follows the heading, up to the next heading or
+/// the end of the file.
+fn last_section<'a>(text: &'a str, heading: &str) -> Option<&'a str> {
+    let at = text
+        .match_indices("## ")
+        .filter(|(at, _)| *at == 0 || text[..*at].ends_with('\n'))
+        .map(|(at, _)| at)
+        .filter(|at| {
+            text[*at..]
+                .lines()
+                .next()
+                .is_some_and(|line| line.ends_with(heading))
+        })
+        .last()?;
+    let rest = &text[at..];
+    let body = &rest[rest.find('\n').map_or(rest.len(), |at| at + 1)..];
+    let end = body.find("\n## ").map_or(body.len(), |at| at + 1);
+    Some(body[..end].trim())
+}
+
+/// An instruction left for the next run.
+///
+/// `say` and not a channel: there is no channel during a run (SPEC 4.3). What
+/// is written here is read by the run after this one, by every role, because
+/// every role is told to read this file before anything else.
+pub fn said(file: &Path, who: &str, what: &str) -> Result<(), FollowupError> {
+    append(
+        file,
+        &format!(
+            "## {date} — {who} left an instruction for the next run\n\n{what}\n",
+            date = today(),
+        ),
+    )
+}
+
+/// The first twelve characters of a commit, which is how every other message
+/// in `nunki` names one.
+fn short(head: &str) -> &str {
+    &head[..12.min(head.len())]
+}
+
+fn today() -> String {
+    crate::state::now_rfc3339()
+        .split('T')
+        .next()
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn append(file: &Path, block: &str) -> Result<(), FollowupError> {
+    use std::io::Write;
+    // Reports, causes and commit subjects are written here by agents and
+    // authors, and this file is read by a human, in a terminal as often as
+    // not: every block is made printable on its way in.
+    let block = crate::text::printable(block);
+    let existing = std::fs::read_to_string(file).unwrap_or_default();
+    let mut out = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(file)
+        .map_err(|e| FollowupError::Io(file.to_path_buf(), e))?;
+    // One blank line between blocks, and never two: this file is read by an
+    // agent that is told to read it first, and a heading glued to the
+    // previous paragraph is a heading it may not see.
+    let lead = match () {
+        _ if existing.is_empty() || existing.ends_with("\n\n") => "",
+        _ if existing.ends_with('\n') => "\n",
+        _ => "\n\n",
+    };
+    write!(out, "{lead}{block}").map_err(|e| FollowupError::Io(file.to_path_buf(), e))
+}

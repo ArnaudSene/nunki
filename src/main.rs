@@ -1,0 +1,3860 @@
+//! `nunki` — a mission orchestrator for AI coding agents (SPEC 4.2).
+
+use std::path::PathBuf;
+use std::process::ExitCode;
+
+use clap::{Parser, Subcommand};
+
+use nunki::harness::Harness;
+use nunki::mission::{Header, Integration, Lot, Rigor, Security, Service, dir as mission_dir};
+use nunki::project::Project;
+use nunki::{check, image, init, probe, slot};
+
+#[derive(Parser)]
+#[command(
+    name = "nunki",
+    version,
+    about = "Orchestrate missions run by AI coding agents",
+    long_about = None
+)]
+struct Cli {
+    /// Where to look for the project. Defaults to the current directory, and
+    /// `nunki` walks up from there the way git does.
+    #[arg(long, short = 'C', global = true, value_name = "DIR")]
+    directory: Option<PathBuf>,
+
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum ProtectionArg {
+    Forge,
+    ByHand,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Make an existing repository orchestrable.
+    ///
+    /// Creates what is absent, never overwrites a file a human edits — it
+    /// deposits its version beside it — and keeps no manifest. Replayable.
+    ///
+    /// On a terminal, a first `init` asks what `nunki.yaml` should declare,
+    /// proposing what the repository already says: the stacks its manifests
+    /// declare and where, the forge its `origin` names, the branches it has.
+    /// A flag answers its question in advance; `--yes` takes every proposal.
+    /// Off a terminal, and without `--yes`, nothing is detected and nothing
+    /// asked: only the flags count, as they always have.
+    Init {
+        /// Stack fragments to write in the project's home, under `stacks/`:
+        /// `name`, or `name=dir` for a stack in a directory of the repository.
+        #[arg(long = "stack", value_name = "NAME[=DIR]")]
+        stacks: Vec<String>,
+        /// A forge domain no agent may reach. Repeatable.
+        #[arg(long = "forge", value_name = "DOMAIN")]
+        forge: Vec<String>,
+        /// Who refuses a push to a protected branch besides nunki's gate.
+        #[arg(long = "forge-protection", value_enum)]
+        forge_protection: Option<ProtectionArg>,
+        /// How the harness answers a permission nobody is there to give.
+        #[arg(long = "permission-mode", value_parser = ["auto", "dontAsk"])]
+        permission_mode: Option<String>,
+        /// A branch no mission may target or push to. Repeatable.
+        #[arg(long = "protected-branch", value_name = "BRANCH")]
+        protected_branches: Vec<String>,
+        /// Take every proposed answer without asking.
+        #[arg(long)]
+        yes: bool,
+        /// Replace every fragment file an older nunki wrote and nobody has
+        /// touched since with today's. A file the project rewrote is kept, and
+        /// today's version goes beside it. Refused while a container of the
+        /// project is up: its scripts are mounted file by file.
+        #[arg(long)]
+        refresh: bool,
+    },
+
+    /// Slots: a local clone without hard links, where missions happen.
+    #[command(subcommand)]
+    Slot(SlotCommand),
+
+    /// Campaigns outside missions: on the base, launched by you, read back
+    /// into the project's debt of survivors (SPEC 4.4).
+    #[command(subcommand)]
+    Mutants(MutantsCommand),
+
+    /// Push a verified mission's branch, and hand the pull request over.
+    ///
+    /// The one verb that touches the forge in write, and the one thing in
+    /// `nunki` that is not autonomous: it needs `--yes`, on the command line,
+    /// from somebody who has read the pull request.
+    Push {
+        /// The mission.
+        mission: String,
+        /// Your explicit authorisation. There is no dialogue, and no flag to
+        /// push past a red verdict.
+        #[arg(long)]
+        yes: bool,
+    },
+
+    /// Missions: what an agent is asked to do, and where it reports.
+    ///
+    /// Boxed because `mission new` carries every field of a mission header
+    /// and would otherwise decide the size of every other subcommand: this
+    /// value is parsed once per process, and its size is not worth spending
+    /// on the seven variants beside it.
+    #[command(subcommand)]
+    Mission(Box<MissionCommand>),
+
+    /// Accounts: which subscription a mission spends.
+    #[command(subcommand)]
+    Account(AccountCommand),
+
+    /// Say who nunki thinks you are, and where it got that from.
+    Whoami,
+
+    /// Play the verification phase of a mission: the gates, then the
+    /// integration and security missions, each with theirs (SPEC 4.2).
+    /// Resumable — running it again picks up where it stopped.
+    Verify {
+        /// The mission to verify.
+        mission: String,
+    },
+    /// Run a command in a slot's container — how the HQ replays a proof
+    /// without having the stack on this machine (SPEC 4.2).
+    Exec {
+        /// The slot whose container runs it.
+        slot: String,
+        /// Run on the working tree instead of the clean copy of `HEAD`.
+        ///
+        /// Dangerous, and not the default for a reason: a proof replayed in
+        /// the tree an agent has been living in proves what that tree does,
+        /// not what the commit does. Never while a run is in progress.
+        #[arg(long)]
+        tree: bool,
+        /// The command, after `--`.
+        #[arg(trailing_var_arg = true, required = true)]
+        argv: Vec<String>,
+    },
+    /// Render the runs of a mission, readably.
+    ///
+    /// What replaces watching a screen: an agent nobody can look at is
+    /// acceptable because its output is readable afterwards.
+    Logs {
+        /// The mission. Defaults to the one this HQ touched last.
+        mission: Option<String>,
+        /// Only the last run.
+        #[arg(long)]
+        last: bool,
+    },
+
+    /// List the sessions this machine holds: an identifier, and the
+    /// repository it belongs to.
+    ///
+    /// A home is named by its identifier, so this is how a human finds the
+    /// one they are looking at (SPEC 4.1).
+    Sessions,
+
+    /// Point an existing session at the repository here — after moving or
+    /// renaming it, so that its HQ and its missions follow.
+    ///
+    /// It refuses while the recorded path still holds a repository: that one
+    /// is a live project, and adopting would take its HQ from it.
+    Adopt {
+        /// The session's identifier, as `nunki sessions` lists it.
+        id: String,
+    },
+
+    /// Secrets gate 8 found and you have ruled on (SPEC 4.4).
+    ///
+    /// The project's, not a mission's: an exception that lived with a mission
+    /// would go into `archive/` with it, and the same secret would stop the
+    /// next one. It lives in the HQ, mounted read-only in the container, so
+    /// no agent can rule on its own finding.
+    #[command(subcommand)]
+    Secret(SecretCommand),
+
+    /// The project's services file as nunki lifts it, and your approval of
+    /// it (SPEC 4.2).
+    ///
+    /// Read from a commit, never from a tree: for a mission you name, the
+    /// commit its branch starts from, which is what its system profile
+    /// lifts; the repository's `HEAD` otherwise. What you approve is
+    /// the digest of nunki's rendering, kept in the project's HQ; a
+    /// rendering nobody approved starts no service, and the mission that
+    /// needed it is handed back to you.
+    #[command(group(clap::ArgGroup::new("gesture").required(true).args(["show", "approve"])))]
+    Services {
+        /// Print the rendering nunki would lift, and its digest.
+        #[arg(long)]
+        show: bool,
+        /// Approve the rendering with this digest — only while it is the
+        /// file's rendering as it stands now.
+        #[arg(long, value_name = "DIGEST")]
+        approve: Option<String>,
+        /// Read the file where this mission's system profile reads it.
+        mission: Option<String>,
+    },
+
+    /// Say whether the project holds what the specification describes.
+    ///
+    /// Red when a restriction is not held; and it always says what it could
+    /// not check, because a check that quietly skips reads as a pass.
+    Check {
+        /// Probe the mission profile from inside this slot's containers.
+        #[arg(long, value_name = "NAME")]
+        slot: Option<String>,
+        /// Probe the system profile of this mission as well.
+        #[arg(long, value_name = "ID")]
+        mission: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum SecretCommand {
+    /// Accept the risk of a secret gate 8 found, so it stops blocking.
+    ///
+    /// The gesture after the credential is revoked, not instead of it: a
+    /// secret cannot be taken out of a branch's history, and `nunki` rewrites
+    /// none.
+    Accept {
+        /// The finding, exactly as gate 8 names it — the first field of the
+        /// line it printed.
+        id: String,
+        /// Why the risk is acceptable. Required: a risk accepted without a
+        /// reason is not accepted, it is forgotten.
+        #[arg(long, value_name = "WHY")]
+        because: String,
+    },
+    /// What this project has ruled on, and why.
+    List,
+    /// Drop a ruling — after the credential is revoked, or when it was made
+    /// in error.
+    Forget {
+        /// The finding, as `nunki secret list` names it.
+        id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum MutantsCommand {
+    /// Start a campaign outside missions, in a slot no mission holds, on the
+    /// base as your repository has it: on the files changed since the last
+    /// completed one, each mutated whole, on the whole code with `--whole`,
+    /// or on the debt's survivors by name with `--owed`. It starts nothing
+    /// while a campaign is filed in the slot; `nunki mutants status` reads
+    /// one back.
+    Run {
+        /// The slot to run it in: one no mission holds.
+        #[arg(long)]
+        slot: String,
+        /// Measure the whole code, rather than the files changed since the
+        /// last completed campaign outside missions.
+        #[arg(long, conflicts_with = "owed")]
+        whole: bool,
+        /// Measure the debt's survivors by name, and nothing else: each one
+        /// a test now kills leaves the debt. What settles a hardening
+        /// mission's survivors once its tests are on the base.
+        #[arg(long)]
+        owed: bool,
+        /// The branch it runs on, as `nunki mission new` defaults it.
+        #[arg(long, default_value = "dev")]
+        base: String,
+        /// Its deadline, in minutes. It measures no sample, so the deadline
+        /// only stops a campaign that hangs.
+        #[arg(long, default_value_t = nunki::offmission::DEFAULT_MINUTES)]
+        minutes: u32,
+    },
+    /// Read back the campaign outside missions in flight — asking the
+    /// container, and recording its survivors into the project's debt once
+    /// it has ended — then say the debt. It never starts a campaign: a loop
+    /// polling it waits, and starts nothing.
+    Status {
+        /// The slot to read; every slot when absent.
+        #[arg(long)]
+        slot: Option<String>,
+    },
+    /// List the project's debt — each survivor campaigns outside missions
+    /// left, the commit that found it, and the registry's proposal on it —
+    /// or rule on it, once for the project, in the registry of equivalences
+    /// every mission's campaign reads. A survivor ruled leaves the debt.
+    Debt {
+        /// Rule that a survivor of the debt is equivalent, in the registry.
+        /// Nothing is ruled when the registry cannot take it, and the
+        /// survivor stays owed.
+        #[arg(
+            long,
+            value_name = "SURVIVOR",
+            requires = "because",
+            conflicts_with = "ratify"
+        )]
+        equivalent: Option<String>,
+        /// Why it is equivalent, in one sentence. Required with
+        /// `--equivalent`.
+        #[arg(long, value_name = "SENTENCE", requires = "equivalent")]
+        because: Option<String>,
+        /// Ratify the registry's proposal on a survivor of the debt, with
+        /// the registry's sentence. With `--all` and no survivor, every
+        /// proposal, each printed first.
+        #[arg(long, value_name = "SURVIVOR", num_args = 0..=1)]
+        ratify: Option<Option<String>>,
+        /// With `--ratify`: every proposal of the debt.
+        #[arg(long, requires = "ratify")]
+        all: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum SlotCommand {
+    /// Clone the project into a new slot.
+    Add { name: String },
+    /// List this project's slots.
+    List,
+    /// Build this project's images: the stack's, and the firewall sidecar's.
+    Rebuild {
+        /// Which stack's image. Defaults to the only one declared.
+        #[arg(long, value_name = "NAME")]
+        stack: Option<String>,
+        /// Build with the versions this slot's branch pins, rather than the
+        /// repository's: what a launch in that slot compares the image with.
+        /// The image is shared by the project's slots, so another slot whose
+        /// branch pins differently is refused at its next launch, and says so.
+        #[arg(long, value_name = "SLOT")]
+        slot: Option<String>,
+    },
+    /// Remove a slot, refusing while it holds work the repository lacks.
+    Rm {
+        name: String,
+        /// Remove it anyway. The commits in it are lost.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Put a slot back to a clean state: discard the work in progress and
+    /// the slot's caches, keep the clone.
+    ///
+    /// The reason to reach for it is a named volume gone bad — a build cache
+    /// or a harness state directory that outlives every rebuild of the image
+    /// and that nothing else can reach.
+    Reset {
+        name: String,
+        /// Reset it anyway, discarding commits the repository does not have.
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum AccountCommand {
+    /// List the accounts declared in ~/.nunki/accounts.yaml.
+    List,
+}
+
+#[derive(Subcommand)]
+enum MissionCommand {
+    /// Write a new mission folder at the HQ.
+    New {
+        /// Identifier: letters, digits, - and _.
+        id: String,
+        /// The branch the agents work on.
+        #[arg(long)]
+        branch: String,
+        /// What that branch starts from.
+        #[arg(long, default_value = "dev")]
+        base: String,
+        /// A unit of work, as `id:title`. Repeat it; order is the order.
+        #[arg(
+            long = "lot",
+            value_name = "ID:TITLE",
+            required_unless_present = "harden"
+        )]
+        lots: Vec<String>,
+        /// Frame a hardening mission: the tests that kill the project's
+        /// debt (`nunki mutants debt`). nunki freezes into its header as many
+        /// of the debt's survivors as its campaign's budget measures, oldest
+        /// first, writes its lot and its brief, and frames it at `standard`.
+        /// Its gate 7 runs each survivor by name; `nunki mutants run --owed`
+        /// settles the debt once its tests are on the base.
+        #[arg(
+            long,
+            conflicts_with_all = ["lots", "services", "wiring", "security_agent", "about"]
+        )]
+        harden: bool,
+        /// A service the integrator may reach, as `name=host[,host…]`.
+        /// Declaring one makes this an integration mission.
+        #[arg(long = "service", value_name = "NAME=REACH")]
+        services: Vec<String>,
+        /// A path the integrator's commits may touch — configuration,
+        /// system tests, fixtures, migrations. Repeatable, globs allowed.
+        /// This list **is** "wiring" as SPEC 4.4 defines it: every commit
+        /// outside it is out of perimeter, so an integration mission that
+        /// declares none lets its integrator commit nothing.
+        #[arg(long = "wiring", value_name = "PATH")]
+        wiring: Vec<String>,
+        /// Why there is no integration mission. Required when no service is
+        /// declared: a shape is stated, never inferred from silence.
+        #[arg(long, default_value = "no external service is involved")]
+        no_integration: String,
+        /// Call the security agent, rather than the mechanical gates alone.
+        #[arg(long)]
+        security_agent: bool,
+        /// How much verification asks of this mission: `prototype` (the
+        /// coder and the mechanical gates only), `standard` or `critical`.
+        /// Defaults to the project's `rigor:` in nunki.yaml, then to
+        /// `critical`. Frozen into the header like the bounds.
+        #[arg(long, value_name = "RIGOR")]
+        rigor: Option<Rigor>,
+        /// How `nunki` starts the application for the integrator and the
+        /// security agent, as a path inside the tree. Refines `nunki.yaml` and
+        /// the stack's `run.sh`; `none` when there is nothing to start.
+        #[arg(long, value_name = "SCRIPT")]
+        run: Option<String>,
+        /// Which account this mission spends. Defaults to the project's, then
+        /// to the one named in ~/.nunki/accounts.yaml.
+        #[arg(long, value_name = "NAME")]
+        account: Option<String>,
+        /// Which model this mission's agents run on. Defaults to the
+        /// project's `model:` in nunki.yaml, then to the harness's own default.
+        ///
+        /// An alias for the latest of a family (`sonnet`, `opus`) or a full
+        /// name (`claude-opus-5-5`). No name is checked here: nunki knows
+        /// harnesses, not models, and the harness refuses what it does not
+        /// know.
+        #[arg(long, value_name = "MODEL")]
+        model: Option<String>,
+        /// Who arbitrates when this mission comes back with a question.
+        /// Defaults to whoever runs `nunki` — `nunki whoami` says who that is.
+        #[arg(long = "for", value_name = "NAME")]
+        arbiter: Option<String>,
+        /// The prose an agent reads under the header.
+        #[arg(long, default_value = "Describe the mission here.")]
+        about: String,
+    },
+    /// List the missions this project's HQ holds, each with its stage in a
+    /// word: `framed` for one never started.
+    List {
+        /// Only the missions started and not archived.
+        #[arg(long)]
+        active: bool,
+    },
+    /// What a mission is, and where it stands.
+    Status { id: String },
+    /// Start the mission: freeze its framing and launch the coder's first run.
+    Start {
+        id: String,
+        /// The slot it happens in.
+        #[arg(long)]
+        slot: String,
+    },
+    /// Hold the mission: nunki launches no further run for it. The run in
+    /// progress finishes its lot. `nunki mission resume` lifts the hold.
+    Stop {
+        id: String,
+        /// End the run in progress too: the agent finishes its turn cleanly
+        /// and writes its resume block, instead of finishing its lot.
+        #[arg(long)]
+        now: bool,
+        /// Why it is held. Required: it is shown wherever the hold is —
+        /// `mission status`, `watch`, `wait`, `verify` and the monitor.
+        #[arg(long = "because", value_name = "WHY")]
+        why: String,
+    },
+    /// Put a mission's framing back in front of you, and re-freeze it.
+    ///
+    /// `nunki` never re-reads `MISSION.md` during a mission — it froze the
+    /// header when you validated the framing — so editing the file changes
+    /// nothing until this verb says so.
+    Reframe {
+        /// The mission.
+        id: String,
+        /// Apply it. Without this, it says what would change and does
+        /// nothing.
+        #[arg(long)]
+        yes: bool,
+    },
+
+    /// Call a mission off before it is verified.
+    ///
+    /// `stop` ends a run, `archive` closes a finished mission; this is for a
+    /// mission you have given up on, so that it can be closed — started or
+    /// not.
+    End {
+        /// The mission.
+        id: String,
+        /// Why you are calling it off.
+        #[arg(long = "because", value_name = "WHY")]
+        why: String,
+    },
+
+    /// Take a mission back from a handover, and say what changed.
+    ///
+    /// Every handover is a bound running out — a lot's attempts, a role's, or
+    /// the returns to the coder. This puts the mission on the work it stopped
+    /// on, and hands a lot's or a role's attempts back whole. The returns to
+    /// the coder are counted over the mission's life: on spent volets it
+    /// grants one more, written with your reason in FOLLOWUP_HQ.md, and the
+    /// next red verdict hands the mission back again. A lot that awaited your ruling
+    /// on survivors is no bound: it resumes at its next attempt, once you
+    /// have ruled. A mission you called off yourself is not a handover, and
+    /// is refused.
+    Retry {
+        /// The mission.
+        id: String,
+        /// What changed since it stopped. Required: the tree and the cause
+        /// have not moved on their own, and the next run reads this.
+        #[arg(long = "because", value_name = "WHAT")]
+        why: String,
+    },
+
+    /// Close a finished mission, or one never started: its folder and its
+    /// state move under `archive/`. Nothing is deleted, and the slot is left
+    /// alone.
+    Archive {
+        /// The mission.
+        id: String,
+    },
+
+    /// Watch a mission's runs and drive it on between them. Started by `nunki`,
+    /// detached, and never typed (SPEC 4.3).
+    #[command(hide = true)]
+    Monitor {
+        /// The mission.
+        id: String,
+    },
+
+    /// Follow the run in progress until it ends.
+    ///
+    /// Two states, and a third a human causes: it runs, it is paused, it is
+    /// finished. Nothing is asked of the agent — this reads the container and
+    /// the run's own stream, like everything else `nunki` knows about a run.
+    Watch {
+        /// The mission.
+        id: String,
+        /// Seconds between readings.
+        #[arg(long, default_value_t = 10)]
+        every: u64,
+    },
+
+    /// Block until the mission needs someone, then say so in one line.
+    ///
+    /// Returns at once if the mission is already stopped. The exit code says
+    /// which stop: 0 verified (or pushed, or archived), 10 findings, 11
+    /// handed over, 12 held or the account's window spent, 13 the monitor
+    /// stopped on an error or a gate that could not be played, 14 no monitor
+    /// while the mission is still being driven, 15 `--timeout` reached. It
+    /// reads and never drives: it takes no lock and launches nothing.
+    Wait {
+        /// The mission.
+        id: String,
+        /// Give up after this long: seconds, or `<n>m`, or `<n>h`. Default:
+        /// never.
+        #[arg(long, value_parser = nunki::wait::parse_duration)]
+        timeout: Option<u64>,
+        /// Seconds between readings of the state.
+        #[arg(long, default_value_t = nunki::wait::EVERY_SECONDS,
+              value_parser = clap::value_parser!(u64).range(1..))]
+        every: u64,
+        /// Print the stop as one JSON object (`id`, `stage`, `detail`,
+        /// `awaits`, `code`) rather than a line.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Freeze the agent's container where it is.
+    ///
+    /// Nothing is lost: the processes are suspended by the engine. A model
+    /// call in flight may time out during a long freeze, and the harness
+    /// replays it.
+    Pause {
+        /// The mission.
+        id: String,
+    },
+
+    /// Lift a hold left by `stop`, and unfreeze a paused container
+    /// exactly where it was — the mission was held, and it is held no
+    /// longer.
+    Resume {
+        /// The mission.
+        id: String,
+    },
+
+    /// The emergency brake: kill the agent's container, waiting for nothing.
+    ///
+    /// After it, the lot in progress is a failed attempt and the relaunch
+    /// starts from the last resume block the agent wrote. Use `stop` if you
+    /// want the agent to finish its turn.
+    Kill {
+        /// The mission.
+        id: String,
+    },
+
+    /// Leave an instruction for the **next** run.
+    ///
+    /// There is no channel during a run. This lands in `FOLLOWUP_HQ.md`,
+    /// which every role reads before anything else; if it is urgent,
+    /// `nunki mission stop` ends the current run first.
+    Say {
+        /// The mission.
+        id: String,
+        /// What to tell the next run.
+        what: Vec<String>,
+    },
+
+    /// Bring a mission's commits from its slot into the repository.
+    ///
+    /// The only way commits leave a slot, and it goes one way. `nunki push`
+    /// does it for you; this is for looking at them yourself first.
+    Fetch {
+        /// The mission.
+        id: String,
+    },
+
+    /// Lift a security finding, or what a `FINDINGS` verdict still carries.
+    ///
+    /// Never touches `VERDICT.json`: the verdict says what the agent found,
+    /// `nunki`'s state says what you decided, and `nunki push` reads it there.
+    Accept {
+        /// The mission.
+        id: String,
+        /// One finding, as the report names it. Without it, what the report
+        /// still carries is lifted and the mission concludes.
+        #[arg(long, value_name = "NAME")]
+        finding: Option<String>,
+        /// The commit that fixed the findings after the security agent's last
+        /// round, which it did not attack. The pull request then says they
+        /// were fixed by it and checked by you, not accepted as a risk. Only
+        /// once the rounds are spent, and for the report as a whole.
+        #[arg(long = "fixed-by", value_name = "COMMIT", conflicts_with = "finding")]
+        fixed_by: Option<String>,
+        /// Why the risk is acceptable — or, with `--fixed-by`, how you
+        /// checked the fix. Required: a risk accepted without a reason is not
+        /// accepted, it is forgotten.
+        #[arg(long = "because", value_name = "WHY")]
+        why: String,
+    },
+
+    /// Send the mission back to the coder, as a volet: a `FINDINGS` verdict,
+    /// a verified branch the HQ refuses on review, or the survivors of a
+    /// mutation campaign that stopped short — those two with `--because`.
+    ///
+    /// Bound by the mission's rigor: a report with no HIGH (at `standard`,
+    /// and at `critical` from the second round on) is not sent back, nor a
+    /// `standard` mission reviewed a second time — unless `--override`.
+    Iterate {
+        /// The mission.
+        id: String,
+        /// What the review refuses, for a verified mission. It is what the
+        /// coder reads, in `FOLLOWUP_HQ.md`, and the volet's cause. With
+        /// `--override`, why the rigor is set aside.
+        #[arg(long = "because", value_name = "WHAT")]
+        because: Option<String>,
+        /// Send it back although the rigor says not to. Needs `--because`,
+        /// written, dated, in `FOLLOWUP_HQ.md` as a departure from the rigor
+        /// and listed by `mission status` and in the pull request.
+        #[arg(long = "override", requires = "because")]
+        overriding: bool,
+    },
+
+    /// Start the mutation campaign, or say where the one in flight is
+    /// (SPEC 4.4, gate 7). Long: it is launched detached and watched, and
+    /// the call that finds it finished writes `MUTANTS.json`.
+    ///
+    /// Without a flag this **starts** a campaign whenever none is in flight:
+    /// a loop that polls it starts a new one each time the last one ends.
+    /// To follow a campaign without starting one, `--status`.
+    Mutants {
+        /// The mission. Not needed with `--registry`.
+        id: Option<String>,
+        /// Print the project's registry of equivalences — the HQ's rulings
+        /// applied to every mission's campaigns while their line stands —
+        /// each with whether its line still stands at the repository's
+        /// `HEAD`. Needs no mission.
+        #[arg(
+            long,
+            conflicts_with_all = ["equivalent", "ratify", "all", "refuse", "lift", "again", "slot", "because", "cancel", "status"]
+        )]
+        registry: bool,
+        /// Say where the campaign in flight is — since when, how far into its
+        /// deadline, full or partial, how many lines its log holds — or that
+        /// none is, and the campaigns on file. Reads the record and the log
+        /// only: it asks the container nothing, reads nothing back, and never
+        /// starts a campaign.
+        #[arg(
+            long,
+            conflicts_with_all = ["equivalent", "ratify", "all", "refuse", "lift", "again", "because", "cancel"]
+        )]
+        status: bool,
+        /// Which slot runs it. Defaults to the one the mission started in.
+        #[arg(long)]
+        slot: Option<String>,
+        /// Rule that a survivor is equivalent rather than starting or
+        /// following a campaign. This outcome is not the coder's to give —
+        /// nothing can check it — so it is written here, by hand, on
+        /// purpose (SPEC 4.4).
+        #[arg(long = "equivalent", value_name = "SURVIVOR")]
+        equivalent: Option<String>,
+        /// Why it is equivalent, in one sentence. Required with
+        /// `--equivalent`: a ruling nobody can check must at least say what
+        /// it rests on. With `--ratify`, it replaces the coder's sentence;
+        /// with `--refuse`, it is required, and it is what the next coder run
+        /// reads.
+        #[arg(long = "because", value_name = "SENTENCE")]
+        because: Option<String>,
+        /// Ratify the equivalence proposed on a survivor — by the coder, or
+        /// by `nunki` from a ruling it matched: the HQ's ruling, written
+        /// exactly as `--equivalent` writes it, with the proposal's sentence
+        /// as its reason unless `--because` replaces it. With `--all` and no
+        /// survivor, every pending proposal, each printed first with its
+        /// source and sentence.
+        #[arg(
+            long = "ratify",
+            value_name = "SURVIVOR",
+            num_args = 0..=1,
+            conflicts_with_all = ["equivalent", "lift", "refuse"]
+        )]
+        ratify: Option<Option<String>>,
+        /// With `--ratify`: every pending proposal of the mission.
+        #[arg(long, requires = "ratify", conflicts_with = "because")]
+        all: bool,
+        /// Refuse the equivalence the coder proposed on a survivor, with
+        /// `--because`: the proposal is removed, the refusal recorded, and the
+        /// survivor needs an outcome again. The next coder run reads why in
+        /// `FOLLOWUP_HQ.md`.
+        #[arg(
+            long = "refuse",
+            value_name = "SURVIVOR",
+            conflicts_with_all = ["equivalent", "lift"]
+        )]
+        refuse: Option<String>,
+        /// Lift the HQ's `equivalent` ruling from a survivor, so that it
+        /// needs an outcome again. Rulings are carried from one campaign to
+        /// the next when the same mutation survives, so this is the way back
+        /// from one that was wrong, or that changed code made wrong.
+        #[arg(long = "lift", value_name = "SURVIVOR", conflicts_with = "equivalent")]
+        lift: Option<String>,
+        /// Call off the campaign in flight, with `--because`: it is stopped
+        /// as its deadline would stop it, the survivors it had reported are
+        /// kept in MUTANTS.json as from an incomplete campaign — they never
+        /// make gate 7 green — and the reason goes to FOLLOWUP_HQ.md. The
+        /// mission stays at its gates: `nunki mission iterate --because`
+        /// sends those survivors to the coder, `--again` runs a new one.
+        #[arg(
+            long,
+            requires = "because",
+            conflicts_with_all = ["equivalent", "ratify", "refuse", "lift", "again"]
+        )]
+        cancel: bool,
+        /// Run it again although a campaign on this exact content is on
+        /// file. The fingerprint is over the touched files, so it cannot see
+        /// a change to the stack's `mutation.sh`, to the tool, or to an
+        /// exclusion — this is how you say one happened. A campaign already
+        /// in flight is left alone.
+        #[arg(long)]
+        again: bool,
+    },
+    /// Play the verification gates 1 to 4 on what the slot holds (SPEC 4.4).
+    /// Deterministic, and nothing is asked of the agent.
+    Gates {
+        id: String,
+        /// Whose gates. Each role has the gates that match what it produces.
+        #[arg(long, default_value = "coder")]
+        role: RoleArg,
+        /// Play the final verification's gates too — the deliverable and the
+        /// battery. The battery runs in the slot's container, on the clean
+        /// copy of `HEAD`, so a profile has to be up.
+        #[arg(long)]
+        verification: bool,
+        /// Which slot to judge. Defaults to the one the mission started in;
+        /// naming one lets a human play the gates before a run exists.
+        #[arg(long)]
+        slot: Option<String>,
+    },
+}
+
+/// The three roles, as a command-line word.
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum RoleArg {
+    Coder,
+    Integrator,
+    Security,
+}
+
+impl From<RoleArg> for nunki::harness::Role {
+    fn from(role: RoleArg) -> Self {
+        match role {
+            RoleArg::Coder => nunki::harness::Role::Coder,
+            RoleArg::Integrator => nunki::harness::Role::Integrator,
+            RoleArg::Security => nunki::harness::Role::Security,
+        }
+    }
+}
+
+fn main() -> ExitCode {
+    let cli = Cli::parse();
+    let start = cli
+        .directory
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+    match cli.command {
+        Command::Init {
+            stacks,
+            forge,
+            forge_protection,
+            permission_mode,
+            protected_branches,
+            yes,
+            refresh,
+        } => {
+            // `init` is the one verb that runs before a project exists: it
+            // finds the repository as git does, and names the home after it.
+            let root = match Project::find_root(&start) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let given = nunki::interview::Given {
+                stacks: stacks.clone(),
+                forge,
+                forge_protection: forge_protection.map(|p| match p {
+                    ProtectionArg::Forge => nunki::project::ForgeProtection::Forge,
+                    ProtectionArg::ByHand => nunki::project::ForgeProtection::ByHand,
+                }),
+                permission_mode,
+                protected_branches,
+            };
+            // What a fresh `nunki.yaml` will say. Decided before the home is
+            // made, so an interview left unconfirmed leaves nothing behind.
+            let configured = Project::home_for(&root)
+                .is_ok_and(|h| h.join(nunki::project::CONFIG_FILE).is_file());
+            let (stacks, answers) = match first_configuration(&root, &given, yes, configured) {
+                Ok(decided) => decided,
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            // The one verb that may open a session: every other reads the
+            // ledger and refuses what is not in it.
+            let home = match Project::home_for_new(&root) {
+                Ok(h) => h,
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            // A refresh replaces files a running container has mounted one by
+            // one: the container would keep the old inode and judge an agent
+            // with a script nobody can see. So nothing may be up, and every
+            // slot is held while it happens.
+            let mut held = Vec::new();
+            let fragments = if refresh {
+                match quiet_project(&root) {
+                    Ok(locks) => held = locks,
+                    Err(why) => {
+                        eprintln!("nunki: {why}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+                init::Fragments::Refresh
+            } else {
+                init::Fragments::Keep
+            };
+            let done = init::init_as(&root, &home, &stacks, &answers, fragments);
+            drop(held);
+            match done {
+                Ok(actions) => {
+                    for action in &actions {
+                        println!("{}", action.render());
+                    }
+                    if actions.is_empty() {
+                        println!("nothing to do: this project is already orchestrable.");
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+
+        Command::Sessions => {
+            let nunki_home = match Project::nunki_dir() {
+                Ok(h) => h,
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            match nunki::sessions::load(&nunki_home) {
+                Ok(sessions) => {
+                    if sessions.is_empty() {
+                        println!(
+                            "no session yet: `nunki init` opens one for the repository you are in"
+                        );
+                    }
+                    for (id, root) in &sessions {
+                        // Said rather than assumed: a repository that is gone
+                        // is exactly what `nunki adopt` is for.
+                        let state = if root.join(".git").exists() {
+                            ""
+                        } else {
+                            "  (no repository there any more)"
+                        };
+                        println!("{id}  {}{state}", root.display());
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+
+        Command::Adopt { id } => {
+            let root = match Project::find_root(&start) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let nunki_home = match Project::nunki_dir() {
+                Ok(h) => h,
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            match nunki::sessions::adopt(&nunki_home, &id, &root) {
+                Ok(at) => {
+                    // The ledger and the home say the same thing, or the next
+                    // verb would refuse what this one just did.
+                    if let Err(e) = Project::claim(&nunki_home.join(&id), &at) {
+                        eprintln!("nunki: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                    println!("session {id} now belongs to {}", at.display());
+                    println!("its home is {}", nunki_home.join(&id).display());
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+
+        Command::Mutants(command) => {
+            let project = match open(&start) {
+                Some(p) => p,
+                None => return ExitCode::FAILURE,
+            };
+            mutants_outside_missions(&project, command)
+        }
+
+        Command::Slot(command) => {
+            let project = match open(&start) {
+                Some(p) => p,
+                None => return ExitCode::FAILURE,
+            };
+            match command {
+                SlotCommand::Add { name } => match slot::add(&project, &name) {
+                    Ok(s) => {
+                        println!("slot {} at {}", s.name, s.tree.display());
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("nunki: {e}");
+                        ExitCode::FAILURE
+                    }
+                },
+                SlotCommand::List => {
+                    let slots = slot::list(&project);
+                    if slots.is_empty() {
+                        println!("no slot yet: `nunki slot add <name>`");
+                    }
+                    let occupants = match nunki::lifecycle::occupants(&project) {
+                        Ok(o) => o,
+                        Err(e) => {
+                            eprintln!("nunki: {e}");
+                            return ExitCode::FAILURE;
+                        }
+                    };
+                    for s in slots {
+                        let missions = occupants.get(&s.name).cloned().unwrap_or_default();
+                        println!("{}", nunki::lifecycle::slot_line(&s, &missions));
+                    }
+                    ExitCode::SUCCESS
+                }
+                SlotCommand::Rebuild { stack, slot } => {
+                    let stack = match stack
+                        .or_else(|| project.config.stacks.first().map(|s| s.name.clone()))
+                    {
+                        Some(s) => s,
+                        None => {
+                            eprintln!("nunki: no stack declared in nunki.yaml; pass --stack");
+                            return ExitCode::FAILURE;
+                        }
+                    };
+                    let engine = std::env::var("HQ_ENGINE").unwrap_or_else(|_| "docker".into());
+                    println!("building the images for {stack}, this takes a while…");
+                    let tree = match &slot {
+                        None => project.root.clone(),
+                        Some(name) => match slot::find(&project, name) {
+                            Ok(found) => {
+                                println!("versions  read in slot {name}, on its branch");
+                                found.tree
+                            }
+                            Err(e) => {
+                                eprintln!("nunki: {e}");
+                                return ExitCode::FAILURE;
+                            }
+                        },
+                    };
+                    match image::build_from(
+                        &project,
+                        &tree,
+                        &stack,
+                        &engine,
+                        image::Harness::Install,
+                    ) {
+                        Ok(image::Built { images, versions }) => {
+                            println!("agent     {}", images.agent);
+                            println!("firewall  {}", images.firewall);
+                            println!("prober    {}", images.prober);
+                            // What the repository pinned, and what it did not
+                            // and why: an argument left at the Dockerfile's
+                            // default is said, never silent (SPEC 4.2).
+                            for pin in &versions {
+                                match pin {
+                                    nunki::versions::Pin::Found { arg, value, from } => {
+                                        println!("pinned    {arg}={value}  ({from})")
+                                    }
+                                    nunki::versions::Pin::Unpinned { arg, tried } => {
+                                        println!(
+                                            "default   {arg}, the Dockerfile's own — {}",
+                                            tried.join("; ")
+                                        )
+                                    }
+                                }
+                            }
+                            ExitCode::SUCCESS
+                        }
+                        Err(e) => {
+                            eprintln!("nunki: {e}");
+                            ExitCode::FAILURE
+                        }
+                    }
+                }
+                SlotCommand::Reset { name, force } => {
+                    let engine = nunki::engine::docker::Docker::real();
+                    match slot::reset(&project, &name, &engine, force) {
+                        Ok(reset) => {
+                            println!("reset     {}", reset.slot.tree.display());
+                            if reset.discarded {
+                                println!("          uncommitted work was discarded");
+                            }
+                            if !reset.taken_down.is_empty() {
+                                println!(
+                                    "          took down the containers of {} — containers only, \
+                                     no volume with them",
+                                    reset.taken_down.join(", ")
+                                );
+                            }
+                            match reset.volumes.len() {
+                                0 => println!("          no named volume to remove"),
+                                _ => println!("          removed {}", reset.volumes.join(", ")),
+                            }
+                            for (volume, why) in &reset.failed {
+                                eprintln!("nunki: {volume} was not removed: {why}");
+                            }
+                            if reset.failed.is_empty() {
+                                ExitCode::SUCCESS
+                            } else {
+                                ExitCode::FAILURE
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("nunki: {e}");
+                            ExitCode::FAILURE
+                        }
+                    }
+                }
+                SlotCommand::Rm { name, force } => match slot::rm(&project, &name, force) {
+                    Ok(s) => {
+                        println!("removed {}", s.tree.display());
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("nunki: {e}");
+                        ExitCode::FAILURE
+                    }
+                },
+            }
+        }
+
+        Command::Whoami => {
+            let project = open(&start);
+            let nunki_home = project
+                .as_ref()
+                .map(|p| p.nunki_home())
+                .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".nunki")))
+                .unwrap_or_else(|| PathBuf::from("."));
+            let me = nunki::human::me(&nunki_home, project.as_ref().map(|p| p.root.as_path()));
+            match &me.name {
+                Some(name) => {
+                    println!("{name}");
+                    if let Some(email) = &me.email {
+                        println!("{email}");
+                    }
+                    println!("from {}", me.source.describe());
+                }
+                None if me.unreadable().is_some() => {
+                    // Written, and unreadable: said, and nothing else asked
+                    // in its place.
+                    eprintln!(
+                        "nunki: {}; nunki names nobody until it reads",
+                        me.source.describe()
+                    );
+                    return ExitCode::FAILURE;
+                }
+                None => {
+                    println!("nunki does not know who you are.");
+                    println!();
+                    println!(
+                        "Write {}:",
+                        nunki_home.join(nunki::human::ME_FILE).display()
+                    );
+                    println!("name: Your Name");
+                    println!("email: you@example.com");
+                }
+            }
+            ExitCode::SUCCESS
+        }
+
+        Command::Account(AccountCommand::List) => {
+            let project = match open(&start) {
+                Some(p) => p,
+                None => return ExitCode::FAILURE,
+            };
+            let nunki_home = project.nunki_home();
+            let accounts = match nunki::account::Accounts::load(&nunki_home) {
+                Ok(a) => a,
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            if accounts.accounts.is_empty() {
+                println!(
+                    "no account declared. Write {}:\n",
+                    nunki_home.join(nunki::account::INDEX_FILE).display()
+                );
+                println!("default: perso");
+                println!("accounts:");
+                println!("  perso:");
+                println!("    harness: claude-code");
+                println!("    token_file: accounts/perso");
+                println!("    note: my own subscription");
+                println!();
+                println!(
+                    "then put the token in {}/accounts/perso, mode 600.",
+                    nunki_home.display()
+                );
+                return ExitCode::SUCCESS;
+            }
+            for (name, account) in &accounts.accounts {
+                let path = account.token_path(&nunki_home);
+                let state = match account.token(&nunki_home, name) {
+                    Ok(_) => "ready",
+                    Err(_) => "no token",
+                };
+                let chosen = if accounts.default.as_deref() == Some(name.as_str()) {
+                    " (default)"
+                } else {
+                    ""
+                };
+                println!(
+                    "{name:<12} {:<14} {state:<9} {}{chosen}",
+                    account.harness,
+                    path.display()
+                );
+                if let Some(note) = &account.note {
+                    println!("{:<12} {note}", "");
+                }
+            }
+            ExitCode::SUCCESS
+        }
+
+        Command::Mission(command) => {
+            let project = match open(&start) {
+                Some(p) => p,
+                None => return ExitCode::FAILURE,
+            };
+            mission(&project, *command)
+        }
+
+        Command::Logs { mission, last } => {
+            let project = match open(&start) {
+                Some(p) => p,
+                None => return ExitCode::FAILURE,
+            };
+            let mission = match mission {
+                Some(id) => id,
+                None => match nunki::logs::most_recent(&project) {
+                    Ok(Some(id)) => {
+                        // Said out loud: choosing for the reader without
+                        // telling them which is a guess dressed as a
+                        // convenience.
+                        println!("mission   {id} — the one this HQ touched last");
+                        id
+                    }
+                    Ok(None) => {
+                        eprintln!("nunki: no mission has run yet; name one");
+                        return ExitCode::FAILURE;
+                    }
+                    Err(e) => {
+                        eprintln!("nunki: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                },
+            };
+            let harness = harness_for(&project, "", None);
+            match nunki::logs::of(&project, &mission, &harness) {
+                Ok(runs) => {
+                    let runs = if last {
+                        runs.into_iter().next_back().into_iter().collect()
+                    } else {
+                        runs
+                    };
+                    for run in runs {
+                        println!();
+                        println!("── run {} ({})", run.session, run.log.display());
+                        for line in run.lines {
+                            let mark = match line.kind {
+                                nunki::harness::LineKind::Start => "start",
+                                nunki::harness::LineKind::Said => "said ",
+                                nunki::harness::LineKind::Did => "did  ",
+                                nunki::harness::LineKind::Ended => "ended",
+                                nunki::harness::LineKind::Unread => "?    ",
+                                nunki::harness::LineKind::Noted => "…    ",
+                            };
+                            for (n, text) in line.text.lines().enumerate() {
+                                match n {
+                                    0 => println!("{mark} {text}"),
+                                    _ => println!("      {text}"),
+                                }
+                            }
+                        }
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+
+        Command::Push { mission, yes } => {
+            let project = match open(&start) {
+                Some(p) => p,
+                None => return ExitCode::FAILURE,
+            };
+            match nunki::push::push(&project, &mission, yes) {
+                Ok(pushed) => {
+                    println!("pushed    {} → {}", pushed.branch, pushed.remote);
+                    println!("head      {}", &pushed.head[..12.min(pushed.head.len())]);
+                    // Pushed on a spent round cap (SPEC 4.5): said before the
+                    // pull request, so whoever opens it reads what the
+                    // security agent never saw.
+                    if !pushed.not_attacked.is_empty() {
+                        println!(
+                            "security  the rounds were spent; not attacked by the security agent:"
+                        );
+                        for commit in &pushed.not_attacked {
+                            println!("          {commit}");
+                        }
+                    }
+                    // A lift nobody typed (SPEC 4.5): said here, so whoever
+                    // opens the pull request reads what was accepted, and by
+                    // whom.
+                    if !pushed.lifted_by_nunki.is_empty() {
+                        println!("security  accepted by nunki (LOW/INFO):");
+                        for finding in &pushed.lifted_by_nunki {
+                            println!("          {}", nunki::text::one_line(finding));
+                        }
+                    }
+                    // Findings accepted and not fixed are not published by
+                    // default (`security_findings` in nunki.yaml): said here,
+                    // with how many, so nobody wonders where the report went.
+                    // The Security section nunki writes gives only the count.
+                    let withheld = pushed.withheld.as_ref();
+                    if let Some(w) = withheld {
+                        let findings = match w.findings {
+                            Some(n) => format!("{n} finding(s)"),
+                            None => "findings nunki could not count".to_string(),
+                        };
+                        println!(
+                            "security  withheld from the pull request: the security agent's \
+                             report and its {findings}, accepted and not fixed — the Security \
+                             section nunki wrote says how many, and who accepted them"
+                        );
+                    }
+                    match pushed.pull_request {
+                        nunki::push::PullRequestState::Opened(nunki::forge::Opened::Created(
+                            url,
+                        )) => {
+                            println!("opened    {url}");
+                        }
+                        nunki::push::PullRequestState::Opened(
+                            nunki::forge::Opened::AlreadyOpen(url),
+                        ) => {
+                            println!("updated   {url}");
+                            println!("          it was already open; this push is on it now");
+                        }
+                        // The push succeeded; only the pull request is left
+                        // to the human, and the exit code says the push.
+                        nunki::push::PullRequestState::ByHand { compare, why } => {
+                            println!("pull request not opened by nunki: {why}");
+                            if let Some(url) = compare {
+                                println!("          open it yourself at {url}");
+                            }
+                            if withheld.is_some() {
+                                println!(
+                                    "          the findings stay withheld: publish nothing of \
+                                     the security agent's report or of VERDICT.json"
+                                );
+                            }
+                        }
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+
+        Command::Verify { mission } => {
+            let project = match open(&start) {
+                Some(p) => p,
+                None => return ExitCode::FAILURE,
+            };
+            let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+                std::sync::Arc::new(nunki::engine::docker::Docker::real());
+            let engine_bin = std::env::var("HQ_ENGINE").unwrap_or_else(|_| "docker".into());
+            let code = match nunki::verify::verify(&project, &mission, engine.clone(), &engine_bin)
+            {
+                Ok(steps) => {
+                    let mut owed = false;
+                    // The rounds spent, read from the state rather than from a
+                    // step: the step is said once, when the cap is met, and a
+                    // later `verify` on the same report would not repeat it.
+                    // What makes `--fixed-by` the lift to name (#162).
+                    let spent = nunki::state::Store::open(&project.hq_root)
+                        .and_then(|store| store.load(&mission))
+                        .map(|state| {
+                            state.flow.security_rounds() >= state.flow.max_security_rounds()
+                        })
+                        .unwrap_or(false);
+                    for step in &steps {
+                        match step {
+                            nunki::verify::Step::Gates { role, report } => {
+                                println!("gates     {role:?}, on {}", &report.head[..12]);
+                                print_gates(report);
+                            }
+                            nunki::verify::Step::GateUnplayable { role, why } => {
+                                owed = true;
+                                println!(
+                                    "unplayed  a {role:?} gate could not be played, and no run \
+                                     would change that"
+                                );
+                                println!("          {}", nunki::text::printable(why));
+                            }
+                            // The one unplayable gate nunki clears itself, so
+                            // the verb the human just typed does it rather
+                            // than telling them to type another.
+                            nunki::verify::Step::CampaignOwed { role, why } => {
+                                owed = true;
+                                println!(
+                                    "campaign  a {role:?} gate waits on one — {}",
+                                    nunki::text::printable(why)
+                                );
+                                match nunki::verify::campaign(&project, &mission, engine.clone()) {
+                                    Ok(progress) => println!(
+                                        "          {}",
+                                        match progress {
+                                            nunki::mutants::Progress::Started { .. } =>
+                                                nunki::mutants::started(&mission),
+                                            other => format!("{other:?}"),
+                                        }
+                                    ),
+                                    Err(e) => {
+                                        eprintln!("nunki: {e}");
+                                        return ExitCode::FAILURE;
+                                    }
+                                }
+                            }
+                            nunki::verify::Step::Moved { to } => println!("stage     {to:?}"),
+                            nunki::verify::Step::Held {
+                                role,
+                                who,
+                                date,
+                                reason,
+                            } => {
+                                owed = true;
+                                println!(
+                                    "held      a {role:?} run is owed and nunki launches none \
+                                     — {who} held this mission on {date}"
+                                );
+                                if let Some(why) = reason {
+                                    println!("          {}", nunki::text::printable(why));
+                                }
+                                println!(
+                                    "          `nunki mission resume {mission}` lifts the hold"
+                                );
+                            }
+                            nunki::verify::Step::Saving {
+                                role,
+                                account,
+                                window,
+                                per_mille,
+                                stop_at_percent,
+                                until,
+                            } => {
+                                owed = true;
+                                println!(
+                                    "saving    a {role:?} run is owed; account {account}'s \
+                                     {window} is at {}% and nunki stops at {stop_at_percent}%",
+                                    nunki::consumption::percent(*per_mille)
+                                );
+                                println!(
+                                    "          nunki launches none before {until}, when it \
+                                     resets; `nunki verify {mission}` after that goes on"
+                                );
+                            }
+                            nunki::verify::Step::Waiting {
+                                role,
+                                until,
+                                failures,
+                                last,
+                            } => {
+                                owed = true;
+                                println!(
+                                    "waiting   a {role:?} run is owed; the harness failed \
+                                     {failures} time(s) in a row — last: {}",
+                                    nunki::text::printable(last)
+                                );
+                                println!(
+                                    "          nunki launches none before {until}; \
+                                     `nunki verify {mission}` after that relaunches it"
+                                );
+                            }
+                            nunki::verify::Step::Busy { role, provider, by } => {
+                                owed = true;
+                                println!(
+                                    "busy      a {role:?} run is owed; provider {provider} is \
+                                     held by {by}"
+                                );
+                                println!(
+                                    "          nunki launches none until it is free; the \
+                                     mission's monitor looks again every minute"
+                                );
+                            }
+                            nunki::verify::Step::LeftBehind { role, said } => {
+                                println!("left      the {role:?} run ended — {said}");
+                            }
+                            nunki::verify::Step::CampaignEnded { since } => {
+                                println!(
+                                    "campaign  ended — one had been rewriting the clean copy \
+                                     of HEAD since {since}, and the launch below recreates \
+                                     the container it lives in"
+                                );
+                                println!(
+                                    "          nothing was recorded from it: gate 7 asks for \
+                                     another once this run is read back"
+                                );
+                            }
+                            nunki::verify::Step::PortsDropped { services } => {
+                                println!("ports     {}", nunki::services::ports_dropped(services));
+                            }
+                            nunki::verify::Step::Remounted { databases } => {
+                                for at in databases {
+                                    println!(
+                                        "mounted   the advisory database at {}, filled after \
+                                         the slot's container was lifted: the container was \
+                                         recreated with it",
+                                        at.display()
+                                    );
+                                }
+                            }
+                            nunki::verify::Step::Launched { role, application } => {
+                                owed = true;
+                                println!("launched  a {role:?} run — {application}");
+                                println!(
+                                    "          it runs detached; `nunki verify {mission}` \
+                                     again reads it back"
+                                );
+                            }
+                            nunki::verify::Step::Unreachable { role, why } => {
+                                owed = true;
+                                println!("unknown   the {role:?} run could not be asked — {why}");
+                            }
+                            nunki::verify::Step::SecurityRoundsSpent { rounds, max } => println!(
+                                "security  round cap reached ({rounds} / {max}): the security \
+                                 agent is not called again, and FOLLOWUP_HQ.md says so"
+                            ),
+                            nunki::verify::Step::LiftedByNunki { findings } => {
+                                println!(
+                                    "lifted    by nunki, every finding LOW or INFO; \
+                                     FOLLOWUP_HQ.md says so:"
+                                );
+                                for one in findings {
+                                    println!("          {}", nunki::text::one_line(one));
+                                }
+                            }
+                            nunki::verify::Step::LeftToHuman { why } => println!(
+                                "security  not lifted by nunki: {}",
+                                nunki::text::one_line(why)
+                            ),
+                            nunki::verify::Step::Verified => println!(
+                                "VERIFIED  every declared stage is green; read it, then \
+                                 `nunki push {mission}`"
+                            ),
+                            nunki::verify::Step::AwaitingHuman(handover) => {
+                                owed = true;
+                                println!("stopped   {}", handover.line(&mission));
+                            }
+                            nunki::verify::Step::Findings { report, lifted } => {
+                                owed = true;
+                                println!("findings  {}", nunki::text::printable(report));
+                                for one in lifted {
+                                    println!("lifted    {}", nunki::text::printable(one));
+                                }
+                                println!(
+                                    "          `nunki mission iterate {mission}` sends it back \
+                                     to the coder;"
+                                );
+                                println!(
+                                    "          `nunki mission accept {mission} --because <why>` \
+                                     lifts what remains."
+                                );
+                                if spent {
+                                    println!(
+                                        "          the rounds are spent: if a commit after the \
+                                         last one fixed it and you checked it, `nunki mission \
+                                         accept {mission} --fixed-by <commit> --because <how>` \
+                                         lifts it as fixed, not as an accepted risk."
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    if owed {
+                        ExitCode::FAILURE
+                    } else {
+                        ExitCode::SUCCESS
+                    }
+                }
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    ExitCode::FAILURE
+                }
+            };
+            start_monitor(&project, &mission);
+            code
+        }
+
+        Command::Exec { slot, tree, argv } => {
+            let project = match open(&start) {
+                Some(p) => p,
+                None => return ExitCode::FAILURE,
+            };
+            let slot = match nunki::slot::find(&project, &slot) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+                std::sync::Arc::new(nunki::engine::docker::Docker::real());
+            let on = if tree {
+                nunki::exec::On::Tree
+            } else {
+                nunki::exec::On::Proof
+            };
+            match nunki::exec::run(&project, &slot, engine, &argv, on) {
+                Ok(out) => {
+                    // The command's own output, on the streams it wrote to,
+                    // and its own status: `nunki exec` is a way through, not a
+                    // reporter.
+                    print!("{}", out.stdout);
+                    eprint!("{}", out.stderr);
+                    if out.ok() {
+                        ExitCode::SUCCESS
+                    } else {
+                        ExitCode::from(u8::try_from(out.status).unwrap_or(1))
+                    }
+                }
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+
+        Command::Secret(what) => {
+            let project = match open(&start) {
+                Some(p) => p,
+                None => return ExitCode::FAILURE,
+            };
+            let file = nunki::secrets::file(&project);
+            match what {
+                SecretCommand::Accept { id, because } => {
+                    match nunki::secrets::accept(&file, &id, &because) {
+                        Ok(nunki::secrets::Accepted::Added) => {
+                            println!("accepted  {id}");
+                            println!("because   {}", because.trim());
+                            println!("in        {}", file.display());
+                        }
+                        Ok(nunki::secrets::Accepted::Replaced(was)) => {
+                            println!("accepted  {id}");
+                            println!("because   {}", because.trim());
+                            println!("was       {was}");
+                            println!("in        {}", file.display());
+                        }
+                        Err(e) => {
+                            eprintln!("nunki: {e}");
+                            return ExitCode::FAILURE;
+                        }
+                    }
+                }
+                SecretCommand::List => {
+                    let rulings = nunki::secrets::read(&file);
+                    if rulings.is_empty() {
+                        println!(
+                            "nothing ruled on yet: `nunki secret accept <id> --because <why>`"
+                        );
+                    }
+                    for ruling in rulings {
+                        println!("{}\n  {}", ruling.id, ruling.because);
+                    }
+                }
+                SecretCommand::Forget { id } => match nunki::secrets::forget(&file, &id) {
+                    Ok(true) => println!("forgotten  {id}"),
+                    Ok(false) => {
+                        println!("nothing ruled on {id}; `nunki secret list` says what is");
+                    }
+                    Err(e) => {
+                        eprintln!("nunki: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                },
+            }
+            ExitCode::SUCCESS
+        }
+
+        Command::Services {
+            show: _,
+            approve,
+            mission,
+        } => {
+            let project = match open(&start) {
+                Some(p) => p,
+                None => return ExitCode::FAILURE,
+            };
+            let readings =
+                match nunki::services::readings(&project, mission.as_deref(), approve.is_some()) {
+                    Ok(readings) => readings,
+                    Err(e) => {
+                        eprintln!("nunki: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                };
+            if let Some(digest) = approve {
+                let current: Vec<_> = readings
+                    .into_iter()
+                    .filter_map(|r| r.current.ok())
+                    .collect();
+                return match nunki::services::approve(&project, &digest, &current) {
+                    Ok(nunki::services::Approved::Now(a)) => {
+                        println!("approved  {}", a.digest);
+                        println!("by        {}", a.by);
+                        println!("in        {}", nunki::services::file(&project).display());
+                        ExitCode::SUCCESS
+                    }
+                    Ok(nunki::services::Approved::Already(a)) => {
+                        println!("already approved  {}", a.digest);
+                        println!("by                {} at {}", a.by, a.at);
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("nunki: {e}");
+                        ExitCode::FAILURE
+                    }
+                };
+            }
+            let approvals = match nunki::services::Approvals::load(&nunki::services::file(&project))
+            {
+                Ok(a) => a,
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let mut code = ExitCode::SUCCESS;
+            for reading in readings {
+                match reading.current {
+                    Ok(current) => {
+                        print!(
+                            "{}",
+                            nunki::services::show(&current, &reading.from, &approvals)
+                        )
+                    }
+                    Err(e) => {
+                        eprintln!("nunki: {}: {e}", reading.from);
+                        code = ExitCode::FAILURE;
+                    }
+                }
+            }
+            code
+        }
+
+        Command::Check {
+            slot: which,
+            mission,
+        } => {
+            let project = match open(&start) {
+                Some(p) => p,
+                None => return ExitCode::FAILURE,
+            };
+            let mut report = check::run(&project);
+            check::forge_protection(&project, nunki::forge::github::API, &mut report);
+            check::image_versions(
+                &project,
+                &std::env::var("HQ_ENGINE").unwrap_or_else(|_| "docker".into()),
+                &mut report,
+            );
+            report.checks.extend(probes(&project, which.as_deref()));
+            report.checks.extend(nunki::services::checks(
+                &project,
+                which.as_deref(),
+                mission.as_deref(),
+            ));
+            if let Some(id) = &mission {
+                let engine_bin = std::env::var("HQ_ENGINE").unwrap_or_else(|_| "docker".into());
+                let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+                    std::sync::Arc::new(nunki::engine::docker::Docker::real());
+                match probe::system_profile(&project, id, engine, &engine_bin) {
+                    Ok(checks) => report.checks.extend(checks),
+                    Err(e) => report.checks.push(check::Check {
+                        what: format!("the perimeter holds from inside the system profile of {id}"),
+                        verdict: match e {
+                            // Something to do, not something broken.
+                            probe::ProbeError::NoImages(..) | probe::ProbeError::NotStarted(_) => {
+                                check::Verdict::NotChecked(e.to_string())
+                            }
+                            _ => check::Verdict::Red(e.to_string()),
+                        },
+                    }),
+                }
+            }
+            print!("{}", report.render());
+            if report.is_red() {
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+    }
+}
+
+/// Every slot of the project at `root` locked, once no container of it is up;
+/// or why not.
+fn quiet_project(root: &std::path::Path) -> Result<Vec<nunki::state::SlotLock>, String> {
+    let project = Project::open(root).map_err(|e| e.to_string())?;
+    let engine = std::env::var("HQ_ENGINE").unwrap_or_else(|_| "docker".into());
+    let mut locks = Vec::new();
+    for slot in nunki::slot::list(&project) {
+        locks.push(
+            nunki::state::SlotLock::acquire(
+                &project.hq_root.join("locks"),
+                &slot.name,
+                "init --refresh",
+            )
+            .map_err(|e| e.to_string())?,
+        );
+        let compose = nunki::compose::project_name(&project.session(), &slot.name)
+            .map_err(|e| e.to_string())?;
+        let out = std::process::Command::new(&engine)
+            .args([
+                "ps",
+                "-q",
+                "--filter",
+                &format!("label=com.docker.compose.project={compose}"),
+            ])
+            .output()
+            .map_err(|e| format!("{engine} could not say what is running: {e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "{engine} could not say what is running: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        if !String::from_utf8_lossy(&out.stdout).trim().is_empty() {
+            return Err(format!(
+                "slot {} has containers up ({compose}): they mount the fragment's scripts \
+                 file by file and would keep the old ones — take them down first \
+                 (`docker compose -p {compose} down`, never `down -v`)",
+                slot.name
+            ));
+        }
+    }
+    Ok(locks)
+}
+
+/// The stacks and the rest of a first `nunki.yaml` (SPEC 4.2, `nunki init`).
+///
+/// Once `nunki.yaml` exists nothing is asked: nunki never rewrites it, and
+/// the flags that would shape a new one say so rather than vanish. A stack
+/// the manifests declare and the file does not is named, since that is the
+/// one question whose answer changes on its own as a repository grows.
+fn first_configuration(
+    root: &std::path::Path,
+    given: &nunki::interview::Given,
+    yes: bool,
+    configured: bool,
+) -> Result<(Vec<String>, init::Answers), nunki::interview::InterviewError> {
+    use std::io::IsTerminal;
+    if configured {
+        let shaped = !given.forge.is_empty()
+            || given.forge_protection.is_some()
+            || given.permission_mode.is_some()
+            || !given.protected_branches.is_empty();
+        if shaped {
+            eprintln!(
+                "nunki: nunki.yaml already exists and nunki never rewrites it; \
+                 --forge, --forge-protection, --permission-mode and --protected-branch \
+                 only shape a new one — edit it instead"
+            );
+        }
+        if let Ok(project) = Project::open(root) {
+            for (stack, manifest) in nunki::interview::detect(root).stacks {
+                if !project.config.stacks.iter().any(|s| s.name == stack.name) {
+                    eprintln!(
+                        "nunki: {manifest} declares a {} stack nunki.yaml does not; \
+                         `nunki init --stack {}` writes its fragment, and nunki.yaml needs \
+                         the line by hand",
+                        stack.name,
+                        if stack.dir.is_empty() {
+                            stack.name.clone()
+                        } else {
+                            format!("{}={}", stack.name, stack.dir)
+                        }
+                    );
+                }
+            }
+        }
+        return Ok((given.stacks.clone(), init::Answers::default()));
+    }
+    let terminal = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+    if yes {
+        let detected = nunki::interview::detect(root);
+        return nunki::interview::interview(&detected, given, &mut nunki::interview::Proposed);
+    }
+    if terminal {
+        let detected = nunki::interview::detect(root);
+        return nunki::interview::interview(&detected, given, &mut nunki::interview::Terminal);
+    }
+    // Off a terminal and without `--yes`: the flags, over the defaults every
+    // non-interactive `init` has written.
+    let defaults = init::Answers::default();
+    Ok((
+        given.stacks.clone(),
+        init::Answers {
+            forge: if given.forge.is_empty() {
+                defaults.forge
+            } else {
+                given.forge.clone()
+            },
+            forge_protection: given.forge_protection.unwrap_or(defaults.forge_protection),
+            permission_mode: given
+                .permission_mode
+                .clone()
+                .unwrap_or(defaults.permission_mode),
+            protected_branches: if given.protected_branches.is_empty() {
+                defaults.protected_branches
+            } else {
+                given.protected_branches.clone()
+            },
+        },
+    ))
+}
+
+/// Open the project containing `start`, reporting the failure the way every
+/// verb reports it.
+fn open(start: &std::path::Path) -> Option<Project> {
+    match Project::open(start) {
+        Ok(p) => Some(p),
+        Err(e) => {
+            eprintln!("nunki: {e}");
+            None
+        }
+    }
+}
+
+/// The container probes of SPEC 4.1 bis rule 7, when a slot was named. Never
+/// silently skipped: without a slot, that is said as plainly as a result.
+fn probes(project: &Project, which: Option<&str>) -> Vec<check::Check> {
+    let Some(name) = which else {
+        return vec![check::Check {
+            what: "the perimeter holds from inside the mission profile".to_string(),
+            verdict: check::Verdict::NotChecked(
+                "no slot named: `nunki check --slot <name>` lifts one and probes it".to_string(),
+            ),
+        }];
+    };
+    let slot = match slot::find(project, name) {
+        Ok(s) => s,
+        Err(e) => {
+            return vec![check::Check {
+                what: "the perimeter holds from inside the mission profile".to_string(),
+                verdict: check::Verdict::Red(e.to_string()),
+            }];
+        }
+    };
+    let Some(stack) = project.config.stacks.first().map(|s| s.name.clone()) else {
+        return vec![check::Check {
+            what: "the perimeter holds from inside the mission profile".to_string(),
+            verdict: check::Verdict::NotChecked(
+                "no stack declared in nunki.yaml, so no image to lift".to_string(),
+            ),
+        }];
+    };
+    let engine_bin = std::env::var("HQ_ENGINE").unwrap_or_else(|_| "docker".into());
+    let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+        std::sync::Arc::new(nunki::engine::docker::Docker::real());
+
+    let mut checks =
+        match probe::mission_profile(project, &slot, &stack, engine.clone(), &engine_bin) {
+            Ok(checks) => checks,
+            Err(e) => vec![check::Check {
+                what: "the perimeter holds from inside the mission profile".to_string(),
+                verdict: match e {
+                    // Missing images are something to do, not something broken.
+                    probe::ProbeError::NoImages(..) => check::Verdict::NotChecked(e.to_string()),
+                    _ => check::Verdict::Red(e.to_string()),
+                },
+            }],
+        };
+    // The campaign copy's build cache (SPEC 4.4, gate 7): amber when it is
+    // no longer being cleaned.
+    checks.push(check::campaign_cache(project, &slot, engine));
+    checks
+}
+
+/// Follow a run until it ends, printing only what changed.
+///
+/// Only what changed, because a line every ten seconds saying the same thing
+/// is a log nobody reads to the end — and the two facts worth seeing, the
+/// transitions, would be lost in it.
+fn watch(project: &Project, id: &str, every: u64) -> ExitCode {
+    let store = match nunki::state::Store::open(&project.hq_root) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("nunki: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut said = String::new();
+    let mut told = false;
+    loop {
+        let state = match store.load(id) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("nunki: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        // SPEC 4.5 gives `watch` two states plus a third the human
+        // provokes. A hold is a second one they provoke, and it is the one
+        // that decides whether anything follows — reported before the run,
+        // because "no run in progress" on a held mission reads as "it is
+        // between two runs" when it means "nothing is coming".
+        print_hold(&state, id);
+        let Some(handle) = &state.run else {
+            println!("run       none in progress");
+            return ExitCode::SUCCESS;
+        };
+        let harness = harness_for(project, &state.slot, Some(&handle.session.0));
+        // Measured at every tick while a run goes, so the account's file is
+        // as fresh as the run's own stream — and acted on: past the account's
+        // threshold the run is told to end its turn. The mission's monitor
+        // does the same with no terminal; this is the one a human watches.
+        let at = nunki::state::now_secs();
+        if let Err(e) = nunki::consumption::note(project, &state, harness.windows(handle), at) {
+            eprintln!("nunki: {e}");
+        }
+        match nunki::gesture::spare(project, id, &harness, at, "mission watch") {
+            Ok(Some(spared)) if !told => {
+                println!(
+                    "spared    account {}'s {} is at {}% — the run was told to end its turn",
+                    spared.account,
+                    spared.window,
+                    nunki::consumption::percent(spared.per_mille)
+                );
+                println!(
+                    "          nunki launches nothing before {}, then goes on; the read-back \
+                     spends no attempt",
+                    nunki::state::rfc3339(spared.until)
+                );
+                told = true;
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!("nunki: {e}"),
+        }
+        let now = match harness.state(handle) {
+            Ok(nunki::harness::RunState::Running(p)) => format!(
+                "running — {} event(s), {} tool call(s)",
+                p.events, p.tool_calls
+            ),
+            Ok(nunki::harness::RunState::Paused(p)) => format!(
+                "paused — {} event(s), {} tool call(s); `nunki mission resume {id}` unfreezes it",
+                p.events, p.tool_calls
+            ),
+            Ok(nunki::harness::RunState::Finished(outcome)) => {
+                println!("run       finished — {outcome:?}");
+                println!("          `nunki logs {id} --last` renders it");
+                return ExitCode::SUCCESS;
+            }
+            // Not a reason to stop watching: a machine that slept comes
+            // back, and a `watch` that gave up on the first silence would
+            // give up exactly when the human left it running.
+            Err(e) => format!("unknown — {e}"),
+        };
+        if now != said {
+            println!("run       {now}");
+            said = now;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(every.max(1)));
+    }
+}
+
+/// `pause` and `resume` are one gesture in two directions, and printing them
+/// from one place keeps the two messages saying the same thing.
+fn pause(project: &Project, id: &str) -> ExitCode {
+    let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+        std::sync::Arc::new(nunki::engine::docker::Docker::real());
+    match nunki::gesture::pause(project, id, engine) {
+        Ok(_) => {
+            println!(
+                "frozen    the agent and its firewall are suspended where they were\n\
+                 \x20         `nunki mission resume {id}` unfreezes exactly there"
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("nunki: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn mission(project: &Project, command: MissionCommand) -> ExitCode {
+    match command {
+        MissionCommand::New {
+            id,
+            branch,
+            base,
+            lots,
+            harden,
+            services,
+            wiring,
+            no_integration,
+            security_agent,
+            rigor,
+            run,
+            account,
+            model,
+            arbiter,
+            about,
+        } => {
+            // A hardening mission is framed at `standard` (SPEC 4.4, the
+            // debt), whatever the project's default: its gate 7 is the share
+            // of what it runs killed.
+            if let Some(asked) = rigor.filter(|r| harden && *r != Rigor::Standard) {
+                eprintln!(
+                    "nunki: a hardening mission runs at standard, and --rigor {asked} says \
+                     otherwise: drop --rigor"
+                );
+                return ExitCode::FAILURE;
+            }
+            let rigor = if harden {
+                Rigor::Standard
+            } else {
+                Rigor::chosen(rigor, project.config.rigor)
+            };
+            // Refused before anything is parsed or written: a prototype that
+            // asks for an integrator or a security agent contradicts itself.
+            if let Err(e) = rigor.admits(!services.is_empty(), security_agent) {
+                eprintln!("nunki: {e}");
+                return ExitCode::FAILURE;
+            }
+            // Said rather than assumed: whoever frames a mission is who it
+            // comes back to, until somebody says otherwise. A `me.yaml` that
+            // cannot be read names nobody, and a mission framed now would
+            // say nobody arbitrates: refused, saying why.
+            let arbiter = match arbiter {
+                Some(arbiter) => Some(arbiter),
+                None => {
+                    let me = nunki::human::me(&project.nunki_home(), Some(&project.root));
+                    if let Some(why) = me.unreadable() {
+                        eprintln!(
+                            "nunki: who arbitrates this mission is not known: {why}. Fix it, \
+                             or name the arbiter with --for"
+                        );
+                        return ExitCode::FAILURE;
+                    }
+                    me.name
+                }
+            };
+            // What a hardening mission takes from the debt, frozen now: a
+            // campaign or a ruling after this does not change what it kills.
+            let taken = if harden {
+                match nunki::offmission::hardening(
+                    project,
+                    &base,
+                    project.config.bounds.mutation_minutes,
+                ) {
+                    Ok(taken) => Some(taken),
+                    Err(e) => {
+                        eprintln!("nunki: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            } else {
+                None
+            };
+            let lots = match &taken {
+                Some(taken) => vec![nunki::mission::Lot {
+                    id: "harden".to_string(),
+                    title: format!(
+                        "Write the tests that kill the {} survivor(s) of the debt named below",
+                        taken.taken.len()
+                    ),
+                }],
+                None => match lots
+                    .iter()
+                    .map(|l| parse_lot(l))
+                    .collect::<Result<Vec<_>, _>>()
+                {
+                    Ok(l) => l,
+                    Err(e) => {
+                        eprintln!("nunki: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                },
+            };
+            let about = match &taken {
+                Some(taken) => nunki::offmission::hardening_brief(taken),
+                None => about,
+            };
+            let integration = if services.is_empty() {
+                // The shape is declared, never inferred from silence: a
+                // mission that needs services and does not say so would run
+                // its integrator with an empty perimeter (SPEC 2).
+                Integration::None {
+                    reason: no_integration,
+                }
+            } else {
+                match services
+                    .iter()
+                    .map(|s| parse_service(s))
+                    .collect::<Result<Vec<_>, _>>()
+                {
+                    Ok(services) => Integration::Services { services, wiring },
+                    Err(e) => {
+                        eprintln!("nunki: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            };
+            let header = Header {
+                branch,
+                base,
+                lots,
+                integration,
+                security: if security_agent {
+                    Security::Agent
+                } else {
+                    Security::Gates
+                },
+                rigor,
+                // Frozen with the rigor it serves, like the bounds: a threshold read
+                // live could be lowered under a mission already framed.
+                mutation_threshold: Some(project.config.mutation_threshold),
+                hardening: taken
+                    .as_ref()
+                    .map(nunki::offmission::hardened)
+                    .unwrap_or_default(),
+                account,
+                model,
+                run,
+                arbiter,
+                bounds: project.config.bounds.clone(),
+            };
+            match mission_dir::create(&project.hq_root, &id, &header, &about) {
+                Ok(paths) => {
+                    println!("mission {id} at {}", paths.dir.display());
+                    if let Some(taken) = &taken {
+                        let left = taken.left.len() + taken.beyond;
+                        println!(
+                            "  a hardening mission: {} survivor(s) of the debt frozen into its \
+                             header{}",
+                            taken.taken.len(),
+                            match (left, taken.left.is_empty()) {
+                                (0, _) => String::new(),
+                                (left, true) => format!(
+                                    ", {left} left beyond what its campaign's budget measures"
+                                ),
+                                (left, false) => {
+                                    format!(", {left} left — {}", taken.left_said())
+                                }
+                            }
+                        );
+                    }
+                    println!(
+                        "  {} — yours and the HQ's, read-only for the agent",
+                        paths.mission.display()
+                    );
+                    println!("  {} — the agent's", paths.journal.display());
+                    println!();
+                    println!("Edit MISSION.md, then `nunki mission status {id}`.");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+
+        MissionCommand::List { active } => {
+            let listed = match nunki::lifecycle::listing(project, active) {
+                Ok(listed) => listed,
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            if listed.is_empty() {
+                if active {
+                    println!("no mission started and not archived");
+                } else {
+                    println!(
+                        "no mission yet: `nunki mission new <id> --branch <branch> --lot L1:…`"
+                    );
+                }
+            }
+            for mission in &listed {
+                println!("{}", mission.line());
+            }
+            ExitCode::SUCCESS
+        }
+
+        MissionCommand::Start {
+            id,
+            slot: slot_name,
+        } => {
+            let slot = match slot::find(project, &slot_name) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let engine_bin = std::env::var("HQ_ENGINE").unwrap_or_else(|_| "docker".into());
+            let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+                std::sync::Arc::new(nunki::engine::docker::Docker::real());
+            match nunki::run::start(project, &id, &slot, engine, &engine_bin) {
+                Ok(started) => {
+                    let state = started.state;
+                    println!("mission {id} started in slot {}", state.slot);
+                    if let Some(brought) = &started.base {
+                        println!(
+                            "base    {}",
+                            nunki::run::base_said(&state.flow.header().base, brought)
+                        );
+                    }
+                    if let Some(run) = &state.run {
+                        println!("session {}", run.session.0);
+                        println!("log     {}", run.log.display());
+                    }
+                    println!();
+                    println!("`nunki mission status {id}` says where it is.");
+                    start_monitor(project, &id);
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+
+        MissionCommand::Reframe { id, yes } => match nunki::lifecycle::reframe(project, &id, yes) {
+            Ok(reframed) => {
+                if reframed.changes.is_empty() {
+                    println!("framing   unchanged — the frozen header already says this");
+                    return ExitCode::SUCCESS;
+                }
+                for change in &reframed.changes {
+                    println!("{:<9} {} → {}", change.what, change.from, change.to);
+                }
+                if reframed.applied {
+                    println!();
+                    println!("frozen    the new framing is what nunki reads from here on");
+                } else {
+                    println!();
+                    println!(
+                        "nothing has changed yet — `nunki mission reframe {id} --yes` freezes it"
+                    );
+                }
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("nunki: {e}");
+                ExitCode::FAILURE
+            }
+        },
+
+        MissionCommand::End { id, why } => match nunki::lifecycle::end(project, &id, &why) {
+            Ok(ended) => {
+                match ended {
+                    nunki::lifecycle::Ended::Started(state) => {
+                        println!("ended     {:?}", state.flow.stage())
+                    }
+                    nunki::lifecycle::Ended::NeverStarted => {
+                        println!("ended     it had never started, so nothing else moved")
+                    }
+                }
+                println!(
+                    "          written to FOLLOWUP_HQ.md; `nunki mission archive {id}` closes it"
+                );
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("nunki: {e}");
+                ExitCode::FAILURE
+            }
+        },
+
+        MissionCommand::Retry { id, why } => match nunki::lifecycle::retry(project, &id, &why) {
+            Ok(state) => {
+                println!("retried   {:?}", state.flow.stage());
+                // What it handed back depends on the handover — attempts
+                // whole, one volet, nothing for a ruling — and the record
+                // says which; the count is said here whatever it was.
+                println!("volets    {}", state.flow.volets_said());
+                println!(
+                    "          what it hands back is written to FOLLOWUP_HQ.md; `nunki verify \
+                     {id}` launches the run"
+                );
+                start_monitor(project, &id);
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("nunki: {e}");
+                ExitCode::FAILURE
+            }
+        },
+
+        MissionCommand::Archive { id } => match nunki::lifecycle::archive(project, &id) {
+            Ok(archived) => {
+                println!("archived  {} → {}", archived.id, archived.at.display());
+                println!("          nothing was deleted, and the slot is untouched");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("nunki: {e}");
+                ExitCode::FAILURE
+            }
+        },
+
+        MissionCommand::Monitor { id } => {
+            let engine_bin = std::env::var("HQ_ENGINE").unwrap_or_else(|_| "docker".into());
+            let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+                std::sync::Arc::new(nunki::engine::docker::Docker::real());
+            let line = nunki::monitor::run(project, &id, engine, &engine_bin);
+            println!(
+                "{}  monitor stops: {line}",
+                nunki::state::rfc3339(nunki::state::now_secs())
+            );
+            ExitCode::SUCCESS
+        }
+
+        MissionCommand::Watch { id, every } => watch(project, &id, every),
+
+        MissionCommand::Wait {
+            id,
+            timeout,
+            every,
+            json,
+        } => {
+            let mut reader = nunki::wait::Hq::new(project);
+            match nunki::wait::wait(
+                &id,
+                &mut reader,
+                &mut nunki::wait::SystemClock,
+                every,
+                timeout,
+            ) {
+                Ok(status) => {
+                    if json {
+                        println!("{}", status.json());
+                    } else {
+                        println!("{}", status.line());
+                    }
+                    ExitCode::from(status.code)
+                }
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+
+        MissionCommand::Pause { id } => pause(project, &id),
+        MissionCommand::Resume { id } => {
+            let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+                std::sync::Arc::new(nunki::engine::docker::Docker::real());
+            match nunki::gesture::resume(project, &id, engine) {
+                Ok(lifted) => {
+                    match lifted {
+                        Some(held) => {
+                            println!(
+                                "lifted    the hold {} put on {} is lifted",
+                                held.who, held.date
+                            );
+                            if let Some(why) = &held.reason {
+                                println!("          it said: {}", nunki::text::printable(why));
+                            }
+                            println!("          and the harness's failures are forgotten");
+                        }
+                        None => println!("lifted    nothing was holding mission {id}"),
+                    }
+                    println!("          the container is unfrozen if it was frozen");
+                    start_monitor(project, &id);
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+
+        MissionCommand::Kill { id } => {
+            let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+                std::sync::Arc::new(nunki::engine::docker::Docker::real());
+            match nunki::gesture::kill(project, &id, engine) {
+                Ok(_) => {
+                    println!("killed    nothing was waited for");
+                    println!(
+                        "          the lot in progress is a failed attempt; the relaunch \
+                         starts from the last resume block"
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+
+        MissionCommand::Say { id, what } => {
+            match nunki::gesture::say(project, &id, &what.join(" ")) {
+                Ok(()) => {
+                    println!("said      written to FOLLOWUP_HQ.md, for the next run");
+                    println!(
+                        "          there is no channel during a run; `nunki mission stop {id} \
+                     --now` ends this one first"
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+
+        MissionCommand::Fetch { id } => match nunki::push::fetch(project, &id) {
+            Ok(fetched) => {
+                let head = &fetched.head[..12.min(fetched.head.len())];
+                match fetched.was {
+                    Some(was) if was == fetched.head => {
+                        println!("fetched   {} already at {head}", fetched.branch)
+                    }
+                    Some(was) => println!(
+                        "fetched   {} {} → {head}",
+                        fetched.branch,
+                        &was[..12.min(was.len())]
+                    ),
+                    None => println!("fetched   {} at {head}, new here", fetched.branch),
+                }
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("nunki: {e}");
+                ExitCode::FAILURE
+            }
+        },
+
+        MissionCommand::Accept {
+            id,
+            finding,
+            fixed_by,
+            why,
+        } => {
+            let lift = match finding {
+                Some(name) => nunki::findings::Lift::Finding(name),
+                None => nunki::findings::Lift::Verdict,
+            };
+            let accepted = match &fixed_by {
+                Some(commit) => nunki::findings::accept_fixed(project, &id, commit, &why),
+                None => nunki::findings::accept(project, &id, lift, &why),
+            };
+            match accepted {
+                Ok(state) => {
+                    match state.accepted.last().and_then(|a| a.fixed_by.as_ref()) {
+                        Some(fix) => println!(
+                            "accepted  as fixed by {}, not attacked by the security agent — \
+                             written to FOLLOWUP_HQ.md and to nunki's state",
+                            fix.get(..12).unwrap_or(fix)
+                        ),
+                        None => {
+                            println!("accepted  written to FOLLOWUP_HQ.md and to nunki's state")
+                        }
+                    }
+                    println!("stage     {:?}", state.flow.stage());
+                    if matches!(
+                        state.flow.stage(),
+                        nunki::mission::flow::Stage::FinalCampaign
+                    ) {
+                        println!(
+                            "          `nunki verify {id}` plays gate 7 again at HEAD, which a \
+                             `critical` mission is verified on"
+                        );
+                    }
+                    println!(
+                        "          VERDICT.json still says FINDINGS — that is the agent's \
+                         answer, and it is not yours to edit"
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+
+        MissionCommand::Iterate {
+            id,
+            because,
+            overriding,
+        } => {
+            let sent = match (overriding, because.as_deref()) {
+                (true, Some(why)) => nunki::findings::iterate_overriding(project, &id, why),
+                (_, because) => nunki::findings::iterate(project, &id, because),
+            };
+            match sent {
+                Ok(state) => {
+                    println!("stage     {:?}", state.flow.stage());
+                    if overriding {
+                        println!(
+                            "override  written to FOLLOWUP_HQ.md as a departure from the rigor"
+                        );
+                    }
+                    println!("          `nunki verify {id}` plays it from there");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+
+        MissionCommand::Mutants {
+            id,
+            slot,
+            equivalent,
+            because,
+            ratify,
+            all,
+            refuse,
+            lift,
+            again,
+            cancel,
+            registry,
+            status,
+        } => {
+            if registry {
+                return match nunki::equivalences::read(&project.hq_root) {
+                    Ok(entries) => {
+                        println!("{}", nunki::equivalences::listing(&entries, &project.root));
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("nunki: {e}");
+                        ExitCode::FAILURE
+                    }
+                };
+            }
+            let Some(id) = id else {
+                eprintln!("nunki: name the mission — only `--registry` needs none");
+                return ExitCode::FAILURE;
+            };
+            if status {
+                return campaign_status(project, &id, slot);
+            }
+            if because.is_some()
+                && equivalent.is_none()
+                && ratify.is_none()
+                && refuse.is_none()
+                && !cancel
+            {
+                eprintln!(
+                    "nunki: --because goes with --equivalent, --ratify, --refuse or --cancel: \
+                     it is the reason of a ruling, or of calling a campaign off"
+                );
+                return ExitCode::FAILURE;
+            }
+            let ratify = match (ratify, all) {
+                (Some(None), true) => {
+                    return ratify_all(project, &id);
+                }
+                (Some(None), false) => {
+                    eprintln!(
+                        "nunki: --ratify names a survivor, or takes --all for every pending \
+                         proposal"
+                    );
+                    return ExitCode::FAILURE;
+                }
+                (Some(Some(_)), true) => {
+                    eprintln!("nunki: --ratify --all names no survivor: it takes every one");
+                    return ExitCode::FAILURE;
+                }
+                (ratify, _) => ratify.flatten(),
+            };
+            if let Some(survivor) = ratify {
+                return match nunki::findings::ratify_proposal(
+                    project,
+                    &id,
+                    &survivor,
+                    because.as_deref(),
+                ) {
+                    Ok((why, registered)) => {
+                        println!(
+                            "{} ruled equivalent — {}",
+                            nunki::text::one_line(&survivor),
+                            nunki::text::one_line(&why)
+                        );
+                        say_registered(&registered);
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("nunki: {e}");
+                        ExitCode::FAILURE
+                    }
+                };
+            }
+            if let Some(survivor) = refuse {
+                let Some(why) = because else {
+                    eprintln!(
+                        "nunki: --refuse needs --because: the next coder run reads why, and a \
+                         refusal that says nothing teaches it nothing"
+                    );
+                    return ExitCode::FAILURE;
+                };
+                return match nunki::findings::refuse_proposal(project, &id, &survivor, &why) {
+                    Ok(refused) => {
+                        println!(
+                            "{}: the proposal is refused, and it needs an outcome again — the \
+                             next coder run reads why in FOLLOWUP_HQ.md",
+                            nunki::text::one_line(&survivor)
+                        );
+                        if let Some(stage) = refused.sent_back {
+                            println!("stage     {stage:?}");
+                            println!(
+                                "          the mission was verified, so the refusal sends it \
+                                 back to the coder — `nunki verify {id}` plays it from there"
+                            );
+                        }
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("nunki: {e}");
+                        ExitCode::FAILURE
+                    }
+                };
+            }
+            if let Some(survivor) = lift {
+                return match nunki::findings::lift_equivalent(project, &id, &survivor) {
+                    Ok(registered) => {
+                        println!(
+                            "{survivor}: the `equivalent` ruling is lifted, and it needs an outcome again"
+                        );
+                        say_registered(&registered);
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("nunki: {e}");
+                        ExitCode::FAILURE
+                    }
+                };
+            }
+            if let Some(survivor) = equivalent {
+                let Some(why) = because else {
+                    eprintln!(
+                        "nunki: --equivalent needs --because: a ruling nobody can check must \
+                         say what it rests on"
+                    );
+                    return ExitCode::FAILURE;
+                };
+                return match nunki::findings::rule_equivalent(project, &id, &survivor, &why) {
+                    Ok(registered) => {
+                        println!("{survivor} ruled equivalent — {why}");
+                        say_registered(&registered);
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("nunki: {e}");
+                        ExitCode::FAILURE
+                    }
+                };
+            }
+            let header = match nunki::mission::dir::read_header(&project.hq_root, &id) {
+                Ok(h) => h,
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let Some(in_slot) = slot.or_else(|| {
+                nunki::state::Store::open(&project.hq_root)
+                    .and_then(|s| s.load(&id))
+                    .ok()
+                    .map(|s| s.slot)
+            }) else {
+                eprintln!("nunki: mission {id} has not started — name a slot with --slot");
+                return ExitCode::FAILURE;
+            };
+            let slot = match nunki::slot::find(project, &in_slot) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            // The slot's lock, and the same refusal `nunki verify` makes.
+            //
+            // A campaign lifts no profile, so this verb looked harmless — and
+            // it is the one door through which a campaign and an agent run
+            // ever meet. `cargo mutants` rewrites the clean copy of `HEAD` in
+            // the container the agent is working in, and the agent's next
+            // launch recreates that container and ends the campaign. In the
+            // flow they cannot overlap: `verify` starts a campaign only at
+            // `Stage::Gates`, with gates 1 to 5 green, and nothing a campaign
+            // does can turn those red. Typed by hand during a run, they do.
+            let locks = project.hq_root.join("locks");
+            let _lock = match nunki::state::SlotLock::acquire(&locks, &slot.name, "mission mutants")
+            {
+                Ok(lock) => lock,
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            // Calling a campaign off needs no run to be idle: it touches the
+            // campaign alone, and stopping one is what the deadline does
+            // whatever the agent is doing.
+            if cancel {
+                let why = because.as_deref().unwrap_or_default();
+                let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+                    std::sync::Arc::new(nunki::engine::docker::Docker::real());
+                let paths = nunki::mission::dir::Paths::of(&project.hq_root, &id);
+                let who = nunki::human::me(&project.nunki_home(), Some(&project.root)).addressed();
+                return match nunki::mutants::cancel_and_say(
+                    project, &slot, engine, &paths, &who, why,
+                ) {
+                    // Called off, but the copy not put back: said on stderr,
+                    // and not a success.
+                    Ok(
+                        cancelled @ nunki::mutants::Cancelled::Stopped {
+                            reset: nunki::mutants::Reset::Failed(_),
+                            ..
+                        },
+                    ) => {
+                        eprintln!("nunki: {}", nunki::mutants::cancelled_said(&cancelled));
+                        ExitCode::FAILURE
+                    }
+                    Ok(cancelled) => {
+                        println!("{}", nunki::mutants::cancelled_said(&cancelled));
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("nunki: {e}");
+                        ExitCode::FAILURE
+                    }
+                };
+            }
+            if let Ok(state) = nunki::state::Store::open(&project.hq_root).and_then(|s| s.load(&id))
+            {
+                let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+                    std::sync::Arc::new(nunki::engine::docker::Docker::real());
+                if let Err(e) = nunki::verify::refuse_while_running(
+                    project,
+                    engine,
+                    &id,
+                    &state,
+                    nunki::state::now_secs(),
+                ) {
+                    eprintln!("nunki: {e}");
+                    return ExitCode::FAILURE;
+                }
+            }
+            let stack = project
+                .config
+                .stacks
+                .first()
+                .map(|s| s.name.clone())
+                .unwrap_or_else(|| "rust".to_string());
+            let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+                std::sync::Arc::new(nunki::engine::docker::Docker::real());
+            let paths = nunki::mission::dir::Paths::of(&project.hq_root, &id);
+            match nunki::mutants::campaign(
+                project,
+                &slot,
+                engine,
+                &paths.dir,
+                &stack,
+                &nunki::mutants::Asked {
+                    // The base's name: `campaign` works out what this branch
+                    // brought, through the same call gate 7 makes.
+                    base: &header.base,
+                    budget_minutes: header.bounds.mutation_minutes,
+                    // Without `--again`, as the monitor would.
+                    replay: if again {
+                        nunki::mutants::Replay::Now
+                    } else {
+                        nunki::mutants::Replay::WhenChanged
+                    },
+                    rigor: header.rigor,
+                    threshold: header
+                        .mutation_threshold
+                        .unwrap_or(project.config.mutation_threshold),
+                    hardening: &header.hardening,
+                },
+            ) {
+                Ok(progress) => {
+                    use nunki::mutants::Progress;
+                    match progress {
+                        Progress::Fresh { survivors } => println!(
+                            "a campaign on this exact content is already on file — \
+                             {survivors} survivor(s); it replays only when the touched \
+                             files change, or when you say `--again`"
+                        ),
+                        Progress::Started { fingerprint, scope } => println!(
+                            "campaign {} started, {}{}; `nunki mission mutants {id}` follows it",
+                            &fingerprint[..7.min(fingerprint.len())],
+                            scope.said(),
+                            match &scope {
+                                nunki::mutants::Scope::Full { why } if !why.trim().is_empty() =>
+                                    format!(" ({})", nunki::text::one_line(why)),
+                                _ => String::new(),
+                            }
+                        ),
+                        Progress::Running {
+                            started_at,
+                            lines,
+                            unstopped,
+                        } => {
+                            println!("running since {started_at} — {lines} line(s) so far");
+                            if let Some(why) = unstopped {
+                                eprintln!("nunki: the campaign still holds the clean copy: {why}");
+                                return ExitCode::FAILURE;
+                            }
+                        }
+                        Progress::Finished { survivors, chain } => {
+                            println!("{}", nunki::mutants::ended(survivors));
+                            for said in &chain {
+                                println!("campaign  {said}");
+                            }
+                        }
+                        Progress::Overrun {
+                            minutes,
+                            survivors,
+                            reset,
+                        } => {
+                            eprintln!(
+                                "nunki: {}; {}",
+                                nunki::mutants::stopped_said(
+                                    &nunki::mutants::Stopped::Deadline { minutes },
+                                    survivors
+                                ),
+                                nunki::mutants::reset_said(&reset)
+                            );
+                            return ExitCode::FAILURE;
+                        }
+                        Progress::Incomplete { survivors, stopped } => {
+                            eprintln!(
+                                "nunki: {}",
+                                nunki::mutants::stopped_said(&stopped, survivors)
+                            );
+                            return ExitCode::FAILURE;
+                        }
+                        Progress::CouldNotRun(why) => {
+                            eprintln!("nunki: the campaign could not run: {why}");
+                            return ExitCode::FAILURE;
+                        }
+                        Progress::Lost(why) => {
+                            eprintln!("nunki: the campaign cannot be reached: {why}");
+                            return ExitCode::FAILURE;
+                        }
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+
+        MissionCommand::Gates {
+            id,
+            role,
+            verification,
+            slot,
+        } => {
+            let role: nunki::harness::Role = role.into();
+            let started = nunki::state::Store::open(&project.hq_root)
+                .and_then(|s| s.load(&id))
+                .ok();
+            // The frozen header once a mission has started, and the file only
+            // before that: `nunki` never re-reads the header during a mission
+            // (SPEC 4.1). A perimeter a run is judged against must be the one
+            // it was launched with, or an agent could widen it between two
+            // gates.
+            let header = match &started {
+                Some(state) => state.flow.header().clone(),
+                None => match nunki::mission::dir::read_header(&project.hq_root, &id) {
+                    Ok(h) => h,
+                    Err(e) => {
+                        eprintln!("nunki: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                },
+            };
+            let in_slot = match slot.or_else(|| started.as_ref().map(|s| s.slot.clone())) {
+                Some(s) => s,
+                None => {
+                    eprintln!(
+                        "nunki: mission {id} has not started, so there is no slot to judge — \
+                         name one with --slot"
+                    );
+                    return ExitCode::FAILURE;
+                }
+            };
+            let slot = match nunki::slot::find(project, &in_slot) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let paths = nunki::mission::dir::Paths::of(&project.hq_root, &id);
+            let coder_head = started
+                .as_ref()
+                .and_then(|s| s.concluded(nunki::harness::Role::Coder))
+                .map(|c| c.head.clone());
+            let services_file = nunki::services::declared_path(project);
+            let subject = nunki::gate::Subject {
+                role,
+                tree: &slot.tree,
+                journal: &paths.journal,
+                pr: &paths.pr,
+                verdict: &paths.verdict,
+                mission_dir: &paths.dir,
+                header: &header,
+                protected_branches: &project.config.protected_branches,
+                protected_paths: &project.config.protected_paths,
+                services_file: services_file.as_deref(),
+                coder_head: coder_head.as_deref(),
+            };
+            let played = {
+                let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+                    std::sync::Arc::new(nunki::engine::docker::Docker::real());
+                let stack = project
+                    .config
+                    .stacks
+                    .first()
+                    .map(|s| s.name.clone())
+                    .unwrap_or_else(|| "rust".to_string());
+                let context = nunki::gate::Verification {
+                    project,
+                    slot: &slot,
+                    engine,
+                    stack: &stack,
+                };
+                if verification {
+                    nunki::gate::at_verification(&subject, &context)
+                } else {
+                    // Gate 8 needs the container too, so both phases carry it.
+                    nunki::gate::after_run(&subject, &context)
+                }
+            };
+            let report = match played {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            println!("mission   {id}");
+            println!("role      {:?}", report.role);
+            println!("head      {}", report.head);
+            print_gates(&report);
+            match report.failure() {
+                Some(_) => ExitCode::FAILURE,
+                None => ExitCode::SUCCESS,
+            }
+        }
+
+        MissionCommand::Stop { id, now, why } => {
+            // Read once for the slot and the session: the harness has to be
+            // built against the container the run is in, and `--now`
+            // identifies the process by its session id.
+            let state = match nunki::gesture::started(project, &id) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let session = state.run.as_ref().map(|r| r.session.0.clone());
+            let harness = harness_for(project, &state.slot, session.as_deref());
+            match nunki::gesture::stop(project, &id, &harness, now, &why) {
+                Ok(held) => {
+                    println!("held      nunki will launch no further run for mission {id}");
+                    if let Some(why) = &held.reason {
+                        println!("because   {}", nunki::text::printable(why));
+                    }
+                    match (now, held.interrupted) {
+                        // SIGINT, not SIGTERM: the agent ends its turn and
+                        // writes its resume block (SPEC 4.3).
+                        (_, true) => {
+                            println!("          the run in progress was asked to end its turn")
+                        }
+                        // Asked for, and there was nothing to interrupt. The
+                        // hold stands all the same; saying so beats a silent
+                        // success that reads like an interruption.
+                        (true, false) => {
+                            println!("          no run was going, so nothing was interrupted")
+                        }
+                        (false, false) => {
+                            println!("          the run in progress, if any, finishes its lot")
+                        }
+                    }
+                    println!("          `nunki mission resume {id}` lifts the hold");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+
+        MissionCommand::Status { id } => {
+            let header = match mission_dir::read_header(&project.hq_root, &id) {
+                Ok(h) => h,
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            println!("mission   {id}");
+            println!("branch    {} (from {})", header.branch, header.base);
+            println!("shape     {:?}", header.shape());
+            match (header.rigor, header.mutation_threshold) {
+                // The threshold frozen with the rigor; a header framed before
+                // it was frozen reads the project's, and says so.
+                (Rigor::Standard, Some(threshold)) => println!(
+                    "rigor     standard — gate 7 passes at {threshold}% of tried mutants killed"
+                ),
+                (Rigor::Standard, None) => println!(
+                    "rigor     standard — gate 7 passes at {}% of tried mutants killed \
+                     (nunki.yaml's, read now: this header froze none)",
+                    project.config.mutation_threshold
+                ),
+                (rigor, _) => println!("rigor     {rigor}"),
+            }
+            // The campaign in flight first, as its record says: the chain
+            // below holds only the campaigns that ended, and a reader
+            // following a campaign was shown the last one recorded instead.
+            if let Ok(state) = nunki::state::Store::open(&project.hq_root).and_then(|s| s.load(&id))
+            {
+                match nunki::mutants::in_flight(&project.hq_root, &state.slot) {
+                    Ok(Some(campaign)) => println!(
+                        "campaign  {} (slot {})",
+                        nunki::mutants::in_flight_said(&campaign),
+                        state.slot
+                    ),
+                    Ok(None) => {}
+                    Err(e) => println!("campaign  in flight could not be read: {e}"),
+                }
+            }
+            // Each campaign of the chain, full or partial, with its counts:
+            // gate 7 judges them one by one, and so does this listing.
+            match nunki::mutants::chain_on_file(&mission_dir::Paths::of(&project.hq_root, &id).dir)
+            {
+                Ok(chain) => {
+                    for said in &chain {
+                        println!("campaign  {said}");
+                    }
+                }
+                Err(e) => println!("campaign  could not be read: {e}"),
+            }
+            for lot in &header.lots {
+                println!("lot       {} — {}", lot.id, lot.title);
+            }
+            match &header.integration {
+                Integration::None { reason } => println!("services  none — {reason}"),
+                Integration::Services { services, wiring } => {
+                    for s in services {
+                        println!("service   {} → {}", s.name, s.reach.join(", "));
+                    }
+                    if wiring.is_empty() {
+                        println!("wiring    none declared — the integrator may commit nothing");
+                    } else {
+                        println!("wiring    {}", wiring.join(", "));
+                    }
+                }
+            }
+            println!(
+                "bounds    {} volet(s), {} attempt(s) per lot",
+                header.bounds.max_volets, header.bounds.attempts_per_lot
+            );
+
+            // The state is the other half of the answer, and its absence is
+            // an answer too: a mission exists before it has ever run.
+            match nunki::state::Store::open(&project.hq_root).and_then(|s| s.load(&id)) {
+                Ok(state) => {
+                    println!("stage     {:?} in slot {}", state.flow.stage(), state.slot);
+                    if let nunki::mission::flow::Stage::AwaitingHuman(handover) = state.flow.stage()
+                    {
+                        println!("handover  {}", handover.line(&id));
+                    }
+                    println!("volets    {}", state.flow.volets_said());
+                    // Every time the HQ set the rigor aside, with its reason:
+                    // how often the rule gave way is part of the mission.
+                    for said in nunki::push::overrides_said(state.flow.overrides()) {
+                        println!("override  {said}");
+                    }
+                    println!(
+                        "security rounds: {} / {}{}",
+                        state.flow.security_rounds(),
+                        state.flow.max_security_rounds(),
+                        if state.flow.header().has_security_agent() {
+                            ""
+                        } else {
+                            " — this mission calls no security agent"
+                        }
+                    );
+                    print_proposals(project, &id);
+                    print_registry(project);
+                    // The lifts nobody typed: a verified mission otherwise
+                    // reads as if a CLEAR or a human had verified it.
+                    for lift in state.accepted.iter().filter(|a| a.by_nunki) {
+                        println!(
+                            "accepted  by nunki (LOW/INFO) on {}:",
+                            &lift.head[..12.min(lift.head.len())]
+                        );
+                        for finding in nunki::findings::lifted_by_nunki(lift) {
+                            println!("          {finding}");
+                        }
+                    }
+                    // A hold changes what `nunki` will do next, and nothing
+                    // else in this report says so: a mission held between
+                    // two runs reads exactly like one nobody touched.
+                    print_hold(&state, &id);
+                    print_usage(project, &state);
+                    print_monitor(project, &id);
+                    if let Some(handle) = &state.run {
+                        println!("session   {}", handle.session.0);
+                        // Read from the run itself, not from what was
+                        // recorded: a machine that slept leaves the state
+                        // saying "running" (SPEC 4.2).
+                        match harness_for(project, &state.slot, Some(&handle.session.0))
+                            .state(handle)
+                        {
+                            Ok(nunki::harness::RunState::Running(p)) => println!(
+                                "run       running — {} event(s), {} tool call(s)",
+                                p.events, p.tool_calls
+                            ),
+                            Ok(nunki::harness::RunState::Paused(p)) => println!(
+                                "run       paused — {} event(s), {} tool call(s); \
+                                 `nunki mission resume {id}` unfreezes it",
+                                p.events, p.tool_calls
+                            ),
+                            Ok(nunki::harness::RunState::Finished(outcome)) => {
+                                println!("run       finished — {outcome:?}")
+                            }
+                            // Not "finished", not "running": `nunki` says it
+                            // does not know, and why. Calling an unreachable
+                            // run a dead one is how a container taken down
+                            // becomes a harness failure in the record.
+                            Err(e) => println!("run       unknown — {e}"),
+                        }
+                    }
+                }
+                Err(_) => println!("stage     not started"),
+            }
+            ExitCode::SUCCESS
+        }
+    }
+}
+
+fn parse_lot(spec: &str) -> Result<Lot, String> {
+    let (id, title) = spec
+        .split_once(':')
+        .ok_or_else(|| format!("a lot is written `id:title`, and {spec:?} is not"))?;
+    if id.trim().is_empty() || title.trim().is_empty() {
+        return Err(format!(
+            "a lot needs an id and a title, and {spec:?} lacks one"
+        ));
+    }
+    Ok(Lot {
+        id: id.trim().to_string(),
+        title: title.trim().to_string(),
+    })
+}
+
+fn parse_service(spec: &str) -> Result<Service, String> {
+    let (name, reach) = spec
+        .split_once('=')
+        .ok_or_else(|| format!("a service is written `name=host[,host…]`, and {spec:?} is not"))?;
+    let reach: Vec<String> = reach
+        .split(',')
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+        .map(str::to_string)
+        .collect();
+    if name.trim().is_empty() || reach.is_empty() {
+        return Err(format!(
+            "a service needs a name and something to reach, and {spec:?} lacks one"
+        ));
+    }
+    // A real provider is said in the header, `shared: true`, before it is
+    // validated: the flag is the human's to set, never a default.
+    Ok(Service {
+        name: name.trim().to_string(),
+        reach,
+        shared: false,
+    })
+}
+
+/// What a ruling or a lift left in the project's registry of equivalences,
+/// when it left it as it was: the mission's own file is written, and the HQ
+/// must know the next mission will not see it.
+fn say_registered(registered: &nunki::equivalences::Registered) {
+    if let Some(why) = registered.warning() {
+        eprintln!("nunki: the registry of equivalences is unchanged — {why}");
+    }
+}
+
+/// `nunki mission mutants <id> --status`: the campaign in flight in the
+/// mission's slot, as its record and its log say, then the campaigns on
+/// file. Takes no lock and builds no engine: following a campaign must not
+/// be able to start one, or to stop one ([`nunki::mutants::in_flight`]).
+fn campaign_status(project: &Project, id: &str, slot: Option<String>) -> ExitCode {
+    let Some(slot) = slot.or_else(|| {
+        nunki::state::Store::open(&project.hq_root)
+            .and_then(|s| s.load(id))
+            .ok()
+            .map(|s| s.slot)
+    }) else {
+        eprintln!("nunki: mission {id} has not started — name a slot with --slot");
+        return ExitCode::FAILURE;
+    };
+    match nunki::mutants::in_flight(&project.hq_root, &slot) {
+        Ok(Some(campaign)) => println!(
+            "in flight  {} (slot {slot}; the record's word — `nunki mission mutants {id}` \
+             asks the container, and reads it back once it ended)",
+            nunki::mutants::in_flight_said(&campaign)
+        ),
+        Ok(None) => {
+            println!("in flight  none in slot {slot} — `nunki mission mutants {id}` starts one")
+        }
+        Err(e) => {
+            eprintln!("nunki: {e}");
+            return ExitCode::FAILURE;
+        }
+    }
+    match nunki::mutants::chain_on_file(&mission_dir::Paths::of(&project.hq_root, id).dir) {
+        Ok(chain) => {
+            for said in &chain {
+                println!("on file    {said}");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("nunki: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `nunki mission mutants <id> --ratify --all`: every pending proposal,
+/// printed first with its source and sentence, then ratified — the list
+/// printed is the list ruled ([`nunki::findings::ratify_all`]).
+fn ratify_all(project: &Project, id: &str) -> ExitCode {
+    let listed = match nunki::findings::pending(project, id) {
+        Ok(listed) => listed,
+        Err(e) => {
+            eprintln!("nunki: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if listed.is_empty() {
+        println!("no proposal awaits the HQ's ruling on mission {id}");
+        return ExitCode::SUCCESS;
+    }
+    println!("ratifying {} proposal(s):", listed.len());
+    for p in &listed {
+        println!("          {}", proposal_line(p));
+    }
+    match nunki::findings::ratify_all(project, id, &listed) {
+        Ok(done) => {
+            for ratified in &done {
+                println!(
+                    "{} ruled equivalent — {}",
+                    nunki::text::name(&ratified.proposal.id),
+                    nunki::text::one_line(&ratified.proposal.why)
+                );
+                say_registered(&ratified.registered);
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("nunki: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// A project registry of equivalences that cannot be read: no campaign is
+/// matched against it, and the HQ should know why it hears nothing from it.
+fn print_registry(project: &Project) {
+    if let Err(e) = nunki::equivalences::read(&project.hq_root) {
+        println!("registry  could not be read: {e}");
+    }
+}
+
+/// One proposal as the HQ reads it before ruling: the survivor, who
+/// proposed it, and the sentence.
+fn proposal_line(p: &nunki::mutants::Proposal) -> String {
+    format!(
+        "{} ({}) — {}",
+        nunki::text::name(&p.id),
+        p.source(),
+        nunki::text::one_line(&p.why)
+    )
+}
+
+/// The equivalence proposals that await the HQ — the coder's, and `nunki`'s
+/// from rulings it matched — each with its source and sentence: `nunki push`
+/// refuses until each is ratified or refused, and this is where the HQ finds
+/// them without opening two JSON files.
+fn print_proposals(project: &Project, id: &str) {
+    let dir = mission_dir::Paths::of(&project.hq_root, id).dir;
+    match nunki::mutants::awaiting_ruling(&dir) {
+        Ok(waiting) => {
+            if let Some(line) = nunki::mutants::proposals_await(&waiting) {
+                println!("proposals {line}");
+                for p in &waiting {
+                    println!("          {}", proposal_line(p));
+                }
+                println!(
+                    "          `nunki mission mutants {id} --ratify <survivor>` (or \
+                     `--ratify --all`) or `--refuse <survivor> --because <why>`"
+                );
+            }
+        }
+        Err(e) => println!("proposals could not be read: {e}"),
+    }
+}
+
+/// One line per gate, the same wherever gates are reported — `nunki mission
+/// gates` and `nunki verify` must not describe the same report differently.
+/// A hold, and a harness being waited out, change what `nunki` does next, and
+/// nothing else in a report says so: a mission held between two runs reads
+/// exactly like one nobody touched.
+fn print_hold(state: &nunki::state::MissionState, id: &str) {
+    if let Some(hold) = &state.stopped {
+        println!(
+            "held      by {} on {} — nunki will launch no further run",
+            hold.who, hold.date
+        );
+        if let Some(why) = &hold.reason {
+            println!("          {}", nunki::text::printable(why));
+        }
+        println!("          `nunki mission resume {id}` lifts it");
+    } else if let Some(down) = &state.harness_down {
+        println!(
+            "harness   failed {} time(s) in a row — no run before {} — last: {}",
+            down.failures,
+            nunki::state::rfc3339(down.not_before),
+            nunki::text::printable(&down.last)
+        );
+    }
+    if let Some(spared) = &state.spared {
+        println!(
+            "spared    nunki ended the run's turn on {}: account {}'s {} was at {}%",
+            spared.date,
+            spared.account,
+            spared.window,
+            nunki::consumption::percent(spared.per_mille)
+        );
+        println!(
+            "          nothing is launched before {}; the read-back spends no attempt",
+            nunki::state::rfc3339(spared.until)
+        );
+    }
+    // What the mission has spent, in the four kinds kept apart: the caps have
+    // no default until real missions are measured, and this is the measure.
+    let spent = &state.spent;
+    let u = &spent.usage;
+    println!(
+        "spent     {} run(s), {} tokens — in {}, out {}, cache written {}, cache read {}",
+        spent.runs,
+        u.total(),
+        u.input_tokens,
+        u.output_tokens,
+        u.cache_creation_input_tokens,
+        u.cache_read_input_tokens
+    );
+    let bounds = &state.flow.header().bounds;
+    if bounds.max_runs.is_some() || bounds.max_tokens.is_some() {
+        let cap = |c: Option<String>| c.unwrap_or_else(|| "none".into());
+        println!(
+            "          caps: {} run(s), {} tokens",
+            cap(bounds.max_runs.map(|n| n.to_string())),
+            cap(bounds.max_tokens.map(|n| n.to_string()))
+        );
+    }
+}
+
+/// How far the account the mission spends has used its two windows, as last
+/// measured — or that it has not been, in those words: a supervisor reading
+/// "0" where nothing was measured would read that nothing was spent. While a
+/// run goes, the account is the one it was launched on.
+fn print_usage(project: &Project, state: &nunki::state::MissionState) {
+    use nunki::consumption::{Window, percent};
+    let header = state.flow.header();
+    let bounds = &header.bounds;
+    let account = match nunki::consumption::spending(project, state) {
+        Ok(account) => account,
+        Err(e) => {
+            println!("usage     not measured — {e}");
+            return;
+        }
+    };
+    let measure = match nunki::consumption::read(&project.nunki_home(), &account) {
+        Ok(Some(measure)) => measure,
+        Ok(None) => {
+            println!(
+                "usage     account {account}: not measured yet — nunki measures it when it reads a run"
+            );
+            return;
+        }
+        Err(e) => {
+            println!("usage     account {account}: unreadable — {e}");
+            return;
+        }
+    };
+    let window = |w: Option<Window>, stop: u32| match w {
+        Some(w) => format!(
+            "{}% (stops at {stop}%, resets {})",
+            percent(w.per_mille),
+            nunki::state::rfc3339(w.resets_at)
+        ),
+        None => "not reported".to_string(),
+    };
+    println!(
+        "usage     account {account}: five hours {} — week {}",
+        window(measure.windows.five_hour, bounds.five_hour_stop_percent),
+        window(measure.windows.weekly, bounds.weekly_stop_percent)
+    );
+    println!(
+        "          measured {} from {}",
+        nunki::state::rfc3339(measure.measured_at),
+        measure.harness
+    );
+    if let Some(over) = nunki::consumption::over(&measure, bounds, nunki::state::now_secs()) {
+        println!(
+            "          past its threshold: nunki launches no run before {}",
+            nunki::state::rfc3339(over.until)
+        );
+    }
+}
+
+/// Start the mission's monitor when it has something to watch or wait for
+/// (SPEC 4.3). The verbs that launch, read back or resume call this, so a
+/// mission never runs unwatched for want of a terminal. `HQ_NO_MONITOR` in
+/// the environment turns it off, for a human who drives by hand.
+fn start_monitor(project: &Project, id: &str) {
+    if std::env::var_os("HQ_NO_MONITOR").is_some() {
+        return;
+    }
+    let Ok(state) = nunki::state::Store::open(&project.hq_root).and_then(|s| s.load(id)) else {
+        return;
+    };
+    if !nunki::monitor::wanted(project, &state, nunki::state::now_secs()) {
+        return;
+    }
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(e) => {
+            eprintln!("nunki: the mission's monitor could not start: {e}");
+            return;
+        }
+    };
+    match nunki::monitor::ensure(project, id, &exe) {
+        Ok(ensured) => {
+            for line in nunki::monitor::ensured_said(&project.hq_root, id, ensured) {
+                println!("{line}");
+            }
+        }
+        Err(e) => eprintln!("nunki: the mission's monitor could not start: {e}"),
+    }
+}
+
+fn print_monitor(project: &Project, id: &str) {
+    match nunki::monitor::running(&project.hq_root, id) {
+        Some(pid) => println!(
+            "monitor   watching (pid {pid}) — log: {}",
+            nunki::monitor::logfile(&project.hq_root, id).display()
+        ),
+        None => println!("monitor   none watching"),
+    }
+}
+
+fn print_gates(report: &nunki::gate::Report) {
+    for outcome in &report.outcomes {
+        let (mark, detail) = match &outcome.decision {
+            nunki::gate::Decision::Passed => ("pass", String::new()),
+            nunki::gate::Decision::Failed(why) => {
+                ("FAIL", format!(" — {}", nunki::text::printable(why)))
+            }
+            // Said, never folded into a pass: a skipped gate reported as
+            // green is how a report stops being worth reading (SPEC 4.4,
+            // the per-role table).
+            nunki::gate::Decision::NotApplicable(why) => {
+                ("n/a ", format!(" — {}", nunki::text::printable(why)))
+            }
+            // Neither green nor red: nobody managed to play it.
+            nunki::gate::Decision::Unplayed(why) => {
+                ("????", format!(" — {}", nunki::text::printable(why)))
+            }
+        };
+        println!(
+            "gate {}    {mark}  {}{detail}",
+            outcome.gate.number(),
+            outcome.gate.title()
+        );
+        // What a green gate still owes the reader.
+        if let Some(note) = &outcome.note {
+            println!("          note  {}", nunki::text::printable(note));
+        }
+    }
+}
+
+/// The harness as it must be addressed for a run that lives in a slot's
+/// container: through the engine, because the pid `nunki` holds is inside it.
+fn harness_for(
+    project: &Project,
+    slot: &str,
+    session: Option<&str>,
+) -> nunki::harness::claude_code::ClaudeCode {
+    let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+        std::sync::Arc::new(nunki::engine::docker::Docker::real());
+    let file = nunki::run::profile_path(project, slot);
+    // The nunki session's, not the `session` above — that one is the
+    // harness run's.
+    let compose_project = nunki::compose::project_name(&project.session(), slot)
+        .unwrap_or_else(|_| format!("nunki-{}-{slot}", project.session()));
+    let mut spawner = nunki::engine::spawn::ContainerSpawner::new(
+        engine,
+        file,
+        &compose_project,
+        nunki::compose::AGENT_SERVICE,
+    );
+    if let Some(session) = session {
+        spawner = spawner.identified_by(session);
+    }
+    nunki::harness::claude_code::ClaudeCode::new(Default::default(), Box::new(spawner))
+}
+
+/// `nunki mutants` (SPEC 4.4, the campaigns outside missions).
+fn mutants_outside_missions(
+    project: &nunki::project::Project,
+    command: MutantsCommand,
+) -> ExitCode {
+    let engine: std::sync::Arc<dyn nunki::engine::Engine> =
+        std::sync::Arc::new(nunki::engine::docker::Docker::real());
+    match command {
+        MutantsCommand::Run {
+            slot,
+            whole,
+            owed,
+            base,
+            minutes,
+        } => {
+            let stack = project
+                .config
+                .stacks
+                .first()
+                .map(|s| s.name.clone())
+                .unwrap_or_else(|| "rust".to_string());
+            let asked = nunki::offmission::Asked {
+                base: &base,
+                form: if whole {
+                    nunki::offmission::Form::Whole
+                } else if owed {
+                    nunki::offmission::Form::Owed
+                } else {
+                    nunki::offmission::Form::SinceLast
+                },
+                minutes,
+            };
+            let slot = match nunki::slot::find(project, &slot) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            match nunki::offmission::run(project, &slot, engine, &stack, &asked) {
+                Ok(started) => {
+                    let on = match (&started.since, &started.owed) {
+                        (_, Some(owing)) => format!(
+                            "{} survivor(s) of the debt, by name{}",
+                            owing.named,
+                            match (owing.left, &owing.why) {
+                                (0, _) => String::new(),
+                                (left, Some(why)) => {
+                                    format!(", {left} left — {why}")
+                                }
+                                (left, None) => format!(
+                                    ", {left} left beyond what one campaign is handed: run it \
+                                     again once it is read back"
+                                ),
+                            }
+                        ),
+                        (None, None) => "the whole code".to_string(),
+                        (Some(since), None) => format!(
+                            "the files changed since {}, each whole",
+                            since.chars().take(12).collect::<String>()
+                        ),
+                    };
+                    println!(
+                        "campaign  started in slot {} on {} at {}: {on}, {} path(s), deadline \
+                         {} minutes",
+                        started.slot,
+                        started.base,
+                        started.commit.chars().take(12).collect::<String>(),
+                        started.paths,
+                        started.minutes
+                    );
+                    println!(
+                        "          `nunki mutants status` reads it back; asking it starts nothing"
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        MutantsCommand::Status { slot } => {
+            let slots = match slot {
+                Some(name) => match nunki::slot::find(project, &name) {
+                    Ok(s) => vec![s],
+                    Err(e) => {
+                        eprintln!("nunki: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                },
+                None => nunki::slot::list(project),
+            };
+            let mut failed = false;
+            for slot in &slots {
+                match nunki::mutants::read_running(&project.hq_root, &slot.name) {
+                    Ok(Some(running)) if running.off_mission.is_some() => {
+                        match nunki::mutants::read_back_off_mission(project, slot, engine.clone()) {
+                            Ok(Some(progress)) => println!(
+                                "{:<10}{}",
+                                slot.name,
+                                nunki::monitor::campaign_line(&progress)
+                            ),
+                            Ok(None) => {}
+                            Err(e) => {
+                                eprintln!("nunki: slot {}: {e}", slot.name);
+                                failed = true;
+                            }
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        eprintln!("nunki: slot {}: {e}", slot.name);
+                        failed = true;
+                    }
+                }
+            }
+            match nunki::offmission::read_debt(&project.hq_root) {
+                Ok(debt) => println!("debt      {}", nunki::offmission::debt_said(&debt)),
+                Err(e) => {
+                    eprintln!("nunki: {e}");
+                    failed = true;
+                }
+            }
+            if failed {
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+        MutantsCommand::Debt {
+            equivalent,
+            because,
+            ratify,
+            all,
+        } => debt(project, equivalent, because, ratify, all),
+    }
+}
+
+/// `nunki mutants debt`: the listing, or one of the HQ's rulings on it.
+fn debt(
+    project: &nunki::project::Project,
+    equivalent: Option<String>,
+    because: Option<String>,
+    ratify: Option<Option<String>>,
+    all: bool,
+) -> ExitCode {
+    let failed = |e: nunki::offmission::OffMissionError| {
+        eprintln!("nunki: {e}");
+        ExitCode::FAILURE
+    };
+    match (equivalent, ratify) {
+        (Some(survivor), _) => {
+            let why = because.unwrap_or_default();
+            match nunki::offmission::rule_equivalent(project, &survivor, &why) {
+                Ok(()) => {
+                    println!(
+                        "{} ruled equivalent in the registry, and settled — {}",
+                        nunki::text::name(&survivor),
+                        nunki::text::one_line(&why)
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => failed(e),
+            }
+        }
+        (None, Some(Some(_))) if all => {
+            eprintln!("nunki: --ratify --all names no survivor: it takes every one");
+            ExitCode::FAILURE
+        }
+        (None, Some(Some(survivor))) => match nunki::offmission::ratify(project, &survivor) {
+            Ok(why) => {
+                println!(
+                    "{} ruled equivalent in the registry, and settled — {}",
+                    nunki::text::name(&survivor),
+                    nunki::text::one_line(&why)
+                );
+                ExitCode::SUCCESS
+            }
+            Err(e) => failed(e),
+        },
+        (None, Some(None)) if !all => {
+            eprintln!(
+                "nunki: --ratify names a survivor of the debt, or takes --all for every proposal"
+            );
+            ExitCode::FAILURE
+        }
+        (None, Some(None)) => {
+            let listed = match nunki::offmission::pending(project) {
+                Ok(listed) => listed,
+                Err(e) => return failed(e),
+            };
+            if listed.is_empty() {
+                println!("the registry proposes nothing on the debt");
+                return ExitCode::SUCCESS;
+            }
+            println!("ratifying {} proposal(s):", listed.len());
+            for p in &listed {
+                println!("          {}", proposal_line(p));
+            }
+            match nunki::offmission::ratify_all(project, &listed) {
+                Ok(done) => {
+                    for (id, p) in done.iter().zip(&listed) {
+                        println!(
+                            "{} ruled equivalent in the registry, and settled — {}",
+                            nunki::text::name(id),
+                            nunki::text::one_line(&p.why)
+                        );
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => failed(e),
+            }
+        }
+        (None, None) => match nunki::offmission::read_debt(&project.hq_root) {
+            Ok(debt) => {
+                let registry = nunki::equivalences::read(&project.hq_root);
+                if let Err(e) = &registry {
+                    println!("registry  could not be read: {e}");
+                }
+                println!(
+                    "{}",
+                    nunki::offmission::listing(&debt, registry.as_ref().ok())
+                );
+                if !debt.owed.is_empty() {
+                    println!(
+                        "          `nunki mutants debt --equivalent <survivor> --because <why>` \
+                         rules one in the registry; `--ratify <survivor>` (or `--ratify --all`) \
+                         ratifies the registry's proposals"
+                    );
+                }
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("nunki: {e}");
+                ExitCode::FAILURE
+            }
+        },
+    }
+}

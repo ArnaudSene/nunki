@@ -1,0 +1,1140 @@
+//! `nunki check` — does this project hold what SPEC describes? (SPEC 4.2.)
+//!
+//! Two rules shape it. It is **red** when a restriction is not held, not
+//! when something is merely absent. And it **says what it could not check**:
+//! a check that quietly skips is worse than no check, because it reads as a
+//! pass. Everything in [`run`] is a function of the project on disk, and its
+//! one write is a slot's host mirror brought up to date
+//! ([`host_runs_no_git_in_slots`]); probing containers is the caller's, and so is asking the forge
+//! ([`forge_protection`]), the one check here that talks to the network.
+
+use std::collections::BTreeMap;
+use std::path::Path;
+
+use crate::harness::Role;
+use crate::perimeter::{PerimeterError, Sources, compute};
+use crate::project::Project;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Verdict {
+    /// Held, with what was found.
+    Green(String),
+    /// Not held. The text says what to do about it.
+    Red(String),
+    /// Could not be established, and why. Never counted as a pass.
+    NotChecked(String),
+    /// Held, but drifting toward a state that will cost: something to look
+    /// at, with what to do. Not red — nothing is breached — and never
+    /// counted as green either.
+    Amber(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Check {
+    pub what: String,
+    pub verdict: Verdict,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Report {
+    pub checks: Vec<Check>,
+}
+
+impl Report {
+    fn add(&mut self, what: impl Into<String>, verdict: Verdict) {
+        self.checks.push(Check {
+            what: what.into(),
+            verdict,
+        });
+    }
+
+    pub fn is_red(&self) -> bool {
+        self.checks
+            .iter()
+            .any(|c| matches!(c.verdict, Verdict::Red(_)))
+    }
+
+    pub fn unchecked(&self) -> usize {
+        self.checks
+            .iter()
+            .filter(|c| matches!(c.verdict, Verdict::NotChecked(_)))
+            .count()
+    }
+
+    /// One line per check, then a summary that never calls an unchecked
+    /// thing a pass.
+    pub fn render(&self) -> String {
+        let mut out = String::new();
+        for check in &self.checks {
+            let (mark, detail) = match &check.verdict {
+                Verdict::Green(d) => ("ok  ", d),
+                Verdict::Red(d) => ("RED ", d),
+                Verdict::NotChecked(d) => ("--  ", d),
+                Verdict::Amber(d) => ("!!  ", d),
+            };
+            out.push_str(&format!("{mark}{}\n      {detail}\n", check.what));
+        }
+        let red = self
+            .checks
+            .iter()
+            .filter(|c| matches!(c.verdict, Verdict::Red(_)))
+            .count();
+        let unchecked = self.unchecked();
+        let amber = self
+            .checks
+            .iter()
+            .filter(|c| matches!(c.verdict, Verdict::Amber(_)))
+            .count();
+        out.push('\n');
+        out.push_str(&match (red, unchecked) {
+            (0, 0) => "everything checked is held.".to_string(),
+            (0, n) => format!("everything checked is held; {n} could not be checked."),
+            (r, 0) => format!("{r} restriction(s) not held."),
+            (r, n) => format!("{r} restriction(s) not held; {n} could not be checked."),
+        });
+        if amber > 0 {
+            out.push_str(&format!(" {amber} to look at (!!)."));
+        }
+        out.push('\n');
+        out
+    }
+}
+
+/// Everything that can be established from the project on disk.
+pub fn run(project: &Project) -> Report {
+    let mut report = Report::default();
+    git_repository(project, &mut report);
+    shareable_path(project, &mut report);
+    case_collisions(project, &mut report);
+    line_endings(project, &mut report);
+    hq_exists(project, &mut report);
+    known_harness(project, &mut report);
+    rules_are_reachable(project, &mut report);
+    harness_can_authenticate(project, &mut report);
+    somebody_to_hand_back_to(project, &mut report);
+    credentials_outside_the_tree(project, &mut report);
+    coder_perimeter(project, &mut report);
+    stack_versions(project, &mut report);
+    fragments_follow(project, &mut report);
+    advisory_databases(project, &mut report);
+    host_runs_no_git_in_slots(project, &mut report);
+    report
+}
+
+/// Whether each advisory database a stack declares is on this machine
+/// (SPEC 4.4, gate 8).
+///
+/// Red when it is not: gate 8 cannot look without it, and a mission started
+/// anyway meets that wall at the end of its first run, after the hours the
+/// run took. The sentence repeats the stack's own command, so `nunki` names
+/// no tool. Never created here: a directory `nunki` made would be an empty
+/// database, which the tool reads as "nothing to report".
+fn advisory_databases(project: &Project, report: &mut Report) {
+    for stack in &project.config.stacks {
+        let Some(at) = project.stack_advisories(&stack.name) else {
+            continue;
+        };
+        let verdict = if at.is_dir() {
+            Verdict::Green(format!("{} is there", at.display()))
+        } else {
+            Verdict::Red(format!(
+                "no advisory database at {}: gate 8 cannot look without it. {}",
+                at.display(),
+                project.how_to_fill_advisories(&stack.name)
+            ))
+        };
+        report.add(
+            format!("the {} advisory database is on this machine", stack.name),
+            verdict,
+        );
+    }
+}
+
+/// Whether each stack's fragment is today's (SPEC 4.2, "les fragments suivent
+/// nunki").
+///
+/// Red for what `nunki init --refresh` can fix — a file an older nunki wrote
+/// and nobody touched, one missing — and for CRLF endings, which a human
+/// converts. A file the project rewrote is the project's: said, never red, or
+/// a deliberate rewrite would be a red nobody can clear.
+fn fragments_follow(project: &Project, report: &mut Report) {
+    for stack in &project.config.stacks {
+        let files = crate::init::fragment(&stack.name);
+        if files.is_empty() {
+            continue;
+        }
+        let dir = project.fragment(&stack.name);
+        let what = format!("the {} fragment is today's", stack.name);
+        let (mut older, mut absent, mut crlf, mut own) = (vec![], vec![], vec![], vec![]);
+        for (name, body, _) in &files {
+            match crate::init::kept(&stack.name, name, &dir.join(name), body) {
+                crate::init::Kept::Current => {}
+                crate::init::Kept::Older => older.push(*name),
+                crate::init::Kept::Absent => absent.push(*name),
+                crate::init::Kept::LineEndings => crlf.push(*name),
+                crate::init::Kept::Edited => own.push(*name),
+            }
+        }
+        let mut red = Vec::new();
+        if !older.is_empty() {
+            red.push(format!(
+                "{} {} an older nunki's, untouched — `nunki init --refresh` replaces them",
+                older.join(", "),
+                if older.len() == 1 { "is" } else { "are" }
+            ));
+        }
+        if !absent.is_empty() {
+            red.push(format!(
+                "{} {} missing — `nunki init` writes them",
+                absent.join(", "),
+                if absent.len() == 1 { "is" } else { "are" }
+            ));
+        }
+        if !crlf.is_empty() {
+            red.push(format!(
+                "{} {} CRLF line endings — a script ending in `\\r` does not run; \
+                 convert them to LF",
+                crlf.join(", "),
+                if crlf.len() == 1 { "has" } else { "have" }
+            ));
+        }
+        let said = if own.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "{} {} the project's own, kept; today's version lies beside each as \
+                 <file>{} once `nunki init` has run",
+                own.join(", "),
+                if own.len() == 1 { "is" } else { "are" },
+                crate::init::SUGGESTION
+            )
+        };
+        let verdict = if red.is_empty() {
+            Verdict::Green(if said.is_empty() {
+                format!("{}: every file is today's", dir.display())
+            } else {
+                said
+            })
+        } else {
+            Verdict::Red(
+                red.into_iter()
+                    .chain((!said.is_empty()).then_some(said))
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            )
+        };
+        report.add(what, verdict);
+    }
+}
+
+/// Whether each stack's fragment can read the versions the repository pins
+/// into its image (SPEC 4.2, `versions.txt`), and what it reads today.
+///
+/// Red when `versions.txt` names an argument the Dockerfile does not declare:
+/// the engine would drop it and the image keep its default, which is the
+/// failure the file exists to prevent — and `nunki slot rebuild` refuses it.
+fn stack_versions(project: &Project, report: &mut Report) {
+    let stacks = &project.config.stacks;
+    for stack in stacks {
+        let name = &stack.name;
+        let what = format!("the {name} image follows the versions the repository pins");
+        let sources = match project.stack_versions(name) {
+            Ok(s) => s,
+            Err(e) => {
+                report.add(what, Verdict::Red(e.to_string()));
+                continue;
+            }
+        };
+        if sources.is_empty() {
+            report.add(
+                what,
+                Verdict::NotChecked(format!(
+                    "the fragment has no {}, so the image keeps its Dockerfile's defaults \
+                     whatever the repository pins; `nunki init --stack {name}` writes it",
+                    crate::versions::FILE
+                )),
+            );
+            continue;
+        }
+        // What this stack puts into the image: its own Dockerfile when it is
+        // the primary, its add-on onto the primary's otherwise (SPEC 4.2,
+        // "plusieurs stacks"). Its versions are read against that, and in its
+        // own directory.
+        let text = match crate::image::contribution(project, stacks, stack) {
+            Ok(t) => t,
+            Err(e) => {
+                report.add(what, Verdict::Red(e.to_string()));
+                continue;
+            }
+        };
+        let missing = crate::versions::undeclared(&sources, &text);
+        if !missing.is_empty() {
+            let file = if stack == &stacks[0] {
+                "Dockerfile"
+            } else {
+                crate::project::ADDON_FILE
+            };
+            report.add(
+                what,
+                Verdict::Red(format!(
+                    "{} declares no {}, which {} reads: the image would keep its default. \
+                     The fragment predates it — `nunki init --refresh` replaces {file} if \
+                     nobody edited it; otherwise carry your edits into today's version, \
+                     beside it as {file}.nunki",
+                    project.fragment(name).join(file).display(),
+                    missing.join(", "),
+                    crate::versions::FILE
+                )),
+            );
+            continue;
+        }
+        let pins = crate::versions::resolve(&project.stack_tree(&project.root, name), &sources);
+        let said: Vec<String> = pins
+            .iter()
+            .map(|p| match p {
+                crate::versions::Pin::Found { arg, value, from } => {
+                    format!("{arg}={value} ({from})")
+                }
+                crate::versions::Pin::Unpinned { arg, .. } => {
+                    format!("{arg} unpinned, the Dockerfile's default")
+                }
+            })
+            .collect();
+        report.add(what, Verdict::Green(said.join("; ")));
+    }
+}
+
+/// Whether the project's image still carries what the repository pins now,
+/// for every stack it carries. Asks the container engine, so it is the
+/// caller's to run, like [`forge_protection`] is for the forge.
+///
+/// One image, whatever the number of stacks: the others are added onto the
+/// primary's (SPEC 4.2, "plusieurs stacks"), and a secondary stack has no
+/// image of its own to look for.
+pub fn image_versions(project: &Project, engine: &str, report: &mut Report) {
+    let Some(primary) = project.config.stacks.first() else {
+        return;
+    };
+    let what = "the image carries what the repository pins now".to_string();
+    let reads_any = project
+        .config
+        .stacks
+        .iter()
+        .any(|s| project.stack_versions(&s.name).is_ok_and(|v| !v.is_empty()));
+    if !reads_any {
+        return;
+    }
+    let wanted = match crate::image::pinned_now(project, &project.root, &primary.name) {
+        Ok(w) => w,
+        // Already red above, with the fragment or the line at fault.
+        Err(_) => return,
+    };
+    let image = crate::image::names(project, &primary.name).agent;
+    let verdict = match crate::image::recorded(engine, &image) {
+        Err(e) => Verdict::NotChecked(e.to_string()),
+        Ok(crate::image::Recorded::Absent) => Verdict::NotChecked(format!(
+            "{image} is not built yet: `nunki slot rebuild` builds it"
+        )),
+        Ok(recorded) => match serves(&recorded, &wanted) {
+            Ok(()) => Verdict::Green(image),
+            Err(drift) => Verdict::Red(format!(
+                "{}; `nunki slot rebuild` builds it again",
+                drift.join("; ")
+            )),
+        },
+    };
+    report.add(what, verdict);
+    image_dockerfile(project, engine, &primary.name, report);
+}
+
+/// Whether the image was built from the Dockerfile as it stands now — the
+/// stacks' templates, their add-ons, the project's own steps. A template
+/// refreshed or a step added since changes nothing until the image is built
+/// again, and that is said rather than discovered in a run.
+fn image_dockerfile(project: &Project, engine: &str, primary: &str, report: &mut Report) {
+    let what = "the image was built from today's Dockerfile".to_string();
+    let Ok(stacks) = crate::image::image_stacks(project, primary) else {
+        return;
+    };
+    let now = match crate::image::dockerfile(project, &stacks) {
+        Ok(text) => crate::init::sha256(text.as_bytes()),
+        Err(e) => {
+            report.add(what, Verdict::Red(e.to_string()));
+            return;
+        }
+    };
+    let image = crate::image::names(project, primary).agent;
+    let verdict = match crate::image::recorded(engine, &image) {
+        Err(e) => Verdict::NotChecked(e.to_string()),
+        Ok(crate::image::Recorded::Pinned {
+            dockerfile: Some(built),
+            ..
+        }) => match dockerfile_drift(&built, &now) {
+            None => Verdict::Green(image),
+            Some(why) => Verdict::Red(why),
+        },
+        Ok(_) => Verdict::NotChecked(format!(
+            "{image} does not record the Dockerfile it was built from: `nunki slot rebuild` \
+             records it"
+        )),
+    };
+    report.add(what, verdict);
+}
+
+/// Why an image built from the Dockerfile hashed `built` does not serve the
+/// one hashed `now`, or `None` when it does.
+pub fn dockerfile_drift(built: &str, now: &str) -> Option<String> {
+    (built != now).then(|| {
+        "the Dockerfile changed since the image was built — a template refreshed, an \
+         add-on or a project step edited; `nunki slot rebuild` builds it again"
+            .to_string()
+    })
+}
+
+/// Whether an image built with `recorded` serves a repository pinning
+/// `wanted`, or every argument that moved. An image that recorded nothing
+/// serves only a repository that pins nothing: what it carries is unknown.
+pub fn serves(
+    recorded: &crate::image::Recorded,
+    wanted: &BTreeMap<String, String>,
+) -> Result<(), Vec<String>> {
+    let built = match recorded {
+        crate::image::Recorded::Pinned { versions, .. } => versions.clone(),
+        crate::image::Recorded::Absent | crate::image::Recorded::Unrecorded => {
+            if wanted.is_empty() {
+                return Ok(());
+            }
+            return Err(vec![
+                "the image was built before nunki recorded versions, so what it carries \
+                 is unknown"
+                    .to_string(),
+            ]);
+        }
+    };
+    let drift = crate::versions::drift(&built, wanted);
+    if drift.is_empty() { Ok(()) } else { Err(drift) }
+}
+
+/// The line SPEC 3.1 asks of every slot: the host runs no git inside it.
+///
+/// Green when every slot is read through its host mirror
+/// ([`crate::git::SlotGit`]) — which this brings up to date, the one thing
+/// it writes, and only in the mirror. Amber, naming the slot, for a slot the
+/// host cannot read, for a slot whose `HEAD` holds a gitlink (refused by
+/// every work-tree git, [`crate::git::GitError::Gitlink`]), and for a slot
+/// whose `.git/config` carries a key git would execute: nothing was run, which is why it is not red, and an agent
+/// planted it, which is why it is said. The keys are named
+/// ([`crate::git::executable_keys`]); the protection never depended on
+/// that list.
+pub fn host_runs_no_git_in_slots(project: &Project, report: &mut Report) {
+    let what = "the host runs no git inside a slot";
+    let slots = crate::slot::list(project);
+    if slots.is_empty() {
+        report.add(
+            what,
+            Verdict::Green("no slot yet; every one is read through a host mirror".into()),
+        );
+        return;
+    }
+    let mut said = Vec::new();
+    let mut read = Vec::new();
+    for slot in &slots {
+        match crate::git::SlotGit::open(&slot.tree) {
+            Ok(repo) => {
+                read.push(format!("{} at {}", slot.name, repo.mirror().display()));
+                match repo.gitlinks() {
+                    Ok(paths) if paths.is_empty() => {}
+                    Ok(paths) => said.push(format!(
+                        "slot {}'s HEAD holds a submodule (a gitlink) at {}: nunki slots do \
+                         not support submodules, and every host git that would take its tree \
+                         as work tree refuses it; nunki ran none. Its agent committed it: \
+                         read what it did, and `nunki slot rm` the slot rather than reuse it",
+                        slot.name,
+                        paths.join(", ")
+                    )),
+                    Err(e) => said.push(format!("slot {}: {e}", slot.name)),
+                }
+            }
+            Err(e) => said.push(format!("slot {}: {e}", slot.name)),
+        }
+        match crate::git::executable_keys(&slot.tree) {
+            Ok(keys) if keys.is_empty() => {}
+            Ok(keys) => said.push(format!(
+                "slot {}'s .git/config carries {}, which git would execute; nunki ran \
+                 none of them, since no git on the host reads a slot's configuration. \
+                 Its agent wrote them: read what it did, and `nunki slot rm` the slot \
+                 rather than reuse it",
+                slot.name,
+                keys.join(", ")
+            )),
+            Err(e) => said.push(format!("slot {}: {e}", slot.name)),
+        }
+    }
+    report.add(
+        what,
+        if said.is_empty() {
+            Verdict::Green(format!(
+                "every slot is read through its host mirror: {}",
+                read.join("; ")
+            ))
+        } else {
+            Verdict::Amber(said.join("\n      "))
+        },
+    );
+}
+
+fn git_repository(project: &Project, report: &mut Report) {
+    let dot_git = project.root.join(".git");
+    report.add(
+        "the project is a git repository",
+        if dot_git.exists() {
+            Verdict::Green(format!("{} exists", dot_git.display()))
+        } else {
+            // A slot is a local clone with an unreachable origin (SPEC 3.2);
+            // without git there is nothing to clone and no branch to gate.
+            Verdict::Red(format!("no {} — a slot is a clone", dot_git.display()))
+        },
+    );
+}
+
+fn shareable_path(project: &Project, report: &mut Report) {
+    // Resolved first: what the engine shares is the real path, and on macOS
+    // `/var/...` and `/tmp/...` are both symlinks into `/private`. Judging
+    // the unresolved path would refuse directories that work.
+    let path = std::fs::canonicalize(&project.root)
+        .unwrap_or_else(|_| project.root.clone())
+        .display()
+        .to_string();
+    let verdict = if path.starts_with("/mnt/") {
+        // SPEC 4.2 bis: `/mnt/c` under WSL is very slow and carries no unix
+        // permissions, so git refuses the tree from inside a container.
+        Verdict::Red(format!(
+            "{path} is on a Windows drive mounted in WSL: slow, and without \
+             the permissions git needs from inside a container"
+        ))
+    } else if cfg!(target_os = "macos") {
+        const SHARED: [&str; 4] = ["/Users/", "/Volumes/", "/private/", "/tmp/"];
+        if SHARED.iter().any(|p| path.starts_with(p)) {
+            Verdict::Green(format!("{path} is under a directory the engine shares"))
+        } else {
+            Verdict::Red(format!(
+                "{path} is outside what a container engine shares by default \
+                 ({})",
+                SHARED.join(", ")
+            ))
+        }
+    } else {
+        Verdict::Green(format!("{path} is a native path"))
+    };
+    report.add("the tree is on a path a container can mount", verdict);
+}
+
+fn case_collisions(project: &Project, report: &mut Report) {
+    let mut paths = Vec::new();
+    walk(&project.root, &mut |path| {
+        paths.push(path.display().to_string())
+    });
+    let clashes = collisions(&paths);
+    report.add(
+        "no two paths differ only by case",
+        if clashes.is_empty() {
+            Verdict::Green(format!("{} paths, no collision", paths.len()))
+        } else {
+            Verdict::Red(clashes.join("; "))
+        },
+    );
+}
+
+/// Paths that differ only by case (SPEC 4.2 bis): APFS is case-insensitive by
+/// default and ext4 is not, so a pair created on Linux survives a commit and
+/// then collides — inside the container, or on the next clone to a Mac.
+///
+/// Separate from the walk on purpose: on a case-insensitive filesystem such a
+/// pair cannot be created, so the only way to test this is to hand it the
+/// names.
+pub fn collisions(paths: &[String]) -> Vec<String> {
+    let mut seen: BTreeMap<String, &String> = BTreeMap::new();
+    let mut clashes = Vec::new();
+    for path in paths {
+        let key = path.to_lowercase();
+        match seen.get(&key) {
+            Some(first) if *first != path => clashes.push(format!("{first} and {path}")),
+            _ => {
+                seen.insert(key, path);
+            }
+        }
+    }
+    clashes
+}
+
+fn line_endings(project: &Project, report: &mut Report) {
+    let file = project.root.join(".gitattributes");
+    let verdict = match std::fs::read_to_string(&file) {
+        Ok(text) if text.contains("eol=lf") => Verdict::Green(".gitattributes pins LF".to_string()),
+        Ok(_) => Verdict::Red(format!(
+            "{} exists but does not pin `eol=lf`, so an editor on Windows \
+             can commit CRLF",
+            file.display()
+        )),
+        Err(_) => Verdict::NotChecked(format!(
+            "no {} — line endings depend on each machine's git configuration",
+            file.display()
+        )),
+    };
+    report.add("line endings are pinned", verdict);
+}
+
+fn hq_exists(project: &Project, report: &mut Report) {
+    report.add(
+        "the project's HQ exists",
+        if project.hq_root.is_dir() {
+            Verdict::Green(project.hq_root.display().to_string())
+        } else {
+            Verdict::Red(format!(
+                "{} is missing — state, missions and the journal live there",
+                project.hq_root.display()
+            ))
+        },
+    );
+}
+
+fn known_harness(project: &Project, report: &mut Report) {
+    const KNOWN: [&str; 1] = ["claude-code"];
+    let harness = &project.config.harness;
+    report.add(
+        "the declared harness has an adapter",
+        if KNOWN.contains(&harness.as_str()) {
+            Verdict::Green(harness.clone())
+        } else {
+            Verdict::Red(format!(
+                "{harness:?} has no adapter; known: {}",
+                KNOWN.join(", ")
+            ))
+        },
+    );
+}
+
+/// The files Claude Code reads in place of `AGENTS.md` when one of them
+/// stands at the root of the tree it works in. The last is personal and kept
+/// out of the history by convention, so it counts only when it is committed:
+/// a slot is a clone, and an uncommitted one never reaches an agent.
+const CLAUDE_FILES: [&str; 3] = ["CLAUDE.md", ".claude/CLAUDE.md", CLAUDE_LOCAL];
+const CLAUDE_LOCAL: &str = "CLAUDE.local.md";
+
+/// The project's rules, `AGENTS.md`, have to reach the harness that is
+/// driving (SPEC 4.1). Claude Code reads `AGENTS.md` on its own, but only
+/// where no `CLAUDE.md` stands in front of it: where one does, it is read in
+/// place of `AGENTS.md`, which then loads only if one of them imports it or
+/// is a link to it. Red for that case alone, because a mission would start
+/// with the project's rules unread.
+///
+/// No `AGENTS.md` is not red: the project then states no rules of its own,
+/// and what `nunki` asks of its agents reaches them in their role prompt.
+fn rules_are_reachable(project: &Project, report: &mut Report) {
+    report.add(
+        "the rules of the place reach the harness",
+        rules_verdict(project),
+    );
+}
+
+fn rules_verdict(project: &Project) -> Verdict {
+    let agents = project.root.join("AGENTS.md");
+    if !agents.is_file() {
+        return Verdict::Green(format!(
+            "no {} — the project states no rules of its own, and nunki's reach its agents \
+             in their role prompt",
+            agents.display()
+        ));
+    }
+    let mut in_front = Vec::new();
+    for name in CLAUDE_FILES {
+        let path = project.root.join(name);
+        if path.symlink_metadata().is_err() {
+            continue;
+        }
+        if name == CLAUDE_LOCAL {
+            match crate::git::run(&project.root, &["ls-files", "--", name]) {
+                Ok(listed) if listed.is_empty() => continue,
+                Ok(_) => {}
+                Err(e) => {
+                    return Verdict::NotChecked(format!(
+                        "whether git tracks {} could not be read: {e}",
+                        path.display()
+                    ));
+                }
+            }
+        }
+        if path.is_symlink()
+            && std::fs::canonicalize(&path).ok() == std::fs::canonicalize(&agents).ok()
+        {
+            return Verdict::Green(format!("{} is a link to AGENTS.md", path.display()));
+        }
+        match std::fs::read_to_string(&path) {
+            Ok(text) if text.contains("AGENTS.md") => {
+                return Verdict::Green(format!("{} imports AGENTS.md", path.display()));
+            }
+            Ok(_) => in_front.push(path),
+            Err(e) => {
+                return Verdict::NotChecked(format!("{} could not be read: {e}", path.display()));
+            }
+        }
+    }
+    match in_front.as_slice() {
+        [] => Verdict::Green(format!(
+            "no CLAUDE.md in front of it: Claude Code reads {} directly",
+            agents.display()
+        )),
+        [one] => Verdict::Red(format!(
+            "{} does not import AGENTS.md, and Claude Code reads it in place of AGENTS.md, so \
+             the project's rules never load — add `@AGENTS.md` to it",
+            one.display()
+        )),
+        [first, ..] => Verdict::Red(format!(
+            "{} stand in front of AGENTS.md and none imports it: Claude Code reads them in its \
+             place, so the project's rules never load — add `@AGENTS.md` to {}",
+            in_front
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
+            first.display()
+        )),
+    }
+}
+
+/// Which account this project's missions spend, and whether it can actually
+/// pay (SPEC 4.3). A human may hold several subscriptions — two Anthropic
+/// ones, an OpenAI one — so the question is not "is there a token" but "is
+/// the named account usable by this project".
+fn harness_can_authenticate(project: &Project, report: &mut Report) {
+    use crate::account::{Accounts, setup_command};
+
+    let what = "the account this project spends can authenticate";
+    let nunki_home = project.nunki_home();
+    let accounts = match Accounts::load(&nunki_home) {
+        Ok(a) => a,
+        Err(e) => {
+            report.add(what, Verdict::Red(e.to_string()));
+            return;
+        }
+    };
+    let (name, account) =
+        match accounts.choose(&nunki_home, None, project.config.account.as_deref()) {
+            Ok(pair) => pair,
+            // Nothing named and nothing to guess from: something to do, not
+            // something broken.
+            Err(e) => {
+                report.add(what, Verdict::NotChecked(e.to_string()));
+                return;
+            }
+        };
+
+    if account.harness != project.config.harness {
+        report.add(
+            what,
+            Verdict::Red(format!(
+                "account {name:?} authenticates {}, but this project runs {}",
+                account.harness, project.config.harness
+            )),
+        );
+        return;
+    }
+
+    let path = account.token_path(&nunki_home);
+    if path.starts_with(&project.root) {
+        // A token in the tree is a token in every slot and every container.
+        report.add(
+            what,
+            Verdict::Red(format!(
+                "{} is inside the repository, so every slot and every container \
+                 would carry it",
+                path.display()
+            )),
+        );
+        return;
+    }
+    match account.token(&nunki_home, &name) {
+        Err(_) => report.add(
+            what,
+            Verdict::NotChecked(format!(
+                "account {name:?} has no token at {} — put the output of `{}` there",
+                path.display(),
+                setup_command(&account.harness)
+            )),
+        ),
+        Ok(_) => {
+            // A secret others can read is a secret.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(&path)
+                    .map(|m| m.permissions().mode())
+                    .unwrap_or(0);
+                if mode & 0o077 != 0 {
+                    report.add(
+                        what,
+                        Verdict::Red(format!(
+                            "{} is readable by others ({:o}) — `chmod 600` it",
+                            path.display(),
+                            mode & 0o777
+                        )),
+                    );
+                    return;
+                }
+            }
+            report.add(what, Verdict::Green(format!("{name} ({})", path.display())));
+        }
+    }
+}
+
+/// A mission ends by giving something back to a person (SPEC 4.5). "Waiting
+/// on the human" is enough while there is one; it stops being enough the
+/// moment a second person works on the project, and an arbitration for
+/// Alice is not an arbitration for Bob.
+fn somebody_to_hand_back_to(project: &Project, report: &mut Report) {
+    use crate::human::{ME_FILE, Source, me};
+
+    let who = me(&project.nunki_home(), Some(&project.root));
+    let what = "nunki knows who to hand a mission back to";
+    let verdict = match (&who.name, &who.source) {
+        (Some(name), Source::Declared(path)) => {
+            Verdict::Green(format!("{name}, from {}", path.display()))
+        }
+        (Some(name), Source::Git) => Verdict::Green(format!("{name}, from git")),
+        // The human said who they are, and it cannot be read: nunki names
+        // nobody rather than somebody else, and says why.
+        (_, Source::Unreadable { .. }) => Verdict::Red(format!(
+            "{}; nunki names nobody until it reads",
+            who.source.describe()
+        )),
+        // A machine account name is a guess, not a statement — usable, and
+        // said to be a guess.
+        (Some(name), _) => Verdict::NotChecked(format!(
+            "{name} is the machine's account name, not something you said; \
+             write {} to be addressed properly",
+            project.nunki_home().join(ME_FILE).display()
+        )),
+        (None, _) => Verdict::NotChecked(format!(
+            "nothing says who you are; write {}",
+            project.nunki_home().join(ME_FILE).display()
+        )),
+    };
+    report.add(what, verdict);
+}
+
+fn credentials_outside_the_tree(project: &Project, report: &mut Report) {
+    let Some(dir) = &project.config.credentials else {
+        report.add(
+            "test credentials live outside the tree",
+            Verdict::Green("none declared".to_string()),
+        );
+        return;
+    };
+    let inside = dir.starts_with(&project.root);
+    report.add(
+        "test credentials live outside the tree",
+        if inside {
+            // The coder's profile mounts no credentials at all (SPEC 4.1); a
+            // credentials directory inside the tree would be mounted with it.
+            Verdict::Red(format!(
+                "{} is inside the repository, so the coder would read it \
+                 through the tree mount",
+                dir.display()
+            ))
+        } else {
+            Verdict::Green(dir.display().to_string())
+        },
+    );
+}
+
+fn coder_perimeter(project: &Project, report: &mut Report) {
+    let harness_domains = crate::harness::claude_code::ClaudeCode::new(
+        Default::default(),
+        Box::new(crate::harness::spawn::LocalSpawner),
+    );
+    let harness_domains = {
+        use crate::harness::Harness;
+        harness_domains.provision().domains
+    };
+
+    if project.config.stacks.is_empty() {
+        report.add(
+            "the coder's allowlist names no forge domain",
+            Verdict::NotChecked("no stack declared in nunki.yaml".to_string()),
+        );
+        return;
+    }
+
+    for stack in project.config.stacks.iter().map(|s| &s.name) {
+        let what = format!("the coder's allowlist for {stack} names no forge domain");
+        let Some(domains) = project.stack_domains(stack) else {
+            report.add(
+                what,
+                Verdict::NotChecked(format!(
+                    "{} has no allow.txt",
+                    project.fragment(stack).display()
+                )),
+            );
+            continue;
+        };
+        let verdict = match compute(
+            Role::Coder,
+            &Sources {
+                stack: &domains,
+                harness: &harness_domains,
+                services: &[],
+                forge: &project.config.forge,
+            },
+        ) {
+            Ok(perimeter) => Verdict::Green(format!(
+                "{} domain(s), none of them the forge",
+                perimeter.domains.len()
+            )),
+            Err(e @ PerimeterError::Forge { .. }) => Verdict::Red(e.to_string()),
+            Err(e) => Verdict::Red(e.to_string()),
+        };
+        report.add(what, verdict);
+    }
+}
+
+/// Everything under `root`, skipping what no container ever mounts.
+fn walk(root: &Path, visit: &mut impl FnMut(&Path)) {
+    const SKIP: [&str; 4] = [".git", "target", "node_modules", ".venv"];
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        if SKIP.iter().any(|s| name == *s) {
+            continue;
+        }
+        visit(&path);
+        if path.is_dir() {
+            walk(&path, visit);
+        }
+    }
+}
+
+/// Whether each protected branch is protected **on the forge** (SPEC 4.1
+/// bis, "branche protégée"): locally nothing stops an agent committing to
+/// `main` in its clone — gate 2 sees it, and the forge is what refuses the
+/// push. When the forge would not refuse, gate 2 is the only guard left, and
+/// that is a restriction not held — unless `nunki.yaml` declares
+/// `forge_protection: by_hand`, the written decision that the human holds the
+/// rule. Then the forge is not asked, and every branch is named as held by
+/// hand: never green, since nunki cannot see a human keep a rule, and never red.
+///
+/// It asks with the human's credential at the HQ, and without one it says it
+/// did not ask. Anything the forge declines to answer is "not checked",
+/// never green and never red: a check that cannot say "I do not know" lies.
+///
+/// It runs on every `nunki check` where a credential is present — unlike the
+/// container probes, which wait for `--slot`. The asymmetry is deliberate:
+/// SPEC 4.1 bis asks for it "quand un credential de forge est présent sur
+/// l'hôte", and it costs one read per protected branch, where a probe costs
+/// a profile lifted and taken down. Without a credential it makes no network
+/// call at all.
+pub fn forge_protection(project: &Project, api: &str, report: &mut Report) {
+    use crate::forge::{Protection, TOKEN_FILE, token};
+    use crate::project::{CONFIG_FILE, ForgeProtection};
+
+    let not_checked = |report: &mut Report, why: String| {
+        for branch in &project.config.protected_branches {
+            report.add(
+                format!("{branch} is protected on the forge"),
+                Verdict::NotChecked(why.clone()),
+            );
+        }
+    };
+
+    if project.config.forge_protection == ForgeProtection::ByHand {
+        return not_checked(
+            report,
+            format!(
+                "held by hand, as {CONFIG_FILE} declares (`forge_protection: by_hand`): the forge \
+                 is not asked and would accept a push to it, so gate 2 and the human are the \
+                 guards (SPEC 4.1 bis)"
+            ),
+        );
+    }
+
+    let Ok(remote) = crate::git::run(&project.root, &["remote", "get-url", crate::push::REMOTE])
+    else {
+        return not_checked(
+            report,
+            format!(
+                "the repository has no `{}` remote, so there is no forge to ask",
+                crate::push::REMOTE
+            ),
+        );
+    };
+    let Some((forge, repo)) = crate::forge::of_remote_at(&remote, api) else {
+        return not_checked(
+            report,
+            format!(
+                "the remote is on a forge nunki has no adapter for ({}): GitHub is the one it \
+                 can ask",
+                remote.trim()
+            ),
+        );
+    };
+    let Some(token) = token(&project.nunki_home()) else {
+        return not_checked(
+            report,
+            format!(
+                "no forge credential at {} — without one nunki cannot ask the forge, and says so",
+                project.nunki_home().join(TOKEN_FILE).display()
+            ),
+        );
+    };
+
+    for branch in &project.config.protected_branches {
+        let verdict = match forge.protection(&token, &repo, branch) {
+            Ok(Protection::Protected) => Verdict::Green(format!(
+                "{} reports {branch} protected on {}/{}",
+                forge.name(),
+                repo.owner,
+                repo.name
+            )),
+            Ok(Protection::Unprotected) => Verdict::Red(format!(
+                "{} reports {branch} unprotected on {}/{}: the forge would accept a push \
+                 to it, and gate 2 is the only guard left (SPEC 4.1 bis). Protect it on the \
+                 forge — on a private GitHub repository that needs a paid plan — or, if you \
+                 hold the rule yourself, declare `forge_protection: by_hand` in {CONFIG_FILE}",
+                forge.name(),
+                repo.owner,
+                repo.name
+            )),
+            Ok(Protection::NoSuchBranch) => Verdict::NotChecked(format!(
+                "{branch} does not exist on {}/{}, so there is nothing to protect yet",
+                repo.owner, repo.name
+            )),
+            Err(e) => Verdict::NotChecked(format!("the forge did not say: {e}")),
+        };
+        report.add(format!("{branch} is protected on the forge"), verdict);
+    }
+}
+
+/// Above this many files, the campaign copy's `target/` is no longer being
+/// cleaned (SPEC 4.4, gate 7).
+///
+/// Measured on nunki's own repository, cargo-mutants 27.1.0: a cache built
+/// once for the tests holds about 11,000 files, and one campaign of 23
+/// mutants that nothing cleaned added 67,450 more — about 2,900 a mutant,
+/// mostly `.dwo` files hard-linked under new names. A full campaign of 172
+/// mutants left uncleaned would add about 500,000; the slot that prompted
+/// this held 6.8 million, with each mutant 70 s instead of 7. 250,000 is
+/// twenty times a healthy cache of this size, crossed by the first full
+/// campaign that leaves its artefacts, and far below where it hurts.
+pub const CACHE_FILES_AMBER: u64 = 250_000;
+
+/// Above this many GiB, likewise. Hard links make size the weaker signal —
+/// the 67,450 files above weighed 370 MB — so this is for what links do not
+/// explain: a copy of the tree left behind, an output nobody removes. The
+/// healthy cache above is 1.9 GB; the slot that prompted this held several
+/// hundred.
+pub const CACHE_GIB_AMBER: u64 = 50;
+
+/// What runs in the slot's agent container to measure the clean copy's
+/// cache: `none` when there is no `target/`, else its file count and its size
+/// in KiB. Read from the volume as it stands — no refresh, nothing lifted.
+pub fn cache_probe() -> String {
+    format!(
+        "d={}/target\n\
+         if [ ! -d \"$d\" ]; then echo none; exit 0; fi\n\
+         files=$(find \"$d\" -type f | wc -l | tr -d ' ')\n\
+         kib=$(du -sk \"$d\" | cut -f1)\n\
+         echo \"$files $kib\"\n",
+        crate::exec::PROOF_AT
+    )
+}
+
+/// The line `nunki check --slot` gives the campaign copy's build cache: amber
+/// past [`CACHE_FILES_AMBER`] files or [`CACHE_GIB_AMBER`] GiB, a sign that
+/// the stack's `mutation.sh` does not clean what its mutants build — an older
+/// one, or a project's own. Measured in the slot's agent container when it is
+/// up; never lifted for this, so a slot that is down is not checked.
+pub fn campaign_cache(
+    project: &Project,
+    slot: &crate::slot::Slot,
+    engine: std::sync::Arc<dyn crate::engine::Engine>,
+) -> Check {
+    let what = "the campaign copy's build cache is being cleaned".to_string();
+    let not_checked = |why: String| Check {
+        what: what.clone(),
+        verdict: Verdict::NotChecked(why),
+    };
+    let file = crate::run::profile_path(project, &slot.name);
+    if !file.is_file() {
+        return not_checked(format!(
+            "slot {} has no profile, so there is no copy to measure",
+            slot.name
+        ));
+    }
+    let compose_project = match crate::compose::project_name(&project.session(), &slot.name) {
+        Ok(p) => p,
+        Err(e) => return not_checked(e.to_string()),
+    };
+    match engine.container_of(&file, &compose_project, crate::compose::AGENT_SERVICE) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return not_checked(format!(
+                "slot {}'s profile is down, and this check does not lift it",
+                slot.name
+            ));
+        }
+        Err(e) => return not_checked(e.to_string()),
+    }
+    let said = engine.exec(
+        &file,
+        &compose_project,
+        crate::compose::AGENT_SERVICE,
+        &["sh".to_string(), "-c".to_string(), cache_probe()],
+    );
+    Check {
+        what,
+        verdict: cache_verdict(said),
+    }
+}
+
+/// What the cache's measurement says: [`cache_probe`]'s answer, judged.
+pub fn cache_verdict(
+    said: Result<crate::engine::ExecOutput, crate::engine::EngineError>,
+) -> Verdict {
+    let out = match said {
+        Ok(out) if out.ok() => out,
+        Ok(out) => {
+            return Verdict::NotChecked(format!(
+                "the measurement failed ({}): {}",
+                out.status,
+                out.stderr.trim()
+            ));
+        }
+        Err(e) => return Verdict::NotChecked(format!("the measurement failed: {e}")),
+    };
+    let text = out.stdout.trim();
+    if text == "none" {
+        return Verdict::Green("the copy has no build cache yet".to_string());
+    }
+    let mut numbers = text.split_whitespace().map(str::parse::<u64>);
+    let (Some(Ok(files)), Some(Ok(kib)), None) = (numbers.next(), numbers.next(), numbers.next())
+    else {
+        return Verdict::NotChecked(format!("the measurement said {text:?}, not two numbers"));
+    };
+    let gib = kib / (1024 * 1024);
+    let found = format!(
+        "{files} files, {gib} GiB in {}/target",
+        crate::exec::PROOF_AT
+    );
+    if files > CACHE_FILES_AMBER || gib > CACHE_GIB_AMBER {
+        Verdict::Amber(format!(
+            "{found}, past {CACHE_FILES_AMBER} files or {CACHE_GIB_AMBER} GiB: what the \
+             mutants built is not being removed, and every build scans it. `nunki init` \
+             writes a `mutation.sh` that cleans up after itself; then empty the copy's \
+             `target/` once, from inside the slot"
+        ))
+    } else {
+        Verdict::Green(found)
+    }
+}

@@ -1,0 +1,548 @@
+//! Compose generation (SPEC 4.2, "la forme déclarative des conteneurs").
+//!
+//! `nunki` invents no format: it writes a Compose file per profile at every
+//! launch, from the frozen mission header, `nunki.yaml` and the stack fragment,
+//! and an engine adapter runs it. Nothing here talks to a container engine —
+//! this module is a pure function from a plan to bytes, which is what makes
+//! the doctrine of 4.1 bis testable without Docker.
+//!
+//! Three shapes are load-bearing, and each was measured against Docker
+//! Compose v5.1.2 before being written here (see SPEC 4.2):
+//!
+//! 1. The **firewall owns the network namespace** and the agent joins it
+//!    (`network_mode: service:firewall`), not the other way round: in the
+//!    other direction the agent starts first and has a network before any
+//!    rule is laid.
+//! 2. The agent therefore cannot declare `networks:` — Compose rejects the
+//!    two together — so the firewall is what attaches to the project's
+//!    service network.
+//! 3. Every profile file **re-declares the project's services identically**,
+//!    under a project name stable for the slot, so switching profiles leaves
+//!    their containers untouched.
+//!
+//! The project's services are no longer merged verbatim: they arrive as the
+//! closed model of [`services`], and what lands in the file is that model's
+//! own rendering, read back — the very text a human approves.
+
+pub mod model;
+pub mod services;
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use crate::engine::Dialect;
+use crate::engine::spawn::RUN_DIR;
+use crate::harness::Role;
+use crate::perimeter::{Perimeter, Profile};
+use crate::yaml::{self, Mapping, Value};
+
+use model::{Document, Entry, Healthcheck, Service, depends_on_healthy};
+
+/// The sidecar's service name in every generated file.
+pub const FIREWALL_SERVICE: &str = "firewall";
+/// The agent's service name in every generated file.
+pub const AGENT_SERVICE: &str = "agent";
+/// The service `nunki check` runs its probes from, when a plan carries one.
+pub const PROBER_SERVICE: &str = "prober";
+/// The files an agent of `role` may write in the mission folder (SPEC 4.1):
+/// each is bind-mounted read-write over the folder's read-only mount, and
+/// nothing else there is. The one place this is said.
+///
+/// `MUTANTS.triage.json` was added with gate 7: the
+/// coder answers a campaign's survivors there, and it is a **different file**
+/// from `MUTANTS.json` on purpose. What decides who wrote a line is this
+/// list, not the line — so the outcome no machine can check lives in the
+/// HQ's file, which is mounted read-only here. It is **the coder's alone**
+/// (SPEC 4.4, "Qui écrit quoi"): survivors only ever go back to the coder —
+/// the integrator does not play gate 7, the security agent commits nothing
+/// — so an outcome that counts can be written in no other role's profile.
+/// The two others read it through the folder's read-only mount, and
+/// [`any_agent_writable`] still names it, so it exists before every lift.
+///
+/// `PR.md` is not the security agent's (SPEC 4.5, "Un constat accepté n'est
+/// pas un constat corrigé"): its report reaches the pull request only through
+/// the section `nunki push` writes from the verdict, so a finding withheld
+/// from the forge is withheld by what the agent cannot write, not by reading
+/// what it wrote. It still reads `PR.md`, through the folder's own mount,
+/// read-only, like `MISSION.md`.
+pub fn agent_writable(role: Role) -> &'static [&'static str] {
+    match role {
+        Role::Coder => &["JOURNAL.md", "PR.md", "VERDICT.json", "MUTANTS.triage.json"],
+        Role::Integrator => &["JOURNAL.md", "PR.md", "VERDICT.json"],
+        Role::Security => &["JOURNAL.md", "VERDICT.json"],
+    }
+}
+
+/// Every file some role may write, once each, in the order [`agent_writable`]
+/// first names it: the bind sources a mission folder must hold before a
+/// profile is lifted, whichever role it is lifted for.
+pub fn any_agent_writable() -> Vec<&'static str> {
+    let mut files: Vec<&'static str> = Vec::new();
+    for role in Role::ALL {
+        for file in agent_writable(role) {
+            if !files.contains(file) {
+                files.push(file);
+            }
+        }
+    }
+    files
+}
+
+/// The uid and gid of the human, passed through so that files the agent
+/// creates belong to them on the host (SPEC 4.2 bis).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UserIds {
+    pub uid: u32,
+    pub gid: u32,
+}
+
+/// A named volume: the slot's caches, the harness config directory, the
+/// writable directories a read-only tree still needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedVolume {
+    pub name: String,
+    /// Where it is mounted inside the container.
+    pub at: PathBuf,
+}
+
+/// Everything the generator needs. Assembled by the engine from the frozen
+/// header, `nunki.yaml` and the stack fragment — never from the slot.
+#[derive(Debug, Clone)]
+pub struct Plan {
+    /// The session the project is registered under: half of the Compose
+    /// project name, and what tells two projects' slots apart.
+    pub session: String,
+    /// Slot identifier; the other half.
+    pub slot: String,
+    pub role: Role,
+    /// The stack image for the agent container.
+    pub image: String,
+    /// The sidecar image.
+    pub firewall_image: String,
+    pub user: UserIds,
+    /// The slot's tree on the host, and where it is mounted.
+    pub tree: PathBuf,
+    pub tree_at: PathBuf,
+    /// The mission folder at the HQ, and where it is mounted.
+    pub mission_dir: PathBuf,
+    pub mission_dir_at: PathBuf,
+    /// The stack's scripts, from the project's home, mounted read-only one
+    /// file at a time. Given as (host path, path in the container).
+    pub stack_scripts: Vec<(PathBuf, PathBuf)>,
+    /// Test credential files, mounted read-only on a system profile only
+    /// (SPEC 3.1). Given as (host path, path in the container).
+    pub credentials: Vec<(PathBuf, PathBuf)>,
+    /// The advisory database gate 8 reads, mounted read-only, or `None` when
+    /// the stack declares none. Filled by the host and never by `nunki`: the
+    /// tool owns its own layout (SPEC 4.4, gate 8).
+    /// One advisory database per stack that declares one (SPEC 4.2,
+    /// "plusieurs stacks").
+    pub advisories: Vec<(PathBuf, PathBuf)>,
+    /// The secrets a human has ruled on, from the project's HQ, mounted
+    /// read-only, or `None` when nobody has ruled on any (SPEC 4.4, gate 8).
+    /// Given as (host path, path in the container).
+    pub secrets: Option<(PathBuf, PathBuf)>,
+    pub volumes: Vec<NamedVolume>,
+    pub environment: BTreeMap<String, String>,
+    pub command: Vec<String>,
+    pub perimeter: Perimeter,
+    /// The project's own services and volumes, read into the closed model of
+    /// [`services`] and lifted as its rendering, never as the file's bytes.
+    ///
+    /// Re-typed on purpose, which reverses what this field used to say: the
+    /// file is in the slot's tree, the coder writes the tree, and a key
+    /// nunki did not type is power nobody approved. A key outside the model
+    /// refuses the file before it reaches a plan. The file declares no
+    /// network: its services and the firewall both land on the generated
+    /// default network, and reach each other there (measured).
+    ///
+    /// The volumes travel with the services: a service naming a volume the
+    /// document does not declare makes the whole project invalid — `service
+    /// "db" refers to undefined volume dbdata: invalid compose project` on
+    /// Compose v5.1.2 — and they hold what a profile switch must not take
+    /// with it (SPEC 4.2).
+    pub project_services: Option<services::Lifted>,
+    /// nunki's own prober, for `nunki check`. A service nunki writes itself,
+    /// so it travels apart from the project's and the closed model never has
+    /// to allow what it holds — a shared namespace, a user, a dropped
+    /// capability.
+    pub prober: Option<Service>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ComposeError {
+    #[error(
+        "slot {0:?} yields no usable Compose project name (lowercase letters, digits, - and _)"
+    )]
+    SlotName(String),
+    #[error("the project declares a service named {0:?}, which nunki reserves")]
+    ReservedService(String),
+    #[error("the project declares a volume named {0:?}, which nunki reserves for the slot")]
+    ReservedVolume(String),
+    #[error("{what} must be an absolute path, found {path:?}")]
+    RelativePath { what: &'static str, path: PathBuf },
+    #[error(
+        "the mission profile carries {0} credential file(s); only the system profile may (SPEC 4.1)"
+    )]
+    CredentialsOnMissionProfile(usize),
+    #[error("no domain and no address is allowed: the agent would have no allowlist at all")]
+    EmptyPerimeter,
+}
+
+/// Generate the Compose file for one profile. The dialect comes from the
+/// engine adapter: how a namespace is shared is the one thing on the 4.2
+/// engine table this file needs, and it must not be spelled here.
+pub fn generate(plan: &Plan, dialect: &Dialect) -> Result<String, ComposeError> {
+    let document = build(plan, dialect)?;
+    Ok(yaml::to_string(&document).expect("the document serialises"))
+}
+
+/// The Compose project name: the **session** and the slot, in that order.
+///
+/// Stable across the three profiles, which is what keeps the project's
+/// services up between them. Compose refuses anything but lowercase letters,
+/// digits, `-` and `_`.
+///
+/// The session is in it because the slot alone is not unique. Two projects
+/// that both have a slot called `one` would otherwise both be the Compose
+/// project `nunki-one` — one set of containers, one network, one harness
+/// volume holding both projects' sessions. Starting a mission on either would
+/// recreate the other's containers under a running agent, and each HQ's own
+/// `locks/one` would say the slot was free. The session comes first so that
+/// `docker ps` groups a project's containers together.
+pub fn project_name(session: &str, slot: &str) -> Result<String, ComposeError> {
+    // The slot is judged on its own, as it was before the session joined it:
+    // prefixed, a slot named `_1` or `///` would be legal for Compose by the
+    // session's grace rather than by being a usable name, and `///` would
+    // have stopped being refused at all.
+    let slot = legal(slot).ok_or_else(|| ComposeError::SlotName(slot.to_string()))?;
+    let session = legal(short(session)).ok_or_else(|| ComposeError::SlotName(slot.clone()))?;
+    Ok(format!("nunki-{session}-{slot}"))
+}
+
+/// A name Compose accepts, or nothing: lowercase letters, digits, `-` and
+/// `_`, starting on a letter or a digit — "must consist only of lowercase
+/// alphanumeric characters, hyphens, and underscores as well as start with a
+/// letter or number", measured.
+fn legal(part: &str) -> Option<String> {
+    let mut name: String = part
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    while name.starts_with(|c: char| !c.is_ascii_alphanumeric()) {
+        name.remove(0);
+    }
+    (!name.is_empty()).then_some(name)
+}
+
+/// As much of a session as a name needs: the first eight characters.
+///
+/// A whole identifier would make every container name forty characters of
+/// hexadecimal, and `docker ps` is read by a human. Eight is what `nunki`
+/// already shows of a campaign's fingerprint, and the ledger holds the whole
+/// one — two sessions that agreed on eight characters would still have two
+/// homes and two HQs; they would share a Compose project, which is the thing
+/// this function exists to stop, so it is worth saying that it is a
+/// one-in-four-billion accident and not a design.
+fn short(session: &str) -> &str {
+    &session[..8.min(session.len())]
+}
+
+fn build(plan: &Plan, dialect: &Dialect) -> Result<Document, ComposeError> {
+    let profile = Profile::of(plan.role);
+
+    if profile == Profile::Mission && !plan.credentials.is_empty() {
+        return Err(ComposeError::CredentialsOnMissionProfile(
+            plan.credentials.len(),
+        ));
+    }
+    if plan.perimeter.is_empty() {
+        return Err(ComposeError::EmptyPerimeter);
+    }
+    absolute("the slot tree", &plan.tree)?;
+    absolute("the mission folder", &plan.mission_dir)?;
+    for (host, _) in &plan.credentials {
+        absolute("a credential file", host)?;
+    }
+
+    let lifted = plan
+        .project_services
+        .as_ref()
+        .filter(|l| !l.services.services.is_empty());
+
+    let mut services = vec![
+        (
+            FIREWALL_SERVICE.to_string(),
+            Entry::Own(Box::new(firewall(plan, lifted.is_some()))),
+        ),
+        (
+            AGENT_SERVICE.to_string(),
+            Entry::Own(Box::new(agent(plan, dialect)?)),
+        ),
+    ];
+    if let Some(prober) = &plan.prober {
+        services.push((
+            PROBER_SERVICE.to_string(),
+            Entry::Own(Box::new(prober.clone())),
+        ));
+    }
+
+    let mut volumes = Mapping::new();
+    for volume in &plan.volumes {
+        volumes.insert(Value::from(volume.name.clone()), Value::Null);
+    }
+
+    let mut networks = Mapping::new();
+    if let Some(project) = lifted {
+        // The rendering, read back: what the engine is given is the text a
+        // human is shown, and not a second serialisation of the model that
+        // could drift from it.
+        let mut rendered: Value = yaml::from_str(&project.services.render())
+            .expect("nunki's own rendering is YAML it reads back");
+        if let Some(declared) = rendered.get_mut("services").and_then(Value::as_mapping_mut) {
+            for (_, service) in declared.iter_mut() {
+                if let Some(service) = service.as_mapping_mut() {
+                    fence(service, &project.approved);
+                }
+            }
+        }
+        // The model refuses these names already; this is the second guard,
+        // on the document itself, so a name nunki writes is never
+        // overwritten by one the project wrote.
+        if let Some(declared) = rendered.get("services").and_then(Value::as_mapping) {
+            for (key, value) in declared {
+                let name = key.as_str().unwrap_or_default();
+                if services.iter().any(|(taken, _)| taken == name) {
+                    return Err(ComposeError::ReservedService(name.to_string()));
+                }
+                services.push((name.to_string(), Entry::Lifted(value.clone())));
+            }
+        }
+        if let Some(declared) = rendered.get("volumes").and_then(Value::as_mapping) {
+            for (key, value) in declared {
+                if volumes.contains_key(key) {
+                    let name = key.as_str().unwrap_or_default();
+                    return Err(ComposeError::ReservedVolume(name.to_string()));
+                }
+                volumes.insert(key.clone(), value.clone());
+            }
+        }
+        // Internal, so the engine routes nothing out of it, and without a
+        // gateway, so the host is not on it either: no IPv4 address on the
+        // bridge, and no IPv6 at all, whatever the daemon's default. Every
+        // address family is turned off but nunki's own.
+        let mut internal = Mapping::new();
+        internal.insert(Value::from("internal"), Value::from(true));
+        let mut options = Mapping::new();
+        options.insert(
+            Value::from(services::NO_GATEWAY.0),
+            Value::from(services::NO_GATEWAY.1),
+        );
+        internal.insert(Value::from("driver_opts"), Value::Mapping(options));
+        internal.insert(Value::from("enable_ipv6"), Value::from(false));
+        networks.insert(Value::from(services::NETWORK), Value::Mapping(internal));
+    }
+
+    Ok(Document {
+        name: project_name(&plan.session, &plan.slot)?,
+        services,
+        volumes,
+        networks,
+    })
+}
+
+/// nunki's own keys on a lifted service, written after the rendering and
+/// never taken from the file, which may hold none of them (SPEC 4.1 bis):
+///
+/// - the label carrying the approved digest, so the next launch can tell a
+///   container of an approved definition from one that is not (SPEC 4.2);
+/// - nunki's internal network and no other, so the service reaches nothing
+///   but what is on it, and publishes nothing;
+/// - every capability dropped and a fixed few given back, no new privilege,
+///   and a bound on memory and on processes.
+fn fence(service: &mut Mapping, approved: &str) {
+    let strings = |items: &[&str]| Value::Sequence(items.iter().map(|s| Value::from(*s)).collect());
+    let mut labels = Mapping::new();
+    labels.insert(Value::from(services::LABEL), Value::from(approved));
+    service.insert(Value::from("labels"), Value::Mapping(labels));
+    service.insert(Value::from("networks"), strings(&[services::NETWORK]));
+    service.insert(Value::from("cap_drop"), strings(&["ALL"]));
+    service.insert(Value::from("cap_add"), strings(&services::CAPABILITIES));
+    service.insert(
+        Value::from("security_opt"),
+        strings(&["no-new-privileges:true"]),
+    );
+    service.insert(Value::from("mem_limit"), Value::from(services::MEMORY));
+    service.insert(Value::from("pids_limit"), Value::from(services::PROCESSES));
+}
+
+/// The sidecar: the only container with power, and the one that owns the
+/// network namespace (SPEC 4.1 bis, rules 1 and 3).
+fn firewall(plan: &Plan, fenced: bool) -> Service {
+    let mut environment = BTreeMap::new();
+    environment.insert(
+        "HQ_ALLOW_DOMAINS".to_string(),
+        plan.perimeter
+            .domains
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(","),
+    );
+    environment.insert(
+        "HQ_ALLOW_ADDRESSES".to_string(),
+        plan.perimeter
+            .addresses
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(","),
+    );
+
+    Service {
+        image: plan.firewall_image.clone(),
+        cap_drop: vec!["ALL".to_string()],
+        // NET_ADMIN and NET_RAW to lay the rules; SETUID and SETGID because
+        // the resolver drops to its own uid, which is what the ruleset uses
+        // to tell its queries from the agent's ("failed to change group-id
+        // to dip: Operation not permitted", measured). Four capabilities in
+        // the container built to hold them, none in the agent's.
+        cap_add: vec![
+            "NET_ADMIN".to_string(),
+            "NET_RAW".to_string(),
+            "SETUID".to_string(),
+            "SETGID".to_string(),
+        ],
+        security_opt: vec!["no-new-privileges:true".to_string()],
+        // The default network for the way out it fences, and nunki's
+        // internal one for the project's services, which reach nothing
+        // else: the agent, in this namespace, reaches them through the
+        // perimeter (SPEC 4.1 bis). Only when there is a service to reach.
+        networks: if fenced {
+            vec!["default".to_string(), services::NETWORK.to_string()]
+        } else {
+            Vec::new()
+        },
+        healthcheck: Some(Healthcheck {
+            test: vec!["CMD".to_string(), "/usr/local/bin/fw-ready".to_string()],
+            interval: "1s".to_string(),
+            timeout: "2s".to_string(),
+            retries: 30,
+            start_period: "1s".to_string(),
+        }),
+        environment,
+        init: Some(true),
+        restart: Some("no".to_string()),
+        ..Service::default()
+    }
+}
+
+/// The agent: no capability, the human's uid, and no way to declare a
+/// network of its own — it lives in the firewall's namespace.
+fn agent(plan: &Plan, dialect: &Dialect) -> Result<Service, ComposeError> {
+    let mut volumes = Vec::new();
+
+    let tree_mode = match plan.role {
+        // The security agent reads the tree and never writes it; what an
+        // execution must still write is declared by the stack and mounted as
+        // named volumes (SPEC 4.2, services and launch, rule 3).
+        Role::Security => "ro",
+        Role::Coder | Role::Integrator => "rw",
+    };
+    volumes.push(mount(&plan.tree, &plan.tree_at, tree_mode));
+
+    // The mission folder is the agent's only channel with the HQ, and it is
+    // read-only but for the files its role writes (SPEC 4.1). A directory
+    // mounted rw would
+    // hand back `MISSION.md` — the header the whole run is framed by.
+    volumes.push(mount(&plan.mission_dir, &plan.mission_dir_at, "ro"));
+    for file in agent_writable(plan.role) {
+        volumes.push(mount(
+            &plan.mission_dir.join(file),
+            &plan.mission_dir_at.join(file),
+            "rw",
+        ));
+    }
+
+    // The scripts that judge the agent and start its application. They live
+    // in the project's home, not in the tree, and read-only is what keeps
+    // them out of the agent's reach — by construction, not by a gate.
+    for (host, at) in &plan.stack_scripts {
+        volumes.push(mount(host, at, "ro"));
+    }
+
+    for (host, at) in &plan.credentials {
+        volumes.push(mount(host, at, "ro"));
+    }
+    // Read-only, like everything that judges the agent: a database it could
+    // write is one it could empty.
+    for (host, at) in &plan.advisories {
+        volumes.push(mount(host, at, "ro"));
+    }
+    // The one part of the HQ an agent's container sees, and it sees it the
+    // way it sees the allowlist: declared out of its reach, readable all the
+    // same, so the gate can say "a human ruled on this" in the agent's own
+    // proof rather than only in the HQ.
+    if let Some((host, at)) = &plan.secrets {
+        volumes.push(mount(host, at, "ro"));
+    }
+    for volume in &plan.volumes {
+        volumes.push(format!("{}:{}", volume.name, display(&volume.at)));
+    }
+
+    Ok(Service {
+        image: plan.image.clone(),
+        user: Some(format!("{}:{}", plan.user.uid, plan.user.gid)),
+        working_dir: Some(display(&plan.tree_at)),
+        network_mode: Some(
+            dialect.netns_ref(&project_name(&plan.session, &plan.slot)?, FIREWALL_SERVICE),
+        ),
+        cap_drop: vec!["ALL".to_string()],
+        security_opt: vec!["no-new-privileges:true".to_string()],
+        depends_on: Some(depends_on_healthy(FIREWALL_SERVICE)),
+        volumes,
+        // The one place the agent may write that is neither the tree nor the
+        // mission folder: its own runtime files, starting with the process id
+        // a run publishes so `nunki` can stop it from inside (see
+        // `engine::spawn`). A tmpfs, so it dies with the container; owned by
+        // the agent, so nothing else in the pair can touch it.
+        tmpfs: vec![format!(
+            "{RUN_DIR}:uid={},gid={},mode=0700",
+            plan.user.uid, plan.user.gid
+        )],
+        environment: plan.environment.clone(),
+        init: Some(true),
+        restart: Some("no".to_string()),
+        command: plan.command.clone(),
+        ..Service::default()
+    })
+}
+
+/// A bind mount as the profile spells it. Public for the one caller that adds
+/// one to a profile already written ([`crate::run::remount_advisories`]), so
+/// the line it adds is the line a launch would have written.
+pub fn mount(host: &Path, at: &Path, mode: &str) -> String {
+    format!("{}:{}:{mode}", display(host), display(at))
+}
+
+fn display(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+fn absolute(what: &'static str, path: &Path) -> Result<(), ComposeError> {
+    if path.is_absolute() {
+        Ok(())
+    } else {
+        Err(ComposeError::RelativePath {
+            what,
+            path: path.to_path_buf(),
+        })
+    }
+}

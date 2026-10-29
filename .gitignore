@@ -1,0 +1,9 @@
+/target
+
+# `nunki` keeps a project's tooling at `~/.nunki/<project>/`, never in the
+# project itself: `nunki.yaml`, the HQ, and the stack fragments the slots
+# mount. A copy committed here is a second copy nothing reads, and it goes
+# stale without saying so: its files drift from the live ones and new ones
+# never appear in it.
+/.nunki/
+/nunki.yaml

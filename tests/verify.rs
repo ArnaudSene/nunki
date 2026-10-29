@@ -1,0 +1,4877 @@
+//! `nunki verify` (SPEC 4.2, 4.4, 4.5): the verification phase as one resumable
+//! state machine.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::Arc;
+
+use nunki::gate::Gate;
+use nunki::harness::Role;
+use nunki::mission::flow::{Flow, Handover, Stage, Work};
+use nunki::mission::{Bounds, Header, Integration, Lot, Security};
+use nunki::project::{Config, Project, ProtectedPaths};
+use nunki::state::{MissionState, Store};
+use nunki::verify::{self, Step, VerifyError};
+
+fn git(at: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(at)
+        .args(["-c", "user.name=Verify Test", "-c", "user.email=v@test"])
+        .args(args)
+        .output()
+        .expect("git is on the path");
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+fn write(at: &Path, path: &str, body: &str) {
+    let full = at.join(path);
+    if let Some(dir) = full.parent() {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    std::fs::write(full, body).unwrap();
+}
+
+fn header_of(lots: usize, integration: Integration) -> Header {
+    Header {
+        branch: "mission/x".into(),
+        base: "dev".into(),
+        lots: (1..=lots)
+            .map(|n| Lot {
+                id: format!("L{n}"),
+                title: format!("lot {n}"),
+            })
+            .collect(),
+        integration,
+        security: Security::Gates,
+        rigor: Default::default(),
+        mutation_threshold: None,
+        hardening: Vec::new(),
+        arbiter: None,
+        run: None,
+        account: None,
+        model: None,
+        bounds: Bounds {
+            attempts_per_lot: 3,
+            ..Default::default()
+        },
+    }
+}
+
+struct World {
+    _dir: tempfile::TempDir,
+    project: Project,
+    tree: PathBuf,
+}
+
+impl World {
+    fn new(lots: usize) -> Self {
+        Self::shaped(
+            lots,
+            Integration::None {
+                reason: "no external service is involved".into(),
+            },
+        )
+    }
+
+    fn shaped(lots: usize, integration: Integration) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let hq_root = dir.path().join("nunki").join(nunki::project::HQ_DIR);
+        std::fs::create_dir_all(hq_root.join("locks")).unwrap();
+        std::fs::create_dir_all(hq_root.join("missions")).unwrap();
+        std::fs::create_dir_all(hq_root.join("state/missions")).unwrap();
+
+        // A slot, where `nunki slot find` looks: beside the repository root.
+        let slots = dir.path().join("repo-slots");
+        std::fs::create_dir_all(&slots).unwrap();
+        let tree = slots.join("one");
+        std::fs::create_dir_all(&tree).unwrap();
+        git(&tree, &["init", "-q", "-b", "dev"]);
+        write(&tree, "src/lib.rs", "pub fn one() -> u8 { 1 }\n");
+        write(&tree, "AGENTS.md", "the rules\n");
+        git(&tree, &["add", "-A"]);
+        git(&tree, &["commit", "-q", "-m", "base"]);
+        git(&tree, &["checkout", "-q", "-b", "mission/x"]);
+        record_base(&tree);
+
+        let project = Project::at(
+            dir.path().join("repo"),
+            Config {
+                root: None,
+                harness: "claude-code".into(),
+                forge: vec!["github.com".into()],
+                stacks: vec!["rust".into()],
+                protected_branches: vec!["main".into(), "dev".into()],
+                protected_paths: ProtectedPaths {
+                    refuse: vec!["AGENTS.md".into(), ".nunki/**".into()],
+                    refuse_if_exists: vec![],
+                },
+                account: None,
+                model: None,
+                bounds: Default::default(),
+                credentials: None,
+                run: None,
+                services_file: None,
+                permission_mode: "auto".to_string(),
+                rigor: None,
+                mutation_threshold: 80,
+                mutation_jobs: None,
+                forge_protection: Default::default(),
+                security_findings: Default::default(),
+            },
+            hq_root.parent().unwrap().to_path_buf(),
+        );
+        // A profile on disk, because gate 8 runs in the container at the end
+        // of **every** run (SPEC 4.4) and `nunki exec` refuses a slot that has
+        // none. A real run has one: the agent has just worked in it. The fake
+        // engine answers with an empty contract, which is what a scan finding
+        // nothing looks like.
+        let profile = nunki::run::profile_path(&project, "one");
+        std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+        std::fs::write(&profile, "services: {}\n").unwrap();
+
+        let world = Self {
+            _dir: dir,
+            project,
+            tree,
+        };
+        nunki::mission::dir::create(
+            &world.project.hq_root,
+            "m1",
+            &header_of(lots, integration.clone()),
+            "do it",
+        )
+        .unwrap();
+        let store = Store::open(&world.project.hq_root).unwrap();
+        store
+            .save(&MissionState {
+                id: "m1".into(),
+                slot: "one".into(),
+                flow: Flow::new(header_of(lots, integration)).unwrap(),
+                run: None,
+                run_account: None,
+                app: None,
+                verdicts: Vec::new(),
+                accepted: Vec::new(),
+                stopped: None,
+                harness_down: None,
+                spent: Default::default(),
+                spared: None,
+                decided: None,
+                coder_session: None,
+                pushed: None,
+                updated_at: String::new(),
+                revision: 0,
+            })
+            .unwrap();
+        world
+    }
+
+    fn mission(&self) -> PathBuf {
+        self.project.hq_root.join("missions/m1")
+    }
+
+    /// Take the slot's profile away, so anything that needs the container
+    /// cannot reach it — what a slot whose profile was never lifted looks
+    /// like.
+    fn without_profile(&self) {
+        let _ = std::fs::remove_file(nunki::run::profile_path(&self.project, "one"));
+    }
+
+    fn journal_names_head(&self) {
+        std::fs::write(
+            self.mission().join("JOURNAL.md"),
+            format!(
+                "# Journal\n\n## ÉTAT DE REPRISE\n\nHEAD is `{}`.\n",
+                git(&self.tree, &["rev-parse", "HEAD"])
+            ),
+        )
+        .unwrap();
+    }
+
+    fn commit(&self, path: &str, body: &str, message: &str) {
+        write(&self.tree, path, body);
+        git(&self.tree, &["add", "-A"]);
+        git(&self.tree, &["commit", "-q", "-m", message]);
+    }
+
+    fn state(&self) -> MissionState {
+        Store::open(&self.project.hq_root)
+            .unwrap()
+            .load("m1")
+            .unwrap()
+    }
+
+    /// What a finished coder run would tell the flow.
+    fn coder_finished_the_lot(&self) {
+        let store = Store::open(&self.project.hq_root).unwrap();
+        let mut state = store.load("m1").unwrap();
+        store
+            .apply(
+                &mut state,
+                nunki::mission::flow::Event::RunEnded {
+                    outcome: nunki::harness::Outcome::Finished(Default::default()),
+                    lot_done: true,
+                },
+            )
+            .unwrap();
+    }
+
+    /// What `nunki mission resume` does to a held mission: the hold is lifted.
+    fn release(&self) {
+        let store = Store::open(&self.project.hq_root).unwrap();
+        let mut state = store.load("m1").unwrap();
+        state.release();
+        store.save(&state).unwrap();
+    }
+
+    /// What `nunki mission stop` writes: the mission is held.
+    fn hold(&self) {
+        let store = Store::open(&self.project.hq_root).unwrap();
+        let mut state = store.load("m1").unwrap();
+        state.hold("Alex Martin", false, "the base is being rewritten");
+        store.save(&state).unwrap();
+    }
+
+    fn verify(&self) -> Result<Vec<Step>, VerifyError> {
+        let engine: Arc<dyn nunki::engine::Engine> =
+            Arc::new(nunki::engine::fake::FakeEngine::default());
+        verify::verify(&self.project, "m1", engine, "docker")
+    }
+}
+
+fn gates_of(steps: &[Step]) -> &nunki::gate::Report {
+    steps
+        .iter()
+        .find_map(|s| match s {
+            Step::Gates { report, .. } => Some(&**report),
+            _ => None,
+        })
+        .expect("the gates were played")
+}
+
+/// Gates 1 to 4 are played while the coder still has lots, not only at the
+/// end. A forbidden commit found after the first lot costs one run; found at
+/// the final verification it costs the mission (SPEC 4.4).
+#[test]
+fn a_forbidden_commit_costs_a_run_now_and_not_the_mission_later() {
+    let world = World::new(2);
+    world.commit("AGENTS.md", "rewritten by the agent\n", "loosen the rules");
+    world.journal_names_head();
+    // Held, so this world — no account, no images — launches nothing and
+    // `verify` answers with its steps.
+    world.hold();
+
+    let steps = world.verify().unwrap();
+    let report = gates_of(&steps);
+    assert!(matches!(
+        report
+            .outcomes
+            .iter()
+            .find(|o| o.gate == Gate::Perimeter)
+            .map(|o| &o.decision),
+        Some(nunki::gate::Decision::Failed(_))
+    ));
+    // One more run on the same lot, not a volet and not the human.
+    match world.state().flow.stage() {
+        Stage::Coding { work, attempt } => {
+            assert_eq!(*work, Work::Lot(0));
+            assert_eq!(*attempt, 2, "the red gate cost one attempt");
+        }
+        other => panic!("a red gate during coding is one more run: {other:?}"),
+    }
+}
+
+/// Bounded like any other attempt: a lot whose gates keep failing goes to the
+/// human rather than round for ever. Each attempt is a run read back on the
+/// red tree — this world cannot launch one, so each is recorded by hand.
+#[test]
+fn a_gate_that_keeps_failing_reaches_the_human() {
+    let world = World::new(1);
+    world.commit("AGENTS.md", "rewritten\n", "loosen");
+    world.journal_names_head();
+    for _ in 0..3 {
+        world.run_recorded(Some(41), FINISHED);
+        let _ = world.verify();
+    }
+    match world.state().flow.stage() {
+        Stage::AwaitingHuman(handover) => {
+            let said = format!("{handover:?}");
+            assert!(said.contains("L1"), "{said}");
+        }
+        other => panic!("three attempts spent: {other:?}"),
+    }
+}
+
+/// The claim SPEC makes about this verb: *"Reprenable : son état est persisté
+/// à chaque transition, et le relancer reprend au même point."*
+#[test]
+fn running_it_again_picks_up_where_it_stopped() {
+    let world = World::new(2);
+    world.commit("src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    world.journal_names_head();
+    world.hold();
+
+    // Green gates, first lot still owed a run — and held, so none launched.
+    let first = world.verify().unwrap();
+    assert!(
+        gates_of(&first).passed(),
+        "{:?}",
+        gates_of(&first).failure()
+    );
+    assert!(matches!(first.last(), Some(Step::Held { .. })));
+    let after_first = world.state();
+
+    // The run happens; the flow moves to the second lot.
+    world.coder_finished_the_lot();
+    assert!(matches!(
+        world.state().flow.stage(),
+        Stage::Coding {
+            work: Work::Lot(1),
+            attempt: 1
+        }
+    ));
+
+    // Running verify again does not replay the first lot, and does not spend
+    // an attempt on the second.
+    let again = world.verify().unwrap();
+    assert!(gates_of(&again).passed());
+    match world.state().flow.stage() {
+        Stage::Coding { work, attempt } => {
+            assert_eq!(*work, Work::Lot(1), "it did not go back a lot");
+            assert_eq!(*attempt, 1, "a green gate spends nothing");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_ne!(after_first.updated_at, world.state().updated_at);
+}
+
+#[test]
+fn a_mission_that_never_started_is_named_rather_than_invented() {
+    let world = World::new(1);
+    let engine: Arc<dyn nunki::engine::Engine> =
+        Arc::new(nunki::engine::fake::FakeEngine::default());
+    let err = verify::verify(&world.project, "nope", engine, "docker").unwrap_err();
+    assert!(matches!(err, VerifyError::NotStarted(_)), "{err}");
+    assert!(err.to_string().contains("nunki mission start"), "{err}");
+}
+
+/// A tree the agent is still writing is not a tree to judge. This is the
+/// interlock `nunki exec --tree` deliberately does not carry, and this is where
+/// it belongs (SPEC 4.2).
+#[test]
+fn a_mission_whose_run_is_still_going_is_not_verified_under_it() {
+    let world = World::new(1);
+    world.commit("src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    world.journal_names_head();
+
+    // A handle whose log holds no result and whose container is unknown to
+    // the engine reads as *not* running — nunki does not know, and refusing to
+    // verify because the engine is down would be a lie in another place.
+    let store = Store::open(&world.project.hq_root).unwrap();
+    let mut state = store.load("m1").unwrap();
+    state.run = Some(nunki::harness::RunHandle {
+        session: nunki::harness::SessionId("s".into()),
+        container: "no-such-container".into(),
+        pid: Some(4242),
+        log: world.mission().join("runs/s.jsonl"),
+    });
+    store.save(&state).unwrap();
+    assert!(
+        world.verify().is_ok(),
+        "an unreachable run is not a run in progress"
+    );
+}
+
+/// The lock is taken once, at the top, and everything under it runs inside it
+/// (SPEC 4.2). A slot already driven by another `nunki` is not driven twice.
+#[test]
+fn a_slot_already_held_is_not_verified_under_the_other_hq() {
+    let world = World::new(1);
+    world.journal_names_head();
+    let held = nunki::state::SlotLock::acquire(
+        &world.project.hq_root.join("locks"),
+        "one",
+        "something else",
+    )
+    .unwrap();
+    assert!(matches!(world.verify(), Err(VerifyError::Lock(_))));
+    drop(held);
+    // Held, so the coder's run is refused by name rather than launched in a
+    // world with no account.
+    world.hold();
+    assert!(world.verify().is_ok());
+}
+
+/// The whole phase, end to end, in a real container: gates 1 to 4 while the
+/// coder works, then the final seven, a red gate 7 sending it back, a
+/// campaign, a triage, and `VERIFIED`.
+///
+/// This is the test the verb exists for. Everything else here checks one
+/// transition; this one checks that the transitions compose.
+///
+/// ```text
+/// cargo test --test verify -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "lifts real containers; run by hand"]
+fn live_a_mission_is_driven_from_its_first_lot_to_verified() {
+    use nunki::mutants::Triage;
+    use std::collections::BTreeMap;
+
+    let world = World::new(1);
+    // The battery and the campaign the stack declares, in the project's home
+    // where `nunki init` puts them, and mounted read-only below: they judge
+    // the mission, so they are never the mission's to commit.
+    let stack = world.project.fragment("rust");
+    std::fs::create_dir_all(&stack).unwrap();
+    let executable = |name: &str, body: &str| {
+        let path = stack.join(name);
+        std::fs::write(&path, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    };
+    executable(
+        nunki::gate::BATTERY,
+        "#!/bin/sh\nset -eu\ntest -f src/new.rs\n",
+    );
+    executable(
+        nunki::mutants::SCRIPT,
+        // The last line is the one `nunki` reads as "this campaign got to the
+        // end" (SPEC 4.4). Without it a campaign that found nothing and one
+        // that was killed are the same log.
+        "#!/bin/sh\n\
+         echo '{\"id\":\"src/new.rs:1\",\"file\":\"src/new.rs\",\"line\":1,\
+         \"description\":\"replace two with 0\"}'\n\
+         echo '{\"campaign\":\"done\"}'\n",
+    );
+    // Gate 8 is played after every run and at the verification (SPEC 4.4), so
+    // a world whose stack ships no `security.sh` is a world where it is red —
+    // for the stack, not for the mission. Nothing to find here: no lockfile,
+    // no secret, and the contract says an empty answer is an empty answer.
+    executable(nunki::gate::SECURITY, "#!/bin/sh\nexit 0\n");
+
+    write(&world.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n");
+    write(
+        &world.tree,
+        "tests/thing.rs",
+        "#[test]\nfn two_is_two() { assert_eq!(2, 2); }\n",
+    );
+    git(&world.tree, &["add", "-A"]);
+    git(&world.tree, &["commit", "-q", "-m", "L1"]);
+    world.journal_names_head();
+    std::fs::write(
+        world.mission().join("PR.md"),
+        "# What this changes\n\nA lot.\n",
+    )
+    .unwrap();
+
+    // A profile, as a slot would have one up.
+    let slot = nunki::slot::Slot {
+        name: "one".into(),
+        tree: world.tree.clone(),
+    };
+    let volume = nunki::exec::proof_volume(&slot.name);
+    let file = nunki::run::profile_path(&world.project, &slot.name);
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    // `safe.directory` for the reason `tests/exec.rs` gives: the fixture
+    // runs as root so `apk` can install git, and on Linux git then refuses
+    // the mounted tree as "dubious ownership" (measured on the ubuntu
+    // runner); a real profile runs as the host's uid and is never asked.
+    std::fs::write(
+        &file,
+        format!(
+            "services:\n\
+             \x20 agent:\n\
+             \x20   image: alpine:3.20\n\
+             \x20   volumes:\n\
+             \x20     - {tree}:{tree_at}\n\
+             \x20     - {volume}:{proof}\n\
+             \x20     - {stack}/{battery}:{stack_at}/{battery}:ro\n\
+             \x20     - {stack}/{campaign}:{stack_at}/{campaign}:ro\n\
+             \x20     - {stack}/{security}:{stack_at}/{security}:ro\n\
+             \x20   tmpfs:\n\
+             \x20     - /run/nunki\n\
+             \x20   command: [\"sh\", \"-c\", \"apk add --no-cache git > /dev/null && \
+             git config --global --add safe.directory '*' && sleep 600\"]\n\
+             \x20   healthcheck:\n\
+             \x20     test: [\"CMD-SHELL\", \"command -v git > /dev/null\"]\n\
+             \x20     interval: 1s\n\
+             \x20     timeout: 2s\n\
+             \x20     retries: 60\n\
+             \x20     start_period: 1s\n\
+             volumes:\n\
+             \x20 {volume}:\n",
+            tree = world.tree.display(),
+            tree_at = nunki::run::TREE_AT,
+            proof = nunki::exec::PROOF_AT,
+            stack = stack.display(),
+            stack_at = nunki::run::STACK_AT,
+            battery = nunki::gate::BATTERY,
+            campaign = nunki::mutants::SCRIPT,
+            security = nunki::gate::SECURITY,
+        ),
+    )
+    .unwrap();
+
+    let engine: Arc<dyn nunki::engine::Engine> = Arc::new(nunki::engine::docker::Docker::real());
+    let compose_project =
+        nunki::compose::project_name(&world.project.session(), &slot.name).unwrap();
+    let _ = engine.down(&file, &compose_project, true);
+    engine.up(&file, &compose_project).unwrap();
+    let go = || verify::verify(&world.project, "m1", engine.clone(), "docker").unwrap();
+
+    // 1. The coder still owes its lot a run; gates 1 to 4 are green. Held,
+    //    because this world has no account to launch it with.
+    world.hold();
+    let steps = go();
+    assert!(
+        gates_of(&steps).passed(),
+        "{:?}",
+        gates_of(&steps).failure()
+    );
+    assert!(matches!(steps.last(), Some(Step::Held { role, .. }) if *role == Role::Coder));
+
+    // 2. The run happens, the flow reaches the final gates.
+    world.coder_finished_the_lot();
+    assert!(matches!(world.state().flow.stage(), Stage::Gates));
+
+    // 3. All seven: the battery is green, and gate 7 has nothing to read.
+    // Lifted for this step: a held mission starts no campaign (#166), and
+    // this one is held only because the world has no account to launch a
+    // run with. Nothing is launched at the gates, and the hold is put back
+    // before the volet below would launch the coder.
+    world.release();
+    let steps = go();
+    let report = gates_of(&steps);
+    assert_eq!(
+        report
+            .outcomes
+            .iter()
+            .find(|o| o.gate == Gate::Battery)
+            .map(|o| &o.decision),
+        Some(&nunki::gate::Decision::Passed),
+        "{report:?}"
+    );
+    match report
+        .outcomes
+        .iter()
+        .find(|o| o.gate == Gate::Mutation)
+        .map(|o| &o.decision)
+    {
+        Some(nunki::gate::Decision::Unplayed(why)) => {
+            assert!(why.contains("nunki mission mutants"))
+        }
+        other => panic!("no campaign has run: {other:?}"),
+    }
+    // That gate is unplayable, not red, and the difference decides who is
+    // owed the next move. The flow stays where it is — no volet, no attempt,
+    // no run — and names what it is waiting for. Here the battery is green in
+    // a real container, so gate 7 stands alone and the obstacle is one nunki
+    // clears itself: the step is a campaign owed, not a wall.
+    assert!(matches!(world.state().flow.stage(), Stage::Gates));
+    assert!(
+        steps.iter().any(|s| matches!(s, Step::CampaignOwed { .. })),
+        "{steps:?}"
+    );
+    world.hold();
+
+    // 4. The campaign runs — through the flow's own entry point, the one the
+    // monitor calls on that step, so this proves it against a real engine
+    // where a fake can only prove the decision to call it.
+    loop {
+        match nunki::verify::campaign(&world.project, "m1", engine.clone()).unwrap() {
+            nunki::mutants::Progress::Running { .. } => {
+                std::thread::sleep(std::time::Duration::from_millis(300))
+            }
+            nunki::mutants::Progress::Started { .. } => {}
+            other => {
+                println!("campaign: {other:?}");
+                break;
+            }
+        }
+    }
+    // 4 bis. The survivor has no outcome, so gate 7 is **red** — the agent's
+    // to answer, unlike the unplayable gate above — and a red gate at the
+    // final verification opens a volet: the coder is sent back for it.
+    //
+    // This is what the whole chain exists to do. A test that writes the
+    // triage itself before ever playing the gates again never opens the
+    // volet, and applies step 5's coder run to a flow still sitting at the
+    // gates — and nothing catches it, because a live test is `#[ignore]`d
+    // and CI never plays it.
+    let steps = go();
+    assert!(
+        matches!(gates_of(&steps).verdict(), nunki::gate::Verdict::Red(_)),
+        "a survivor with no outcome is red: {steps:?}"
+    );
+    assert!(
+        matches!(
+            world.state().flow.stage(),
+            Stage::Coding {
+                work: Work::Volet { .. },
+                ..
+            }
+        ),
+        "{:?}",
+        world.state().flow.stage()
+    );
+
+    // What the coder writes on that volet: the survivor, killed by a test it
+    // names and commits.
+    let mut triage = BTreeMap::new();
+    triage.insert(
+        "src/new.rs:1".to_string(),
+        Triage::Killed {
+            test: "two_is_two".into(),
+        },
+    );
+    nunki::mutants::write_triage(&world.mission(), &triage).unwrap();
+
+    // 4 ter. A run in the slot stops verification dead: gates read a tree,
+    // and a tree the agent is still writing is not a tree to judge.
+    {
+        use nunki::harness::spawn::{CommandSpec, Spawner};
+        let session = "77777777-8888-4999-8aaa-bbbbbbbbbbbb";
+        let spawner = nunki::engine::spawn::ContainerSpawner::new(
+            engine.clone(),
+            file.clone(),
+            &compose_project,
+            nunki::compose::AGENT_SERVICE,
+        )
+        .identified_by(session);
+        let log = world
+            .mission()
+            .join("runs")
+            .join(format!("{session}.jsonl"));
+        let spawned = spawner
+            .spawn(
+                &CommandSpec {
+                    program: "sh".to_string(),
+                    args: vec![
+                        "-c".to_string(),
+                        "while :; do sleep 1; done".to_string(),
+                        session.to_string(),
+                    ],
+                    cwd: std::path::PathBuf::from("/"),
+                    env: Default::default(),
+                },
+                &log,
+            )
+            .unwrap();
+        let store = Store::open(&world.project.hq_root).unwrap();
+        let mut state = store.load("m1").unwrap();
+        state.run = Some(nunki::harness::RunHandle {
+            session: nunki::harness::SessionId(session.to_string()),
+            container: spawned.container.clone(),
+            pid: spawned.pid,
+            log,
+        });
+        store.save(&state).unwrap();
+        match verify::verify(&world.project, "m1", engine.clone(), "docker") {
+            Err(VerifyError::RunInProgress { slot, .. }) => assert_eq!(slot, "one"),
+            other => panic!("a live run must stop verification: {other:?}"),
+        }
+        spawner
+            .signal(&spawned, nunki::harness::spawn::Signal::Terminate)
+            .unwrap();
+        let mut state = store.load("m1").unwrap();
+        state.run = None;
+        store.save(&state).unwrap();
+    }
+
+    // 5. The volet's run ends, and this time everything is green.
+    world.coder_finished_the_lot();
+    world.journal_names_head();
+    let steps = go();
+    let report = gates_of(&steps);
+    assert!(report.passed(), "{:?}", report.failure());
+    assert!(matches!(steps.last(), Some(Step::Verified)));
+
+    // And it is persisted before anything was printed: a session that dies
+    // here must not lose the verdict.
+    assert!(matches!(world.state().flow.stage(), Stage::Verified));
+
+    engine.down(&file, &compose_project, true).unwrap();
+}
+
+// --- the integration run, read back (SPEC 4.2, 4.4, 4.5) -------------------
+
+fn integration() -> Integration {
+    Integration::Services {
+        services: vec![nunki::mission::Service {
+            name: "db".into(),
+            reach: vec!["db".into()],
+            shared: false,
+        }],
+        wiring: vec!["compose.yaml".into()],
+    }
+}
+
+impl World {
+    /// Drive the flow to the stage where the integrator is due, the way a
+    /// finished coder and a green verification do.
+    ///
+    /// And leave a world where the integrator owes its gates nothing: the
+    /// coder's commit, recorded as green the way `verify` records it, one
+    /// wiring commit after it, the journal naming `HEAD`, the integrator's
+    /// section of `PR.md`, and a profile up for the system battery to run in.
+    /// A test that wants a gate red breaks exactly one of these.
+    fn at_integration(&self) {
+        self.commit("src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+        let coder = self.head();
+        self.commit("compose.yaml", "services: {}\n", "wire it");
+        self.journal_names_head();
+        std::fs::write(
+            self.mission().join("PR.md"),
+            "# L1\n\nThe lot.\n\n## Integration\n\nWired to its services.\n",
+        )
+        .unwrap();
+        let profile = nunki::run::profile_path(&self.project, "one");
+        std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+        std::fs::write(&profile, "services: {}\n").unwrap();
+
+        let store = Store::open(&self.project.hq_root).unwrap();
+        let mut state = store.load("m1").unwrap();
+        state.conclude(Role::Coder, None, &coder);
+        store
+            .apply(
+                &mut state,
+                nunki::mission::flow::Event::RunEnded {
+                    outcome: nunki::harness::Outcome::Finished(Default::default()),
+                    lot_done: true,
+                },
+            )
+            .unwrap();
+        store
+            .apply(&mut state, nunki::mission::flow::Event::GatesPassed)
+            .unwrap();
+        assert!(matches!(state.flow.stage(), Stage::Integration { .. }));
+        self.full_campaign_at_head();
+    }
+
+    /// A full campaign with no survivor on the content of `HEAD`, on file:
+    /// what the final stage of a `critical` mission — the default rigor —
+    /// is verified on (SPEC 4.4, 4.5), so that a test about another stage
+    /// does not stop at that one.
+    fn full_campaign_at_head(&self) {
+        let touched = nunki::gate::touched_since_base(&self.tree, "dev").unwrap();
+        nunki::mutants::write(
+            &self.mission(),
+            &nunki::mutants::Campaign {
+                stopped: None,
+                files: None,
+                chain: Default::default(),
+                fingerprint: nunki::mutants::fingerprint(&self.tree, &touched).unwrap(),
+                head: self.head(),
+                date: "2026-10-09T12:00:00Z".into(),
+                survivors: vec![],
+                tried: Some(4),
+            },
+        )
+        .unwrap();
+    }
+
+    /// Record a run for the current stage, with a harness log that says how
+    /// it ended. `pid` absent is a run nothing can be asked about.
+    fn run_recorded(&self, pid: Option<u32>, log_body: &str) {
+        let runs = self.mission().join("runs");
+        std::fs::create_dir_all(&runs).unwrap();
+        let log = runs.join("integration.log");
+        std::fs::write(&log, log_body).unwrap();
+        let store = Store::open(&self.project.hq_root).unwrap();
+        let mut state = store.load("m1").unwrap();
+        state.run = Some(nunki::harness::RunHandle {
+            session: nunki::harness::SessionId("s-integration".into()),
+            container: "cafe1234".into(),
+            pid,
+            log,
+        });
+        store.save(&state).unwrap();
+    }
+
+    fn verdict(&self, role: &str, verdict: &str, head: &str, report: &str) {
+        std::fs::write(
+            self.mission().join("VERDICT.json"),
+            format!(
+                "{{\"role\":\"{role}\",\"verdict\":\"{verdict}\",\"head\":\"{head}\",\
+                 \"date\":\"2026-09-10T00:00:00Z\",\"report\":\"{report}\"}}"
+            ),
+        )
+        .unwrap();
+    }
+
+    fn head(&self) -> String {
+        git(&self.tree, &["rev-parse", "HEAD"])
+    }
+}
+
+/// A harness log whose run concluded normally.
+const FINISHED: &str =
+    "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"usage\":{}}\n";
+
+/// The chain SPEC 4.5 describes: the integrator concludes `INTEGRATED`, and
+/// the mission moves on rather than waiting for a human to relay the verdict.
+#[test]
+fn an_integration_run_that_concluded_moves_the_mission_on() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.run_recorded(Some(41), FINISHED);
+    world.verdict("Integrator", "INTEGRATED", &world.head(), "wired");
+
+    let steps = world.verify().unwrap();
+    assert!(
+        matches!(steps.last(), Some(Step::Verified)),
+        "the shape declares no security agent, so INTEGRATED ends it: {steps:?}"
+    );
+    // On its gates, not on its word: the system battery was played.
+    let report = gates_of(&steps);
+    assert_eq!(report.role, Role::Integrator);
+    assert!(
+        report
+            .outcomes
+            .iter()
+            .any(|o| o.gate == nunki::gate::Gate::Battery
+                && o.decision == nunki::gate::Decision::Passed),
+        "{report:?}"
+    );
+    // The run is forgotten with the transition: left recorded, the next
+    // `verify` would read the same run back a second time.
+    assert!(world.state().run.is_none(), "{:?}", world.state().run);
+}
+
+/// An `INTEGRATED` is the integrator's word, and its gates are what the word
+/// is worth: an agent's report is never the truth (SPEC 2).
+///
+/// A flow that reads the verdict and moves on lets an `INTEGRATED` with no
+/// system test run and no section of `PR.md` reach `Verified`.
+#[test]
+fn an_integrated_verdict_is_worth_its_gates_and_no_more() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    // The coder's pull request, never completed.
+    std::fs::write(world.mission().join("PR.md"), "# L1\n\nThe lot.\n").unwrap();
+    world.run_recorded(Some(41), FINISHED);
+    world.verdict("Integrator", "INTEGRATED", &world.head(), "wired");
+
+    // The relaunch that follows needs images and an account this world has
+    // neither of; what is asserted is the transition, written before.
+    let _ = world.verify();
+    let state = world.state();
+    assert!(
+        matches!(state.flow.stage(), Stage::Integration { attempt: 2 }),
+        "the integrator fixes its own work, run after run (SPEC 4.5): {:?}",
+        state.flow.stage()
+    );
+    assert_eq!(state.flow.volets(), 0, "and the coder is not sent a volet");
+    assert!(
+        state.concluded(Role::Integrator).is_none(),
+        "a verdict its gates refused is not recorded"
+    );
+    let told = world.followup();
+    assert!(
+        told.contains("integration, attempt 1") && told.contains("Integration"),
+        "the next attempt is told which gate and why: {told}"
+    );
+}
+
+/// A `BROKEN` sends the coder a volet — once the integrator's own run has
+/// honoured what every run owes. A commit outside its wiring is its own to
+/// answer for, whatever it concluded.
+#[test]
+fn a_broken_verdict_still_owes_the_gates_every_run_owes() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.commit(
+        "src/new.rs",
+        "pub fn two() -> u8 { 3 }\n",
+        "repair it myself",
+    );
+    world.journal_names_head();
+    world.run_recorded(Some(41), FINISHED);
+    world.verdict(
+        "Integrator",
+        "BROKEN",
+        &world.head(),
+        "the adapter cannot be wired as it stands",
+    );
+    world.hold();
+
+    let _ = world.verify();
+    let state = world.state();
+    assert!(
+        matches!(state.flow.stage(), Stage::Integration { attempt: 2 }),
+        "{:?}",
+        state.flow.stage()
+    );
+    assert_eq!(state.flow.volets(), 0);
+}
+
+/// A gate about the machine stops the flow instead of spending an attempt:
+/// here, no profile is up for the system battery to run in, and no
+/// integrator run would change that.
+#[test]
+fn an_integrators_gate_nobody_could_play_stops_and_spends_nothing() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    std::fs::remove_file(nunki::run::profile_path(&world.project, "one")).unwrap();
+    world.run_recorded(Some(41), FINISHED);
+    world.verdict("Integrator", "INTEGRATED", &world.head(), "wired");
+
+    let steps = world.verify().unwrap();
+    assert!(
+        matches!(steps.last(), Some(Step::GateUnplayable { role, .. }) if *role == Role::Integrator),
+        "{steps:?}"
+    );
+    let state = world.state();
+    assert!(
+        matches!(state.flow.stage(), Stage::Integration { attempt: 1 }),
+        "{:?}",
+        state.flow.stage()
+    );
+    assert!(
+        state.run.is_some(),
+        "the run stays recorded, to be read back and judged again"
+    );
+}
+
+/// "Un verdict vaut pour un `HEAD`" (SPEC 4.4). A verdict concluding on
+/// another commit is a verdict on other work, and accepting it would carry a
+/// green over a change nobody judged.
+#[test]
+fn a_verdict_on_another_commit_is_not_a_verdict_on_this_one() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.run_recorded(Some(41), FINISHED);
+    world.verdict(
+        "Integrator",
+        "INTEGRATED",
+        "0000000000000000000000000000000000000000",
+        "wired",
+    );
+
+    // The relaunch that follows needs images and an account this world has
+    // neither of; what is asserted is the transition, which is written
+    // before anything is lifted.
+    let _ = world.verify();
+    assert!(
+        matches!(
+            world.state().flow.stage(),
+            Stage::Integration { attempt: 2 }
+        ),
+        "it costs an attempt and the role runs again: {:?}",
+        world.state().flow.stage()
+    );
+}
+
+#[test]
+fn a_run_that_left_no_verdict_did_not_conclude() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.run_recorded(Some(41), FINISHED);
+    // No VERDICT.json at all: `nunki mission dir` creates an empty one.
+
+    let _ = world.verify();
+    assert!(
+        matches!(
+            world.state().flow.stage(),
+            Stage::Integration { attempt: 2 }
+        ),
+        "{:?}",
+        world.state().flow.stage()
+    );
+}
+
+#[test]
+fn a_verdict_signed_by_another_role_is_not_this_roles() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.run_recorded(Some(41), FINISHED);
+    world.verdict("Coder", "INTEGRATED", &world.head(), "wired");
+
+    let _ = world.verify();
+    assert!(
+        matches!(
+            world.state().flow.stage(),
+            Stage::Integration { attempt: 2 }
+        ),
+        "{:?}",
+        world.state().flow.stage()
+    );
+}
+
+/// A run `nunki` cannot ask about decides nothing: a machine that slept must not
+/// cost the mission an attempt (SPEC 4.2, "la reprise re-dérive avant de
+/// décider"; AGENTS.md §4, "a check that cannot say 'I do not know' will
+/// lie").
+#[test]
+fn a_run_that_cannot_be_asked_about_decides_nothing() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    // No pid, and a log that says nothing: there is no answer to be had.
+    world.run_recorded(None, "");
+    world.verdict("Integrator", "INTEGRATED", &world.head(), "wired");
+
+    let steps = world.verify().unwrap();
+    assert!(
+        matches!(steps.last(), Some(Step::Unreachable { role, .. }) if *role == Role::Integrator),
+        "{steps:?}"
+    );
+    assert!(
+        matches!(
+            world.state().flow.stage(),
+            Stage::Integration { attempt: 1 }
+        ),
+        "no attempt was spent: {:?}",
+        world.state().flow.stage()
+    );
+    assert!(world.state().run.is_some(), "and the run is still recorded");
+}
+
+/// A `BROKEN` integrator sends the mission back to the coder as a volet,
+/// bounded — it does not stop the mission and does not repair it itself
+/// (SPEC 4.5).
+#[test]
+fn a_broken_integration_goes_back_to_the_coder_as_a_volet() {
+    let world = World::shaped(1, integration());
+    world.journal_names_head();
+    world.at_integration();
+    world.run_recorded(Some(41), FINISHED);
+    world.verdict(
+        "Integrator",
+        "BROKEN",
+        &world.head(),
+        "the adapter cannot be wired as it stands",
+    );
+    // Held: the read-back still happens, and the coder's launch is refused
+    // by name rather than failing in a world with no account.
+    world.hold();
+
+    let steps = world.verify().unwrap();
+    assert!(
+        matches!(
+            world.state().flow.stage(),
+            Stage::Coding {
+                work: Work::Volet { .. },
+                ..
+            }
+        ),
+        "{:?}",
+        world.state().flow.stage()
+    );
+    assert!(
+        matches!(steps.last(), Some(Step::Held { role, .. }) if *role == Role::Coder),
+        "the coder is owed the volet: {steps:?}"
+    );
+}
+
+// --- the security mission, read back (SPEC 4.4, 4.5) -----------------------
+
+fn with_security_agent(lots: usize) -> World {
+    let world = World::shaped(lots, integration());
+    // `verify` reads the **frozen** header out of the state and never the
+    // file (SPEC 4.1), so declaring the security agent means rebuilding the
+    // flow, not rewriting `MISSION.md`.
+    let mut header = header_of(lots, integration());
+    header.security = Security::Agent;
+    let store = Store::open(&world.project.hq_root).unwrap();
+    store
+        .save(&MissionState {
+            id: "m1".into(),
+            slot: "one".into(),
+            flow: Flow::new(header).unwrap(),
+            run: None,
+            run_account: None,
+            app: None,
+            verdicts: Vec::new(),
+            accepted: Vec::new(),
+            stopped: None,
+            harness_down: None,
+            spent: Default::default(),
+            spared: None,
+            decided: None,
+            coder_session: None,
+            pushed: None,
+            updated_at: String::new(),
+            revision: 0,
+        })
+        .unwrap();
+    world
+}
+
+impl World {
+    /// Drive the flow to the stage where the security agent is due, and leave
+    /// a world where the security agent owes its gates nothing: a journal
+    /// naming `HEAD`, and a report in the verdict each test writes. A test
+    /// that wants a gate red breaks one of the two.
+    fn at_security(&self) {
+        self.journal_names_head();
+        let store = Store::open(&self.project.hq_root).unwrap();
+        let mut state = store.load("m1").unwrap();
+        for event in [
+            nunki::mission::flow::Event::RunEnded {
+                outcome: nunki::harness::Outcome::Finished(Default::default()),
+                lot_done: true,
+            },
+            nunki::mission::flow::Event::GatesPassed,
+            nunki::mission::flow::Event::Verdict {
+                verdict: nunki::mission::Verdict::Integrated,
+                report: "wired".into(),
+            },
+        ] {
+            store.apply(&mut state, event).unwrap();
+        }
+        assert!(
+            matches!(state.flow.stage(), Stage::SecurityAgent { .. }),
+            "{:?}",
+            state.flow.stage()
+        );
+        self.full_campaign_at_head();
+    }
+}
+
+/// `CLEAR` on this `HEAD` is the last thing the mission was waiting for.
+#[test]
+fn a_clear_security_run_ends_the_mission() {
+    let world = with_security_agent(1);
+    world.at_security();
+    world.run_recorded(Some(41), FINISHED);
+    world.verdict("Security", "CLEAR", &world.head(), "nothing found");
+
+    let steps = world.verify().unwrap();
+    assert!(matches!(steps.last(), Some(Step::Verified)), "{steps:?}");
+    assert!(world.state().run.is_none());
+}
+
+/// `FINDINGS` parks the mission where a human decides: the HQ iterates, or
+/// the findings are lifted. Both events exist in the flow and no verb applies
+/// either yet — so this asserts where it stops, not that it moves on.
+#[test]
+fn findings_park_the_mission_and_carry_the_report() {
+    let world = with_security_agent(1);
+    world.at_security();
+    world.run_recorded(Some(41), FINISHED);
+    world.verdict("Security", "FINDINGS", &world.head(), "an open redirect");
+
+    let steps = world.verify().unwrap();
+    assert!(
+        matches!(steps.last(), Some(Step::Findings { report, .. }) if report.contains("open redirect")),
+        "{steps:?}"
+    );
+    assert!(matches!(world.state().flow.stage(), Stage::Findings { .. }));
+}
+
+/// A verdict is the security agent's word, and its gates are what the word is
+/// worth (SPEC 2: an agent's report is never the truth). It commits nothing,
+/// so what it owes is a resume block naming the commit it attacked and a
+/// report — and `CLEAR` with an empty report is a verdict about nothing.
+///
+/// A flow that reads the verdict and moves on takes both on trust.
+#[test]
+fn a_security_verdict_is_worth_its_gates_and_no_more() {
+    // An empty report, which is the deliverable this role owes.
+    let world = with_security_agent(1);
+    world.at_security();
+    world.run_recorded(Some(41), FINISHED);
+    world.verdict("Security", "CLEAR", &world.head(), "");
+
+    let _ = world.verify();
+    let state = world.state();
+    assert!(
+        matches!(state.flow.stage(), Stage::SecurityAgent { attempt: 2 }),
+        "{:?}",
+        state.flow.stage()
+    );
+    assert!(
+        state.concluded(Role::Security).is_none(),
+        "a verdict its gates refused is not recorded"
+    );
+    let told = world.followup();
+    assert!(
+        told.contains("security, attempt 1"),
+        "the next attempt is told why: {told}"
+    );
+
+    // And a journal that names another commit: the block is about work
+    // nobody attacked.
+    let other = with_security_agent(1);
+    other.at_security();
+    std::fs::write(
+        other.mission().join("JOURNAL.md"),
+        "# Journal\n\n## ÉTAT DE REPRISE\n\nHEAD is `0000000000000000000000000000000000000000`.\n",
+    )
+    .unwrap();
+    other.run_recorded(Some(41), FINISHED);
+    other.verdict("Security", "CLEAR", &other.head(), "nothing found");
+
+    let _ = other.verify();
+    assert!(
+        matches!(
+            other.state().flow.stage(),
+            Stage::SecurityAgent { attempt: 2 }
+        ),
+        "{:?}",
+        other.state().flow.stage()
+    );
+}
+
+/// The security agent's verdict is signed by the security agent. An
+/// integrator's `INTEGRATED` left in the same file is not a security answer.
+#[test]
+fn an_integrators_verdict_does_not_clear_the_security_run() {
+    let world = with_security_agent(1);
+    world.at_security();
+    world.run_recorded(Some(41), FINISHED);
+    world.verdict("Integrator", "INTEGRATED", &world.head(), "wired");
+
+    let _ = world.verify();
+    assert!(
+        matches!(
+            world.state().flow.stage(),
+            Stage::SecurityAgent { attempt: 2 }
+        ),
+        "{:?}",
+        world.state().flow.stage()
+    );
+}
+
+// --- lifting a security verdict (SPEC 4.5) ---------------------------------
+
+impl World {
+    /// Drive a mission to `FINDINGS`, and say who is running `nunki`, so the
+    /// acceptance records a name rather than whatever `$USER` happens to be.
+    fn at_findings(&self) {
+        std::fs::write(
+            self.project.nunki_home().join("me.yaml"),
+            "name: Alex Martin\nemail: a@example.com\n",
+        )
+        .unwrap();
+        self.at_security();
+        self.run_recorded(Some(41), FINISHED);
+        self.verdict(
+            "Security",
+            "FINDINGS",
+            &self.head(),
+            "an open redirect in /auth/callback",
+        );
+        let steps = self.verify().unwrap();
+        assert!(
+            matches!(steps.last(), Some(Step::Findings { .. })),
+            "{steps:?}"
+        );
+    }
+
+    fn followup(&self) -> String {
+        std::fs::read_to_string(self.mission().join("FOLLOWUP_HQ.md")).unwrap()
+    }
+}
+
+/// The constat lives in the journal of the role that made it, and the HQ
+/// carries it to the coder — dated, in `FOLLOWUP_HQ.md`. An agent never
+/// speaks to another agent.
+#[test]
+fn a_red_verdict_is_carried_to_the_coder_and_a_green_one_is_not() {
+    let world = with_security_agent(1);
+    world.at_findings();
+    let carried = world.followup();
+    assert!(carried.contains("security"), "{carried}");
+    assert!(carried.contains("open redirect"), "{carried}");
+
+    // A green verdict is not something the coder has to act on, and a
+    // follow-up file that fills with green is one nobody reads.
+    let other = World::shaped(1, integration());
+    other.at_integration();
+    other.run_recorded(Some(41), FINISHED);
+    other.verdict("Integrator", "INTEGRATED", &other.head(), "wired");
+    other.verify().unwrap();
+    assert!(
+        !other.followup().contains("concluded Integrated"),
+        "{}",
+        other.followup()
+    );
+}
+
+/// Lifting the verdict as a whole is what concludes the mission — and it
+/// never touches `VERDICT.json`: the verdict says what the agent found, the
+/// state says what the human decided.
+#[test]
+fn lifting_the_verdict_concludes_the_mission_and_leaves_the_verdict_red() {
+    let world = with_security_agent(1);
+    world.at_findings();
+
+    let state = nunki::findings::accept(
+        &world.project,
+        "m1",
+        nunki::findings::Lift::Verdict,
+        "the callback is behind the VPN and the host allowlist is closed",
+    )
+    .unwrap();
+    // At `critical`, the default, the lift leads to the final full
+    // campaign, and the next `verify` verifies on the one at `HEAD`.
+    assert_eq!(state.flow.stage(), &Stage::FinalCampaign);
+    let steps = world.verify().unwrap();
+    assert!(matches!(steps.last(), Some(Step::Verified)), "{steps:?}");
+    let state = world.state();
+    assert!(state.verdict_lifted_on(&world.head()));
+
+    let verdict = std::fs::read_to_string(world.mission().join("VERDICT.json")).unwrap();
+    assert!(verdict.contains("FINDINGS"), "{verdict}");
+    let carried = world.followup();
+    assert!(carried.contains("Alex Martin"), "{carried}");
+    assert!(carried.contains("behind the VPN"), "{carried}");
+}
+
+/// Naming one finding records it and does **not** conclude: itemising is not
+/// concluding, and a session that treated the first acceptance as the last
+/// would push on a report nobody finished reading.
+#[test]
+fn accepting_one_finding_records_it_without_concluding() {
+    let world = with_security_agent(1);
+    world.at_findings();
+
+    let state = nunki::findings::accept(
+        &world.project,
+        "m1",
+        nunki::findings::Lift::Finding("open redirect in /auth/callback".into()),
+        "unreachable from outside the VPN",
+    )
+    .unwrap();
+    assert!(matches!(state.flow.stage(), Stage::Findings { .. }));
+    assert!(!state.verdict_lifted_on(&world.head()));
+    assert_eq!(state.accepted_on(&world.head()).len(), 1);
+
+    // And `verify` shows it back, so the human sees what they have lifted.
+    let steps = world.verify().unwrap();
+    assert!(
+        matches!(steps.last(), Some(Step::Findings { lifted, .. })
+            if lifted.iter().any(|l| l.contains("unreachable from outside"))),
+        "{steps:?}"
+    );
+}
+
+/// A verdict, and its lift, are worth one commit and no other. A new commit
+/// makes an acceptance stale rather than silently carrying it forward.
+#[test]
+fn an_acceptance_given_on_another_commit_does_not_hold() {
+    let world = with_security_agent(1);
+    world.at_findings();
+    nunki::findings::accept(
+        &world.project,
+        "m1",
+        nunki::findings::Lift::Verdict,
+        "accepted on the commit that was judged",
+    )
+    .unwrap();
+    let judged = world.head();
+    assert!(world.state().verdict_lifted_on(&judged));
+
+    world.commit(
+        "src/new.rs",
+        "pub fn two() -> u8 { 2 }\n",
+        "one more change",
+    );
+    assert!(
+        !world.state().verdict_lifted_on(&world.head()),
+        "the lift was given on {judged}, and the slot has moved"
+    );
+}
+
+/// A risk accepted without a reason is not accepted, it is forgotten.
+#[test]
+fn a_lift_without_a_reason_is_refused() {
+    let world = with_security_agent(1);
+    world.at_findings();
+    let err = nunki::findings::accept(
+        &world.project,
+        "m1",
+        nunki::findings::Lift::Verdict,
+        "   \n\t ",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, nunki::findings::FindingsError::NoReason),
+        "{err}"
+    );
+    assert!(matches!(world.state().flow.stage(), Stage::Findings { .. }));
+}
+
+/// A lift is recorded under the human's name; when their declaration
+/// cannot be read, it is refused saying why, and no other name signs it.
+#[test]
+fn a_lift_by_a_human_whose_declaration_cannot_be_read_is_refused_saying_why() {
+    let world = with_security_agent(1);
+    world.at_findings();
+    let me_yaml = world.project.nunki_home().join(nunki::human::ME_FILE);
+    std::fs::create_dir_all(me_yaml.parent().unwrap()).unwrap();
+    std::fs::write(&me_yaml, "name: [Alex\n").unwrap();
+    let err = nunki::findings::accept(
+        &world.project,
+        "m1",
+        nunki::findings::Lift::Verdict,
+        "accepted for the demo",
+    )
+    .unwrap_err();
+    match &err {
+        nunki::findings::FindingsError::HumanUnreadable(why) => {
+            assert!(
+                why.contains("me.yaml, which cannot be read: line 1"),
+                "{why}"
+            )
+        }
+        other => panic!("{other}"),
+    }
+    assert!(
+        err.to_string()
+            .starts_with("nunki cannot name who you are: ")
+    );
+    assert!(matches!(world.state().flow.stage(), Stage::Findings { .. }));
+}
+
+// --- the lift nunki records itself (SPEC 4.5) ------------------------------
+
+impl World {
+    /// The security agent's verdict, ranked: `findings` is spliced in as the
+    /// raw JSON the agent wrote.
+    fn ranked(&self, verdict: &str, findings: &str) {
+        std::fs::write(
+            self.mission().join("VERDICT.json"),
+            format!(
+                "{{\"role\":\"Security\",\"verdict\":\"{verdict}\",\"head\":\"{}\",\
+                 \"date\":\"2026-10-05T00:00:00Z\",\"report\":\"what was attacked and found\",\
+                 \"findings\":{findings}}}",
+                self.head()
+            ),
+        )
+        .unwrap();
+    }
+}
+
+/// [`with_security_agent`], framed at `rigor`.
+fn with_security_agent_at(rigor: nunki::mission::Rigor) -> World {
+    let world = with_security_agent(1);
+    let mut header = header_of(1, integration());
+    header.security = Security::Agent;
+    header.rigor = rigor;
+    let store = Store::open(&world.project.hq_root).unwrap();
+    let mut state = store.load("m1").unwrap();
+    state.flow = Flow::new(header).unwrap();
+    store.save(&state).unwrap();
+    world
+}
+
+const LOW_AND_INFO: &str = r#"[{"severity":"LOW","title":"verbose error page","why_acceptable":"it names no path"},{"severity":"INFO","title":"no security.txt","why_acceptable":"nothing is exposed by its absence"}]"#;
+
+/// A FINDINGS whose every finding is LOW or INFO is lifted by nunki itself,
+/// at `standard` and at `critical`: one acceptance for the verdict as a
+/// whole, on this commit, marked as nunki's, its reason the findings — and
+/// the mission goes on to `Verified` as after a human's accept. The verdict
+/// stays FINDINGS, and the follow-up says who lifted it.
+#[test]
+fn a_findings_verdict_with_only_low_and_info_is_lifted_by_nunki_and_verified() {
+    for rigor in [
+        nunki::mission::Rigor::Standard,
+        nunki::mission::Rigor::Critical,
+    ] {
+        let world = with_security_agent_at(rigor);
+        world.at_security();
+        world.run_recorded(Some(41), FINISHED);
+        world.ranked("FINDINGS", LOW_AND_INFO);
+
+        let steps = world.verify().unwrap();
+        assert!(
+            matches!(steps.last(), Some(Step::Verified)),
+            "{rigor}: {steps:?}"
+        );
+        assert!(
+            steps
+                .iter()
+                .any(|s| matches!(s, Step::LiftedByNunki { findings }
+                if findings == &vec![
+                    "LOW — verbose error page: it names no path".to_string(),
+                    "INFO — no security.txt: nothing is exposed by its absence".to_string(),
+                ])),
+            "{rigor}: {steps:?}"
+        );
+
+        let state = world.state();
+        assert_eq!(state.flow.stage(), &Stage::Verified);
+        assert_eq!(state.accepted.len(), 1, "{:?}", state.accepted);
+        let lift = &state.accepted[0];
+        assert!(lift.by_nunki);
+        assert_eq!(lift.who, nunki::state::NUNKI);
+        assert_eq!(lift.finding, None, "the verdict as a whole");
+        assert_eq!(lift.head, world.head());
+        assert!(lift.why.contains("verbose error page: it names no path"));
+        assert!(state.verdict_lifted_on(&world.head()));
+        assert_eq!(
+            state.concluded(Role::Security).and_then(|c| c.verdict),
+            Some(nunki::mission::Verdict::Findings),
+            "what the agent concluded is kept as it said it"
+        );
+
+        let verdict = std::fs::read_to_string(world.mission().join("VERDICT.json")).unwrap();
+        assert!(verdict.contains("\"FINDINGS\""), "{verdict}");
+        let told = world.followup();
+        assert!(told.contains("nunki lifted the security verdict"), "{told}");
+        assert!(told.contains("no security.txt"), "{told}");
+    }
+}
+
+/// One MEDIUM in the list and the mission stops at `Findings` exactly as
+/// before: nothing is recorded, and verify says why nunki did not lift it.
+#[test]
+fn one_medium_finding_stops_at_findings_as_before() {
+    let world = with_security_agent_at(nunki::mission::Rigor::Standard);
+    world.at_security();
+    world.run_recorded(Some(41), FINISHED);
+    world.ranked(
+        "FINDINGS",
+        r#"[{"severity":"MEDIUM","title":"an open redirect"},{"severity":"LOW","title":"verbose error page","why_acceptable":"it names no path"}]"#,
+    );
+
+    let steps = world.verify().unwrap();
+    assert!(
+        matches!(steps.last(), Some(Step::Findings { .. })),
+        "{steps:?}"
+    );
+    assert!(
+        steps.iter().any(|s| matches!(s, Step::LeftToHuman { why }
+            if why.contains("an open redirect") && why.contains("MEDIUM"))),
+        "{steps:?}"
+    );
+    let state = world.state();
+    assert!(matches!(state.flow.stage(), Stage::Findings { .. }));
+    assert!(state.accepted.is_empty(), "{:?}", state.accepted);
+    assert!(!world.followup().contains("nunki lifted"));
+}
+
+/// A CLEAR says nothing was found; a list of findings beside it says the
+/// opposite. Such a verdict is refused like any malformed one — not
+/// recorded, and one more attempt for the agent — whether the list names a
+/// finding or cannot be read. An empty list, or none, is a CLEAR.
+#[test]
+fn a_clear_that_lists_findings_is_refused_as_malformed() {
+    for findings in [
+        r#"[{"severity":"LOW","title":"a","why_acceptable":"x"}]"#,
+        r#"[{"severity":"HIGH","title":"an open redirect"}]"#,
+        r#""none""#,
+        r#"{"severity":"LOW"}"#,
+    ] {
+        let world = with_security_agent_at(nunki::mission::Rigor::Standard);
+        world.at_security();
+        world.run_recorded(Some(41), FINISHED);
+        world.ranked("CLEAR", findings);
+
+        let _ = world.verify();
+        let state = world.state();
+        assert!(
+            matches!(state.flow.stage(), Stage::SecurityAgent { attempt: 2 }),
+            "{findings}: {:?}",
+            state.flow.stage()
+        );
+        assert!(
+            state.concluded(Role::Security).is_none(),
+            "{findings}: a refused verdict is not recorded"
+        );
+        assert!(
+            world.followup().contains("a CLEAR"),
+            "{findings}: the next attempt is told why: {}",
+            world.followup()
+        );
+    }
+
+    for findings in ["[]", "null"] {
+        let world = with_security_agent_at(nunki::mission::Rigor::Standard);
+        world.at_security();
+        world.run_recorded(Some(41), FINISHED);
+        world.ranked("CLEAR", findings);
+        let steps = world.verify().unwrap();
+        assert!(
+            matches!(steps.last(), Some(Step::Verified)),
+            "{findings}: {steps:?}"
+        );
+    }
+}
+
+/// Fail closed, end to end: no list, an empty one with FINDINGS, an unknown
+/// severity, a LOW without its reason — each stops at `Findings` with
+/// nothing recorded, and none costs the agent an attempt.
+#[test]
+fn a_findings_verdict_nunki_cannot_read_for_certain_stops_at_findings() {
+    for findings in [
+        "null",
+        "[]",
+        r#"[{"severity":"CRITICAL","title":"a","why_acceptable":"x"}]"#,
+        r#"[{"severity":"LOW","title":"a"}]"#,
+        r#""all LOW""#,
+    ] {
+        let world = with_security_agent_at(nunki::mission::Rigor::Standard);
+        world.at_security();
+        world.run_recorded(Some(41), FINISHED);
+        world.ranked("FINDINGS", findings);
+
+        let steps = world.verify().unwrap();
+        assert!(
+            matches!(steps.last(), Some(Step::Findings { .. })),
+            "{findings}: {steps:?}"
+        );
+        let state = world.state();
+        assert!(
+            state.accepted.is_empty(),
+            "{findings}: {:?}",
+            state.accepted
+        );
+        assert_eq!(
+            state.flow.security_rounds(),
+            1,
+            "{findings}: the round counts"
+        );
+    }
+}
+
+/// The lift is a lift, and a lift is the answer to a FINDINGS: nothing is
+/// recorded outside one, and never with no finding to show for it.
+#[test]
+fn nunki_lifts_nothing_outside_findings_or_without_a_finding() {
+    let world = with_security_agent_at(nunki::mission::Rigor::Standard);
+    world.at_security();
+    let store = Store::open(&world.project.hq_root).unwrap();
+    let mut state = store.load("m1").unwrap();
+    let one = [nunki::mission::LowFinding {
+        severity: nunki::mission::Severity::Low,
+        title: "a".into(),
+        why_acceptable: "x".into(),
+    }];
+    let err = nunki::findings::lift_by_nunki(
+        &store,
+        &mut state,
+        &world.mission().join("FOLLOWUP_HQ.md"),
+        &one,
+        &world.head(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, nunki::findings::FindingsError::NotOnFindings { .. }),
+        "{err}"
+    );
+
+    world.run_recorded(Some(41), FINISHED);
+    world.verdict("Security", "FINDINGS", &world.head(), "an open redirect");
+    world.verify().unwrap();
+    let mut state = store.load("m1").unwrap();
+    let err = nunki::findings::lift_by_nunki(
+        &store,
+        &mut state,
+        &world.mission().join("FOLLOWUP_HQ.md"),
+        &[],
+        &world.head(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, nunki::findings::FindingsError::NoReason),
+        "{err}"
+    );
+    assert!(store.load("m1").unwrap().accepted.is_empty());
+}
+
+/// Iterating is a gesture, not a default: a `verify` that sent the mission
+/// back by itself would spend a volet the human might have wanted to spend on
+/// an acceptance instead.
+#[test]
+fn iterating_sends_the_mission_back_to_the_coder_as_a_volet() {
+    let world = with_security_agent(1);
+    world.at_findings();
+
+    // Running `verify` again changes nothing: it stops at the same place.
+    let again = world.verify().unwrap();
+    assert!(
+        matches!(again.last(), Some(Step::Findings { .. })),
+        "{again:?}"
+    );
+
+    let state = nunki::findings::iterate(&world.project, "m1", None).unwrap();
+    assert!(
+        matches!(
+            state.flow.stage(),
+            Stage::Coding {
+                work: Work::Volet { .. },
+                ..
+            }
+        ),
+        "{:?}",
+        state.flow.stage()
+    );
+}
+
+/// A verified branch is read by the HQ before it is pushed (SPEC 4.5), and
+/// what the review refuses goes back to the coder as a volet. The reason is
+/// what the coder acts on, so it lands in `FOLLOWUP_HQ.md` and a review
+/// without one is refused.
+#[test]
+fn the_hq_sends_a_verified_mission_back_with_what_its_review_refuses() {
+    let world = with_security_agent(1);
+    world.at_findings();
+    nunki::findings::accept(
+        &world.project,
+        "m1",
+        nunki::findings::Lift::Verdict,
+        "the callback is behind the VPN",
+    )
+    .unwrap();
+    world.verify().unwrap();
+    assert!(matches!(world.state().flow.stage(), Stage::Verified));
+
+    let err = nunki::findings::iterate(&world.project, "m1", Some("  ")).unwrap_err();
+    assert!(
+        matches!(err, nunki::findings::FindingsError::NoReview),
+        "{err}"
+    );
+    assert!(matches!(world.state().flow.stage(), Stage::Verified));
+
+    let state = nunki::findings::iterate(
+        &world.project,
+        "m1",
+        Some("revert the Playwright bump: the image follows the lockfile now"),
+    )
+    .unwrap();
+    match state.flow.stage() {
+        Stage::Coding {
+            work: Work::Volet { cause, .. },
+            ..
+        } => assert!(cause.contains("revert the Playwright bump"), "{cause}"),
+        other => panic!("not a volet: {other:?}"),
+    }
+    let followup = world.followup();
+    assert!(
+        followup.contains("read the verified branch and sends it back"),
+        "{followup}"
+    );
+    assert!(
+        followup.contains("revert the Playwright bump: the image follows the lockfile now"),
+        "{followup}"
+    );
+}
+
+/// Neither verb applies anywhere but on a security verdict, and says where
+/// the mission actually is rather than failing obscurely.
+#[test]
+fn neither_verb_applies_before_there_is_a_verdict_to_lift() {
+    let world = with_security_agent(1);
+    // Who is running `nunki` is asked before where the mission is, so the
+    // world says it, as `at_findings` does. Left to the machine, the answer
+    // was git's `user.name` or `$USER`, and where neither is set — a nunki
+    // slot — the refusal was "who are you?" and never the one this asks.
+    std::fs::write(
+        world.project.nunki_home().join("me.yaml"),
+        "name: Alex Martin\n",
+    )
+    .unwrap();
+    for err in [
+        nunki::findings::accept(&world.project, "m1", nunki::findings::Lift::Verdict, "why")
+            .unwrap_err(),
+        nunki::findings::iterate(&world.project, "m1", None).unwrap_err(),
+    ] {
+        assert!(
+            matches!(err, nunki::findings::FindingsError::NotOnFindings { .. }),
+            "{err}"
+        );
+        assert!(err.to_string().contains("Coding"), "{err}");
+    }
+}
+
+/// The whole point of `nunki mission stop` (SPEC 4.5): "`nunki` ne relancera aucun
+/// run". This world has neither images nor an account, so an unheld `verify`
+/// at this stage **fails trying to launch** — which is what makes the held
+/// case worth asserting: it returns, having launched nothing.
+#[test]
+fn a_held_mission_launches_no_integration_run() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    assert!(
+        world.verify().is_err(),
+        "the probe is worth nothing unless the unheld path really launches"
+    );
+
+    world.hold();
+    let steps = world.verify().unwrap();
+    assert!(
+        matches!(steps.last(), Some(Step::Held { role, .. }) if *role == nunki::harness::Role::Integrator),
+        "{steps:?}"
+    );
+}
+
+/// Holding a mission stops `nunki` from starting work, not from reading what is
+/// already there: the gates still run, and the coder's run is refused by a
+/// step that names who held it.
+#[test]
+fn a_held_mission_still_plays_its_gates_and_says_who_held_it() {
+    let world = World::shaped(1, integration());
+    world.hold();
+    let steps = world.verify().unwrap();
+
+    assert!(
+        steps.iter().any(|s| matches!(s, Step::Gates { .. })),
+        "{steps:?}"
+    );
+    match steps.last() {
+        Some(Step::Held { role, who, .. }) => {
+            assert_eq!(*role, nunki::harness::Role::Coder);
+            assert!(!who.is_empty(), "it names who held it");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// The hold is lifted by `resume`, and the flow is exactly where it was: a
+/// hold is not a stage, so nothing about the mission's progress moved while
+/// it was held.
+#[test]
+fn lifting_the_hold_leaves_the_flow_where_it_was() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    let before = world.state().flow.stage().clone();
+    world.hold();
+    world.verify().unwrap();
+
+    let engine: Arc<dyn nunki::engine::Engine> =
+        Arc::new(nunki::engine::fake::FakeEngine::default());
+    nunki::gesture::resume(&world.project, "m1", engine).unwrap();
+    assert_eq!(&before, world.state().flow.stage());
+    assert!(!world.state().held());
+}
+
+/// The hold has to mean the same thing at every launch site, and the
+/// security one is a second site: a mutation that removed only its guard
+/// survived the whole battery until this test existed.
+#[test]
+fn a_held_mission_launches_no_security_run() {
+    let world = with_security_agent(1);
+    world.at_security();
+    assert!(
+        world.verify().is_err(),
+        "the probe is worth nothing unless the unheld path really launches"
+    );
+
+    world.hold();
+    let steps = world.verify().unwrap();
+    assert!(
+        matches!(steps.last(), Some(Step::Held { role, .. }) if *role == nunki::harness::Role::Security),
+        "{steps:?}"
+    );
+}
+
+// --- waiting out the harness (SPEC 4.3) -------------------------------------
+
+/// A run that fell for a quota, as Claude Code writes it.
+const QUOTA: &str = "{\"type\":\"result\",\"subtype\":\"error\",\"is_error\":true,\
+                     \"result\":\"API Error: 429 rate limit reached\",\"usage\":{}}\n";
+/// A run whose harness could not authenticate; the text says nothing, the
+/// status says it all.
+const UNAUTHORIZED: &str = "{\"type\":\"result\",\"subtype\":\"error\",\"is_error\":true,\
+                            \"result\":\"boom\",\"api_error_status\":401}\n";
+
+impl World {
+    fn harness_down(&self, record: Option<nunki::backoff::HarnessDown>) {
+        let store = Store::open(&self.project.hq_root).unwrap();
+        let mut state = store.load("m1").unwrap();
+        state.harness_down = record;
+        store.save(&state).unwrap();
+    }
+}
+
+/// A quota is replayed, not at once: the run is forgotten, no attempt is
+/// spent, and the launch site answers with the wait. Asked again at once,
+/// it still waits — and this world cannot launch (no images, no account),
+/// so a guard that let the launch through would fail the call instead.
+#[test]
+fn a_harness_failure_is_waited_out_rather_than_relaunched() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.run_recorded(Some(41), QUOTA);
+
+    let steps = world.verify().unwrap();
+    match steps.last() {
+        Some(Step::Waiting {
+            role,
+            failures,
+            last,
+            ..
+        }) => {
+            assert_eq!(*role, Role::Integrator);
+            assert_eq!(*failures, 1);
+            assert!(last.contains("rate limit"), "{last}");
+        }
+        other => panic!("{other:?}"),
+    }
+    let state = world.state();
+    assert!(state.run.is_none(), "{:?}", state.run);
+    assert_eq!(state.flow.stage(), &Stage::Integration { attempt: 1 });
+    let down = state.harness_down.expect("the failure is counted");
+    assert!(down.not_before > nunki::state::now_secs(), "{down:?}");
+
+    let steps = world.verify().unwrap();
+    assert!(
+        matches!(steps.last(), Some(Step::Waiting { failures: 1, .. })),
+        "{steps:?}"
+    );
+}
+
+/// The wait has to hold at every launch site, as the hold does: the
+/// security one is the second.
+#[test]
+fn a_harness_failure_of_the_security_run_is_waited_out_too() {
+    let world = with_security_agent(1);
+    world.at_security();
+    world.run_recorded(Some(41), QUOTA);
+
+    let steps = world.verify().unwrap();
+    assert!(
+        matches!(steps.last(), Some(Step::Waiting { role, .. }) if *role == Role::Security),
+        "{steps:?}"
+    );
+    let steps = world.verify().unwrap();
+    assert!(
+        matches!(steps.last(), Some(Step::Waiting { failures: 1, .. })),
+        "{steps:?}"
+    );
+}
+
+/// No wait mends a revoked token: the first 401 holds the mission, and the
+/// hold says why and that `nunki` put it there.
+#[test]
+fn an_authentication_failure_holds_the_mission_at_once() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.run_recorded(Some(41), UNAUTHORIZED);
+
+    let steps = world.verify().unwrap();
+    match steps.last() {
+        Some(Step::Held { who, reason, .. }) => {
+            assert_eq!(who, "nunki");
+            let reason = reason.as_deref().unwrap_or_default();
+            assert!(reason.contains("could not authenticate"), "{reason}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(world.state().held());
+}
+
+/// Past the ceiling, `nunki` stops waiting and holds the mission: a harness that
+/// has been failing for six hours is not one more wait away from working.
+#[test]
+fn a_harness_down_past_the_ceiling_holds_the_mission() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    let now = nunki::state::now_secs();
+    world.harness_down(Some(nunki::backoff::HarnessDown {
+        failures: 6,
+        since: now - 6 * 3600 + 60,
+        not_before: now - 1,
+        last: "429".into(),
+    }));
+    world.run_recorded(Some(41), QUOTA);
+
+    let steps = world.verify().unwrap();
+    match steps.last() {
+        Some(Step::Held { reason, .. }) => {
+            let reason = reason.as_deref().unwrap_or_default();
+            assert!(reason.contains("6-hour ceiling"), "{reason}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A run the harness carried through, whatever it concluded, means the
+/// harness works again: the count starts over.
+#[test]
+fn a_run_the_harness_carried_forgets_its_failures() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.harness_down(Some(nunki::backoff::HarnessDown {
+        failures: 3,
+        since: 0,
+        not_before: 0,
+        last: "429".into(),
+    }));
+    world.run_recorded(Some(41), FINISHED);
+    world.verdict("Integrator", "INTEGRATED", &world.head(), "wired");
+
+    let steps = world.verify().unwrap();
+    assert!(matches!(steps.last(), Some(Step::Verified)), "{steps:?}");
+    assert!(world.state().harness_down.is_none());
+}
+
+/// Lifting `nunki`'s hold forgets the failures with it: a count carried over
+/// would send the very next quota straight back to the human.
+#[test]
+fn resuming_forgets_the_harness_failures() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.run_recorded(Some(41), UNAUTHORIZED);
+    world.verify().unwrap();
+    assert!(world.state().harness_down.is_some());
+
+    let engine: Arc<dyn nunki::engine::Engine> =
+        Arc::new(nunki::engine::fake::FakeEngine::default());
+    nunki::gesture::resume(&world.project, "m1", engine).unwrap();
+    let state = world.state();
+    assert!(!state.held());
+    assert!(state.harness_down.is_none(), "{:?}", state.harness_down);
+}
+
+// --- what a mission spends, and its caps (SPEC 7) ---------------------------
+
+/// A finished run as Claude Code writes it, with what it spent in each kind.
+const SPENDING: &str = "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\
+                        \"usage\":{\"input_tokens\":10,\"output_tokens\":40,\
+                        \"cache_creation_input_tokens\":20,\"cache_read_input_tokens\":30}}\n";
+/// A run that fell for a quota, having spent something first.
+const QUOTA_SPENT: &str = "{\"type\":\"result\",\"subtype\":\"error\",\"is_error\":true,\
+                           \"result\":\"API Error: 429 rate limit reached\",\
+                           \"usage\":{\"input_tokens\":5,\"output_tokens\":1}}\n";
+
+impl World {
+    /// Re-freeze the header with these caps, the way `nunki mission reframe`
+    /// would.
+    fn capped(&self, max_runs: Option<u32>, max_tokens: Option<u64>) {
+        let store = Store::open(&self.project.hq_root).unwrap();
+        let mut state = store.load("m1").unwrap();
+        let mut header = state.flow.header().clone();
+        header.bounds.max_runs = max_runs;
+        header.bounds.max_tokens = max_tokens;
+        state.flow.reframe(header).unwrap();
+        store.save(&state).unwrap();
+    }
+
+    fn spent(&self, runs: u32, input_tokens: u64) {
+        let store = Store::open(&self.project.hq_root).unwrap();
+        let mut state = store.load("m1").unwrap();
+        state.spent = nunki::state::Spent {
+            runs,
+            usage: nunki::harness::Usage {
+                input_tokens,
+                ..Default::default()
+            },
+        };
+        store.save(&state).unwrap();
+    }
+}
+
+#[test]
+fn a_run_read_back_is_counted_with_the_four_kinds_it_spent() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.run_recorded(Some(41), SPENDING);
+    world.verdict("Integrator", "INTEGRATED", &world.head(), "wired");
+
+    let steps = world.verify().unwrap();
+    assert!(matches!(steps.last(), Some(Step::Verified)), "{steps:?}");
+    let spent = world.state().spent;
+    assert_eq!(spent.runs, 1);
+    assert_eq!(
+        spent.usage,
+        nunki::harness::Usage {
+            input_tokens: 10,
+            output_tokens: 40,
+            cache_creation_input_tokens: 20,
+            cache_read_input_tokens: 30,
+        }
+    );
+}
+
+#[test]
+fn a_run_that_fell_for_a_quota_is_counted_too() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.run_recorded(Some(41), QUOTA_SPENT);
+
+    world.verify().unwrap();
+    let spent = world.state().spent;
+    assert_eq!(spent.runs, 1);
+    assert_eq!(spent.usage.total(), 6);
+}
+
+/// At its cap, the mission is held instead of launched, and the hold says
+/// which cap and how to raise it. One run short of it, the launch is really
+/// attempted — this world cannot launch, so that is an error — which is what
+/// makes the held case worth asserting.
+#[test]
+fn a_mission_at_its_run_cap_is_held_rather_than_launched() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.capped(Some(2), None);
+    world.spent(1, 0);
+    assert!(
+        world.verify().is_err(),
+        "below the cap, a launch is attempted"
+    );
+
+    world.spent(2, 0);
+    let steps = world.verify().unwrap();
+    match steps.last() {
+        Some(Step::Held { who, reason, .. }) => {
+            assert_eq!(who, "nunki");
+            let reason = reason.as_deref().unwrap_or_default();
+            assert!(reason.contains("max_runs"), "{reason}");
+            assert!(reason.contains("nunki mission reframe m1"), "{reason}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(world.state().held());
+}
+
+#[test]
+fn a_mission_at_its_token_cap_is_held_rather_than_launched() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.capped(None, Some(100));
+    world.spent(0, 99);
+    assert!(
+        world.verify().is_err(),
+        "below the cap, a launch is attempted"
+    );
+
+    world.spent(0, 100);
+    let steps = world.verify().unwrap();
+    match steps.last() {
+        Some(Step::Held { reason, .. }) => {
+            let reason = reason.as_deref().unwrap_or_default();
+            assert!(reason.contains("max_tokens"), "{reason}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// The cap holds at every launch site, as the hold and the wait do.
+#[test]
+fn the_cap_holds_at_the_security_launch_site_too() {
+    let world = with_security_agent(1);
+    world.at_security();
+    world.capped(Some(1), None);
+    world.spent(1, 0);
+
+    let steps = world.verify().unwrap();
+    assert!(
+        matches!(steps.last(), Some(Step::Held { role, .. }) if *role == Role::Security),
+        "{steps:?}"
+    );
+}
+
+/// Raised in the header and resumed, the mission launches again: the cap is
+/// a question put to the human, not an end.
+#[test]
+fn raising_the_cap_and_resuming_lets_the_mission_launch_again() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.capped(Some(1), None);
+    world.spent(1, 0);
+    world.verify().unwrap();
+    assert!(world.state().held());
+
+    world.capped(Some(5), None);
+    let engine: Arc<dyn nunki::engine::Engine> =
+        Arc::new(nunki::engine::fake::FakeEngine::default());
+    nunki::gesture::resume(&world.project, "m1", engine).unwrap();
+    assert!(world.verify().is_err(), "the launch is attempted again");
+    assert!(!world.state().held());
+}
+
+/// No cap by default, and none written into a header that did not set one:
+/// `mission new` copies the bounds into every header it writes.
+#[test]
+fn caps_are_absent_unless_set() {
+    let bounds = Bounds::default();
+    assert_eq!((bounds.max_runs, bounds.max_tokens), (None, None));
+    let yaml = nunki::yaml::to_string(&bounds).unwrap();
+    assert!(
+        !yaml.contains("max_runs") && !yaml.contains("max_tokens"),
+        "{yaml}"
+    );
+}
+
+/// Counted at every place `nunki` reads a run back: the security run is the
+/// second, and a mutation that dropped only its count survived until this
+/// test existed.
+#[test]
+fn a_security_run_read_back_is_counted_too() {
+    let world = with_security_agent(1);
+    world.at_security();
+    world.run_recorded(Some(41), SPENDING);
+    world.verdict("Security", "CLEAR", &world.head(), "nothing found");
+
+    let steps = world.verify().unwrap();
+    assert!(matches!(steps.last(), Some(Step::Verified)), "{steps:?}");
+    let spent = world.state().spent;
+    assert_eq!((spent.runs, spent.usage.total()), (1, 100));
+}
+
+// --- the subscription's windows (SPEC 4.3) ----------------------------------
+
+/// A finished run whose stream said how far the windows were used.
+const MEASURED: &str = "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"unifiedWindows\":\
+                        {\"five_hour\":{\"utilization\":0.37,\"resetsAt\":1789003800},\
+                        \"seven_day\":{\"utilization\":0.41,\"resetsAt\":1789351200}}}}\n\
+                        {\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"usage\":{}}\n";
+
+impl World {
+    /// One account, so the mission spends it without naming it. Its token
+    /// is absent: a launch attempted here fails, which is what makes a
+    /// launch that was *not* attempted worth asserting.
+    fn with_account(&self) {
+        std::fs::write(
+            self.project.nunki_home().join("accounts.yaml"),
+            "accounts:\n  main:\n    harness: claude-code\n    token_file: accounts/main.token\n",
+        )
+        .unwrap();
+    }
+
+    fn five_hours_at(&self, per_mille: u32, resets_at: u64) {
+        nunki::consumption::record(
+            &self.project.nunki_home(),
+            "main",
+            &nunki::consumption::Measure {
+                windows: nunki::consumption::Windows {
+                    five_hour: Some(nunki::consumption::Window {
+                        per_mille,
+                        resets_at,
+                    }),
+                    weekly: None,
+                },
+                measured_at: nunki::state::now_secs(),
+                harness: "claude-code".into(),
+            },
+        )
+        .unwrap();
+    }
+}
+
+/// Past 90 % of five hours, the launch waits for the reset — a wait, not a
+/// hold: nothing for a human to lift. Below it, the launch is attempted.
+#[test]
+fn a_window_past_its_threshold_launches_nothing_until_it_resets() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.with_account();
+    let now = nunki::state::now_secs();
+    world.five_hours_at(100, now + 3_600);
+    assert!(
+        world.verify().is_err(),
+        "below the threshold, a launch is attempted"
+    );
+
+    world.five_hours_at(950, now + 3_600);
+    let steps = world.verify().unwrap();
+    match steps.last() {
+        Some(Step::Saving {
+            role,
+            account,
+            per_mille,
+            stop_at_percent,
+            ..
+        }) => {
+            assert_eq!(*role, Role::Integrator);
+            assert_eq!(account, "main");
+            assert_eq!((*per_mille, *stop_at_percent), (950, 90));
+        }
+        other => panic!("{other:?}"),
+    }
+    let state = world.state();
+    assert!(state.run.is_none() && !state.held(), "{state:?}");
+}
+
+/// Once the window has reset, the same measure forbids nothing: `nunki` goes on
+/// by itself.
+#[test]
+fn a_window_that_has_reset_lets_the_launch_through() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.with_account();
+    world.five_hours_at(990, nunki::state::now_secs() - 1);
+    assert!(world.verify().is_err(), "the launch is attempted");
+}
+
+/// The wait holds at every launch site.
+#[test]
+fn the_window_holds_at_the_security_launch_site_too() {
+    let world = with_security_agent(1);
+    world.at_security();
+    world.with_account();
+    world.five_hours_at(950, nunki::state::now_secs() + 3_600);
+    let steps = world.verify().unwrap();
+    assert!(
+        matches!(steps.last(), Some(Step::Saving { role, .. }) if *role == Role::Security),
+        "{steps:?}"
+    );
+}
+
+/// A run read back leaves its measure in the account's file, where the
+/// supervisor reads it.
+#[test]
+fn a_run_read_back_leaves_its_measure_for_the_account() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.with_account();
+    world.run_recorded(Some(41), MEASURED);
+    world.verdict("Integrator", "INTEGRATED", &world.head(), "wired");
+
+    world.verify().unwrap();
+    let kept = nunki::consumption::read(&world.project.nunki_home(), "main")
+        .unwrap()
+        .expect("measured");
+    assert_eq!(kept.windows.five_hour.map(|w| w.per_mille), Some(370));
+    assert_eq!(kept.windows.weekly.map(|w| w.per_mille), Some(410));
+    assert_eq!(kept.harness, "claude-code");
+}
+
+/// Recorded at every place `nunki` reads a run back: the security run is the
+/// second, and a mutation that dropped only its record survived until this
+/// test existed.
+#[test]
+fn a_security_run_read_back_leaves_its_measure_too() {
+    let world = with_security_agent(1);
+    world.at_security();
+    world.with_account();
+    world.run_recorded(Some(41), MEASURED);
+    world.verdict("Security", "CLEAR", &world.head(), "nothing found");
+
+    world.verify().unwrap();
+    let kept = nunki::consumption::read(&world.project.nunki_home(), "main")
+        .unwrap()
+        .expect("measured");
+    assert_eq!(kept.windows.five_hour.map(|w| w.per_mille), Some(370));
+}
+
+impl World {
+    /// Two accounts, and the mission names neither: it spends `main`, the
+    /// index's default, until someone names `other`.
+    fn with_two_accounts(&self) {
+        std::fs::write(
+            self.project.nunki_home().join("accounts.yaml"),
+            "default: main\naccounts:\n  main:\n    harness: claude-code\n    token_file: \
+             accounts/main.token\n  other:\n    harness: claude-code\n    token_file: \
+             accounts/other.token\n",
+        )
+        .unwrap();
+    }
+
+    /// What a launch records beside its run: the account it was launched on.
+    fn launched_on(&self, account: &str) {
+        let store = Store::open(&self.project.hq_root).unwrap();
+        let mut state = store.load("m1").unwrap();
+        state.run_account = Some(account.into());
+        store.save(&state).unwrap();
+    }
+}
+
+/// A run's stream measures the account it was launched on, and its read-back
+/// keeps the measure there — not under the account the mission would spend
+/// now, which a human may have switched since the launch (#179).
+#[test]
+fn a_run_read_back_measures_the_account_it_was_launched_on() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.with_two_accounts();
+    world.run_recorded(Some(41), MEASURED);
+    world.launched_on("other");
+    world.verdict("Integrator", "INTEGRATED", &world.head(), "wired");
+
+    world.verify().unwrap();
+    let home = world.project.nunki_home();
+    let kept = nunki::consumption::read(&home, "other")
+        .unwrap()
+        .expect("measured under the run's account");
+    assert_eq!(kept.windows.five_hour.map(|w| w.per_mille), Some(370));
+    assert!(
+        nunki::consumption::read(&home, "main").unwrap().is_none(),
+        "the account the mission would spend now is left alone"
+    );
+    assert_eq!(world.state().run_account, None, "forgotten with the run");
+}
+
+// --- a run nunki stopped for the window (SPEC 4.3) -----------------------------
+
+impl World {
+    /// What `nunki` writes when it tells the run to end its turn.
+    fn spared(&self) {
+        let store = Store::open(&self.project.hq_root).unwrap();
+        let mut state = store.load("m1").unwrap();
+        state.spared = Some(nunki::state::Spared {
+            account: "main".into(),
+            window: "five-hour window".into(),
+            per_mille: 950,
+            until: nunki::state::now_secs() + 3_600,
+            date: "2026-09-11T00:00:00Z".into(),
+        });
+        store.save(&state).unwrap();
+    }
+}
+
+/// Unmarked, a run that finished without a verdict is a failed attempt
+/// (`a_run_that_left_no_verdict_did_not_conclude`). Marked, it is a turn `nunki`
+/// ended: the same attempt is replayed, and the mark is spent.
+#[test]
+fn a_run_hq_spared_costs_no_attempt() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.run_recorded(Some(41), FINISHED);
+    world.spared();
+
+    // This world cannot launch the replay; what matters is written before.
+    let _ = world.verify();
+    let state = world.state();
+    assert_eq!(state.flow.stage(), &Stage::Integration { attempt: 1 });
+    assert!(state.spared.is_none(), "the mark is spent by its read-back");
+    assert_eq!(state.spent.runs, 1, "it spent, and it is counted");
+}
+
+/// An nunki-initiated stop is not a harness failure: two of them in a row must
+/// not walk the harness wait towards its ceiling.
+#[test]
+fn a_run_hq_spared_is_not_a_harness_failure() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.run_recorded(Some(41), QUOTA);
+    world.spared();
+
+    let _ = world.verify();
+    let state = world.state();
+    assert!(state.harness_down.is_none(), "{:?}", state.harness_down);
+    assert_eq!(state.flow.stage(), &Stage::Integration { attempt: 1 });
+}
+
+/// A verdict written before the turn ended is a conclusion; the window has
+/// nothing to say about it.
+#[test]
+fn a_verdict_written_before_the_turn_ended_still_stands() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.run_recorded(Some(41), FINISHED);
+    world.verdict("Integrator", "INTEGRATED", &world.head(), "wired");
+    world.spared();
+
+    let steps = world.verify().unwrap();
+    assert!(matches!(steps.last(), Some(Step::Verified)), "{steps:?}");
+}
+
+/// The mark is read at every read-back site: the security one is the second.
+#[test]
+fn a_security_run_hq_spared_costs_no_attempt_too() {
+    let world = with_security_agent(1);
+    world.at_security();
+    world.run_recorded(Some(41), FINISHED);
+    world.spared();
+
+    let _ = world.verify();
+    assert_eq!(
+        world.state().flow.stage(),
+        &Stage::SecurityAgent { attempt: 1 }
+    );
+}
+
+/// `verify` finding a run still going is the moment to judge the window
+/// while it runs: past the threshold the run is told to end its turn, and
+/// the caller hears why instead of "a run is still going". Below it, the
+/// run goes on and `verify` refuses as before.
+///
+/// The fake engine answers the liveness probe with the marker the probe
+/// prints for a live process (`nunki-run-running`, in `engine::spawn`).
+#[test]
+fn a_run_still_going_past_the_threshold_is_told_to_end_its_turn() {
+    use nunki::engine::{ExecOutput, Liveness, fake::FakeEngine};
+    let still_going = || -> Arc<dyn nunki::engine::Engine> {
+        Arc::new(
+            FakeEngine::default()
+                .with_liveness("cafe1234", Liveness::Running)
+                .with_exec(ExecOutput {
+                    status: 0,
+                    stdout: "nunki-run-running\n".into(),
+                    stderr: String::new(),
+                }),
+        )
+    };
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.with_account();
+    world.run_recorded(Some(41), "");
+    let now = nunki::state::now_secs();
+
+    world.five_hours_at(100, now + 3_600);
+    match verify::verify(&world.project, "m1", still_going(), "docker") {
+        Err(VerifyError::RunInProgress { .. }) => {}
+        other => panic!("below the threshold the run goes on: {other:?}"),
+    }
+    assert!(world.state().spared.is_none());
+
+    world.five_hours_at(950, now + 3_600);
+    match verify::verify(&world.project, "m1", still_going(), "docker") {
+        Err(VerifyError::Spared { account, .. }) => assert_eq!(account, "main"),
+        other => panic!("past the threshold the turn is ended: {other:?}"),
+    }
+    assert!(world.state().spared.is_some());
+}
+
+// --- the coder's runs, read back and relaunched (SPEC 4.3) -------------------
+
+impl World {
+    /// The journal's resume block, naming HEAD, with the run's `Lot:` line.
+    fn journal_says(&self, line: &str) {
+        std::fs::write(
+            self.mission().join("JOURNAL.md"),
+            format!(
+                "# Journal\n\n## ÉTAT DE REPRISE\n\nHEAD is `{}`.\n{line}\n",
+                self.head()
+            ),
+        )
+        .unwrap();
+    }
+
+    /// A coder session, as `nunki mission start` records one.
+    fn coder_session(&self, id: &str) {
+        let store = Store::open(&self.project.hq_root).unwrap();
+        let mut state = store.load("m1").unwrap();
+        state.coder_session = Some(nunki::harness::SessionId(id.into()));
+        store.save(&state).unwrap();
+    }
+
+    /// A coder run that finished, having left `line` in its resume block.
+    /// Held, so the relaunch is refused by name instead of failing in a
+    /// world with no account.
+    fn coder_ran(&self, line: &str) -> Vec<Step> {
+        self.journal_says(line);
+        self.coder_session("s-coder");
+        self.run_recorded(Some(41), FINISHED);
+        self.hold();
+        self.verify().unwrap()
+    }
+}
+
+fn coding(state: &MissionState) -> (Work, u32) {
+    match state.flow.stage() {
+        Stage::Coding { work, attempt } => (work.clone(), *attempt),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// The run says its lot is done, the gates agree: the next lot, first
+/// attempt, in the same session — and the run is counted and forgotten.
+#[test]
+fn a_coder_run_that_says_its_lot_is_done_moves_to_the_next_lot() {
+    let world = World::new(2);
+    world.commit("src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    let steps = world.coder_ran("Lot: L1 — done");
+
+    assert!(
+        gates_of(&steps).passed(),
+        "{:?}",
+        gates_of(&steps).failure()
+    );
+    let state = world.state();
+    assert_eq!(coding(&state), (Work::Lot(1), 1));
+    assert!(state.run.is_none(), "{:?}", state.run);
+    assert_eq!(state.spent.runs, 1, "counted when read back");
+    assert_eq!(
+        state.coder_session,
+        Some(nunki::harness::SessionId("s-coder".into())),
+        "the next lot resumes the session"
+    );
+    assert!(
+        matches!(steps.last(), Some(Step::Held { role, .. }) if *role == Role::Coder),
+        "{steps:?}"
+    );
+}
+
+/// A lot the run says it failed is one more attempt, in a fresh session, and
+/// the next attempt reads why in the file every run reads first.
+#[test]
+fn a_run_that_says_its_lot_failed_costs_an_attempt_and_its_session() {
+    let world = World::new(2);
+    world.commit("src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    world.coder_ran("Lot: L1 — failed: the parser rejects empty input");
+
+    let state = world.state();
+    assert_eq!(coding(&state), (Work::Lot(0), 2));
+    assert!(state.coder_session.is_none(), "{:?}", state.coder_session);
+    let followup = world.followup();
+    assert!(followup.contains("L1, attempt 1"), "{followup}");
+    assert!(
+        followup.contains("the parser rejects empty input"),
+        "{followup}"
+    );
+}
+
+/// No `Lot:` line is no word that the lot is done: a failed attempt.
+#[test]
+fn a_run_that_does_not_say_its_lot_is_done_has_not_finished_it() {
+    let world = World::new(2);
+    world.commit("src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    world.coder_ran("Nothing said about the lot.");
+
+    let state = world.state();
+    assert_eq!(coding(&state), (Work::Lot(0), 2));
+    assert!(state.coder_session.is_none());
+    assert!(
+        world.followup().contains("no `Lot: L1 — done` line"),
+        "{}",
+        world.followup()
+    );
+}
+
+/// A `done` for another lot is not this lot's.
+#[test]
+fn a_done_line_for_another_lot_is_not_this_lots() {
+    let world = World::new(2);
+    world.commit("src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    world.coder_ran("Lot: L2 — done");
+
+    assert_eq!(coding(&world.state()), (Work::Lot(0), 2));
+    assert!(
+        world.followup().contains("reports lot L2"),
+        "{}",
+        world.followup()
+    );
+}
+
+/// Red gates after a run cost that run's attempt, once: the launch that
+/// follows is not preceded by a second judgement of the same tree.
+#[test]
+fn red_gates_after_a_coder_run_spend_one_attempt_not_two() {
+    let world = World::new(2);
+    world.commit("AGENTS.md", "rewritten by the agent\n", "loosen the rules");
+    let steps = world.coder_ran("Lot: L1 — done");
+
+    assert_eq!(coding(&world.state()), (Work::Lot(0), 2));
+    assert_eq!(
+        steps
+            .iter()
+            .filter(|s| matches!(s, Step::Gates { .. }))
+            .count(),
+        1,
+        "{steps:?}"
+    );
+    assert!(world.state().coder_session.is_none());
+    assert!(
+        world.followup().contains("the gates were red"),
+        "{}",
+        world.followup()
+    );
+}
+
+/// A turn `nunki` ended is replayed in the same session, and its tree is not
+/// judged: a resume block one commit behind would turn the replay into a
+/// spent attempt.
+#[test]
+fn a_coder_turn_hq_spared_is_replayed_without_judging_the_tree() {
+    let world = World::new(2);
+    world.journal_names_head();
+    world.commit("src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1, half done");
+    world.coder_session("s-coder");
+    world.run_recorded(Some(41), FINISHED);
+    world.spared();
+    world.hold();
+
+    let steps = world.verify().unwrap();
+    let state = world.state();
+    assert_eq!(coding(&state), (Work::Lot(0), 1));
+    assert!(state.spared.is_none(), "the mark is spent");
+    assert_eq!(
+        state.coder_session,
+        Some(nunki::harness::SessionId("s-coder".into()))
+    );
+    assert!(
+        !steps.iter().any(|s| matches!(s, Step::Gates { .. })),
+        "{steps:?}"
+    );
+}
+
+/// A harness that failed the coder's run is waited out, like any other role's,
+/// and the session is kept for the replay.
+#[test]
+fn a_coder_harness_failure_is_waited_out_and_keeps_its_session() {
+    let world = World::new(2);
+    world.journal_names_head();
+    world.coder_session("s-coder");
+    world.run_recorded(Some(41), QUOTA);
+
+    let steps = world.verify().unwrap();
+    assert!(
+        matches!(steps.last(), Some(Step::Waiting { role, .. }) if *role == Role::Coder),
+        "{steps:?}"
+    );
+    let state = world.state();
+    assert_eq!(coding(&state), (Work::Lot(0), 1));
+    assert!(state.harness_down.is_some());
+    assert_eq!(
+        state.coder_session,
+        Some(nunki::harness::SessionId("s-coder".into()))
+    );
+}
+
+/// A spared turn waits for the window it was spared for, so its replay is
+/// launched by a later `verify` than the one that read it back. That one
+/// launches it on the tree the turn left, uncommitted work and all, and
+/// spends nothing: the tree was not to be judged, and still is not (#177).
+#[test]
+fn a_spared_coder_turn_is_still_replayed_once_the_window_resets() {
+    let world = World::new(2);
+    world.journal_names_head();
+    write(&world.tree, "src/half.rs", "pub fn half() {}\n");
+    world.coder_session("s-coder");
+    world.run_recorded(Some(41), FINISHED);
+    world.spared();
+    world.with_account();
+    world.five_hours_at(970, nunki::state::now_secs() + 3_600);
+
+    let steps = world.verify().unwrap();
+    assert!(
+        matches!(steps.last(), Some(Step::Saving { role, .. }) if *role == Role::Coder),
+        "{steps:?}"
+    );
+    assert_eq!(coding(&world.state()), (Work::Lot(0), 1));
+
+    world.five_hours_at(970, nunki::state::now_secs() - 1);
+    assert!(world.verify().is_err(), "the replay is launched");
+    let state = world.state();
+    assert_eq!(coding(&state), (Work::Lot(0), 1));
+    assert_eq!(
+        state.coder_session,
+        Some(nunki::harness::SessionId("s-coder".into()))
+    );
+}
+
+/// The same for a harness failure, whose replay always waits: the tree it
+/// left is not judged when the wait is over.
+#[test]
+fn a_coder_harness_failure_is_replayed_once_the_wait_is_over() {
+    let world = World::new(2);
+    world.journal_names_head();
+    write(&world.tree, "src/half.rs", "pub fn half() {}\n");
+    world.coder_session("s-coder");
+    world.run_recorded(Some(41), QUOTA);
+
+    let steps = world.verify().unwrap();
+    assert!(
+        matches!(steps.last(), Some(Step::Waiting { role, .. }) if *role == Role::Coder),
+        "{steps:?}"
+    );
+    let mut down = world.state().harness_down.expect("the failure is counted");
+    down.not_before = nunki::state::now_secs() - 1;
+    world.harness_down(Some(down));
+
+    assert!(world.verify().is_err(), "the replay is launched");
+    assert_eq!(coding(&world.state()), (Work::Lot(0), 1));
+}
+
+/// Red gates spend their run's attempt once, even when the next run is not
+/// launched by the same `verify`: the tree is not judged again on its way to
+/// the launch.
+#[test]
+fn red_gates_and_a_held_launch_still_spend_one_attempt() {
+    let world = World::new(2);
+    world.commit("AGENTS.md", "rewritten by the agent\n", "loosen the rules");
+    world.coder_ran("Lot: L1 — done");
+    assert_eq!(coding(&world.state()), (Work::Lot(0), 2));
+
+    world.release();
+    assert!(world.verify().is_err(), "the next attempt is launched");
+    assert_eq!(coding(&world.state()), (Work::Lot(0), 2));
+}
+
+/// A clock for the monitor's loop that starts at the real time, since the
+/// `verify` it calls reads that one. It never sleeps: it remembers each pause
+/// and, at the first, does what the test says the world did meanwhile.
+struct Pauses<'a> {
+    now: u64,
+    slept: Vec<u64>,
+    meanwhile: Option<Box<dyn FnOnce() + 'a>>,
+}
+
+impl nunki::wait::Clock for Pauses<'_> {
+    fn now(&mut self) -> u64 {
+        self.now
+    }
+    fn sleep(&mut self, seconds: u64) {
+        assert!(self.slept.len() < 10, "the monitor should have stopped");
+        self.slept.push(seconds);
+        self.now += seconds;
+        if let Some(meanwhile) = self.meanwhile.take() {
+            meanwhile();
+        }
+    }
+}
+
+/// The monitor read the spared turn back and went to sleep until the
+/// window's reset, an hour off. A human's `verify` launched a run meanwhile —
+/// on another account, in #179: the monitor looks at it within the minute,
+/// not at the reset.
+#[test]
+fn a_monitor_asleep_until_the_reset_wakes_for_a_run_launched_meanwhile() {
+    let world = World::new(2);
+    world.journal_names_head();
+    write(&world.tree, "src/half.rs", "pub fn half() {}\n");
+    world.coder_session("s-coder");
+    world.run_recorded(Some(41), FINISHED);
+    world.spared();
+    world.with_account();
+    let now = nunki::state::now_secs();
+    world.five_hours_at(970, now + 3_600);
+    let mut clock = Pauses {
+        now,
+        slept: Vec::new(),
+        // What the human's `verify` leaves: a run recorded. And a hold, so
+        // that the monitor stops at its next `verify` rather than ticking on.
+        meanwhile: Some(Box::new(|| {
+            world.run_recorded(Some(42), FINISHED);
+            world.hold();
+        })),
+    };
+    let engine: Arc<dyn nunki::engine::Engine> =
+        Arc::new(nunki::engine::fake::FakeEngine::default());
+    let mut log: Vec<u8> = Vec::new();
+
+    let why = nunki::monitor::watch(&world.project, "m1", engine, "docker", &mut clock, &mut log);
+
+    let log = String::from_utf8(log).unwrap();
+    assert!(log.contains("verify: Saving"), "{log}");
+    assert_eq!(
+        clock.slept,
+        vec![60],
+        "woken within the minute, not at the reset: {log}"
+    );
+    assert!(why.starts_with("held by"), "{why}\n{log}");
+}
+
+impl World {
+    /// The project's `nunki.yaml` on disk, naming `account`: this world's
+    /// configuration, which is what a monitor reads again at every tick.
+    fn config_on_disk(&self, account: Option<&str>) {
+        let mut config = self.project.config.clone();
+        config.root = Some(self.project.root.clone());
+        config.account = account.map(str::to_string);
+        // `mutation_jobs` unset is a key left out: the file refuses a null
+        // there, and nunki never writes one.
+        let text: String = nunki::yaml::to_string(&config)
+            .unwrap()
+            .lines()
+            .filter(|line| *line != "mutation_jobs: null")
+            .map(|line| format!("{line}\n"))
+            .collect();
+        std::fs::write(self.project.home.join(nunki::project::CONFIG_FILE), text).unwrap();
+    }
+}
+
+/// The monitor read the spared turn back and went to sleep until `main`'s
+/// reset, an hour off. Meanwhile a human switched the project to `other`,
+/// below its threshold, and typed nothing else. Within the minute the
+/// monitor launches the replay on `other` (SPEC 4.3): this world has no
+/// token for it, so the launch fails naming `other`, which is how the test
+/// tells it was tried there.
+#[test]
+fn a_monitor_asleep_until_the_reset_launches_on_the_account_switched_to() {
+    let world = World::new(2);
+    world.journal_names_head();
+    write(&world.tree, "src/half.rs", "pub fn half() {}\n");
+    world.coder_session("s-coder");
+    world.run_recorded(Some(41), FINISHED);
+    world.spared();
+    world.with_two_accounts();
+    world.config_on_disk(None);
+    let reopened =
+        Project::open_at(world.project.root.clone(), world.project.home.clone()).unwrap();
+    let mut written = world.project.config.clone();
+    written.root = Some(world.project.root.clone());
+    assert_eq!(
+        reopened.config, written,
+        "the file reads back as this world's configuration"
+    );
+    let now = nunki::state::now_secs();
+    world.five_hours_at(970, now + 3_600);
+    let mut clock = Pauses {
+        now,
+        slept: Vec::new(),
+        meanwhile: Some(Box::new(|| world.config_on_disk(Some("other")))),
+    };
+    let engine: Arc<dyn nunki::engine::Engine> =
+        Arc::new(nunki::engine::fake::FakeEngine::default());
+    let mut log: Vec<u8> = Vec::new();
+
+    let why = nunki::monitor::watch(&world.project, "m1", engine, "docker", &mut clock, &mut log);
+
+    let log = String::from_utf8(log).unwrap();
+    assert!(log.contains("verify: Saving"), "{log}");
+    assert!(log.contains("account: \"main\""), "{log}");
+    assert_eq!(
+        clock.slept,
+        vec![60],
+        "woken within the minute, not at main's reset: {log}"
+    );
+    assert!(
+        why.contains("account \"other\" has no token"),
+        "{why}\n{log}"
+    );
+}
+
+/// `nunki.yaml` that cannot be read mid-mission — an editor halfway through
+/// saving it — does not stop the monitor: it goes on with the copy it last
+/// read, and says so in its log.
+#[test]
+fn a_monitor_goes_on_with_its_copy_when_nunki_yaml_cannot_be_read() {
+    let world = World::new(2);
+    world.journal_names_head();
+    write(&world.tree, "src/half.rs", "pub fn half() {}\n");
+    world.coder_session("s-coder");
+    world.run_recorded(Some(41), FINISHED);
+    world.spared();
+    world.with_two_accounts();
+    world.config_on_disk(None);
+    let now = nunki::state::now_secs();
+    world.five_hours_at(970, now + 3_600);
+    let config = world.project.home.join(nunki::project::CONFIG_FILE);
+    let mut clock = Pauses {
+        now,
+        slept: Vec::new(),
+        // Broken, then the mission held, so that the monitor's next `verify`
+        // stops it.
+        meanwhile: Some(Box::new(|| {
+            std::fs::write(&config, "root: [").unwrap();
+            world.hold();
+        })),
+    };
+    let engine: Arc<dyn nunki::engine::Engine> =
+        Arc::new(nunki::engine::fake::FakeEngine::default());
+    let mut log: Vec<u8> = Vec::new();
+
+    let why = nunki::monitor::watch(&world.project, "m1", engine, "docker", &mut clock, &mut log);
+
+    let log = String::from_utf8(log).unwrap();
+    assert!(why.starts_with("held by"), "{why}\n{log}");
+    let said = log
+        .lines()
+        .filter(|line| line.contains("nunki.yaml could not be read again"))
+        .count();
+    assert_eq!(said, 1, "{log}");
+}
+
+/// The coder's launch site answers to the account's window like the others.
+#[test]
+fn the_window_holds_at_the_coder_launch_site_too() {
+    let world = World::new(2);
+    world.journal_names_head();
+    world.with_account();
+    world.five_hours_at(950, nunki::state::now_secs() + 3_600);
+
+    let steps = world.verify().unwrap();
+    assert!(
+        matches!(steps.last(), Some(Step::Saving { role, .. }) if *role == Role::Coder),
+        "{steps:?}"
+    );
+}
+
+/// And to the mission's caps: below, the launch is attempted (and fails in
+/// this world); at the cap, the mission is held.
+#[test]
+fn the_cap_holds_at_the_coder_launch_site_too() {
+    let world = World::new(2);
+    world.journal_names_head();
+    world.capped(Some(1), None);
+    assert!(
+        world.verify().is_err(),
+        "below the cap, a launch is attempted"
+    );
+
+    world.spent(1, 0);
+    let steps = world.verify().unwrap();
+    match steps.last() {
+        Some(Step::Held {
+            role, who, reason, ..
+        }) => {
+            assert_eq!((*role, who.as_str()), (Role::Coder, "nunki"));
+            assert!(reason.as_deref().unwrap_or_default().contains("max_runs"));
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Red final gates open a volet, and the coder is told why in the file every
+/// run reads first — the one place a volet's reason reaches the agent.
+#[test]
+fn red_final_gates_tell_the_coder_why() {
+    let world = World::new(1);
+    world.commit("src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    world.journal_names_head();
+    world.coder_finished_the_lot();
+    world.hold();
+
+    let steps = world.verify();
+    let stage = world.state().flow.stage().clone();
+    assert!(
+        matches!(
+            stage,
+            Stage::Coding {
+                work: Work::Volet { .. },
+                ..
+            }
+        ),
+        "{stage:?} after {steps:?}"
+    );
+    assert!(
+        world.followup().contains("the final gates were red"),
+        "{}",
+        world.followup()
+    );
+}
+
+/// The last lot done is not a stopping point: the same `verify` goes on to
+/// the final gates, which this world has red — so the mission is already on
+/// its first volet when it returns.
+#[test]
+fn the_last_lot_done_goes_on_to_the_final_gates_at_once() {
+    let world = World::new(1);
+    world.commit("src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    let steps = world.coder_ran("Lot: L1 — done");
+
+    assert!(
+        steps
+            .iter()
+            .any(|s| matches!(s, Step::Moved { to: Stage::Gates })),
+        "{steps:?}"
+    );
+    assert_ne!(world.state().flow.stage(), &Stage::Gates, "{steps:?}");
+}
+
+/// A gate nobody could play stops the verification where it stands, and the
+/// coder is not sent back at it.
+///
+/// Gate 7 says `Unplayed` when no campaign has run, and starting one is
+/// `nunki mission mutants` — an HQ verb no container holds. A volet opened
+/// anyway buys three runs in a row, each reading the same instruction,
+/// saying it has no way to carry it out, and stopping — tens of thousands of
+/// output tokens to say so.
+///
+/// This world owes nothing: the journal names `HEAD` and `PR.md` is written,
+/// so no gate is red. What is left is a battery with no profile up and a
+/// campaign nobody has started — two gates about the machine, which is the
+/// one thing an agent cannot be sent back to fix.
+#[test]
+fn a_gate_nobody_could_play_stops_instead_of_opening_a_volet() {
+    let world = World::new(1);
+    // Take the profile away: this test is about a gate that needs the machine
+    // and cannot reach it, and the battery is the one it was written around.
+    world.without_profile();
+    world.commit("src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    world.journal_names_head();
+    std::fs::write(
+        world.mission().join("PR.md"),
+        "# What this changes\n\nL1, and nothing else.\n",
+    )
+    .unwrap();
+    world.coder_finished_the_lot();
+
+    let steps = world.verify().unwrap();
+    let report = gates_of(&steps);
+    assert!(
+        !matches!(report.verdict(), nunki::gate::Verdict::Red(_)),
+        "nothing is the agent's to fix here: {report:?}"
+    );
+    assert!(
+        matches!(steps.last(), Some(Step::GateUnplayable { .. })),
+        "{steps:?}"
+    );
+
+    // The flow has not moved, which is the whole point: no volet, no
+    // attempt, no run spent against a wall the agent cannot move. A later
+    // `nunki verify`, once a human has done what the gate's sentence asks,
+    // plays it again and goes on.
+    assert_eq!(world.state().flow.stage(), &Stage::Gates, "{steps:?}");
+    assert_eq!(world.state().flow.volets(), 0);
+
+    // And nothing is written to the file the next run reads first, unlike a
+    // red gate: there is no next run to read it.
+    assert!(
+        !world.followup().contains("could not be played"),
+        "{}",
+        world.followup()
+    );
+}
+
+/// A volet is called `volet-<n>`: the name the coder is given, the one its
+/// `Lot:` line must repeat, and the one a handover to the human names.
+#[test]
+fn a_volet_is_named_by_its_number() {
+    let world = World::new(1);
+    let work = Work::Volet {
+        n: 2,
+        cause: "gate: red".into(),
+    };
+    assert_eq!(world.state().flow.label(&work), "volet-2");
+}
+
+// --- a real provider, locked for the other missions (SPEC 7) -----------------
+
+fn shared_integration() -> Integration {
+    Integration::Services {
+        services: vec![nunki::mission::Service {
+            name: "stripe".into(),
+            reach: vec!["api.stripe.com".into()],
+            shared: true,
+        }],
+        wiring: vec!["compose.yaml".into()],
+    }
+}
+
+impl World {
+    /// Another mission of the project on the same framing, at its
+    /// integration stage, with its run recorded or read back.
+    fn another_mission_integrating(&self, with_run: bool) {
+        let store = Store::open(&self.project.hq_root).unwrap();
+        let mut other = self.state();
+        other.id = "m2".into();
+        other.slot = "two".into();
+        other.run = with_run.then(|| nunki::harness::RunHandle {
+            session: nunki::harness::SessionId("s-m2".into()),
+            container: "beef5678".into(),
+            pid: Some(42),
+            log: PathBuf::from("/dev/null"),
+        });
+        store.save(&other).unwrap();
+    }
+}
+
+/// A provider another mission's integration run holds is waited for: no
+/// run, no attempt spent. Once that run is read back, the launch goes.
+#[test]
+fn a_provider_another_mission_holds_is_waited_for() {
+    let world = World::shaped(1, shared_integration());
+    world.at_integration();
+    world.another_mission_integrating(true);
+
+    let steps = world.verify().unwrap();
+    match steps.last() {
+        Some(Step::Busy { role, provider, by }) => {
+            assert_eq!(*role, Role::Integrator);
+            assert_eq!(provider, "stripe");
+            assert_eq!(by, "mission m2");
+        }
+        other => panic!("{other:?}"),
+    }
+    let state = world.state();
+    assert!(state.run.is_none());
+    assert_eq!(state.flow.stage(), &Stage::Integration { attempt: 1 });
+
+    world.another_mission_integrating(false);
+    assert!(
+        world.verify().is_err(),
+        "free again, the launch is attempted"
+    );
+}
+
+/// A service not declared shared is not a real provider: two missions may
+/// use it at once.
+#[test]
+fn a_service_not_declared_shared_is_not_locked() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.another_mission_integrating(true);
+    assert!(world.verify().is_err(), "the launch is attempted");
+}
+
+/// A battery that came back red while a campaign was rewriting the copy of
+/// `HEAD` opens no volet, because it was judging a mutant.
+///
+/// `verify` starts the campaign — `cargo mutants --in-place`, in the clean
+/// copy of `HEAD` — and then, called again, would play the whole gate set
+/// against that same copy. The battery comes back 101 on `warning: unused
+/// variable: value`, in a function whose body cargo-mutants has replaced and
+/// which uses its argument in the coder's own code. Every play also resets
+/// the copy under the running campaign, `exec::run(On::Proof)` refreshing it
+/// first.
+///
+/// A flow that reads gate 6 red opens a volet, again and again until the
+/// volets are spent, and neither the integrator nor the security agent ever
+/// runs. Nothing any agent did was wrong.
+#[test]
+fn a_battery_red_under_a_running_campaign_opens_no_volet() {
+    use nunki::engine::{ExecOutput, fake::FakeEngine};
+
+    let world = World::new(1);
+    world.commit("src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    world.journal_names_head();
+    std::fs::write(
+        world.mission().join("PR.md"),
+        "# What this changes\n\nL1, and nothing else.\n",
+    )
+    .unwrap();
+    world.coder_finished_the_lot();
+
+    let file = nunki::run::profile_path(&world.project, "one");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, "services:\n  agent:\n    image: alpine:3.20\n").unwrap();
+    // The container answers the way it did: the battery failed, on a mutant.
+    //
+    // A queue and not one answer, because `exec::run(On::Proof)` refreshes the
+    // copy first and `battery` reports an exec that **errored** as unplayed
+    // too. With a single 101 the gate came back unplayed for the wrong reason,
+    // and this test passed with the guard taken out.
+    let ok = ExecOutput {
+        status: 0,
+        stdout: String::new(),
+        stderr: String::new(),
+    };
+    let engine: Arc<dyn nunki::engine::Engine> = Arc::new(FakeEngine::default().with_execs(vec![
+        ok.clone(),
+        ExecOutput {
+            status: 101,
+            stdout: String::new(),
+            stderr: "error: test failed, to rerun pass `--lib`".into(),
+        },
+        ok,
+    ]));
+
+    nunki::mutants::write_running(
+        &world.project.hq_root,
+        "one",
+        &nunki::mutants::Running {
+            off_mission: None,
+            chain: Default::default(),
+            fingerprint: "a62d271".into(),
+            head: git(&world.tree, &["rev-parse", "HEAD"]),
+            started_at: "2026-09-18T20:56:38Z".into(),
+            container: "64e0796ca1de".into(),
+            pid: Some(2736),
+            log: world.mission().join("mutants.log"),
+            deadline_minutes: 45,
+        },
+    )
+    .unwrap();
+
+    let steps = verify::verify(&world.project, "m1", engine, "docker").unwrap();
+
+    let report = gates_of(&steps);
+    assert!(
+        !matches!(report.verdict(), nunki::gate::Verdict::Red(_)),
+        "the coder was sent back for a mutant it did not write: {report:?}"
+    );
+    // And unplayed for the campaign, not for something else that went wrong.
+    let battery = report
+        .outcomes
+        .iter()
+        .find(|o| o.gate == Gate::Battery)
+        .expect("gate 6 is played");
+    let nunki::gate::Decision::Unplayed(why) = &battery.decision else {
+        panic!("the battery judged a copy a campaign is rewriting: {battery:?}");
+    };
+    assert!(why.contains("2026-09-18T20:56:38Z"), "{why}");
+    // No volet, no attempt, no run spent. A later `verify`, once the campaign
+    // has been read back, plays the battery on the copy it owns again.
+    assert_eq!(world.state().flow.stage(), &Stage::Gates, "{steps:?}");
+    assert_eq!(world.state().flow.volets(), 0);
+
+    // And the turn ends by going to read the campaign, not by calling it a
+    // wall. A wall stops `verify` before the campaign is read back, and the
+    // gates that stood down for it then stand down for ever: turn after turn
+    // of `verify`, every one of them reporting a campaign in flight and none
+    // of them reading it.
+    match steps.last() {
+        Some(Step::CampaignOwed { role, .. }) => assert_eq!(*role, Role::Coder),
+        other => panic!("waiting on the campaign became a wall: {other:?}"),
+    }
+}
+
+/// Gate 7 with no campaign, and everything else played: the flow does not
+/// stop for a verb a human would have typed. It says a campaign is owed, and
+/// the monitor runs one.
+///
+/// A profile on disk and an engine that answers, so gate 6 is green and gate
+/// 7 stands alone — the shape a real mission has, and the one a world with no
+/// profile can never show: there, gate 6 is unplayable too and the report is
+/// a wall, which is what `a_gate_nobody_could_play_stops_instead_of_opening_a_volet`
+/// covers.
+#[test]
+fn a_gate_seven_with_no_campaign_asks_for_one_rather_than_stopping() {
+    use nunki::engine::{ExecOutput, fake::FakeEngine};
+
+    let world = World::new(1);
+    world.commit("src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    world.journal_names_head();
+    std::fs::write(
+        world.mission().join("PR.md"),
+        "# What this changes\n\nL1, and nothing else.\n",
+    )
+    .unwrap();
+    world.coder_finished_the_lot();
+
+    let file = nunki::run::profile_path(&world.project, "one");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, "services:\n  agent:\n    image: alpine:3.20\n").unwrap();
+    let engine: Arc<dyn nunki::engine::Engine> =
+        Arc::new(FakeEngine::default().with_exec(ExecOutput {
+            status: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+
+    let steps = verify::verify(&world.project, "m1", engine, "docker").unwrap();
+    let report = gates_of(&steps);
+    assert!(
+        !matches!(report.verdict(), nunki::gate::Verdict::Red(_)),
+        "nothing is the agent's to fix here: {report:?}"
+    );
+    assert_eq!(
+        report
+            .outcomes
+            .iter()
+            .find(|o| o.gate == Gate::Battery)
+            .map(|o| &o.decision),
+        Some(&nunki::gate::Decision::Passed),
+        "the battery has to be green for gate 7 to stand alone: {report:?}"
+    );
+    match steps.last() {
+        Some(Step::CampaignOwed { role, why }) => {
+            assert_eq!(*role, Role::Coder);
+            assert!(why.contains("no mutation campaign has run"), "{why}");
+        }
+        other => panic!("a campaign is owed, not a wall: {other:?}"),
+    }
+
+    // The flow has not moved, exactly as it does not for a wall: no volet,
+    // no attempt, no run. What changed is who is expected to act next.
+    assert_eq!(world.state().flow.stage(), &Stage::Gates, "{steps:?}");
+    assert_eq!(world.state().flow.volets(), 0);
+}
+
+/// At `standard`, the security agent plays one round. Once it is spent —
+/// FINDINGS, then an iterate whose volet is gated and integrated again —
+/// the security agent is not launched, and the mission is not verified
+/// either: it is back on the findings, and the follow-up records the cap,
+/// `1 / 1`, and that the fix was not attacked again, exactly once.
+#[test]
+fn at_standard_the_spent_security_round_is_recorded_and_the_findings_come_back() {
+    let world = World::shaped(1, integration());
+    let mut header = header_of(1, integration());
+    header.security = Security::Agent;
+    header.rigor = nunki::mission::Rigor::Standard;
+    let store = Store::open(&world.project.hq_root).unwrap();
+    let mut state = store.load("m1").unwrap();
+    state.flow = Flow::new(header).unwrap();
+    store.save(&state).unwrap();
+
+    world.at_integration();
+    let mut state = store.load("m1").unwrap();
+    use nunki::mission::flow::Event;
+    for event in [
+        Event::Verdict {
+            verdict: nunki::mission::Verdict::Integrated,
+            report: "wired".into(),
+        },
+        Event::Verdict {
+            verdict: nunki::mission::Verdict::Findings,
+            report: "an open redirect".into(),
+        },
+        Event::Iterate,
+        Event::RunEnded {
+            outcome: nunki::harness::Outcome::Finished(Default::default()),
+            lot_done: true,
+        },
+        Event::GatesPassed,
+    ] {
+        store.apply(&mut state, event).unwrap();
+    }
+    assert!(matches!(state.flow.stage(), Stage::Integration { .. }));
+    assert_eq!(state.flow.security_rounds(), 1);
+    // The round was played on the commit as it stood; what came after it is
+    // what the spent cap leaves unattacked, and the note names it.
+    state.conclude(
+        Role::Security,
+        Some(nunki::mission::Verdict::Findings),
+        &world.head(),
+    );
+    store.save(&state).unwrap();
+    world.commit("compose.yaml", "services: {db: {}}\n", "rewire it");
+    let rewire = world.head();
+    world.journal_names_head();
+
+    world.run_recorded(Some(41), FINISHED);
+    world.verdict("Integrator", "INTEGRATED", &world.head(), "wired again");
+    let steps = world.verify().unwrap();
+    let n = steps.len();
+    assert!(
+        matches!(steps.last(), Some(Step::Findings { report, .. }) if report == "an open redirect"),
+        "{steps:?}"
+    );
+    assert!(
+        matches!(
+            steps[n - 2],
+            Step::SecurityRoundsSpent { rounds: 1, max: 1 }
+        ),
+        "{steps:?}"
+    );
+    assert!(
+        !steps.iter().any(|s| matches!(
+            s,
+            Step::Launched {
+                role: Role::Security,
+                ..
+            }
+        )),
+        "no second security run: {steps:?}"
+    );
+    let followup = std::fs::read_to_string(world.mission().join("FOLLOWUP_HQ.md")).unwrap();
+    assert!(
+        followup.contains("security round cap was reached: 1 / 1"),
+        "{followup}"
+    );
+    assert!(
+        followup.contains(&format!(
+            "Not attacked by the security agent:\n\n- {} rewire it\n",
+            &rewire[..12]
+        )),
+        "{followup}"
+    );
+    assert!(
+        followup.contains("has not been attacked\nagain"),
+        "{followup}"
+    );
+    assert!(
+        !followup.contains("mission is verified without"),
+        "{followup}"
+    );
+
+    // Said once: a later `verify` finds the same findings and says no more.
+    let again = world.verify().unwrap();
+    assert!(
+        !again
+            .iter()
+            .any(|s| matches!(s, Step::SecurityRoundsSpent { .. })),
+        "{again:?}"
+    );
+    let followup = std::fs::read_to_string(world.mission().join("FOLLOWUP_HQ.md")).unwrap();
+    assert_eq!(
+        followup.matches("security round cap was reached").count(),
+        1
+    );
+}
+
+/// At `standard`, a CLEAR spends the one round. When the HQ sends the
+/// verified branch back and its volet comes through the gates green, the
+/// mission is verified without the security agent, and the follow-up says
+/// so, with the cap, `1 / 1`, and that the last commits were not read by the
+/// agent — exactly once.
+#[test]
+fn at_standard_a_review_after_the_clear_is_verified_with_the_spent_round_recorded() {
+    let world = World::shaped(1, integration());
+    let mut header = header_of(1, integration());
+    header.security = Security::Agent;
+    header.rigor = nunki::mission::Rigor::Standard;
+    let store = Store::open(&world.project.hq_root).unwrap();
+    let mut state = store.load("m1").unwrap();
+    state.flow = Flow::new(header).unwrap();
+    store.save(&state).unwrap();
+
+    world.at_integration();
+    let mut state = store.load("m1").unwrap();
+    use nunki::mission::flow::Event;
+    for event in [
+        Event::Verdict {
+            verdict: nunki::mission::Verdict::Integrated,
+            report: "wired".into(),
+        },
+        Event::Verdict {
+            verdict: nunki::mission::Verdict::Clear,
+            report: "nothing found".into(),
+        },
+        Event::Reviewed {
+            because: "rename it".into(),
+        },
+        Event::RunEnded {
+            outcome: nunki::harness::Outcome::Finished(Default::default()),
+            lot_done: true,
+        },
+        Event::GatesPassed,
+    ] {
+        store.apply(&mut state, event).unwrap();
+    }
+    assert!(matches!(state.flow.stage(), Stage::Integration { .. }));
+    assert_eq!(state.flow.security_rounds(), 1);
+    // The round was played on the commit as it stood; what came after it is
+    // what the spent cap leaves unattacked, and the note names it.
+    state.conclude(
+        Role::Security,
+        Some(nunki::mission::Verdict::Clear),
+        &world.head(),
+    );
+    store.save(&state).unwrap();
+    world.commit("compose.yaml", "services: {db: {}}\n", "rewire it");
+    let rewire = world.head();
+    world.journal_names_head();
+
+    world.run_recorded(Some(41), FINISHED);
+    world.verdict("Integrator", "INTEGRATED", &world.head(), "wired again");
+    let steps = world.verify().unwrap();
+    let n = steps.len();
+    assert!(matches!(steps.last(), Some(Step::Verified)), "{steps:?}");
+    assert!(
+        matches!(
+            steps[n - 2],
+            Step::SecurityRoundsSpent { rounds: 1, max: 1 }
+        ),
+        "{steps:?}"
+    );
+    assert!(
+        !steps.iter().any(|s| matches!(
+            s,
+            Step::Launched {
+                role: Role::Security,
+                ..
+            }
+        )),
+        "no second security run: {steps:?}"
+    );
+    let followup = std::fs::read_to_string(world.mission().join("FOLLOWUP_HQ.md")).unwrap();
+    assert!(
+        followup.contains("security round cap was reached: 1 / 1"),
+        "{followup}"
+    );
+    assert!(
+        followup.contains(&format!(
+            "Not attacked by the security agent:\n\n- {} rewire it\n",
+            &rewire[..12]
+        )),
+        "{followup}"
+    );
+    assert!(
+        followup.contains("mission is verified without"),
+        "{followup}"
+    );
+    assert!(!followup.contains("has not been attacked"), "{followup}");
+
+    // Said once: a later `verify` is verified again and says no more.
+    let again = world.verify().unwrap();
+    assert!(matches!(again.last(), Some(Step::Verified)), "{again:?}");
+    assert!(
+        !again
+            .iter()
+            .any(|s| matches!(s, Step::SecurityRoundsSpent { .. })),
+        "{again:?}"
+    );
+    let followup = std::fs::read_to_string(world.mission().join("FOLLOWUP_HQ.md")).unwrap();
+    assert_eq!(
+        followup.matches("security round cap was reached").count(),
+        1
+    );
+}
+
+// --- a coder run that awaits a ruling (SPEC 4.4 gate 7, 4.5) -----------------
+
+impl World {
+    /// The mission's campaign: `m1` with no outcome, `m2` ruled by the HQ,
+    /// `m3` answered by the coder — only `m1` is open.
+    fn campaign_with_survivors(&self) {
+        use nunki::mutants::{Campaign, Survivor, Triage};
+        let survivor = |id: &str, outcome: Option<Triage>| Survivor {
+            found_on: None,
+            id: id.into(),
+            file: "src/lib.rs".into(),
+            line: 1,
+            end_line: None,
+            description: "replace 1 with 0".into(),
+            outcome,
+            refused: None,
+        };
+        nunki::mutants::write(
+            &self.mission(),
+            &Campaign {
+                stopped: None,
+                files: None,
+                chain: Default::default(),
+                fingerprint: "f".into(),
+                head: self.head(),
+                date: "2026-10-05T12:00:00Z".into(),
+                survivors: vec![
+                    survivor("m1", None),
+                    survivor(
+                        "m2",
+                        Some(Triage::Equivalent {
+                            why: "ruled".into(),
+                            carried_from: None,
+                        }),
+                    ),
+                    survivor("m3", None),
+                ],
+                tried: Some(10),
+            },
+        )
+        .unwrap();
+        std::fs::write(
+            self.mission().join(nunki::mutants::TRIAGE_FILE),
+            r#"{"m3": {"kind": "killed", "test": "one_is_one"}}"#,
+        )
+        .unwrap();
+    }
+}
+
+/// One run, and the mission is the HQ's at once: no further attempt is
+/// launched, and the handover names the survivors to rule on.
+#[test]
+fn a_run_that_awaits_a_ruling_on_an_open_survivor_hands_over_after_one_run() {
+    let world = World::new(2);
+    world.commit("src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    world.campaign_with_survivors();
+    let steps = world.coder_ran("Lot: L1 — awaits ruling: `m1` changes nothing observable");
+
+    let state = world.state();
+    assert_eq!(
+        state.flow.stage(),
+        &Stage::AwaitingHuman(nunki::mission::flow::Handover::AwaitingRuling {
+            lot: "L1".into(),
+            what: "`m1` changes nothing observable".into(),
+            attempt: 1,
+            survivors: vec!["m1".into()],
+        })
+    );
+    assert_eq!(state.spent.runs, 1, "exactly one run");
+    assert!(state.run.is_none());
+    assert!(
+        matches!(steps.last(), Some(Step::AwaitingHuman(_))),
+        "nothing launched after it: {steps:?}"
+    );
+    let followup = world.followup();
+    assert!(
+        followup.contains("L1, attempt 1: awaits the HQ's ruling: `m1`"),
+        "{followup}"
+    );
+}
+
+/// The id check is what keeps the line from being a free exit: a survivor
+/// already answered — by the HQ or by the coder — or one the campaign never
+/// had is no ruling to await, and the run is a failed attempt like any other.
+#[test]
+fn a_ruling_on_anything_but_an_open_survivor_is_a_failed_attempt() {
+    for (named, why) in [
+        ("`m2`", "`m2`"),
+        ("`m3`", "`m3`"),
+        ("`m1` and `nowhere`", "`nowhere`"),
+        ("nothing quoted", "named no survivor"),
+    ] {
+        let world = World::new(2);
+        world.commit("src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+        world.campaign_with_survivors();
+        world.coder_ran(&format!("Lot: L1 — awaits ruling: {named}"));
+
+        let state = world.state();
+        assert_eq!(coding(&state), (Work::Lot(0), 2), "{named}");
+        assert!(state.coder_session.is_none(), "{named}");
+        let followup = world.followup();
+        assert!(followup.contains("L1, attempt 1"), "{named}: {followup}");
+        assert!(followup.contains(why), "{named}: {followup}");
+    }
+}
+
+/// No campaign, no survivor to await a ruling on.
+#[test]
+fn a_ruling_with_no_campaign_on_file_is_a_failed_attempt() {
+    let world = World::new(2);
+    world.commit("src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    world.coder_ran("Lot: L1 — awaits ruling: `m1`");
+
+    assert_eq!(coding(&world.state()), (Work::Lot(0), 2));
+    assert!(
+        world.followup().contains("not a survivor of MUTANTS.json"),
+        "{}",
+        world.followup()
+    );
+}
+
+/// `awaits ruling` with nothing after it is not the third line, and is judged
+/// as a run that said nothing about its lot.
+#[test]
+fn awaits_ruling_with_nothing_after_it_is_judged_as_no_line() {
+    let world = World::new(2);
+    world.commit("src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    world.campaign_with_survivors();
+    world.coder_ran("Lot: L1 — awaits ruling:");
+
+    assert_eq!(coding(&world.state()), (Work::Lot(0), 2));
+    assert!(
+        world.followup().contains("no `Lot: L1 — done` line"),
+        "{}",
+        world.followup()
+    );
+}
+
+/// The gates come before the run's word on its lot: a ruling line on a tree
+/// whose gates 1 to 4 are red is a red gate — one more attempt, told why —
+/// and never a handover, so the line cannot carry a forbidden commit past
+/// them.
+#[test]
+fn a_ruling_line_behind_a_red_gate_is_a_red_gate_and_not_a_ruling() {
+    let world = World::new(2);
+    world.commit("AGENTS.md", "rewritten by the agent\n", "loosen the rules");
+    world.campaign_with_survivors();
+    world.coder_ran("Lot: L1 — awaits ruling: `m1` changes nothing observable");
+
+    let state = world.state();
+    assert_eq!(
+        coding(&state),
+        (Work::Lot(0), 2),
+        "{:?}",
+        state.flow.stage()
+    );
+    let followup = world.followup();
+    assert!(followup.contains("the gates were red"), "{followup}");
+    assert!(!followup.contains("awaits the HQ's ruling"), "{followup}");
+}
+
+/// A survivor the coder proposed equivalent has an outcome, so a ruling
+/// cannot be awaited on it too: the line naming it is a failed attempt. One
+/// whose proposal gives no reason is still open, and can be awaited.
+#[test]
+fn a_ruling_cannot_be_awaited_on_a_survivor_the_coder_proposed() {
+    let world = World::new(2);
+    world.commit("src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    world.campaign_with_survivors();
+    std::fs::write(
+        world.mission().join(nunki::mutants::TRIAGE_FILE),
+        r#"{"m1": {"kind": "equivalent_proposed", "why": "only a log line reads it"}}"#,
+    )
+    .unwrap();
+    world.coder_ran("Lot: L1 — awaits ruling: `m1` changes nothing observable");
+    assert_eq!(coding(&world.state()), (Work::Lot(0), 2));
+    assert!(world.followup().contains("`m1`"), "{}", world.followup());
+
+    let world = World::new(2);
+    world.commit("src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    world.campaign_with_survivors();
+    std::fs::write(
+        world.mission().join(nunki::mutants::TRIAGE_FILE),
+        r#"{"m1": {"kind": "equivalent_proposed", "why": " "}}"#,
+    )
+    .unwrap();
+    world.coder_ran("Lot: L1 — awaits ruling: `m1` changes nothing observable");
+    assert!(
+        matches!(world.state().flow.stage(), Stage::AwaitingHuman(_)),
+        "{:?}",
+        world.state().flow.stage()
+    );
+}
+
+/// When the coder's final gates are green, the follow-up says each campaign
+/// gate 7 judged when there were several — full or partial, from which
+/// commit, with its counts — beside the proposals awaiting the HQ.
+#[test]
+fn green_final_gates_leave_each_campaign_of_the_chain_in_the_follow_up() {
+    use nunki::mutants::{Campaign, Chain, Link, Scope};
+    let world = World::new(2);
+    let paths = nunki::mission::dir::Paths::of(&world.project.hq_root, "m1");
+    std::fs::write(&paths.followup, "# Follow-up\n").unwrap();
+    let earlier = "e".repeat(40);
+    nunki::mutants::write(
+        &paths.dir,
+        &Campaign {
+            stopped: None,
+            files: None,
+            fingerprint: "f".into(),
+            head: world.head(),
+            date: "2026-10-07T12:00:00Z".into(),
+            survivors: vec![],
+            tried: Some(3),
+            chain: Chain {
+                sample: None,
+                fork: None,
+                handed: None,
+                ran: None,
+                scope: Scope::Partial {
+                    since: earlier.clone(),
+                },
+                tooling: Some("tools".into()),
+                earlier: vec![Link {
+                    head: earlier,
+                    date: "2026-10-07T10:00:00Z".into(),
+                    scope: Scope::Full { why: String::new() },
+                    tried: Some(30),
+                }],
+            },
+        },
+    )
+    .unwrap();
+
+    verify::gate_seven_said(&paths, "m1").unwrap();
+    let followup = world.followup();
+    assert!(
+        followup.contains("2 mutation campaigns in this mission's chain"),
+        "{followup}"
+    );
+    assert!(
+        followup.contains("1. full at eeeeeeeeeeee — tried 30\n"),
+        "{followup}"
+    );
+    assert!(
+        followup.contains("2. partial since eeeeeeeeeeee at "),
+        "{followup}"
+    );
+    assert!(
+        followup.contains("Then judged as one campaign at "),
+        "{followup}"
+    );
+    assert!(
+        !followup.contains("3. "),
+        "the judged line is no campaign: {followup}"
+    );
+}
+
+/// What `run::branch` does at launch: the host records the mission's base
+/// from the project's repository (`refs/nunki/origin/*` in the slot's
+/// mirror), and the gates judge against that record alone. A bare copy of
+/// the slot, taken now, before any agent commit, stands in for the project.
+fn record_base(tree: &Path) {
+    let name = tree.file_name().unwrap().to_string_lossy().into_owned();
+    let project = tree.with_file_name(format!("{name}-project.git"));
+    git(
+        tree.parent().unwrap(),
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            tree.to_str().unwrap(),
+            project.to_str().unwrap(),
+        ],
+    );
+    nunki::git::SlotGit::open(tree)
+        .unwrap()
+        .fetch_origin(&project)
+        .unwrap();
+}
+
+impl World {
+    /// Make the mission's base hold `path`, recorded by the host the way a
+    /// launch records it. Before any commit of the mission's own: the branch
+    /// still sits on the base.
+    fn base_holds(&self, path: &str, body: &str) {
+        self.commit(path, body, "the base holds it");
+        git(&self.tree, &["branch", "-f", "dev", "HEAD"]);
+        let project = self.tree.with_file_name("one-project.git");
+        git(
+            &self.tree,
+            &["push", "-q", project.to_str().unwrap(), "dev"],
+        );
+        nunki::git::SlotGit::open(&self.tree)
+            .unwrap()
+            .fetch_origin(&project)
+            .unwrap();
+    }
+
+    /// The services file where the mission's system profile reads it.
+    fn services_at_base(&self) -> nunki::services::Current {
+        nunki::services::read(
+            &self.project,
+            nunki::services::At::Mission {
+                tree: &self.tree,
+                base: "dev",
+            },
+        )
+        .unwrap()
+        .unwrap()
+    }
+}
+
+/// An edit to the services file on the branch is never what the system
+/// profile lifts (#141): it reads the file as the mission's base holds it,
+/// and gate 4 refuses the edit. So an integration that is due goes past the
+/// approval on the base's rendering, whatever the branch did to the file —
+/// here the integrator's wiring and a coder's tuning both — and the mission
+/// is not handed back for a rendering nobody will lift.
+#[test]
+fn an_edit_to_the_services_file_on_the_branch_is_never_lifted() {
+    use nunki::engine::fake::FakeEngine;
+    let mut world = World::shaped(1, integration());
+    world.project.config.services_file = Some("compose.yaml".into());
+    world.base_holds("compose.yaml", "services:\n  db:\n    image: postgres:16\n");
+    let base = world.services_at_base();
+    nunki::services::approve(&world.project, &base.digest, std::slice::from_ref(&base)).unwrap();
+    world.at_integration();
+    world.commit(
+        "compose.yaml",
+        "services:\n  db:\n    image: postgres:16\n    command: [postgres, -c, fsync=off]\n",
+        "the coder tunes it",
+    );
+    assert_ne!(
+        nunki::services::read(&world.project, nunki::services::At::Slot(&world.tree))
+            .unwrap()
+            .unwrap()
+            .digest,
+        base.digest,
+        "the branch holds another rendering"
+    );
+
+    let engine = Arc::new(FakeEngine::default());
+    match verify::verify(&world.project, "m1", engine, "docker") {
+        Err(VerifyError::Run(nunki::run::RunError::Services(e))) => {
+            panic!("the base's approved rendering was refused: {e}")
+        }
+        Err(_) => {}
+        Ok(steps) => assert!(
+            !steps.iter().any(|s| matches!(s, Step::AwaitingHuman(_))),
+            "{steps:?}"
+        ),
+    }
+    assert_eq!(
+        world.state().flow.stage(),
+        &Stage::Integration { attempt: 1 }
+    );
+}
+
+/// The base's own rendering still needs a human, and the guard still holds
+/// where the start's question was not asked: the mission is handed back
+/// with the base's digest — not the branch's — no profile up, no run
+/// recorded, no attempt spent. The verbs name the mission, so the approval
+/// reads where the profile does. Approved and retried, it goes past.
+#[test]
+fn an_unapproved_services_file_on_the_base_hands_the_mission_back() {
+    use nunki::engine::fake::{Call, FakeEngine};
+    let mut world = World::shaped(1, integration());
+    world.project.config.services_file = Some("compose.yaml".into());
+    world.base_holds("compose.yaml", "services:\n  db:\n    image: postgres:16\n");
+    world.at_integration();
+    let base = world.services_at_base();
+
+    let verify = |world: &World| {
+        let engine = Arc::new(FakeEngine::default());
+        let steps = verify::verify(&world.project, "m1", engine.clone(), "docker");
+        let calls = engine.calls.lock().unwrap().clone();
+        (steps, calls)
+    };
+    let (steps, calls) = verify(&world);
+    let steps = steps.unwrap();
+    assert!(
+        calls.iter().all(|c| !matches!(c, Call::Up(_))),
+        "nothing was started: {calls:?}"
+    );
+    let handover = Handover::ServicesNotApproved {
+        role: Role::Integrator,
+        attempt: 1,
+        file: "compose.yaml".into(),
+        digest: base.digest.clone(),
+    };
+    assert_eq!(
+        world.state().flow.stage(),
+        &Stage::AwaitingHuman(handover.clone()),
+        "{steps:?}"
+    );
+    assert!(world.state().run.is_none(), "no run was recorded");
+    let followup = std::fs::read_to_string(world.mission().join("FOLLOWUP_HQ.md")).unwrap();
+    assert!(
+        followup.contains(&format!("nunki services --approve {} m1", base.digest)),
+        "{followup}"
+    );
+    assert!(
+        followup.contains("the commit the mission's branch starts from"),
+        "{followup}"
+    );
+
+    // `nunki check --mission m1` reads where the profile reads, too.
+    let checks = nunki::services::checks(&world.project, None, Some("m1"));
+    assert!(
+        matches!(&checks[..], [c] if matches!(&c.verdict, nunki::check::Verdict::Red(why) if why.contains(&base.digest))),
+        "{checks:?}"
+    );
+
+    // What `nunki services --approve <digest> m1` reads.
+    let current: Vec<_> = nunki::services::readings(&world.project, Some("m1"), true)
+        .unwrap()
+        .into_iter()
+        .filter_map(|r| r.current.ok())
+        .collect();
+    nunki::services::approve(&world.project, &base.digest, &current).unwrap();
+    nunki::lifecycle::retry(&world.project, "m1", "approved the database").unwrap();
+    let (steps, _) = verify(&world);
+    match steps {
+        Err(VerifyError::Run(nunki::run::RunError::Services(e))) => {
+            panic!("an approved rendering was refused: {e}")
+        }
+        Err(_) => {}
+        Ok(steps) => assert!(
+            !steps.iter().any(|s| matches!(s, Step::AwaitingHuman(_))),
+            "{steps:?}"
+        ),
+    }
+    assert_eq!(
+        world.state().flow.stage(),
+        &Stage::Integration { attempt: 1 }
+    );
+}
+
+/// The security agent's profile is a system profile too: the same refusal
+/// at its launch site, the same handover, with the role it was for.
+#[test]
+fn an_unapproved_services_file_hands_the_security_run_back_as_well() {
+    use nunki::engine::fake::{Call, FakeEngine};
+    let mut world = with_security_agent(1);
+    world.project.config.services_file = Some("compose.yaml".into());
+    world.base_holds("compose.yaml", "services:\n  db:\n    image: postgres:16\n");
+    world.at_security();
+    let engine = Arc::new(FakeEngine::default());
+    let steps = verify::verify(&world.project, "m1", engine.clone(), "docker").unwrap();
+    assert!(
+        matches!(
+            world.state().flow.stage(),
+            Stage::AwaitingHuman(Handover::ServicesNotApproved {
+                role: Role::Security,
+                attempt: 1,
+                ..
+            })
+        ),
+        "{steps:?}"
+    );
+    assert!(
+        engine
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|c| !matches!(c, Call::Up(_))),
+        "nothing was started"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The final full campaign of a `critical` mission (SPEC 4.4, 4.5).
+// ---------------------------------------------------------------------------
+
+impl World {
+    /// The campaign on file, made partial since an earlier commit and
+    /// carrying `survivors`, on the content of `HEAD`.
+    fn campaign_at_head(&self, scope: nunki::mutants::Scope, open: usize) {
+        self.full_campaign_at_head();
+        let mut campaign = nunki::mutants::read(&self.mission()).unwrap().unwrap();
+        campaign.chain.scope = scope;
+        campaign.survivors = (1..=open as u32)
+            .map(|line| nunki::mutants::Survivor {
+                found_on: None,
+                id: format!("src/new.rs:{line}"),
+                file: "src/new.rs".into(),
+                line,
+                end_line: None,
+                description: "replace two with 0".into(),
+                outcome: None,
+                refused: None,
+            })
+            .collect();
+        nunki::mutants::write(&self.mission(), &campaign).unwrap();
+    }
+
+    /// The security agent's `CLEAR` on `HEAD`, read back.
+    fn cleared(&self) -> Vec<Step> {
+        self.run_recorded(Some(41), FINISHED);
+        self.verdict("Security", "CLEAR", &self.head(), "nothing found");
+        self.verify().unwrap()
+    }
+}
+
+fn partial() -> nunki::mutants::Scope {
+    nunki::mutants::Scope::Partial {
+        since: "e".repeat(40),
+    }
+}
+
+/// The chain holds to the end: a `critical` mission whose security verdict
+/// is `CLEAR` on a partial chain that passes at `HEAD` is `Verified`, and no
+/// full campaign is owed.
+#[test]
+fn at_critical_a_clear_on_a_partial_chain_that_passes_at_head_is_verified() {
+    let world = with_security_agent(1);
+    world.at_security();
+    world.campaign_at_head(partial(), 0);
+    let steps = world.cleared();
+    assert!(
+        !steps.iter().any(|s| matches!(s, Step::CampaignOwed { .. })),
+        "a partial chain that passes owed a campaign: {steps:?}"
+    );
+    assert!(matches!(steps.last(), Some(Step::Verified)), "{steps:?}");
+}
+
+/// A mission at the final stage that owes a campaign — none at `HEAD`'s
+/// content — is answered by a partial one there, as a mission parked at that
+/// stage by an earlier `nunki` is: the campaign the caller runs from there is
+/// not run again on that content, and the next look verifies.
+#[test]
+fn at_the_final_stage_a_partial_campaign_at_head_answers_the_campaign_owed() {
+    let world = with_security_agent(1);
+    world.at_security();
+    world.campaign_at_head(partial(), 0);
+    let mut elsewhere = nunki::mutants::read(&world.mission()).unwrap().unwrap();
+    elsewhere.fingerprint = "f".repeat(64);
+    nunki::mutants::write(&world.mission(), &elsewhere).unwrap();
+
+    let steps = world.cleared();
+    assert!(
+        matches!(steps.last(), Some(Step::CampaignOwed { .. })),
+        "{steps:?}"
+    );
+    assert_eq!(world.state().flow.stage(), &Stage::FinalCampaign);
+
+    world.campaign_at_head(partial(), 0);
+    let engine: Arc<dyn nunki::engine::Engine> =
+        Arc::new(nunki::engine::fake::FakeEngine::default());
+    assert_eq!(
+        verify::campaign(&world.project, "m1", engine).unwrap(),
+        nunki::mutants::Progress::Fresh { survivors: 0 },
+        "the final stage ran a campaign again on content a partial one measured"
+    );
+    let steps = world.verify().unwrap();
+    assert!(matches!(steps.last(), Some(Step::Verified)), "{steps:?}");
+}
+
+/// A first full campaign at `HEAD` that passes is the final one: no second
+/// full campaign is owed on the same commit.
+#[test]
+fn a_full_campaign_at_head_that_passes_needs_no_second_one() {
+    let world = with_security_agent(1);
+    world.at_security();
+    let steps = world.cleared();
+    assert!(
+        !steps.iter().any(|s| matches!(s, Step::CampaignOwed { .. })),
+        "{steps:?}"
+    );
+    assert!(matches!(steps.last(), Some(Step::Verified)), "{steps:?}");
+}
+
+/// The final campaign's survivors go back to the coder, as any campaign's
+/// do: a volet, told why in the follow-up.
+#[test]
+fn the_final_campaigns_survivors_go_back_to_the_coder() {
+    let world = with_security_agent(1);
+    world.at_security();
+    world.campaign_at_head(nunki::mutants::Scope::Full { why: String::new() }, 1);
+    world.run_recorded(Some(41), FINISHED);
+    world.verdict("Security", "CLEAR", &world.head(), "nothing found");
+
+    // The coder's launch after it needs an account this world has not
+    // named; the volet is in the state before it is attempted.
+    let _ = world.verify();
+    match world.state().flow.stage() {
+        Stage::Coding {
+            work: Work::Volet { cause, .. },
+            ..
+        } => {
+            assert!(cause.starts_with("final campaign: "), "{cause}");
+            assert!(cause.contains("src/new.rs:1"), "{cause}");
+        }
+        other => panic!("the survivors did not go back to the coder: {other:?}"),
+    }
+    let followup = std::fs::read_to_string(world.mission().join("FOLLOWUP_HQ.md")).unwrap();
+    assert!(
+        followup.contains("the final campaign was red on"),
+        "{followup}"
+    );
+}
+
+/// At `standard`, a `CLEAR` on a partial chain is verified as before.
+#[test]
+fn at_standard_a_clear_on_a_partial_chain_is_verified() {
+    let world = with_security_agent_at(nunki::mission::Rigor::Standard);
+    world.at_security();
+    world.campaign_at_head(partial(), 0);
+    let steps = world.cleared();
+    assert!(matches!(steps.last(), Some(Step::Verified)), "{steps:?}");
+}
+
+// --- the rigor binds the HQ's verbs (SPEC 4.5) ------------------------------
+
+const MEDIUM_ONLY: &str = r#"[{"severity":"MEDIUM","title":"an open redirect"}]"#;
+
+/// A `standard` mission standing on a security report ranked `findings`,
+/// reached through `verify` as a real report is.
+fn at_standard_on(findings: &str) -> World {
+    let world = with_security_agent_at(nunki::mission::Rigor::Standard);
+    std::fs::write(
+        world.project.nunki_home().join("me.yaml"),
+        "name: Alex Martin\nemail: a@example.com\n",
+    )
+    .unwrap();
+    world.at_security();
+    world.run_recorded(Some(41), FINISHED);
+    world.ranked("FINDINGS", findings);
+    world.verify().unwrap();
+    assert!(matches!(world.state().flow.stage(), Stage::Findings { .. }));
+    world
+}
+
+/// At `standard`, `iterate` on a MEDIUM-only report is refused, names both
+/// ways on — `accept` first — and writes nothing; with `--override` it runs,
+/// and the follow-up carries the departure and its reason, dated.
+#[test]
+fn at_standard_iterate_on_a_medium_only_report_is_refused_and_names_both_verbs() {
+    let world = at_standard_on(MEDIUM_ONLY);
+    assert_eq!(
+        world.state().flow.findings_worst(),
+        Some(nunki::mission::Severity::Medium),
+        "verify ranks the report it concluded"
+    );
+    let before = world.followup();
+
+    let err = nunki::findings::iterate(&world.project, "m1", None).unwrap_err();
+    assert!(
+        matches!(err, nunki::findings::FindingsError::RigorRefuses { .. }),
+        "{err}"
+    );
+    let said = err.to_string();
+    let accept = said
+        .find("`nunki mission accept m1 --because <why>`")
+        .unwrap_or_else(|| panic!("accept is not named: {said}"));
+    let overriding = said
+        .find("`nunki mission iterate m1 --override --because <why>`")
+        .unwrap_or_else(|| panic!("the override is not named: {said}"));
+    assert!(accept < overriding, "accept comes first: {said}");
+    assert!(said.contains("MEDIUM"), "{said}");
+    assert_eq!(world.followup(), before, "a refused verb leaves no record");
+    assert!(matches!(world.state().flow.stage(), Stage::Findings { .. }));
+
+    let state = nunki::findings::iterate_overriding(
+        &world.project,
+        "m1",
+        "the redirect is reachable before login",
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            state.flow.stage(),
+            Stage::Coding {
+                work: Work::Volet { .. },
+                ..
+            }
+        ),
+        "{:?}",
+        state.flow.stage()
+    );
+    assert_eq!(state.flow.overrides().len(), 1);
+    let told = world.followup();
+    let record = told
+        .split("## ")
+        .find(|s| s.contains("departed from the rigor"))
+        .unwrap_or_else(|| panic!("no departure recorded:\n{told}"));
+    assert!(record.contains("Alex Martin"), "{record}");
+    assert!(record.contains("does not block"), "{record}");
+    assert!(
+        record.contains("**Why:** the redirect is reachable before login"),
+        "{record}"
+    );
+    let date: Vec<char> = record.chars().take(10).collect();
+    assert!(
+        date.iter().enumerate().all(|(i, c)| match i {
+            4 | 7 => *c == '-',
+            _ => c.is_ascii_digit(),
+        }),
+        "the departure is not dated: {record}"
+    );
+}
+
+/// A HIGH is sent back with the plain verb, and `--override` on it is
+/// refused without writing anything: there is nothing to set aside.
+#[test]
+fn at_standard_a_high_is_sent_back_without_an_override() {
+    let world = at_standard_on(
+        r#"[{"severity":"HIGH","title":"SQL injection"},{"severity":"LOW","title":"x","why_acceptable":"y"}]"#,
+    );
+    let before = world.followup();
+    let err =
+        nunki::findings::iterate_overriding(&world.project, "m1", "just because").unwrap_err();
+    assert!(
+        matches!(
+            err,
+            nunki::findings::FindingsError::NothingToOverride { .. }
+        ),
+        "{err}"
+    );
+    assert_eq!(world.followup(), before);
+
+    let state = nunki::findings::iterate(&world.project, "m1", None).unwrap();
+    assert!(matches!(state.flow.stage(), Stage::Coding { .. }));
+    assert!(state.flow.overrides().is_empty());
+}
+
+/// An override needs its reason: without one it is refused, and nothing is
+/// written.
+#[test]
+fn an_override_without_a_reason_is_refused() {
+    let world = at_standard_on(MEDIUM_ONLY);
+    let before = world.followup();
+    let err = nunki::findings::iterate_overriding(&world.project, "m1", " \n").unwrap_err();
+    assert!(
+        matches!(err, nunki::findings::FindingsError::NoOverrideReason),
+        "{err}"
+    );
+    assert_eq!(world.followup(), before);
+}
+
+/// A second HQ review at `standard` is refused without `--override`, and
+/// the refusal names the push and the override; with it, the review reaches
+/// the coder and the departure is written beside it.
+#[test]
+fn a_second_review_at_standard_needs_an_override() {
+    let world = at_standard_on(MEDIUM_ONLY);
+    nunki::findings::accept(
+        &world.project,
+        "m1",
+        nunki::findings::Lift::Verdict,
+        "the redirect is behind the VPN",
+    )
+    .unwrap();
+    assert_eq!(world.state().flow.stage(), &Stage::Verified);
+    nunki::findings::iterate(&world.project, "m1", Some("rename it")).unwrap();
+    // The volet done and gated green: at the round cap, verified again.
+    let store = Store::open(&world.project.hq_root).unwrap();
+    let mut state = store.load("m1").unwrap();
+    for event in [
+        nunki::mission::flow::Event::RunEnded {
+            outcome: nunki::harness::Outcome::Finished(Default::default()),
+            lot_done: true,
+        },
+        nunki::mission::flow::Event::GatesPassed,
+        nunki::mission::flow::Event::Verdict {
+            verdict: nunki::mission::Verdict::Integrated,
+            report: "wired".into(),
+        },
+    ] {
+        store.apply(&mut state, event).unwrap();
+    }
+    assert_eq!(state.flow.stage(), &Stage::Verified);
+
+    let err = nunki::findings::iterate(&world.project, "m1", Some("zz second look")).unwrap_err();
+    let said = err.to_string();
+    assert!(said.contains("`nunki push m1 --yes`"), "{said}");
+    assert!(
+        said.contains("`nunki mission iterate m1 --override --because <why>`"),
+        "{said}"
+    );
+    assert!(
+        !said.contains("mission accept"),
+        "nothing to accept: {said}"
+    );
+    assert!(!world.followup().contains("zz second look"));
+
+    let state =
+        nunki::findings::iterate_overriding(&world.project, "m1", "the rename broke the API")
+            .unwrap();
+    assert_eq!(state.flow.volets(), 2);
+    let told = world.followup();
+    assert!(told.contains("departed from the rigor"), "{told}");
+    assert!(
+        told.contains("**What to change:** the rename broke the API"),
+        "the coder reads the review: {told}"
+    );
+}
+
+/// A campaign stopped at its deadline, on the content as it stands, with
+/// everything else green: the flow stops for the HQ — no volet, and no
+/// campaign started against the same deadline — and the HQ's `iterate
+/// --because` is what sends its survivors to the coder, as a volet with the
+/// HQ's reason, written where the coder reads it first.
+#[test]
+fn a_campaign_stopped_at_its_deadline_waits_for_the_hq_who_can_send_its_survivors() {
+    use nunki::engine::{ExecOutput, fake::FakeEngine};
+
+    let world = World::new(1);
+    world.commit("src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    world.journal_names_head();
+    std::fs::write(
+        world.mission().join("PR.md"),
+        "# What this changes\n\nL1, and nothing else.\n",
+    )
+    .unwrap();
+    world.coder_finished_the_lot();
+    std::fs::write(
+        world.project.nunki_home().join("me.yaml"),
+        "name: Alex Martin\n",
+    )
+    .unwrap();
+
+    let file = nunki::run::profile_path(&world.project, "one");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, "services:\n  agent:\n    image: alpine:3.20\n").unwrap();
+    let engine: Arc<dyn nunki::engine::Engine> =
+        Arc::new(FakeEngine::default().with_exec(ExecOutput {
+            status: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+
+    // At the gates, nothing iterates yet: there is nothing to send.
+    let err = nunki::findings::iterate(&world.project, "m1", Some("answer them")).unwrap_err();
+    assert!(
+        matches!(err, nunki::findings::FindingsError::NotOnFindings { .. }),
+        "{err}"
+    );
+
+    let touched = nunki::gate::touched_since_base(&world.tree, "dev").unwrap();
+    nunki::mutants::write(
+        &world.mission(),
+        &nunki::mutants::Campaign {
+            // Stopped at the deadline the mission's 45-minute budget gives
+            // (SPEC 4.4, gate 7: the budget).
+            stopped: Some(nunki::mutants::Stopped::Deadline {
+                minutes: nunki::mutants::deadline_minutes(45),
+            }),
+            fingerprint: nunki::mutants::fingerprint(&world.tree, &touched).unwrap(),
+            head: git(&world.tree, &["rev-parse", "HEAD"]),
+            date: "2026-10-11T10:00:00Z".into(),
+            survivors: vec![nunki::mutants::Survivor {
+                found_on: None,
+                id: "src/new.rs:1:22: replace two -> u8 with 0".into(),
+                file: "src/new.rs".into(),
+                line: 1,
+                end_line: None,
+                description: "replace two -> u8 with 0".into(),
+                outcome: None,
+                refused: None,
+            }],
+            tried: None,
+            files: None,
+            chain: Default::default(),
+        },
+    )
+    .unwrap();
+
+    let steps = verify::verify(&world.project, "m1", engine, "docker").unwrap();
+    match steps.last() {
+        Some(Step::GateUnplayable { role, why }) => {
+            assert_eq!(*role, Role::Coder);
+            assert!(why.contains("68-minute deadline"), "{why}");
+            assert!(why.contains("1 survivor(s)"), "{why}");
+            assert!(why.contains("iterate --because"), "{why}");
+        }
+        other => panic!("a campaign stopped at its deadline is the HQ's to choose: {other:?}"),
+    }
+    assert_eq!(world.state().flow.stage(), &Stage::Gates, "{steps:?}");
+    assert_eq!(world.state().flow.volets(), 0);
+
+    // Sent with no reason: refused, and nothing moved.
+    let err = nunki::findings::iterate(&world.project, "m1", None).unwrap_err();
+    assert!(
+        matches!(err, nunki::findings::FindingsError::NoPartialReason),
+        "{err}"
+    );
+    assert_eq!(world.state().flow.stage(), &Stage::Gates);
+    // Nor is there a rigor to set aside here: this is no review.
+    let err = nunki::findings::iterate_overriding(&world.project, "m1", "because").unwrap_err();
+    assert!(
+        matches!(
+            err,
+            nunki::findings::FindingsError::NothingToOverride { .. }
+        ),
+        "{err}"
+    );
+    assert_eq!(world.state().flow.volets(), 0);
+
+    let state = nunki::findings::iterate(
+        &world.project,
+        "m1",
+        Some("answer the survivor it found; the rest waits for the next campaign"),
+    )
+    .unwrap();
+    match state.flow.stage() {
+        Stage::Coding {
+            work: Work::Volet { cause, .. },
+            ..
+        } => {
+            assert!(cause.contains("incomplete mutation campaign"), "{cause}");
+            assert!(cause.contains("answer the survivor it found"), "{cause}");
+        }
+        other => panic!("not a volet: {other:?}"),
+    }
+    assert_eq!(state.flow.volets(), 1);
+    let followup = world.followup();
+    assert!(
+        followup.contains("Alex Martin sends the survivors of an incomplete campaign"),
+        "{followup}"
+    );
+    assert!(
+        followup.contains("answer the survivor it found; the rest waits for the next campaign"),
+        "{followup}"
+    );
+}
+
+/// No process outlives its run: when `verify` reads back a run that has
+/// ended, what it left running in its container — tagged with the run's
+/// `NUNKI_RUN` — is stopped, and said. The engine answers the liveness probe
+/// that the run ended, then the reaping script with the pids it stopped.
+#[test]
+fn what_a_run_left_running_is_stopped_once_it_ends_and_said() {
+    use nunki::engine::fake::{Call, FakeEngine};
+    use nunki::engine::{ExecOutput, Liveness};
+    let said = |stdout: &str| ExecOutput {
+        status: 0,
+        stdout: stdout.into(),
+        stderr: String::new(),
+    };
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.run_recorded(Some(41), FINISHED);
+    // Held, so that `verify` stops at the launch that would follow the
+    // read-back, rather than failing on an account this world does not have.
+    world.hold();
+    let engine = Arc::new(
+        FakeEngine::default()
+            .with_liveness("cafe1234", Liveness::Running)
+            .with_execs(vec![said("nunki-run-ended\n"), said("nunki-reaped 77\n")]),
+    );
+
+    let steps = verify::verify(&world.project, "m1", engine.clone(), "docker").unwrap();
+
+    let calls = engine.calls();
+    let reaped = calls.iter().any(|c| match c {
+        Call::Exec(_, _, argv) => argv.iter().any(|a| a.contains("NUNKI_RUN=integration")),
+        _ => false,
+    });
+    assert!(
+        reaped,
+        "the run's leftovers were never looked for: {calls:?}"
+    );
+    let left: Vec<&String> = steps
+        .iter()
+        .filter_map(|s| match s {
+            Step::LeftBehind { role, said } => {
+                assert_eq!(*role, Role::Integrator);
+                Some(said)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(left.len(), 1, "{steps:?}");
+    assert!(left[0].contains("stopped 1 process(es)"), "{}", left[0]);
+    assert!(left[0].contains("77"), "{}", left[0]);
+}
+
+/// A world whose stack declares an advisory database the host has filled,
+/// and whose profile was written before that: the agent mounts its tree and
+/// no database. The coder's lot is done and the mission held, so `verify`
+/// plays the gates and launches nothing after them. Where the database lives,
+/// and the profile.
+fn filled_after_the_lift() -> (World, PathBuf, PathBuf) {
+    let world = World::new(1);
+    let db = world._dir.path().join("advisory-db");
+    std::fs::create_dir_all(&db).unwrap();
+    let fragment = world.project.fragment("rust");
+    std::fs::create_dir_all(&fragment).unwrap();
+    std::fs::write(
+        fragment.join(nunki::project::ADVISORIES_FILE),
+        format!("{}\ncargo deny check advisories\n", db.display()),
+    )
+    .unwrap();
+    let profile = nunki::run::profile_path(&world.project, "one");
+    std::fs::write(
+        &profile,
+        format!(
+            "services:\n  {}:\n    volumes:\n    - \"/slot:/work/tree:rw\"\n",
+            nunki::compose::AGENT_SERVICE
+        ),
+    )
+    .unwrap();
+    world.coder_finished_the_lot();
+    world.hold();
+    (world, db, profile)
+}
+
+/// The `nunki verify` gate 8 sends a human back to, once the database is
+/// filled, mounts it before any gate is played (#165). Before, the profile
+/// was written at the launch only, so the container kept running without the
+/// database and gate 8 stayed unplayable whatever the human did.
+#[test]
+fn verify_mounts_an_advisory_database_filled_after_the_lift_before_any_gate() {
+    let (world, db, profile) = filled_after_the_lift();
+    let engine = Arc::new(nunki::engine::fake::FakeEngine::default());
+
+    let steps = verify::verify(&world.project, "m1", engine.clone(), "docker").unwrap();
+
+    assert_eq!(
+        steps.first(),
+        Some(&Step::Remounted {
+            databases: vec![db.clone()]
+        }),
+        "{steps:?}"
+    );
+    assert!(
+        std::fs::read_to_string(&profile)
+            .unwrap()
+            .contains(&format!(
+                "{}:{}:ro",
+                db.display(),
+                nunki::run::ADVISORIES_AT
+            )),
+        "{}",
+        std::fs::read_to_string(&profile).unwrap()
+    );
+    // Lifted again before the first command the gates ran in it.
+    let calls = engine.calls();
+    let up = calls
+        .iter()
+        .position(|c| matches!(c, nunki::engine::fake::Call::Up(_)))
+        .expect("the profile was lifted again");
+    let first_exec = calls
+        .iter()
+        .position(|c| matches!(c, nunki::engine::fake::Call::Exec(..)))
+        .expect("the gates ran in the container");
+    assert!(up < first_exec, "{calls:?}");
+}
+
+/// The application a role was given lives in the agent's container, so a
+/// remount would kill it under the gates that are about to test it: nothing
+/// is remounted while one is recorded, and gate 8 says what it waits for.
+#[test]
+fn verify_mounts_nothing_while_an_application_lives_in_the_container() {
+    let (world, _, profile) = filled_after_the_lift();
+    let before = std::fs::read_to_string(&profile).unwrap();
+    let store = Store::open(&world.project.hq_root).unwrap();
+    let mut state = store.load("m1").unwrap();
+    state.app = Some(nunki::harness::RunHandle {
+        session: nunki::harness::SessionId("app".into()),
+        container: "agent".into(),
+        pid: Some(4242),
+        log: world._dir.path().join("app.log"),
+    });
+    store.save(&state).unwrap();
+    let engine = Arc::new(nunki::engine::fake::FakeEngine::default());
+
+    let steps = verify::verify(&world.project, "m1", engine.clone(), "docker").unwrap();
+
+    assert!(
+        !steps.iter().any(|s| matches!(s, Step::Remounted { .. })),
+        "{steps:?}"
+    );
+    assert_eq!(std::fs::read_to_string(&profile).unwrap(), before);
+}
+
+/// A world at the gates after the coder's lot, the way #166 met it: a
+/// profile up, and an engine whose every command answers green, so the only
+/// gate with something to say is gate 7.
+fn at_the_gates() -> (World, Arc<dyn nunki::engine::Engine>) {
+    use nunki::engine::{ExecOutput, fake::FakeEngine};
+    let world = World::new(1);
+    world.commit("src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    world.journal_names_head();
+    std::fs::write(
+        world.mission().join("PR.md"),
+        "# What this changes\n\nL1, and nothing else.\n",
+    )
+    .unwrap();
+    world.coder_finished_the_lot();
+    let file = nunki::run::profile_path(&world.project, "one");
+    std::fs::write(&file, "services:\n  agent:\n    image: alpine:3.20\n").unwrap();
+    let engine: Arc<dyn nunki::engine::Engine> =
+        Arc::new(FakeEngine::default().with_exec(ExecOutput {
+            status: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+    (world, engine)
+}
+
+/// #166 end to end. The campaign on file is the first one, on content a volet
+/// has since changed, and the campaign on today's content could not run and
+/// said why. `verify` used to answer `CampaignOwed`, and the monitor started
+/// it again every few minutes; now the coder is sent the reason as a volet.
+#[test]
+fn a_campaign_that_could_not_run_after_a_volet_goes_back_to_the_coder() {
+    let (world, engine) = at_the_gates();
+    nunki::mutants::write(
+        &world.mission(),
+        &nunki::mutants::Campaign {
+            stopped: None,
+            files: None,
+            chain: Default::default(),
+            fingerprint: "b326371".repeat(6),
+            head: git(&world.tree, &["rev-parse", "HEAD"]),
+            date: "2026-01-01T00:00:00Z".into(),
+            survivors: Vec::new(),
+            tried: None,
+        },
+    )
+    .unwrap();
+    let touched = nunki::gate::touched_since_base(&world.tree, "dev").unwrap();
+    let fingerprint = nunki::mutants::fingerprint(&world.tree, &touched).unwrap();
+    let runs = world.mission().join("runs");
+    std::fs::create_dir_all(&runs).unwrap();
+    std::fs::write(
+        runs.join(format!("mutants-{}.err", &fingerprint[..7])),
+        "UnitTestDidNotEnd: still running after 10.0 s\n\
+         failed to collect stats. runner returned 1\n",
+    )
+    .unwrap();
+    // Held, so the volet is opened and no run is launched for it.
+    world.hold();
+
+    let steps = verify::verify(&world.project, "m1", engine, "docker").unwrap();
+
+    assert!(
+        !steps.iter().any(|s| matches!(s, Step::CampaignOwed { .. })),
+        "the same campaign is asked for again: {steps:?}"
+    );
+    match world.state().flow.stage() {
+        Stage::Coding {
+            work: Work::Volet { cause, .. },
+            ..
+        } => assert!(cause.contains("UnitTestDidNotEnd"), "{cause}"),
+        other => panic!("not sent back to the coder: {other:?} after {steps:?}"),
+    }
+}
+
+/// A held mission starts no campaign (#166): `verify` answers that it is
+/// held where it would have owed one, so neither the monitor nor a human's
+/// `nunki verify` starts an hour of work in the slot, and the monitor stops
+/// on it — which is what `nunki mission wait` reports.
+#[test]
+fn a_held_mission_owes_no_campaign_and_the_monitor_stops_on_it() {
+    let (world, engine) = at_the_gates();
+
+    let steps = verify::verify(&world.project, "m1", engine.clone(), "docker").unwrap();
+    assert!(
+        matches!(steps.last(), Some(Step::CampaignOwed { .. })),
+        "unheld, this world owes a campaign: {steps:?}"
+    );
+
+    world.hold();
+    let steps = verify::verify(&world.project, "m1", engine, "docker").unwrap();
+
+    assert!(matches!(steps.last(), Some(Step::Held { .. })), "{steps:?}");
+    match nunki::monitor::after_verify("m1", &Ok(steps)) {
+        nunki::monitor::Next::Exit(why) => assert!(why.contains("held by"), "{why}"),
+        other => panic!("the monitor would go on: {other:?}"),
+    }
+}
+
+/// #162. Once the security rounds are spent, a finding the coder fixed after
+/// the last round can be lifted as **fixed by that commit**, not as an
+/// accepted risk: the commit is resolved to its full id and recorded, the
+/// mission concludes as any lift of the whole verdict does, and
+/// `FOLLOWUP_HQ.md` says it was fixed and how the HQ checked it.
+#[test]
+fn a_fix_after_the_last_round_is_lifted_as_fixed_by_its_commit() {
+    let world = with_security_agent_at(nunki::mission::Rigor::Standard);
+    world.at_findings();
+    assert_eq!(world.state().flow.security_rounds(), 1);
+    world.commit("src/lib.rs", "pub fn one() -> u8 { 2 }\n", "the fix");
+    let fix = world.head();
+
+    let state = nunki::findings::accept_fixed(
+        &world.project,
+        "m1",
+        &fix[..10],
+        "probed /auth/callback on the host: the redirect is refused",
+    )
+    .unwrap();
+
+    let lift = state.accepted.last().unwrap();
+    assert_eq!(lift.fixed_by.as_deref(), Some(fix.as_str()));
+    assert_eq!(lift.finding, None);
+    assert!(
+        !matches!(state.flow.stage(), Stage::Findings { .. }),
+        "{:?}",
+        state.flow.stage()
+    );
+    let carried = world.followup();
+    assert!(
+        carried.contains(&format!("**Fixed by:** `{}`", &fix[..12])),
+        "{carried}"
+    );
+    assert!(carried.contains("redirect is refused"), "{carried}");
+}
+
+/// What `--fixed-by` refuses, each with its own sentence: a round still to
+/// play (it would attack the fix), what is not a hexadecimal commit id (and
+/// so never reaches git as an option), a commit the slot does not have, the
+/// commit the last round attacked, and a commit off the branch being pushed.
+/// None of them records anything or moves the mission.
+#[test]
+fn a_fix_is_refused_with_rounds_left_off_the_branch_or_not_after_the_report() {
+    // At `critical`, the first round leaves two.
+    let world = with_security_agent(1);
+    world.at_findings();
+    world.commit("src/lib.rs", "pub fn one() -> u8 { 2 }\n", "the fix");
+    let err =
+        nunki::findings::accept_fixed(&world.project, "m1", &world.head(), "checked").unwrap_err();
+    assert!(
+        matches!(
+            err,
+            nunki::findings::FindingsError::FixWithRoundsLeft {
+                rounds: 1,
+                max: 3,
+                ..
+            }
+        ),
+        "{err}"
+    );
+
+    let world = with_security_agent_at(nunki::mission::Rigor::Standard);
+    world.at_findings();
+    let attacked = world.head();
+    // Off the branch: a commit after the report, on another one.
+    git(&world.tree, &["checkout", "-q", "-b", "elsewhere"]);
+    world.commit("src/lib.rs", "pub fn one() -> u8 { 7 }\n", "not pushed");
+    let elsewhere = world.head();
+    git(&world.tree, &["checkout", "-q", "mission/x"]);
+    world.commit("src/lib.rs", "pub fn one() -> u8 { 2 }\n", "the fix");
+
+    let refused = |commit: &str| {
+        nunki::findings::accept_fixed(&world.project, "m1", commit, "checked").unwrap_err()
+    };
+    let err = refused("--upload-pack=touch");
+    assert!(
+        matches!(err, nunki::findings::FindingsError::FixNotACommit(_)),
+        "{err}"
+    );
+    let err = refused("HEAD");
+    assert!(
+        matches!(err, nunki::findings::FindingsError::FixNotACommit(_)),
+        "{err}"
+    );
+    let err = refused("deadbeefdeadbeef");
+    assert!(
+        matches!(err, nunki::findings::FindingsError::FixUnknown(_)),
+        "{err}"
+    );
+    let err = refused(&attacked);
+    assert!(
+        matches!(err, nunki::findings::FindingsError::FixNotAfter { .. }),
+        "{err}"
+    );
+    let err = refused(&elsewhere);
+    assert!(
+        matches!(err, nunki::findings::FindingsError::FixNotOnBranch { .. }),
+        "{err}"
+    );
+
+    let state = world.state();
+    assert!(state.accepted.is_empty(), "{:?}", state.accepted);
+    assert!(matches!(state.flow.stage(), Stage::Findings { .. }));
+}
+
+/// The HQ learns the lift where it reads what to do: once the rounds are
+/// spent and the mission is back on its last report, `nunki mission wait`
+/// names `--fixed-by` beside `accept` and `iterate`; while a round is left it
+/// does not, since the fix would be attacked (#162).
+#[test]
+fn wait_names_fixed_by_only_once_the_rounds_are_spent() {
+    let context = nunki::wait::Context {
+        watcher: nunki::wait::Watcher::Gone,
+        window: None,
+        proposals: Ok(Vec::new()),
+    };
+    let spent = with_security_agent_at(nunki::mission::Rigor::Standard);
+    spent.at_findings();
+    let status = nunki::wait::status("m1", &spent.state(), &context).unwrap();
+    assert!(
+        status.line().contains("--fixed-by <commit>"),
+        "{}",
+        status.line()
+    );
+
+    let left = with_security_agent(1);
+    left.at_findings();
+    let status = nunki::wait::status("m1", &left.state(), &context).unwrap();
+    assert!(!status.line().contains("--fixed-by"), "{}", status.line());
+}

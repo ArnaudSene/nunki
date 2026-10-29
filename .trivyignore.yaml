@@ -1,0 +1,16 @@
+# What the image scan (.github/workflows/images.yml) lets through, and until
+# when. Read only by the step that fails the build: the listing above it
+# still shows every finding.
+#
+# An entry names one vulnerability in one file, says why, and expires. On
+# its expiry date it stops applying and the scan is red again, so nothing
+# here outlives the reason it was written for.
+#
+# Empty today. The three entries that stood here were one class: Go fixes
+# that osv-scanner's releases did not carry, because a release carries the
+# Go it was built with. A fourth came (CVE-2026-111943, fixed in Go 1.27.3),
+# and this file's rule held: rather than a fourth entry, the images now build
+# osv-scanner from its tagged source with a Go that carries the fixes
+# (src/init.rs, `osv_scanner_stage`). Measured with trivy 0.74.0: four high
+# advisories with a fix in the released 2.7.0 binary, none in the one built.
+vulnerabilities: []

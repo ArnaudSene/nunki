@@ -1,0 +1,396 @@
+//! Slots: a local clone, its volumes, and one agent container at a time
+//! (SPEC 4.2, "slots et branches").
+//!
+//! A slot is where a mission happens. Three properties make it a slot rather
+//! than a copy of the repository:
+//!
+//! 1. **The clone has no hard links.** A local clone shares its `.git`
+//!    objects with the repository it came from, and a raw write in the
+//!    container corrupts both (SPEC 3.2).
+//! 2. **Its `origin` is a host path that does not exist in the container.**
+//!    That is what makes pushing impossible without relying on any harness.
+//! 3. **It is created beside the repository**, never on another volume: a
+//!    slot on a different filesystem is a slot the engine may not share
+//!    (SPEC 4.2 bis).
+
+use std::path::{Path, PathBuf};
+
+use crate::git::{self, GitError};
+use crate::project::Project;
+
+/// Where a project's slots live: a sibling of the repository, so the clone
+/// stays on the same filesystem.
+pub fn slots_dir(project: &Project) -> PathBuf {
+    let parent = project
+        .root
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    parent.join(format!("{}-slots", project.name()))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Slot {
+    pub name: String,
+    pub tree: PathBuf,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SlotError {
+    #[error("slot {0:?} already exists at {1}")]
+    Exists(String, PathBuf),
+    #[error("no slot {0:?} under {1}")]
+    Unknown(String, PathBuf),
+    #[error(
+        "slot {name:?} carries {count} commit(s) on {branch} that {repository} does not have; \
+         `nunki mission fetch` first, or say so explicitly"
+    )]
+    Unfetched {
+        name: String,
+        branch: String,
+        count: usize,
+        repository: String,
+    },
+    #[error("slot {0:?} has uncommitted work; commit it or discard it first")]
+    Dirty(String),
+    #[error("a slot name may hold letters, digits, - and _ only, and {0:?} does not")]
+    BadName(String),
+    #[error(
+        "slot {name:?} is in use — {what}; resetting it would take its container down under \
+         it. Let it end, or stop it, first"
+    )]
+    Busy { name: String, what: String },
+    /// A state the reset could not read: it cannot tell whether a run is in
+    /// flight in the slot, so it does not take its containers down.
+    #[error(
+        "slot {name:?} was not reset, and nothing in it was changed: {why}. nunki cannot tell \
+         whether a run of mission {mission} is in flight in this slot, and a reset would take \
+         its container down under it. Repair that file; or, if mission {mission} is over, \
+         move its state file out of {missions} — it then reads as never started, and \
+         `nunki mission archive {mission}` closes it. Only missions not archived are read"
+    )]
+    StateUnreadable {
+        name: String,
+        mission: String,
+        why: String,
+        missions: String,
+    },
+    /// The state store itself would not open.
+    #[error(
+        "slot {name:?} was not reset, and nothing in it was changed: the missions' states \
+         cannot be read ({why}), so nunki cannot tell whether a run is in flight in this slot"
+    )]
+    StoreUnreadable { name: String, why: String },
+    /// The list of missions would not read: an empty list it is not, and a
+    /// run in flight may be among what could not be read.
+    #[error(
+        "slot {name:?} was not reset, and nothing in it was changed: the list of missions in \
+         {dir} cannot be read ({why}), so nunki cannot tell whether a run is in flight in \
+         this slot. Make that directory readable again"
+    )]
+    MissionsUnreadable {
+        name: String,
+        dir: String,
+        why: String,
+    },
+    #[error("the engine: {0}")]
+    Engine(String),
+    #[error("the slot's campaign record could not be read: {0}")]
+    Unreadable(String),
+    #[error(transparent)]
+    Git(#[from] GitError),
+    #[error("{0}: {1}")]
+    Io(PathBuf, std::io::Error),
+}
+
+/// Create a slot: a clone of the project, without hard links.
+pub fn add(project: &Project, name: &str) -> Result<Slot, SlotError> {
+    check_name(name)?;
+    let dir = slots_dir(project);
+    let tree = dir.join(name);
+    if tree.exists() {
+        return Err(SlotError::Exists(name.to_string(), tree));
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| SlotError::Io(dir.clone(), e))?;
+
+    // `--no-hardlinks` is the whole point: without it the clone shares its
+    // objects with the repository, and a raw write inside a container
+    // corrupts the human's history along with the slot's.
+    git::run_anywhere(&[
+        "clone",
+        "--no-hardlinks",
+        &project.root.display().to_string(),
+        &tree.display().to_string(),
+    ])?;
+
+    Ok(Slot {
+        name: name.to_string(),
+        tree,
+    })
+}
+
+/// The slots a project has, in name order.
+pub fn list(project: &Project) -> Vec<Slot> {
+    let dir = slots_dir(project);
+    let mut slots: Vec<Slot> = std::fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().join(".git").exists())
+        .map(|e| Slot {
+            name: e.file_name().to_string_lossy().into_owned(),
+            tree: e.path(),
+        })
+        .collect();
+    slots.sort_by(|a, b| a.name.cmp(&b.name));
+    slots
+}
+
+pub fn find(project: &Project, name: &str) -> Result<Slot, SlotError> {
+    list(project)
+        .into_iter()
+        .find(|s| s.name == name)
+        .ok_or_else(|| SlotError::Unknown(name.to_string(), slots_dir(project)))
+}
+
+/// Remove a slot — and refuse while it holds work the repository does not
+/// have (SPEC 3.3, rule 2). `force` is the human saying it anyway.
+/// Put a slot back to a clean state without destroying it.
+///
+/// What it removes, and what it deliberately does not. The **clone stays**:
+/// `nunki slot rm` is the verb that deletes one, and a reset that quietly did
+/// the same would be a name lying about a destructive act. What goes is the
+/// work in progress — uncommitted changes, untracked files — and the slot's
+/// **named volumes**, which is the real reason to reset: a build cache or a
+/// harness state directory that has gone bad outlives every rebuild of the
+/// image, and nothing else can reach it.
+///
+/// **The slot's containers are taken down first**, and that alone. An engine
+/// refuses to remove a volume a container still mounts, running or stopped,
+/// so a reset that went straight to the volumes removed none of them while a
+/// profile stood — and said "no named volume to remove", which was false.
+/// Containers go through [`crate::engine::Engine::remove`], which never takes
+/// a volume with it: the only volumes removed are the slot's own, by name
+/// ([`volumes_of`]). A volume that still cannot be removed is said, with the
+/// engine's reason ([`Reset::failed`]).
+///
+/// Refused while a run or a mutation campaign is in flight in the slot:
+/// taking its container down would end it under the mission that owns it.
+///
+/// It refuses on the same grounds as `rm`, and for the same reason: commits
+/// the repository does not have are work nobody else holds, and a verb that
+/// discarded them because its name sounds mild would be the worst kind of
+/// verb (SPEC 3.3).
+pub fn reset(
+    project: &Project,
+    name: &str,
+    engine: &dyn crate::engine::Engine,
+    force: bool,
+) -> Result<Reset, SlotError> {
+    let slot = find(project, name)?;
+    if let Some(mission) = running_in(project, name)? {
+        return Err(SlotError::Busy {
+            name: name.to_string(),
+            what: format!("mission {mission} has a run in progress"),
+        });
+    }
+    if crate::mutants::read_running(&project.hq_root, name)
+        .map_err(|e| SlotError::Unreadable(e.to_string()))?
+        .is_some()
+    {
+        return Err(SlotError::Busy {
+            name: name.to_string(),
+            what: "a mutation campaign is in flight".to_string(),
+        });
+    }
+    if !force {
+        let missing = git::commits_not_in(&slot.tree, &project.root)?;
+        if !missing.is_empty() {
+            return Err(SlotError::Unfetched {
+                name: name.to_string(),
+                branch: git::SlotGit::open(&slot.tree)?.current_branch()?,
+                count: missing.len(),
+                repository: project.root.display().to_string(),
+            });
+        }
+    }
+
+    // Played from the slot's host mirror, never by a git in the slot
+    // (`git::SlotGit`). `-x` in the clean, unlike the refresh of the proof
+    // copy: that one keeps the build cache on purpose, and this one exists to
+    // throw it away.
+    let repo = git::SlotGit::open(&slot.tree)?;
+    let discarded = !repo.is_clean()?;
+    repo.reset_hard()?;
+
+    let compose = crate::compose::project_name(&project.session(), &slot.name)
+        .map_err(|e| SlotError::Engine(e.to_string()))?;
+    let containers = engine
+        .containers(&compose)
+        .map_err(|e| SlotError::Engine(e.to_string()))?;
+    let ids: Vec<String> = containers.iter().map(|c| c.id.clone()).collect();
+    engine
+        .remove(&ids)
+        .map_err(|e| SlotError::Engine(e.to_string()))?;
+    let mut taken_down: Vec<String> = containers.into_iter().map(|c| c.service).collect();
+    taken_down.sort();
+    taken_down.dedup();
+
+    let mut volumes = Vec::new();
+    let mut failed = Vec::new();
+    for volume in volumes_of(project, &slot) {
+        match engine.remove_volume(&volume) {
+            Ok(true) => volumes.push(volume),
+            // Never created: a slot reset before its first run has none.
+            Ok(false) => {}
+            Err(e) => failed.push((volume, e.to_string())),
+        }
+    }
+    Ok(Reset {
+        slot,
+        discarded,
+        taken_down,
+        volumes,
+        failed,
+    })
+}
+
+/// The mission whose run is in progress in slot `name`, if one is.
+///
+/// A state that cannot be read is not a state that says nothing runs: it is
+/// refused, naming the file and why, rather than read as "no run" and a
+/// live run's container taken down. So is a list of missions that cannot be
+/// read: an empty list it is not. And the missions read are those with a
+/// folder ([`crate::mission::dir::list_checked`]) **and** those with a state
+/// file ([`crate::state::Store::missions`]): a run the store records in this
+/// slot blocks the reset whether or not its folder is listed.
+///
+/// Only the missions not archived are read — archiving moves the folder and
+/// the state under `archive/`, out of reach of both — so an old broken file
+/// stops blocking once its mission is closed. A mission framed and never
+/// started has no state, and nothing in flight.
+fn running_in(project: &Project, name: &str) -> Result<Option<String>, SlotError> {
+    let store =
+        crate::state::Store::open(&project.hq_root).map_err(|e| SlotError::StoreUnreadable {
+            name: name.to_string(),
+            why: e.to_string(),
+        })?;
+    // A set: a mission with both a folder and a state is read once, in name
+    // order.
+    let mut ids: std::collections::BTreeSet<String> =
+        crate::mission::dir::list_checked(&project.hq_root)
+            .map_err(|e| SlotError::MissionsUnreadable {
+                name: name.to_string(),
+                dir: project.hq_root.join("missions").display().to_string(),
+                why: e.to_string(),
+            })?
+            .into_iter()
+            .collect();
+    ids.extend(store.missions().map_err(|e| SlotError::StoreUnreadable {
+        name: name.to_string(),
+        why: e.to_string(),
+    })?);
+    for id in ids {
+        match store.load(&id) {
+            Ok(state) if state.slot == name && state.run.is_some() => return Ok(Some(id)),
+            Ok(_) | Err(crate::state::StateError::Missing(_)) => {}
+            Err(e) => {
+                return Err(SlotError::StateUnreadable {
+                    name: name.to_string(),
+                    mission: id,
+                    why: e.to_string(),
+                    missions: store.root().join("missions").display().to_string(),
+                });
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// What a reset threw away, for the caller to print.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reset {
+    pub slot: Slot,
+    /// Whether the tree had uncommitted work.
+    pub discarded: bool,
+    /// The services whose containers were taken down so that their volumes
+    /// could go — their containers only, never a volume with them.
+    pub taken_down: Vec<String>,
+    /// The named volumes that were actually removed.
+    pub volumes: Vec<String>,
+    /// The named volumes the engine would not remove, and why.
+    pub failed: Vec<(String, String)>,
+}
+
+/// Every named volume a slot owns, whichever profile put it there.
+///
+/// Listed here rather than derived from a profile file: a profile is
+/// regenerated at every launch and may not exist at all, and a reset must be
+/// able to clean a slot whose last profile is gone.
+pub fn volumes_of(project: &Project, slot: &Slot) -> Vec<String> {
+    let mut names = vec![
+        crate::exec::proof_volume(&slot.name),
+        format!("nunki-{}-harness", slot.name),
+        // Slots made before caches were a declared fragment carry this one.
+        // Listed so a reset still removes it; nothing creates it any more.
+        format!("nunki-{}-cargo", slot.name),
+    ];
+    for stack in project.config.stacks.iter().map(|s| &s.name) {
+        for path in project.stack_writable(stack) {
+            names.push(crate::run::writable_volume(&slot.name, &path));
+        }
+        for path in project.stack_caches(stack) {
+            names.push(crate::run::cache_volume(&slot.name, &path));
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+pub fn rm(project: &Project, name: &str, force: bool) -> Result<Slot, SlotError> {
+    let slot = find(project, name)?;
+    if !force {
+        if !git::is_clean(&slot.tree)? {
+            return Err(SlotError::Dirty(name.to_string()));
+        }
+        let missing = git::commits_not_in(&slot.tree, &project.root)?;
+        if !missing.is_empty() {
+            return Err(SlotError::Unfetched {
+                name: name.to_string(),
+                branch: git::SlotGit::open(&slot.tree)?.current_branch()?,
+                count: missing.len(),
+                repository: project.root.display().to_string(),
+            });
+        }
+    }
+    std::fs::remove_dir_all(&slot.tree).map_err(|e| SlotError::Io(slot.tree.clone(), e))?;
+    // Its mirror goes with it: a slot of the same name made later would
+    // otherwise start from a mirror of this one.
+    let mirror = git::mirror_of(&slot.tree);
+    match std::fs::remove_dir_all(&mirror) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(SlotError::Io(mirror, e)),
+    }
+    Ok(slot)
+}
+
+/// A name that survives being a directory, a Compose project and a container
+/// name (SPEC 4.2: Compose refuses anything but lowercase letters, digits,
+/// `-` and `_`).
+fn check_name(name: &str) -> Result<(), SlotError> {
+    let ok = !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        && name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric());
+    if ok {
+        Ok(())
+    } else {
+        Err(SlotError::BadName(name.to_string()))
+    }
+}

@@ -1,0 +1,541 @@
+//! The persisted state of `nunki` (SPEC 4.2, "L'état de `nunki` est persisté, et
+//! verrouillé").
+//!
+//! `nunki verify` lasts hours and must survive the death of the HQ session, a
+//! sleeping machine, a closed terminal. So every transition is written to
+//! disk under `<nunki-root>/state/`, one file per mission, atomically; and a
+//! lock per slot keeps two `nunki` from driving the same slot at once. A
+//! restarted `nunki` reads the state back and, before deciding anything,
+//! re-derives whether the run it recorded is still alive — that part is the
+//! engine's, not this module's: here we only keep and hand back the facts.
+
+pub mod lock;
+
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+use crate::harness::RunHandle;
+use crate::mission::flow::{Event, Flow, FlowError, Stage};
+
+pub use lock::{LockError, SlotLock};
+
+#[derive(Debug, thiserror::Error)]
+pub enum StateError {
+    #[error("io on {path}: {source}")]
+    Io { path: PathBuf, source: io::Error },
+    #[error("state file {path} is not valid: {source}")]
+    Corrupt {
+        path: PathBuf,
+        source: serde_json::Error,
+    },
+    #[error("no state for mission {0}")]
+    Missing(String),
+    #[error(transparent)]
+    Flow(#[from] FlowError),
+}
+
+/// Everything `nunki` knows about a mission that is not in its files: the flow
+/// (which carries the frozen header), the slot, and the run in progress if
+/// any, as a persistable handle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MissionState {
+    pub id: String,
+    pub slot: String,
+    pub flow: Flow,
+    /// The run launched for the current stage, if one is (or was) running.
+    /// Kept so a restarted `nunki` can ask the engine whether it is still alive.
+    pub run: Option<RunHandle>,
+    /// The account that run was launched on: the one whose token it holds,
+    /// so the one its stream measures (SPEC 4.3). Kept beside the run rather
+    /// than resolved again, because what resolves it — `nunki.yaml`, a
+    /// long-lived monitor's copy of it — can name another account by the
+    /// time the run is measured (#179). Set and forgotten with `run`. Absent
+    /// from a run an older `nunki` recorded, which is measured under the
+    /// account the mission spends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_account: Option<String>,
+    /// The application `nunki` started for the current stage, if the mission
+    /// has one (SPEC 4.2, "les services et le lancement de l'application").
+    /// Its own field and not the run's: "the agent is up" and "the
+    /// deliverable is up" are two facts, and one handle would report them as
+    /// one.
+    #[serde(default)]
+    pub app: Option<RunHandle>,
+    /// What each role concluded, and on which commit (SPEC 4.2, "verdicts et
+    /// leurs `HEAD`"). `VERDICT.json` holds one verdict at a time and every
+    /// role overwrites it, so the file cannot answer "did the integrator pass,
+    /// and on what?" once the security agent has written. This can, and it is
+    /// what `nunki push` reads.
+    #[serde(default)]
+    pub verdicts: Vec<Concluded>,
+    /// Security findings a human has lifted (SPEC 4.5). `VERDICT.json` stays
+    /// `FINDINGS` — the verdict says what the agent found, this says what the
+    /// human decided, and `nunki push` reads the decision here. Each acceptance
+    /// carries the commit it was given on, because a verdict and its lift are
+    /// worth one commit and no other.
+    #[serde(default)]
+    pub accepted: Vec<Accepted>,
+    /// Set by `nunki mission stop`: `nunki` launches no further run for this
+    /// mission (SPEC 4.5). Deliberately **not** a stage — a stopped mission
+    /// is neither abandoned (`end` says that) nor finished; SPEC calls it
+    /// "intact et reprenable", and a stage would conflate a human's hold
+    /// with where the work has got to.
+    #[serde(default)]
+    pub stopped: Option<Stopped>,
+    /// Harness failures in a row, and the time before which no run is
+    /// launched (SPEC 4.3). A wait and not a hold: it expires by itself, and
+    /// only when it would pass the ceiling does `nunki` hold the mission.
+    #[serde(default)]
+    pub harness_down: Option<crate::backoff::HarnessDown>,
+    /// What the mission has spent, against its caps (SPEC 7).
+    #[serde(default)]
+    pub spent: Spent,
+    /// Set when `nunki` told the run in progress to end its turn because the
+    /// account's window passed its threshold (SPEC 4.3). The read-back that
+    /// follows costs no attempt, whatever the run left: the state decides and
+    /// not the log, because what a harness writes after an interrupted turn
+    /// has not been measured.
+    #[serde(default)]
+    pub spared: Option<Spared>,
+    /// The stage the coder's last read-back or judgement moved the flow to,
+    /// until the run it owes is launched (SPEC 4.3). That read-back judged
+    /// the tree, or chose not to — a turn `nunki` ended, a harness failure —
+    /// and when a hold, the harness's wait or the account's window puts the
+    /// launch off, a later `verify` makes it: on the same tree, without
+    /// judging it again, since that would spend an attempt on a run that
+    /// never happened. Written by [`Store::apply_decided`] with the
+    /// transition, forgotten by any other transition and by the launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decided: Option<Stage>,
+    /// The coder's harness session, resumed by its next run (SPEC 4.3):
+    /// kept from one lot to the next and
+    /// across a harness failure or a spared turn, dropped when an attempt
+    /// fails — a context that failed is not the one to carry on with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coder_session: Option<crate::harness::SessionId>,
+    /// Set by `nunki push` once the branch is on the forge, and forgotten at
+    /// the next transition of the flow: it says the push happened at the
+    /// stage the mission stands at, and a review sent back after it moves the
+    /// mission off that stage. What `nunki mission wait` reads to tell a
+    /// pushed mission from one still to be read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pushed: Option<PushedAt>,
+    /// RFC 3339 time of the last write; informational.
+    pub updated_at: String,
+    /// How many times this state has been written: [`Store::save`] advances
+    /// it on every write, whoever writes and whatever changed. What tells two
+    /// writes apart when `updated_at`, to the second and not set by every
+    /// writer, does not — `nunki mission wait` reads the monitor's exit as
+    /// current only on the revision it was said on. Absent from older files,
+    /// read as 0.
+    #[serde(default)]
+    pub revision: u64,
+}
+
+/// The one field [`Store::save`] reads back from the file it replaces.
+#[derive(Deserialize)]
+struct Revision {
+    #[serde(default)]
+    revision: u64,
+}
+
+/// A push `nunki push` made: the commit, and when.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushedAt {
+    pub head: String,
+    pub date: String,
+}
+
+/// A run `nunki` ended because the account's window passed its threshold.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Spared {
+    pub account: String,
+    /// Which window, as a human reads it.
+    pub window: String,
+    pub per_mille: u32,
+    /// When that window resets, in epoch seconds.
+    pub until: u64,
+    pub date: String,
+}
+
+/// Runs, and tokens as the harness reported them (SPEC 7).
+///
+/// A run is counted when `nunki verify` reads it back, whatever the role — the
+/// coder's first run too, launched by `nunki mission start` and read back like
+/// the others.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Spent {
+    pub runs: u32,
+    pub usage: crate::harness::Usage,
+}
+
+impl Spent {
+    /// One more run, and what it spent — nothing, if the harness did not say.
+    pub fn record(&mut self, usage: Option<&crate::harness::Usage>) {
+        self.runs = self.runs.saturating_add(1);
+        if let Some(usage) = usage {
+            self.usage.add(usage);
+        }
+    }
+}
+
+/// What one role concluded, and where.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Concluded {
+    pub role: crate::harness::Role,
+    /// `None` for the coder, whose verdict SPEC 4.4 makes implicit: its
+    /// gates were green. Saying `None` rather than inventing a fourth
+    /// `Verdict` keeps the file's vocabulary the one the agents write.
+    pub verdict: Option<crate::mission::Verdict>,
+    /// The commit the role concluded on.
+    pub head: String,
+    pub date: String,
+    /// What the verdict said, as `nunki` parsed it when the role concluded:
+    /// kept for the security agent, whose report and findings `nunki push`
+    /// lays into the pull request's Security section (SPEC 4.5). Kept here
+    /// because `VERDICT.json` is rewritten by every role and nothing else
+    /// holds them once the flow moves on. `None` for the other roles, and
+    /// in state an older `nunki` wrote: the section then says it could not
+    /// read them, and never reads the file instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub said: Option<Said>,
+}
+
+/// A verdict's report and findings, as its file held them when it was
+/// concluded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Said {
+    pub report: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub findings: Option<crate::mission::FindingList>,
+}
+
+impl Said {
+    /// What `file` says, taken whole.
+    pub fn of(file: &crate::mission::VerdictFile) -> Self {
+        Said {
+            report: file.report.clone(),
+            findings: file.findings.clone(),
+        }
+    }
+}
+
+/// One risk taken, on the record: by a human through `nunki mission
+/// accept`, or by `nunki` itself on a report whose every finding is `LOW` or
+/// `INFO` (SPEC 4.5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Accepted {
+    /// What was lifted. `None` means the verdict as a whole — the human read
+    /// the report and lifted what remained of it.
+    pub finding: Option<String>,
+    /// Why. Never empty: a risk accepted without a reason is not accepted,
+    /// it is forgotten. For a lift `nunki` recorded, one line per finding:
+    /// its severity, its title and the agent's reason.
+    pub why: String,
+    /// Who took it, as `nunki whoami` knows them — or [`NUNKI`].
+    pub who: String,
+    /// The commit it was given on.
+    pub head: String,
+    pub date: String,
+    /// Recorded by `nunki` rather than by a person. Its own field and not
+    /// only a name in `who`, because a person may be called anything. Absent
+    /// from older state files, which only ever held a human's lifts.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub by_nunki: bool,
+    /// The commit that fixed what was lifted, after the security agent's last
+    /// round, when the lift says so (`nunki mission accept --fixed-by`): a
+    /// finding fixed and checked by the HQ, but not attacked by the agent,
+    /// whose rounds were spent (#162). Its full id. `None` for a risk
+    /// accepted as it stands, and absent from older state files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixed_by: Option<String>,
+}
+
+/// Who an automatic lift names.
+pub const NUNKI: &str = "nunki";
+
+/// A hold a human put on a mission: no further run is launched until
+/// `nunki mission resume` lifts it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Stopped {
+    /// Who held it, as `nunki whoami` knows them.
+    pub who: String,
+    pub date: String,
+    /// Whether the run in progress was also interrupted (`--now`). Kept
+    /// because the two are different facts: one says what `nunki` will not do
+    /// next, the other says what was done to the run that was going.
+    pub interrupted: bool,
+    /// Why: the human's `--because`, or `nunki`'s own reason — a harness it
+    /// stopped waiting for. A hold whose reason is lost reads as a mission
+    /// someone forgot. Absent only from a hold an older `nunki` recorded.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+impl MissionState {
+    /// Record what a role concluded, replacing whatever it concluded before.
+    ///
+    /// Replacing, because a volet replays the whole chain: an `INTEGRATED`
+    /// from before a correction is not a second opinion, it is a stale one,
+    /// and keeping both would let `nunki push` find the green it wants among
+    /// answers about other commits.
+    pub fn conclude(
+        &mut self,
+        role: crate::harness::Role,
+        verdict: Option<crate::mission::Verdict>,
+        head: &str,
+    ) {
+        self.conclude_saying(role, verdict, head, None);
+    }
+
+    /// [`MissionState::conclude`], keeping what the verdict said with it.
+    pub fn conclude_saying(
+        &mut self,
+        role: crate::harness::Role,
+        verdict: Option<crate::mission::Verdict>,
+        head: &str,
+        said: Option<Said>,
+    ) {
+        self.verdicts.retain(|c| c.role != role);
+        self.verdicts.push(Concluded {
+            role,
+            verdict,
+            head: head.to_string(),
+            date: now_rfc3339(),
+            said,
+        });
+    }
+
+    /// What `role` concluded, if it has.
+    pub fn concluded(&self, role: crate::harness::Role) -> Option<&Concluded> {
+        self.verdicts.iter().find(|c| c.role == role)
+    }
+
+    /// The acceptances that still stand: those given on `head`. A new commit
+    /// makes the others stale, exactly as it makes a verdict stale.
+    pub fn accepted_on(&self, head: &str) -> Vec<&Accepted> {
+        self.accepted.iter().filter(|a| a.head == head).collect()
+    }
+
+    /// Whether the human lifted the verdict as a whole on `head`.
+    pub fn verdict_lifted_on(&self, head: &str) -> bool {
+        self.accepted_on(head).iter().any(|a| a.finding.is_none())
+    }
+
+    /// Hold the mission, saying why: `nunki` launches no further run for it.
+    pub fn hold(&mut self, who: &str, interrupted: bool, because: &str) {
+        self.stopped = Some(Stopped {
+            who: who.to_string(),
+            date: now_rfc3339(),
+            interrupted,
+            reason: Some(because.to_string()),
+        });
+    }
+
+    /// Hold the mission, saying why: `nunki`'s own hold, when waiting no longer
+    /// serves.
+    pub fn hold_for(&mut self, who: &str, reason: String) {
+        self.stopped = Some(Stopped {
+            who: who.to_string(),
+            date: now_rfc3339(),
+            interrupted: false,
+            reason: Some(reason),
+        });
+    }
+
+    /// Lift the hold. Returns what was lifted, so a caller can say whether
+    /// there was anything to lift rather than claiming it lifted one.
+    ///
+    /// The harness's failures are forgotten with it: a human who lifts a hold
+    /// has mended the cause, or means to watch, and a count carried over
+    /// would send the very next failure back to them at the ceiling.
+    pub fn release(&mut self) -> Option<Stopped> {
+        self.harness_down = None;
+        self.stopped.take()
+    }
+
+    /// Whether `nunki` may launch a run for this mission.
+    pub fn held(&self) -> bool {
+        self.stopped.is_some()
+    }
+}
+
+/// The state directory of one project's HQ.
+#[derive(Debug, Clone)]
+pub struct Store {
+    root: PathBuf,
+}
+
+impl Store {
+    /// Open (creating if needed) the state directory under an HQ root —
+    /// `~/.nunki/<project>/` in production, a temp dir in tests.
+    pub fn open(hq_root: &Path) -> Result<Self, StateError> {
+        let root = hq_root.join("state");
+        for dir in [root.join("missions"), root.join("locks")] {
+            fs::create_dir_all(&dir).map_err(|source| StateError::Io {
+                path: dir.clone(),
+                source,
+            })?;
+        }
+        Ok(Self { root })
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    fn mission_path(&self, id: &str) -> PathBuf {
+        self.root.join("missions").join(format!("{id}.json"))
+    }
+
+    /// Write a mission's state atomically: to a temp file in the same
+    /// directory, then rename. A crash mid-write leaves the previous file
+    /// intact, never a truncated one. The state written carries the next
+    /// [`MissionState::revision`] — one past both the file's and `state`'s,
+    /// so a caller holding an older copy still writes a newer revision.
+    pub fn save(&self, state: &MissionState) -> Result<(), StateError> {
+        self.write(state).map(|_| ())
+    }
+
+    /// [`Store::save`], returning the revision it wrote.
+    fn write(&self, state: &MissionState) -> Result<u64, StateError> {
+        let path = self.mission_path(&state.id);
+        let tmp = path.with_extension("json.tmp");
+        let on_disk = fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Revision>(&bytes).ok())
+            .map_or(0, |r| r.revision);
+        let mut written = state.clone();
+        written.revision = on_disk.max(state.revision).saturating_add(1);
+        let bytes = serde_json::to_vec_pretty(&written).expect("MissionState serializes");
+        fs::write(&tmp, bytes).map_err(|source| StateError::Io {
+            path: tmp.clone(),
+            source,
+        })?;
+        fs::rename(&tmp, &path).map_err(|source| StateError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        Ok(written.revision)
+    }
+
+    pub fn load(&self, id: &str) -> Result<MissionState, StateError> {
+        let path = self.mission_path(id);
+        let bytes = match fs::read(&path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                return Err(StateError::Missing(id.to_string()));
+            }
+            Err(source) => return Err(StateError::Io { path, source }),
+        };
+        serde_json::from_slice(&bytes).map_err(|source| StateError::Corrupt { path, source })
+    }
+
+    /// Identifiers of every mission with a state file.
+    pub fn missions(&self) -> Result<Vec<String>, StateError> {
+        let dir = self.root.join("missions");
+        let entries = fs::read_dir(&dir).map_err(|source| StateError::Io {
+            path: dir.clone(),
+            source,
+        })?;
+        let mut ids = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|source| StateError::Io {
+                path: dir.clone(),
+                source,
+            })?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if let Some(id) = name.strip_suffix(".json") {
+                ids.push(id.to_string());
+            }
+        }
+        ids.sort();
+        Ok(ids)
+    }
+
+    /// Advance a mission's flow by one event and persist the result before
+    /// returning it. The flow is only changed if the event is valid; a
+    /// rejected event writes nothing.
+    pub fn apply(&self, state: &mut MissionState, event: Event) -> Result<(), StateError> {
+        self.transition(state, event, false)
+    }
+
+    /// [`Store::apply`], for the coder's read-back or judgement: the stage
+    /// the flow lands on is recorded as [`MissionState::decided`], in the
+    /// same write, so that no crash keeps the transition and loses what it
+    /// decided.
+    pub fn apply_decided(&self, state: &mut MissionState, event: Event) -> Result<(), StateError> {
+        self.transition(state, event, true)
+    }
+
+    fn transition(
+        &self,
+        state: &mut MissionState,
+        event: Event,
+        decided: bool,
+    ) -> Result<(), StateError> {
+        state.flow.advance(event)?;
+        // A push describes the stage it was made at, and the flow just left
+        // it. So does a decision.
+        state.pushed = None;
+        state.decided = decided.then(|| state.flow.stage().clone());
+        state.updated_at = now_rfc3339();
+        state.revision = self.write(state)?;
+        Ok(())
+    }
+
+    /// Record the run launched for the current stage (or clear it), and
+    /// persist. The account it was launched on is not known here, and is
+    /// forgotten: the run is measured under the account the mission spends.
+    pub fn set_run(
+        &self,
+        state: &mut MissionState,
+        run: Option<RunHandle>,
+    ) -> Result<(), StateError> {
+        state.run = run;
+        state.run_account = None;
+        state.updated_at = now_rfc3339();
+        state.revision = self.write(state)?;
+        Ok(())
+    }
+}
+
+/// Now, in seconds since the epoch.
+pub fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+pub(crate) fn now_rfc3339() -> String {
+    rfc3339(now_secs())
+}
+
+/// Seconds since the epoch, formatted as RFC 3339 in UTC, without pulling
+/// a date crate for a few informational fields.
+pub fn rfc3339(secs: u64) -> String {
+    // Civil-from-days, Howard Hinnant's algorithm.
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        rem / 3_600,
+        (rem % 3_600) / 60,
+        rem % 60
+    )
+}

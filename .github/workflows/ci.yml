@@ -1,0 +1,227 @@
+# The gate the repository's own doctrine asks for: nothing merges on the word
+# of whoever ran the commands locally.
+#
+# Two platforms, because SPEC 4.2 bis commits to macOS and to Linux under WSL
+# and there is no cross-compilation to lean on. Only GitHub's own actions are
+# used: the toolchain ships with the runners, and an action nobody reads is a
+# dependency nobody reviews.
+#
+# Major tags, not commit digests, and the reason is that these two are
+# GitHub's own. A digest would freeze the patch level, so a fix inside v7
+# would wait for someone to notice and edit; a major tag takes it the next
+# morning. The risk a digest buys off — an owner repointing a tag at other
+# code — sits inside a trust boundary we are already all the way inside:
+# these runners, this toolchain and the job's token are GitHub's too.
+#
+# That reasoning does not extend to anyone else's action. **A third-party
+# action is pinned to a commit digest**, with the version in a comment, or it
+# does not go in. Check the majors now and then:
+#
+#   gh api repos/actions/checkout/releases/latest --jq .tag_name
+#   gh api repos/actions/cache/releases/latest    --jq .tag_name
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [dev, main]
+  # `release.yml` plays the whole of this file again on a tag, before it
+  # publishes anything.
+  workflow_call:
+
+env:
+  CARGO_TERM_COLOR: always
+  # No blanket `RUSTFLAGS: -D warnings`: it applies to dependencies too, so a
+  # warning upstream would turn this repository red for something it cannot
+  # fix. Clippy denies warnings where it matters — our own code.
+  # A test driving the real `nunki` binary through `mission start`, `verify` or
+  # `resume` would otherwise leave a detached mission monitor behind it.
+  HQ_NO_MONITOR: "1"
+
+jobs:
+  check:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    # Every job here has a deadline, because GitHub's own is six hours. On
+    # `dev` at 93659d4 a test hung (#158), and its job ran 41 minutes before
+    # anyone noticed and cancelled it. Each deadline is two to three times the
+    # job's longest run over the workflow's last hundred: room for a cold
+    # cache, and GitHub still stops a hang within the hour. This job's longest
+    # was 15 minutes, on macOS.
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # Named, never `ubuntu-latest`. `actions/runner-images#14748` moves
+        # that label to Ubuntu 26.04 over the weeks from 2026-10-19, and a
+        # label that changes what it means under a repository is the same
+        # kind of thing as an unpinned action: it turns a green history red
+        # on a morning nobody chose.
+        #
+        # 26.04 and not 24.04, already: every job passes on both, and once
+        # that is known, running both buys a comparison nobody is reading.
+        # Being ahead of the migration costs less than
+        # being behind it, and 24.04 comes back in one line if it is ever
+        # needed.
+        os: [ubuntu-26.04, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Show what the runner brought
+        run: |
+          rustc --version
+          cargo --version
+          cargo fmt --version
+          cargo clippy --version
+          docker compose version || echo "no container engine here — engine tests will skip"
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ matrix.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ matrix.os }}-cargo-
+
+      - name: Formatting
+        run: cargo fmt --all -- --check
+
+      - name: The changelog has the notes of the version Cargo.toml names
+        # Here and not only at the tag: a version raised without its
+        # section goes red in the pull request that raised it, rather than
+        # after the owner has tagged it.
+        run: scripts/release-notes.sh > /dev/null
+
+      - name: Clippy, warnings included
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Tests
+        # The `#[ignore]`d ones stay out here and are played by the job
+        # below, where there is an engine to play them with.
+        run: cargo test --all-features
+
+  # The `#[ignore]`d tests that need nothing but a container engine.
+  #
+  # Run by hand, they are run when somebody remembers, and in between they
+  # fall behind: a fixture that trails a changed contract — gate 8's script,
+  # or the line a campaign prints to say it finished — goes red only when
+  # somebody next plays it, instead of in the pull request that changed the
+  # contract. A proof nobody plays is a proof that rots, and this
+  # repository's own doctrine says a check that quietly skips reads as a
+  # pass.
+  #
+  # **Blocking, like every other job here.** A container job that may fail
+  # without stopping a merge is a signal nobody has to act on, and teaching
+  # people to ignore a red check costs more than the check is worth. Anything
+  # flaky in it is a defect to fix, not noise to tolerate.
+  #
+  # Two are still out, and for reasons no runner can change: the headless run
+  # spends a human's subscription, and the forge tests need a token this
+  # workflow is not given. They self-skip without one, which is why they are
+  # named here rather than silently absent.
+  #
+  # Ubuntu only: the macOS runner ships no container engine, which is also
+  # why the job above prints what it found.
+  containers:
+    name: containers
+    # The job where what the runner brings is load-bearing, and the step
+    # below exists because it is: the engine copies the host's resolver,
+    # `search` list included, and that list can read a declared service as
+    # "refused" on this runner while every Mac says "reached"
+    # (`perimeter::resolves`).
+    #
+    # It is green on 24.04 and on 26.04, and this job costs several minutes,
+    # which is not a price to pay twice for an answer already known.
+    runs-on: ubuntu-26.04
+    # Longest run: 13 minutes. See `check` for how the deadline is set.
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Show what the runner brought
+        # The resolver a container gets here, `search` list included: the
+        # engine copies the host's, and that list can read a declared
+        # service as "refused" on this runner while every Mac says "reached"
+        # (`perimeter::resolves`).
+        run: |
+          docker compose version
+          docker run --rm alpine:3.22 cat /etc/resolv.conf
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: containers-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: containers-cargo-
+
+      # One suite plays the shipped `mutation.sh` against the real tool, and
+      # says so in its own reason for being ignored. Installed rather than
+      # skipped: a proof that needs a tool and does not get it is a proof
+      # nobody ran, which is what this job exists to stop.
+      - name: Install cargo-mutants if the cache did not carry it
+        run: command -v cargo-mutants >/dev/null || cargo install cargo-mutants --locked
+
+      - name: The live tests, one suite at a time
+        # One binary at a time and one thread inside it: these lift containers
+        # under names derived from the test, and a collision between two of
+        # them would read as a defect in whichever lost the race.
+        run: |
+          set -eu
+          for suite in exec engine firewall gate launch mutants probe run verify; do
+            echo "::group::$suite"
+            cargo test --all-features --test "$suite" -- --ignored --test-threads=1
+            echo "::endgroup::"
+          done
+          # The fences of the project's services: no way out to a public
+          # address, no outside name, only what the mission declares, and the
+          # agent still reaching its service. One is left out: the
+          # capability measurement lifts every image once per capability,
+          # from a fresh start and again after a stop (about 37 minutes on
+          # the HQ's engine); the HQ runs it when the set or its images
+          # change. The set is still exercised here: these tests lift nginx
+          # with it.
+          echo "::group::services_file"
+          cargo test --all-features --test services_file -- --ignored --test-threads=1 \
+            --skip live_the_capability_set_is_the_smallest_the_images_need
+          echo "::endgroup::"
+
+      - name: Leave nothing behind
+        if: always()
+        run: docker ps -aq | xargs -r docker rm -f
+
+  supply-chain:
+    name: supply chain
+    # Pinned for the reason the matrix above gives. This job reads
+    # `Cargo.lock` and `deny.toml`; the answer does not depend on which
+    # Ubuntu asked.
+    runs-on: ubuntu-26.04
+    # Longest run: 5 minutes. See `check` for how the deadline is set.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+          key: audit-tools-${{ hashFiles('**/Cargo.lock', 'deny.toml') }}
+          restore-keys: audit-tools-
+
+      - name: Install the two auditors if the cache did not carry them
+        run: |
+          command -v cargo-audit >/dev/null || cargo install cargo-audit --locked
+          command -v cargo-deny  >/dev/null || cargo install cargo-deny  --locked
+
+      - name: Known vulnerabilities
+        run: cargo audit --deny warnings
+
+      - name: Licences, bans and sources
+        run: cargo deny check

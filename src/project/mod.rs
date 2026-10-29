@@ -1,0 +1,896 @@
+//! A project `nunki` can orchestrate: where it lives, and what it declares
+//! (SPEC 4.1, `nunki.yaml`).
+//!
+//! Two places, and they are never the same. The **repository** is the
+//! human's, and `nunki` writes almost nothing in it: `AGENTS.md`, the import
+//! that makes a harness read it, and a `.gitattributes` when none exists
+//! (SPEC 3.3). Development tooling is not a project's to carry in its history.
+//!
+//! Everything else lives in the project's **home**, `~/.nunki/<project>/`,
+//! laid out so that the separation can be seen:
+//!
+//! - `nunki.yaml`, the project's configuration, which names the repository
+//!   it belongs to;
+//! - `hq/`, the HQ — state, locks, missions, profiles. Never mounted into a
+//!   container, but for each mission's own folder;
+//! - `stacks/<stack>/`, the stack fragments. What an image is built from and
+//!   what a firewall is fenced by is read on the host; the scripts a gate or
+//!   a launch runs are mounted read-only into the agent's container, one file
+//!   at a time.
+
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+use crate::mission::{Bounds, Rigor};
+
+/// The file in the project's home. What it declares beats a stack default;
+/// a mission header beats it in turn (SPEC 4.1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Config {
+    /// The repository this configuration belongs to. The home is named after
+    /// the repository's directory, so two repositories with the same name
+    /// would otherwise share one configuration and one HQ without a word.
+    #[serde(default)]
+    pub root: Option<PathBuf>,
+    /// Which harness runs the agents.
+    pub harness: String,
+    /// The project's forge. No agent may reach it: the clone's origin is
+    /// unreachable, and an allowlist naming the forge would undo that
+    /// (SPEC 3.1, 4.1 bis rule 6).
+    #[serde(default)]
+    pub forge: Vec<String>,
+    /// Stack fragments this project uses, under the home's `stacks/<name>/`,
+    /// each in the directory of the repository it covers. The first is the
+    /// primary: its Dockerfile is the image the others are added onto
+    /// (SPEC 4.2, "plusieurs stacks").
+    #[serde(default)]
+    pub stacks: Vec<Stack>,
+    /// Branches no mission may target or push to.
+    #[serde(default = "default_protected_branches")]
+    pub protected_branches: Vec<String>,
+    #[serde(default)]
+    pub protected_paths: ProtectedPaths,
+    /// The account this project's missions spend unless one says otherwise.
+    #[serde(default)]
+    pub account: Option<String>,
+    /// Which model the agents run on, when the harness takes one. Absent,
+    /// the harness keeps its own default. A mission header beats it, and no
+    /// name is checked against a list: what a model name means belongs to
+    /// the harness, not to `nunki`, and a list here would rot with every
+    /// release. An unknown name fails in the container, where the harness
+    /// says what it accepts.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// How the harness answers a permission it would otherwise ask a human
+    /// about. There is nobody to ask in an autonomous container, so the
+    /// question is only which way the silence falls (SPEC 4.3).
+    ///
+    /// `auto` — the default — lets the harness's own safety checks decide
+    /// and nudges the agent to keep working rather than stop for a
+    /// clarification. `dontAsk` allows only what is pre-approved and denies
+    /// everything else, which is safer and stricter: an agent refused a tool
+    /// it needed is a run that ends having done nothing.
+    ///
+    /// Not checked against a list, for the same reason as `model`: these
+    /// names belong to the harness's vocabulary, not to `nunki`.
+    #[serde(default = "default_permission_mode")]
+    pub permission_mode: String,
+    /// The rigor a mission is framed at when `mission new` is given none.
+    /// Absent, `critical`. It is read once, at framing: the header freezes
+    /// it, and changing this file afterwards moves no mission already
+    /// framed.
+    #[serde(default)]
+    pub rigor: Option<Rigor>,
+    /// The share of tried mutants, as a whole percentage from 1 to 100, a
+    /// `standard` mission must kill for gate 7 to pass (SPEC 4.4, gate 7).
+    /// A value outside that range is refused when this file is read: 0
+    /// would pass a campaign that killed nothing, and above 100 nothing
+    /// could pass.
+    #[serde(
+        default = "default_mutation_threshold",
+        deserialize_with = "mutation_threshold"
+    )]
+    pub mutation_threshold: u32,
+    /// How many mutants a campaign runs at once, handed to the stack's
+    /// `mutation.sh` in [`crate::mutants::JOBS_ENV`] (SPEC 4.4, gate 7). A
+    /// whole number of at least 1, refused otherwise when this file is read:
+    /// 0 would be a campaign that runs nothing. `1` is the Rust stack's
+    /// in-place run, one mutant at a time. Absent, [`Config::jobs`] reads
+    /// [`DEFAULT_MUTATION_JOBS`].
+    #[serde(default, deserialize_with = "mutation_jobs")]
+    pub mutation_jobs: Option<u32>,
+    #[serde(default)]
+    pub bounds: Bounds,
+    /// Where the test credentials live, mounted read-only on a system
+    /// profile and never anywhere else (SPEC 3.1).
+    #[serde(default)]
+    pub credentials: Option<PathBuf>,
+    /// How the application is started, overriding the stack's `run.sh`: a
+    /// path inside the tree, or `none` for a library (SPEC 4.2).
+    #[serde(default)]
+    pub run: Option<String>,
+    /// The project's own Compose file, whose `services:` and `networks:` are
+    /// merged verbatim into every system profile (SPEC 4.2, engine table:
+    /// `include:` is unusable on one of the two engines, so `nunki` merges the
+    /// YAML itself). A path inside the tree, because the file is the
+    /// project's and travels with the commit; absent means the mission's
+    /// system profile lifts no service of its own.
+    #[serde(default)]
+    pub services_file: Option<PathBuf>,
+    /// Who refuses a push to a protected branch besides gate 2: the forge,
+    /// or the human (SPEC 4.1 bis, "branche protégée").
+    #[serde(default)]
+    pub forge_protection: ForgeProtection,
+    /// Whether the Security section `nunki push` writes withholds the
+    /// security agent's report and findings while they are lifted and not
+    /// fixed ([`SecurityFindings`]). Absent, they are withheld.
+    #[serde(default)]
+    pub security_findings: SecurityFindings,
+}
+
+/// One stack a project declares: a fragment's name, and the directory of the
+/// repository it covers — empty for the root.
+///
+/// Written in `nunki.yaml` as the bare name for the root (`- rust`), or as a
+/// one-entry map for a subdirectory (`- next: frontend`), so every file written
+/// before a stack could have a directory still reads.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Stack {
+    pub name: String,
+    /// Relative to the repository's root, without a leading or trailing `/`;
+    /// empty for the root itself.
+    pub dir: String,
+}
+
+impl Stack {
+    /// A stack at the repository's root.
+    pub fn root(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            dir: String::new(),
+        }
+    }
+
+    /// `name` or `name=dir`, as `nunki init --stack` takes it.
+    pub fn parse(text: &str) -> Result<Self, String> {
+        match text.split_once('=') {
+            None => Self::new(text, ""),
+            Some((name, dir)) => Self::new(name, dir),
+        }
+    }
+
+    /// A stack in `dir`, refused when the directory is not one inside the
+    /// repository: the stack's scripts run there, and its paths are read there.
+    pub fn new(name: &str, dir: &str) -> Result<Self, String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("a stack needs a name".to_string());
+        }
+        let trimmed = dir.trim().trim_matches('/');
+        if dir.trim().starts_with('/') || trimmed.split('/').any(|s| s == "..") {
+            return Err(format!(
+                "{dir:?} is not a directory inside the repository, so stack {name} cannot live there"
+            ));
+        }
+        let dir = if trimmed == "." { "" } else { trimmed };
+        Ok(Self {
+            name: name.to_string(),
+            dir: dir.to_string(),
+        })
+    }
+
+    /// `path`, relative to the stack's directory, as a path relative to the
+    /// repository's root.
+    pub fn in_tree(&self, path: &str) -> String {
+        if self.dir.is_empty() {
+            path.to_string()
+        } else {
+            format!("{}/{path}", self.dir)
+        }
+    }
+}
+
+impl std::fmt::Display for Stack {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.dir.is_empty() {
+            f.write_str(&self.name)
+        } else {
+            write!(f, "{} in {}/", self.name, self.dir)
+        }
+    }
+}
+
+impl From<&str> for Stack {
+    fn from(name: &str) -> Self {
+        Self::root(name)
+    }
+}
+
+impl PartialEq<String> for Stack {
+    fn eq(&self, other: &String) -> bool {
+        self.dir.is_empty() && &self.name == other
+    }
+}
+
+impl Serialize for Stack {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        if self.dir.is_empty() {
+            serializer.serialize_str(&self.name)
+        } else {
+            let mut map = serializer.serialize_map(Some(1))?;
+            map.serialize_entry(&self.name, &self.dir)?;
+            map.end()
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Stack {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Written {
+            Name(String),
+            InDir(std::collections::BTreeMap<String, String>),
+        }
+        let stack = match Written::deserialize(deserializer)? {
+            Written::Name(name) => Stack::new(&name, ""),
+            Written::InDir(map) => {
+                let mut entries = map.into_iter();
+                match (entries.next(), entries.next()) {
+                    (Some((name, dir)), None) => Stack::new(&name, &dir),
+                    _ => Err(
+                        "a stack in a directory is written `- <name>: <dir>`, one per \
+                              line"
+                            .to_string(),
+                    ),
+                }
+            }
+        };
+        stack.map_err(serde::de::Error::custom)
+    }
+}
+
+fn default_protected_branches() -> Vec<String> {
+    vec!["main".to_string(), "master".to_string(), "dev".to_string()]
+}
+
+/// An agent that keeps working is worth more
+/// than one refused a tool it needed, now that the container, the firewall
+/// and git are what actually restrain it (SPEC 3.2).
+fn default_permission_mode() -> String {
+    "auto".to_string()
+}
+
+/// What `mutation_threshold` is when `nunki.yaml` does not say: four
+/// mutants killed in five.
+pub const DEFAULT_MUTATION_THRESHOLD: u32 = 80;
+
+fn default_mutation_threshold() -> u32 {
+    DEFAULT_MUTATION_THRESHOLD
+}
+
+/// `mutation_threshold`, refused outside 1 to 100 rather than clamped: a
+/// threshold silently moved is a gate that passes on a number nobody wrote.
+///
+/// Read signed, so that `-5` is refused by this rule and in its words,
+/// naming the key, and not by the parser as a number that is no `u32`.
+fn mutation_threshold<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
+    whole_percentage(i64::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+}
+
+fn whole_percentage(value: i64) -> Result<u32, String> {
+    u32::try_from(value)
+        .ok()
+        .filter(|value| (1..=100).contains(value))
+        .ok_or_else(|| {
+            format!("mutation_threshold is a whole percentage from 1 to 100, and {value} is not")
+        })
+}
+
+/// What `mutation_jobs` is when `nunki.yaml` does not say: one mutant at a
+/// time, the Rust stack's in-place run.
+///
+/// Chosen from a measurement and not from the core count. On nunki's own
+/// repository, 53 mutants on 12 cores from an emptied cache: in place
+/// 533 s; 2 jobs 463 s at twice the disk; 4 jobs 492 s; 12 jobs 607 s at
+/// 27 GB, and the two survivors came back as timeouts, which count as
+/// killed. Building a mutant already uses every core, so more jobs queue for
+/// them, and a loaded machine overruns a test timeout set from an unloaded
+/// baseline. A 13% gain at 2 jobs does not pay for the copies and that risk;
+/// a project whose build leaves cores idle can raise it after measuring.
+pub const DEFAULT_MUTATION_JOBS: u32 = 1;
+
+impl Config {
+    /// How many mutants a campaign runs at once: `mutation_jobs`, or
+    /// [`DEFAULT_MUTATION_JOBS`] when `nunki.yaml` does not say.
+    pub fn jobs(&self) -> u32 {
+        self.mutation_jobs.unwrap_or(DEFAULT_MUTATION_JOBS)
+    }
+}
+
+/// `mutation_jobs`, refused unless it is a whole number of at least 1 — a
+/// fraction, a word and a negative number all name the rule, rather than
+/// the type serde expected.
+fn mutation_jobs<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u32>, D::Error> {
+    struct Jobs;
+
+    impl Jobs {
+        fn refuse<E: serde::de::Error>(value: impl std::fmt::Display) -> E {
+            E::custom(format!(
+                "mutation_jobs is a whole number of at least 1, and {value} is not"
+            ))
+        }
+    }
+
+    impl serde::de::Visitor<'_> for Jobs {
+        type Value = u32;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("mutation_jobs as a whole number of at least 1")
+        }
+
+        fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<u32, E> {
+            match u32::try_from(value) {
+                Ok(jobs) if jobs >= 1 => Ok(jobs),
+                _ => Err(Self::refuse(value)),
+            }
+        }
+
+        fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<u32, E> {
+            match u64::try_from(value) {
+                Ok(value) => self.visit_u64(value),
+                Err(_) => Err(Self::refuse(value)),
+            }
+        }
+
+        fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<u32, E> {
+            Err(Self::refuse(value))
+        }
+
+        fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<u32, E> {
+            Err(Self::refuse(format!("{value:?}")))
+        }
+    }
+
+    deserializer.deserialize_any(Jobs).map(Some)
+}
+
+/// The same refusal for a mission header's frozen `mutation_threshold`,
+/// which is absent from a header written before it was frozen.
+pub(crate) fn frozen_mutation_threshold<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u32>, D::Error> {
+    Option::<i64>::deserialize(deserializer)?
+        .map(whole_percentage)
+        .transpose()
+        .map_err(serde::de::Error::custom)
+}
+
+/// A private repository on GitHub's free plan can neither protect a branch
+/// nor say it does, and a red `nunki check` cannot fix that: a red that cannot
+/// be fixed teaches to ignore red. `by_hand` is the written decision that the
+/// human holds the rule instead.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForgeProtection {
+    /// The forge refuses the push, and `nunki check` asks it whether it would.
+    #[default]
+    Forge,
+    /// The human holds the rule; `nunki check` does not ask the forge, and says
+    /// so for every protected branch.
+    ByHand,
+}
+
+/// What the Security section `nunki push` writes says when the verdict that
+/// answers the push is a `FINDINGS` that was lifted — by the HQ's `accept`,
+/// or by `nunki` for `LOW` and `INFO` (SPEC 4.5). Those findings are not
+/// fixed, and the pull request's body is published: on a public repository
+/// the report would describe an open flaw, and an edit afterwards leaves it
+/// in the forge's history.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SecurityFindings {
+    /// The section says how many findings were accepted, by whom, and that
+    /// their details are withheld: no word of the report, of a finding's
+    /// title or of its reason. A push refuses a `PR.md` that may still hold
+    /// the section an older `nunki`'s security agent wrote there.
+    #[default]
+    Withhold,
+    /// The section names who accepted the findings, lists each with its
+    /// severity, title and reason, and quotes the report: for a repository
+    /// only its owners read.
+    Publish,
+}
+
+/// The two modes of SPEC 4.1. There is no "ask": nothing can ask in an
+/// autonomous run.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProtectedPaths {
+    /// Refused outright.
+    #[serde(default)]
+    pub refuse: Vec<String>,
+    /// Refused only where the file already exists on the base.
+    #[serde(default)]
+    pub refuse_if_exists: Vec<String>,
+}
+
+/// The file `nunki init` writes in the project's home, and every verb reads.
+pub const CONFIG_FILE: &str = "nunki.yaml";
+/// The HQ, inside the project's home.
+pub const HQ_DIR: &str = "hq";
+/// The stack fragments, inside the project's home.
+pub const STACKS_DIR: &str = "stacks";
+/// Where a stack fragment declares the directories an execution must be able
+/// to write when the tree is read-only.
+pub const WRITABLE_FILE: &str = "writable.txt";
+/// Where a stack fragment declares the caches its toolchain keeps outside the
+/// tree — a package registry, a compiler cache — each kept as a named volume
+/// per slot.
+pub const CACHES_FILE: &str = "caches.txt";
+/// What a stack puts **before** the primary stack's first `FROM` when it is
+/// added onto another stack's image: the global `ARG`s and the stages its
+/// add-on copies from (SPEC 4.2, "plusieurs stacks"). A stage has to come first
+/// because `COPY --from` does not expand a variable, so an official image named
+/// by a version cannot be copied from directly. Absent for a stack that copies
+/// from nothing.
+pub const ADDON_STAGES_FILE: &str = "Dockerfile.stages";
+/// What a stack appends to the primary stack's image to add its toolchain.
+/// It starts from an image that ends as the agent, and ends as the agent.
+pub const ADDON_FILE: &str = "Dockerfile.addon";
+/// The project's own steps for its image, in its home and not under any
+/// stack: what the image needs that no stack's template carries — a system
+/// library, a tool the build calls (SPEC 4.2, "les fragments suivent nunki").
+/// Appended after every stack's add-on, starting and ending as the agent, so
+/// the stacks' Dockerfiles stay nunki's and follow its releases.
+pub const PROJECT_ADDON_FILE: &str = "Dockerfile.project";
+/// Its stages, for a `COPY --from` an official image named by a version.
+pub const PROJECT_STAGES_FILE: &str = "Dockerfile.project.stages";
+/// Where a stack fragment declares the advisory database its auditor reads,
+/// as a path **on the host**, and on the next line the command that fills it.
+/// `nunki` mounts it read-only, never fills it, and repeats the command to a
+/// human who has to (SPEC 4.4, gate 8).
+pub const ADVISORIES_FILE: &str = "advisories.txt";
+
+#[derive(Debug, thiserror::Error)]
+pub enum ProjectError {
+    #[error("{0} is not inside a git repository, and nunki orchestrates a repository")]
+    NotARepository(PathBuf),
+    #[error("git could not answer for {at}, so nunki cannot say which repository this is: {said}")]
+    GitSilent { at: PathBuf, said: String },
+    #[error(
+        "the repository at {0} is in no project of this machine — `nunki init` makes it one, \
+         and `nunki adopt <id>` points an existing project here if you moved it"
+    )]
+    NotRegistered(PathBuf),
+    #[error(transparent)]
+    Sessions(#[from] crate::sessions::SessionsError),
+    #[error("no {} for the repository at {root} — run `nunki init` there first", config.display())]
+    NotAProject { root: PathBuf, config: PathBuf },
+    #[error(
+        "{config} belongs to the repository at {claimed}, not to {here}: two repositories \
+         with the same directory name cannot share one home — rename one of them"
+    )]
+    ClaimedBy {
+        config: PathBuf,
+        claimed: PathBuf,
+        here: PathBuf,
+    },
+    #[error("{config} does not say which repository it belongs to — add `root: {here}` to it")]
+    Unclaimed { config: PathBuf, here: PathBuf },
+    #[error(
+        "{found} is in the repository, and nunki's configuration now lives outside it: move \
+         it to {home}/{CONFIG_FILE} with `root: {root}` added, and move `.nunki/stacks/` \
+         to {home}/{STACKS_DIR}/"
+    )]
+    ConfigInTheTree {
+        found: PathBuf,
+        home: PathBuf,
+        root: PathBuf,
+    },
+    #[error(
+        "{home} holds the HQ at its top level, and the HQ now lives in {home}/{HQ_DIR}/: move \
+         state/, locks/, missions/ and whatever else nunki wrote there into it"
+    )]
+    FlatHq { home: PathBuf },
+    #[error("{0} could not be read: {1}")]
+    Unreadable(PathBuf, String),
+    #[error("{0} is not valid: {1}")]
+    Invalid(PathBuf, String),
+    #[error("no home directory: every project's home lives under ~/.nunki")]
+    NoHome,
+}
+
+/// An opened project: the repository, its configuration, its home and the
+/// HQ inside it.
+#[derive(Debug, Clone)]
+pub struct Project {
+    pub root: PathBuf,
+    pub config: Config,
+    /// `~/.nunki/<project>/`.
+    pub home: PathBuf,
+    /// `~/.nunki/<project>/hq/`.
+    pub hq_root: PathBuf,
+}
+
+impl Project {
+    /// Open the project whose repository contains `start`: the repository's
+    /// top level, the way git finds it, then its home under `~/.nunki`.
+    pub fn open(start: &Path) -> Result<Self, ProjectError> {
+        let root = Self::find_root(start)?;
+        let home = Self::home_for(&root)?;
+        Self::open_at(root, home)
+    }
+
+    /// Open the project rooted at `root` whose home is `home` — what `open`
+    /// does once both are known, and what a test does to keep `~/.nunki` out
+    /// of it.
+    pub fn open_at(root: PathBuf, home: PathBuf) -> Result<Self, ProjectError> {
+        let file = home.join(CONFIG_FILE);
+        if !file.is_file() {
+            // Said by name rather than as "not a project": a repository that
+            // still carries the old layout is one a human has to move once,
+            // and nunki moves nothing silently.
+            let in_tree = root.join(CONFIG_FILE);
+            if in_tree.is_file() {
+                return Err(ProjectError::ConfigInTheTree {
+                    found: in_tree,
+                    home,
+                    root,
+                });
+            }
+            return Err(ProjectError::NotAProject { root, config: file });
+        }
+        if home.join("state").is_dir() && !home.join(HQ_DIR).is_dir() {
+            return Err(ProjectError::FlatHq { home });
+        }
+
+        let text = std::fs::read_to_string(&file)
+            .map_err(|e| ProjectError::Unreadable(file.clone(), e.to_string()))?;
+        let config: Config = crate::yaml::from_str(&text)
+            .map_err(|e| ProjectError::Invalid(file.clone(), e.to_string()))?;
+        // One fragment per name: two entries naming one would share its
+        // scripts and its image steps, and only one directory could be right.
+        let mut seen = std::collections::BTreeSet::new();
+        for stack in &config.stacks {
+            if !seen.insert(stack.name.as_str()) {
+                return Err(ProjectError::Invalid(
+                    file.clone(),
+                    format!("stack {} is declared twice", stack.name),
+                ));
+            }
+        }
+        let Some(claimed) = config.root.clone() else {
+            return Err(ProjectError::Unclaimed {
+                config: file,
+                here: root,
+            });
+        };
+        if canonical(&claimed) != canonical(&root) {
+            return Err(ProjectError::ClaimedBy {
+                config: file,
+                claimed,
+                here: root,
+            });
+        }
+        Ok(Self::at(root, config, home))
+    }
+
+    /// A project rooted exactly here, with its home somewhere chosen — the
+    /// form tests use, and the one `nunki init` uses before a home exists.
+    pub fn at(root: PathBuf, config: Config, home: PathBuf) -> Self {
+        let hq_root = home.join(HQ_DIR);
+        Self {
+            root,
+            config,
+            home,
+            hq_root,
+        }
+    }
+
+    /// `~/.nunki/` — the directory every project's home sits under, and where
+    /// accounts live. Derived from the home rather than from `HOME`, so a test
+    /// or a second machine can point the whole thing elsewhere by saying so
+    /// once.
+    pub fn nunki_home(&self) -> PathBuf {
+        self.home
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.home.clone())
+    }
+
+    /// The session this project is registered under: the name of its home,
+    /// and the ledger's key (SPEC 4.1).
+    ///
+    /// What tells two projects apart everywhere a directory name would not.
+    /// Two repositories called `api` have two sessions; two projects
+    /// whose slots are both called `one` have two homes, and this is what
+    /// says so.
+    pub fn session(&self) -> String {
+        self.home
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "session".to_string())
+    }
+
+    pub fn name(&self) -> String {
+        self.root
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "project".to_string())
+    }
+
+    /// The stack the project declares under `name`, or one at the root when it
+    /// declares none — what every single-stack caller has always assumed.
+    pub fn stack(&self, name: &str) -> Stack {
+        self.config
+            .stacks
+            .iter()
+            .find(|s| s.name == name)
+            .cloned()
+            .unwrap_or_else(|| Stack::root(name))
+    }
+
+    /// Where the stack `name` lives in the repository at `tree` — the
+    /// project's root, or a slot's clone of it.
+    pub fn stack_tree(&self, tree: &Path, name: &str) -> PathBuf {
+        let stack = self.stack(name);
+        if stack.dir.is_empty() {
+            tree.to_path_buf()
+        } else {
+            tree.join(&stack.dir)
+        }
+    }
+
+    /// The stack fragment directory for `stack`, whether or not it exists.
+    pub fn fragment(&self, stack: &str) -> PathBuf {
+        self.home.join(STACKS_DIR).join(stack)
+    }
+
+    /// The domains a stack declares for its dependencies, if it declares any.
+    pub fn stack_domains(&self, stack: &str) -> Option<Vec<String>> {
+        let file = self.fragment(stack).join("allow.txt");
+        let text = std::fs::read_to_string(file).ok()?;
+        Some(
+            text.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                .map(str::to_string)
+                .collect(),
+        )
+    }
+
+    /// The directories a stack declares as writable when the tree is mounted
+    /// read-only (SPEC 4.2, services and launch, rule 3). Relative paths
+    /// inside the tree; what is not declared stays closed.
+    pub fn stack_writable(&self, stack: &str) -> Vec<String> {
+        let file = self.fragment(stack).join(WRITABLE_FILE);
+        let Ok(text) = std::fs::read_to_string(file) else {
+            return Vec::new();
+        };
+        text.lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(|l| l.trim_matches('/').to_string())
+            .filter(|l| !l.is_empty() && l != "." && !l.split('/').any(|s| s == ".."))
+            // Relative to the stack's directory in the fragment, and to the
+            // tree from here on: this is the one place the prefix is added, so
+            // the image's mount point, the seeded directory and the volume
+            // cannot disagree about where `node_modules` is.
+            .map(|l| self.stack(stack).in_tree(&l))
+            .collect()
+    }
+
+    /// The caches a stack keeps **outside the tree**, as absolute paths in
+    /// the container (SPEC 4.2; the stack-agnostic principle names caches
+    /// among the declared fragments).
+    ///
+    /// `nunki` used to mount `/home/agent/.cargo/registry` from its own code,
+    /// for every stack and every role: a Python project carried an empty
+    /// `cargo` volume and none for pip. A cache belongs to a toolchain, so it
+    /// is declared where the toolchain is.
+    ///
+    /// Absolute, and `..` refused: the path becomes a mount point, and a
+    /// relative one would land wherever the container's working directory
+    /// happens to be.
+    pub fn stack_caches(&self, stack: &str) -> Vec<String> {
+        let file = self.fragment(stack).join(CACHES_FILE);
+        let Ok(text) = std::fs::read_to_string(file) else {
+            return Vec::new();
+        };
+        text.lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .filter(|l| l.starts_with('/') && !l.split('/').any(|s| s == ".."))
+            .map(|l| l.trim_end_matches('/').to_string())
+            .filter(|l: &String| !l.is_empty())
+            .collect()
+    }
+
+    /// Where the repository pins the versions this stack's image is built
+    /// with, from the fragment's `versions.txt` (SPEC 4.2). Empty when the
+    /// fragment has none — a fragment written before nunki read versions — and
+    /// an error naming the line when one cannot be read.
+    pub fn stack_versions(
+        &self,
+        stack: &str,
+    ) -> Result<Vec<crate::versions::Source>, crate::versions::SourcesError> {
+        let file = self.fragment(stack).join(crate::versions::FILE);
+        match std::fs::read_to_string(&file) {
+            Ok(text) => crate::versions::parse(&text, &file),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(e) => Err(crate::versions::SourcesError::Io(file, e)),
+        }
+    }
+
+    /// The advisory database this stack's auditor reads, as a path on the
+    /// host, or `None` when the stack declares none.
+    ///
+    /// A `~` is expanded here and nowhere else: the file is written by a
+    /// human, and a path they can type is one that starts with a tilde. What
+    /// comes back is absolute or nothing — a relative advisory database would
+    /// resolve against whatever directory `nunki` happened to be started in.
+    pub fn stack_advisories(&self, stack: &str) -> Option<PathBuf> {
+        let lines = self.advisories_lines(stack);
+        let line = lines.first()?;
+        let path = match line.strip_prefix("~/") {
+            Some(rest) => PathBuf::from(std::env::var_os("HOME")?).join(rest),
+            None => PathBuf::from(line),
+        };
+        path.is_absolute().then_some(path)
+    }
+
+    /// The command that fills this stack's advisory database on the host, as
+    /// the stack writes it: the line after the path, or `None` for a fragment
+    /// that names none — one an older `nunki` wrote, before the line existed.
+    ///
+    /// Read from the fragment and never written here: `nunki` is agnostic to
+    /// the stack, so the sentence that sends a human to fill the database
+    /// repeats the stack's own words rather than naming a tool (SPEC 4.4,
+    /// gate 8).
+    pub fn stack_advisories_filled_by(&self, stack: &str) -> Option<String> {
+        self.advisories_lines(stack).into_iter().nth(1)
+    }
+
+    /// How a human fills this stack's advisory database: the stack's own
+    /// command when its fragment gives one, and where to read it otherwise.
+    /// One sentence, for `nunki check` and gate 8 alike.
+    pub fn how_to_fill_advisories(&self, stack: &str) -> String {
+        match self.stack_advisories_filled_by(stack) {
+            Some(command) => {
+                format!("Fill it on this machine, from the project's root: `{command}`")
+            }
+            None => format!(
+                "Fill it on this machine with the command its stack names in {}",
+                self.fragment(stack).join(ADVISORIES_FILE).display()
+            ),
+        }
+    }
+
+    /// The lines of a stack's `advisories.txt` that are neither blank nor a
+    /// comment, trimmed: the path first, then the command.
+    fn advisories_lines(&self, stack: &str) -> Vec<String> {
+        let file = self.fragment(stack).join(ADVISORIES_FILE);
+        let Ok(text) = std::fs::read_to_string(file) else {
+            return Vec::new();
+        };
+        text.lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// The top level of the repository containing `start`, as git reports it.
+    ///
+    /// Two failures, and they send a human to different places. Git saying
+    /// there is no repository here is one; git unable to run at all — a
+    /// permission on the working directory, a missing binary — is the other,
+    /// and it is reported in git's own words. When macOS stops
+    /// git from reading its working directory, `nunki` must not answer "not
+    /// inside a git repository".
+    pub fn find_root(start: &Path) -> Result<PathBuf, ProjectError> {
+        let dir = if start.is_dir() {
+            start
+        } else {
+            start
+                .parent()
+                .ok_or_else(|| ProjectError::NotARepository(start.to_path_buf()))?
+        };
+        match crate::git::run(dir, &["rev-parse", "--show-toplevel"]) {
+            Ok(top) => Ok(canonical(Path::new(&top))),
+            Err(crate::git::GitError::Failed { stderr, .. })
+                if stderr.contains("not a git repository") =>
+            {
+                Err(ProjectError::NotARepository(start.to_path_buf()))
+            }
+            Err(e) => Err(ProjectError::GitSilent {
+                at: dir.to_path_buf(),
+                said: e.to_string(),
+            }),
+        }
+    }
+
+    /// Where the project rooted at `root` keeps everything that is not the
+    /// repository's: `~/.nunki/<id>/`, the identifier the ledger holds for it.
+    ///
+    /// Named by an identifier and not by the repository's directory: two
+    /// repositories called `api` are two projects, and a name cannot tell
+    /// them apart (SPEC 4.1).
+    pub fn home_for(root: &Path) -> Result<PathBuf, ProjectError> {
+        Self::home_in(&Self::nunki_dir()?, root)
+    }
+
+    /// The same, in a home that is given rather than read from the
+    /// environment.
+    ///
+    /// The split is what keeps a test out of the human's `~/.nunki`.
+    /// `home_for` reads `$HOME`, so a test calling it answers from whatever
+    /// that machine happens to hold: it passed here because a temporary path
+    /// was not in the real ledger, which is a probe that would pass with the
+    /// rule removed. `nunki_dir` is now the one place the environment is
+    /// read, and it is read at the edge.
+    pub fn home_in(nunki_home: &Path, root: &Path) -> Result<PathBuf, ProjectError> {
+        match crate::sessions::find(nunki_home, root)? {
+            Some(id) => Ok(nunki_home.join(id)),
+            None => Err(ProjectError::NotRegistered(root.to_path_buf())),
+        }
+    }
+
+    /// The same, opening a session for the project when it has none: what
+    /// `nunki init` needs, and the only verb that may hand an identifier out.
+    pub fn home_for_new(root: &Path) -> Result<PathBuf, ProjectError> {
+        Self::home_for_new_in(&Self::nunki_dir()?, root)
+    }
+
+    /// The same, in a home that is given. Split for the reason
+    /// [`Project::home_in`] is: the environment is read at the edge, and
+    /// nowhere a test can reach by accident.
+    pub fn home_for_new_in(nunki_home: &Path, root: &Path) -> Result<PathBuf, ProjectError> {
+        let id = crate::sessions::open(nunki_home, root)?;
+        Ok(nunki_home.join(id))
+    }
+
+    /// Write `root:` into a home's configuration, so that the ledger and the
+    /// home agree on which repository this is.
+    ///
+    /// The file is rewritten line by line rather than re-serialised: it is the
+    /// human's, comments and all, and `nunki` changes the one line it owns
+    /// (SPEC 3.3).
+    pub fn claim(home: &Path, root: &Path) -> Result<(), ProjectError> {
+        let file = home.join(CONFIG_FILE);
+        let text = std::fs::read_to_string(&file)
+            .map_err(|e| ProjectError::Unreadable(file.clone(), e.to_string()))?;
+        let said = format!("root: {}", canonical(root).display());
+        let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+        match lines.iter().position(|l| l.starts_with("root:")) {
+            Some(at) => lines[at] = said,
+            None => lines.insert(0, said),
+        }
+        std::fs::write(&file, format!("{}\n", lines.join("\n")))
+            .map_err(|e| ProjectError::Unreadable(file, e.to_string()))
+    }
+
+    /// `~/.nunki/`: the homes, the accounts and the ledger.
+    /// `~/.nunki`, and **the one place the environment is read**.
+    ///
+    /// Everything that needs a home takes one; only the verbs at the edge
+    /// call this. That is what keeps a test out of the human's home: a test
+    /// that reads it does not fail, it answers from whatever that machine
+    /// happens to hold, which is the shape of a probe that passes with the
+    /// rule removed.
+    pub fn nunki_dir() -> Result<PathBuf, ProjectError> {
+        let home = std::env::var_os("HOME").ok_or(ProjectError::NoHome)?;
+        Ok(PathBuf::from(home).join(".nunki"))
+    }
+}
+
+/// A path as the filesystem resolves it, or as given when it does not exist:
+/// `/tmp` and `/private/tmp` are one directory on macOS, and a comparison of
+/// spellings would call them two.
+fn canonical(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
