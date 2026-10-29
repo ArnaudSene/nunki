@@ -52,9 +52,13 @@ What you need:
 - **git**.
 - **A container engine** with Compose: Docker, or OrbStack. Every agent runs
   in a container behind a firewall sidecar; nothing runs on your machine.
-- **A Claude subscription**, and the Claude Code CLI **once on your machine**,
-  to mint a long-lived token. The agents' own CLI lives in their image, not
-  here.
+- **A subscription to a harness `nunki` has an adapter for.** `nunki` is
+  harness-agnostic: each harness sits behind its own adapter, and nothing
+  past the adapter knows which one runs (SPEC 4.3). But Claude Code is the
+  only adapter today, and `nunki check` turns red for any other harness. So
+  for now: a Claude subscription, and the Claude Code CLI **once on your
+  machine**, to mint a long-lived token. The agents' own CLI lives in their
+  image, not here.
 
 To use `nunki`, build and install the latest release, whose notes, like
 every earlier release's, are in [`CHANGELOG.md`](CHANGELOG.md):
