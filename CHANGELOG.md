@@ -11,6 +11,18 @@ merged since the last one. `AGENTS.md`, under "Releases", says how.
 
 ## [Unreleased]
 
+### Security
+
+- **The Next.js stack's pnpm is now 12.16.1 by default, up from 12.5.1.**
+  The undici 6.28.1 that pnpm 12.5.1 bundles carries three high
+  advisories: CVE-2026-109383, CVE-2026-109869 and CVE-2026-87018.
+  pnpm 12.16.1 bundles undici 6.29.1, which fixes all three.
+  - A project that pins pnpm with `packageManager` in its `package.json`
+    keeps its pin.
+  - In a project set up before, `nunki init --refresh` replaces the
+    Dockerfile if nobody has touched it, and `nunki slot rebuild` then
+    rebuilds the image.
+
 ## [0.1.0] - 2026-10-28
 
 The first release. `nunki` orchestrates missions run by AI coding agents on
