@@ -52,18 +52,36 @@ What you need:
 - **git**.
 - **A container engine** with Compose: Docker, or OrbStack. Every agent runs
   in a container behind a firewall sidecar; nothing runs on your machine.
-- **A Claude subscription**, and the Claude Code CLI **once on your machine**,
-  to mint a long-lived token. The agents' own CLI lives in their image, not
-  here.
+- **A subscription to a harness `nunki` has an adapter for.** `nunki` is
+  harness-agnostic: each harness sits behind its own adapter, and nothing
+  past the adapter knows which one runs (SPEC 4.3). But Claude Code is the
+  only adapter today, and `nunki check` turns red for any other harness. So
+  for now: a Claude subscription, and the Claude Code CLI **once on your
+  machine**, to mint a long-lived token. The agents' own CLI lives in their
+  image, not here.
 
-Build and install the binary:
+To use `nunki`, build and install the latest release, whose notes, like
+every earlier release's, are in [`CHANGELOG.md`](CHANGELOG.md):
 
 ```sh
-git clone https://github.com/ArnaudSene/nunki
+cargo install --locked --git https://github.com/ArnaudSene/nunki --tag v0.1.0
+nunki --version              # installed in ~/.cargo/bin
+```
+
+To work on `nunki`, clone it and build what `dev` holds, unreleased. The
+clone names `dev` because the repository's default branch, `main`, holds
+no code:
+
+```sh
+git clone --branch dev https://github.com/ArnaudSene/nunki
 cd nunki
-cargo install --path .       # puts `nunki` in ~/.cargo/bin
+cargo install --locked --path .   # puts `nunki` in ~/.cargo/bin
 nunki --version
 ```
+
+`--locked` builds with the dependencies `Cargo.lock` pins, the ones CI
+audits. Without it, cargo resolves them again to the newest versions
+`Cargo.toml` allows.
 
 Declare the subscription `nunki` spends. The token is written under `~/.nunki`,
 never in a repository, and that file is the only one that holds it: it reaches
