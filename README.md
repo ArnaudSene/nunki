@@ -64,7 +64,7 @@ To use `nunki`, build and install the latest release, whose notes, like
 every earlier release's, are in [`CHANGELOG.md`](CHANGELOG.md):
 
 ```sh
-cargo install --locked --git https://github.com/ArnaudSene/nunki --tag v0.1.0
+cargo install --locked --git https://github.com/ArnaudSene/nunki --tag v0.1.1
 nunki --version              # installed in ~/.cargo/bin
 ```
 
