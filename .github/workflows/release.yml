@@ -4,10 +4,10 @@
 # (AGENTS.md, "Releases"). Before anything is published, three things are
 # checked, and a tag that fails any of them publishes nothing:
 #
-# - the tag names the version `Cargo.toml` holds, and `dev` or `main`
-#   already holds the tagged commit, so the release is of code that came
-#   through a pull request; `CHANGELOG.md` has that version's section, which
-#   becomes the release's notes (`scripts/release-notes.sh`);
+# - the tag names the version `Cargo.toml` holds, and `main` already holds
+#   the tagged commit, so the release is of what its pull request to `main`
+#   brought there; `CHANGELOG.md` has that version's section, which becomes
+#   the release's notes (`scripts/release-notes.sh`);
 # - the whole of `ci.yml` passes again, on the tagged commit itself.
 #   `ci.yml` does not run on tags, and a branch's green is no proof for a
 #   commit that branch has since moved past.
@@ -37,7 +37,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           # Every branch and its whole history, so the script can tell
-          # whether `dev` or `main` holds the tagged commit.
+          # whether `main` holds the tagged commit.
           fetch-depth: 0
 
       - name: The tag, its commit and its notes

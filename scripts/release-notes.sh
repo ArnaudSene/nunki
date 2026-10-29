@@ -4,9 +4,10 @@
 # section is missing, undated or empty.
 #
 # Given a tag, it first checks the tag is the one a release of that version
-# carries, `v` and the version, and that it points at a commit `origin/dev`
-# or `origin/main` holds: a release is of code that came through a pull
-# request, never of a commit pushed with its tag alone.
+# carries, `v` and the version, and that it points at a commit `origin/main`
+# holds. `main` holds what is released, and only a release's pull request
+# brings anything there: a release is never of a commit `dev` alone holds,
+# nor of one pushed with its tag alone.
 #
 #   scripts/release-notes.sh            # CI, on every change
 #   scripts/release-notes.sh v0.1.0     # the release workflow, on the tag
@@ -33,15 +34,8 @@ if [ $# -gt 0 ]; then
     echo "this clone has no tag $tag" >&2
     exit 1
   fi
-  held=""
-  for branch in dev main; do
-    if git -C "$root" merge-base --is-ancestor "$commit" "refs/remotes/origin/$branch" 2>/dev/null; then
-      held="$branch"
-      break
-    fi
-  done
-  if [ -z "$held" ]; then
-    echo "tag $tag points at $commit, which neither origin/dev nor origin/main holds (fetched?): tag a commit merged through a pull request" >&2
+  if ! git -C "$root" merge-base --is-ancestor "$commit" refs/remotes/origin/main 2>/dev/null; then
+    echo "tag $tag points at $commit, which origin/main does not hold (fetched?): a release is tagged on main, once its pull request to main is merged" >&2
     exit 1
   fi
 fi

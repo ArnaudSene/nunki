@@ -37,7 +37,8 @@ this repository, under `hq/` in this project's own home — the one
 
 - **Never commit to `dev` or `main`, and never push to them.** Work on a
   branch (`feat/…`, `fix/…`, `docs/…`) and open a pull request **targeting
-  `dev`**. One piece of work, one branch, one pull request.
+  `dev`**. One piece of work, one branch, one pull request. A release's
+  pull request is the one that targets `main` ("Releases", below).
 - **Never commit without being asked.** The owner decides when work is
   committed and when it is pushed. Ask; do not infer approval from silence or
   from a green test run.
@@ -56,9 +57,11 @@ this repository, under `hq/` in this project's own home — the one
 
 ### Releases
 
-A release is a `v<version>` tag on a commit `dev` holds, and **only the
-owner tags**: no agent creates, moves or pushes a tag. Pushing the tag is
-the whole gesture. `.github/workflows/release.yml` checks it, plays `ci.yml`
+`main` holds what is released, and nothing else: work lands on `dev`, and
+reaches `main` only through a release's pull request. A release is a
+`v<version>` tag on the commit that pull request's merge made on `main`,
+and **only the owner tags**: no agent creates, moves or pushes a tag.
+Pushing the tag is the whole gesture. `.github/workflows/release.yml` checks it, plays `ci.yml`
 again on the tagged commit, and publishes the release with the version's
 section of `CHANGELOG.md` as its notes. A tag that fails a check publishes
 nothing, and the run's log says why.
@@ -73,16 +76,30 @@ To cut one:
    (`git log --merges v<last>..origin/dev`). Write it for someone who uses
    `nunki`, not by copying titles. Empty `[Unreleased]` and update the
    links at the bottom. CI reads the changelog, and goes red when the
-   version `Cargo.toml` names has no dated section.
+   version `Cargo.toml` names has no dated section. Open the pull request
+   to `dev`.
 2. A new version renames the firewall and prober images
    (`nunki/firewall:<version>`), and a launch refuses until
    `nunki slot rebuild` has built them. Say so in the version's section.
-3. Once the pull request is merged, the owner tags its merge commit and
-   pushes the tag:
+3. Once it is merged, cut a branch `release/v<version>` at its merge
+   commit, and open a pull request from it to `main`. A branch fixed at
+   that commit rather than `dev` itself, so that a pull request merged into
+   `dev` meanwhile does not ride into the release:
 
    ```sh
    git fetch origin
-   git tag -a v<version> "$(gh pr view <number> --json mergeCommit --jq .mergeCommit.oid)" -m "nunki <version>"
+   git push origin "$(gh pr view <number> --json mergeCommit --jq .mergeCommit.oid):refs/heads/release/v<version>"
+   gh pr create --base main --head release/v<version> --title "Release <version>" --body "Brings main up to v<version>."
+   ```
+
+4. The owner merges it with **a merge commit, never a squash or a
+   rebase**: either would give `main` commits `dev` does not have, and the
+   next release would conflict with this one. Then the owner tags `main`
+   and pushes the tag:
+
+   ```sh
+   git fetch origin
+   git tag -a v<version> origin/main -m "nunki <version>"
    git push origin v<version>
    ```
 
