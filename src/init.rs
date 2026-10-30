@@ -3510,16 +3510,43 @@ shift
 #
 # Test files are left out: a mutated test proves nothing about the code, and
 # Stryker would report it as uncovered for ever.
-files=""
+#
+# They all go in **one** `--mutate`, joined by commas. The flag does not
+# add up: measured on Stryker 10.0.0, each one replaces the one before, so
+# `--mutate a.ts --mutate b.ts` mutated b.ts alone, said nothing of a.ts,
+# and exited 0 — a branch touching two sources had one measured. Its value
+# is split on commas, so a path holding one cannot be handed over at all,
+# and the campaign says so rather than measure part of the branch.
+#
+# And each path becomes a pattern that matches that one file. Stryker reads
+# every entry as a glob over the absolute path (minimatch), and a Next.js
+# dynamic route is a character class to it: measured on 10.0.0,
+# `app/[...slug]/page.ts` mutated `app/s/page.ts` and never the route, and
+# `app/[[...slug]]/page.ts` matched nothing. A backslash escapes nothing,
+# since Stryker turns it into `/` first; a character in brackets of its own
+# does, and `app/[[]...slug[]]/page.ts` matched the route alone. So every
+# character a glob reads is put in brackets. `!` is left as it is: it only
+# means something at the start of a pattern, which is a `/` here, or before
+# a `(`, which is bracketed.
+mutate=""
 for path in "$@"; do
   case "$path" in
     *.test.*|*.spec.*|*/__tests__/*|*/e2e/*) continue ;;
   esac
   case "$path" in
-    *.ts|*.tsx|*.js|*.jsx|*.mjs|*.cjs) files="$files --mutate $path" ;;
+    *.ts|*.tsx|*.js|*.jsx|*.mjs|*.cjs) ;;
+    *) continue ;;
   esac
+  case "$path" in
+    *,*)
+      echo "nunki: $path holds a comma, which Stryker's --mutate splits on, so it cannot be mutated and the campaign measured nothing" >&2
+      exit 1
+      ;;
+  esac
+  pattern=$(printf '%s\n' "$path" | sed 's/[][*?{}()]/[&]/g')
+  mutate="${mutate:+$mutate,}$pattern"
 done
-if [ -z "$files" ]; then
+if [ -z "$mutate" ]; then
   # Nothing this branch touched is mutable, so there are no mutants and no
   # survivors — and that is a measurement, not a campaign that failed to
   # happen. The terminal line is printed **before** leaving, because `nunki`
@@ -3603,7 +3630,7 @@ rm -rf .stryker-tmp
 # never read as one that did, whatever report it left.
 # shellcheck disable=SC2086
 status=0
-pnpm exec stryker run $files $concurrency --cleanTempDir always --reporters json >&2 || status=$?
+pnpm exec stryker run --mutate "$mutate" $concurrency --cleanTempDir always --reporters json >&2 || status=$?
 if [ "$status" -ne 0 ]; then
   echo "nunki: stryker exited $status, so the campaign did not complete and measured nothing" >&2
   exit 1
