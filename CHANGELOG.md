@@ -11,6 +11,24 @@ merged since the last one. `AGENTS.md`, under "Releases", says how.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A Next.js mutation campaign now mutates every source the branch
+  touched.** It handed Stryker one `--mutate` per file, and Stryker keeps
+  only the last. On a branch touching several sources, all but one went
+  unmeasured, the campaign still said it had finished, and gate 7 could
+  pass on them.
+  - A Next.js dynamic route, such as `app/[slug]/page.tsx`, was never
+    mutated either. Stryker read its brackets as a pattern, and could
+    mutate another file in its place, such as `app/s/page.tsx`.
+  - A path holding a space made the campaign fail to run: Stryker read
+    half of it as its configuration file. It is now mutated like any
+    other.
+  - A path holding a comma, which Stryker cannot be handed, now stops the
+    campaign with a message rather than going unmeasured.
+  - In a project set up before, `nunki init --refresh` replaces the
+    campaign script if nobody has touched it.
+
 ## [0.1.1] - 2026-10-29
 
 A security release: the Next.js stack's default pnpm bundled an undici

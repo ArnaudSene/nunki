@@ -1751,8 +1751,9 @@ fn the_next_campaign_trusts_its_report_and_only_a_failing_status() {
     // its test runner is the one Stryker runs.
     assert!(!run.contains("--testRunner"), "{run}");
     // And the touched files are a flag, which is what the Python stack could
-    // not do.
-    assert!(script.contains("--mutate $path"), "{script}");
+    // not do — one flag, since Stryker keeps only the last it is given
+    // (`the_next_campaign_mutates_every_touched_source_and_only_it`).
+    assert!(run.contains(r#"--mutate "$mutate""#), "{run}");
 
     // Two terminal lines, and the order between them is the invariant: one
     // for a branch with nothing mutable in it, which is a measurement, and
@@ -2935,6 +2936,20 @@ fn campaign_with(
     files: &[(&str, &str)],
     env: &[(&str, &str)],
 ) -> (String, String, Option<i32>) {
+    let touched: Vec<&str> = touched.split_whitespace().collect();
+    campaign_of_paths(stack, &touched, stub, files, env)
+}
+
+/// [`campaign_with`], with the touched paths given one by one, so that a
+/// path may hold a space.
+#[cfg(unix)]
+fn campaign_of_paths(
+    stack: &str,
+    touched: &[&str],
+    stub: &[(&str, &str)],
+    files: &[(&str, &str)],
+    env: &[(&str, &str)],
+) -> (String, String, Option<i32>) {
     let (dir, root, nunki) = fresh();
     init(&root, &nunki, &[stack.to_string()]).unwrap();
     let script = home(&root).join("stacks").join(stack).join("mutation.sh");
@@ -2950,7 +2965,7 @@ fn campaign_with(
     let out = sh()
         .arg(&script)
         .arg("abc123")
-        .args(touched.split_whitespace())
+        .args(touched)
         .env("PATH", path)
         .envs(env.iter().copied())
         .current_dir(&tree)
@@ -3188,6 +3203,112 @@ exit 0
         Some(r#"{"campaign":"done"}"#),
         "{said}"
     );
+}
+
+/// A Stryker that reads `--mutate` as Stryker 10.0.0 does, measured: each
+/// flag replaces the one before, its value is split on commas, and each
+/// entry is a glob over the tree's files — matched here with the shell's
+/// own patterns, whose brackets are minimatch's. Every file it matches gets
+/// one survivor in the report, so the survivors say what was mutated.
+#[cfg(unix)]
+const STRYKER_MUTATE: &str = r#"#!/bin/sh
+case "$*" in
+  *"stryker run"*) ;;
+  *) exit 0 ;;
+esac
+echo "asked: $*" >&2
+mutate=""
+while [ $# -gt 0 ]; do
+  if [ "$1" = --mutate ]; then mutate=$2; fi
+  shift
+done
+matched=$(find . -type f -name '*.ts' | sed 's#^\./##' | sort | while IFS= read -r file; do
+  rest=$mutate
+  while [ -n "$rest" ]; do
+    pattern=${rest%%,*}
+    case "$rest" in
+      (*,*) rest=${rest#*,} ;;
+      (*) rest="" ;;
+    esac
+    case "$file" in
+      ($pattern) echo "$file"; break ;;
+    esac
+  done
+done)
+mkdir -p reports/mutation
+printf '%s\n' "$matched" | jq -R -s '{files: (split("\n") | map(select(length > 0))
+  | map({key: ., value: {mutants: [{status: "Survived", mutatorName: "M", replacement: "x",
+      location: {start: {line: 1, column: 1}}}]}}) | from_entries)}' > reports/mutation/mutation.json
+exit 0
+"#;
+
+/// Every source the branch touched is mutated, and no other file. Three
+/// failures, all measured on Stryker 10.0.0. One `--mutate` per path
+/// mutated the last path alone, and the campaign said it finished. A
+/// Next.js dynamic route is a glob's character class: `app/[slug]/page.ts`
+/// handed as it is mutates `app/s/page.ts`, and `app/[[...rest]]/page.ts`
+/// matches nothing. And a path holding a space, split in two, had Stryker
+/// read its second half as a configuration file and exit 1.
+#[cfg(unix)]
+#[test]
+fn the_next_campaign_mutates_every_touched_source_and_only_it() {
+    let body = "export const x = 1;\n";
+    let (said, why, status) = campaign_of_paths(
+        "next",
+        &[
+            "app/page.ts",
+            "app/[slug]/page.ts",
+            "app/[[...rest]]/page.ts",
+            "app/with space/page.ts",
+        ],
+        &[("pnpm", STRYKER_MUTATE), ("node", NODE)],
+        &[
+            ("app/page.ts", body),
+            ("app/[slug]/page.ts", body),
+            ("app/[[...rest]]/page.ts", body),
+            ("app/with space/page.ts", body),
+            // What the route's brackets reach when nobody escapes them.
+            ("app/s/page.ts", body),
+            ("app/r]/page.ts", body),
+        ],
+        &[],
+    );
+    assert_eq!(status, Some(0), "{why}");
+    assert!(nunki::mutants::completed(&said), "{said}\n{why}");
+    let mutated: std::collections::BTreeSet<String> = nunki::mutants::parse(&said)
+        .into_iter()
+        .map(|survivor| survivor.file)
+        .collect();
+    assert_eq!(
+        mutated,
+        [
+            "app/page.ts",
+            "app/[slug]/page.ts",
+            "app/[[...rest]]/page.ts",
+            "app/with space/page.ts",
+        ]
+        .map(String::from)
+        .into(),
+        "{said}\n{why}"
+    );
+}
+
+/// A path holding a comma cannot be handed to Stryker, which splits
+/// `--mutate` on commas: the campaign says so and measures nothing, rather
+/// than mutate two halves that name no file and finish green.
+#[cfg(unix)]
+#[test]
+fn a_next_campaign_refuses_a_path_stryker_would_split() {
+    let (said, why, status) = campaign_in(
+        "next",
+        "app/page.ts app/a,b.ts",
+        &[("pnpm", STRYKER_MUTATE), ("node", NODE)],
+        &[("app/page.ts", "export const x = 1;\n")],
+    );
+    assert_ne!(status, Some(0), "{why}");
+    assert!(!nunki::mutants::completed(&said), "{said}\n{why}");
+    assert!(why.contains("app/a,b.ts holds a comma"), "{why}");
+    assert!(!why.contains("asked: "), "Stryker ran: {why}");
 }
 
 // ---------------------------------------------------------------------------
