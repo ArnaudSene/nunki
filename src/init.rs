@@ -3722,11 +3722,17 @@ pnpm exec vitest run --exclude '**/reports/**' --exclude '**/.stryker-tmp/**' \
 /// The mutation campaign a Next.js project runs (SPEC 4.4, gate 7).
 ///
 /// Checked against Stryker 9.6.1 before it shipped: an exit status of 0
-/// says little — 0 with survivors, 0 on a file that does not exist, 0 on a
-/// source that does not parse — so the report is the guard for those, while
-/// any other status is a campaign that did not complete; and its
-/// mutant ids are per-file sequential integers, so they are not the ids
-/// `nunki` can hand back to a coder.
+/// says little — 0 with survivors, 0 on a file that does not exist beside
+/// one that does, 0 on a source that does not parse — so the report is the
+/// guard for those, while any other status is a campaign that did not
+/// complete; and its mutant ids are per-file sequential integers, so they are
+/// not the ids `nunki` can hand back to a coder.
+///
+/// Scoped to the lines the branch changed, and measured on Stryker 10.0.0, on
+/// a scratch Next.js project whose branch changed one line of `format.ts`
+/// and added three to `search.ts`: 14 mutants counted, where the two whole
+/// files hold 55, with 12 survivors and 2 killed, each with the status the
+/// whole files' campaign gave it.
 const MUTATION_NEXT: &str = r##"#!/bin/sh
 # The mutation campaign for a Next.js project (SPEC 4.4, gate 7).
 #
@@ -3741,27 +3747,44 @@ const MUTATION_NEXT: &str = r##"#!/bin/sh
 # campaign is full.
 # nunki-tool-version: pnpm exec stryker --version
 #
+# The campaign answers for the lines this branch **changed**, not for every
+# line of the files it touched (SPEC 4.4). `nunki` sets `NUNKI_BASE` to the
+# commit the branch forked from, and Stryker takes line ranges in `--mutate`,
+# `<file>:<first>-<last>`: this script hands it one for each run of lines the
+# diff since that commit adds. A twenty-line fix in a file of two thousand
+# lines owes answers for its own mutants, not for the file's history.
+# Without `NUNKI_BASE` the whole of each touched file is mutated.
+#
+# Its limit, measured on Stryker 10.0.0 and read in its code
+# (`locationIncluded`): Stryker mutates only the code that sits **wholly**
+# inside a range. A block or a function body replaced, which reaches past the
+# changed lines, is not tested: with line 12 changed, the block that line
+# opens, lines 12 to 14, was not. That is narrower than cargo-mutants'
+# `--in-diff`, and SPEC 4.4 says so.
+#
 # It prints **one JSON object per line** on stdout, one per surviving mutant:
 #   {"id":"…","file":"…","line":12,"end_line":12,"description":"…"}
+# then one per touched file with a mutant counted, with that file's counts:
+#   {"measured":"app/page.ts","tried":12,"found":13}
+# and, last of all and exactly once, the line that says it got to the end:
+#   {"campaign":"done","tried":42,"found":45,"by_file":true}
 # `end_line` is the last line of the code the mutation replaces, from the
 # location Stryker's report gives each mutant; 0 when it gives none — a span
 # nobody knows, which no ruling is tied to.
-# and, last of all and exactly once, the line that says it got to the end:
-#   {"campaign":"done"}
-# with **no** `tried` and no `found`. A `standard` mission's gate 7 divides
-# the killed mutants by `tried`, and the share means something only over the
-# lines this branch changed (SPEC 4.4). `--mutate` below names whole touched
-# files, so whatever this script could count would be over those files: a
-# well-tested file would hide the new untested lines in it. Stryker takes
-# line ranges, but nothing here has been measured against a real Stryker
-# doing so, and a count is not shipped on a reading of its documentation.
-# Without a count `nunki` judges gate 7 as `critical` does — an outcome for
-# every survivor. A branch that touched nothing mutable is the one exact
-# count this script has, and says `tried` 0.
-# For the same reason it gives no per-file counts and never says `by_file`:
-# Stryker's report does name each mutant's file, but over whole files, so a
-# campaign after one of this stack's is always full, never rebuilt from
-# counts that are not the branch's (SPEC 4.4, the chain of campaigns).
+# `found` is every mutant counted, less those Stryker calls invalid,
+# `CompileError` and `RuntimeError`, and those the project has it ignore,
+# `Ignored`: a mutant no test had to kill, the counterpart of cargo-mutants'
+# unviable ones. `tried` is those of them the tests ran against, or that no
+# test reaches (`NoCoverage`), which are not killed either: what a `standard`
+# mission's gate 7 divides by. A mutant left `Pending` is found and not
+# tried, and `tried` 0 beside a `found` above 0 is a campaign that measured
+# nothing.
+# There is no `missed`. Stryker's account of its outcomes is the report these
+# counts are read from: a tally of it would always agree with the survivor
+# lines, and prove nothing.
+# `by_file` says each file was counted, and that the counts add up to the
+# totals: a later partial campaign is rebuilt from them, file by file
+# (SPEC 4.4, the chain). A file with no line has nothing counted in it.
 # `nunki` reads no other line as a result, so progress may go to stdout freely —
 # though this script keeps the tool's own chatter on stderr. A campaign that
 # stops before that last line has measured nothing, whatever else it printed.
@@ -3770,6 +3793,12 @@ set -eu
 campaign="$1"
 shift
 
+# Outside the tree, and removed however this script leaves: where Stryker
+# keeps its incremental file for this run (below), which is nothing the next
+# battery should find beside the sources.
+scratch=$(mktemp -d)
+trap 'rm -rf "$scratch"' EXIT
+
 # The sources the branch touched, and only those: Stryker's `--mutate` takes
 # them as a flag and touches nothing on disk, which is what the Python stack
 # could not do and had to pay for in campaign time.
@@ -3777,25 +3806,20 @@ shift
 # Test files are left out: a mutated test proves nothing about the code, and
 # Stryker would report it as uncovered for ever.
 #
+# And a source the branch removed: there is nothing left of it to mutate.
+# Handed to Stryker alone, measured on 10.0.0, a path that names no file
+# leaves nothing to mutate and no test to run, and Stryker exits 1, "No tests
+# were executed": a branch whose one touched source it removed would have
+# gate 7 ask for a campaign for ever.
+#
 # They all go in **one** `--mutate`, joined by commas. The flag does not
 # add up: measured on Stryker 10.0.0, each one replaces the one before, so
 # `--mutate a.ts --mutate b.ts` mutated b.ts alone, said nothing of a.ts,
 # and exited 0 — a branch touching two sources had one measured. Its value
 # is split on commas, so a path holding one cannot be handed over at all,
 # and the campaign says so rather than measure part of the branch.
-#
-# And each path becomes a pattern that matches that one file. Stryker reads
-# every entry as a glob over the absolute path (minimatch), and a Next.js
-# dynamic route is a character class to it: measured on 10.0.0,
-# `app/[...slug]/page.ts` mutated `app/s/page.ts` and never the route, and
-# `app/[[...slug]]/page.ts` matched nothing. A backslash escapes nothing,
-# since Stryker turns it into `/` first; a character in brackets of its own
-# does, and `app/[[]...slug[]]/page.ts` matched the route alone. So every
-# character a glob reads is put in brackets. `!` is left as it is: it only
-# means something at the start of a pattern, which is a `/` here, or before
-# a `(`, which is bracketed.
-mutate=""
 for path in "$@"; do
+  shift
   case "$path" in
     *.test.*|*.spec.*|*/__tests__/*|*/e2e/*) continue ;;
   esac
@@ -3803,23 +3827,29 @@ for path in "$@"; do
     *.ts|*.tsx|*.js|*.jsx|*.mjs|*.cjs) ;;
     *) continue ;;
   esac
+  [ -f "$path" ] || continue
   case "$path" in
     *,*)
       echo "nunki: $path holds a comma, which Stryker's --mutate splits on, so it cannot be mutated and the campaign measured nothing" >&2
       exit 1
       ;;
   esac
-  pattern=$(printf '%s\n' "$path" | sed 's/[][*?{}()]/[&]/g')
-  mutate="${mutate:+$mutate,}$pattern"
+  set -- "$@" "$path"
 done
-if [ -z "$mutate" ]; then
-  # Nothing this branch touched is mutable, so there are no mutants and no
-  # survivors — and that is a measurement, not a campaign that failed to
-  # happen. The terminal line is printed **before** leaving, because `nunki`
-  # reads its absence as a campaign that was killed and asks for another:
-  # a branch touching only tests or documentation would be asked for ever.
-  printf '{"campaign":"done","tried":0,"found":0}\n'
+
+# Nothing this branch touched is mutable, so there are no mutants and no
+# survivors — and that is a measurement, not a campaign that failed to
+# happen. The terminal line is printed **before** leaving, because `nunki`
+# reads its absence as a campaign that was killed and asks for another:
+# a branch touching only tests or documentation would be asked for ever.
+# Said from two places: here, for a branch that touched no source; and
+# below, for one that only removed lines from the sources it touched.
+nothing_mutable() {
+  printf '{"campaign":"done","tried":0,"found":0,"by_file":true}\n'
   exit 0
+}
+if [ $# -eq 0 ]; then
+  nothing_mutable
 fi
 
 # How many mutants run at once: the project's `mutation_jobs`, which `nunki`
@@ -3848,6 +3878,180 @@ if ! pnpm exec stryker --version >/dev/null 2>&1; then
   echo "nunki: this stack's campaign needs @stryker-mutator/core, which this project does not declare." >&2
   echo "nunki: add it where the lock can pin it: pnpm add -D @stryker-mutator/core" >&2
   exit 1
+fi
+
+# What the campaign reads, in the project's own Node: one program for two
+# questions, so that what Stryker is asked to mutate and what the campaign
+# counts are decided by the same code:
+# - `plan` prints the value of `--mutate`;
+# - `read` prints the survivors and each file's counts, then the two totals.
+#
+# Under `set -e`, a failure in it ends the script **before** the terminal
+# line, which is what it should do: results nobody could read are not a
+# measurement.
+campaign_js() {
+  node --input-type=commonjs - "$@" <<'JS'
+const fs = require("fs");
+const { execFileSync } = require("child_process");
+
+const [mode, ...rest] = process.argv.slice(2);
+const base = process.env.NUNKI_BASE || "";
+
+// What counts as answered, in the vocabulary Stryker uses. `Killed` and
+// `Timeout` are what it calls detected — a mutant that hangs the suite is one
+// the suite noticed. `CompileError` and `RuntimeError` are what it calls
+// invalid: nothing **could** prove them dead, which is not the same as nobody
+// having tried. `Ignored` was excluded on purpose.
+//
+// So the survivors are `Survived`, `NoCoverage` and `Pending`: the second is
+// code no test reaches, and the third was never run at all. A campaign that
+// read only `Survived` would call both of them green.
+const ANSWERED = new Set(["Killed", "Timeout", "CompileError", "RuntimeError", "Ignored"]);
+
+// Neither found nor tried: no test had to kill them. An invalid mutant is
+// code that does not compile or does not load, as an unviable mutant is code
+// that does not build for cargo-mutants, which counts neither. And counting
+// an ignored one as tried would raise a `standard` mission's share as if a
+// test had killed it.
+const LEFT_OUT = new Set(["CompileError", "RuntimeError", "Ignored"]);
+
+// Found, and not tried: no test ran against them.
+const UNTRIED = new Set(["Pending"]);
+
+function fail(why) {
+  process.stderr.write("nunki: " + why + "\n");
+  process.exit(1);
+}
+
+function bare(path) {
+  return path.startsWith("./") ? path.slice(2) : path;
+}
+
+// The runs of lines the branch changed in `path` since its fork point, each
+// as its first and last line. As the Rust fragment asks git: `--no-renames`,
+// so that a file renamed is a file added whole, as `nunki` compares files
+// from one campaign to the next; the path as a literal one, never read as a
+// pathspec; and a name outside ASCII as it is, not in octal escapes. A hunk
+// that only removes lines adds none, and gives no range: Stryker refuses a
+// range that ends before it starts, and the whole campaign with it.
+function changed(path) {
+  let diff;
+  try {
+    diff = execFileSync(
+      "git",
+      ["-c", "core.quotePath=false", "--literal-pathspecs",
+        "diff", "-U0", "--relative", "--no-renames", base, "HEAD", "--", path],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 1 << 30 },
+    );
+  } catch (error) {
+    fail(`cannot diff against the base ${base}: ${String(error.stderr || error.message).trim().slice(-400)}`);
+  }
+  const runs = [];
+  for (const hunk of diff.matchAll(/^@@ -\S+ \+([0-9]+)(?:,([0-9]+))? @@/gm)) {
+    const first = Number(hunk[1]);
+    const count = hunk[2] === undefined ? 1 : Number(hunk[2]);
+    if (count > 0) runs.push([first, first + count - 1]);
+  }
+  return runs;
+}
+
+if (mode === "plan") {
+  // Each path becomes a pattern that matches that one file. Stryker reads
+  // every entry as a glob over the absolute path (minimatch), and a Next.js
+  // dynamic route is a character class to it: measured on 10.0.0,
+  // `app/[...slug]/page.ts` mutated `app/s/page.ts` and never the route, and
+  // `app/[[...slug]]/page.ts` matched nothing. A backslash escapes nothing,
+  // since Stryker turns it into `/` first; a character in brackets of its own
+  // does, and `app/[[]...slug[]]/page.ts` matched the route alone. A range
+  // can follow it: Stryker refuses one after a glob, and to minimatch a lone
+  // character in brackets is none (measured: two routes, each with a range,
+  // mutated). So every character a glob reads is put in brackets. `!` is
+  // left as it is: it only
+  // means something at the start of a pattern, which is a `/` here, or
+  // before a `(`, which is bracketed.
+  const entries = [];
+  for (const path of rest) {
+    const pattern = path.replace(/[\][*?{}()]/g, "[$&]");
+    if (!base) {
+      entries.push(pattern);
+      continue;
+    }
+    for (const [first, last] of changed(path)) entries.push(`${pattern}:${first}-${last}`);
+  }
+  process.stdout.write(entries.join(","));
+  process.exit(0);
+}
+
+const report = JSON.parse(fs.readFileSync(rest[0], "utf8"));
+const touched = new Map();
+for (const path of rest.slice(1)) {
+  touched.set(bare(path), { handed: path, runs: base ? changed(path) : null });
+}
+
+let tried = 0;
+let found = 0;
+for (const [file, entry] of Object.entries(report.files ?? {})) {
+  // A file nobody handed is one the patterns took by mistake — what an
+  // unescaped dynamic route did — and its mutants are not the branch's.
+  const here = touched.get(bare(file));
+  if (!here) {
+    fail(`Stryker's report holds mutants of ${file}, which the campaign did not hand it, so it cannot tell what it measured`);
+  }
+  const counts = { tried: 0, found: 0 };
+  for (const mutant of entry.mutants ?? []) {
+    const at = mutant.location?.start ?? {};
+    const end = mutant.location?.end?.line;
+    // With a base, only a mutant whose lines reach a changed one is the
+    // branch's to answer for. Stryker already makes no other, but a count
+    // that depends on how a tool picks its mutants changes with the tool.
+    // One whose lines the report does not give counts.
+    if (
+      here.runs &&
+      Number.isInteger(at.line) &&
+      Number.isInteger(end) &&
+      !here.runs.some(([first, last]) => at.line <= last && end >= first)
+    ) {
+      continue;
+    }
+    if (LEFT_OUT.has(mutant.status)) continue;
+    counts.found += 1;
+    if (!UNTRIED.has(mutant.status)) counts.tried += 1;
+    if (ANSWERED.has(mutant.status)) continue;
+    const was = (mutant.replacement ?? "").replace(/\s+/g, " ").trim();
+    // The id Stryker gives is a per-file sequential integer that moves between
+    // runs, so a coder answering "#7" would name something else next time.
+    // The position, the mutator and what it wrote are what stay the same —
+    // and the replacement is in it because one position carries several
+    // mutants: `ConditionalExpression` to `true` and to `false` sit on the
+    // very same column.
+    const id = [file, at.line, at.column, mutant.mutatorName, was].join(":");
+    // The description is what a ruling on the survivor is filed under, with
+    // its file, so it does not carry the status: measured on 10.0.0, the same
+    // block, `format.ts` lines 18 to 24, came back `NoCoverage` from the
+    // whole file and `Survived` from a range over its function — and a
+    // ruling given on one would not have been offered for the other.
+    const what = `${mutant.mutatorName} -> ${was}`;
+    // A whole number from 1 up, or 0: anything else in the report is a span
+    // nobody knows, and says so rather than reaching nunki as text, a
+    // fraction or a negative, as the rust template does with its `case`.
+    const end_line = Number.isInteger(end) && end > 0 ? end : 0;
+    process.stdout.write(JSON.stringify({ id, file, line: at.line, end_line, description: what }) + "\n");
+  }
+  if (counts.found) {
+    process.stdout.write(JSON.stringify({ measured: here.handed, tried: counts.tried, found: counts.found }) + "\n");
+  }
+  tried += counts.tried;
+  found += counts.found;
+}
+process.stdout.write(`${tried} ${found}\n`);
+JS
+}
+
+mutate=$(campaign_js plan "$@")
+if [ -z "$mutate" ]; then
+  # The branch only removed lines from the sources it touched: none of
+  # their mutants is on a line it changed.
+  nothing_mutable
 fi
 
 # Where the project's configuration puts the json report. There is no command
@@ -3885,18 +4089,26 @@ rm -rf .stryker-tmp
 # even when the run fails, so a killed campaign leaves no copy of the project
 # beside the tree for the next battery to walk into.
 #
+# `--incrementalFile` in the scratch directory, which no run has written:
+# a project whose configuration turns on Stryker's incremental mode then
+# reuses nothing. Measured on 10.0.0, with it on and its own file kept, a
+# campaign over two ranges reported every mutant of both files, 55 where the
+# ranges hold 14, with the statuses an earlier run left. With a file nobody
+# wrote, the same campaign reported its 14; with the mode off, the option
+# writes nothing.
+#
 # Stryker is otherwise driven by the project's own configuration — its test
 # runner among it — which it reads from the working directory.
 #
 # The status is not enough on its own, because 0 says little: measured on
 # 9.6.1, it is 0 with survivors, 0 when `--mutate` names a file that does
-# not exist, and 0 on a source file that does not parse. So the report
-# below is the guard for those. But anything **other** than 0 is a campaign
-# that did not complete — a failing initial test run among them — and is
-# never read as one that did, whatever report it left.
+# not exist beside one that does, and 0 on a source file that does not
+# parse. So the report below is the guard for those. But anything **other**
+# than 0 is a campaign that did not complete — a failing initial test run
+# among them — and is never read as one that did, whatever report it left.
 # shellcheck disable=SC2086
 status=0
-pnpm exec stryker run --mutate "$mutate" $concurrency --cleanTempDir always --reporters json >&2 || status=$?
+pnpm exec stryker run --mutate "$mutate" $concurrency --incrementalFile "$scratch/incremental.json" --cleanTempDir always --reporters json >&2 || status=$?
 if [ "$status" -ne 0 ]; then
   echo "nunki: stryker exited $status, so the campaign did not complete and measured nothing" >&2
   exit 1
@@ -3909,44 +4121,12 @@ if [ ! -f "$report" ]; then
   exit 1
 fi
 
-node -e '
-const fs = require("fs");
-const report = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-
-// What counts as answered, in the vocabulary Stryker uses. `Killed` and
-// `Timeout` are what it calls detected — a mutant that hangs the suite is one
-// the suite noticed. `CompileError` and `RuntimeError` are what it calls
-// invalid: nothing **could** prove them dead, which is not the same as nobody
-// having tried. `Ignored` was excluded on purpose.
-//
-// So the survivors are `Survived`, `NoCoverage` and `Pending`: the second is
-// code no test reaches, and the third was never run at all. A campaign that
-// read only `Survived` would call both of them green.
-const ANSWERED = new Set(["Killed", "Timeout", "CompileError", "RuntimeError", "Ignored"]);
-
-for (const [file, entry] of Object.entries(report.files ?? {})) {
-  for (const mutant of entry.mutants ?? []) {
-    if (ANSWERED.has(mutant.status)) continue;
-    const at = mutant.location?.start ?? {};
-    const was = (mutant.replacement ?? "").replace(/\s+/g, " ").trim();
-    // The id Stryker gives is a per-file sequential integer that moves between
-    // runs, so a coder answering "#7" would name something else next time.
-    // The position, the mutator and what it wrote are what stay the same —
-    // and the replacement is in it because one position carries several
-    // mutants: `ConditionalExpression` to `true` and to `false` sit on the
-    // very same column.
-    const id = [file, at.line, at.column, mutant.mutatorName, was].join(":");
-    const what = `${mutant.status}: ${mutant.mutatorName} -> ${was}`;
-    // A whole number from 1 up, or 0: anything else in the report is a span
-    // nobody knows, and says so rather than reaching nunki as text, a
-    // fraction or a negative, as the rust template does with its `case`.
-    // (No apostrophe in this script: it sits inside single quotes.)
-    const end = mutant.location?.end?.line;
-    const end_line = Number.isInteger(end) && end > 0 ? end : 0;
-    process.stdout.write(JSON.stringify({ id, file, line: at.line, end_line, description: what }) + "\n");
-  }
-}
-' "$report"
+# The survivors and each file's counts, then the two totals on a line of
+# their own, which become the terminal line below. Kept until the program has
+# finished: one that dies halfway prints nothing at all.
+out=$(campaign_js read "$report" "$@") || exit 1
+totals=$(printf '%s\n' "$out" | tail -n 1)
+printf '%s\n' "$out" | sed '$d'
 
 # Behind itself, once the survivors have been read out of it — the file and
 # the directory Stryker made for it, because an empty `reports/` left in the
@@ -3957,6 +4137,15 @@ rm -f "$report"
 holder=$(dirname "$report")
 [ "$holder" = "." ] || rmdir -p "$holder" 2>/dev/null || true
 
+tried="${totals% *}"
+found="${totals#* }"
+case "$tried" in ''|*[!0-9]*) tried="" ;; esac
+case "$found" in ''|*[!0-9]*) found="" ;; esac
+if [ -z "$tried" ] || [ -z "$found" ]; then
+  echo "nunki: the campaign's totals cannot be read: $totals" >&2
+  exit 1
+fi
+
 # The last thing it prints, and the only line that says the campaign got to
 # the end. Without it `nunki` cannot tell "no survivor" from "no answer": a
 # campaign killed halfway, one whose container went away and one that never
@@ -3966,7 +4155,7 @@ holder=$(dirname "$report")
 # A line and not an exit status, because the status does not survive. The
 # spawner `exec`s the command so that the pid it published is the campaign's
 # own, and a shell that has been replaced cannot write `$?`.
-printf '{"campaign":"done"}\n'
+printf '{"campaign":"done","tried":%s,"found":%s,"by_file":true}\n' "$tried" "$found"
 "##;
 
 /// The mechanical security of a Next.js project (SPEC 4.4, gate 8): the

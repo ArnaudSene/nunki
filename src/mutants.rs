@@ -2529,8 +2529,8 @@ pub enum Replay {
 ///   every file, unchanged files included;
 /// - it counted each file ([`Campaign::files`]), and those counts add up to
 ///   its total: a partial campaign is rebuilt from them, and a script that
-///   gives none — the Next.js one, a project's own — or gave
-///   ones that do not add up leaves nothing to rebuild from;
+///   gives none — a project's own — or gave ones that do not add up leaves
+///   nothing to rebuild from;
 /// - its counts can be carried (`carried`, which says why when they cannot,
 ///   [`uncarried`]): the files changed since it could be listed, and every
 ///   file it counted that did not change is one the branch touches at

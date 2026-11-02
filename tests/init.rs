@@ -1754,6 +1754,9 @@ fn the_next_campaign_trusts_its_report_and_only_a_failing_status() {
     // not do — one flag, since Stryker keeps only the last it is given
     // (`the_next_campaign_mutates_every_touched_source_and_only_it`).
     assert!(run.contains(r#"--mutate "$mutate""#), "{run}");
+    // A project's incremental mode reuses nothing: the file is one no run
+    // wrote (`the_next_campaign_keeps_strykers_incremental_file_outside_the_tree`).
+    assert!(run.contains(r#"--incrementalFile "$scratch/"#), "{run}");
 
     // Two terminal lines, and the order between them is the invariant: one
     // for a branch with nothing mutable in it, which is a measurement, and
@@ -1765,13 +1768,13 @@ fn the_next_campaign_trusts_its_report_and_only_a_failing_status() {
         "{script}"
     );
     let nothing = script
-        .find(r#"printf '{"campaign":"done","tried":0,"found":0}\n'"#)
+        .find(r#"printf '{"campaign":"done","tried":0,"found":0,"by_file":true}\n'"#)
         .expect("a branch with nothing to mutate says so");
     let guard = script
         .find("left no report at")
         .expect("the guard says why it stopped");
     let done = script
-        .find(r#"printf '{"campaign":"done"}\n'"#)
+        .find(r#"printf '{"campaign":"done","tried":%s,"found":%s,"by_file":true}\n'"#)
         .expect("the campaign says when it got to the end");
     // A Stryker that did not exit 0 is stopped before the report is read.
     let status = script
@@ -3587,29 +3590,26 @@ fn a_python_campaign_lets_the_next_one_be_partial() {
     );
 }
 
-/// A `node` standing in for the two scripts the Next.js campaign hands it,
-/// told apart by their argument count (there is no node in this image).
-/// With `-e` alone it is the locator, and answers where `stryker.config.json`
-/// puts the json report, or Stryker's default. With the report after it, it
-/// prints the survivors the report names, in the campaign's own shape.
+/// A source for the Next.js campaign to find in its tree: it skips a touched
+/// path that names no file, as one the branch removed.
 #[cfg(unix)]
-const NODE: &str = r#"#!/bin/sh
-if [ $# -lt 3 ]; then
-  jq -jr '.jsonReporter.fileName // "reports/mutation/mutation.json"' stryker.config.json 2>/dev/null \
-    || printf 'reports/mutation/mutation.json'
-  exit 0
-fi
-jq -c '.files | to_entries[] | .key as $f | .value.mutants[]
-  | select(.status == "Survived" or .status == "NoCoverage" or .status == "Pending")
-  | {id: ($f + ":" + .mutatorName), file: $f, line: .location.start.line, description: .status}' "$3"
-"#;
+const PAGE: (&str, &str) = ("app/page.ts", "export const x = 1;\n");
 
-/// Next.js: the survivors Stryker's report names, and **no count**:
-/// `--mutate` names whole touched files, and a share over whole files would
-/// let a well-tested file hide the branch's new untested lines.
+/// Next.js: each file's counts, and the totals. `Killed` and `Timeout` are
+/// tried and answered; `Survived` and `NoCoverage` tried and owed; `Pending`
+/// found and owed, and not tried; `CompileError`, `RuntimeError` and
+/// `Ignored` neither found nor tried, as cargo-mutants' unviable mutants are
+/// neither. And a survivor's description names the mutation, not the status
+/// it came back with, which changes from one campaign to the next.
 #[cfg(unix)]
 #[test]
-fn the_next_campaign_gives_no_count_over_whole_files() {
+fn the_next_campaign_counts_each_file_and_leaves_out_what_no_test_had_to_kill() {
+    if !present(
+        "node",
+        "the_next_campaign_counts_each_file_and_leaves_out_what_no_test_had_to_kill",
+    ) {
+        return;
+    }
     let pnpm = r#"#!/bin/sh
 case "$*" in
   *"stryker run"*)
@@ -3623,14 +3623,23 @@ case "$*" in
 esac
 exit 0
 "#;
-    let (said, why) = campaign_of("next", "app/page.ts", &[("pnpm", pnpm), ("node", NODE)]);
+    let (said, why, status) = campaign_in("next", "app/page.ts", &[("pnpm", pnpm)], &[PAGE]);
+    assert_eq!(status, Some(0), "{why}");
     assert!(nunki::mutants::completed(&said), "{said}\n{why}");
-    assert_eq!(nunki::mutants::parse(&said).len(), 3, "{said}\n{why}");
-    assert_eq!(nunki::mutants::tried(&said), None, "{said}\n{why}");
-    assert_eq!(nunki::mutants::found(&said), None, "{said}\n{why}");
+    let described: Vec<String> = nunki::mutants::parse(&said)
+        .into_iter()
+        .map(|survivor| survivor.description)
+        .collect();
+    assert_eq!(described, ["M -> x", "N -> y", "P -> z"], "{said}\n{why}");
+    assert_eq!(nunki::mutants::tried(&said), Some(4), "{said}\n{why}");
+    assert_eq!(nunki::mutants::found(&said), Some(5), "{said}\n{why}");
+    assert!(
+        said.contains(r#"{"measured":"app/page.ts","tried":4,"found":5}"#),
+        "{said}"
+    );
     assert_eq!(
         said.lines().last(),
-        Some(r#"{"campaign":"done"}"#),
+        Some(r#"{"campaign":"done","tried":4,"found":5,"by_file":true}"#),
         "{said}"
     );
 }
@@ -3682,6 +3691,12 @@ exit 0
 #[cfg(unix)]
 #[test]
 fn the_next_campaign_mutates_every_touched_source_and_only_it() {
+    if !present(
+        "node",
+        "the_next_campaign_mutates_every_touched_source_and_only_it",
+    ) {
+        return;
+    }
     let body = "export const x = 1;\n";
     let (said, why, status) = campaign_of_paths(
         "next",
@@ -3691,7 +3706,7 @@ fn the_next_campaign_mutates_every_touched_source_and_only_it() {
             "app/[[...rest]]/page.ts",
             "app/with space/page.ts",
         ],
-        &[("pnpm", STRYKER_MUTATE), ("node", NODE)],
+        &[("pnpm", STRYKER_MUTATE)],
         &[
             ("app/page.ts", body),
             ("app/[slug]/page.ts", body),
@@ -3732,13 +3747,373 @@ fn a_next_campaign_refuses_a_path_stryker_would_split() {
     let (said, why, status) = campaign_in(
         "next",
         "app/page.ts app/a,b.ts",
-        &[("pnpm", STRYKER_MUTATE), ("node", NODE)],
-        &[("app/page.ts", "export const x = 1;\n")],
+        &[("pnpm", STRYKER_MUTATE)],
+        &[PAGE, ("app/a,b.ts", "export const y = 2;\n")],
     );
     assert_ne!(status, Some(0), "{why}");
     assert!(!nunki::mutants::completed(&said), "{said}\n{why}");
     assert!(why.contains("app/a,b.ts holds a comma"), "{why}");
     assert!(!why.contains("asked: "), "Stryker ran: {why}");
+}
+
+/// The Next.js campaign, run as `nunki` runs it on a branch: in a git tree
+/// whose branch changed `app/page.ts` from `before` to `after` — or removed
+/// it, when `after` is empty — with the fork point in `NUNKI_BASE`.
+#[cfg(unix)]
+fn next_campaign_on_branch(before: &str, after: &str, pnpm: &str) -> (String, String, Option<i32>) {
+    let (dir, root, nunki) = fresh();
+    init(&root, &nunki, &["next".to_string()]).unwrap();
+    let script = home(&root).join("stacks/next/mutation.sh");
+    let tree = dir.path().join("tree");
+    std::fs::create_dir_all(tree.join("app")).unwrap();
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&tree)
+            .args(["-c", "user.name=T", "-c", "user.email=t@t"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    git(&["init", "-q", "-b", "dev"]);
+    std::fs::write(tree.join("app/page.ts"), before).unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "base"]);
+    let base = git(&["rev-parse", "HEAD"]);
+    if after.is_empty() {
+        git(&["rm", "-q", "app/page.ts"]);
+    } else {
+        std::fs::write(tree.join("app/page.ts"), after).unwrap();
+    }
+    git(&["commit", "-q", "-am", "branch"]);
+    let path = stubs(&dir.path().join("stub-bin"), &[("pnpm", pnpm)]);
+    let out = sh()
+        .arg(&script)
+        .arg("abc123")
+        .arg("app/page.ts")
+        .env("PATH", path)
+        .env(nunki::mutants::BASE_ENV, &base)
+        .current_dir(&tree)
+        .output()
+        .expect("sh runs the campaign");
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        out.status.code(),
+    )
+}
+
+/// A page whose branch changes line 2, removes line 6, and adds lines 8 to
+/// 11: three hunks, the second of which adds nothing.
+#[cfg(unix)]
+const PAGE_BEFORE: &str = "export function a(n: number): number {\n  return n + 1;\n}\n\nexport function b(n: number): number {\n  const unused = 0;\n  return n * 2;\n}\n";
+#[cfg(unix)]
+const PAGE_AFTER: &str = "export function a(n: number): number {\n  return n + 2;\n}\n\nexport function b(n: number): number {\n  return n * 2;\n}\n\nexport function c(n: number): number {\n  return n - 3;\n}\n";
+
+/// A Stryker that says what it was asked to mutate, refuses a range as
+/// Stryker 10.0.0's options validator does — one that starts before line 1
+/// or ends before it starts, and the whole run with it — and, as 10.0.0 does
+/// when nothing it was handed names a file, exits 1 having run no test.
+/// Otherwise it leaves `REPORT` as its report.
+#[cfg(unix)]
+const STRYKER_RANGES: &str = r#"#!/bin/sh
+case "$*" in
+  *"stryker run"*) ;;
+  *) exit 0 ;;
+esac
+echo "asked: $*" >&2
+mutate=""
+while [ $# -gt 0 ]; do
+  if [ "$1" = --mutate ]; then mutate=$2; fi
+  shift
+done
+echo "mutate: $mutate" >&2
+rest=$mutate
+named=0
+while [ -n "$rest" ]; do
+  entry=${rest%%,*}
+  case "$rest" in
+    (*,*) rest=${rest#*,} ;;
+    (*) rest="" ;;
+  esac
+  file=${entry%%:*}
+  [ -f "$file" ] && named=1
+  case "$entry" in
+    (*:*-*)
+      range=${entry##*:}
+      first=${range%-*}
+      last=${range#*-}
+      if [ "$first" -lt 1 ] || [ "$first" -gt "$last" ]; then
+        echo "Mutation range \"$range\" is invalid" >&2
+        exit 1
+      fi
+      ;;
+  esac
+done
+if [ "$named" = 0 ]; then
+  echo "No tests were executed. Stryker will exit prematurely." >&2
+  exit 1
+fi
+mkdir -p reports/mutation
+printf '%s' 'REPORT' > reports/mutation/mutation.json
+exit 0
+"#;
+
+/// What Stryker's report could hold for [`PAGE_AFTER`]: a survivor on line 2,
+/// which the branch changed; one on line 6, which it did not; a block over
+/// lines 1 to 3, which reaches line 2; one whose report gives only where it
+/// starts, on line 6; and a mutant killed on line 10, which the branch added.
+#[cfg(unix)]
+const PAGE_REPORT: &str = r#"{"files":{"app/page.ts":{"mutants":[
+  {"status":"Survived","mutatorName":"A","replacement":"a","location":{"start":{"line":2,"column":10},"end":{"line":2,"column":15}}},
+  {"status":"Survived","mutatorName":"B","replacement":"b","location":{"start":{"line":6,"column":10},"end":{"line":6,"column":15}}},
+  {"status":"NoCoverage","mutatorName":"C","replacement":"{}","location":{"start":{"line":1,"column":38},"end":{"line":3,"column":2}}},
+  {"status":"Survived","mutatorName":"E","replacement":"e","location":{"start":{"line":6,"column":1}}},
+  {"status":"Killed","mutatorName":"D","replacement":"d","location":{"start":{"line":10,"column":10},"end":{"line":10,"column":15}}}]}}}"#;
+
+/// The lines a branch changed are what Stryker is asked to mutate, one range
+/// for each run of lines the diff adds, and what the campaign counts: a
+/// mutant whose lines reach a changed one, and no other. A hunk that only
+/// removes lines gives no range — Stryker would refuse `5-4`, and the
+/// campaign with it.
+#[cfg(unix)]
+#[test]
+fn the_next_campaign_mutates_and_counts_only_the_lines_the_branch_changed() {
+    if !present(
+        "node",
+        "the_next_campaign_mutates_and_counts_only_the_lines_the_branch_changed",
+    ) {
+        return;
+    }
+    let pnpm = STRYKER_RANGES.replace("REPORT", PAGE_REPORT);
+    let (said, why, code) = next_campaign_on_branch(PAGE_BEFORE, PAGE_AFTER, &pnpm);
+    assert_eq!(code, Some(0), "{said}\n{why}");
+    assert!(
+        why.contains("mutate: app/page.ts:2-2,app/page.ts:8-11\n"),
+        "{why}"
+    );
+    let survivors: Vec<(String, u32)> = nunki::mutants::parse(&said)
+        .into_iter()
+        .map(|survivor| (survivor.description, survivor.line))
+        .collect();
+    assert_eq!(
+        survivors,
+        [
+            ("A -> a".to_string(), 2),
+            ("C -> {}".to_string(), 1),
+            ("E -> e".to_string(), 6)
+        ],
+        "{said}"
+    );
+    assert_eq!(nunki::mutants::tried(&said), Some(4), "{said}");
+    assert_eq!(nunki::mutants::found(&said), Some(4), "{said}");
+    assert!(
+        said.contains(r#"{"measured":"app/page.ts","tried":4,"found":4}"#),
+        "{said}"
+    );
+}
+
+/// A branch that only removed lines from the sources it touched has nothing
+/// mutable, and says so without running Stryker: none of its mutants is on a
+/// line the branch changed, and an empty `--mutate` would have Stryker mutate
+/// whatever its configuration names.
+#[cfg(unix)]
+#[test]
+fn a_next_branch_that_only_removed_lines_has_nothing_mutable() {
+    if !present(
+        "node",
+        "a_next_branch_that_only_removed_lines_has_nothing_mutable",
+    ) {
+        return;
+    }
+    let after = PAGE_BEFORE.replace("  const unused = 0;\n", "");
+    let pnpm = STRYKER_RANGES.replace("REPORT", PAGE_REPORT);
+    let (said, why, code) = next_campaign_on_branch(PAGE_BEFORE, &after, &pnpm);
+    assert_eq!(code, Some(0), "{said}\n{why}");
+    assert!(!why.contains("asked: "), "Stryker ran: {why}");
+    assert_eq!(
+        said.lines().last(),
+        Some(r#"{"campaign":"done","tried":0,"found":0,"by_file":true}"#),
+        "{said}"
+    );
+}
+
+/// A source the branch removed is not handed to Stryker, with a base or
+/// without one. Handed alone, measured on Stryker 10.0.0, a path that names
+/// no file has Stryker exit 1, "No tests were executed": a campaign that
+/// could not run, and gate 7 asking for ever.
+#[cfg(unix)]
+#[test]
+fn a_next_campaign_skips_a_source_the_branch_removed() {
+    if !present("node", "a_next_campaign_skips_a_source_the_branch_removed") {
+        return;
+    }
+    let pnpm = STRYKER_RANGES.replace("REPORT", PAGE_REPORT);
+    let (said, why, code) = next_campaign_on_branch(PAGE_BEFORE, "", &pnpm);
+    assert_eq!(code, Some(0), "{said}\n{why}");
+    assert!(!why.contains("asked: "), "Stryker ran: {why}");
+    assert_eq!(nunki::mutants::tried(&said), Some(0), "{said}");
+
+    let pnpm = STRYKER_RANGES.replace(
+        "REPORT",
+        r#"{"files":{"app/page.ts":{"mutants":[{"status":"Killed"}]}}}"#,
+    );
+    let (said, why, status) = campaign_in(
+        "next",
+        "app/gone.ts app/page.ts",
+        &[("pnpm", &pnpm)],
+        &[PAGE],
+    );
+    assert_eq!(status, Some(0), "{why}");
+    assert!(why.contains("mutate: app/page.ts\n"), "{why}");
+    assert_eq!(nunki::mutants::tried(&said), Some(1), "{said}");
+
+    let (said, why, status) = campaign_in("next", "app/gone.ts", &[("pnpm", &pnpm)], &[PAGE]);
+    assert_eq!(status, Some(0), "{why}");
+    assert!(!why.contains("asked: "), "Stryker ran: {why}");
+    assert_eq!(
+        said.lines().last(),
+        Some(r#"{"campaign":"done","tried":0,"found":0,"by_file":true}"#),
+        "{said}"
+    );
+}
+
+/// A report that holds mutants of a file the campaign did not hand Stryker
+/// is one whose patterns took a file by mistake — what an unescaped dynamic
+/// route did — and the campaign measured nothing it can name.
+#[cfg(unix)]
+#[test]
+fn a_next_campaign_refuses_a_report_of_a_file_it_did_not_hand() {
+    if !present(
+        "node",
+        "a_next_campaign_refuses_a_report_of_a_file_it_did_not_hand",
+    ) {
+        return;
+    }
+    let pnpm = r#"#!/bin/sh
+case "$*" in
+  *"stryker run"*)
+    mkdir -p reports/mutation
+    printf '%s' '{"files":{"app/page.ts":{"mutants":[{"status":"Killed"}]},"app/s/page.ts":{"mutants":[{"status":"Killed"}]}}}' > reports/mutation/mutation.json
+    ;;
+esac
+exit 0
+"#;
+    let (said, why, status) = campaign_in("next", "app/page.ts", &[("pnpm", pnpm)], &[PAGE]);
+    assert_ne!(status, Some(0), "{why}");
+    assert!(!nunki::mutants::completed(&said), "{said}\n{why}");
+    assert!(why.contains("mutants of app/s/page.ts"), "{why}");
+}
+
+/// Stryker's incremental file goes in a directory of the campaign's own,
+/// outside the tree, that no run has written and that is gone once the
+/// campaign ends: a project that turns the mode on reuses nothing, and no
+/// file is left beside its sources. Measured on Stryker 10.0.0, with the
+/// mode on and its own file kept, a campaign over two ranges reported the
+/// 55 mutants of both files, where the ranges hold 14.
+#[cfg(unix)]
+#[test]
+fn the_next_campaign_keeps_strykers_incremental_file_outside_the_tree() {
+    if !present(
+        "node",
+        "the_next_campaign_keeps_strykers_incremental_file_outside_the_tree",
+    ) {
+        return;
+    }
+    let pnpm = r#"#!/bin/sh
+case "$*" in
+  *"stryker run"*) ;;
+  *) exit 0 ;;
+esac
+while [ $# -gt 0 ]; do
+  if [ "$1" = --incrementalFile ]; then
+    if [ -e "$2" ]; then echo "an incremental file was already there" >&2; fi
+    echo "incremental: $2" >&2
+    echo '{}' > "$2"
+  fi
+  shift
+done
+mkdir -p reports/mutation
+printf '%s' '{"files":{"app/page.ts":{"mutants":[{"status":"Killed"}]}}}' > reports/mutation/mutation.json
+exit 0
+"#;
+    let (said, why, status) = campaign_in("next", "app/page.ts", &[("pnpm", pnpm)], &[PAGE]);
+    assert_eq!(status, Some(0), "{why}");
+    assert!(nunki::mutants::completed(&said), "{said}\n{why}");
+    assert!(!why.contains("already there"), "{why}");
+    let file = why
+        .lines()
+        .find_map(|l| l.strip_prefix("incremental: "))
+        .unwrap_or_else(|| panic!("Stryker was given no incremental file: {why}"));
+    let file = Path::new(file);
+    assert!(file.is_absolute(), "{}", file.display());
+    assert!(
+        !file.parent().unwrap().exists(),
+        "the campaign left {}",
+        file.display()
+    );
+}
+
+/// The Next.js campaign now gives what a chain is rebuilt from (SPEC 4.4,
+/// the chain of campaigns). Recorded as `nunki` records it, the log the
+/// script prints on a branch lets the next campaign be partial, every other
+/// condition being met; dev's log, which counted no file, made it full.
+#[cfg(unix)]
+#[test]
+fn a_next_campaign_lets_the_next_one_be_partial() {
+    if !present("node", "a_next_campaign_lets_the_next_one_be_partial") {
+        return;
+    }
+    let pnpm = STRYKER_RANGES.replace("REPORT", PAGE_REPORT);
+    let (said, why, code) = next_campaign_on_branch(PAGE_BEFORE, PAGE_AFTER, &pnpm);
+    assert_eq!(code, Some(0), "{said}\n{why}");
+    let head = "c".repeat(40);
+    let fork = "f".repeat(40);
+    let handed = vec!["app/page.ts".to_string()];
+    let recorded = |log: &str| nunki::mutants::Campaign {
+        fingerprint: "fingerprint".to_string(),
+        head: head.clone(),
+        date: "2026-11-02T00:00:00Z".to_string(),
+        survivors: nunki::mutants::parse(log),
+        tried: nunki::mutants::tried(log),
+        files: nunki::mutants::trusted_files(log, &head, Some(&handed)),
+        chain: nunki::mutants::Chain {
+            tooling: Some("tools".to_string()),
+            fork: Some(fork.clone()),
+            handed: Some(handed.clone()),
+            ..Default::default()
+        },
+        stopped: None,
+    };
+    let next = |previous: &nunki::mutants::Campaign| {
+        nunki::mutants::scope(
+            nunki::mission::Rigor::Standard,
+            nunki::mutants::Replay::WhenChanged,
+            Some(previous),
+            Ok("tools"),
+            &fork,
+            |_| None,
+            |_| true,
+            |_| None,
+        )
+    };
+    assert_eq!(
+        next(&recorded(&said)),
+        nunki::mutants::Scope::Partial {
+            since: head.clone()
+        },
+        "{said}"
+    );
+    let dev = "{\"id\":\"app/page.ts:2:10:A:a\",\"file\":\"app/page.ts\",\"line\":2,\"end_line\":2,\"description\":\"Survived: A -> a\"}\n{\"campaign\":\"done\"}\n";
+    assert!(
+        matches!(
+            next(&recorded(dev)),
+            nunki::mutants::Scope::Full { why } if why.contains("did not count each file")
+        ),
+        "dev's log"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -3908,6 +4283,12 @@ exit 0
 #[cfg(unix)]
 #[test]
 fn the_next_campaign_runs_with_the_trees_own_stryker_config() {
+    if !present(
+        "node",
+        "the_next_campaign_runs_with_the_trees_own_stryker_config",
+    ) {
+        return;
+    }
     // A Stryker that writes its report where the configuration tells it to,
     // and says on stderr what it was asked.
     let pnpm = r#"#!/bin/sh
@@ -3926,8 +4307,8 @@ exit 0
     let (said, why, status) = campaign_in(
         "next",
         "app/page.ts",
-        &[("pnpm", pnpm), ("node", NODE)],
-        &[("stryker.config.json", config)],
+        &[("pnpm", pnpm)],
+        &[("stryker.config.json", config), PAGE],
     );
     assert_eq!(status, Some(0), "{why}");
     assert!(why.contains("stryker asked: "), "Stryker never ran: {why}");
@@ -3936,7 +4317,7 @@ exit 0
     assert_eq!(nunki::mutants::parse(&said).len(), 1, "{said}\n{why}");
     assert_eq!(
         said.lines().last(),
-        Some(r#"{"campaign":"done"}"#),
+        Some(r#"{"campaign":"done","tried":2,"found":2,"by_file":true}"#),
         "{said}"
     );
     // The report it read is the one it removes behind itself.
@@ -3949,6 +4330,12 @@ exit 0
 #[cfg(unix)]
 #[test]
 fn a_next_campaign_whose_stryker_fails_never_says_it_finished() {
+    if !present(
+        "node",
+        "a_next_campaign_whose_stryker_fails_never_says_it_finished",
+    ) {
+        return;
+    }
     let pnpm = r#"#!/bin/sh
 case "$*" in
   *"stryker run"*)
@@ -3959,12 +4346,7 @@ case "$*" in
 esac
 exit 0
 "#;
-    let (said, why, status) = campaign_in(
-        "next",
-        "app/page.ts",
-        &[("pnpm", pnpm), ("node", NODE)],
-        &[],
-    );
+    let (said, why, status) = campaign_in("next", "app/page.ts", &[("pnpm", pnpm)], &[PAGE]);
     assert!(!nunki::mutants::completed(&said), "{said}\n{why}");
     assert_ne!(status, Some(0), "{why}");
     assert!(why.contains("stryker exited 1"), "{why}");
@@ -4113,6 +4495,9 @@ exit 0
 #[cfg(unix)]
 #[test]
 fn the_next_campaign_hands_mutation_jobs_to_stryker() {
+    if !present("node", "the_next_campaign_hands_mutation_jobs_to_stryker") {
+        return;
+    }
     let pnpm = r#"#!/bin/sh
 case "$*" in
   *"stryker run"*)
@@ -4124,39 +4509,38 @@ esac
 exit 0
 "#;
     let run = |env: &[(&str, &str)]| {
-        campaign_with(
-            "next",
-            "app/page.ts",
-            &[("pnpm", pnpm), ("node", NODE)],
-            &[],
-            env,
-        )
+        campaign_with("next", "app/page.ts", &[("pnpm", pnpm)], &[PAGE], env)
     };
-    let today = "exec stryker run --mutate app/page.ts --cleanTempDir always --reporters json";
+    // The incremental file is in a directory made for the run, and is a new
+    // one each time; the rest of the command is what is compared.
+    let asked = |why: &str| {
+        let asked = asked(why);
+        match asked.split_once(" --incrementalFile ") {
+            Some((before, after)) => {
+                let rest = after.split_once(' ').map_or("", |(_, rest)| rest);
+                format!("{before} --incrementalFile SCRATCH {rest}")
+            }
+            None => asked,
+        }
+    };
+    let today = "exec stryker run --mutate app/page.ts --incrementalFile SCRATCH --cleanTempDir always --reporters json";
+    let done = r#"{"campaign":"done","tried":1,"found":1,"by_file":true}"#;
 
     let (said, why, status) = run(&[]);
     assert_eq!(status, Some(0), "{why}");
     assert_eq!(asked(&why), today, "without the variable");
-    assert_eq!(
-        said.lines().last(),
-        Some(r#"{"campaign":"done"}"#),
-        "{said}"
-    );
+    assert_eq!(said.lines().last(), Some(done), "{said}");
     for n in ["1", "6"] {
         let (said, why, status) = run(&[(nunki::mutants::JOBS_ENV, n)]);
         assert_eq!(status, Some(0), "{why}");
         assert_eq!(
             asked(&why),
             today.replace(
-                "--cleanTempDir",
-                &format!("--concurrency {n} --cleanTempDir")
+                "--incrementalFile",
+                &format!("--concurrency {n} --incrementalFile")
             )
         );
-        assert_eq!(
-            said.lines().last(),
-            Some(r#"{"campaign":"done"}"#),
-            "{said}"
-        );
+        assert_eq!(said.lines().last(), Some(done), "{said}");
     }
     for bad in BAD_JOBS {
         let (said, why, status) = run(&[(nunki::mutants::JOBS_ENV, bad)]);
@@ -4700,7 +5084,7 @@ case "$*" in
 esac
 exit 0
 "#;
-    let (said, why) = campaign_of("next", "app/page.ts", &[("pnpm", pnpm)]);
+    let (said, why, _) = campaign_in("next", "app/page.ts", &[("pnpm", pnpm)], &[PAGE]);
     assert!(nunki::mutants::completed(&said), "{said}\n{why}");
     let ends: Vec<Option<u32>> = nunki::mutants::parse(&said)
         .into_iter()
@@ -5686,6 +6070,12 @@ fn a_rust_campaign_within_its_budget_or_without_one_runs_whole() {
 #[cfg(unix)]
 #[test]
 fn a_next_campaign_clears_the_sandbox_a_killed_one_left() {
+    if !present(
+        "node",
+        "a_next_campaign_clears_the_sandbox_a_killed_one_left",
+    ) {
+        return;
+    }
     let pnpm = r#"#!/bin/sh
 case "$*" in
   *"stryker run"*)
@@ -5699,8 +6089,11 @@ exit 0
     let (said, why, status) = campaign_in(
         "next",
         "app/page.ts",
-        &[("pnpm", pnpm), ("node", NODE)],
-        &[(".stryker-tmp/sandbox-1234/app/page.ts", "a mutant\n")],
+        &[("pnpm", pnpm)],
+        &[
+            (".stryker-tmp/sandbox-1234/app/page.ts", "a mutant\n"),
+            PAGE,
+        ],
     );
     assert_eq!(status, Some(0), "{why}");
     assert!(nunki::mutants::completed(&said), "{said}\n{why}");
