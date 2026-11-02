@@ -127,8 +127,10 @@ pub const CAMPAIGN_ENV: [&str; 6] = [
 
 /// The line of a stack's `mutation.sh` that says it reads [`NAMES_ENV`].
 /// The stack's to say, as with [`TOOL_VERSION_MARK`]: the Rust stack's
-/// script says it, and the Python and Next.js ones, whose tools `nunki` has
-/// not measured by name, do not.
+/// script says it, and the Python and Next.js ones do not. Stryker names no
+/// mutant; mutmut does, and runs a name exactly (measured on 3.8.0), but it
+/// numbers a function's mutants from the function's top, so once the
+/// function is edited a name can point at another mutant and still be found.
 pub const BY_NAME_MARK: &str = "# nunki-by-name: NUNKI_MUTATION_NAMES";
 
 /// Whether a `mutation.sh` says it reads [`NAMES_ENV`] ([`BY_NAME_MARK`]).
@@ -2527,7 +2529,7 @@ pub enum Replay {
 ///   every file, unchanged files included;
 /// - it counted each file ([`Campaign::files`]), and those counts add up to
 ///   its total: a partial campaign is rebuilt from them, and a script that
-///   gives none — the Python and Next.js ones, a project's own — or gave
+///   gives none — the Next.js one, a project's own — or gave
 ///   ones that do not add up leaves nothing to rebuild from;
 /// - its counts can be carried (`carried`, which says why when they cannot,
 ///   [`uncarried`]): the files changed since it could be listed, and every

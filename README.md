@@ -467,9 +467,9 @@ runs the coder and the mechanical gates only, so `mission new`, the start of
 the mission and `mission reframe` all refuse one with a service or a security
 agent.
 
-Python and Next.js projects judge `standard` as `critical` until their
-campaigns count changed lines: mutmut and Stryker are run over whole touched
-files, so they give no count, and every survivor needs an outcome there.
+Next.js projects judge `standard` as `critical` until their campaign counts
+changed lines: Stryker is run over whole touched files, so it gives no count,
+and every survivor needs an outcome there.
 
 ### Gate 7's campaigns, full and partial
 
@@ -510,9 +510,15 @@ file with that file's counts, `{"measured":"src/lib.rs","tried":12,"found":13}`,
 and its last line says `"by_file":true`. nunki trusts them only when each
 file is named once, every one is a path nunki handed that campaign, and
 they add up to the totals. The Rust template gives them, keyed by the file
-cargo-mutants' own account names for each mutant. The Python and Next.js
-ones measure whole files, give no count at all, and so never chain: every
-campaign of theirs is full.
+cargo-mutants' own account names for each mutant. The Python template gives
+them too: mutmut has no mode for a diff, so the script has it test only the
+functions and methods that hold a changed line, and counts only the mutants
+whose change reaches one, each placed on its line by mutmut's own
+`get_diff_for_mutant`. That function is internal to mutmut, not an
+interface: a mutmut without it measures nothing, and the tool's version,
+which the chain checks, ties the counts to the mutmut that placed them. The
+Next.js template measures whole files, gives no count at all, and so never
+chains: every campaign of its is full.
 
 **Survivors reported.** The last line may also say how many survivors the
 tool reported, `"missed":3`, taken from the tool's own account and never
@@ -523,9 +529,10 @@ is not recorded, gate 7 is red with both numbers, and `nunki push` has
 nothing to answer with. The Rust template gives it, from cargo-mutants'
 `outcomes.json`, and writes every line with `jq`, so a tab or a newline in
 a file's name is carried, escaped, and never splits a survivor in two. The
-Python and Next.js templates write theirs with a JSON encoder and give no
-count: their tools keep no tally of their own over the touched files, and
-a count taken from the lines they print would always agree with them. A
+Python and Next.js templates write theirs with a JSON encoder and say no
+`missed`: their tools keep no tally apart from the records the survivor
+lines are read from, and a count taken from those would always agree with
+them. A
 survivor's name is printed with its control characters escaped (`\u{9}`).
 
 **How a chain is judged: once.** `MUTANTS.json` keeps, for each touched

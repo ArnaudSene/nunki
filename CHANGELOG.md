@@ -11,6 +11,25 @@ merged since the last one. `AGENTS.md`, under "Releases", says how.
 
 ## [Unreleased]
 
+### Changed
+
+- **A Python mutation campaign now answers for the lines the branch
+  changed, not for whole files.** mutmut tests only the functions and
+  methods that hold a changed line, and the campaign counts and reports
+  only the mutants whose change reaches one, file by file.
+  - A `standard` Python mission is judged on its share of killed mutants,
+    no longer as `critical`. The limitation listed in 0.1.0 is lifted for
+    Python, and stays for Next.js.
+  - A later campaign of the same mission can be partial: it measures again
+    only the files changed since the previous one.
+  - A survivor on a line the branch did not change, in a function it did,
+    is no longer reported.
+  - Each mutant's line is read through `get_diff_for_mutant`, a function
+    inside mutmut that 3.8.0 has. With a mutmut that lacks it, the
+    campaign measures nothing and says why.
+  - In a project set up before, `nunki init --refresh` replaces the
+    campaign script if nobody has touched it.
+
 ### Fixed
 
 - **A Next.js mutation campaign now mutates every source the branch
