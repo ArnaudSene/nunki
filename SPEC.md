@@ -1221,16 +1221,18 @@ eux-mêmes plutôt que tus :
   sources`, trois étapes sans réseau ; `osv-scanner --licenses` passe par
   deps.dev, que la liste blanche du codeur ne nomme pas. La stack le dit plutôt
   que de laisser croire à une vérification qui n'a pas lieu.
-- **La campagne ne teste que les fichiers touchés, mais entiers.** `mutmut
-  run` prend des motifs glob sur les noms de mutants (mesuré sur 3.8.0) : un
-  motif par fichier touché, `<chemin pointé>.x*`, fait tester les mutants de ce
-  fichier et eux seuls, avec les seuls tests qui les atteignent. La génération
-  et les statistiques couvrent toujours tout l'arbre, et rien ne restreint la
-  campagne aux lignes changées : c'est pourquoi elle ne donne aucun compte
-  (4.4). Des motifs qui ne prennent aucun mutant — un module de constantes, un
-  script hors de `source_paths` — sont refusés par mutmut ; la campagne y lit
-  une branche sans rien de mutable, d'après ce que mutmut a laissé sur disque,
-  et non une campagne qui n'a pas pu tourner. L'autre restriction de mutmut,
+- **La campagne ne répond que des lignes changées.** `mutmut run` prend des
+  motifs glob sur les noms de mutants, ou des noms exacts (mesuré sur
+  3.8.0), et ne teste que ceux qu'ils prennent, avec les seuls tests qui les
+  atteignent. mutmut n'a aucun mode diff : c'est le script qui restreint la
+  campagne aux fonctions qui portent une ligne changée, puis ses comptes aux
+  mutants de ces lignes (4.4, `NUNKI_BASE`). La génération et les
+  statistiques couvrent toujours tout l'arbre, un coût fixe que chaque
+  campagne paie. Des motifs qui ne prennent aucun mutant — un module de
+  constantes, une fonction changée où rien ne se mute, un script hors de
+  `source_paths` — sont refusés par mutmut ; la campagne y lit une branche
+  sans rien de mutable, d'après ce que mutmut a laissé sur disque, et non une
+  campagne qui n'a pas pu tourner. L'autre restriction de mutmut,
   `only_mutate`, vit dans le `pyproject.toml` du projet, que la campagne ne
   réécrira pas : la copie propre de `HEAD` est aussi celle où tourne la
   porte 6.
@@ -1795,11 +1797,45 @@ dernier lot. La première rouge arrête tout.
    de fourche y est par construction. Une variable plutôt qu'un argument, pour
    que le `mutation.sh` qu'un projet a réécrit, qui lit
    `<campaign-id> <path>...`, continue de marcher tel quel. La stack restreint
-   sa campagne au diff depuis ce commit quand son outil le sait : pour Rust,
-   `cargo-mutants --in-diff`, qui ne garde que les mutants que le diff
-   atteint. Python (mutmut) et Next (Stryker) ne le font pas encore : leurs
-   scripts mutent toujours les fichiers entiers, et restreindre leurs
-   campagnes est un travail de stack à part. Un diff qui n'atteint aucun mutant — un commentaire, un test — est
+   sa campagne au diff depuis ce commit quand elle le sait, avec sa limite,
+   écrite :
+
+   - **Rust** : `cargo-mutants --in-diff`, qui ne garde que les mutants que
+     le diff atteint.
+   - **Python** : mutmut n'a aucun mode diff (lu jusqu'à 3.8.1). Le script ne
+     fait tester que les fonctions et les méthodes qui portent une ligne
+     changée, décorateurs compris, par les motifs de noms de mutmut
+     (`<module>.x_<fonction>__mutmut_*`,
+     `<module>.xǁ<Classe>ǁ<méthode>__mutmut_*`), et ne compte et ne rapporte
+     que les mutants dont le changement atteint une ligne changée ; les
+     autres mutants de ces fonctions tournent sans compter. Un mutant qu'il
+     ne sait pas placer, ou dont il ne connaît pas l'étendue, compte. Il
+     trouve les fonctions en lisant la source avec l'interpréteur du projet,
+     celles que mutmut mute — celles du module et les méthodes de ses
+     classes, rien d'autre (lu dans le code de mutmut) — et un mutant d'une
+     fonction qu'il n'y trouve pas fait une campagne qui n'a rien mesuré. La
+     ligne d'un mutant vient de `get_diff_for_mutant`, une fonction interne
+     de mutmut et non une interface : le script échoue fermé sans elle, et
+     `# nunki-tool-version` lie la chaîne à la version qui l'a donnée.
+     Mesuré sur mutmut 3.8.0, sur une branche qui changeait une fonction et
+     une méthode : 13 mutants testés sur les 51 du fichier, 6 comptés, et
+     des 3 survivants les 2 des lignes changées rapportés ; avec un point de
+     fourche plus ancien, qui rend changée la ligne du troisième, il l'est
+     aussi. Les motifs de deux fonctions donnent les mêmes survivants et les
+     mêmes verdicts que la campagne entière, sans prendre la fonction au nom
+     voisin (`matching_lines_all` pour `matching_lines`), et la
+     correspondance place 4 704 mutants en 5,5 s, aucun sans ligne. **Le
+     cache `mutants/` est vidé avant chaque campagne** : gardé, il a rendu
+     survivant un mutant que la campagne à froid rendait tué, parce qu'un
+     changement de source faisait atteindre sa fonction par un test de plus.
+     Un hunk qui ne fait que supprimer ne laisse aucune ligne changée : la
+     fonction qui a perdu ces lignes n'est mutée que si une autre des siennes
+     a changé. Non vérifié : une classe dans une classe, et si mutmut mute un
+     décorateur.
+   - **Next.js** : pas encore. Son script mute toujours les fichiers entiers,
+     et restreindre sa campagne est un travail de stack à part.
+
+   Un diff qui n'atteint aucun mutant — un commentaire, un test — est
    une campagne sans survivant, pas une campagne qui n'a pas pu tourner : les
    deux ne laissent aucun `mutants.out`, et seul le statut de l'outil les
    distingue (mesuré sur cargo-mutants 27.1.0 : 0 pour l'une, 1 pour un crate
