@@ -1251,10 +1251,13 @@ secrets. Trois choses lui sont propres, chacune parce qu'elle a été mesurée :
 - **La batterie de l'intégrateur teste l'application**, pas des modules :
   Playwright pilote un vrai Chromium contre ce que `run.sh` a lancé.
 - **Le statut de Stryker ne dit rien** — 0 avec des survivants, 0 sur un
-  fichier absent, 0 sur une source qui ne se parse pas — donc c'est son
-  rapport qui fait foi, et son identifiant de mutant étant un entier
-  séquentiel par fichier, `nunki` en reconstruit un stable à partir de la
-  position, du mutateur et du remplacement.
+  fichier absent à côté d'un fichier présent, 0 sur une source qui ne se
+  parse pas — donc c'est son rapport qui fait foi, et son identifiant de
+  mutant étant un entier séquentiel par fichier, `nunki` en reconstruit un
+  stable à partir de la position, du mutateur et du remplacement. Seul, un
+  fichier absent le fait sortir en 1, « No tests were executed » (mesuré
+  sur 10.0.0) : la campagne ne lui confie pas une source que la branche a
+  supprimée.
 
 ### 4.2 bis — Les plateformes
 
@@ -1832,8 +1835,44 @@ dernier lot. La première rouge arrête tout.
      fonction qui a perdu ces lignes n'est mutée que si une autre des siennes
      a changé. Non vérifié : une classe dans une classe, et si mutmut mute un
      décorateur.
-   - **Next.js** : pas encore. Son script mute toujours les fichiers entiers,
-     et restreindre sa campagne est un travail de stack à part.
+   - **Next.js** : Stryker prend des étendues de lignes,
+     `<fichier>:<début>-<fin>`. Le script lui en donne une par suite de
+     lignes que le diff ajoute, toutes dans un seul `--mutate` séparées par
+     des virgules ; un hunk qui ne fait que supprimer n'en donne aucune, et
+     une source que la branche a supprimée n'est pas confiée à Stryker.
+     **Limite, plus étroite que celle de Rust** : Stryker ne garde qu'un
+     mutant **entièrement** dans une étendue (lu dans son code,
+     `locationIncluded`, et mesuré : la ligne 12 changée, le bloc qu'elle
+     ouvre, des lignes 12 à 14, n'a pas été muté). Un bloc ou le corps d'une
+     fonction remplacé, qui déborde des lignes changées, n'est pas mesuré, là
+     où `--in-diff` garde un mutant que le diff atteint. Le script ne compte
+     et ne rapporte que les mutants dont les lignes atteignent une ligne
+     changée — Stryker n'en fait pas d'autres, mais le compte ne dépend pas
+     de la façon dont l'outil choisit ses mutants — et un mutant dont le
+     rapport ne donne pas les lignes compte. Les comptes viennent des
+     statuts du rapport : essayés, `Killed`, `Timeout`, `Survived` et
+     `NoCoverage` ; trouvés, les mêmes et `Pending` ; ni l'un ni l'autre,
+     `CompileError` et `RuntimeError`, que Stryker dit invalides, et
+     `Ignored`, comme les non viables de cargo-mutants. Compter `NoCoverage`
+     parmi les essayés est un choix, écrit : cargo-mutants n'a pas cet état.
+     Un rapport qui porte un fichier que le script n'a pas confié à Stryker
+     est une campagne qui n'a rien mesuré. Mesuré sur Stryker 10.0.0, sur
+     une branche qui changeait une ligne d'un fichier et en ajoutait trois à
+     un autre : 14 mutants comptés, là où les deux fichiers entiers en
+     portent 55, chacun avec le statut que lui donnait la campagne sur les
+     fichiers entiers ; plusieurs étendues et deux fichiers dans une valeur
+     en donnent l'union. Un même bloc est revenu `NoCoverage` de la campagne
+     sur son fichier entier et `Survived` d'une étendue sur sa fonction, deux
+     formes de survivant : la description d'un survivant ne porte donc pas
+     son statut, qui changerait la clé de report d'une mesure à l'autre.
+     **Le mode incrémental de Stryker n'est jamais pris** : allumé par la
+     configuration du projet, son fichier gardé, une campagne sur deux
+     étendues a rapporté les 55 mutants des deux fichiers, avec les statuts
+     d'une campagne d'avant. Le script donne à Stryker un fichier
+     incrémental que rien n'a écrit, hors de l'arbre, et la même campagne a
+     rapporté ses 14. Non vérifié : `CompileError`, `RuntimeError` et
+     `Timeout`, que le projet d'essai n'a jamais produits, et la durée sur un
+     projet réel.
 
    Un diff qui n'atteint aucun mutant — un commentaire, un test — est
    une campagne sans survivant, pas une campagne qui n'a pas pu tourner : les

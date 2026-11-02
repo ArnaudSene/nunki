@@ -467,10 +467,6 @@ runs the coder and the mechanical gates only, so `mission new`, the start of
 the mission and `mission reframe` all refuse one with a service or a security
 agent.
 
-Next.js projects judge `standard` as `critical` until their campaign counts
-changed lines: Stryker is run over whole touched files, so it gives no count,
-and every survivor needs an outcome there.
-
 ### Gate 7's campaigns, full and partial
 
 A mission's campaigns form a chain, and its unit is the **file**. The first
@@ -517,8 +513,11 @@ whose change reaches one, each placed on its line by mutmut's own
 `get_diff_for_mutant`. That function is internal to mutmut, not an
 interface: a mutmut without it measures nothing, and the tool's version,
 which the chain checks, ties the counts to the mutmut that placed them. The
-Next.js template measures whole files, gives no count at all, and so never
-chains: every campaign of its is full.
+Next.js template gives them too: Stryker takes line ranges, and the script
+hands it one for each run of lines the branch added, then counts what its
+report gives, keyed by the file each mutant is in. Stryker mutates only what
+sits wholly inside a range, so a block or a function body that reaches past
+the changed lines is not measured: a narrower answer than Rust's.
 
 **Survivors reported.** The last line may also say how many survivors the
 tool reported, `"missed":3`, taken from the tool's own account and never

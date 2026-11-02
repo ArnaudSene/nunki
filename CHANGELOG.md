@@ -19,7 +19,7 @@ merged since the last one. `AGENTS.md`, under "Releases", says how.
   only the mutants whose change reaches one, file by file.
   - A `standard` Python mission is judged on its share of killed mutants,
     no longer as `critical`. The limitation listed in 0.1.0 is lifted for
-    Python, and stays for Next.js.
+    Python.
   - A later campaign of the same mission can be partial: it measures again
     only the files changed since the previous one.
   - A survivor on a line the branch did not change, in a function it did,
@@ -27,6 +27,26 @@ merged since the last one. `AGENTS.md`, under "Releases", says how.
   - Each mutant's line is read through `get_diff_for_mutant`, a function
     inside mutmut that 3.8.0 has. With a mutmut that lacks it, the
     campaign measures nothing and says why.
+  - In a project set up before, `nunki init --refresh` replaces the
+    campaign script if nobody has touched it.
+- **A Next.js mutation campaign now answers for the lines the branch
+  changed, not for whole files.** Stryker is handed one line range for each
+  run of lines the branch added, and the campaign counts and reports what
+  it mutated there, file by file.
+  - A `standard` Next.js mission is judged on its share of killed mutants,
+    no longer as `critical`. The limitation listed in 0.1.0 is lifted for
+    Next.js too.
+  - A later campaign of the same mission can be partial, as for Rust and
+    Python.
+  - Stryker mutates only what sits wholly inside a range: a block or a
+    function body that reaches past the changed lines is not measured.
+  - A survivor's description no longer starts with its status, which
+    changed from one campaign to the next. An outcome already given to a
+    Next.js survivor is therefore not carried to the first campaign after
+    the update, and an equivalence the project's registry holds for one is
+    not proposed again: it has to be ruled once more.
+  - A project whose Stryker configuration turns on incremental mode no
+    longer has the campaign reuse an earlier run's results.
   - In a project set up before, `nunki init --refresh` replaces the
     campaign script if nobody has touched it.
 
@@ -47,6 +67,11 @@ merged since the last one. `AGENTS.md`, under "Releases", says how.
     campaign with a message rather than going unmeasured.
   - In a project set up before, `nunki init --refresh` replaces the
     campaign script if nobody has touched it.
+- **A Next.js branch whose only touched source it removed no longer leaves
+  gate 7 asking for a campaign for ever.** Handed that path alone, Stryker
+  ran no test and exited 1, "No tests were executed", which the campaign
+  read as a run that could not complete. It now hands Stryker no source the
+  branch removed.
 
 ## [0.1.1] - 2026-10-29
 
