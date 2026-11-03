@@ -126,11 +126,14 @@ pub const CAMPAIGN_ENV: [&str; 6] = [
 ];
 
 /// The line of a stack's `mutation.sh` that says it reads [`NAMES_ENV`].
-/// The stack's to say, as with [`TOOL_VERSION_MARK`]: the Rust stack's
-/// script says it, and the Python and Next.js ones do not. Stryker names no
-/// mutant; mutmut does, and runs a name exactly (measured on 3.8.0), but it
-/// numbers a function's mutants from the function's top, so once the
-/// function is edited a name can point at another mutant and still be found.
+/// The stack's to say, as with [`TOOL_VERSION_MARK`]: the Rust and Next.js
+/// stacks' scripts say it, and the Python one does not. Stryker names no
+/// mutant, and the Next.js script names one by the span of the code it
+/// replaces, which Stryker's `--mutate` runs again (measured on 10.0.0).
+/// mutmut does name its mutants, and runs a name exactly (measured on
+/// 3.8.0), but it numbers a function's mutants from the function's top, so
+/// once the function is edited a name can point at another mutant and still
+/// be found.
 pub const BY_NAME_MARK: &str = "# nunki-by-name: NUNKI_MUTATION_NAMES";
 
 /// Whether a `mutation.sh` says it reads [`NAMES_ENV`] ([`BY_NAME_MARK`]).

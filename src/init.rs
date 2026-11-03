@@ -3740,6 +3740,16 @@ pnpm exec vitest run --exclude '**/reports/**' --exclude '**/.stryker-tmp/**' \
 /// and added three to `search.ts`: 14 mutants counted, where the two whole
 /// files hold 55, with 12 survivors and 2 killed, each with the status the
 /// whole files' campaign gave it.
+///
+/// Measured by name on the same project and Stryker, with the script as
+/// this binary writes it. Without names, the same survivors and counts as
+/// the script before, each id with its span — and the ids unique, where
+/// the script before gave two survivors of `format.ts` one id. Handed the
+/// file changed since and two of `search.ts`'s three survivors by name: 16
+/// mutants run, the changed file's 11 and the 5 inside the two spans, and
+/// of those 5 the two named reported and counted. A test added since, then:
+/// the three named in `search.ts` killed, the two in `format.ts` reported
+/// again.
 const MUTATION_NEXT: &str = r##"#!/bin/sh
 # The mutation campaign for a Next.js project (SPEC 4.4, gate 7).
 #
@@ -3753,6 +3763,23 @@ const MUTATION_NEXT: &str = r##"#!/bin/sh
 # version are what the previous one ran with; without the line, every
 # campaign is full.
 # nunki-tool-version: pnpm exec stryker --version
+#
+# The next line tells `nunki` that this script measures mutants **by name**
+# (SPEC 4.4, the debt): given `NUNKI_MUTATION_NAMES`, a JSON list of the ids
+# this script gives its survivors, it runs those mutants as well as the ones
+# its scope reaches. A hardening mission and `nunki mutants run --owed`
+# measure the debt's survivors that way; without the line, `nunki` hands
+# this stack no name.
+# nunki-by-name: NUNKI_MUTATION_NAMES
+#
+# The next line says more: a name is looked for in any file of the project,
+# not only in the files handed. The recheck at a mission's final `HEAD`
+# (SPEC 4.4) hands the files changed since the campaign, and by name the
+# campaign's survivors in the files that did not change: handing those files
+# too would mutate again everything the branch changed in them. Without the
+# line, `nunki` hands this stack those files instead, and they are measured
+# again whole.
+# nunki-by-name-anywhere: NUNKI_MUTATION_NAMES
 #
 # The campaign answers for the lines this branch **changed**, not for every
 # line of the files it touched (SPEC 4.4). `nunki` sets `NUNKI_BASE` to the
@@ -3768,6 +3795,17 @@ const MUTATION_NEXT: &str = r##"#!/bin/sh
 # changed lines, is not tested: with line 12 changed, the block that line
 # opens, lines 12 to 14, was not. That is narrower than cargo-mutants'
 # `--in-diff`, and SPEC 4.4 says so.
+#
+# Stryker names no mutant, and a name is measured again **by its span**.
+# The id this script gives a survivor carries where the code it replaces
+# starts and ends, as the report gives them, and Stryker takes a span in
+# `--mutate` as it takes a line range, `<file>:<line>:<column>-<line>:<column>`.
+# Measured on Stryker 10.0.0: a survivor's span runs it again, with every
+# other mutant wholly inside that span — the other mutations of the same
+# code, or everything in a function body replaced whole — and two spans in
+# two files run in one `--mutate`. Of those, the campaign reports and counts
+# only the mutants it was handed, each found by its id; the others were
+# measured by the campaign before, in a file nobody changed since.
 #
 # It prints **one JSON object per line** on stdout, one per surviving mutant:
 #   {"id":"…","file":"…","line":12,"end_line":12,"description":"…"}
@@ -3851,11 +3889,12 @@ done
 # a branch touching only tests or documentation would be asked for ever.
 # Said from two places: here, for a branch that touched no source; and
 # below, for one that only removed lines from the sources it touched.
+# A campaign handed names has them to measure, path or not.
 nothing_mutable() {
   printf '{"campaign":"done","tried":0,"found":0,"by_file":true}\n'
   exit 0
 }
-if [ $# -eq 0 ]; then
+if [ $# -eq 0 ] && [ -z "${NUNKI_MUTATION_NAMES:-}" ]; then
   nothing_mutable
 fi
 
@@ -3889,7 +3928,7 @@ fi
 
 # What the campaign reads, in the project's own Node: one program for two
 # questions, so that what Stryker is asked to mutate and what the campaign
-# counts are decided by the same code:
+# counts are decided by the same code, the names it was handed among it:
 # - `plan` prints the value of `--mutate`;
 # - `read` prints the survivors and each file's counts, then the two totals.
 #
@@ -3934,6 +3973,56 @@ function bare(path) {
   return path.startsWith("./") ? path.slice(2) : path;
 }
 
+// The id this script gives a mutant: its file, the span of the code it
+// replaces, its mutator and what it wrote. Stryker's own id is a per-file
+// sequential integer that moves between runs, so a coder answering "#7"
+// would name something else next time; these stay the same. The
+// replacement is in it because one span carries several mutants:
+// `ConditionalExpression` to `true` and to `false` replace the very same
+// code. And the span whole, not where it starts, because that is what
+// `--mutate` takes to run it again. A location the report gives only in
+// part leaves the span out, and the id names a mutant no name can run.
+function idOf(file, mutant) {
+  const start = mutant.location?.start ?? {};
+  const end = mutant.location?.end ?? {};
+  const was = (mutant.replacement ?? "").replace(/\s+/g, " ").trim();
+  const known = [start.line, start.column, end.line, end.column].every(
+    (n) => Number.isInteger(n) && n > 0,
+  );
+  const span = known
+    ? `${start.line}:${start.column}-${end.line}:${end.column}`
+    : `${start.line}:${start.column}`;
+  return [file, span, mutant.mutatorName, was].join(":");
+}
+
+// The mutants `nunki` names, if it names any: a JSON list of at least one
+// id this script gave, each in a file of the project, handed or not. Each
+// is read back into its file and its span, and run under it; and it is
+// found again afterwards by its whole id, never by the parts read here. A
+// list that is not one, or a name without a span — one an older script
+// gave — measured nothing, and says so: a list read wrong would run other
+// mutants than the ones asked for.
+const SPAN = /^(.+?):([1-9][0-9]*):([1-9][0-9]*)-([1-9][0-9]*):([1-9][0-9]*):/;
+function named() {
+  const given = process.env.NUNKI_MUTATION_NAMES || "";
+  if (!given) return [];
+  let list = null;
+  try {
+    list = JSON.parse(given);
+  } catch {}
+  if (!Array.isArray(list) || list.length === 0 || !list.every((n) => typeof n === "string")) {
+    fail("NUNKI_MUTATION_NAMES is a JSON list of at least one mutant's name, and it is not, so the campaign measured nothing");
+  }
+  return list.map((name) => {
+    const at = SPAN.exec(name);
+    if (!at) {
+      fail(`${JSON.stringify(name)} is no name this script gives a mutant — its file, then where the code it replaces starts and ends — so the campaign measured nothing`);
+    }
+    const [first, from, last, to] = at.slice(2).map(Number);
+    return { name, file: at[1], first, from, last, to };
+  });
+}
+
 // The runs of lines the branch changed in `path` since its fork point, each
 // as its first and last line. As the Rust fragment asks git: `--no-renames`,
 // so that a file renamed is a file added whole, as `nunki` compares files
@@ -3976,14 +4065,29 @@ if (mode === "plan") {
   // left as it is: it only
   // means something at the start of a pattern, which is a `/` here, or
   // before a `(`, which is bracketed.
+  const glob = (path) => path.replace(/[\][*?{}()]/g, "[$&]");
   const entries = [];
   for (const path of rest) {
-    const pattern = path.replace(/[\][*?{}()]/g, "[$&]");
+    const pattern = glob(path);
     if (!base) {
       entries.push(pattern);
       continue;
     }
     for (const [first, last] of changed(path)) entries.push(`${pattern}:${first}-${last}`);
+  }
+  // Each name's span, where `--mutate` counts columns from 0 and the report
+  // from 1 (measured on 10.0.0). A file that is not there, or whose path
+  // the flag would split, cannot hold the mutant: what a name in a file the
+  // branch removed comes to.
+  for (const { name, file, first, from, last, to } of named()) {
+    if (!fs.existsSync(file)) {
+      fail(`${JSON.stringify(name)} names ${file}, which is not in the code the campaign runs on, so it measured nothing`);
+    }
+    if (file.includes(",")) {
+      fail(`${file} holds a comma, which Stryker's --mutate splits on, so the mutant named in it cannot be run and the campaign measured nothing`);
+    }
+    const entry = `${glob(file)}:${first}:${from - 1}-${last}:${to - 1}`;
+    if (!entries.includes(entry)) entries.push(entry);
   }
   process.stdout.write(entries.join(","));
   process.exit(0);
@@ -3994,29 +4098,43 @@ const touched = new Map();
 for (const path of rest.slice(1)) {
   touched.set(bare(path), { handed: path, runs: base ? changed(path) : null });
 }
+const names = new Map();
+for (const { name, file } of named()) {
+  if (!names.has(bare(file))) names.set(bare(file), new Set());
+  names.get(bare(file)).add(name);
+}
+const seen = new Set();
 
 let tried = 0;
 let found = 0;
 for (const [file, entry] of Object.entries(report.files ?? {})) {
-  // A file nobody handed is one the patterns took by mistake — what an
-  // unescaped dynamic route did — and its mutants are not the branch's.
+  // A file nobody handed or named is one the patterns took by mistake —
+  // what an unescaped dynamic route did — and its mutants are not the
+  // branch's.
   const here = touched.get(bare(file));
-  if (!here) {
+  const wanted = names.get(bare(file)) ?? new Set();
+  if (!here && wanted.size === 0) {
     fail(`Stryker's report holds mutants of ${file}, which the campaign did not hand it, so it cannot tell what it measured`);
   }
   const counts = { tried: 0, found: 0 };
   for (const mutant of entry.mutants ?? []) {
     const at = mutant.location?.start ?? {};
     const end = mutant.location?.end?.line;
-    // With a base, only a mutant whose lines reach a changed one is the
-    // branch's to answer for. Stryker already makes no other, but a count
-    // that depends on how a tool picks its mutants changes with the tool.
-    // One whose lines the report does not give counts.
-    if (
-      here.runs &&
-      Number.isInteger(at.line) &&
-      Number.isInteger(end) &&
-      !here.runs.some(([first, last]) => at.line <= last && end >= first)
+    const id = idOf(file, mutant);
+    // A mutant named is measured whatever its lines, and found again.
+    // Another is the campaign's only in a file handed, and with a base only
+    // when its lines reach a changed one: Stryker already makes no other in
+    // a range, but a count that depends on how a tool picks its mutants
+    // changes with the tool, and a span runs every mutant inside it. One
+    // whose lines the report does not give counts.
+    if (wanted.has(id)) {
+      seen.add(id);
+    } else if (
+      !here ||
+      (here.runs &&
+        Number.isInteger(at.line) &&
+        Number.isInteger(end) &&
+        !here.runs.some(([first, last]) => at.line <= last && end >= first))
     ) {
       continue;
     }
@@ -4025,13 +4143,6 @@ for (const [file, entry] of Object.entries(report.files ?? {})) {
     if (!UNTRIED.has(mutant.status)) counts.tried += 1;
     if (ANSWERED.has(mutant.status)) continue;
     const was = (mutant.replacement ?? "").replace(/\s+/g, " ").trim();
-    // The id Stryker gives is a per-file sequential integer that moves between
-    // runs, so a coder answering "#7" would name something else next time.
-    // The position, the mutator and what it wrote are what stay the same —
-    // and the replacement is in it because one position carries several
-    // mutants: `ConditionalExpression` to `true` and to `false` sit on the
-    // very same column.
-    const id = [file, at.line, at.column, mutant.mutatorName, was].join(":");
     // The description is what a ruling on the survivor is filed under, with
     // its file, so it does not carry the status: measured on 10.0.0, the same
     // block, `format.ts` lines 18 to 24, came back `NoCoverage` from the
@@ -4045,10 +4156,18 @@ for (const [file, entry] of Object.entries(report.files ?? {})) {
     process.stdout.write(JSON.stringify({ id, file, line: at.line, end_line, description: what }) + "\n");
   }
   if (counts.found) {
-    process.stdout.write(JSON.stringify({ measured: here.handed, tried: counts.tried, found: counts.found }) + "\n");
+    process.stdout.write(JSON.stringify({ measured: here ? here.handed : file, tried: counts.tried, found: counts.found }) + "\n");
   }
   tried += counts.tried;
   found += counts.found;
+}
+// A name Stryker did not make again is a mutant no longer in the code — the
+// code it replaces moved or changed — and the campaign measured nothing:
+// read without it, it would report killed a mutant it never ran.
+const handed = [...names.values()].flatMap((set) => [...set]);
+const missing = handed.filter((name) => !seen.has(name));
+if (missing.length) {
+  fail(`${missing.length} of the ${handed.length} mutant(s) this campaign was handed by name are not in the code it runs on — the code they mutate moved or changed since they were measured — so it measured nothing: ${JSON.stringify(missing.slice(0, 5))}`);
 }
 process.stdout.write(`${tried} ${found}\n`);
 JS

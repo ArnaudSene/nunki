@@ -1788,11 +1788,17 @@ fn the_next_campaign_trusts_its_report_and_only_a_failing_status() {
 
     // The id is built rather than taken: Stryker numbers its mutants per file
     // and the numbers move between runs, so a coder answering "#7" would name
-    // something else next time. And the replacement is in it because one
-    // position carries several mutants — `ConditionalExpression` to `true`
-    // and to `false` sit on the very same column.
+    // something else next time. The replacement is in it because one span
+    // carries several mutants — `ConditionalExpression` to `true` and to
+    // `false` replace the very same code — and the span whole because that
+    // is what `--mutate` runs again
+    // (`a_next_campaign_runs_a_named_mutant_by_its_span_and_reports_it_alone`).
     assert!(
-        script.contains("[file, at.line, at.column, mutant.mutatorName, was].join(\":\")"),
+        script.contains("[file, span, mutant.mutatorName, was].join(\":\")"),
+        "{script}"
+    );
+    assert!(
+        script.contains("`${start.line}:${start.column}-${end.line}:${end.column}`"),
         "{script}"
     );
     // Everything Stryker does not call detected or invalid owes an answer,
@@ -3761,6 +3767,18 @@ fn a_next_campaign_refuses_a_path_stryker_would_split() {
 /// it, when `after` is empty — with the fork point in `NUNKI_BASE`.
 #[cfg(unix)]
 fn next_campaign_on_branch(before: &str, after: &str, pnpm: &str) -> (String, String, Option<i32>) {
+    next_campaign_naming(before, after, pnpm, None)
+}
+
+/// [`next_campaign_on_branch`], handed `names` in `NUNKI_MUTATION_NAMES`
+/// when given.
+#[cfg(unix)]
+fn next_campaign_naming(
+    before: &str,
+    after: &str,
+    pnpm: &str,
+    names: Option<&str>,
+) -> (String, String, Option<i32>) {
     let (dir, root, nunki) = fresh();
     init(&root, &nunki, &["next".to_string()]).unwrap();
     let script = home(&root).join("stacks/next/mutation.sh");
@@ -3781,7 +3799,7 @@ fn next_campaign_on_branch(before: &str, after: &str, pnpm: &str) -> (String, St
     std::fs::write(tree.join("app/page.ts"), before).unwrap();
     git(&["add", "-A"]);
     git(&["commit", "-q", "-m", "base"]);
-    let base = git(&["rev-parse", "HEAD"]);
+    let fork = git(&["rev-parse", "HEAD"]);
     if after.is_empty() {
         git(&["rm", "-q", "app/page.ts"]);
     } else {
@@ -3789,15 +3807,18 @@ fn next_campaign_on_branch(before: &str, after: &str, pnpm: &str) -> (String, St
     }
     git(&["commit", "-q", "-am", "branch"]);
     let path = stubs(&dir.path().join("stub-bin"), &[("pnpm", pnpm)]);
-    let out = sh()
+    let mut campaign = sh();
+    campaign
         .arg(&script)
         .arg("abc123")
         .arg("app/page.ts")
         .env("PATH", path)
-        .env(nunki::mutants::BASE_ENV, &base)
-        .current_dir(&tree)
-        .output()
-        .expect("sh runs the campaign");
+        .env(nunki::mutants::BASE_ENV, &fork)
+        .current_dir(&tree);
+    if let Some(names) = names {
+        campaign.env(nunki::mutants::NAMES_ENV, names);
+    }
+    let out = campaign.output().expect("sh runs the campaign");
     (
         String::from_utf8_lossy(&out.stdout).into_owned(),
         String::from_utf8_lossy(&out.stderr).into_owned(),
@@ -3913,6 +3934,230 @@ fn the_next_campaign_mutates_and_counts_only_the_lines_the_branch_changed() {
         said.contains(r#"{"measured":"app/page.ts","tried":4,"found":4}"#),
         "{said}"
     );
+}
+
+/// [`PAGE_REPORT`] as a span returns it besides the lines the branch
+/// changed: `B`, on line 6, which the branch did not change, and `F`, a
+/// second mutation of the very code `B` replaces.
+#[cfg(unix)]
+const NAMED_REPORT: &str = r#"{"files":{"app/page.ts":{"mutants":[
+  {"status":"Survived","mutatorName":"A","replacement":"a","location":{"start":{"line":2,"column":10},"end":{"line":2,"column":15}}},
+  {"status":"NoCoverage","mutatorName":"B","replacement":"b","location":{"start":{"line":6,"column":10},"end":{"line":6,"column":15}}},
+  {"status":"Survived","mutatorName":"F","replacement":"f","location":{"start":{"line":6,"column":10},"end":{"line":6,"column":15}}},
+  {"status":"NoCoverage","mutatorName":"C","replacement":"{}","location":{"start":{"line":1,"column":38},"end":{"line":3,"column":2}}},
+  {"status":"Killed","mutatorName":"D","replacement":"d","location":{"start":{"line":10,"column":10},"end":{"line":10,"column":15}}}]}}}"#;
+
+/// A survivor's id carries the span of the code it replaces, and a name
+/// handed is run by that span, its columns counted from 0 as `--mutate`
+/// counts them where the report counts from 1 (measured on Stryker 10.0.0).
+/// Of what the span returns, the campaign reports and counts the mutant
+/// named and not `F`, its sibling on a line the branch did not change.
+#[cfg(unix)]
+#[test]
+fn a_next_campaign_runs_a_named_mutant_by_its_span_and_reports_it_alone() {
+    if !present(
+        "node",
+        "a_next_campaign_runs_a_named_mutant_by_its_span_and_reports_it_alone",
+    ) {
+        return;
+    }
+    let pnpm = STRYKER_RANGES.replace("REPORT", NAMED_REPORT);
+    let (said, why, code) = next_campaign_naming(
+        PAGE_BEFORE,
+        PAGE_AFTER,
+        &pnpm,
+        Some(r#"["app/page.ts:6:10-6:15:B:b"]"#),
+    );
+    assert_eq!(code, Some(0), "{said}\n{why}");
+    assert!(
+        why.contains("mutate: app/page.ts:2-2,app/page.ts:8-11,app/page.ts:6:9-6:14\n"),
+        "{why}"
+    );
+    let ids: Vec<String> = nunki::mutants::parse(&said)
+        .into_iter()
+        .map(|survivor| survivor.id)
+        .collect();
+    assert_eq!(
+        ids,
+        [
+            "app/page.ts:2:10-2:15:A:a",
+            "app/page.ts:6:10-6:15:B:b",
+            "app/page.ts:1:38-3:2:C:{}"
+        ],
+        "{said}"
+    );
+    assert!(
+        said.contains(r#"{"measured":"app/page.ts","tried":4,"found":4}"#),
+        "{said}"
+    );
+    assert_eq!(
+        said.lines().last(),
+        Some(r#"{"campaign":"done","tried":4,"found":4,"by_file":true}"#),
+        "{said}"
+    );
+}
+
+/// Handed names and no path, the campaign runs the named mutants alone,
+/// counts them in their file, and reads no diff: there is no git here, and
+/// the base names no commit.
+#[cfg(unix)]
+#[test]
+fn a_next_campaign_handed_names_and_no_path_runs_them_alone_and_reads_no_diff() {
+    if !present(
+        "node",
+        "a_next_campaign_handed_names_and_no_path_runs_them_alone_and_reads_no_diff",
+    ) {
+        return;
+    }
+    let pnpm = STRYKER_RANGES.replace("REPORT", NAMED_REPORT);
+    let (said, why, code) = campaign_of_paths(
+        "next",
+        &[],
+        &[("pnpm", &pnpm)],
+        &[("app/page.ts", PAGE_AFTER)],
+        &[
+            (nunki::mutants::BASE_ENV, "not-a-commit"),
+            (
+                nunki::mutants::NAMES_ENV,
+                r#"["app/page.ts:6:10-6:15:B:b"]"#,
+            ),
+        ],
+    );
+    assert_eq!(code, Some(0), "{said}\n{why}");
+    assert!(why.contains("mutate: app/page.ts:6:9-6:14\n"), "{why}");
+    let ids: Vec<String> = nunki::mutants::parse(&said)
+        .into_iter()
+        .map(|survivor| survivor.id)
+        .collect();
+    assert_eq!(ids, ["app/page.ts:6:10-6:15:B:b"], "{said}");
+    assert!(
+        said.contains(r#"{"measured":"app/page.ts","tried":1,"found":1}"#),
+        "{said}"
+    );
+    assert_eq!(
+        said.lines().last(),
+        Some(r#"{"campaign":"done","tried":1,"found":1,"by_file":true}"#),
+        "{said}"
+    );
+}
+
+/// What a campaign cannot run by name measured nothing, and Stryker is not
+/// started: a list that is not one, a name without a span — what an older
+/// script gave — a name in a file that is not there, and one in a file
+/// whose path `--mutate` would split.
+#[cfg(unix)]
+#[test]
+fn a_next_campaign_refuses_names_it_cannot_run_before_stryker_starts() {
+    if !present(
+        "node",
+        "a_next_campaign_refuses_names_it_cannot_run_before_stryker_starts",
+    ) {
+        return;
+    }
+    let pnpm = STRYKER_RANGES.replace("REPORT", NAMED_REPORT);
+    for (names, said_why) in [
+        (r#"{"a":1}"#, "is a JSON list of at least one mutant's name"),
+        ("[]", "is a JSON list of at least one mutant's name"),
+        (
+            r#"["app/page.ts:6:10:B:b"]"#,
+            "is no name this script gives",
+        ),
+        (
+            r#"["app/gone.ts:6:10-6:15:B:b"]"#,
+            "names app/gone.ts, which is not in the code",
+        ),
+        (r#"["app/a,b.ts:1:1-1:5:B:b"]"#, "app/a,b.ts holds a comma"),
+    ] {
+        let (said, why, code) = campaign_of_paths(
+            "next",
+            &[],
+            &[("pnpm", &pnpm)],
+            &[
+                ("app/page.ts", PAGE_AFTER),
+                ("app/a,b.ts", "export const y = 2;\n"),
+            ],
+            &[(nunki::mutants::NAMES_ENV, names)],
+        );
+        assert_ne!(code, Some(0), "{names}: {said}\n{why}");
+        assert!(!nunki::mutants::completed(&said), "{names}: {said}\n{why}");
+        assert!(why.contains(said_why), "{names}: {why}");
+        assert!(!why.contains("asked: "), "{names}: Stryker ran: {why}");
+    }
+}
+
+/// Two survivors of the very same code share a span, and `--mutate` is
+/// handed it once; each is reported, under its own id.
+#[cfg(unix)]
+#[test]
+fn a_next_campaign_runs_one_span_for_two_survivors_of_the_same_code() {
+    if !present(
+        "node",
+        "a_next_campaign_runs_one_span_for_two_survivors_of_the_same_code",
+    ) {
+        return;
+    }
+    let pnpm = STRYKER_RANGES.replace("REPORT", NAMED_REPORT);
+    let (said, why, code) = campaign_of_paths(
+        "next",
+        &[],
+        &[("pnpm", &pnpm)],
+        &[("app/page.ts", PAGE_AFTER)],
+        &[(
+            nunki::mutants::NAMES_ENV,
+            r#"["app/page.ts:6:10-6:15:B:b","app/page.ts:6:10-6:15:F:f"]"#,
+        )],
+    );
+    assert_eq!(code, Some(0), "{said}\n{why}");
+    assert!(why.contains("mutate: app/page.ts:6:9-6:14\n"), "{why}");
+    let ids: Vec<String> = nunki::mutants::parse(&said)
+        .into_iter()
+        .map(|survivor| survivor.id)
+        .collect();
+    assert_eq!(
+        ids,
+        ["app/page.ts:6:10-6:15:B:b", "app/page.ts:6:10-6:15:F:f"],
+        "{said}"
+    );
+}
+
+/// A name Stryker does not make again is a mutant no longer in the code,
+/// and the campaign measured nothing: read without it, it would report
+/// killed a mutant it never ran. Found by its whole id, so a span that
+/// holds a mutant of another mutator is not the one named.
+#[cfg(unix)]
+#[test]
+fn a_next_campaign_that_does_not_find_a_named_mutant_measured_nothing() {
+    if !present(
+        "node",
+        "a_next_campaign_that_does_not_find_a_named_mutant_measured_nothing",
+    ) {
+        return;
+    }
+    let pnpm = STRYKER_RANGES.replace("REPORT", NAMED_REPORT);
+    for names in [
+        r#"["app/page.ts:6:10-6:16:B:b"]"#,
+        r#"["app/page.ts:6:10-6:15:G:b"]"#,
+    ] {
+        let (said, why, code) = campaign_of_paths(
+            "next",
+            &[],
+            &[("pnpm", &pnpm)],
+            &[("app/page.ts", PAGE_AFTER)],
+            &[(nunki::mutants::NAMES_ENV, names)],
+        );
+        assert_ne!(code, Some(0), "{names}: {said}\n{why}");
+        assert!(!nunki::mutants::completed(&said), "{names}: {said}\n{why}");
+        assert!(
+            why.contains("asked: "),
+            "{names}: Stryker did not run: {why}"
+        );
+        assert!(
+            why.contains(
+                "1 of the 1 mutant(s) this campaign was handed by name are not in the code"
+            ),
+            "{names}: {why}"
+        );
+    }
 }
 
 /// A branch that only removed lines from the sources it touched has nothing
@@ -5060,7 +5305,9 @@ exit 0
 
 /// Next.js: the span is the report's `location.end.line` when it is a whole
 /// number from 1 up, and 0 — unknown — when it is anything else, as the
-/// Rust template does with what jq reads.
+/// Rust template does with what jq reads. And the id carries the span only
+/// from a location whole numbers give in full: from any other, it says
+/// where the code starts, and names a mutant no name can run again.
 #[cfg(unix)]
 #[test]
 fn the_next_campaign_carries_each_survivors_span_and_sanitises_it() {
@@ -5093,6 +5340,21 @@ exit 0
     assert_eq!(
         ends,
         vec![Some(4), Some(0), Some(0), Some(0), Some(0)],
+        "{said}"
+    );
+    let ids: Vec<String> = nunki::mutants::parse(&said)
+        .into_iter()
+        .map(|s| s.id)
+        .collect();
+    assert_eq!(
+        ids,
+        [
+            "app/page.ts:2:1-4:2:A:a",
+            "app/page.ts:5:1:B:b",
+            "app/page.ts:6:1:C:c",
+            "app/page.ts:7:1:D:d",
+            "app/page.ts:8:1:E:e"
+        ],
         "{said}"
     );
 }
@@ -6643,12 +6905,13 @@ fn a_campaign_handed_names_over_its_budget_samples_them_under_one_filter() {
     assert!(ran(&said).iter().all(|s| expected.contains(s)), "{said}");
 }
 
-/// The Rust stack's script says it measures by name, and in every file of
-/// its crate, and nunki hands names only to a script that says it: the
-/// Python and Next.js scripts, whose tools nunki has not measured by name,
-/// do not, and a recheck hands them their survivors' files instead.
+/// The Rust and Next.js stacks' scripts say they measure by name, and in
+/// every file of the stack, and nunki hands names only to a script that
+/// says it: the Python script, whose tool nunki has not measured by name
+/// with a guard, does not, and a recheck hands it its survivors' files
+/// instead.
 #[test]
-fn only_the_rust_script_says_it_measures_by_name() {
+fn the_python_script_alone_does_not_say_it_measures_by_name() {
     let (_dir, root, nunki) = fresh();
     init(&root, &nunki, &KNOWN_STACKS.map(str::to_string)).unwrap();
     for stack in KNOWN_STACKS {
@@ -6661,12 +6924,12 @@ fn only_the_rust_script_says_it_measures_by_name() {
         .unwrap();
         assert_eq!(
             nunki::mutants::measures_by_name(&script),
-            stack == "rust",
+            stack != "python",
             "{stack}"
         );
         assert_eq!(
             nunki::mutants::measures_by_name_anywhere(&script),
-            stack == "rust",
+            stack != "python",
             "{stack}"
         );
     }

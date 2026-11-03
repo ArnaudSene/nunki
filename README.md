@@ -514,15 +514,20 @@ its `mutation.sh` says it looks for a name in every file of the stack,
 `# nunki-by-name:` line. The Rust template says it: cargo-mutants runs exact
 names under one `-F` in every file of the crate, and the run's other
 mutants with them, behind one baseline (measured on 27.1.0, in a workspace
-too). The Python and Next.js templates do not, and a recheck hands them
-their survivors' files instead, measured again whole like changed ones:
-correct, and close to a second campaign when the survivors are spread over
-many files. A project still on an older Rust script, set up before and not
-refreshed with `nunki init --refresh`, is rechecked by file too: that script
+too). The Next.js template says it too. Stryker names no mutant, so the
+template's id for a survivor carries the span of the code it replaces, and
+Stryker runs that span again as it runs a line range, in the same run as
+the files changed. A span also runs the other mutants inside it; only the
+one named is reported (measured on 10.0.0). The Python template does not,
+and a recheck hands it its survivors' files instead, measured again whole
+like changed ones: correct, and close to a second campaign when the
+survivors are spread over many files. A project still on an older Rust or
+Next.js script, set up before and not refreshed with
+`nunki init --refresh`, is rechecked by file too: the older Rust script
 looked for a name only in the files it was handed, and given others it
-measured nothing (measured). A name the tool cannot find in an unchanged
-file is a recheck that measured nothing, and says so: never a survivor
-counted killed.
+measured nothing (measured); the older Next.js one read no name. A name
+the tool cannot find in an unchanged file is a recheck that measured
+nothing, and says so: never a survivor counted killed.
 
 **When the recheck continues the campaign.** It is partial when all of these
 hold, and full otherwise, with the reason in `MUTANTS.json`:
@@ -943,31 +948,35 @@ nunki mutants status                       # read it back, and say the debt
     one. Frozen, because a campaign or a ruling can change the debt under a
     mission already framed.
   - **What it takes.** Oldest first, the survivors a stack can measure by
-    name (its `mutation.sh` carries `# nunki-by-name:
-    NUNKI_MUTATION_NAMES`; only the Rust stack's does), whose file has not
-    changed in your repository between the commit that found them and the
-    base: a name holds a line and a column. Not those the registry proposes
-    as equivalent, which `--ratify` settles. And no more than its campaign's
-    budget measures at the project's pace, so that its gate 7 runs every
-    one of them. That is an aim, not a promise: the pace is the one on file
-    at framing, and the campaign also measures what the branch changes. If
-    the pace rises before it runs, or the branch adds code to mutate, the
-    union no longer fits the budget and is sampled like any campaign. The
-    verb says how many it left, and why.
+    name (its `mutation.sh` carries `# nunki-by-name: NUNKI_MUTATION_NAMES`;
+    the Rust and Next.js stacks' do), whose file has not changed in your
+    repository between the commit that found them and the base: a name holds
+    a line and a column. Not those the registry proposes as equivalent,
+    which `--ratify` settles. And no more than its campaign's budget
+    measures at the project's pace, so that its gate 7 runs every one of
+    them. That is an aim, not a promise: the pace is the one on file at
+    framing, and the campaign also measures what the branch changes. If the
+    pace rises before it runs, or the branch adds code to mutate, the union
+    no longer fits the budget and is sampled like any campaign. The verb
+    says how many it left, and why.
   - **Its gate 7.** A mission that writes only tests reaches no mutant
     through its diff: a file under `tests/` is never mutated (measured on
     cargo-mutants 27.1.0). So its campaign runs its survivors by name, as
-    well as what its branch changed, and is always full. The script lists
-    both and runs the union by name under one `-F`: measured on 27.1.0, two
+    well as what its branch changed, and is always full. The Rust script
+    lists both and runs the union by name under one `-F`: measured on 27.1.0, two
     `-F` select what either selects, and an `-F` selects within `--in-diff`
     or `--file`, never beyond. The budget's sample is drawn from that union.
-    Its fingerprint holds the survivors' files and names, so a rebase that
-    changes one of those files is other content.
+    The Next.js script hands Stryker each survivor's span beside the lines
+    the branch changed, in one `--mutate`. Its fingerprint holds the
+    survivors' files and names, so a rebase that changes one of those files
+    is other content.
   - **A name no longer in the code measures nothing.** Its line moved, or
     the code it replaces changed, and a campaign run without it would count
     killed a mutant it never ran. Measured on 27.1.0: a `#[cfg(test)]`
     module added at the end of a file keeps every name in it, and a line
-    added above them moves them all. The brief tells the coder.
+    added above them moves them all. With Stryker, a span that no longer
+    holds the mutant named, its mutator and what it writes, measures
+    nothing too (measured on 10.0.0). The brief tells the coder.
   - **Settling the debt.** The mission's tests settle nothing until they are
     on the base. `--owed` then runs the debt's survivors by name, measurable
     on the same conditions, with the base's own commit as the fork point, so
@@ -981,10 +990,13 @@ nunki mutants status                       # read it back, and say the debt
     (read, not measured). Beyond it, the oldest go first, and the next
     campaign takes the rest: a survivor found again comes back at the end
     of the debt.
-  - **Limits.** Only the Rust stack measures by name; the other stacks'
-    survivors wait for a campaign on the whole code. A base that moves after
-    framing and changes a survivor's file makes its campaign measure
-    nothing, and a new hardening mission takes it up.
+  - **Limits.** The Python stack does not measure by name, and its
+    survivors wait for a campaign on the whole code. A Next.js survivor the
+    debt holds from an older script has an id without a span: a campaign
+    handed it measures nothing, and `nunki mutants run --whole` replaces
+    the debt. A base that moves after framing and changes a survivor's file
+    makes its campaign measure nothing, and a new hardening mission takes
+    it up.
 - **The disk.** The sweep and the 2 GiB floor apply here as in a mission.
   What the sweep frees on a large crate is not measured, and on a nearly
   full disk shared with other services, a whole-crate campaign will meet
