@@ -110,6 +110,7 @@ fn alive() -> Context {
         watcher: Watcher::Alive,
         window: None,
         proposals: Ok(Vec::new()),
+        campaign: None,
     }
 }
 
@@ -360,6 +361,7 @@ fn a_spent_window_returns_12_with_its_reset() {
             until: 0,
         }),
         proposals: Ok(Vec::new()),
+        campaign: None,
     };
     let said = status("m1", &coding(), &context).unwrap();
     assert_eq!((said.stop, said.code), (Stop::WindowSpent, 12));
@@ -382,6 +384,7 @@ fn a_gate_that_could_not_be_played_returns_13_naming_the_gate_and_the_reason() {
         },
         window: None,
         proposals: Ok(Vec::new()),
+        campaign: None,
     };
     let state = state_of(flow(Security::Gates, vec![finished(true)]));
     let said = status("m1", &state, &context).unwrap();
@@ -403,6 +406,7 @@ fn a_dead_monitor_during_a_running_stage_returns_14() {
         watcher: Watcher::Gone,
         window: None,
         proposals: Ok(Vec::new()),
+        campaign: None,
     };
     let said = status("m1", &coding(), &context).unwrap();
     assert_eq!((said.stop, said.code), (Stop::MonitorGone, 14));
@@ -434,6 +438,7 @@ fn where_the_flow_stands_comes_before_the_monitor() {
             watcher,
             window: None,
             proposals: Ok(Vec::new()),
+            campaign: None,
         };
         assert_eq!(
             status("m1", &verified(), &context).map(|s| s.stop),
@@ -933,6 +938,7 @@ fn agent_text_reaches_waits_line_escaped_never_raw() {
         },
         window: None,
         proposals: Ok(Vec::new()),
+        campaign: None,
     };
     lines.push((
         "the monitor's word",
@@ -945,6 +951,7 @@ fn agent_text_reaches_waits_line_escaped_never_raw() {
         watcher: Watcher::Gone,
         window: None,
         proposals: Ok(Vec::new()),
+        campaign: None,
     };
     lines.push((
         "a lot's label",
@@ -1178,5 +1185,237 @@ fn a_report_that_does_not_block_says_so_and_names_accept_first() {
         !said.line().contains("`nunki mission iterate m1` sends"),
         "{}",
         said.line()
+    );
+}
+
+// --- a campaign with no monitor (#183) -----------------------------------
+
+/// A mission at its recheck, the stage a campaign runs at.
+fn at_recheck() -> MissionState {
+    state_of(flow(
+        Security::Gates,
+        vec![finished(true), Event::GatesPassed],
+    ))
+}
+
+fn gone_with(campaign: Option<nunki::wait::Campaign>) -> Context {
+    Context {
+        watcher: Watcher::Gone,
+        campaign,
+        ..alive()
+    }
+}
+
+fn ended() -> nunki::wait::Campaign {
+    nunki::wait::Campaign::Over {
+        said: "abc1234 has ended, its log says, and is not read back yet".into(),
+    }
+}
+
+/// With no monitor, a campaign started detached moves the mission as a run
+/// does, and `wait` blocks on it. It returned at once, exit 14, saying that
+/// nothing moved the mission and that `nunki verify` would start a
+/// campaign, when one was in flight (#183). Once the campaign no longer
+/// moves the mission by itself, the line says so and names the reading
+/// that does.
+#[test]
+fn with_no_monitor_wait_blocks_on_a_campaign_in_flight_and_says_when_it_is_over() {
+    use nunki::wait::Campaign;
+    assert_eq!(at_recheck().flow.stage(), &Stage::FinalCampaign);
+    assert_eq!(
+        status("m1", &at_recheck(), &gone_with(Some(Campaign::Running))),
+        None
+    );
+
+    let said = status("m1", &at_recheck(), &gone_with(Some(ended()))).unwrap();
+    assert_eq!((said.stop, said.code), (Stop::MonitorGone, 14));
+    assert_says(
+        &said,
+        &[
+            "m1 · recheck · no monitor is watching, and the campaign abc1234 has ended, its log \
+             says, and is not read back yet",
+            "awaits the human: `nunki verify m1` reads it back and plays gate 7",
+        ],
+    );
+    assert!(!said.line().contains("starts one"), "{}", said.line());
+
+    // Read again while it runs, and returned once it is over.
+    let reading = |campaign| Observed::Live {
+        state: Box::new(at_recheck()),
+        context: gone_with(campaign),
+    };
+    let mut clock = clock();
+    let said = wait(
+        "m1",
+        &mut Script(VecDeque::from([
+            reading(Some(Campaign::Running)),
+            reading(Some(Campaign::Running)),
+            reading(Some(ended())),
+        ])),
+        &mut clock,
+        30,
+        None,
+    )
+    .unwrap();
+    assert_eq!(said.code, 14);
+    assert_eq!(clock.slept, [30, 30]);
+}
+
+/// Whether a campaign runs, not known, is said and never waited on; a held
+/// mission is held, campaign or not; and with no campaign the line is the
+/// one it always was.
+#[test]
+fn with_no_monitor_a_campaign_not_known_is_said_and_a_hold_comes_first() {
+    use nunki::wait::Campaign;
+    let said = status(
+        "m1",
+        &at_recheck(),
+        &gone_with(Some(Campaign::Unknown {
+            why: "MUTANTS.run.json: expected value".into(),
+        })),
+    )
+    .unwrap();
+    assert_eq!((said.stop, said.code), (Stop::MonitorGone, 14));
+    assert_says(
+        &said,
+        &[
+            "whether a campaign runs could not be read: MUTANTS.run.json: expected value",
+            "awaits the human: `nunki verify m1` picks the mission up",
+        ],
+    );
+
+    let mut held = at_recheck();
+    held.stopped = Some(Stopped {
+        who: "Alex Martin".into(),
+        date: "now".into(),
+        interrupted: false,
+        reason: None,
+    });
+    let said = status("m1", &held, &gone_with(Some(Campaign::Running))).unwrap();
+    assert_eq!(said.stop, Stop::Held);
+
+    let said = status("m1", &at_recheck(), &gone_with(None)).unwrap();
+    assert_says(
+        &said,
+        &[
+            "no monitor is watching, and nothing moves the mission",
+            "`nunki verify m1` picks it up and starts one",
+        ],
+    );
+}
+
+/// The HQ's reader takes the mission's campaign from the slot's record and
+/// the campaign's log, as `mission status` does, without asking the
+/// container: running while the log has no last line and the deadline is
+/// not past; over once the log has it, or once the deadline is past; none
+/// of the mission's when the record is a campaign outside missions or logs
+/// outside the mission's folder; and not known when the log or the record
+/// cannot be read.
+#[test]
+fn the_hq_reads_the_missions_campaign_from_the_slots_record() {
+    use nunki::wait::Campaign;
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    save(&project, &at_recheck());
+    let runs = nunki::mission::dir::Paths::of(&project.hq_root, "m1")
+        .dir
+        .join("runs");
+    std::fs::create_dir_all(&runs).unwrap();
+    let log = runs.join("mutants-abc1234.log");
+    let survivor = "{\"id\":\"s1\",\"file\":\"src/lib.rs\",\"line\":3,\"description\":\"x\"}\n";
+    std::fs::write(&log, survivor).unwrap();
+    let record = |log: &Path, started_at: String, off_mission| {
+        nunki::mutants::write_running(
+            &project.hq_root,
+            "one",
+            &nunki::mutants::Running {
+                off_mission,
+                chain: Default::default(),
+                fingerprint: "abc1234def".into(),
+                head: "def5678".into(),
+                started_at,
+                container: "cafe1234".into(),
+                pid: Some(41),
+                log: log.to_path_buf(),
+                deadline_minutes: 45,
+            },
+        )
+        .unwrap();
+    };
+    let observe = || match nunki::wait::Hq::watched_by(&project, |_, _| false)
+        .observe("m1")
+        .unwrap()
+    {
+        Observed::Live { context, .. } => context.campaign,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(observe(), None, "no record");
+
+    record(&log, nunki::state::rfc3339(nunki::state::now_secs()), None);
+    assert_eq!(observe(), Some(Campaign::Running));
+
+    std::fs::write(&log, format!("{survivor}{{\"campaign\":\"done\"}}\n")).unwrap();
+    assert_eq!(
+        observe(),
+        Some(Campaign::Over {
+            said: "abc1234 has ended, its log says, and is not read back yet".into()
+        })
+    );
+
+    std::fs::write(&log, survivor).unwrap();
+    // Past it as the reading that stops a campaign counts it: at its 45th
+    // minute it still runs, and it is over at its 46th.
+    let ago = |minutes: u64| nunki::state::rfc3339(nunki::state::now_secs() - minutes * 60);
+    record(&log, ago(45), None);
+    assert_eq!(observe(), Some(Campaign::Running), "at the deadline");
+    record(&log, ago(46), None);
+    assert!(
+        matches!(observe(), Some(Campaign::Over { said }) if said.contains("is past its deadline")),
+        "past it"
+    );
+    record(&log, "2026-01-01T00:00:00Z".into(), None);
+    match observe() {
+        Some(Campaign::Over { said }) => {
+            assert!(said.starts_with("abc1234 is past its deadline, "), "{said}");
+            assert!(said.ends_with(" of 45 minute(s)"), "{said}");
+        }
+        other => panic!("{other:?}"),
+    }
+
+    let elsewhere = dir.path().join("mutants-abc1234.log");
+    std::fs::write(&elsewhere, survivor).unwrap();
+    record(
+        &elsewhere,
+        nunki::state::rfc3339(nunki::state::now_secs()),
+        None,
+    );
+    assert_eq!(observe(), None, "another mission's");
+    record(
+        &log,
+        nunki::state::rfc3339(nunki::state::now_secs()),
+        Some(nunki::mutants::OffMission {
+            base: "dev".into(),
+            commit: "def5678".into(),
+            since: None,
+            changed: None,
+            owed: None,
+        }),
+    );
+    assert_eq!(observe(), None, "outside missions");
+
+    record(&log, nunki::state::rfc3339(nunki::state::now_secs()), None);
+    std::fs::remove_file(&log).unwrap();
+    assert!(
+        matches!(observe(), Some(Campaign::Unknown { why }) if why.contains("its log could not be read")),
+        "no log"
+    );
+    std::fs::write(
+        nunki::mutants::running_path(&project.hq_root, "one"),
+        "not json",
+    )
+    .unwrap();
+    assert!(
+        matches!(observe(), Some(Campaign::Unknown { .. })),
+        "no record to read"
     );
 }
