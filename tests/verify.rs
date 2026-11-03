@@ -409,8 +409,9 @@ fn a_slot_already_held_is_not_verified_under_the_other_hq() {
 }
 
 /// The whole phase, end to end, in a real container: gates 1 to 4 while the
-/// coder works, then the final seven, a red gate 7 sending it back, a
-/// campaign, a triage, and `VERIFIED`.
+/// coder works, then the final seven, a campaign, a red gate 7 sending it
+/// back, a triage and the test it names, the recheck at the final `HEAD`, and
+/// `VERIFIED`.
 ///
 /// This is the test the verb exists for. Everything else here checks one
 /// transition; this one checks that the transitions compose.
@@ -445,10 +446,13 @@ fn live_a_mission_is_driven_from_its_first_lot_to_verified() {
     );
     executable(
         nunki::mutants::SCRIPT,
+        // The survivor is reported until the test that kills it is
+        // committed, as a real campaign stops finding a mutant a test kills.
         // The last line is the one `nunki` reads as "this campaign got to the
         // end" (SPEC 4.4). Without it a campaign that found nothing and one
         // that was killed are the same log.
         "#!/bin/sh\n\
+         grep -q -w two_is_not_zero tests/thing.rs || \
          echo '{\"id\":\"src/new.rs:1\",\"file\":\"src/new.rs\",\"line\":1,\
          \"description\":\"replace two with 0\"}'\n\
          echo '{\"campaign\":\"done\"}'\n",
@@ -587,18 +591,16 @@ fn live_a_mission_is_driven_from_its_first_lot_to_verified() {
     // 4. The campaign runs — through the flow's own entry point, the one the
     // monitor calls on that step, so this proves it against a real engine
     // where a fake can only prove the decision to call it.
-    loop {
+    let campaign = || loop {
         match nunki::verify::campaign(&world.project, "m1", engine.clone()).unwrap() {
             nunki::mutants::Progress::Running { .. } => {
                 std::thread::sleep(std::time::Duration::from_millis(300))
             }
             nunki::mutants::Progress::Started { .. } => {}
-            other => {
-                println!("campaign: {other:?}");
-                break;
-            }
+            other => break other,
         }
-    }
+    };
+    println!("campaign: {:?}", campaign());
     // 4 bis. The survivor has no outcome, so gate 7 is **red** — the agent's
     // to answer, unlike the unplayable gate above — and a red gate at the
     // final verification opens a volet: the coder is sent back for it.
@@ -626,12 +628,19 @@ fn live_a_mission_is_driven_from_its_first_lot_to_verified() {
     );
 
     // What the coder writes on that volet: the survivor, killed by a test it
-    // names and commits.
+    // names and commits. A `killed` naming `two_is_two`, which the campaign
+    // ran against this very content, would be refuted (`mutants::refuted`).
+    world.commit(
+        "tests/thing.rs",
+        "#[test]\nfn two_is_two() { assert_eq!(2, 2); }\n\n\
+         #[test]\nfn two_is_not_zero() { assert_ne!(2, 0); }\n",
+        "kill the survivor",
+    );
     let mut triage = BTreeMap::new();
     triage.insert(
         "src/new.rs:1".to_string(),
         Triage::Killed {
-            test: "two_is_two".into(),
+            test: "two_is_not_zero".into(),
         },
     );
     nunki::mutants::write_triage(&world.mission(), &triage).unwrap();
@@ -688,13 +697,38 @@ fn live_a_mission_is_driven_from_its_first_lot_to_verified() {
         store.save(&state).unwrap();
     }
 
-    // 5. The volet's run ends, and this time everything is green.
+    // 5. The volet's run ends, and the final gates are green: gate 7 judges
+    //    the campaign on file, which the volet's commit overtook, and the
+    //    recheck at this HEAD is owed. Lifted for this step, as in step 3.
     world.coder_finished_the_lot();
     world.journal_names_head();
+    world.release();
     let steps = go();
     let report = gates_of(&steps);
     assert!(report.passed(), "{:?}", report.failure());
-    assert!(matches!(steps.last(), Some(Step::Verified)));
+    assert_eq!(world.state().flow.stage(), &Stage::FinalCampaign);
+    assert!(
+        matches!(steps.last(), Some(Step::CampaignOwed { .. })),
+        "{steps:?}"
+    );
+    world.hold();
+
+    // 6. The recheck runs, and the test committed on the volet kills the
+    //    survivor.
+    let recheck = campaign();
+    assert!(
+        matches!(
+            recheck,
+            nunki::mutants::Progress::Finished { survivors: 0, .. }
+        ),
+        "{recheck:?}"
+    );
+
+    // 7. On a measure of this very content, everything is green.
+    let steps = go();
+    let report = gates_of(&steps);
+    assert!(report.passed(), "{:?}", report.failure());
+    assert!(matches!(steps.last(), Some(Step::Verified)), "{steps:?}");
 
     // And it is persisted before anything was printed: a session that dies
     // here must not lose the verdict.
