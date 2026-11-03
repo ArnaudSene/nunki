@@ -3486,6 +3486,8 @@ fn at_standard_a_review_after_the_clear_is_verified_with_the_spent_round_recorde
             verdict: nunki::mission::Verdict::Clear,
             report: "nothing found".into(),
         },
+        // The recheck, green.
+        Event::GatesPassed,
         Event::Reviewed {
             because: "rename it".into(),
         },
@@ -3513,6 +3515,9 @@ fn at_standard_a_review_after_the_clear_is_verified_with_the_spent_round_recorde
 
     world.run_recorded(Some(41), FINISHED);
     world.verdict("Integrator", "INTEGRATED", &world.head(), "wired again");
+    // The recheck at this HEAD, on file and green: at `standard` too, it is
+    // the last stage before `Verified`.
+    world.full_campaign_at_head();
     let steps = world.verify().unwrap();
     let n = steps.len();
     assert!(matches!(steps.last(), Some(Step::Verified)), "{steps:?}");
@@ -3673,6 +3678,33 @@ fn a_ruling_on_anything_but_an_open_survivor_is_a_failed_attempt() {
     }
 }
 
+/// On a campaign of the content as it stands, a `killed` it refutes leaves
+/// its survivor open (SPEC 4.4): the test it names ran against the mutant,
+/// which lived, so the coder may await a ruling on it as on any survivor
+/// without an outcome. On other content the same `killed` answers it, and a
+/// ruling on it is a failed attempt (above).
+#[test]
+fn a_ruling_can_be_awaited_on_a_survivor_whose_killed_the_campaign_refutes() {
+    let world = World::new(2);
+    world.commit("src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    world.commit("tests/one.rs", "#[test]\nfn one_is_one() {}\n", "its test");
+    world.campaign_with_survivors();
+    let touched = nunki::gate::touched_since_base(&world.tree, "dev").unwrap();
+    let mut campaign = nunki::mutants::read(&world.mission()).unwrap().unwrap();
+    campaign.fingerprint = nunki::mutants::fingerprint(&world.tree, &touched).unwrap();
+    nunki::mutants::write(&world.mission(), &campaign).unwrap();
+    world.coder_ran("Lot: L1 — awaits ruling: `m3` changes nothing observable");
+    assert_eq!(
+        world.state().flow.stage(),
+        &Stage::AwaitingHuman(nunki::mission::flow::Handover::AwaitingRuling {
+            lot: "L1".into(),
+            what: "`m3` changes nothing observable".into(),
+            attempt: 1,
+            survivors: vec!["m3".into()],
+        })
+    );
+}
+
 /// No campaign, no survivor to await a ruling on.
 #[test]
 fn a_ruling_with_no_campaign_on_file_is_a_failed_attempt() {
@@ -3785,6 +3817,7 @@ fn green_final_gates_leave_each_campaign_of_the_chain_in_the_follow_up() {
                 sample: None,
                 fork: None,
                 handed: None,
+                named: None,
                 ran: None,
                 scope: Scope::Partial {
                     since: earlier.clone(),
@@ -3801,7 +3834,7 @@ fn green_final_gates_leave_each_campaign_of_the_chain_in_the_follow_up() {
     )
     .unwrap();
 
-    verify::gate_seven_said(&paths, "m1").unwrap();
+    verify::gate_seven_said(&paths, "m1", false).unwrap();
     let followup = world.followup();
     assert!(
         followup.contains("2 mutation campaigns in this mission's chain"),
@@ -4141,10 +4174,10 @@ fn a_full_campaign_at_head_that_passes_needs_no_second_one() {
     assert!(matches!(steps.last(), Some(Step::Verified)), "{steps:?}");
 }
 
-/// The final campaign's survivors go back to the coder, as any campaign's
-/// do: a volet, told why in the follow-up.
+/// The recheck's survivors go back to the coder, as any campaign's do: a
+/// volet, told why in the follow-up.
 #[test]
-fn the_final_campaigns_survivors_go_back_to_the_coder() {
+fn the_rechecks_survivors_go_back_to_the_coder() {
     let world = with_security_agent(1);
     world.at_security();
     world.campaign_at_head(nunki::mutants::Scope::Full { why: String::new() }, 1);
@@ -4159,16 +4192,13 @@ fn the_final_campaigns_survivors_go_back_to_the_coder() {
             work: Work::Volet { cause, .. },
             ..
         } => {
-            assert!(cause.starts_with("final campaign: "), "{cause}");
+            assert!(cause.starts_with("recheck: "), "{cause}");
             assert!(cause.contains("src/new.rs:1"), "{cause}");
         }
         other => panic!("the survivors did not go back to the coder: {other:?}"),
     }
     let followup = std::fs::read_to_string(world.mission().join("FOLLOWUP_HQ.md")).unwrap();
-    assert!(
-        followup.contains("the final campaign was red on"),
-        "{followup}"
-    );
+    assert!(followup.contains("the recheck was red on"), "{followup}");
 }
 
 /// At `standard`, a `CLEAR` on a partial chain is verified as before.
@@ -4322,6 +4352,13 @@ fn a_second_review_at_standard_needs_an_override() {
         "the redirect is behind the VPN",
     )
     .unwrap();
+    // At `standard` too, the lift leads to the recheck, which passes here.
+    let store = Store::open(&world.project.hq_root).unwrap();
+    let mut state = store.load("m1").unwrap();
+    assert_eq!(state.flow.stage(), &Stage::FinalCampaign);
+    store
+        .apply(&mut state, nunki::mission::flow::Event::GatesPassed)
+        .unwrap();
     assert_eq!(world.state().flow.stage(), &Stage::Verified);
     nunki::findings::iterate(&world.project, "m1", Some("rename it")).unwrap();
     // The volet done and gated green: at the round cap, verified again.
@@ -4337,6 +4374,8 @@ fn a_second_review_at_standard_needs_an_override() {
             verdict: nunki::mission::Verdict::Integrated,
             report: "wired".into(),
         },
+        // The recheck, green.
+        nunki::mission::flow::Event::GatesPassed,
     ] {
         store.apply(&mut state, event).unwrap();
     }

@@ -410,7 +410,7 @@ fn play(subject: &Subject, verification: &Verification, phase: Phase) -> Result<
         // to, and that pair is what a campaign that could not run leaves.
         outcomes.push(match &campaign {
             Some(why) => Outcome::waiting(Gate::Mutation, why),
-            None => mutation(subject, threshold(subject, verification))?,
+            None => mutation(subject, threshold(subject, verification), At::Gates)?,
         });
     }
     outcomes.push(match &campaign {
@@ -442,21 +442,22 @@ fn threshold(subject: &Subject, verification: &Verification) -> Threshold {
     }
 }
 
-/// Gate 7 alone, as the final stage of a `critical` mission plays it
-/// (SPEC 4.4, 4.5): every other stage owed is green, and the mission is
-/// `Verified` only on a campaign at `HEAD` that passes.
+/// Gate 7 alone, as the final stage of a `standard` or `critical` mission
+/// plays it (SPEC 4.4, 4.5: one campaign, then a recheck): every other stage
+/// owed is green, and the mission is `Verified` only on a measure of the
+/// content at `HEAD` that passes.
 ///
-/// Gate 7 as it is played at the final gates. The chain holds to the end: a
-/// partial campaign at `HEAD` that passes verifies the mission, judged on
-/// its reconstruction as the final gates judge it. A `HEAD` the gates'
-/// campaign already measured owes nothing more; one that moved since owes a
-/// campaign, partial when the chain allows it. One that fails is red: its
+/// A `HEAD` whose content the measure on file ran on owes nothing more — the
+/// campaign itself, when nothing moved since: a survivor it found alive on
+/// that content is not answered by a `killed` ([`crate::mutants::refuted`]),
+/// and running it again would find the same. Content that moved since owes
+/// the recheck, partial when the chain allows it. One that fails is red: its
 /// survivors go back to the coder as any campaign's do.
 pub fn final_campaign(subject: &Subject, verification: &Verification) -> Result<Report, GateError> {
     let head = git::slot_head(subject.tree)?;
     let outcome = match campaign_in_flight(verification) {
         Some(why) => Outcome::waiting(Gate::Mutation, &why),
-        None => mutation(subject, threshold(subject, verification))?,
+        None => mutation(subject, threshold(subject, verification), At::Final)?,
     };
     Ok(Report {
         role: subject.role,
@@ -1663,6 +1664,32 @@ fn written_after(path: &Path, date: &str) -> Result<bool, GateError> {
     Ok(!in_form || crate::state::rfc3339(secs).as_str() > date)
 }
 
+/// Where gate 7 is played (SPEC 4.4: one campaign, then a recheck), which
+/// decides what a measure on other content is worth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum At {
+    /// The final gates, after the coder's last lot or a volet: the measure
+    /// on file is judged whatever ran since. Between the campaign and the
+    /// recheck no commit owes a campaign.
+    Gates,
+    /// The final stage, every other stage green: the measure must be of the
+    /// content at `HEAD`, or the recheck is owed.
+    Final,
+}
+
+/// Whether `campaign` ran on the content of the slot at `tree` as it stands
+/// — its fingerprint the one gate 7 asks for — the condition under which it
+/// refutes a `killed` ([`crate::mutants::refuted`]). Asked here for those
+/// that only say what the gate judged: `mission status`, the follow-up.
+pub fn measured_here(
+    tree: &Path,
+    header: &Header,
+    campaign: &crate::mutants::Campaign,
+) -> Result<bool, GateError> {
+    let want = campaign_on(tree, &header.base, &header.hardening)?.fingerprint;
+    Ok(campaign.fingerprint == want)
+}
+
 /// Gate 7: every mutant that survived has received an outcome (SPEC 4.4) —
 /// or, for a `standard` mission, enough of the tried mutants are killed.
 ///
@@ -1673,14 +1700,19 @@ fn written_after(path: &Path, date: &str) -> Result<bool, GateError> {
 ///
 /// Three states it must keep apart:
 ///
-/// - no campaign, or one that ran on other content: **unplayed**. Nobody has
-///   asked the question yet, and answering "green" would be a lie about work
-///   that was never done.
-/// - survivors nobody has triaged: **red**, and the message names them. SPEC
-///   makes the return of survivors to the coder "un run de plus sur le lot,
-///   pas un volet", which is what a failed gate produces.
+/// - no campaign, or, at the final stage, one that ran on other content:
+///   **unplayed**. Nobody has asked the question yet, and answering "green"
+///   would be a lie about work that was never done. At the final gates, a
+///   measure on other content is judged: the commits since are the
+///   recheck's to measure (`at`).
+/// - survivors nobody has triaged: **red**, and the message names them. The
+///   coder gets them back in a volet, counted in the bound.
 /// - every survivor answered: green, and the note says how many rode on
 ///   `equivalent`, the one outcome no gate can check.
+///
+/// On a measure of this very content, a `killed` on a survivor it found
+/// itself is no outcome ([`crate::mutants::refuted`]): the test it names ran
+/// against that mutant, and the mutant lived.
 ///
 /// The mission's rigor changes what is asked, and nothing else: a
 /// `prototype` owes no campaign at all, and a `standard` one is judged on
@@ -1688,7 +1720,7 @@ fn written_after(path: &Path, date: &str) -> Result<bool, GateError> {
 /// frozen `mutation_threshold` or, for a header framed before it was
 /// frozen, the project's ([`share_killed`]). Who may give which outcome, and
 /// that a named test must exist, hold at every rigor.
-fn mutation(subject: &Subject, threshold: Threshold) -> Result<Outcome, GateError> {
+fn mutation(subject: &Subject, threshold: Threshold, at: At) -> Result<Outcome, GateError> {
     let gate = Gate::Mutation;
     if subject.role != Role::Coder {
         // SPEC 4.4's per-role table: "non (des tests système et de la
@@ -1734,28 +1766,43 @@ fn mutation(subject: &Subject, threshold: Threshold) -> Result<Outcome, GateErro
             ),
         ));
     };
-    if campaign.fingerprint != want {
-        // The campaign on file is an earlier one, and the content has moved
-        // since — a volet's commit, typically. If a campaign on today's
-        // content has already failed, that is what is said, as when no file
-        // is there: otherwise the next `verify` asks for the same campaign
+    let here = campaign.fingerprint == want;
+    // The measure on file is an earlier one, and the content has moved
+    // since — a volet's commit, typically.
+    let moved = match (here, at) {
+        (true, _) => None,
+        // At the final gates it is judged all the same: the commits since
+        // are the recheck's to measure, at the final `HEAD`, and asking for
+        // a campaign at each return to the coder is what measured the same
+        // survivors eleven times over (SPEC 4.4).
+        (false, At::Gates) => Some(format!(
+            "judged on the measure at {}, before the commits since: the recheck at the \
+             final HEAD measures what they changed",
+            &campaign.head[..12.min(campaign.head.len())]
+        )),
+        // At the final stage it owes the recheck. If one on today's content
+        // has already failed, that is what is said, as when no file is
+        // there: otherwise the next `verify` asks for the same campaign
         // again, it fails the same way, and the monitor loops (#166).
-        if let Some(why) =
-            campaign_that_could_not_run(subject.mission_dir, &want, Some(&campaign.date))?
-        {
-            return Ok(Outcome::of(gate, Decision::Failed(why)));
+        (false, At::Final) => {
+            if let Some(why) =
+                campaign_that_could_not_run(subject.mission_dir, &want, Some(&campaign.date))?
+            {
+                return Ok(Outcome::of(gate, Decision::Failed(why)));
+            }
+            return Ok(Outcome::of(
+                gate,
+                Decision::Unplayed(format!(
+                    "the campaign in {} ran on other content ({} against {}), so it says \
+                     nothing about the code as it stands — the recheck at this HEAD is owed, \
+                     and `nunki mission mutants` runs it",
+                    crate::mutants::FILE,
+                    &campaign.fingerprint[..7.min(campaign.fingerprint.len())],
+                    &want[..7.min(want.len())]
+                )),
+            ));
         }
-        return Ok(Outcome::of(
-            gate,
-            Decision::Unplayed(format!(
-                "the campaign in {} ran on other content ({} against {}), so it says \
-                 nothing about the code as it stands — `nunki mission mutants` runs it again",
-                crate::mutants::FILE,
-                &campaign.fingerprint[..7.min(campaign.fingerprint.len())],
-                &want[..7.min(want.len())]
-            )),
-        ));
-    }
+    };
 
     // Stopped short (SPEC 4.4, "un délai paramétré"): never green, never a
     // volet of its own. Its survivors are on file; whether they go to the
@@ -1781,23 +1828,32 @@ fn mutation(subject: &Subject, threshold: Threshold) -> Result<Outcome, GateErro
     // coder's file only the outcomes it may give are read: anything else
     // there is no outcome, never shadows the HQ's file, and is named in the
     // note (HQ review 3).
-    let coders = crate::mutants::read_triage(subject.mission_dir)
+    let written = crate::mutants::read_triage(subject.mission_dir)
         .map_err(|e| GateError::Mutants(e.to_string()))?;
     let foreign = crate::mutants::foreign(subject.mission_dir)
         .map_err(|e| GateError::Mutants(e.to_string()))?;
+    // A `killed` naming a test the tree does not hold is not refuted: that
+    // test never ran, and the claim is red on its own, as a missing test.
+    let mut refuted = crate::mutants::refuted(&campaign, &written, here);
+    if !refuted.is_empty() {
+        let repo = git::SlotGit::open(subject.tree)?;
+        refuted.retain(|_, test| holds_test(&repo, None, test));
+    }
+    let coders = crate::mutants::without(written.clone(), &refuted);
     // A proposal is an outcome here, so the mission goes on; whether the HQ
     // ruled on it is `nunki push`'s question, not this gate's.
     let answer = &Answers {
         coders: &coders,
         foreign: &foreign,
+        refuted: &refuted,
     };
     // Once, on the campaign on file: for a chain, the reconstruction one
     // full campaign at `HEAD` would give (SPEC 4.4, the chain of campaigns).
     let mut outcome = judged(subject, threshold, &campaign, answer)?;
-    if let Some(chained) = chained(&campaign) {
+    for said in [chained(&campaign), moved].into_iter().flatten() {
         outcome.note = Some(match outcome.note {
-            Some(note) => format!("{chained}; {note}"),
-            None => chained,
+            Some(note) => format!("{said}; {note}"),
+            None => said,
         });
     }
     if let Some(refused) = crate::mutants::foreign_said(&foreign) {
@@ -1821,9 +1877,15 @@ fn chained(campaign: &crate::mutants::Campaign) -> Option<String> {
     Some(match &campaign.files {
         Some(files) => {
             let here = files.values().filter(|m| m.on == campaign.head).count();
+            let named = match campaign.chain.named.as_ref().map(Vec::len) {
+                Some(n) if n > 0 => {
+                    format!(", and {n} survivor(s) of those measured again by name")
+                }
+                _ => String::new(),
+            };
             format!(
                 "judged once, as one campaign at this commit: {} file(s), {here} measured by \
-                 this campaign and {} kept from the {earlier} before it",
+                 this campaign and {} kept from the {earlier} before it{named}",
                 files.len(),
                 files.len() - here
             )
@@ -2034,19 +2096,7 @@ pub fn named_test_missing(
         let Some(test) = outcome.test() else {
             continue;
         };
-        // The commit given, or `HEAD`: read in the mirror, never in the
-        // working tree, so no git runs with the slot's tree as work tree.
-        let grep = [
-            "grep",
-            "--quiet",
-            "-F",
-            "-w",
-            "-e",
-            test,
-            commit.unwrap_or("HEAD"),
-            "--",
-        ];
-        if repo.run(&grep).is_err() {
+        if !holds_test(&repo, commit, test) {
             return Some(format!(
                 "{}:{} names the test {test:?}, and nothing in the tree is called \
                  that",
@@ -2055,6 +2105,23 @@ pub fn named_test_missing(
         }
     }
     None
+}
+
+/// Whether the tree of `commit`, or `HEAD`'s, holds `test` as a whole word:
+/// read in the mirror, never in the working tree, so no git runs with the
+/// slot's tree as work tree.
+fn holds_test(repo: &git::SlotGit, commit: Option<&str>, test: &str) -> bool {
+    let grep = [
+        "grep",
+        "--quiet",
+        "-F",
+        "-w",
+        "-e",
+        test,
+        commit.unwrap_or("HEAD"),
+        "--",
+    ];
+    repo.run(&grep).is_ok()
 }
 
 /// How many survivors rode on `equivalent`, the outcome no machine can
@@ -2137,9 +2204,17 @@ fn rulings(campaign: &crate::mutants::Campaign, answer: &Answers) -> Option<Stri
 /// The survivors' outcomes as gate 7 reads them: the coder's file and the
 /// HQ's together ([`crate::mutants::answer`]).
 struct Answers<'a> {
+    /// The coder's file, less the `killed` the campaign refutes
+    /// ([`crate::mutants::refuted`]) — and only those whose test the tree
+    /// holds: one naming a test it does not hold stays, and is red as a test
+    /// that does not exist.
     coders: &'a std::collections::BTreeMap<String, crate::mutants::Triage>,
     /// The coder's entries `nunki` does not read, named beside the survivor.
     foreign: &'a [crate::mutants::Foreign],
+    /// The `killed` the campaign refutes, by survivor, with the test each
+    /// names: named beside the survivor too, or the coder would not know why
+    /// its line was not read.
+    refuted: &'a std::collections::BTreeMap<String, String>,
 }
 
 impl Answers<'_> {
@@ -2166,7 +2241,17 @@ impl Answers<'_> {
                         crate::mutants::FILE
                     )
                 });
-                match foreign.or_else(|| crate::mutants::not_an_outcome(s, self.coders)) {
+                let refuted = self.refuted.get(&s.id).map(|test| {
+                    format!(
+                        "its `killed` names {test:?}, and the campaign on file ran on this very \
+                         content, that test included, and found the mutant alive: a test that \
+                         kills it is one committed since, or another outcome"
+                    )
+                });
+                match foreign
+                    .or(refuted)
+                    .or_else(|| crate::mutants::not_an_outcome(s, self.coders))
+                {
                     Some(why) => format!("{}:{} {} ({why})", name(&s.file), s.line, name(&s.id)),
                     None => format!("{}:{} {}", name(&s.file), s.line, name(&s.id)),
                 }

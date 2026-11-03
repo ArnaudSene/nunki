@@ -82,10 +82,12 @@ fn coding() -> MissionState {
     state_of(flow(Security::Gates, vec![]))
 }
 
+/// Verified: the gates green, then the recheck at the final `HEAD` (SPEC
+/// 4.4), green.
 fn verified() -> MissionState {
     state_of(flow(
         Security::Gates,
-        vec![finished(true), Event::GatesPassed],
+        vec![finished(true), Event::GatesPassed, Event::GatesPassed],
     ))
 }
 
@@ -149,6 +151,8 @@ fn a_verified_mission_returns_0_and_says_the_human_reads_it_then_pushes() {
                 verdict: Verdict::Clear,
                 report: "nothing".into(),
             },
+            // The recheck, green.
+            Event::GatesPassed,
         ],
     ));
     assert_says(

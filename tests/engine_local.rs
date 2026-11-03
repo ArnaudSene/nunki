@@ -651,6 +651,7 @@ impl Volet {
                     sample: None,
                     fork: Some(nunki::gate::fork_point(&self.w.slot.tree, "dev").unwrap()),
                     handed: Some(vec!["src/lib.rs".into()]),
+                    named: None,
                     ran: None,
                     scope: nunki::mutants::Scope::Full {
                         why: "the first campaign of this mission".into(),
@@ -780,6 +781,131 @@ fn at_standard_a_volets_campaign_is_launched_partial_from_the_previous_head() {
     let chain = v.launched_as();
     assert_eq!(chain.scope, partial);
     assert_eq!(chain.tooling, tooling);
+}
+
+/// The recheck after a volet measures again the campaign's survivors in the
+/// files unchanged since: by name when its stack's script looks for a name
+/// in every file, handed no such file; by their files when it does not,
+/// those files then measured again whole (SPEC 4.4: one campaign, then a
+/// recheck). Either way in one invocation, and filed with what it named.
+#[test]
+fn a_recheck_hands_the_unchanged_files_survivors_by_name_or_their_files() {
+    for anywhere in [true, false] {
+        let v = volet();
+        let tree = &v.w.slot.tree;
+        std::fs::write(
+            tree.join("src/kept.rs"),
+            "pub fn kept() -> u8 {\n    1\n}\n",
+        )
+        .unwrap();
+        git(tree, &["add", "src/kept.rs"]);
+        git(tree, &["commit", "-q", "-m", "kept"]);
+        let campaign_head = git(tree, &["rev-parse", "HEAD"]);
+        std::fs::write(
+            tree.join("src/lib.rs"),
+            "pub fn keep(n: u8) -> bool {\n    n > 6\n}\n",
+        )
+        .unwrap();
+        git(tree, &["commit", "-q", "-am", "a second volet"]);
+
+        let marks = if anywhere {
+            format!(
+                "{}\n{}\n",
+                nunki::mutants::BY_NAME_MARK,
+                nunki::mutants::BY_NAME_ANYWHERE_MARK
+            )
+        } else {
+            format!("{}\n", nunki::mutants::BY_NAME_MARK)
+        };
+        std::fs::write(
+            v.project.fragment("rust").join(nunki::mutants::SCRIPT),
+            format!(
+                "#!/bin/sh\n# nunki-tool-version: echo stand-in 1.0\n{marks}\
+                 shift\n\
+                 {{ printf 'paths %s\\n' \"$*\"; printf 'names %s\\n' \"${{NUNKI_MUTATION_NAMES:-none}}\"; }} \
+                 > nunki-recheck.tmp\n\
+                 mv nunki-recheck.tmp nunki-recheck.txt\n\
+                 printf '%s\\n' '{{\"campaign\":\"done\",\"tried\":0,\"found\":0}}'\n"
+            ),
+        )
+        .unwrap();
+        v.first_campaign_ran_with(v.tooling_now());
+        let survivor = nunki::mutants::Survivor {
+            id: "src/kept.rs:2:5: replace kept -> u8 with 0".into(),
+            file: "src/kept.rs".into(),
+            line: 2,
+            end_line: Some(2),
+            description: "replace kept -> u8 with 0".into(),
+            outcome: None,
+            refused: None,
+            found_on: None,
+        };
+        let mut on_file = nunki::mutants::read(&v.mission).unwrap().unwrap();
+        on_file.head = campaign_head.clone();
+        on_file.survivors = vec![survivor.clone()];
+        on_file.files = Some(
+            [("src/lib.rs", 12), ("src/kept.rs", 3)]
+                .into_iter()
+                .map(|(file, tried)| {
+                    (
+                        file.to_string(),
+                        nunki::mutants::Measured {
+                            tried,
+                            found: Some(tried),
+                            on: campaign_head.clone(),
+                        },
+                    )
+                })
+                .collect(),
+        );
+        on_file.tried = Some(15);
+        nunki::mutants::write(&v.mission, &on_file).unwrap();
+        nunki::mutants::write_triage(
+            &v.mission,
+            &[(
+                survivor.id.clone(),
+                nunki::mutants::Triage::EquivalentProposed {
+                    why: "only a log line reads it".into(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        )
+        .unwrap();
+
+        match v.launch(nunki::mission::Rigor::Standard) {
+            nunki::mutants::Progress::Started { scope, .. } => {
+                assert_eq!(scope.since(), Some(campaign_head.as_str()), "{scope:?}")
+            }
+            other => panic!("the recheck was not launched: {other:?}"),
+        }
+        let at = v.w.proof.join("nunki-recheck.txt");
+        let started = std::time::Instant::now();
+        while !at.exists() && started.elapsed() < std::time::Duration::from_secs(20) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let said = std::fs::read_to_string(&at).expect("the script ran");
+        let chain = v.launched_as();
+        if anywhere {
+            assert_eq!(
+                said,
+                format!("paths src/lib.rs\nnames [{:?}]\n", survivor.id),
+                "by name, its file not handed"
+            );
+            assert_eq!(chain.named, Some(vec![survivor.id.clone()]));
+            assert_eq!(chain.handed, Some(vec!["src/lib.rs".to_string()]));
+        } else {
+            assert_eq!(
+                said, "paths src/kept.rs src/lib.rs\nnames none\n",
+                "by file"
+            );
+            assert_eq!(chain.named, None);
+            assert_eq!(
+                chain.handed,
+                Some(vec!["src/kept.rs".to_string(), "src/lib.rs".to_string()])
+            );
+        }
+    }
 }
 
 /// The same volet with a script edited since the first campaign: full, and

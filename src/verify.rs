@@ -377,7 +377,8 @@ pub fn verify_as(
                                 gate::Verdict::Green => {
                                     let journal =
                                         std::fs::read_to_string(&paths.journal).unwrap_or_default();
-                                    Some(lot_said(&paths, &journal, &label, outcome))
+                                    let here = measured_here(&paths.dir, &slot.tree, &header)?;
+                                    Some(lot_said(&paths, here, &journal, &label, outcome))
                                 }
                             }
                         } else {
@@ -548,7 +549,11 @@ pub fn verify_as(
                         // that commit: everything after it must be the
                         // integrator's wiring and nothing else.
                         state.conclude(Role::Coder, None, &head);
-                        gate_seven_said(&paths, id)?;
+                        gate_seven_said(
+                            &paths,
+                            id,
+                            measured_here(&paths.dir, &slot.tree, &header)?,
+                        )?;
                         Event::GatesPassed
                     }
                 };
@@ -896,11 +901,12 @@ pub fn verify_as(
                 steps.push(Step::AwaitingHuman(handover));
                 return Ok(steps);
             }
-            // A `critical` mission whose every other stage is green: gate 7
-            // alone, and `Verified` only on a campaign at `HEAD` that passes,
-            // partial when the chain allows it (SPEC 4.4, 4.5). A `HEAD` that
-            // moved since owes one, which the caller runs as it runs any
-            // campaign owed ([`campaign`]).
+            // A `standard` or `critical` mission whose every other stage is
+            // green: gate 7 alone, and `Verified` only on a measure of the
+            // content at `HEAD` that passes (SPEC 4.4, 4.5: one campaign, then
+            // a recheck). Content that moved since owes the recheck, partial
+            // when it can continue the campaign, which the caller runs as it
+            // runs any campaign owed ([`campaign`]).
             Stage::FinalCampaign => {
                 let head = crate::git::slot_head(&slot.tree)?;
                 let report = gate::final_campaign(&subject, &verification)?;
@@ -917,7 +923,7 @@ pub fn verify_as(
                             &paths.followup,
                             "nunki",
                             &format!(
-                                "the final campaign was red on {}: {reason}",
+                                "the recheck was red on {}: {reason}",
                                 &head[..head.len().min(12)]
                             ),
                         )?;
@@ -934,8 +940,10 @@ pub fn verify_as(
                         });
                         return Ok(steps);
                     }
+                    // Green at the final stage only on a measure of this
+                    // very content.
                     gate::Verdict::Green => {
-                        gate_seven_said(&paths, id)?;
+                        gate_seven_said(&paths, id, true)?;
                         Event::GatesPassed
                     }
                 };
@@ -1181,7 +1189,7 @@ fn what_for(work: &Work, header: &crate::mission::Header) -> String {
 /// A ruling line is checked here, against the mission's campaign, because
 /// the flow reads no file: a line naming no open survivor is a failed
 /// attempt, like any other line that does not say the lot is done.
-fn lot_said(paths: &Paths, journal: &str, label: &str, outcome: Outcome) -> Event {
+fn lot_said(paths: &Paths, here: bool, journal: &str, label: &str, outcome: Outcome) -> Event {
     use crate::mission::journal::{Judgement, awaitable, judge};
     let failed = |why: String| Event::RunEnded {
         outcome: Outcome::MissionFailure(why),
@@ -1194,7 +1202,7 @@ fn lot_said(paths: &Paths, journal: &str, label: &str, outcome: Outcome) -> Even
         },
         Judgement::Failed(why) => failed(why),
         Judgement::AwaitsRuling { what, survivors } => {
-            let open = match crate::mutants::open(&paths.dir) {
+            let open = match crate::mutants::open(&paths.dir, here) {
                 Ok(open) => open,
                 Err(e) => {
                     return failed(format!(
@@ -1744,15 +1752,49 @@ pub fn harness_spawner(
 /// (SPEC 4.4, gate 7): the equivalences proposed and not yet ruled on, with
 /// their reasons, long before `nunki push` refuses on them; and, when gate 7
 /// judged several campaigns, each of them — full or partial, from which
-/// commit, with its counts.
-pub fn gate_seven_said(paths: &Paths, id: &str) -> Result<(), VerifyError> {
+/// commit, with its counts. `here` says whether the measure on file ran on
+/// the content gate 7 judged ([`gate::measured_here`]).
+pub fn gate_seven_said(paths: &Paths, id: &str, here: bool) -> Result<(), VerifyError> {
     crate::followup::proposals_await(
         &paths.followup,
         id,
         &crate::mutants::awaiting_ruling(&paths.dir)?,
     )?;
-    crate::followup::campaigns(&paths.followup, &crate::mutants::chain_on_file(&paths.dir)?)?;
+    crate::followup::campaigns(
+        &paths.followup,
+        &crate::mutants::chain_on_file(&paths.dir, here)?,
+    )?;
     Ok(())
+}
+
+/// Whether the measure on file in `dir` ran on the content of the slot at
+/// `tree` as it stands ([`gate::measured_here`]); `false` with none on file.
+pub fn measured_here(
+    dir: &std::path::Path,
+    tree: &std::path::Path,
+    header: &crate::mission::Header,
+) -> Result<bool, VerifyError> {
+    Ok(match crate::mutants::read(dir)? {
+        Some(campaign) => gate::measured_here(tree, header, &campaign)?,
+        None => false,
+    })
+}
+
+/// The measures on file for mission `id`, as `mission status` lists them
+/// ([`crate::mutants::chain_on_file`]), read as gate 7 reads them: on the
+/// content of the mission's slot when it can be found, and otherwise as a
+/// measure of other content, which refutes nothing.
+pub fn chain_as_judged(project: &Project, id: &str) -> Result<Vec<String>, VerifyError> {
+    let dir = Paths::of(&project.hq_root, id).dir;
+    let here = Store::open(&project.hq_root)
+        .ok()
+        .and_then(|store| store.load(id).ok())
+        .and_then(|state| {
+            let slot = crate::slot::find(project, &state.slot).ok()?;
+            measured_here(&dir, &slot.tree, state.flow.header()).ok()
+        })
+        .unwrap_or(false);
+    Ok(crate::mutants::chain_on_file(&dir, here)?)
 }
 
 /// The line a launch owes when it dropped some services' `ports`, and none
@@ -1944,7 +1986,8 @@ mod tests {
                 .any(|s| matches!(s, Step::LiftedByNunki { .. })),
             "{steps:?}"
         );
-        assert_eq!(state.flow.stage(), &Stage::Verified);
+        // At `standard`, as at `critical`, the lift leads to the recheck.
+        assert_eq!(state.flow.stage(), &Stage::FinalCampaign);
         assert_eq!(state.accepted.len(), 1);
     }
 

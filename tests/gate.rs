@@ -1384,6 +1384,16 @@ impl Fixture {
         .unwrap();
     }
 
+    /// Gate 7 as the final stage plays it: where a measure on other content
+    /// owes the recheck, and a recheck that could not run is said.
+    fn final_gate_seven(&self) -> nunki::gate::Outcome {
+        self.final_campaign()
+            .outcomes
+            .into_iter()
+            .next()
+            .expect("gate 7 alone")
+    }
+
     /// Where the stderr of a campaign on the current content lands.
     fn campaign_stderr(&self) -> PathBuf {
         let touched = nunki::gate::touched_since_base(&self.tree, "dev").unwrap();
@@ -1401,6 +1411,9 @@ impl Fixture {
 /// when no `MUTANTS.json` existed, so it answered "ran on other content", and
 /// the monitor started the same doomed campaign every few minutes for hours.
 /// It is a red gate, with what the campaign said, and the coder gets it.
+///
+/// At the final stage, where a measure on other content owes the recheck:
+/// the final gates judge the campaign on file instead.
 #[test]
 fn a_campaign_that_could_not_run_after_a_volet_is_a_red_gate_not_another_campaign() {
     let f = Fixture::new();
@@ -1408,8 +1421,8 @@ fn a_campaign_that_could_not_run_after_a_volet_is_a_red_gate_not_another_campaig
     f.earlier_campaign("2026-01-01T00:00:00Z");
 
     assert!(
-        matches!(f.gate_seven(Role::Coder).decision, Decision::Unplayed(ref why) if why.contains("other content")),
-        "before any attempt on today's content, a campaign is owed"
+        matches!(f.final_gate_seven().decision, Decision::Unplayed(ref why) if why.contains("other content")),
+        "before any attempt on today's content, the recheck is owed"
     );
 
     f.campaign_said(
@@ -1418,7 +1431,7 @@ fn a_campaign_that_could_not_run_after_a_volet_is_a_red_gate_not_another_campaig
          nunki: it stopped without saying it had finished\n",
     );
 
-    match f.gate_seven(Role::Coder).decision {
+    match f.final_gate_seven().decision {
         Decision::Failed(why) => {
             assert!(why.contains("already run and measured nothing"), "{why}");
             assert!(why.contains("UnitTestDidNotEnd"), "{why}");
@@ -1427,8 +1440,8 @@ fn a_campaign_that_could_not_run_after_a_volet_is_a_red_gate_not_another_campaig
     }
 }
 
-/// The stderr counts only when it was written after the campaign on file was
-/// recorded. A campaign that measured leaves a stderr too, full of its
+/// At the final stage, the stderr counts only when it was written after the
+/// campaign on file was recorded. A campaign that measured leaves a stderr too, full of its
 /// progress; content brought back to what it measured — a reverted commit —
 /// must not read that stderr as a campaign that could not run.
 #[test]
@@ -1446,9 +1459,9 @@ fn a_stderr_older_than_the_campaign_on_file_is_not_a_campaign_that_could_not_run
     f.earlier_campaign("2026-03-01T00:00:00Z");
 
     assert!(
-        matches!(f.gate_seven(Role::Coder).decision, Decision::Unplayed(_)),
+        matches!(f.final_gate_seven().decision, Decision::Unplayed(_)),
         "{:?}",
-        f.gate_seven(Role::Coder).decision
+        f.final_gate_seven().decision
     );
 
     // In the same second is not after: a campaign that measured writes its
@@ -1456,17 +1469,17 @@ fn a_stderr_older_than_the_campaign_on_file_is_not_a_campaign_that_could_not_run
     // stderr is its own, not a failure's.
     f.earlier_campaign("2026-01-01T00:00:00Z");
     assert!(
-        matches!(f.gate_seven(Role::Coder).decision, Decision::Unplayed(_)),
+        matches!(f.final_gate_seven().decision, Decision::Unplayed(_)),
         "{:?}",
-        f.gate_seven(Role::Coder).decision
+        f.final_gate_seven().decision
     );
 
     // Recorded before the stderr was written, the same file is the failure.
     f.earlier_campaign("2025-12-01T00:00:00Z");
     assert!(
-        matches!(f.gate_seven(Role::Coder).decision, Decision::Failed(_)),
+        matches!(f.final_gate_seven().decision, Decision::Failed(_)),
         "{:?}",
-        f.gate_seven(Role::Coder).decision
+        f.final_gate_seven().decision
     );
 }
 
@@ -1482,9 +1495,9 @@ fn a_campaign_date_nunki_cannot_read_lets_the_stderr_count() {
     f.campaign_said("ImportError: no module named visit\n");
 
     assert!(
-        matches!(f.gate_seven(Role::Coder).decision, Decision::Failed(_)),
+        matches!(f.final_gate_seven().decision, Decision::Failed(_)),
         "{:?}",
-        f.gate_seven(Role::Coder).decision
+        f.final_gate_seven().decision
     );
 }
 
@@ -1551,6 +1564,20 @@ fn a_single_endless_line_is_cut_in_the_cause() {
 }
 
 impl Fixture {
+    /// A volet's commit after the campaign: the content moves, so the
+    /// campaign on file is one of other content — which the final gates
+    /// judge all the same, a `killed` read by its test's name until the
+    /// recheck measures it (SPEC 4.4: one campaign, then a recheck).
+    fn after_a_volet(&self) {
+        commit(
+            &self.tree,
+            "tests/volet.rs",
+            "#[test]\nfn the_volets_test() {}\n",
+            "volet",
+        );
+        self.journal_names_head();
+    }
+
     /// What the coder wrote, in its own file.
     fn coder_answers(&self, answers: &[(&str, Triage)]) {
         let map: BTreeMap<String, Triage> = answers
@@ -1587,22 +1614,153 @@ fn a_mission_with_no_campaign_has_not_passed_gate_seven() {
     }
 }
 
-/// A campaign that ran on other content says nothing about the code as it
-/// stands — and saying nothing is not saying yes.
+/// At the final gates, a campaign a commit has overtaken is judged all the
+/// same, and the note says on what (SPEC 4.4: one campaign, then a recheck):
+/// the commits since are the recheck's to measure, at the final `HEAD`, and
+/// asking for a campaign at each return to the coder measured the same
+/// survivors eleven times over. At the final stage, the same campaign says
+/// nothing about the code as it stands, and the recheck is owed.
 #[test]
-fn a_campaign_overtaken_by_a_commit_is_not_an_answer_about_this_one() {
+fn at_the_final_gates_a_campaign_overtaken_by_a_commit_is_judged_and_the_recheck_owed() {
     let f = Fixture::new();
     commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
-    f.campaign(vec![]);
-    f.journal_names_head();
-    assert_eq!(f.gate_seven(Role::Coder).decision, Decision::Passed);
-
-    // The code moves; the campaign does not.
-    commit(&f.tree, "src/new.rs", "pub fn two() -> u8 { 3 }\n", "L2");
+    f.campaign(vec![survivor(1, None)]);
     f.journal_names_head();
     match f.gate_seven(Role::Coder).decision {
-        Decision::Unplayed(why) => assert!(why.contains("other content"), "{why}"),
-        other => panic!("the campaign is stale: {other:?}"),
+        Decision::Failed(why) => assert!(why.contains("1 survivor(s) have no outcome"), "{why}"),
+        other => panic!("an open survivor is red: {other:?}"),
+    }
+
+    // The volet: a test, and the coder's answer naming it.
+    commit(
+        &f.tree,
+        "tests/two.rs",
+        "#[test]\nfn two_is_two() {}\n",
+        "volet",
+    );
+    f.journal_names_head();
+    f.coder_answers(&[(
+        "src/new.rs:1",
+        Triage::Killed {
+            test: "two_is_two".into(),
+        },
+    )]);
+    let outcome = f.gate_seven(Role::Coder);
+    assert_eq!(outcome.decision, Decision::Passed, "{outcome:?}");
+    let note = outcome.note.expect("what it was judged on is said");
+    assert!(note.starts_with("judged on the measure at"), "{note}");
+    assert!(note.contains("the recheck at the final HEAD"), "{note}");
+
+    match f.final_gate_seven().decision {
+        Decision::Unplayed(why) => {
+            assert!(why.contains("other content"), "{why}");
+            assert!(why.contains("the recheck at this HEAD is owed"), "{why}");
+        }
+        other => panic!("the final stage took a measure of other content: {other:?}"),
+    }
+}
+
+/// On a measure of this very content, the coder's `killed` on a survivor it
+/// found itself is no outcome: the test it names ran against that mutant,
+/// and the mutant lived (SPEC 4.4). The gate names the survivor and says
+/// why, at the final gates as at the final stage. A survivor kept from an
+/// earlier campaign, and a `bug`, are not refuted; once a commit moves the
+/// content, the `killed` is read by its test's name again, until the
+/// recheck measures it.
+#[test]
+fn a_killed_a_measure_of_this_very_content_refutes_is_no_outcome() {
+    let f = critical();
+    f.campaign(vec![
+        survivor(1, None),
+        Survivor {
+            found_on: Some("e".repeat(40)),
+            ..survivor(2, None)
+        },
+        survivor(3, None),
+    ]);
+    f.coder_answers(&[
+        (
+            "src/new.rs:1",
+            Triage::Killed {
+                test: "the_thing_holds".into(),
+            },
+        ),
+        (
+            "src/new.rs:2",
+            Triage::Killed {
+                test: "the_thing_holds".into(),
+            },
+        ),
+        (
+            "src/new.rs:3",
+            Triage::Bug {
+                test: "the_known_hole".into(),
+            },
+        ),
+    ]);
+    for decision in [
+        f.gate_seven(Role::Coder).decision,
+        f.final_gate_seven().decision,
+    ] {
+        match decision {
+            Decision::Failed(why) => {
+                assert!(why.contains("1 survivor(s) have no outcome"), "{why}");
+                assert!(
+                    why.contains(
+                        "src/new.rs:1 src/new.rs:1 (its `killed` names \"the_thing_holds\""
+                    ) && why.contains("found the mutant alive"),
+                    "{why}"
+                );
+            }
+            other => panic!("a refuted killed was taken: {other:?}"),
+        }
+    }
+
+    f.after_a_volet();
+    assert_eq!(f.gate_seven(Role::Coder).decision, Decision::Passed);
+}
+
+/// At `standard`, a refuted `killed` leaves its survivor without an outcome,
+/// and the share counts it so.
+#[test]
+fn at_standard_a_refuted_killed_counts_as_a_survivor_left_open() {
+    let f = standard();
+    f.campaign_tried(untriaged(2), Some(5));
+    f.coder_answers(&[(
+        "src/new.rs:1",
+        Triage::Killed {
+            test: "the_thing_holds".into(),
+        },
+    )]);
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => assert!(why.contains("3 of 5 tried mutant(s) killed"), "{why}"),
+        other => panic!("a refuted killed counted as a kill: {other:?}"),
+    }
+    f.after_a_volet();
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Passed => {}
+        other => panic!("80% is the threshold: {other:?}"),
+    }
+}
+
+/// A `killed` naming a test the tree does not hold is not refuted — that
+/// test never ran — and is red on its own, as on any campaign.
+#[test]
+fn a_killed_naming_a_missing_test_is_red_as_missing_not_refuted() {
+    let f = critical();
+    f.campaign(untriaged(1));
+    f.coder_answers(&[(
+        "src/new.rs:1",
+        Triage::Killed {
+            test: "a_test_nobody_wrote".into(),
+        },
+    )]);
+    match f.gate_seven(Role::Coder).decision {
+        Decision::Failed(why) => {
+            assert!(why.contains("nothing in the tree is called that"), "{why}");
+            assert!(!why.contains("found the mutant alive"), "{why}");
+        }
+        other => panic!("{other:?}"),
     }
 }
 
@@ -1717,6 +1875,7 @@ fn the_coder_answers_with_the_two_outcomes_that_rest_on_a_test() {
         "tests",
     );
     f.campaign(vec![survivor(1, None), survivor(2, None)]);
+    f.after_a_volet();
     f.coder_answers(&[
         (
             "src/new.rs:1",
@@ -1734,7 +1893,12 @@ fn the_coder_answers_with_the_two_outcomes_that_rest_on_a_test() {
     f.journal_names_head();
     let outcome = f.gate_seven(Role::Coder);
     assert_eq!(outcome.decision, Decision::Passed);
-    assert!(outcome.note.is_none(), "nothing rode on a judgement");
+    let note = outcome.note.expect("what it was judged on is said");
+    assert!(note.starts_with("judged on the measure at"), "{note}");
+    assert!(
+        !note.contains("rode on"),
+        "nothing rode on a judgement: {note}"
+    );
 
     // And a test it names still has to exist.
     f.coder_answers(&[(
@@ -3082,6 +3246,7 @@ fn at_standard_a_survivor_with_an_outcome_counts_as_killed() {
         ],
         Some(10),
     );
+    f.after_a_volet();
     f.coder_answers(&[
         (
             "src/new.rs:3",
@@ -3165,6 +3330,7 @@ fn at_standard_a_campaign_without_a_count_is_judged_as_critical() {
         "{note}"
     );
 
+    f.after_a_volet();
     f.coder_answers(&[(
         "src/new.rs:1",
         Triage::Killed {
@@ -3453,6 +3619,7 @@ fn a_critical_mission_with_two_proposals_passes_gate_seven_and_counts_them_apart
             }),
         ),
     ]);
+    f.after_a_volet();
     f.coder_answers(&[
         ("src/new.rs:1", proposed("the value is only ever logged")),
         (
@@ -3616,7 +3783,7 @@ fn gate_seven_takes_no_test_name_that_is_not_a_name() {
         "L1",
     );
     f.campaign(vec![survivor(1, None)]);
-    f.journal_names_head();
+    f.after_a_volet();
     for name in ["", " ", "fn", "u8"] {
         f.coder_answers(&[("src/new.rs:1", Triage::Killed { test: name.into() })]);
         match f.gate_seven(Role::Coder).decision {
@@ -3701,6 +3868,7 @@ impl Fixture {
                     sample: None,
                     fork: None,
                     handed: None,
+                    named: None,
                     ran: Some(tried),
                     scope: Scope::Partial {
                         since: earlier.clone(),
@@ -3828,7 +3996,8 @@ fn gate_two_refuses_a_head_that_is_not_on_the_missions_branch() {
 }
 
 // ---------------------------------------------------------------------------
-// The final campaign of a `critical` mission (SPEC 4.4, 4.5).
+// The recheck of a `standard` or `critical` mission (SPEC 4.4, 4.5: one
+// campaign, then a recheck).
 // ---------------------------------------------------------------------------
 
 impl Fixture {
@@ -3911,6 +4080,28 @@ fn the_final_campaigns_survivors_are_red() {
 fn a_partial_campaign_with_an_open_survivor_is_red_rather_than_owed() {
     let f = critical();
     f.chained(10, 1, 10, 0, true);
+    assert!(
+        matches!(f.final_campaign().verdict(), nunki::gate::Verdict::Red(_)),
+        "{:?}",
+        f.final_campaign()
+    );
+}
+
+/// Content the campaign measured owes no recheck, survivors or not (SPEC
+/// 4.4): running it again would find the same survivors, and a `killed` on
+/// one of them is refuted already. Answered, they verify the mission.
+#[test]
+fn at_the_final_stage_the_campaign_on_this_content_answers_survivors_or_not() {
+    let f = critical();
+    f.campaign(untriaged(1));
+    f.coder_answers(&[("src/new.rs:1", proposed("only a log line reads it"))]);
+    assert_eq!(f.final_campaign().verdict(), nunki::gate::Verdict::Green);
+    f.coder_answers(&[(
+        "src/new.rs:1",
+        Triage::Killed {
+            test: "the_thing_holds".into(),
+        },
+    )]);
     assert!(
         matches!(f.final_campaign().verdict(), nunki::gate::Verdict::Red(_)),
         "{:?}",
@@ -4099,9 +4290,10 @@ fn a_file_named_like_a_pathspec_is_read_as_the_file_it_is() {
 
 /// A hardening mission's gate 7 judges the campaign that ran on its
 /// survivors by name — the fingerprint `campaign_on` gives, which holds the
-/// names and their files — and judges it as any `standard` campaign: a
-/// campaign on what the branch changed alone is other content, never a
-/// measurement of the survivors the mission was framed to kill.
+/// names and their files — and judges it as any `standard` campaign: at the
+/// final stage, a campaign on what the branch changed alone is other
+/// content, never a measurement of the survivors the mission was framed to
+/// kill.
 #[test]
 fn a_hardening_missions_gate_judges_the_campaign_on_its_survivors_by_name() {
     let mut f = standard();
@@ -4123,9 +4315,9 @@ fn a_hardening_missions_gate_judges_the_campaign_on_its_survivors_by_name() {
     }];
 
     // On file under what the branch touched alone: not this mission's
-    // campaign.
+    // campaign, which the final stage asks for.
     f.campaign_tried(untriaged(1), Some(10));
-    let outcome = f.gate_seven(Role::Coder);
+    let outcome = f.final_gate_seven();
     match &outcome.decision {
         Decision::Unplayed(why) => assert!(why.contains("ran on other content"), "{why}"),
         other => panic!("a campaign without the names is not this one: {other:?}"),

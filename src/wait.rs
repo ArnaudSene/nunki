@@ -181,7 +181,7 @@ pub fn stage_name(flow: &Flow) -> String {
         Stage::Integration { attempt } => format!("integration, attempt {attempt}"),
         Stage::SecurityAgent { attempt } => format!("security agent, attempt {attempt}"),
         Stage::Findings { .. } => "findings".to_string(),
-        Stage::FinalCampaign => "final campaign".to_string(),
+        Stage::FinalCampaign => "recheck".to_string(),
         Stage::AwaitingHuman(_) => "awaiting human".to_string(),
         Stage::Verified => "verified".to_string(),
     }
@@ -196,7 +196,7 @@ pub fn stage_word(flow: &Flow) -> &'static str {
         Stage::Integration { .. } => "integration",
         Stage::SecurityAgent { .. } => "security",
         Stage::Findings { .. } => "findings",
-        Stage::FinalCampaign => "campaign",
+        Stage::FinalCampaign => "recheck",
         Stage::AwaitingHuman(_) => "handed-over",
         Stage::Verified => "verified",
     }

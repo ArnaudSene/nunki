@@ -6418,9 +6418,11 @@ fn one_filter_each(calls: &str) {
 }
 
 /// Handed names, a campaign runs them and what its scope reaches by itself
-/// — the lines the branch changed — and nothing else: listed by name in the
-/// files handed, listed by the diff, checked, then run over those files
-/// under one filter of the names the two lists hold.
+/// — the lines the branch changed — and nothing else: listed by name under
+/// the filter alone, in every file of the crate, listed by the diff,
+/// checked, then run under one filter of the names the two lists hold and
+/// no `--file`, which would keep out a named mutant whose file was not
+/// handed.
 #[cfg(unix)]
 #[test]
 fn a_campaign_handed_names_runs_them_and_what_its_branch_changed() {
@@ -6460,7 +6462,7 @@ fn a_campaign_handed_names_runs_them_and_what_its_branch_changed() {
     let calls: Vec<&str> = calls.lines().collect();
     assert_eq!(calls.len(), 4, "{calls:?}");
     assert!(
-        calls[0].contains("--list") && calls[0].contains("--file src/lib.rs -F"),
+        calls[0].contains("--list") && calls[0].contains(" -F ") && !calls[0].contains("--file"),
         "{calls:?}"
     );
     assert!(
@@ -6468,13 +6470,13 @@ fn a_campaign_handed_names_runs_them_and_what_its_branch_changed() {
         "{calls:?}"
     );
     assert!(
-        calls[2].contains("--list") && calls[2].contains("--file src/lib.rs -F"),
+        calls[2].contains("--list") && calls[2].contains(" -F ") && !calls[2].contains("--file"),
         "{calls:?}"
     );
     assert!(
         !calls[3].contains("--list")
             && !calls[3].contains("--in-diff")
-            && calls[3].contains("--file src/lib.rs")
+            && !calls[3].contains("--file")
             && calls[3].contains(" -F "),
         "{calls:?}"
     );
@@ -6519,9 +6521,8 @@ fn a_name_not_in_the_code_is_a_campaign_that_measured_nothing() {
     );
 }
 
-/// Names that are not a list of names, or no Rust file to find them in,
-/// measure nothing, and say so: a list read wrong would run other mutants
-/// than the ones asked for.
+/// Names that are not a list of names measure nothing, and say so: a list
+/// read wrong would run other mutants than the ones asked for.
 #[cfg(unix)]
 #[test]
 fn names_the_campaign_cannot_read_are_a_campaign_that_measured_nothing() {
@@ -6541,21 +6542,53 @@ fn names_the_campaign_cannot_read_are_a_campaign_that_measured_nothing() {
         );
         assert!(calls.is_empty(), "{names}: {calls}");
     }
-    let (said, why, status, _) = named_campaign(
-        &listing,
-        &[],
-        &["README.md"],
-        &[(
-            nunki::mutants::NAMES_ENV,
-            "[\"src/lib.rs:1:5: replace > with == in keep\"]",
-        )],
-    );
-    assert_eq!(status, Some(1), "{why}");
-    assert!(!nunki::mutants::completed(&said), "{said}");
-    assert!(
-        why.contains("handed 1 mutant(s) by name and none of the Rust files they are in"),
-        "{why}"
-    );
+}
+
+/// Handed names and no Rust file — the recheck of a branch whose volets
+/// changed only tests, which no campaign mutates — a campaign runs the
+/// named mutants alone, where they are, and reads no diff: `git diff` given
+/// no path is the whole of it, and its scope would be every line the branch
+/// changed. Measured on cargo-mutants 27.1.0: four names in a file not
+/// handed ran under the filter alone, three caught by a test added since.
+#[cfg(unix)]
+#[test]
+fn a_campaign_handed_names_and_no_rust_file_runs_the_named_mutants_alone() {
+    let named = "src/lib.rs:1:5: replace > with == in keep";
+    let missed = "src/lib.rs:1:5: replace > with < in keep, missed";
+    let other = "src/lib.rs:3:5: replace + with - in other";
+    let listing = vec![
+        listed("src/lib.rs", 1, "replace > with == in keep"),
+        listed("src/lib.rs", 1, "replace > with < in keep, missed"),
+        listed("src/lib.rs", 3, "replace + with - in other"),
+    ];
+    let names = serde_json::to_string(&[named, missed]).unwrap();
+    // The last with a base the copy does not hold: no diff is read, so none
+    // fails.
+    let nowhere = "0".repeat(40);
+    for (paths, base) in [
+        (&[][..], None),
+        (&["README.md"][..], None),
+        (&[][..], Some(nowhere.as_str())),
+    ] {
+        let mut env = vec![(nunki::mutants::NAMES_ENV, names.as_str())];
+        env.extend(base.map(|b| (nunki::mutants::BASE_ENV, b)));
+        let (said, why, status, calls) = named_campaign(&listing, &[other], paths, &env);
+        assert_eq!(status, Some(0), "{paths:?}: {why}");
+        assert!(nunki::mutants::completed(&said), "{paths:?}: {said}\n{why}");
+        assert_eq!(nunki::mutants::tried(&said), Some(2), "{said}");
+        assert_eq!(
+            survivors_of(&said),
+            [missed.to_string()].into_iter().collect(),
+            "{said}"
+        );
+        one_filter_each(&calls);
+        assert!(
+            calls
+                .lines()
+                .all(|c| !c.contains("--in-diff") && !c.contains("--file")),
+            "{paths:?}: {calls}"
+        );
+    }
 }
 
 /// Over its budget, a campaign handed names samples what it would run — the
@@ -6610,9 +6643,10 @@ fn a_campaign_handed_names_over_its_budget_samples_them_under_one_filter() {
     assert!(ran(&said).iter().all(|s| expected.contains(s)), "{said}");
 }
 
-/// The Rust stack's script says it measures by name, and nunki hands names
-/// only to a script that says it: the Python and Next.js scripts, whose
-/// tools nunki has not measured by name, do not.
+/// The Rust stack's script says it measures by name, and in every file of
+/// its crate, and nunki hands names only to a script that says it: the
+/// Python and Next.js scripts, whose tools nunki has not measured by name,
+/// do not, and a recheck hands them their survivors' files instead.
 #[test]
 fn only_the_rust_script_says_it_measures_by_name() {
     let (_dir, root, nunki) = fresh();
@@ -6627,6 +6661,11 @@ fn only_the_rust_script_says_it_measures_by_name() {
         .unwrap();
         assert_eq!(
             nunki::mutants::measures_by_name(&script),
+            stack == "rust",
+            "{stack}"
+        );
+        assert_eq!(
+            nunki::mutants::measures_by_name_anywhere(&script),
             stack == "rust",
             "{stack}"
         );
