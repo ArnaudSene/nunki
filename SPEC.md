@@ -1254,7 +1254,10 @@ secrets. Trois choses lui sont propres, chacune parce qu'elle a été mesurée :
   fichier absent à côté d'un fichier présent, 0 sur une source qui ne se
   parse pas — donc c'est son rapport qui fait foi, et son identifiant de
   mutant étant un entier séquentiel par fichier, `nunki` en reconstruit un
-  stable à partir de la position, du mutateur et du remplacement. Seul, un
+  stable à partir de l'étendue entière du code remplacé, du mutateur et du
+  remplacement. Le seul point de départ ne suffisait pas : deux mutants
+  partis du même point avec le même remplacement partageaient un
+  identifiant (mesuré sur 10.0.0). Seul, un
   fichier absent le fait sortir en 1, « No tests were executed » (mesuré
   sur 10.0.0) : la campagne ne lui confie pas une source que la branche a
   supprimée.
@@ -2274,19 +2277,33 @@ dernier lot. La première rouge arrête tout.
        contre-épreuve qui n'a rien mesuré, et qui le dit : jamais un
        survivant compté tué.
 
-     Seul le script Rust cherche un nom partout : cargo-mutants lance des
-     noms exacts sous un seul `-F`, dans tous les fichiers du crate, avec
-     les autres mutants de la contre-épreuve, derrière une seule référence.
-     Mesuré sur 27.1.0, dans un espace de travail à deux paquets aussi : les
-     mutants nommés d'un paquet que la contre-épreuve n'avait pas confié ont
-     tourné contre les tests de ce paquet. Les scripts Python et Next ne le
-     disent pas : la contre-épreuve leur confie les fichiers de leurs
+     Les scripts Rust et Next cherchent un nom partout. cargo-mutants lance
+     des noms exacts sous un seul `-F`, dans tous les fichiers du crate,
+     avec les autres mutants de la contre-épreuve, derrière une seule
+     référence. Mesuré sur 27.1.0, dans un espace de travail à deux paquets
+     aussi : les mutants nommés d'un paquet que la contre-épreuve n'avait
+     pas confié ont tourné contre les tests de ce paquet. Stryker ne nomme
+     pas ses mutants : le script Next remesure un survivant par son
+     étendue, `<fichier>:<ligne>:<colonne>-<ligne>:<colonne>`, et garde
+     donc l'étendue entière dans l'identifiant qu'il lui donne. Mesuré sur
+     Stryker 10.0.0, colonnes comptées depuis 0 là où le rapport les compte
+     depuis 1 : l'étendue d'un survivant le rend, avec chaque mutant qu'elle
+     contient (les autres mutants du même code, ou tout ce que contient le
+     corps d'une fonction), et le script n'en rapporte et n'en compte que
+     celui qu'on lui a nommé, retrouvé par son identifiant entier ; deux
+     étendues sur deux fichiers tiennent dans un seul `--mutate`, avec les
+     lignes changées ; et un test ajouté depuis rend `Killed` les survivants
+     nommés d'un fichier, quand ceux de l'autre restent `Survived`. Un
+     survivant `NoCoverage` de la campagne y est revenu `Survived` : c'est
+     pourquoi sa description ne porte pas son statut (plus haut). Le script
+     Python ne le dit pas : la contre-épreuve lui confie les fichiers de ses
      survivants, remesurés entiers. C'est juste, et presque une deuxième
      campagne quand les survivants sont répartis dans beaucoup de fichiers.
-     Un projet resté sur un script Rust plus ancien est remesuré par
-     fichier aussi : ce script ne cherchait un nom que dans les fichiers
-     qu'on lui confiait, et, mesuré, des noms hors de ces fichiers lui ont
-     fait dire qu'ils n'étaient pas dans le code, sans rien mesurer.
+     Un projet resté sur un script Rust ou Next plus ancien est remesuré par
+     fichier aussi : l'ancien script Rust ne cherchait un nom que dans les
+     fichiers qu'on lui confiait, et, mesuré, des noms hors de ces fichiers
+     lui ont fait dire qu'ils n'étaient pas dans le code, sans rien
+     mesurer ; l'ancien script Next ne lisait aucun nom.
    - **Si rien n'a changé depuis la campagne, la contre-épreuve ne tourne
      pas, survivants ou non** : elle retrouverait les mêmes, et la campagne
      en tient lieu. Sur une mesure de ce contenu même, un `killed` du
@@ -2564,12 +2581,15 @@ dernier lot. La première rouge arrête tout.
    nommés dans les fichiers donnés, et tourne sur l'union des deux listes,
    par nom, sous un seul `-F` : mesuré sur 27.1.0, deux `-F` prennent ce que
    l'un ou l'autre prend, et un `-F` choisit dans `--in-diff` ou `--file`,
-   jamais au-delà. L'échantillon du budget est tiré de cette union. Un nom
-   absent du code — sa ligne a bougé, ou le code qu'il remplace a changé —
+   jamais au-delà. L'échantillon du budget est tiré de cette union. Le
+   script Next confie à Stryker l'étendue de chaque survivant, à côté des
+   lignes changées, dans un seul `--mutate`. Un nom absent du code — sa ligne a bougé, ou le code qu'il remplace a changé —
    fait une campagne qui n'a rien mesuré, et qui le dit : tournée sans lui,
    elle compterait tué un mutant qu'elle n'a jamais essayé. Mesuré aussi : un
    module `#[cfg(test)]` ajouté en fin de fichier laisse les noms tels quels,
-   une ligne ajoutée au-dessus les décale tous. Le brief le dit au codeur.
+   une ligne ajoutée au-dessus les décale tous. Avec Stryker, une étendue
+   qui ne porte plus le mutant nommé, son mutateur et ce qu'il écrit, ne
+   mesure rien non plus (mesuré sur 10.0.0). Le brief le dit au codeur.
    Ce que sa branche change au code est mesuré comme dans toute mission.
 
    Ses tests ne soldent la dette qu'une fois sur la base. `nunki mutants run
@@ -2590,8 +2610,11 @@ dernier lot. La première rouge arrête tout.
    suivante prend la suite, puisqu'un survivant retrouvé revient en fin de
    dette.
 
-   Limites, écrites : seule la stack Rust mesure par nom, et les survivants
-   des autres attendent une campagne sur tout le code ; une base qui bouge
+   Limites, écrites : la stack Python ne mesure pas par nom, et ses
+   survivants attendent une campagne sur tout le code ; un survivant Next
+   que la dette tient d'un script plus ancien porte un identifiant sans
+   étendue, une campagne à qui on le confie ne mesure rien, et c'est
+   `nunki mutants run --whole` qui remplace la dette ; une base qui bouge
    après le cadrage et change le fichier d'un survivant fait une campagne qui
    ne mesure rien, et c'est une nouvelle mission de durcissement qui le
    reprend.
@@ -2636,8 +2659,8 @@ dernier lot. La première rouge arrête tout.
      script porte les deux lignes, lu dans la copie propre comme il
      tournera : leur confier aussi ces fichiers ferait muter de nouveau tout
      ce que la branche y a changé. Une autre reçoit les fichiers de ses
-     survivants, remesurés entiers comme s'ils avaient changé. Seul le
-     script Rust la porte ;
+     survivants, remesurés entiers comme s'ils avaient changé. Les scripts
+     Rust et Next la portent ;
    - un diff contre `NUNKI_BASE` lu sans détection de renommage ;
    - **des chemins pris à la lettre.** Un chemin que `nunki` confie à une
      campagne peut porter une espace, un deux-points, un guillemet, un

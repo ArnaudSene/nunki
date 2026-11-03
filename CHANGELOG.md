@@ -22,9 +22,9 @@ merged since the last one. `AGENTS.md`, under "Releases", says how.
     outcomes, whatever was committed since, and run nothing.
   - The recheck runs once every other stage is green. It measures again
     the files changed since the campaign, and the campaign's survivors in
-    the other files: by name for the Rust stack, by their whole file for
-    Python and Next.js. When nothing changed since the campaign, it does
-    not run.
+    the other files: by name for the Rust and Next.js stacks, by their
+    whole file for Python. When nothing changed since the campaign, it
+    does not run.
   - A `standard` mission now goes through that last stage, as only
     `critical` did, and `nunki push` at `standard` refuses unless the
     measure on file ran on the pushed commit.
@@ -37,6 +37,18 @@ merged since the last one. `AGENTS.md`, under "Releases", says how.
     project set up before, `nunki init --refresh` replaces the script if
     nobody has touched it; until then its Rust survivors are rechecked by
     file.
+  - The Next.js `mutation.sh` measures a named survivor again by the span
+    of the code it replaces, which Stryker takes as it takes a line range,
+    and says so with the same two lines. Of what a span runs, only the
+    mutant named is reported. A survivor's id now carries that span.
+  - With those lines, a hardening mission and `nunki mutants run --owed`
+    take a Next.js project's debt by name too. A survivor the debt holds
+    from before has an id without a span: a campaign handed it measures
+    nothing, and says why. `nunki mutants run --whole` replaces the debt.
+  - In a Next.js project set up before, `nunki init --refresh` replaces
+    the script if nobody has touched it. The first campaign after it is
+    full, and an outcome the coder gave a survivor under its old id has to
+    be given again.
   - Missions in flight: a `standard` mission already `Verified` on a
     campaign of other content is refused by `nunki push` until `nunki
     mission mutants` runs the recheck. One at its final gates with a
@@ -82,6 +94,10 @@ merged since the last one. `AGENTS.md`, under "Releases", says how.
 
 ### Fixed
 
+- **Two Next.js survivors no longer share an id.** The id held where the
+  replaced code started, not where it ended. On `if (value >= high && high
+  > low)`, `true` in place of the whole condition and `true` in place of
+  its left side had one id, so one outcome answered both.
 - **A Next.js mutation campaign now mutates every source the branch
   touched.** It handed Stryker one `--mutate` per file, and Stryker keeps
   only the last. On a branch touching several sources, all but one went
