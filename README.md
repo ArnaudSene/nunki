@@ -456,7 +456,7 @@ A mission declares how much verification asks of it, with `--rigor` on
 | | `prototype` | `standard` | `critical` (the default) |
 |---|---|---|---|
 | Gate 7, the mutation campaign | not played | passes when the share of tried mutants killed reaches `mutation_threshold` (80 unless `nunki.yaml` says otherwise); a survivor with an outcome, a coder's proposal included, counts as killed | every survivor needs an outcome — killed, a bug, the HQ's equivalence, or the coder's proposal of one |
-| Gate 7's campaigns | none | the first full, a later one partial when the chain allows it | the same chain, to `Verified` and to `nunki push`; gate 7 is played again at the final `HEAD` before `Verified` |
+| Gate 7's campaigns | none | one campaign at the final gates, then a recheck at the final `HEAD`, before `Verified` and `nunki push` | the same |
 | Security agent rounds | none | at most 1 | at most 3 |
 | Integration | none | as declared | as declared |
 
@@ -467,23 +467,68 @@ runs the coder and the mechanical gates only, so `mission new`, the start of
 the mission and `mission reframe` all refuse one with a service or a security
 agent.
 
-### Gate 7's campaigns, full and partial
+### Gate 7: one campaign, then a recheck
 
-A mission's campaigns form a chain, and its unit is the **file**. The first
-campaign is **full**: every touched file, mutated where the branch changed it
-since its fork point. At `standard` and at `critical`, a later one — after
-a volet, say — is **partial**: the same campaign, restricted to the touched
-files whose content changed since the previous campaign's `HEAD`. Its base
-is still the fork point, so each of those files is measured exactly as a
-full campaign would measure it. Which files changed is git's answer on
-blobs (`git diff --name-only --no-renames`); no diff hunk is ever read. A
-file renamed is a file removed and a file added.
+At `standard` and `critical`, a mission owes **one campaign**, then **a
+recheck** at its final `HEAD`. A `prototype` owes neither. Measured on a
+`critical` mission of a Python project: eleven full campaigns, nine of
+which mostly found the same 102 to 114 survivors again, because each return
+to the coder owed one.
 
-A campaign is partial only when all of these hold, and full otherwise, with
-the reason in `MUTANTS.json`:
+- **The campaign** runs the first time the mission reaches its final gates,
+  after the coder's last lot. It is **full**: every touched file, mutated
+  where the branch changed it since its fork point. A red gate 7 on it sends
+  its survivors back to the coder, a volet counted in the bound, and the
+  coder answers them in `MUTANTS.triage.json`.
+- **Between the campaign and the recheck, no commit owes a campaign.** At
+  the final gates a volet's commits replay — the survivors' volet, or one
+  the integrator, the security agent or the HQ's review opened — gate 7
+  judges the measure on file and the coder's outcomes, and mutates nothing.
+  Its note says which measure it judged. A named test is looked for in the
+  tree, as everywhere.
+- **The recheck** runs once every other stage the mission owes is green
+  (`CLEAR`, a lift, or rounds spent with nothing left to lift), in one
+  invocation per stack. It measures again:
+  - in each touched file whose content changed since the campaign's
+    `HEAD`, removed and renamed ones included, everything the branch changed
+    in it, with the fork point as base, as the campaign did;
+  - in each file that did not change, **each of the campaign's survivors,
+    by name**. This is what checks that a test the coder named does kill
+    its mutant, where the gates only saw the test's name.
+- **Content the campaign measured owes no recheck**, survivors or not:
+  running it again would find the same survivors. And a `killed` written on
+  one of them is no outcome: on a measure of this very content, a survivor
+  its own run found had every test of the tree run against it, the named
+  one included, and lived. Gate 7 says so beside the survivor, at the final
+  gates as at the final stage, and `nunki push` refuses it too. A `bug` is
+  not affected, and a `killed` naming a test the tree does not hold is red,
+  as on any campaign.
+- **A red gate 7 on the recheck** opens a volet, counted in the bound. The
+  next recheck continues that one the same way: the files changed since it,
+  and the survivors of the others by name. The volets' bound bounds the
+  rechecks.
+
+**By name, or by file.** A stack is handed its survivors by name only when
+its `mutation.sh` says it looks for a name in every file of the stack,
+`# nunki-by-name-anywhere: NUNKI_MUTATION_NAMES`, beside its
+`# nunki-by-name:` line. The Rust template says it: cargo-mutants runs exact
+names under one `-F` in every file of the crate, and the run's other
+mutants with them, behind one baseline (measured on 27.1.0, in a workspace
+too). The Python and Next.js templates do not, and a recheck hands them
+their survivors' files instead, measured again whole like changed ones:
+correct, and close to a second campaign when the survivors are spread over
+many files. A project still on an older Rust script, set up before and not
+refreshed with `nunki init --refresh`, is rechecked by file too: that script
+looked for a name only in the files it was handed, and given others it
+measured nothing (measured). A name the tool cannot find in an unchanged
+file is a recheck that measured nothing, and says so: never a survivor
+counted killed.
+
+**When the recheck continues the campaign.** It is partial when all of these
+hold, and full otherwise, with the reason in `MUTANTS.json`:
 
 - the mission is at `standard` or `critical` (a `prototype` runs none);
-- a previous campaign of the mission is on file and gate 7 passes on it;
+- the measure it continues is on file and gate 7 passes on it;
 - its `HEAD` is an ancestor of the current one;
 - it ran from the same fork point: a base merged in, or a hunk the base
   cherry-picked, moves what the branch changed in every file;
@@ -492,14 +537,18 @@ the reason in `MUTANTS.json`:
   that did not change is one the branch touches at `HEAD`, present there;
 - the stack's `mutation.sh` and its tool's version are the ones it ran with —
   read through the script's `# nunki-tool-version: <command>` line, which
-  every shipped `mutation.sh` carries; a script without it runs full
-  campaigns only. With several stacks, only those the campaign calls count —
-  the ones owning a touched path — and each stack's command runs where its
-  script does, in the stack's own directory. A stack the branch did not
-  touch neither counts nor can make the campaign full. When a version
-  cannot be read, the reason in `MUTANTS.json` names the stack, the command
-  and what it answered;
+  every shipped `mutation.sh` carries; a script without it is rechecked
+  full. With several stacks, only those the recheck calls count — the ones
+  owning a touched path — and each stack's command runs where its script
+  does, in the stack's own directory. A stack the branch did not touch
+  neither counts nor can make the recheck full. When a version cannot be
+  read, the reason in `MUTANTS.json` names the stack, the command and what
+  it answered;
 - it was not asked with `nunki mission mutants --again`.
+
+Which files changed is git's answer on blobs (`git diff --name-only
+--no-renames`); no diff hunk is ever read. A file renamed is a file removed
+and a file added.
 
 **Per-file counts.** Before its last line, `mutation.sh` prints one line per
 file with that file's counts, `{"measured":"src/lib.rs","tried":12,"found":13}`,
@@ -512,7 +561,7 @@ functions and methods that hold a changed line, and counts only the mutants
 whose change reaches one, each placed on its line by mutmut's own
 `get_diff_for_mutant`. That function is internal to mutmut, not an
 interface: a mutmut without it measures nothing, and the tool's version,
-which the chain checks, ties the counts to the mutmut that placed them. The
+which the recheck checks, ties the counts to the mutmut that placed them. The
 Next.js template gives them too: Stryker takes line ranges, and the script
 hands it one for each run of lines the branch added, then counts what its
 report gives, keyed by the file each mutant is in. Stryker mutates only what
@@ -534,60 +583,54 @@ lines are read from, and a count taken from those would always agree with
 them. A
 survivor's name is printed with its control characters escaped (`\u{9}`).
 
-**How a chain is judged: once.** `MUTANTS.json` keeps, for each touched
-file, the counts of the latest campaign that measured it. A file unchanged
-since keeps its counts and its survivors exactly as they were — same file,
-same lines — and what the HQ said on them comes back the way it does between
-any two campaigns: a ruling as a proposal marked carried, awaiting
-`--ratify`, and a refusal as a refusal. A file changed, removed or renamed
-takes its old counts and survivors with it; what the new campaign found in
-it replaces them. Gate 7, and `nunki push` after it, judge that
+**How the reconstruction is judged: once.** `MUTANTS.json` keeps, for each
+touched file, the counts of the latest measure that reached it. A file
+changed, removed or renamed holds what the recheck found in it alone. A file
+unchanged since keeps the campaign's counts, and its survivors are those the
+recheck found again by name: one it killed leaves the list. What the HQ said
+on a survivor found again comes back the way it does between any two
+campaigns: a ruling as a proposal marked carried, awaiting `--ratify`, and a
+refusal as a refusal. Gate 7, and `nunki push` after it, judge that
 reconstruction once, as they judge any campaign of the mission's rigor: at
 `standard`, at its threshold — the sum of every file's tried, and the
 survivors left without an outcome; at `critical`, with no threshold — every
-survivor listed, kept from an unchanged file or found by the latest
-campaign, needs an outcome. These are the numbers one
-full campaign at `HEAD` would give, under the assumption below. A volet that
-re-mutates well-killed code cannot pad the share: its new counts replace the
-old ones rather than adding to them.
+survivor listed needs an outcome. These are the numbers one full campaign at
+`HEAD` would give, under the assumption below. A volet that re-mutates
+well-killed code cannot pad the share: its new counts replace the old ones
+rather than adding to them.
 
-A partial campaign whose own counts cannot be trusted — none given, ones that
-do not add up, a count or a survivor in a file that did not change — is
-recorded with every survivor listed and no count. Gate 7 then judges it as
-`critical` does, and the next campaign is full. `mission status`, the
-monitor's log and the follow-up name each campaign (full or partial, from
-which commit, what it tried), then the one campaign gate 7 judged.
+A recheck whose own counts cannot be trusted — none given, ones that do not
+add up, a count in a file it neither measured again nor measured by name, a
+survivor in an unchanged file it was not handed by name — is recorded with
+every survivor listed and no count. Gate 7 then judges it as `critical` does,
+and the next one is full. `mission status`, the monitor's log and the
+follow-up name each measure (full or partial, from which commit, what it
+tried), then the one gate 7 judged.
 
-**The known limit.** A partial campaign assumes that a mutant measured
-earlier in a file nobody has changed since still exists, and is still
-killed. A volet that weakens a test can make the second false; one that
-stops compiling an unchanged file — its `mod` line removed — makes the
-first false, and that file keeps its counts. The chain will not see
-either, at any rigor, and nothing in the mission does. `--again` forces a
-full campaign, and it is the only remedy inside the mission; outside it,
-a campaign over the whole code (`nunki mutants run --whole`, below).
+**The known limit.** A recheck assumes that a mutant the campaign killed in
+a file nobody has changed since still exists, and is still killed. A volet
+that weakens a test can make the second false; one that stops compiling an
+unchanged file — its `mod` line removed — makes the first false, and that
+file keeps its counts. The recheck measures again by name only survivors,
+and will not see either, at any rigor. `--again` forces a full campaign, and
+it is the only remedy inside the mission; outside it, a campaign over the
+whole code (`nunki mutants run --whole`, below).
 
-**The final campaign, at `critical`.** The chain holds to the end: a
-`critical` mission is verified, and pushed, on a campaign at its final
-`HEAD` that passes, partial or full. When every other stage it owes is
-green — the gates, the integrator and the security verdict as its shape
-requires: `CLEAR`, a lift, or rounds spent with nothing left to lift — it
-stands at a last stage, the final campaign, where gate 7 is played again
-alone:
+**The final stage.** A `standard` or `critical` mission whose every other
+stage is green stands at a last stage, the recheck, where gate 7 is played
+again alone:
 
-- a campaign on file at `HEAD` passes: the mission is `Verified`. When
-  nothing moved `HEAD` since the gates, that is the gates' own campaign,
-  and nothing runs again;
-- none is on file at `HEAD`'s content — a commit came after the gates:
-  `nunki` launches one, partial when the chain allows it, watched like any
-  campaign, and looks again once it is read back;
+- the measure on file is of `HEAD`'s content and passes: the mission is
+  `Verified`. When nothing moved since the campaign, that is the campaign
+  itself, and nothing runs again;
+- it is not: `nunki` launches the recheck, watched like any campaign, and
+  looks again once it is read back;
 - it has survivors without an outcome: they go back to the coder as a volet,
-  as any campaign's do, and gate 7 is played again at this stage before
-  `Verified`.
+  and gate 7 is played again at this stage before `Verified`.
 
-`nunki push` at `critical` refuses unless the campaign on file was run on
-the content of the pushed commit and passes; its refusal names
-`nunki mission mutants <mission>`, which runs one there.
+`nunki push` at `standard` and `critical` refuses unless the measure on file
+ran on the content of the pushed commit and passes; its refusal names
+`nunki mission mutants <mission>`, which runs the recheck there.
 
 ### A budget, and a sample when the campaign does not fit it
 
@@ -597,7 +640,7 @@ The mission's `mutation_minutes` (45 by default) is each campaign's
 - the seconds a mutant took on the project's last campaign that tried at
   least five, `NUNKI_MUTATION_PACE`. It is kept in `campaign-pace.json`
   under the project's HQ; the script assumes 60 without it;
-- for a partial campaign, the fraction of the campaign it continues,
+- for a recheck, the fraction of the measure it continues,
   `NUNKI_MUTATION_SAMPLE`.
 
 The Rust script lists the mutants its scope reaches (`cargo mutants --list
@@ -618,14 +661,15 @@ less one for the baseline, which rebuilds the crate as a mutant does.
   the whole.
 - **What it ran at is recorded.** The script says it on a line before its
   terminal one, `{"sampled":k,"listed":N,"paced":s,"pace":m}`. `MUTANTS.json`
-  keeps the fraction in the chain, and `mission status` says "a sample of
+  keeps the fraction, and `mission status` says "a sample of
   1/3 of 48". Under the filter the tool's own tallies are the sample's, so
   gate 7 judges the sample whole: the threshold at `standard`, an outcome
   for every sampled survivor at `critical`.
-- **A partial campaign runs at its chain's fraction,** even when its few
-  files would fit whole, so that the reconstruction is one sample. At
-  another fraction, it is not recorded alone. A full campaign sizes its
-  own.
+- **A recheck runs at the fraction of the measure it continues,** even
+  when its few files would fit whole, so that the reconstruction is one
+  sample. At another fraction, it is not recorded alone. A full campaign
+  sizes its own. The survivors it names are in that sample already, chosen
+  by the same key.
 - **Rust only.** The Python and Next.js scripts ignore the budget and run
   whole. On a project with several stacks, the Rust stack gets the whole
   budget and the others run whole after it, under the same deadline.
@@ -1155,7 +1199,7 @@ MISSION  (one branch off its base, one slot)
 
 - **Stage** — where the mission stands, one at a time: coding, final gates,
   integration, security, findings (the security agent's, for a human to
-  iterate on or lift), the final campaign (`critical` only), awaiting a
+  iterate on or lift), the recheck (`standard` and `critical`), awaiting a
   human, verified. A stage the mission does
   not declare is absent by declaration, not skipped.
 - **Lot** — a planned unit of the coder's work, listed in the header (`L1`,

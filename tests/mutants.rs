@@ -2913,12 +2913,33 @@ fn old_triage_and_campaign_files_still_read() {
     let campaign = mutants::read(dir.path()).unwrap().unwrap();
     assert_eq!(campaign.survivors[0].refused, None);
     assert_eq!(campaign.survivors[1].refused, None);
-    assert!(mutants::open(dir.path()).unwrap().is_empty());
+    assert!(mutants::open(dir.path(), false).unwrap().is_empty());
     assert!(mutants::awaiting_ruling(dir.path()).unwrap().is_empty());
 
     mutants::write(dir.path(), &campaign).unwrap();
     let written = std::fs::read_to_string(dir.path().join(mutants::FILE)).unwrap();
     assert!(!written.contains("refused"), "{written}");
+}
+
+/// A survivor whose `killed` the campaign refutes — the campaign ran on the
+/// content as it stands, and found it alive — is open: its lot may be handed
+/// over awaiting a ruling on it, as for any survivor without an outcome. On
+/// other content, the `killed` answers it until the recheck.
+#[test]
+fn a_survivor_whose_killed_the_campaign_refutes_is_open() {
+    let dir = tempfile::tempdir().unwrap();
+    ruled_before(dir.path(), vec![one("m1", 1, "a")]);
+    let coders = [(
+        "m1".to_string(),
+        Triage::Killed {
+            test: "one_is_one".into(),
+        },
+    )]
+    .into_iter()
+    .collect();
+    mutants::write_triage(dir.path(), &coders).unwrap();
+    assert!(mutants::open(dir.path(), false).unwrap().is_empty());
+    assert_eq!(mutants::open(dir.path(), true).unwrap(), vec!["m1"]);
 }
 
 /// A survivor with a valid proposal is no longer open — it cannot be awaited
@@ -2944,7 +2965,7 @@ fn a_survivor_with_a_proposal_is_not_open_and_awaits_the_hq() {
             ("m4", "the HQ's already"),
         ],
     );
-    assert_eq!(mutants::open(dir.path()).unwrap(), vec!["m2", "m3"]);
+    assert_eq!(mutants::open(dir.path(), false).unwrap(), vec!["m2", "m3"]);
     let waiting = mutants::awaiting_ruling(dir.path()).unwrap();
     assert_eq!(
         waiting,
@@ -3091,11 +3112,14 @@ fn refusing_reopens_the_survivor_and_the_next_run_reads_why() {
         &paths.dir,
         &[("m1", "only a log line reads it"), ("m2", "kept")],
     );
-    assert_eq!(mutants::open(&paths.dir).unwrap(), Vec::<String>::new());
+    assert_eq!(
+        mutants::open(&paths.dir, false).unwrap(),
+        Vec::<String>::new()
+    );
 
     mutants::refuse_and_say(&paths, "Arnaud", "m1", "the CLI prints that line").unwrap();
 
-    assert_eq!(mutants::open(&paths.dir).unwrap(), vec!["m1"]);
+    assert_eq!(mutants::open(&paths.dir, false).unwrap(), vec!["m1"]);
     let triage = mutants::read_triage(&paths.dir).unwrap();
     assert!(!triage.contains_key("m1"), "{triage:?}");
     assert!(triage.contains_key("m2"), "only the refused one is taken");
@@ -3122,7 +3146,7 @@ fn refusing_reopens_the_survivor_and_the_next_run_reads_why() {
         &paths.dir,
         &[("m1", "only a log line reads it, truly"), ("m2", "kept")],
     );
-    assert_eq!(mutants::open(&paths.dir).unwrap(), vec!["m1"]);
+    assert_eq!(mutants::open(&paths.dir, false).unwrap(), vec!["m1"]);
     let waiting = mutants::awaiting_ruling(&paths.dir).unwrap();
     assert_eq!(
         waiting.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
@@ -3141,7 +3165,7 @@ fn refusing_reopens_the_survivor_and_the_next_run_reads_why() {
     mutants::ratify(&paths.dir, "m1", None).unwrap();
     let campaign = mutants::read(&paths.dir).unwrap().unwrap();
     assert_eq!(campaign.survivors[0].refused, None);
-    assert!(mutants::open(&paths.dir).unwrap().is_empty());
+    assert!(mutants::open(&paths.dir, false).unwrap().is_empty());
 }
 
 /// A refusal says why, and is of a proposal: anything else is refused, and
@@ -3337,19 +3361,19 @@ fn what_is_owed_is_read_from_the_mission_folder() {
     use nunki::mission::Rigor;
     let dir = tempfile::tempdir().unwrap();
     assert_eq!(
-        mutants::owed_on_file(dir.path(), Rigor::Critical, 80).unwrap(),
+        mutants::owed_on_file(dir.path(), Rigor::Critical, 80, false).unwrap(),
         None
     );
     ruled_before(dir.path(), vec![one("m1", 1, "a")]);
     assert!(
-        mutants::owed_on_file(dir.path(), Rigor::Critical, 80)
+        mutants::owed_on_file(dir.path(), Rigor::Critical, 80, false)
             .unwrap()
             .unwrap()
             .contains("m1")
     );
     proposes(dir.path(), &[("m1", "only a log line reads it")]);
     assert_eq!(
-        mutants::owed_on_file(dir.path(), Rigor::Critical, 80).unwrap(),
+        mutants::owed_on_file(dir.path(), Rigor::Critical, 80, false).unwrap(),
         None
     );
 }
@@ -3387,7 +3411,7 @@ fn ratify_refuse_and_lift_act_on_every_survivor_sharing_the_id() {
     }
     assert_eq!(campaign.survivors[2].outcome, None, "Y is not X");
     assert!(mutants::awaiting_ruling(dir.path()).unwrap().is_empty());
-    assert_eq!(mutants::open(dir.path()).unwrap(), vec!["Y"]);
+    assert_eq!(mutants::open(dir.path(), false).unwrap(), vec!["Y"]);
 
     mutants::lift_equivalent(dir.path(), "X").unwrap();
     let campaign = mutants::read(dir.path()).unwrap().unwrap();
@@ -3402,7 +3426,10 @@ fn ratify_refuse_and_lift_act_on_every_survivor_sharing_the_id() {
         assert!(s.refused.is_some(), "{s:?}");
     }
     assert_eq!(campaign.survivors[2].refused, None);
-    assert_eq!(mutants::open(dir.path()).unwrap(), vec!["X", "X", "Y"]);
+    assert_eq!(
+        mutants::open(dir.path(), false).unwrap(),
+        vec!["X", "X", "Y"]
+    );
 
     // A ruling on an id nobody carries is still refused.
     let err = mutants::rule_equivalent(dir.path(), "Z", "no").unwrap_err();
@@ -3488,7 +3515,7 @@ fn a_refusal_follows_its_mutant_to_the_next_campaign_like_a_ruling() {
     );
     assert!(mutants::awaiting_ruling(dir.path()).unwrap().is_empty());
     assert_eq!(
-        mutants::open(dir.path()).unwrap(),
+        mutants::open(dir.path(), false).unwrap(),
         vec!["m1", "new-name", "d1", "d2", "m4"]
     );
 }
@@ -3659,7 +3686,7 @@ fn a_mutant_ruled_on_one_mission_is_not_asked_again_on_the_next() {
     );
     let b = mission_dir(&project, "b");
     assert!(
-        mutants::open(&b).unwrap().is_empty(),
+        mutants::open(&b, false).unwrap().is_empty(),
         "B's coder is not asked again"
     );
     let waiting = mutants::awaiting_ruling(&b).unwrap();
@@ -3698,7 +3725,9 @@ fn after_its_line_changes_the_same_mutation_is_open_again() {
     assert_eq!(recorded.from_registry, 0);
     assert_eq!(campaign.survivors[0].outcome, None);
     assert_eq!(
-        mutants::open(&mission_dir(&project, "b")).unwrap().len(),
+        mutants::open(&mission_dir(&project, "b"), false)
+            .unwrap()
+            .len(),
         1,
         "the ruling was about other code"
     );
@@ -3803,7 +3832,7 @@ fn lifting_on_a_later_mission_takes_the_ruling_out_and_the_next_is_asked_again()
     );
     let b = mission_dir(&project, "b");
     assert_eq!(
-        mutants::open(&b).unwrap(),
+        mutants::open(&b, false).unwrap(),
         vec![id.clone()],
         "B needs an outcome"
     );
@@ -3953,7 +3982,7 @@ fn an_unreadable_registry_applies_nothing_and_says_so() {
         "{ this is not a registry"
     );
     assert!(
-        mutants::open(&mission_dir(&project, "b"))
+        mutants::open(&mission_dir(&project, "b"), false)
             .unwrap()
             .is_empty()
     );
@@ -4078,7 +4107,7 @@ fn a_proposal_from_the_registry_is_refused_like_any_proposal() {
     assert_eq!(refusal.proposed, "nothing reads the value");
     let campaign = mutants::read(&b).unwrap().unwrap();
     assert_eq!(campaign.survivors[0].outcome, None);
-    assert_eq!(mutants::open(&b).unwrap(), vec![id.clone()]);
+    assert_eq!(mutants::open(&b, false).unwrap(), vec![id.clone()]);
     // And the next campaign of B neither proposes it again nor drops the
     // refusal.
     let (campaign, _) = campaign_on(&project, "b", &[on_lib(2)]);
@@ -4867,7 +4896,7 @@ fn a_lift_the_registry_cannot_take_fails_and_leaves_the_mission_alone() {
         nunki::findings::lift_equivalent(&project, "a", &id).unwrap(),
         Registered::Done(1)
     );
-    assert!(mutants::open(&a).unwrap().contains(&id));
+    assert!(mutants::open(&a, false).unwrap().contains(&id));
 }
 
 /// A registry entry outlives the ruling on its mission — lifted there by a
@@ -5053,7 +5082,7 @@ fn a_ruled_line_deleted_leaves_its_twin_a_proposal_never_a_ruling() {
     // The HQ refuses it: the survivor is open, with the refusal on it.
     nunki::findings::refuse_proposal(&project, "a", "second", "the twin is read").unwrap();
     let a = mission_dir(&project, "a");
-    assert_eq!(mutants::open(&a).unwrap(), vec!["second"]);
+    assert_eq!(mutants::open(&a, false).unwrap(), vec!["second"]);
 }
 
 /// Attack 3: a refusal on text that occurs twice, and the id changes. The
@@ -5078,7 +5107,7 @@ fn a_refusal_on_repeated_text_follows_an_id_change() {
         Some("it is returned")
     );
     proposes(&a, &[("after", "nothing reads it")]);
-    assert_eq!(mutants::open(&a).unwrap(), vec!["after"]);
+    assert_eq!(mutants::open(&a, false).unwrap(), vec!["after"]);
     assert!(mutants::awaiting_ruling(&a).unwrap().is_empty());
 }
 
@@ -5137,7 +5166,7 @@ fn lifting_a_carried_proposal_takes_its_ruling_out_of_the_registry() {
             .is_empty()
     );
     assert_eq!(
-        mutants::open(&mission_dir(&project, "a")).unwrap(),
+        mutants::open(&mission_dir(&project, "a"), false).unwrap(),
         vec!["renamed"]
     );
 }
@@ -5271,7 +5300,7 @@ fn a_proposal_by_nunki_forged_in_the_coders_file_is_nothing() {
 
     assert!(mutants::awaiting_ruling(&a).unwrap().is_empty());
     assert!(nunki::findings::pending(&project, "a").unwrap().is_empty());
-    assert_eq!(mutants::open(&a).unwrap(), vec![id.clone()]);
+    assert_eq!(mutants::open(&a, false).unwrap(), vec![id.clone()]);
     let foreign = mutants::foreign(&a).unwrap();
     assert_eq!(foreign.len(), 1);
     assert_eq!(foreign[0].kind, "proposed_by_nunki");
@@ -5784,6 +5813,7 @@ fn on_file_at(head: &str, survivors: Vec<Survivor>, tried: Option<u32>) -> Campa
             sample: None,
             fork: Some(FORK.into()),
             handed: None,
+            named: None,
             ran: None,
             scope: Scope::Full {
                 why: "the first campaign of this mission".into(),
@@ -6341,6 +6371,7 @@ fn a_partial_campaign_is_read_back_with_its_chain_or_forgotten_when_it_broke() {
                     sample: None,
                     fork: Some(FORK.into()),
                     handed: Some(vec!["src/lib.rs".into()]),
+                    named: None,
                     ran: None,
                     scope: Scope::Partial {
                         since: first.clone(),
@@ -11303,4 +11334,367 @@ fn no_campaign_is_handed_more_names_than_fit() {
         .collect();
     assert!(serde_json::to_string(&names).unwrap().len() <= mutants::NAMES_MAX_BYTES);
     assert_eq!(names[0], owed[0].survivor.id, "the oldest first");
+}
+
+// ---------------------------------------------------------------------------
+// The recheck at the final HEAD (SPEC 4.4: one campaign, then a recheck).
+// ---------------------------------------------------------------------------
+
+/// Record `log` as a recheck since `since`, at `head`, over the campaign on
+/// file, as a launch hands it: the files changed since and `by_file`
+/// besides, and `named` by their ids; what is on file afterwards.
+#[allow(clippy::too_many_arguments)]
+fn recorded_recheck(
+    dir: &Path,
+    tree: &Path,
+    since: &str,
+    head: &str,
+    previous: &Campaign,
+    log: &str,
+    named: &[&str],
+    by_file: &[&str],
+) -> Campaign {
+    let mission = dir.join("mission");
+    std::fs::create_dir_all(&mission).unwrap();
+    mutants::write(&mission, previous).unwrap();
+    let mut handed: Vec<String> = mutants::changed_between(tree, since, head)
+        .unwrap()
+        .into_iter()
+        .collect();
+    handed.extend(by_file.iter().map(|f| f.to_string()));
+    let chain = Chain {
+        scope: Scope::Partial {
+            since: since.into(),
+        },
+        tooling: Some("tools-1".into()),
+        fork: Some(FORK.into()),
+        handed: Some(handed),
+        named: (!named.is_empty()).then(|| named.iter().map(|n| n.to_string()).collect()),
+        ..Chain::default()
+    };
+    mutants::record_finished_with_registry(
+        &mission,
+        &dir.join("hq"),
+        tree,
+        "fp-recheck",
+        head,
+        log,
+        &chain,
+    )
+    .unwrap();
+    mutants::read(&mission).unwrap().unwrap()
+}
+
+/// The recheck's own log: the survivors it reported, each file's count, and
+/// the terminal line, its total the sum of the counts it printed.
+fn rechecked(survivors: &[Survivor], files: &[(&str, u32)]) -> String {
+    counted_log(survivors, files)
+}
+
+/// A file unchanged since the campaign keeps the campaign's counts, and of
+/// its survivors those the recheck found again by name; the one it killed
+/// leaves the list. The recheck's own count for that file — the named
+/// mutants alone — is never taken as the file's. A survivor found again is
+/// the recheck's own, measured on its content: no `found_on`.
+#[test]
+fn a_recheck_keeps_the_survivors_it_found_again_by_name_and_drops_the_ones_it_killed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (tree, first, second) = two_commits(
+        dir.path(),
+        &[("src/a.rs", A), ("src/b.rs", B)],
+        &[(
+            "src/a.rs",
+            Some("pub fn a(n: u8) -> bool {\n    n > 5\n}\n"),
+        )],
+    );
+    let lives = survivor_at("src/b.rs:2:5: replace * with + in b", "src/b.rs", 2);
+    let killed = survivor_at("src/b.rs:2:5: replace * with / in b", "src/b.rs", 2);
+    let changed = survivor_at("src/a.rs:2:7: replace > with >= in a", "src/a.rs", 2);
+    let previous = on_file_with(
+        &first,
+        vec![lives.clone(), killed.clone(), changed],
+        &[("src/a.rs", 3), ("src/b.rs", 4)],
+    );
+    let new_in_a = survivor_at("src/a.rs:2:7: replace > with == in a", "src/a.rs", 2);
+    let log = rechecked(
+        &[new_in_a.clone(), lives.clone()],
+        &[("src/a.rs", 5), ("src/b.rs", 2)],
+    );
+    let on_file = recorded_recheck(
+        dir.path(),
+        &tree,
+        &first,
+        &second,
+        &previous,
+        &log,
+        &[&lives.id, &killed.id],
+        &[],
+    );
+    let ids: std::collections::BTreeSet<&str> =
+        on_file.survivors.iter().map(|s| s.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        [new_in_a.id.as_str(), lives.id.as_str()]
+            .into_iter()
+            .collect(),
+        "{on_file:?}"
+    );
+    assert!(
+        on_file.survivors.iter().all(|s| s.found_on.is_none()),
+        "found again is found here: {:?}",
+        on_file.survivors
+    );
+    let files = on_file.files.expect("the reconstruction is trusted");
+    assert_eq!(files["src/a.rs"].tried, 5);
+    assert_eq!(files["src/a.rs"].on, second);
+    assert_eq!(files["src/b.rs"].tried, 4, "the campaign's count stands");
+    assert_eq!(files["src/b.rs"].on, first);
+    assert_eq!(on_file.tried, Some(9));
+    assert_eq!(on_file.chain.ran, Some(7), "what the recheck itself tried");
+    assert_eq!(
+        on_file.chain.named,
+        Some(vec![lives.id.clone(), killed.id.clone()])
+    );
+}
+
+/// A file handed besides the files changed — a survivor's file, for a stack
+/// whose script does not look for a name outside the files handed — is the
+/// recheck's whole: its counts and its survivors come from it alone.
+#[test]
+fn a_recheck_measures_again_whole_the_files_it_was_handed_besides() {
+    let dir = tempfile::tempdir().unwrap();
+    let (tree, first, second) = two_commits(
+        dir.path(),
+        &[("src/a.rs", A), ("src/b.rs", B)],
+        &[(
+            "src/a.rs",
+            Some("pub fn a(n: u8) -> bool {\n    n > 5\n}\n"),
+        )],
+    );
+    let old = survivor_at("src/b.rs:2:5: replace * with + in b", "src/b.rs", 2);
+    let previous = on_file_with(
+        &first,
+        vec![old.clone()],
+        &[("src/a.rs", 3), ("src/b.rs", 4)],
+    );
+    let new_in_b = survivor_at("src/b.rs:2:5: replace * with / in b", "src/b.rs", 2);
+    let log = rechecked(
+        std::slice::from_ref(&new_in_b),
+        &[("src/a.rs", 3), ("src/b.rs", 6)],
+    );
+    let on_file = recorded_recheck(
+        dir.path(),
+        &tree,
+        &first,
+        &second,
+        &previous,
+        &log,
+        &[],
+        &["src/b.rs"],
+    );
+    assert_eq!(
+        on_file.survivors.iter().map(|s| &s.id).collect::<Vec<_>>(),
+        vec![&new_in_b.id],
+        "{on_file:?}"
+    );
+    let files = on_file.files.expect("the reconstruction is trusted");
+    assert_eq!(files["src/b.rs"].tried, 6);
+    assert_eq!(files["src/b.rs"].on, second);
+    assert_eq!(on_file.tried, Some(9));
+}
+
+/// A recheck the reconstruction cannot trust is recorded without a count:
+/// one that reports, in a file unchanged since, a survivor it was not handed
+/// by name, or that counts a file it neither measured again nor measured by
+/// name.
+#[test]
+fn a_recheck_that_answers_for_what_it_was_not_handed_is_recorded_without_a_count() {
+    let dir = tempfile::tempdir().unwrap();
+    let (tree, first, second) = two_commits(
+        dir.path(),
+        &[("src/a.rs", A), ("src/b.rs", B), ("src/c.rs", B)],
+        &[(
+            "src/a.rs",
+            Some("pub fn a(n: u8) -> bool {\n    n > 5\n}\n"),
+        )],
+    );
+    let named = survivor_at("src/b.rs:2:5: replace * with + in b", "src/b.rs", 2);
+    let previous = on_file_with(
+        &first,
+        vec![named.clone()],
+        &[("src/a.rs", 3), ("src/b.rs", 4), ("src/c.rs", 2)],
+    );
+    let stray = survivor_at("src/b.rs:2:5: replace * with / in b", "src/b.rs", 2);
+    for log in [
+        rechecked(
+            &[named.clone(), stray.clone()],
+            &[("src/a.rs", 3), ("src/b.rs", 2)],
+        ),
+        rechecked(
+            std::slice::from_ref(&named),
+            &[("src/a.rs", 3), ("src/b.rs", 1), ("src/c.rs", 1)],
+        ),
+    ] {
+        let on_file = recorded_recheck(
+            dir.path(),
+            &tree,
+            &first,
+            &second,
+            &previous,
+            &log,
+            &[&named.id],
+            &[],
+        );
+        assert_eq!(on_file.files, None, "{log}");
+        assert_eq!(on_file.tried, None, "{log}");
+    }
+}
+
+/// How a recheck measures the survivors of the files unchanged since: by
+/// name for a stack whose script looks for a name in every file, by their
+/// files for any other, and all by file when their names would not fit in
+/// what a campaign is handed.
+#[cfg(unix)]
+#[test]
+fn a_recheck_names_the_survivors_of_a_stack_that_looks_everywhere_and_hands_the_others_files() {
+    let two = TwoStacks::new("#!/bin/sh\n", "#!/bin/sh\n");
+    let rust = survivor_at("rust:src/lib.rs:1:5: replace y", "src/lib.rs", 1);
+    let next = survivor_at("next:app/page.ts:3: replace x", "frontend/app/page.ts", 3);
+    let anywhere: std::collections::BTreeSet<String> = ["rust".to_string()].into();
+    let plan = mutants::recheck_plan(&two.judged, &[rust.clone(), next.clone()], &anywhere);
+    assert_eq!(
+        plan.names,
+        [(
+            "rust".to_string(),
+            vec!["src/lib.rs:1:5: replace y".to_string()]
+        )]
+        .into()
+    );
+    assert_eq!(plan.ids, vec![rust.id.clone()]);
+    assert_eq!(plan.by_file, vec!["frontend/app/page.ts".to_string()]);
+
+    let none = mutants::recheck_plan(&two.judged, &[rust.clone(), next], &Default::default());
+    assert!(none.names.is_empty() && none.ids.is_empty(), "{none:?}");
+    assert_eq!(none.by_file.len(), 2);
+
+    let long = "x".repeat(1024);
+    let many: Vec<Survivor> = (0..80)
+        .map(|n| survivor_at(&format!("rust:src/lib.rs:{n}:5: {long}"), "src/lib.rs", n))
+        .collect();
+    let over = mutants::recheck_plan(&two.judged, &many, &anywhere);
+    assert!(over.names.is_empty() && over.ids.is_empty(), "{over:?}");
+    assert_eq!(over.by_file, vec!["src/lib.rs".to_string()]);
+}
+
+/// The new line is half of a promise: a script says it looks for a name in
+/// every file only when it says it reads names at all.
+#[test]
+fn a_script_looks_for_names_everywhere_only_when_it_reads_them() {
+    let both = format!(
+        "#!/bin/sh\n{}\n{}\n",
+        mutants::BY_NAME_MARK,
+        mutants::BY_NAME_ANYWHERE_MARK
+    );
+    assert!(mutants::measures_by_name_anywhere(&both));
+    let alone = format!("#!/bin/sh\n{}\n", mutants::BY_NAME_ANYWHERE_MARK);
+    assert!(!mutants::measures_by_name_anywhere(&alone));
+    let older = format!("#!/bin/sh\n{}\n", mutants::BY_NAME_MARK);
+    assert!(!mutants::measures_by_name_anywhere(&older));
+}
+
+/// Read in the clean copy, as the recheck will run it: only the stacks whose
+/// script carries both lines are handed names, and one that cannot be read
+/// is not.
+#[test]
+fn a_recheck_reads_in_the_clean_copy_which_stacks_look_everywhere() {
+    use nunki::engine::fake::FakeEngine;
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot) = rust_and_next(dir.path());
+    let both = format!(
+        "#!/bin/sh\n{}\n{}\n",
+        mutants::BY_NAME_MARK,
+        mutants::BY_NAME_ANYWHERE_MARK
+    );
+    let judged = nunki::run::judged(&project, "rust");
+    let stacks: std::collections::BTreeSet<String> =
+        ["rust".to_string(), "next".to_string()].into();
+    for (rust_says, next_says, want) in [
+        (
+            container_says(&both),
+            container_says(&both),
+            vec!["next", "rust"],
+        ),
+        (
+            container_says(&both),
+            container_says("#!/bin/sh\n"),
+            vec!["rust"],
+        ),
+        (
+            failed(1, "No such file"),
+            container_says(&both),
+            vec!["next"],
+        ),
+    ] {
+        let fake = std::sync::Arc::new(
+            FakeEngine::default()
+                .with_container(nunki::compose::AGENT_SERVICE, "cafe1234")
+                .with_exec_when("/work/stack/mutation.sh", rust_says)
+                .with_exec_when("/work/stack-next/mutation.sh", next_says),
+        );
+        let anywhere = mutants::named_anywhere(&project, &slot, fake, &judged, &stacks).unwrap();
+        assert_eq!(
+            anywhere.iter().map(String::as_str).collect::<Vec<_>>(),
+            want
+        );
+    }
+}
+
+/// Rule A as one function: on a measure of the content being judged, the
+/// coder's `killed` on a survivor that measure found is refuted; not on
+/// other content, not on a survivor kept from an earlier campaign, not a
+/// `bug`, and not a `killed` whose test is no test name.
+#[test]
+fn a_measure_of_this_content_refutes_a_killed_on_what_it_found_and_nothing_else() {
+    let found = survivor_at("found", "src/lib.rs", 1);
+    let kept = Survivor {
+        found_on: Some("e".repeat(40)),
+        ..survivor_at("kept", "src/lib.rs", 2)
+    };
+    let frozen = survivor_at("frozen", "src/lib.rs", 3);
+    let nameless = survivor_at("nameless", "src/lib.rs", 4);
+    let campaign = on_file_at("h", vec![found, kept, frozen, nameless], None);
+    let coders: std::collections::BTreeMap<String, Triage> = [
+        (
+            "found",
+            Triage::Killed {
+                test: "it_holds".into(),
+            },
+        ),
+        (
+            "kept",
+            Triage::Killed {
+                test: "it_holds".into(),
+            },
+        ),
+        (
+            "frozen",
+            Triage::Bug {
+                test: "it_holds".into(),
+            },
+        ),
+        ("nameless", Triage::Killed { test: "a b".into() }),
+    ]
+    .into_iter()
+    .map(|(id, t)| (id.to_string(), t))
+    .collect();
+    let refuted = mutants::refuted(&campaign, &coders, true);
+    assert_eq!(
+        refuted,
+        [("found".to_string(), "it_holds".to_string())].into()
+    );
+    assert!(mutants::refuted(&campaign, &coders, false).is_empty());
+    let standing = mutants::unrefuted(coders.clone(), &campaign, true);
+    assert!(!standing.contains_key("found"));
+    assert_eq!(standing.len(), 3);
+    assert_eq!(mutants::unrefuted(coders.clone(), &campaign, false), coders);
 }

@@ -138,6 +138,28 @@ pub fn measures_by_name(script: &str) -> bool {
     script.lines().any(|line| line.trim() == BY_NAME_MARK)
 }
 
+/// The line of a stack's `mutation.sh` that says more than
+/// [`BY_NAME_MARK`]: a name is looked for in every file of the stack, not
+/// only in the files handed. The recheck at a mission's final `HEAD` hands
+/// a stack by name the survivors of the files unchanged since the measure
+/// it continues, and not those files: handed, everything the branch changed
+/// in them would be mutated again (SPEC 4.4). A script without it is handed
+/// those files instead, and they are measured again whole — measured with
+/// the Rust stack's script as an older `nunki` wrote it: given names outside
+/// the files handed, it said they were not in the code, and measured
+/// nothing.
+pub const BY_NAME_ANYWHERE_MARK: &str = "# nunki-by-name-anywhere: NUNKI_MUTATION_NAMES";
+
+/// Whether a `mutation.sh` says it looks for a name in every file of its
+/// stack ([`BY_NAME_ANYWHERE_MARK`]). It must say it reads names too
+/// ([`measures_by_name`]): the two lines are one promise, read together.
+pub fn measures_by_name_anywhere(script: &str) -> bool {
+    measures_by_name(script)
+        && script
+            .lines()
+            .any(|line| line.trim() == BY_NAME_ANYWHERE_MARK)
+}
+
 /// Where the project's pace is kept, under its HQ: the seconds a mutant took
 /// on its last campaign that tried at least [`PACE_TRIED`], as the stack's
 /// script measured it. Only the Rust stack's script measures it today.
@@ -588,19 +610,26 @@ pub struct Measured {
     pub on: String,
 }
 
-/// A mission's campaigns form a chain (SPEC 4.4, gate 7). The first is
-/// **full**: every touched file, mutated where the branch changed it since
-/// its fork point. At `standard`, a later one may be **partial** — the same
-/// campaign, restricted to the touched files whose content changed since the
-/// previous campaign's `HEAD` — when that campaign passed gate 7, ran with
-/// the same script and tool, and counted each file ([`scope`]).
+/// A mission's measures form a chain (SPEC 4.4, gate 7: one campaign, then
+/// a recheck). The first, the campaign, is **full**: every touched file,
+/// mutated where the branch changed it since its fork point. The recheck at
+/// the final `HEAD` may be **partial** — the touched files whose content
+/// changed since the campaign's `HEAD`, each mutated as the campaign mutated
+/// it, and the campaign's survivors in the other files, measured again by
+/// name — when the campaign passed gate 7, ran with the same script and
+/// tool, and counted each file ([`scope`]). A recheck after a red one
+/// continues that one the same way.
 ///
 /// The granularity is the file, and no diff hunk is ever read: a file
-/// unchanged since keeps its counts and its survivors as they were; a file
-/// changed, removed or renamed is measured again whole, or is gone. Gate 7
-/// judges **once**, on that reconstruction ([`Campaign::files`]): what one
-/// full campaign at `HEAD` would give, under the README's assumption that a
-/// mutant measured in an unchanged file still exists and is still killed.
+/// unchanged since keeps its counts, and of its survivors those the recheck
+/// found again ([`Chain::named`]); a file changed, removed or renamed is
+/// measured again whole, or is gone. A stack whose script does not look for
+/// a name outside the files handed ([`measures_by_name_anywhere`]) has the
+/// files of its survivors handed instead, measured again whole like changed
+/// ones. Gate 7 judges **once**, on that reconstruction
+/// ([`Campaign::files`]): what one full campaign at `HEAD` would give, under
+/// the README's assumption that a mutant the campaign killed in an
+/// unchanged file still exists and is still killed.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Chain {
     #[serde(default)]
@@ -636,6 +665,14 @@ pub struct Chain {
     /// from a record written before it was kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handed: Option<Vec<String>>,
+    /// The survivors a partial campaign was handed by name, by their ids in
+    /// the campaign it continues: those of the files unchanged since, whose
+    /// stack looks for a name in every file. Of those, the ones it reports
+    /// again stand, and the others it killed. Absent when it was handed none,
+    /// and from a record written before rechecks measured them again — one
+    /// that kept them as they stood.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub named: Option<Vec<String>>,
     /// The fraction the campaign measured, as its script said it
     /// ([`sampled`]); absent from a campaign whose script measures no
     /// sample, which ran whole. A partial campaign continues this one only
@@ -1141,12 +1178,13 @@ fn remove_triage_entry(dir: &Path, id: &str) -> Result<(), MutantsError> {
 ///
 /// A survivor with a valid proposal is not open: it cannot be awaited and
 /// proposed at once. One whose proposal gives no reason, or that the HQ
-/// already refused, is.
-pub fn open(dir: &Path) -> Result<Vec<String>, MutantsError> {
+/// already refused, is. So is one whose `killed` the campaign refutes,
+/// `here` saying it ran on the content as it stands ([`unrefuted`]).
+pub fn open(dir: &Path, here: bool) -> Result<Vec<String>, MutantsError> {
     let Some(campaign) = read(dir)? else {
         return Ok(Vec::new());
     };
-    let coders = read_triage(dir)?;
+    let coders = unrefuted(read_triage(dir)?, &campaign, here);
     Ok(campaign
         .survivors
         .iter()
@@ -1178,6 +1216,63 @@ pub fn answer(survivor: &Survivor, coders: &BTreeMap<String, Triage>) -> Option<
         Some(other) => Some(other.clone()),
         None => survivor.outcome.clone(),
     }
+}
+
+/// The coder's `killed` that `campaign` refutes, by survivor id, with the
+/// test each names (SPEC 4.4, gate 7). Only when the campaign ran on the
+/// content being judged — `here`, its fingerprint the current one: then a
+/// survivor its own run found, rather than kept from an earlier campaign,
+/// had every test the tree holds run against it, the one named included,
+/// and lived. Nothing when it ran on other content: a test added or changed
+/// since may kill it, and the next measure says so.
+///
+/// `bug` is not refuted here: the test it names freezes a bug, and need not
+/// kill the mutant. Nor a `killed` whose test is no test name, which is no
+/// outcome already and says why ([`not_an_outcome`]); one naming a test the
+/// tree does not hold is read from the file as written, and red on its own
+/// ([`crate::gate::named_test_missing`]).
+pub fn refuted(
+    campaign: &Campaign,
+    coders: &BTreeMap<String, Triage>,
+    here: bool,
+) -> BTreeMap<String, String> {
+    if !here {
+        return BTreeMap::new();
+    }
+    campaign
+        .survivors
+        .iter()
+        .filter(|s| s.found_on.is_none())
+        .filter_map(|s| match coders.get(&s.id) {
+            Some(Triage::Killed { test }) if is_test_name(test) => {
+                Some((s.id.clone(), test.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The coder's file as it answers `campaign`: every entry, less the
+/// `killed` the campaign refutes ([`refuted`]). What gate 7, `nunki push` and
+/// the launcher judge a campaign with, so that the three cannot disagree.
+pub fn unrefuted(
+    coders: BTreeMap<String, Triage>,
+    campaign: &Campaign,
+    here: bool,
+) -> BTreeMap<String, Triage> {
+    let refuted = refuted(campaign, &coders, here);
+    without(coders, &refuted)
+}
+
+/// `coders`, less the entries of the survivors `refuted` names.
+pub fn without(
+    mut coders: BTreeMap<String, Triage>,
+    refuted: &BTreeMap<String, String>,
+) -> BTreeMap<String, Triage> {
+    for id in refuted.keys() {
+        coders.remove(id);
+    }
+    coders
 }
 
 /// Whether `name` can be what an outcome names as its test: an identifier
@@ -1421,26 +1516,32 @@ pub fn chain_said(campaign: &Campaign, coders: &BTreeMap<String, Triage>) -> Vec
 }
 
 /// [`chain_said`] on the mission folder's own files; nothing when no
-/// campaign is on file.
-pub fn chain_on_file(dir: &Path) -> Result<Vec<String>, MutantsError> {
+/// campaign is on file. `here` says whether the campaign on file ran on the
+/// content being judged ([`unrefuted`]).
+pub fn chain_on_file(dir: &Path, here: bool) -> Result<Vec<String>, MutantsError> {
     let Some(campaign) = read(dir)? else {
         return Ok(Vec::new());
     };
-    Ok(chain_said(&campaign, &read_triage(dir)?))
+    let coders = unrefuted(read_triage(dir)?, &campaign, here);
+    Ok(chain_said(&campaign, &coders))
 }
 
-/// [`owed`], on the mission folder's own two files. No campaign, nothing
-/// owed here: whether one is due is the caller's question — `nunki push`
-/// refuses a mission that owes one and has none before it asks this.
+/// [`owed`], on the mission folder's own two files, the coder's read as
+/// they answer the campaign on file ([`unrefuted`], with `here`). No
+/// campaign, nothing owed here: whether one is due is the caller's question
+/// — `nunki push` refuses a mission that owes one and has none before it
+/// asks this.
 pub fn owed_on_file(
     dir: &Path,
     rigor: crate::mission::Rigor,
     threshold: u32,
+    here: bool,
 ) -> Result<Option<String>, MutantsError> {
     let Some(campaign) = read(dir)? else {
         return Ok(None);
     };
-    Ok(owed(&campaign, &read_triage(dir)?, rigor, threshold))
+    let coders = unrefuted(read_triage(dir)?, &campaign, here);
+    Ok(owed(&campaign, &coders, rigor, threshold))
 }
 
 /// How `mission status` and `mission wait` say that `proposals` await the
@@ -1975,18 +2076,21 @@ pub fn record_finished_with_registry(
 ///
 /// Continuing it is a matter of files, never of lines ([`Chain`]). The files
 /// whose content changed between the two commits — `git diff --name-only
-/// --no-renames`, no hunk read — are the new campaign's: their counts and
-/// their survivors come from it alone, and a file removed or renamed is
-/// gone. Every other file keeps its counts and its survivors as the campaign
-/// on file had them, unchanged since: the same file, the same lines. Kept
+/// --no-renames`, no hunk read — and the files it was handed besides are the
+/// new campaign's: their counts and their survivors come from it alone, and a
+/// file removed or renamed is gone. Every other file keeps its counts as the
+/// campaign on file had them, unchanged since: the same file, the same
+/// lines. Its survivors are those the new campaign reported again of the
+/// ones it was handed by name ([`Chain::named`]); the others it killed. The
 /// survivors are given back nothing the HQ said on them here; that comes
 /// through [`carry`], as it does from one campaign to the next.
 ///
 /// **Fails closed.** When the new campaign's own per-file counts are
-/// missing or do not add up, or it counted or named a survivor in a file
-/// that did not change, the reconstruction cannot be trusted: the campaign
-/// is recorded with every survivor listed and **no** count, so gate 7
-/// judges it as `critical` does, and the next campaign is full.
+/// missing or do not add up, or it counted a file it neither measured again
+/// nor measured by name, or named a survivor in a file that did not change
+/// and that it was not handed by name, the reconstruction cannot be trusted:
+/// the campaign is recorded with every survivor listed and **no** count, so
+/// gate 7 judges it as `critical` does, and the next campaign is full.
 #[allow(clippy::too_many_arguments)]
 fn record(
     dir: &Path,
@@ -2037,18 +2141,39 @@ fn record(
         let tree = tree.ok_or_else(|| {
             MutantsError::Broken("a partial campaign is recorded in its slot only".to_string())
         })?;
-        let changed = changed_between(tree, since, head)?;
-        let (earlier, kept, before) = continued(previous, &changed);
+        // Measured again whole: every file changed since, and every file it
+        // was handed — a stack's survivors' files among them, when its script
+        // does not look for a name outside the files handed.
+        let mut remeasured = changed_between(tree, since, head)?;
+        remeasured.extend(chain.handed.iter().flatten().cloned());
+        // Measured again by name: the survivors of files unchanged since.
+        let named: BTreeSet<String> = chain.named.iter().flatten().cloned().collect();
+        let named_files: BTreeSet<String> = previous
+            .survivors
+            .iter()
+            .filter(|s| named.contains(&s.id))
+            .map(|s| s.file.clone())
+            .collect();
+        // A file measured by name is counted too, by the mutants named in
+        // it: trusted under its path, never kept as its count.
+        if let Some(handed) = &chain.handed {
+            let mut counted_under = handed.clone();
+            counted_under.extend(named_files.iter().cloned());
+            files = trusted_files(text, head, Some(&counted_under));
+        }
+        let (earlier, kept, before) = continued(previous, &remeasured, &named);
         chain.earlier = earlier;
         chain.ran = counted;
-        let within = |file: &str| changed.contains(file);
-        let trusted = survivors.iter().all(|s| within(&s.file))
-            && files
-                .as_ref()
-                .is_some_and(|f| f.keys().all(|file| within(file)));
+        let within = |file: &str| remeasured.contains(file);
+        let found_again = |s: &Survivor| named.contains(&s.id) && named_files.contains(&s.file);
+        let trusted = survivors.iter().all(|s| within(&s.file) || found_again(s))
+            && files.as_ref().is_some_and(|f| {
+                f.keys()
+                    .all(|file| within(file) || named_files.contains(file))
+            });
         (files, counted) = match (trusted, before, files) {
             (true, Some(mut before), Some(new)) => {
-                before.extend(new);
+                before.extend(new.into_iter().filter(|(file, _)| within(file)));
                 let total = tried_in(&before);
                 (total.map(|_| before), total)
             }
@@ -2093,20 +2218,26 @@ fn broken(since: &str, previous: Option<&Campaign>) -> String {
 }
 
 /// What a partial campaign takes from the campaign it continues, given the
-/// files `changed` since it: the chain so far with that campaign appended;
-/// the survivors of the files that did not change, as they stood, each
-/// naming the campaign that found it — what the HQ said on it is then
-/// [`carry`]'s to decide, which finds each kept survivor's own twin and
-/// sets its outcome and refusal from it;
-/// and those files' counts — `None` when the campaign on file kept none, in
-/// which case nothing can be rebuilt.
+/// files it measured again whole (`remeasured`: those changed since, and any
+/// it was handed besides) and the survivors it was handed by name (`named`,
+/// by id): the chain so far with that campaign appended; the survivors it
+/// neither measured again nor named, as they stood, each naming the
+/// campaign that found it — what the HQ said on it is then [`carry`]'s to
+/// decide, which finds each kept survivor's own twin and sets its outcome and
+/// refusal from it; and the counts of the files it did not measure again
+/// whole — `None` when the campaign on file kept none, in which case nothing
+/// can be rebuilt.
 ///
-/// A survivor of a changed file is dropped: that file is the new campaign's,
-/// which measures it again whole. A survivor of a file removed or renamed is
-/// dropped with it.
+/// A survivor of a file measured again whole is dropped: that file is the
+/// new campaign's. A survivor of a file removed or renamed is dropped with
+/// it. A survivor named is dropped too: the new campaign reports it again
+/// if it still lives, and killed it otherwise. Kept, then, are only the
+/// survivors of a campaign an older `nunki` launched, which measured none of
+/// them again.
 pub fn continued(
     previous: &Campaign,
-    changed: &BTreeSet<String>,
+    remeasured: &BTreeSet<String>,
+    named: &BTreeSet<String>,
 ) -> (Vec<Link>, Vec<Survivor>, Option<BTreeMap<String, Measured>>) {
     let mut earlier = previous.chain.earlier.clone();
     earlier.push(Link {
@@ -2118,7 +2249,7 @@ pub fn continued(
     let kept = previous
         .survivors
         .iter()
-        .filter(|s| !changed.contains(&s.file))
+        .filter(|s| !remeasured.contains(&s.file) && !named.contains(&s.id))
         .map(|s| Survivor {
             found_on: s.found_on.clone().or_else(|| Some(previous.head.clone())),
             ..s.clone()
@@ -2127,7 +2258,7 @@ pub fn continued(
     let before = previous.files.as_ref().map(|files| {
         files
             .iter()
-            .filter(|(file, _)| !changed.contains(*file))
+            .filter(|(file, _)| !remeasured.contains(*file))
             .map(|(file, m)| (file.clone(), m.clone()))
             .collect()
     });
@@ -2507,7 +2638,7 @@ pub enum Replay {
 }
 
 /// Whether the next campaign may be partial, and when not, why (SPEC 4.4,
-/// gate 7: the chain of a mission's campaigns).
+/// gate 7: one campaign, then a recheck that continues it).
 ///
 /// Partial — the touched files whose content changed since the previous
 /// campaign's `HEAD`, each measured as a full campaign would measure it —
@@ -2805,6 +2936,93 @@ pub fn unnamed(
         }
     }
     Ok(None)
+}
+
+/// Of the `stacks` named, those whose script looks for a name in every file
+/// ([`measures_by_name_anywhere`]), read in the clean copy as the campaign
+/// will run it: the stacks a recheck hands their survivors by name. A
+/// script that cannot be read is not one of them, and its survivors' files
+/// are handed instead ([`recheck_plan`]): measured again whole, never not at
+/// all.
+pub fn named_anywhere(
+    project: &crate::project::Project,
+    slot: &crate::slot::Slot,
+    engine: std::sync::Arc<dyn crate::engine::Engine>,
+    judged: &[crate::run::Judged],
+    stacks: &BTreeSet<String>,
+) -> Result<BTreeSet<String>, MutantsError> {
+    let mut anywhere = BTreeSet::new();
+    for j in judged.iter().filter(|j| stacks.contains(&j.stack.name)) {
+        let script = crate::exec::run(
+            project,
+            slot,
+            engine.clone(),
+            &["cat".to_string(), format!("{}/{SCRIPT}", j.scripts_at)],
+            crate::exec::On::Proof,
+        )?;
+        if script.ok() && measures_by_name_anywhere(&script.stdout) {
+            anywhere.insert(j.stack.name.clone());
+        }
+    }
+    Ok(anywhere)
+}
+
+/// How a recheck measures the survivors standing in files unchanged since
+/// the measure it continues ([`recheck_plan`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RecheckPlan {
+    /// By stack, the names its tool gives the survivors handed by name.
+    pub names: BTreeMap<String, Vec<String>>,
+    /// Those survivors' ids, as the record holds them ([`Chain::named`]).
+    pub ids: Vec<String>,
+    /// The files of the others, handed to be measured again whole.
+    pub by_file: Vec<String>,
+}
+
+/// The plan for `standing`, the survivors of the files unchanged since the
+/// measure a recheck continues: each by name when its stack is in
+/// `anywhere` ([`named_anywhere`]) and names it ([`named_by`]); every other
+/// one by its file. All by file when the names would not fit in
+/// [`NAMES_MAX_BYTES`]: a recheck is one measure, and one that ran some of
+/// its survivors by name and dropped the rest would answer for what it never
+/// ran.
+///
+/// A survivor named is never dropped by a sample, which would read as one
+/// the recheck killed: the recheck runs at the fraction of the measure it
+/// continues ([`fraction`]; [`record`] refuses another), and a mutant of a
+/// file unchanged since keeps the key the sample is drawn by — its file and
+/// its description — so it is in the recheck's sample as it was in that one.
+pub fn recheck_plan(
+    judged: &[crate::run::Judged],
+    standing: &[Survivor],
+    anywhere: &BTreeSet<String>,
+) -> RecheckPlan {
+    let mut plan = RecheckPlan::default();
+    for survivor in standing {
+        match named_by(judged, survivor) {
+            Ok((j, name)) if anywhere.contains(&j.stack.name) => {
+                plan.names
+                    .entry(j.stack.name.clone())
+                    .or_default()
+                    .push(name);
+                plan.ids.push(survivor.id.clone());
+            }
+            _ => plan.by_file.push(survivor.file.clone()),
+        }
+    }
+    let size: usize = plan
+        .names
+        .values()
+        .map(|names| names_json(names).len())
+        .sum();
+    if size > NAMES_MAX_BYTES {
+        plan.by_file = standing.iter().map(|s| s.file.clone()).collect();
+        plan.names.clear();
+        plan.ids.clear();
+    }
+    plan.by_file.sort();
+    plan.by_file.dedup();
+    plan
 }
 
 /// What a command run in the container said, for a reason on one line: its
@@ -3265,7 +3483,9 @@ fn read_ended(
                     keep_pace(&project.hq_root, &text)?;
                     Progress::Finished {
                         survivors: recorded.survivors,
-                        chain: chain_on_file(dir)?,
+                        // Just measured, on the content the slot holds:
+                        // nothing runs in it while a campaign does.
+                        chain: chain_on_file(dir, true)?,
                     }
                 }
                 // A partial campaign whose chain broke under it measured
@@ -3666,9 +3886,11 @@ pub struct Asked<'a> {
 /// are recycled within seconds, and liveness here means "this campaign", not
 /// "something holds that number". The fork point travels in [`BASE_ENV`].
 ///
-/// A partial campaign has the same base, and as paths those the branch
-/// touched whose content changed since the previous campaign's `HEAD`
-/// ([`scope`], [`touched_since`]).
+/// A partial campaign — the recheck at the final `HEAD` (SPEC 4.4) — has the
+/// same base, and as paths those the branch touched whose content changed
+/// since the previous campaign's `HEAD` ([`scope`], [`touched_since`]); and
+/// it measures again the survivors of the files unchanged since, by name or
+/// by their files ([`recheck_plan`]).
 pub fn campaign(
     project: &crate::project::Project,
     slot: &crate::slot::Slot,
@@ -3778,6 +4000,11 @@ pub fn campaign(
             read(dir)?.as_ref(),
             tooling.as_deref().map_err(String::as_str),
             &fork,
+            // Read as written: a campaign is launched only on content the
+            // one on file did not measure — on the same content it is not run
+            // again ([`already_answered`]) unless it stopped short, which owes
+            // a full one, and `--again` is full before this is asked — so
+            // nothing on file is refuted here ([`refuted`]).
             |previous| {
                 owed(previous, &coders, asked.rigor, asked.threshold).or_else(|| {
                     crate::gate::named_test_missing(&slot.tree, None, previous, &coders)
@@ -3797,10 +4024,41 @@ pub fn campaign(
             ),
         }
     };
-    let paths = if on.named.is_empty() {
-        handed(&slot.tree, &touched, &scope)?
-    } else {
-        on.paths.clone()
+    let (paths, named, by_name) = match scope.since() {
+        // A partial campaign measures again the survivors of the one it
+        // continues, in the files unchanged since: by name where the stack's
+        // script looks for a name in every file, by handing their files
+        // otherwise (SPEC 4.4, the recheck). Never kept as they stood: a
+        // test added since may kill them, and the claim that one does is
+        // what this checks.
+        Some(since) => {
+            let previous = read(dir)?;
+            let changed = changed_between(&slot.tree, since, "HEAD")?;
+            let standing: Vec<Survivor> = previous
+                .iter()
+                .flat_map(|p| p.survivors.iter())
+                .filter(|s| !changed.contains(&s.file))
+                .cloned()
+                .collect();
+            let stacks: BTreeSet<String> = standing
+                .iter()
+                .filter_map(|s| named_by(&judged, s).ok())
+                .map(|(j, _)| j.stack.name.clone())
+                .collect();
+            let anywhere = named_anywhere(project, slot, engine.clone(), &judged, &stacks)?;
+            let plan = recheck_plan(&judged, &standing, &anywhere);
+            let mut paths = touched_since(&slot.tree, since, &touched)?;
+            paths.extend(plan.by_file);
+            paths.sort();
+            paths.dedup();
+            (
+                paths,
+                plan.names,
+                Some(plan.ids).filter(|ids| !ids.is_empty()),
+            )
+        }
+        None if on.named.is_empty() => (touched.clone(), named, None),
+        None => (on.paths.clone(), named, None),
     };
     let mut launched = command_naming(&judged, &want, &paths, &fork, project.config.jobs(), &named);
     launched.env.extend(sizing(
@@ -3853,6 +4111,7 @@ pub fn campaign(
                 ran: None,
                 fork: Some(fork.clone()),
                 handed: Some(paths),
+                named: by_name,
                 sample: None,
             },
             off_mission: None,
@@ -3864,12 +4123,15 @@ pub fn campaign(
     })
 }
 
-/// What a campaign of `scope` runs ([`command`]): a full one on every path
-/// the branch touched; a partial one on those whose content changed since
-/// the previous campaign's `HEAD` ([`touched_since`]). Both with the fork
-/// point in [`BASE_ENV`]: in each file it is given, a partial campaign
-/// mutates everything the branch changed, exactly as a full one would, so
-/// the file's counts are the ones a full campaign would give.
+/// What a campaign of `scope` runs over the files it measures whole
+/// ([`command`]): a full one on every path the branch touched; a partial one
+/// on those whose content changed since the previous campaign's `HEAD`
+/// ([`touched_since`]). Both with the fork point in [`BASE_ENV`]: in each
+/// file it is given, a partial campaign mutates everything the branch
+/// changed, exactly as a full one would, so the file's counts are the ones a
+/// full campaign would give. What a recheck adds for the survivors of the
+/// files unchanged since — their names, or their files — is [`campaign`]'s
+/// to work out, in the container ([`recheck_plan`]).
 pub fn launch_command(
     tree: &Path,
     judged: &[crate::run::Judged],

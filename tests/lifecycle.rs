@@ -1000,7 +1000,7 @@ fn every_stage_has_a_word_of_its_own() {
     }
     assert_eq!(
         seen.into_iter().collect::<Vec<_>>(),
-        ["campaign", "coding", "gates", "verified"]
+        ["coding", "gates", "recheck", "verified"]
     );
     let _ = world;
 }

@@ -978,10 +978,19 @@ const MUTATION_RUST: &str = r#"#!/bin/sh
 # The next line tells `nunki` that this script measures mutants **by name**
 # (SPEC 4.4, the debt): given `NUNKI_MUTATION_NAMES`, a JSON list of the
 # names cargo-mutants gives them, it runs those mutants as well as the ones
-# its scope reaches, in the files it is handed. A hardening mission and
-# `nunki mutants run --owed` measure the debt's survivors that way; without
-# the line, `nunki` hands this stack no name.
+# its scope reaches. A hardening mission and `nunki mutants run --owed`
+# measure the debt's survivors that way; without the line, `nunki` hands
+# this stack no name.
 # nunki-by-name: NUNKI_MUTATION_NAMES
+#
+# The next line says more: a name is looked for in the whole crate, not only
+# in the files handed. The recheck at a mission's final `HEAD` (SPEC 4.4)
+# hands the files changed since the campaign, and by name the campaign's
+# survivors in the files that did not change: handing those files too would
+# mutate again everything the branch changed in them. Without the line,
+# `nunki` hands this stack those files instead, and they are measured again
+# whole.
+# nunki-by-name-anywhere: NUNKI_MUTATION_NAMES
 #
 # The campaign answers for the lines this branch **changed**, not for every
 # line of the files it touched (SPEC 4.4). `nunki` sets `NUNKI_BASE` to the
@@ -1042,9 +1051,10 @@ done
 
 # The mutants `nunki` names, if it names any: a JSON list of at least one
 # name, each a name cargo-mutants gives — `src/lib.rs:2:7: replace > with ==
-# in keep` — and each in one of the files handed. Anything else measured
-# nothing, and says so: a list read wrong would run other mutants than the
-# ones asked for.
+# in keep` — and each in a file of the crate, handed or not. Anything else
+# measured nothing, and says so: a list read wrong would run other mutants
+# than the ones asked for. A campaign handed names and no path runs the
+# named mutants alone.
 names="${NUNKI_MUTATION_NAMES:-}"
 if [ -n "$names" ]; then
   if ! named=$(printf '%s' "$names" | jq -e '
@@ -1055,12 +1065,8 @@ if [ -n "$names" ]; then
     echo "nunki: NUNKI_MUTATION_NAMES is a JSON list of at least one mutant's name, and it is not, so the campaign measured nothing" >&2
     exit 1
   fi
-  if [ "$#" -eq 0 ]; then
-    echo "nunki: the campaign was handed $named mutant(s) by name and none of the Rust files they are in, so it measured nothing" >&2
-    exit 1
-  fi
 fi
-if [ "$#" -eq 0 ]; then
+if [ "$#" -eq 0 ] && [ -z "$names" ]; then
   # Nothing this branch touched is mutable, so there are no mutants and no
   # survivors — and that is a measurement, not a campaign that failed to
   # happen. The terminal line is printed **before** leaving, because `nunki`
@@ -1120,9 +1126,12 @@ mkdir -p "$out"
 # measured on cargo-mutants 27.1.0, that filter is the one thing that can
 # carry them: two `-F` select what either selects, and an `-F` selects
 # within `--in-diff` or `--file`, never beyond. So a campaign handed names
-# lists what its scope reaches by itself and the named mutants in the files
-# handed, and runs the two together, by name, over those files: the sample
-# below is drawn from that list and handed as the one filter.
+# lists what its scope reaches by itself, and the named mutants under an
+# `-F` alone, which selects in every file of the crate; and it runs the two
+# together under that one filter, with no `--file`, which would keep out a
+# named mutant whose file was not handed: the sample below is drawn from
+# that list and handed as the filter. Handed no path, its scope reaches
+# nothing, and no diff is read: `git diff` given no path is the whole of it.
 #
 # A name that is not listed is a mutant no longer in the code — its line
 # moved, or the code it replaces changed — and the campaign measured
@@ -1148,7 +1157,7 @@ listed_in() {
   fi
   cargo mutants --no-config --list --json --exclude-re "replace main -> " "$@"
 }
-if [ -n "${NUNKI_BASE:-}" ]; then
+if [ -n "${NUNKI_BASE:-}" ] && [ "$#" -gt 0 ]; then
   diff="$out/touched.diff"
   if ! git -c core.quotePath=false --literal-pathspecs \
     diff --relative --no-renames "$NUNKI_BASE" HEAD -- "$@" > "$diff"; then
@@ -1158,17 +1167,18 @@ if [ -n "${NUNKI_BASE:-}" ]; then
 fi
 if [ -n "$names" ]; then
   if ! by_name=$(printf '%s' "$names" | jq -r "$alternation") \
-    || ! listed_in "$by_name" "$@" > "$out/named.json" 2> "$out/named.err"; then
+    || ! listed_in "$by_name" > "$out/named.json" 2> "$out/named.err"; then
     echo "nunki: cargo mutants could not list the $named mutant(s) this campaign was handed by name, so it measured nothing:" >&2
     tail -n 20 "$out/named.err" >&2
     exit 1
   fi
-  if [ -n "${NUNKI_BASE:-}" ]; then
-    reached=0
+  reached=0
+  if [ "$#" -eq 0 ]; then
+    printf '[]\n' > "$out/own.json"
+  elif [ -n "${NUNKI_BASE:-}" ]; then
     cargo mutants --no-config --list --json --exclude-re "replace main -> " \
       --in-diff "$diff" > "$out/own.json" 2> "$out/own.err" || reached=$?
   else
-    reached=0
     listed_in "" "$@" > "$out/own.json" 2> "$out/own.err" || reached=$?
   fi
   if [ "$reached" -ne 0 ]; then
@@ -1190,10 +1200,7 @@ if [ -n "$names" ]; then
     echo "nunki: cannot join the mutants this campaign reaches and the ones it was handed by name, so it measured nothing" >&2
     exit 1
   fi
-  for path in "$@"; do
-    shift
-    set -- "$@" --file "$path"
-  done
+  set --
 elif [ -n "${NUNKI_BASE:-}" ]; then
   set -- --in-diff "$diff"
 else
@@ -1474,7 +1481,7 @@ done
 k=1
 n=""
 # A campaign handed names was listed above, and always runs under a filter:
-# its scope is the files, whole, and the filter is what keeps it to the
+# its scope is the whole crate, and the filter is what keeps it to the
 # mutants listed.
 if [ -n "$names" ] || [ -n "$budget" ] || [ -n "$fixed" ]; then
   if [ -z "$names" ]; then

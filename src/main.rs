@@ -2551,8 +2551,8 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                         nunki::mission::flow::Stage::FinalCampaign
                     ) {
                         println!(
-                            "          `nunki verify {id}` plays gate 7 again at HEAD, which a \
-                             `critical` mission is verified on"
+                            "          `nunki verify {id}` plays gate 7 again at HEAD, the \
+                             recheck a `standard` or `critical` mission is verified on"
                         );
                     }
                     println!(
@@ -3128,8 +3128,7 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
             }
             // Each campaign of the chain, full or partial, with its counts:
             // gate 7 judges them one by one, and so does this listing.
-            match nunki::mutants::chain_on_file(&mission_dir::Paths::of(&project.hq_root, &id).dir)
-            {
+            match nunki::verify::chain_as_judged(project, &id) {
                 Ok(chain) => {
                     for said in &chain {
                         println!("campaign  {said}");
@@ -3313,7 +3312,7 @@ fn campaign_status(project: &Project, id: &str, slot: Option<String>) -> ExitCod
             return ExitCode::FAILURE;
         }
     }
-    match nunki::mutants::chain_on_file(&mission_dir::Paths::of(&project.hq_root, id).dir) {
+    match nunki::verify::chain_as_judged(project, id) {
         Ok(chain) => {
             for said in &chain {
                 println!("on file    {said}");

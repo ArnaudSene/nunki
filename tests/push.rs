@@ -278,9 +278,9 @@ impl World {
         for event in events {
             store.apply(&mut state, event).unwrap();
         }
-        // At `critical`, the default, the final full campaign: the one on
-        // file is put on the content of `HEAD`, full, as the final stage
-        // leaves it, and its green gate verifies the mission.
+        // At `standard` and `critical`, the recheck: the campaign on file is
+        // put on the content of `HEAD`, full, as the final stage leaves it,
+        // and its green gate verifies the mission.
         if matches!(state.flow.stage(), Stage::FinalCampaign) {
             self.campaign_on_head();
             store.apply(&mut state, Event::GatesPassed).unwrap();
@@ -1551,7 +1551,7 @@ fn push_refuses_until_every_proposed_equivalence_is_ratified_or_refused() {
             ),
             (
                 "s3".to_string(),
-                Triage::Killed {
+                Triage::Bug {
                     test: "one_is_two".into(),
                 },
             ),
@@ -1577,7 +1577,7 @@ fn push_refuses_until_every_proposed_equivalence_is_ratified_or_refused() {
     }
     assert!(
         !said.contains("s3"),
-        "a killed survivor awaits nothing: {said}"
+        "a survivor frozen as a bug awaits nothing: {said}"
     );
     assert!(world.on_forge("mission/x").is_none(), "nothing was pushed");
 
@@ -1608,11 +1608,13 @@ fn push_refuses_until_every_proposed_equivalence_is_ratified_or_refused() {
     );
     assert!(world.on_forge("mission/x").is_none());
 
-    // The coder answers it with a test, and the push goes.
+    // The coder answers it with a bug frozen in a test, and the push goes.
+    // A `killed` would not: the measure on file ran on the pushed commit,
+    // that test included, and found the mutant alive.
     let mut answers = mutants::read_triage(&dir).unwrap();
     answers.insert(
         "s2".to_string(),
-        Triage::Killed {
+        Triage::Bug {
             test: "two_is_printed".into(),
         },
     );
@@ -1841,7 +1843,7 @@ fn refusing_a_proposal_on_a_verified_mission_sends_it_back_to_the_coder() {
         nunki::findings::refuse_proposal(&world.project, "m1", "s1", "the CLI prints it").unwrap();
     assert_eq!(refused.sent_back, None);
     assert_eq!(world.stage(), before);
-    assert_eq!(mutants::open(&paths.dir).unwrap(), vec!["s1"]);
+    assert_eq!(mutants::open(&paths.dir, false).unwrap(), vec!["s1"]);
 
     // Verified: the refusal opens a volet whose cause is the refusal.
     propose();
@@ -2382,7 +2384,29 @@ fn push_refuses_a_killed_naming_a_test_that_does_not_exist() {
     }
     assert!(world.on_forge("mission/x").is_none());
 
+    // A `killed` naming a test the pushed commit holds is refuted: the
+    // measure on file ran on that commit, the test included, and found the
+    // mutant alive (SPEC 4.4). A bug frozen in it is an outcome.
     killed_by("one_is_two");
+    assert!(
+        matches!(
+            push::push(&world.project, "m1", true),
+            Err(PushError::MutantsOwed { .. })
+        ),
+        "a refuted killed was taken"
+    );
+    nunki::mutants::write_triage(
+        &dir,
+        &[(
+            "s1".to_string(),
+            nunki::mutants::Triage::Bug {
+                test: "one_is_two".into(),
+            },
+        )]
+        .into_iter()
+        .collect(),
+    )
+    .unwrap();
     push::push(&world.project, "m1", true).unwrap();
     assert_eq!(world.on_forge("mission/x").as_deref(), Some(head.as_str()));
 }
@@ -2453,7 +2477,29 @@ fn push_takes_no_test_name_that_is_not_a_name() {
         }
     }
     assert!(world.on_forge("mission/x").is_none());
+    // A `killed` naming a test the pushed commit holds is refuted: the
+    // measure on file ran on that commit, the test included, and found the
+    // mutant alive (SPEC 4.4). A bug frozen in it is an outcome.
     killed_by("one_is_two");
+    assert!(
+        matches!(
+            push::push(&world.project, "m1", true),
+            Err(PushError::MutantsOwed { .. })
+        ),
+        "a refuted killed was taken"
+    );
+    nunki::mutants::write_triage(
+        &dir,
+        &[(
+            "s1".to_string(),
+            nunki::mutants::Triage::Bug {
+                test: "one_is_two".into(),
+            },
+        )]
+        .into_iter()
+        .collect(),
+    )
+    .unwrap();
     push::push(&world.project, "m1", true).unwrap();
     assert_eq!(world.on_forge("mission/x").as_deref(), Some(head.as_str()));
 }
@@ -2528,6 +2574,7 @@ fn push_judges_the_chain_once_on_its_reconstruction() {
             sample: None,
             fork: None,
             handed: None,
+            named: None,
             ran: Some(60),
             scope: Scope::Partial {
                 since: earlier.clone(),
@@ -2579,6 +2626,7 @@ fn status_says_each_campaign_of_the_chain_with_its_counts() {
                 sample: None,
                 fork: None,
                 handed: None,
+                named: None,
                 ran: Some(4),
                 scope: Scope::Partial {
                     since: earlier.clone(),
@@ -2656,7 +2704,7 @@ fn only_the_judged_commit_is_fetched_or_pushed() {
     );
 }
 
-// --- the final full campaign of a `critical` mission (SPEC 4.4, 4.5) -------
+// --- the recheck of a `standard` or `critical` mission (SPEC 4.4, 4.5) -----
 
 impl World {
     /// A mission with a security agent at `rigor`, coded, `CLEAR` on `HEAD`
@@ -2668,9 +2716,6 @@ impl World {
         let world = World::at(rigor);
         world.coded("pub fn one() -> u8 { 2 }\n", "the lot");
         world.security(Verdict::Clear, T1);
-        if rigor != nunki::mission::Rigor::Critical {
-            world.campaign_on_head();
-        }
         assert_eq!(world.stage(), Stage::Verified);
         let dir = nunki::mission::dir::Paths::of(&world.project.hq_root, "m1").dir;
         let mut campaign = nunki::mutants::read(&dir).unwrap().unwrap();
@@ -2694,21 +2739,31 @@ fn at_critical_push_takes_a_partial_campaign_at_the_pushed_commit() {
 }
 
 /// It does not take a campaign that ran on other content than the pushed
-/// commit, and names the verb that runs one on it.
+/// commit, at `standard` as at `critical` (SPEC 4.4: one campaign, then a
+/// recheck), and names the verb that runs the recheck on it.
 #[test]
-fn at_critical_push_refuses_a_campaign_on_other_content() {
-    let world = World::verified_then(nunki::mission::Rigor::Critical, |c| {
-        c.fingerprint = "f".into();
-    });
-    let err = push::push(&world.project, "m1", true).unwrap_err();
-    assert!(matches!(err, PushError::NotAtPushed { .. }), "{err}");
-    let said = err.to_string();
-    assert!(said.contains("other content"), "{said}");
-    assert!(
-        said.contains("`nunki mission mutants m1` runs one"),
-        "{said}"
-    );
-    assert!(world.on_forge("mission/x").is_none(), "nothing was pushed");
+fn at_standard_and_critical_push_refuses_a_campaign_on_other_content() {
+    for rigor in [
+        nunki::mission::Rigor::Standard,
+        nunki::mission::Rigor::Critical,
+    ] {
+        let world = World::verified_then(rigor, |c| {
+            c.fingerprint = "f".into();
+        });
+        let err = push::push(&world.project, "m1", true).unwrap_err();
+        assert!(
+            matches!(err, PushError::NotAtPushed { .. }),
+            "{rigor}: {err}"
+        );
+        let said = err.to_string();
+        assert!(said.contains("other content"), "{said}");
+        assert!(said.contains(&format!("at `{rigor}` rigor")), "{said}");
+        assert!(
+            said.contains("`nunki mission mutants m1` runs the recheck"),
+            "{said}"
+        );
+        assert!(world.on_forge("mission/x").is_none(), "nothing was pushed");
+    }
 }
 
 /// A full campaign at the pushed commit that passes is pushed on.
@@ -2719,17 +2774,17 @@ fn at_critical_push_takes_a_full_campaign_at_the_pushed_commit() {
     assert_eq!(world.on_forge("mission/x"), Some(pushed.head));
 }
 
-/// At `standard`, the chain's partial campaign is what the push stands on,
-/// as before.
+/// At `standard` too, a partial recheck at the pushed commit that passes is
+/// pushed on.
 #[test]
-fn at_standard_push_takes_a_partial_campaign() {
+fn at_standard_push_takes_a_partial_campaign_at_the_pushed_commit() {
     let world = World::verified_then(nunki::mission::Rigor::Standard, |c| {
         c.chain.scope = nunki::mutants::Scope::Partial {
             since: "e".repeat(40),
         };
-        c.fingerprint = "f".into();
     });
-    push::push(&world.project, "m1", true).unwrap();
+    let pushed = push::push(&world.project, "m1", true).unwrap();
+    assert_eq!(world.on_forge("mission/x"), Some(pushed.head));
 }
 
 /// `mission status` prints the volets taken against the cap, and past it how

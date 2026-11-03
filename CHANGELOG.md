@@ -13,6 +13,37 @@ merged since the last one. `AGENTS.md`, under "Releases", says how.
 
 ### Changed
 
+- **A `standard` or `critical` mission now owes one mutation campaign, then
+  one recheck at its final `HEAD`, instead of a campaign at each return to
+  the coder.** Measured on a `critical` mission of a Python project: eleven
+  full campaigns, nine of which mostly found the same survivors again.
+  - The campaign runs the first time the mission reaches its final gates.
+    After it, the final gates judge the campaign on file and the coder's
+    outcomes, whatever was committed since, and run nothing.
+  - The recheck runs once every other stage is green. It measures again
+    the files changed since the campaign, and the campaign's survivors in
+    the other files: by name for the Rust stack, by their whole file for
+    Python and Next.js. When nothing changed since the campaign, it does
+    not run.
+  - A `standard` mission now goes through that last stage, as only
+    `critical` did, and `nunki push` at `standard` refuses unless the
+    measure on file ran on the pushed commit.
+  - On a measure of the content being judged, a coder's `killed` on a
+    survivor that measure found is no longer an outcome: the test it names
+    ran against the mutant, and the mutant lived. Gate 7 says so beside the
+    survivor, and `nunki push` refuses it too.
+  - The Rust `mutation.sh` looks for a named mutant in every file of the
+    crate, and says so with a new line, `# nunki-by-name-anywhere`. In a
+    project set up before, `nunki init --refresh` replaces the script if
+    nobody has touched it; until then its Rust survivors are rechecked by
+    file.
+  - Missions in flight: a `standard` mission already `Verified` on a
+    campaign of other content is refused by `nunki push` until `nunki
+    mission mutants` runs the recheck. One at its final gates with a
+    campaign of other content on file is judged on it, rather than running
+    a new one.
+  - `mission list` names that last stage `recheck`, where it said
+    `campaign`.
 - **A Python mutation campaign now answers for the lines the branch
   changed, not for whole files.** mutmut tests only the functions and
   methods that hold a changed line, and the campaign counts and reports
@@ -20,8 +51,8 @@ merged since the last one. `AGENTS.md`, under "Releases", says how.
   - A `standard` Python mission is judged on its share of killed mutants,
     no longer as `critical`. The limitation listed in 0.1.0 is lifted for
     Python.
-  - A later campaign of the same mission can be partial: it measures again
-    only the files changed since the previous one.
+  - Its recheck can be partial: it measures again only the files changed
+    since the campaign, and the files of the campaign's survivors.
   - A survivor on a line the branch did not change, in a function it did,
     is no longer reported.
   - Each mutant's line is read through `get_diff_for_mutant`, a function
@@ -36,8 +67,7 @@ merged since the last one. `AGENTS.md`, under "Releases", says how.
   - A `standard` Next.js mission is judged on its share of killed mutants,
     no longer as `critical`. The limitation listed in 0.1.0 is lifted for
     Next.js too.
-  - A later campaign of the same mission can be partial, as for Rust and
-    Python.
+  - Its recheck can be partial, as for Rust and Python.
   - Stryker mutates only what sits wholly inside a range: a block or a
     function body that reaches past the changed lines is not measured.
   - A survivor's description no longer starts with its status, which

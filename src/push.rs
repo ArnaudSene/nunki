@@ -119,11 +119,15 @@ pub enum PushError {
     )]
     MutantsOwed { mission: String, owed: String },
     #[error(
-        "mission {mission} is at `critical` rigor, and {why} — a `critical` mission is \
-         pushed only on a campaign at the pushed commit that passes: `nunki mission \
-         mutants {mission}` runs one"
+        "mission {mission} is at `{rigor}` rigor, and {why} — a `{rigor}` mission is \
+         pushed only on a measure of the pushed commit that passes: `nunki mission \
+         mutants {mission}` runs the recheck"
     )]
-    NotAtPushed { mission: String, why: String },
+    NotAtPushed {
+        mission: String,
+        rigor: crate::mission::Rigor,
+        why: String,
+    },
     #[error(
         "mission {mission} is at `{rigor}` rigor and {file} holds no mutation campaign — \
          no campaign, no push: `nunki mission mutants {mission}` runs one, and the same \
@@ -556,6 +560,11 @@ fn proposals_ruled(project: &Project, id: &str) -> Result<(), PushError> {
 /// tree of `head`, the commit being pushed — and
 /// its refusal names the entries it did not read (HQ review 3): a triage
 /// rewritten after the gates is judged as the gate would have judged it.
+///
+/// At `standard` and `critical` alike, the measure on file must have run on
+/// the pushed content (SPEC 4.4: one campaign, then a recheck), and so a
+/// `killed` on a survivor it found alive there is no outcome, as at gate 7
+/// ([`crate::mutants::refuted`]).
 fn nothing_owed(
     project: &Project,
     id: &str,
@@ -571,18 +580,22 @@ fn nothing_owed(
             file: crate::mutants::FILE,
         });
     }
-    if header.rigor == crate::mission::Rigor::Critical
+    if header.rigor != crate::mission::Rigor::Prototype
         && let Some(campaign) = crate::mutants::read(&dir)?
         && let Some(why) = not_at_pushed(tree, header, &campaign)?
     {
         return Err(PushError::NotAtPushed {
             mission: id.to_string(),
+            rigor: header.rigor,
             why,
         });
     }
     let threshold = header
         .mutation_threshold
         .unwrap_or(project.config.mutation_threshold);
+    // Past the check above, the measure on file ran on the pushed content:
+    // a `killed` on a survivor it found alive there is no outcome.
+    let here = true;
     let missing = match crate::mutants::read(&dir)? {
         Some(campaign) if header.rigor != crate::mission::Rigor::Prototype => {
             crate::gate::named_test_missing(
@@ -594,7 +607,14 @@ fn nothing_owed(
         }
         _ => None,
     };
-    let owed = crate::mutants::owed_on_file(&dir, header.rigor, threshold)?.or(missing);
+    // A test that does not exist first: the more precise of the two, and a
+    // `killed` naming one is no claim the measure could refute.
+    let owed = missing.or(crate::mutants::owed_on_file(
+        &dir,
+        header.rigor,
+        threshold,
+        here,
+    )?);
     match owed {
         None => Ok(()),
         Some(owed) => Err(PushError::MutantsOwed {
@@ -607,10 +627,11 @@ fn nothing_owed(
     }
 }
 
-/// Why `campaign` is not one a `critical` mission is pushed on (SPEC 4.4,
-/// 4.5), or `None` when it is: it must have run on the content of `HEAD`,
-/// the commit being pushed — the same fingerprint gate 7 asks. Partial or
-/// full: the chain holds to the push, judged on its reconstruction.
+/// Why `campaign` is not one a `standard` or `critical` mission is pushed on
+/// (SPEC 4.4, 4.5), or `None` when it is: it must have run on the content of
+/// `HEAD`, the commit being pushed — the same fingerprint gate 7 asks at the
+/// final stage. The recheck, or the campaign when nothing moved since;
+/// partial or full, judged on its reconstruction.
 fn not_at_pushed(
     tree: &std::path::Path,
     header: &crate::mission::Header,
