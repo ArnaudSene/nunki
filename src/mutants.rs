@@ -1646,6 +1646,14 @@ pub struct InFlight {
     pub scope: Scope,
     /// The lines its log holds so far, or why the log could not be read.
     pub lines: Result<usize, String>,
+    /// Whether its log already says it got to the end ([`completed`]):
+    /// ended, and not read back yet.
+    pub ended: bool,
+    /// Where its log is: a mission's campaign writes it in the mission's
+    /// own folder.
+    pub log: PathBuf,
+    /// Whether it is a campaign outside missions ([`Running::off_mission`]).
+    pub off_mission: bool,
 }
 
 /// The campaign the slot's record says is in flight, or `None` when there
@@ -1654,16 +1662,42 @@ pub fn in_flight(hq_root: &Path, slot: &str) -> Result<Option<InFlight>, Mutants
     let Some(running) = read_running(hq_root, slot)? else {
         return Ok(None);
     };
-    let lines = std::fs::read_to_string(&running.log)
-        .map(|text| text.lines().count())
+    let text = std::fs::read_to_string(&running.log)
         .map_err(|e| format!("{}: {e}", running.log.display()));
     Ok(Some(InFlight {
         fingerprint: running.fingerprint,
         started_at: running.started_at,
         deadline_minutes: running.deadline_minutes,
         scope: running.chain.scope,
-        lines,
+        lines: text
+            .as_ref()
+            .map(|text| text.lines().count())
+            .map_err(|e| e.clone()),
+        ended: text.as_ref().is_ok_and(|text| completed(text)),
+        log: running.log,
+        off_mission: running.off_mission.is_some(),
     }))
+}
+
+/// Why a campaign in flight no longer moves its mission by itself, or `None`
+/// while it does, as far as its record and its log say: its log says it got
+/// to the end, or its deadline is past, as the reading that stops it counts
+/// it. Either way what moves the mission next is a reading of it — the
+/// monitor's, or `nunki verify`'s — which records it, or stops it at its
+/// deadline. A campaign that died before its last line is still running
+/// here until that deadline: nothing short of asking the container tells it
+/// apart.
+pub fn in_flight_over(campaign: &InFlight) -> Option<String> {
+    if campaign.ended {
+        return Some("has ended, its log says, and is not read back yet".to_string());
+    }
+    let minutes = minutes_since(&campaign.started_at);
+    (minutes > campaign.deadline_minutes).then(|| {
+        format!(
+            "is past its deadline, {minutes} of {} minute(s)",
+            campaign.deadline_minutes
+        )
+    })
 }
 
 /// One line for a campaign in flight: which, since when, how far into its

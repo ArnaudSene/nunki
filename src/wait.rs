@@ -63,8 +63,8 @@ pub enum Stop {
     /// The monitor stopped on something the state does not show: a gate that
     /// could not be played, a `verify` that failed, a campaign lost.
     MonitorFailed,
-    /// No monitor runs, and the stage is not a stop: nothing moves the
-    /// mission.
+    /// No monitor runs, the stage is not a stop, and no campaign of the
+    /// mission's runs: nothing moves the mission.
     MonitorGone,
     /// `--timeout` came first.
     TimedOut,
@@ -159,6 +159,21 @@ pub struct Spent {
     pub until: u64,
 }
 
+/// A campaign of the mission's, in its slot, as the slot's record and the
+/// campaign's log say ([`crate::mutants::in_flight`]): read without asking
+/// the container, so that waiting on a campaign can never start one (#139).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Campaign {
+    /// It moves the mission, monitor or not: its log has no last line yet,
+    /// and its deadline is not past (#183).
+    Running,
+    /// It no longer moves the mission by itself (`said` says why,
+    /// [`crate::mutants::in_flight_over`]): a reading of it does.
+    Over { said: String },
+    /// Whether one runs could not be read.
+    Unknown { why: String },
+}
+
 /// What a stop is decided on, beside the state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Context {
@@ -168,6 +183,8 @@ pub struct Context {
     /// and `nunki`'s from rulings it matched
     /// ([`crate::mutants::awaiting_ruling`]) — or why they could not be read.
     pub proposals: Result<Vec<crate::mutants::Proposal>, String>,
+    /// The mission's campaign in its slot, when the slot's record names one.
+    pub campaign: Option<Campaign>,
 }
 
 /// The stage as the line names it.
@@ -252,12 +269,32 @@ fn stopped(id: &str, state: &MissionState, context: &Context) -> Option<Status> 
     match &context.watcher {
         Watcher::Stopped { why } => return Some(monitor_failed(id, state, why)),
         Watcher::Gone => {
+            let (detail, what) = match &context.campaign {
+                // A campaign started detached moves the mission with no
+                // monitor, as a run does: `wait` blocks on it (#183).
+                Some(Campaign::Running) => return None,
+                Some(Campaign::Over { said }) => (
+                    format!("no monitor is watching, and the campaign {said}"),
+                    format!("`nunki verify {id}` reads it back and plays gate 7"),
+                ),
+                Some(Campaign::Unknown { why }) => (
+                    format!(
+                        "no monitor is watching, and whether a campaign runs could not be read: \
+                         {why}"
+                    ),
+                    format!("`nunki verify {id}` picks the mission up"),
+                ),
+                None => (
+                    "no monitor is watching, and nothing moves the mission".to_string(),
+                    format!("`nunki verify {id}` picks it up and starts one"),
+                ),
+            };
             return Some(Status::new(
                 id,
                 stage_name(&state.flow),
-                "no monitor is watching, and nothing moves the mission".to_string(),
+                detail,
                 "the human",
-                format!("`nunki verify {id}` picks it up and starts one"),
+                what,
                 Stop::MonitorGone,
             ));
         }
@@ -608,15 +645,50 @@ impl Reader for Hq<'_> {
         let proposals =
             crate::mutants::awaiting_ruling(&crate::mission::dir::Paths::of(hq_root, id).dir)
                 .map_err(|e| e.to_string());
+        let campaign = campaign_of(hq_root, id, &state.slot);
         Ok(Observed::Live {
             state: Box::new(state),
             context: Context {
                 watcher,
                 window,
                 proposals,
+                campaign,
             },
         })
     }
+}
+
+/// The mission's campaign in its slot, as the slot's record names it: one
+/// whose log is in the mission's own folder, where its campaigns write
+/// theirs. A campaign outside missions, or another mission's, is none of
+/// this one's.
+fn campaign_of(hq_root: &Path, id: &str, slot: &str) -> Option<Campaign> {
+    let campaign = match crate::mutants::in_flight(hq_root, slot) {
+        Ok(Some(campaign)) => campaign,
+        Ok(None) => return None,
+        Err(e) => return Some(Campaign::Unknown { why: e.to_string() }),
+    };
+    let mission = crate::mission::dir::Paths::of(hq_root, id).dir;
+    if campaign.off_mission || !campaign.log.starts_with(&mission) {
+        return None;
+    }
+    if let Err(why) = &campaign.lines {
+        return Some(Campaign::Unknown {
+            why: format!("its log could not be read: {why}"),
+        });
+    }
+    Some(match crate::mutants::in_flight_over(&campaign) {
+        Some(over) => Campaign::Over {
+            said: format!(
+                "{} {over}",
+                campaign
+                    .fingerprint
+                    .get(..7)
+                    .unwrap_or(&campaign.fingerprint)
+            ),
+        },
+        None => Campaign::Running,
+    })
 }
 
 /// A duration as `--timeout` takes it: seconds, or `<n>s`, `<n>m`, `<n>h`.

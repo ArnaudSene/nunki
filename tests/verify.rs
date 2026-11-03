@@ -4933,6 +4933,7 @@ fn wait_names_fixed_by_only_once_the_rounds_are_spent() {
         watcher: nunki::wait::Watcher::Gone,
         window: None,
         proposals: Ok(Vec::new()),
+        campaign: None,
     };
     let spent = with_security_agent_at(nunki::mission::Rigor::Standard);
     spent.at_findings();

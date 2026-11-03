@@ -118,6 +118,12 @@ merged since the last one. `AGENTS.md`, under "Releases", says how.
   ran no test and exited 1, "No tests were executed", which the campaign
   read as a run that could not complete. It now hands Stryker no source the
   branch removed.
+- **`nunki mission wait` no longer returns at once while a campaign runs
+  with no monitor** (#183). It said exit 14, "nothing moves the mission",
+  and that `nunki verify` would start a campaign, when one was in flight.
+  It now waits while the campaign runs, then returns 14 saying the
+  campaign is over and that `nunki verify` reads it back. A campaign that
+  dies before its last line keeps it waiting until the campaign's deadline.
 
 ## [0.1.1] - 2026-10-29
 

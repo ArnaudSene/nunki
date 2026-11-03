@@ -3796,7 +3796,14 @@ Ce que la boucle veut dire, et ce qu'elle ne veut pas dire.
   `FINDINGS`, 11 rendue à l'humain (une décision attendue comprise), 12
   suspendue ou fenêtre du compte épuisée, 13 moniteur arrêté sur une erreur
   ou porte injouable, 14 aucun moniteur alors que l'étape n'est pas un
-  arrêt, 15 délai `--timeout` atteint. **Les verbes qui lancent ou trouvent
+  arrêt et qu'aucune campagne de la mission ne tourne, 15 délai `--timeout`
+  atteint. Sans moniteur, une campagne lancée en arrière-plan fait encore
+  avancer la mission : `wait` attend tant que l'enregistrement du slot dit
+  qu'elle tourne, que son journal n'a pas sa dernière ligne et que son
+  délai n'est pas passé, puis sort en 14 en disant qu'elle est finie et que
+  `nunki verify` la relit (#183). Une campagne morte avant sa dernière
+  ligne le fait attendre jusqu'à son délai : l'enregistrement ne la
+  distingue pas sans interroger le conteneur. **Les verbes qui lancent ou trouvent
   le moniteur la nomment** sous sa ligne — `mission start`, `verify`,
   `mission resume`, `mission retry` : c'est là, au moment où il agit, que le
   HQ apprend qu'il peut être prévenu de l'arrêt au lieu de sonder

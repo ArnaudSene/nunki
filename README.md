@@ -410,8 +410,15 @@ and exits with a code that says which stop it is:
 | Handed over to the human, a ruling included | 11 |
 | Held, or the account's window spent | 12 |
 | The monitor stopped on an error, or a gate could not be played | 13 |
-| No monitor runs while the mission is still being driven | 14 |
+| No monitor runs while the mission is still being driven, and no campaign of its own is running | 14 |
 | `--timeout` reached | 15 |
+
+With no monitor, a campaign the mission started runs detached and still
+moves it, so `wait` keeps waiting while the slot's record says one runs, its
+log has no last line, and its deadline is not past. Then it returns 14,
+saying the campaign is over and that `nunki verify <mission>` reads it back.
+A campaign that dies before its last line keeps `wait` waiting until its
+deadline: the record cannot tell it apart without asking the container.
 
 `wait` drives nothing: it takes no lock and launches nothing, so two of them on
 the same mission are harmless. (Opening the HQ's state creates its
