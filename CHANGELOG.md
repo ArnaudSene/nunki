@@ -11,6 +11,19 @@ merged since the last one. `AGENTS.md`, under "Releases", says how.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-04
+
+Gate 7 changes regime. A `standard` or `critical` mission owes one
+mutation campaign, then one recheck at its final `HEAD`, instead of a
+campaign at each return to the coder, and the Python and Next.js campaigns
+answer for the lines a branch changed. It is a minor version because
+`nunki push` refuses more at `standard`, and a Next.js survivor's id
+changes.
+
+After upgrading, run `nunki init --refresh` in each project, which takes
+the new campaign scripts where nobody has touched them, then `nunki slot
+rebuild`.
+
 ### Changed
 
 - **A `standard` or `critical` mission now owes one mutation campaign, then
@@ -91,6 +104,10 @@ merged since the last one. `AGENTS.md`, under "Releases", says how.
     longer has the campaign reuse an earlier run's results.
   - In a project set up before, `nunki init --refresh` replaces the
     campaign script if nobody has touched it.
+- **The firewall and prober images are tagged `0.2.0`**, as every
+  version tags them with its own number. After upgrading, run
+  `nunki slot rebuild` in each project before its next launch. Until
+  then a launch refuses, saying the images are missing.
 
 ### Fixed
 
@@ -223,6 +240,7 @@ result, and hands the push back to the human.
 - **No prebuilt binary.** `nunki` is built from source, with Rust 1.89 or
   later and a C compiler.
 
-[Unreleased]: https://github.com/ArnaudSene/nunki/compare/v0.1.1...dev
+[Unreleased]: https://github.com/ArnaudSene/nunki/compare/v0.2.0...dev
+[0.2.0]: https://github.com/ArnaudSene/nunki/releases/tag/v0.2.0
 [0.1.1]: https://github.com/ArnaudSene/nunki/releases/tag/v0.1.1
 [0.1.0]: https://github.com/ArnaudSene/nunki/releases/tag/v0.1.0
