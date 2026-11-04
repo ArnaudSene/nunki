@@ -310,9 +310,12 @@ enum SlotCommand {
     Add { name: String },
     /// List this project's slots.
     List,
-    /// Build this project's images: the stack's, and the firewall sidecar's.
+    /// Build this project's images: the agent's, the firewall's and the prober's.
     Rebuild {
-        /// Which stack's image. Defaults to the only one declared.
+        /// The primary stack, the first `nunki.yaml` declares, and the only one
+        /// this takes: the agent's image is built from it, with every other
+        /// declared stack added onto it (SPEC 4.2). Defaults to it; needed only
+        /// when `nunki.yaml` declares no stack.
         #[arg(long, value_name = "NAME")]
         stack: Option<String>,
         /// Build with the versions this slot's branch pins, rather than the
