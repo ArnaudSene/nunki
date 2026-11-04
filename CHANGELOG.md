@@ -11,6 +11,14 @@ merged since the last one. `AGENTS.md`, under "Releases", says how.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`nunki slot rebuild --help` now says which stack `--stack` takes.** It
+  said the option defaulted to "the only one declared". It defaults to the
+  first stack `nunki.yaml` declares, the primary, and takes no other: the
+  agent's image is built from it, with the other declared stacks added onto
+  it. The help also names the prober among the images it builds.
+
 ## [0.2.0] - 2026-11-04
 
 Gate 7 changes regime. A `standard` or `critical` mission owes one
