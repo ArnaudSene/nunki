@@ -361,8 +361,8 @@ impl Measurable {
 ///
 /// - a stack names it ([`mutants::named_by`]) and its script, in the
 ///   project's home, says it measures by name ([`mutants::measures_by_name`]).
-///   The Python and Next.js scripts do not, and their survivors wait for a
-///   campaign on the whole code;
+///   The Python script does not, and its survivors wait for a campaign on
+///   the whole code;
 /// - its file is unchanged in the human's repository between the commit
 ///   that found it and `commit`. A name holds a line and a column: in a file
 ///   changed since, it may have moved, and a name no longer in the code makes

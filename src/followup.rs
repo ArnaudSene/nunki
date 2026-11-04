@@ -541,7 +541,8 @@ fn last_proposals(text: &str) -> Option<&str> {
     last_section(text, PROPOSALS_HEADING)
 }
 
-/// Gate 7 passed on a chain of campaigns (SPEC 4.4): each campaign in one
+/// Gate 7 passed on a campaign and the rechecks that continue it (SPEC 4.4:
+/// one campaign, then a recheck): each in one
 /// line ([`crate::mutants::chain_said`]) — full or partial, from which
 /// commit, what it itself tried — then the one campaign gate 7 judged, so
 /// the HQ reading the pull request's follow-up sees which files were
@@ -562,9 +563,10 @@ pub fn campaigns(file: &Path, chain: &[String]) -> Result<(), FollowupError> {
         .collect::<Vec<_>>()
         .join("\n");
     let body = format!(
-        "A partial campaign measured again only the files whose content changed\n\
-         since the campaign before it, and kept the other files' counts and\n\
-         survivors as they were. Gate 7 judged them once, as one campaign:\n\n\
+        "A recheck measured again the files whose content changed since the\n\
+         measure before it, and the survivors of the other files, by name or with\n\
+         their files; the other files kept their counts. Gate 7 judged them once,\n\
+         as one campaign:\n\n\
          {listed}\n\n\
          Then {}\n",
         crate::text::one_line(judged)

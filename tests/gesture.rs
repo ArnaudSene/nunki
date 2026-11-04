@@ -688,6 +688,7 @@ fn a_hold_without_a_reason_is_refused_and_one_with_a_reason_carries_it() {
             watcher: nunki::wait::Watcher::Alive,
             window: None,
             proposals: Ok(Vec::new()),
+            campaign: None,
         },
     )
     .expect("a held mission is stopped");

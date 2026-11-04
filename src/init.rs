@@ -978,10 +978,19 @@ const MUTATION_RUST: &str = r#"#!/bin/sh
 # The next line tells `nunki` that this script measures mutants **by name**
 # (SPEC 4.4, the debt): given `NUNKI_MUTATION_NAMES`, a JSON list of the
 # names cargo-mutants gives them, it runs those mutants as well as the ones
-# its scope reaches, in the files it is handed. A hardening mission and
-# `nunki mutants run --owed` measure the debt's survivors that way; without
-# the line, `nunki` hands this stack no name.
+# its scope reaches. A hardening mission and `nunki mutants run --owed`
+# measure the debt's survivors that way; without the line, `nunki` hands
+# this stack no name.
 # nunki-by-name: NUNKI_MUTATION_NAMES
+#
+# The next line says more: a name is looked for in the whole crate, not only
+# in the files handed. The recheck at a mission's final `HEAD` (SPEC 4.4)
+# hands the files changed since the campaign, and by name the campaign's
+# survivors in the files that did not change: handing those files too would
+# mutate again everything the branch changed in them. Without the line,
+# `nunki` hands this stack those files instead, and they are measured again
+# whole.
+# nunki-by-name-anywhere: NUNKI_MUTATION_NAMES
 #
 # The campaign answers for the lines this branch **changed**, not for every
 # line of the files it touched (SPEC 4.4). `nunki` sets `NUNKI_BASE` to the
@@ -1042,9 +1051,10 @@ done
 
 # The mutants `nunki` names, if it names any: a JSON list of at least one
 # name, each a name cargo-mutants gives — `src/lib.rs:2:7: replace > with ==
-# in keep` — and each in one of the files handed. Anything else measured
-# nothing, and says so: a list read wrong would run other mutants than the
-# ones asked for.
+# in keep` — and each in a file of the crate, handed or not. Anything else
+# measured nothing, and says so: a list read wrong would run other mutants
+# than the ones asked for. A campaign handed names and no path runs the
+# named mutants alone.
 names="${NUNKI_MUTATION_NAMES:-}"
 if [ -n "$names" ]; then
   if ! named=$(printf '%s' "$names" | jq -e '
@@ -1055,12 +1065,8 @@ if [ -n "$names" ]; then
     echo "nunki: NUNKI_MUTATION_NAMES is a JSON list of at least one mutant's name, and it is not, so the campaign measured nothing" >&2
     exit 1
   fi
-  if [ "$#" -eq 0 ]; then
-    echo "nunki: the campaign was handed $named mutant(s) by name and none of the Rust files they are in, so it measured nothing" >&2
-    exit 1
-  fi
 fi
-if [ "$#" -eq 0 ]; then
+if [ "$#" -eq 0 ] && [ -z "$names" ]; then
   # Nothing this branch touched is mutable, so there are no mutants and no
   # survivors — and that is a measurement, not a campaign that failed to
   # happen. The terminal line is printed **before** leaving, because `nunki`
@@ -1120,9 +1126,12 @@ mkdir -p "$out"
 # measured on cargo-mutants 27.1.0, that filter is the one thing that can
 # carry them: two `-F` select what either selects, and an `-F` selects
 # within `--in-diff` or `--file`, never beyond. So a campaign handed names
-# lists what its scope reaches by itself and the named mutants in the files
-# handed, and runs the two together, by name, over those files: the sample
-# below is drawn from that list and handed as the one filter.
+# lists what its scope reaches by itself, and the named mutants under an
+# `-F` alone, which selects in every file of the crate; and it runs the two
+# together under that one filter, with no `--file`, which would keep out a
+# named mutant whose file was not handed: the sample below is drawn from
+# that list and handed as the filter. Handed no path, its scope reaches
+# nothing, and no diff is read: `git diff` given no path is the whole of it.
 #
 # A name that is not listed is a mutant no longer in the code — its line
 # moved, or the code it replaces changed — and the campaign measured
@@ -1148,7 +1157,7 @@ listed_in() {
   fi
   cargo mutants --no-config --list --json --exclude-re "replace main -> " "$@"
 }
-if [ -n "${NUNKI_BASE:-}" ]; then
+if [ -n "${NUNKI_BASE:-}" ] && [ "$#" -gt 0 ]; then
   diff="$out/touched.diff"
   if ! git -c core.quotePath=false --literal-pathspecs \
     diff --relative --no-renames "$NUNKI_BASE" HEAD -- "$@" > "$diff"; then
@@ -1158,17 +1167,18 @@ if [ -n "${NUNKI_BASE:-}" ]; then
 fi
 if [ -n "$names" ]; then
   if ! by_name=$(printf '%s' "$names" | jq -r "$alternation") \
-    || ! listed_in "$by_name" "$@" > "$out/named.json" 2> "$out/named.err"; then
+    || ! listed_in "$by_name" > "$out/named.json" 2> "$out/named.err"; then
     echo "nunki: cargo mutants could not list the $named mutant(s) this campaign was handed by name, so it measured nothing:" >&2
     tail -n 20 "$out/named.err" >&2
     exit 1
   fi
-  if [ -n "${NUNKI_BASE:-}" ]; then
-    reached=0
+  reached=0
+  if [ "$#" -eq 0 ]; then
+    printf '[]\n' > "$out/own.json"
+  elif [ -n "${NUNKI_BASE:-}" ]; then
     cargo mutants --no-config --list --json --exclude-re "replace main -> " \
       --in-diff "$diff" > "$out/own.json" 2> "$out/own.err" || reached=$?
   else
-    reached=0
     listed_in "" "$@" > "$out/own.json" 2> "$out/own.err" || reached=$?
   fi
   if [ "$reached" -ne 0 ]; then
@@ -1190,10 +1200,7 @@ if [ -n "$names" ]; then
     echo "nunki: cannot join the mutants this campaign reaches and the ones it was handed by name, so it measured nothing" >&2
     exit 1
   fi
-  for path in "$@"; do
-    shift
-    set -- "$@" --file "$path"
-  done
+  set --
 elif [ -n "${NUNKI_BASE:-}" ]; then
   set -- --in-diff "$diff"
 else
@@ -1474,7 +1481,7 @@ done
 k=1
 n=""
 # A campaign handed names was listed above, and always runs under a filter:
-# its scope is the files, whole, and the filter is what keeps it to the
+# its scope is the whole crate, and the filter is what keeps it to the
 # mutants listed.
 if [ -n "$names" ] || [ -n "$budget" ] || [ -n "$fixed" ]; then
   if [ -z "$names" ]; then
@@ -2310,7 +2317,11 @@ uv run --frozen --no-sync pytest --ignore=mutants -m "not system"
 /// was: `mutmut run` takes glob patterns over mutant names and refuses
 /// patterns that match nothing, and a function no test covers comes back
 /// `no tests` rather than `survived` — so a campaign that reads only
-/// "survived" calls untested code green.
+/// "survived" calls untested code green. And again on 3.8.0 when it learnt
+/// the changed lines: on a branch that changed lines in a function and in a
+/// method, it counted 6 mutants and reported 2 survivors, where the run on
+/// every mutant of the file reported 3 — the third on a line the branch did
+/// not change.
 const MUTATION_PYTHON: &str = r##"#!/bin/sh
 # The mutation campaign for a Python project (SPEC 4.4, gate 7).
 #
@@ -2322,29 +2333,47 @@ const MUTATION_PYTHON: &str = r##"#!/bin/sh
 # chain of campaigns). A later campaign of a `standard` mission covers only
 # what changed since the previous one, and only when this script and that
 # version are what the previous one ran with; without the line, every
-# campaign is full.
+# campaign is full. It matters more here than elsewhere: which line a mutant
+# is on is read through a function inside mutmut (below), and the version is
+# what ties a chain to the mutmut that placed its mutants.
 # nunki-tool-version: uv run --frozen --no-sync python -c "import importlib.metadata as m; print('mutmut', m.version('mutmut'))"
+#
+# The campaign answers for the lines this branch **changed**, not for every
+# line of the files it touched (SPEC 4.4). `nunki` sets `NUNKI_BASE` to the
+# commit the branch forked from. mutmut has no mode for a diff (read up to
+# 3.8.1), so this script scopes the campaign itself, twice:
+# - mutmut **tests** only the functions and methods that hold a changed line,
+#   by the patterns mutmut names them with;
+# - and the campaign **counts and reports** only the mutants whose change
+#   reaches a changed line. The other mutants of those functions are
+#   tested, and not counted.
+# A twenty-line fix in a module of two thousand lines owes answers for its
+# own mutants, not for the module's history. Without `NUNKI_BASE` every
+# function of each touched file is tested, and every mutant counted.
 #
 # It prints **one JSON object per line** on stdout, one per surviving mutant:
 #   {"id":"…","file":"…","line":12,"end_line":12,"description":"…"}
+# then one per touched file with a mutant counted, with that file's counts:
+#   {"measured":"src/pkg/mod.py","tried":12,"found":13}
+# and, last of all and exactly once, the line that says it got to the end:
+#   {"campaign":"done","tried":42,"found":45,"by_file":true}
 # `end_line` is the last line of the code the mutation replaces: the diff
 # mutmut shows removes that code, one `-` line per line of it. 0 when the
 # removed lines are not one run — a span nobody knows, which no ruling is
 # tied to.
-# and, last of all and exactly once, the line that says it got to the end:
-#   {"campaign":"done"}
-# with **no** `tried` and no `found`. A `standard` mission's gate 7 divides
-# the killed mutants by `tried`, and the share means something only over the
-# lines this branch changed (SPEC 4.4). mutmut tests the touched files'
-# mutants (see below), but every one of each file's, so whatever this
-# script could count would be over whole files: a well-tested file would
-# hide the new untested lines in it. Without a count `nunki` judges gate 7 as
-# `critical` does — an outcome for every survivor — which the survivors,
-# filtered to the touched files, can carry. A branch that touched nothing
-# mutable is the one exact count this script has, and says `tried` 0.
-# For the same reason it gives no per-file counts and never says `by_file`:
-# a campaign after one of this stack's is always full, never rebuilt from
-# counts nobody made (SPEC 4.4, the chain of campaigns).
+# `found` is every mutant counted, less those mutmut's type check caught or
+# that it skipped: a mutant no test had to kill, the counterpart of
+# cargo-mutants' unviable ones. `tried` is those of them the tests ran
+# against, or that no test reaches (`no tests`), which are not killed
+# either: what a `standard` mission's gate 7 divides by. A mutant left `not
+# checked` is found and not tried, and `tried` 0 beside a `found` above 0 is
+# a campaign that measured nothing.
+# There is no `missed`. mutmut's account of its outcomes is the record it
+# keeps of each file, the one these counts are read from: a tally of it
+# would always agree with the survivor lines, and prove nothing.
+# `by_file` says each file was counted, and that the counts add up to the
+# totals: a later partial campaign is rebuilt from them, file by file
+# (SPEC 4.4, the chain). A file with no line has nothing counted in it.
 # `nunki` reads no other line as a result, so progress may go to stdout freely —
 # though this script keeps the tool's own chatter on stderr. A campaign that
 # stops before that last line has measured nothing, whatever else it printed.
@@ -2409,10 +2438,11 @@ done
 # happen. The terminal line is printed **before** leaving, because `nunki`
 # reads its absence as a campaign that was killed and asks for another:
 # a branch touching only tests or documentation would be asked for ever.
-# Said from two places: here, for a branch that touched no Python source,
-# and after mutmut, for one whose touched sources hold no mutant.
+# Said from three places: here, for a branch that touched no Python source;
+# below, for one whose changed lines are in no function; and after mutmut,
+# for one whose touched functions hold no mutant.
 nothing_mutable() {
-  printf '{"campaign":"done","tried":0,"found":0}\n'
+  printf '{"campaign":"done","tried":0,"found":0,"by_file":true}\n'
   exit 0
 }
 if [ -z "$files" ]; then
@@ -2466,120 +2496,52 @@ fi
 # fails leaves its own empty answer, which is the truth; one that dies before
 # writing anything leaves the previous campaign's, on code that has changed
 # since — and a replay of the same fingerprint reaches exactly that path.
+#
+# Kept, it lies even when the campaign runs. mutmut regenerates only the
+# files whose time moved, and reuses its map of which test reaches which
+# function: measured on 3.8.0, after a source change made one more test reach
+# a method, a run on the kept copy reported a mutant of it survived, and the
+# same run on a cleared one killed it.
 rm -rf mutants
 
-# mutmut still mutates every file under its `source_paths`, but it **tests**
-# only the mutants its arguments name. Those are glob patterns over mutant
-# names, not exact names: measured on 3.8.0, `mutmut run "<module>.*"`
-# tested one module's 1,642 mutants out of a project's 13,733, left the
-# others `not checked`, ran only the tests that reach them, and found the
-# same survivors in that module as a full run. The names given without a `*`
-# — a module, a function prefix, a file path — match nothing, which is what
-# an earlier draft measured before concluding that mutmut could not be told
-# to do less.
-#
-# `only_mutate`, the other restriction it offers, lives in the project's own
-# `pyproject.toml`, and this script will not rewrite that file. The clean copy
-# of HEAD is where gate 6's battery runs too, and `nunki exec` resets it
-# between calls: a campaign that edits the project's configuration there
-# either races the battery or measures a project that does not exist.
+# What the campaign reads, in the project's own interpreter: the one that
+# parses the project's sources as the project writes them, and the one mutmut
+# is installed in. One program for three questions, so that what mutmut is
+# asked to test and what the campaign counts are decided by the same code:
+# - `plan` prints the patterns mutmut tests;
+# - `refused` says whether a run mutmut refused had nothing to test;
+# - `read` prints the survivors and each file's counts, then the two totals.
 #
 # A mutant's name is its file's dotted path, the function, and a number:
 # `src/pkg/mod.py` gives `pkg.mod.x_total__mutmut_3`, a method
 # `pkg.mod.xǁCartǁadd__mutmut_1`. mutmut drops the `.py`, a leading `src.`
 # and an `.__init__`, so a package's own code is named after the package, and
-# every function and method starts with an `x`. So each touched file gives
-# `<dotted path>.x*`, which takes all of its mutants. For a package it also
-# takes those of a submodule whose name starts with an `x`: more campaign
-# time, never a wrong answer, since the survivors below are read from the
-# touched files' own records.
+# every function and method starts with an `x`. The number counts the
+# function's mutants from its top: an edit above a mutant renumbers it, so a
+# name says which mutant it is only in a function nobody changed.
 #
-# The patterns go to mutmut as arguments, never through the shell's globbing.
-set --
-for path in $files; do
-  module="${path#./}"
-  module="$(printf '%s' "${module%.py}" | tr / .)"
-  module="${module#src.}"
-  case "$module" in
-    *.__init__) module="${module%.__init__}" ;;
-  esac
-  set -- "$@" "$module.x*"
-done
-
-# Its status is the discriminator here, and it is not cargo-mutants'.
-# Measured on 3.8.0: `mutmut run` exits **0** whether every mutant was killed
-# or two survived, and **1** when it could not run at all — a source file it
-# cannot parse raises `InvalidGeneratedSyntaxException` before a single
-# mutant is tested. So the status is not swallowed, where the Rust fragment
-# swallows cargo-mutants' (which answers 2 for "there are survivors").
-#
-# The existence of `mutants/` is no guard: mutmut copies the tree into it
-# *before* it generates anything, so the directory is there even when the
-# campaign died on the first file. Taken as a guard, it lets the script print
-# `{"campaign":"done"}` with no survivor — gate 7 green on nothing,
-# which is the one failure this contract exists to prevent.
-#
-# One failure is a measurement: patterns that match no mutant at all.
-# mutmut refuses them — "Filtered for specific mutants, but nothing
-# matches", status 1 — when every touched file is one it made no mutant in:
-# a module of constants, an `__init__.py` of imports, a script outside
-# `source_paths`. That is a branch with nothing mutable, and saying it could
-# not run would have gate 7 ask for ever. It is told from a real failure by
-# what mutmut left, not by its message: `mutants/mutmut-stats.json` is
-# written once every file is generated and the tests have run, just before
-# the patterns are matched (3.8.0), and each mutated file's record,
-# `mutants/<path>.meta`, names every mutant made in it. With the first
-# there and no touched file's record naming one, there was nothing to test.
-# Anything else — a record that cannot be read among them — is a campaign
-# that could not run.
-# shellcheck disable=SC2086
-if ! uv run --frozen --no-sync mutmut run $children "$@" >&2; then
-  # shellcheck disable=SC2086
-  if [ -f mutants/mutmut-stats.json ] && python3 - $files <<'PY'
-import json
-import sys
-
-for path in sys.argv[1:]:
-    path = path[2:] if path.startswith("./") else path
-    try:
-        with open("mutants/" + path + ".meta") as stream:
-            record = json.load(stream)
-    except FileNotFoundError:
-        continue
-    if record["exit_code_by_key"]:
-        sys.exit(1)
-PY
-  then
-    nothing_mutable
-  fi
-  echo "nunki: the campaign could not run, so no mutant was tested" >&2
-  exit 1
-fi
-
-# `mutmut results` says `<name>: <status>`, and `mutmut show <name>` prints a
-# unified diff carrying the file and the line. Read with python rather than
-# with sed because the diff has to be counted, not matched — and because the
-# interpreter is the one tool this stack is certain to have.
-#
-# Which mutants are the touched files' is read from mutmut's record of each
-# file, `mutants/<path>.meta`, which names every mutant made in it, and only
-# those are shown. Not from `mutmut show` itself, one process per mutant:
-# `results` also lists every untouched file's mutant, `not checked` after a
-# filtered run, and a project of 13,733 mutants had 12,091 of them.
-#
-# Under `set -e`, a failure here ends the script **before** the terminal line,
-# which is what it should do: results nobody could read are not a measurement.
-# shellcheck disable=SC2086
-python3 - $files -- "$@" <<'PY' || exit 1
+# Under `set -e`, a failure in it ends the script **before** the terminal
+# line, which is what it should do: results nobody could read are not a
+# measurement.
+campaign_py() {
+  uv run --frozen --no-sync python - "$@" <<'PY'
+import ast
 import fnmatch
 import json
+import os
 import re
 import subprocess
 import sys
 
-cut = sys.argv.index("--")
-touched = {p[2:] if p.startswith("./") else p for p in sys.argv[1:cut]}
-patterns = sys.argv[cut + 1 :]
+# The names it prints carry mutmut's separator, `ǁ`, whatever the locale.
+sys.stdout.reconfigure(encoding="utf-8")
+
+mode = sys.argv[1]
+rest = sys.argv[2:]
+cut = rest.index("--") if "--" in rest else len(rest)
+handed = rest[:cut]
+patterns = rest[cut + 1 :]
+base = os.environ.get("NUNKI_BASE", "")
 
 # What counts as answered. Everything else — `survived`, but also `no tests`,
 # `not checked`, `timeout`, `suspicious`, `segfault` — is a mutant nothing
@@ -2588,6 +2550,16 @@ patterns = sys.argv[cut + 1 :]
 # and a campaign that read only `survived` would report them green.
 ANSWERED = {"killed", "caught by type check", "skipped"}
 
+# Neither found nor tried: no test had to kill them. A mutant mutmut's type
+# check caught is code that does not type, as an unviable mutant is code that
+# does not build for cargo-mutants, which counts neither. And counting a
+# skipped one as tried would raise a `standard` mission's share as if a test
+# had killed it.
+LEFT_OUT = {"caught by type check", "skipped"}
+
+# Found, and not tried: no test ran against them.
+UNTRIED = {"not checked", "check was interrupted by user"}
+
 # A mutant's name: anything but whitespace, then `__mutmut_` and a number.
 # Not narrower, because a method's name carries mutmut's own separator —
 # `pkg.mod.xǁCartǁadd__mutmut_2`, measured on 3.8.0 — and an identifier may
@@ -2595,6 +2567,190 @@ ANSWERED = {"killed", "caught by type check", "skipped"}
 # survivor as a line that was not a result: one survivor of a file's seven
 # reached gate 7, and the other six were green on nothing.
 NAME = re.compile(r"^\S+__mutmut_[0-9]+$")
+SEPARATOR = "ǁ"
+
+
+def bare(path):
+    return path[2:] if path.startswith("./") else path
+
+
+def module_of(path):
+    """The dotted name mutmut gives the mutants of `path`."""
+    module = bare(path)
+    if module.endswith(".py"):
+        module = module[: -len(".py")]
+    module = module.replace("/", ".")
+    if module.startswith("src."):
+        module = module[len("src.") :]
+    if module.endswith(".__init__"):
+        module = module[: -len(".__init__")]
+    return module
+
+
+def changed_lines(path):
+    """The lines of `path` the branch changed since its fork point.
+
+    As the Rust fragment asks git: `--no-renames`, so that a file renamed is
+    a file added whole, as `nunki` compares files from one campaign to the
+    next; the path as a literal one, never read as a pathspec; and a name
+    outside ASCII as it is, not in octal escapes. A hunk that only removes
+    lines changes none that is still there.
+    """
+    done = subprocess.run(
+        [
+            "git", "-c", "core.quotePath=false", "--literal-pathspecs",
+            "diff", "-U0", "--relative", "--no-renames", base, "HEAD", "--", path,
+        ],
+        capture_output=True,
+        text=True,
+        errors="replace",
+    )
+    if done.returncode != 0:
+        sys.exit("nunki: cannot diff against the base {}: {}".format(base, done.stderr.strip()[-400:]))
+    lines = set()
+    for hunk in re.finditer(r"^@@ -\S+ \+([0-9]+)(?:,([0-9]+))? @@", done.stdout, re.M):
+        start = int(hunk.group(1))
+        count = 1 if hunk.group(2) is None else int(hunk.group(2))
+        lines.update(range(start, start + count))
+    return lines
+
+
+def functions(path):
+    """Each function and method mutmut mutates in `path`, by the name it
+    gives it, with the lines it spans, decorators included; `None` for a
+    file gone at HEAD.
+
+    mutmut 3.8.0 mutates the functions at the top of a module and the methods
+    at the top of a class at the top of a module, and nothing else: not code
+    at the module's level, not a class inside a class (`OuterFunctionProvider`
+    in its `file_mutation.py`). A function inside a function is part of it.
+    """
+    try:
+        with open(path, "rb") as stream:
+            source = stream.read()
+    except FileNotFoundError:
+        return None
+    try:
+        tree = ast.parse(source, filename=path)
+    except (SyntaxError, ValueError) as error:
+        sys.exit("nunki: cannot parse {}, so the campaign cannot tell which of its functions the branch changed: {}".format(path, error))
+    found = {}
+
+    def span(node):
+        return (min([node.lineno] + [d.lineno for d in node.decorator_list]), node.end_lineno)
+
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            found["x_" + node.name] = span(node)
+        elif isinstance(node, ast.ClassDef):
+            for method in node.body:
+                if isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    found["x{0}{1}{0}{2}".format(SEPARATOR, node.name, method.name)] = span(method)
+    return found
+
+
+def plan():
+    """Each touched file, and with `NUNKI_BASE` the lines the branch changed
+    in it and the functions and methods that hold one."""
+    files = []
+    for path in handed:
+        entry = {"handed": path, "path": bare(path), "module": module_of(path), "changed": None}
+        if base:
+            index = functions(entry["path"])
+            if index is None:
+                continue
+            changed = changed_lines(entry["path"])
+            entry["changed"] = changed
+            entry["functions"] = index
+            entry["selected"] = {
+                name for name, (first, last) in index.items()
+                if any(first <= line <= last for line in changed)
+            }
+        files.append(entry)
+    return files
+
+
+def record(entry):
+    """The mutants mutmut made in a touched file, from its record of that
+    file, `mutants/<path>.meta`: none for a file without one — outside
+    `source_paths`, or one its configuration leaves out."""
+    try:
+        with open("mutants/" + entry["path"] + ".meta") as stream:
+            return json.load(stream)["exit_code_by_key"]
+    except FileNotFoundError:
+        return {}
+
+
+def aliases(keys):
+    """mutmut records each result under the mutant's name less any
+    `__init__.`. For a module whose own name is `__init__` — code in
+    `src/__init__.py` — that is a second key of the same record, measured on
+    3.8.0: `x_top__mutmut_1: no tests` beside a `__init__.x_top__mutmut_1`
+    left `not checked`. Both are read, as they were before the campaign was
+    filtered; the copy is no pattern's to take, and is placed by the name
+    it copies, the one mutmut made."""
+    return {key.replace("__init__.", ""): key for key in keys if "__init__." in key}
+
+
+def taken(key, copies):
+    return key in copies or any(fnmatch.fnmatch(key, pattern) for pattern in patterns)
+
+
+def function_of(key, entry, copies):
+    """The function or method a mutant is in, as `functions` names it, or
+    `None` when its name is not the module's."""
+    name = key.rpartition("__mutmut_")[0]
+    if key in copies:
+        return name
+    prefix = entry["module"] + "."
+    return name[len(prefix) :] if name.startswith(prefix) else None
+
+
+if mode == "plan":
+    # Without a base, `<dotted path>.x*` takes every mutant of the file. For
+    # a package it also takes those of a submodule whose name starts with an
+    # `x`: more campaign time, never a wrong answer, since the survivors are
+    # read from the touched files' own records. With one, a pattern per
+    # function or method that holds a changed line: measured on 3.8.0, those
+    # patterns gave the same survivors and verdicts as the whole file's
+    # campaign in those functions, and did not take `matching_lines_all` for
+    # `matching_lines`.
+    for entry in plan():
+        if entry["changed"] is None:
+            print(entry["module"] + ".x*")
+        else:
+            for name in sorted(entry["selected"]):
+                print("{}.{}__mutmut_*".format(entry["module"], name))
+    sys.exit(0)
+
+if mode == "refused":
+    # Nothing to test, when no touched file's record holds a mutant mutmut
+    # was asked to test. With a base, also none of a function that holds a
+    # changed line, and none of a function this program cannot find: either
+    # would mean its patterns missed what the branch changed.
+    for entry in plan():
+        keys = record(entry)
+        copies = aliases(keys)
+        for key in keys:
+            if entry["changed"] is None or taken(key, copies):
+                sys.exit(1)
+            name = function_of(key, entry, copies)
+            if name is None or name not in entry["functions"] or name in entry["selected"]:
+                sys.exit(1)
+    sys.exit(0)
+
+# The line each mutant is on comes from mutmut's own `get_diff_for_mutant`,
+# in this process: measured on 3.8.0, it placed 4,704 mutants in 5.5 s, where
+# `mutmut show`, one process a mutant, takes 0.29 s each. It is a function
+# inside mutmut and not an interface, so a mutmut without it measures
+# nothing, and says so.
+try:
+    from mutmut.mutation.diff_apply import get_diff_for_mutant
+except Exception as error:
+    sys.exit(
+        "nunki: this campaign places each mutant with mutmut's own get_diff_for_mutant, "
+        "an internal function this mutmut does not have ({}), so it measured nothing".format(error)
+    )
 
 
 def mutmut(*args):
@@ -2703,33 +2859,17 @@ def in_file(path, head, at, removed_raw):
     return guess
 
 
-# The touched files' mutants, each with its file. A touched file without a
-# record is one mutmut made no mutant in: outside `source_paths`, or one its
-# configuration leaves out.
-mine = {}
-for path in sorted(touched):
+def placed(key, path):
     try:
-        with open("mutants/" + path + ".meta") as stream:
-            keys = json.load(stream)["exit_code_by_key"]
-    except FileNotFoundError:
-        continue
-    # mutmut records each result under the mutant's name less any
-    # `__init__.`. For a module whose own name is `__init__` — code in
-    # `src/__init__.py` — that is a second key of the same record, measured
-    # on 3.8.0: `x_top__mutmut_1: no tests` beside a
-    # `__init__.x_top__mutmut_1` left `not checked`. Both are read, as they
-    # were before the campaign was filtered; the copy is no pattern's to take.
-    copies = {key.replace("__init__.", "") for key in keys if "__init__." in key}
-    for key in keys:
-        # The patterns are this script's reading of how mutmut names a
-        # mutant. A touched file's mutant none of them takes was never tested,
-        # and is refused here rather than reported `not checked`: the coder
-        # would be asked to answer for a mutant nothing ran.
-        if key not in copies and not any(fnmatch.fnmatch(key, pattern) for pattern in patterns):
-            sys.exit("nunki: no pattern of {} takes {}, a mutant of {}, so it was never tested".format(patterns, key, path))
-        mine[key] = path
+        diff = get_diff_for_mutant(key, path=path)
+    except Exception as error:
+        sys.exit("nunki: mutmut gave no diff for {}, a mutant of {}, so the campaign cannot place it: {}".format(key, path, error))
+    return where(diff)
 
-survivors = []
+
+# `mutmut results` says `<name>: <status>` for every mutant it did not
+# kill; a mutant of a record it does not name was killed.
+statuses = {}
 for text in mutmut("results").splitlines():
     if not text.strip():
         continue
@@ -2741,31 +2881,164 @@ for text in mutmut("results").splitlines():
     # tool that changed, and a campaign that cannot read it measured nothing.
     if not NAME.match(name):
         sys.exit("nunki: mutmut results printed a line this campaign cannot read: {!r}".format(text))
-    if status in ANSWERED or name not in mine:
-        continue
-    survivors.append((name, status))
+    statuses[name] = status
 
-for name, status in survivors:
-    path, line, removed, added, span = where(mutmut("show", name))
-    # Loudly, rather than a survivor with an empty file: a line nunki cannot
-    # place is a line the coder cannot answer, and printing it anyway would
-    # spend the triage on nothing.
-    if path is None or line is None:
-        sys.exit("nunki: mutmut show {} named no file".format(name))
-    # And loudly when the diff names another file than the record the mutant
-    # was read from: dropped, it would be a touched file's survivor gone.
-    if path != mine[name]:
-        sys.exit("nunki: mutmut show {} named {}, and its record is {}'s".format(name, path, mine[name]))
-    what = status if not removed else "{}: {} -> {}".format(status, removed, added)
-    end = line + span - 1 if span else 0
-    print(json.dumps({"id": name, "file": path, "line": line, "end_line": end, "description": what}))
+tried = found = 0
+for entry in plan():
+    path = entry["path"]
+    keys = record(entry)
+    copies = aliases(keys)
+    here = {"tried": 0, "found": 0}
+    for key in keys:
+        if entry["changed"] is not None:
+            # A mutant of a function this program cannot find is one it
+            # cannot say the branch did not change: refused, not passed over.
+            name = function_of(key, entry, copies)
+            if name is None or name not in entry["functions"]:
+                sys.exit("nunki: {} is a mutant of {} in no function the campaign found there, so it cannot tell whether the branch changed it".format(key, path))
+            if name not in entry["selected"]:
+                continue
+        # The patterns are this program's reading of how mutmut names a
+        # mutant. A mutant it should have tested that none of them takes was
+        # never tested, and is refused here rather than reported `not
+        # checked`: the coder would be asked to answer for a mutant nothing
+        # ran.
+        if not taken(key, copies):
+            sys.exit("nunki: no pattern of {} takes {}, a mutant of {}, so it was never tested".format(patterns, key, path))
+        # Absent from `mutmut results` is killed: 3.8.0 lists every other
+        # status. A mutant its record says never ran cannot be one, and a
+        # campaign that cannot tell what became of it measured nothing.
+        if key not in statuses and keys[key] is None:
+            sys.exit("nunki: mutmut's record says {} never ran, and mutmut results does not list it, so the campaign cannot tell its outcome".format(key))
+        status = statuses.get(key, "killed")
+        if status in LEFT_OUT:
+            continue
+        at = None
+        if entry["changed"] is not None or status not in ANSWERED:
+            at = placed(copies.get(key, key), path)
+        if entry["changed"] is not None:
+            # Counted when its change reaches a changed line. One that
+            # cannot be placed, or whose span is not known, is counted: it
+            # was tested, and a mutant left out would be one nobody answers.
+            _, line, _, _, span = at
+            if line is not None and span and not entry["changed"].intersection(range(line, line + span)):
+                continue
+        here["found"] += 1
+        if status not in UNTRIED:
+            here["tried"] += 1
+        if status in ANSWERED:
+            continue
+        shown, line, removed, added, span = at
+        # Loudly, rather than a survivor with an empty file: a line nunki
+        # cannot place is a line the coder cannot answer, and printing it
+        # anyway would spend the triage on nothing.
+        if shown is None or line is None:
+            sys.exit("nunki: the diff of {} named no file".format(key))
+        # And loudly when the diff names another file than the record the
+        # mutant was read from: dropped, it would be a touched file's
+        # survivor gone.
+        if shown != path:
+            sys.exit("nunki: the diff of {} named {}, and its record is {}'s".format(key, shown, path))
+        what = status if not removed else "{}: {} -> {}".format(status, removed, added)
+        end = line + span - 1 if span else 0
+        print(json.dumps({"id": key, "file": path, "line": line, "end_line": end, "description": what}))
+    if here["found"]:
+        print(json.dumps({"measured": entry["handed"], "tried": here["tried"], "found": here["found"]}))
+    tried += here["tried"]
+    found += here["found"]
+print(tried, found)
 PY
+}
+
+# mutmut still mutates every file under its `source_paths`, but it **tests**
+# only the mutants its arguments name. Those are glob patterns over mutant
+# names, or exact names: measured on 3.8.0, `mutmut run "<module>.*"` tested
+# one module's 1,642 mutants out of a project's 13,733, left the others `not
+# checked`, ran only the tests that reach them, and found the same survivors
+# in that module as a full run. A prefix without a `*` — a module, a
+# function — matches nothing.
+#
+# `only_mutate`, the other restriction it offers, lives in the project's own
+# `pyproject.toml`, and this script will not rewrite that file. The clean copy
+# of HEAD is where gate 6's battery runs too, and `nunki exec` resets it
+# between calls: a campaign that edits the project's configuration there
+# either races the battery or measures a project that does not exist.
+#
+# The patterns go to mutmut as arguments, never through the shell's globbing.
+# shellcheck disable=SC2086
+patterns=$(campaign_py plan $files)
+if [ -z "$patterns" ]; then
+  # No function or method holds a line the branch changed — a module's
+  # constants, a nested class — and mutmut mutates nothing else.
+  if [ -n "${NUNKI_BASE:-}" ]; then
+    nothing_mutable
+  fi
+  echo "nunki: the campaign found nothing to hand mutmut in$files, so it measured nothing" >&2
+  exit 1
+fi
+set -f
+# shellcheck disable=SC2086
+set -- $patterns
+set +f
+
+# Its status is the discriminator here, and it is not cargo-mutants'.
+# Measured on 3.8.0: `mutmut run` exits **0** whether every mutant was killed
+# or two survived, and **1** when it could not run at all — a source file it
+# cannot parse raises `InvalidGeneratedSyntaxException` before a single
+# mutant is tested. So the status is not swallowed, where the Rust fragment
+# swallows cargo-mutants' (which answers 2 for "there are survivors").
+#
+# The existence of `mutants/` is no guard: mutmut copies the tree into it
+# *before* it generates anything, so the directory is there even when the
+# campaign died on the first file. Taken as a guard, it lets the script print
+# `{"campaign":"done"}` with no survivor — gate 7 green on nothing,
+# which is the one failure this contract exists to prevent.
+#
+# One failure is a measurement: patterns that match no mutant at all.
+# mutmut refuses them — "Filtered for specific mutants, but nothing
+# matches", status 1 — when no touched function holds a mutant: a module of
+# constants, an `__init__.py` of imports, a script outside `source_paths`, a
+# changed function with nothing to mutate in it. That is a branch with
+# nothing mutable, and saying it could not run would have gate 7 ask for
+# ever. It is told from a real failure by what mutmut left, not by its
+# message: `mutants/mutmut-stats.json` is written once every file is
+# generated and the tests have run, just before the patterns are matched
+# (3.8.0), and each mutated file's record, `mutants/<path>.meta`, names every
+# mutant made in it. With the first there and no record naming a mutant the
+# patterns should have taken, there was nothing to test. Anything else — a
+# record that cannot be read among them — is a campaign that could not run.
+# shellcheck disable=SC2086
+if ! uv run --frozen --no-sync mutmut run $children "$@" >&2; then
+  # shellcheck disable=SC2086
+  if [ -f mutants/mutmut-stats.json ] && campaign_py refused $files -- "$@"; then
+    nothing_mutable
+  fi
+  echo "nunki: the campaign could not run, so no mutant was tested" >&2
+  exit 1
+fi
+
+# The survivors and each file's counts, then the two totals on a line of
+# their own, which become the terminal line below. Kept until the program has
+# finished: one that dies halfway prints nothing at all.
+# shellcheck disable=SC2086
+out=$(campaign_py read $files -- "$@") || exit 1
+totals=$(printf '%s\n' "$out" | tail -n 1)
+printf '%s\n' "$out" | sed '$d'
 
 # Behind itself, once the survivors have been read out of it. A courtesy
 # and not a guard: a campaign that is killed — and one often is, the
 # deadline is 45 minutes — never reaches this line, which is why the
 # battery excludes the directory rather than trusting it to be gone.
 rm -rf mutants
+
+tried="${totals% *}"
+found="${totals#* }"
+case "$tried" in ''|*[!0-9]*) tried="" ;; esac
+case "$found" in ''|*[!0-9]*) found="" ;; esac
+if [ -z "$tried" ] || [ -z "$found" ]; then
+  echo "nunki: the campaign's totals cannot be read: $totals" >&2
+  exit 1
+fi
 
 # The last thing it prints, and the only line that says the campaign got to
 # the end. Without it `nunki` cannot tell "no survivor" from "no answer": a
@@ -2777,7 +3050,7 @@ rm -rf mutants
 # spawner `exec`s the command so that the pid it published is the campaign's
 # own, and a shell that has been replaced cannot write `$?`. A truncated log
 # loses its last line, which is this one, so the three failures fail alike.
-printf '{"campaign":"done"}\n'
+printf '{"campaign":"done","tried":%s,"found":%s,"by_file":true}\n' "$tried" "$found"
 "##;
 
 /// The mechanical security of a Python project (SPEC 4.4, gate 8): the
@@ -3456,11 +3729,27 @@ pnpm exec vitest run --exclude '**/reports/**' --exclude '**/.stryker-tmp/**' \
 /// The mutation campaign a Next.js project runs (SPEC 4.4, gate 7).
 ///
 /// Checked against Stryker 9.6.1 before it shipped: an exit status of 0
-/// says little — 0 with survivors, 0 on a file that does not exist, 0 on a
-/// source that does not parse — so the report is the guard for those, while
-/// any other status is a campaign that did not complete; and its
-/// mutant ids are per-file sequential integers, so they are not the ids
-/// `nunki` can hand back to a coder.
+/// says little — 0 with survivors, 0 on a file that does not exist beside
+/// one that does, 0 on a source that does not parse — so the report is the
+/// guard for those, while any other status is a campaign that did not
+/// complete; and its mutant ids are per-file sequential integers, so they are
+/// not the ids `nunki` can hand back to a coder.
+///
+/// Scoped to the lines the branch changed, and measured on Stryker 10.0.0, on
+/// a scratch Next.js project whose branch changed one line of `format.ts`
+/// and added three to `search.ts`: 14 mutants counted, where the two whole
+/// files hold 55, with 12 survivors and 2 killed, each with the status the
+/// whole files' campaign gave it.
+///
+/// Measured by name on the same project and Stryker, with the script as
+/// this binary writes it. Without names, the same survivors and counts as
+/// the script before, each id with its span — and the ids unique, where
+/// the script before gave two survivors of `format.ts` one id. Handed the
+/// file changed since and two of `search.ts`'s three survivors by name: 16
+/// mutants run, the changed file's 11 and the 5 inside the two spans, and
+/// of those 5 the two named reported and counted. A test added since, then:
+/// the three named in `search.ts` killed, the two in `format.ts` reported
+/// again.
 const MUTATION_NEXT: &str = r##"#!/bin/sh
 # The mutation campaign for a Next.js project (SPEC 4.4, gate 7).
 #
@@ -3475,27 +3764,72 @@ const MUTATION_NEXT: &str = r##"#!/bin/sh
 # campaign is full.
 # nunki-tool-version: pnpm exec stryker --version
 #
+# The next line tells `nunki` that this script measures mutants **by name**
+# (SPEC 4.4, the debt): given `NUNKI_MUTATION_NAMES`, a JSON list of the ids
+# this script gives its survivors, it runs those mutants as well as the ones
+# its scope reaches. A hardening mission and `nunki mutants run --owed`
+# measure the debt's survivors that way; without the line, `nunki` hands
+# this stack no name.
+# nunki-by-name: NUNKI_MUTATION_NAMES
+#
+# The next line says more: a name is looked for in any file of the project,
+# not only in the files handed. The recheck at a mission's final `HEAD`
+# (SPEC 4.4) hands the files changed since the campaign, and by name the
+# campaign's survivors in the files that did not change: handing those files
+# too would mutate again everything the branch changed in them. Without the
+# line, `nunki` hands this stack those files instead, and they are measured
+# again whole.
+# nunki-by-name-anywhere: NUNKI_MUTATION_NAMES
+#
+# The campaign answers for the lines this branch **changed**, not for every
+# line of the files it touched (SPEC 4.4). `nunki` sets `NUNKI_BASE` to the
+# commit the branch forked from, and Stryker takes line ranges in `--mutate`,
+# `<file>:<first>-<last>`: this script hands it one for each run of lines the
+# diff since that commit adds. A twenty-line fix in a file of two thousand
+# lines owes answers for its own mutants, not for the file's history.
+# Without `NUNKI_BASE` the whole of each touched file is mutated.
+#
+# Its limit, measured on Stryker 10.0.0 and read in its code
+# (`locationIncluded`): Stryker mutates only the code that sits **wholly**
+# inside a range. A block or a function body replaced, which reaches past the
+# changed lines, is not tested: with line 12 changed, the block that line
+# opens, lines 12 to 14, was not. That is narrower than cargo-mutants'
+# `--in-diff`, and SPEC 4.4 says so.
+#
+# Stryker names no mutant, and a name is measured again **by its span**.
+# The id this script gives a survivor carries where the code it replaces
+# starts and ends, as the report gives them, and Stryker takes a span in
+# `--mutate` as it takes a line range, `<file>:<line>:<column>-<line>:<column>`.
+# Measured on Stryker 10.0.0: a survivor's span runs it again, with every
+# other mutant wholly inside that span — the other mutations of the same
+# code, or everything in a function body replaced whole — and two spans in
+# two files run in one `--mutate`. Of those, the campaign reports and counts
+# only the mutants it was handed, each found by its id; the others were
+# measured by the campaign before, in a file nobody changed since.
+#
 # It prints **one JSON object per line** on stdout, one per surviving mutant:
 #   {"id":"…","file":"…","line":12,"end_line":12,"description":"…"}
+# then one per touched file with a mutant counted, with that file's counts:
+#   {"measured":"app/page.ts","tried":12,"found":13}
+# and, last of all and exactly once, the line that says it got to the end:
+#   {"campaign":"done","tried":42,"found":45,"by_file":true}
 # `end_line` is the last line of the code the mutation replaces, from the
 # location Stryker's report gives each mutant; 0 when it gives none — a span
 # nobody knows, which no ruling is tied to.
-# and, last of all and exactly once, the line that says it got to the end:
-#   {"campaign":"done"}
-# with **no** `tried` and no `found`. A `standard` mission's gate 7 divides
-# the killed mutants by `tried`, and the share means something only over the
-# lines this branch changed (SPEC 4.4). `--mutate` below names whole touched
-# files, so whatever this script could count would be over those files: a
-# well-tested file would hide the new untested lines in it. Stryker takes
-# line ranges, but nothing here has been measured against a real Stryker
-# doing so, and a count is not shipped on a reading of its documentation.
-# Without a count `nunki` judges gate 7 as `critical` does — an outcome for
-# every survivor. A branch that touched nothing mutable is the one exact
-# count this script has, and says `tried` 0.
-# For the same reason it gives no per-file counts and never says `by_file`:
-# Stryker's report does name each mutant's file, but over whole files, so a
-# campaign after one of this stack's is always full, never rebuilt from
-# counts that are not the branch's (SPEC 4.4, the chain of campaigns).
+# `found` is every mutant counted, less those Stryker calls invalid,
+# `CompileError` and `RuntimeError`, and those the project has it ignore,
+# `Ignored`: a mutant no test had to kill, the counterpart of cargo-mutants'
+# unviable ones. `tried` is those of them the tests ran against, or that no
+# test reaches (`NoCoverage`), which are not killed either: what a `standard`
+# mission's gate 7 divides by. A mutant left `Pending` is found and not
+# tried, and `tried` 0 beside a `found` above 0 is a campaign that measured
+# nothing.
+# There is no `missed`. Stryker's account of its outcomes is the report these
+# counts are read from: a tally of it would always agree with the survivor
+# lines, and prove nothing.
+# `by_file` says each file was counted, and that the counts add up to the
+# totals: a later partial campaign is rebuilt from them, file by file
+# (SPEC 4.4, the chain). A file with no line has nothing counted in it.
 # `nunki` reads no other line as a result, so progress may go to stdout freely —
 # though this script keeps the tool's own chatter on stderr. A campaign that
 # stops before that last line has measured nothing, whatever else it printed.
@@ -3504,29 +3838,64 @@ set -eu
 campaign="$1"
 shift
 
+# Outside the tree, and removed however this script leaves: where Stryker
+# keeps its incremental file for this run (below), which is nothing the next
+# battery should find beside the sources.
+scratch=$(mktemp -d)
+trap 'rm -rf "$scratch"' EXIT
+
 # The sources the branch touched, and only those: Stryker's `--mutate` takes
 # them as a flag and touches nothing on disk, which is what the Python stack
 # could not do and had to pay for in campaign time.
 #
 # Test files are left out: a mutated test proves nothing about the code, and
 # Stryker would report it as uncovered for ever.
-files=""
+#
+# And a source the branch removed: there is nothing left of it to mutate.
+# Handed to Stryker alone, measured on 10.0.0, a path that names no file
+# leaves nothing to mutate and no test to run, and Stryker exits 1, "No tests
+# were executed": a branch whose one touched source it removed would have
+# gate 7 ask for a campaign for ever.
+#
+# They all go in **one** `--mutate`, joined by commas. The flag does not
+# add up: measured on Stryker 10.0.0, each one replaces the one before, so
+# `--mutate a.ts --mutate b.ts` mutated b.ts alone, said nothing of a.ts,
+# and exited 0 — a branch touching two sources had one measured. Its value
+# is split on commas, so a path holding one cannot be handed over at all,
+# and the campaign says so rather than measure part of the branch.
 for path in "$@"; do
+  shift
   case "$path" in
     *.test.*|*.spec.*|*/__tests__/*|*/e2e/*) continue ;;
   esac
   case "$path" in
-    *.ts|*.tsx|*.js|*.jsx|*.mjs|*.cjs) files="$files --mutate $path" ;;
+    *.ts|*.tsx|*.js|*.jsx|*.mjs|*.cjs) ;;
+    *) continue ;;
   esac
+  [ -f "$path" ] || continue
+  case "$path" in
+    *,*)
+      echo "nunki: $path holds a comma, which Stryker's --mutate splits on, so it cannot be mutated and the campaign measured nothing" >&2
+      exit 1
+      ;;
+  esac
+  set -- "$@" "$path"
 done
-if [ -z "$files" ]; then
-  # Nothing this branch touched is mutable, so there are no mutants and no
-  # survivors — and that is a measurement, not a campaign that failed to
-  # happen. The terminal line is printed **before** leaving, because `nunki`
-  # reads its absence as a campaign that was killed and asks for another:
-  # a branch touching only tests or documentation would be asked for ever.
-  printf '{"campaign":"done","tried":0,"found":0}\n'
+
+# Nothing this branch touched is mutable, so there are no mutants and no
+# survivors — and that is a measurement, not a campaign that failed to
+# happen. The terminal line is printed **before** leaving, because `nunki`
+# reads its absence as a campaign that was killed and asks for another:
+# a branch touching only tests or documentation would be asked for ever.
+# Said from two places: here, for a branch that touched no source; and
+# below, for one that only removed lines from the sources it touched.
+# A campaign handed names has them to measure, path or not.
+nothing_mutable() {
+  printf '{"campaign":"done","tried":0,"found":0,"by_file":true}\n'
   exit 0
+}
+if [ $# -eq 0 ] && [ -z "${NUNKI_MUTATION_NAMES:-}" ]; then
+  nothing_mutable
 fi
 
 # How many mutants run at once: the project's `mutation_jobs`, which `nunki`
@@ -3555,6 +3924,260 @@ if ! pnpm exec stryker --version >/dev/null 2>&1; then
   echo "nunki: this stack's campaign needs @stryker-mutator/core, which this project does not declare." >&2
   echo "nunki: add it where the lock can pin it: pnpm add -D @stryker-mutator/core" >&2
   exit 1
+fi
+
+# What the campaign reads, in the project's own Node: one program for two
+# questions, so that what Stryker is asked to mutate and what the campaign
+# counts are decided by the same code, the names it was handed among it:
+# - `plan` prints the value of `--mutate`;
+# - `read` prints the survivors and each file's counts, then the two totals.
+#
+# Under `set -e`, a failure in it ends the script **before** the terminal
+# line, which is what it should do: results nobody could read are not a
+# measurement.
+campaign_js() {
+  node --input-type=commonjs - "$@" <<'JS'
+const fs = require("fs");
+const { execFileSync } = require("child_process");
+
+const [mode, ...rest] = process.argv.slice(2);
+const base = process.env.NUNKI_BASE || "";
+
+// What counts as answered, in the vocabulary Stryker uses. `Killed` and
+// `Timeout` are what it calls detected — a mutant that hangs the suite is one
+// the suite noticed. `CompileError` and `RuntimeError` are what it calls
+// invalid: nothing **could** prove them dead, which is not the same as nobody
+// having tried. `Ignored` was excluded on purpose.
+//
+// So the survivors are `Survived`, `NoCoverage` and `Pending`: the second is
+// code no test reaches, and the third was never run at all. A campaign that
+// read only `Survived` would call both of them green.
+const ANSWERED = new Set(["Killed", "Timeout", "CompileError", "RuntimeError", "Ignored"]);
+
+// Neither found nor tried: no test had to kill them. An invalid mutant is
+// code that does not compile or does not load, as an unviable mutant is code
+// that does not build for cargo-mutants, which counts neither. And counting
+// an ignored one as tried would raise a `standard` mission's share as if a
+// test had killed it.
+const LEFT_OUT = new Set(["CompileError", "RuntimeError", "Ignored"]);
+
+// Found, and not tried: no test ran against them.
+const UNTRIED = new Set(["Pending"]);
+
+function fail(why) {
+  process.stderr.write("nunki: " + why + "\n");
+  process.exit(1);
+}
+
+function bare(path) {
+  return path.startsWith("./") ? path.slice(2) : path;
+}
+
+// The id this script gives a mutant: its file, the span of the code it
+// replaces, its mutator and what it wrote. Stryker's own id is a per-file
+// sequential integer that moves between runs, so a coder answering "#7"
+// would name something else next time; these stay the same. The
+// replacement is in it because one span carries several mutants:
+// `ConditionalExpression` to `true` and to `false` replace the very same
+// code. And the span whole, not where it starts, because that is what
+// `--mutate` takes to run it again. A location the report gives only in
+// part leaves the span out, and the id names a mutant no name can run.
+function idOf(file, mutant) {
+  const start = mutant.location?.start ?? {};
+  const end = mutant.location?.end ?? {};
+  const was = (mutant.replacement ?? "").replace(/\s+/g, " ").trim();
+  const known = [start.line, start.column, end.line, end.column].every(
+    (n) => Number.isInteger(n) && n > 0,
+  );
+  const span = known
+    ? `${start.line}:${start.column}-${end.line}:${end.column}`
+    : `${start.line}:${start.column}`;
+  return [file, span, mutant.mutatorName, was].join(":");
+}
+
+// The mutants `nunki` names, if it names any: a JSON list of at least one
+// id this script gave, each in a file of the project, handed or not. Each
+// is read back into its file and its span, and run under it; and it is
+// found again afterwards by its whole id, never by the parts read here. A
+// list that is not one, or a name without a span — one an older script
+// gave — measured nothing, and says so: a list read wrong would run other
+// mutants than the ones asked for.
+const SPAN = /^(.+?):([1-9][0-9]*):([1-9][0-9]*)-([1-9][0-9]*):([1-9][0-9]*):/;
+function named() {
+  const given = process.env.NUNKI_MUTATION_NAMES || "";
+  if (!given) return [];
+  let list = null;
+  try {
+    list = JSON.parse(given);
+  } catch {}
+  if (!Array.isArray(list) || list.length === 0 || !list.every((n) => typeof n === "string")) {
+    fail("NUNKI_MUTATION_NAMES is a JSON list of at least one mutant's name, and it is not, so the campaign measured nothing");
+  }
+  return list.map((name) => {
+    const at = SPAN.exec(name);
+    if (!at) {
+      fail(`${JSON.stringify(name)} is no name this script gives a mutant — its file, then where the code it replaces starts and ends — so the campaign measured nothing`);
+    }
+    const [first, from, last, to] = at.slice(2).map(Number);
+    return { name, file: at[1], first, from, last, to };
+  });
+}
+
+// The runs of lines the branch changed in `path` since its fork point, each
+// as its first and last line. As the Rust fragment asks git: `--no-renames`,
+// so that a file renamed is a file added whole, as `nunki` compares files
+// from one campaign to the next; the path as a literal one, never read as a
+// pathspec; and a name outside ASCII as it is, not in octal escapes. A hunk
+// that only removes lines adds none, and gives no range: Stryker refuses a
+// range that ends before it starts, and the whole campaign with it.
+function changed(path) {
+  let diff;
+  try {
+    diff = execFileSync(
+      "git",
+      ["-c", "core.quotePath=false", "--literal-pathspecs",
+        "diff", "-U0", "--relative", "--no-renames", base, "HEAD", "--", path],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 1 << 30 },
+    );
+  } catch (error) {
+    fail(`cannot diff against the base ${base}: ${String(error.stderr || error.message).trim().slice(-400)}`);
+  }
+  const runs = [];
+  for (const hunk of diff.matchAll(/^@@ -\S+ \+([0-9]+)(?:,([0-9]+))? @@/gm)) {
+    const first = Number(hunk[1]);
+    const count = hunk[2] === undefined ? 1 : Number(hunk[2]);
+    if (count > 0) runs.push([first, first + count - 1]);
+  }
+  return runs;
+}
+
+if (mode === "plan") {
+  // Each path becomes a pattern that matches that one file. Stryker reads
+  // every entry as a glob over the absolute path (minimatch), and a Next.js
+  // dynamic route is a character class to it: measured on 10.0.0,
+  // `app/[...slug]/page.ts` mutated `app/s/page.ts` and never the route, and
+  // `app/[[...slug]]/page.ts` matched nothing. A backslash escapes nothing,
+  // since Stryker turns it into `/` first; a character in brackets of its own
+  // does, and `app/[[]...slug[]]/page.ts` matched the route alone. A range
+  // can follow it: Stryker refuses one after a glob, and to minimatch a lone
+  // character in brackets is none (measured: two routes, each with a range,
+  // mutated). So every character a glob reads is put in brackets. `!` is
+  // left as it is: it only
+  // means something at the start of a pattern, which is a `/` here, or
+  // before a `(`, which is bracketed.
+  const glob = (path) => path.replace(/[\][*?{}()]/g, "[$&]");
+  const entries = [];
+  for (const path of rest) {
+    const pattern = glob(path);
+    if (!base) {
+      entries.push(pattern);
+      continue;
+    }
+    for (const [first, last] of changed(path)) entries.push(`${pattern}:${first}-${last}`);
+  }
+  // Each name's span, where `--mutate` counts columns from 0 and the report
+  // from 1 (measured on 10.0.0). A file that is not there, or whose path
+  // the flag would split, cannot hold the mutant: what a name in a file the
+  // branch removed comes to.
+  for (const { name, file, first, from, last, to } of named()) {
+    if (!fs.existsSync(file)) {
+      fail(`${JSON.stringify(name)} names ${file}, which is not in the code the campaign runs on, so it measured nothing`);
+    }
+    if (file.includes(",")) {
+      fail(`${file} holds a comma, which Stryker's --mutate splits on, so the mutant named in it cannot be run and the campaign measured nothing`);
+    }
+    const entry = `${glob(file)}:${first}:${from - 1}-${last}:${to - 1}`;
+    if (!entries.includes(entry)) entries.push(entry);
+  }
+  process.stdout.write(entries.join(","));
+  process.exit(0);
+}
+
+const report = JSON.parse(fs.readFileSync(rest[0], "utf8"));
+const touched = new Map();
+for (const path of rest.slice(1)) {
+  touched.set(bare(path), { handed: path, runs: base ? changed(path) : null });
+}
+const names = new Map();
+for (const { name, file } of named()) {
+  if (!names.has(bare(file))) names.set(bare(file), new Set());
+  names.get(bare(file)).add(name);
+}
+const seen = new Set();
+
+let tried = 0;
+let found = 0;
+for (const [file, entry] of Object.entries(report.files ?? {})) {
+  // A file nobody handed or named is one the patterns took by mistake —
+  // what an unescaped dynamic route did — and its mutants are not the
+  // branch's.
+  const here = touched.get(bare(file));
+  const wanted = names.get(bare(file)) ?? new Set();
+  if (!here && wanted.size === 0) {
+    fail(`Stryker's report holds mutants of ${file}, which the campaign did not hand it, so it cannot tell what it measured`);
+  }
+  const counts = { tried: 0, found: 0 };
+  for (const mutant of entry.mutants ?? []) {
+    const at = mutant.location?.start ?? {};
+    const end = mutant.location?.end?.line;
+    const id = idOf(file, mutant);
+    // A mutant named is measured whatever its lines, and found again.
+    // Another is the campaign's only in a file handed, and with a base only
+    // when its lines reach a changed one: Stryker already makes no other in
+    // a range, but a count that depends on how a tool picks its mutants
+    // changes with the tool, and a span runs every mutant inside it. One
+    // whose lines the report does not give counts.
+    if (wanted.has(id)) {
+      seen.add(id);
+    } else if (
+      !here ||
+      (here.runs &&
+        Number.isInteger(at.line) &&
+        Number.isInteger(end) &&
+        !here.runs.some(([first, last]) => at.line <= last && end >= first))
+    ) {
+      continue;
+    }
+    if (LEFT_OUT.has(mutant.status)) continue;
+    counts.found += 1;
+    if (!UNTRIED.has(mutant.status)) counts.tried += 1;
+    if (ANSWERED.has(mutant.status)) continue;
+    const was = (mutant.replacement ?? "").replace(/\s+/g, " ").trim();
+    // The description is what a ruling on the survivor is filed under, with
+    // its file, so it does not carry the status: measured on 10.0.0, the same
+    // block, `format.ts` lines 18 to 24, came back `NoCoverage` from the
+    // whole file and `Survived` from a range over its function — and a
+    // ruling given on one would not have been offered for the other.
+    const what = `${mutant.mutatorName} -> ${was}`;
+    // A whole number from 1 up, or 0: anything else in the report is a span
+    // nobody knows, and says so rather than reaching nunki as text, a
+    // fraction or a negative, as the rust template does with its `case`.
+    const end_line = Number.isInteger(end) && end > 0 ? end : 0;
+    process.stdout.write(JSON.stringify({ id, file, line: at.line, end_line, description: what }) + "\n");
+  }
+  if (counts.found) {
+    process.stdout.write(JSON.stringify({ measured: here ? here.handed : file, tried: counts.tried, found: counts.found }) + "\n");
+  }
+  tried += counts.tried;
+  found += counts.found;
+}
+// A name Stryker did not make again is a mutant no longer in the code — the
+// code it replaces moved or changed — and the campaign measured nothing:
+// read without it, it would report killed a mutant it never ran.
+const handed = [...names.values()].flatMap((set) => [...set]);
+const missing = handed.filter((name) => !seen.has(name));
+if (missing.length) {
+  fail(`${missing.length} of the ${handed.length} mutant(s) this campaign was handed by name are not in the code it runs on — the code they mutate moved or changed since they were measured — so it measured nothing: ${JSON.stringify(missing.slice(0, 5))}`);
+}
+process.stdout.write(`${tried} ${found}\n`);
+JS
+}
+
+mutate=$(campaign_js plan "$@")
+if [ -z "$mutate" ]; then
+  # The branch only removed lines from the sources it touched: none of
+  # their mutants is on a line it changed.
+  nothing_mutable
 fi
 
 # Where the project's configuration puts the json report. There is no command
@@ -3592,18 +4215,26 @@ rm -rf .stryker-tmp
 # even when the run fails, so a killed campaign leaves no copy of the project
 # beside the tree for the next battery to walk into.
 #
+# `--incrementalFile` in the scratch directory, which no run has written:
+# a project whose configuration turns on Stryker's incremental mode then
+# reuses nothing. Measured on 10.0.0, with it on and its own file kept, a
+# campaign over two ranges reported every mutant of both files, 55 where the
+# ranges hold 14, with the statuses an earlier run left. With a file nobody
+# wrote, the same campaign reported its 14; with the mode off, the option
+# writes nothing.
+#
 # Stryker is otherwise driven by the project's own configuration — its test
 # runner among it — which it reads from the working directory.
 #
 # The status is not enough on its own, because 0 says little: measured on
 # 9.6.1, it is 0 with survivors, 0 when `--mutate` names a file that does
-# not exist, and 0 on a source file that does not parse. So the report
-# below is the guard for those. But anything **other** than 0 is a campaign
-# that did not complete — a failing initial test run among them — and is
-# never read as one that did, whatever report it left.
+# not exist beside one that does, and 0 on a source file that does not
+# parse. So the report below is the guard for those. But anything **other**
+# than 0 is a campaign that did not complete — a failing initial test run
+# among them — and is never read as one that did, whatever report it left.
 # shellcheck disable=SC2086
 status=0
-pnpm exec stryker run $files $concurrency --cleanTempDir always --reporters json >&2 || status=$?
+pnpm exec stryker run --mutate "$mutate" $concurrency --incrementalFile "$scratch/incremental.json" --cleanTempDir always --reporters json >&2 || status=$?
 if [ "$status" -ne 0 ]; then
   echo "nunki: stryker exited $status, so the campaign did not complete and measured nothing" >&2
   exit 1
@@ -3616,44 +4247,12 @@ if [ ! -f "$report" ]; then
   exit 1
 fi
 
-node -e '
-const fs = require("fs");
-const report = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-
-// What counts as answered, in the vocabulary Stryker uses. `Killed` and
-// `Timeout` are what it calls detected — a mutant that hangs the suite is one
-// the suite noticed. `CompileError` and `RuntimeError` are what it calls
-// invalid: nothing **could** prove them dead, which is not the same as nobody
-// having tried. `Ignored` was excluded on purpose.
-//
-// So the survivors are `Survived`, `NoCoverage` and `Pending`: the second is
-// code no test reaches, and the third was never run at all. A campaign that
-// read only `Survived` would call both of them green.
-const ANSWERED = new Set(["Killed", "Timeout", "CompileError", "RuntimeError", "Ignored"]);
-
-for (const [file, entry] of Object.entries(report.files ?? {})) {
-  for (const mutant of entry.mutants ?? []) {
-    if (ANSWERED.has(mutant.status)) continue;
-    const at = mutant.location?.start ?? {};
-    const was = (mutant.replacement ?? "").replace(/\s+/g, " ").trim();
-    // The id Stryker gives is a per-file sequential integer that moves between
-    // runs, so a coder answering "#7" would name something else next time.
-    // The position, the mutator and what it wrote are what stay the same —
-    // and the replacement is in it because one position carries several
-    // mutants: `ConditionalExpression` to `true` and to `false` sit on the
-    // very same column.
-    const id = [file, at.line, at.column, mutant.mutatorName, was].join(":");
-    const what = `${mutant.status}: ${mutant.mutatorName} -> ${was}`;
-    // A whole number from 1 up, or 0: anything else in the report is a span
-    // nobody knows, and says so rather than reaching nunki as text, a
-    // fraction or a negative, as the rust template does with its `case`.
-    // (No apostrophe in this script: it sits inside single quotes.)
-    const end = mutant.location?.end?.line;
-    const end_line = Number.isInteger(end) && end > 0 ? end : 0;
-    process.stdout.write(JSON.stringify({ id, file, line: at.line, end_line, description: what }) + "\n");
-  }
-}
-' "$report"
+# The survivors and each file's counts, then the two totals on a line of
+# their own, which become the terminal line below. Kept until the program has
+# finished: one that dies halfway prints nothing at all.
+out=$(campaign_js read "$report" "$@") || exit 1
+totals=$(printf '%s\n' "$out" | tail -n 1)
+printf '%s\n' "$out" | sed '$d'
 
 # Behind itself, once the survivors have been read out of it — the file and
 # the directory Stryker made for it, because an empty `reports/` left in the
@@ -3664,6 +4263,15 @@ rm -f "$report"
 holder=$(dirname "$report")
 [ "$holder" = "." ] || rmdir -p "$holder" 2>/dev/null || true
 
+tried="${totals% *}"
+found="${totals#* }"
+case "$tried" in ''|*[!0-9]*) tried="" ;; esac
+case "$found" in ''|*[!0-9]*) found="" ;; esac
+if [ -z "$tried" ] || [ -z "$found" ]; then
+  echo "nunki: the campaign's totals cannot be read: $totals" >&2
+  exit 1
+fi
+
 # The last thing it prints, and the only line that says the campaign got to
 # the end. Without it `nunki` cannot tell "no survivor" from "no answer": a
 # campaign killed halfway, one whose container went away and one that never
@@ -3673,7 +4281,7 @@ holder=$(dirname "$report")
 # A line and not an exit status, because the status does not survive. The
 # spawner `exec`s the command so that the pid it published is the campaign's
 # own, and a shell that has been replaced cannot write `$?`.
-printf '{"campaign":"done"}\n'
+printf '{"campaign":"done","tried":%s,"found":%s,"by_file":true}\n' "$tried" "$found"
 "##;
 
 /// The mechanical security of a Next.js project (SPEC 4.4, gate 8): the

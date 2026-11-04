@@ -1221,16 +1221,18 @@ eux-mêmes plutôt que tus :
   sources`, trois étapes sans réseau ; `osv-scanner --licenses` passe par
   deps.dev, que la liste blanche du codeur ne nomme pas. La stack le dit plutôt
   que de laisser croire à une vérification qui n'a pas lieu.
-- **La campagne ne teste que les fichiers touchés, mais entiers.** `mutmut
-  run` prend des motifs glob sur les noms de mutants (mesuré sur 3.8.0) : un
-  motif par fichier touché, `<chemin pointé>.x*`, fait tester les mutants de ce
-  fichier et eux seuls, avec les seuls tests qui les atteignent. La génération
-  et les statistiques couvrent toujours tout l'arbre, et rien ne restreint la
-  campagne aux lignes changées : c'est pourquoi elle ne donne aucun compte
-  (4.4). Des motifs qui ne prennent aucun mutant — un module de constantes, un
-  script hors de `source_paths` — sont refusés par mutmut ; la campagne y lit
-  une branche sans rien de mutable, d'après ce que mutmut a laissé sur disque,
-  et non une campagne qui n'a pas pu tourner. L'autre restriction de mutmut,
+- **La campagne ne répond que des lignes changées.** `mutmut run` prend des
+  motifs glob sur les noms de mutants, ou des noms exacts (mesuré sur
+  3.8.0), et ne teste que ceux qu'ils prennent, avec les seuls tests qui les
+  atteignent. mutmut n'a aucun mode diff : c'est le script qui restreint la
+  campagne aux fonctions qui portent une ligne changée, puis ses comptes aux
+  mutants de ces lignes (4.4, `NUNKI_BASE`). La génération et les
+  statistiques couvrent toujours tout l'arbre, un coût fixe que chaque
+  campagne paie. Des motifs qui ne prennent aucun mutant — un module de
+  constantes, une fonction changée où rien ne se mute, un script hors de
+  `source_paths` — sont refusés par mutmut ; la campagne y lit une branche
+  sans rien de mutable, d'après ce que mutmut a laissé sur disque, et non une
+  campagne qui n'a pas pu tourner. L'autre restriction de mutmut,
   `only_mutate`, vit dans le `pyproject.toml` du projet, que la campagne ne
   réécrira pas : la copie propre de `HEAD` est aussi celle où tourne la
   porte 6.
@@ -1249,10 +1251,16 @@ secrets. Trois choses lui sont propres, chacune parce qu'elle a été mesurée :
 - **La batterie de l'intégrateur teste l'application**, pas des modules :
   Playwright pilote un vrai Chromium contre ce que `run.sh` a lancé.
 - **Le statut de Stryker ne dit rien** — 0 avec des survivants, 0 sur un
-  fichier absent, 0 sur une source qui ne se parse pas — donc c'est son
-  rapport qui fait foi, et son identifiant de mutant étant un entier
-  séquentiel par fichier, `nunki` en reconstruit un stable à partir de la
-  position, du mutateur et du remplacement.
+  fichier absent à côté d'un fichier présent, 0 sur une source qui ne se
+  parse pas — donc c'est son rapport qui fait foi, et son identifiant de
+  mutant étant un entier séquentiel par fichier, `nunki` en reconstruit un
+  stable à partir de l'étendue entière du code remplacé, du mutateur et du
+  remplacement. Le seul point de départ ne suffisait pas : deux mutants
+  partis du même point avec le même remplacement partageaient un
+  identifiant (mesuré sur 10.0.0). Seul, un
+  fichier absent le fait sortir en 1, « No tests were executed » (mesuré
+  sur 10.0.0) : la campagne ne lui confie pas une source que la branche a
+  supprimée.
 
 ### 4.2 bis — Les plateformes
 
@@ -1722,10 +1730,12 @@ dernier lot. La première rouge arrête tout.
 5. livrable présent (`PR.md`) ;
 6. batterie verte — absente ou non exécutable, la porte **échoue**, elle ne
    saute pas ;
-7. **mutation** : campagne jouée sur ce que la branche a changé. **Pas de
-   seuil** au niveau `critical` : la porte est verte quand **chaque survivant
-   a reçu une des trois issues** — tué par un test nommé, reconnu comme bug et
-   figé dans un test, ou démontré équivalent en une phrase.
+7. **mutation** : **une campagne par mission**, jouée sur ce que la branche
+   a changé, puis **une contre-épreuve** au `HEAD` final (plus bas, « Une
+   campagne, puis une contre-épreuve »). **Pas de seuil** au niveau
+   `critical` : la porte est verte quand **chaque survivant a reçu une des
+   trois issues** — tué par un test nommé, reconnu comme bug et figé dans un
+   test, ou démontré équivalent en une phrase.
 
    **Le niveau d'exigence règle cette porte.** Au niveau `prototype`, elle ne
    s'applique pas et aucune campagne n'est due. Au niveau `standard`, elle est
@@ -1795,11 +1805,81 @@ dernier lot. La première rouge arrête tout.
    de fourche y est par construction. Une variable plutôt qu'un argument, pour
    que le `mutation.sh` qu'un projet a réécrit, qui lit
    `<campaign-id> <path>...`, continue de marcher tel quel. La stack restreint
-   sa campagne au diff depuis ce commit quand son outil le sait : pour Rust,
-   `cargo-mutants --in-diff`, qui ne garde que les mutants que le diff
-   atteint. Python (mutmut) et Next (Stryker) ne le font pas encore : leurs
-   scripts mutent toujours les fichiers entiers, et restreindre leurs
-   campagnes est un travail de stack à part. Un diff qui n'atteint aucun mutant — un commentaire, un test — est
+   sa campagne au diff depuis ce commit quand elle le sait, avec sa limite,
+   écrite :
+
+   - **Rust** : `cargo-mutants --in-diff`, qui ne garde que les mutants que
+     le diff atteint.
+   - **Python** : mutmut n'a aucun mode diff (lu jusqu'à 3.8.1). Le script ne
+     fait tester que les fonctions et les méthodes qui portent une ligne
+     changée, décorateurs compris, par les motifs de noms de mutmut
+     (`<module>.x_<fonction>__mutmut_*`,
+     `<module>.xǁ<Classe>ǁ<méthode>__mutmut_*`), et ne compte et ne rapporte
+     que les mutants dont le changement atteint une ligne changée ; les
+     autres mutants de ces fonctions tournent sans compter. Un mutant qu'il
+     ne sait pas placer, ou dont il ne connaît pas l'étendue, compte. Il
+     trouve les fonctions en lisant la source avec l'interpréteur du projet,
+     celles que mutmut mute — celles du module et les méthodes de ses
+     classes, rien d'autre (lu dans le code de mutmut) — et un mutant d'une
+     fonction qu'il n'y trouve pas fait une campagne qui n'a rien mesuré. La
+     ligne d'un mutant vient de `get_diff_for_mutant`, une fonction interne
+     de mutmut et non une interface : le script échoue fermé sans elle, et
+     `# nunki-tool-version` lie les comptes à la version qui les a donnés.
+     Mesuré sur mutmut 3.8.0, sur une branche qui changeait une fonction et
+     une méthode : 13 mutants testés sur les 51 du fichier, 6 comptés, et
+     des 3 survivants les 2 des lignes changées rapportés ; avec un point de
+     fourche plus ancien, qui rend changée la ligne du troisième, il l'est
+     aussi. Les motifs de deux fonctions donnent les mêmes survivants et les
+     mêmes verdicts que la campagne entière, sans prendre la fonction au nom
+     voisin (`matching_lines_all` pour `matching_lines`), et la
+     correspondance place 4 704 mutants en 5,5 s, aucun sans ligne. **Le
+     cache `mutants/` est vidé avant chaque campagne** : gardé, il a rendu
+     survivant un mutant que la campagne à froid rendait tué, parce qu'un
+     changement de source faisait atteindre sa fonction par un test de plus.
+     Un hunk qui ne fait que supprimer ne laisse aucune ligne changée : la
+     fonction qui a perdu ces lignes n'est mutée que si une autre des siennes
+     a changé. Non vérifié : une classe dans une classe, et si mutmut mute un
+     décorateur.
+   - **Next.js** : Stryker prend des étendues de lignes,
+     `<fichier>:<début>-<fin>`. Le script lui en donne une par suite de
+     lignes que le diff ajoute, toutes dans un seul `--mutate` séparées par
+     des virgules ; un hunk qui ne fait que supprimer n'en donne aucune, et
+     une source que la branche a supprimée n'est pas confiée à Stryker.
+     **Limite, plus étroite que celle de Rust** : Stryker ne garde qu'un
+     mutant **entièrement** dans une étendue (lu dans son code,
+     `locationIncluded`, et mesuré : la ligne 12 changée, le bloc qu'elle
+     ouvre, des lignes 12 à 14, n'a pas été muté). Un bloc ou le corps d'une
+     fonction remplacé, qui déborde des lignes changées, n'est pas mesuré, là
+     où `--in-diff` garde un mutant que le diff atteint. Le script ne compte
+     et ne rapporte que les mutants dont les lignes atteignent une ligne
+     changée — Stryker n'en fait pas d'autres, mais le compte ne dépend pas
+     de la façon dont l'outil choisit ses mutants — et un mutant dont le
+     rapport ne donne pas les lignes compte. Les comptes viennent des
+     statuts du rapport : essayés, `Killed`, `Timeout`, `Survived` et
+     `NoCoverage` ; trouvés, les mêmes et `Pending` ; ni l'un ni l'autre,
+     `CompileError` et `RuntimeError`, que Stryker dit invalides, et
+     `Ignored`, comme les non viables de cargo-mutants. Compter `NoCoverage`
+     parmi les essayés est un choix, écrit : cargo-mutants n'a pas cet état.
+     Un rapport qui porte un fichier que le script n'a pas confié à Stryker
+     est une campagne qui n'a rien mesuré. Mesuré sur Stryker 10.0.0, sur
+     une branche qui changeait une ligne d'un fichier et en ajoutait trois à
+     un autre : 14 mutants comptés, là où les deux fichiers entiers en
+     portent 55, chacun avec le statut que lui donnait la campagne sur les
+     fichiers entiers ; plusieurs étendues et deux fichiers dans une valeur
+     en donnent l'union. Un même bloc est revenu `NoCoverage` de la campagne
+     sur son fichier entier et `Survived` d'une étendue sur sa fonction, deux
+     formes de survivant : la description d'un survivant ne porte donc pas
+     son statut, qui changerait la clé de report d'une mesure à l'autre.
+     **Le mode incrémental de Stryker n'est jamais pris** : allumé par la
+     configuration du projet, son fichier gardé, une campagne sur deux
+     étendues a rapporté les 55 mutants des deux fichiers, avec les statuts
+     d'une campagne d'avant. Le script donne à Stryker un fichier
+     incrémental que rien n'a écrit, hors de l'arbre, et la même campagne a
+     rapporté ses 14. Non vérifié : `CompileError`, `RuntimeError` et
+     `Timeout`, que le projet d'essai n'a jamais produits, et la durée sur un
+     projet réel.
+
+   Un diff qui n'atteint aucun mutant — un commentaire, un test — est
    une campagne sans survivant, pas une campagne qui n'a pas pu tourner : les
    deux ne laissent aucun `mutants.out`, et seul le statut de l'outil les
    distingue (mesuré sur cargo-mutants 27.1.0 : 0 pour l'une, 1 pour un crate
@@ -2122,7 +2202,9 @@ dernier lot. La première rouge arrête tout.
    « équivalent » partout avec une phrase crédible. Compter les équivalences
    les signale à un lecteur ; les refuser côté agent les empêche. Un seuil et un triage tiraient en sens contraire, et Google, dont la
    pratique inspire cette porte, ne fait ni score ni seuil. Le retour des
-   survivants au codeur est un run de plus sur le lot, pas un volet. Quatre
+   survivants au codeur est un volet, compté dans la borne comme celui de
+   toute porte finale rouge : sans compte, des survivants qu'aucun test ne
+   tue renverraient le codeur sans fin. Quatre
    particularités, écrites parce qu'elles ne sont pas évidentes : elle tourne
    **dans le conteneur du slot**, lancée par `nunki exec` comme une commande
    déterministe déclarée par le fragment de stack, sans session d'agent ; sur
@@ -2142,63 +2224,139 @@ dernier lot. La première rouge arrête tout.
    plus tuer le conteneur). Dans l'environnement de l'image, jamais dans le
    `Cargo.toml` du projet, qui est le sien. La campagne est
    **longue**, donc elle se lance et se guette comme un run, avec un délai
-   paramétré ; et elle **ne rejoue que si les fichiers touchés ont changé**
-   depuis la dernière campagne verte sur cette mission. Son résultat est un
-   fichier du dossier de mission que le HQ lit.
+   paramétré ; et elle **ne joue qu'une fois par mission**, suivie d'une
+   contre-épreuve (ci-dessous). Son résultat est un fichier du dossier de
+   mission que le HQ lit.
 
-   **Aux niveaux `standard` et `critical`, les campagnes d'une mission
-   forment une chaîne, dont l'unité est le fichier** (un `prototype` ne doit
-   aucune campagne). La première est complète. Une suivante est
-   **partielle** : elle ne mute que les fichiers touchés dont le contenu a
-   changé depuis le `HEAD` de la précédente, avec toujours le point de
-   fourche dans `NUNKI_BASE` — dans ces fichiers, tout ce que la branche a
-   changé est muté de nouveau. Conditions, toutes requises : la campagne
-   précédente est enregistrée ; la porte 7 passe sur elle ; son `HEAD` est un
-   ancêtre de `HEAD` ; elle est partie du même point de fourche ; elle a
-   donné des comptes par fichier qui font son total, sous des chemins que
-   `nunki` lui avait confiés ; les fichiers changés ont pu être listés, et
-   chaque fichier compté qui n'a pas changé est touché et présent à `HEAD` ;
-   le `mutation.sh` et la version de l'outil de chaque stack que la campagne
-   appelle — celles qui portent un chemin touché — sont inchangés ; une stack
-   que la branche n'a pas touchée n'est pas appelée, et ne compte pas ;
-   `--again` n'a pas été demandé. Sinon la campagne est complète, et sa raison
-   est écrite dans `MUTANTS.json`.
+   **Une campagne, puis une contre-épreuve.** Aux niveaux `standard` et
+   `critical`, une mission doit une campagne, puis une contre-épreuve ; un
+   `prototype` ne doit rien. Mesuré sur une mission `critical` d'un projet
+   Python : onze campagnes complètes, dont neuf ont surtout retrouvé les
+   mêmes 102 à 114 survivants. Chaque retour au codeur en devait une, et la
+   chaîne qui devait les rendre partielles n'y partait jamais, faute de
+   comptes par fichier. Sur ce dépôt, une mission `critical` en avait de
+   même compté sept, complètes, d'environ deux heures chacune.
 
-   **Au niveau `critical`, la chaîne sert jusqu'à `Verified` et jusqu'à
-   `nunki push`.** La reconstruction y est jugée sans seuil : chaque
-   survivant qu'elle liste, gardé d'un fichier inchangé ou trouvé par la
-   dernière campagne, doit recevoir une issue. Quand toutes les autres
-   étapes dues sont vertes (`CLEAR`, une levée, ou des tours épuisés sans
-   rien à lever), la porte 7 est jouée de nouveau, seule, au `HEAD` final :
-   une campagne enregistrée sur son contenu et qui passe, partielle ou
-   complète, rend la mission `Verified`. Quand rien n'a bougé `HEAD` depuis
-   les portes, c'est leur campagne, et rien ne tourne de nouveau ; un commit
-   venu après elles doit une campagne, partielle si la chaîne le permet. Des
-   survivants, et c'est un volet, compté dans la borne. `nunki push`, au
-   niveau `critical`, exige que la campagne enregistrée ait tourné sur le
-   contenu du commit poussé et passe ; son refus nomme
-   `nunki mission mutants <id>`. Mesuré sur une mission `critical` de ce
-   dépôt : sept campagnes complètes d'environ deux heures, là où la chaîne
-   en aurait demandé une ou deux. Et sur trois missions `critical`, une
-   campagne complète de plus au `HEAD` final a coûté 109 minutes, 36 en
-   moyenne, pour refaire à peu près la mesure de la première campagne
-   complète : c'est pourquoi aucune n'est due à la fin.
+   - **La campagne** est lancée la première fois que la mission atteint ses
+     portes, portes 1 à 5 vertes, après le dernier lot du codeur. Elle mute
+     tout ce que la branche a changé depuis le point de fourche, dans chaque
+     stack que la branche a touchée. Une porte 7 rouge sur elle renvoie ses
+     survivants au codeur, un volet compté dans la borne (plus haut), et il
+     y répond dans `MUTANTS.triage.json`.
+   - **Entre la campagne et la contre-épreuve, aucun commit ne doit de
+     campagne** : ni le volet des survivants, ni un volet ouvert par
+     l'intégrateur, la sécurité ou la revue du HQ. Aux portes que ces
+     commits rejouent, la porte 7 juge la campagne enregistrée et les issues
+     du codeur, sans rien muter ; un test nommé y est cherché dans l'arbre
+     de travail, comme partout, et sur une mesure de ce contenu même un
+     `killed` qu'elle réfute n'y compte pas (plus bas).
+   - **La contre-épreuve** est jouée une fois, au `HEAD` final, quand toutes
+     les autres étapes dues sont vertes (`CLEAR`, une levée, ou des tours
+     épuisés sans rien à lever). Elle tourne **en une seule invocation par
+     stack**, parce qu'en Python chaque invocation paie un coût fixe.
+     Mesuré avec mutmut 3.8.0 sur un projet Python réel de 19 540 mutants,
+     hors de l'image, sur ses tests unitaires et sans quinze fichiers de
+     tests faute des bibliothèques de l'image : entre 221 et environ 400 s
+     avant le premier mutant (tous les mutants générés de nouveau, puis la
+     suite entière sous traçage), quand les 853 mutants d'un module tournent
+     en 45 s. Elle mesure :
+     - dans chaque fichier touché dont le contenu a changé depuis le `HEAD`
+       de la campagne, supprimé ou renommé compris, tout ce que la branche
+       y a changé, de nouveau, avec toujours le point de fourche dans
+       `NUNKI_BASE` ;
+     - dans chaque fichier qui n'a pas changé depuis, **chaque survivant de
+       la campagne, par son nom**, dans `NUNKI_MUTATION_NAMES` (plus bas, ce
+       qui solde la dette), pour une stack dont le script cherche un nom
+       dans tous ses fichiers (`# nunki-by-name-anywhere`, plus bas) ; pour
+       une autre, avec son fichier entier, remesuré comme un fichier
+       changé. C'est elle qui vérifie qu'un test nommé tue vraiment son
+       mutant, là où la porte n'a vu que le nom du test. Par son nom dans
+       un fichier inchangé seulement : un nom désigne un mutant dans un
+       contenu donné, et une ligne ajoutée au-dessus le déplace (mesuré sur
+       cargo-mutants 27.1.0, plus bas). Un nom introuvable fait une
+       contre-épreuve qui n'a rien mesuré, et qui le dit : jamais un
+       survivant compté tué.
+
+     Les scripts Rust et Next cherchent un nom partout. cargo-mutants lance
+     des noms exacts sous un seul `-F`, dans tous les fichiers du crate,
+     avec les autres mutants de la contre-épreuve, derrière une seule
+     référence. Mesuré sur 27.1.0, dans un espace de travail à deux paquets
+     aussi : les mutants nommés d'un paquet que la contre-épreuve n'avait
+     pas confié ont tourné contre les tests de ce paquet. Stryker ne nomme
+     pas ses mutants : le script Next remesure un survivant par son
+     étendue, `<fichier>:<ligne>:<colonne>-<ligne>:<colonne>`, et garde
+     donc l'étendue entière dans l'identifiant qu'il lui donne. Mesuré sur
+     Stryker 10.0.0, colonnes comptées depuis 0 là où le rapport les compte
+     depuis 1 : l'étendue d'un survivant le rend, avec chaque mutant qu'elle
+     contient (les autres mutants du même code, ou tout ce que contient le
+     corps d'une fonction), et le script n'en rapporte et n'en compte que
+     celui qu'on lui a nommé, retrouvé par son identifiant entier ; deux
+     étendues sur deux fichiers tiennent dans un seul `--mutate`, avec les
+     lignes changées ; et un test ajouté depuis rend `Killed` les survivants
+     nommés d'un fichier, quand ceux de l'autre restent `Survived`. Un
+     survivant `NoCoverage` de la campagne y est revenu `Survived` : c'est
+     pourquoi sa description ne porte pas son statut (plus haut). Le script
+     Python ne le dit pas : la contre-épreuve lui confie les fichiers de ses
+     survivants, remesurés entiers. C'est juste, et presque une deuxième
+     campagne quand les survivants sont répartis dans beaucoup de fichiers.
+     Un projet resté sur un script Rust ou Next plus ancien est remesuré par
+     fichier aussi : l'ancien script Rust ne cherchait un nom que dans les
+     fichiers qu'on lui confiait, et, mesuré, des noms hors de ces fichiers
+     lui ont fait dire qu'ils n'étaient pas dans le code, sans rien
+     mesurer ; l'ancien script Next ne lisait aucun nom.
+   - **Si rien n'a changé depuis la campagne, la contre-épreuve ne tourne
+     pas, survivants ou non** : elle retrouverait les mêmes, et la campagne
+     en tient lieu. Sur une mesure de ce contenu même, un `killed` du
+     codeur sur un survivant qu'elle a trouvé elle-même n'est pas une
+     issue : le test qu'il nomme a tourné contre ce mutant, et le mutant a
+     vécu. La porte 7 le dit à côté du survivant, aux portes comme au
+     `HEAD` final, et `nunki push` le refuse aussi. Un `bug` n'est pas
+     touché ; un `killed` qui nomme un test absent de l'arbre est rouge,
+     comme partout.
+
+   La contre-épreuve repart de la campagne à ces conditions, toutes
+   requises : la campagne est enregistrée ; la porte 7 passe sur elle ; son
+   `HEAD` est un ancêtre de `HEAD` ; elle est partie du même point de
+   fourche ; elle a donné des comptes par fichier qui font son total, sous
+   des chemins que `nunki` lui avait confiés ; les fichiers changés ont pu
+   être listés, et chaque fichier compté qui n'a pas changé est touché et
+   présent à `HEAD` ; le `mutation.sh` et la version de l'outil de chaque
+   stack que la campagne appelle — celles qui portent un chemin touché —
+   sont inchangés ; une stack que la branche n'a pas touchée n'est pas
+   appelée, et ne compte pas ; `--again` n'a pas été demandé. Sinon elle est
+   une campagne complète, et sa raison est écrite dans `MUTANTS.json`.
 
    `MUTANTS.json` garde, pour chaque fichier touché, les comptes de la
-   dernière campagne qui l'a mesuré. Un fichier inchangé garde ses comptes et
-   ses survivants, sous les règles de report ; un fichier changé, supprimé ou
-   renommé les tient de la nouvelle campagne seule. La porte 7 et
-   `nunki push` jugent cette reconstruction **une seule fois** : la part du
-   total essayé, telle qu'une campagne complète à `HEAD` la donnerait. Aucun
-   diff n'est lu ligne à ligne : deviner ce qu'un changement atteint a été
-   contourné trois fois, comparer des contenus de fichiers ne l'est pas. La
-   limite, écrite avec son remède : un mutant mesuré dans un fichier que
-   personne n'a changé est supposé exister encore et être encore tué. Un
-   test modifié ou supprimé, ou tout autre changement d'un fichier touché,
-   peut laisser revivre un mutant d'un fichier inchangé, et aucune campagne
-   partielle ne le voit, à aucun niveau. Dans la mission, le seul remède est
-   `--again`, à la main ; hors mission, c'est la campagne sur tout le code
-   (plus bas, « Des campagnes hors mission »).
+   dernière mesure qui l'a atteint. Un fichier changé, supprimé ou renommé
+   les tient de la contre-épreuve seule ; un fichier inchangé garde les
+   comptes de la campagne, et ses survivants sont ceux que la contre-épreuve
+   a retrouvés par leur nom, sous les règles de report : un survivant
+   qu'elle a tué quitte la liste. La porte 7 et `nunki push` jugent cette
+   reconstruction **une seule fois** : la part du total essayé, telle
+   qu'une campagne complète à `HEAD` la donnerait. Aucun diff n'est lu ligne
+   à ligne pour choisir ce qui se remesure : deviner ce qu'un changement
+   atteint a été contourné trois fois, comparer des contenus de fichiers ne
+   l'est pas. La limite, écrite avec son remède : un mutant que la campagne
+   a tué dans un fichier que personne n'a changé est supposé exister encore
+   et être encore tué. Un test modifié ou supprimé peut le laisser revivre,
+   et la contre-épreuve, qui ne remesure par nom que des survivants, ne le
+   voit pas, à aucun niveau. Dans la mission, le seul remède est `--again`,
+   à la main ; hors mission, c'est la campagne sur tout le code (plus bas,
+   « Des campagnes hors mission »).
+
+   Une porte 7 rouge sur la contre-épreuve ouvre un volet, compté dans la
+   borne. Après lui, une nouvelle contre-épreuve repart de la précédente
+   comme celle-ci de la campagne : les fichiers changés depuis, et les
+   survivants des autres par leur nom. Chaque contre-épreuve de plus suit
+   donc un volet, et la borne des volets les borne.
+
+   `nunki push` exige que la mesure enregistrée — la contre-épreuve, ou la
+   campagne quand rien n'a bougé depuis — porte sur le contenu du commit
+   poussé et passe ; son refus nomme `nunki mission mutants <id>`. Sur trois
+   missions `critical`, une campagne complète de plus au `HEAD` final a
+   coûté 109 minutes, 36 en moyenne, pour refaire à peu près la mesure de la
+   première : c'est pourquoi la contre-épreuve repart de la campagne au lieu
+   de la refaire.
 
    **Un budget de temps, mesuré sur un échantillon choisi d'avance.** Le
    `mutation_minutes` d'une mission est le budget de chacune de ses
@@ -2208,7 +2366,7 @@ dernier lot. La première rouge arrête tout.
    secondes (`NUNKI_MUTATION_BUDGET`), la durée d'un mutant sur la dernière
    campagne du projet qui en a essayé au moins cinq (`NUNKI_MUTATION_PACE`,
    gardée dans `campaign-pace.json`, au HQ du projet ; le script suppose 60
-   secondes sans elle), et, à une campagne partielle, la fraction de la
+   secondes sans elle), et, à une contre-épreuve, la fraction de la
    campagne qu'elle continue (`NUNKI_MUTATION_SAMPLE`). Le script Rust liste
    les mutants que sa portée atteint (`--list --json`). S'ils ne tiennent pas
    dans le budget — autant de mutants que de fois la durée dans le budget,
@@ -2240,22 +2398,22 @@ dernier lot. La première rouge arrête tout.
    de l'outil sont ceux de l'échantillon (mesuré sur 27.1.0), si bien que la
    porte 7 juge l'échantillon comme un tout : le seuil au niveau `standard`,
    une issue pour chaque survivant de l'échantillon au niveau `critical`.
-   `MUTANTS.json` garde la fraction dans la chaîne, et `mission status` la
-   dit : « a sample of 1/3 of 48 ». **Une campagne partielle tourne à la
+   `MUTANTS.json` garde la fraction de la campagne, et `mission status` la
+   dit : « a sample of 1/3 of 48 ». **Une contre-épreuve tourne à la
    fraction de la campagne qu'elle continue**, même quand ses quelques
    fichiers tiendraient entiers : la reconstruction reste un seul
    échantillon. À une autre fraction, elle n'est pas enregistrée seule. Une
-   campagne complète — la première, `--again`, une chaîne rompue — fixe la
-   sienne. Changer le script change ce avec quoi la campagne tourne, et la
+   campagne complète — la campagne, `--again`, une contre-épreuve qui ne
+   peut repartir de la campagne — fixe la sienne. Changer le script change ce avec quoi la campagne tourne, et la
    suivante est complète : un hachage changé ne redistribue jamais un
-   échantillon au milieu d'une chaîne.
+   échantillon entre une campagne et sa contre-épreuve.
 
    Mesuré sur cargo-mutants 27.1.0, dans l'image Rust, sur ce dépôt : les
    48 mutants d'un diff, avec un budget qui en laisse tenir 16, donnent un
    échantillon de 1/3, 18 mutants. Le filtre est vérifié, seuls ces 18
    tournent, et chacun a la même issue que dans la campagne entière (17
    tués, 1 non viable). Un commit de plus, qui ajoute 9 mutants dans un
-   autre fichier, à la fraction de la chaîne : l'échantillon garde les 18
+   autre fichier, à la fraction de la campagne : l'échantillon garde les 18
    et en prend 4 des 9 nouveaux, aucun n'en sort. Le motif, sur un projet
    Rust + Next.js : une campagne a compté 514 mutants à environ 47 secondes
    chacun, soit environ 6,5 heures, quand le délai par défaut était de 45
@@ -2263,8 +2421,8 @@ dernier lot. La première rouge arrête tout.
 
    La stack Rust d'abord : rien n'est vérifié de mutmut ni de Stryker, et
    leurs scripts ignorent le budget. Sur un projet à plusieurs stacks, la
-   stack Rust reçoit tout le budget et les autres tournent entières après
-   elle, sous le même délai : c'est une limite, écrite. Ce qu'on perd : un
+   stack Rust reçoit tout le budget et les autres tournent sans échantillon
+   après elle, sous le même délai : c'est une limite, écrite. Ce qu'on perd : un
    vrai survivant hors de l'échantillon passe la mission, et c'est la
    campagne hors mission (plus bas) qui le trouverait. Après la mise à
    jour, une campagne enregistrée comme arrêtée à son délai d'avant — le
@@ -2285,7 +2443,7 @@ dernier lot. La première rouge arrête tout.
    intervalle sans fin (mesuré aussi). Avec `--whole`, sur tout le code et sans point
    de fourche : chaque fichier suivi, que chaque stack lit à sa façon
    (mesuré sur cargo-mutants 27.1.0 : un chemin qui n'est pas du Rust est
-   ignoré) ; seule celle-ci ferme la limite de la chaîne. Sans campagne
+   ignoré) ; seule celle-ci ferme la limite de la contre-épreuve. Sans campagne
    terminée, la première forme est refusée et nomme `--whole` ; sur une base
    qui n'a pas bougé depuis, rien ne part. La troisième, `--owed`, sur les
    survivants de la dette par leur nom, est plus bas : c'est ce qui solde
@@ -2314,8 +2472,8 @@ dernier lot. La première rouge arrête tout.
    appliqué. Une campagne sur tout le code la remplace. Une campagne sur les
    fichiers changés depuis y remplace, pour chacun d'eux — retirés et
    renommés compris —, ce qui était dû par ce qu'elle y a trouvé, et laisse
-   tels quels les survivants des fichiers inchangés : la règle de la chaîne
-   (plus haut), et son hypothèse, qu'un mutant mesuré dans un fichier que
+   tels quels les survivants des fichiers inchangés : la règle de la
+   reconstruction (plus haut), et son hypothèse, qu'un mutant mesuré dans un fichier que
    personne n'a changé depuis existe encore et survit encore. Aucun hunk
    n'est lu. Remesurer les seules lignes changées laissait dû un survivant
    que personne n'avait remesuré, à une ligne qu'une édition avait
@@ -2423,12 +2581,15 @@ dernier lot. La première rouge arrête tout.
    nommés dans les fichiers donnés, et tourne sur l'union des deux listes,
    par nom, sous un seul `-F` : mesuré sur 27.1.0, deux `-F` prennent ce que
    l'un ou l'autre prend, et un `-F` choisit dans `--in-diff` ou `--file`,
-   jamais au-delà. L'échantillon du budget est tiré de cette union. Un nom
-   absent du code — sa ligne a bougé, ou le code qu'il remplace a changé —
+   jamais au-delà. L'échantillon du budget est tiré de cette union. Le
+   script Next confie à Stryker l'étendue de chaque survivant, à côté des
+   lignes changées, dans un seul `--mutate`. Un nom absent du code — sa ligne a bougé, ou le code qu'il remplace a changé —
    fait une campagne qui n'a rien mesuré, et qui le dit : tournée sans lui,
    elle compterait tué un mutant qu'elle n'a jamais essayé. Mesuré aussi : un
    module `#[cfg(test)]` ajouté en fin de fichier laisse les noms tels quels,
-   une ligne ajoutée au-dessus les décale tous. Le brief le dit au codeur.
+   une ligne ajoutée au-dessus les décale tous. Avec Stryker, une étendue
+   qui ne porte plus le mutant nommé, son mutateur et ce qu'il écrit, ne
+   mesure rien non plus (mesuré sur 10.0.0). Le brief le dit au codeur.
    Ce que sa branche change au code est mesuré comme dans toute mission.
 
    Ses tests ne soldent la dette qu'une fois sur la base. `nunki mutants run
@@ -2449,14 +2610,18 @@ dernier lot. La première rouge arrête tout.
    suivante prend la suite, puisqu'un survivant retrouvé revient en fin de
    dette.
 
-   Limites, écrites : seule la stack Rust mesure par nom, et les survivants
-   des autres attendent une campagne sur tout le code ; une base qui bouge
+   Limites, écrites : la stack Python ne mesure pas par nom, et ses
+   survivants attendent une campagne sur tout le code ; un survivant Next
+   que la dette tient d'un script plus ancien porte un identifiant sans
+   étendue, une campagne à qui on le confie ne mesure rien, et c'est
+   `nunki mutants run --whole` qui remplace la dette ; une base qui bouge
    après le cadrage et change le fichier d'un survivant fait une campagne qui
    ne mesure rien, et c'est une nouvelle mission de durcissement qui le
    reprend.
 
    **Le contrat de `mutation.sh` s'enrichit**, tout en restant facultatif
-   pour une stack qui ne veut pas de chaîne :
+   pour une stack qui ne veut pas de contre-épreuve qui reparte de la
+   campagne :
    - une ligne `# nunki-tool-version: <commande>`, que `nunki` lance dans la
      copie propre, là où la campagne lance le script de la stack — son propre
      dossier quand le projet en porte plusieurs —, pour lire la version de
@@ -2465,7 +2630,8 @@ dernier lot. La première rouge arrête tout.
      ce qu'elle a répondu ;
    - des lignes par fichier avant la ligne de fin,
      `{"measured":"<chemin>","tried":N,"found":M}`, annoncées par
-     `"by_file":true` sur la ligne de fin, qui font ses totaux ;
+     `"by_file":true` sur la ligne de fin, qui font ses totaux. Les trois
+     scripts livrés les donnent, sur les lignes changées (plus haut) ;
    - `"missed":K` sur la ligne de fin, le nombre de survivants que l'outil a
      rapportés, pris dans son propre compte (plus haut). Le script Rust lit
      tout dans le `outcomes.json` de cargo-mutants — chaque résultat y porte
@@ -2486,6 +2652,15 @@ dernier lot. La première rouge arrête tout.
      dans le home du projet pour choisir les survivants, et de nouveau dans
      la copie propre avant de lancer : un script qui ignorerait les noms
      mesurerait d'autres mutants que ceux nommés, sans rien dire ;
+   - une ligne `# nunki-by-name-anywhere: NUNKI_MUTATION_NAMES`, à côté de
+     la précédente : un nom est cherché dans tous les fichiers de la stack,
+     pas seulement dans ceux qu'on lui confie. La contre-épreuve ne confie
+     par nom les survivants des fichiers inchangés qu'à une stack dont le
+     script porte les deux lignes, lu dans la copie propre comme il
+     tournera : leur confier aussi ces fichiers ferait muter de nouveau tout
+     ce que la branche y a changé. Une autre reçoit les fichiers de ses
+     survivants, remesurés entiers comme s'ils avaient changé. Les scripts
+     Rust et Next la portent ;
    - un diff contre `NUNKI_BASE` lu sans détection de renommage ;
    - **des chemins pris à la lettre.** Un chemin que `nunki` confie à une
      campagne peut porter une espace, un deux-points, un guillemet, un
@@ -2555,11 +2730,15 @@ dernier lot. La première rouge arrête tout.
 
    **C'est `nunki` qui la lance, pas l'humain** : sinon le moniteur s'arrête
    pour un verbe qu'il aurait pu taper lui-même — pour la campagne que
-   personne n'a démarrée, ou pour celle qu'un volet a rendue périmée. Une
+   personne n'a démarrée, ou pour la contre-épreuve que le `HEAD` final
+   attend. Une
    porte que rien ne peut jouer arrête le flux —
    c'est ce qui le garde honnête — mais celle-ci est la seule dont l'obstacle
-   soit à la portée de `nunki` : sans campagne, ou avec une campagne sur un
-   autre contenu, il en lance une et regarde de nouveau au tour suivant.
+   soit à la portée de `nunki` : sans campagne, il lance la campagne ; au
+   `HEAD` final, toutes les autres étapes dues vertes, sans mesure sur ce
+   contenu, il lance la contre-épreuve ; et il regarde de nouveau au tour
+   suivant. Entre les deux, un autre contenu ne lui fait rien lancer (plus
+   haut, « Une campagne, puis une contre-épreuve »).
    `nunki mission mutants` reste, pour l'humain qui en veut une à la main.
    Sans option, il en lance une dès qu'aucune n'est en vol : une boucle qui
    l'interroge pour attendre la fin en relance une à chaque fin. Pour suivre
@@ -2613,8 +2792,8 @@ dernier lot. La première rouge arrête tout.
    "minutes": N}`, avec les décisions du HQ reportées comme à tout rejeu, et
    **sans compte** : la part d'une partie de campagne est la part du mauvais
    tout. Une campagne incomplète **ne rend jamais la porte 7 verte**, ne
-   répond jamais à `nunki push`, et ne sert jamais de base à une campagne
-   partielle. La porte 7 sur elle attend le HQ — un **mur**, ni un volet ni
+   répond jamais à `nunki push`, et ne sert jamais de base à une
+   contre-épreuve. La porte 7 sur elle attend le HQ — un **mur**, ni un volet ni
    une campagne due — et le moniteur s'y arrête en nommant les deux voies :
    relever `mutation_minutes` et `nunki mission reframe --yes`, ce qui doit
    une nouvelle campagne dès que la borne dépasse celle où elle s'est
@@ -3315,6 +3494,7 @@ HQ lance la SÉCURITÉ sur ce HEAD (profil système s'il y a des services, sinon
    │             au codeur, et l'intégrateur REJOUE avant la sécurité, puisque
    │             le code a changé
    └─ CLEAR
+la CONTRE-ÉPREUVE de la porte 7, au HEAD final (4.4)
 l'HUMAIN valide ──► nunki push : la branche est poussée, la pull request ouverte
 ```
 
@@ -3341,7 +3521,8 @@ Ce que la boucle veut dire, et ce qu'elle ne veut pas dire.
   `nunki push` refuse sans les deux verdicts sur le `HEAD` courant — tant
   qu'il reste un tour de sécurité (voir plus bas, tours épuisés).
 - **`nunki push` rejoue la porte 7 sur ce qu'il pousse.** Il refuse sans
-  campagne sur le `HEAD` (et nomme `nunki mission mutants <id>`, qui en lance
+  mesure sur le `HEAD` — la contre-épreuve, ou la campagne quand rien n'a
+  bougé depuis (4.4) — (et nomme `nunki mission mutants <id>`, qui en lance
   une), tant qu'un survivant de la campagne porte une proposition ni ratifiée
   ni refusée — celle du codeur comme celle de `nunki` — en nommant chacune et
   les deux commandes, et quand une issue lue dans le fichier du codeur est
@@ -3419,8 +3600,8 @@ Ce que la boucle veut dire, et ce qu'elle ne veut pas dire.
     d'un défaut de l'outillage, par exemple — ne peut que partir telle quelle
     ou être abandonnée.
   - **Aux portes, sur une campagne incomplète** (arrêtée à son délai ou
-    annulée, 4.4), `iterate --because` est accepté aussi, et à la campagne
-    finale du niveau `critical` : il ouvre un volet comme une
+    annulée, 4.4), `iterate --because` est accepté aussi, et à la
+    contre-épreuve : il ouvre un volet comme une
     porte 7 rouge, avec la raison dans `FOLLOWUP_HQ.md`. Ce n'est pas une
     revue : le niveau d'exigence ne le borne pas, et `--override` y est
     refusé, faute de rien à outrepasser.
@@ -3615,7 +3796,14 @@ Ce que la boucle veut dire, et ce qu'elle ne veut pas dire.
   `FINDINGS`, 11 rendue à l'humain (une décision attendue comprise), 12
   suspendue ou fenêtre du compte épuisée, 13 moniteur arrêté sur une erreur
   ou porte injouable, 14 aucun moniteur alors que l'étape n'est pas un
-  arrêt, 15 délai `--timeout` atteint. **Les verbes qui lancent ou trouvent
+  arrêt et qu'aucune campagne de la mission ne tourne, 15 délai `--timeout`
+  atteint. Sans moniteur, une campagne lancée en arrière-plan fait encore
+  avancer la mission : `wait` attend tant que l'enregistrement du slot dit
+  qu'elle tourne, que son journal n'a pas sa dernière ligne et que son
+  délai n'est pas passé, puis sort en 14 en disant qu'elle est finie et que
+  `nunki verify` la relit (#183). Une campagne morte avant sa dernière
+  ligne le fait attendre jusqu'à son délai : l'enregistrement ne la
+  distingue pas sans interroger le conteneur. **Les verbes qui lancent ou trouvent
   le moniteur la nomment** sous sa ligne — `mission start`, `verify`,
   `mission resume`, `mission retry` : c'est là, au moment où il agit, que le
   HQ apprend qu'il peut être prévenu de l'arrêt au lieu de sonder
@@ -3672,8 +3860,9 @@ Voici l'addition.
 - **Un cycle complet, au pire cas** : une mission codeur, sept portes dont la
   mutation, une mission d'intégration, une mission de sécurité, puis jusqu'à
   trois fois (volet codeur, portes, intégration, sécurité). Sur un projet
-  moyen, c'est une journée. La borne de trois volets et la mutation qui ne
-  rejoue que sur changement sont ce qui l'empêche de doubler.
+  moyen, c'est une journée. La borne de trois volets et une seule campagne
+  par mission, suivie de sa contre-épreuve, sont ce qui l'empêche de
+  doubler.
 - **La consommation** : trois rôles par mission triplent les tokens d'une
   mission solitaire, et tout est pris sur la **fenêtre de l'abonnement**
   de l'humain, partagée avec sa session HQ (4.3) : plusieurs slots en parallèle

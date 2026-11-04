@@ -1537,13 +1537,13 @@ fn the_python_campaign_says_nothing_when_it_could_not_run() {
         "{script}"
     );
     let nothing = script
-        .find(r#"printf '{"campaign":"done","tried":0,"found":0}\n'"#)
+        .find(r#"printf '{"campaign":"done","tried":0,"found":0,"by_file":true}\n'"#)
         .expect("a branch with nothing to mutate says so");
     let guard = script
         .find("the campaign could not run")
         .expect("the guard says why it stopped");
     let done = script
-        .rfind(r#"printf '{"campaign":"done"}\n'"#)
+        .rfind(r#"printf '{"campaign":"done","tried":%s,"found":%s,"by_file":true}\n'"#)
         .expect("the campaign says when it got to the end");
     assert!(nothing < guard, "{script}");
     assert!(
@@ -1751,8 +1751,12 @@ fn the_next_campaign_trusts_its_report_and_only_a_failing_status() {
     // its test runner is the one Stryker runs.
     assert!(!run.contains("--testRunner"), "{run}");
     // And the touched files are a flag, which is what the Python stack could
-    // not do.
-    assert!(script.contains("--mutate $path"), "{script}");
+    // not do — one flag, since Stryker keeps only the last it is given
+    // (`the_next_campaign_mutates_every_touched_source_and_only_it`).
+    assert!(run.contains(r#"--mutate "$mutate""#), "{run}");
+    // A project's incremental mode reuses nothing: the file is one no run
+    // wrote (`the_next_campaign_keeps_strykers_incremental_file_outside_the_tree`).
+    assert!(run.contains(r#"--incrementalFile "$scratch/"#), "{run}");
 
     // Two terminal lines, and the order between them is the invariant: one
     // for a branch with nothing mutable in it, which is a measurement, and
@@ -1764,13 +1768,13 @@ fn the_next_campaign_trusts_its_report_and_only_a_failing_status() {
         "{script}"
     );
     let nothing = script
-        .find(r#"printf '{"campaign":"done","tried":0,"found":0}\n'"#)
+        .find(r#"printf '{"campaign":"done","tried":0,"found":0,"by_file":true}\n'"#)
         .expect("a branch with nothing to mutate says so");
     let guard = script
         .find("left no report at")
         .expect("the guard says why it stopped");
     let done = script
-        .find(r#"printf '{"campaign":"done"}\n'"#)
+        .find(r#"printf '{"campaign":"done","tried":%s,"found":%s,"by_file":true}\n'"#)
         .expect("the campaign says when it got to the end");
     // A Stryker that did not exit 0 is stopped before the report is read.
     let status = script
@@ -1784,11 +1788,17 @@ fn the_next_campaign_trusts_its_report_and_only_a_failing_status() {
 
     // The id is built rather than taken: Stryker numbers its mutants per file
     // and the numbers move between runs, so a coder answering "#7" would name
-    // something else next time. And the replacement is in it because one
-    // position carries several mutants — `ConditionalExpression` to `true`
-    // and to `false` sit on the very same column.
+    // something else next time. The replacement is in it because one span
+    // carries several mutants — `ConditionalExpression` to `true` and to
+    // `false` replace the very same code — and the span whole because that
+    // is what `--mutate` runs again
+    // (`a_next_campaign_runs_a_named_mutant_by_its_span_and_reports_it_alone`).
     assert!(
-        script.contains("[file, at.line, at.column, mutant.mutatorName, was].join(\":\")"),
+        script.contains("[file, span, mutant.mutatorName, was].join(\":\")"),
+        "{script}"
+    );
+    assert!(
+        script.contains("`${start.line}:${start.column}-${end.line}:${end.column}`"),
         "{script}"
     );
     // Everything Stryker does not call detected or invalid owes an answer,
@@ -2894,6 +2904,38 @@ printf '%s' "$all" | jq --argjson missed "${STUB_MISSED:-null}" '
   }' > "$1/outcomes.json"
 "#;
 
+/// What a stubbed `uv` does first for the Python campaign: the program the
+/// campaign runs in the project's interpreter (`uv run … python -`) runs for
+/// real, in `python3`, with [`DIFF_APPLY`] standing in for the one module of
+/// mutmut it imports.
+#[cfg(unix)]
+const UV_RUNS_PYTHON: &str = "case \"$*\" in\n  \"run --frozen --no-sync python -\"*)\n    shift 4\n    PYTHONPATH=\"${0%/*}/pylib\" exec python3 \"$@\"\n    ;;\nesac\n";
+
+/// A stand-in for mutmut's `get_diff_for_mutant`, written beside the stubs
+/// as `pylib/mutmut/mutation/diff_apply.py`: the diff is the one the stubbed
+/// `uv` prints for `mutmut show`, as the campaign once asked for it.
+#[cfg(unix)]
+const DIFF_APPLY: &str = r#"import subprocess
+
+
+def get_diff_for_mutant(mutant_name, source=None, path=None):
+    return subprocess.run(
+        ["uv", "run", "--frozen", "--no-sync", "mutmut", "show", mutant_name],
+        stdout=subprocess.PIPE,
+        text=True,
+        check=True,
+    ).stdout
+"#;
+
+/// A `uv` stub for the Python campaign: `body`, after [`UV_RUNS_PYTHON`].
+#[cfg(unix)]
+fn python_uv(body: &str) -> String {
+    let rest = body
+        .strip_prefix("#!/bin/sh\n")
+        .expect("a stub starts with its shebang");
+    format!("#!/bin/sh\n{UV_RUNS_PYTHON}{rest}")
+}
+
 #[cfg(unix)]
 fn stubs(at: &Path, scripts: &[(&str, &str)]) -> String {
     use std::os::unix::fs::PermissionsExt;
@@ -2902,6 +2944,11 @@ fn stubs(at: &Path, scripts: &[(&str, &str)]) -> String {
         std::fs::write(at.join(name), body).unwrap();
         std::fs::set_permissions(at.join(name), std::fs::Permissions::from_mode(0o755)).unwrap();
     }
+    let mutation = at.join("pylib/mutmut/mutation");
+    std::fs::create_dir_all(&mutation).unwrap();
+    std::fs::write(at.join("pylib/mutmut/__init__.py"), "").unwrap();
+    std::fs::write(mutation.join("__init__.py"), "").unwrap();
+    std::fs::write(mutation.join("diff_apply.py"), DIFF_APPLY).unwrap();
     format!(
         "{}:{}",
         at.display(),
@@ -2935,6 +2982,20 @@ fn campaign_with(
     files: &[(&str, &str)],
     env: &[(&str, &str)],
 ) -> (String, String, Option<i32>) {
+    let touched: Vec<&str> = touched.split_whitespace().collect();
+    campaign_of_paths(stack, &touched, stub, files, env)
+}
+
+/// [`campaign_with`], with the touched paths given one by one, so that a
+/// path may hold a space.
+#[cfg(unix)]
+fn campaign_of_paths(
+    stack: &str,
+    touched: &[&str],
+    stub: &[(&str, &str)],
+    files: &[(&str, &str)],
+    env: &[(&str, &str)],
+) -> (String, String, Option<i32>) {
     let (dir, root, nunki) = fresh();
     init(&root, &nunki, &[stack.to_string()]).unwrap();
     let script = home(&root).join("stacks").join(stack).join("mutation.sh");
@@ -2950,7 +3011,7 @@ fn campaign_with(
     let out = sh()
         .arg(&script)
         .arg("abc123")
-        .args(touched.split_whitespace())
+        .args(touched)
         .env("PATH", path)
         .envs(env.iter().copied())
         .current_dir(&tree)
@@ -3098,43 +3159,63 @@ exit 2
     );
 }
 
-/// Python: the survivors, filtered to the touched files, and **no count**.
-/// mutmut mutates whole files under `source_paths`, so any `tried` would be
-/// a share over whole files, where a well-tested file hides the branch's
-/// new untested lines (HQ review). Without one, a `standard` gate 7 judges
-/// as `critical` does. The stubs leave mutmut's per-file records exactly as
-/// a count would read them, so a script that counted again would say so.
+/// Python: each touched file's counts, and the totals they add up to. A
+/// mutant mutmut's type check caught, or one it skipped, is neither found nor
+/// tried: no test had to kill it, as none has to kill cargo-mutants'
+/// unviable ones. One left `not checked` is found and not tried, and is a
+/// survivor. Without `NUNKI_BASE` — a run by hand — every mutant of a touched
+/// file counts.
 #[cfg(unix)]
 #[test]
-fn the_python_campaign_gives_no_count_over_whole_files() {
-    let uv = r#"#!/bin/sh
+fn the_python_campaign_counts_each_file_and_leaves_out_what_no_test_had_to_kill() {
+    if !present(
+        "python3",
+        "the_python_campaign_counts_each_file_and_leaves_out_what_no_test_had_to_kill",
+    ) {
+        return;
+    }
+    let uv = python_uv(
+        r#"#!/bin/sh
 case "$*" in
   *"mutmut run"*)
     mkdir -p mutants/src/pkg
     printf '%s' '{"exit_code_by_key":{"pkg.thing.x_a__mutmut_1":1,"pkg.thing.x_a__mutmut_2":3,"pkg.thing.x_a__mutmut_3":37,"pkg.thing.x_a__mutmut_4":0,"pkg.thing.x_a__mutmut_5":null,"pkg.thing.x_a__mutmut_6":34}}' > mutants/src/pkg/thing.py.meta
     ;;
+  *"mutmut results"*)
+    printf '    pkg.thing.x_a__mutmut_3: caught by type check\n    pkg.thing.x_a__mutmut_4: survived\n    pkg.thing.x_a__mutmut_5: not checked\n    pkg.thing.x_a__mutmut_6: skipped\n'
+    ;;
+  *"mutmut show"*)
+    printf -- '--- src/pkg/thing.py\n+++ src/pkg/thing.py\n@@ -1,2 +1,2 @@\n def x_a(a, b):\n-    return a > b\n+    return a >= b\n'
+    ;;
 esac
 exit 0
-"#;
-    // The interpreter reads `mutmut results` and `mutmut show`; here it
-    // prints what it would have found: the two mutants nothing proved dead.
-    let python = r#"#!/bin/sh
-cat > /dev/null
-printf '%s\n' '{"id": "pkg.thing.x_a__mutmut_4", "file": "src/pkg/thing.py", "line": 3, "description": "survived: a -> b"}'
-printf '%s\n' '{"id": "pkg.thing.x_a__mutmut_5", "file": "src/pkg/thing.py", "line": 4, "description": "not checked"}'
-"#;
-    let (said, why) = campaign_of(
+"#,
+    );
+    let (said, why, code) = campaign_in(
         "python",
         "src/pkg/thing.py",
-        &[("uv", uv), ("python3", python)],
+        &[("uv", &uv)],
+        &[("src/pkg/thing.py", "def x_a(a, b):\n    return a > b\n")],
     );
+    assert_eq!(code, Some(0), "{said}\n{why}");
     assert!(nunki::mutants::completed(&said), "{said}\n{why}");
-    assert_eq!(nunki::mutants::parse(&said).len(), 2, "{said}");
-    assert_eq!(nunki::mutants::tried(&said), None, "{said}\n{why}");
-    assert_eq!(nunki::mutants::found(&said), None, "{said}\n{why}");
+    let survivors: Vec<String> = nunki::mutants::parse(&said)
+        .into_iter()
+        .map(|s| s.id)
+        .collect();
+    assert_eq!(
+        survivors,
+        ["pkg.thing.x_a__mutmut_4", "pkg.thing.x_a__mutmut_5"],
+        "{said}"
+    );
+    assert_eq!(nunki::mutants::tried(&said), Some(3), "{said}\n{why}");
+    assert_eq!(nunki::mutants::found(&said), Some(4), "{said}\n{why}");
+    let files = nunki::mutants::by_file(&said, "h").expect("each file is counted");
+    let thing = &files["src/pkg/thing.py"];
+    assert_eq!((thing.tried, thing.found), (3, Some(4)), "{said}");
     assert_eq!(
         said.lines().last(),
-        Some(r#"{"campaign":"done"}"#),
+        Some(r#"{"campaign":"done","tried":3,"found":4,"by_file":true}"#),
         "{said}"
     );
     assert!(
@@ -3143,28 +3224,398 @@ printf '%s\n' '{"id": "pkg.thing.x_a__mutmut_5", "file": "src/pkg/thing.py", "li
     );
 }
 
-/// A `node` standing in for the two scripts the Next.js campaign hands it,
-/// told apart by their argument count (there is no node in this image).
-/// With `-e` alone it is the locator, and answers where `stryker.config.json`
-/// puts the json report, or Stryker's default. With the report after it, it
-/// prints the survivors the report names, in the campaign's own shape.
+/// The Python campaign, run as `nunki` runs it on a branch: in a git tree
+/// whose branch changed `src/pkg/thing.py` from `before` to `after` — or
+/// removed it, when `after` is empty — with the fork point in `NUNKI_BASE`.
 #[cfg(unix)]
-const NODE: &str = r#"#!/bin/sh
-if [ $# -lt 3 ]; then
-  jq -jr '.jsonReporter.fileName // "reports/mutation/mutation.json"' stryker.config.json 2>/dev/null \
-    || printf 'reports/mutation/mutation.json'
-  exit 0
-fi
-jq -c '.files | to_entries[] | .key as $f | .value.mutants[]
-  | select(.status == "Survived" or .status == "NoCoverage" or .status == "Pending")
-  | {id: ($f + ":" + .mutatorName), file: $f, line: .location.start.line, description: .status}' "$3"
+fn python_campaign_on_branch(before: &str, after: &str, uv: &str) -> (String, String, Option<i32>) {
+    let (dir, root, nunki) = fresh();
+    init(&root, &nunki, &["python".to_string()]).unwrap();
+    let script = home(&root).join("stacks/python/mutation.sh");
+    let tree = dir.path().join("tree");
+    std::fs::create_dir_all(tree.join("src/pkg")).unwrap();
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&tree)
+            .args(["-c", "user.name=T", "-c", "user.email=t@t"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    git(&["init", "-q", "-b", "dev"]);
+    std::fs::write(tree.join("src/pkg/thing.py"), before).unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "base"]);
+    let base = git(&["rev-parse", "HEAD"]);
+    if after.is_empty() {
+        git(&["rm", "-q", "src/pkg/thing.py"]);
+    } else {
+        std::fs::write(tree.join("src/pkg/thing.py"), after).unwrap();
+    }
+    git(&["commit", "-q", "-am", "branch"]);
+    let path = stubs(&dir.path().join("stub-bin"), &[("uv", uv)]);
+    let out = sh()
+        .arg(&script)
+        .arg("abc123")
+        .arg("src/pkg/thing.py")
+        .env("PATH", path)
+        .env(nunki::mutants::BASE_ENV, &base)
+        .current_dir(&tree)
+        .output()
+        .expect("sh runs the campaign");
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        out.status.code(),
+    )
+}
+
+/// A module whose branch changed line 7, in `other`, and nothing else.
+#[cfg(unix)]
+const THING_BEFORE: &str = "def keep(a):\n    return a > 2\n\n\ndef other(a):\n    b = a + 1\n    return b * 3\n\n\nclass Tally:\n    def add(self, n):\n        return n + 1\n";
+#[cfg(unix)]
+const THING_AFTER: &str = "def keep(a):\n    return a > 2\n\n\ndef other(a):\n    b = a + 1\n    return b * 2\n\n\nclass Tally:\n    def add(self, n):\n        return n + 1\n";
+
+/// mutmut as a filtered run on [`THING_AFTER`] leaves it: `keep` and
+/// `Tally.add` not checked, and in `other` a survivor on line 6, which the
+/// branch did not change, one on line 7, which it did, and a mutant killed
+/// on line 7. `RECORD` is replaced by the mutants mutmut made.
+#[cfg(unix)]
+const THING_UV: &str = r#"#!/bin/sh
+case "$*" in
+  *"mutmut run"*)
+    echo "asked: $*" >&2
+    RECORD
+    ;;
+  *"mutmut results"*)
+    printf '    pkg.thing.x_keep__mutmut_1: not checked\n    pkg.thing.x_other__mutmut_1: survived\n    pkg.thing.x_other__mutmut_2: survived\n    pkg.thing.xǁTallyǁadd__mutmut_1: not checked\n'
+    ;;
+  *"mutmut show pkg.thing.x_other__mutmut_1"*)
+    printf -- '--- src/pkg/thing.py\n+++ src/pkg/thing.py\n@@ -1,3 +1,3 @@\n def other(a):\n-    b = a + 1\n+    b = a - 1\n     return b * 2\n'
+    ;;
+  *"mutmut show pkg.thing.x_other__mutmut_2"*)
+    printf -- '--- src/pkg/thing.py\n+++ src/pkg/thing.py\n@@ -1,3 +1,3 @@\n def other(a):\n     b = a + 1\n-    return b * 2\n+    return b / 2\n'
+    ;;
+  *"mutmut show pkg.thing.x_other__mutmut_3"*)
+    printf -- '--- src/pkg/thing.py\n+++ src/pkg/thing.py\n@@ -1,3 +1,3 @@\n def other(a):\n     b = a + 1\n-    return b * 2\n+    return b * 3\n'
+    ;;
+  *"mutmut show"*)
+    echo "shown: $*" >&2
+    exit 1
+    ;;
+esac
+exit 0
 "#;
 
-/// Next.js: the survivors Stryker's report names, and **no count**, for the
-/// same reason as Python: `--mutate` names whole touched files.
+/// The mutants mutmut makes in [`THING_AFTER`].
+#[cfg(unix)]
+const THING_MUTANTS: [&str; 5] = [
+    "pkg.thing.x_keep__mutmut_1",
+    "pkg.thing.x_other__mutmut_1",
+    "pkg.thing.x_other__mutmut_2",
+    "pkg.thing.x_other__mutmut_3",
+    "pkg.thing.xǁTallyǁadd__mutmut_1",
+];
+
+/// mutmut's record of [`THING_MUTANTS`] and of `more`, as the filtered run
+/// leaves it: the killed mutant of `other` with its exit code, every other
+/// one either a survivor or never run, which `mutmut results` lists.
+#[cfg(unix)]
+fn thing_record(more: &[&str]) -> String {
+    let coded: Vec<(&str, &str)> = THING_MUTANTS
+        .iter()
+        .chain(more)
+        .map(|key| {
+            let code = if *key == "pkg.thing.x_other__mutmut_3" {
+                "1"
+            } else {
+                "null"
+            };
+            (*key, code)
+        })
+        .collect();
+    record_coded("src/pkg/thing.py", &coded)
+}
+
+/// Python, on a branch: mutmut tests only the functions and methods that
+/// hold a changed line, and the campaign counts and reports only the mutants
+/// whose change reaches one (SPEC 4.4). `other` is tested whole; its
+/// survivor on line 6, which the branch did not change, is neither counted
+/// nor reported; `keep` and `Tally.add` are not tested, and nothing of them
+/// is even placed. Measured with the real mutmut 3.8.0 the same way: on a
+/// branch that changed a function and a method, 13 mutants tested, 6
+/// counted, and of the 3 survivors the 2 on changed lines reported.
 #[cfg(unix)]
 #[test]
-fn the_next_campaign_gives_no_count_over_whole_files() {
+fn the_python_campaign_counts_only_the_mutants_of_the_lines_the_branch_changed() {
+    if !present(
+        "python3",
+        "the_python_campaign_counts_only_the_mutants_of_the_lines_the_branch_changed",
+    ) {
+        return;
+    }
+    let uv = python_uv(THING_UV).replace("RECORD", &thing_record(&[]));
+    let (said, why, code) = python_campaign_on_branch(THING_BEFORE, THING_AFTER, &uv);
+    assert_eq!(code, Some(0), "{said}\n{why}");
+    assert_eq!(
+        asked(&why),
+        "run --frozen --no-sync mutmut run pkg.thing.x_other__mutmut_*",
+        "only the function that holds a changed line is tested"
+    );
+    assert!(
+        !why.contains("shown: "),
+        "a mutant nobody tested was placed: {why}"
+    );
+    assert_eq!(
+        spans(&said),
+        [("pkg.thing.x_other__mutmut_2".to_string(), Some((7, 7)))].into(),
+        "{said}\n{why}"
+    );
+    let files = nunki::mutants::by_file(&said, "h").expect("each file is counted");
+    let thing = &files["src/pkg/thing.py"];
+    assert_eq!((thing.tried, thing.found), (2, Some(2)), "{said}");
+    assert_eq!(
+        said.lines().last(),
+        Some(r#"{"campaign":"done","tried":2,"found":2,"by_file":true}"#),
+        "{said}"
+    );
+}
+
+/// Python, on a branch: a mutant of a function the campaign cannot find in
+/// the file is one it cannot say the branch left alone. It is refused, and
+/// the campaign measured nothing, rather than passed over as untouched.
+#[cfg(unix)]
+#[test]
+fn a_python_campaign_refuses_a_mutant_of_a_function_it_cannot_find() {
+    if !present(
+        "python3",
+        "a_python_campaign_refuses_a_mutant_of_a_function_it_cannot_find",
+    ) {
+        return;
+    }
+    let uv = python_uv(THING_UV).replace("RECORD", &thing_record(&["pkg.thing.x_ghost__mutmut_1"]));
+    let (said, why, code) = python_campaign_on_branch(THING_BEFORE, THING_AFTER, &uv);
+    assert!(!nunki::mutants::completed(&said), "{said}\n{why}");
+    assert_ne!(code, Some(0), "{why}");
+    assert!(
+        why.contains("pkg.thing.x_ghost__mutmut_1 is a mutant of src/pkg/thing.py in no function"),
+        "{why}"
+    );
+}
+
+/// Python: a mutant `mutmut results` does not list was killed, since mutmut
+/// 3.8.0 lists every other outcome — unless its record says it never ran.
+/// That one the campaign cannot account for, and it measured nothing rather
+/// than count it killed.
+#[cfg(unix)]
+#[test]
+fn a_python_campaign_refuses_a_mutant_that_never_ran_and_is_not_listed() {
+    if !present(
+        "python3",
+        "a_python_campaign_refuses_a_mutant_that_never_ran_and_is_not_listed",
+    ) {
+        return;
+    }
+    let uv = python_uv(THING_UV).replace("RECORD", &record("src/pkg/thing.py", &THING_MUTANTS));
+    let (said, why, code) = python_campaign_on_branch(THING_BEFORE, THING_AFTER, &uv);
+    assert!(!nunki::mutants::completed(&said), "{said}\n{why}");
+    assert_ne!(code, Some(0), "{why}");
+    assert!(
+        why.contains("pkg.thing.x_other__mutmut_3 never ran, and mutmut results does not list it"),
+        "{why}"
+    );
+}
+
+/// Python, on a branch whose changed lines are in no function — a module's
+/// constant — mutmut mutates nothing the branch changed: the campaign says it
+/// finished with nothing tried, and never runs mutmut. And when mutmut does
+/// run and refuses its patterns for matching nothing, that is nothing to
+/// test only if no record holds a mutant of a function that holds a changed
+/// line, or of one the campaign cannot find.
+#[cfg(unix)]
+#[test]
+fn a_python_branch_that_changed_no_function_has_nothing_mutable() {
+    if !present(
+        "python3",
+        "a_python_branch_that_changed_no_function_has_nothing_mutable",
+    ) {
+        return;
+    }
+    let done = r#"{"campaign":"done","tried":0,"found":0,"by_file":true}"#;
+    let uv = python_uv(
+        "#!/bin/sh\ncase \"$*\" in\n  *\"mutmut run\"*) echo \"asked: $*\" >&2 ;;\nesac\nexit 0\n",
+    );
+    let (said, why, code) = python_campaign_on_branch(
+        &format!("LIMIT = 3\n\n\n{THING_BEFORE}"),
+        &format!("LIMIT = 4\n\n\n{THING_BEFORE}"),
+        &uv,
+    );
+    assert_eq!(code, Some(0), "{why}");
+    assert_eq!(said.lines().last(), Some(done), "{said}\n{why}");
+    assert!(!why.contains("asked: "), "mutmut ran for nothing: {why}");
+
+    // `other` is changed and holds no mutant: mutmut refuses its pattern.
+    let refusing = |keys: &[&str]| {
+        python_uv(&format!(
+            "#!/bin/sh\ncase \"$*\" in\n  *\"mutmut run\"*)\n    mkdir -p mutants\n    \
+             touch mutants/mutmut-stats.json\n    {}\n    \
+             echo 'AssertionError: Filtered for specific mutants, but nothing matches' >&2\n    \
+             exit 1\n    ;;\nesac\nexit 0\n",
+            record("src/pkg/thing.py", keys)
+        ))
+    };
+    let (said, why, code) = python_campaign_on_branch(
+        THING_BEFORE,
+        THING_AFTER,
+        &refusing(&["pkg.thing.x_keep__mutmut_1"]),
+    );
+    assert_eq!(code, Some(0), "{why}");
+    assert_eq!(said.lines().last(), Some(done), "{said}\n{why}");
+    for keys in [
+        ["pkg.thing.x_other__mutmut_1"],
+        ["pkg.thing.x_ghost__mutmut_1"],
+    ] {
+        let (said, why, code) =
+            python_campaign_on_branch(THING_BEFORE, THING_AFTER, &refusing(&keys));
+        assert!(!nunki::mutants::completed(&said), "{keys:?}: {said}\n{why}");
+        assert_ne!(code, Some(0), "{keys:?}: {why}");
+        assert!(
+            why.contains("the campaign could not run"),
+            "{keys:?}: {why}"
+        );
+    }
+}
+
+/// Python, on a branch: a changed decorator belongs to the function it
+/// decorates, which is tested — whether mutmut mutates a decorator was not
+/// measured, so the campaign does not assume it never does. And a touched
+/// file the branch removed has nothing left to mutate: it is not read, and
+/// mutmut is not run for it.
+#[cfg(unix)]
+#[test]
+fn a_python_campaign_tests_a_function_whose_decorator_changed_and_not_a_removed_file() {
+    if !present(
+        "python3",
+        "a_python_campaign_tests_a_function_whose_decorator_changed_and_not_a_removed_file",
+    ) {
+        return;
+    }
+    let uv = python_uv(
+        "#!/bin/sh\ncase \"$*\" in\n  *\"mutmut run\"*) echo \"asked: $*\" >&2 ;;\nesac\nexit 0\n",
+    );
+    let decorated = |size: &str| {
+        format!(
+            "import functools\n\n\n@functools.lru_cache({size})\ndef keep(a):\n    return a > 2\n"
+        )
+    };
+    let (said, why, code) = python_campaign_on_branch(&decorated("1"), &decorated("2"), &uv);
+    assert_eq!(code, Some(0), "{said}\n{why}");
+    assert_eq!(
+        asked(&why),
+        "run --frozen --no-sync mutmut run pkg.thing.x_keep__mutmut_*"
+    );
+    assert!(nunki::mutants::completed(&said), "{said}\n{why}");
+
+    let (said, why, code) = python_campaign_on_branch(THING_BEFORE, "", &uv);
+    assert_eq!(code, Some(0), "{said}\n{why}");
+    assert_eq!(
+        said.lines().last(),
+        Some(r#"{"campaign":"done","tried":0,"found":0,"by_file":true}"#),
+        "{said}\n{why}"
+    );
+    assert!(
+        !why.contains("asked: "),
+        "mutmut ran for a removed file: {why}"
+    );
+}
+
+/// What dev's Python campaign printed, for a chain to continue from: no
+/// count of any file.
+#[cfg(unix)]
+const PYTHON_LOG_WITHOUT_COUNTS: &str = "{\"id\": \"pkg.thing.x_other__mutmut_2\", \"file\": \"src/pkg/thing.py\", \"line\": 7, \"end_line\": 7, \"description\": \"survived: return b * 2 -> return b / 2\"}\n{\"campaign\":\"done\"}\n";
+
+/// Python's campaign now gives what a chain is rebuilt from (SPEC 4.4, the
+/// chain of campaigns). Recorded as `nunki` records it, the log the script
+/// prints on a branch lets the next campaign be partial, every other
+/// condition being met; dev's log, which counted no file, made it full.
+#[cfg(unix)]
+#[test]
+fn a_python_campaign_lets_the_next_one_be_partial() {
+    if !present("python3", "a_python_campaign_lets_the_next_one_be_partial") {
+        return;
+    }
+    let uv = python_uv(THING_UV).replace("RECORD", &thing_record(&[]));
+    let (said, why, code) = python_campaign_on_branch(THING_BEFORE, THING_AFTER, &uv);
+    assert_eq!(code, Some(0), "{said}\n{why}");
+    let head = "c".repeat(40);
+    let fork = "f".repeat(40);
+    let handed = vec!["src/pkg/thing.py".to_string()];
+    let recorded = |log: &str| nunki::mutants::Campaign {
+        fingerprint: "fingerprint".to_string(),
+        head: head.clone(),
+        date: "2026-11-02T00:00:00Z".to_string(),
+        survivors: nunki::mutants::parse(log),
+        tried: nunki::mutants::tried(log),
+        files: nunki::mutants::trusted_files(log, &head, Some(&handed)),
+        chain: nunki::mutants::Chain {
+            tooling: Some("tools".to_string()),
+            fork: Some(fork.clone()),
+            handed: Some(handed.clone()),
+            ..Default::default()
+        },
+        stopped: None,
+    };
+    let next = |previous: &nunki::mutants::Campaign| {
+        nunki::mutants::scope(
+            nunki::mission::Rigor::Standard,
+            nunki::mutants::Replay::WhenChanged,
+            Some(previous),
+            Ok("tools"),
+            &fork,
+            |_| None,
+            |_| true,
+            |_| None,
+        )
+    };
+    assert_eq!(
+        next(&recorded(&said)),
+        nunki::mutants::Scope::Partial {
+            since: head.clone()
+        },
+        "{said}"
+    );
+    assert!(
+        matches!(
+            next(&recorded(PYTHON_LOG_WITHOUT_COUNTS)),
+            nunki::mutants::Scope::Full { why } if why.contains("did not count each file")
+        ),
+        "dev's log"
+    );
+}
+
+/// A source for the Next.js campaign to find in its tree: it skips a touched
+/// path that names no file, as one the branch removed.
+#[cfg(unix)]
+const PAGE: (&str, &str) = ("app/page.ts", "export const x = 1;\n");
+
+/// Next.js: each file's counts, and the totals. `Killed` and `Timeout` are
+/// tried and answered; `Survived` and `NoCoverage` tried and owed; `Pending`
+/// found and owed, and not tried; `CompileError`, `RuntimeError` and
+/// `Ignored` neither found nor tried, as cargo-mutants' unviable mutants are
+/// neither. And a survivor's description names the mutation, not the status
+/// it came back with, which changes from one campaign to the next.
+#[cfg(unix)]
+#[test]
+fn the_next_campaign_counts_each_file_and_leaves_out_what_no_test_had_to_kill() {
+    if !present(
+        "node",
+        "the_next_campaign_counts_each_file_and_leaves_out_what_no_test_had_to_kill",
+    ) {
+        return;
+    }
     let pnpm = r#"#!/bin/sh
 case "$*" in
   *"stryker run"*)
@@ -3178,15 +3629,735 @@ case "$*" in
 esac
 exit 0
 "#;
-    let (said, why) = campaign_of("next", "app/page.ts", &[("pnpm", pnpm), ("node", NODE)]);
+    let (said, why, status) = campaign_in("next", "app/page.ts", &[("pnpm", pnpm)], &[PAGE]);
+    assert_eq!(status, Some(0), "{why}");
     assert!(nunki::mutants::completed(&said), "{said}\n{why}");
-    assert_eq!(nunki::mutants::parse(&said).len(), 3, "{said}\n{why}");
-    assert_eq!(nunki::mutants::tried(&said), None, "{said}\n{why}");
-    assert_eq!(nunki::mutants::found(&said), None, "{said}\n{why}");
+    let described: Vec<String> = nunki::mutants::parse(&said)
+        .into_iter()
+        .map(|survivor| survivor.description)
+        .collect();
+    assert_eq!(described, ["M -> x", "N -> y", "P -> z"], "{said}\n{why}");
+    assert_eq!(nunki::mutants::tried(&said), Some(4), "{said}\n{why}");
+    assert_eq!(nunki::mutants::found(&said), Some(5), "{said}\n{why}");
+    assert!(
+        said.contains(r#"{"measured":"app/page.ts","tried":4,"found":5}"#),
+        "{said}"
+    );
     assert_eq!(
         said.lines().last(),
-        Some(r#"{"campaign":"done"}"#),
+        Some(r#"{"campaign":"done","tried":4,"found":5,"by_file":true}"#),
         "{said}"
+    );
+}
+
+/// A Stryker that reads `--mutate` as Stryker 10.0.0 does, measured: each
+/// flag replaces the one before, its value is split on commas, and each
+/// entry is a glob over the tree's files — matched here with the shell's
+/// own patterns, whose brackets are minimatch's. Every file it matches gets
+/// one survivor in the report, so the survivors say what was mutated.
+#[cfg(unix)]
+const STRYKER_MUTATE: &str = r#"#!/bin/sh
+case "$*" in
+  *"stryker run"*) ;;
+  *) exit 0 ;;
+esac
+echo "asked: $*" >&2
+mutate=""
+while [ $# -gt 0 ]; do
+  if [ "$1" = --mutate ]; then mutate=$2; fi
+  shift
+done
+matched=$(find . -type f -name '*.ts' | sed 's#^\./##' | sort | while IFS= read -r file; do
+  rest=$mutate
+  while [ -n "$rest" ]; do
+    pattern=${rest%%,*}
+    case "$rest" in
+      (*,*) rest=${rest#*,} ;;
+      (*) rest="" ;;
+    esac
+    case "$file" in
+      ($pattern) echo "$file"; break ;;
+    esac
+  done
+done)
+mkdir -p reports/mutation
+printf '%s\n' "$matched" | jq -R -s '{files: (split("\n") | map(select(length > 0))
+  | map({key: ., value: {mutants: [{status: "Survived", mutatorName: "M", replacement: "x",
+      location: {start: {line: 1, column: 1}}}]}}) | from_entries)}' > reports/mutation/mutation.json
+exit 0
+"#;
+
+/// Every source the branch touched is mutated, and no other file. Three
+/// failures, all measured on Stryker 10.0.0. One `--mutate` per path
+/// mutated the last path alone, and the campaign said it finished. A
+/// Next.js dynamic route is a glob's character class: `app/[slug]/page.ts`
+/// handed as it is mutates `app/s/page.ts`, and `app/[[...rest]]/page.ts`
+/// matches nothing. And a path holding a space, split in two, had Stryker
+/// read its second half as a configuration file and exit 1.
+#[cfg(unix)]
+#[test]
+fn the_next_campaign_mutates_every_touched_source_and_only_it() {
+    if !present(
+        "node",
+        "the_next_campaign_mutates_every_touched_source_and_only_it",
+    ) {
+        return;
+    }
+    let body = "export const x = 1;\n";
+    let (said, why, status) = campaign_of_paths(
+        "next",
+        &[
+            "app/page.ts",
+            "app/[slug]/page.ts",
+            "app/[[...rest]]/page.ts",
+            "app/with space/page.ts",
+        ],
+        &[("pnpm", STRYKER_MUTATE)],
+        &[
+            ("app/page.ts", body),
+            ("app/[slug]/page.ts", body),
+            ("app/[[...rest]]/page.ts", body),
+            ("app/with space/page.ts", body),
+            // What the route's brackets reach when nobody escapes them.
+            ("app/s/page.ts", body),
+            ("app/r]/page.ts", body),
+        ],
+        &[],
+    );
+    assert_eq!(status, Some(0), "{why}");
+    assert!(nunki::mutants::completed(&said), "{said}\n{why}");
+    let mutated: std::collections::BTreeSet<String> = nunki::mutants::parse(&said)
+        .into_iter()
+        .map(|survivor| survivor.file)
+        .collect();
+    assert_eq!(
+        mutated,
+        [
+            "app/page.ts",
+            "app/[slug]/page.ts",
+            "app/[[...rest]]/page.ts",
+            "app/with space/page.ts",
+        ]
+        .map(String::from)
+        .into(),
+        "{said}\n{why}"
+    );
+}
+
+/// A path holding a comma cannot be handed to Stryker, which splits
+/// `--mutate` on commas: the campaign says so and measures nothing, rather
+/// than mutate two halves that name no file and finish green.
+#[cfg(unix)]
+#[test]
+fn a_next_campaign_refuses_a_path_stryker_would_split() {
+    let (said, why, status) = campaign_in(
+        "next",
+        "app/page.ts app/a,b.ts",
+        &[("pnpm", STRYKER_MUTATE)],
+        &[PAGE, ("app/a,b.ts", "export const y = 2;\n")],
+    );
+    assert_ne!(status, Some(0), "{why}");
+    assert!(!nunki::mutants::completed(&said), "{said}\n{why}");
+    assert!(why.contains("app/a,b.ts holds a comma"), "{why}");
+    assert!(!why.contains("asked: "), "Stryker ran: {why}");
+}
+
+/// The Next.js campaign, run as `nunki` runs it on a branch: in a git tree
+/// whose branch changed `app/page.ts` from `before` to `after` — or removed
+/// it, when `after` is empty — with the fork point in `NUNKI_BASE`.
+#[cfg(unix)]
+fn next_campaign_on_branch(before: &str, after: &str, pnpm: &str) -> (String, String, Option<i32>) {
+    next_campaign_naming(before, after, pnpm, None)
+}
+
+/// [`next_campaign_on_branch`], handed `names` in `NUNKI_MUTATION_NAMES`
+/// when given.
+#[cfg(unix)]
+fn next_campaign_naming(
+    before: &str,
+    after: &str,
+    pnpm: &str,
+    names: Option<&str>,
+) -> (String, String, Option<i32>) {
+    let (dir, root, nunki) = fresh();
+    init(&root, &nunki, &["next".to_string()]).unwrap();
+    let script = home(&root).join("stacks/next/mutation.sh");
+    let tree = dir.path().join("tree");
+    std::fs::create_dir_all(tree.join("app")).unwrap();
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&tree)
+            .args(["-c", "user.name=T", "-c", "user.email=t@t"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    git(&["init", "-q", "-b", "dev"]);
+    std::fs::write(tree.join("app/page.ts"), before).unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "base"]);
+    let fork = git(&["rev-parse", "HEAD"]);
+    if after.is_empty() {
+        git(&["rm", "-q", "app/page.ts"]);
+    } else {
+        std::fs::write(tree.join("app/page.ts"), after).unwrap();
+    }
+    git(&["commit", "-q", "-am", "branch"]);
+    let path = stubs(&dir.path().join("stub-bin"), &[("pnpm", pnpm)]);
+    let mut campaign = sh();
+    campaign
+        .arg(&script)
+        .arg("abc123")
+        .arg("app/page.ts")
+        .env("PATH", path)
+        .env(nunki::mutants::BASE_ENV, &fork)
+        .current_dir(&tree);
+    if let Some(names) = names {
+        campaign.env(nunki::mutants::NAMES_ENV, names);
+    }
+    let out = campaign.output().expect("sh runs the campaign");
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        out.status.code(),
+    )
+}
+
+/// A page whose branch changes line 2, removes line 6, and adds lines 8 to
+/// 11: three hunks, the second of which adds nothing.
+#[cfg(unix)]
+const PAGE_BEFORE: &str = "export function a(n: number): number {\n  return n + 1;\n}\n\nexport function b(n: number): number {\n  const unused = 0;\n  return n * 2;\n}\n";
+#[cfg(unix)]
+const PAGE_AFTER: &str = "export function a(n: number): number {\n  return n + 2;\n}\n\nexport function b(n: number): number {\n  return n * 2;\n}\n\nexport function c(n: number): number {\n  return n - 3;\n}\n";
+
+/// A Stryker that says what it was asked to mutate, refuses a range as
+/// Stryker 10.0.0's options validator does — one that starts before line 1
+/// or ends before it starts, and the whole run with it — and, as 10.0.0 does
+/// when nothing it was handed names a file, exits 1 having run no test.
+/// Otherwise it leaves `REPORT` as its report.
+#[cfg(unix)]
+const STRYKER_RANGES: &str = r#"#!/bin/sh
+case "$*" in
+  *"stryker run"*) ;;
+  *) exit 0 ;;
+esac
+echo "asked: $*" >&2
+mutate=""
+while [ $# -gt 0 ]; do
+  if [ "$1" = --mutate ]; then mutate=$2; fi
+  shift
+done
+echo "mutate: $mutate" >&2
+rest=$mutate
+named=0
+while [ -n "$rest" ]; do
+  entry=${rest%%,*}
+  case "$rest" in
+    (*,*) rest=${rest#*,} ;;
+    (*) rest="" ;;
+  esac
+  file=${entry%%:*}
+  [ -f "$file" ] && named=1
+  case "$entry" in
+    (*:*-*)
+      range=${entry##*:}
+      first=${range%-*}
+      last=${range#*-}
+      if [ "$first" -lt 1 ] || [ "$first" -gt "$last" ]; then
+        echo "Mutation range \"$range\" is invalid" >&2
+        exit 1
+      fi
+      ;;
+  esac
+done
+if [ "$named" = 0 ]; then
+  echo "No tests were executed. Stryker will exit prematurely." >&2
+  exit 1
+fi
+mkdir -p reports/mutation
+printf '%s' 'REPORT' > reports/mutation/mutation.json
+exit 0
+"#;
+
+/// What Stryker's report could hold for [`PAGE_AFTER`]: a survivor on line 2,
+/// which the branch changed; one on line 6, which it did not; a block over
+/// lines 1 to 3, which reaches line 2; one whose report gives only where it
+/// starts, on line 6; and a mutant killed on line 10, which the branch added.
+#[cfg(unix)]
+const PAGE_REPORT: &str = r#"{"files":{"app/page.ts":{"mutants":[
+  {"status":"Survived","mutatorName":"A","replacement":"a","location":{"start":{"line":2,"column":10},"end":{"line":2,"column":15}}},
+  {"status":"Survived","mutatorName":"B","replacement":"b","location":{"start":{"line":6,"column":10},"end":{"line":6,"column":15}}},
+  {"status":"NoCoverage","mutatorName":"C","replacement":"{}","location":{"start":{"line":1,"column":38},"end":{"line":3,"column":2}}},
+  {"status":"Survived","mutatorName":"E","replacement":"e","location":{"start":{"line":6,"column":1}}},
+  {"status":"Killed","mutatorName":"D","replacement":"d","location":{"start":{"line":10,"column":10},"end":{"line":10,"column":15}}}]}}}"#;
+
+/// The lines a branch changed are what Stryker is asked to mutate, one range
+/// for each run of lines the diff adds, and what the campaign counts: a
+/// mutant whose lines reach a changed one, and no other. A hunk that only
+/// removes lines gives no range — Stryker would refuse `5-4`, and the
+/// campaign with it.
+#[cfg(unix)]
+#[test]
+fn the_next_campaign_mutates_and_counts_only_the_lines_the_branch_changed() {
+    if !present(
+        "node",
+        "the_next_campaign_mutates_and_counts_only_the_lines_the_branch_changed",
+    ) {
+        return;
+    }
+    let pnpm = STRYKER_RANGES.replace("REPORT", PAGE_REPORT);
+    let (said, why, code) = next_campaign_on_branch(PAGE_BEFORE, PAGE_AFTER, &pnpm);
+    assert_eq!(code, Some(0), "{said}\n{why}");
+    assert!(
+        why.contains("mutate: app/page.ts:2-2,app/page.ts:8-11\n"),
+        "{why}"
+    );
+    let survivors: Vec<(String, u32)> = nunki::mutants::parse(&said)
+        .into_iter()
+        .map(|survivor| (survivor.description, survivor.line))
+        .collect();
+    assert_eq!(
+        survivors,
+        [
+            ("A -> a".to_string(), 2),
+            ("C -> {}".to_string(), 1),
+            ("E -> e".to_string(), 6)
+        ],
+        "{said}"
+    );
+    assert_eq!(nunki::mutants::tried(&said), Some(4), "{said}");
+    assert_eq!(nunki::mutants::found(&said), Some(4), "{said}");
+    assert!(
+        said.contains(r#"{"measured":"app/page.ts","tried":4,"found":4}"#),
+        "{said}"
+    );
+}
+
+/// [`PAGE_REPORT`] as a span returns it besides the lines the branch
+/// changed: `B`, on line 6, which the branch did not change, and `F`, a
+/// second mutation of the very code `B` replaces.
+#[cfg(unix)]
+const NAMED_REPORT: &str = r#"{"files":{"app/page.ts":{"mutants":[
+  {"status":"Survived","mutatorName":"A","replacement":"a","location":{"start":{"line":2,"column":10},"end":{"line":2,"column":15}}},
+  {"status":"NoCoverage","mutatorName":"B","replacement":"b","location":{"start":{"line":6,"column":10},"end":{"line":6,"column":15}}},
+  {"status":"Survived","mutatorName":"F","replacement":"f","location":{"start":{"line":6,"column":10},"end":{"line":6,"column":15}}},
+  {"status":"NoCoverage","mutatorName":"C","replacement":"{}","location":{"start":{"line":1,"column":38},"end":{"line":3,"column":2}}},
+  {"status":"Killed","mutatorName":"D","replacement":"d","location":{"start":{"line":10,"column":10},"end":{"line":10,"column":15}}}]}}}"#;
+
+/// A survivor's id carries the span of the code it replaces, and a name
+/// handed is run by that span, its columns counted from 0 as `--mutate`
+/// counts them where the report counts from 1 (measured on Stryker 10.0.0).
+/// Of what the span returns, the campaign reports and counts the mutant
+/// named and not `F`, its sibling on a line the branch did not change.
+#[cfg(unix)]
+#[test]
+fn a_next_campaign_runs_a_named_mutant_by_its_span_and_reports_it_alone() {
+    if !present(
+        "node",
+        "a_next_campaign_runs_a_named_mutant_by_its_span_and_reports_it_alone",
+    ) {
+        return;
+    }
+    let pnpm = STRYKER_RANGES.replace("REPORT", NAMED_REPORT);
+    let (said, why, code) = next_campaign_naming(
+        PAGE_BEFORE,
+        PAGE_AFTER,
+        &pnpm,
+        Some(r#"["app/page.ts:6:10-6:15:B:b"]"#),
+    );
+    assert_eq!(code, Some(0), "{said}\n{why}");
+    assert!(
+        why.contains("mutate: app/page.ts:2-2,app/page.ts:8-11,app/page.ts:6:9-6:14\n"),
+        "{why}"
+    );
+    let ids: Vec<String> = nunki::mutants::parse(&said)
+        .into_iter()
+        .map(|survivor| survivor.id)
+        .collect();
+    assert_eq!(
+        ids,
+        [
+            "app/page.ts:2:10-2:15:A:a",
+            "app/page.ts:6:10-6:15:B:b",
+            "app/page.ts:1:38-3:2:C:{}"
+        ],
+        "{said}"
+    );
+    assert!(
+        said.contains(r#"{"measured":"app/page.ts","tried":4,"found":4}"#),
+        "{said}"
+    );
+    assert_eq!(
+        said.lines().last(),
+        Some(r#"{"campaign":"done","tried":4,"found":4,"by_file":true}"#),
+        "{said}"
+    );
+}
+
+/// Handed names and no path, the campaign runs the named mutants alone,
+/// counts them in their file, and reads no diff: there is no git here, and
+/// the base names no commit.
+#[cfg(unix)]
+#[test]
+fn a_next_campaign_handed_names_and_no_path_runs_them_alone_and_reads_no_diff() {
+    if !present(
+        "node",
+        "a_next_campaign_handed_names_and_no_path_runs_them_alone_and_reads_no_diff",
+    ) {
+        return;
+    }
+    let pnpm = STRYKER_RANGES.replace("REPORT", NAMED_REPORT);
+    let (said, why, code) = campaign_of_paths(
+        "next",
+        &[],
+        &[("pnpm", &pnpm)],
+        &[("app/page.ts", PAGE_AFTER)],
+        &[
+            (nunki::mutants::BASE_ENV, "not-a-commit"),
+            (
+                nunki::mutants::NAMES_ENV,
+                r#"["app/page.ts:6:10-6:15:B:b"]"#,
+            ),
+        ],
+    );
+    assert_eq!(code, Some(0), "{said}\n{why}");
+    assert!(why.contains("mutate: app/page.ts:6:9-6:14\n"), "{why}");
+    let ids: Vec<String> = nunki::mutants::parse(&said)
+        .into_iter()
+        .map(|survivor| survivor.id)
+        .collect();
+    assert_eq!(ids, ["app/page.ts:6:10-6:15:B:b"], "{said}");
+    assert!(
+        said.contains(r#"{"measured":"app/page.ts","tried":1,"found":1}"#),
+        "{said}"
+    );
+    assert_eq!(
+        said.lines().last(),
+        Some(r#"{"campaign":"done","tried":1,"found":1,"by_file":true}"#),
+        "{said}"
+    );
+}
+
+/// What a campaign cannot run by name measured nothing, and Stryker is not
+/// started: a list that is not one, a name without a span — what an older
+/// script gave — a name in a file that is not there, and one in a file
+/// whose path `--mutate` would split.
+#[cfg(unix)]
+#[test]
+fn a_next_campaign_refuses_names_it_cannot_run_before_stryker_starts() {
+    if !present(
+        "node",
+        "a_next_campaign_refuses_names_it_cannot_run_before_stryker_starts",
+    ) {
+        return;
+    }
+    let pnpm = STRYKER_RANGES.replace("REPORT", NAMED_REPORT);
+    for (names, said_why) in [
+        (r#"{"a":1}"#, "is a JSON list of at least one mutant's name"),
+        ("[]", "is a JSON list of at least one mutant's name"),
+        (
+            r#"["app/page.ts:6:10:B:b"]"#,
+            "is no name this script gives",
+        ),
+        (
+            r#"["app/gone.ts:6:10-6:15:B:b"]"#,
+            "names app/gone.ts, which is not in the code",
+        ),
+        (r#"["app/a,b.ts:1:1-1:5:B:b"]"#, "app/a,b.ts holds a comma"),
+    ] {
+        let (said, why, code) = campaign_of_paths(
+            "next",
+            &[],
+            &[("pnpm", &pnpm)],
+            &[
+                ("app/page.ts", PAGE_AFTER),
+                ("app/a,b.ts", "export const y = 2;\n"),
+            ],
+            &[(nunki::mutants::NAMES_ENV, names)],
+        );
+        assert_ne!(code, Some(0), "{names}: {said}\n{why}");
+        assert!(!nunki::mutants::completed(&said), "{names}: {said}\n{why}");
+        assert!(why.contains(said_why), "{names}: {why}");
+        assert!(!why.contains("asked: "), "{names}: Stryker ran: {why}");
+    }
+}
+
+/// Two survivors of the very same code share a span, and `--mutate` is
+/// handed it once; each is reported, under its own id.
+#[cfg(unix)]
+#[test]
+fn a_next_campaign_runs_one_span_for_two_survivors_of_the_same_code() {
+    if !present(
+        "node",
+        "a_next_campaign_runs_one_span_for_two_survivors_of_the_same_code",
+    ) {
+        return;
+    }
+    let pnpm = STRYKER_RANGES.replace("REPORT", NAMED_REPORT);
+    let (said, why, code) = campaign_of_paths(
+        "next",
+        &[],
+        &[("pnpm", &pnpm)],
+        &[("app/page.ts", PAGE_AFTER)],
+        &[(
+            nunki::mutants::NAMES_ENV,
+            r#"["app/page.ts:6:10-6:15:B:b","app/page.ts:6:10-6:15:F:f"]"#,
+        )],
+    );
+    assert_eq!(code, Some(0), "{said}\n{why}");
+    assert!(why.contains("mutate: app/page.ts:6:9-6:14\n"), "{why}");
+    let ids: Vec<String> = nunki::mutants::parse(&said)
+        .into_iter()
+        .map(|survivor| survivor.id)
+        .collect();
+    assert_eq!(
+        ids,
+        ["app/page.ts:6:10-6:15:B:b", "app/page.ts:6:10-6:15:F:f"],
+        "{said}"
+    );
+}
+
+/// A name Stryker does not make again is a mutant no longer in the code,
+/// and the campaign measured nothing: read without it, it would report
+/// killed a mutant it never ran. Found by its whole id, so a span that
+/// holds a mutant of another mutator is not the one named.
+#[cfg(unix)]
+#[test]
+fn a_next_campaign_that_does_not_find_a_named_mutant_measured_nothing() {
+    if !present(
+        "node",
+        "a_next_campaign_that_does_not_find_a_named_mutant_measured_nothing",
+    ) {
+        return;
+    }
+    let pnpm = STRYKER_RANGES.replace("REPORT", NAMED_REPORT);
+    for names in [
+        r#"["app/page.ts:6:10-6:16:B:b"]"#,
+        r#"["app/page.ts:6:10-6:15:G:b"]"#,
+    ] {
+        let (said, why, code) = campaign_of_paths(
+            "next",
+            &[],
+            &[("pnpm", &pnpm)],
+            &[("app/page.ts", PAGE_AFTER)],
+            &[(nunki::mutants::NAMES_ENV, names)],
+        );
+        assert_ne!(code, Some(0), "{names}: {said}\n{why}");
+        assert!(!nunki::mutants::completed(&said), "{names}: {said}\n{why}");
+        assert!(
+            why.contains("asked: "),
+            "{names}: Stryker did not run: {why}"
+        );
+        assert!(
+            why.contains(
+                "1 of the 1 mutant(s) this campaign was handed by name are not in the code"
+            ),
+            "{names}: {why}"
+        );
+    }
+}
+
+/// A branch that only removed lines from the sources it touched has nothing
+/// mutable, and says so without running Stryker: none of its mutants is on a
+/// line the branch changed, and an empty `--mutate` would have Stryker mutate
+/// whatever its configuration names.
+#[cfg(unix)]
+#[test]
+fn a_next_branch_that_only_removed_lines_has_nothing_mutable() {
+    if !present(
+        "node",
+        "a_next_branch_that_only_removed_lines_has_nothing_mutable",
+    ) {
+        return;
+    }
+    let after = PAGE_BEFORE.replace("  const unused = 0;\n", "");
+    let pnpm = STRYKER_RANGES.replace("REPORT", PAGE_REPORT);
+    let (said, why, code) = next_campaign_on_branch(PAGE_BEFORE, &after, &pnpm);
+    assert_eq!(code, Some(0), "{said}\n{why}");
+    assert!(!why.contains("asked: "), "Stryker ran: {why}");
+    assert_eq!(
+        said.lines().last(),
+        Some(r#"{"campaign":"done","tried":0,"found":0,"by_file":true}"#),
+        "{said}"
+    );
+}
+
+/// A source the branch removed is not handed to Stryker, with a base or
+/// without one. Handed alone, measured on Stryker 10.0.0, a path that names
+/// no file has Stryker exit 1, "No tests were executed": a campaign that
+/// could not run, and gate 7 asking for ever.
+#[cfg(unix)]
+#[test]
+fn a_next_campaign_skips_a_source_the_branch_removed() {
+    if !present("node", "a_next_campaign_skips_a_source_the_branch_removed") {
+        return;
+    }
+    let pnpm = STRYKER_RANGES.replace("REPORT", PAGE_REPORT);
+    let (said, why, code) = next_campaign_on_branch(PAGE_BEFORE, "", &pnpm);
+    assert_eq!(code, Some(0), "{said}\n{why}");
+    assert!(!why.contains("asked: "), "Stryker ran: {why}");
+    assert_eq!(nunki::mutants::tried(&said), Some(0), "{said}");
+
+    let pnpm = STRYKER_RANGES.replace(
+        "REPORT",
+        r#"{"files":{"app/page.ts":{"mutants":[{"status":"Killed"}]}}}"#,
+    );
+    let (said, why, status) = campaign_in(
+        "next",
+        "app/gone.ts app/page.ts",
+        &[("pnpm", &pnpm)],
+        &[PAGE],
+    );
+    assert_eq!(status, Some(0), "{why}");
+    assert!(why.contains("mutate: app/page.ts\n"), "{why}");
+    assert_eq!(nunki::mutants::tried(&said), Some(1), "{said}");
+
+    let (said, why, status) = campaign_in("next", "app/gone.ts", &[("pnpm", &pnpm)], &[PAGE]);
+    assert_eq!(status, Some(0), "{why}");
+    assert!(!why.contains("asked: "), "Stryker ran: {why}");
+    assert_eq!(
+        said.lines().last(),
+        Some(r#"{"campaign":"done","tried":0,"found":0,"by_file":true}"#),
+        "{said}"
+    );
+}
+
+/// A report that holds mutants of a file the campaign did not hand Stryker
+/// is one whose patterns took a file by mistake — what an unescaped dynamic
+/// route did — and the campaign measured nothing it can name.
+#[cfg(unix)]
+#[test]
+fn a_next_campaign_refuses_a_report_of_a_file_it_did_not_hand() {
+    if !present(
+        "node",
+        "a_next_campaign_refuses_a_report_of_a_file_it_did_not_hand",
+    ) {
+        return;
+    }
+    let pnpm = r#"#!/bin/sh
+case "$*" in
+  *"stryker run"*)
+    mkdir -p reports/mutation
+    printf '%s' '{"files":{"app/page.ts":{"mutants":[{"status":"Killed"}]},"app/s/page.ts":{"mutants":[{"status":"Killed"}]}}}' > reports/mutation/mutation.json
+    ;;
+esac
+exit 0
+"#;
+    let (said, why, status) = campaign_in("next", "app/page.ts", &[("pnpm", pnpm)], &[PAGE]);
+    assert_ne!(status, Some(0), "{why}");
+    assert!(!nunki::mutants::completed(&said), "{said}\n{why}");
+    assert!(why.contains("mutants of app/s/page.ts"), "{why}");
+}
+
+/// Stryker's incremental file goes in a directory of the campaign's own,
+/// outside the tree, that no run has written and that is gone once the
+/// campaign ends: a project that turns the mode on reuses nothing, and no
+/// file is left beside its sources. Measured on Stryker 10.0.0, with the
+/// mode on and its own file kept, a campaign over two ranges reported the
+/// 55 mutants of both files, where the ranges hold 14.
+#[cfg(unix)]
+#[test]
+fn the_next_campaign_keeps_strykers_incremental_file_outside_the_tree() {
+    if !present(
+        "node",
+        "the_next_campaign_keeps_strykers_incremental_file_outside_the_tree",
+    ) {
+        return;
+    }
+    let pnpm = r#"#!/bin/sh
+case "$*" in
+  *"stryker run"*) ;;
+  *) exit 0 ;;
+esac
+while [ $# -gt 0 ]; do
+  if [ "$1" = --incrementalFile ]; then
+    if [ -e "$2" ]; then echo "an incremental file was already there" >&2; fi
+    echo "incremental: $2" >&2
+    echo '{}' > "$2"
+  fi
+  shift
+done
+mkdir -p reports/mutation
+printf '%s' '{"files":{"app/page.ts":{"mutants":[{"status":"Killed"}]}}}' > reports/mutation/mutation.json
+exit 0
+"#;
+    let (said, why, status) = campaign_in("next", "app/page.ts", &[("pnpm", pnpm)], &[PAGE]);
+    assert_eq!(status, Some(0), "{why}");
+    assert!(nunki::mutants::completed(&said), "{said}\n{why}");
+    assert!(!why.contains("already there"), "{why}");
+    let file = why
+        .lines()
+        .find_map(|l| l.strip_prefix("incremental: "))
+        .unwrap_or_else(|| panic!("Stryker was given no incremental file: {why}"));
+    let file = Path::new(file);
+    assert!(file.is_absolute(), "{}", file.display());
+    assert!(
+        !file.parent().unwrap().exists(),
+        "the campaign left {}",
+        file.display()
+    );
+}
+
+/// The Next.js campaign now gives what a chain is rebuilt from (SPEC 4.4,
+/// the chain of campaigns). Recorded as `nunki` records it, the log the
+/// script prints on a branch lets the next campaign be partial, every other
+/// condition being met; dev's log, which counted no file, made it full.
+#[cfg(unix)]
+#[test]
+fn a_next_campaign_lets_the_next_one_be_partial() {
+    if !present("node", "a_next_campaign_lets_the_next_one_be_partial") {
+        return;
+    }
+    let pnpm = STRYKER_RANGES.replace("REPORT", PAGE_REPORT);
+    let (said, why, code) = next_campaign_on_branch(PAGE_BEFORE, PAGE_AFTER, &pnpm);
+    assert_eq!(code, Some(0), "{said}\n{why}");
+    let head = "c".repeat(40);
+    let fork = "f".repeat(40);
+    let handed = vec!["app/page.ts".to_string()];
+    let recorded = |log: &str| nunki::mutants::Campaign {
+        fingerprint: "fingerprint".to_string(),
+        head: head.clone(),
+        date: "2026-11-02T00:00:00Z".to_string(),
+        survivors: nunki::mutants::parse(log),
+        tried: nunki::mutants::tried(log),
+        files: nunki::mutants::trusted_files(log, &head, Some(&handed)),
+        chain: nunki::mutants::Chain {
+            tooling: Some("tools".to_string()),
+            fork: Some(fork.clone()),
+            handed: Some(handed.clone()),
+            ..Default::default()
+        },
+        stopped: None,
+    };
+    let next = |previous: &nunki::mutants::Campaign| {
+        nunki::mutants::scope(
+            nunki::mission::Rigor::Standard,
+            nunki::mutants::Replay::WhenChanged,
+            Some(previous),
+            Ok("tools"),
+            &fork,
+            |_| None,
+            |_| true,
+            |_| None,
+        )
+    };
+    assert_eq!(
+        next(&recorded(&said)),
+        nunki::mutants::Scope::Partial {
+            since: head.clone()
+        },
+        "{said}"
+    );
+    let dev = "{\"id\":\"app/page.ts:2:10:A:a\",\"file\":\"app/page.ts\",\"line\":2,\"end_line\":2,\"description\":\"Survived: A -> a\"}\n{\"campaign\":\"done\"}\n";
+    assert!(
+        matches!(
+            next(&recorded(dev)),
+            nunki::mutants::Scope::Full { why } if why.contains("did not count each file")
+        ),
+        "dev's log"
     );
 }
 
@@ -3292,11 +4463,33 @@ exit 4
 #[cfg(unix)]
 #[test]
 fn the_python_campaign_runs_with_the_trees_own_mutmut_config() {
-    let uv = "#!/bin/sh\necho \"uv $*\" >&2\nexit 0\n";
-    let python = r#"#!/bin/sh
-cat > /dev/null
-printf '%s\n' '{"id": "pkg.thing.x_a__mutmut_4", "file": "src/pkg/thing.py", "line": 3, "description": "survived: a -> b"}'
-"#;
+    if !present(
+        "python3",
+        "the_python_campaign_runs_with_the_trees_own_mutmut_config",
+    ) {
+        return;
+    }
+    let uv = python_uv(
+        r#"#!/bin/sh
+echo "uv $*" >&2
+case "$*" in
+  *"mutmut run"*)
+    RECORD
+    ;;
+  *"mutmut results"*)
+    printf '    pkg.thing.x_a__mutmut_4: survived\n'
+    ;;
+  *"mutmut show"*)
+    printf -- '--- src/pkg/thing.py\n+++ src/pkg/thing.py\n@@ -1,2 +1,2 @@\n def x_a(a, b):\n-    return a > b\n+    return a >= b\n'
+    ;;
+esac
+exit 0
+"#,
+    )
+    .replace(
+        "RECORD",
+        &record("src/pkg/thing.py", &["pkg.thing.x_a__mutmut_4"]),
+    );
     for (file, body) in [
         (
             "pyproject.toml",
@@ -3307,8 +4500,11 @@ printf '%s\n' '{"id": "pkg.thing.x_a__mutmut_4", "file": "src/pkg/thing.py", "li
         let (said, why, status) = campaign_in(
             "python",
             "src/pkg/thing.py",
-            &[("uv", uv), ("python3", python)],
-            &[(file, body)],
+            &[("uv", &uv)],
+            &[
+                (file, body),
+                ("src/pkg/thing.py", "def x_a(a, b):\n    return a > b\n"),
+            ],
         );
         assert_eq!(status, Some(0), "{file}: {why}");
         assert!(
@@ -3319,7 +4515,7 @@ printf '%s\n' '{"id": "pkg.thing.x_a__mutmut_4", "file": "src/pkg/thing.py", "li
         assert_eq!(nunki::mutants::parse(&said).len(), 1, "{file}: {said}");
         assert_eq!(
             said.lines().last(),
-            Some(r#"{"campaign":"done"}"#),
+            Some(r#"{"campaign":"done","tried":1,"found":1,"by_file":true}"#),
             "{file}: {said}"
         );
     }
@@ -3332,6 +4528,12 @@ printf '%s\n' '{"id": "pkg.thing.x_a__mutmut_4", "file": "src/pkg/thing.py", "li
 #[cfg(unix)]
 #[test]
 fn the_next_campaign_runs_with_the_trees_own_stryker_config() {
+    if !present(
+        "node",
+        "the_next_campaign_runs_with_the_trees_own_stryker_config",
+    ) {
+        return;
+    }
     // A Stryker that writes its report where the configuration tells it to,
     // and says on stderr what it was asked.
     let pnpm = r#"#!/bin/sh
@@ -3350,8 +4552,8 @@ exit 0
     let (said, why, status) = campaign_in(
         "next",
         "app/page.ts",
-        &[("pnpm", pnpm), ("node", NODE)],
-        &[("stryker.config.json", config)],
+        &[("pnpm", pnpm)],
+        &[("stryker.config.json", config), PAGE],
     );
     assert_eq!(status, Some(0), "{why}");
     assert!(why.contains("stryker asked: "), "Stryker never ran: {why}");
@@ -3360,7 +4562,7 @@ exit 0
     assert_eq!(nunki::mutants::parse(&said).len(), 1, "{said}\n{why}");
     assert_eq!(
         said.lines().last(),
-        Some(r#"{"campaign":"done"}"#),
+        Some(r#"{"campaign":"done","tried":2,"found":2,"by_file":true}"#),
         "{said}"
     );
     // The report it read is the one it removes behind itself.
@@ -3373,6 +4575,12 @@ exit 0
 #[cfg(unix)]
 #[test]
 fn a_next_campaign_whose_stryker_fails_never_says_it_finished() {
+    if !present(
+        "node",
+        "a_next_campaign_whose_stryker_fails_never_says_it_finished",
+    ) {
+        return;
+    }
     let pnpm = r#"#!/bin/sh
 case "$*" in
   *"stryker run"*)
@@ -3383,12 +4591,7 @@ case "$*" in
 esac
 exit 0
 "#;
-    let (said, why, status) = campaign_in(
-        "next",
-        "app/page.ts",
-        &[("pnpm", pnpm), ("node", NODE)],
-        &[],
-    );
+    let (said, why, status) = campaign_in("next", "app/page.ts", &[("pnpm", pnpm)], &[PAGE]);
     assert!(!nunki::mutants::completed(&said), "{said}\n{why}");
     assert_ne!(status, Some(0), "{why}");
     assert!(why.contains("stryker exited 1"), "{why}");
@@ -3476,21 +4679,22 @@ exit 2
 #[cfg(unix)]
 #[test]
 fn the_python_campaign_hands_mutation_jobs_to_mutmut() {
-    let uv = r#"#!/bin/sh
+    if !present(
+        "python3",
+        "the_python_campaign_hands_mutation_jobs_to_mutmut",
+    ) {
+        return;
+    }
+    let uv = python_uv(
+        r#"#!/bin/sh
 case "$*" in
   *"mutmut run"*) echo "asked: $*" >&2 ;;
 esac
 exit 0
-"#;
-    let python = "#!/bin/sh\ncat > /dev/null\n";
+"#,
+    );
     let run = |env: &[(&str, &str)]| {
-        campaign_with(
-            "python",
-            "src/pkg/thing.py",
-            &[("uv", uv), ("python3", python)],
-            &[],
-            env,
-        )
+        campaign_with("python", "src/pkg/thing.py", &[("uv", &uv)], &[], env)
     };
     let today = "run --frozen --no-sync mutmut run";
 
@@ -3503,7 +4707,7 @@ exit 0
     );
     assert_eq!(
         said.lines().last(),
-        Some(r#"{"campaign":"done"}"#),
+        Some(r#"{"campaign":"done","tried":0,"found":0,"by_file":true}"#),
         "{said}"
     );
     for n in ["1", "6"] {
@@ -3515,7 +4719,7 @@ exit 0
         );
         assert_eq!(
             said.lines().last(),
-            Some(r#"{"campaign":"done"}"#),
+            Some(r#"{"campaign":"done","tried":0,"found":0,"by_file":true}"#),
             "{said}"
         );
     }
@@ -3536,6 +4740,9 @@ exit 0
 #[cfg(unix)]
 #[test]
 fn the_next_campaign_hands_mutation_jobs_to_stryker() {
+    if !present("node", "the_next_campaign_hands_mutation_jobs_to_stryker") {
+        return;
+    }
     let pnpm = r#"#!/bin/sh
 case "$*" in
   *"stryker run"*)
@@ -3547,39 +4754,38 @@ esac
 exit 0
 "#;
     let run = |env: &[(&str, &str)]| {
-        campaign_with(
-            "next",
-            "app/page.ts",
-            &[("pnpm", pnpm), ("node", NODE)],
-            &[],
-            env,
-        )
+        campaign_with("next", "app/page.ts", &[("pnpm", pnpm)], &[PAGE], env)
     };
-    let today = "exec stryker run --mutate app/page.ts --cleanTempDir always --reporters json";
+    // The incremental file is in a directory made for the run, and is a new
+    // one each time; the rest of the command is what is compared.
+    let asked = |why: &str| {
+        let asked = asked(why);
+        match asked.split_once(" --incrementalFile ") {
+            Some((before, after)) => {
+                let rest = after.split_once(' ').map_or("", |(_, rest)| rest);
+                format!("{before} --incrementalFile SCRATCH {rest}")
+            }
+            None => asked,
+        }
+    };
+    let today = "exec stryker run --mutate app/page.ts --incrementalFile SCRATCH --cleanTempDir always --reporters json";
+    let done = r#"{"campaign":"done","tried":1,"found":1,"by_file":true}"#;
 
     let (said, why, status) = run(&[]);
     assert_eq!(status, Some(0), "{why}");
     assert_eq!(asked(&why), today, "without the variable");
-    assert_eq!(
-        said.lines().last(),
-        Some(r#"{"campaign":"done"}"#),
-        "{said}"
-    );
+    assert_eq!(said.lines().last(), Some(done), "{said}");
     for n in ["1", "6"] {
         let (said, why, status) = run(&[(nunki::mutants::JOBS_ENV, n)]);
         assert_eq!(status, Some(0), "{why}");
         assert_eq!(
             asked(&why),
             today.replace(
-                "--cleanTempDir",
-                &format!("--concurrency {n} --cleanTempDir")
+                "--incrementalFile",
+                &format!("--concurrency {n} --incrementalFile")
             )
         );
-        assert_eq!(
-            said.lines().last(),
-            Some(r#"{"campaign":"done"}"#),
-            "{said}"
-        );
+        assert_eq!(said.lines().last(), Some(done), "{said}");
     }
     for bad in BAD_JOBS {
         let (said, why, status) = run(&[(nunki::mutants::JOBS_ENV, bad)]);
@@ -3633,10 +4839,23 @@ fn present(program: &str, test: &str) -> bool {
 
 /// The shell line a stubbed `mutmut run` uses to leave mutmut's record of
 /// `path`, `mutants/<path>.meta`, naming `keys`: where the Python campaign
-/// reads a touched file's mutants from.
+/// reads a touched file's mutants from. Each is recorded as never run, as a
+/// filtered run leaves every mutant it did not take; [`record_coded`] gives
+/// each its exit code.
 #[cfg(unix)]
 fn record(path: &str, keys: &[&str]) -> String {
-    let keys: Vec<String> = keys.iter().map(|key| format!("\"{key}\":null")).collect();
+    let never_ran: Vec<(&str, &str)> = keys.iter().map(|key| (*key, "null")).collect();
+    record_coded(path, &never_ran)
+}
+
+/// [`record`], with each mutant's exit code as mutmut writes it: `null`
+/// for one never run, `1` for one a test killed.
+#[cfg(unix)]
+fn record_coded(path: &str, keys: &[(&str, &str)]) -> String {
+    let keys: Vec<String> = keys
+        .iter()
+        .map(|(key, code)| format!("\"{key}\":{code}"))
+        .collect();
     let dir = std::path::Path::new(path)
         .parent()
         .map(|dir| dir.display().to_string())
@@ -3669,7 +4888,7 @@ fn the_python_campaign_carries_each_survivors_span_from_mutmuts_diff() {
         return;
     }
     let thing = "def x_a(a, b):\n    return a > b\n\n\ndef x_b(n):\n    y = n + 1\n    return y\n";
-    let uv = r#"#!/bin/sh
+    let uv = python_uv(r#"#!/bin/sh
 case "$*" in
   *"mutmut run"*)
     RECORD
@@ -3688,7 +4907,7 @@ case "$*" in
     ;;
 esac
 exit 0
-"#
+"#)
     .replace(
         "RECORD",
         &record(
@@ -3732,7 +4951,7 @@ fn the_python_campaign_reports_a_methods_survivor_on_its_own_line() {
         return;
     }
     let thing = "def x_a(a, b):\n    return a > b\n\n\nclass Count:\n    def up(self, n):\n        if n < 0:\n            n = 0\n        return n + 1\n";
-    let uv = r#"#!/bin/sh
+    let uv = python_uv(r#"#!/bin/sh
 case "$*" in
   *"mutmut run"*)
     RECORD
@@ -3748,7 +4967,7 @@ case "$*" in
     ;;
 esac
 exit 0
-"#
+"#)
     .replace(
         "RECORD",
         &record(
@@ -3785,18 +5004,20 @@ fn the_python_campaign_refuses_a_result_it_cannot_read() {
     ) {
         return;
     }
-    let uv = r#"#!/bin/sh
+    let uv = python_uv(
+        r#"#!/bin/sh
 case "$*" in
   *"mutmut results"*)
     printf '    pkg.thing.x_a__mutmut_1: killed\n    pkg.thing.x_a mutant 2: survived\n'
     ;;
 esac
 exit 0
-"#;
+"#,
+    );
     let (said, why, code) = campaign_in(
         "python",
         "src/pkg/thing.py",
-        &[("uv", uv)],
+        &[("uv", &uv)],
         &[("src/pkg/thing.py", "def x_a(a, b):\n    return a > b\n")],
     );
     assert!(!nunki::mutants::completed(&said), "{said}\n{why}");
@@ -3815,18 +5036,25 @@ exit 0
 #[cfg(unix)]
 #[test]
 fn the_python_campaign_tests_only_the_touched_files_mutants() {
-    let uv = r#"#!/bin/sh
+    if !present(
+        "python3",
+        "the_python_campaign_tests_only_the_touched_files_mutants",
+    ) {
+        return;
+    }
+    let uv = python_uv(
+        r#"#!/bin/sh
 case "$*" in
   *"mutmut run"*) echo "asked: $*" >&2 ;;
 esac
 exit 0
-"#;
-    let python = "#!/bin/sh\ncat > /dev/null\n";
+"#,
+    );
     let (said, why, status) = campaign_in(
         "python",
         "src/pkg/thing.py src/pkg/__init__.py lib/tool.py tests/test_thing.py \
          src/pkg/sub/__init__.py __init__.py ./src/pkg/other.py README.md",
-        &[("uv", uv), ("python3", python)],
+        &[("uv", &uv)],
         &[],
     );
     assert_eq!(status, Some(0), "{why}");
@@ -3854,11 +5082,11 @@ fn a_python_campaign_whose_touched_files_hold_no_mutant_says_it_finished() {
         return;
     }
     let uv = |left: &str| {
-        format!(
+        python_uv(&format!(
             "#!/bin/sh\ncase \"$*\" in\n  *\"mutmut run\"*)\n    mkdir -p mutants\n    {left}\n    \
              echo 'AssertionError: Filtered for specific mutants, but nothing matches' >&2\n    \
              exit 1\n    ;;\nesac\nexit 0\n"
-        )
+        ))
     };
     let run = |left: &str| {
         campaign_in(
@@ -3880,7 +5108,7 @@ fn a_python_campaign_whose_touched_files_hold_no_mutant_says_it_finished() {
         assert_eq!(code, Some(0), "{left}: {why}");
         assert_eq!(
             said.lines().last(),
-            Some(r#"{"campaign":"done","tried":0,"found":0}"#),
+            Some(r#"{"campaign":"done","tried":0,"found":0,"by_file":true}"#),
             "{left}: {said}\n{why}"
         );
     }
@@ -3919,7 +5147,7 @@ fn the_python_campaign_shows_only_the_touched_files_survivors() {
     ) {
         return;
     }
-    let uv = r#"#!/bin/sh
+    let uv = python_uv(r#"#!/bin/sh
 case "$*" in
   *"mutmut run"*)
     RECORD
@@ -3936,7 +5164,7 @@ case "$*" in
     ;;
 esac
 exit 0
-"#
+"#)
     .replace(
         "RECORD",
         &record("src/pkg/thing.py", &["pkg.thing.x_a__mutmut_1"]),
@@ -3966,7 +5194,9 @@ exit 0
 /// `__init__`, and mutmut records its results under a second name, less the
 /// `__init__.` (measured on 3.8.0). Both names are read, as they were before
 /// the campaign was filtered, and the second is not refused for being no
-/// pattern's: refused, such a branch could never finish a campaign.
+/// pattern's: refused, such a branch could never finish a campaign. The
+/// second is placed by the name it copies, the one mutmut made: whether
+/// mutmut can give the diff of the copy was never measured.
 #[cfg(unix)]
 #[test]
 fn a_python_campaign_reads_both_names_mutmut_gives_a_module_called_init() {
@@ -3976,7 +5206,7 @@ fn a_python_campaign_reads_both_names_mutmut_gives_a_module_called_init() {
     ) {
         return;
     }
-    let uv = r#"#!/bin/sh
+    let uv = python_uv(r#"#!/bin/sh
 case "$*" in
   *"mutmut run"*)
     RECORD
@@ -3984,12 +5214,16 @@ case "$*" in
   *"mutmut results"*)
     printf '    __init__.x_top__mutmut_1: not checked\n    x_top__mutmut_1: no tests\n'
     ;;
-  *"mutmut show"*)
+  *"mutmut show __init__.x_top__mutmut_1"*)
     printf -- '--- src/__init__.py\n+++ src/__init__.py\n@@ -1,2 +1,2 @@\n def top(a):\n-    return a + 1\n+    return a - 1\n'
+    ;;
+  *"mutmut show"*)
+    echo "no diff for $*" >&2
+    exit 1
     ;;
 esac
 exit 0
-"#
+"#)
     .replace(
         "RECORD",
         &record(
@@ -4026,7 +5260,7 @@ fn a_python_campaign_refuses_a_touched_mutant_it_cannot_account_for() {
         return;
     }
     let uv = |name: &str, file: &str| {
-        r#"#!/bin/sh
+        python_uv(r#"#!/bin/sh
 case "$*" in
   *"mutmut run"*)
     RECORD
@@ -4039,7 +5273,7 @@ case "$*" in
     ;;
 esac
 exit 0
-"#
+"#)
         .replace("RECORD", &record("src/pkg/thing.py", &[name]))
         .replace("NAME", name)
         .replace("FILE", file)
@@ -4071,7 +5305,9 @@ exit 0
 
 /// Next.js: the span is the report's `location.end.line` when it is a whole
 /// number from 1 up, and 0 — unknown — when it is anything else, as the
-/// Rust template does with what jq reads.
+/// Rust template does with what jq reads. And the id carries the span only
+/// from a location whole numbers give in full: from any other, it says
+/// where the code starts, and names a mutant no name can run again.
 #[cfg(unix)]
 #[test]
 fn the_next_campaign_carries_each_survivors_span_and_sanitises_it() {
@@ -4095,7 +5331,7 @@ case "$*" in
 esac
 exit 0
 "#;
-    let (said, why) = campaign_of("next", "app/page.ts", &[("pnpm", pnpm)]);
+    let (said, why, _) = campaign_in("next", "app/page.ts", &[("pnpm", pnpm)], &[PAGE]);
     assert!(nunki::mutants::completed(&said), "{said}\n{why}");
     let ends: Vec<Option<u32>> = nunki::mutants::parse(&said)
         .into_iter()
@@ -4104,6 +5340,21 @@ exit 0
     assert_eq!(
         ends,
         vec![Some(4), Some(0), Some(0), Some(0), Some(0)],
+        "{said}"
+    );
+    let ids: Vec<String> = nunki::mutants::parse(&said)
+        .into_iter()
+        .map(|s| s.id)
+        .collect();
+    assert_eq!(
+        ids,
+        [
+            "app/page.ts:2:1-4:2:A:a",
+            "app/page.ts:5:1:B:b",
+            "app/page.ts:6:1:C:c",
+            "app/page.ts:7:1:D:d",
+            "app/page.ts:8:1:E:e"
+        ],
         "{said}"
     );
 }
@@ -5081,6 +6332,12 @@ fn a_rust_campaign_within_its_budget_or_without_one_runs_whole() {
 #[cfg(unix)]
 #[test]
 fn a_next_campaign_clears_the_sandbox_a_killed_one_left() {
+    if !present(
+        "node",
+        "a_next_campaign_clears_the_sandbox_a_killed_one_left",
+    ) {
+        return;
+    }
     let pnpm = r#"#!/bin/sh
 case "$*" in
   *"stryker run"*)
@@ -5094,8 +6351,11 @@ exit 0
     let (said, why, status) = campaign_in(
         "next",
         "app/page.ts",
-        &[("pnpm", pnpm), ("node", NODE)],
-        &[(".stryker-tmp/sandbox-1234/app/page.ts", "a mutant\n")],
+        &[("pnpm", pnpm)],
+        &[
+            (".stryker-tmp/sandbox-1234/app/page.ts", "a mutant\n"),
+            PAGE,
+        ],
     );
     assert_eq!(status, Some(0), "{why}");
     assert!(nunki::mutants::completed(&said), "{said}\n{why}");
@@ -5111,19 +6371,26 @@ exit 0
 #[cfg(unix)]
 #[test]
 fn a_python_campaign_clears_what_a_killed_one_left_before_it_runs() {
-    let uv = r#"#!/bin/sh
+    if !present(
+        "python3",
+        "a_python_campaign_clears_what_a_killed_one_left_before_it_runs",
+    ) {
+        return;
+    }
+    let uv = python_uv(
+        r#"#!/bin/sh
 case "$*" in
   *"mutmut run"*)
     if [ -e mutants/left-by-the-killed-one.py ]; then echo "old copy still there" >&2; fi
     ;;
 esac
 exit 0
-"#;
-    let python = "#!/bin/sh\ncat > /dev/null\n";
+"#,
+    );
     let (said, why, status) = campaign_in(
         "python",
         "src/pkg/thing.py",
-        &[("uv", uv), ("python3", python)],
+        &[("uv", &uv)],
         &[("mutants/left-by-the-killed-one.py", "a mutant\n")],
     );
     assert_eq!(status, Some(0), "{why}");
@@ -5413,9 +6680,11 @@ fn one_filter_each(calls: &str) {
 }
 
 /// Handed names, a campaign runs them and what its scope reaches by itself
-/// — the lines the branch changed — and nothing else: listed by name in the
-/// files handed, listed by the diff, checked, then run over those files
-/// under one filter of the names the two lists hold.
+/// — the lines the branch changed — and nothing else: listed by name under
+/// the filter alone, in every file of the crate, listed by the diff,
+/// checked, then run under one filter of the names the two lists hold and
+/// no `--file`, which would keep out a named mutant whose file was not
+/// handed.
 #[cfg(unix)]
 #[test]
 fn a_campaign_handed_names_runs_them_and_what_its_branch_changed() {
@@ -5455,7 +6724,7 @@ fn a_campaign_handed_names_runs_them_and_what_its_branch_changed() {
     let calls: Vec<&str> = calls.lines().collect();
     assert_eq!(calls.len(), 4, "{calls:?}");
     assert!(
-        calls[0].contains("--list") && calls[0].contains("--file src/lib.rs -F"),
+        calls[0].contains("--list") && calls[0].contains(" -F ") && !calls[0].contains("--file"),
         "{calls:?}"
     );
     assert!(
@@ -5463,13 +6732,13 @@ fn a_campaign_handed_names_runs_them_and_what_its_branch_changed() {
         "{calls:?}"
     );
     assert!(
-        calls[2].contains("--list") && calls[2].contains("--file src/lib.rs -F"),
+        calls[2].contains("--list") && calls[2].contains(" -F ") && !calls[2].contains("--file"),
         "{calls:?}"
     );
     assert!(
         !calls[3].contains("--list")
             && !calls[3].contains("--in-diff")
-            && calls[3].contains("--file src/lib.rs")
+            && !calls[3].contains("--file")
             && calls[3].contains(" -F "),
         "{calls:?}"
     );
@@ -5514,9 +6783,8 @@ fn a_name_not_in_the_code_is_a_campaign_that_measured_nothing() {
     );
 }
 
-/// Names that are not a list of names, or no Rust file to find them in,
-/// measure nothing, and say so: a list read wrong would run other mutants
-/// than the ones asked for.
+/// Names that are not a list of names measure nothing, and say so: a list
+/// read wrong would run other mutants than the ones asked for.
 #[cfg(unix)]
 #[test]
 fn names_the_campaign_cannot_read_are_a_campaign_that_measured_nothing() {
@@ -5536,21 +6804,53 @@ fn names_the_campaign_cannot_read_are_a_campaign_that_measured_nothing() {
         );
         assert!(calls.is_empty(), "{names}: {calls}");
     }
-    let (said, why, status, _) = named_campaign(
-        &listing,
-        &[],
-        &["README.md"],
-        &[(
-            nunki::mutants::NAMES_ENV,
-            "[\"src/lib.rs:1:5: replace > with == in keep\"]",
-        )],
-    );
-    assert_eq!(status, Some(1), "{why}");
-    assert!(!nunki::mutants::completed(&said), "{said}");
-    assert!(
-        why.contains("handed 1 mutant(s) by name and none of the Rust files they are in"),
-        "{why}"
-    );
+}
+
+/// Handed names and no Rust file — the recheck of a branch whose volets
+/// changed only tests, which no campaign mutates — a campaign runs the
+/// named mutants alone, where they are, and reads no diff: `git diff` given
+/// no path is the whole of it, and its scope would be every line the branch
+/// changed. Measured on cargo-mutants 27.1.0: four names in a file not
+/// handed ran under the filter alone, three caught by a test added since.
+#[cfg(unix)]
+#[test]
+fn a_campaign_handed_names_and_no_rust_file_runs_the_named_mutants_alone() {
+    let named = "src/lib.rs:1:5: replace > with == in keep";
+    let missed = "src/lib.rs:1:5: replace > with < in keep, missed";
+    let other = "src/lib.rs:3:5: replace + with - in other";
+    let listing = vec![
+        listed("src/lib.rs", 1, "replace > with == in keep"),
+        listed("src/lib.rs", 1, "replace > with < in keep, missed"),
+        listed("src/lib.rs", 3, "replace + with - in other"),
+    ];
+    let names = serde_json::to_string(&[named, missed]).unwrap();
+    // The last with a base the copy does not hold: no diff is read, so none
+    // fails.
+    let nowhere = "0".repeat(40);
+    for (paths, base) in [
+        (&[][..], None),
+        (&["README.md"][..], None),
+        (&[][..], Some(nowhere.as_str())),
+    ] {
+        let mut env = vec![(nunki::mutants::NAMES_ENV, names.as_str())];
+        env.extend(base.map(|b| (nunki::mutants::BASE_ENV, b)));
+        let (said, why, status, calls) = named_campaign(&listing, &[other], paths, &env);
+        assert_eq!(status, Some(0), "{paths:?}: {why}");
+        assert!(nunki::mutants::completed(&said), "{paths:?}: {said}\n{why}");
+        assert_eq!(nunki::mutants::tried(&said), Some(2), "{said}");
+        assert_eq!(
+            survivors_of(&said),
+            [missed.to_string()].into_iter().collect(),
+            "{said}"
+        );
+        one_filter_each(&calls);
+        assert!(
+            calls
+                .lines()
+                .all(|c| !c.contains("--in-diff") && !c.contains("--file")),
+            "{paths:?}: {calls}"
+        );
+    }
 }
 
 /// Over its budget, a campaign handed names samples what it would run — the
@@ -5605,11 +6905,13 @@ fn a_campaign_handed_names_over_its_budget_samples_them_under_one_filter() {
     assert!(ran(&said).iter().all(|s| expected.contains(s)), "{said}");
 }
 
-/// The Rust stack's script says it measures by name, and nunki hands names
-/// only to a script that says it: the Python and Next.js scripts, whose
-/// tools nunki has not measured by name, do not.
+/// The Rust and Next.js stacks' scripts say they measure by name, and in
+/// every file of the stack, and nunki hands names only to a script that
+/// says it: the Python script, whose tool nunki has not measured by name
+/// with a guard, does not, and a recheck hands it its survivors' files
+/// instead.
 #[test]
-fn only_the_rust_script_says_it_measures_by_name() {
+fn the_python_script_alone_does_not_say_it_measures_by_name() {
     let (_dir, root, nunki) = fresh();
     init(&root, &nunki, &KNOWN_STACKS.map(str::to_string)).unwrap();
     for stack in KNOWN_STACKS {
@@ -5622,7 +6924,12 @@ fn only_the_rust_script_says_it_measures_by_name() {
         .unwrap();
         assert_eq!(
             nunki::mutants::measures_by_name(&script),
-            stack == "rust",
+            stack != "python",
+            "{stack}"
+        );
+        assert_eq!(
+            nunki::mutants::measures_by_name_anywhere(&script),
+            stack != "python",
             "{stack}"
         );
     }
