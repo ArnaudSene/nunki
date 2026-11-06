@@ -636,8 +636,9 @@ enum MissionCommand {
     },
 
     /// Send the mission back to the coder, as a volet: a `FINDINGS` verdict,
-    /// a verified branch the HQ refuses on review, or the survivors of a
-    /// mutation campaign that stopped short — those two with `--because`.
+    /// with `--because` if the HQ rules on it; a verified branch the HQ
+    /// refuses on review, or the survivors of a mutation campaign that
+    /// stopped short — those two with `--because`.
     ///
     /// Bound by the mission's rigor: a report with no HIGH (at `standard`,
     /// and at `critical` from the second round on) is not sent back, nor a
@@ -645,8 +646,9 @@ enum MissionCommand {
     Iterate {
         /// The mission.
         id: String,
-        /// What the review refuses, for a verified mission. It is what the
-        /// coder reads, in `FOLLOWUP_HQ.md`, and the volet's cause. With
+        /// What the review refuses, for a verified mission; the HQ's ruling
+        /// on the report, for a `FINDINGS` verdict. It is what the coder
+        /// reads, in `FOLLOWUP_HQ.md`, and joins the volet's cause. With
         /// `--override`, why the rigor is set aside.
         #[arg(long = "because", value_name = "WHAT")]
         because: Option<String>,

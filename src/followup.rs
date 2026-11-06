@@ -302,6 +302,26 @@ pub fn reviewed(file: &Path, who: &str, why: &str) -> Result<(), FollowupError> 
     )
 }
 
+/// The HQ sends a security report back to the coder with its ruling on it
+/// (`nunki mission iterate --because`, on a `FINDINGS` verdict).
+///
+/// Here, because this is the file the coder reads first. The volet's cause
+/// holds the ruling too, but it is for the HQ — `verify`'s launch line,
+/// `mission status`, the handover — and the coder's prompt names the volet
+/// only.
+pub fn ruled_on_findings(file: &Path, who: &str, why: &str) -> Result<(), FollowupError> {
+    append(
+        file,
+        &format!(
+            "## {date} — {who} sends the security findings back, with a ruling\n\n\
+             **The HQ's ruling:** {why}\n\n\
+             This is a volet: correct the findings as the ruling says, prove it as\n\
+             for any lot, and the verification runs again from the gates.\n",
+            date = today(),
+        ),
+    )
+}
+
 /// The HQ called off the mutation campaign in flight, and said why
 /// (`nunki mission mutants --cancel`): `survivors` is how many it had already
 /// reported, kept in `MUTANTS.json` as from an incomplete campaign.

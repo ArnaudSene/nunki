@@ -360,7 +360,9 @@ pub fn lifted_by_nunki(accepted: &Accepted) -> Vec<String> {
 
 /// Send the mission back to the coder, bounded by `max_volets`.
 ///
-/// From a security verdict, as a correction of its findings. From a verified
+/// From a security verdict, as a correction of its findings: `because`, if
+/// given, is the HQ's ruling on them, written to `FOLLOWUP_HQ.md` and joined
+/// to the volet's cause. From a verified
 /// mission, as the HQ's review of the branch before it is pushed (SPEC 4.5:
 /// the HQ reads the code, and its answer is the iteration loop): `because`
 /// is then required, is written to `FOLLOWUP_HQ.md` where the coder reads it,
@@ -484,6 +486,17 @@ fn send_back(
             &mut state,
             Event::Reviewed {
                 because: because.to_string(),
+            },
+        )?;
+    } else if let Some(ruling) = because {
+        // The HQ's ruling on the report goes where a review's does: where
+        // the coder reads first, and into the volet's cause. Accepted and
+        // kept nowhere, the coder would correct the report without it.
+        crate::followup::ruled_on_findings(&paths.followup, &who(), ruling)?;
+        store.apply(
+            &mut state,
+            Event::Ruled {
+                because: ruling.to_string(),
             },
         )?;
     } else {
