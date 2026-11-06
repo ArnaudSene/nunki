@@ -671,8 +671,15 @@ fn a_real_compose_accepts_every_generated_profile() {
         );
         let normalised = String::from_utf8_lossy(&out.stdout);
         // `no` must survive as a string, not become the boolean it is in
-        // YAML 1.1.
-        assert!(normalised.contains(r#"restart: "no""#), "{normalised}");
+        // YAML 1.1. Quoted either way: Compose 5.1.3 writes `"no"` and 5.5.0
+        // writes `'no'`, the same string. A text match and not a parse, since
+        // a YAML 1.2 parser reads a bare `no` as a string too.
+        assert!(
+            [r#"restart: "no""#, "restart: 'no'"]
+                .iter()
+                .any(|quoted| normalised.contains(quoted)),
+            "{normalised}"
+        );
     }
 }
 
