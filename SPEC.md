@@ -3588,7 +3588,11 @@ Ce que la boucle veut dire, et ce qu'elle ne veut pas dire.
   - `nunki mission iterate <mission>` renvoie au codeur en volet. C'est un
     **geste**, pas un défaut : un `verify` qui renverrait de lui-même
     dépenserait un volet que l'humain voulait peut-être dépenser en
-    acceptation.
+    acceptation. Sur un `FINDINGS`, `--because` est facultatif : donné, il
+    est écrit daté dans `FOLLOWUP_HQ.md` et joint à la cause du volet.
+    Mesuré (#182) : il était accepté puis perdu, et le codeur repartait sans
+    la décision du HQ, qui étendait la correction à une seconde fonction que
+    le rapport ne nommait pas.
   - **Et une mission vérifiée se relit avant de se pousser.** Le HQ relit le
     code (2) ; ce qu'il refuse repart au codeur par le même verbe,
     `nunki mission iterate <mission> --because <ce qui est refusé>`, depuis

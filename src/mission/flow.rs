@@ -218,6 +218,11 @@ pub enum Event {
     Verdict { verdict: Verdict, report: String },
     /// From `Findings`: the HQ chooses to iterate.
     Iterate,
+    /// From `Findings`: the HQ chooses to iterate, and adds its ruling on the
+    /// report (`nunki mission iterate --because`): a fix it widens, a finding
+    /// it reads otherwise. The ruling joins the volet's cause, after the
+    /// report (SPEC 4.5).
+    Ruled { because: String },
     /// From `Findings`: the human lifted every finding (`nunki mission
     /// accept`) — or `nunki` did, every finding being `LOW` or `INFO`
     /// ([`crate::findings::lift_by_nunki`]). One transition for both, so a
@@ -751,6 +756,14 @@ impl Flow {
                     return Err(FlowError::RigorRefuses(departure));
                 }
                 self.volet(format!("security FINDINGS: {report}"))
+            }
+            (Stage::Findings { report }, Event::Ruled { because }) => {
+                if let Some(departure) = self.rigor_refuses() {
+                    return Err(FlowError::RigorRefuses(departure));
+                }
+                self.volet(format!(
+                    "security FINDINGS: {report} — HQ ruling: {because}"
+                ))
             }
             (Stage::Findings { report }, Event::Overridden { because, date }) => {
                 self.overridden(because, date)?;

@@ -1745,6 +1745,48 @@ fn iterating_sends_the_mission_back_to_the_coder_as_a_volet() {
     );
 }
 
+/// The HQ may rule on a report as it sends it back — widen the fix to code
+/// the report did not name — and the coder must not miss it: the ruling lands
+/// in `FOLLOWUP_HQ.md` and in the volet's cause, after the report. Measured
+/// (#182): it was accepted, then written nowhere.
+#[test]
+fn a_ruling_sent_with_findings_reaches_the_coder() {
+    let world = with_security_agent(1);
+    world.at_findings();
+
+    let state = nunki::findings::iterate(
+        &world.project,
+        "m1",
+        Some("fix the same redirect in /auth/logout too"),
+    )
+    .unwrap();
+    match state.flow.stage() {
+        Stage::Coding {
+            work: Work::Volet { cause, .. },
+            ..
+        } => {
+            assert!(
+                cause.starts_with("security FINDINGS: an open redirect"),
+                "{cause}"
+            );
+            assert!(
+                cause.ends_with("HQ ruling: fix the same redirect in /auth/logout too"),
+                "{cause}"
+            );
+        }
+        other => panic!("not a volet: {other:?}"),
+    }
+    let followup = world.followup();
+    assert!(
+        followup.contains("sends the security findings back, with a ruling"),
+        "{followup}"
+    );
+    assert!(
+        followup.contains("fix the same redirect in /auth/logout too"),
+        "{followup}"
+    );
+}
+
 /// A verified branch is read by the HQ before it is pushed (SPEC 4.5), and
 /// what the review refuses goes back to the coder as a volet. The reason is
 /// what the coder acts on, so it lands in `FOLLOWUP_HQ.md` and a review
@@ -4264,6 +4306,29 @@ fn at_standard_on(findings: &str) -> World {
     world.verify().unwrap();
     assert!(matches!(world.state().flow.stage(), Stage::Findings { .. }));
     world
+}
+
+/// A ruling is no way past the rigor: at `standard`, `iterate --because` on
+/// a MEDIUM-only report is refused as the plain verb is, and writes nothing.
+/// With `--override`, the reason is written once, as the departure, and not
+/// again as a ruling.
+#[test]
+fn at_standard_a_ruling_on_a_medium_only_report_is_refused_and_writes_nothing() {
+    let world = at_standard_on(MEDIUM_ONLY);
+    let before = world.followup();
+
+    let err = nunki::findings::iterate(&world.project, "m1", Some("zz fix it anyway")).unwrap_err();
+    assert!(
+        matches!(err, nunki::findings::FindingsError::RigorRefuses { .. }),
+        "{err}"
+    );
+    assert_eq!(world.followup(), before, "a refused verb leaves no record");
+    assert!(matches!(world.state().flow.stage(), Stage::Findings { .. }));
+
+    nunki::findings::iterate_overriding(&world.project, "m1", "zz fix it anyway").unwrap();
+    let told = world.followup();
+    assert_eq!(told.matches("zz fix it anyway").count(), 1, "{told}");
+    assert!(!told.contains("with a ruling"), "{told}");
 }
 
 /// At `standard`, `iterate` on a MEDIUM-only report is refused, names both

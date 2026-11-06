@@ -18,6 +18,12 @@ merged since the last one. `AGENTS.md`, under "Releases", says how.
   first stack `nunki.yaml` declares, the primary, and takes no other: the
   agent's image is built from it, with the other declared stacks added onto
   it. The help also names the prober among the images it builds.
+- **`nunki mission iterate --because` on a `FINDINGS` verdict now reaches
+  the coder.** The command took the reason and wrote it nowhere, so the
+  coder corrected the report without the HQ's ruling on it. The ruling is
+  now written to `FOLLOWUP_HQ.md` and joined to the volet's cause, after
+  the report. It opens no way past the rigor: where the plain verb is
+  refused, so is the verb with a ruling, and it writes nothing (#182).
 
 ## [0.2.0] - 2026-11-04
 

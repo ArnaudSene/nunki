@@ -1807,6 +1807,23 @@ fn at_standard_iterate_on_a_medium_only_report_is_refused() {
     assert_eq!(flow.volets(), 0);
 }
 
+/// A ruling is no way past the rigor: the verb with one is refused as the
+/// plain verb is, and moves nothing. `--override` is the way, on the record.
+#[test]
+fn at_standard_a_ruling_on_a_medium_only_report_is_refused() {
+    let mut flow = on_findings(Rigor::Standard, Some(Severity::Medium));
+    let before = flow.clone();
+
+    let error = flow
+        .advance(Event::Ruled {
+            because: "fix it anyway".into(),
+        })
+        .unwrap_err();
+
+    assert!(matches!(error, FlowError::RigorRefuses(_)), "{error:?}");
+    assert_eq!(flow, before, "a refused verb changes nothing");
+}
+
 /// With `--override`, the same report is sent back, as a volet like any
 /// other, and the departure is kept with its reason and date.
 #[test]
