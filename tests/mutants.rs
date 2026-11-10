@@ -11698,3 +11698,143 @@ fn a_measure_of_this_content_refutes_a_killed_on_what_it_found_and_nothing_else(
     assert_eq!(standing.len(), 3);
     assert_eq!(mutants::unrefuted(coders.clone(), &campaign, false), coders);
 }
+
+/// The log of [`in_flight`]'s campaign, last written an hour after the
+/// campaign's recorded start.
+fn last_written_an_hour_in(mission: &Path) {
+    let start = nunki::state::epoch_of("2026-09-18T22:52:37Z").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(mission.join("mutants.log"))
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(start + 3_600))
+        .unwrap();
+}
+
+/// What `max_work_hours` counts of a campaign is kept beside it (SPEC 7):
+/// every way a mission's campaign is read back ended times it, from its start
+/// to its log's last write — not to the reading, which may come hours later.
+#[test]
+fn every_way_a_campaign_ends_times_it_from_its_start_to_its_logs_last_write() {
+    let an_hour = mutants::Worked {
+        seconds: 3_600,
+        untimed: 0,
+    };
+
+    // Past its deadline, and stopped.
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot) = context(dir.path());
+    let mission = dir.path().join("mission");
+    let engine = in_flight(
+        &project,
+        &slot,
+        &mission,
+        HALF_A_CAMPAIGN,
+        45,
+        nunki::engine::Liveness::Running,
+        "nunki-run-running",
+    );
+    last_written_an_hour_in(&mission);
+    let progress = mutants::read_back(&project, &slot, engine, &mission).unwrap();
+    assert!(
+        matches!(progress, Some(mutants::Progress::Overrun { .. })),
+        "{progress:?}"
+    );
+    assert_eq!(mutants::worked(&mission).unwrap(), an_hour, "overrun");
+
+    // Its script ended.
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot) = context(dir.path());
+    let mission = dir.path().join("mission");
+    let engine = in_flight_left(
+        &project,
+        &slot,
+        &mission,
+        HALF_A_CAMPAIGN,
+        u32::MAX,
+        nunki::engine::Liveness::Running,
+        "nunki-run-ended",
+        "nunki-left",
+    );
+    last_written_an_hour_in(&mission);
+    let progress = mutants::read_back(&project, &slot, engine, &mission).unwrap();
+    assert!(
+        matches!(progress, Some(mutants::Progress::Lost(_))),
+        "{progress:?}"
+    );
+    assert_eq!(mutants::worked(&mission).unwrap(), an_hour, "ended");
+
+    // Its container went.
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot) = context(dir.path());
+    let mission = dir.path().join("mission");
+    let engine = in_flight(
+        &project,
+        &slot,
+        &mission,
+        HALF_A_CAMPAIGN,
+        u32::MAX,
+        nunki::engine::Liveness::Gone,
+        "nunki-run-running",
+    );
+    last_written_an_hour_in(&mission);
+    let progress = mutants::read_back(&project, &slot, engine, &mission).unwrap();
+    assert!(
+        matches!(progress, Some(mutants::Progress::Lost(_))),
+        "{progress:?}"
+    );
+    assert_eq!(mutants::worked(&mission).unwrap(), an_hour, "vanished");
+
+    // Called off by the HQ.
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot) = context(dir.path());
+    let paths = nunki::mission::dir::Paths::of(&project.hq_root, "m1");
+    let engine = in_flight(
+        &project,
+        &slot,
+        &paths.dir,
+        HALF_A_CAMPAIGN,
+        u32::MAX,
+        nunki::engine::Liveness::Running,
+        "nunki-run-running",
+    );
+    last_written_an_hour_in(&paths.dir);
+    let cancelled =
+        mutants::cancel_and_say(&project, &slot, engine, &paths, "Alex Martin", "not needed")
+            .unwrap();
+    assert!(
+        matches!(cancelled, mutants::Cancelled::Stopped { .. }),
+        "{cancelled:?}"
+    );
+    assert_eq!(mutants::worked(&paths.dir).unwrap(), an_hour, "cancelled");
+}
+
+/// A campaign is one start: read back twice — a crash between its line and
+/// its record's removal — it counts once. One started and never read back
+/// ended, or a line a crash cut short, is untimed: said, never zero.
+#[test]
+fn a_missions_campaigns_count_once_each_and_the_untimed_apart() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(
+        mutants::worked(dir.path()).unwrap(),
+        mutants::Worked::default(),
+        "no file, nothing worked"
+    );
+    std::fs::write(
+        dir.path().join(mutants::TIME_FILE),
+        "{\"fingerprint\":\"f1\",\"started_at\":\"2026-10-14T12:00:00Z\"}\n\
+         {\"fingerprint\":\"f1\",\"started_at\":\"2026-10-14T12:00:00Z\",\"seconds\":600}\n\
+         {\"fingerprint\":\"f1\",\"started_at\":\"2026-10-14T12:00:00Z\",\"seconds\":900}\n\
+         {\"fingerprint\":\"f1\",\"started_at\":\"2026-10-14T14:00:00Z\",\"seconds\":60}\n\
+         {\"fingerprint\":\"f2\",\"started_at\":\"2026-10-14T15:00:00Z\"}\n\
+         {\"fingerprint\":\"f3\",\"started_",
+    )
+    .unwrap();
+    assert_eq!(
+        mutants::worked(dir.path()).unwrap(),
+        mutants::Worked {
+            seconds: 660,
+            untimed: 2,
+        }
+    );
+}

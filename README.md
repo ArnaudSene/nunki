@@ -1242,8 +1242,9 @@ MISSION  (one branch off its base, one slot)
 
 - **Run** — one launch of one role's agent in its container, from start to
   its result. It is what `nunki` launches, watches, stops and reads back, and
-  what the caps count (`max_runs`, `max_tokens`). The coder has **one run per
-  lot**: the run ends when the lot is done and proved, or when it fails.
+  what the caps count (`max_runs`, `max_tokens`, and with the mutation
+  campaigns, `max_work_hours`). The coder has **one run per lot**: the run
+  ends when the lot is done and proved, or when it fails.
 - **Session** — the harness's conversation. The coder's is resumed from one
   lot to the next, and dropped after a failed attempt, so the next attempt
   starts fresh. The integrator and the security agent start a fresh one each

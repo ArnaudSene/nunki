@@ -207,6 +207,12 @@ pub struct Bounds {
     /// summed (SPEC 7). No default until real missions have been measured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u64>,
+    /// Hours of work a mission may spend before `nunki` holds it: its runs,
+    /// as the harness timed each one, and its mutation campaigns (SPEC 7).
+    /// Not the clock: the HQ's waits, the nights and the quota's are not the
+    /// tool's work. No default until real missions have been measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_work_hours: Option<u32>,
     /// Percent of the subscription's five-hour window past which `nunki`
     /// launches no run until the window resets (SPEC 4.3).
     #[serde(default = "default_five_hour_stop_percent")]
@@ -244,6 +250,7 @@ impl Default for Bounds {
             harness_wait_hours: default_harness_wait_hours(),
             max_runs: None,
             max_tokens: None,
+            max_work_hours: None,
         }
     }
 }

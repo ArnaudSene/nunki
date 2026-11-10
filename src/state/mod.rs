@@ -161,7 +161,8 @@ pub struct Spared {
     pub date: String,
 }
 
-/// Runs, and tokens as the harness reported them (SPEC 7).
+/// Runs, tokens and the runs' working time, as the harness reported them
+/// (SPEC 7).
 ///
 /// A run is counted when `nunki verify` reads it back, whatever the role — the
 /// coder's first run too, launched by `nunki mission start` and read back like
@@ -170,16 +171,49 @@ pub struct Spared {
 pub struct Spent {
     pub runs: u32,
     pub usage: crate::harness::Usage,
+    /// Seconds the runs worked, as the harness timed each one. The mutation
+    /// campaigns' time is kept with the campaigns, in the mission's folder
+    /// ([`crate::mutants::worked`]). Absent from a state an older `nunki`
+    /// wrote, which reads as none.
+    #[serde(default)]
+    pub run_seconds: u64,
+    /// Runs read back whose harness gave their time. The others are
+    /// [`Spent::untimed_runs`], said rather than read as zero, which would
+    /// make `max_work_hours` fire late — and a state an older `nunki` wrote
+    /// has none, so every run it counted reads as untimed.
+    #[serde(default)]
+    pub timed_runs: u32,
 }
 
 impl Spent {
-    /// One more run, and what it spent — nothing, if the harness did not say.
-    pub fn record(&mut self, usage: Option<&crate::harness::Usage>) {
+    /// One more run, what it spent and how long it worked — nothing, if the
+    /// harness did not say.
+    pub fn record(
+        &mut self,
+        usage: Option<&crate::harness::Usage>,
+        worked: Option<std::time::Duration>,
+    ) {
         self.runs = self.runs.saturating_add(1);
         if let Some(usage) = usage {
             self.usage.add(usage);
         }
+        if let Some(worked) = worked {
+            self.run_seconds = self.run_seconds.saturating_add(worked.as_secs());
+            self.timed_runs = self.timed_runs.saturating_add(1);
+        }
     }
+
+    /// Runs read back whose time is not known: the harness gave none, or an
+    /// older `nunki` read them back before runs were timed.
+    pub fn untimed_runs(&self) -> u32 {
+        self.runs.saturating_sub(self.timed_runs)
+    }
+}
+
+/// Seconds as hours and minutes, `7h05`: how `nunki` says a mission's
+/// working time.
+pub fn hours_said(seconds: u64) -> String {
+    format!("{}h{:02}", seconds / 3_600, (seconds % 3_600) / 60)
 }
 
 /// What one role concluded, and where.
@@ -514,6 +548,31 @@ pub fn now_secs() -> u64 {
 
 pub(crate) fn now_rfc3339() -> String {
     rfc3339(now_secs())
+}
+
+/// An RFC 3339 stamp as [`rfc3339`] writes it, `YYYY-MM-DDTHH:MM:SSZ`, back
+/// into seconds since the epoch: its exact inverse. `None` for anything else.
+pub fn epoch_of(stamp: &str) -> Option<u64> {
+    let b = stamp.as_bytes();
+    if b.len() != 20 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' || b[19] != b'Z' {
+        return None;
+    }
+    let n = |from: usize, to: usize| stamp.get(from..to)?.parse::<i64>().ok();
+    let (y, m, d) = (n(0, 4)?, n(5, 7)?, n(8, 10)?);
+    let (h, mi, s) = (n(11, 13)?, n(14, 16)?, n(17, 19)?);
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) || h > 23 || mi > 59 || s > 59 {
+        return None;
+    }
+    // Days-from-civil, Howard Hinnant's algorithm: the inverse of the one
+    // [`rfc3339`] uses.
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
+    let mp = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    u64::try_from(days * 86_400 + h * 3_600 + mi * 60 + s).ok()
 }
 
 /// Seconds since the epoch, formatted as RFC 3339 in UTC, without pulling

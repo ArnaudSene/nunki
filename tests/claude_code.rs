@@ -145,6 +145,19 @@ fn a_captured_successful_run_parses_as_finished_with_its_usage() {
     assert_eq!(parsed.usage.as_ref().map(|u| u.total()), Some(16_970));
 }
 
+/// How long the run worked is its `result` event's `duration_ms`, as the
+/// captured run reports it: what `max_work_hours` counts (SPEC 7). A run
+/// whose event carries none says none, never zero.
+#[test]
+fn a_captured_run_says_how_long_it_worked() {
+    assert_eq!(
+        parse_stream(&fixture()).duration,
+        Some(std::time::Duration::from_millis(2274))
+    );
+    let untimed = r#"{"type":"result","subtype":"success","is_error":false,"usage":{}}"#;
+    assert_eq!(parse_stream(untimed).duration, None);
+}
+
 /// A run that fell for a quota spent tokens too, and a cap that counted only
 /// the runs that succeeded would undercount the ones that cost the most.
 #[test]

@@ -705,6 +705,40 @@ impl Volet {
     }
 }
 
+/// A mission's campaign is timed from its launch (SPEC 7, `max_work_hours`):
+/// untimed while it runs — said, never zero — and timed once read back ended.
+#[test]
+fn a_campaign_is_untimed_while_it_runs_and_timed_once_read_back() {
+    let v = volet();
+    match v.launch(nunki::mission::Rigor::Critical) {
+        nunki::mutants::Progress::Started { .. } => {}
+        other => panic!("the campaign was not launched: {other:?}"),
+    }
+    assert_eq!(
+        nunki::mutants::worked(&v.mission).unwrap(),
+        nunki::mutants::Worked {
+            seconds: 0,
+            untimed: 1
+        }
+    );
+    let started = std::time::Instant::now();
+    let ended = loop {
+        match v.launch(nunki::mission::Rigor::Critical) {
+            nunki::mutants::Progress::Running { .. }
+                if started.elapsed() < std::time::Duration::from_secs(30) =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(100))
+            }
+            other => break other,
+        }
+    };
+    assert!(
+        !matches!(ended, nunki::mutants::Progress::Running { .. }),
+        "{ended:?}"
+    );
+    assert_eq!(nunki::mutants::worked(&v.mission).unwrap().untimed, 0);
+}
+
 /// What sizes a campaign reaches the script `nunki` launches (SPEC 4.4,
 /// gate 7: the budget): the mission's budget in seconds, the project's pace
 /// on file, and — for a partial campaign — the fraction of the campaign it

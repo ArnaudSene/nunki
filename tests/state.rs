@@ -640,3 +640,96 @@ fn status_says_the_campaign_in_flight_in_the_missions_slot() {
         assert!(line.contains(said), "{said:?} in {line}");
     }
 }
+
+/// The stamps `nunki` writes read back to the second they were written
+/// from, on either side of a leap day and of a year's end, and anything
+/// else reads as no time at all rather than as a wrong one.
+#[test]
+fn a_stamp_reads_back_to_the_second_it_was_written_from() {
+    for secs in [
+        0,
+        951_782_400,   // 2000-02-29T00:00:00Z
+        1_709_251_199, // 2024-02-29T23:59:59Z
+        1_798_761_599, // 2026-12-31T23:59:59Z
+        1_789_865_557,
+    ] {
+        let stamp = nunki::state::rfc3339(secs);
+        assert_eq!(nunki::state::epoch_of(&stamp), Some(secs), "{stamp}");
+    }
+    for bad in [
+        "",
+        "2026-09-18",
+        "2026-09-18T22:52:37",
+        "2026-09-18 22:52:37Z",
+        "2026-13-18T22:52:37Z",
+        "2026-09-18T24:52:37Z",
+        "2026-09-18T22:52:37.5Z",
+    ] {
+        assert_eq!(nunki::state::epoch_of(bad), None, "{bad:?}");
+    }
+    assert_eq!(nunki::state::hours_said(0), "0h00");
+    assert_eq!(nunki::state::hours_said(7 * 3_600 + 5 * 60 + 59), "7h05");
+}
+
+/// `mission status` says how long the mission worked — its runs and its
+/// campaigns apart, and what could not be timed — and the work cap beside
+/// the others (SPEC 7). This drives the real binary, as the hold's test
+/// does.
+#[test]
+fn status_says_how_long_the_mission_worked_and_what_was_not_timed() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    let home = common::project_home(&root, &dir.path().join("home"), "harness: claude-code\n");
+    let hq_root = home.join(nunki::project::HQ_DIR);
+    let mut capped = header();
+    capped.bounds.max_work_hours = Some(8);
+    nunki::mission::dir::create(&hq_root, "m1", &capped, "do it").unwrap();
+    let mut held = state("m1");
+    held.flow = Flow::new(capped).unwrap();
+    held.spent.runs = 2;
+    held.spent.timed_runs = 1;
+    held.spent.run_seconds = 3_600;
+    Store::open(&hq_root).unwrap().save(&held).unwrap();
+    let mission = nunki::mission::dir::Paths::of(&hq_root, "m1").dir;
+    fs::write(
+        mission.join(nunki::mutants::TIME_FILE),
+        "{\"fingerprint\":\"f1\",\"started_at\":\"2026-10-14T12:00:00Z\"}\n\
+         {\"fingerprint\":\"f1\",\"started_at\":\"2026-10-14T12:00:00Z\",\"seconds\":1800}\n\
+         {\"fingerprint\":\"f2\",\"started_at\":\"2026-10-14T13:00:00Z\"}\n",
+    )
+    .unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_nunki"))
+        .args(["-C"])
+        .arg(&root)
+        .args(["mission", "status", "m1"])
+        .env("HOME", dir.path().join("home"))
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains(
+            "worked    1h30 (runs 1h00, mutation campaigns 0h30), not counting 1 run(s) \
+             and 1 campaign(s) that were not timed"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("caps: none run(s), none tokens, 8 hour(s) of work"),
+        "{text}"
+    );
+}
+
+/// A state an older `nunki` wrote counted its runs and never timed them:
+/// they read as untimed, not as a mission that worked no time at all.
+#[test]
+fn runs_counted_before_runs_were_timed_read_as_untimed() {
+    let older: nunki::state::Spent =
+        serde_json::from_str(r#"{"runs":3,"usage":{"input_tokens":1,"output_tokens":2}}"#).unwrap();
+    assert_eq!((older.run_seconds, older.untimed_runs()), (0, 3));
+    assert_eq!(
+        nunki::verify::worked_said(&older, &nunki::mutants::Worked::default()),
+        "0h00 (runs 0h00, mutation campaigns 0h00), not counting 3 run(s) and 0 \
+         campaign(s) that were not timed"
+    );
+}
