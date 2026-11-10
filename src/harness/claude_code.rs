@@ -379,6 +379,11 @@ impl Harness for ClaudeCode {
         parse_stream(&text).windows
     }
 
+    fn duration(&self, handle: &RunHandle) -> Option<std::time::Duration> {
+        let text = fs::read_to_string(&handle.log).ok()?;
+        parse_stream(&text).duration
+    }
+
     fn readable(&self, text: &str) -> Vec<crate::harness::Line> {
         use crate::harness::{Line, LineKind};
         let mut lines = Vec::new();
@@ -498,6 +503,9 @@ pub struct Parsed {
     /// What the run spent, read from its `result` event whatever it
     /// concluded.
     pub usage: Option<Usage>,
+    /// How long the run worked, from its `result` event's `duration_ms`
+    /// whatever it concluded; `None` when that event or the field is absent.
+    pub duration: Option<std::time::Duration>,
     /// The subscription's windows, as the last `rate_limit_event` said.
     pub windows: Option<crate::consumption::Windows>,
 }
@@ -547,6 +555,10 @@ pub fn parse_stream(text: &str) -> Parsed {
             }
             Some("result") => {
                 parsed.usage = Some(usage_of(&event));
+                parsed.duration = event
+                    .get("duration_ms")
+                    .and_then(Value::as_u64)
+                    .map(std::time::Duration::from_millis);
                 parsed.outcome = Some(classify_result(&event));
             }
             // Emitted when a window's utilization moves, not at every turn

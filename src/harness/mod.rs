@@ -325,6 +325,14 @@ pub trait Harness: Send + Sync {
         None
     }
 
+    /// How long a finished run worked, if the harness says — whatever it
+    /// concluded, as [`Harness::usage`]: what `max_work_hours` counts
+    /// (SPEC 7). The default is that it does not say, and the run is then
+    /// counted as untimed, never as zero.
+    fn duration(&self, _handle: &RunHandle) -> Option<std::time::Duration> {
+        None
+    }
+
     /// How far the subscription's two windows are used — five hours and a
     /// week — as this run's own stream last said (SPEC 4.3). The run's, so
     /// the account's: a coder on one token and a supervisor on another are

@@ -2109,6 +2109,9 @@ fn resuming_forgets_the_harness_failures() {
 const SPENDING: &str = "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\
                         \"usage\":{\"input_tokens\":10,\"output_tokens\":40,\
                         \"cache_creation_input_tokens\":20,\"cache_read_input_tokens\":30}}\n";
+/// The same run, timed as Claude Code times it.
+const SPENDING_TIMED: &str = "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\
+                              \"duration_ms\":125400,\"usage\":{\"input_tokens\":10}}\n";
 /// A run that fell for a quota, having spent something first.
 const QUOTA_SPENT: &str = "{\"type\":\"result\",\"subtype\":\"error\",\"is_error\":true,\
                            \"result\":\"API Error: 429 rate limit reached\",\
@@ -2136,7 +2139,26 @@ impl World {
                 input_tokens,
                 ..Default::default()
             },
+            ..Default::default()
         };
+        store.save(&state).unwrap();
+    }
+
+    /// Re-freeze the header with a work cap of `hours`.
+    fn work_capped(&self, hours: u32) {
+        let store = Store::open(&self.project.hq_root).unwrap();
+        let mut state = store.load("m1").unwrap();
+        let mut header = state.flow.header().clone();
+        header.bounds.max_work_hours = Some(hours);
+        state.flow.reframe(header).unwrap();
+        store.save(&state).unwrap();
+    }
+
+    /// The runs have worked `seconds`.
+    fn worked(&self, seconds: u64) {
+        let store = Store::open(&self.project.hq_root).unwrap();
+        let mut state = store.load("m1").unwrap();
+        state.spent.run_seconds = seconds;
         store.save(&state).unwrap();
     }
 }
@@ -2160,6 +2182,33 @@ fn a_run_read_back_is_counted_with_the_four_kinds_it_spent() {
             cache_creation_input_tokens: 20,
             cache_read_input_tokens: 30,
         }
+    );
+}
+
+/// A run's working time is the harness's word on it, and a run that gave
+/// none is counted as untimed, never as zero (SPEC 7).
+#[test]
+fn a_run_read_back_is_counted_with_the_time_it_worked_or_as_untimed() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.run_recorded(Some(41), SPENDING_TIMED);
+    world.verdict("Integrator", "INTEGRATED", &world.head(), "wired");
+    world.verify().unwrap();
+    let spent = world.state().spent;
+    assert_eq!(
+        (spent.runs, spent.run_seconds, spent.untimed_runs()),
+        (1, 125, 0)
+    );
+
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.run_recorded(Some(41), SPENDING);
+    world.verdict("Integrator", "INTEGRATED", &world.head(), "wired");
+    world.verify().unwrap();
+    let spent = world.state().spent;
+    assert_eq!(
+        (spent.runs, spent.run_seconds, spent.untimed_runs()),
+        (1, 0, 1)
     );
 }
 
@@ -2226,6 +2275,89 @@ fn a_mission_at_its_token_cap_is_held_rather_than_launched() {
     }
 }
 
+/// At its work cap, the mission is held, and the hold says what is left: the
+/// lots, the volets, the survivors without an outcome. The campaigns' time
+/// counts with the runs' (SPEC 7).
+#[test]
+fn a_mission_at_its_work_cap_is_held_and_says_what_is_left() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.work_capped(1);
+    world.worked(3_599);
+    assert!(
+        world.verify().is_err(),
+        "below the cap, a launch is attempted"
+    );
+
+    world.worked(3_600);
+    let steps = world.verify().unwrap();
+    match steps.last() {
+        Some(Step::Held { who, reason, .. }) => {
+            assert_eq!(who, "nunki");
+            let reason = reason.as_deref().unwrap_or_default();
+            for said in [
+                "worked 1h00 (runs 1h00, mutation campaigns 0h00)",
+                "its cap is 1 h (`max_work_hours`)",
+                "every lot done",
+                "volets 0 / 3 spent",
+                "0 survivor(s) without an outcome",
+                "nunki mission reframe m1",
+            ] {
+                assert!(reason.contains(said), "{said:?} in {reason}");
+            }
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(world.state().held());
+}
+
+/// The campaigns' time counts toward the cap: half an hour of runs and
+/// half an hour of a campaign hold a mission capped at one hour.
+#[test]
+fn a_campaigns_time_counts_toward_the_work_cap() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.work_capped(1);
+    world.worked(1_800);
+    let mission = nunki::mission::dir::Paths::of(&world.project.hq_root, "m1").dir;
+    std::fs::write(
+        mission.join(nunki::mutants::TIME_FILE),
+        "{\"fingerprint\":\"f1\",\"started_at\":\"2026-10-14T12:00:00Z\",\"seconds\":1799}\n",
+    )
+    .unwrap();
+    assert!(
+        world.verify().is_err(),
+        "a second short, a launch is attempted"
+    );
+
+    std::fs::write(
+        mission.join(nunki::mutants::TIME_FILE),
+        "{\"fingerprint\":\"f1\",\"started_at\":\"2026-10-14T12:00:00Z\",\"seconds\":1800}\n",
+    )
+    .unwrap();
+    let steps = world.verify().unwrap();
+    assert!(
+        matches!(steps.last(), Some(Step::Held { reason: Some(r), .. }) if r.contains("max_work_hours")),
+        "{steps:?}"
+    );
+}
+
+/// While a lot is still being coded, the hold says how many are not done.
+#[test]
+fn a_work_cap_reached_mid_lots_says_how_many_are_not_done() {
+    let world = World::shaped(2, integration());
+    world.work_capped(1);
+    world.worked(3_600);
+    let steps = world.verify().unwrap();
+    match steps.last() {
+        Some(Step::Held { reason, .. }) => {
+            let reason = reason.as_deref().unwrap_or_default();
+            assert!(reason.contains("2 of 2 lot(s) not done"), "{reason}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
 /// The cap holds at every launch site, as the hold and the wait do.
 #[test]
 fn the_cap_holds_at_the_security_launch_site_too() {
@@ -2265,12 +2397,28 @@ fn raising_the_cap_and_resuming_lets_the_mission_launch_again() {
 #[test]
 fn caps_are_absent_unless_set() {
     let bounds = Bounds::default();
-    assert_eq!((bounds.max_runs, bounds.max_tokens), (None, None));
+    assert_eq!(
+        (bounds.max_runs, bounds.max_tokens, bounds.max_work_hours),
+        (None, None, None)
+    );
     let yaml = nunki::yaml::to_string(&bounds).unwrap();
     assert!(
-        !yaml.contains("max_runs") && !yaml.contains("max_tokens"),
+        !yaml.contains("max_runs") && !yaml.contains("max_tokens") && !yaml.contains("max_work"),
         "{yaml}"
     );
+}
+
+/// Set, the work cap is written into the header and read back from it,
+/// where the HQ raises it.
+#[test]
+fn a_work_cap_set_in_the_bounds_reads_back() {
+    let bounds = Bounds {
+        max_work_hours: Some(7),
+        ..Bounds::default()
+    };
+    let yaml = nunki::yaml::to_string(&bounds).unwrap();
+    assert!(yaml.contains("max_work_hours: 7"), "{yaml}");
+    assert_eq!(nunki::yaml::from_str::<Bounds>(&yaml).unwrap(), bounds);
 }
 
 /// Counted at every place `nunki` reads a run back: the security run is the

@@ -3890,6 +3890,31 @@ Voici l'addition.
   puis `nunki mission resume`. Un run se compte quand `nunki verify` le
   relit, quel que soit le rôle — le premier run du codeur compris, lancé par
   `nunki mission start`.
+  **Le temps de travail a sa borne aussi** : `max_work_hours`, facultatif et
+  sans valeur par défaut comme les deux autres, compte les heures de travail
+  de l'outil, pas l'horloge. Mesuré sur sept missions d'un même projet,
+  l'attente humaine faisait 42 % de l'horloge : une borne qui la compterait
+  tomberait pour des nuits et des week-ends. Elle compte la durée de chaque
+  run telle que le harnais la rend — le `duration_ms` de Claude Code, présent
+  sur 660 des 662 runs archivés d'un projet — et celle des campagnes de
+  mutation, de leur lancement à la dernière écriture de leur journal, tenue
+  à côté d'elles dans `MUTANTS.time.jsonl`, parce qu'une campagne est relue
+  par le premier verbe qui la regarde. Elle se vérifie au même site que les
+  deux autres : une mission peut la dépasser du run en cours et des campagnes
+  lancées avant le run suivant. Atteinte, la retenue dit ce qui reste — les
+  lots pas faits, les volets dépensés, les survivants sans issue — et se
+  relève de la même façon. Un run dont le harnais ne rend pas de durée, ou
+  une campagne qu'aucune relecture n'a chronométrée — encore en cours, ou
+  emportée avec son conteneur par un changement de profil —, n'est jamais
+  compté zéro : `nunki mission status` le compte à part, et les runs qu'un
+  `nunki` plus ancien a relus s'y lisent comme non chronométrés. Deux
+  limites écrites : les campagnes d'avant cette borne n'ont laissé aucune
+  ligne et ne sont pas comptées ; et on n'a pas mesuré si un run gelé par
+  `nunki mission pause` continue de compter dans le `duration_ms` du
+  harnais. La valeur se fixe par mission, à partir
+  d'une estimation — le nombre de lots fois la durée mesurée d'un lot, plus
+  une campagne et un tour de sécurité — et un défaut attend des missions
+  mesurées.
 - **Les tests système sur une vraie API tierce** : lents, instables, à effets
   de bord, et deux missions parallèles partagent le même palier de test et se
   marchent dessus. Une mission d'intégration qui déclare un fournisseur réel

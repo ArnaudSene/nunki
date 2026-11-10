@@ -1993,7 +1993,11 @@ fn watch(project: &Project, id: &str, every: u64) -> ExitCode {
         // that decides whether anything follows — reported before the run,
         // because "no run in progress" on a held mission reads as "it is
         // between two runs" when it means "nothing is coming".
-        print_hold(&state, id);
+        print_hold(
+            &state,
+            id,
+            &nunki::mission::dir::Paths::of(&project.hq_root, id).dir,
+        );
         let Some(handle) = &state.run else {
             println!("run       none in progress");
             return ExitCode::SUCCESS;
@@ -3203,7 +3207,11 @@ fn mission(project: &Project, command: MissionCommand) -> ExitCode {
                     // A hold changes what `nunki` will do next, and nothing
                     // else in this report says so: a mission held between
                     // two runs reads exactly like one nobody touched.
-                    print_hold(&state, &id);
+                    print_hold(
+                        &state,
+                        &id,
+                        &nunki::mission::dir::Paths::of(&project.hq_root, &id).dir,
+                    );
                     print_usage(project, &state);
                     print_monitor(project, &id);
                     if let Some(handle) = &state.run {
@@ -3416,7 +3424,7 @@ fn print_proposals(project: &Project, id: &str) {
 /// A hold, and a harness being waited out, change what `nunki` does next, and
 /// nothing else in a report says so: a mission held between two runs reads
 /// exactly like one nobody touched.
-fn print_hold(state: &nunki::state::MissionState, id: &str) {
+fn print_hold(state: &nunki::state::MissionState, id: &str, dir: &std::path::Path) {
     if let Some(hold) = &state.stopped {
         println!(
             "held      by {} on {} — nunki will launch no further run",
@@ -3460,13 +3468,23 @@ fn print_hold(state: &nunki::state::MissionState, id: &str) {
         u.cache_creation_input_tokens,
         u.cache_read_input_tokens
     );
+    // The working time `max_work_hours` counts: the runs' and the
+    // campaigns', what could not be timed said apart (SPEC 7).
+    match nunki::mutants::worked(dir) {
+        Ok(campaigns) => println!(
+            "worked    {}",
+            nunki::verify::worked_said(spent, &campaigns)
+        ),
+        Err(e) => println!("worked    the campaigns' time could not be read: {e}"),
+    }
     let bounds = &state.flow.header().bounds;
-    if bounds.max_runs.is_some() || bounds.max_tokens.is_some() {
+    if bounds.max_runs.is_some() || bounds.max_tokens.is_some() || bounds.max_work_hours.is_some() {
         let cap = |c: Option<String>| c.unwrap_or_else(|| "none".into());
         println!(
-            "          caps: {} run(s), {} tokens",
+            "          caps: {} run(s), {} tokens, {} hour(s) of work",
             cap(bounds.max_runs.map(|n| n.to_string())),
-            cap(bounds.max_tokens.map(|n| n.to_string()))
+            cap(bounds.max_tokens.map(|n| n.to_string())),
+            cap(bounds.max_work_hours.map(|n| n.to_string()))
         );
     }
 }

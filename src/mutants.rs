@@ -54,6 +54,13 @@ pub const FILE: &str = "MUTANTS.json";
 /// ([`Triage::EquivalentProposed`]), and the HQ rules.
 pub const TRIAGE_FILE: &str = "MUTANTS.triage.json";
 
+/// How long each of the mission's campaigns worked, beside them: one line
+/// when a campaign starts, one when `nunki` reads it back ended. What
+/// `max_work_hours` counts with the runs' time (SPEC 7), and kept here
+/// rather than in the mission's state, because a campaign is read back by
+/// whichever verb asks first, and most of them hold no state to write into.
+pub const TIME_FILE: &str = "MUTANTS.time.jsonl";
+
 /// Where the campaigns in flight are filed, under the HQ.
 ///
 /// Its own record on purpose: the mission state holds one run handle and that
@@ -1617,6 +1624,107 @@ pub fn write_running(hq_root: &Path, slot: &str, running: &Running) -> Result<()
     }
     let body = serde_json::to_string_pretty(running).expect("a record serialises");
     std::fs::write(&file, format!("{body}\n")).map_err(|e| MutantsError::Io(file, e))
+}
+
+/// One line of [`TIME_FILE`]: a campaign as it started, or, once read back
+/// ended, with the seconds it worked.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct Timed {
+    fingerprint: String,
+    started_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    seconds: Option<u64>,
+}
+
+/// What a mission's campaigns worked, as [`TIME_FILE`] says (SPEC 7).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Worked {
+    /// Seconds the campaigns read back ended worked, each from its start to
+    /// its log's last write.
+    pub seconds: u64,
+    /// Campaigns started and not timed: still in flight, taken down with
+    /// their container before any reading (`run::switch_out`), or whose log
+    /// could not be read. Said, never read as zero.
+    pub untimed: u32,
+}
+
+/// What the mission's campaigns worked. A campaign is one start, keyed by
+/// its fingerprint and its start: read back twice — a crash between the
+/// line and the record's removal — it counts once. No file, nothing worked.
+pub fn worked(dir: &Path) -> Result<Worked, MutantsError> {
+    let file = dir.join(TIME_FILE);
+    let text = match std::fs::read_to_string(&file) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Worked::default()),
+        Err(e) => return Err(MutantsError::Io(file, e)),
+    };
+    let mut campaigns: BTreeMap<(String, String), Option<u64>> = BTreeMap::new();
+    let mut unreadable = 0u32;
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        match serde_json::from_str::<Timed>(line) {
+            Ok(timed) => {
+                let seconds = campaigns
+                    .entry((timed.fingerprint, timed.started_at))
+                    .or_default();
+                if seconds.is_none() {
+                    *seconds = timed.seconds;
+                }
+            }
+            // Only `nunki` writes here; a line it cannot read is a write a
+            // crash cut short, and a campaign it cannot time.
+            Err(_) => unreadable = unreadable.saturating_add(1),
+        }
+    }
+    let seconds = campaigns
+        .values()
+        .flatten()
+        .fold(0u64, |a, s| a.saturating_add(*s));
+    let untimed = campaigns.values().filter(|s| s.is_none()).count();
+    Ok(Worked {
+        seconds,
+        untimed: u32::try_from(untimed)
+            .unwrap_or(u32::MAX)
+            .saturating_add(unreadable),
+    })
+}
+
+/// A mission's campaign has started: one line, so that one never read back
+/// is counted as untimed rather than forgotten.
+fn note_started(dir: &Path, running: &Running) -> Result<(), MutantsError> {
+    note_time(dir, running, None)
+}
+
+/// A mission's campaign was read back ended: the seconds from its start to
+/// its log's last write. Not to the reading — a campaign read back hours
+/// after it ended did not work those hours. A log that cannot be read leaves
+/// it untimed.
+fn note_ended(dir: &Path, running: &Running) -> Result<(), MutantsError> {
+    let ended = std::fs::metadata(&running.log)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs());
+    let seconds = ended
+        .zip(crate::state::epoch_of(&running.started_at))
+        .map(|(end, start)| end.saturating_sub(start));
+    note_time(dir, running, seconds)
+}
+
+fn note_time(dir: &Path, running: &Running, seconds: Option<u64>) -> Result<(), MutantsError> {
+    use std::io::Write;
+    let file = dir.join(TIME_FILE);
+    let line = serde_json::to_string(&Timed {
+        fingerprint: running.fingerprint.clone(),
+        started_at: running.started_at.clone(),
+        seconds,
+    })
+    .expect("a timed line serialises");
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&file)
+        .and_then(|mut f| writeln!(f, "{line}"))
+        .map_err(|e| MutantsError::Io(file, e))
 }
 
 pub fn forget_running(hq_root: &Path, slot: &str) -> Result<(), MutantsError> {
@@ -3422,14 +3530,17 @@ fn read_back_into(
                         // Outside missions nothing is recorded of a campaign
                         // stopped short: the debt holds what was measured.
                         let survivors = match &sink {
-                            Sink::Mission(dir) => record_stopped(
-                                dir,
-                                &running,
-                                &text,
-                                Stopped::Deadline {
-                                    minutes: running.deadline_minutes,
-                                },
-                            )?,
+                            Sink::Mission(dir) => {
+                                note_ended(dir, &running)?;
+                                record_stopped(
+                                    dir,
+                                    &running,
+                                    &text,
+                                    Stopped::Deadline {
+                                        minutes: running.deadline_minutes,
+                                    },
+                                )?
+                            }
                             Sink::OffMission => 0,
                         };
                         forget_running(&project.hq_root, &slot.name)?;
@@ -3472,6 +3583,9 @@ fn read_back_into(
         // A positive answer from the engine: the container has exited, or the
         // engine no longer knows it. Nothing in it can be running.
         Presence::Vanished(why) => {
+            if let Sink::Mission(dir) = &sink {
+                note_ended(dir, &running)?;
+            }
             forget_running(&project.hq_root, &slot.name)?;
             Progress::Lost(why)
         }
@@ -3500,6 +3614,7 @@ fn read_ended(
     dir: &Path,
     running: &Running,
 ) -> Result<Progress, MutantsError> {
+    note_ended(dir, running)?;
     // Read after the stop: whatever the campaign printed until then counts.
     let text = std::fs::read_to_string(&running.log).unwrap_or_default();
     if completed(&text) {
@@ -3817,6 +3932,7 @@ pub fn cancel(
             if let Some(why) = unstopped_said(&halt) {
                 return Err(MutantsError::NotStopped(why));
             }
+            note_ended(dir, &running)?;
             let survivors = record_stopped(
                 dir,
                 &running,
@@ -4130,30 +4246,28 @@ pub fn campaign(
         .spawn(&launched, &log)
         .map_err(|e| MutantsError::Launch(e.to_string()))?;
 
-    write_running(
-        &project.hq_root,
-        &slot.name,
-        &Running {
-            fingerprint: want.clone(),
-            head,
-            started_at: crate::state::now_rfc3339(),
-            container: spawned.container,
-            pid: spawned.pid,
-            log,
-            deadline_minutes: deadline,
-            chain: Chain {
-                scope: scope.clone(),
-                tooling: tooling.ok(),
-                earlier: Vec::new(),
-                ran: None,
-                fork: Some(fork.clone()),
-                handed: Some(paths),
-                named: by_name,
-                sample: None,
-            },
-            off_mission: None,
+    let running = Running {
+        fingerprint: want.clone(),
+        head,
+        started_at: crate::state::now_rfc3339(),
+        container: spawned.container,
+        pid: spawned.pid,
+        log,
+        deadline_minutes: deadline,
+        chain: Chain {
+            scope: scope.clone(),
+            tooling: tooling.ok(),
+            earlier: Vec::new(),
+            ran: None,
+            fork: Some(fork.clone()),
+            handed: Some(paths),
+            named: by_name,
+            sample: None,
         },
-    )?;
+        off_mission: None,
+    };
+    write_running(&project.hq_root, &slot.name, &running)?;
+    note_started(dir, &running)?;
     Ok(Progress::Started {
         fingerprint: want,
         scope,

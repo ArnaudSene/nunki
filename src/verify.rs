@@ -301,7 +301,7 @@ pub fn verify_as(
                 let label = state.flow.label(&work);
                 let event = match state.run.clone() {
                     Some(handle) => {
-                        let (outcome, usage, windows) = match read_back(
+                        let (outcome, measured) = match read_back(
                             project,
                             engine.clone(),
                             &state,
@@ -316,17 +316,9 @@ pub fn verify_as(
                                 });
                                 return Ok(steps);
                             }
-                            Ended::With(outcome, usage, windows) => (outcome, usage, windows),
+                            Ended::With(outcome, measured) => (outcome, measured),
                         };
-                        let spared = tally(
-                            project,
-                            &mut state,
-                            &header,
-                            usage.as_ref(),
-                            windows,
-                            &outcome,
-                            now,
-                        )?;
+                        let spared = tally(project, &mut state, &header, measured, &outcome, now)?;
                         // A turn `nunki` ended is replayed, whatever the run
                         // left, and nothing is judged on a tree it did not
                         // finish — a resume block one commit behind would
@@ -467,7 +459,14 @@ pub fn verify_as(
                     steps.push(step);
                     return Ok(steps);
                 }
-                if let Some(step) = capped(&store, &mut state, Role::Coder, &header.bounds, id)? {
+                if let Some(step) = capped(
+                    &store,
+                    &mut state,
+                    Role::Coder,
+                    &header.bounds,
+                    id,
+                    &paths.dir,
+                )? {
                     steps.push(step);
                     return Ok(steps);
                 }
@@ -584,17 +583,10 @@ pub fn verify_as(
                             });
                             return Ok(steps);
                         }
-                        Ended::With(outcome, usage, windows) => {
+                        Ended::With(outcome, measured) => {
                             let head = crate::git::slot_head(&slot.tree)?;
-                            let spared = tally(
-                                project,
-                                &mut state,
-                                &header,
-                                usage.as_ref(),
-                                windows,
-                                &outcome,
-                                now,
-                            )?;
+                            let spared =
+                                tally(project, &mut state, &header, measured, &outcome, now)?;
                             let mut event = concluded(
                                 Role::Integrator,
                                 outcome,
@@ -694,9 +686,14 @@ pub fn verify_as(
                     steps.push(step);
                     return Ok(steps);
                 }
-                if let Some(step) =
-                    capped(&store, &mut state, Role::Integrator, &header.bounds, id)?
-                {
+                if let Some(step) = capped(
+                    &store,
+                    &mut state,
+                    Role::Integrator,
+                    &header.bounds,
+                    id,
+                    &paths.dir,
+                )? {
                     steps.push(step);
                     return Ok(steps);
                 }
@@ -771,17 +768,10 @@ pub fn verify_as(
                             });
                             return Ok(steps);
                         }
-                        Ended::With(outcome, usage, windows) => {
+                        Ended::With(outcome, measured) => {
                             let head = crate::git::slot_head(&slot.tree)?;
-                            let spared = tally(
-                                project,
-                                &mut state,
-                                &header,
-                                usage.as_ref(),
-                                windows,
-                                &outcome,
-                                now,
-                            )?;
+                            let spared =
+                                tally(project, &mut state, &header, measured, &outcome, now)?;
                             // The gates are played by the closure, between
                             // the single parse of the verdict and the lift
                             // decided on it ([`security_concluded`]).
@@ -818,8 +808,14 @@ pub fn verify_as(
                     steps.push(step);
                     return Ok(steps);
                 }
-                if let Some(step) = capped(&store, &mut state, Role::Security, &header.bounds, id)?
-                {
+                if let Some(step) = capped(
+                    &store,
+                    &mut state,
+                    Role::Security,
+                    &header.bounds,
+                    id,
+                    &paths.dir,
+                )? {
                     steps.push(step);
                     return Ok(steps);
                 }
@@ -1123,8 +1119,9 @@ fn capped(
     role: Role,
     bounds: &Bounds,
     id: &str,
+    dir: &std::path::Path,
 ) -> Result<Option<Step>, VerifyError> {
-    let Some(why) = over_cap(&state.spent, bounds, id) else {
+    let Some(why) = over_cap(state, bounds, id, dir)? else {
         return Ok(None);
     };
     state.hold_for("nunki", why);
@@ -1132,7 +1129,13 @@ fn capped(
     Ok(held(state, role))
 }
 
-fn over_cap(spent: &Spent, bounds: &Bounds, id: &str) -> Option<String> {
+fn over_cap(
+    state: &MissionState,
+    bounds: &Bounds,
+    id: &str,
+    dir: &std::path::Path,
+) -> Result<Option<String>, VerifyError> {
+    let spent = &state.spent;
     let raise = format!(
         "raise it in the mission's header, then `nunki mission reframe {id} --yes` and \
          `nunki mission resume {id}`"
@@ -1140,21 +1143,74 @@ fn over_cap(spent: &Spent, bounds: &Bounds, id: &str) -> Option<String> {
     if let Some(max) = bounds.max_runs
         && spent.runs >= max
     {
-        return Some(format!(
+        return Ok(Some(format!(
             "the mission has spent {} run(s), and its cap is {max} (`max_runs`) — {raise}",
             spent.runs
-        ));
+        )));
     }
     if let Some(max) = bounds.max_tokens
         && spent.usage.total() >= max
     {
-        return Some(format!(
+        return Ok(Some(format!(
             "the mission has spent {} tokens, and its cap is {max} (`max_tokens`, the four \
              kinds summed) — {raise}",
             spent.usage.total()
+        )));
+    }
+    if let Some(max) = bounds.max_work_hours {
+        let campaigns = crate::mutants::worked(dir)?;
+        if worked_seconds(spent, &campaigns) >= u64::from(max) * 3_600 {
+            // What is left goes with the hold, so that the HQ decides on
+            // the residue and not on the clock alone (SPEC 7).
+            let header = state.flow.header();
+            let lots = match state.flow.stage() {
+                Stage::Coding {
+                    work: Work::Lot(i), ..
+                } => format!(
+                    "{} of {} lot(s) not done",
+                    header.lots.len().saturating_sub(*i),
+                    header.lots.len()
+                ),
+                _ => "every lot done".to_string(),
+            };
+            let open = crate::mutants::open(dir, false)?.len();
+            return Ok(Some(format!(
+                "the mission has worked {}, and its cap is {max} h (`max_work_hours`). \
+                 Left: {lots}, volets {} spent, {open} survivor(s) without an outcome; \
+                 `nunki mission status {id}` says the rest — {raise}",
+                worked_said(spent, &campaigns),
+                state.flow.volets_said(),
+            )));
+        }
+    }
+    Ok(None)
+}
+
+/// Seconds a mission has worked: its runs, as the harness timed them, and
+/// its mutation campaigns (SPEC 7). What was not timed is not in it, and
+/// [`worked_said`] says so.
+pub fn worked_seconds(spent: &Spent, campaigns: &crate::mutants::Worked) -> u64 {
+    spent.run_seconds.saturating_add(campaigns.seconds)
+}
+
+/// How long a mission has worked, as `nunki mission status` and the hold of
+/// `max_work_hours` say it: the total, then runs and campaigns apart, and
+/// what could not be timed — said, never read as zero.
+pub fn worked_said(spent: &Spent, campaigns: &crate::mutants::Worked) -> String {
+    let mut said = format!(
+        "{} (runs {}, mutation campaigns {})",
+        crate::state::hours_said(worked_seconds(spent, campaigns)),
+        crate::state::hours_said(spent.run_seconds),
+        crate::state::hours_said(campaigns.seconds),
+    );
+    if spent.untimed_runs() > 0 || campaigns.untimed > 0 {
+        said.push_str(&format!(
+            ", not counting {} run(s) and {} campaign(s) that were not timed",
+            spent.untimed_runs(),
+            campaigns.untimed
         ));
     }
-    None
+    said
 }
 
 fn fault_of(outcome: &Outcome) -> Option<Fault> {
@@ -1238,22 +1294,21 @@ fn attempt_failed(event: &Event) -> Option<String> {
     }
 }
 
-/// What every read-back records, whatever the role: the run and what it
-/// spent, the account's windows as it last saw them, and the harness's
+/// What every read-back records, whatever the role: the run, what it spent
+/// and how long it worked, the account's windows as it last saw them, and the harness's
 /// failures in a row. Returns the spared mark, spent by this read-back — a
 /// turn `nunki` ended is no fault of the harness's, and is not counted as one.
 fn tally(
     project: &Project,
     state: &mut MissionState,
     header: &crate::mission::Header,
-    usage: Option<&Usage>,
-    windows: Option<crate::consumption::Windows>,
+    measured: Measured,
     outcome: &Outcome,
     now: u64,
 ) -> Result<Option<crate::state::Spared>, VerifyError> {
     let spared = state.spared.take();
-    state.spent.record(usage);
-    crate::consumption::note(project, state, windows, now).map_err(VerifyError::Usage)?;
+    state.spent.record(measured.usage.as_ref(), measured.worked);
+    crate::consumption::note(project, state, measured.windows, now).map_err(VerifyError::Usage)?;
     let fault = if spared.is_some() {
         None
     } else {
@@ -1265,13 +1320,20 @@ fn tally(
 
 /// What a recorded run came to, as the engine answers it.
 enum Ended {
-    /// How it ended, what it spent, and how far the subscription's windows
-    /// were used — each as far as the harness said.
-    With(Outcome, Option<Usage>, Option<crate::consumption::Windows>),
+    /// How it ended, and what the harness measured of it.
+    With(Outcome, Measured),
     /// The question could not be put. A run `nunki` cannot reach is not a run
     /// that failed, and turning one into the other would consume an attempt
     /// on a machine that was asleep.
     Unreachable(String),
+}
+
+/// What a finished run's harness said of it, each as far as it said: what it
+/// spent, how far the subscription's windows were used, how long it worked.
+struct Measured {
+    usage: Option<Usage>,
+    windows: Option<crate::consumption::Windows>,
+    worked: Option<std::time::Duration>,
 }
 
 fn read_back(
@@ -1317,8 +1379,11 @@ fn read_back(
             }
             Ended::With(
                 outcome,
-                crate::harness::Harness::usage(&harness, handle),
-                crate::harness::Harness::windows(&harness, handle),
+                Measured {
+                    usage: crate::harness::Harness::usage(&harness, handle),
+                    windows: crate::harness::Harness::windows(&harness, handle),
+                    worked: crate::harness::Harness::duration(&harness, handle),
+                },
             )
         }
         // A frozen run is a run in progress that a human stopped on purpose.

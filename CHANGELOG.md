@@ -11,6 +11,23 @@ merged since the last one. `AGENTS.md`, under "Releases", says how.
 
 ## [Unreleased]
 
+### Added
+
+- **A cap on a mission's working time, `max_work_hours`.** Set in the
+  mission's header or in `nunki.yaml`, like `max_runs` and `max_tokens`, it
+  holds the mission between two runs once its runs and its mutation
+  campaigns have worked that many hours. It counts the tool's work, not the
+  clock: the HQ's waits, the nights and the quota's are not in it. The hold
+  says what is left: the lots not done, the volets spent and the survivors
+  without an outcome. Raise it in the header, then `nunki mission reframe`
+  and `nunki mission resume`. It has no default.
+- **`nunki mission status` says how long the mission has worked**, its runs
+  and its campaigns apart, and how many runs or campaigns could not be
+  timed. A run is timed by the harness; a campaign from its launch to its
+  log's last write, in `MUTANTS.time.jsonl` in the mission's folder. Runs
+  an older `nunki` read back show as not timed; the campaigns it ran left
+  no record of their time, and are not counted.
+
 ### Fixed
 
 - **`nunki slot rebuild --help` now says which stack `--stack` takes.** It
