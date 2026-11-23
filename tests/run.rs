@@ -70,6 +70,37 @@ fn a_model_is_chosen_by_the_mission_then_the_project() {
     );
 }
 
+/// What every launch hands the harness: the model the mission chose and the
+/// permission mode the project declares, each reaching the CLI as a flag.
+/// Dropped, the run would go on the CLI's defaults without a word — another
+/// model, and `auto` where the project asked for something else.
+#[test]
+fn the_harness_is_launched_with_the_missions_model_and_the_projects_permission_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut project = project(dir.path());
+    project.config.model = Some("claude-sonnet-5".to_string());
+    project.config.permission_mode = "dontAsk".to_string();
+    let mut header = header_with(nunki::mission::Integration::None {
+        reason: "no external service is involved".to_string(),
+    });
+    header.model = Some("claude-opus-5".to_string());
+
+    let config = run::harness_config(&project, &header);
+    assert_eq!(
+        config,
+        nunki::harness::claude_code::Config {
+            model: Some("claude-opus-5".to_string()),
+            permission_mode: "dontAsk".to_string(),
+            ..Default::default()
+        }
+    );
+    // Both differ from what the CLI would take on its own, so a field left
+    // out is a field this test sees.
+    let default = nunki::harness::claude_code::Config::default();
+    assert_ne!(config.model, default.model);
+    assert_ne!(config.permission_mode, default.permission_mode);
+}
+
 #[test]
 fn an_account_is_chosen_by_the_mission_then_the_project_then_the_default() {
     use nunki::account::{Account, Accounts};

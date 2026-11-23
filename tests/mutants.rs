@@ -11838,3 +11838,52 @@ fn a_missions_campaigns_count_once_each_and_the_untimed_apart() {
         }
     );
 }
+
+/// A campaign stopped midway records what it is, whatever the record of it
+/// in flight said: no earlier campaigns behind it and no count of its own.
+/// It tried part of what it was handed, and its survivors are only the ones
+/// the tool had reported — so it continues no chain, and a count would be a
+/// share of the wrong whole. The record in flight is read back from disk,
+/// and nothing there is trusted to say otherwise.
+#[test]
+fn a_stopped_campaign_records_no_chain_behind_it_and_no_count_of_its_own() {
+    let dir = tempfile::tempdir().unwrap();
+    let running = mutants::Running {
+        off_mission: None,
+        chain: mutants::Chain {
+            earlier: vec![mutants::Link {
+                head: "1111111".into(),
+                date: "2026-10-14T12:00:00Z".into(),
+                scope: Default::default(),
+                tried: Some(40),
+            }],
+            ran: Some(7),
+            fork: Some("abcdef0".into()),
+            ..Default::default()
+        },
+        fingerprint: "f1".into(),
+        head: "2222222".into(),
+        started_at: "2026-10-15T12:00:00Z".into(),
+        container: "c".into(),
+        pid: Some(1),
+        log: dir.path().join("log"),
+        deadline_minutes: 5,
+    };
+    mutants::record_stopped(
+        dir.path(),
+        &running,
+        "",
+        mutants::Stopped::Deadline { minutes: 5 },
+    )
+    .unwrap();
+
+    let recorded = mutants::read(dir.path()).unwrap().expect("recorded");
+    assert!(recorded.chain.earlier.is_empty(), "{:?}", recorded.chain);
+    assert_eq!(recorded.chain.ran, None, "{:?}", recorded.chain);
+    // The rest of the chain is the record's own.
+    assert_eq!(recorded.chain.fork.as_deref(), Some("abcdef0"));
+    assert_eq!(
+        recorded.stopped,
+        Some(mutants::Stopped::Deadline { minutes: 5 })
+    );
+}

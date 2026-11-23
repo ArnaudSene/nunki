@@ -1718,6 +1718,18 @@ fn a_campaign_outside_missions_runs_on_the_recorded_base_and_lands_in_the_debt()
         (started.commit.as_str(), started.since),
         (dev.as_str(), None)
     );
+    // The record in flight says what the campaign is and why it is whole:
+    // no mission's chain, but a campaign outside missions — not a bare full
+    // scope with no reason, which reads like a mission's first campaign.
+    let record = nunki::mutants::read_running(&project.hq_root, &v.w.slot.name)
+        .unwrap()
+        .expect("the campaign is recorded in flight");
+    assert_eq!(
+        record.chain.scope,
+        nunki::mutants::Scope::Full {
+            why: "a campaign outside missions".into()
+        }
+    );
     let first = said();
     assert!(first.contains("NUNKI_BASE=\n"), "{first}");
     assert!(first.contains(&format!("head {dev}")), "{first}");
