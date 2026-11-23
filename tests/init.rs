@@ -5711,6 +5711,40 @@ echo 'CaughtMutant|src/lib.rs|1|1|src/lib.rs:1:1: replace a' | mutants-out "$out
 exit 0
 "#;
 
+/// Every process on this machine, as `<pid> <command line>`.
+///
+/// From `/proc` where there is one: the battery runs in nunki's own Rust
+/// image, which carries no procps, so `ps` is not there to ask, and a test
+/// that needs it fails there for a reason that is not its subject. From `ps`
+/// elsewhere — macOS has no `/proc` and always has `ps`.
+#[cfg(unix)]
+fn processes() -> Vec<String> {
+    let proc = Path::new("/proc");
+    if proc.join("self/cmdline").is_file() {
+        let Ok(entries) = std::fs::read_dir(proc) else {
+            return Vec::new();
+        };
+        return entries
+            .flatten()
+            .filter_map(|e| {
+                let pid: u32 = e.file_name().to_str()?.parse().ok()?;
+                // Gone between the listing and the read: nothing to report.
+                let raw = std::fs::read(e.path().join("cmdline")).ok()?;
+                let line = String::from_utf8_lossy(&raw).replace('\0', " ");
+                Some(format!("{pid} {}", line.trim_end()))
+            })
+            .collect();
+    }
+    let ps = std::process::Command::new("ps")
+        .args(["-A", "-o", "pid=,command="])
+        .output()
+        .expect("a machine without /proc has ps");
+    String::from_utf8_lossy(&ps.stdout)
+        .lines()
+        .map(|l| l.trim().to_string())
+        .collect()
+}
+
 /// While the tool runs, a `.dwo` in `target/debug/deps` that a mutant wrote
 /// goes once no build has touched its file for the settling time — a new
 /// name, an old file linked under one, one linked from the session. Nothing
@@ -5776,19 +5810,16 @@ fn a_rust_campaign_sweeps_the_debug_files_its_mutants_write_while_it_runs() {
             // The sweep ends with the campaign: nothing still runs this
             // script, which `nunki` would otherwise find still in flight.
             // Whatever does is killed before the test says so.
-            let ps = std::process::Command::new("ps")
-                .args(["-A", "-o", "pid=,command="])
-                .output()
-                .unwrap();
             let script_at = script.display().to_string();
-            let outlived: Vec<String> = String::from_utf8_lossy(&ps.stdout)
-                .lines()
+            let outlived: Vec<String> = processes()
+                .into_iter()
                 .filter(|l| l.contains(&script_at))
-                .map(str::to_string)
                 .collect();
             for line in &outlived {
-                if let Some(pid) = line.split_whitespace().next() {
-                    let _ = std::process::Command::new("kill").arg(pid).status();
+                if let Some(pid) = line.split_whitespace().next().and_then(|p| p.parse().ok()) {
+                    // SAFETY: a signal sent to a pid this test read; nothing
+                    // in this process is touched.
+                    unsafe { libc::kill(pid, libc::SIGTERM) };
                 }
             }
             let said = std::fs::read_to_string(&stdout).unwrap();
