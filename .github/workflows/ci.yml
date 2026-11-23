@@ -3,8 +3,9 @@
 #
 # Two platforms, because SPEC 4.2 bis commits to macOS and to Linux under WSL
 # and there is no cross-compilation to lean on. Only GitHub's own actions are
-# used: the toolchain ships with the runners, and an action nobody reads is a
-# dependency nobody reviews.
+# used: rustup ships with the runners and installs the toolchain
+# `rust-toolchain.toml` pins, and an action nobody reads is a dependency
+# nobody reviews.
 #
 # Major tags, not commit digests, and the reason is that these two are
 # GitHub's own. A digest would freeze the patch level, so a fix inside v7
