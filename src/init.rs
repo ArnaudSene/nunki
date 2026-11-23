@@ -828,8 +828,18 @@ RUN mkdir -p /home/agent/.cargo/registry /home/agent/.harness
 # `Cargo.lock`, in a folder of its own: a scanner recognises it by that name
 # and no other. The registry directory stays, empty, as the mount point of the
 # slot's cargo cache.
-RUN cargo install cargo-mutants --locked \
- && cargo install cargo-deny --locked \
+#
+# Both are nunki's tools, not the repository's, so this file pins them and
+# `versions.txt` does not (SPEC 4.2). Without `--version`, `cargo install`
+# takes whatever crates.io serves on the day of the build, and two images of
+# one project carry two tools. 27.1.0 is the cargo-mutants every measurement
+# in `mutation.sh` cites; 0.20.2 is the cargo-deny the images carried when
+# they were pinned. Raising either is a decision of its own: change the
+# default here, or pass `--build-arg`.
+ARG CARGO_MUTANTS=27.1.0
+ARG CARGO_DENY=0.20.2
+RUN cargo install cargo-mutants --version "${CARGO_MUTANTS}" --locked \
+ && cargo install cargo-deny --version "${CARGO_DENY}" --locked \
  && mkdir -p /home/agent/.cargo/installed/cargo-mutants \
               /home/agent/.cargo/installed/cargo-deny \
  && cp /home/agent/.cargo/registry/src/*/cargo-mutants-*/Cargo.lock \

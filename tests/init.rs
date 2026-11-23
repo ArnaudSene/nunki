@@ -757,6 +757,67 @@ fn the_rust_image_carries_what_the_battery_calls() {
     assert!(user < install, "{dockerfile}");
 }
 
+/// nunki's own tools in the Rust image are pinned (SPEC 4.2, "ce que chaque
+/// stack lit"): a `cargo install` without `--version` takes whatever
+/// crates.io serves on the day of the build, and an image built two weeks
+/// apart carries another cargo-deny. Every install in the shipped Dockerfile
+/// and its add-on takes a `--version`, from a build argument whose default is
+/// an exact version — 27.1.0 and 0.20.2, the ones the images carried.
+#[test]
+fn every_tool_the_rust_image_installs_takes_an_exact_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    nunki::init::init(
+        &root,
+        &dir.path().join("nunki"),
+        &["next".to_string(), "rust=backend".to_string()],
+    )
+    .unwrap();
+    for file in ["stacks/rust/Dockerfile", "stacks/rust/Dockerfile.addon"] {
+        let text = std::fs::read_to_string(home(&root).join(file)).unwrap();
+        let mut installed = Vec::new();
+        for (at, _) in text.match_indices("cargo install ") {
+            // One command: up to the next `&&`, or the end of its line.
+            let rest = &text[at..];
+            let end = [rest.find("&&"), rest.find(" \\\n"), rest.find('\n')]
+                .into_iter()
+                .flatten()
+                .min()
+                .unwrap_or(rest.len());
+            let words: Vec<&str> = rest[..end].split_whitespace().collect();
+            let tool = words[2];
+            let version = words
+                .iter()
+                .position(|w| *w == "--version")
+                .and_then(|i| words.get(i + 1))
+                .unwrap_or_else(|| panic!("{file}: {tool} takes no --version: {:?}", words));
+            let arg = version
+                .trim_matches('"')
+                .strip_prefix("${")
+                .and_then(|v| v.strip_suffix('}'))
+                .unwrap_or_else(|| panic!("{file}: {tool} takes {version}, not an ARG"));
+            let default = text
+                .lines()
+                .find_map(|l| l.trim().strip_prefix(&format!("ARG {arg}=")))
+                .unwrap_or_else(|| panic!("{file}: no default for {arg}"));
+            installed.push((tool.to_string(), arg.to_string(), default.to_string()));
+        }
+        assert_eq!(
+            installed,
+            [
+                (
+                    "cargo-mutants".into(),
+                    "CARGO_MUTANTS".into(),
+                    "27.1.0".into()
+                ),
+                ("cargo-deny".into(), "CARGO_DENY".into(), "0.20.2".into()),
+            ],
+            "{file}"
+        );
+    }
+}
+
 /// The battery asks only for what the coder's container can reach.
 ///
 /// `cargo deny check` runs four stages, and `advisories` fetches its database

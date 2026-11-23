@@ -47,6 +47,12 @@ merged since the last one. `AGENTS.md`, under "Releases", says how.
   checked"), makes `nunki check` red and a launch refuse. `nunki init
   --refresh` replaces an untouched `versions.txt`; an edited one keeps the
   project's edits, with today's version beside it as `versions.txt.nunki`.
+- **The Rust image pins the tools nunki installs in it.** `cargo-mutants`
+  and `cargo-deny` were installed at whatever crates.io served on the day of
+  the build. They are now build arguments with exact defaults,
+  `CARGO_MUTANTS=27.1.0` and `CARGO_DENY=0.20.2`, in the Rust Dockerfile and
+  in the Rust add-on. `nunki init --refresh` replaces an untouched
+  Dockerfile; `nunki slot rebuild` then builds with these versions.
 
 ### Fixed
 
