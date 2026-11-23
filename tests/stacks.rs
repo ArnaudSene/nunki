@@ -798,3 +798,31 @@ fn the_rebuild_verb_says_each_unpinned_argument_as_an_error_and_succeeds() {
         "{out:?}"
     );
 }
+
+/// A `versions.txt` that is there but cannot be read is not a missing one:
+/// "missing" sends a human to `nunki init --refresh`, which writes nothing
+/// over a path that exists, while the read error names the path and why.
+#[test]
+fn a_versions_file_that_cannot_be_read_is_an_error_not_a_missing_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = project(dir.path(), &["rust"]);
+    let file = p.fragment("rust").join(nunki::versions::FILE);
+    std::fs::remove_file(&file).unwrap();
+    // A directory where the file should be: read_to_string fails, and not
+    // with NotFound — whatever user the test runs as.
+    std::fs::create_dir(&file).unwrap();
+    match p.stack_versions("rust") {
+        Err(nunki::versions::SourcesError::Io(at, e)) => {
+            assert_eq!(at, file);
+            assert_ne!(e.kind(), std::io::ErrorKind::NotFound);
+        }
+        other => panic!("{other:?}"),
+    }
+    match versions_verdict(&p, "rust") {
+        nunki::check::Verdict::Red(why) => {
+            assert!(why.contains(&file.display().to_string()), "{why}");
+            assert!(!why.contains("is missing"), "{why}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
