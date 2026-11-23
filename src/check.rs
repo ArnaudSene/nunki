@@ -233,29 +233,28 @@ fn fragments_follow(project: &Project, report: &mut Report) {
 /// Red when `versions.txt` names an argument the Dockerfile does not declare:
 /// the engine would drop it and the image keep its default, which is the
 /// failure the file exists to prevent — and `nunki slot rebuild` refuses it.
+/// Red too when a required argument has no exact version, or the fragment
+/// predates `require:` or has no `versions.txt`: a launch refuses each of
+/// those ([`crate::image::unpinned`]), and says it in the same words.
 fn stack_versions(project: &Project, report: &mut Report) {
     let stacks = &project.config.stacks;
     for stack in stacks {
         let name = &stack.name;
         let what = format!("the {name} image follows the versions the repository pins");
-        let sources = match project.stack_versions(name) {
-            Ok(s) => s,
+        let versions = match project.stack_versions(name) {
+            Ok(Some(v)) => v,
+            Ok(None) => {
+                report.add(
+                    what,
+                    Verdict::Red(crate::image::unpinned(project, name, None, &[]).join("; ")),
+                );
+                continue;
+            }
             Err(e) => {
                 report.add(what, Verdict::Red(e.to_string()));
                 continue;
             }
         };
-        if sources.is_empty() {
-            report.add(
-                what,
-                Verdict::NotChecked(format!(
-                    "the fragment has no {}, so the image keeps its Dockerfile's defaults \
-                     whatever the repository pins; `nunki init --stack {name}` writes it",
-                    crate::versions::FILE
-                )),
-            );
-            continue;
-        }
         // What this stack puts into the image: its own Dockerfile when it is
         // the primary, its add-on onto the primary's otherwise (SPEC 4.2,
         // "plusieurs stacks"). Its versions are read against that, and in its
@@ -267,7 +266,7 @@ fn stack_versions(project: &Project, report: &mut Report) {
                 continue;
             }
         };
-        let missing = crate::versions::undeclared(&sources, &text);
+        let missing = crate::versions::undeclared(&versions.sources, &text);
         if !missing.is_empty() {
             let file = if stack == &stacks[0] {
                 "Dockerfile"
@@ -288,7 +287,12 @@ fn stack_versions(project: &Project, report: &mut Report) {
             );
             continue;
         }
-        let pins = crate::versions::resolve(&project.stack_tree(&project.root, name), &sources);
+        let pins = crate::versions::resolve(&project.stack_tree(&project.root, name), &versions);
+        let unmet = crate::image::unpinned(project, name, Some(&versions), &pins);
+        if !unmet.is_empty() {
+            report.add(what, Verdict::Red(unmet.join("; ")));
+            continue;
+        }
         let said: Vec<String> = pins
             .iter()
             .map(|p| match p {
@@ -316,17 +320,10 @@ pub fn image_versions(project: &Project, engine: &str, report: &mut Report) {
         return;
     };
     let what = "the image carries what the repository pins now".to_string();
-    let reads_any = project
-        .config
-        .stacks
-        .iter()
-        .any(|s| project.stack_versions(&s.name).is_ok_and(|v| !v.is_empty()));
-    if !reads_any {
-        return;
-    }
     let wanted = match crate::image::pinned_now(project, &project.root, &primary.name) {
         Ok(w) => w,
-        // Already red above, with the fragment or the line at fault.
+        // Already red above, with the fragment, the line or the argument at
+        // fault — a fragment with no `versions.txt` included.
         Err(_) => return,
     };
     let image = crate::image::names(project, &primary.name).agent;

@@ -144,9 +144,12 @@ fn every_stack_ships_an_add_on_declaring_what_it_reads() {
         let p = project(dir.path(), &[primary, &format!("{stack}=sub")]);
         let text = image::contribution(&p, &p.config.stacks, &p.config.stacks[1])
             .unwrap_or_else(|e| panic!("{stack}: {e}"));
-        let sources = p.stack_versions(stack).unwrap();
+        let sources = p
+            .stack_versions(stack)
+            .unwrap()
+            .expect("the fragment has a versions.txt");
         assert_eq!(
-            nunki::versions::undeclared(&sources, &text),
+            nunki::versions::undeclared(&sources.sources, &text),
             Vec::<String>::new(),
             "{stack}"
         );
@@ -354,8 +357,20 @@ fn the_image_reads_each_stack_in_its_own_directory() {
         build.label,
         "nunki.versions=PNPM=11.15.0;RUST_VERSION=1.98.0"
     );
+    // Required by the next fragment, and pinned nowhere `frontend/` reads:
+    // the build goes on, a launch refuses, and the line names the stack.
+    assert_eq!(build.unmet.len(), 1, "{:?}", build.unmet);
+    assert!(
+        build.unmet[0].starts_with("next: NODE: nothing exact"),
+        "{:?}",
+        build.unmet
+    );
+    assert!(image::pinned_now(&p, &p.root, "rust").is_err());
+
+    std::fs::write(p.root.join("frontend/.nvmrc"), "22.3.0\n").unwrap();
     let wanted: BTreeMap<String, String> = image::pinned_now(&p, &p.root, "rust").unwrap();
-    assert_eq!(wanted.len(), 2);
+    assert_eq!(wanted.len(), 3);
+    assert_eq!(wanted["NODE"], "22.3.0");
 }
 
 /// The image is the project's: named after its primary stack, and built
@@ -407,6 +422,19 @@ fn a_secondary_stack_without_an_add_on_says_how_to_get_one() {
 fn check_reads_a_secondary_stack_against_its_add_on() {
     let dir = tempfile::tempdir().unwrap();
     let p = project(dir.path(), &["rust", "next=frontend"]);
+    // What both fragments require, pinned where each reads it.
+    std::fs::write(
+        p.root.join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"1.98.0\"\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(p.root.join("frontend")).unwrap();
+    std::fs::write(p.root.join("frontend/.nvmrc"), "22\n").unwrap();
+    std::fs::write(
+        p.root.join("frontend/package.json"),
+        r#"{"packageManager": "pnpm@11.15.0"}"#,
+    )
+    .unwrap();
     let find = |report: &nunki::check::Report, what: &str| {
         report
             .checks
@@ -472,5 +500,301 @@ fn a_profile_mounts_every_stack_and_reaches_what_each_needs() {
     assert!(
         writable.iter().any(|w| w == "frontend/node_modules"),
         "{writable:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A toolchain the repository does not pin stops the launch (SPEC 4.2): what
+// each shipped `versions.txt` requires, through `nunki check` and through the
+// guard every launch goes through.
+// ---------------------------------------------------------------------------
+
+/// A stand-in for the container engine whose image carries `label` — and
+/// whose builds all succeed, so a rebuild runs without one.
+fn engine_with(dir: &Path, label: &str) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = dir.join("engine");
+    std::fs::write(
+        &bin,
+        format!(
+            "#!/bin/sh\n[ \"$1\" = build ] && exit 0\n\
+             echo '{{\"nunki.versions\":\"{label}\"}}'\n"
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    bin.to_string_lossy().into_owned()
+}
+
+fn versions_verdict(p: &Project, stack: &str) -> nunki::check::Verdict {
+    let what = format!("the {stack} image follows the versions the repository pins");
+    nunki::check::run(p)
+        .checks
+        .into_iter()
+        .find(|c| c.what == what)
+        .unwrap_or_else(|| panic!("no {what:?}"))
+        .verdict
+}
+
+/// The launch guard, as `mission start`, `verify`, `resume` and `retry`
+/// reach it, on an image built with `label`.
+fn launch(dir: &Path, p: &Project, stack: &str, label: &str) -> Result<(), nunki::run::RunError> {
+    nunki::run::image_serves(
+        p,
+        &p.root,
+        stack,
+        &engine_with(dir, label),
+        "nunki/x:latest",
+    )
+}
+
+/// A repository that pins nothing the `stack` fragment requires is red in
+/// `check` and refused at launch, each time with every `needle`; the same
+/// repository once `files` pin it exactly is green, and an image built with
+/// `label` serves it.
+fn unpinned_then_pinned(
+    stack: &str,
+    needles: &[&str],
+    optional: &[&str],
+    files: &[(&str, &str)],
+    label: &str,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let p = project(dir.path(), &[stack]);
+
+    match versions_verdict(&p, stack) {
+        nunki::check::Verdict::Red(why) => {
+            for needle in needles {
+                assert!(why.contains(needle), "{stack}: {needle:?} in {why}");
+            }
+            // An optional argument is not what stops it.
+            for arg in optional {
+                assert!(!why.contains(&format!("{arg}:")), "{stack}: {arg} in {why}");
+            }
+        }
+        other => panic!("{stack}: {other:?}"),
+    }
+    // Whatever the image carries: the label is not the question.
+    let err = launch(dir.path(), &p, stack, label).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            nunki::run::RunError::Image(image::ImageError::Unpinned { .. })
+        ),
+        "{stack}: {err}"
+    );
+    for needle in needles {
+        assert!(
+            err.to_string().contains(needle),
+            "{stack}: {needle:?} in {err}"
+        );
+    }
+    assert!(
+        err.to_string()
+            .contains("Every launch refuses until it is pinned"),
+        "{err}"
+    );
+
+    for (name, body) in files {
+        std::fs::write(p.root.join(name), body).unwrap();
+    }
+    match versions_verdict(&p, stack) {
+        nunki::check::Verdict::Green(said) => {
+            for arg in optional {
+                assert!(
+                    said.contains(&format!("{arg} unpinned, the Dockerfile's default")),
+                    "{stack}: {said}"
+                );
+            }
+        }
+        other => panic!("{stack}, pinned: {other:?}"),
+    }
+    launch(dir.path(), &p, stack, label).unwrap_or_else(|e| panic!("{stack}: {e}"));
+}
+
+/// Rust requires its channel; components and targets stay optional, since an
+/// empty list is an answer.
+#[test]
+fn a_rust_repository_without_a_toolchain_file_is_red_and_refused_until_it_pins_one() {
+    unpinned_then_pinned(
+        "rust",
+        &[
+            "RUST_VERSION: nothing exact (rust-toolchain.toml toolchain.channel: absent)",
+            "pin an exact version in one of rust-toolchain.toml (toolchain.channel)",
+        ],
+        &["RUST_COMPONENTS", "RUST_TARGETS"],
+        &[("rust-toolchain.toml", "[toolchain]\nchannel = \"1.91.0\"\n")],
+        "RUST_VERSION=1.91.0",
+    );
+}
+
+#[test]
+fn a_python_repository_without_a_python_version_is_red_and_refused_until_it_pins_one() {
+    unpinned_then_pinned(
+        "python",
+        &[
+            "PYTHON: nothing exact (.python-version: absent)",
+            "pin an exact version in one of .python-version",
+        ],
+        &[],
+        &[(".python-version", "3.12.7\n")],
+        "PYTHON=3.12.7",
+    );
+}
+
+/// Next.js requires Node and pnpm; a project without Playwright has nothing
+/// to pin for it, and stays green.
+#[test]
+fn a_next_repository_without_node_and_pnpm_is_red_and_refused_until_it_pins_both() {
+    unpinned_then_pinned(
+        "next",
+        &[
+            "pin an exact version in one of .nvmrc, .node-version, package.json \
+             (engines.node)",
+            "NODE: nothing exact (.nvmrc: absent; .nvmrc: absent; .node-version: absent; \
+             .node-version: absent; package.json engines.node: absent)",
+            "pin an exact version in one of package.json (packageManager)",
+        ],
+        &["PLAYWRIGHT"],
+        &[
+            (".nvmrc", "22\n"),
+            ("package.json", r#"{"packageManager": "pnpm@10.4.1"}"#),
+        ],
+        "NODE=22;PNPM=10.4.1",
+    );
+}
+
+/// `stable` is a channel, and moves under the image at each rebuild: refused
+/// for `RUST_VERSION` with its reason; a dated nightly is a version.
+#[test]
+fn stable_is_refused_for_rust_version_and_a_dated_nightly_is_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = project(dir.path(), &["rust"]);
+    std::fs::write(
+        p.root.join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"stable\"\n",
+    )
+    .unwrap();
+    let reason = "rust-toolchain.toml toolchain.channel: \"stable\" names a channel that moves";
+    match versions_verdict(&p, "rust") {
+        nunki::check::Verdict::Red(why) => assert!(why.contains(reason), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    let err = launch(dir.path(), &p, "rust", "RUST_VERSION=stable").unwrap_err();
+    assert!(err.to_string().contains(reason), "{err}");
+
+    std::fs::write(
+        p.root.join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"nightly-2026-11-01\"\n",
+    )
+    .unwrap();
+    assert!(matches!(
+        versions_verdict(&p, "rust"),
+        nunki::check::Verdict::Green(_)
+    ));
+    launch(dir.path(), &p, "rust", "RUST_VERSION=nightly-2026-11-01").unwrap();
+}
+
+/// `nunki slot rebuild` still builds — the firewall and the prober with the
+/// agent's image — and carries what stops a launch, for the verb to say.
+#[test]
+fn a_rebuild_with_a_required_argument_unpinned_builds_and_says_what_stops_a_launch() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = project(dir.path(), &["rust"]);
+    let built = image::build_from(
+        &p,
+        &p.root,
+        "rust",
+        &engine_with(dir.path(), ""),
+        image::Harness::Install,
+    )
+    .expect("the build goes on");
+    assert_eq!(built.unmet.len(), 1, "{:?}", built.unmet);
+    assert!(
+        built.unmet[0].starts_with("RUST_VERSION: nothing exact"),
+        "{:?}",
+        built.unmet
+    );
+
+    std::fs::write(
+        p.root.join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"1.91.0\"\n",
+    )
+    .unwrap();
+    let built = image::build_from(
+        &p,
+        &p.root,
+        "rust",
+        &engine_with(dir.path(), ""),
+        image::Harness::Install,
+    )
+    .unwrap();
+    assert!(built.unmet.is_empty(), "{:?}", built.unmet);
+}
+
+/// The verb, as a human runs it: each unpinned required argument is an error
+/// line, a launch is said to refuse, and the rebuild exits successfully.
+#[test]
+fn the_rebuild_verb_says_each_unpinned_argument_as_an_error_and_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let root = dir.path().join("repo");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&root).unwrap();
+    assert!(
+        std::process::Command::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .arg(&root)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let nunki = |args: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_nunki"))
+            .env("HOME", &home)
+            .env("HQ_ENGINE", engine_with(dir.path(), ""))
+            .arg("-C")
+            .arg(&root)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let init = nunki(&["init", "--stack", "next"]);
+    assert!(init.status.success(), "{init:?}");
+
+    let out = nunki(&["slot", "rebuild"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    let errors: Vec<&str> = stderr
+        .lines()
+        .filter(|l| l.starts_with("error     "))
+        .collect();
+    assert_eq!(errors.len(), 2, "{stderr}");
+    assert!(
+        errors[0].starts_with("error     NODE: nothing exact"),
+        "{stderr}"
+    );
+    assert!(
+        errors[1].starts_with("error     PNPM: nothing exact"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("every launch refuses until it is pinned"),
+        "{stderr}"
+    );
+
+    std::fs::write(root.join(".nvmrc"), "22\n").unwrap();
+    std::fs::write(
+        root.join("package.json"),
+        r#"{"packageManager": "pnpm@10.4.1"}"#,
+    )
+    .unwrap();
+    let out = nunki(&["slot", "rebuild"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert!(!stderr.contains("error"), "{stderr}");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("pinned    NODE=22  (.nvmrc)"),
+        "{out:?}"
     );
 }

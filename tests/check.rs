@@ -507,7 +507,7 @@ fn the_verb_exits_non_zero_when_a_restriction_is_not_held() {
 /// on both CI runners, having asserted something about the machine rather
 /// than about the repository.
 #[test]
-fn the_verb_is_green_on_this_very_repository() {
+fn the_verb_is_green_on_this_very_repository_but_for_a_toolchain_it_does_not_pin() {
     let root = std::fs::canonicalize(env!("CARGO_MANIFEST_DIR")).unwrap();
     let home = tempfile::tempdir().unwrap();
     // This repository's configuration is not in it, like any project's: the
@@ -542,12 +542,30 @@ fn the_verb_is_green_on_this_very_repository() {
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_nunki"))
         .env("HOME", home.path())
         .args(["-C"])
-        .arg(root)
+        .arg(&root)
         .arg("check")
         .output()
         .unwrap();
     let text = String::from_utf8_lossy(&out.stdout);
-    assert_eq!(out.status.code(), Some(0), "{text}");
+    // This repository pins no toolchain yet: no `rust-toolchain.toml`, so
+    // `RUST_VERSION`, which the rust fragment requires, is not pinned and the
+    // versions line is red — rightly (SPEC 4.2). That line, and no other;
+    // once the repository pins its toolchain, the verb is green.
+    let red: Vec<&str> = text.lines().filter(|l| l.starts_with("RED ")).collect();
+    if root.join("rust-toolchain.toml").is_file() {
+        assert_eq!(out.status.code(), Some(0), "{text}");
+    } else {
+        assert_eq!(
+            red,
+            ["RED the rust image follows the versions the repository pins"],
+            "{text}"
+        );
+        assert!(
+            text.contains("RUST_VERSION: nothing exact")
+                && text.contains("pin an exact version in one of rust-toolchain.toml"),
+            "{text}"
+        );
+    }
     assert!(text.contains("the coder's allowlist for rust"), "{text}");
     // The container probes are named as not run, never silently skipped.
     assert!(text.contains("could not be checked"), "{text}");
@@ -1011,7 +1029,8 @@ fn with_versions(dir: &Path, dockerfile: &str) -> Project {
     std::fs::create_dir_all(&fragment).unwrap();
     std::fs::write(
         fragment.join(nunki::versions::FILE),
-        "RUST_VERSION rust-toolchain.toml toolchain.channel\n\
+        "require: RUST_VERSION\n\
+         RUST_VERSION rust-toolchain.toml toolchain.channel\n\
          RUST_TARGETS rust-toolchain.toml toolchain.targets\n",
     )
     .unwrap();
@@ -1060,16 +1079,21 @@ fn a_declared_version_is_green_and_says_what_it_read() {
 }
 
 /// A fragment with no `versions.txt` is not a pass: nobody asked the
-/// repository what it pins.
+/// repository what it pins, and nothing says what it must. Red, with the
+/// procedure that brings the fragment up to date — no longer "not checked",
+/// which let a launch go on a toolchain nobody chose.
 #[test]
-fn a_fragment_without_versions_says_it_does_not_know() {
+fn a_fragment_without_versions_is_red_and_names_the_refresh() {
     let dir = tempfile::tempdir().unwrap();
     let project = with_versions(dir.path(), "ARG RUST_VERSION\nARG RUST_TARGETS\n");
     std::fs::remove_file(project.fragment("rust").join(nunki::versions::FILE)).unwrap();
-    assert!(matches!(
-        verdict(&run(&project), "follows the versions"),
-        Verdict::NotChecked(_)
-    ));
+    match verdict(&run(&project), "follows the versions") {
+        Verdict::Red(why) => {
+            assert!(why.contains("versions.txt is missing"), "{why}");
+            assert!(why.contains("nunki init --refresh"), "{why}");
+        }
+        other => panic!("{other:?}"),
+    }
 }
 
 /// A stand-in for the container engine that answers `image inspect` the way

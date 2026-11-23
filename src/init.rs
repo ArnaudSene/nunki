@@ -641,7 +641,11 @@ const VERSIONS_RUST: &str =
 # Columns: ARG, file in the repository, key into a .toml or .json (`-` for the
 # whole of a plain file), and an optional pattern whose `{}` is the version.
 # Several lines for one ARG are tried in order; only an exact version is taken,
-# never a range. Nothing exact, and the Dockerfile's default stands.
+# never a range. An argument the `require:` line names must be pinned exactly,
+# by a version with a digit in it (`stable` or `lts` name a channel that
+# moves): without one, `nunki check` is red and every launch refuses. Any other
+# argument left unpinned keeps the Dockerfile's default.
+require: RUST_VERSION
 RUST_VERSION rust-toolchain.toml toolchain.channel
 RUST_COMPONENTS rust-toolchain.toml toolchain.components
 RUST_TARGETS rust-toolchain.toml toolchain.targets
@@ -655,7 +659,11 @@ const VERSIONS_PYTHON: &str =
 # Columns: ARG, file in the repository, key into a .toml or .json (`-` for the
 # whole of a plain file), and an optional pattern whose `{}` is the version.
 # Several lines for one ARG are tried in order; only an exact version is taken,
-# never a range. Nothing exact, and the Dockerfile's default stands.
+# never a range. An argument the `require:` line names must be pinned exactly,
+# by a version with a digit in it (`stable` or `lts` name a channel that
+# moves): without one, `nunki check` is red and every launch refuses. Any other
+# argument left unpinned keeps the Dockerfile's default.
+require: PYTHON
 PYTHON .python-version
 ";
 
@@ -668,7 +676,11 @@ const VERSIONS_NEXT: &str =
 # Columns: ARG, file in the repository, key into a .toml or .json (`-` for the
 # whole of a plain file), and an optional pattern whose `{}` is the version.
 # Several lines for one ARG are tried in order; only an exact version is taken,
-# never a range. Nothing exact, and the Dockerfile's default stands.
+# never a range. An argument the `require:` line names must be pinned exactly,
+# by a version with a digit in it (`stable` or `lts` name a channel that
+# moves): without one, `nunki check` is red and every launch refuses. Any other
+# argument left unpinned keeps the Dockerfile's default.
+require: NODE PNPM
 NODE .nvmrc - v{}
 NODE .nvmrc
 NODE .node-version - v{}

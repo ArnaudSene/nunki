@@ -298,3 +298,76 @@ fn an_image_built_from_another_dockerfile_is_red() {
     let why = nunki::check::dockerfile_drift("abc", "def").unwrap();
     assert!(why.contains("slot rebuild"), "{why}");
 }
+
+/// A stand-in engine whose image carries nothing nunki recorded.
+fn engine(dir: &Path) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = dir.join("engine");
+    std::fs::write(&bin, "#!/bin/sh\necho '{\"nunki.versions\":\"\"}'\n").unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    bin.to_string_lossy().into_owned()
+}
+
+/// What `check` says of a stack's versions, and what a launch says.
+fn red_and_refused(root: &Path, home: &Path, stack: &str) -> (String, String) {
+    let project = nunki::project::Project::open_at(root.to_path_buf(), home.to_path_buf()).unwrap();
+    let what = format!("the {stack} image follows the versions the repository pins");
+    let verdict = nunki::check::run(&project)
+        .checks
+        .into_iter()
+        .find(|c| c.what == what)
+        .unwrap_or_else(|| panic!("no {what:?}"))
+        .verdict;
+    let nunki::check::Verdict::Red(why) = verdict else {
+        panic!("{stack}: {verdict:?}");
+    };
+    let err = nunki::run::image_serves(&project, root, stack, &engine(home), "nunki/x:latest")
+        .expect_err("a launch refuses");
+    (why, err.to_string())
+}
+
+/// A `versions.txt` an older nunki wrote says nothing of what must be pinned:
+/// red and refused, never guessed, with the procedure that brings it up to
+/// date — and `--refresh`, since nobody touched it, brings it.
+#[test]
+fn an_older_versions_file_without_require_is_red_and_refused_until_refreshed() {
+    for stack in nunki::init::KNOWN_STACKS {
+        let (_d, root, home) = fresh(&[stack]);
+        let file = home.join("stacks").join(stack).join(nunki::versions::FILE);
+        std::fs::write(&file, older(&format!("{stack}-versions.txt"))).unwrap();
+        assert_eq!(
+            kept(
+                stack,
+                nunki::versions::FILE,
+                &file,
+                &today(stack, nunki::versions::FILE)
+            ),
+            Kept::Older,
+            "{stack}: the fixture is what an older nunki shipped"
+        );
+        for said in <[String; 2]>::from(red_and_refused(&root, &home, stack)) {
+            assert!(said.contains("has no `require:` line"), "{stack}: {said}");
+            assert!(
+                said.contains("`nunki init --refresh` replaces versions.txt"),
+                "{said}"
+            );
+            assert!(said.contains("versions.txt.nunki"), "{said}");
+        }
+
+        run(&root, &home, Fragments::Refresh);
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.contains("\nrequire: "), "{stack}: {text}");
+    }
+}
+
+/// A fragment with no `versions.txt` at all reads nothing the repository
+/// pins: red and refused too, with the same procedure.
+#[test]
+fn a_fragment_without_a_versions_file_is_red_and_refused() {
+    let (_d, root, home) = fresh(&["python"]);
+    std::fs::remove_file(home.join("stacks/python").join(nunki::versions::FILE)).unwrap();
+    for said in <[String; 2]>::from(red_and_refused(&root, &home, "python")) {
+        assert!(said.contains("versions.txt is missing"), "{said}");
+        assert!(said.contains("`nunki init --refresh`"), "{said}");
+    }
+}

@@ -402,8 +402,9 @@ fn snapshot(root: &Path) -> Vec<(String, String)> {
 }
 
 /// The two verbs in the order a human runs them, through the binary: an
-/// ordinary repository becomes one `nunki check` passes, once the machine has
-/// the one thing `init` cannot give it — the stack's advisory database.
+/// ordinary repository becomes one `nunki check` passes, once the machine and
+/// the repository have what `init` cannot give them — the stack's advisory
+/// database, and the toolchain the repository pins.
 #[test]
 fn init_then_check_is_green_on_a_repository_that_had_nothing() {
     let dir = tempfile::tempdir().unwrap();
@@ -443,20 +444,35 @@ fn init_then_check_is_green_on_a_repository_that_had_nothing() {
             .output()
             .unwrap()
     };
-    // One thing is left, and it is the machine's: the stack's advisory
-    // database, which no `init` fills (#165). Red, with the stack's command,
-    // rather than green until gate 8 finds it missing after a whole run.
+    // Two things are left, and neither is `init`'s to give. The machine's:
+    // the stack's advisory database, which no `init` fills (#165). Red, with
+    // the stack's command, rather than green until gate 8 finds it missing
+    // after a whole run. And the repository's: the toolchain it is built
+    // with, which nobody chose yet (SPEC 4.2) — red, naming the file to add.
     let first = check();
     let text = String::from_utf8_lossy(&first.stdout);
     assert_eq!(first.status.code(), Some(1), "{text}");
-    assert!(text.contains("1 restriction(s) not held"), "{text}");
+    assert!(text.contains("2 restriction(s) not held"), "{text}");
     assert!(
         text.contains("RED the rust advisory database is on this machine"),
         "{text}"
     );
     assert!(text.contains("`cargo deny check advisories`"), "{text}");
+    assert!(
+        text.contains("RED the rust image follows the versions the repository pins"),
+        "{text}"
+    );
+    assert!(
+        text.contains("pin an exact version in one of rust-toolchain.toml"),
+        "{text}"
+    );
 
     std::fs::create_dir_all(home.join(".cargo/advisory-db")).unwrap();
+    std::fs::write(
+        root.join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"1.91.0\"\n",
+    )
+    .unwrap();
     let check = check();
     let text = String::from_utf8_lossy(&check.stdout);
     assert_eq!(check.status.code(), Some(0), "{text}");
@@ -2212,10 +2228,13 @@ fn every_version_a_fragment_reads_is_an_argument_its_image_declares() {
         let file = fragment.join(nunki::versions::FILE);
         let sources = nunki::versions::parse(&std::fs::read_to_string(&file).unwrap(), &file)
             .unwrap_or_else(|e| panic!("{stack}: {e}"));
-        assert!(!sources.is_empty(), "{stack} reads no version at all");
+        assert!(
+            !sources.sources.is_empty(),
+            "{stack} reads no version at all"
+        );
         let dockerfile = std::fs::read_to_string(fragment.join("Dockerfile")).unwrap();
         assert_eq!(
-            nunki::versions::undeclared(&sources, &dockerfile),
+            nunki::versions::undeclared(&sources.sources, &dockerfile),
             Vec::<String>::new(),
             "{stack}"
         );

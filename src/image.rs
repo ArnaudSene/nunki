@@ -69,6 +69,12 @@ pub enum ImageError {
         first: String,
         second: String,
     },
+    #[error(
+        "the repository leaves unpinned what the image must be built with — {}. \
+         Every launch refuses until it is pinned",
+        unmet.join("; ")
+    )]
+    Unpinned { unmet: Vec<String> },
     #[error("{engine} could not say what {image} was built with: {said}")]
     Inspect {
         engine: String,
@@ -82,6 +88,12 @@ pub enum ImageError {
 pub struct Built {
     pub images: Images,
     pub versions: Vec<crate::versions::Pin>,
+    /// What stops every launch on this image, one line each: a required
+    /// argument the repository leaves without an exact version, a fragment
+    /// that predates `require:` ([`unpinned`]). The build goes on regardless
+    /// — it builds the firewall and the prober too, and a rebuild reported as
+    /// failed would be run again for nothing.
+    pub unmet: Vec<String>,
 }
 
 /// The uid and gid the images and containers run under: the human's own.
@@ -151,6 +163,7 @@ pub fn build_from(
         args,
         label,
         versions,
+        unmet,
     } = stack_build_from(project, tree, stack, uid, gid)?;
     let base = base_tag(project, stack);
     // The Dockerfile the image is built from: the primary's, as it stands, or
@@ -211,7 +224,11 @@ pub fn build_from(
         args
     })?;
 
-    Ok(Built { images, versions })
+    Ok(Built {
+        images,
+        versions,
+        unmet,
+    })
 }
 
 /// What the stack's own image is built with: the build arguments and the
@@ -223,6 +240,8 @@ pub struct StackBuild {
     /// launch read it back: the tag alone cannot say which toolchain is inside.
     pub label: String,
     pub versions: Vec<crate::versions::Pin>,
+    /// What stops a launch on the image, as [`Built::unmet`].
+    pub unmet: Vec<String>,
 }
 
 /// The stacks one image carries, the primary first: every stack the project
@@ -409,7 +428,11 @@ pub fn stack_build_from(
     uid: u32,
     gid: u32,
 ) -> Result<StackBuild, ImageError> {
-    let (versions, pinned) = read_versions(project, tree, stack)?;
+    let Read {
+        versions,
+        pinned,
+        unmet,
+    } = read_versions(project, tree, stack)?;
     let mut args = vec![format!("UID={uid}"), format!("GID={gid}")];
     args.extend(pinned.iter().map(|(arg, value)| format!("{arg}={value}")));
     Ok(StackBuild {
@@ -420,34 +443,84 @@ pub fn stack_build_from(
             crate::versions::label(&pinned)
         ),
         versions,
+        unmet,
     })
 }
 
 /// What the repository at `tree` pins for the image `stack` is the primary
 /// of — every stack it carries, each read in its own directory — as the label
 /// records it. What `nunki check` and a launch compare an image against.
+///
+/// Refused when a required argument is left without an exact version, or a
+/// fragment predates `require:` ([`unpinned`]): an image built on a
+/// toolchain nobody chose serves nobody, whatever its label says.
 pub fn pinned_now(
     project: &Project,
     tree: &Path,
     stack: &str,
 ) -> Result<std::collections::BTreeMap<String, String>, ImageError> {
-    Ok(read_versions(project, tree, stack)?.1)
+    let read = read_versions(project, tree, stack)?;
+    if !read.unmet.is_empty() {
+        return Err(ImageError::Unpinned { unmet: read.unmet });
+    }
+    Ok(read.pinned)
 }
 
-type Read = (
-    Vec<crate::versions::Pin>,
-    std::collections::BTreeMap<String, String>,
-);
+/// What one stack's `versions.txt` leaves unpinned that must not be, one line
+/// each: every required argument without an exact version
+/// ([`crate::versions::unmet`]), or the whole fragment when it predates the
+/// `require:` line or has no `versions.txt` at all. Neither of those is
+/// guessed: nothing in them says what the repository must pin, so they are
+/// refused with the procedure that brings the fragment up to date.
+///
+/// `nunki check` says these lines for the stack, a launch refuses on them, and
+/// `nunki slot rebuild` prints them — one text for the three.
+pub fn unpinned(
+    project: &Project,
+    stack: &str,
+    versions: Option<&crate::versions::Versions>,
+    pins: &[crate::versions::Pin],
+) -> Vec<String> {
+    let file = project.fragment(stack).join(crate::versions::FILE);
+    let why = match versions {
+        None => "is missing, so nothing reads what the repository pins",
+        Some(v) if v.required.is_none() => {
+            "has no `require:` line, so nothing says what the repository must pin"
+        }
+        Some(v) => return crate::versions::unmet(v, pins),
+    };
+    vec![format!(
+        "{} {why}. The fragment predates it — `nunki init --refresh` replaces {name} if \
+         nobody edited it; otherwise carry your edits into today's version, which sits \
+         beside it as {name}{}",
+        file.display(),
+        crate::init::SUGGESTION,
+        name = crate::versions::FILE,
+    )]
+}
+
+struct Read {
+    versions: Vec<crate::versions::Pin>,
+    pinned: std::collections::BTreeMap<String, String>,
+    unmet: Vec<String>,
+}
 
 fn read_versions(project: &Project, tree: &Path, stack: &str) -> Result<Read, ImageError> {
     let stacks = image_stacks(project, stack)?;
     let mut owner: std::collections::BTreeMap<String, String> = Default::default();
     let mut versions = Vec::new();
+    let mut unmet = Vec::new();
     for s in &stacks {
-        let sources = project.stack_versions(&s.name)?;
-        if sources.is_empty() {
+        // Said by stack when the image carries more than one: each reads its
+        // own `versions.txt`, in its own directory.
+        let said = |line: String| match stacks.len() {
+            1 => line,
+            _ => format!("{}: {line}", s.name),
+        };
+        let Some(read) = project.stack_versions(&s.name)? else {
+            unmet.extend(unpinned(project, &s.name, None, &[]).into_iter().map(said));
             continue;
-        }
+        };
         // The project's own steps may declare an argument a stack reads.
         let text = format!(
             "{}\n{}",
@@ -456,7 +529,7 @@ fn read_versions(project: &Project, tree: &Path, stack: &str) -> Result<Read, Im
                 .map(|(stages, body)| format!("{stages}{body}"))
                 .unwrap_or_default()
         );
-        let missing = crate::versions::undeclared(&sources, &text);
+        let missing = crate::versions::undeclared(&read.sources, &text);
         if !missing.is_empty() {
             return Err(ImageError::Undeclared {
                 stack: s.name.clone(),
@@ -468,7 +541,7 @@ fn read_versions(project: &Project, tree: &Path, stack: &str) -> Result<Read, Im
                 }),
             });
         }
-        for source in &sources {
+        for source in &read.sources {
             match owner.get(&source.arg) {
                 Some(first) if *first != s.name => {
                     return Err(ImageError::SharedArgument {
@@ -482,13 +555,20 @@ fn read_versions(project: &Project, tree: &Path, stack: &str) -> Result<Read, Im
                 }
             }
         }
-        versions.extend(crate::versions::resolve(
-            &project.stack_tree(tree, &s.name),
-            &sources,
-        ));
+        let pins = crate::versions::resolve(&project.stack_tree(tree, &s.name), &read);
+        unmet.extend(
+            unpinned(project, &s.name, Some(&read), &pins)
+                .into_iter()
+                .map(said),
+        );
+        versions.extend(pins);
     }
     let pinned = crate::versions::pinned(&versions);
-    Ok((versions, pinned))
+    Ok(Read {
+        versions,
+        pinned,
+        unmet,
+    })
 }
 
 /// What an image records about the versions it was built with.
