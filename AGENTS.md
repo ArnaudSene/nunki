@@ -196,8 +196,10 @@ is worth**. Applied to our own work:
   and the ban on wildcard versions.
 - Adding a dependency is a decision, not a reflex. Prefer the standard
   library; prefer a few lines of our own over a crate we would not read.
-- In CI, **only GitHub's own actions** (`checkout`, `cache`). The toolchain
-  ships with the runners. An action nobody reads is a dependency nobody
+- In CI, **only GitHub's own actions** (`checkout`, `cache`). rustup ships
+  with the runners and installs the toolchain `rust-toolchain.toml` pins,
+  the one every developer and every mission image use. An action nobody
+  reads is a dependency nobody
   reviews. Those are referenced by **major tag**, so a patch-level fix
   arrives on its own; the digest a tag could hide protects against a threat
   already inside GitHub's trust boundary, which is the runner's anyway. If a
