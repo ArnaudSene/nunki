@@ -187,7 +187,9 @@ impl ClaudeCode {
 pub const AGENT_HOME: &str = "/home/agent";
 
 /// The user message that starts a run: which lot, which attempt, where the
-/// mission files are. The role prompt itself travels as a system prompt.
+/// mission files are, and what the owner asks about committing
+/// ([`commit_ask`]). The role prompt itself travels as a system prompt, or
+/// ahead of all this when the harness cannot take one.
 fn lot_prompt(request: &RunRequest, exposure: &Exposure) -> String {
     let mut base = format!(
         "Mission folder: {}. Work on lot `{}` (attempt {}). Read MISSION.md and JOURNAL.md first; \
@@ -208,9 +210,37 @@ fn lot_prompt(request: &RunRequest, exposure: &Exposure) -> String {
             request.lot, request.lot, request.lot
         ));
     }
+    base.push(' ');
+    base.push_str(commit_ask(request.role));
     match exposure {
         Exposure::UserMessage(m) => format!("{m}\n\n{base}"),
         Exposure::SystemPromptFile(_) => base,
+    }
+}
+
+/// What the owner asks of this run about committing, said in the run's own
+/// message (SPEC 3.2, 3.3 item 1).
+///
+/// Under `--permission-mode auto` a classifier decides in the owner's place,
+/// and it judges an action against what the user asked. The only user turn
+/// a run has is this message: the order to commit lives in the role prompt,
+/// and a project's own rules may say not to commit unless asked. Said here,
+/// the ask is in the owner's turn.
+///
+/// A convenience for one harness, not a guard: what keeps a commit on the
+/// mission's branch and a push off the forge is the container and the gates
+/// (SPEC 3.2). The text asks; it does not argue, and it names no project's
+/// rule.
+fn commit_ask(role: Role) -> &'static str {
+    match role {
+        Role::Coder | Role::Integrator => {
+            "The owner asks this run to commit its work on the branch the slot is on; \
+             never push, and never commit to or switch to another branch."
+        }
+        Role::Security => {
+            "This run commits nothing: the owner asks it to read and report, \
+             not to change the branch."
+        }
     }
 }
 

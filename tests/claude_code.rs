@@ -835,3 +835,40 @@ fn the_harness_is_told_to_sign_nothing_and_says_it_once() {
         assert!(cmd.display().contains(json), "{}", cmd.display());
     }
 }
+
+/// The owner's ask about committing travels in the run's own message, the
+/// one user turn a run has, with either exposure of the role prompt: the
+/// two roles that commit are asked to, on the slot's branch and never with
+/// a push; the security agent is told it commits nothing.
+#[test]
+fn the_run_message_says_the_owner_asks_the_commit_of_the_roles_that_commit() {
+    const ASK: &str = "The owner asks this run to commit its work on the branch the slot is on; \
+                       never push, and never commit to or switch to another branch.";
+    const NOTHING: &str = "This run commits nothing";
+    let exposures = [
+        Exposure::SystemPromptFile("/r.md".into()),
+        Exposure::UserMessage("the role prompt".into()),
+    ];
+    for role in Role::ALL {
+        for exposure in &exposures {
+            let mut req = request(false);
+            req.role = role;
+            let cmd = adapter().command(&req, &GuardSetup::default(), exposure);
+            let last = cmd.args.last().unwrap();
+            if let Exposure::UserMessage(m) = exposure {
+                assert!(last.starts_with(m.as_str()), "{last}");
+            }
+            let commits = role != Role::Security;
+            assert_eq!(
+                last.contains(ASK),
+                commits,
+                "{role:?}, {exposure:?}: {last}"
+            );
+            assert_eq!(
+                last.contains(NOTHING),
+                !commits,
+                "{role:?}, {exposure:?}: {last}"
+            );
+        }
+    }
+}
