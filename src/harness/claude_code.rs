@@ -77,7 +77,10 @@ use super::{
 /// checked out, and only when the run's message asks for it — the same
 /// settings go to the security agent, whose message says it commits
 /// nothing. It grants nothing that reaches a remote, no branch switch and no
-/// history rewrite: those stay with the built-in rules.
+/// history rewrite: those stay with the built-in rules. And it lifts only
+/// the judgment that the commit itself is unwanted, never a built-in block
+/// on what the commit carries: Security Test Removal, which the CLI judges
+/// "at the git commit/push that carries it", still applies to the commit.
 const SETTINGS: &str = concat!(
     r#"{"attribution":{"commitTrailers":false,"sessionUrl":false},"#,
     r#""includeCoAuthoredBy":false,"#,
@@ -86,7 +89,9 @@ const SETTINGS: &str = concat!(
     r#"`git add` and `git commit` in the run's working tree, on the branch that is checked out, "#,
     r#"are the work the owner asked for. This covers staging and committing only: not "#,
     r#"switching or creating a branch, not amending, rebasing or resetting, and nothing that "#,
-    r#"reaches a remote."],"#,
+    r#"reaches a remote. It lifts only the judgment that the commit itself is unwanted: it "#,
+    r#"does not lift a built-in block on what the commit carries, such as Security Test "#,
+    r#"Removal, which is still judged at that commit."],"#,
     r#""environment":["$defaults","#,
     r#""**nunki mission run**: This is an autonomous run in a container, with nobody to ask, "#,
     r#"on a mission branch the owner framed. Its commits stay on that branch, where nunki's "#,

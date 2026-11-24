@@ -905,6 +905,17 @@ fn the_classifier_is_told_a_commit_on_the_mission_branch_is_the_owners_ask() {
             "{rule}"
         );
         assert!(rule.contains("nothing that reaches a remote"), "{rule}");
+        // It lifts the judgment on the commit, not the CLI's blocks on what
+        // the commit carries (the security review of 65c108f, LOW).
+        assert!(
+            rule.contains("lifts only the judgment that the commit itself is unwanted"),
+            "{rule}"
+        );
+        assert!(
+            rule.contains("does not lift a built-in block on what the commit carries"),
+            "{rule}"
+        );
+        assert!(rule.contains("such as Security Test Removal"), "{rule}");
         for entry in &allow {
             assert!(!entry.to_lowercase().contains("push"), "{entry}");
         }
