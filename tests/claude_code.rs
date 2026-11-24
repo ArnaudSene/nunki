@@ -836,6 +836,106 @@ fn the_harness_is_told_to_sign_nothing_and_says_it_once() {
     }
 }
 
+/// Under `--permission-mode auto` the classifier also reads the `autoMode`
+/// block of the settings: one rule that a commit on the checked-out branch
+/// is the owner's ask, after the CLI's own rules, and a word on what the run
+/// is. It rides in the one `--settings` the line has, beside the attribution
+/// keys, and grants nothing that reaches a remote.
+#[test]
+fn the_classifier_is_told_a_commit_on_the_mission_branch_is_the_owners_ask() {
+    use nunki::harness::Harness;
+
+    let nunki = ClaudeCode::new(Config::default(), Box::new(LocalSpawner));
+    for role in Role::ALL {
+        let guards = nunki.guards(role);
+        let line = guards.args.join(" ");
+        assert_eq!(
+            guards.args.iter().filter(|a| *a == "--settings").count(),
+            1,
+            "{line}"
+        );
+        let json = guards
+            .args
+            .iter()
+            .skip_while(|a| *a != "--settings")
+            .nth(1)
+            .unwrap_or_else(|| panic!("{line}"));
+        let settings: serde_json::Value = serde_json::from_str(json).unwrap();
+
+        // Beside the attribution keys, not in their place.
+        assert_eq!(settings["attribution"]["commitTrailers"], false, "{json}");
+        assert_eq!(settings["attribution"]["sessionUrl"], false, "{json}");
+        assert_eq!(settings["includeCoAuthoredBy"], false, "{json}");
+
+        // Only the keys the 2.1.331 CLI reads under `autoMode`.
+        let auto = settings["autoMode"]
+            .as_object()
+            .unwrap_or_else(|| panic!("{json}"));
+        for key in auto.keys() {
+            assert!(
+                ["allow", "soft_deny", "hard_deny", "environment"].contains(&key.as_str()),
+                "{key}"
+            );
+        }
+        let list = |key: &str| -> Vec<&str> {
+            auto[key]
+                .as_array()
+                .unwrap_or_else(|| panic!("{key}: {json}"))
+                .iter()
+                .map(|v| v.as_str().unwrap_or_else(|| panic!("{key}: {json}")))
+                .collect()
+        };
+
+        // The CLI's own rules first, then the commit rule and nothing else.
+        let allow = list("allow");
+        assert_eq!(allow.len(), 2, "{json}");
+        assert_eq!(allow[0], "$defaults", "{json}");
+        let rule = allow[1];
+        assert!(rule.starts_with("Mission Branch Commit: "), "{rule}");
+        // It answers the ask the run's message makes (`commit_ask`).
+        assert!(rule.contains("the owner asks this run to commit"), "{rule}");
+        assert!(rule.contains("`git add` and `git commit`"), "{rule}");
+        assert!(rule.contains("the branch that is checked out"), "{rule}");
+        assert!(
+            rule.contains("not switching or creating a branch"),
+            "{rule}"
+        );
+        assert!(
+            rule.contains("not amending, rebasing or resetting"),
+            "{rule}"
+        );
+        assert!(rule.contains("nothing that reaches a remote"), "{rule}");
+        for entry in &allow {
+            assert!(!entry.to_lowercase().contains("push"), "{entry}");
+        }
+        // Nothing is added to the CLI's blocks: they stay its own.
+        assert!(auto.get("soft_deny").is_none(), "{json}");
+        assert!(auto.get("hard_deny").is_none(), "{json}");
+
+        // What the run is, after the CLI's own entries.
+        let environment = list("environment");
+        assert_eq!(environment.len(), 2, "{json}");
+        assert_eq!(environment[0], "$defaults", "{json}");
+        let run = environment[1];
+        assert!(run.starts_with("**nunki mission run**: "), "{run}");
+        for words in [
+            "autonomous run in a container",
+            "a mission branch the owner framed",
+            "nunki's gates judge them before any push",
+            "only the owner pushes, from outside the container",
+        ] {
+            assert!(run.contains(words), "{words}: {run}");
+        }
+
+        let cmd = nunki.command(
+            &request(false),
+            &guards,
+            &Exposure::SystemPromptFile("/r.md".into()),
+        );
+        assert!(cmd.display().contains(json), "{}", cmd.display());
+    }
+}
+
 /// The owner's ask about committing travels in the run's own message, the
 /// one user turn a run has, with either exposure of the role prompt: the
 /// two roles that commit are asked to, on the slot's branch and never with

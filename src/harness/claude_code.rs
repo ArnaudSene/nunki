@@ -54,9 +54,43 @@ use super::{
 /// words, read from the binary. An older image gets an older CLI, and a
 /// key it does not know is ignored rather than refused, so naming all
 /// three costs nothing and covers both.
+///
+/// `autoMode` tells the classifier of `--permission-mode auto` what the run
+/// is and what it was asked (SPEC 3.2, 3.3 item 1), beside what the run's
+/// message says ([`commit_ask`]). It is a convenience for one harness, not
+/// a guard: the container and the gates stay the enforcement. Read from the
+/// 2.1.331 binary:
+///
+/// - `autoMode` takes `allow`, `soft_deny`, `hard_deny` and `environment`,
+///   each a list of strings, and only from user settings, `--settings` and
+///   managed policy; in project and local settings, which a repository
+///   controls, the CLI ignores it with a warning. That is why it lives here.
+/// - `"$defaults"` is spelled so, and is the same placeholder in every
+///   list: "include the literal string "$defaults" to inherit the built-in
+///   rules at that position". A list that leaves it out *replaces* the
+///   built-in entries, so both lists start with it. The built-in lists
+///   (`claude auto-mode defaults`) hold no `"$defaults"` themselves.
+/// - The built-in entries read `Label: text` in `allow` and
+///   `**Label**: text` in `environment`; ours follow suit.
+///
+/// The allow rule covers staging and committing on the branch that is
+/// checked out, and only when the run's message asks for it — the same
+/// settings go to the security agent, whose message says it commits
+/// nothing. It grants nothing that reaches a remote, no branch switch and no
+/// history rewrite: those stay with the built-in rules.
 const SETTINGS: &str = concat!(
     r#"{"attribution":{"commitTrailers":false,"sessionUrl":false},"#,
-    r#""includeCoAuthoredBy":false}"#
+    r#""includeCoAuthoredBy":false,"#,
+    r#""autoMode":{"allow":["$defaults","#,
+    r#""Mission Branch Commit: When the run's message says the owner asks this run to commit, "#,
+    r#"`git add` and `git commit` in the run's working tree, on the branch that is checked out, "#,
+    r#"are the work the owner asked for. This covers staging and committing only: not "#,
+    r#"switching or creating a branch, not amending, rebasing or resetting, and nothing that "#,
+    r#"reaches a remote."],"#,
+    r#""environment":["$defaults","#,
+    r#""**nunki mission run**: This is an autonomous run in a container, with nobody to ask, "#,
+    r#"on a mission branch the owner framed. Its commits stay on that branch, where nunki's "#,
+    r#"gates judge them before any push, and only the owner pushes, from outside the container."]}}"#
 );
 
 /// What is fixed per project or per mission, not per run.
