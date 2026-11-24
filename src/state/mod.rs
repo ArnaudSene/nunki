@@ -110,6 +110,22 @@ pub struct MissionState {
     /// transition, forgotten by any other transition and by the launch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decided: Option<Stage>,
+    /// The stage whose run was cut before `nunki` concluded it, and which
+    /// the flow kept so that the same attempt goes on (SPEC 4.1, "le
+    /// verdict"; 4.3). Every cut — the account's window, a harness that
+    /// failed and is waited out, a container lost — reaches the flow as a
+    /// run that ended for a cause that is not the mission's, so this is
+    /// written by [`Store::transition`] on that event, and forgotten by any
+    /// other transition.
+    ///
+    /// What [`MissionState::continues`] reads: the next launch on this stage
+    /// continues the run that was cut, and keeps `VERDICT.json`, which the
+    /// agent may have written before the cut and no other role has touched
+    /// since. Every other launch empties it first. Whether a harness session
+    /// is resumed says nothing here: a new lot, a volet and a new security
+    /// round may resume one, and each is still a new run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cut: Option<Stage>,
     /// The coder's harness session, resumed by its next run (SPEC 4.3):
     /// kept from one lot to the next and
     /// across a harness failure or a spared turn, dropped when an attempt
@@ -391,6 +407,15 @@ impl MissionState {
         self.stopped.take()
     }
 
+    /// Whether the next launch continues a run that was cut, rather than
+    /// starting a new one: the run recorded for the stage the mission
+    /// stands at was cut, and nothing has moved the flow since
+    /// ([`MissionState::cut`]). A continuation keeps `VERDICT.json`; a new
+    /// run starts with it empty (SPEC 4.1, "le verdict").
+    pub fn continues(&self) -> bool {
+        self.cut.as_ref() == Some(self.flow.stage())
+    }
+
     /// Whether `nunki` may launch a run for this mission.
     pub fn held(&self) -> bool {
         self.stopped.is_some()
@@ -512,11 +537,14 @@ impl Store {
         event: Event,
         decided: bool,
     ) -> Result<(), StateError> {
+        let cut = is_cut(&event);
         state.flow.advance(event)?;
         // A push describes the stage it was made at, and the flow just left
-        // it. So does a decision.
+        // it. So does a decision, and so does a cut — unless this event is
+        // one, which the flow answers by keeping the stage.
         state.pushed = None;
         state.decided = decided.then(|| state.flow.stage().clone());
+        state.cut = cut.then(|| state.flow.stage().clone());
         state.updated_at = now_rfc3339();
         state.revision = self.write(state)?;
         Ok(())
@@ -536,6 +564,21 @@ impl Store {
         state.revision = self.write(state)?;
         Ok(())
     }
+}
+
+/// Whether `event` is a run cut before `nunki` concluded it: one that ended
+/// for a cause that is not the mission's, which the flow answers by
+/// replaying the same attempt (SPEC 4.3). A turn `nunki` ended for the
+/// account's window reaches the flow so too, once its read-back found no
+/// verdict to conclude on.
+fn is_cut(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::RunEnded {
+            outcome: crate::harness::Outcome::HarnessFailure(_),
+            ..
+        }
+    )
 }
 
 /// Now, in seconds since the epoch.

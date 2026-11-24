@@ -163,6 +163,7 @@ impl World {
                 spent: Default::default(),
                 spared: None,
                 decided: None,
+                cut: None,
                 coder_session: None,
                 pushed: None,
                 updated_at: String::new(),
@@ -1132,6 +1133,7 @@ fn with_security_agent(lots: usize) -> World {
             spent: Default::default(),
             spared: None,
             decided: None,
+            cut: None,
             coder_session: None,
             pushed: None,
             updated_at: String::new(),
@@ -5161,4 +5163,194 @@ fn wait_names_fixed_by_only_once_the_rounds_are_spent() {
     left.at_findings();
     let status = nunki::wait::status("m1", &left.state(), &context).unwrap();
     assert!(!status.line().contains("--fixed-by"), "{}", status.line());
+}
+
+/// A harness log whose run was cut: the quota ran out, a cause that is not
+/// the mission's, and the flow replays the same attempt.
+const CUT: &str = r#"{"type":"result","subtype":"error","is_error":true,"result":"API Error: 429 rate limit reached","usage":{}}
+"#;
+
+impl World {
+    fn verdict_file(&self) -> String {
+        std::fs::read_to_string(self.mission().join("VERDICT.json")).unwrap()
+    }
+
+    /// The harness's wait is over, as the monitor finds it once its time
+    /// has come.
+    fn wait_over(&self) {
+        let store = Store::open(&self.project.hq_root).unwrap();
+        let mut state = store.load("m1").unwrap();
+        if let Some(down) = state.harness_down.as_mut() {
+            down.not_before = 0;
+        }
+        store.save(&state).unwrap();
+    }
+}
+
+/// The mission that pinned toolchain versions, end to end (SPEC 4.1, "le
+/// verdict"; 4.4, "un verdict vaut pour un `HEAD`"). The security agent
+/// concluded `FINDINGS`, every finding `LOW`, on A. The coder committed B,
+/// then set the file's `head` to B by mistake. A security run on B is
+/// launched and finishes without writing.
+///
+/// Read as that run's, the verdict left behind would be a review of B that
+/// nobody gave — and, all `LOW`, `nunki` would lift it itself and let B be
+/// pushed. The launch empties the file, so the run is what it is: a run that
+/// finished and concluded nothing.
+#[test]
+fn a_security_verdict_an_earlier_run_left_is_not_the_next_runs() {
+    let world = with_security_agent_at(nunki::mission::Rigor::Standard);
+    world.commit("src/a.rs", "pub fn a() -> u8 { 1 }\n", "A");
+    let a = world.head();
+    world.ranked("FINDINGS", LOW_AND_INFO);
+    world.commit("src/b.rs", "pub fn b() -> u8 { 2 }\n", "B");
+    let b = world.head();
+    let moved = world.verdict_file().replace(&a, &b);
+    assert!(moved.contains(&b), "{moved}");
+    std::fs::write(world.mission().join("VERDICT.json"), &moved).unwrap();
+    world.at_security();
+
+    // The security run on B is launched. This world has no account, so the
+    // launch stops there — after the file was emptied, which comes first.
+    let launched = world.verify();
+    assert!(matches!(launched, Err(VerifyError::Run(_))), "{launched:?}");
+    assert_eq!(world.verdict_file(), "", "a new run starts with no verdict");
+
+    // It finishes without writing.
+    world.run_recorded(Some(41), FINISHED);
+    let _ = world.verify();
+
+    let state = world.state();
+    assert_eq!(
+        state.flow.stage(),
+        &Stage::SecurityAgent { attempt: 2 },
+        "a run that concluded nothing is a mission failure"
+    );
+    assert!(
+        state.concluded(Role::Security).is_none(),
+        "{:?}",
+        state.verdicts
+    );
+    assert!(
+        state.accepted.is_empty(),
+        "nothing is lifted: {:?}",
+        state.accepted
+    );
+    let told = world.followup();
+    assert!(
+        told.contains("security, attempt 1") && told.contains("VERDICT.json is empty"),
+        "the failure names the empty file: {told}"
+    );
+    assert!(!told.contains("nunki lifted"), "{told}");
+}
+
+/// The same for the integrator: an `INTEGRATED` an earlier integrator run
+/// left, naming the commit the slot is on, is not the verdict of the next
+/// integrator run, which wrote none.
+#[test]
+fn an_integrator_verdict_an_earlier_run_left_is_not_the_next_runs() {
+    let world = World::shaped(1, integration());
+    world.at_integration();
+    world.verdict("Integrator", "INTEGRATED", &world.head(), "wired, earlier");
+
+    let launched = world.verify();
+    assert!(matches!(launched, Err(VerifyError::Run(_))), "{launched:?}");
+    assert_eq!(world.verdict_file(), "", "a new run starts with no verdict");
+
+    world.run_recorded(Some(41), FINISHED);
+    let _ = world.verify();
+
+    let state = world.state();
+    assert_eq!(state.flow.stage(), &Stage::Integration { attempt: 2 });
+    assert!(
+        state.concluded(Role::Integrator).is_none(),
+        "{:?}",
+        state.verdicts
+    );
+    let told = world.followup();
+    assert!(
+        told.contains("integration, attempt 1") && told.contains("VERDICT.json is empty"),
+        "{told}"
+    );
+}
+
+/// A run cut before `nunki` concluded it is continued, not restarted, and its
+/// continuation keeps the file: the agent wrote its verdict before the cut,
+/// and no other role ran in between. Here the harness fails after the
+/// security agent wrote `CLEAR`; the monitor waits it out and relaunches;
+/// the continuation finishes without writing again — and the mission is
+/// concluded on the verdict written before the cut.
+#[test]
+fn a_run_continued_after_a_cut_is_concluded_on_the_verdict_it_wrote_before() {
+    let world = with_security_agent(1);
+    world.at_security();
+    world.run_recorded(Some(41), CUT);
+    world.verdict("Security", "CLEAR", &world.head(), "nothing found");
+    let written = world.verdict_file();
+
+    // The cut is read back: the same attempt, after the harness's wait.
+    let steps = world.verify().unwrap();
+    assert!(
+        matches!(steps.last(), Some(Step::Waiting { .. })),
+        "{steps:?}"
+    );
+    assert_eq!(
+        world.state().flow.stage(),
+        &Stage::SecurityAgent { attempt: 1 }
+    );
+    assert!(world.state().continues());
+
+    // The wait is over, and the run is launched again: a continuation.
+    world.wait_over();
+    let launched = world.verify();
+    assert!(matches!(launched, Err(VerifyError::Run(_))), "{launched:?}");
+    assert_eq!(world.verdict_file(), written, "a continuation keeps it");
+
+    // It finishes without writing again.
+    world.run_recorded(Some(41), FINISHED);
+    let steps = world.verify().unwrap();
+    assert!(matches!(steps.last(), Some(Step::Verified)), "{steps:?}");
+    let state = world.state();
+    let concluded = state.concluded(Role::Security).expect("concluded");
+    assert_eq!(concluded.verdict, Some(nunki::mission::Verdict::Clear));
+    assert_eq!(concluded.head, world.head());
+}
+
+/// A volet resumes the coder's harness session, and is a new run all the
+/// same: it starts with an empty file. "The session is resumed" is not what
+/// tells a continuation from a new run — a new lot, a volet or a new
+/// security round may resume one.
+#[test]
+fn a_new_volet_that_resumes_the_coders_session_starts_with_no_verdict() {
+    let world = with_security_agent(1);
+    world.commit("src/new.rs", "pub fn two() -> u8 { 2 }\n", "L1");
+    world.at_findings();
+    nunki::findings::iterate(&world.project, "m1", None).unwrap();
+    let store = Store::open(&world.project.hq_root).unwrap();
+    let mut state = store.load("m1").unwrap();
+    let session = nunki::harness::SessionId("s-coder".into());
+    state.coder_session = Some(session.clone());
+    store.save(&state).unwrap();
+    assert!(world.verdict_file().contains("FINDINGS"));
+
+    let launched = world.verify();
+    assert!(matches!(launched, Err(VerifyError::Run(_))), "{launched:?}");
+    let state = world.state();
+    assert!(
+        matches!(
+            state.flow.stage(),
+            Stage::Coding {
+                work: Work::Volet { .. },
+                attempt: 1
+            }
+        ),
+        "{:?}",
+        state.flow.stage()
+    );
+    assert_eq!(
+        state.coder_session,
+        Some(session),
+        "the launch resumes the coder's session"
+    );
+    assert_eq!(world.verdict_file(), "", "and starts with no verdict");
 }

@@ -105,6 +105,7 @@ impl World {
                 spent: Default::default(),
                 spared: None,
                 decided: None,
+                cut: None,
                 coder_session: None,
                 pushed: None,
                 updated_at: when.into(),

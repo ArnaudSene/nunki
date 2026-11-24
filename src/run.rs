@@ -428,6 +428,8 @@ pub fn start(
         lot,
         attempt: 1,
         session: None,
+        // The mission's first run: there is nothing to continue.
+        continues: false,
     })?;
     let session = launched.run.session.clone();
 
@@ -446,6 +448,7 @@ pub fn start(
         spent: Default::default(),
         spared: None,
         decided: None,
+        cut: None,
         coder_session: Some(session),
         pushed: None,
         updated_at: String::new(),
@@ -589,6 +592,12 @@ pub struct Launching<'a> {
     pub attempt: u32,
     /// The harness session to resume, or `None` for a fresh one.
     pub session: Option<SessionId>,
+    /// This launch continues a run that was cut before `nunki` concluded it
+    /// ([`MissionState::continues`]), and `VERDICT.json` is kept. Every
+    /// other launch is a new run and starts with the file empty. Not the
+    /// same thing as [`Launching::session`]: a new lot, a volet or a new
+    /// security round may resume a session, and is still a new run.
+    pub continues: bool,
 }
 
 /// What a launch left behind, for the caller to persist.
@@ -724,7 +733,18 @@ pub fn launch(l: &Launching) -> Result<Launched, RunError> {
     } = l;
     let role = *role;
 
-    // First of all, for a profile that lifts the project's services: a
+    // Before anything else, a new run starts with no verdict: the one in the
+    // file is an earlier run's, already concluded and recorded in the state,
+    // and left there it would be read as this run's if this one writes
+    // none (SPEC 4.1, "le verdict"). First, so that every launch, whichever
+    // check below refuses it, leaves no earlier verdict behind. A run that
+    // continues after a cut keeps it: its agent may have written it before
+    // the cut, and no other role has run since.
+    if !l.continues {
+        mission_dir::empty_verdict(paths)?;
+    }
+
+    // Then, for a profile that lifts the project's services: a
     // rendering no human approved starts nothing, and is said before an
     // account, an image or a branch is so much as looked at. `plan` reads it
     // again and is the guard; this is what keeps a refusal from being
