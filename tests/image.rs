@@ -199,7 +199,8 @@ fn pinning(dir: &std::path::Path, dockerfile: &str) -> nunki::project::Project {
     std::fs::create_dir_all(&fragment).unwrap();
     std::fs::write(
         fragment.join(nunki::versions::FILE),
-        "RUST_VERSION rust-toolchain.toml toolchain.channel\n\
+        "require: RUST_VERSION\n\
+         RUST_VERSION rust-toolchain.toml toolchain.channel\n\
          RUST_TARGETS rust-toolchain.toml toolchain.targets\n",
     )
     .unwrap();

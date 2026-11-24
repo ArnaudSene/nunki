@@ -28,6 +28,32 @@ merged since the last one. `AGENTS.md`, under "Releases", says how.
   an older `nunki` read back show as not timed; the campaigns it ran left
   no record of their time, and are not counted.
 
+### Changed
+
+- **A toolchain the repository does not pin now stops the launch.** Each
+  stack's `versions.txt` gains a `require:` line naming the build arguments
+  the repository must pin: `RUST_VERSION` for Rust, `PYTHON` for Python,
+  `NODE` and `PNPM` for Next.js. When one has no exact version — a version
+  with a digit in it; `stable` or `lts` name a channel and are refused —
+  `nunki check` is red and `mission start`, `verify`, `resume` and `retry`
+  refuse, naming each file tried and the one to add (a `rust-toolchain.toml`,
+  a `.python-version`, a `.nvmrc`, a `packageManager` field). Before, the
+  Dockerfile's default stood, and the project ran on a toolchain nobody
+  chose that changed at each rebuild. `nunki slot rebuild` still builds,
+  prints each unpinned argument as an error and exits successfully.
+  Component lists, targets and Playwright stay optional.
+- **A fragment written before `require:` is red.** A `versions.txt` without
+  the line, or a stack with no `versions.txt` at all (until now "not
+  checked"), makes `nunki check` red and a launch refuse. `nunki init
+  --refresh` replaces an untouched `versions.txt`; an edited one keeps the
+  project's edits, with today's version beside it as `versions.txt.nunki`.
+- **The Rust image pins the tools nunki installs in it.** `cargo-mutants`
+  and `cargo-deny` were installed at whatever crates.io served on the day of
+  the build. They are now build arguments with exact defaults,
+  `CARGO_MUTANTS=27.1.0` and `CARGO_DENY=0.20.2`, in the Rust Dockerfile and
+  in the Rust add-on. `nunki init --refresh` replaces an untouched
+  Dockerfile; `nunki slot rebuild` then builds with these versions.
+
 ### Fixed
 
 - **`nunki slot rebuild --help` now says which stack `--stack` takes.** It

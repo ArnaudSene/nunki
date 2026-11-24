@@ -711,17 +711,18 @@ impl Project {
     }
 
     /// Where the repository pins the versions this stack's image is built
-    /// with, from the fragment's `versions.txt` (SPEC 4.2). Empty when the
-    /// fragment has none — a fragment written before nunki read versions — and
-    /// an error naming the line when one cannot be read.
+    /// with, from the fragment's `versions.txt` (SPEC 4.2). `None` when the
+    /// fragment has none — a fragment written before nunki read versions,
+    /// which a launch refuses — and an error naming the line when one cannot
+    /// be read.
     pub fn stack_versions(
         &self,
         stack: &str,
-    ) -> Result<Vec<crate::versions::Source>, crate::versions::SourcesError> {
+    ) -> Result<Option<crate::versions::Versions>, crate::versions::SourcesError> {
         let file = self.fragment(stack).join(crate::versions::FILE);
         match std::fs::read_to_string(&file) {
-            Ok(text) => crate::versions::parse(&text, &file),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+            Ok(text) => crate::versions::parse(&text, &file).map(Some),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(crate::versions::SourcesError::Io(file, e)),
         }
     }

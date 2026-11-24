@@ -18,7 +18,14 @@
 //! RUST_VERSION    rust-toolchain.toml   toolchain.channel
 //! PNPM            package.json          packageManager      pnpm@{}
 //! NODE            .nvmrc                -                   v{}
+//! require: RUST_VERSION NODE
 //! ```
+//!
+//! The `require:` line says which arguments the repository **must** pin: one
+//! left to the Dockerfile's default is a toolchain nobody chose, and one that
+//! changes at each rebuild. Which ones is the fragment's to say, never the
+//! core's (SPEC 3.2). A colon cannot appear in an argument's name, so no
+//! source line is ever read as one.
 //!
 //! Read at `nunki slot rebuild`, never at `nunki init`: a fragment never
 //! updates itself, so a version frozen into it at init would be stale the
@@ -57,6 +64,29 @@ impl Source {
     }
 }
 
+/// A whole `versions.txt`: where each argument is read, and which arguments
+/// the repository must pin.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Versions {
+    pub sources: Vec<Source>,
+    /// The arguments its `require:` lines name, in the order written; `None`
+    /// for a file with no `require:` line at all — one written before the
+    /// line existed, which says nothing about what must be pinned.
+    pub required: Option<Vec<String>>,
+}
+
+impl Versions {
+    /// Whether the repository must pin `arg`.
+    pub fn requires(&self, arg: &str) -> bool {
+        self.required
+            .as_ref()
+            .is_some_and(|r| r.iter().any(|a| a == arg))
+    }
+}
+
+/// The directive that names the arguments a repository must pin.
+pub const REQUIRE: &str = "require:";
+
 #[derive(Debug, thiserror::Error)]
 pub enum SourcesError {
     #[error("{0}: {1}")]
@@ -67,12 +97,31 @@ pub enum SourcesError {
         line: usize,
         why: String,
     },
+    #[error("{file}, line {line}: {why} — the line is `require: ARG [ARG…]`")]
+    Require {
+        file: PathBuf,
+        line: usize,
+        why: String,
+    },
+}
+
+fn is_name(arg: &str) -> bool {
+    let mut chars = arg.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Parse a `versions.txt`. A line nunki cannot read is an error that names
 /// it, never a line skipped: a skipped line is a version silently not read.
-pub fn parse(text: &str, file: &Path) -> Result<Vec<Source>, SourcesError> {
+///
+/// A `require:` line may come before the sources it names, so what it names
+/// is checked once the whole file is read — and an argument no source line
+/// names is an error on that `require:` line, since nothing could pin it.
+pub fn parse(text: &str, file: &Path) -> Result<Versions, SourcesError> {
     let mut sources = Vec::new();
+    let mut required: Option<Vec<(String, usize)>> = None;
     for (n, raw) in text.lines().enumerate() {
         let line = raw.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -83,6 +132,22 @@ pub fn parse(text: &str, file: &Path) -> Result<Vec<Source>, SourcesError> {
             line: n + 1,
             why: why.to_string(),
         };
+        if let Some(rest) = line.strip_prefix(REQUIRE) {
+            let named = required.get_or_insert_with(Vec::new);
+            for arg in rest.split_whitespace() {
+                if !is_name(arg) {
+                    return Err(SourcesError::Require {
+                        file: file.to_path_buf(),
+                        line: n + 1,
+                        why: format!("{arg:?} is not a build argument's name"),
+                    });
+                }
+                if !named.iter().any(|(a, _)| a == arg) {
+                    named.push((arg.to_string(), n + 1));
+                }
+            }
+            continue;
+        }
         let columns: Vec<&str> = line.split_whitespace().collect();
         let (arg, path, key, pattern) = match columns.as_slice() {
             [arg, path] => (*arg, *path, None, None),
@@ -90,12 +155,7 @@ pub fn parse(text: &str, file: &Path) -> Result<Vec<Source>, SourcesError> {
             [arg, path, key, pattern] => (*arg, *path, Some(*key), Some(*pattern)),
             _ => return Err(bad("expected two to four columns")),
         };
-        let mut chars = arg.chars();
-        let named = chars
-            .next()
-            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
-        if !named {
+        if !is_name(arg) {
             return Err(bad(&format!("{arg:?} is not a build argument's name")));
         }
         // Inside the repository, or it is not the repository pinning it.
@@ -124,7 +184,24 @@ pub fn parse(text: &str, file: &Path) -> Result<Vec<Source>, SourcesError> {
             pattern,
         });
     }
-    Ok(sources)
+    let required = match required {
+        None => None,
+        Some(named) => {
+            for (arg, line) in &named {
+                if !sources.iter().any(|s| &s.arg == arg) {
+                    return Err(SourcesError::Require {
+                        file: file.to_path_buf(),
+                        line: *line,
+                        why: format!(
+                            "{arg} is required, but no line says where the repository pins it"
+                        ),
+                    });
+                }
+            }
+            Some(named.into_iter().map(|(arg, _)| arg).collect())
+        }
+    };
+    Ok(Versions { sources, required })
 }
 
 /// What the repository says about one build argument.
@@ -136,8 +213,9 @@ pub enum Pin {
         value: String,
         from: String,
     },
-    /// No source gave an exact version, so the Dockerfile's default stands.
-    /// Each source tried, and why it gave nothing.
+    /// No source gave an exact version. Each source tried, and why it gave
+    /// nothing. For an optional argument the Dockerfile's default stands; a
+    /// required one stops every launch ([`unmet`]).
     Unpinned { arg: String, tried: Vec<String> },
 }
 
@@ -153,7 +231,12 @@ impl Pin {
 /// `root`. Sources for one argument are tried in the order they are written,
 /// and the first exact version wins — so `.nvmrc` can come before
 /// `engines.node`.
-pub fn resolve(root: &Path, sources: &[Source]) -> Vec<Pin> {
+///
+/// For a required argument a version must also hold a digit: `stable`,
+/// `lts` or `latest` name a channel that moves, and are refused the way a
+/// range is, so the next source is tried.
+pub fn resolve(root: &Path, versions: &Versions) -> Vec<Pin> {
+    let sources = &versions.sources;
     let mut order: Vec<&str> = Vec::new();
     for s in sources {
         if !order.contains(&s.arg.as_str()) {
@@ -164,8 +247,14 @@ pub fn resolve(root: &Path, sources: &[Source]) -> Vec<Pin> {
         .into_iter()
         .map(|arg| {
             let mut tried = Vec::new();
+            let required = versions.requires(arg);
             for source in sources.iter().filter(|s| s.arg == arg) {
                 match read(root, source) {
+                    Ok(value) if required && !value.chars().any(|c| c.is_ascii_digit()) => tried
+                        .push(format!(
+                            "{}: {value:?} names a channel that moves, not a version",
+                            source.place()
+                        )),
                     Ok(value) => {
                         return Pin::Found {
                             arg: arg.to_string(),
@@ -180,6 +269,35 @@ pub fn resolve(root: &Path, sources: &[Source]) -> Vec<Pin> {
                 arg: arg.to_string(),
                 tried,
             }
+        })
+        .collect()
+}
+
+/// Every required argument the repository left without an exact version, one
+/// line each: every source tried and why it gave nothing, then what to add,
+/// taken from the fragment's own source lines. Empty when every required
+/// argument is pinned.
+pub fn unmet(versions: &Versions, pins: &[Pin]) -> Vec<String> {
+    pins.iter()
+        .filter_map(|p| match p {
+            Pin::Unpinned { arg, tried } if versions.requires(arg) => {
+                let mut places: Vec<String> = Vec::new();
+                for s in versions.sources.iter().filter(|s| &s.arg == arg) {
+                    let place = match &s.key {
+                        Some(key) => format!("{} ({key})", s.file),
+                        None => s.file.clone(),
+                    };
+                    if !places.contains(&place) {
+                        places.push(place);
+                    }
+                }
+                Some(format!(
+                    "{arg}: nothing exact ({}); pin an exact version in one of {}",
+                    tried.join("; "),
+                    places.join(", ")
+                ))
+            }
+            _ => None,
         })
         .collect()
 }
@@ -380,8 +498,9 @@ fn json_items(value: &serde_json::Value) -> Result<Vec<String>, String> {
 ///
 /// Only an **exact** version is taken: `>=20`, `^3.12` or `lts/iron` name a
 /// range or an alias, and turning one into an image tag is a guess. Refused,
-/// the next source is tried, and failing all of them the Dockerfile's default
-/// stands and the build says so.
+/// the next source is tried. Failing all of them, an optional argument keeps
+/// the Dockerfile's default and the build says so; a required one stops every
+/// launch ([`unmet`]).
 ///
 /// Behind the pattern's `{}`, what follows the version must be the pattern's
 /// own suffix — or, when it has none, nothing but `+` build metadata, the way
@@ -421,7 +540,7 @@ fn exact(value: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn sources(text: &str) -> Vec<Source> {
+    fn sources(text: &str) -> Versions {
         parse(text, Path::new("versions.txt")).expect("the fixture parses")
     }
 
@@ -637,10 +756,129 @@ mod tests {
         assert_eq!(d, want);
         assert_eq!(
             undeclared(
-                &sources("PYTHON .python-version\nNODE .nvmrc\n"),
+                &sources("PYTHON .python-version\nNODE .nvmrc\n").sources,
                 "ARG PYTHON\n"
             ),
             vec!["NODE".to_string()]
         );
+    }
+
+    /// Every line written before `require:` existed reads as it did, and says
+    /// nothing about what must be pinned — which is not the same as saying
+    /// nothing must be.
+    #[test]
+    fn a_file_without_require_reads_its_sources_and_requires_nothing_it_knows_of() {
+        let v = sources("RUST_VERSION rust-toolchain.toml toolchain.channel\n");
+        assert_eq!(v.sources.len(), 1);
+        assert_eq!(v.required, None);
+        assert!(!v.requires("RUST_VERSION"));
+    }
+
+    /// A `require:` line names arguments, wherever it sits and however many
+    /// there are; an argument named twice is required once.
+    #[test]
+    fn require_lines_name_the_arguments_that_must_be_pinned() {
+        let v = sources(
+            "require: NODE\nNODE .nvmrc\nPNPM package.json packageManager pnpm@{}\n\
+             PLAYWRIGHT pnpm-lock.yaml\nrequire:PNPM NODE\n",
+        );
+        assert_eq!(v.sources.len(), 3, "{v:?}");
+        assert_eq!(
+            v.required,
+            Some(vec!["NODE".to_string(), "PNPM".to_string()])
+        );
+        assert!(v.requires("NODE") && v.requires("PNPM"));
+        assert!(!v.requires("PLAYWRIGHT"));
+        // Written, and empty: a fragment that requires nothing, and says so.
+        assert_eq!(sources("require:\nA f\n").required, Some(vec![]));
+    }
+
+    /// A required argument no line reads could never be pinned: an error on
+    /// the `require:` line, naming the file and the line.
+    #[test]
+    fn a_required_argument_no_line_reads_is_an_error_naming_the_line() {
+        let err = parse(
+            "# header\nNODE .nvmrc\nrequire: NODE PNPM\n",
+            Path::new("/frag/versions.txt"),
+        )
+        .unwrap_err();
+        let said = err.to_string();
+        assert!(
+            said.starts_with("/frag/versions.txt, line 3: PNPM is required"),
+            "{said}"
+        );
+        assert!(said.contains("`require: ARG [ARG…]`"), "{said}");
+        let err = parse("require: 1NODE\nNODE .nvmrc\n", Path::new("v.txt")).unwrap_err();
+        assert!(
+            err.to_string().starts_with("v.txt, line 1: \"1NODE\""),
+            "{err}"
+        );
+    }
+
+    /// A required argument needs a digit: a channel name moves under the
+    /// image. Refused the way a range is, so the next source is tried.
+    #[test]
+    fn a_required_argument_refuses_a_channel_and_accepts_a_version() {
+        for channel in ["stable", "beta", "nightly", "lts", "latest"] {
+            let dir = repo(&[("v", &format!("{channel}\n"))]);
+            let pins = resolve(dir.path(), &sources("require: A\nA v\n"));
+            match &pins[0] {
+                Pin::Unpinned { tried, .. } => assert_eq!(
+                    tried,
+                    &[format!(
+                        "v: \"{channel}\" names a channel that moves, not a version"
+                    )]
+                ),
+                other => panic!("{channel}: {other:?}"),
+            }
+        }
+        for version in ["1.99", "22", "3.12", "nightly-2026-11-01"] {
+            let dir = repo(&[("v", &format!("{version}\n"))]);
+            let pins = resolve(dir.path(), &sources("require: A\nA v\n"));
+            assert_eq!(pinned(&pins)["A"], version, "{pins:?}");
+        }
+        // The channel refused, the next source is read.
+        let dir = repo(&[("v", "stable\n"), ("w", "1.98.0\n")]);
+        let pins = resolve(dir.path(), &sources("require: A\nA v\nA w\n"));
+        assert_eq!(pinned(&pins)["A"], "1.98.0", "{pins:?}");
+    }
+
+    /// An optional argument keeps today's rule: an exact token is taken,
+    /// digit or not.
+    #[test]
+    fn an_optional_argument_still_takes_a_channel() {
+        let dir = repo(&[("v", "stable\n")]);
+        let pins = resolve(dir.path(), &sources("require: B\nA v\nB v\n"));
+        assert_eq!(pinned(&pins).get("A").map(String::as_str), Some("stable"));
+        assert_eq!(pinned(&pins).get("B"), None);
+    }
+
+    /// What is unmet: every required argument left unpinned, with each
+    /// source tried and why, then each place to pin it, once.
+    #[test]
+    fn unmet_names_what_was_tried_and_where_to_pin_it() {
+        let v = sources(
+            "require: NODE PNPM\nNODE .nvmrc - v{}\nNODE .nvmrc\nNODE package.json engines.node\n\
+             PNPM package.json packageManager pnpm@{}\nPLAYWRIGHT pnpm-lock.yaml\n",
+        );
+        let dir = repo(&[("package.json", r#"{"engines": {"node": ">=20"}}"#)]);
+        let pins = resolve(dir.path(), &v);
+        assert_eq!(
+            unmet(&v, &pins),
+            [
+                "NODE: nothing exact (.nvmrc: absent; .nvmrc: absent; package.json engines.node: \
+                 \">=20\" is not an exact version); pin an exact version in one of .nvmrc, \
+                 package.json (engines.node)",
+                "PNPM: nothing exact (package.json packageManager: no packageManager); pin an \
+                 exact version in one of package.json (packageManager)",
+            ]
+        );
+        std::fs::write(dir.path().join(".nvmrc"), "22\n").unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"packageManager": "pnpm@10.4.1"}"#,
+        )
+        .unwrap();
+        assert!(unmet(&v, &resolve(dir.path(), &v)).is_empty());
     }
 }

@@ -1073,9 +1073,44 @@ image qui porte `stable`.
   retour dans le cœur (3.2). Plusieurs lignes pour un argument sont essayées
   dans l'ordre, et la première version **exacte** gagne ; un intervalle
   (`>=20`, `^3.12`) ou un alias (`lts/iron`) est refusé, puisque le traduire
-  en étiquette d'image serait deviner. Rien d'exact : la valeur par défaut du
-  Dockerfile reste, et `nunki slot rebuild` le dit, argument par argument, avec
-  la raison pour chaque source.
+  en étiquette d'image serait deviner. Rien d'exact pour un argument
+  facultatif : la valeur par défaut du Dockerfile reste, et `nunki slot
+  rebuild` le dit, argument par argument, avec la raison pour chaque source.
+- **Le fragment dit ce qui doit être épinglé.** Une ligne `require: ARG
+  [ARG…]` de `versions.txt` nomme les arguments que le dépôt doit épingler ;
+  le deux-points ne peut pas figurer dans le nom d'un argument, donc aucune
+  ligne de source n'est lue comme elle. Un argument requis qu'aucune ligne ne
+  lit est une erreur qui nomme le fichier et la ligne. Les fragments livrés
+  requièrent `RUST_VERSION` (Rust), `PYTHON` (Python), `NODE` et `PNPM`
+  (Next.js) ; composants, cibles et Playwright restent facultatifs : une liste
+  vide est une réponse, et un projet sans Playwright n'a rien à épingler.
+  Quels arguments sont requis est écrit dans le fragment, jamais dans le cœur
+  (3.2).
+  - **Une version requise contient un chiffre.** `stable`, `beta`, `nightly`,
+    `lts` et `latest` nomment un canal qui bouge : refusés comme un
+    intervalle, avec la raison, et la source suivante est essayée. `1.99`,
+    `22`, `3.12` et `nightly-2026-11-01` sont acceptés.
+  - **Rien d'exact pour un argument requis : rouge, et lancement refusé.**
+    `nunki check` rend rouge la ligne des versions de la stack, et nomme pour
+    chaque argument chaque source essayée et pourquoi elle n'a rien donné,
+    puis où l'épingler, tiré des lignes du fragment. Tout lancement qui
+    compare l'image à l'arbre du slot, sur la branche de la mission, refuse
+    avec le même texte : `mission start`, et les lancements de rôle de
+    `verify`, `resume` et `retry`. Le projet ne tourne pas sur une chaîne
+    d'outils que personne n'a choisie et qui change à chaque reconstruction.
+  - **`nunki slot rebuild` construit quand même.** Il construit aussi le
+    pare-feu et la sonde ; il écrit chaque argument requis non épinglé comme
+    une ligne d'erreur, dit que les lancements refusent tant qu'il ne l'est
+    pas, et sort en succès : une reconstruction dite en échec serait relancée
+    pour rien.
+  - **Un fragment antérieur à la règle est rouge, jamais deviné.** Un
+    `versions.txt` sans ligne `require:`, ou une stack sans `versions.txt`
+    (jusqu'ici « non vérifié »), rend `nunki check` rouge et le lancement
+    refusé, avec la procédure : `nunki init --refresh` remplace le fichier si
+    personne ne l'a modifié ; sinon, reporter ses modifications dans la
+    version du jour, déposée à côté sous le nom `versions.txt.nunki`. Une
+    ligne `require:` sans argument dit que le fragment ne requiert rien : ce
+    n'est pas un fichier antérieur à la règle.
 - **Lu à `nunki slot rebuild`, jamais à `nunki init`.** Un fragment ne se met
   jamais à jour tout seul ; une version figée dedans à `init` serait fausse au
   premier mouvement du dépôt. Les valeurs lues sont passées en `--build-arg`
@@ -1108,8 +1143,13 @@ image qui porte `stable`.
   batterie a besoin. Python : `.python-version` ; `requires-python` n'est pas
   lu, c'est un intervalle. Next.js : `.nvmrc`, puis `.node-version`, puis
   `engines.node` s'il est exact, et `packageManager` pour pnpm. Les outils de
-  `nunki` lui-même — trufflehog, osv-scanner, Playwright — restent épinglés
-  par le fragment : ils ne sont pas au dépôt.
+  `nunki` lui-même — trufflehog, osv-scanner, Playwright, `cargo-mutants` et
+  `cargo-deny` — restent épinglés par le fragment : ils ne sont pas au dépôt.
+  Chacun est un argument de build à la valeur par défaut exacte
+  (`CARGO_MUTANTS=27.1.0`, `CARGO_DENY=0.20.2`), installé avec `--version` :
+  sans elle, `cargo install` prend ce que crates.io sert le jour de la
+  construction, et deux images d'un même projet portent deux outils. Les
+  relever est une décision à part.
 
 **Plusieurs stacks dans un projet** (l'hybride ci-dessous plutôt qu'une image
 entièrement générée par `nunki`). Un dépôt peut porter du Rust à la racine et un

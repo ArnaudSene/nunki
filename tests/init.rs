@@ -402,8 +402,9 @@ fn snapshot(root: &Path) -> Vec<(String, String)> {
 }
 
 /// The two verbs in the order a human runs them, through the binary: an
-/// ordinary repository becomes one `nunki check` passes, once the machine has
-/// the one thing `init` cannot give it — the stack's advisory database.
+/// ordinary repository becomes one `nunki check` passes, once the machine and
+/// the repository have what `init` cannot give them — the stack's advisory
+/// database, and the toolchain the repository pins.
 #[test]
 fn init_then_check_is_green_on_a_repository_that_had_nothing() {
     let dir = tempfile::tempdir().unwrap();
@@ -443,20 +444,35 @@ fn init_then_check_is_green_on_a_repository_that_had_nothing() {
             .output()
             .unwrap()
     };
-    // One thing is left, and it is the machine's: the stack's advisory
-    // database, which no `init` fills (#165). Red, with the stack's command,
-    // rather than green until gate 8 finds it missing after a whole run.
+    // Two things are left, and neither is `init`'s to give. The machine's:
+    // the stack's advisory database, which no `init` fills (#165). Red, with
+    // the stack's command, rather than green until gate 8 finds it missing
+    // after a whole run. And the repository's: the toolchain it is built
+    // with, which nobody chose yet (SPEC 4.2) — red, naming the file to add.
     let first = check();
     let text = String::from_utf8_lossy(&first.stdout);
     assert_eq!(first.status.code(), Some(1), "{text}");
-    assert!(text.contains("1 restriction(s) not held"), "{text}");
+    assert!(text.contains("2 restriction(s) not held"), "{text}");
     assert!(
         text.contains("RED the rust advisory database is on this machine"),
         "{text}"
     );
     assert!(text.contains("`cargo deny check advisories`"), "{text}");
+    assert!(
+        text.contains("RED the rust image follows the versions the repository pins"),
+        "{text}"
+    );
+    assert!(
+        text.contains("pin an exact version in one of rust-toolchain.toml"),
+        "{text}"
+    );
 
     std::fs::create_dir_all(home.join(".cargo/advisory-db")).unwrap();
+    std::fs::write(
+        root.join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"1.91.0\"\n",
+    )
+    .unwrap();
     let check = check();
     let text = String::from_utf8_lossy(&check.stdout);
     assert_eq!(check.status.code(), Some(0), "{text}");
@@ -739,6 +755,67 @@ fn the_rust_image_carries_what_the_battery_calls() {
         .find("cargo install cargo-deny")
         .expect("checked above");
     assert!(user < install, "{dockerfile}");
+}
+
+/// nunki's own tools in the Rust image are pinned (SPEC 4.2, "ce que chaque
+/// stack lit"): a `cargo install` without `--version` takes whatever
+/// crates.io serves on the day of the build, and an image built two weeks
+/// apart carries another cargo-deny. Every install in the shipped Dockerfile
+/// and its add-on takes a `--version`, from a build argument whose default is
+/// an exact version — 27.1.0 and 0.20.2, the ones the images carried.
+#[test]
+fn every_tool_the_rust_image_installs_takes_an_exact_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    nunki::init::init(
+        &root,
+        &dir.path().join("nunki"),
+        &["next".to_string(), "rust=backend".to_string()],
+    )
+    .unwrap();
+    for file in ["stacks/rust/Dockerfile", "stacks/rust/Dockerfile.addon"] {
+        let text = std::fs::read_to_string(home(&root).join(file)).unwrap();
+        let mut installed = Vec::new();
+        for (at, _) in text.match_indices("cargo install ") {
+            // One command: up to the next `&&`, or the end of its line.
+            let rest = &text[at..];
+            let end = [rest.find("&&"), rest.find(" \\\n"), rest.find('\n')]
+                .into_iter()
+                .flatten()
+                .min()
+                .unwrap_or(rest.len());
+            let words: Vec<&str> = rest[..end].split_whitespace().collect();
+            let tool = words[2];
+            let version = words
+                .iter()
+                .position(|w| *w == "--version")
+                .and_then(|i| words.get(i + 1))
+                .unwrap_or_else(|| panic!("{file}: {tool} takes no --version: {:?}", words));
+            let arg = version
+                .trim_matches('"')
+                .strip_prefix("${")
+                .and_then(|v| v.strip_suffix('}'))
+                .unwrap_or_else(|| panic!("{file}: {tool} takes {version}, not an ARG"));
+            let default = text
+                .lines()
+                .find_map(|l| l.trim().strip_prefix(&format!("ARG {arg}=")))
+                .unwrap_or_else(|| panic!("{file}: no default for {arg}"));
+            installed.push((tool.to_string(), arg.to_string(), default.to_string()));
+        }
+        assert_eq!(
+            installed,
+            [
+                (
+                    "cargo-mutants".into(),
+                    "CARGO_MUTANTS".into(),
+                    "27.1.0".into()
+                ),
+                ("cargo-deny".into(), "CARGO_DENY".into(), "0.20.2".into()),
+            ],
+            "{file}"
+        );
+    }
 }
 
 /// The battery asks only for what the coder's container can reach.
@@ -2212,10 +2289,13 @@ fn every_version_a_fragment_reads_is_an_argument_its_image_declares() {
         let file = fragment.join(nunki::versions::FILE);
         let sources = nunki::versions::parse(&std::fs::read_to_string(&file).unwrap(), &file)
             .unwrap_or_else(|e| panic!("{stack}: {e}"));
-        assert!(!sources.is_empty(), "{stack} reads no version at all");
+        assert!(
+            !sources.sources.is_empty(),
+            "{stack} reads no version at all"
+        );
         let dockerfile = std::fs::read_to_string(fragment.join("Dockerfile")).unwrap();
         assert_eq!(
-            nunki::versions::undeclared(&sources, &dockerfile),
+            nunki::versions::undeclared(&sources.sources, &dockerfile),
             Vec::<String>::new(),
             "{stack}"
         );
@@ -5631,6 +5711,40 @@ echo 'CaughtMutant|src/lib.rs|1|1|src/lib.rs:1:1: replace a' | mutants-out "$out
 exit 0
 "#;
 
+/// Every process on this machine, as `<pid> <command line>`.
+///
+/// From `/proc` where there is one: the battery runs in nunki's own Rust
+/// image, which carries no procps, so `ps` is not there to ask, and a test
+/// that needs it fails there for a reason that is not its subject. From `ps`
+/// elsewhere — macOS has no `/proc` and always has `ps`.
+#[cfg(unix)]
+fn processes() -> Vec<String> {
+    let proc = Path::new("/proc");
+    if proc.join("self/cmdline").is_file() {
+        let Ok(entries) = std::fs::read_dir(proc) else {
+            return Vec::new();
+        };
+        return entries
+            .flatten()
+            .filter_map(|e| {
+                let pid: u32 = e.file_name().to_str()?.parse().ok()?;
+                // Gone between the listing and the read: nothing to report.
+                let raw = std::fs::read(e.path().join("cmdline")).ok()?;
+                let line = String::from_utf8_lossy(&raw).replace('\0', " ");
+                Some(format!("{pid} {}", line.trim_end()))
+            })
+            .collect();
+    }
+    let ps = std::process::Command::new("ps")
+        .args(["-A", "-o", "pid=,command="])
+        .output()
+        .expect("a machine without /proc has ps");
+    String::from_utf8_lossy(&ps.stdout)
+        .lines()
+        .map(|l| l.trim().to_string())
+        .collect()
+}
+
 /// While the tool runs, a `.dwo` in `target/debug/deps` that a mutant wrote
 /// goes once no build has touched its file for the settling time — a new
 /// name, an old file linked under one, one linked from the session. Nothing
@@ -5696,19 +5810,16 @@ fn a_rust_campaign_sweeps_the_debug_files_its_mutants_write_while_it_runs() {
             // The sweep ends with the campaign: nothing still runs this
             // script, which `nunki` would otherwise find still in flight.
             // Whatever does is killed before the test says so.
-            let ps = std::process::Command::new("ps")
-                .args(["-A", "-o", "pid=,command="])
-                .output()
-                .unwrap();
             let script_at = script.display().to_string();
-            let outlived: Vec<String> = String::from_utf8_lossy(&ps.stdout)
-                .lines()
+            let outlived: Vec<String> = processes()
+                .into_iter()
                 .filter(|l| l.contains(&script_at))
-                .map(str::to_string)
                 .collect();
             for line in &outlived {
-                if let Some(pid) = line.split_whitespace().next() {
-                    let _ = std::process::Command::new("kill").arg(pid).status();
+                if let Some(pid) = line.split_whitespace().next().and_then(|p| p.parse().ok()) {
+                    // SAFETY: a signal sent to a pid this test read; nothing
+                    // in this process is touched.
+                    unsafe { libc::kill(pid, libc::SIGTERM) };
                 }
             }
             let said = std::fs::read_to_string(&stdout).unwrap();

@@ -363,6 +363,20 @@ pub fn model_for(project: &Project, header: &crate::mission::Header) -> Option<S
         .or_else(|| project.config.model.clone())
 }
 
+/// What the harness of every launch is configured with: the mission's model
+/// ([`model_for`]) and the project's permission mode, the CLI's defaults for
+/// the rest. Its own function so that what reaches the harness is proved
+/// without lifting a container: a model dropped here would run the mission
+/// on the CLI's default model, and a permission mode dropped here on the
+/// CLI's default mode, both without a word.
+pub fn harness_config(project: &Project, header: &crate::mission::Header) -> claude_code::Config {
+    claude_code::Config {
+        model: model_for(project, header),
+        permission_mode: project.config.permission_mode.clone(),
+        ..Default::default()
+    }
+}
+
 /// What [`start`] started, and what it did with the slot's own base branch.
 #[derive(Debug)]
 pub struct Started {
@@ -844,14 +858,7 @@ pub fn launch(l: &Launching) -> Result<Launched, RunError> {
     )
     .identified_by(&session.0)
     .passing_secret(token_env, &token);
-    let harness = claude_code::ClaudeCode::new(
-        claude_code::Config {
-            model: model_for(project, header),
-            permission_mode: project.config.permission_mode.clone(),
-            ..Default::default()
-        },
-        Box::new(spawner),
-    );
+    let harness = claude_code::ClaudeCode::new(harness_config(project, header), Box::new(spawner));
     std::fs::create_dir_all(&runs).map_err(|e| RunError::Io(runs.clone(), e))?;
     let request = RunRequest {
         role,

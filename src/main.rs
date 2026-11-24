@@ -1027,7 +1027,11 @@ fn main() -> ExitCode {
                         &engine,
                         image::Harness::Install,
                     ) {
-                        Ok(image::Built { images, versions }) => {
+                        Ok(image::Built {
+                            images,
+                            versions,
+                            unmet,
+                        }) => {
                             println!("agent     {}", images.agent);
                             println!("firewall  {}", images.firewall);
                             println!("prober    {}", images.prober);
@@ -1046,6 +1050,20 @@ fn main() -> ExitCode {
                                         )
                                     }
                                 }
+                            }
+                            // A required argument left unpinned stops every
+                            // launch, and is said as an error. The rebuild
+                            // still succeeds: it built the firewall and the
+                            // prober too, and one reported as failed would be
+                            // run again for nothing (SPEC 4.2).
+                            for line in &unmet {
+                                eprintln!("error     {line}");
+                            }
+                            if !unmet.is_empty() {
+                                eprintln!(
+                                    "          every launch refuses until it is pinned; \
+                                     `nunki check` says the same"
+                                );
                             }
                             ExitCode::SUCCESS
                         }

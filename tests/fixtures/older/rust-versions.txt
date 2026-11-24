@@ -1,0 +1,10 @@
+# Where the repository pins what this stack's image is built with (SPEC 4.2).
+# `nunki slot rebuild` reads each line from the repository and passes the value
+# as a build argument of the Dockerfile beside this file, which must declare it.
+# Columns: ARG, file in the repository, key into a .toml or .json (`-` for the
+# whole of a plain file), and an optional pattern whose `{}` is the version.
+# Several lines for one ARG are tried in order; only an exact version is taken,
+# never a range. Nothing exact, and the Dockerfile's default stands.
+RUST_VERSION rust-toolchain.toml toolchain.channel
+RUST_COMPONENTS rust-toolchain.toml toolchain.components
+RUST_TARGETS rust-toolchain.toml toolchain.targets

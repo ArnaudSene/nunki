@@ -1,0 +1,19 @@
+# Where the repository pins what this stack's image is built with (SPEC 4.2).
+# `nunki slot rebuild` reads each line from the repository and passes the value
+# as a build argument of the Dockerfile beside this file, which must declare it.
+# Columns: ARG, file in the repository, key into a .toml or .json (`-` for the
+# whole of a plain file), and an optional pattern whose `{}` is the version.
+# Several lines for one ARG are tried in order; only an exact version is taken,
+# never a range. Nothing exact, and the Dockerfile's default stands.
+NODE .nvmrc - v{}
+NODE .nvmrc
+NODE .node-version - v{}
+NODE .node-version
+NODE package.json engines.node
+PNPM package.json packageManager pnpm@{}
+# The browsers the image carries are Playwright's, and they must be the ones the
+# project resolved: the battery refuses to start on a mismatch, and inside a
+# run Playwright cannot fetch others. The lockfile holds the exact version;
+# `package.json` holds a range.
+PLAYWRIGHT pnpm-lock.yaml - '@playwright/test@{}':
+PLAYWRIGHT package-lock.json packages.node_modules/@playwright/test.version
