@@ -38,6 +38,9 @@ pub struct FakeEngine {
     exec_when: Mutex<Vec<(String, ExecOutput)>>,
     fail_up: Mutex<Option<String>>,
     fail_stop: Mutex<Option<String>>,
+    /// A file `stop` writes before it answers, and what it writes: a process
+    /// still running in a container being removed, writing a file it mounts.
+    write_on_stop: Mutex<Option<(PathBuf, String)>>,
     lifted: Mutex<Vec<Container>>,
     /// The named volumes the engine holds. One is **in use** while any
     /// container of the project remains, as Docker refuses `volume rm` on a
@@ -72,6 +75,7 @@ impl Default for FakeEngine {
             exec_when: Mutex::new(Vec::new()),
             fail_up: Mutex::new(None),
             fail_stop: Mutex::new(None),
+            write_on_stop: Mutex::new(None),
             lifted: Mutex::new(Vec::new()),
             volumes: Mutex::new(Default::default()),
             held: Mutex::new(Default::default()),
@@ -179,6 +183,14 @@ impl FakeEngine {
         self
     }
 
+    /// Make `stop` write `body` to `path` before it answers: what a process
+    /// left running in the container being removed can do, up to the moment
+    /// it goes.
+    pub fn writing_on_stop(self, path: &Path, body: &str) -> Self {
+        *self.write_on_stop.lock().unwrap() = Some((path.to_path_buf(), body.to_string()));
+        self
+    }
+
     /// Make `stop` fail, the way an engine that cannot remove a container
     /// does.
     pub fn failing_stop(self, why: &str) -> Self {
@@ -253,6 +265,9 @@ impl Engine for FakeEngine {
             project.to_string(),
             services.iter().map(|s| s.to_string()).collect(),
         ));
+        if let Some((path, body)) = self.write_on_stop.lock().unwrap().clone() {
+            std::fs::write(&path, body).map_err(EngineError::Io)?;
+        }
         match self.fail_stop.lock().unwrap().clone() {
             Some(stderr) => Err(EngineError::Command {
                 verb: "stop",

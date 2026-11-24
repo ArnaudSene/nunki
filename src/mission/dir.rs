@@ -162,6 +162,24 @@ pub fn ensure_writable(dir: &Path) -> Result<(), MissionDirError> {
     Ok(())
 }
 
+/// Empty `VERDICT.json` before a new run is launched: zero bytes, as
+/// [`create`] writes it, which [`crate::verify`] reads as the absence of a
+/// verdict (SPEC 4.1, "le verdict"; 4.4, "un verdict vaut pour un `HEAD`").
+///
+/// The file is one for the whole mission and every role writes it, so
+/// without this a verdict an earlier run left — one whose `head` something
+/// moved since — would be read as the verdict of the next run of that role,
+/// a run that wrote nothing. What each role concluded is already in
+/// `nunki`'s state, and a red one in `FOLLOWUP_HQ.md`: nothing reads the
+/// file as a record once its run is concluded.
+///
+/// Truncated in place, never replaced: the file is bind-mounted on its own,
+/// and a mount follows the file it was given, not its name.
+pub fn empty_verdict(paths: &Paths) -> Result<(), MissionDirError> {
+    ensure_writable(&paths.dir)?;
+    write(&paths.verdict, "")
+}
+
 /// The header of a mission, read back from its folder. `nunki` reads this once,
 /// when the human validates the framing, and freezes it in its state; during
 /// the mission it never reads it again.

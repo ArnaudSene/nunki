@@ -3615,3 +3615,106 @@ fn no_profile_carries_the_subscription_token() {
         );
     }
 }
+
+/// What a switch for a new run is played on: a project, its slot, a
+/// mission folder whose `VERDICT.json` is empty, and the slot's profile on
+/// disk — the file the previous role's containers were lifted from.
+fn switching(
+    dir: &Path,
+) -> (
+    Project,
+    nunki::slot::Slot,
+    nunki::mission::dir::Paths,
+    PathBuf,
+) {
+    let project = project(dir);
+    std::fs::create_dir_all(project.hq_root.join("missions")).unwrap();
+    let slot = nunki::slot::Slot {
+        name: "one".into(),
+        tree: dir.join("tree"),
+    };
+    let paths = nunki::mission::dir::Paths::of(&project.hq_root, "m1");
+    std::fs::create_dir_all(&paths.dir).unwrap();
+    nunki::mission::dir::ensure_writable(&paths.dir).unwrap();
+    let profile = run::profile_path(&project, &slot.name);
+    std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+    std::fs::write(&profile, "services: {}\n").unwrap();
+    (project, slot, paths, profile)
+}
+
+/// A security verdict on `HEAD`, every finding `LOW`: what a process left in
+/// the previous role's container would forge for the next security run.
+const FORGED: &str = r#"{"role":"Security","verdict":"FINDINGS","head":"b","date":"d","report":"r","findings":[{"severity":"LOW","title":"t","why_acceptable":"w"}]}"#;
+
+/// The previous role's agent container mounts `VERDICT.json` read-write and
+/// stays up until the switch removes it, so a process left running in it can
+/// write the file after `launch` first emptied it. The new run must still
+/// start with no verdict: the file is emptied again once that container is
+/// gone, before the application and the agent start (SPEC 4.1, "le
+/// verdict").
+#[test]
+fn a_verdict_the_previous_container_writes_until_it_is_removed_is_not_the_new_runs() {
+    use nunki::engine::fake::{Call, FakeEngine};
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot, paths, profile) = switching(dir.path());
+    let engine = FakeEngine::default().writing_on_stop(&paths.verdict, FORGED);
+
+    run::switch_and_empty(&engine, &project, &slot, &profile, "p", &paths, false).unwrap();
+
+    assert!(
+        engine.calls().iter().any(|c| matches!(c, Call::Stop(..))),
+        "the previous containers were removed"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&paths.verdict).unwrap(),
+        "",
+        "what they wrote until then is not the new run's"
+    );
+}
+
+/// A run continued after a cut keeps the file through the switch: its agent
+/// may have written its verdict before the cut, and no other role ran.
+#[test]
+fn a_continued_run_keeps_its_verdict_through_the_switch() {
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot, paths, profile) = switching(dir.path());
+    std::fs::write(&paths.verdict, FORGED).unwrap();
+    let engine = nunki::engine::fake::FakeEngine::default();
+
+    run::switch_and_empty(&engine, &project, &slot, &profile, "p", &paths, true).unwrap();
+
+    assert_eq!(std::fs::read_to_string(&paths.verdict).unwrap(), FORGED);
+}
+
+/// With no profile on disk the switch removes nothing — there is no file to
+/// name the previous containers — and a new run's verdict is emptied all
+/// the same.
+#[test]
+fn with_no_profile_nothing_is_removed_and_the_verdict_is_still_emptied() {
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot, paths, profile) = switching(dir.path());
+    std::fs::remove_file(&profile).unwrap();
+    std::fs::write(&paths.verdict, FORGED).unwrap();
+    let engine = nunki::engine::fake::FakeEngine::default();
+
+    run::switch_and_empty(&engine, &project, &slot, &profile, "p", &paths, false).unwrap();
+
+    assert!(engine.calls().is_empty(), "{:?}", engine.calls());
+    assert_eq!(std::fs::read_to_string(&paths.verdict).unwrap(), "");
+}
+
+/// The stand-in for a process left in the previous container does write:
+/// the bare switch — the removal alone, which is all a new run had before
+/// the second emptying — leaves the forged verdict in the file. Without
+/// this, a fake whose `stop` wrote nothing would make the test above pass
+/// whatever the order.
+#[test]
+fn the_removal_alone_leaves_what_the_previous_container_wrote() {
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot, paths, profile) = switching(dir.path());
+    let engine = nunki::engine::fake::FakeEngine::default().writing_on_stop(&paths.verdict, FORGED);
+
+    run::switch_out(&engine, &project, &slot, &profile, "p").unwrap();
+
+    assert_eq!(std::fs::read_to_string(&paths.verdict).unwrap(), FORGED);
+}

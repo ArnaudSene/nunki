@@ -54,6 +54,7 @@ fn state(id: &str) -> MissionState {
         spent: Default::default(),
         spared: None,
         decided: None,
+        cut: None,
         coder_session: None,
         pushed: None,
         updated_at: String::new(),
@@ -732,4 +733,81 @@ fn runs_counted_before_runs_were_timed_read_as_untimed() {
         "0h00 (runs 0h00, mutation campaigns 0h00), not counting 3 run(s) and 0 \
          campaign(s) that were not timed"
     );
+}
+
+/// A run cut before `nunki` concluded it — a harness failure, the account's
+/// window, a container lost, all of which reach the flow as a run that ended
+/// for a cause that is not the mission's — leaves the stage marked: the next
+/// launch there continues it, and keeps `VERDICT.json` (SPEC 4.1, "le
+/// verdict"). The mark is written with the transition, so it survives a
+/// restarted `nunki`, and the next transition that is not a cut forgets it.
+#[test]
+fn a_cut_run_is_continued_until_the_flow_moves_for_another_reason() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let mut st = state("m5");
+    let first = Stage::Coding {
+        work: Work::Lot(0),
+        attempt: 1,
+    };
+    assert!(!st.continues(), "a mission's first run continues nothing");
+
+    store
+        .apply(
+            &mut st,
+            Event::RunEnded {
+                outcome: Outcome::HarnessFailure(nunki::harness::Fault::transient("rate limit")),
+                lot_done: false,
+            },
+        )
+        .unwrap();
+    let back = store.load("m5").unwrap();
+    assert_eq!(back.flow.stage(), &first, "a cut replays the same attempt");
+    assert_eq!(back.cut, Some(first.clone()));
+    assert!(back.continues(), "and the next launch continues the run");
+
+    // A run that finished without finishing its lot: a new attempt, which is
+    // a new run.
+    store
+        .apply(
+            &mut st,
+            Event::RunEnded {
+                outcome: Outcome::Finished(Usage::default()),
+                lot_done: false,
+            },
+        )
+        .unwrap();
+    let back = store.load("m5").unwrap();
+    assert_eq!(back.cut, None);
+    assert!(!back.continues());
+}
+
+/// The mark names the stage whose run was cut, and holds on that stage only:
+/// a flow that stands anywhere else is about another run, whatever the mark
+/// says.
+#[test]
+fn a_cut_holds_only_on_the_stage_it_names() {
+    let mut st = state("m6");
+    st.cut = Some(Stage::Gates);
+    assert!(!st.continues(), "{:?}", st.flow.stage());
+    st.cut = Some(st.flow.stage().clone());
+    assert!(st.continues());
+}
+
+/// A state an older `nunki` wrote has no mark, and reads as no cut: its next
+/// launch is a new run, and starts with an empty verdict.
+#[test]
+fn a_state_without_the_mark_reads_as_no_cut() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    store.save(&state("m7")).unwrap();
+    let path = dir.path().join("state/missions/m7.json");
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(
+        !text.contains("\"cut\""),
+        "an absent mark is not written: {text}"
+    );
+    let back = store.load("m7").unwrap();
+    assert_eq!(back.cut, None);
+    assert!(!back.continues());
 }

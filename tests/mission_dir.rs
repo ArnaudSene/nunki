@@ -1,7 +1,7 @@
 //! The mission folder at the HQ (SPEC 4.1): five files, and the split
 //! between them is a restriction rather than a convention.
 
-use nunki::mission::dir::{MissionDirError, Paths, create, list, read_header};
+use nunki::mission::dir::{MissionDirError, Paths, create, empty_verdict, list, read_header};
 use nunki::mission::{Bounds, Header, Integration, Lot, Rigor, RigorError, Security, Service};
 
 mod common;
@@ -745,4 +745,49 @@ fn a_header_written_by_the_previous_writer_reads_to_the_same_header() {
     std::fs::create_dir_all(mission.parent().unwrap()).unwrap();
     std::fs::write(&mission, frozen).unwrap();
     assert_eq!(read_header(dir.path(), "m1").unwrap(), awkward_header());
+}
+
+/// Before a new run, `VERDICT.json` goes back to what a new mission holds:
+/// zero bytes, the absence of a verdict (SPEC 4.1, "le verdict"). In place,
+/// the same file: it is bind-mounted on its own, and a mount follows the
+/// file it was given — a file put in its place under the same name would
+/// leave a container that is up reading the old one.
+#[test]
+fn emptying_the_verdict_leaves_zero_bytes_in_the_same_file() {
+    use std::os::unix::fs::MetadataExt;
+    let dir = tempfile::tempdir().unwrap();
+    let paths = create(dir.path(), "m1", &header(), "Do it.").unwrap();
+    std::fs::write(
+        &paths.verdict,
+        r#"{"role":"Security","verdict":"CLEAR","head":"abc","date":"d","report":"r"}"#,
+    )
+    .unwrap();
+    let before = std::fs::metadata(&paths.verdict).unwrap().ino();
+
+    empty_verdict(&paths).unwrap();
+
+    let after = std::fs::metadata(&paths.verdict).unwrap();
+    assert_eq!(after.len(), 0);
+    assert_eq!(after.ino(), before, "truncated, not replaced");
+    // The rest of the agent's files are left as they were.
+    assert!(paths.journal.is_file());
+}
+
+/// A verdict an engine turned into an empty directory — what a bind mount of
+/// a missing file makes — is a file again, empty: the launch that empties it
+/// is also the one that mounts it.
+#[test]
+fn emptying_a_verdict_the_engine_made_a_directory_makes_it_a_file_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = create(dir.path(), "m1", &header(), "Do it.").unwrap();
+    std::fs::remove_file(&paths.verdict).unwrap();
+    std::fs::create_dir(&paths.verdict).unwrap();
+
+    empty_verdict(&paths).unwrap();
+
+    assert!(
+        paths.verdict.is_file(),
+        "the engine's placeholder is undone"
+    );
+    assert_eq!(std::fs::metadata(&paths.verdict).unwrap().len(), 0);
 }

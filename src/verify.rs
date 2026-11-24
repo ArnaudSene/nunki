@@ -481,6 +481,7 @@ pub fn verify_as(
                     lot: state.flow.label(&work),
                     attempt,
                     session: state.coder_session.clone(),
+                    continues: state.continues(),
                 })?;
                 state.coder_session = Some(launched.run.session.clone());
                 state.run = Some(launched.run);
@@ -723,6 +724,7 @@ pub fn verify_as(
                     lot: "integration".to_string(),
                     attempt,
                     session: None,
+                    continues: state.continues(),
                 }) {
                     Err(crate::run::RunError::Services(
                         crate::services::ApprovalError::NotApproved { path, digest },
@@ -830,6 +832,7 @@ pub fn verify_as(
                     lot: "security".to_string(),
                     attempt,
                     session: None,
+                    continues: state.continues(),
                 }) {
                     Err(crate::run::RunError::Services(
                         crate::services::ApprovalError::NotApproved { path, digest },
@@ -1928,6 +1931,7 @@ mod tests {
             spent: Default::default(),
             spared: None,
             decided: None,
+            cut: None,
             coder_session: None,
             pushed: None,
             updated_at: String::new(),
