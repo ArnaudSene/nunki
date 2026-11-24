@@ -705,6 +705,44 @@ pub fn switch_out(
     Ok(())
 }
 
+/// Step 2 of [`launch`] for a new run: [`switch_out`], then empty
+/// `VERDICT.json` again (SPEC 4.1, "le verdict").
+///
+/// [`launch`] empties the file first, before any check can refuse it. That
+/// alone does not hold: the previous role's agent container is still up
+/// until [`switch_out`] removes it, it mounts the file read-write, and a
+/// process left running in it — something the previous run started in the
+/// background, a mutation campaign — may write the file back in between,
+/// through every check `launch` makes and the stop's grace period. Emptied
+/// again here, once that container is gone and before the application and
+/// the agent start, the new run finds the file as `nunki` left it.
+///
+/// A run that continues after a cut keeps the file, as at the top of
+/// [`launch`]: its agent may have written its verdict before the cut.
+///
+/// Without a profile file, [`switch_out`] removes nothing, and this still
+/// empties the file. `nunki` writes that file at every launch and never
+/// removes it, so its absence means no profile was ever lifted for the slot
+/// from it — the mission's first launch — and there is no previous role's
+/// container to wait for. A container a human left behind after removing
+/// the file by hand is not one this switch can name, and nothing here
+/// stops a process in it.
+pub fn switch_and_empty(
+    engine: &dyn Engine,
+    project: &Project,
+    slot: &Slot,
+    file: &Path,
+    compose_project: &str,
+    paths: &Paths,
+    continues: bool,
+) -> Result<(), RunError> {
+    switch_out(engine, project, slot, file, compose_project)?;
+    if !continues {
+        mission_dir::empty_verdict(paths)?;
+    }
+    Ok(())
+}
+
 /// Lift the role's profile and launch its run, on a slot whose lock the
 /// caller already holds.
 ///
@@ -813,8 +851,18 @@ pub fn launch(l: &Launching) -> Result<Launched, RunError> {
 
     // Step 2. The switch, read from the file that is up — the one that names
     // the services to remove — and the campaign ended above forgotten only
-    // once its container is gone.
-    switch_out(engine.as_ref(), project, slot, &file, &compose_project)?;
+    // once its container is gone. Then, for a new run, the verdict emptied
+    // again: until that container was removed, a process left in it could
+    // write the file back.
+    switch_and_empty(
+        engine.as_ref(),
+        project,
+        slot,
+        &file,
+        &compose_project,
+        paths,
+        l.continues,
+    )?;
 
     std::fs::write(&file, crate::compose::generate(&plan, engine.dialect())?)
         .map_err(|e| RunError::Io(file.clone(), e))?;
