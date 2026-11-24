@@ -18,6 +18,9 @@ FROM node:${NODE}-bookworm-slim AS nunki-next-node
 # standard library the image scan reports four high advisories against, each
 # with a fix (CVE-2026-78667, -78669 and -97031 in 1.27.2, CVE-2026-111943
 # in 1.27.3). Built with a Go that carries them, the binary carries none.
+# 2.7.1 rather than 2.7.0 for a module: 2.7.0 carries golang.org/x/net
+# v0.61.0 (CVE-2026-78661, fixed in v0.62.0). 2.7.1's go.mod, read from its
+# tag, requires go 1.27.3 and carries golang.org/x/net v0.62.0.
 #
 # `go install` checks every module it fetches against Go's checksum
 # database, which is what a release's SHA256SUMS were checked for.
@@ -26,7 +29,7 @@ FROM node:${NODE}-bookworm-slim AS nunki-next-node
 # binary static, so it runs on any base. Raising Go is raising the tag below;
 # raising osv-scanner is raising `OSV_SCANNER`.
 FROM golang:1.27.3-bookworm AS nunki-next-osv-scanner
-ARG OSV_SCANNER=2.7.0
+ARG OSV_SCANNER=2.7.1
 RUN CGO_ENABLED=0 GOTOOLCHAIN=local GOBIN=/out \
     go install -trimpath -ldflags='-s -w' \
       github.com/google/osv-scanner/v2/cmd/osv-scanner@v${OSV_SCANNER}
@@ -38,6 +41,9 @@ FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS nunki-python-uv
 # standard library the image scan reports four high advisories against, each
 # with a fix (CVE-2026-78667, -78669 and -97031 in 1.27.2, CVE-2026-111943
 # in 1.27.3). Built with a Go that carries them, the binary carries none.
+# 2.7.1 rather than 2.7.0 for a module: 2.7.0 carries golang.org/x/net
+# v0.61.0 (CVE-2026-78661, fixed in v0.62.0). 2.7.1's go.mod, read from its
+# tag, requires go 1.27.3 and carries golang.org/x/net v0.62.0.
 #
 # `go install` checks every module it fetches against Go's checksum
 # database, which is what a release's SHA256SUMS were checked for.
@@ -46,7 +52,7 @@ FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS nunki-python-uv
 # binary static, so it runs on any base. Raising Go is raising the tag below;
 # raising osv-scanner is raising `OSV_SCANNER`.
 FROM golang:1.27.3-bookworm AS nunki-python-osv-scanner
-ARG OSV_SCANNER=2.7.0
+ARG OSV_SCANNER=2.7.1
 RUN CGO_ENABLED=0 GOTOOLCHAIN=local GOBIN=/out \
     go install -trimpath -ldflags='-s -w' \
       github.com/google/osv-scanner/v2/cmd/osv-scanner@v${OSV_SCANNER}

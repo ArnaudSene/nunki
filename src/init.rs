@@ -2135,7 +2135,7 @@ RUN set -eu; \
 # in the project's lock for the reason cargo-deny is in the Rust image: what
 # judges the agent is not the agent's to weaken. It reads a database the host
 # fills and nunki mounts read-only, and it needs no network to do it —
-# measured on 2.6.0, and on 2.7.0 as built above, with `--network none`,
+# measured on 2.6.0, and on 2.7.0 built from source, with `--network none`,
 # against a read-only copy.
 "##;
 
@@ -2155,7 +2155,10 @@ const OSV_STAGE_NEXT: &str = "nunki-next-osv-scanner";
 /// with, and the image scan reads that Go's advisories as the image's own.
 /// Measured on 2.7.0: the released binary reads go1.27.0 and trivy 0.74.0
 /// finds four high advisories with fixes in it; this stage's reads go1.27.3
-/// and golang.org/x/net v0.61.0, and trivy finds none.
+/// and golang.org/x/net v0.61.0, and trivy then found none. Trivy has since
+/// found CVE-2026-78661 in that golang.org/x/net, fixed in v0.62.0, so the
+/// stage builds 2.7.1: its go.mod, read and not built, requires go 1.27.3,
+/// the Go of this stage's image, and carries golang.org/x/net v0.62.0.
 fn osv_scanner_stage(stage: &str) -> String {
     format!(
         r##"
@@ -2164,6 +2167,9 @@ fn osv_scanner_stage(stage: &str) -> String {
 # standard library the image scan reports four high advisories against, each
 # with a fix (CVE-2026-78667, -78669 and -97031 in 1.27.2, CVE-2026-111943
 # in 1.27.3). Built with a Go that carries them, the binary carries none.
+# 2.7.1 rather than 2.7.0 for a module: 2.7.0 carries golang.org/x/net
+# v0.61.0 (CVE-2026-78661, fixed in v0.62.0). 2.7.1's go.mod, read from its
+# tag, requires go 1.27.3 and carries golang.org/x/net v0.62.0.
 #
 # `go install` checks every module it fetches against Go's checksum
 # database, which is what a release's SHA256SUMS were checked for.
@@ -2172,7 +2178,7 @@ fn osv_scanner_stage(stage: &str) -> String {
 # binary static, so it runs on any base. Raising Go is raising the tag below;
 # raising osv-scanner is raising `OSV_SCANNER`.
 FROM golang:1.27.3-bookworm AS {stage}
-ARG OSV_SCANNER=2.7.0
+ARG OSV_SCANNER=2.7.1
 RUN CGO_ENABLED=0 GOTOOLCHAIN=local GOBIN=/out \
     go install -trimpath -ldflags='-s -w' \
       github.com/google/osv-scanner/v2/cmd/osv-scanner@v${{OSV_SCANNER}}
@@ -3081,8 +3087,8 @@ printf '{"campaign":"done","tried":%s,"found":%s,"by_file":true}\n' "$tried" "$f
 /// agent is not the agent's to weaken.
 ///
 /// Checked against osv-scanner 2.6.0 before it shipped, and again on 2.7.0
-/// as [`osv_scanner_stage`] builds it, against a `uv.lock` holding
-/// `requests` 2.19.0:
+/// built from source the way [`osv_scanner_stage`] builds, against a
+/// `uv.lock` holding `requests` 2.19.0:
 /// `--offline --offline-vulnerabilities` really does run with no network at
 /// all, against a **read-only** database; there is no `--local-db-path`, so
 /// `XDG_CACHE_HOME` is the only way to say where it is; and the finding to
@@ -3575,7 +3581,7 @@ RUN set -eu; \
 
 # `osv-scanner` is this stack's dependency audit, reading a database the host
 # fills and nunki mounts read-only. It needs no network to do it — measured
-# on 2.6.0 against `pnpm-lock.yaml`, and on 2.7.0 as built above against a
+# on 2.6.0 against `pnpm-lock.yaml`, and on 2.7.0 built from source against a
 # `uv.lock`, both with `--network none`.
 "##;
 
