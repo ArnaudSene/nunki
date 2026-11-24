@@ -3702,3 +3702,19 @@ fn with_no_profile_nothing_is_removed_and_the_verdict_is_still_emptied() {
     assert!(engine.calls().is_empty(), "{:?}", engine.calls());
     assert_eq!(std::fs::read_to_string(&paths.verdict).unwrap(), "");
 }
+
+/// The stand-in for a process left in the previous container does write:
+/// the bare switch — the removal alone, which is all a new run had before
+/// the second emptying — leaves the forged verdict in the file. Without
+/// this, a fake whose `stop` wrote nothing would make the test above pass
+/// whatever the order.
+#[test]
+fn the_removal_alone_leaves_what_the_previous_container_wrote() {
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot, paths, profile) = switching(dir.path());
+    let engine = nunki::engine::fake::FakeEngine::default().writing_on_stop(&paths.verdict, FORGED);
+
+    run::switch_out(&engine, &project, &slot, &profile, "p").unwrap();
+
+    assert_eq!(std::fs::read_to_string(&paths.verdict).unwrap(), FORGED);
+}
