@@ -996,3 +996,71 @@ fn a_toolchain_file_that_links_inside_the_tree_is_followed() {
     }
     launch(dir.path(), &p, "rust", "RUST_VERSION=1.91.0").unwrap();
 }
+
+/// A FIFO as `rust-toolchain.toml`, which an untracked file left in a slot
+/// can be: `nunki check` finishes, red, and says the file is a FIFO and not
+/// read. Opening a FIFO for reading blocks until something writes into it,
+/// so the test bounds its own wait: past it, it opens the FIFO for writing
+/// until the binary has ended, and fails.
+#[test]
+fn a_toolchain_file_that_is_a_fifo_never_hangs_nunki_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let (root, nunki) = initialised(dir.path(), "rust");
+    let at = root.join("rust-toolchain.toml");
+    let _ = std::fs::remove_file(&at);
+    let made = std::process::Command::new("mkfifo")
+        .arg(&at)
+        .status()
+        .is_ok_and(|s| s.success());
+    if !made {
+        eprintln!("skipped: no FIFO can be made here");
+        return;
+    }
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let out = std::thread::scope(|s| {
+        s.spawn(|| {
+            let _ = tx.send(nunki(&["check"]));
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(60)) {
+            Ok(out) => Some(out),
+            Err(_) => {
+                // Unblock every open the binary makes of the FIFO — a source
+                // read twice opens it twice — until it has ended, so the scope
+                // can end. Opened without blocking: with no reader waiting,
+                // the open fails at once instead of waiting for one.
+                use std::os::unix::fs::OpenOptionsExt as _;
+                loop {
+                    let _ = std::fs::OpenOptions::new()
+                        .write(true)
+                        .custom_flags(libc::O_NONBLOCK)
+                        .open(&at);
+                    if rx
+                        .recv_timeout(std::time::Duration::from_millis(100))
+                        .is_ok()
+                    {
+                        break None;
+                    }
+                }
+            }
+        }
+    });
+    let out = out.expect("nunki check was still running after 60 seconds on a FIFO");
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!out.status.success(), "{said}");
+    let red = said
+        .lines()
+        .skip_while(|l| !l.starts_with("RED the rust image follows the versions"))
+        .nth(1)
+        .unwrap_or_else(|| panic!("no red versions line: {said}"));
+    assert!(
+        red.contains(
+            "rust-toolchain.toml toolchain.channel: is a FIFO, not a regular file, and is not read"
+        ),
+        "{said}"
+    );
+}

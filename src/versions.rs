@@ -426,11 +426,7 @@ pub fn undeclared(sources: &[Source], dockerfile: &str) -> Vec<String> {
 /// One source's value, or why it gave none.
 fn read(tree: &Result<PathBuf, String>, root: &Path, source: &Source) -> Result<String, String> {
     let path = inside(tree, &root.join(&source.file))?;
-    let text = match std::fs::read_to_string(&path) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err("absent".to_string()),
-        Err(e) => return Err(format!("could not be read ({e})")),
-    };
+    let text = regular_file(&path, SOURCE_LIMIT)?;
     let items = match (format(&source.file), &source.key) {
         (Format::Plain, None) => {
             // The version is on the first line that opens as the pattern
@@ -500,6 +496,76 @@ fn inside(tree: &Result<PathBuf, String>, path: &Path) -> Result<PathBuf, String
         Ok(real)
     } else {
         Err("leads outside the tree, and is not read".to_string())
+    }
+}
+
+/// The most a version source may hold. A `pnpm-lock.yaml` is a source, and
+/// the largest real one measured held 183,116 bytes for 625 packages (about
+/// 300 bytes each): this is room for some 200,000 packages, and still a
+/// read the host survives.
+pub const SOURCE_LIMIT: u64 = 64 << 20;
+
+// Far above the largest real lockfile measured: a limit lowered under a
+// hundred of them does not build.
+const _: () = assert!(SOURCE_LIMIT >= 100 * 183_116);
+
+/// The text of the source at `path`, already resolved by [`inside`], or why
+/// it gives none (SPEC 4.2).
+///
+/// Only a regular file is read. A FIFO, a socket, a device or a directory
+/// gives nothing, and this is asked before the file is opened: opening a
+/// FIFO blocks until something writes into it, so a check after the open
+/// would come too late. The look does not follow a link, so a link set
+/// down on the resolved path since [`inside`] gives nothing either.
+///
+/// Never more than `limit` and one byte is read, however large the file is
+/// or grows to; a larger one gives nothing.
+fn regular_file(path: &Path, limit: u64) -> Result<String, String> {
+    use std::io::Read as _;
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err("absent".to_string()),
+        Err(e) => return Err(format!("could not be read ({e})")),
+    };
+    if !meta.is_file() {
+        return Err(format!(
+            "is {}, not a regular file, and is not read",
+            kind(&meta.file_type())
+        ));
+    }
+    let mut text = String::new();
+    std::fs::File::open(path)
+        .and_then(|file| file.take(limit + 1).read_to_string(&mut text))
+        .map_err(|e| format!("could not be read ({e})"))?;
+    if text.len() as u64 > limit {
+        return Err(format!(
+            "holds more than {limit} bytes, more than any version source, and is not read"
+        ));
+    }
+    Ok(text)
+}
+
+/// What a file that is not a regular file is, in words.
+fn kind(file: &std::fs::FileType) -> &'static str {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt as _;
+        if file.is_fifo() {
+            return "a FIFO";
+        }
+        if file.is_socket() {
+            return "a socket";
+        }
+        if file.is_block_device() || file.is_char_device() {
+            return "a device";
+        }
+    }
+    if file.is_dir() {
+        "a directory"
+    } else if file.is_symlink() {
+        "a link"
+    } else {
+        "something else"
     }
 }
 
@@ -1228,5 +1294,161 @@ mod tests {
                 "{t}"
             );
         }
+    }
+
+    /// A FIFO at `at`, or `false` where one cannot be made — the test that
+    /// asked then has nothing to prove, and skips.
+    fn fifo(at: &Path) -> bool {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt as _;
+            let Ok(c) = std::ffi::CString::new(at.as_os_str().as_bytes()) else {
+                return false;
+            };
+            // SAFETY: `c` is a valid NUL-terminated path for the call's span.
+            if unsafe { libc::mkfifo(c.as_ptr(), 0o644) } == 0 {
+                return true;
+            }
+            eprintln!(
+                "skipped: no FIFO can be made here ({})",
+                std::io::Error::last_os_error()
+            );
+        }
+        false
+    }
+
+    /// `resolve` on another thread, waited on for `bound` at most. A source
+    /// that blocks fails the test rather than hanging it, and the FIFO is
+    /// then opened for writing and closed, so the blocked read ends too.
+    fn resolved_within(tree: &Path, v: Versions, unblock: &Path) -> Vec<Pin> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let at = tree.to_path_buf();
+        std::thread::spawn(move || {
+            let _ = tx.send(resolve(&at, &at, &v));
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(pins) => pins,
+            Err(_) => {
+                let _ = std::fs::OpenOptions::new().write(true).open(unblock);
+                panic!("reading the sources blocked for 10 seconds");
+            }
+        }
+    }
+
+    /// A FIFO as `rust-toolchain.toml`: opening it would block until
+    /// something writes into it. It gives nothing, says what it is, never
+    /// blocks, and the next source is read.
+    #[test]
+    fn a_fifo_as_a_source_gives_nothing_and_never_blocks() {
+        let f = fenced();
+        let at = f.tree.join("rust-toolchain.toml");
+        if !fifo(&at) {
+            return;
+        }
+        std::fs::write(f.tree.join("v"), "1.91.0\n").unwrap();
+        let v = sources("require: A\nA rust-toolchain.toml toolchain.channel\nA v\n");
+        let pins = resolved_within(&f.tree, v, &at);
+        assert_eq!(
+            pins,
+            [Pin::Found {
+                arg: "A".into(),
+                value: "1.91.0".into(),
+                from: "v".into(),
+            }]
+        );
+        let v = sources("A rust-toolchain.toml toolchain.channel\n");
+        assert_eq!(
+            reasons(&resolved_within(&f.tree, v, &at)),
+            [
+                "rust-toolchain.toml toolchain.channel: is a FIFO, not a regular file, \
+                 and is not read"
+            ]
+        );
+    }
+
+    /// A directory gives nothing, and says it is one.
+    #[test]
+    fn a_directory_as_a_source_gives_nothing() {
+        let f = fenced();
+        std::fs::create_dir_all(f.tree.join(".nvmrc")).unwrap();
+        let pins = resolve(&f.tree, &f.tree, &sources("A .nvmrc\n"));
+        assert_eq!(
+            reasons(&pins),
+            [".nvmrc: is a directory, not a regular file, and is not read"]
+        );
+    }
+
+    /// A socket gives nothing either, and says it is one.
+    #[cfg(unix)]
+    #[test]
+    fn a_socket_as_a_source_gives_nothing() {
+        let f = fenced();
+        let Ok(_listening) = std::os::unix::net::UnixListener::bind(f.tree.join(".nvmrc")) else {
+            eprintln!("skipped: no socket can be bound here");
+            return;
+        };
+        let pins = resolve(&f.tree, &f.tree, &sources("A .nvmrc\n"));
+        assert_eq!(
+            reasons(&pins),
+            [".nvmrc: is a socket, not a regular file, and is not read"]
+        );
+    }
+
+    /// A device cannot be made in a tree without privileges, so what one is
+    /// called is proved on the host's own `/dev/null`; and a link, which the
+    /// look at a resolved path does not follow, is called a link.
+    #[cfg(unix)]
+    #[test]
+    fn a_device_and_a_link_are_called_what_they_are() {
+        let null = std::fs::symlink_metadata("/dev/null").unwrap();
+        assert_eq!(kind(&null.file_type()), "a device");
+        let f = fenced();
+        if !link(&f.outside.join("secret"), &f.tree.join("v")) {
+            return;
+        }
+        let looked = std::fs::symlink_metadata(f.tree.join("v")).unwrap();
+        assert_eq!(kind(&looked.file_type()), "a link");
+        // A link set down where `inside` resolved a file is not followed.
+        assert_eq!(
+            regular_file(&f.tree.join("v"), SOURCE_LIMIT),
+            Err("is a link, not a regular file, and is not read".to_string())
+        );
+    }
+
+    /// Never more than the limit and one byte: a file of exactly the limit is
+    /// read, one byte more gives nothing, with the reason.
+    #[test]
+    fn a_source_is_read_up_to_its_limit_and_not_a_byte_past_it() {
+        let f = fenced();
+        let at = f.tree.join("v");
+        std::fs::write(&at, "1.91.0\n").unwrap();
+        assert_eq!(regular_file(&at, 7), Ok("1.91.0\n".to_string()));
+        assert_eq!(
+            regular_file(&at, 6),
+            Err("holds more than 6 bytes, more than any version source, and is not read".into())
+        );
+    }
+
+    /// The same at the real limit, with sparse files so the test stays fast:
+    /// a file of `SOURCE_LIMIT` bytes pins, one byte more gives nothing.
+    #[test]
+    fn a_source_past_the_limit_gives_nothing_and_one_at_it_is_read() {
+        let f = fenced();
+        let at = f.tree.join("v");
+        std::fs::write(&at, "1.91.0\n").unwrap();
+        let file = std::fs::OpenOptions::new().write(true).open(&at).unwrap();
+        file.set_len(SOURCE_LIMIT).unwrap();
+        let pins = resolve(&f.tree, &f.tree, &sources("A v\n"));
+        assert_eq!(pinned(&pins)["A"], "1.91.0", "{pins:?}");
+
+        file.set_len(SOURCE_LIMIT + 1).unwrap();
+        let pins = resolve(&f.tree, &f.tree, &sources("A v\n"));
+        assert_eq!(
+            reasons(&pins),
+            [format!(
+                "v: holds more than {SOURCE_LIMIT} bytes, more than any version source, \
+                 and is not read"
+            )]
+        );
     }
 }
