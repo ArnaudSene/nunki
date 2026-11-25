@@ -1183,6 +1183,33 @@ mod tests {
         assert_eq!(reasons(&pins), ["v: absent"]);
     }
 
+    /// A path that cannot be resolved for another reason than a missing file
+    /// is not called absent: "absent" tells a human to add the file, and the
+    /// file may be there. A path through a regular file fails as not a
+    /// directory, and a link to itself as a loop; each says it could not be
+    /// resolved, and why.
+    #[test]
+    fn a_path_that_cannot_be_resolved_is_not_called_absent() {
+        let f = fenced();
+        std::fs::write(f.tree.join("v"), "1.91.0\n").unwrap();
+        let pins = resolve(&f.tree, &f.tree, &sources("A v/x\n"));
+        let tried = reasons(&pins);
+        assert_eq!(tried.len(), 1, "{tried:?}");
+        assert!(
+            tried[0].starts_with("v/x: could not be resolved ("),
+            "{tried:?}"
+        );
+
+        if !link(&f.tree.join("loop"), &f.tree.join("loop")) {
+            return;
+        }
+        let tried = reasons(&resolve(&f.tree, &f.tree, &sources("A loop\n")));
+        assert!(
+            tried[0].starts_with("loop: could not be resolved ("),
+            "{tried:?}"
+        );
+    }
+
     /// A tree that cannot be resolved reads nothing, and every source says
     /// why.
     #[test]
