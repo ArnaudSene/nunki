@@ -1064,3 +1064,60 @@ fn a_toolchain_file_that_is_a_fifo_never_hangs_nunki_check() {
         "{said}"
     );
 }
+
+/// A launch reads what the slot's tree pins only once the previous role's
+/// container is gone (SPEC 4.2): until then it mounts the tree read-write,
+/// and a process left in it can write a version source. The fake engine's
+/// `stop` stands in for that process — it writes `rust-toolchain.toml` as
+/// the container is removed. Read before the switch, the launch would judge
+/// a tree that was still being written; read after, it judges what the tree
+/// holds once nothing can write it.
+#[test]
+fn a_launch_reads_the_slots_versions_only_once_the_previous_container_is_gone() {
+    use nunki::engine::fake::{Call, FakeEngine};
+    let dir = tempfile::tempdir().unwrap();
+    let p = project(dir.path(), &["rust"]);
+    let toolchain = p.root.join("rust-toolchain.toml");
+    std::fs::write(&toolchain, "[toolchain]\nchannel = \"1.90.0\"\n").unwrap();
+    let slot = nunki::slot::Slot {
+        name: "one".into(),
+        tree: p.root.clone(),
+    };
+    let paths = nunki::mission::dir::Paths::of(&p.hq_root, "m1");
+    std::fs::create_dir_all(&paths.dir).unwrap();
+    nunki::mission::dir::ensure_writable(&paths.dir).unwrap();
+    let profile = nunki::run::profile_path(&p, "one");
+    std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+    std::fs::write(&profile, "services: {}\n").unwrap();
+    let engine_bin = engine_with(dir.path(), "RUST_VERSION=1.91.0");
+    let serving = nunki::run::Serving {
+        stack: "rust",
+        engine_bin: &engine_bin,
+        image: "nunki/x:latest",
+    };
+
+    // What the previous container leaves the tree pinning once it is gone:
+    // what the image carries, so the launch goes on.
+    let engine =
+        FakeEngine::default().writing_on_stop(&toolchain, "[toolchain]\nchannel = \"1.91.0\"\n");
+    nunki::run::switch_then_serve(&engine, &p, &slot, &paths, false, &serving).unwrap();
+    assert!(
+        engine.calls().iter().any(|c| matches!(c, Call::Stop(..))),
+        "{:?}",
+        engine.calls()
+    );
+
+    // And the other way: the tree pinned what the image carries until the
+    // container wrote another pin on its way out. Refused, on what the tree
+    // holds now — and the previous container is gone all the same, which is
+    // what lets the `slot rebuild --slot` the refusal names go on.
+    let engine =
+        FakeEngine::default().writing_on_stop(&toolchain, "[toolchain]\nchannel = \"1.92.0\"\n");
+    match nunki::run::switch_then_serve(&engine, &p, &slot, &paths, false, &serving) {
+        Err(nunki::run::RunError::StaleImage { drift, .. }) => {
+            assert!(drift.join(" ").contains("1.92.0"), "{drift:?}")
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(engine.calls().iter().any(|c| matches!(c, Call::Stop(..))));
+}

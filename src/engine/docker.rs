@@ -389,7 +389,7 @@ impl Engine for Docker {
 const WRITERS_FORMAT: &str =
     "{{.Id}}\t{{index .Config.Labels \"com.docker.compose.service\"}}\t{{json .Mounts}}";
 
-/// Read what `inspect` printed with [`WRITERS_FORMAT`]: one container a
+/// Read what `inspect` printed with `WRITERS_FORMAT`: one container a
 /// line, and the source of every mount whose `RW` is true. A line that is not
 /// that shape is an error naming it, never a container that writes nothing.
 pub fn parse_writers(out: &str) -> Result<Vec<Writer>, EngineError> {

@@ -743,6 +743,57 @@ pub fn switch_and_empty(
     Ok(())
 }
 
+/// The image a launch must find serving the slot's tree: the stack it is
+/// built for, the engine binary that reads its label, and its name.
+pub struct Serving<'a> {
+    pub stack: &'a str,
+    pub engine_bin: &'a str,
+    pub image: &'a str,
+}
+
+/// Step 2 of [`launch`], and what must wait for it: [`switch_and_empty`],
+/// then [`image_serves`] on the slot's tree, which reads its version sources.
+///
+/// In that order and no other (SPEC 4.2). Until the switch has removed the
+/// previous role's agent container, it mounts the tree read-write, and a
+/// process left running in it can swap a link into a version source between
+/// its resolution and its read, or a FIFO in between the look and the open.
+/// Read after, no container that can write the tree is up: the project's
+/// services mount no path of the host, and the firewall mounts nothing of
+/// the tree.
+///
+/// What this changes for a refusal: an image that no longer serves the tree
+/// is said once the previous role's container is gone, and a campaign it
+/// ended. The slot is left with no agent container, which is what lets the
+/// `nunki slot rebuild --slot` it names proceed.
+pub fn switch_then_serve(
+    engine: &dyn Engine,
+    project: &Project,
+    slot: &Slot,
+    paths: &Paths,
+    continues: bool,
+    serving: &Serving,
+) -> Result<(), RunError> {
+    let file = profile_path(project, &slot.name);
+    let compose_project = crate::compose::project_name(&project.session(), &slot.name)?;
+    switch_and_empty(
+        engine,
+        project,
+        slot,
+        &file,
+        &compose_project,
+        paths,
+        continues,
+    )?;
+    image_serves(
+        project,
+        &slot.tree,
+        serving.stack,
+        serving.engine_bin,
+        serving.image,
+    )
+}
+
 /// Lift the role's profile and launch its run, on a slot whose lock the
 /// caller already holds.
 ///
@@ -754,7 +805,9 @@ pub fn switch_and_empty(
 /// 2. switch the profile: stop and remove the agent and its sidecar, and
 ///    **only** those. The project's services were lifted once for the slot
 ///    and keep the state the previous role left in them — migrations played,
-///    fixtures laid (rule 1);
+///    fixtures laid (rule 1) — and only then read what the slot's tree pins
+///    against the image ([`switch_then_serve`]): until the previous agent
+///    container is gone, a process in it can write that tree;
 /// 3. start the application, in the new profile, **before** the agent (rule
 ///    2);
 /// 4. launch the agent.
@@ -810,13 +863,6 @@ pub fn launch(l: &Launching) -> Result<Launched, RunError> {
     // checked out and this does nothing.
     let base = branch(slot, &project.root, &header.branch, &header.base)?;
 
-    // The image against what **this branch** pins, read from the slot's tree
-    // now that it is on it (SPEC 4.2). `slot rebuild` read the repository as
-    // it stood then; the mission's base, or a coder's commit on its branch,
-    // may pin another toolchain since, and the first `cargo` of the run would
-    // then spend it on a download the firewall refuses.
-    image_serves(project, &slot.tree, &stack, engine_bin, &images.agent)?;
-
     // Step 1. The coder starts nothing: there is nothing to test or attack
     // yet, and SPEC 4.2's table says so for the "code seul" shape.
     let declared = match role {
@@ -853,15 +899,19 @@ pub fn launch(l: &Launching) -> Result<Launched, RunError> {
     // the services to remove — and the campaign ended above forgotten only
     // once its container is gone. Then, for a new run, the verdict emptied
     // again: until that container was removed, a process left in it could
-    // write the file back.
-    switch_and_empty(
+    // write the file back. And only then the image against what the slot's
+    // tree pins: until then, the same process could write that tree too.
+    switch_then_serve(
         engine.as_ref(),
         project,
         slot,
-        &file,
-        &compose_project,
         paths,
         l.continues,
+        &Serving {
+            stack: &stack,
+            engine_bin,
+            image: &images.agent,
+        },
     )?;
 
     std::fs::write(&file, crate::compose::generate(&plan, engine.dialect())?)
