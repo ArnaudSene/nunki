@@ -232,9 +232,10 @@ impl Pin {
 /// and the first exact version wins — so `.nvmrc` can come before
 /// `engines.node`.
 ///
-/// For a required argument a version must also hold a digit: `stable`,
-/// `lts` or `latest` name a channel that moves, and are refused the way a
-/// range is, so the next source is tried.
+/// For a required argument a version must also not name a channel that
+/// moves ([`moving_channel`]): `stable`, `lts` or `latest`, with or without a
+/// host triple after them, are refused the way a range is, so the next
+/// source is tried.
 pub fn resolve(root: &Path, versions: &Versions) -> Vec<Pin> {
     let sources = &versions.sources;
     let mut order: Vec<&str> = Vec::new();
@@ -250,11 +251,10 @@ pub fn resolve(root: &Path, versions: &Versions) -> Vec<Pin> {
             let required = versions.requires(arg);
             for source in sources.iter().filter(|s| s.arg == arg) {
                 match read(root, source) {
-                    Ok(value) if required && !value.chars().any(|c| c.is_ascii_digit()) => tried
-                        .push(format!(
-                            "{}: {value:?} names a channel that moves, not a version",
-                            source.place()
-                        )),
+                    Ok(value) if required && moving_channel(&value) => tried.push(format!(
+                        "{}: {value:?} names a channel that moves, not a version",
+                        source.place()
+                    )),
                     Ok(value) => {
                         return Pin::Found {
                             arg: arg.to_string(),
@@ -271,6 +271,43 @@ pub fn resolve(root: &Path, versions: &Versions) -> Vec<Pin> {
             }
         })
         .collect()
+}
+
+/// Whether a value names a channel that moves rather than a version (SPEC
+/// 4.2, "Une version requise contient un chiffre").
+///
+/// The value is cut at its first `-`. A first part that holds a digit is a
+/// version — `22`, `1.89.0`, `1.89.0-x86_64-unknown-linux-gnu`. One that
+/// holds none is a channel, and a channel is pinned only when a date written
+/// `YYYY-MM-DD` follows it, alone or before a further `-`. Anything else after
+/// it — a host triple, a codename — still follows the channel wherever it
+/// moves, which is what a required argument exists to refuse.
+///
+/// The rule is about the shape of a value: it names no channel and no host
+/// triple, and knows no stack (SPEC 3.2). Whether the date's day exists is
+/// not checked.
+fn moving_channel(value: &str) -> bool {
+    let (head, rest) = match value.split_once('-') {
+        Some((head, rest)) => (head, Some(rest)),
+        None => (value, None),
+    };
+    if head.chars().any(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    !rest.is_some_and(dated)
+}
+
+/// Whether `rest` opens on a date written `YYYY-MM-DD`, followed by nothing
+/// or by a `-` and whatever comes after it.
+fn dated(rest: &str) -> bool {
+    const SHAPE: &[u8] = b"dddd-dd-dd";
+    let bytes = rest.as_bytes();
+    bytes.len() >= SHAPE.len()
+        && SHAPE.iter().zip(bytes).all(|(want, got)| match want {
+            b'd' => got.is_ascii_digit(),
+            other => got == other,
+        })
+        && matches!(bytes.get(SHAPE.len()), None | Some(b'-'))
 }
 
 /// Every required argument the repository left without an exact version, one
@@ -841,6 +878,76 @@ mod tests {
         let dir = repo(&[("v", "stable\n"), ("w", "1.98.0\n")]);
         let pins = resolve(dir.path(), &sources("require: A\nA v\nA w\n"));
         assert_eq!(pinned(&pins)["A"], "1.98.0", "{pins:?}");
+    }
+
+    /// What one required value resolves to, alone in its source: the value
+    /// pinned, or the reasons it was not.
+    fn required(value: &str) -> Result<String, Vec<String>> {
+        let dir = repo(&[("v", &format!("{value}\n"))]);
+        match resolve(dir.path(), &sources("require: A\nA v\n")).remove(0) {
+            Pin::Found { value, .. } => Ok(value),
+            Pin::Unpinned { tried, .. } => Err(tried),
+        }
+    }
+
+    /// The value is cut at its first `-`: a first part with a digit is a
+    /// version, whatever follows; one without is a channel, pinned only by a
+    /// date after it. A host triple or a codename after a channel still
+    /// follows the channel, and is refused the way the bare channel is.
+    #[test]
+    fn a_channel_followed_by_anything_but_a_date_is_refused() {
+        for channel in [
+            "stable",
+            "nightly",
+            "lts",
+            "latest",
+            "stable-x86_64-unknown-linux-gnu",
+            "beta-aarch64-apple-darwin",
+            "lts-iron",
+        ] {
+            assert_eq!(
+                required(channel),
+                Err(vec![format!(
+                    "v: \"{channel}\" names a channel that moves, not a version"
+                )]),
+                "{channel}"
+            );
+        }
+        for version in [
+            "nightly-2026-11-01",
+            "nightly-2026-11-01-x86_64-unknown-linux-gnu",
+            "1.89.0",
+            "1.89.0-x86_64-unknown-linux-gnu",
+            "22",
+            "3.12",
+        ] {
+            assert_eq!(required(version), Ok(version.to_string()), "{version}");
+        }
+    }
+
+    /// A date is four digits, two and two, with a `-` between each, and ends
+    /// the value or a `-` follows it. Any other shape is no date, and the
+    /// channel before it is refused. The day itself is not checked.
+    #[test]
+    fn a_date_after_a_channel_has_exactly_the_shape_yyyy_mm_dd() {
+        for value in [
+            "nightly-2026-11-0",
+            "nightly-2026-11-1x",
+            "nightly-2026-1-01",
+            "nightly-26-11-01",
+            "nightly-2026_11-01",
+            "nightly-2026-11_01",
+            "nightly-x026-11-01",
+            "nightly-2026-11-012",
+            "nightly-2026-11-01x86_64",
+            "nightly-",
+        ] {
+            assert!(required(value).is_err(), "{value}: {:?}", required(value));
+        }
+        assert_eq!(
+            required("nightly-2026-13-45"),
+            Ok("nightly-2026-13-45".to_string())
+        );
     }
 
     /// An optional argument keeps today's rule: an exact token is taken,

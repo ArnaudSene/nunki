@@ -695,6 +695,35 @@ fn stable_is_refused_for_rust_version_and_a_dated_nightly_is_not() {
     launch(dir.path(), &p, "rust", "RUST_VERSION=nightly-2026-11-01").unwrap();
 }
 
+/// A channel with a host triple holds digits only because of the triple, and
+/// still follows the channel: through the shipped Rust fragment it is red in
+/// `check` and refused at launch — even on an image built with that very
+/// value, so the refusal is the rule's and not the drift guard's.
+#[test]
+fn a_channel_with_a_host_triple_is_refused_for_rust_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = project(dir.path(), &["rust"]);
+    std::fs::write(
+        p.root.join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"stable-x86_64-unknown-linux-gnu\"\n",
+    )
+    .unwrap();
+    let reason = "rust-toolchain.toml toolchain.channel: \"stable-x86_64-unknown-linux-gnu\" \
+                  names a channel that moves";
+    match versions_verdict(&p, "rust") {
+        nunki::check::Verdict::Red(why) => assert!(why.contains(reason), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    let err = launch(
+        dir.path(),
+        &p,
+        "rust",
+        "RUST_VERSION=stable-x86_64-unknown-linux-gnu",
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains(reason), "{err}");
+}
+
 /// `nunki slot rebuild` still builds — the firewall and the prober with the
 /// agent's image — and carries what stops a launch, for the verb to say.
 #[test]
