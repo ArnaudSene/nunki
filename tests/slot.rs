@@ -867,19 +867,6 @@ fn rebuilt(
     (got, called)
 }
 
-/// The fake engine as a live run's: its container runs, and the probe in
-/// it answers with the marker a live process prints (`engine::spawn`).
-fn engine_with_a_live_run() -> nunki::engine::fake::FakeEngine {
-    use nunki::engine::{ExecOutput, Liveness, fake::FakeEngine};
-    FakeEngine::default()
-        .with_liveness("cafe1234", Liveness::Running)
-        .with_exec(ExecOutput {
-            status: 0,
-            stdout: "nunki-run-running\n".into(),
-            stderr: String::new(),
-        })
-}
-
 /// A container up in slot `one`'s Compose project, backing `service`,
 /// mounting `writable` writable — as [`nunki::engine::Engine::writers`]
 /// reports one.
@@ -1168,29 +1155,19 @@ fn a_rebuild_of_a_slot_that_does_not_exist_builds_nothing() {
     assert!(engine.calls.lock().unwrap().is_empty());
 }
 
-/// A run recorded in the slot that has ended — its container exited, or its
-/// log says how it ended — is not live: the rebuild builds. Nor is a paused
-/// one, as `verify` reads it: one notion of live, not one per verb.
+/// A run that has ended, its container down — exited or gone, so the engine
+/// lists nothing up — lets the rebuild build. A container that is up is
+/// refused whatever its run says: paused (it is listed up, and a human can
+/// unpause it mid-read), or with its result in the log. The test this
+/// replaces asserted a build in that last case, from the run's log alone;
+/// that was the defect the first security round found.
 #[test]
-fn a_rebuild_builds_when_the_run_in_its_slot_has_ended_or_is_paused() {
-    use nunki::engine::{Liveness, fake::FakeEngine};
+fn a_rebuild_builds_once_the_runs_container_is_down_and_never_while_it_is_up() {
+    use nunki::engine::fake::FakeEngine;
     let dir = tempfile::tempdir().unwrap();
     let project = repository(dir.path());
     let one = add(&project, "one").unwrap();
     running(&project, "m1");
-
-    for (what, liveness) in [
-        ("exited", Liveness::Exited(0)),
-        ("gone", Liveness::Gone),
-        ("paused", Liveness::Paused),
-    ] {
-        let engine = std::sync::Arc::new(FakeEngine::default().with_liveness("cafe1234", liveness));
-        let (got, called) = rebuilt(&project, Some("one"), engine);
-        assert_eq!(got.unwrap(), one.tree, "{what}");
-        assert!(called.get(), "{what}");
-    }
-
-    // The container still runs, but the run wrote its result: ended.
     let log = dir.path().join("run.jsonl");
     std::fs::write(
         &log,
@@ -1201,11 +1178,30 @@ fn a_rebuild_builds_when_the_run_in_its_slot_has_ended_or_is_paused() {
     let mut state = store.load("m1").unwrap();
     state.run.as_mut().unwrap().log = log;
     store.save(&state).unwrap();
+
+    // Down: nothing up.
     let (got, called) = rebuilt(
         &project,
         Some("one"),
-        std::sync::Arc::new(engine_with_a_live_run()),
+        std::sync::Arc::new(FakeEngine::default()),
     );
     assert_eq!(got.unwrap(), one.tree);
     assert!(called.get());
+
+    // Up — running or paused, the engine lists it alike — with the result
+    // logged: refused.
+    let (got, called) = rebuilt(
+        &project,
+        Some("one"),
+        std::sync::Arc::new(FakeEngine::default().with_writer(up(
+            "cafe1234",
+            "agent",
+            &[&one.tree],
+        ))),
+    );
+    assert!(
+        matches!(got, Err(nunki::slot::RebuildError::Writing { .. })),
+        "{got:?}"
+    );
+    assert!(!called.get());
 }
