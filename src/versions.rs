@@ -227,8 +227,9 @@ impl Pin {
     }
 }
 
-/// Read every build argument the sources name, from the repository at
-/// `root`. Sources for one argument are tried in the order they are written,
+/// Read every build argument the sources name, from the stack's directory
+/// `root` inside the repository's `tree` — the project's root, or a slot's
+/// clone of it. Sources for one argument are tried in the order they are written,
 /// and the first exact version wins — so `.nvmrc` can come before
 /// `engines.node`.
 ///
@@ -236,7 +237,15 @@ impl Pin {
 /// moves ([`moving_channel`]): `stable`, `lts` or `latest`, with or without a
 /// host triple after them, are refused the way a range is, so the next
 /// source is tried.
-pub fn resolve(root: &Path, versions: &Versions) -> Vec<Pin> {
+///
+/// A source that leads outside `tree` gives nothing (SPEC 4.2): the tree is
+/// one the agents write, and a link in it must not make the host read, or
+/// print, a file of its own ([`inside`]).
+pub fn resolve(tree: &Path, root: &Path, versions: &Versions) -> Vec<Pin> {
+    // Resolved once, the way each source is: a tree reached through a link
+    // (`/tmp` on macOS) must still hold the files resolved inside it.
+    let tree = std::fs::canonicalize(tree)
+        .map_err(|e| format!("the tree {} could not be resolved ({e})", tree.display()));
     let sources = &versions.sources;
     let mut order: Vec<&str> = Vec::new();
     for s in sources {
@@ -250,7 +259,7 @@ pub fn resolve(root: &Path, versions: &Versions) -> Vec<Pin> {
             let mut tried = Vec::new();
             let required = versions.requires(arg);
             for source in sources.iter().filter(|s| s.arg == arg) {
-                match read(root, source) {
+                match read(&tree, root, source) {
                     Ok(value) if required && moving_channel(&value) => tried.push(format!(
                         "{}: {value:?} names a channel that moves, not a version",
                         source.place()
@@ -415,8 +424,8 @@ pub fn undeclared(sources: &[Source], dockerfile: &str) -> Vec<String> {
 }
 
 /// One source's value, or why it gave none.
-fn read(root: &Path, source: &Source) -> Result<String, String> {
-    let path = root.join(&source.file);
+fn read(tree: &Result<PathBuf, String>, root: &Path, source: &Source) -> Result<String, String> {
+    let path = inside(tree, &root.join(&source.file))?;
     let text = match std::fs::read_to_string(&path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err("absent".to_string()),
@@ -466,6 +475,32 @@ fn read(root: &Path, source: &Source) -> Result<String, String> {
         .map(|item| extract(item, source.pattern.as_ref()))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(versions.join(","))
+}
+
+/// Where `path` really is, every link along it followed — or why it is not
+/// read. A link at any component counts, not only the last, and the tree is
+/// resolved the same way.
+///
+/// A path that lands outside `tree` gives nothing: the reason names neither
+/// where it leads nor anything found there, since the source's own place is
+/// all the caller prefixes it with. A link that stays inside the tree is
+/// followed — a `frontend/.nvmrc` that links to `../.nvmrc` is a choice a
+/// repository may make.
+///
+/// The file then read is the resolved path, so no link is followed a second
+/// time between this check and the read.
+fn inside(tree: &Result<PathBuf, String>, path: &Path) -> Result<PathBuf, String> {
+    let tree = tree.as_ref().map_err(Clone::clone)?;
+    let real = match std::fs::canonicalize(path) {
+        Ok(real) => real,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err("absent".to_string()),
+        Err(e) => return Err(format!("could not be resolved ({e})")),
+    };
+    if real.starts_with(tree) {
+        Ok(real)
+    } else {
+        Err("leads outside the tree, and is not read".to_string())
+    }
 }
 
 enum Format {
@@ -598,6 +633,7 @@ mod tests {
         )]);
         let pins = resolve(
             dir.path(),
+            dir.path(),
             &sources(
                 "RUST_VERSION rust-toolchain.toml toolchain.channel\n\
                  RUST_COMPONENTS rust-toolchain.toml toolchain.components\n\
@@ -618,6 +654,7 @@ mod tests {
         ]);
         let pins = resolve(
             dir.path(),
+            dir.path(),
             &sources("NODE package.json engines.node\nNODE .nvmrc - v{}\n"),
         );
         assert_eq!(
@@ -633,7 +670,11 @@ mod tests {
     #[test]
     fn the_first_exact_source_wins_even_when_a_later_one_also_pins() {
         let dir = repo(&[(".nvmrc", "22\n"), (".node-version", "24\n")]);
-        let pins = resolve(dir.path(), &sources("NODE .nvmrc\nNODE .node-version\n"));
+        let pins = resolve(
+            dir.path(),
+            dir.path(),
+            &sources("NODE .nvmrc\nNODE .node-version\n"),
+        );
         assert_eq!(pinned(&pins)["NODE"], "22");
     }
 
@@ -641,6 +682,7 @@ mod tests {
     fn nothing_exact_leaves_the_argument_unpinned_and_says_why_for_each_source() {
         let dir = repo(&[("package.json", r#"{"engines": {"node": "^20"}}"#)]);
         let pins = resolve(
+            dir.path(),
             dir.path(),
             &sources("NODE .nvmrc\nNODE package.json engines.node\n"),
         );
@@ -661,6 +703,7 @@ mod tests {
         )]);
         let pins = resolve(
             dir.path(),
+            dir.path(),
             &sources("PNPM package.json packageManager pnpm@{}\n"),
         );
         assert_eq!(pinned(&pins)["PNPM"], "11.15.0");
@@ -671,6 +714,7 @@ mod tests {
         let dir = repo(&[("package.json", r#"{"packageManager": "yarn@4.1.0"}"#)]);
         let pins = resolve(
             dir.path(),
+            dir.path(),
             &sources("PNPM package.json packageManager pnpm@{}\n"),
         );
         assert!(pinned(&pins).is_empty(), "{pins:?}");
@@ -679,7 +723,7 @@ mod tests {
     #[test]
     fn a_plain_file_gives_its_first_line_and_skips_comments() {
         let dir = repo(&[(".python-version", "# pinned for the lab\n3.13\n")]);
-        let pins = resolve(dir.path(), &sources("PYTHON .python-version\n"));
+        let pins = resolve(dir.path(), dir.path(), &sources("PYTHON .python-version\n"));
         assert_eq!(pinned(&pins)["PYTHON"], "3.13");
     }
 
@@ -697,6 +741,7 @@ mod tests {
         let dir = repo(&[("pnpm-lock.yaml", lock)]);
         let pins = resolve(
             dir.path(),
+            dir.path(),
             &sources("PLAYWRIGHT pnpm-lock.yaml - '@playwright/test@{}':\n"),
         );
         assert_eq!(pinned(&pins)["PLAYWRIGHT"], "1.61.1", "{pins:?}");
@@ -711,6 +756,7 @@ mod tests {
             "lockfileVersion: '9.0'\npackages:\n  next@16.3.3:\n",
         )]);
         let pins = resolve(
+            dir.path(),
             dir.path(),
             &sources("PLAYWRIGHT pnpm-lock.yaml - '@playwright/test@{}':\n"),
         );
@@ -729,14 +775,22 @@ mod tests {
     #[test]
     fn a_pattern_that_opens_on_the_version_reads_the_first_line() {
         let dir = repo(&[(".python-version", "3.13\n3.12\n")]);
-        let pins = resolve(dir.path(), &sources("PYTHON .python-version - {}\n"));
+        let pins = resolve(
+            dir.path(),
+            dir.path(),
+            &sources("PYTHON .python-version - {}\n"),
+        );
         assert_eq!(pinned(&pins)["PYTHON"], "3.13", "{pins:?}");
     }
 
     #[test]
     fn a_key_into_a_plain_file_is_refused_rather_than_ignored() {
         let dir = repo(&[(".python-version", "3.13\n")]);
-        let pins = resolve(dir.path(), &sources("PYTHON .python-version version\n"));
+        let pins = resolve(
+            dir.path(),
+            dir.path(),
+            &sources("PYTHON .python-version version\n"),
+        );
         assert!(pinned(&pins).is_empty());
     }
 
@@ -858,7 +912,7 @@ mod tests {
     fn a_required_argument_refuses_a_channel_and_accepts_a_version() {
         for channel in ["stable", "beta", "nightly", "lts", "latest"] {
             let dir = repo(&[("v", &format!("{channel}\n"))]);
-            let pins = resolve(dir.path(), &sources("require: A\nA v\n"));
+            let pins = resolve(dir.path(), dir.path(), &sources("require: A\nA v\n"));
             match &pins[0] {
                 Pin::Unpinned { tried, .. } => assert_eq!(
                     tried,
@@ -871,12 +925,12 @@ mod tests {
         }
         for version in ["1.99", "22", "3.12", "nightly-2026-11-01"] {
             let dir = repo(&[("v", &format!("{version}\n"))]);
-            let pins = resolve(dir.path(), &sources("require: A\nA v\n"));
+            let pins = resolve(dir.path(), dir.path(), &sources("require: A\nA v\n"));
             assert_eq!(pinned(&pins)["A"], version, "{pins:?}");
         }
         // The channel refused, the next source is read.
         let dir = repo(&[("v", "stable\n"), ("w", "1.98.0\n")]);
-        let pins = resolve(dir.path(), &sources("require: A\nA v\nA w\n"));
+        let pins = resolve(dir.path(), dir.path(), &sources("require: A\nA v\nA w\n"));
         assert_eq!(pinned(&pins)["A"], "1.98.0", "{pins:?}");
     }
 
@@ -884,7 +938,7 @@ mod tests {
     /// pinned, or the reasons it was not.
     fn required(value: &str) -> Result<String, Vec<String>> {
         let dir = repo(&[("v", &format!("{value}\n"))]);
-        match resolve(dir.path(), &sources("require: A\nA v\n")).remove(0) {
+        match resolve(dir.path(), dir.path(), &sources("require: A\nA v\n")).remove(0) {
             Pin::Found { value, .. } => Ok(value),
             Pin::Unpinned { tried, .. } => Err(tried),
         }
@@ -955,7 +1009,7 @@ mod tests {
     #[test]
     fn an_optional_argument_still_takes_a_channel() {
         let dir = repo(&[("v", "stable\n")]);
-        let pins = resolve(dir.path(), &sources("require: B\nA v\nB v\n"));
+        let pins = resolve(dir.path(), dir.path(), &sources("require: B\nA v\nB v\n"));
         assert_eq!(pinned(&pins).get("A").map(String::as_str), Some("stable"));
         assert_eq!(pinned(&pins).get("B"), None);
     }
@@ -969,7 +1023,7 @@ mod tests {
              PNPM package.json packageManager pnpm@{}\nPLAYWRIGHT pnpm-lock.yaml\n",
         );
         let dir = repo(&[("package.json", r#"{"engines": {"node": ">=20"}}"#)]);
-        let pins = resolve(dir.path(), &v);
+        let pins = resolve(dir.path(), dir.path(), &v);
         assert_eq!(
             unmet(&v, &pins),
             [
@@ -986,6 +1040,166 @@ mod tests {
             r#"{"packageManager": "pnpm@10.4.1"}"#,
         )
         .unwrap();
-        assert!(unmet(&v, &resolve(dir.path(), &v)).is_empty());
+        assert!(unmet(&v, &resolve(dir.path(), dir.path(), &v)).is_empty());
+    }
+
+    /// A repository's tree, and beside it a directory outside it whose name
+    /// opens like the tree's: a bound checked on the text of a path would
+    /// take one for the other.
+    struct Fenced {
+        _base: tempfile::TempDir,
+        tree: PathBuf,
+        outside: PathBuf,
+    }
+
+    const MARKER: &str = "SECRET_TOKEN=hunter2-marker";
+
+    fn fenced() -> Fenced {
+        let base = tempfile::tempdir().expect("a temp dir");
+        let tree = base.path().join("tree");
+        let outside = base.path().join("tree-outside");
+        std::fs::create_dir_all(&tree).expect("the tree");
+        std::fs::create_dir_all(&outside).expect("the outside");
+        std::fs::write(outside.join("secret"), format!("{MARKER}\n")).expect("the secret");
+        Fenced {
+            _base: base,
+            tree,
+            outside,
+        }
+    }
+
+    /// A link at `at` to `target`, or `false` where links cannot be made — the
+    /// test that asked then has nothing to prove, and skips.
+    fn link(target: &Path, at: &Path) -> bool {
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(target, at);
+        #[cfg(not(unix))]
+        let made: std::io::Result<()> = Err(std::io::Error::other("no links"));
+        match made {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("skipped: no link can be made here ({e})");
+                false
+            }
+        }
+    }
+
+    fn reasons(pins: &[Pin]) -> Vec<String> {
+        match &pins[0] {
+            Pin::Unpinned { tried, .. } => tried.clone(),
+            other => panic!("pinned: {other:?}"),
+        }
+    }
+
+    /// A `rust-toolchain.toml` that links to a host file: the source gives
+    /// nothing, its reason names the source and neither the target nor what
+    /// it holds, and the next source is tried.
+    #[test]
+    fn a_source_that_links_out_of_the_tree_gives_nothing_and_never_says_what_it_holds() {
+        let f = fenced();
+        if !link(
+            &f.outside.join("secret"),
+            &f.tree.join("rust-toolchain.toml"),
+        ) {
+            return;
+        }
+        let v = sources("require: A\nA rust-toolchain.toml toolchain.channel\n");
+        let pins = resolve(&f.tree, &f.tree, &v);
+        assert_eq!(
+            reasons(&pins),
+            ["rust-toolchain.toml toolchain.channel: leads outside the tree, and is not read"]
+        );
+        let said = unmet(&v, &pins).join("\n");
+        assert!(!said.contains("hunter2"), "{said}");
+        assert!(!said.contains("tree-outside"), "{said}");
+
+        // Refused, the next source is read.
+        std::fs::write(f.tree.join("v"), "1.91.0\n").unwrap();
+        let v = sources("require: A\nA rust-toolchain.toml toolchain.channel\nA v\n");
+        assert_eq!(pinned(&resolve(&f.tree, &f.tree, &v))["A"], "1.91.0");
+    }
+
+    /// A link at any component counts, not only the last: a directory that
+    /// links out leads every file under it out too.
+    #[test]
+    fn a_directory_that_links_out_of_the_tree_leads_its_files_out_too() {
+        let f = fenced();
+        if !link(&f.outside, &f.tree.join("sub")) {
+            return;
+        }
+        let pins = resolve(&f.tree, &f.tree, &sources("A sub/secret\n"));
+        assert_eq!(
+            reasons(&pins),
+            ["sub/secret: leads outside the tree, and is not read"]
+        );
+        // And a stack that lives in that directory reads nothing through it.
+        let pins = resolve(&f.tree, &f.tree.join("sub"), &sources("A secret\n"));
+        assert_eq!(
+            reasons(&pins),
+            ["secret: leads outside the tree, and is not read"]
+        );
+    }
+
+    /// A link that stays inside the tree is followed, even out of the stack's
+    /// own directory: the tree is the bound, not the stack.
+    #[test]
+    fn a_link_that_stays_inside_the_tree_is_followed() {
+        let f = fenced();
+        std::fs::write(f.tree.join(".nvmrc"), "22\n").unwrap();
+        std::fs::create_dir_all(f.tree.join("frontend")).unwrap();
+        if !link(Path::new("../.nvmrc"), &f.tree.join("frontend/.nvmrc")) {
+            return;
+        }
+        let pins = resolve(
+            &f.tree,
+            &f.tree.join("frontend"),
+            &sources("require: NODE\nNODE .nvmrc\n"),
+        );
+        assert_eq!(pinned(&pins)["NODE"], "22", "{pins:?}");
+    }
+
+    /// A tree reached through a link — `/tmp` on macOS is one — still holds
+    /// its own files: the tree is resolved the way each source is.
+    #[test]
+    fn a_tree_reached_through_a_link_still_holds_its_files() {
+        let f = fenced();
+        std::fs::write(f.tree.join("v"), "1.91.0\n").unwrap();
+        let via = f.outside.join("via");
+        if !link(&f.tree, &via) {
+            return;
+        }
+        let pins = resolve(&via, &via, &sources("require: A\nA v\n"));
+        assert_eq!(pinned(&pins)["A"], "1.91.0", "{pins:?}");
+    }
+
+    /// A link to nothing is a file that is not there, inside the tree or out.
+    #[test]
+    fn a_link_to_nothing_is_absent() {
+        let f = fenced();
+        if !link(&f.outside.join("nothing"), &f.tree.join("v")) {
+            return;
+        }
+        let pins = resolve(&f.tree, &f.tree, &sources("A v\n"));
+        assert_eq!(reasons(&pins), ["v: absent"]);
+    }
+
+    /// A tree that cannot be resolved reads nothing, and every source says
+    /// why.
+    #[test]
+    fn a_tree_that_cannot_be_resolved_reads_nothing_and_says_why() {
+        let f = fenced();
+        let gone = f.tree.join("gone");
+        let pins = resolve(&gone, &gone, &sources("A v\nA w\n"));
+        let tried = reasons(&pins);
+        assert_eq!(tried.len(), 2, "{tried:?}");
+        for t in &tried {
+            assert!(
+                t.contains(&format!(
+                    "the tree {} could not be resolved",
+                    gone.display()
+                )),
+                "{t}"
+            );
+        }
     }
 }

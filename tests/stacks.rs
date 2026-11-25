@@ -855,3 +855,144 @@ fn a_versions_file_that_cannot_be_read_is_an_error_not_a_missing_file() {
         other => panic!("{other:?}"),
     }
 }
+
+/// What the host must never print: the line a host file holds, read through
+/// a link the tree's `rust-toolchain.toml` is. A line TOML cannot parse, so
+/// reading it would print it inside the parse error's excerpt.
+const MARKER: &str = "SECRET_TOKEN=hunter2-marker";
+
+/// A link at `at` to `target`, or `false` where links cannot be made — the
+/// test that asked then has nothing to prove, and skips.
+fn link(target: &Path, at: &Path) -> bool {
+    #[cfg(unix)]
+    let made = std::os::unix::fs::symlink(target, at);
+    #[cfg(not(unix))]
+    let made: std::io::Result<()> = Err(std::io::Error::other("no links"));
+    match made {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!("skipped: no link can be made here ({e})");
+            false
+        }
+    }
+}
+
+/// A repository initialised for `stack` by the binary itself, and a way to
+/// run that binary in it, as a human does.
+fn initialised(
+    dir: &Path,
+    stack: &str,
+) -> (std::path::PathBuf, impl Fn(&[&str]) -> std::process::Output) {
+    let home = dir.join("home");
+    let root = dir.join("repo");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&root).unwrap();
+    assert!(
+        std::process::Command::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .arg(&root)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let engine = engine_with(dir, "");
+    let at = root.clone();
+    let nunki = move |args: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_nunki"))
+            .env("HOME", &home)
+            .env("HQ_ENGINE", &engine)
+            .arg("-C")
+            .arg(&at)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let init = nunki(&["init", "--stack", stack]);
+    assert!(init.status.success(), "{init:?}");
+    (root, nunki)
+}
+
+/// A `rust-toolchain.toml` that links to a host file: `nunki check` is red
+/// and says the file leads outside the tree, a launch refuses with the same
+/// text, and `nunki slot rebuild` says it as an error — and none of the three
+/// ever prints what the host file holds, nor where it is.
+#[test]
+fn a_toolchain_file_that_links_out_of_the_tree_is_refused_and_never_printed() {
+    let dir = tempfile::tempdir().unwrap();
+    let secret = dir.path().join("host-secret");
+    std::fs::write(&secret, format!("[toolchain]\n{MARKER}\n")).unwrap();
+    let (root, nunki) = initialised(dir.path(), "rust");
+    if !link(&secret, &root.join("rust-toolchain.toml")) {
+        return;
+    }
+    let reason = "rust-toolchain.toml toolchain.channel: leads outside the tree, and is not read";
+    let never = |said: &str| {
+        assert!(!said.contains("hunter2"), "{said}");
+        assert!(!said.contains("host-secret"), "{said}");
+    };
+
+    let out = nunki(&["check"]);
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!out.status.success(), "{said}");
+    never(&said);
+    let red = said
+        .lines()
+        .skip_while(|l| !l.starts_with("RED the rust image follows the versions"))
+        .nth(1)
+        .unwrap_or_else(|| panic!("no red versions line: {said}"));
+    assert!(red.contains(reason), "{said}");
+
+    // The project's home, where `nunki init` put it under `$HOME/.nunki`.
+    let home = std::fs::read_dir(dir.path().join("home/.nunki"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|h| h.join("nunki.yaml").is_file())
+        .expect("init wrote a project home");
+    let p = Project::open_at(root.clone(), home).unwrap();
+    let err = launch(dir.path(), &p, "rust", "RUST_VERSION=1.91.0")
+        .unwrap_err()
+        .to_string();
+    never(&err);
+    assert!(err.contains(reason), "{err}");
+
+    let out = nunki(&["slot", "rebuild"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    never(&stderr);
+    never(&String::from_utf8_lossy(&out.stdout));
+    assert!(
+        stderr
+            .lines()
+            .any(|l| l.starts_with("error     RUST_VERSION:") && l.contains(reason)),
+        "{stderr}"
+    );
+}
+
+/// A link that stays inside the tree, to a file that pins a version, is a
+/// choice a repository may make: green in `check`, and served at launch.
+#[test]
+fn a_toolchain_file_that_links_inside_the_tree_is_followed() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = project(dir.path(), &["rust"]);
+    std::fs::create_dir_all(p.root.join("toolchain")).unwrap();
+    std::fs::write(
+        p.root.join("toolchain/pinned.toml"),
+        "[toolchain]\nchannel = \"1.91.0\"\n",
+    )
+    .unwrap();
+    if !link(
+        Path::new("toolchain/pinned.toml"),
+        &p.root.join("rust-toolchain.toml"),
+    ) {
+        return;
+    }
+    match versions_verdict(&p, "rust") {
+        nunki::check::Verdict::Green(said) => assert!(said.contains("1.91.0"), "{said}"),
+        other => panic!("{other:?}"),
+    }
+    launch(dir.path(), &p, "rust", "RUST_VERSION=1.91.0").unwrap();
+}
