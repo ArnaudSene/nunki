@@ -1415,6 +1415,23 @@ mod tests {
         );
     }
 
+    /// A source that is gone by the time it is looked at — removed after
+    /// `inside` resolved it — is absent, and only a missing file is: a look
+    /// that fails for another reason (here, a path through a regular file)
+    /// says it could not be read, and why, since "absent" would tell a human
+    /// to add a file that may be there.
+    #[test]
+    fn a_source_gone_after_its_resolution_is_absent_and_only_then() {
+        let f = fenced();
+        assert_eq!(
+            regular_file(&f.tree.join("gone"), SOURCE_LIMIT),
+            Err("absent".to_string())
+        );
+        std::fs::write(f.tree.join("v"), "1.91.0\n").unwrap();
+        let said = regular_file(&f.tree.join("v/x"), SOURCE_LIMIT).unwrap_err();
+        assert!(said.starts_with("could not be read ("), "{said}");
+    }
+
     /// Never more than the limit and one byte: a file of exactly the limit is
     /// read, one byte more gives nothing, with the reason.
     #[test]
