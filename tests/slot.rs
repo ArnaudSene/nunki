@@ -930,7 +930,10 @@ fn a_rebuild_refuses_while_a_container_that_writes_the_slots_tree_is_up() {
     assert!(!called.get(), "refused means nothing built");
     assert_eq!(
         *engine.calls.lock().unwrap(),
-        [Call::Writers(slot_one_project(&project))]
+        [
+            Call::Writers(slot_one_project(&project)),
+            Call::Writers(nunki::probe::compose_project(&project.session(), "one").unwrap()),
+        ]
     );
 }
 
@@ -1204,4 +1207,35 @@ fn a_rebuild_builds_once_the_runs_container_is_down_and_never_while_it_is_up() {
         "{got:?}"
     );
     assert!(!called.get());
+}
+
+/// `nunki check --slot` lifts its probe in a Compose project of its own,
+/// with the slot's tree mounted writable, and takes it down when it is
+/// done. One cut short leaves it up: the rebuild asks about that project
+/// too, and refuses on it. In any other project, the same container does
+/// not count.
+#[test]
+fn a_rebuild_refuses_while_a_probe_of_the_slot_is_left_up() {
+    use nunki::engine::fake::FakeEngine;
+    let dir = tempfile::tempdir().unwrap();
+    let project = repository(dir.path());
+    let one = add(&project, "one").unwrap();
+    let probe = nunki::probe::compose_project(&project.session(), "one").unwrap();
+
+    let engine = std::sync::Arc::new(
+        FakeEngine::default().with_writer_in(&probe, up("cafe1234", "agent", &[&one.tree])),
+    );
+    let (got, called) = rebuilt(&project, Some("one"), engine);
+    assert!(
+        matches!(got, Err(nunki::slot::RebuildError::Writing { .. })),
+        "{got:?}"
+    );
+    assert!(!called.get());
+
+    let engine = std::sync::Arc::new(
+        FakeEngine::default().with_writer_in("someone-else", up("cafe1234", "agent", &[&one.tree])),
+    );
+    let (got, called) = rebuilt(&project, Some("one"), engine);
+    assert_eq!(got.unwrap(), one.tree);
+    assert!(called.get());
 }

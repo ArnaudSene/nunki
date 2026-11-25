@@ -390,8 +390,8 @@ pub enum RebuildError {
 /// Without a slot, the owner's checkout, which no agent writes, and nothing
 /// is asked. With one, that slot's tree — but **before anything in it is
 /// read**, the engine is asked which containers of the slot's Compose
-/// project are up, and what each mounts writable. One that can write the
-/// tree — a writable mount of the tree, of a directory inside it, or of one
+/// project, and of the one `nunki check --slot` lifts for it, are up, and
+/// what each mounts writable. One that can write the tree — a writable mount of the tree, of a directory inside it, or of one
 /// that holds it — refuses the rebuild: a process in it can swap a link in
 /// between the resolution of a version source and its read. That is asked
 /// of the engine and not of a run's log: a run's container outlives the run
@@ -412,14 +412,29 @@ pub fn rebuild<T>(
         return Ok(build(&project.root));
     };
     let found = find(project, name)?;
-    let compose = crate::compose::project_name(&project.session(), name)
-        .map_err(|e| SlotError::Engine(e.to_string()))?;
-    let up = engine
-        .writers(&compose)
-        .map_err(|e| RebuildError::Unknown {
-            slot: name.to_string(),
-            why: e.to_string(),
-        })?;
+    // The slot's own project, where its roles run, and the one `nunki check
+    // --slot` lifts for it: both mount the tree, and a probe cut short
+    // leaves its containers up.
+    let projects = [
+        crate::compose::project_name(&project.session(), name),
+        crate::probe::compose_project(&project.session(), name),
+    ];
+    let mut up = Vec::new();
+    for compose in projects {
+        let compose = compose.map_err(|e| SlotError::Engine(e.to_string()))?;
+        let listed = engine
+            .writers(&compose)
+            .map_err(|e| RebuildError::Unknown {
+                slot: name.to_string(),
+                why: e.to_string(),
+            })?;
+        // Once each, should two projects ever answer for one container.
+        for writer in listed {
+            if !up.iter().any(|w: &crate::engine::Writer| w.id == writer.id) {
+                up.push(writer);
+            }
+        }
+    }
     let writing: Vec<&crate::engine::Writer> = up
         .iter()
         .filter(|w| w.writable.iter().any(|source| writes(source, &found.tree)))
