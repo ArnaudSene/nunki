@@ -42,6 +42,8 @@ this repository, under `hq/` in this project's own home — the one
 - **Never commit without being asked.** The owner decides when work is
   committed and when it is pushed. Ask; do not infer approval from silence or
   from a green test run.
+  A nunki run is asked: its mission and its run message ask the coder and
+  the integrator to commit on the mission's branch, and nothing else.
 - **Never force-push a shared branch**, never rewrite published history,
   never `git add -A` without looking at what it swept in.
 - Commit messages say **what changed and why it had to**, not what files were
