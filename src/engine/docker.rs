@@ -4,7 +4,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use super::cli::{Cli, RealCli};
-use super::{Container, Dialect, Engine, EngineError, ExecOutput, Liveness, Netns, Writer};
+use super::{
+    Container, Dialect, Engine, EngineError, ExecOutput, Liveness, Mounted, Netns, Writer,
+};
 use crate::harness::spawn::CommandSpec;
 
 /// How to invoke the engine. Both halves are overridable, because the
@@ -390,13 +392,16 @@ const WRITERS_FORMAT: &str =
     "{{.Id}}\t{{index .Config.Labels \"com.docker.compose.service\"}}\t{{json .Mounts}}";
 
 /// Read what `inspect` printed with `WRITERS_FORMAT`: one container a
-/// line, and the source of every mount whose `RW` is true. A line that is not
-/// that shape is an error naming it, never a container that writes nothing.
+/// line, and for each of its mounts where it lands in the container and
+/// whether it is writable. A line that is not that shape — a mount without
+/// its `Destination` or its `RW` among them — is an error naming it, never a
+/// container that writes nothing. The mount's host `Source` is not read
+/// ([`Mounted`] says why).
 pub fn parse_writers(out: &str) -> Result<Vec<Writer>, EngineError> {
     #[derive(serde::Deserialize)]
     struct Mount {
-        #[serde(rename = "Source")]
-        source: String,
+        #[serde(rename = "Destination")]
+        destination: String,
         #[serde(rename = "RW")]
         rw: bool,
     }
@@ -415,13 +420,20 @@ pub fn parse_writers(out: &str) -> Result<Vec<Writer>, EngineError> {
             }
             let mounts: Vec<Mount> =
                 serde_json::from_str(mounts.trim()).map_err(|_| unreadable())?;
+            // Where a mount lands is a path in the container, and always an
+            // absolute one: anything else is a mount nunki cannot place.
+            if mounts.iter().any(|m| !m.destination.starts_with('/')) {
+                return Err(unreadable());
+            }
             Ok(Writer {
                 id: id.to_string(),
                 service: service.to_string(),
-                writable: mounts
+                mounts: mounts
                     .into_iter()
-                    .filter(|m| m.rw)
-                    .map(|m| PathBuf::from(m.source))
+                    .map(|m| Mounted {
+                        destination: PathBuf::from(m.destination),
+                        writable: m.rw,
+                    })
                     .collect(),
             })
         })

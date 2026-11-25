@@ -390,7 +390,7 @@ fn plan(
         firewall_image: images.firewall.clone(),
         user: UserIds { uid, gid },
         tree: slot.tree.clone(),
-        tree_at: PathBuf::from("/work/tree"),
+        tree_at: PathBuf::from(crate::run::TREE_AT),
         mission_dir: scratch.to_path_buf(),
         mission_dir_at: PathBuf::from("/work/mission"),
         stack_scripts: crate::run::stack_scripts(project, stack),

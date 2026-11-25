@@ -867,16 +867,26 @@ fn rebuilt(
     (got, called)
 }
 
-/// A container up in slot `one`'s Compose project, backing `service`,
-/// mounting `writable` writable — as [`nunki::engine::Engine::writers`]
-/// reports one.
-fn up(id: &str, service: &str, writable: &[&Path]) -> nunki::engine::Writer {
+/// A container up, backing `service`, with `mounts` — where each lands in
+/// the container, and whether it is writable — as
+/// [`nunki::engine::Engine::writers`] reports one.
+fn up(id: &str, service: &str, mounts: &[(&str, bool)]) -> nunki::engine::Writer {
     nunki::engine::Writer {
         id: id.into(),
         service: service.into(),
-        writable: writable.iter().map(|p| p.to_path_buf()).collect(),
+        mounts: mounts
+            .iter()
+            .map(|(at, writable)| nunki::engine::Mounted {
+                destination: PathBuf::from(at),
+                writable: *writable,
+            })
+            .collect(),
     }
 }
+
+/// The mount a coder's or an integrator's agent holds: the slot's tree,
+/// writable, where nunki mounts it in every container it lifts for a slot.
+const WRITES: &[(&str, bool)] = &[(nunki::run::TREE_AT, true)];
 
 /// The Compose project slot `one` of `project` lives in.
 fn slot_one_project(project: &Project) -> String {
@@ -895,12 +905,12 @@ fn a_rebuild_refuses_while_a_container_that_writes_the_slots_tree_is_up() {
     use nunki::engine::fake::{Call, FakeEngine};
     let dir = tempfile::tempdir().unwrap();
     let project = repository(dir.path());
-    let one = add(&project, "one").unwrap();
+    add(&project, "one").unwrap();
     running(&project, "m1");
     let engine = std::sync::Arc::new(FakeEngine::default().with_writer(up(
         "cafe1234abcdef99",
         "agent",
-        &[&one.tree],
+        WRITES,
     )));
 
     let (got, called) = rebuilt(&project, Some("one"), engine.clone());
@@ -947,7 +957,7 @@ fn a_rebuild_refuses_when_the_run_has_ended_but_its_container_is_still_up() {
     use nunki::engine::fake::FakeEngine;
     let dir = tempfile::tempdir().unwrap();
     let project = repository(dir.path());
-    let one = add(&project, "one").unwrap();
+    add(&project, "one").unwrap();
     running(&project, "m1");
     let log = dir.path().join("run.jsonl");
     std::fs::write(
@@ -959,13 +969,8 @@ fn a_rebuild_refuses_when_the_run_has_ended_but_its_container_is_still_up() {
     let mut state = store.load("m1").unwrap();
     state.run.as_mut().unwrap().log = log;
     store.save(&state).unwrap();
-    let leftover = || {
-        std::sync::Arc::new(FakeEngine::default().with_writer(up(
-            "cafe1234",
-            "agent",
-            &[&one.tree],
-        )))
-    };
+    let leftover =
+        || std::sync::Arc::new(FakeEngine::default().with_writer(up("cafe1234", "agent", WRITES)));
 
     let (got, called) = rebuilt(&project, Some("one"), leftover());
     assert!(
@@ -987,34 +992,42 @@ fn a_rebuild_refuses_when_the_run_has_ended_but_its_container_is_still_up() {
     assert!(!called.get());
 }
 
-/// A container that can write the tree through a directory that holds it,
-/// or a directory inside it, writes the tree just the same: refused. And so
-/// is one whose mount reaches the tree through a link.
+/// Whether a container can write the tree is read from where its mounts
+/// land in the container, never from the host path the engine reports. The
+/// tree's path, writable, refuses. The security agent as measured on
+/// Docker 29.8.2 — the tree read-only, a named volume writable at
+/// `/work/tree/target` — does not, nor does a writable mount anywhere else,
+/// above the tree's path or below it: nunki mounts the tree there and
+/// nowhere else.
 #[test]
-fn a_rebuild_refuses_a_container_that_writes_inside_or_above_the_tree() {
+fn a_rebuild_decides_from_where_a_mount_lands_in_the_container() {
     use nunki::engine::fake::FakeEngine;
     let dir = tempfile::tempdir().unwrap();
     let project = repository(dir.path());
     let one = add(&project, "one").unwrap();
-    std::fs::create_dir_all(one.tree.join("target")).unwrap();
-    let via = dir.path().join("via");
-    std::os::unix::fs::symlink(&one.tree, &via).unwrap();
-
-    for mounted in [
-        one.tree.join("target"),
-        one.tree.parent().unwrap().to_path_buf(),
-        via.clone(),
-    ] {
+    let asked = |mounts: &[(&str, bool)]| {
         let engine =
-            std::sync::Arc::new(FakeEngine::default().with_writer(up("cafe1234", "", &[&mounted])));
-        let (got, called) = rebuilt(&project, Some("one"), engine);
-        let err = got.unwrap_err();
-        assert!(
-            err.to_string().contains("container cafe1234 of slot"),
-            "{}: {err}",
-            mounted.display()
-        );
-        assert!(!called.get(), "{}", mounted.display());
+            std::sync::Arc::new(FakeEngine::default().with_writer(up("cafe1234", "", mounts)));
+        rebuilt(&project, Some("one"), engine)
+    };
+
+    let (got, called) = asked(&[("/work/mission", false), ("/work/tree", true)]);
+    let err = got.unwrap_err();
+    assert!(
+        err.to_string().contains("container cafe1234 of slot"),
+        "{err}"
+    );
+    assert!(!called.get());
+
+    for mounts in [
+        &[("/work/tree", false), ("/work/tree/target", true)][..],
+        &[("/work", true)][..],
+        &[("/work/tree/src", true)][..],
+        &[("/work/treehouse", true)][..],
+    ] {
+        let (got, called) = asked(mounts);
+        assert_eq!(got.unwrap(), one.tree, "{mounts:?}");
+        assert!(called.get(), "{mounts:?}");
     }
 }
 
@@ -1057,7 +1070,7 @@ fn a_rebuild_builds_when_no_container_up_can_write_the_tree() {
     let dir = tempfile::tempdir().unwrap();
     let project = repository(dir.path());
     let one = add(&project, "one").unwrap();
-    let two = add(&project, "two").unwrap();
+    add(&project, "two").unwrap();
 
     let (got, called) = rebuilt(
         &project,
@@ -1068,17 +1081,18 @@ fn a_rebuild_builds_when_no_container_up_can_write_the_tree() {
     assert!(called.get());
 
     running(&project, "m1");
+    let two = nunki::compose::project_name(&project.session(), "two").unwrap();
     let elsewhere = std::sync::Arc::new(
         FakeEngine::default()
-            .with_writer(up("aaaa", "agent", &[&two.tree]))
+            // Slot two's agent: its own tree, in its own project.
+            .with_writer_in(&two, up("aaaa", "agent", WRITES))
             .with_writer(up(
                 "bbbb",
                 "postgres",
-                &[Path::new("/var/lib/docker/volumes/nunki-one-pg/_data")],
+                &[("/var/lib/postgresql/data", true)],
             ))
-            // The security agent's: the tree mounted read-only, so nothing
-            // of it among what it can write.
-            .with_writer(up("cccc", "agent", &[])),
+            // The security agent's: the tree mounted read-only.
+            .with_writer(up("cccc", "agent", &[(nunki::run::TREE_AT, false)])),
     );
     let (got, called) = rebuilt(&project, Some("one"), elsewhere);
     assert_eq!(got.unwrap(), one.tree);
@@ -1106,11 +1120,8 @@ fn a_missions_unreadable_state_does_not_decide_a_rebuild() {
     assert_eq!(got.unwrap(), one.tree);
     assert!(called.get());
 
-    let engine = std::sync::Arc::new(FakeEngine::default().with_writer(up(
-        "cafe1234",
-        "agent",
-        &[&one.tree],
-    )));
+    let engine =
+        std::sync::Arc::new(FakeEngine::default().with_writer(up("cafe1234", "agent", WRITES)));
     let (got, called) = rebuilt(&project, Some("one"), engine);
     let said = got.unwrap_err().to_string();
     assert!(!said.contains("Mission m1"), "{said}");
@@ -1125,13 +1136,10 @@ fn a_rebuild_without_a_slot_builds_from_the_repository_as_before() {
     use nunki::engine::fake::FakeEngine;
     let dir = tempfile::tempdir().unwrap();
     let project = repository(dir.path());
-    let one = add(&project, "one").unwrap();
+    add(&project, "one").unwrap();
     running(&project, "m1");
-    let engine = std::sync::Arc::new(FakeEngine::default().with_writer(up(
-        "cafe1234",
-        "agent",
-        &[&one.tree],
-    )));
+    let engine =
+        std::sync::Arc::new(FakeEngine::default().with_writer(up("cafe1234", "agent", WRITES)));
 
     let (got, called) = rebuilt(&project, None, engine.clone());
     assert_eq!(got.unwrap(), project.root);
@@ -1196,11 +1204,7 @@ fn a_rebuild_builds_once_the_runs_container_is_down_and_never_while_it_is_up() {
     let (got, called) = rebuilt(
         &project,
         Some("one"),
-        std::sync::Arc::new(FakeEngine::default().with_writer(up(
-            "cafe1234",
-            "agent",
-            &[&one.tree],
-        ))),
+        std::sync::Arc::new(FakeEngine::default().with_writer(up("cafe1234", "agent", WRITES))),
     );
     assert!(
         matches!(got, Err(nunki::slot::RebuildError::Writing { .. })),
@@ -1223,7 +1227,7 @@ fn a_rebuild_refuses_while_a_probe_of_the_slot_is_left_up() {
     let probe = nunki::probe::compose_project(&project.session(), "one").unwrap();
 
     let engine = std::sync::Arc::new(
-        FakeEngine::default().with_writer_in(&probe, up("cafe1234", "agent", &[&one.tree])),
+        FakeEngine::default().with_writer_in(&probe, up("cafe1234", "agent", WRITES)),
     );
     let (got, called) = rebuilt(&project, Some("one"), engine);
     assert!(
@@ -1233,9 +1237,119 @@ fn a_rebuild_refuses_while_a_probe_of_the_slot_is_left_up() {
     assert!(!called.get());
 
     let engine = std::sync::Arc::new(
-        FakeEngine::default().with_writer_in("someone-else", up("cafe1234", "agent", &[&one.tree])),
+        FakeEngine::default().with_writer_in("someone-else", up("cafe1234", "agent", WRITES)),
     );
     let (got, called) = rebuilt(&project, Some("one"), engine);
     assert_eq!(got.unwrap(), one.tree);
     assert!(called.get());
+}
+
+/// The rebuild takes the slot's lock, the one `nunki verify` holds while it
+/// launches runs unattended. Held by another verb, the rebuild refuses,
+/// says who holds it, builds nothing and asks the engine nothing: between
+/// one role's switch and the next role's lift the engine would answer
+/// "nothing up" for a container about to come up with the tree writable.
+/// Taken, it is held until the build has read the tree, then released.
+#[test]
+fn a_rebuild_takes_the_slots_lock_and_refuses_while_another_verb_holds_it() {
+    use nunki::engine::fake::FakeEngine;
+    let dir = tempfile::tempdir().unwrap();
+    let project = repository(dir.path());
+    let one = add(&project, "one").unwrap();
+    let locks = project.hq_root.join("locks");
+    std::fs::create_dir_all(&locks).unwrap();
+
+    let held = nunki::state::SlotLock::acquire(&locks, "one", "verify").unwrap();
+    let engine = std::sync::Arc::new(FakeEngine::default());
+    let (got, called) = rebuilt(&project, Some("one"), engine.clone());
+    let err = got.unwrap_err();
+    assert!(matches!(err, nunki::slot::RebuildError::Locked(_)), "{err}");
+    let said = err.to_string();
+    assert!(said.contains("nothing was built"), "{said}");
+    assert!(said.contains("`nunki verify`"), "{said}");
+    assert!(said.contains("once it has released the slot"), "{said}");
+    assert!(!called.get());
+    assert!(engine.calls.lock().unwrap().is_empty());
+    drop(held);
+
+    // Held through the build, released after it.
+    let during = nunki::slot::rebuild(
+        &project,
+        Some("one"),
+        std::sync::Arc::new(FakeEngine::default()),
+        |tree| {
+            assert_eq!(tree, one.tree);
+            nunki::state::SlotLock::acquire(&locks, "one", "verify").map(|_| ())
+        },
+    )
+    .unwrap();
+    assert!(during.is_err(), "the slot was free during the build");
+    nunki::state::SlotLock::acquire(&locks, "one", "verify").expect("released after");
+}
+
+/// The Docker adapter itself behind the rebuild, its command line answered
+/// from a script: `ps` and `inspect` for the slot's project, then `ps` for
+/// its probe project, which has nothing up.
+fn docker_answering(inspect: &str) -> std::sync::Arc<dyn nunki::engine::Engine> {
+    use std::os::unix::process::ExitStatusExt;
+    struct Scripted(std::sync::Mutex<std::collections::VecDeque<String>>);
+    impl nunki::engine::cli::Cli for Scripted {
+        fn run(
+            &self,
+            _spec: &nunki::harness::spawn::CommandSpec,
+        ) -> std::io::Result<std::process::Output> {
+            let stdout = self.0.lock().unwrap().pop_front().unwrap_or_default();
+            Ok(std::process::Output {
+                status: std::process::ExitStatus::from_raw(0),
+                stdout: stdout.into_bytes(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+    let id = inspect.split('\t').next().unwrap().to_string();
+    let answers = vec![format!("{id}\n"), inspect.to_string(), String::new()];
+    std::sync::Arc::new(nunki::engine::docker::Docker::new(
+        nunki::engine::docker::Config {
+            compose: vec!["docker".into(), "compose".into()],
+            engine: "docker".into(),
+            stop_timeout: 20,
+        },
+        Box::new(Scripted(std::sync::Mutex::new(answers.into()))),
+    ))
+}
+
+/// From what the engine prints to what the rebuild decides, through the
+/// real adapter. The security agent as measured on Docker 29.8.2 — tree
+/// read-only, a volume writable inside it — lets it build. A coder's agent
+/// whose bind Docker Desktop names under its own host prefix still holds
+/// the tree writable where nunki mounted it, and refuses: the decision never
+/// rests on that host path.
+#[test]
+fn a_rebuild_reads_the_engines_own_answer_by_where_the_tree_lands() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = repository(dir.path());
+    let one = add(&project, "one").unwrap();
+    let fixture =
+        |name: &str| std::fs::read_to_string(format!("tests/fixtures/inspect/{name}")).unwrap();
+
+    let (got, called) = rebuilt(
+        &project,
+        Some("one"),
+        docker_answering(&fixture("security-agent-docker-29.8.2.txt")),
+    );
+    assert_eq!(got.unwrap(), one.tree);
+    assert!(called.get());
+
+    let (got, called) = rebuilt(
+        &project,
+        Some("one"),
+        docker_answering(&fixture("coder-agent-docker-desktop-wsl.txt")),
+    );
+    let said = got.unwrap_err().to_string();
+    assert!(
+        said.contains("agent (8d2e4f6a0b1c) of slot \"one\" is up"),
+        "{said}"
+    );
+    assert!(said.contains("`docker stop 8d2e4f6a0b1c"), "{said}");
+    assert!(!called.get());
 }

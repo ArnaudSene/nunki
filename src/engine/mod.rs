@@ -72,15 +72,26 @@ pub enum Liveness {
 }
 
 /// A container the engine reports up — running, paused or restarting — and
-/// the host paths it mounts writable: what `nunki slot rebuild --slot` asks
-/// before it reads a slot's tree (SPEC 4.2).
+/// what it mounts: what `nunki slot rebuild --slot` asks before it reads a
+/// slot's tree (SPEC 4.2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Writer {
     pub id: String,
     /// The Compose service it backs, empty when it carries no such label.
     pub service: String,
-    /// The source, on the host, of every mount it can write.
-    pub writable: Vec<PathBuf>,
+    /// Every mount it holds, by where it lands in the container.
+    pub mounts: Vec<Mounted>,
+}
+
+/// One mount of a container, as nunki reads it: where it lands **in the
+/// container**, and whether the container can write it. The host path it
+/// comes from is not read: engines name it each their own way (Docker
+/// Desktop under its own prefixes), and a guard resting on it would fail
+/// open on a name it does not recognise.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mounted {
+    pub destination: PathBuf,
+    pub writable: bool,
 }
 
 /// A container of a Compose project, as the engine lists it.

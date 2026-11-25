@@ -1603,8 +1603,8 @@ fn the_check_after_a_stop_looks_twice_before_it_says_nothing_is_left() {
 
 /// What `slot rebuild --slot` asks the engine: the project's containers
 /// that are up — `ps` without `-a`, so one that exited is not among them —
-/// then one `inspect` of them all, whose mounts are read as JSON, and the
-/// source of each writable one kept. A read-only mount is not.
+/// then one `inspect` of them all, whose mounts are read as JSON: where each
+/// lands in the container, and whether it is writable.
 #[test]
 fn the_containers_up_are_listed_with_the_mounts_they_can_write() {
     let mounts = r#"[{"Type":"bind","Source":"/slots/one","Destination":"/work/tree","Mode":"rw","RW":true,"Propagation":"rprivate"},{"Type":"bind","Source":"/hq/missions/m1","Destination":"/work/mission","Mode":"ro","RW":false,"Propagation":"rprivate"},{"Type":"volume","Name":"nunki-one-cargo","Source":"/var/lib/docker/volumes/nunki-one-cargo/_data","Destination":"/home/agent/.cargo","Driver":"local","Mode":"z","RW":true,"Propagation":""}]"#;
@@ -1636,15 +1636,16 @@ fn the_containers_up_are_listed_with_the_mounts_they_can_write() {
             nunki::engine::Writer {
                 id: "aaaa".into(),
                 service: "agent".into(),
-                writable: vec![
-                    PathBuf::from("/slots/one"),
-                    PathBuf::from("/var/lib/docker/volumes/nunki-one-cargo/_data"),
+                mounts: vec![
+                    mounted("/work/tree", true),
+                    mounted("/work/mission", false),
+                    mounted("/home/agent/.cargo", true),
                 ],
             },
             nunki::engine::Writer {
                 id: "bbbb".into(),
                 service: "firewall".into(),
-                writable: vec![],
+                mounts: vec![],
             },
         ]
     );
@@ -1672,6 +1673,12 @@ fn a_question_about_the_containers_up_that_fails_is_never_nothing_up() {
         "\tagent\t[]\n",
         "aaaa\tagent\tnot json\n",
         "aaaa\tagent\t[{\"Source\":\"/x\"}]\n",
+        // Where it lands, without whether it is writable; and the other way.
+        "aaaa\tagent\t[{\"Destination\":\"/work/tree\"}]\n",
+        "aaaa\tagent\t[{\"RW\":true}]\n",
+        // A destination that is not a path in the container.
+        "aaaa\tagent\t[{\"Destination\":\"\",\"RW\":true}]\n",
+        "aaaa\tagent\t[{\"Destination\":\"work/tree\",\"RW\":true}]\n",
     ] {
         assert!(
             matches!(
@@ -1697,4 +1704,51 @@ fn the_stop_named_for_a_human_is_the_engines_and_runs_nothing() {
     let (docker, cli) = recorded(vec![]);
     assert_eq!(docker.stopping("c1").display(), "docker stop c1");
     assert!(cli.lines().is_empty(), "named, not run");
+}
+
+/// A mount as [`Engine::writers`] reports one, for the assertions above.
+fn mounted(at: &str, writable: bool) -> nunki::engine::Mounted {
+    nunki::engine::Mounted {
+        destination: PathBuf::from(at),
+        writable,
+    }
+}
+
+/// What `inspect` printed for this mission's security agent, as the HQ
+/// measured it on the owner's Mac (Docker Engine - Community 29.8.2): the
+/// slot's tree bound read-only at `/work/tree`, its host source the path as
+/// given, and a named volume writable at `/work/tree/target`. Transcribed
+/// from that report into the line `writers` asks for, not captured raw: the
+/// home directory is elided, and the ids are stand-ins. Read as nunki reads
+/// it — where each mount lands, and whether it is writable.
+#[test]
+fn the_security_agent_measured_on_docker_29_is_read_by_where_its_mounts_land() {
+    let line =
+        std::fs::read_to_string("tests/fixtures/inspect/security-agent-docker-29.8.2.txt").unwrap();
+    let up = nunki::engine::docker::parse_writers(&line).unwrap();
+    assert_eq!(up.len(), 1);
+    assert_eq!(up[0].service, "agent");
+    assert_eq!(
+        up[0].mounts,
+        vec![
+            mounted("/work/tree", false),
+            mounted("/work/tree/target", true)
+        ]
+    );
+}
+
+/// Docker Desktop under WSL names a bind's host source under a prefix of its
+/// own (`/run/desktop/mnt/host/wsl/docker-desktop-bind-mounts/<distro>/<hash>`),
+/// which no host path of the tree matches. Built from that documented shape,
+/// not measured: the point is that nunki never reads it, and finds the tree
+/// where it mounted it.
+#[test]
+fn a_bind_named_under_docker_desktops_prefix_is_still_found_where_it_lands() {
+    let line = std::fs::read_to_string("tests/fixtures/inspect/coder-agent-docker-desktop-wsl.txt")
+        .unwrap();
+    let up = nunki::engine::docker::parse_writers(&line).unwrap();
+    assert_eq!(
+        up[0].mounts,
+        vec![mounted("/work/tree", true), mounted("/work/mission", false)]
+    );
 }

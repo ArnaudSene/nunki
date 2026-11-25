@@ -380,6 +380,16 @@ pub enum RebuildError {
          rebuild reads the versions in it; rebuild once the engine answers"
     )]
     Unknown { slot: String, why: String },
+    /// Another verb holds the slot's lock — `nunki verify`, which launches
+    /// runs unattended, among them. Between one role's switch and the next
+    /// role's lift, the engine would answer "nothing up" for a container
+    /// about to come up with the tree writable.
+    #[error(
+        "nothing was built: {0}. A verb holding the slot can lift a container that writes \
+         its tree while the rebuild reads the versions in it; rebuild once it has released \
+         the slot"
+    )]
+    Locked(#[from] crate::state::lock::LockError),
     #[error(transparent)]
     Slot(#[from] SlotError),
 }
@@ -388,17 +398,21 @@ pub enum RebuildError {
 /// are built with (SPEC 4.2), and return what it built.
 ///
 /// Without a slot, the owner's checkout, which no agent writes, and nothing
-/// is asked. With one, that slot's tree — but **before anything in it is
-/// read**, the engine is asked which containers of the slot's Compose
-/// project, and of the one `nunki check --slot` lifts for it, are up, and
-/// what each mounts writable. One that can write the tree — a writable mount of the tree, of a directory inside it, or of one
-/// that holds it — refuses the rebuild: a process in it can swap a link in
-/// between the resolution of a version source and its read. That is asked
-/// of the engine and not of a run's log: a run's container outlives the run
-/// until the slot's next launch takes it down, and so does any process it
-/// left behind. An engine that cannot answer refuses too, with its own
-/// reason. A container that has exited, or one that mounts the tree only
-/// read-only, does not.
+/// is asked. With one, that slot's tree — but first the slot's lock is
+/// taken, and held until the build has read the tree: `nunki verify` and
+/// every verb that launches a run hold it, so none can lift a container
+/// meanwhile, and one that holds it refuses the rebuild. Then, **before
+/// anything in the tree is read**, the engine is asked which containers of
+/// the slot's Compose project, and of the one `nunki check --slot` lifts for
+/// it, are up, and what each mounts. One with a writable mount landing on
+/// the tree's path in the container ([`writes_the_tree`]) refuses the
+/// rebuild: a process in it can swap a link in between the resolution of a
+/// version source and its read. That is asked of the engine and not of a
+/// run's log: a run's container outlives the run until the slot's next
+/// launch takes it down, and so does any process it left behind. An engine
+/// that cannot answer, or a mount it reports that cannot be placed, refuses
+/// too, with its own reason. A container that has exited, or one that
+/// mounts the tree only read-only, does not.
 ///
 /// The mission whose run is recorded in the slot, if one is, is named in the
 /// refusal so that the owner knows what to stop; it decides nothing.
@@ -412,6 +426,14 @@ pub fn rebuild<T>(
         return Ok(build(&project.root));
     };
     let found = find(project, name)?;
+    // Held until the build has read the tree: no verb that launches a run
+    // in this slot can take it meanwhile.
+    let locks = project.hq_root.join("locks");
+    std::fs::create_dir_all(&locks).map_err(|source| crate::state::lock::LockError::Io {
+        path: locks.clone(),
+        source,
+    })?;
+    let _lock = crate::state::SlotLock::acquire(&locks, name, "slot rebuild")?;
     // The slot's own project, where its roles run, and the one `nunki check
     // --slot` lifts for it: both mount the tree, and a probe cut short
     // leaves its containers up.
@@ -437,7 +459,7 @@ pub fn rebuild<T>(
     }
     let writing: Vec<&crate::engine::Writer> = up
         .iter()
-        .filter(|w| w.writable.iter().any(|source| writes(source, &found.tree)))
+        .filter(|w| w.mounts.iter().any(writes_the_tree))
         .collect();
     if writing.is_empty() {
         return Ok(build(&found.tree));
@@ -481,14 +503,18 @@ pub fn rebuild<T>(
     })
 }
 
-/// Whether a writable mount of `source` lets its container write `tree`:
-/// the tree itself, a directory inside it, or one that holds it. Both are
-/// resolved when they can be, so a link on either side (`/tmp` on macOS)
-/// does not hide an overlap; one that cannot be is compared as written.
-fn writes(source: &Path, tree: &Path) -> bool {
-    let real = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-    let (source, tree) = (real(source), real(tree));
-    source.starts_with(&tree) || tree.starts_with(&source)
+/// Whether a mount lets its container write the slot's tree: writable, and
+/// landing where nunki itself mounts the tree in every container it lifts
+/// for a slot ([`crate::run::TREE_AT`], for the roles and the probes alike).
+///
+/// Decided from what nunki defines, never from the host path an engine
+/// reports as the mount's source: Docker Desktop names it under prefixes of
+/// its own, and a comparison that does not recognise one would read a
+/// container writing the tree as one that does not. A named volume landing
+/// inside the tree (`/work/tree/target`) is not the tree: what it holds
+/// lives in the engine, not in the slot.
+fn writes_the_tree(mount: &crate::engine::Mounted) -> bool {
+    mount.writable && mount.destination == Path::new(crate::run::TREE_AT)
 }
 
 /// A container id as a human reads it: its first twelve characters.
