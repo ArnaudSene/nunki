@@ -847,3 +847,270 @@ fn a_run_the_state_records_blocks_a_reset_without_its_mission_folder() {
     assert_eq!(reset.taken_down, ["agent"]);
     assert!(!slot.tree.join("half-written.rs").exists());
 }
+
+/// What `slot rebuild` is handed to build with, and whether it was called:
+/// the build stands behind a closure, so a refusal is proved by a build that
+/// never ran rather than by an error alone.
+fn rebuilt(
+    project: &Project,
+    slot: Option<&str>,
+    engine: std::sync::Arc<dyn nunki::engine::Engine>,
+) -> (
+    Result<PathBuf, nunki::slot::RebuildError>,
+    std::cell::Cell<bool>,
+) {
+    let called = std::cell::Cell::new(false);
+    let got = nunki::slot::rebuild(project, slot, engine, |tree| {
+        called.set(true);
+        tree.to_path_buf()
+    });
+    (got, called)
+}
+
+/// The fake engine as a live run's: its container runs, and the probe in
+/// it answers with the marker a live process prints (`engine::spawn`).
+fn engine_with_a_live_run() -> nunki::engine::fake::FakeEngine {
+    use nunki::engine::{ExecOutput, Liveness, fake::FakeEngine};
+    FakeEngine::default()
+        .with_liveness("cafe1234", Liveness::Running)
+        .with_exec(ExecOutput {
+            status: 0,
+            stdout: "nunki-run-running\n".into(),
+            stderr: String::new(),
+        })
+}
+
+/// A run live in the slot refuses the rebuild: its agent writes the tree the
+/// host would read the versions in. The refusal names the mission and the
+/// slot, says why and what to do, and nothing is built.
+#[test]
+fn a_rebuild_refuses_while_a_run_is_live_in_its_slot_and_builds_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = repository(dir.path());
+    add(&project, "one").unwrap();
+    running(&project, "m1");
+    let engine = std::sync::Arc::new(engine_with_a_live_run());
+
+    let (got, called) = rebuilt(&project, Some("one"), engine.clone());
+    let err = got.unwrap_err();
+    assert!(
+        matches!(&err, nunki::slot::RebuildError::Live { mission, slot }
+            if mission == "m1" && slot == "one"),
+        "{err}"
+    );
+    let said = err.to_string();
+    assert!(said.contains("nothing was built"), "{said}");
+    assert!(said.contains("mission m1"), "{said}");
+    assert!(said.contains("slot \"one\""), "{said}");
+    assert!(said.contains("writes that tree"), "{said}");
+    assert!(said.contains("Wait for the run to end"), "{said}");
+    assert!(said.contains("nunki mission stop m1 --now"), "{said}");
+    assert!(!called.get(), "refused means nothing built");
+    // It was the engine that was asked, about that run's container.
+    assert!(
+        engine
+            .calls
+            .lock()
+            .unwrap()
+            .contains(&nunki::engine::fake::Call::Liveness("cafe1234".into())),
+        "{:?}",
+        engine.calls.lock().unwrap()
+    );
+}
+
+/// An engine that cannot say whether the run is live is its own answer,
+/// never "not live": the rebuild says it could not tell, and why, and
+/// builds nothing.
+#[test]
+fn a_rebuild_refuses_with_its_own_reason_when_the_engine_cannot_say() {
+    use nunki::engine::fake::FakeEngine;
+    let dir = tempfile::tempdir().unwrap();
+    let project = repository(dir.path());
+    add(&project, "one").unwrap();
+    running(&project, "m1");
+    let engine = std::sync::Arc::new(FakeEngine::default().with_unanswered("cafe1234"));
+
+    let (got, called) = rebuilt(&project, Some("one"), engine);
+    let err = got.unwrap_err();
+    assert!(
+        matches!(&err, nunki::slot::RebuildError::Unknown { mission, slot, .. }
+            if mission == "m1" && slot == "one"),
+        "{err}"
+    );
+    let said = err.to_string();
+    assert!(said.contains("nothing was built"), "{said}");
+    assert!(said.contains("could not tell"), "{said}");
+    assert!(said.contains("the engine did not answer"), "{said}");
+    assert!(!called.get(), "refused means nothing built");
+}
+
+/// No mission in the slot, a mission in it with no run, a run in another
+/// slot: the rebuild builds from the slot's tree, and asks the engine
+/// nothing.
+#[test]
+fn a_rebuild_builds_from_the_slot_when_no_run_is_recorded_in_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = repository(dir.path());
+    let one = add(&project, "one").unwrap();
+    let engine = std::sync::Arc::new(engine_with_a_live_run());
+
+    // No mission at all.
+    let (got, called) = rebuilt(&project, Some("one"), engine.clone());
+    assert_eq!(got.unwrap(), one.tree);
+    assert!(called.get());
+
+    // A live run, in another slot.
+    let mut state = running(&project, "m1");
+    state.slot = "two".into();
+    let store = nunki::state::Store::open(&project.hq_root).unwrap();
+    store.save(&state).unwrap();
+    let (got, called) = rebuilt(&project, Some("one"), engine.clone());
+    assert_eq!(got.unwrap(), one.tree);
+    assert!(called.get());
+
+    // In this slot, with no run.
+    state.slot = "one".into();
+    state.run = None;
+    store.save(&state).unwrap();
+    let (got, called) = rebuilt(&project, Some("one"), engine.clone());
+    assert_eq!(got.unwrap(), one.tree);
+    assert!(called.get());
+    assert!(engine.calls.lock().unwrap().is_empty());
+}
+
+/// A run recorded in the slot that has ended — its container exited, or its
+/// log says how it ended — is not live: the rebuild builds. Nor is a paused
+/// one, as `verify` reads it: one notion of live, not one per verb.
+#[test]
+fn a_rebuild_builds_when_the_run_in_its_slot_has_ended_or_is_paused() {
+    use nunki::engine::{Liveness, fake::FakeEngine};
+    let dir = tempfile::tempdir().unwrap();
+    let project = repository(dir.path());
+    let one = add(&project, "one").unwrap();
+    running(&project, "m1");
+
+    for (what, liveness) in [
+        ("exited", Liveness::Exited(0)),
+        ("gone", Liveness::Gone),
+        ("paused", Liveness::Paused),
+    ] {
+        let engine = std::sync::Arc::new(FakeEngine::default().with_liveness("cafe1234", liveness));
+        let (got, called) = rebuilt(&project, Some("one"), engine);
+        assert_eq!(got.unwrap(), one.tree, "{what}");
+        assert!(called.get(), "{what}");
+    }
+
+    // The container still runs, but the run wrote its result: ended.
+    let log = dir.path().join("run.jsonl");
+    std::fs::write(
+        &log,
+        "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\"}\n",
+    )
+    .unwrap();
+    let store = nunki::state::Store::open(&project.hq_root).unwrap();
+    let mut state = store.load("m1").unwrap();
+    state.run.as_mut().unwrap().log = log;
+    store.save(&state).unwrap();
+    let (got, called) = rebuilt(
+        &project,
+        Some("one"),
+        std::sync::Arc::new(engine_with_a_live_run()),
+    );
+    assert_eq!(got.unwrap(), one.tree);
+    assert!(called.get());
+}
+
+/// A state that cannot be read says nothing about what runs: the rebuild
+/// refuses, names the mission and why, and builds nothing.
+#[test]
+fn a_rebuild_refuses_when_a_missions_state_cannot_be_read() {
+    use nunki::engine::fake::FakeEngine;
+    let dir = tempfile::tempdir().unwrap();
+    let project = repository(dir.path());
+    add(&project, "one").unwrap();
+    framed(&project, "m1");
+    let store = nunki::state::Store::open(&project.hq_root).unwrap();
+    std::fs::write(store.root().join("missions/m1.json"), "{ half a state").unwrap();
+
+    let (got, called) = rebuilt(
+        &project,
+        Some("one"),
+        std::sync::Arc::new(FakeEngine::default()),
+    );
+    let err = got.unwrap_err();
+    assert!(
+        matches!(err, nunki::slot::RebuildError::Unreadable { .. }),
+        "{err}"
+    );
+    let said = err.to_string();
+    assert!(said.contains("nothing was built"), "{said}");
+    assert!(said.contains("mission m1's state cannot be read"), "{said}");
+    assert!(!called.get());
+}
+
+/// Without `--slot`, the rebuild reads the owner's checkout, which no agent
+/// writes: it builds from the repository, a live run anywhere or not, and
+/// asks the engine nothing.
+#[test]
+fn a_rebuild_without_a_slot_builds_from_the_repository_as_before() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = repository(dir.path());
+    add(&project, "one").unwrap();
+    running(&project, "m1");
+    let engine = std::sync::Arc::new(engine_with_a_live_run());
+
+    let (got, called) = rebuilt(&project, None, engine.clone());
+    assert_eq!(got.unwrap(), project.root);
+    assert!(called.get());
+    assert!(engine.calls.lock().unwrap().is_empty());
+}
+
+/// An unknown slot is refused as before, and nothing is built.
+#[test]
+fn a_rebuild_of_a_slot_that_does_not_exist_builds_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = repository(dir.path());
+    let (got, called) = rebuilt(
+        &project,
+        Some("nope"),
+        std::sync::Arc::new(nunki::engine::fake::FakeEngine::default()),
+    );
+    assert!(
+        matches!(
+            got,
+            Err(nunki::slot::RebuildError::Slot(SlotError::Unknown(..)))
+        ),
+        "{got:?}"
+    );
+    assert!(!called.get());
+}
+
+/// A state store that will not open says nothing about what runs either:
+/// the rebuild refuses with the reason, and builds nothing.
+#[test]
+fn a_rebuild_refuses_when_the_state_store_will_not_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = repository(dir.path());
+    add(&project, "one").unwrap();
+    let state = project.hq_root.join("state");
+    let _ = std::fs::remove_dir_all(&state);
+    std::fs::create_dir_all(&project.hq_root).unwrap();
+    std::fs::write(&state, "not a directory").unwrap();
+
+    let (got, called) = rebuilt(
+        &project,
+        Some("one"),
+        std::sync::Arc::new(nunki::engine::fake::FakeEngine::default()),
+    );
+    let err = got.unwrap_err();
+    assert!(
+        matches!(err, nunki::slot::RebuildError::Unreadable { .. }),
+        "{err}"
+    );
+    assert!(
+        err.to_string()
+            .contains("the missions' states cannot be read"),
+        "{err}"
+    );
+    assert!(!called.get());
+}

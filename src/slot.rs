@@ -270,33 +270,110 @@ pub fn reset(
 /// stops blocking once its mission is closed. A mission framed and never
 /// started has no state, and nothing in flight.
 fn running_in(project: &Project, name: &str) -> Result<Option<String>, SlotError> {
+    each_run_in(project, name, |state, _| {
+        std::ops::ControlFlow::Break(state.id.clone())
+    })
+    .map_err(|unread| unread.for_reset(name))
+}
+
+/// Why the missions in a slot could not be read: whoever asked cannot tell
+/// whether a run is in flight there, and says so in its own words.
+#[derive(Debug)]
+enum Unread {
+    Store(String),
+    Missions {
+        dir: String,
+        why: String,
+    },
+    State {
+        mission: String,
+        why: String,
+        missions: String,
+    },
+}
+
+impl Unread {
+    fn for_reset(self, name: &str) -> SlotError {
+        let name = name.to_string();
+        match self {
+            Unread::Store(why) => SlotError::StoreUnreadable { name, why },
+            Unread::Missions { dir, why } => SlotError::MissionsUnreadable { name, dir, why },
+            Unread::State {
+                mission,
+                why,
+                missions,
+            } => SlotError::StateUnreadable {
+                name,
+                mission,
+                why,
+                missions,
+            },
+        }
+    }
+
+    /// What the rebuild says instead of building: the same facts as
+    /// [`Unread::for_reset`], and what to do about them.
+    fn for_rebuild(self, slot: &str) -> RebuildError {
+        let why = match self {
+            Unread::Store(why) => format!("the missions' states cannot be read ({why})"),
+            Unread::Missions { dir, why } => format!(
+                "the list of missions in {dir} cannot be read ({why}); make that directory \
+                 readable again"
+            ),
+            Unread::State {
+                mission,
+                why,
+                missions,
+            } => format!(
+                "mission {mission}'s state cannot be read ({why}); repair that file or, if \
+                 mission {mission} is over, move its state file out of {missions} — it then \
+                 reads as never started, and `nunki mission archive {mission}` closes it"
+            ),
+        };
+        RebuildError::Unreadable {
+            slot: slot.to_string(),
+            why,
+        }
+    }
+}
+
+/// Hand `visit` the state of every mission that records a run in slot
+/// `name`, in name order, until it breaks; what it broke with is returned.
+/// What it reads, and what it refuses to read as "no run", is said on
+/// [`running_in`].
+fn each_run_in<T>(
+    project: &Project,
+    name: &str,
+    mut visit: impl FnMut(
+        &crate::state::MissionState,
+        &crate::harness::RunHandle,
+    ) -> std::ops::ControlFlow<T>,
+) -> Result<Option<T>, Unread> {
     let store =
-        crate::state::Store::open(&project.hq_root).map_err(|e| SlotError::StoreUnreadable {
-            name: name.to_string(),
-            why: e.to_string(),
-        })?;
+        crate::state::Store::open(&project.hq_root).map_err(|e| Unread::Store(e.to_string()))?;
     // A set: a mission with both a folder and a state is read once, in name
     // order.
     let mut ids: std::collections::BTreeSet<String> =
         crate::mission::dir::list_checked(&project.hq_root)
-            .map_err(|e| SlotError::MissionsUnreadable {
-                name: name.to_string(),
+            .map_err(|e| Unread::Missions {
                 dir: project.hq_root.join("missions").display().to_string(),
                 why: e.to_string(),
             })?
             .into_iter()
             .collect();
-    ids.extend(store.missions().map_err(|e| SlotError::StoreUnreadable {
-        name: name.to_string(),
-        why: e.to_string(),
-    })?);
+    ids.extend(store.missions().map_err(|e| Unread::Store(e.to_string()))?);
     for id in ids {
         match store.load(&id) {
-            Ok(state) if state.slot == name && state.run.is_some() => return Ok(Some(id)),
+            Ok(state) if state.slot == name => {
+                if let Some(handle) = &state.run
+                    && let std::ops::ControlFlow::Break(found) = visit(&state, handle)
+                {
+                    return Ok(Some(found));
+                }
+            }
             Ok(_) | Err(crate::state::StateError::Missing(_)) => {}
             Err(e) => {
-                return Err(SlotError::StateUnreadable {
-                    name: name.to_string(),
+                return Err(Unread::State {
                     mission: id,
                     why: e.to_string(),
                     missions: store.root().join("missions").display().to_string(),
@@ -305,6 +382,85 @@ fn running_in(project: &Project, name: &str) -> Result<Option<String>, SlotError
         }
     }
     Ok(None)
+}
+
+/// Why `nunki slot rebuild --slot` built nothing (SPEC 4.2).
+#[derive(Debug, thiserror::Error)]
+pub enum RebuildError {
+    /// A run is live in the slot: its agent writes the tree the rebuild
+    /// would read the versions in.
+    #[error(
+        "nothing was built: mission {mission}'s run is live in slot {slot:?}, and its agent \
+         writes that tree while the rebuild would read the versions in it. Wait for the run \
+         to end, or stop it (`nunki mission stop {mission} --now --because <why>`), then \
+         rebuild"
+    )]
+    Live { mission: String, slot: String },
+    /// The engine could not say whether the run is live. Never read as "not
+    /// live": the rebuild is about to need that engine anyway.
+    #[error(
+        "nothing was built: nunki could not tell whether mission {mission}'s run in slot \
+         {slot:?} is live ({why}). A live run's agent writes that tree while the rebuild \
+         would read the versions in it; rebuild once the engine answers, or once the run \
+         has ended"
+    )]
+    Unknown {
+        mission: String,
+        slot: String,
+        why: String,
+    },
+    /// The missions could not be read, so whether a run is live in the slot
+    /// is not known either.
+    #[error("nothing was built: nunki cannot tell whether a run is live in slot {slot:?}: {why}")]
+    Unreadable { slot: String, why: String },
+    #[error(transparent)]
+    Slot(#[from] SlotError),
+}
+
+/// `nunki slot rebuild`: hand `build` the tree whose versions the images
+/// are built with (SPEC 4.2), and return what it built.
+///
+/// Without a slot, the owner's checkout, which no agent writes, and nothing
+/// is asked. With one, that slot's tree — but **before anything in it is
+/// read**, every mission that records a run in the slot is asked whether
+/// that run is live, the way [`crate::verify::refuse_while_running`] asks
+/// it. A live run refuses: its agent writes the tree while the host would
+/// read it, and a link swapped in between the resolution of a version source
+/// and its read would be followed. A run the engine cannot answer for
+/// refuses too, with its own reason. A paused run, or one that has ended,
+/// does not: `build` is called as before.
+pub fn rebuild<T>(
+    project: &Project,
+    slot: Option<&str>,
+    engine: std::sync::Arc<dyn crate::engine::Engine>,
+    build: impl FnOnce(&Path) -> T,
+) -> Result<T, RebuildError> {
+    let Some(name) = slot else {
+        return Ok(build(&project.root));
+    };
+    let refused = each_run_in(project, name, |state, handle| {
+        let harness = crate::verify::run_harness(project, engine.clone(), name, handle);
+        match crate::harness::Harness::state(&harness, handle) {
+            Ok(crate::harness::RunState::Running(_)) => {
+                std::ops::ControlFlow::Break(RebuildError::Live {
+                    mission: state.id.clone(),
+                    slot: name.to_string(),
+                })
+            }
+            Ok(_) => std::ops::ControlFlow::Continue(()),
+            Err(e) => std::ops::ControlFlow::Break(RebuildError::Unknown {
+                mission: state.id.clone(),
+                slot: name.to_string(),
+                why: e.to_string(),
+            }),
+        }
+    })
+    .map_err(|unread| unread.for_rebuild(name))?;
+    if let Some(refused) = refused {
+        return Err(refused);
+    }
+    let found = find(project, name)?;
+    Ok(build(&found.tree))
 }
 
 /// What a reset threw away, for the caller to print.

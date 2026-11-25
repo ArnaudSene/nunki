@@ -1695,15 +1695,7 @@ pub fn refuse_while_running(
     let Some(handle) = &state.run else {
         return Ok(());
     };
-    let harness = crate::harness::claude_code::ClaudeCode::new(
-        Default::default(),
-        Box::new(harness_spawner(
-            project,
-            engine,
-            &state.slot,
-            &handle.session.0,
-        )),
-    );
+    let harness = run_harness(project, engine, &state.slot, handle);
     // A run `nunki` cannot reach is not a run in progress: it says so elsewhere
     // (`nunki mission status`), and refusing to verify because the engine is
     // down would be the same lie in another place.
@@ -1723,6 +1715,22 @@ pub fn refuse_while_running(
         });
     }
     Ok(())
+}
+
+/// The harness that answers for the run `handle` of a mission in `slot`:
+/// what [`refuse_while_running`] asks whether a run is live, and what
+/// `nunki slot rebuild --slot` asks too (SPEC 4.2). One way of putting the
+/// question, not one per verb.
+pub fn run_harness(
+    project: &Project,
+    engine: Arc<dyn Engine>,
+    slot: &str,
+    handle: &RunHandle,
+) -> crate::harness::claude_code::ClaudeCode {
+    crate::harness::claude_code::ClaudeCode::new(
+        Default::default(),
+        Box::new(harness_spawner(project, engine, slot, &handle.session.0)),
+    )
 }
 
 /// A run `nunki` stopped for the account's window costs no attempt, whatever it
