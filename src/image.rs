@@ -555,7 +555,7 @@ fn read_versions(project: &Project, tree: &Path, stack: &str) -> Result<Read, Im
                 }
             }
         }
-        let pins = crate::versions::resolve(&project.stack_tree(tree, &s.name), &read);
+        let pins = crate::versions::resolve(tree, &project.stack_tree(tree, &s.name), &read);
         unmet.extend(
             unpinned(project, &s.name, Some(&read), &pins)
                 .into_iter()

@@ -287,7 +287,11 @@ fn stack_versions(project: &Project, report: &mut Report) {
             );
             continue;
         }
-        let pins = crate::versions::resolve(&project.stack_tree(&project.root, name), &versions);
+        let pins = crate::versions::resolve(
+            &project.root,
+            &project.stack_tree(&project.root, name),
+            &versions,
+        );
         let unmet = crate::image::unpinned(project, name, Some(&versions), &pins);
         if !unmet.is_empty() {
             report.add(what, Verdict::Red(unmet.join("; ")));

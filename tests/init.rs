@@ -2453,7 +2453,7 @@ fn each_fragment_reads_the_versions_its_ecosystem_pins() {
             .join(nunki::versions::FILE);
         let sources =
             nunki::versions::parse(&std::fs::read_to_string(&file).unwrap(), &file).unwrap();
-        let got = nunki::versions::pinned(&nunki::versions::resolve(&root, &sources));
+        let got = nunki::versions::pinned(&nunki::versions::resolve(&root, &root, &sources));
         let want: std::collections::BTreeMap<String, String> = want
             .iter()
             .map(|(a, v)| (a.to_string(), v.to_string()))

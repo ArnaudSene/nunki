@@ -1095,10 +1095,37 @@ image qui porte `stable`.
   vide est une réponse, et un projet sans Playwright n'a rien à épingler.
   Quels arguments sont requis est écrit dans le fragment, jamais dans le cœur
   (3.2).
-  - **Une version requise contient un chiffre.** `stable`, `beta`, `nightly`,
-    `lts` et `latest` nomment un canal qui bouge : refusés comme un
-    intervalle, avec la raison, et la source suivante est essayée. `1.99`,
-    `22`, `3.12` et `nightly-2026-11-01` sont acceptés.
+  - **Une version requise contient un chiffre avant son premier tiret.** La
+    valeur est coupée à son premier `-`. Si la première partie contient un
+    chiffre, c'est une version : `1.99`, `22`, `3.12`,
+    `1.89.0-x86_64-unknown-linux-gnu`. Sinon, c'est un canal, et un canal
+    bouge : `stable`, `beta`, `nightly`, `lts` et `latest` sont refusés comme
+    un intervalle, avec la raison, et la source suivante est essayée. Un canal
+    n'est accepté que suivi d'une date écrite `AAAA-MM-JJ`, seule ou suivie
+    d'un `-` : c'est un canal daté (`nightly-2026-11-01`,
+    `nightly-2026-11-01-x86_64-unknown-linux-gnu`). La forme de la date est
+    exacte, mais l'existence du jour n'est pas vérifiée. Tout le reste après
+    un canal est refusé comme le canal seul : un triplet d'hôte
+    (`stable-x86_64-unknown-linux-gnu`) ou un nom de code (`lts-iron`) suit
+    toujours le canal. La règle porte sur la forme de la valeur, et le cœur ne
+    nomme ni canal ni triplet (3.2).
+  - **Une source qui mène hors de l'arbre ne donne rien.** Avant de lire une
+    source, `nunki` résout son chemin, chaque lien suivi, à tout composant et
+    pas seulement au dernier ; l'arbre est résolu de la même façon (`/tmp`
+    est un lien sur macOS). Si le chemin aboutit hors de l'arbre, la source
+    ne donne rien et la suivante est essayée : la raison dit que le fichier
+    mène hors de l'arbre et nomme le chemin de la source dans le dépôt, jamais
+    celui de la cible, et la cible n'est jamais lue ni affichée. L'arbre est
+    celui que les agents écrivent ; un lien n'y fait pas lire à l'hôte un
+    fichier qui est le sien. Un lien qui reste dans l'arbre est suivi : un
+    `frontend/.nvmrc` qui pointe vers `../.nvmrc` est un choix du dépôt.
+    Cela vaut partout où les versions sont lues : `nunki check`, chaque refus
+    de lancement et `nunki slot rebuild`. Ce n'est pas tenu contre un
+    processus qui écrit l'arbre au même instant : le chemin est résolu, puis
+    lu, et un lien posé entre les deux est suivi. Le seul cas où un agent
+    écrit l'arbre pendant cette lecture est un `nunki slot rebuild --slot`
+    lancé pendant un run de ce slot ; ce qu'il affiche ne va qu'au terminal
+    de l'opérateur.
   - **Rien d'exact pour un argument requis : rouge, et lancement refusé.**
     `nunki check` rend rouge la ligne des versions de la stack, et nomme pour
     chaque argument chaque source essayée et pourquoi elle n'a rien donné,
