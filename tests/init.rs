@@ -818,6 +818,83 @@ fn every_tool_the_rust_image_installs_takes_an_exact_version() {
     }
 }
 
+/// The `osv-scanner` the Python and Next.js images build is pinned (SPEC 4.2,
+/// "ce que chaque stack lit"): `go install …@v${OSV_SCANNER}` takes the tag
+/// the build argument names, and a default that is not an exact version —
+/// `latest`, a bare major, nothing — would build whatever the module proxy
+/// serves that day. Every stage that builds it, in each stack's own
+/// Dockerfile and in the stages its add-on brings, installs exactly that
+/// argument, whose default is 2.7.1: the first tag whose go.mod carries
+/// golang.org/x/net v0.62.0, the fix for CVE-2026-78661.
+#[test]
+fn the_osv_scanner_the_python_and_next_images_build_takes_an_exact_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    // Next.js first, Python as an add-on to it, and the other way round, so
+    // every file that can carry the stage is written.
+    nunki::init::init(
+        &root,
+        &dir.path().join("nunki"),
+        &["next".to_string(), "python=py".to_string()],
+    )
+    .unwrap();
+    let other = dir.path().join("other").join("repo");
+    std::fs::create_dir_all(&other).unwrap();
+    nunki::init::init(
+        &other,
+        &other.with_file_name("nunki"),
+        &["python".to_string(), "next=web".to_string()],
+    )
+    .unwrap();
+    let module = "github.com/google/osv-scanner/v2/cmd/osv-scanner@";
+    let mut read = 0;
+    for root in [&root, &other] {
+        for stack in ["python", "next"] {
+            for file in [
+                "Dockerfile",
+                nunki::project::ADDON_FILE,
+                nunki::project::ADDON_STAGES_FILE,
+            ] {
+                let path = home(root).join("stacks").join(stack).join(file);
+                let Ok(text) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                for (at, _) in text.match_indices(module) {
+                    read += 1;
+                    let tag = text[at + module.len()..]
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or_default();
+                    let arg = tag
+                        .strip_prefix("v${")
+                        .and_then(|v| v.strip_suffix('}'))
+                        .unwrap_or_else(|| panic!("{}: builds {tag}, not an ARG", path.display()));
+                    assert_eq!(arg, "OSV_SCANNER", "{}", path.display());
+                    // The default the stage itself declares, above the install.
+                    let default = text[..at]
+                        .lines()
+                        .rev()
+                        .find_map(|l| l.trim().strip_prefix("ARG OSV_SCANNER"))
+                        .unwrap_or_else(|| panic!("{}: no ARG OSV_SCANNER", path.display()));
+                    let version = default.strip_prefix('=').unwrap_or_else(|| {
+                        panic!("{}: OSV_SCANNER has no default", path.display())
+                    });
+                    let exact = version.split('.').count() == 3
+                        && version
+                            .split('.')
+                            .all(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+                    assert!(exact, "{}: OSV_SCANNER={version}", path.display());
+                    assert_eq!(version, "2.7.1", "{}", path.display());
+                }
+            }
+        }
+    }
+    // Python and Next.js each in its own image and in its add-on's stages,
+    // in both projects: a reading that finds nothing has proved nothing.
+    assert_eq!(read, 8, "osv-scanner builds found");
+}
+
 /// The battery asks only for what the coder's container can reach.
 ///
 /// `cargo deny check` runs four stages, and `advisories` fetches its database
