@@ -289,6 +289,15 @@ l'humain. Le projet le déclare (`permission_mode:` dans `nunki.yaml`, `auto` pa
 défaut — voir le tableau des harnais en 4.3), parce que
 tout refuser est aussi une manière de finir un run sans rien avoir produit.
 
+En mode `auto`, c'est un classifieur qui décide à la place du propriétaire,
+et il juge une action d'après ce que le run s'est vu demander. Le message du
+run le dit donc : le propriétaire demande au codeur et à l'intégrateur de
+committer leur travail sur la branche de la mission, et jamais de pousser ;
+à l'agent de sécurité, il dit qu'il ne committe rien. L'adaptateur Claude
+Code passe la même chose à l'invocation, dans ses réglages (3.3, point 1).
+C'est un confort pour un harnais, pas une garde : le conteneur et les
+portes restent l'application de la règle.
+
 ### 3.3 Ce que `nunki` ne fait jamais dans un dépôt
 
 1. Il n'écrit pas dans les fichiers de réglages d'un harnais (`settings.json`
