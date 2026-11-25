@@ -310,31 +310,6 @@ impl Unread {
             },
         }
     }
-
-    /// What the rebuild says instead of building: the same facts as
-    /// [`Unread::for_reset`], and what to do about them.
-    fn for_rebuild(self, slot: &str) -> RebuildError {
-        let why = match self {
-            Unread::Store(why) => format!("the missions' states cannot be read ({why})"),
-            Unread::Missions { dir, why } => format!(
-                "the list of missions in {dir} cannot be read ({why}); make that directory \
-                 readable again"
-            ),
-            Unread::State {
-                mission,
-                why,
-                missions,
-            } => format!(
-                "mission {mission}'s state cannot be read ({why}); repair that file or, if \
-                 mission {mission} is over, move its state file out of {missions} — it then \
-                 reads as never started, and `nunki mission archive {mission}` closes it"
-            ),
-        };
-        RebuildError::Unreadable {
-            slot: slot.to_string(),
-            why,
-        }
-    }
 }
 
 /// Hand `visit` the state of every mission that records a run in slot
@@ -387,32 +362,24 @@ fn each_run_in<T>(
 /// Why `nunki slot rebuild --slot` built nothing (SPEC 4.2).
 #[derive(Debug, thiserror::Error)]
 pub enum RebuildError {
-    /// A run is live in the slot: its agent writes the tree the rebuild
-    /// would read the versions in.
-    #[error(
-        "nothing was built: mission {mission}'s run is live in slot {slot:?}, and its agent \
-         writes that tree while the rebuild would read the versions in it. Wait for the run \
-         to end, or stop it (`nunki mission stop {mission} --now --because <why>`), then \
-         rebuild"
-    )]
-    Live { mission: String, slot: String },
-    /// The engine could not say whether the run is live. Never read as "not
-    /// live": the rebuild is about to need that engine anyway.
-    #[error(
-        "nothing was built: nunki could not tell whether mission {mission}'s run in slot \
-         {slot:?} is live ({why}). A live run's agent writes that tree while the rebuild \
-         would read the versions in it; rebuild once the engine answers, or once the run \
-         has ended"
-    )]
-    Unknown {
-        mission: String,
+    /// A container of the slot that can write its tree is up: an agent, or
+    /// a process one left, can write the tree the rebuild would read the
+    /// versions in. `said` is the whole message, with what to do.
+    #[error("{said}")]
+    Writing {
         slot: String,
-        why: String,
+        /// The containers up that can write the tree, by id.
+        containers: Vec<String>,
+        said: String,
     },
-    /// The missions could not be read, so whether a run is live in the slot
-    /// is not known either.
-    #[error("nothing was built: nunki cannot tell whether a run is live in slot {slot:?}: {why}")]
-    Unreadable { slot: String, why: String },
+    /// The engine could not say which containers are up. Never read as
+    /// "none": the rebuild is about to need that engine anyway.
+    #[error(
+        "nothing was built: nunki could not tell whether a container of slot {slot:?} that \
+         can write its tree is up ({why}). One that is up can write that tree while the \
+         rebuild reads the versions in it; rebuild once the engine answers"
+    )]
+    Unknown { slot: String, why: String },
     #[error(transparent)]
     Slot(#[from] SlotError),
 }
@@ -422,13 +389,19 @@ pub enum RebuildError {
 ///
 /// Without a slot, the owner's checkout, which no agent writes, and nothing
 /// is asked. With one, that slot's tree — but **before anything in it is
-/// read**, every mission that records a run in the slot is asked whether
-/// that run is live, the way [`crate::verify::refuse_while_running`] asks
-/// it. A live run refuses: its agent writes the tree while the host would
-/// read it, and a link swapped in between the resolution of a version source
-/// and its read would be followed. A run the engine cannot answer for
-/// refuses too, with its own reason. A paused run, or one that has ended,
-/// does not: `build` is called as before.
+/// read**, the engine is asked which containers of the slot's Compose
+/// project are up, and what each mounts writable. One that can write the
+/// tree — a writable mount of the tree, of a directory inside it, or of one
+/// that holds it — refuses the rebuild: a process in it can swap a link in
+/// between the resolution of a version source and its read. That is asked
+/// of the engine and not of a run's log: a run's container outlives the run
+/// until the slot's next launch takes it down, and so does any process it
+/// left behind. An engine that cannot answer refuses too, with its own
+/// reason. A container that has exited, or one that mounts the tree only
+/// read-only, does not.
+///
+/// The mission whose run is recorded in the slot, if one is, is named in the
+/// refusal so that the owner knows what to stop; it decides nothing.
 pub fn rebuild<T>(
     project: &Project,
     slot: Option<&str>,
@@ -438,29 +411,74 @@ pub fn rebuild<T>(
     let Some(name) = slot else {
         return Ok(build(&project.root));
     };
-    let refused = each_run_in(project, name, |state, handle| {
-        let harness = crate::verify::run_harness(project, engine.clone(), name, handle);
-        match crate::harness::Harness::state(&harness, handle) {
-            Ok(crate::harness::RunState::Running(_)) => {
-                std::ops::ControlFlow::Break(RebuildError::Live {
-                    mission: state.id.clone(),
-                    slot: name.to_string(),
-                })
-            }
-            Ok(_) => std::ops::ControlFlow::Continue(()),
-            Err(e) => std::ops::ControlFlow::Break(RebuildError::Unknown {
-                mission: state.id.clone(),
-                slot: name.to_string(),
-                why: e.to_string(),
-            }),
-        }
-    })
-    .map_err(|unread| unread.for_rebuild(name))?;
-    if let Some(refused) = refused {
-        return Err(refused);
-    }
     let found = find(project, name)?;
-    Ok(build(&found.tree))
+    let compose = crate::compose::project_name(&project.session(), name)
+        .map_err(|e| SlotError::Engine(e.to_string()))?;
+    let up = engine
+        .writers(&compose)
+        .map_err(|e| RebuildError::Unknown {
+            slot: name.to_string(),
+            why: e.to_string(),
+        })?;
+    let writing: Vec<&crate::engine::Writer> = up
+        .iter()
+        .filter(|w| w.writable.iter().any(|source| writes(source, &found.tree)))
+        .collect();
+    if writing.is_empty() {
+        return Ok(build(&found.tree));
+    }
+    let named: Vec<String> = writing
+        .iter()
+        .map(|w| match w.service.as_str() {
+            "" => format!("container {}", short(&w.id)),
+            service => format!("{service} ({})", short(&w.id)),
+        })
+        .collect();
+    let run = each_run_in(project, name, |state, _| {
+        std::ops::ControlFlow::Break(state.id.clone())
+    })
+    .ok()
+    .flatten();
+    let wait = match run {
+        Some(mission) => format!(
+            " Mission {mission} has a run in this slot: wait for it to end, or stop it \
+             (`nunki mission stop {mission} --now --because <why>`)."
+        ),
+        None => String::new(),
+    };
+    let stops: Vec<String> = writing
+        .iter()
+        .map(|w| format!("`{}`", engine.stopping(&w.id).display()))
+        .collect();
+    let said = format!(
+        "nothing was built: {} of slot {name:?} {} up and can write its tree, so an agent, or \
+         a process one left behind, can write it while the rebuild reads the versions in it.\
+         {wait} A container its run left up is taken down by the slot's next launch, or by \
+         hand: {}. Then rebuild",
+        named.join(", "),
+        if named.len() == 1 { "is" } else { "are" },
+        stops.join(", ")
+    );
+    Err(RebuildError::Writing {
+        slot: name.to_string(),
+        containers: writing.iter().map(|w| w.id.clone()).collect(),
+        said,
+    })
+}
+
+/// Whether a writable mount of `source` lets its container write `tree`:
+/// the tree itself, a directory inside it, or one that holds it. Both are
+/// resolved when they can be, so a link on either side (`/tmp` on macOS)
+/// does not hide an overlap; one that cannot be is compared as written.
+fn writes(source: &Path, tree: &Path) -> bool {
+    let real = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let (source, tree) = (real(source), real(tree));
+    source.starts_with(&tree) || tree.starts_with(&source)
+}
+
+/// A container id as a human reads it: its first twelve characters.
+fn short(id: &str) -> &str {
+    id.get(..12).unwrap_or(id)
 }
 
 /// What a reset threw away, for the caller to print.

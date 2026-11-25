@@ -1600,3 +1600,101 @@ fn the_check_after_a_stop_looks_twice_before_it_says_nothing_is_left() {
         "the late process was missed"
     );
 }
+
+/// What `slot rebuild --slot` asks the engine: the project's containers
+/// that are up — `ps` without `-a`, so one that exited is not among them —
+/// then one `inspect` of them all, whose mounts are read as JSON, and the
+/// source of each writable one kept. A read-only mount is not.
+#[test]
+fn the_containers_up_are_listed_with_the_mounts_they_can_write() {
+    let mounts = r#"[{"Type":"bind","Source":"/slots/one","Destination":"/work/tree","Mode":"rw","RW":true,"Propagation":"rprivate"},{"Type":"bind","Source":"/hq/missions/m1","Destination":"/work/mission","Mode":"ro","RW":false,"Propagation":"rprivate"},{"Type":"volume","Name":"nunki-one-cargo","Source":"/var/lib/docker/volumes/nunki-one-cargo/_data","Destination":"/home/agent/.cargo","Driver":"local","Mode":"z","RW":true,"Propagation":""}]"#;
+    let (docker, cli) = recorded(vec![
+        saying(0, "aaaa\nbbbb\n", ""),
+        saying(
+            0,
+            &format!("aaaa\tagent\t{mounts}\nbbbb\tfirewall\t[]\n"),
+            "",
+        ),
+    ]);
+    let up = docker.writers("nunki-demo-one").unwrap();
+    let lines = cli.lines();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert_eq!(
+        lines[0],
+        "docker ps -q --no-trunc --filter label=com.docker.compose.project=nunki-demo-one"
+    );
+    assert!(
+        lines[1].starts_with("docker inspect --format "),
+        "{}",
+        lines[1]
+    );
+    assert!(lines[1].contains("{{json .Mounts}}"), "{}", lines[1]);
+    assert!(lines[1].ends_with(" aaaa bbbb"), "{}", lines[1]);
+    assert_eq!(
+        up,
+        vec![
+            nunki::engine::Writer {
+                id: "aaaa".into(),
+                service: "agent".into(),
+                writable: vec![
+                    PathBuf::from("/slots/one"),
+                    PathBuf::from("/var/lib/docker/volumes/nunki-one-cargo/_data"),
+                ],
+            },
+            nunki::engine::Writer {
+                id: "bbbb".into(),
+                service: "firewall".into(),
+                writable: vec![],
+            },
+        ]
+    );
+}
+
+/// Nothing up is an answer, and nothing is inspected.
+#[test]
+fn no_container_up_is_an_answer_and_nothing_is_inspected() {
+    let (docker, cli) = recorded(vec![saying(0, "\n", "")]);
+    assert_eq!(docker.writers("p").unwrap(), vec![]);
+    assert_eq!(cli.lines().len(), 1);
+}
+
+/// An engine that does not answer, an `inspect` that fails — a container
+/// removed between the two questions — or a line nunki cannot read is an
+/// error, never "nothing up": the rebuild refuses on it.
+#[test]
+fn a_question_about_the_containers_up_that_fails_is_never_nothing_up() {
+    let unreadable = |answer: &str| {
+        let (docker, _) = recorded(vec![saying(0, "aaaa\n", ""), saying(0, answer, "")]);
+        docker.writers("p")
+    };
+    for answer in [
+        "aaaa\tagent\n",
+        "\tagent\t[]\n",
+        "aaaa\tagent\tnot json\n",
+        "aaaa\tagent\t[{\"Source\":\"/x\"}]\n",
+    ] {
+        assert!(
+            matches!(
+                unreadable(answer),
+                Err(nunki::engine::EngineError::Unreadable(_))
+            ),
+            "{answer:?}"
+        );
+    }
+    let (docker, _) = recorded(vec![saying(1, "", "Cannot connect to the Docker daemon")]);
+    assert!(docker.writers("p").is_err());
+    let (docker, _) = recorded(vec![
+        saying(0, "aaaa\n", ""),
+        saying(1, "", "No such object: aaaa"),
+    ]);
+    assert!(docker.writers("p").is_err());
+}
+
+/// The stop a refusal names for a human keeps the container, and is data:
+/// nothing runs it here.
+#[test]
+fn the_stop_named_for_a_human_is_the_engines_and_runs_nothing() {
+    let (docker, cli) = recorded(vec![]);
+    assert_eq!(docker.stopping("c1").display(), "docker stop c1");
+    assert!(cli.lines().is_empty(), "named, not run");
+}

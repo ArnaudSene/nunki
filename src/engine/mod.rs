@@ -13,7 +13,7 @@ pub mod fake;
 pub mod local;
 pub mod spawn;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// How a service says "share that service's network namespace" — the first
 /// line of the 4.2 engine table, and the one the firewall doctrine rests on.
@@ -69,6 +69,18 @@ pub enum Liveness {
     /// The engine knows nothing about it — a rebuilt machine, a pruned
     /// engine, a slot removed.
     Gone,
+}
+
+/// A container the engine reports up — running, paused or restarting — and
+/// the host paths it mounts writable: what `nunki slot rebuild --slot` asks
+/// before it reads a slot's tree (SPEC 4.2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Writer {
+    pub id: String,
+    /// The Compose service it backs, empty when it carries no such label.
+    pub service: String,
+    /// The source, on the host, of every mount it can write.
+    pub writable: Vec<PathBuf>,
 }
 
 /// A container of a Compose project, as the engine lists it.
@@ -180,6 +192,17 @@ pub trait Engine: Send + Sync {
 
     /// Every container of the Compose project `project`, running or not.
     fn containers(&self, project: &str) -> Result<Vec<Container>, EngineError>;
+
+    /// The containers of the Compose project `project` that are up —
+    /// running, paused or restarting, never one that has exited — and the
+    /// host paths each mounts writable. Whether one of them can write a
+    /// given tree is the caller's to decide; this only reports.
+    fn writers(&self, project: &str) -> Result<Vec<Writer>, EngineError>;
+
+    /// The command line a human runs to stop `container` and keep it, as
+    /// data: what a refusal names when a container must be down first.
+    /// Never run by nunki itself.
+    fn stopping(&self, container: &str) -> crate::harness::spawn::CommandSpec;
 
     /// Stop and remove containers by id, and **never** a volume: not a named
     /// one, which holds what a profile switch must keep, and not an

@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use super::cli::{Cli, RealCli};
-use super::{Container, Dialect, Engine, EngineError, ExecOutput, Liveness, Netns};
+use super::{Container, Dialect, Engine, EngineError, ExecOutput, Liveness, Netns, Writer};
 use crate::harness::spawn::CommandSpec;
 
 /// How to invoke the engine. Both halves are overridable, because the
@@ -319,6 +319,34 @@ impl Engine for Docker {
         parse_containers(&out)
     }
 
+    fn writers(&self, project: &str) -> Result<Vec<Writer>, EngineError> {
+        // Without `-a`: what `ps` lists is up — running, paused or
+        // restarting. A container that exited writes nothing.
+        let filter = format!("label=com.docker.compose.project={project}");
+        let listed = self.run(
+            "ps",
+            &self.engine_command(&["ps", "-q", "--no-trunc", "--filter", &filter]),
+        )?;
+        let ids: Vec<&str> = listed
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        // One `inspect` for all of them. A container removed in between makes
+        // it fail, and that is an error: no answer, never "none up".
+        let mut args = vec!["inspect", "--format", WRITERS_FORMAT];
+        args.extend(ids);
+        let out = self.run("inspect", &self.engine_command(&args))?;
+        parse_writers(&out)
+    }
+
+    fn stopping(&self, container: &str) -> CommandSpec {
+        self.engine_command(&["stop", container])
+    }
+
     fn remove(&self, containers: &[String]) -> Result<(), EngineError> {
         if containers.is_empty() {
             return Ok(());
@@ -354,6 +382,50 @@ impl Engine for Docker {
         self.run("volume rm", &self.engine_command(&["volume", "rm", name]))?;
         Ok(true)
     }
+}
+
+/// What `inspect` prints for [`Docker::writers`]: the id, the Compose
+/// service, and the mounts as the engine reports them, as JSON.
+const WRITERS_FORMAT: &str =
+    "{{.Id}}\t{{index .Config.Labels \"com.docker.compose.service\"}}\t{{json .Mounts}}";
+
+/// Read what `inspect` printed with [`WRITERS_FORMAT`]: one container a
+/// line, and the source of every mount whose `RW` is true. A line that is not
+/// that shape is an error naming it, never a container that writes nothing.
+pub fn parse_writers(out: &str) -> Result<Vec<Writer>, EngineError> {
+    #[derive(serde::Deserialize)]
+    struct Mount {
+        #[serde(rename = "Source")]
+        source: String,
+        #[serde(rename = "RW")]
+        rw: bool,
+    }
+    out.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let unreadable = || EngineError::Unreadable(line.to_string());
+            let mut fields = line.splitn(3, '\t');
+            let (Some(id), Some(service), Some(mounts)) =
+                (fields.next(), fields.next(), fields.next())
+            else {
+                return Err(unreadable());
+            };
+            if id.is_empty() {
+                return Err(unreadable());
+            }
+            let mounts: Vec<Mount> =
+                serde_json::from_str(mounts.trim()).map_err(|_| unreadable())?;
+            Ok(Writer {
+                id: id.to_string(),
+                service: service.to_string(),
+                writable: mounts
+                    .into_iter()
+                    .filter(|m| m.rw)
+                    .map(|m| PathBuf::from(m.source))
+                    .collect(),
+            })
+        })
+        .collect()
 }
 
 /// `docker ps --format` lines of id, service and label, tab-separated. A

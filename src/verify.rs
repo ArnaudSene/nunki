@@ -1718,9 +1718,10 @@ pub fn refuse_while_running(
 }
 
 /// The harness that answers for the run `handle` of a mission in `slot`:
-/// what [`refuse_while_running`] asks whether a run is live, and what
-/// `nunki slot rebuild --slot` asks too (SPEC 4.2). One way of putting the
-/// question, not one per verb.
+/// what [`refuse_while_running`] asks whether a run is live. Not what
+/// `nunki slot rebuild --slot` asks: a run's log can hold its result while
+/// its container still writes the tree, so the rebuild asks the engine
+/// which containers are up ([`crate::slot::rebuild`]).
 pub fn run_harness(
     project: &Project,
     engine: Arc<dyn Engine>,
