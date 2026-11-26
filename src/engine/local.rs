@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 
-use super::{Container, Dialect, Engine, EngineError, ExecOutput, Liveness, Netns};
+use super::{Container, Dialect, Engine, EngineError, ExecOutput, Liveness, Netns, Writer};
 use crate::harness::spawn::CommandSpec;
 
 /// The container id this engine answers with. Fixed: there is one.
@@ -220,6 +220,22 @@ impl Engine for LocalEngine {
     /// One container, the agent's, and nothing a services file lifted.
     fn containers(&self, _project: &str) -> Result<Vec<Container>, EngineError> {
         Ok(Vec::new())
+    }
+
+    /// Refused: it has no container to report, and "none up" would be an
+    /// answer it never asked anyone for.
+    fn writers(&self, _project: &str) -> Result<Vec<Writer>, EngineError> {
+        Err(unsupported("writers"))
+    }
+
+    /// Never named: [`Engine::writers`] is refused here.
+    fn stopping(&self, container: &str) -> CommandSpec {
+        CommandSpec {
+            program: "local-engine".to_string(),
+            args: vec!["stop".to_string(), container.to_string()],
+            cwd: PathBuf::from("."),
+            env: BTreeMap::new(),
+        }
     }
 
     fn remove(&self, _containers: &[String]) -> Result<(), EngineError> {

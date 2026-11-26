@@ -1120,12 +1120,36 @@ image qui porte `stable`.
     fichier qui est le sien. Un lien qui reste dans l'arbre est suivi : un
     `frontend/.nvmrc` qui pointe vers `../.nvmrc` est un choix du dépôt.
     Cela vaut partout où les versions sont lues : `nunki check`, chaque refus
-    de lancement et `nunki slot rebuild`. Ce n'est pas tenu contre un
-    processus qui écrit l'arbre au même instant : le chemin est résolu, puis
-    lu, et un lien posé entre les deux est suivi. Le seul cas où un agent
-    écrit l'arbre pendant cette lecture est un `nunki slot rebuild --slot`
-    lancé pendant un run de ce slot ; ce qu'il affiche ne va qu'au terminal
-    de l'opérateur.
+    de lancement et `nunki slot rebuild`. Le chemin est résolu, puis lu : un
+    lien posé entre les deux serait suivi. C'est pourquoi l'hôte ne lit les
+    sources d'un slot que si aucun conteneur que `nunki` lève pour ce slot ne
+    peut écrire son arbre, hormis l'agent d'une sonde de `nunki check --slot`,
+    comme dit plus bas. Un lancement les lit après que la bascule de profil a
+    retiré le conteneur d'agent du rôle précédent, seul conteneur du projet
+    Compose du slot à monter l'arbre en écriture ; il ne regarde pas le projet
+    `<slot>-check` des sondes de `nunki check --slot`, dont l'agent, laissé
+    levé par une sonde interrompue, monte l'arbre en écriture mais n'exécute
+    que `sleep`. `nunki slot rebuild --slot` tient le verrou du slot et refuse
+    tant qu'un conteneur de l'un ou l'autre de ces projets monte l'arbre en
+    écriture (ci-dessous). `nunki check` lit le dépôt du propriétaire,
+    qu'aucun agent n'écrit. Ce n'est pas tenu contre un processus hors de tout
+    conteneur que `nunki` lève, ni contre un conteneur levé à la main dans un
+    autre projet, ni contre l'agent d'une sonde `nunki check --slot` lancée
+    après la question de la reconstruction : `nunki check --slot` ne prend pas
+    le verrou du slot.
+  - **Une source qui n'est pas un fichier ordinaire, ou trop grande, ne donne
+    rien.** Une fois le chemin résolu, la source n'est lue que si c'est un
+    fichier ordinaire, et c'est demandé avant de l'ouvrir : ouvrir une FIFO
+    bloque jusqu'à ce qu'on y écrive. Une FIFO, une socket, un périphérique ou
+    un répertoire ne donne rien ; la raison nomme le chemin de la source dans
+    le dépôt et ce qu'elle est, et la source suivante est essayée : une FIFO
+    laissée dans l'arbre ne bloque rien. La lecture est bornée : jamais plus
+    de 64 Mio et un octet lus, et un fichier plus grand ne donne rien, avec la
+    raison. Un `pnpm-lock.yaml` est une source : le plus grand mesuré faisait
+    183 116 octets pour 625 paquets, et la borne en tient plus de deux cent
+    mille. Un fichier échangé entre ce regard et l'ouverture serait ouvert :
+    c'est la fenêtre que ferme la règle ci-dessus, dans les limites qu'elle
+    dit.
   - **Rien d'exact pour un argument requis : rouge, et lancement refusé.**
     `nunki check` rend rouge la ligne des versions de la stack, et nomme pour
     chaque argument chaque source essayée et pourquoi elle n'a rien donné,
@@ -1158,9 +1182,37 @@ image qui porte `stable`.
   change une version épinglée ne pourrait plus être servie par aucune image,
   pas même pour le run qui doit la remettre : l'image construite depuis le
   dépôt porte l'ancienne, et le lancement la refuse. Le refus nomme la
-  commande avec le nom du slot. L'image reste partagée par les slots d'un
-  projet : un autre slot dont la branche épingle autrement est refusé à son
-  lancement suivant, et le dit.
+  commande avec le nom du slot. Le lancement fait cette comparaison après la
+  bascule de profil, une fois retiré le conteneur d'agent du rôle précédent :
+  il montait l'arbre en écriture, et un processus laissé dedans pourrait
+  l'écrire pendant la lecture. Un refus laisse donc le slot sans conteneur
+  d'agent. **`nunki slot rebuild --slot <nom>` tient le verrou du slot, et
+  refuse tant qu'un conteneur qui écrit l'arbre du slot est levé.** Il prend
+  le verrou que prennent `nunki verify` et chaque verbe qui lance un run dans
+  le slot, et le garde jusqu'à ce que la construction ait lu l'arbre ; tenu
+  par un autre verbe, il refuse, nomme ce verbe, et ne demande rien au moteur.
+  Puis, avant de lire quoi que ce soit dans l'arbre, il demande au moteur
+  quels conteneurs du projet Compose du slot, et de celui où
+  `nunki check --slot` lève ses sondes, sont levés (en marche, en pause ou en
+  redémarrage), et où chacun de leurs montages arrive dans le conteneur. Un
+  montage en écriture qui arrive à `/work/tree`, où `nunki` monte l'arbre dans
+  chaque conteneur qu'il lève pour un slot, fait refuser ; un volume nommé
+  sous `/work/tree` n'est pas l'arbre. Le chemin hôte que le moteur donne pour
+  la source d'un montage n'est pas lu : chaque moteur le nomme à sa façon. Le
+  refus nomme le conteneur et le slot, dit pourquoi, nomme la mission dont
+  l'état place un run dans le slot s'il y en a une (attendre la fin du run, ou
+  l'arrêter), et donne la commande du moteur qui arrête le conteneur : un
+  conteneur que son run a laissé levé n'est retiré que par le lancement
+  suivant du slot. Rien n'est construit, et la sortie est en échec. C'est le
+  moteur qu'on interroge, et non le journal du run : un run dont le journal
+  porte son résultat laisse son conteneur, et tout processus qu'il y a laissé,
+  jusqu'au lancement suivant. Un moteur qui ne répond pas, ou un montage qu'il
+  décrit sans sa destination ou son mode, est une réponse à part, jamais lue
+  comme « aucun » : la reconstruction refuse et dit pourquoi. Sans conteneur
+  qui écrit l'arbre, elle construit comme avant. Sans `--slot`, rien n'est
+  demandé : le dépôt du propriétaire n'a pas d'agent. L'image reste partagée
+  par les slots d'un projet : un autre slot dont la branche épingle autrement
+  est refusé à son lancement suivant, et le dit.
 - **Un argument que le Dockerfile ne déclare pas est refusé.** Le moteur
   l'abandonnerait avec un avertissement que personne ne lit, et l'image
   garderait sa valeur par défaut — l'échec même que ce fichier existe à

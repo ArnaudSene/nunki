@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use super::{Container, Dialect, Engine, EngineError, ExecOutput, Liveness, Netns};
+use super::{Container, Dialect, Engine, EngineError, ExecOutput, Liveness, Netns, Writer};
 
 /// What was asked of the engine, in order, for a test to assert on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,9 +19,14 @@ pub enum Call {
     ContainerOf(String, String),
     Liveness(String),
     Containers(String),
+    Writers(String),
     Remove(Vec<String>),
     RemoveVolume(String),
 }
+
+/// A container [`Engine::writers`] reports, and the one Compose project it
+/// answers for, or `None` for every project asked about.
+type Scoped = (Option<String>, Writer);
 
 pub struct FakeEngine {
     dialect: Dialect,
@@ -52,6 +57,9 @@ pub struct FakeEngine {
     unanswered: Mutex<std::collections::BTreeSet<String>>,
     /// Containers an `up` makes, listed from then on.
     made_on_up: Mutex<Vec<Container>>,
+    /// What [`Engine::writers`] answers: the containers up, or why the
+    /// engine could not say.
+    writers: Mutex<Result<Vec<Scoped>, String>>,
 }
 
 impl Default for FakeEngine {
@@ -81,6 +89,7 @@ impl Default for FakeEngine {
             held: Mutex::new(Default::default()),
             unanswered: Mutex::new(Default::default()),
             made_on_up: Mutex::new(Vec::new()),
+            writers: Mutex::new(Ok(Vec::new())),
         }
     }
 }
@@ -131,6 +140,29 @@ impl FakeEngine {
     /// what Compose does to a service it finds no container for.
     pub fn making_on_up(self, container: Container) -> Self {
         self.made_on_up.lock().unwrap().push(container);
+        self
+    }
+
+    /// A container up, mounting `writable` writable, as
+    /// [`Engine::writers`] reports it, in every project asked about.
+    pub fn with_writer(self, writer: Writer) -> Self {
+        if let Ok(up) = &mut *self.writers.lock().unwrap() {
+            up.push((None, writer));
+        }
+        self
+    }
+
+    /// [`FakeEngine::with_writer`], in the Compose project `project` only.
+    pub fn with_writer_in(self, project: &str, writer: Writer) -> Self {
+        if let Ok(up) = &mut *self.writers.lock().unwrap() {
+            up.push((Some(project.to_string()), writer));
+        }
+        self
+    }
+
+    /// [`Engine::writers`] cannot be answered: an engine that is down.
+    pub fn with_writers_unanswered(self, why: &str) -> Self {
+        *self.writers.lock().unwrap() = Err(why.to_string());
         self
     }
 
@@ -372,6 +404,27 @@ impl Engine for FakeEngine {
     fn containers(&self, project: &str) -> Result<Vec<Container>, EngineError> {
         self.record(Call::Containers(project.to_string()));
         Ok(self.lifted.lock().unwrap().clone())
+    }
+
+    fn writers(&self, project: &str) -> Result<Vec<Writer>, EngineError> {
+        self.record(Call::Writers(project.to_string()));
+        match &*self.writers.lock().unwrap() {
+            Ok(up) => Ok(up
+                .iter()
+                .filter(|(only, _)| only.as_deref().is_none_or(|p| p == project))
+                .map(|(_, w)| w.clone())
+                .collect()),
+            Err(why) => Err(EngineError::Unreadable(why.clone())),
+        }
+    }
+
+    fn stopping(&self, container: &str) -> crate::harness::spawn::CommandSpec {
+        crate::harness::spawn::CommandSpec {
+            program: "fake-engine".to_string(),
+            args: vec!["stop".to_string(), container.to_string()],
+            cwd: PathBuf::from("."),
+            env: BTreeMap::new(),
+        }
     }
 
     fn removal(&self, container: &str) -> crate::harness::spawn::CommandSpec {

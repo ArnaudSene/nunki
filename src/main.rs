@@ -1006,27 +1006,26 @@ fn main() -> ExitCode {
                         }
                     };
                     let engine = std::env::var("HQ_ENGINE").unwrap_or_else(|_| "docker".into());
-                    println!("building the images for {stack}, this takes a while…");
-                    let tree = match &slot {
-                        None => project.root.clone(),
-                        Some(name) => match slot::find(&project, name) {
-                            Ok(found) => {
-                                println!("versions  read in slot {name}, on its branch");
-                                found.tree
-                            }
-                            Err(e) => {
-                                eprintln!("nunki: {e}");
-                                return ExitCode::FAILURE;
-                            }
-                        },
+                    // Asked before anything in the slot's tree is read: a run
+                    // live in it refuses the rebuild, and so does one the
+                    // engine cannot answer for (SPEC 4.2).
+                    let asked: std::sync::Arc<dyn nunki::engine::Engine> =
+                        std::sync::Arc::new(nunki::engine::docker::Docker::real());
+                    let built = slot::rebuild(&project, slot.as_deref(), asked, |tree| {
+                        println!("building the images for {stack}, this takes a while…");
+                        if let Some(name) = &slot {
+                            println!("versions  read in slot {name}, on its branch");
+                        }
+                        image::build_from(&project, tree, &stack, &engine, image::Harness::Install)
+                    });
+                    let built = match built {
+                        Ok(built) => built,
+                        Err(e) => {
+                            eprintln!("nunki: {e}");
+                            return ExitCode::FAILURE;
+                        }
                     };
-                    match image::build_from(
-                        &project,
-                        &tree,
-                        &stack,
-                        &engine,
-                        image::Harness::Install,
-                    ) {
+                    match built {
                         Ok(image::Built {
                             images,
                             versions,
