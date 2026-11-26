@@ -400,8 +400,11 @@ pub enum RebuildError {
 /// Without a slot, the owner's checkout, which no agent writes, and nothing
 /// is asked. With one, that slot's tree — but first the slot's lock is
 /// taken, and held until the build has read the tree: `nunki verify` and
-/// every verb that launches a run hold it, so none can lift a container
-/// meanwhile, and one that holds it refuses the rebuild. Then, **before
+/// every verb that launches a run hold it, so none of them can lift a
+/// role's container meanwhile, and one that holds it refuses the rebuild.
+/// `nunki check --slot` takes no lock: a check started after the engine was
+/// asked lifts a probe agent with the tree writable that this does not see
+/// (it runs `sleep`, and no code from the tree). Then, **before
 /// anything in the tree is read**, the engine is asked which containers of
 /// the slot's Compose project, and of the one `nunki check --slot` lifts for
 /// it, are up, and what each mounts. One with a writable mount landing on

@@ -1365,6 +1365,22 @@ fn the_local_engine_lists_no_service_and_refuses_to_remove_one() {
     }
 }
 
+/// Asked which containers are up and what they mount, the local engine
+/// refuses rather than answer "none": `slot rebuild --slot` would read an
+/// empty answer as nothing writing the slot's tree, and build while
+/// something did.
+#[test]
+fn the_local_engine_refuses_to_say_which_containers_are_up() {
+    let engine = LocalEngine::new(&[]);
+    match engine.writers("local") {
+        Err(nunki::engine::EngineError::Command { status, stderr, .. }) => {
+            assert_eq!(status, "unsupported");
+            assert!(stderr.contains("does not implement writers"), "{stderr}");
+        }
+        other => panic!("a question the engine cannot answer was answered {other:?}"),
+    }
+}
+
 /// Stops whatever still carries `NUNKI_RUN=<run>` on this machine when it
 /// goes out of scope, so a test whose stop failed leaves no loop behind.
 #[cfg(target_os = "linux")]
