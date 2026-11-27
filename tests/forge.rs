@@ -372,6 +372,21 @@ fn a_token_does_not_print_itself() {
     assert!(shown.contains("Token"), "{shown}");
 }
 
+/// The token's own `Debug` is a placeholder, exactly: it says a token is
+/// there and nothing of it — not its value, not its length, not an empty
+/// string that would read as "no token".
+#[test]
+fn a_token_debugs_as_a_placeholder_and_nothing_else() {
+    let (_dir, home) = homes();
+    common::write_token(&home.join(forge::TOKEN_FILE), "tok-made-up\n");
+    let forge::Credential::Token(token) = forge::credential(&home) else {
+        panic!("the token was not read");
+    };
+
+    assert_eq!(format!("{token:?}"), "Token(..)");
+    assert_eq!(format!("{token:#?}"), "Token(..)");
+}
+
 /// What a bind mount may not be: the home, a directory above it, the token
 /// file, or a link to any of them. What a container does see under the home
 /// — its mission folder, a stack's script — exposes neither.

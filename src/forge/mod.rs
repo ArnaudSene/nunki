@@ -351,18 +351,25 @@ pub fn credential(home: &Path) -> Credential {
 }
 
 /// The permission bits of an opened file, or why they could not be read.
-#[cfg(unix)]
+///
+/// One function on every platform, so that what it does is what the tests
+/// run: the file's metadata is read everywhere — an error is a mode that
+/// could not be read, refused by [`judge`] — and only where the bits come
+/// from depends on the platform. Elsewhere than on unix there are no such
+/// bits, and nothing to judge.
 fn mode_of(file: &std::fs::File) -> Result<Option<u32>, String> {
-    use std::os::unix::fs::PermissionsExt;
-    file.metadata()
-        .map(|m| Some(m.permissions().mode()))
-        .map_err(|e| e.to_string())
-}
-
-/// Elsewhere there are no unix permission bits to judge.
-#[cfg(not(unix))]
-fn mode_of(_file: &std::fs::File) -> Result<Option<u32>, String> {
-    Ok(None)
+    let metadata = file.metadata().map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    let mode = {
+        use std::os::unix::fs::PermissionsExt;
+        Some(metadata.permissions().mode())
+    };
+    #[cfg(not(unix))]
+    let mode = {
+        let _ = metadata;
+        None
+    };
+    Ok(mode)
 }
 
 /// Whether a token file's mode lets it be used: allowed only when it grants
