@@ -636,3 +636,236 @@ fn a_mode_that_cannot_be_read_is_refused_and_only_group_and_other_bits_count() {
     );
     assert!(unknown.contains("nothing is pushed"), "{unknown}");
 }
+
+// --- `git push` with the project's token alone (SPEC 4.2, `nunki push`) -----
+
+/// The configuration the push is given, exactly: every helper reset, then
+/// one scoped to the forge's address that reads the token from the
+/// environment — its name, never its value — no askpass, no redirect, and the
+/// forge's protocol alone. Each line is a door the owner's credentials or
+/// the token could go through; the push's own tests prove the whole against
+/// real git, and this pins each door.
+#[test]
+fn the_push_is_configured_with_one_helper_scoped_to_the_forge_and_nothing_else() {
+    let args = forge::git::config_args("https://github.com/");
+    let pairs: Vec<&str> = args
+        .chunks(2)
+        .map(|c| {
+            assert_eq!(c[0], "-c");
+            c[1].as_str()
+        })
+        .collect();
+    assert_eq!(
+        pairs,
+        [
+            "credential.helper=",
+            "credential.https://github.com/.helper=!f() { test \"$1\" = get || exit 0; \
+             printf 'username=x-access-token\\npassword=%s\\n' \"$NUNKI_FORGE_TOKEN\"; }; f",
+            "core.askPass=",
+            "http.followRedirects=false",
+            "protocol.allow=never",
+            "protocol.https.allow=always",
+        ]
+    );
+    let local = forge::git::config_args("http://127.0.0.1:4242/");
+    assert!(
+        local.contains(&"protocol.http.allow=always".to_string()),
+        "{local:?}"
+    );
+    assert!(
+        local
+            .iter()
+            .any(|a| a.starts_with("credential.http://127.0.0.1:4242/.helper=")),
+        "{local:?}"
+    );
+}
+
+/// The push's environment keeps `PATH` and nothing else of what nunki
+/// inherited — no `HOME`, no `GIT_*`, no askpass, no SSH, no proxy — then
+/// closes the system and global configurations, the prompt, and puts `HOME`
+/// in the scratch directory, where curl finds no `.netrc`.
+#[test]
+fn the_push_environment_keeps_path_alone_and_closes_every_configuration() {
+    let inherited: Vec<(std::ffi::OsString, std::ffi::OsString)> = [
+        ("PATH", "/usr/bin"),
+        ("HOME", "/Users/owner"),
+        ("XDG_CONFIG_HOME", "/Users/owner/.config"),
+        ("GIT_CONFIG_GLOBAL", "/Users/owner/.gitconfig"),
+        ("GIT_CONFIG_SYSTEM", "/opt/homebrew/etc/gitconfig"),
+        ("GIT_CONFIG_PARAMETERS", "'credential.helper'='osxkeychain'"),
+        ("GIT_ASKPASS", "/bin/askpass"),
+        ("SSH_ASKPASS", "/bin/askpass"),
+        ("GIT_SSH_COMMAND", "ssh -i key"),
+        ("GIT_TERMINAL_PROMPT", "1"),
+        ("https_proxy", "http://u:p@proxy"),
+        ("NUNKI_FORGE_TOKEN", "tok-inherited"),
+    ]
+    .iter()
+    .map(|(k, v)| (k.into(), v.into()))
+    .collect();
+    let home = std::path::Path::new("/tmp/nunki-push-x/home");
+
+    let env = forge::git::environment(&inherited, home);
+
+    let env: Vec<(String, String)> = env
+        .into_iter()
+        .map(|(k, v)| (k.into_string().unwrap(), v.into_string().unwrap()))
+        .collect();
+    let pairs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    assert_eq!(
+        pairs,
+        [
+            ("PATH", "/usr/bin"),
+            ("GIT_CONFIG_NOSYSTEM", "1"),
+            ("GIT_CONFIG_GLOBAL", "/dev/null"),
+            ("GIT_TERMINAL_PROMPT", "0"),
+            ("HOME", "/tmp/nunki-push-x/home"),
+            ("LC_ALL", "C"),
+        ]
+    );
+}
+
+/// The address pushed to is the forge's base and the repository the remote
+/// names; a name GitHub would not accept is refused before it reaches a URL,
+/// where it could change what the address means.
+#[test]
+fn the_push_address_is_the_forges_and_a_strange_name_is_refused() {
+    let repo = |owner: &str, name: &str| forge::Repo {
+        owner: owner.into(),
+        name: name.into(),
+    };
+    assert_eq!(
+        forge::git::url("https://github.com/", &repo("o-1", "r_2.x")).unwrap(),
+        "https://github.com/o-1/r_2.x.git"
+    );
+    for (owner, name) in [
+        ("o", ""),
+        ("", "r"),
+        ("o", ".."),
+        (".", "r"),
+        ("o", "r?x"),
+        ("o@evil.example", "r"),
+        ("o", "r/s"),
+        ("o", "r#x"),
+        ("o", "r x"),
+    ] {
+        let err = forge::git::url("https://github.com/", &repo(owner, name)).unwrap_err();
+        assert!(
+            err.to_string().contains("is not a GitHub repository name"),
+            "{owner}/{name}: {err}"
+        );
+    }
+}
+
+/// What git said is given back on one line, and never with the token in it.
+#[test]
+fn what_git_said_is_given_back_without_the_token() {
+    assert_eq!(
+        forge::git::redact("fatal: tok-x refused\n  for tok-x\n", "tok-x"),
+        "fatal: [the token] refused for [the token]"
+    );
+    assert_eq!(forge::git::redact("a\nb", ""), "a b");
+}
+
+/// The push command after its configuration: the scratch repository, no
+/// hook, and the judged commit by id onto the full ref.
+#[test]
+fn the_push_command_pushes_the_commit_by_id_to_the_full_ref_without_hooks() {
+    let args = forge::git::push_args(
+        "https://github.com/",
+        std::path::Path::new("/tmp/s/repo.git"),
+        "https://github.com/o/r.git",
+        "0123abcd",
+        "mission/x",
+    );
+    let config = forge::git::config_args("https://github.com/");
+    assert_eq!(&args[..config.len()], &config[..]);
+    assert_eq!(
+        &args[config.len()..],
+        [
+            "--git-dir=/tmp/s/repo.git",
+            "push",
+            "--no-verify",
+            "--quiet",
+            "https://github.com/o/r.git",
+            "0123abcd:refs/heads/mission/x",
+        ]
+    );
+}
+
+fn git_in(at: &std::path::Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(at)
+        .args(args)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// The push borrows the project's objects whatever their format: a sha256
+/// repository is pushed from a sha256 scratch, and the commit lands.
+#[test]
+fn a_sha256_project_is_pushed_from_a_scratch_of_its_own_format() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    git_in(&project, &["init", "-q", "--object-format=sha256"]);
+    std::fs::write(project.join("f"), "x\n").unwrap();
+    git_in(&project, &["add", "f"]);
+    git_in(
+        &project,
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "-m",
+            "one",
+        ],
+    );
+    let commit = git_in(&project, &["rev-parse", "HEAD"]);
+    let root = dir.path().join("git");
+    std::fs::create_dir_all(root.join("o")).unwrap();
+    git_in(
+        &root.join("o"),
+        &["init", "-q", "--bare", "--object-format=sha256", "r.git"],
+    );
+    let server = common::git_http::GitServer::start(&root, "tok-made-up");
+    let (_home_dir, home) = homes();
+    common::write_token(&home.join(forge::TOKEN_FILE), "tok-made-up\n");
+    let forge::Credential::Token(token) = forge::credential(&home) else {
+        panic!("no token");
+    };
+
+    forge::git::push(&forge::git::Push {
+        objects_of: &project,
+        base: &server.base,
+        repo: &forge::Repo {
+            owner: "o".into(),
+            name: "r".into(),
+        },
+        commit: &commit,
+        branch: "mission/x",
+        token: &token,
+        inherited: &[("PATH".into(), std::env::var_os("PATH").unwrap_or_default())],
+    })
+    .unwrap();
+
+    assert_eq!(
+        git_in(
+            &root.join("o/r.git"),
+            &["rev-parse", "refs/heads/mission/x"]
+        ),
+        commit
+    );
+}

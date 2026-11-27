@@ -12,6 +12,8 @@ use std::thread::JoinHandle;
 /// session is opened for it in `<user_home>/.nunki/sessions.json`, and the
 /// home that session names receives a `nunki.yaml` made of `body` and the
 /// `root:` it belongs to, plus an empty HQ. Returns the home.
+pub mod git_http;
+
 #[allow(dead_code)]
 pub fn project_home(root: &Path, user_home: &Path, body: &str) -> PathBuf {
     std::fs::create_dir_all(root).unwrap();

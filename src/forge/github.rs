@@ -20,6 +20,12 @@ use super::{Forge, ForgeError, Opened, Protection, PullRequest, Repo};
 /// binary never calls with anything but this.
 pub const API: &str = "https://api.github.com";
 
+/// GitHub for git: where `nunki push` pushes, over HTTPS, whatever form the
+/// remote has ([`super::git`]). Like [`API`], never overridable: the token is
+/// sent to this address and to no other, and tests reach a server of their
+/// own through [`crate::push::push_to`].
+pub const GIT: &str = "https://github.com/";
+
 /// The host a remote must name for this adapter to answer for it.
 const HOST: &str = "github.com";
 

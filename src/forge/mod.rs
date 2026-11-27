@@ -39,8 +39,10 @@
 //! repository, a pull request, a protected branch — and each adapter holds how
 //! that forge is asked. GitHub is the one implemented, because it is the one
 //! the projects here use; a remote elsewhere is **said to be elsewhere and
-//! never guessed at**, and the push still happens.
+//! never guessed at**: it is not pushed, since the project's token is a GitHub
+//! token and nothing else may carry the push ([`git`]).
 
+pub mod git;
 pub mod github;
 
 use std::path::{Path, PathBuf};

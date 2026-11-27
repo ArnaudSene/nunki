@@ -44,6 +44,15 @@ merged since the last one. `AGENTS.md`, under "Releases", says how.
   key: on unix, a mode that grants anything to its group or to others, or one
   that cannot be read, makes `nunki push` refuse before anything reaches the
   forge and `nunki check` red, and both say `chmod 600 <path>`.
+- **`git push` authenticates with the project's token, and with nothing
+  else.** `nunki push` pushes over HTTPS to the GitHub repository `origin`
+  names, an SSH remote included, and git reads none of your configuration
+  for it: no credential helper at any level, no keychain, no askpass, no
+  `~/.netrc`, no SSH key, no `insteadOf` rewrite. A remote that is not on
+  GitHub is refused before anything is fetched; it used to be pushed. A push
+  the forge refuses fails with its answer, and opens no pull request. The
+  push no longer updates `refs/remotes/origin/<branch>` in your checkout. It
+  needs git 2.32 or later, and does not use `https_proxy`.
 - **A launch refuses a mount that would expose the project's home or its
   forge token** to a container — an advisory database declared there, or a
   link to it — and says which mount.

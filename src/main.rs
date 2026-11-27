@@ -1289,70 +1289,8 @@ fn main() -> ExitCode {
             };
             match nunki::push::push(&project, &mission, yes) {
                 Ok(pushed) => {
-                    println!("pushed    {} → {}", pushed.branch, pushed.remote);
-                    println!("head      {}", &pushed.head[..12.min(pushed.head.len())]);
-                    // Pushed on a spent round cap (SPEC 4.5): said before the
-                    // pull request, so whoever opens it reads what the
-                    // security agent never saw.
-                    if !pushed.not_attacked.is_empty() {
-                        println!(
-                            "security  the rounds were spent; not attacked by the security agent:"
-                        );
-                        for commit in &pushed.not_attacked {
-                            println!("          {commit}");
-                        }
-                    }
-                    // A lift nobody typed (SPEC 4.5): said here, so whoever
-                    // opens the pull request reads what was accepted, and by
-                    // whom.
-                    if !pushed.lifted_by_nunki.is_empty() {
-                        println!("security  accepted by nunki (LOW/INFO):");
-                        for finding in &pushed.lifted_by_nunki {
-                            println!("          {}", nunki::text::one_line(finding));
-                        }
-                    }
-                    // Findings accepted and not fixed are not published by
-                    // default (`security_findings` in nunki.yaml): said here,
-                    // with how many, so nobody wonders where the report went.
-                    // The Security section nunki writes gives only the count.
-                    let withheld = pushed.withheld.as_ref();
-                    if let Some(w) = withheld {
-                        let findings = match w.findings {
-                            Some(n) => format!("{n} finding(s)"),
-                            None => "findings nunki could not count".to_string(),
-                        };
-                        println!(
-                            "security  withheld from the pull request: the security agent's \
-                             report and its {findings}, accepted and not fixed — the Security \
-                             section nunki wrote says how many, and who accepted them"
-                        );
-                    }
-                    match pushed.pull_request {
-                        nunki::push::PullRequestState::Opened(nunki::forge::Opened::Created(
-                            url,
-                        )) => {
-                            println!("opened    {url}");
-                        }
-                        nunki::push::PullRequestState::Opened(
-                            nunki::forge::Opened::AlreadyOpen(url),
-                        ) => {
-                            println!("updated   {url}");
-                            println!("          it was already open; this push is on it now");
-                        }
-                        // The push succeeded; only the pull request is left
-                        // to the human, and the exit code says the push.
-                        nunki::push::PullRequestState::ByHand { compare, why } => {
-                            println!("pull request not opened by nunki: {why}");
-                            if let Some(url) = compare {
-                                println!("          open it yourself at {url}");
-                            }
-                            if withheld.is_some() {
-                                println!(
-                                    "          the findings stay withheld: publish nothing of \
-                                     the security agent's report or of VERDICT.json"
-                                );
-                            }
-                        }
+                    for line in nunki::push::said(&pushed) {
+                        println!("{line}");
                     }
                     ExitCode::SUCCESS
                 }

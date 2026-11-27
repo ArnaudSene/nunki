@@ -58,6 +58,16 @@ pub enum PushError {
     /// [`crate::forge::Refused::refusal`]'s message.
     #[error("{0}. Nothing was fetched and nothing was pushed")]
     TokenRefused(String),
+    /// The remote is not on GitHub (SPEC 4.2, `nunki push`): the project's
+    /// token is a GitHub token, and nothing else may carry the push.
+    #[error(
+        "the remote `{REMOTE}` is {0}, on a forge nunki has no adapter for: nunki pushes only \
+         to the GitHub repository a remote names, over HTTPS, with the project's token — \
+         never with your own credentials. Nothing was fetched and nothing was pushed"
+    )]
+    NotOnGitHub(String),
+    #[error(transparent)]
+    ForgePush(#[from] crate::forge::git::GitPushError),
     #[error("mission {0} has not started — there is nothing to push")]
     NotStarted(String),
     #[error(
@@ -341,20 +351,50 @@ pub enum PullRequestState {
     },
 }
 
+/// Where a push goes, and the environment it starts from.
+///
+/// The binary has one value of it, [`Endpoints::github`]: GitHub's API and
+/// GitHub for git, constants both, and the environment nunki was started
+/// with — of which the push keeps `PATH` alone ([`crate::forge::git`]). Tests
+/// build their own, to point the real clients at servers they control and to
+/// hand the push an environment that holds the owner's credentials.
+#[derive(Debug, Clone)]
+pub struct Endpoints {
+    /// The forge's API, for the pull request.
+    pub api: String,
+    /// The forge's address for git, with its trailing `/`.
+    pub git: String,
+    /// The environment nunki was started with.
+    pub inherited: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+}
+
+impl Endpoints {
+    /// GitHub itself: the only addresses the token is ever sent to, and never
+    /// read from the environment or from a configuration.
+    pub fn github() -> Self {
+        Self {
+            api: crate::forge::github::API.to_string(),
+            git: crate::forge::github::GIT.to_string(),
+            inherited: std::env::vars_os().collect(),
+        }
+    }
+}
+
 /// Push a verified mission's branch, on an explicit human argument, and open
 /// its pull request on the forge's real API.
 pub fn push(project: &Project, id: &str, authorised: bool) -> Result<Pushed, PushError> {
-    push_to(project, id, authorised, crate::forge::github::API)
+    push_to(project, id, authorised, &Endpoints::github())
 }
 
-/// [`push`], against a given forge API — how the tests point the real client
-/// at a server they control. The binary calls [`push`] only, so the address
-/// the project's token goes to is never read from anything a process inherits.
+/// [`push`], against given [`Endpoints`] — how the tests point the real
+/// clients at servers they control. The binary calls [`push`] only, so the
+/// addresses the project's token goes to are never read from anything a
+/// process inherits.
 pub fn push_to(
     project: &Project,
     id: &str,
     authorised: bool,
-    api: &str,
+    at: &Endpoints,
 ) -> Result<Pushed, PushError> {
     if !authorised {
         return Err(PushError::NotAuthorised(id.to_string()));
@@ -436,13 +476,34 @@ pub fn push_to(
         }
     };
 
+    // Where the push goes, also before the fetch: the GitHub repository the
+    // remote names, over HTTPS whatever form the remote has — an SSH remote
+    // is pushed over HTTPS too, since an SSH key is the owner's personal
+    // credential. A remote nunki has no adapter for has nothing the
+    // project's token could push to.
+    let remote = remote_url(project)?;
+    let Some((forge, repo)) = crate::forge::of_remote_at(&remote, &at.api) else {
+        return Err(PushError::NotOnGitHub(remote.trim().to_string()));
+    };
+    let pushed_to = crate::forge::git::url(&at.git, &repo)?;
+
     // Exactly the judged commit, by id: refused before the fetch when the
     // slot's branch is not it, and checked again on the project's side before
     // anything is pushed.
     let fetched = fetch_judged(project, id, &head)?;
     is_judged(&fetched, &head)?;
-    let remote = remote_url(project)?;
-    crate::git::run(&project.root, &["push", REMOTE, &fetched.branch])?;
+    // With the project's token and nothing else ([`crate::forge::git`]): the
+    // owner's checkout is where the objects come from, and nothing of its
+    // configuration is read.
+    crate::forge::git::push(&crate::forge::git::Push {
+        objects_of: &project.root,
+        base: &at.git,
+        repo: &repo,
+        commit: &head,
+        branch: &fetched.branch,
+        token: &token,
+        inherited: &at.inherited,
+    })?;
 
     state.updated_at = crate::state::now_rfc3339();
     state.pushed = Some(crate::state::PushedAt {
@@ -455,17 +516,17 @@ pub fn push_to(
     // pushes the branch and opens the pull request, on one argument.
     let pull_request = open_pull_request(
         &token,
-        &remote,
+        forge.as_ref(),
+        &repo,
         &header,
         &fetched.branch,
         &paths.pr,
         request,
-        api,
     );
     Ok(Pushed {
         branch: fetched.branch.clone(),
         head,
-        remote,
+        remote: pushed_to,
         pull_request,
         not_attacked,
         lifted_by_nunki,
@@ -486,42 +547,30 @@ pub fn push_to(
 /// never written.
 fn open_pull_request(
     token: &crate::forge::Token,
-    remote: &str,
+    forge: &dyn crate::forge::Forge,
+    repo: &crate::forge::Repo,
     header: &crate::mission::Header,
     branch: &str,
     pr_file: &std::path::Path,
     request: Option<crate::forge::PullRequest>,
-    api: &str,
 ) -> PullRequestState {
-    // The forge the remote is on, if `nunki` has an adapter for it. The
-    // address a human would open the pull request at is that adapter's too:
-    // a remote elsewhere gets no address rather than a GitHub one.
-    let found = crate::forge::of_remote_at(remote, api);
-    let compare = found
-        .as_ref()
-        .map(|(forge, repo)| forge.compare(repo, &header.base, branch));
-    let by_hand = |why: String| PullRequestState::ByHand {
-        compare: compare.clone(),
-        why,
-    };
-
-    // First, because it holds whatever the forge: with no `PR.md`, or one
-    // that gives no title, there is no pull request to open anywhere.
+    // With no `PR.md`, or one that gives no title, there is no pull request
+    // to open: the address a human would open one at is handed over.
     let Some(request) = request else {
-        return by_hand(format!(
-            "{} says nothing a pull request could be titled with",
-            pr_file.display()
-        ));
+        return PullRequestState::ByHand {
+            compare: Some(forge.compare(repo, &header.base, branch)),
+            why: format!(
+                "{} says nothing a pull request could be titled with",
+                pr_file.display()
+            ),
+        };
     };
-    let Some((forge, repo)) = found else {
-        return by_hand(format!(
-            "the remote is on a forge nunki has no adapter for ({remote}): GitHub is the one \
-             it opens pull requests on"
-        ));
-    };
-    match forge.open(token.secret(), &repo, &request) {
+    match forge.open(token.secret(), repo, &request) {
         Ok(opened) => PullRequestState::Opened(opened),
-        Err(e) => by_hand(e.to_string()),
+        Err(e) => PullRequestState::ByHand {
+            compare: Some(forge.compare(repo, &header.base, branch)),
+            why: e.to_string(),
+        },
     }
 }
 
@@ -1346,6 +1395,82 @@ fn with_section(body: &str, section: &str) -> String {
     } else {
         format!("{}\n\n{section}", body.trim_end())
     }
+}
+
+/// What `nunki push` prints once the push is done, one line each: the branch
+/// and where it went, what the security agent did not see, and where the
+/// pull request stands. The binary prints it as it is; it lives here so that
+/// what the human reads can be read by a test without pushing to the real
+/// forge.
+pub fn said(pushed: &Pushed) -> Vec<String> {
+    let mut lines = Vec::new();
+    lines.push(format!("pushed    {} → {}", pushed.branch, pushed.remote));
+    lines.push(format!(
+        "head      {}",
+        &pushed.head[..12.min(pushed.head.len())]
+    ));
+    // Pushed on a spent round cap (SPEC 4.5): said before the
+    // pull request, so whoever opens it reads what the
+    // security agent never saw.
+    if !pushed.not_attacked.is_empty() {
+        lines.push(String::from(
+            "security  the rounds were spent; not attacked by the security agent:",
+        ));
+        for commit in &pushed.not_attacked {
+            lines.push(format!("          {commit}"));
+        }
+    }
+    // A lift nobody typed (SPEC 4.5): said here, so whoever
+    // opens the pull request reads what was accepted, and by
+    // whom.
+    if !pushed.lifted_by_nunki.is_empty() {
+        lines.push("security  accepted by nunki (LOW/INFO):".to_string());
+        for finding in &pushed.lifted_by_nunki {
+            lines.push(format!("          {}", crate::text::one_line(finding)));
+        }
+    }
+    // Findings accepted and not fixed are not published by
+    // default (`security_findings` in nunki.yaml): said here,
+    // with how many, so nobody wonders where the report went.
+    // The Security section nunki writes gives only the count.
+    let withheld = pushed.withheld.as_ref();
+    if let Some(w) = withheld {
+        let findings = match w.findings {
+            Some(n) => format!("{n} finding(s)"),
+            None => "findings nunki could not count".to_string(),
+        };
+        lines.push(format!(
+            "security  withheld from the pull request: the security agent's \
+             report and its {findings}, accepted and not fixed — the Security \
+             section nunki wrote says how many, and who accepted them"
+        ));
+    }
+    match &pushed.pull_request {
+        crate::push::PullRequestState::Opened(crate::forge::Opened::Created(url)) => {
+            lines.push(format!("opened    {url}"));
+        }
+        crate::push::PullRequestState::Opened(crate::forge::Opened::AlreadyOpen(url)) => {
+            lines.push(format!("updated   {url}"));
+            lines.push(String::from(
+                "          it was already open; this push is on it now",
+            ));
+        }
+        // The push succeeded; only the pull request is left
+        // to the human, and the exit code says the push.
+        crate::push::PullRequestState::ByHand { compare, why } => {
+            lines.push(format!("pull request not opened by nunki: {why}"));
+            if let Some(url) = compare {
+                lines.push(format!("          open it yourself at {url}"));
+            }
+            if withheld.is_some() {
+                lines.push(String::from(
+                    "          the findings stay withheld: publish nothing of \
+                     the security agent's report or of VERDICT.json",
+                ));
+            }
+        }
+    }
+    lines
 }
 
 #[cfg(test)]

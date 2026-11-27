@@ -462,8 +462,22 @@ check` name it when it is still there. No container `nunki` lifts mounts the
 project's home or its token.
 
 GitHub is the one forge `nunki` has an adapter for. A remote on another one is
-**said to be on another one**: the branch is still pushed, and no address is
-guessed at from a shape that is GitHub's.
+**said to be on another one**, and `nunki push` refuses it before it fetches
+anything: the project's token is a GitHub token, and your own credentials
+never carry a push.
+
+The push itself authenticates with the project's token and with nothing
+else. It goes over HTTPS to the GitHub repository `origin` names, an SSH
+remote included, because an SSH key is your personal credential. Git is run
+so that it reads none of your git configuration: no credential helper at any
+level (a keychain, `store`, what `gh auth setup-git` installs), no askpass,
+no `~/.netrc`, no SSH command, and no `insteadOf` rewrite. The token reaches
+git through that one command's environment, never on a command line, in a URL
+or in a file. Your checkout's configuration and remotes are left as they
+were. A push the forge refuses, from a token without *Contents: write* or an
+expired one, fails with the forge's answer, and no pull request is opened.
+It needs git 2.32 or later. The push takes `PATH` and nothing else from your
+environment, so a proxy set in `https_proxy` is not used for it.
 
 ## Choosing a rigor
 

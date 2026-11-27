@@ -69,6 +69,8 @@ struct World {
     tree: PathBuf,
     /// A bare repository standing in for the forge.
     forge: PathBuf,
+    /// The forge's git server, which takes the project's token alone.
+    server: common::git_http::GitServer,
     /// The user home the real binary is run with, for a world [`World::opened`].
     home: PathBuf,
 }
@@ -101,11 +103,20 @@ impl World {
             std::fs::create_dir_all(hq_root.join(d)).unwrap();
         }
 
-        // The forge: a bare repository, so `git push` is a real push.
-        let forge = dir.path().join("forge.git");
+        // The forge: a bare repository served over smart HTTP on 127.0.0.1
+        // (`common::git_http`), so `git push` is a real push, authenticated
+        // the way nunki authenticates it, and never reaches github.com.
+        let forge = dir.path().join("git/o/r.git");
         git(
             dir.path(),
-            &["init", "--bare", "-q", "-b", "dev", "forge.git"],
+            &[
+                "init",
+                "--bare",
+                "-q",
+                "-b",
+                "dev",
+                &forge.display().to_string(),
+            ],
         );
 
         // The repository, with the forge as its origin.
@@ -124,6 +135,13 @@ impl World {
             &["remote", "add", "origin", &forge.display().to_string()],
         );
         git(&root, &["push", "-q", "origin", "HEAD"]);
+        // Then `origin` reads as the GitHub repository it stands for, the
+        // shape of a real project: nunki works out where to push from it,
+        // and pushes to the server below instead of github.com.
+        git(
+            &root,
+            &["remote", "set-url", "origin", "https://github.com/o/r.git"],
+        );
 
         // The slot, where `nunki::slot::find` looks: beside the repository.
         let slots = dir.path().join("repo-slots");
@@ -231,6 +249,7 @@ impl World {
         );
 
         Self {
+            server: common::git_http::GitServer::start(&dir.path().join("git"), "tok-project"),
             home: dir.path().join("home"),
             _dir: dir,
             project,
@@ -356,7 +375,7 @@ fn a_push_without_the_humans_word_does_not_happen() {
     let head = world.commit("src.rs", "pub fn one() -> u8 { 2 }\n", "the lot");
     world.verified(&[(Role::Coder, None, head)]);
 
-    let err = push::push(&world.project, "m1", false).unwrap_err();
+    let err = push::push_to(&world.project, "m1", false, &world.endpoints()).unwrap_err();
     assert!(matches!(err, PushError::NotAuthorised(_)), "{err}");
     assert!(world.on_forge("mission/x").is_none(), "nothing was pushed");
 }
@@ -374,7 +393,7 @@ fn a_verified_mission_reaches_the_forge_and_the_pull_request_is_handed_over() {
         (Role::Security, Some(Verdict::Clear), head.clone()),
     ]);
 
-    let pushed = push::push(&world.project, "m1", true).unwrap();
+    let pushed = push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap();
     assert_eq!(pushed.branch, "mission/x");
     assert_eq!(pushed.head, head);
     assert_eq!(world.on_forge("mission/x").as_deref(), Some(head.as_str()));
@@ -395,7 +414,7 @@ fn a_mission_that_is_not_verified_is_not_pushed() {
     );
     world.commit("src.rs", "pub fn one() -> u8 { 2 }\n", "the lot");
 
-    let err = push::push(&world.project, "m1", true).unwrap_err();
+    let err = push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap_err();
     assert!(matches!(err, PushError::NotVerified { .. }), "{err}");
     assert!(err.to_string().contains("Coding"), "{err}");
     assert!(world.on_forge("mission/x").is_none());
@@ -414,7 +433,7 @@ fn a_verdict_on_another_commit_does_not_authorise_this_one() {
         (Role::Integrator, Some(Verdict::Integrated), coder),
     ]);
 
-    let err = push::push(&world.project, "m1", true).unwrap_err();
+    let err = push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap_err();
     assert!(
         matches!(
             err,
@@ -445,7 +464,7 @@ fn findings_nobody_lifted_do_not_reach_the_forge() {
         (Role::Security, Some(Verdict::Findings), head.clone()),
     ]);
 
-    let err = push::push(&world.project, "m1", true).unwrap_err();
+    let err = push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap_err();
     assert!(matches!(err, PushError::NotLifted(_)), "{err}");
     assert!(err.to_string().contains("nunki mission accept"), "{err}");
 
@@ -461,7 +480,7 @@ fn findings_nobody_lifted_do_not_reach_the_forge() {
         fixed_by: None,
     });
     world.store().save(&state).unwrap();
-    push::push(&world.project, "m1", true).unwrap();
+    push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap();
     assert_eq!(world.on_forge("mission/x").as_deref(), Some(head.as_str()));
 }
 
@@ -478,7 +497,7 @@ fn a_commit_after_the_coder_that_is_not_wiring_invalidates_its_verdict() {
         (Role::Integrator, Some(Verdict::Integrated), head.clone()),
     ]);
 
-    let err = push::push(&world.project, "m1", true).unwrap_err();
+    let err = push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap_err();
     assert!(matches!(err, PushError::NotOnlyWiring { .. }), "{err}");
     assert!(err.to_string().contains("src.rs"), "{err}");
     assert!(world.on_forge("mission/x").is_none());
@@ -496,7 +515,7 @@ fn wiring_declared_by_the_mission_keeps_the_coders_verdict_valid() {
         (Role::Integrator, Some(Verdict::Integrated), head.clone()),
     ]);
 
-    push::push(&world.project, "m1", true).unwrap();
+    push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap();
     assert_eq!(world.on_forge("mission/x").as_deref(), Some(head.as_str()));
 }
 
@@ -515,7 +534,7 @@ fn without_an_integrator_nothing_may_follow_the_coders_commit() {
     world.commit("compose.yaml", "services: {}\n", "who wrote this?");
     world.verified(&[(Role::Coder, None, coder)]);
 
-    let err = push::push(&world.project, "m1", true).unwrap_err();
+    let err = push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap_err();
     assert!(matches!(err, PushError::NotOnlyWiring { .. }), "{err}");
     assert!(world.on_forge("mission/x").is_none());
 }
@@ -589,7 +608,7 @@ fn a_role_that_concludes_twice_leaves_one_answer_and_it_is_the_last() {
         "one answer per role: {:?}",
         state.verdicts
     );
-    let err = push::push(&world.project, "m1", true).unwrap_err();
+    let err = push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap_err();
     assert!(
         matches!(
             err,
@@ -616,32 +635,28 @@ fn a_role_that_concludes_twice_leaves_one_answer_and_it_is_the_last() {
     );
     // And the volet's final full campaign, on its `HEAD`.
     world.campaign_on_head();
-    push::push(&world.project, "m1", true).unwrap();
+    push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap();
     assert_eq!(world.on_forge("mission/x").as_deref(), Some(head.as_str()));
 }
 
 // --- the pull request, opened on the forge (SPEC 4.2) -----------------------
 
 impl World {
-    /// The shape of a real project: `origin` reads as a GitHub repository, and
-    /// pushes go to the bare repository standing in for it — so `nunki` works
-    /// out the forge from the remote exactly as it would, and the push is
-    /// still a real push.
-    fn on_github(&self) {
-        git(
-            &self.project.root,
-            &["remote", "set-url", "origin", "https://github.com/o/r.git"],
-        );
-        git(
-            &self.project.root,
-            &[
-                "remote",
-                "set-url",
-                "--push",
-                "origin",
-                &self.forge.display().to_string(),
-            ],
-        );
+    /// Where this world's pushes go: its own git server, and `api` for the
+    /// pull request. The environment handed over holds `PATH` and nothing
+    /// else, the tests that give the push the owner's credentials add them.
+    fn endpoints_at(&self, api: &str) -> push::Endpoints {
+        push::Endpoints {
+            api: api.to_string(),
+            git: self.server.base.clone(),
+            inherited: vec![("PATH".into(), std::env::var_os("PATH").unwrap_or_default())],
+        }
+    }
+
+    /// [`World::endpoints_at`] an API nobody listens on: the pull request is
+    /// left by hand, and the push is what is under test.
+    fn endpoints(&self) -> push::Endpoints {
+        self.endpoints_at("http://127.0.0.1:9")
     }
 
     /// The project's own token, in its home (`~/.nunki/<id>/forge-token`).
@@ -681,7 +696,6 @@ impl World {
 #[test]
 fn a_verified_mission_is_pushed_and_its_pull_request_opened() {
     let world = World::new(with_wiring(), Security::Agent);
-    world.on_github();
     world.with_token();
     world.pr_says("# feat: one returns two\n\nBecause it had to.\n");
     let head = world.ready();
@@ -690,7 +704,7 @@ fn a_verified_mission_is_pushed_and_its_pull_request_opened() {
         201,
         r#"{"html_url":"https://github.com/o/r/pull/9"}"#,
     )]);
-    let pushed = push::push_to(&world.project, "m1", true, &api).unwrap();
+    let pushed = push::push_to(&world.project, "m1", true, &world.endpoints_at(&api)).unwrap();
 
     assert_eq!(world.on_forge("mission/x").as_deref(), Some(head.as_str()));
     // The state says so, on the commit pushed: `mission wait` reads it there.
@@ -782,12 +796,11 @@ fn nobody_knocked(listener: &std::net::TcpListener) {
 fn without_the_projects_token_nothing_is_pushed_and_its_path_is_named() {
     for empty in [false, true] {
         let world = World::new(with_wiring(), Security::Agent);
-        world.on_github();
         world.ready();
         let at = world.without_token(empty);
         let (api, forge) = untouched_forge();
 
-        let err = push::push_to(&world.project, "m1", true, &api).unwrap_err();
+        let err = push::push_to(&world.project, "m1", true, &world.endpoints_at(&api)).unwrap_err();
 
         assert!(matches!(err, PushError::NoToken(_)), "{empty}: {err:?}");
         let err = err.to_string();
@@ -810,13 +823,12 @@ fn without_the_projects_token_nothing_is_pushed_and_its_path_is_named() {
 #[test]
 fn with_the_machine_wide_token_alone_nothing_is_pushed_and_that_file_is_named() {
     let world = World::new(with_wiring(), Security::Agent);
-    world.on_github();
     world.ready();
     let ours = world.without_token(false);
     let retired = world.with_retired_token();
     let (api, forge) = untouched_forge();
 
-    let err = push::push_to(&world.project, "m1", true, &api).unwrap_err();
+    let err = push::push_to(&world.project, "m1", true, &world.endpoints_at(&api)).unwrap_err();
 
     assert!(matches!(err, PushError::NoToken(_)), "{err:?}");
     let err = err.to_string();
@@ -844,13 +856,12 @@ fn a_token_others_can_read_is_refused_and_nothing_is_pushed() {
     use std::os::unix::fs::PermissionsExt;
     for mode in [0o640, 0o604, 0o644] {
         let world = World::new(with_wiring(), Security::Agent);
-        world.on_github();
         world.ready();
         let at = world.project.home.join(nunki::forge::TOKEN_FILE);
         std::fs::set_permissions(&at, std::fs::Permissions::from_mode(mode)).unwrap();
         let (api, forge) = untouched_forge();
 
-        let err = push::push_to(&world.project, "m1", true, &api).unwrap_err();
+        let err = push::push_to(&world.project, "m1", true, &world.endpoints_at(&api)).unwrap_err();
 
         assert!(
             matches!(err, PushError::TokenRefused(_)),
@@ -908,7 +919,6 @@ fn the_binary_exits_red_without_the_projects_token() {
 #[test]
 fn a_forge_that_refuses_the_pull_request_leaves_the_push_standing() {
     let world = World::new(with_wiring(), Security::Agent);
-    world.on_github();
     world.with_token();
     world.pr_says("# feat: one returns two\n");
     let head = world.ready();
@@ -917,7 +927,7 @@ fn a_forge_that_refuses_the_pull_request_leaves_the_push_standing() {
         403,
         r#"{"message":"Resource not accessible by personal access token"}"#,
     )]);
-    let pushed = push::push_to(&world.project, "m1", true, &api).unwrap();
+    let pushed = push::push_to(&world.project, "m1", true, &world.endpoints_at(&api)).unwrap();
     server.join().unwrap();
 
     assert_eq!(world.on_forge("mission/x").as_deref(), Some(head.as_str()));
@@ -934,27 +944,30 @@ fn a_forge_that_refuses_the_pull_request_leaves_the_push_standing() {
     }
 }
 
-/// A remote on a forge nunki has no adapter for is said to be one, and named.
-/// No forge is asked — the server here would fail the test if one were.
+/// A remote on a forge nunki has no adapter for has nothing the project's
+/// token could push to, and the owner's own credentials never carry a push:
+/// refused before the fetch, the remote named, nothing pushed, and neither
+/// the git server nor the API asked.
 #[test]
-fn a_remote_elsewhere_is_named_and_no_forge_is_asked() {
+fn a_remote_elsewhere_is_refused_and_nothing_is_pushed() {
     let world = World::new(with_wiring(), Security::Agent);
-    world.with_token();
-    world.pr_says("# feat: one returns two\n");
     world.ready();
+    git(
+        &world.project.root,
+        &["remote", "set-url", "origin", "https://gitlab.com/o/r.git"],
+    );
+    let (api, forge) = untouched_forge();
 
-    let pushed = push::push_to(&world.project, "m1", true, "http://127.0.0.1:9").unwrap();
-    match pushed.pull_request {
-        push::PullRequestState::ByHand { compare, why } => {
-            assert_eq!(compare, None, "no adapter, so no address to work out");
-            assert!(why.contains("no adapter for"), "{why}");
-            assert!(
-                why.contains("forge.git"),
-                "the remote itself is named: {why}"
-            );
-        }
-        other => panic!("{other:?}"),
-    }
+    let err = push::push_to(&world.project, "m1", true, &world.endpoints_at(&api)).unwrap_err();
+
+    assert!(matches!(err, PushError::NotOnGitHub(_)), "{err:?}");
+    let err = err.to_string();
+    assert!(err.contains("https://gitlab.com/o/r.git"), "{err}");
+    assert!(err.contains("no adapter for"), "{err}");
+    assert!(err.contains("nothing was pushed"), "{err}");
+    world.nothing_left_the_slot();
+    nobody_knocked(&forge);
+    assert!(world.server.seen().is_empty(), "{:?}", world.server.seen());
 }
 
 // ---------------------------------------------------------------------------
@@ -996,23 +1009,16 @@ impl World {
         world
     }
 
-    /// `nunki push m1 --yes`, run by the real binary: what it printed, once
-    /// it succeeded.
-    fn pushed_by_the_binary(&self) -> String {
-        let out = Command::new(env!("CARGO_BIN_EXE_nunki"))
-            .arg("-C")
-            .arg(&self.project.root)
-            .args(["push", "m1", "--yes"])
-            .env("HOME", &self.home)
-            .output()
-            .unwrap();
-        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-        assert!(
-            out.status.success(),
-            "{stdout}{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        stdout
+    /// What `nunki push m1 --yes` prints once it succeeded: the push run
+    /// through the library against this world's servers — the binary
+    /// pushes to github.com and nowhere else — then the lines the binary
+    /// prints ([`push::said`]), as it prints them.
+    fn pushed_and_said(&self) -> String {
+        let pushed = push::push_to(&self.project, "m1", true, &self.endpoints())
+            .unwrap_or_else(|e| panic!("{e}"));
+        let mut out = push::said(&pushed).join("\n");
+        out.push('\n');
+        out
     }
 
     /// The flow moves on `event`. A step onto the final stage of a
@@ -1135,7 +1141,7 @@ fn at_standard_a_clear_a_review_and_a_volet_are_pushed_naming_the_commit_not_att
     let volet = world.coded("pub fn one() -> u8 { 3 }\n", "the volet ends");
     assert_eq!(world.stage(), Stage::Verified, "no second round");
 
-    let pushed = push::push(&world.project, "m1", true).unwrap();
+    let pushed = push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap();
     assert_eq!(pushed.head, volet);
     assert_eq!(
         pushed.not_attacked,
@@ -1161,12 +1167,12 @@ fn at_standard_findings_a_fix_and_an_accept_are_pushed_naming_the_fix() {
     world.event(Event::Iterate);
     let fix = world.coded("pub fn one() -> u8 { 3 }\n", "the fix");
     assert!(matches!(world.stage(), Stage::Findings { .. }));
-    let err = push::push(&world.project, "m1", true).unwrap_err();
+    let err = push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap_err();
     assert!(matches!(err, PushError::NotVerified { .. }), "{err}");
 
     world.accepted(&fix, T1);
     assert_eq!(world.stage(), Stage::Verified);
-    let pushed = push::push(&world.project, "m1", true).unwrap();
+    let pushed = push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap();
     assert_eq!(pushed.not_attacked, vec![named(&fix, "the fix")]);
     assert_eq!(world.on_forge("mission/x").as_deref(), Some(fix.as_str()));
 }
@@ -1188,7 +1194,7 @@ fn after_an_accept_at_the_cap_a_review_and_a_volet_are_pushed() {
         "the lifted report stays lifted"
     );
 
-    let pushed = push::push(&world.project, "m1", true).unwrap();
+    let pushed = push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap();
     assert_eq!(pushed.not_attacked, vec![named(&volet, "the volet")]);
     assert_eq!(world.on_forge("mission/x").as_deref(), Some(volet.as_str()));
 }
@@ -1211,7 +1217,7 @@ fn at_critical_a_clear_on_the_third_round_stands_for_the_volet_after_it() {
     let volet = world.coded("pub fn one() -> u8 { 5 }\n", "the volet");
     assert_eq!(world.stage(), Stage::Verified, "no fourth round");
 
-    let pushed = push::push(&world.project, "m1", true).unwrap();
+    let pushed = push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap();
     assert_eq!(pushed.not_attacked, vec![named(&volet, "the volet")]);
 }
 
@@ -1235,7 +1241,7 @@ fn at_critical_findings_on_the_third_round_a_fix_and_an_accept_are_pushed() {
     assert!(matches!(world.stage(), Stage::Findings { .. }));
     world.accepted(&fix, T3);
 
-    let pushed = push::push(&world.project, "m1", true).unwrap();
+    let pushed = push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap();
     assert_eq!(pushed.not_attacked, vec![named(&fix, "the last fix")]);
 }
 
@@ -1253,7 +1259,7 @@ fn rounds_not_spent_push_still_refuses_a_verdict_on_an_older_commit() {
     state.conclude(Role::Coder, None, &later);
     world.store().save(&state).unwrap();
 
-    let err = push::push(&world.project, "m1", true).unwrap_err();
+    let err = push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap_err();
     assert!(
         matches!(
             &err,
@@ -1271,7 +1277,7 @@ fn rounds_not_spent_a_clear_on_head_names_no_commit() {
     let world = World::at(nunki::mission::Rigor::Critical);
     world.coded("pub fn one() -> u8 { 2 }\n", "the lot");
     world.security(Verdict::Clear, T1);
-    let pushed = push::push(&world.project, "m1", true).unwrap();
+    let pushed = push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap();
     assert!(pushed.not_attacked.is_empty(), "{:?}", pushed.not_attacked);
 }
 
@@ -1289,7 +1295,7 @@ fn at_the_cap_findings_never_lifted_are_still_refused() {
     world.event(Event::HumanAccepted);
     assert_eq!(world.stage(), Stage::Verified);
 
-    let err = push::push(&world.project, "m1", true).unwrap_err();
+    let err = push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap_err();
     assert!(matches!(err, PushError::NotLifted(_)), "{err}");
     assert!(world.on_forge("mission/x").is_none());
 }
@@ -1322,7 +1328,7 @@ fn at_the_cap_a_lift_that_is_not_about_the_last_verdict_is_refused() {
         state.accepted.clear();
         world.store().save(&state).unwrap();
         world.lifted(finding, head, date);
-        let err = push::push(&world.project, "m1", true).unwrap_err();
+        let err = push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap_err();
         assert!(matches!(err, PushError::NotLifted(_)), "{what}: {err}");
     }
     assert!(world.on_forge("mission/x").is_none());
@@ -1332,7 +1338,7 @@ fn at_the_cap_a_lift_that_is_not_about_the_last_verdict_is_refused() {
     state.accepted.clear();
     world.store().save(&state).unwrap();
     world.accepted(&lot, T3);
-    let pushed = push::push(&world.project, "m1", true).unwrap();
+    let pushed = push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap();
     assert_eq!(pushed.not_attacked, vec![named(&fix, "the fix")]);
 }
 
@@ -1349,7 +1355,7 @@ fn at_the_cap_a_verdict_off_the_branch_is_refused() {
     world.coded("pub fn one() -> u8 { 3 }\n", "rewritten");
     assert_eq!(world.stage(), Stage::Verified);
 
-    let err = push::push(&world.project, "m1", true).unwrap_err();
+    let err = push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap_err();
     assert!(
         matches!(&err, PushError::SecurityNotAnAncestor { on, .. } if *on == lot),
         "{err}"
@@ -1369,7 +1375,7 @@ fn at_the_cap_a_red_security_verdict_is_still_red() {
     state.conclude(Role::Security, Some(Verdict::Broken), &lot);
     world.store().save(&state).unwrap();
 
-    let err = push::push(&world.project, "m1", true).unwrap_err();
+    let err = push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap_err();
     assert!(
         matches!(
             err,
@@ -1396,7 +1402,7 @@ fn a_prototype_is_pushed_without_a_security_verdict() {
     let head = world.coded("pub fn one() -> u8 { 2 }\n", "the lot");
     assert_eq!(world.stage(), Stage::Verified);
 
-    let pushed = push::push(&world.project, "m1", true).unwrap();
+    let pushed = push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap();
     assert!(pushed.not_attacked.is_empty());
     assert_eq!(world.on_forge("mission/x").as_deref(), Some(head.as_str()));
 }
@@ -1413,14 +1419,14 @@ fn the_push_command_names_the_commits_not_attacked_and_only_when_there_are_some(
     spent.security(Verdict::Clear, T1);
     spent.review();
     let volet = spent.coded("pub fn one() -> u8 { 3 }\n", "the volet");
-    let out = spent.pushed_by_the_binary();
+    let out = spent.pushed_and_said();
     assert!(out.contains("not attacked by the security agent"), "{out}");
     assert!(out.contains(&named(&volet, "the volet")), "{out}");
 
     let on_head = World::opened_at(nunki::mission::Rigor::Critical);
     on_head.coded("pub fn one() -> u8 { 2 }\n", "the lot");
     on_head.security(Verdict::Clear, T1);
-    let out = on_head.pushed_by_the_binary();
+    let out = on_head.pushed_and_said();
     assert!(out.contains("pushed"), "the push happened: {out}");
     assert!(!out.contains("not attacked"), "{out}");
 }
@@ -1460,7 +1466,7 @@ fn a_commit_subject_not_attacked_is_printed_escaped_never_raw() {
     assert_eq!(not_attacked.len(), 1);
     common::assert_printable(&not_attacked[0], "push::not_attacked");
 
-    let printed = world.pushed_by_the_binary();
+    let printed = world.pushed_and_said();
     assert!(printed.contains(&volet[..12]), "{printed}");
     common::assert_printable(&printed, "nunki push");
 }
@@ -1564,7 +1570,7 @@ fn a_lift_by_nunki_on_head_is_pushed_naming_its_findings() {
     world.lifted_by_nunki();
     assert_eq!(world.stage(), Stage::Verified);
 
-    let pushed = push::push(&world.project, "m1", true).unwrap();
+    let pushed = push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap();
     assert_eq!(pushed.lifted_by_nunki, LIFTED.map(str::to_string).to_vec());
     assert_eq!(
         world.on_forge("mission/x").as_deref(),
@@ -1575,7 +1581,7 @@ fn a_lift_by_nunki_on_head_is_pushed_naming_its_findings() {
     let lot = human.coded("pub fn one() -> u8 { 2 }\n", "the lot");
     human.security(Verdict::Findings, T1);
     human.accepted(&lot, T2);
-    let pushed = push::push(&human.project, "m1", true).unwrap();
+    let pushed = push::push_to(&human.project, "m1", true, &human.endpoints()).unwrap();
     assert!(
         pushed.lifted_by_nunki.is_empty(),
         "{:?}",
@@ -1598,7 +1604,7 @@ fn a_later_findings_is_not_covered_by_an_earlier_lift_by_nunki() {
     assert!(matches!(world.stage(), Stage::Findings { .. }));
     world.event(Event::HumanAccepted);
 
-    let err = push::push(&world.project, "m1", true).unwrap_err();
+    let err = push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap_err();
     assert!(
         matches!(&err, PushError::NotLifted(head) if *head == volet),
         "{err}"
@@ -1619,7 +1625,7 @@ fn at_the_cap_a_lift_by_nunki_stands_for_the_commits_after_it() {
     let volet = world.coded("pub fn one() -> u8 { 3 }\n", "the volet");
     assert_eq!(world.stage(), Stage::Verified, "no second round");
 
-    let pushed = push::push(&world.project, "m1", true).unwrap();
+    let pushed = push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap();
     assert_eq!(pushed.not_attacked, vec![named(&volet, "the volet")]);
     assert_eq!(pushed.lifted_by_nunki, LIFTED.map(str::to_string).to_vec());
 }
@@ -1647,7 +1653,7 @@ fn push_and_status_print_what_nunki_accepted_and_only_then() {
         assert!(status.contains(line), "{line}\nin:\n{status}");
     }
 
-    let out = world.pushed_by_the_binary();
+    let out = world.pushed_and_said();
     assert!(out.contains("accepted by nunki (LOW/INFO):"), "{out}");
     for line in LIFTED {
         assert!(out.contains(line), "{line}\nin:\n{out}");
@@ -1656,7 +1662,7 @@ fn push_and_status_print_what_nunki_accepted_and_only_then() {
     let clear = World::opened_at(nunki::mission::Rigor::Critical);
     clear.coded("pub fn one() -> u8 { 2 }\n", "the lot");
     clear.security(Verdict::Clear, T1);
-    let out = clear.pushed_by_the_binary();
+    let out = clear.pushed_and_said();
     assert!(out.contains("pushed"), "the push happened: {out}");
     assert!(!out.contains("accepted by nunki"), "{out}");
 }
@@ -1730,7 +1736,7 @@ fn push_refuses_until_every_proposed_equivalence_is_ratified_or_refused() {
     )
     .unwrap();
 
-    let err = push::push(&world.project, "m1", true).unwrap_err();
+    let err = push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap_err();
     match &err {
         PushError::ProposalsAwait { count, .. } => assert_eq!(*count, 2),
         other => panic!("two proposals nobody ruled on: {other}"),
@@ -1752,7 +1758,7 @@ fn push_refuses_until_every_proposed_equivalence_is_ratified_or_refused() {
 
     // One ruled: the other still holds the push, and only it is named.
     mutants::ratify(&dir, "s1", None).unwrap();
-    let err = push::push(&world.project, "m1", true).unwrap_err();
+    let err = push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap_err();
     let said = err.to_string();
     assert!(said.contains("`s2`"), "{said}");
     assert!(!said.contains("`s1`"), "{said}");
@@ -1763,7 +1769,7 @@ fn push_refuses_until_every_proposed_equivalence_is_ratified_or_refused() {
     // message names the survivor left without an outcome (security round 1,
     // MEDIUM).
     mutants::refuse(&dir, "s2", "the constant is printed").unwrap();
-    let err = push::push(&world.project, "m1", true).unwrap_err();
+    let err = push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap_err();
     match &err {
         PushError::MutantsOwed { owed, .. } => {
             assert!(owed.contains("1 survivor(s) have no outcome"), "{owed}");
@@ -1788,7 +1794,7 @@ fn push_refuses_until_every_proposed_equivalence_is_ratified_or_refused() {
         },
     );
     mutants::write_triage(&dir, &answers).unwrap();
-    let pushed = push::push(&world.project, "m1", true).unwrap();
+    let pushed = push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap();
     assert_eq!(world.on_forge("mission/x").as_deref(), Some(head.as_str()));
     assert_eq!(pushed.head, head);
 }
@@ -1929,7 +1935,7 @@ fn at_standard_push_refuses_a_share_below_the_threshold_gate_seven_used() {
     )
     .unwrap();
 
-    let err = push::push(&world.project, "m1", true).unwrap_err();
+    let err = push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap_err();
     match &err {
         PushError::MutantsOwed { owed, .. } => {
             assert!(owed.contains("7 of 10 tried mutant(s) killed"), "{owed}");
@@ -1948,7 +1954,7 @@ fn at_standard_push_refuses_a_share_below_the_threshold_gate_seven_used() {
     state.flow.reframe(header).unwrap();
     world.store().save(&state).unwrap();
     assert_eq!(world.stage(), Stage::Verified);
-    push::push(&world.project, "m1", true).unwrap();
+    push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap();
 }
 
 /// `--refuse` on a verified mission sends it back to the coder as a volet,
@@ -2102,7 +2108,7 @@ fn verified_with(rigor: nunki::mission::Rigor, survivors: &[&str]) -> (World, Pa
 #[test]
 fn at_critical_push_refuses_a_survivor_left_without_an_outcome() {
     let (world, dir, head) = verified_with(nunki::mission::Rigor::Critical, &["s1"]);
-    let err = push::push(&world.project, "m1", true).unwrap_err();
+    let err = push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap_err();
     match &err {
         PushError::MutantsOwed { owed, .. } => {
             assert!(
@@ -2134,7 +2140,7 @@ fn at_critical_push_refuses_a_survivor_left_without_an_outcome() {
         .collect(),
     )
     .unwrap();
-    push::push(&world.project, "m1", true).unwrap();
+    push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap();
     assert_eq!(world.on_forge("mission/x").as_deref(), Some(head.as_str()));
 }
 
@@ -2151,7 +2157,7 @@ fn push_fails_closed_when_the_campaign_is_missing_or_empty() {
                 None => std::fs::remove_file(&file).unwrap(),
                 Some(text) => std::fs::write(&file, text).unwrap(),
             }
-            let err = push::push(&world.project, "m1", true).unwrap_err();
+            let err = push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap_err();
             match &err {
                 PushError::NoCampaign { .. } => {}
                 other => panic!("{rigor} with {leave:?}: no campaign, no push: {other}"),
@@ -2169,7 +2175,7 @@ fn push_fails_closed_when_the_campaign_is_missing_or_empty() {
 
     let (world, dir, head) = verified_with(Rigor::Prototype, &[]);
     std::fs::remove_file(dir.join(nunki::mutants::FILE)).unwrap();
-    push::push(&world.project, "m1", true).unwrap();
+    push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap();
     assert_eq!(world.on_forge("mission/x").as_deref(), Some(head.as_str()));
 }
 
@@ -2421,7 +2427,7 @@ fn push_waits_on_nunkis_proposals_and_ratify_all_rules_them() {
     )
     .unwrap();
 
-    let err = push::push(&world.project, "m1", true).unwrap_err();
+    let err = push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap_err();
     let said = err.to_string();
     assert!(
         matches!(err, PushError::ProposalsAwait { count: 3, .. }),
@@ -2489,7 +2495,7 @@ fn push_waits_on_nunkis_proposals_and_ratify_all_rules_them() {
     }
     assert!(mutants::read_triage(&paths.dir).unwrap().is_empty());
     assert!(mutants::awaiting_ruling(&paths.dir).unwrap().is_empty());
-    push::push(&world.project, "m1", true).unwrap();
+    push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap();
     assert!(world.on_forge("mission/x").is_some());
 }
 
@@ -2511,7 +2517,7 @@ fn push_refuses_a_triage_rewritten_to_a_ruling() {
         r#"{"s1": {"kind": "equivalent_registered", "why": "trust me", "mission": "m", "commit": "c"}}"#,
     ] {
         std::fs::write(dir.join(nunki::mutants::TRIAGE_FILE), forged).unwrap();
-        match push::push(&world.project, "m1", true) {
+        match push::push_to(&world.project, "m1", true, &world.endpoints()) {
             Err(PushError::MutantsOwed { owed, .. }) => {
                 assert!(owed.contains("1 survivor(s) have no outcome"), "{owed}");
                 assert!(owed.contains("not the coder's to give"), "{owed}");
@@ -2542,7 +2548,7 @@ fn push_refuses_a_killed_naming_a_test_that_does_not_exist() {
         .unwrap();
     };
     killed_by("a_test_nobody_wrote");
-    match push::push(&world.project, "m1", true) {
+    match push::push_to(&world.project, "m1", true, &world.endpoints()) {
         Err(PushError::MutantsOwed { owed, .. }) => assert!(
             owed.contains(
                 "names the test \"a_test_nobody_wrote\", and nothing in the tree is called that"
@@ -2559,7 +2565,7 @@ fn push_refuses_a_killed_naming_a_test_that_does_not_exist() {
     killed_by("one_is_two");
     assert!(
         matches!(
-            push::push(&world.project, "m1", true),
+            push::push_to(&world.project, "m1", true, &world.endpoints()),
             Err(PushError::MutantsOwed { .. })
         ),
         "a refuted killed was taken"
@@ -2576,7 +2582,7 @@ fn push_refuses_a_killed_naming_a_test_that_does_not_exist() {
         .collect(),
     )
     .unwrap();
-    push::push(&world.project, "m1", true).unwrap();
+    push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap();
     assert_eq!(world.on_forge("mission/x").as_deref(), Some(head.as_str()));
 }
 
@@ -2605,7 +2611,7 @@ fn push_refuses_a_test_named_only_in_an_uncommitted_edit() {
         format!("{committed}#[test]\nfn only_in_the_working_tree() {{}}\n"),
     )
     .unwrap();
-    match push::push(&world.project, "m1", true) {
+    match push::push_to(&world.project, "m1", true, &world.endpoints()) {
         Err(PushError::MutantsOwed { owed, .. }) => assert!(
             owed.contains("names the test \"only_in_the_working_tree\""),
             "{owed}"
@@ -2637,7 +2643,7 @@ fn push_takes_no_test_name_that_is_not_a_name() {
     };
     for name in ["", " ", "fn", "u8", "one_is", "one-is-two"] {
         killed_by(name);
-        match push::push(&world.project, "m1", true) {
+        match push::push_to(&world.project, "m1", true, &world.endpoints()) {
             Err(PushError::MutantsOwed { owed, .. }) => assert!(
                 owed.contains("1 survivor(s) have no outcome") || owed.contains("names the test"),
                 "{name:?}: {owed}"
@@ -2652,7 +2658,7 @@ fn push_takes_no_test_name_that_is_not_a_name() {
     killed_by("one_is_two");
     assert!(
         matches!(
-            push::push(&world.project, "m1", true),
+            push::push_to(&world.project, "m1", true, &world.endpoints()),
             Err(PushError::MutantsOwed { .. })
         ),
         "a refuted killed was taken"
@@ -2669,7 +2675,7 @@ fn push_takes_no_test_name_that_is_not_a_name() {
         .collect(),
     )
     .unwrap();
-    push::push(&world.project, "m1", true).unwrap();
+    push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap();
     assert_eq!(world.on_forge("mission/x").as_deref(), Some(head.as_str()));
 }
 
@@ -2690,7 +2696,7 @@ fn a_prototype_is_pushed_whatever_test_its_triage_names() {
         .collect(),
     )
     .unwrap();
-    push::push(&world.project, "m1", true).unwrap();
+    push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap();
     assert_eq!(world.on_forge("mission/x").as_deref(), Some(head.as_str()));
 }
 
@@ -2759,7 +2765,7 @@ fn push_judges_the_chain_once_on_its_reconstruction() {
     };
     // 30 open of 110: 80 killed, below 80%.
     mutants::write(&dir, &chain(30)).unwrap();
-    match push::push(&world.project, "m1", true).unwrap_err() {
+    match push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap_err() {
         PushError::MutantsOwed { owed, .. } => {
             assert!(owed.contains("80 of 110 tried mutant(s) killed"), "{owed}");
         }
@@ -2769,7 +2775,7 @@ fn push_judges_the_chain_once_on_its_reconstruction() {
 
     // 22 open of 110: 88 killed, 80% exactly, and the push goes.
     mutants::write(&dir, &chain(22)).unwrap();
-    push::push(&world.project, "m1", true).unwrap();
+    push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap();
 }
 
 /// `mission status` says each campaign of the chain, full or partial, from
@@ -2856,7 +2862,7 @@ fn only_the_judged_commit_is_fetched_or_pushed() {
     assert!(err.contains(&judged) && err.contains(&added), "{err}");
     assert!(err.contains("nothing was fetched"), "{err}");
 
-    let err = push::push(&world.project, "m1", true)
+    let err = push::push_to(&world.project, "m1", true, &world.endpoints())
         .unwrap_err()
         .to_string();
     assert!(err.contains(&judged) && err.contains(&added), "{err}");
@@ -2903,7 +2909,7 @@ fn at_critical_push_takes_a_partial_campaign_at_the_pushed_commit() {
             since: "e".repeat(40),
         };
     });
-    let pushed = push::push(&world.project, "m1", true).unwrap();
+    let pushed = push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap();
     assert_eq!(world.on_forge("mission/x"), Some(pushed.head));
 }
 
@@ -2919,7 +2925,7 @@ fn at_standard_and_critical_push_refuses_a_campaign_on_other_content() {
         let world = World::verified_then(rigor, |c| {
             c.fingerprint = "f".into();
         });
-        let err = push::push(&world.project, "m1", true).unwrap_err();
+        let err = push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap_err();
         assert!(
             matches!(err, PushError::NotAtPushed { .. }),
             "{rigor}: {err}"
@@ -2939,7 +2945,7 @@ fn at_standard_and_critical_push_refuses_a_campaign_on_other_content() {
 #[test]
 fn at_critical_push_takes_a_full_campaign_at_the_pushed_commit() {
     let world = World::verified_then(nunki::mission::Rigor::Critical, |_| {});
-    let pushed = push::push(&world.project, "m1", true).unwrap();
+    let pushed = push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap();
     assert_eq!(world.on_forge("mission/x"), Some(pushed.head));
 }
 
@@ -2952,7 +2958,7 @@ fn at_standard_push_takes_a_partial_campaign_at_the_pushed_commit() {
             since: "e".repeat(40),
         };
     });
-    let pushed = push::push(&world.project, "m1", true).unwrap();
+    let pushed = push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap();
     assert_eq!(world.on_forge("mission/x"), Some(pushed.head));
 }
 
@@ -3035,7 +3041,6 @@ fn two_overrides() -> serde_json::Value {
 #[test]
 fn the_pull_request_lists_every_departure_from_the_rigor_with_its_reason() {
     let world = World::new(with_wiring(), Security::Agent);
-    world.on_github();
     world.with_token();
     world.pr_says("# feat: one returns two\n\nBecause it had to.\n");
     world.ready();
@@ -3045,7 +3050,7 @@ fn the_pull_request_lists_every_departure_from_the_rigor_with_its_reason() {
         201,
         r#"{"html_url":"https://github.com/o/r/pull/9"}"#,
     )]);
-    push::push_to(&world.project, "m1", true, &api).unwrap();
+    push::push_to(&world.project, "m1", true, &world.endpoints_at(&api)).unwrap();
 
     let sent = &server.join().unwrap()[0];
     let body: serde_json::Value = serde_json::from_str(sent.split("\r\n\r\n").nth(1).unwrap())
@@ -3197,7 +3202,6 @@ const FILE_WORDS: [&str; 4] = ["platypus", "axolotl", "narwhal", "HIGH"];
 /// for a state an older `nunki` wrote, which kept nothing of it.
 fn lifted_findings(pr: &str, said: Option<Said>) -> (World, String) {
     let world = World::at(nunki::mission::Rigor::Critical);
-    world.on_github();
     world.with_token();
     world.pr_says(pr);
     let lot = world.coded("pub fn one() -> u8 { 2 }\n", "the lot");
@@ -3220,7 +3224,7 @@ fn pushed_and_asked(world: &World) -> (Result<push::Pushed, PushError>, Vec<Stri
         (201, r#"{"html_url":"https://github.com/o/r/pull/9"}"#),
         (200, "{}"),
     ]);
-    let pushed = push::push_to(&world.project, "m1", true, &api);
+    let pushed = push::push_to(&world.project, "m1", true, &world.endpoints_at(&api));
     let address = api.strip_prefix("http://").unwrap();
     for _ in 0..2 {
         if let Ok(mut probe) = std::net::TcpStream::connect(address) {
@@ -3264,7 +3268,6 @@ fn pr_on_disk(world: &World) -> String {
 #[test]
 fn without_a_security_agent_the_body_is_pr_md_as_written_and_holds_no_section() {
     let world = World::new(with_wiring(), Security::Gates);
-    world.on_github();
     world.with_token();
     world.pr_says(PR_AS_WRITTEN);
     world.ready();
@@ -3287,7 +3290,6 @@ fn on_a_clear_the_section_names_the_commit_and_quotes_the_report() {
     ] {
         let mut world = World::new(with_wiring(), Security::Agent);
         world.project.config.security_findings = setting;
-        world.on_github();
         world.with_token();
         world.pr_says(PR_AS_WRITTEN);
         let head = world.ready();
@@ -3378,7 +3380,6 @@ fn on_a_published_findings_the_section_names_who_accepted_each_finding_and_the_r
 #[test]
 fn a_findings_lifted_by_nunki_is_withheld_naming_nunki() {
     let world = World::at(nunki::mission::Rigor::Critical);
-    world.on_github();
     world.with_token();
     world.pr_says(PR_AS_WRITTEN);
     world.coded("pub fn one() -> u8 { 2 }\n", "the lot");
@@ -3422,7 +3423,6 @@ fn a_findings_lifted_by_nunki_is_withheld_naming_nunki() {
 fn the_section_names_the_commits_the_security_agent_did_not_attack() {
     // A CLEAR at `standard`, its one round spent, then a review and a volet.
     let world = World::at(nunki::mission::Rigor::Standard);
-    world.on_github();
     world.with_token();
     world.pr_says(PR_AS_WRITTEN);
     let lot = world.coded("pub fn one() -> u8 { 2 }\n", "the lot");
@@ -3448,7 +3448,6 @@ fn the_section_names_the_commits_the_security_agent_did_not_attack() {
 
     // A FINDINGS lifted at the cap, then a review and a volet: withheld.
     let world = World::at(nunki::mission::Rigor::Standard);
-    world.on_github();
     world.with_token();
     world.pr_says(PR_AS_WRITTEN);
     let lot = world.coded("pub fn one() -> u8 { 2 }\n", "the lot");
@@ -3530,7 +3529,6 @@ fn a_verdict_file_is_never_read_into_the_section() {
 #[test]
 fn what_nunki_did_not_keep_is_said_unreadable_and_not_read_from_the_file() {
     let world = World::new(with_wiring(), Security::Agent);
-    world.on_github();
     world.with_token();
     world.pr_says(PR_AS_WRITTEN);
     let head = world.ready();
@@ -3625,7 +3623,7 @@ fn push_says_it_opened_no_pull_request_when_there_is_no_pull_request_file() {
     world.said(findings_said());
     world.accepted(&lot, T2);
     std::fs::remove_file(world.project.hq_root.join("missions/m1/PR.md")).unwrap();
-    let out = world.pushed_by_the_binary();
+    let out = world.pushed_and_said();
     assert!(out.contains("pushed    mission/x"), "{out}");
     assert!(out.contains("pull request not opened by nunki"), "{out}");
     assert!(
@@ -3645,7 +3643,7 @@ fn push_says_what_it_withheld() {
     world.security(Verdict::Findings, T1);
     world.said(findings_said());
     world.accepted(&lot, T2);
-    let out = world.pushed_by_the_binary();
+    let out = world.pushed_and_said();
     assert!(
         out.contains(
             "security  withheld from the pull request: the security agent's report and its 3 \
@@ -3667,7 +3665,6 @@ fn push_says_what_it_withheld() {
 #[test]
 fn the_security_section_comes_after_the_departures_from_the_rigor() {
     let world = World::new(with_wiring(), Security::Agent);
-    world.on_github();
     world.with_token();
     world.pr_says(PR_AS_WRITTEN);
     world.ready();
@@ -3821,7 +3818,7 @@ fn a_push_that_must_withhold_refuses_a_pr_md_holding_a_security_heading() {
 fn the_refusal_names_every_line_that_fires() {
     let written = "# feat: one returns two\n\n## Security review\n\nx\n\n### security round 2\n";
     let (world, _) = lifted_findings(written, Some(findings_said()));
-    let err = push::push(&world.project, "m1", true).unwrap_err();
+    let err = push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap_err();
     let said = err.to_string();
     assert!(
         said.contains("line 3: ## Security review; line 7: ### security round 2"),
@@ -3864,7 +3861,6 @@ fn a_push_that_must_withhold_sends_lines_that_only_mention_security() {
 fn a_push_that_withholds_nothing_sends_the_same_pr_md_as_written() {
     for (written, _) in refused_forms() {
         let world = World::new(with_wiring(), Security::Agent);
-        world.on_github();
         world.with_token();
         world.pr_says(&written);
         world.ready();
@@ -3947,7 +3943,6 @@ impl World {
     /// sends it back, the coder fixes it, and the mission is back on that
     /// report with no round left. The fix.
     fn fixed_after_the_last_round(&self) -> String {
-        self.on_github();
         self.with_token();
         self.pr_says(PR_AS_WRITTEN);
         self.coded("pub fn one() -> u8 { 2 }\n", "the lot");
@@ -4050,4 +4045,361 @@ fn the_latest_lift_after_the_last_round_decides_fixed_or_accepted() {
     let (_, _, body) = pushed_request(&world);
     assert!(body.contains("accepted, not fixed"), "{body}");
     assert!(!body.contains("They were fixed"), "{body}");
+}
+
+// --- `git push` authenticates with the project's token alone (SPEC 4.2) -----
+
+/// The owner's machine, as a push could find it: credential helpers at every
+/// level git reads, a helper scoped to the forge's own address (what `gh auth
+/// setup-git` installs), an askpass, a `.netrc`, an SSH command, and URL
+/// rewrites sending the forge's address to an SSH one and to another host.
+/// Each helper or program records that it was called, in `called`, and
+/// answers with the owner's own secret.
+struct Owner {
+    _dir: tempfile::TempDir,
+    called: PathBuf,
+    /// The environment nunki is started with on that machine.
+    inherited: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    /// A second server, the "other host" a rewrite points at: it must
+    /// never be asked anything.
+    elsewhere: common::git_http::GitServer,
+}
+
+const OWNER_SECRET: &str = "owner-secret";
+
+impl Owner {
+    fn on(world: &World) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let called = dir.path().join("called");
+        let script = |name: &str, body: &str| {
+            let at = dir.path().join(name);
+            std::fs::write(
+                &at,
+                format!("#!/bin/sh\necho {name} >> {}\n{body}", called.display()),
+            )
+            .unwrap();
+            std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o755)).unwrap();
+            at
+        };
+        let helper = |name: &str| {
+            script(
+                name,
+                &format!("printf 'username=owner\\npassword={OWNER_SECRET}\\n'\n"),
+            )
+        };
+        let askpass = script("askpass", &format!("echo {OWNER_SECRET}\n"));
+        let ssh = script("ssh", "exit 1\n");
+        let elsewhere = common::git_http::GitServer::start(dir.path(), OWNER_SECRET);
+        let base = &world.server.base;
+        let config = |level: &str| {
+            format!(
+                "[credential]\n\thelper = {}\n\
+                 [credential \"{base}\"]\n\thelper = {}\n\
+                 [core]\n\taskPass = {}\n\tsshCommand = {}\n\
+                 [url \"ssh://git@127.0.0.1:1/\"]\n\tpushInsteadOf = {base}\n\
+                 [url \"{}\"]\n\tinsteadOf = {base}\n",
+                helper(&format!("{level}-helper")).display(),
+                helper(&format!("{level}-scoped-helper")).display(),
+                askpass.display(),
+                ssh.display(),
+                elsewhere.base,
+            )
+        };
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(home.join(".config/git")).unwrap();
+        std::fs::write(home.join(".gitconfig"), config("global")).unwrap();
+        std::fs::write(home.join(".config/git/config"), config("xdg")).unwrap();
+        std::fs::write(
+            home.join(".netrc"),
+            format!("machine 127.0.0.1 login owner password {OWNER_SECRET}\n"),
+        )
+        .unwrap();
+        let system = dir.path().join("system-gitconfig");
+        std::fs::write(&system, config("system")).unwrap();
+        let global = dir.path().join("global-gitconfig");
+        std::fs::write(&global, config("global-file")).unwrap();
+        // And the checkout's own configuration: the level nunki cannot leave
+        // out by environment alone.
+        let local = world.project.root.join(".git/config");
+        let mut text = std::fs::read_to_string(&local).unwrap();
+        text.push_str(&config("local"));
+        std::fs::write(&local, text).unwrap();
+
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let env = |k: &str, v: &std::path::Path| (k.into(), v.as_os_str().to_owned());
+        let inherited = vec![
+            ("PATH".into(), path),
+            env("HOME", &home),
+            env("XDG_CONFIG_HOME", &home.join(".config")),
+            env("GIT_CONFIG_SYSTEM", &system),
+            env("GIT_CONFIG_GLOBAL", &global),
+            ("GIT_CONFIG_COUNT".into(), "1".into()),
+            ("GIT_CONFIG_KEY_0".into(), "credential.helper".into()),
+            env("GIT_CONFIG_VALUE_0", &helper("env-helper")),
+            (
+                "GIT_CONFIG_PARAMETERS".into(),
+                format!(
+                    "'credential.helper'='{}'",
+                    helper("parameters-helper").display()
+                )
+                .into(),
+            ),
+            env("GIT_ASKPASS", &askpass),
+            env("SSH_ASKPASS", &askpass),
+            env("GIT_SSH_COMMAND", &ssh),
+            env("GIT_SSH", &ssh),
+            ("GIT_TERMINAL_PROMPT".into(), "1".into()),
+        ];
+        Self {
+            _dir: dir,
+            called,
+            inherited,
+            elsewhere,
+        }
+    }
+
+    /// What was called of the owner's, one name a line; nothing, as it must.
+    fn nothing_called(&self) {
+        let called = std::fs::read_to_string(&self.called).unwrap_or_default();
+        assert!(called.is_empty(), "the owner's own was called: {called}");
+        assert!(
+            self.elsewhere.seen().is_empty(),
+            "a rewrite was followed: {:?}",
+            self.elsewhere.seen()
+        );
+    }
+
+    fn endpoints(&self, world: &World) -> push::Endpoints {
+        push::Endpoints {
+            inherited: self.inherited.clone(),
+            ..world.endpoints()
+        }
+    }
+}
+
+/// The token is what the forge received: git asked once without
+/// credentials, got the 401, and came back with the project's token — on the
+/// push itself (`git-receive-pack`) too — and the branch is on the forge.
+#[test]
+fn the_projects_token_is_what_authenticates_the_push() {
+    let world = World::new(with_wiring(), Security::Agent);
+    let head = world.ready();
+
+    push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap();
+
+    assert_eq!(world.on_forge("mission/x").as_deref(), Some(head.as_str()));
+    let seen = world.server.seen();
+    let expected = format!(
+        "Basic {}",
+        common::git_http::base64(b"x-access-token:tok-project")
+    );
+    assert_eq!(seen[0].authorization, None, "{seen:?}");
+    assert!(
+        seen.iter()
+            .any(|s| s.line.starts_with("POST /o/r.git/git-receive-pack ")
+                && s.authorization.as_deref() == Some(expected.as_str())),
+        "{seen:?}"
+    );
+    for s in seen.iter().filter(|s| s.authorization.is_some()) {
+        assert_eq!(s.authorization.as_deref(), Some(expected.as_str()), "{s:?}");
+    }
+}
+
+/// None of the owner's credentials carries the push, at any level, and no
+/// rewrite of the forge's address is followed: every helper — global, XDG,
+/// system, from the environment, the checkout's own, and those scoped to the
+/// forge's address — every askpass, the `.netrc` and the SSH command are
+/// never called, the other host is never asked, and the forge never sees the
+/// owner's secret. The push lands, with the project's token.
+#[test]
+fn the_owners_own_credentials_and_rewrites_are_never_used() {
+    let world = World::new(with_wiring(), Security::Agent);
+    let head = world.ready();
+    let owner = Owner::on(&world);
+
+    push::push_to(&world.project, "m1", true, &owner.endpoints(&world)).unwrap();
+
+    assert_eq!(world.on_forge("mission/x").as_deref(), Some(head.as_str()));
+    owner.nothing_called();
+    let owners = common::git_http::base64(format!("owner:{OWNER_SECRET}").as_bytes());
+    for s in world.server.seen() {
+        assert!(
+            !s.authorization
+                .as_deref()
+                .unwrap_or_default()
+                .contains(&owners),
+            "{s:?}"
+        );
+    }
+}
+
+/// A push the forge refuses — a token without *Contents: write*, an expired
+/// one — is a failure that says so, with nothing of the token in it: nothing
+/// is on the forge, no pull request is opened, and the push is not recorded.
+/// Refused, git looks for another credential, and finds none of the owner's.
+#[test]
+fn a_push_the_forge_refuses_is_a_failure_and_no_pull_request_is_opened() {
+    let world = World::new(with_wiring(), Security::Agent);
+    world.ready();
+    let owner = Owner::on(&world);
+    let refusing = common::git_http::GitServer::start(
+        world.forge.parent().unwrap().parent().unwrap(),
+        "another-token",
+    );
+    let (api, forge) = untouched_forge();
+    let at = push::Endpoints {
+        api,
+        git: refusing.base.clone(),
+        inherited: owner.inherited.clone(),
+    };
+
+    let err = push::push_to(&world.project, "m1", true, &at).unwrap_err();
+
+    assert!(matches!(err, PushError::ForgePush(_)), "{err:?}");
+    let err = err.to_string();
+    assert!(err.contains("the forge refused the push"), "{err}");
+    assert!(err.contains("Contents: read and write"), "{err}");
+    assert!(err.contains("nothing was pushed"), "{err}");
+    assert!(!err.contains("tok-project"), "{err}");
+    assert_eq!(world.on_forge("mission/x"), None);
+    assert_eq!(world.state().pushed, None);
+    nobody_knocked(&forge);
+    owner.nothing_called();
+}
+
+/// An SSH remote is pushed over HTTPS, to the repository it names: an SSH key
+/// is the owner's personal credential, and no SSH command is ever run.
+#[test]
+fn an_ssh_remote_is_pushed_over_https_and_no_ssh_command_runs() {
+    let world = World::new(with_wiring(), Security::Agent);
+    let head = world.ready();
+    git(
+        &world.project.root,
+        &["remote", "set-url", "origin", "git@github.com:o/r.git"],
+    );
+    let owner = Owner::on(&world);
+
+    let pushed = push::push_to(&world.project, "m1", true, &owner.endpoints(&world)).unwrap();
+
+    assert_eq!(world.on_forge("mission/x").as_deref(), Some(head.as_str()));
+    assert_eq!(pushed.remote, format!("{}o/r.git", world.server.base));
+    owner.nothing_called();
+}
+
+/// The token is on no command line nunki runs — `ps` would show it — and in
+/// nothing it prints: a `git` first on the `PATH` records every argument it is
+/// given, and the token is in none of them, nor in the lines `nunki push`
+/// prints, nor in any file of the checkout's `.git`.
+#[test]
+fn the_token_is_never_on_a_command_line_in_the_output_or_in_a_file() {
+    use std::os::unix::fs::PermissionsExt;
+    let world = World::new(with_wiring(), Security::Agent);
+    world.ready();
+    let dir = tempfile::tempdir().unwrap();
+    let real = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|d| d.join("git"))
+        .find(|g| g.is_file())
+        .expect("git on the PATH");
+    let log = dir.path().join("args");
+    let wrapper = dir.path().join("git");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\" >> {}; done\nexec {} \"$@\"\n",
+            log.display(),
+            real.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = std::env::join_paths(
+        std::iter::once(dir.path().to_path_buf())
+            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    let at = push::Endpoints {
+        inherited: vec![("PATH".into(), path)],
+        ..world.endpoints()
+    };
+
+    let pushed = push::push_to(&world.project, "m1", true, &at).unwrap();
+
+    let args = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        args.lines().any(|a| a == "push"),
+        "the wrapper saw the push: {args}"
+    );
+    assert!(
+        args.contains(nunki::forge::git::TOKEN_ENV),
+        "the helper names the variable: {args}"
+    );
+    assert!(!args.contains("tok-project"), "{args}");
+    let said = push::said(&pushed).join("\n");
+    assert!(!said.contains("tok-project"), "{said}");
+    assert!(!format!("{pushed:?}").contains("tok-project"));
+    let mut files = vec![world.project.root.join(".git")];
+    while let Some(at) = files.pop() {
+        if at.is_dir() {
+            files.extend(std::fs::read_dir(&at).unwrap().map(|e| e.unwrap().path()));
+        } else {
+            let bytes = std::fs::read(&at).unwrap();
+            assert!(
+                !bytes.windows(11).any(|w| w == b"tok-project"),
+                "{}",
+                at.display()
+            );
+        }
+    }
+}
+
+/// The owner's checkout is left as it was: its configuration byte for byte —
+/// its own helpers and rewrites included — and its remotes.
+#[test]
+fn the_checkouts_configuration_and_remotes_are_unchanged_by_the_push() {
+    let world = World::new(with_wiring(), Security::Agent);
+    world.ready();
+    let owner = Owner::on(&world);
+    let config = world.project.root.join(".git/config");
+    let before = std::fs::read(&config).unwrap();
+    let remotes = || {
+        String::from_utf8(
+            Command::new("git")
+                .arg("-C")
+                .arg(&world.project.root)
+                .args(["remote", "-v"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+    };
+    let remotes_before = remotes();
+
+    push::push_to(&world.project, "m1", true, &owner.endpoints(&world)).unwrap();
+
+    assert_eq!(std::fs::read(&config).unwrap(), before);
+    assert_eq!(remotes(), remotes_before);
+}
+
+/// A remote naming what no GitHub repository could be called is refused
+/// before the fetch, as a remote elsewhere is: the name never reaches a URL.
+#[test]
+fn a_remote_naming_no_plain_repository_is_refused_before_the_fetch() {
+    let world = World::new(with_wiring(), Security::Agent);
+    world.ready();
+    git(
+        &world.project.root,
+        &["remote", "set-url", "origin", "https://github.com/o/r@evil"],
+    );
+
+    let err = push::push_to(&world.project, "m1", true, &world.endpoints()).unwrap_err();
+
+    assert!(matches!(err, PushError::ForgePush(_)), "{err:?}");
+    assert!(
+        err.to_string().contains("is not a GitHub repository name"),
+        "{err}"
+    );
+    world.nothing_left_the_slot();
+    assert!(world.server.seen().is_empty(), "{:?}", world.server.seen());
 }
