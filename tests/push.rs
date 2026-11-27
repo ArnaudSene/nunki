@@ -225,7 +225,10 @@ impl World {
         // The project's own forge token, a prerequisite of every push (SPEC
         // 4.2, `nunki push`): every world starts with one, made up, and the
         // tests about its absence take it away.
-        std::fs::write(project.home.join(nunki::forge::TOKEN_FILE), "tok-project\n").unwrap();
+        common::write_token(
+            &project.home.join(nunki::forge::TOKEN_FILE),
+            "tok-project\n",
+        );
 
         Self {
             home: dir.path().join("home"),
@@ -644,11 +647,10 @@ impl World {
     /// The project's own token, in its home (`~/.nunki/<id>/forge-token`).
     fn with_token(&self) {
         std::fs::create_dir_all(&self.project.home).unwrap();
-        std::fs::write(
-            self.project.home.join(nunki::forge::TOKEN_FILE),
+        common::write_token(
+            &self.project.home.join(nunki::forge::TOKEN_FILE),
             "tok-project\n",
-        )
-        .unwrap();
+        );
     }
 
     /// The machine-wide file every project used to share.
@@ -731,7 +733,7 @@ impl World {
     fn without_token(&self, empty: bool) -> PathBuf {
         let at = self.project.home.join(nunki::forge::TOKEN_FILE);
         if empty {
-            std::fs::write(&at, " \n").unwrap();
+            common::write_token(&at, " \n");
         } else {
             std::fs::remove_file(&at).unwrap();
         }
@@ -829,6 +831,46 @@ fn with_the_machine_wide_token_alone_nothing_is_pushed_and_that_file_is_named() 
     assert!(!err.contains("tok-"), "a token reached the message: {err}");
     world.nothing_left_the_slot();
     nobody_knocked(&forge);
+}
+
+/// A token file others can read is refused by `nunki push` as a missing one
+/// is, and at the same point — before the fetch: nothing leaves the slot, no
+/// pull request is opened, and the refusal says why and how to fix it. 0600,
+/// the mode every world starts with, is what
+/// `a_verified_mission_is_pushed_and_its_pull_request_opened` pushes with.
+#[cfg(unix)]
+#[test]
+fn a_token_others_can_read_is_refused_and_nothing_is_pushed() {
+    use std::os::unix::fs::PermissionsExt;
+    for mode in [0o640, 0o604, 0o644] {
+        let world = World::new(with_wiring(), Security::Agent);
+        world.on_github();
+        world.ready();
+        let at = world.project.home.join(nunki::forge::TOKEN_FILE);
+        std::fs::set_permissions(&at, std::fs::Permissions::from_mode(mode)).unwrap();
+        let (api, forge) = untouched_forge();
+
+        let err = push::push_to(&world.project, "m1", true, &api).unwrap_err();
+
+        assert!(
+            matches!(err, PushError::TokenRefused(_)),
+            "{mode:o}: {err:?}"
+        );
+        let err = err.to_string();
+        assert!(
+            err.contains(&format!("{} has mode {mode:04o}", at.display())),
+            "{err}"
+        );
+        assert!(err.contains("others can read"), "{err}");
+        assert!(
+            err.contains(&format!("`chmod 600 {}`", at.display())),
+            "{err}"
+        );
+        assert!(err.contains("nothing was pushed"), "{err}");
+        assert!(!err.contains("tok-"), "{err}");
+        world.nothing_left_the_slot();
+        nobody_knocked(&forge);
+    }
 }
 
 /// The refusal reaches the human from the real binary, as a failure: no

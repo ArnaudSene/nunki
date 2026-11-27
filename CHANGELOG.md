@@ -40,6 +40,10 @@ merged since the last one. `AGENTS.md`, under "Releases", says how.
   project's forge token*. Move your token, or better, create a fine-grained
   one limited to the project's repository, with *Contents: read and write*,
   *Pull requests: read and write* and *Metadata: read*, and `chmod 600` it.
+- **A forge token file others can read is refused**, as ssh refuses such a
+  key: on unix, a mode that grants anything to its group or to others, or one
+  that cannot be read, makes `nunki push` refuse before anything reaches the
+  forge and `nunki check` red, and both say `chmod 600 <path>`.
 - **A launch refuses a mount that would expose the project's home or its
   forge token** to a container — an advisory database declared there, or a
   link to it — and says which mount.

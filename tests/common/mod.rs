@@ -126,3 +126,16 @@ pub fn assert_printable(out: &str, outlet: &str) {
         "{outlet} should show the escape it replaced:\n{out}"
     );
 }
+
+/// Write a made-up forge token where `nunki` reads the project's, readable
+/// by its owner only — the one mode a token file is used with (SPEC 4.2,
+/// `nunki push`), whatever umask the test runs under.
+#[allow(dead_code)]
+pub fn write_token(at: &std::path::Path, text: &str) {
+    std::fs::write(at, text).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(at, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}

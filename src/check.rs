@@ -960,20 +960,25 @@ pub fn forge_protection(project: &Project, api: &str, report: &mut Report) {
     // The project's own token, and no other: the machine-wide file a token
     // used to live in is named, never read (SPEC 4.2, `nunki push`). Said
     // first, and red without one, whatever else the forge lines say.
+    let at = project.home.join(crate::forge::TOKEN_FILE);
     let token = match credential(&project.home) {
         Credential::Token(token) => {
             report.add(
                 FORGE_TOKEN,
                 Verdict::Green(format!(
-                    "{} holds a token",
-                    project.home.join(crate::forge::TOKEN_FILE).display()
+                    "{} holds a token only its owner can read",
+                    at.display()
                 )),
             );
-            Some(token)
+            Ok(token)
         }
         Credential::Absent(absent) => {
             report.add(FORGE_TOKEN, Verdict::Red(absent.refusal()));
-            None
+            Err(format!("there is no forge token at {}", at.display()))
+        }
+        Credential::Refused(refused) => {
+            report.add(FORGE_TOKEN, Verdict::Red(refused.refusal()));
+            Err(format!("the forge token at {} is refused", at.display()))
         }
     };
 
@@ -1008,14 +1013,14 @@ pub fn forge_protection(project: &Project, api: &str, report: &mut Report) {
             ),
         );
     };
-    let Some(token) = token else {
-        return not_checked(
-            report,
-            format!(
-                "the forge was not asked: there is no forge token at {} ({FORGE_TOKEN}, above)",
-                project.home.join(crate::forge::TOKEN_FILE).display()
-            ),
-        );
+    let token = match token {
+        Ok(token) => token,
+        Err(why) => {
+            return not_checked(
+                report,
+                format!("the forge was not asked: {why} ({FORGE_TOKEN}, above)"),
+            );
+        }
     };
 
     for branch in &project.config.protected_branches {

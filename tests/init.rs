@@ -483,7 +483,14 @@ fn init_then_check_is_green_on_a_repository_that_had_nothing() {
         .map(|e| e.unwrap().path())
         .find(|p| p.join(nunki::project::HQ_DIR).is_dir())
         .expect("init made the project's home");
-    std::fs::write(project_home.join(nunki::forge::TOKEN_FILE), "tok-made-up\n").unwrap();
+    let token = project_home.join(nunki::forge::TOKEN_FILE);
+    std::fs::write(&token, "tok-made-up\n").unwrap();
+    // Readable by its owner only: the one mode a token is used with.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
     let check = check();
     let text = String::from_utf8_lossy(&check.stdout);
     assert_eq!(check.status.code(), Some(0), "{text}");

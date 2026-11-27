@@ -52,6 +52,12 @@ pub enum PushError {
     /// forge. The message is [`crate::forge::Absent::refusal`]'s.
     #[error("{0} — nothing was fetched and nothing was pushed")]
     NoToken(String),
+    /// The project's token file is there and refused (SPEC 4.2, `nunki
+    /// push`): others can read it, or its mode could not be read. Refused
+    /// at the same point as [`PushError::NoToken`], with
+    /// [`crate::forge::Refused::refusal`]'s message.
+    #[error("{0}. Nothing was fetched and nothing was pushed")]
+    TokenRefused(String),
     #[error("mission {0} has not started — there is nothing to push")]
     NotStarted(String),
     #[error(
@@ -422,6 +428,11 @@ pub fn push_to(
         crate::forge::Credential::Token(token) => token,
         crate::forge::Credential::Absent(absent) => {
             return Err(PushError::NoToken(absent.refusal()));
+        }
+        // A file others can read, or one nunki cannot judge, is refused the
+        // same way and at the same point: before anything leaves the slot.
+        crate::forge::Credential::Refused(refused) => {
+            return Err(PushError::TokenRefused(refused.refusal()));
         }
     };
 

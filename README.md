@@ -452,7 +452,9 @@ required: without it `nunki push` refuses before it fetches or pushes
 anything, and `nunki check` is red. Put there a fine-grained token limited to
 the project's repository, with *Contents: read and write*, *Pull requests:
 read and write* and *Metadata: read*, in a file only you can read
-(`chmod 600`). One file per project because a fine-grained token is limited to
+(`chmod 600`): a file whose mode lets its group or others in is refused, as
+ssh refuses such a key, and the refusal says the command that fixes it. One
+file per project because a fine-grained token is limited to
 the repositories it names: each project holds a token for its own repository,
 and nothing more. The file `~/.nunki/forge-token` that every project used to
 share is no longer read, not even as a fallback; `nunki push` and `nunki

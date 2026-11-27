@@ -232,14 +232,21 @@ fn homes() -> (tempfile::TempDir, std::path::PathBuf) {
 fn secret_of(credential: &forge::Credential) -> Option<&str> {
     match credential {
         forge::Credential::Token(token) => Some(token.secret()),
-        forge::Credential::Absent(_) => None,
+        forge::Credential::Absent(_) | forge::Credential::Refused(_) => None,
     }
 }
 
 fn absent(credential: forge::Credential) -> forge::Absent {
     match credential {
         forge::Credential::Absent(absent) => absent,
-        forge::Credential::Token(_) => panic!("a token was read where none should be"),
+        other => panic!("not absent: {other:?}"),
+    }
+}
+
+fn refused(credential: forge::Credential) -> forge::Refused {
+    match credential {
+        forge::Credential::Refused(refused) => refused,
+        other => panic!("not refused: {other:?}"),
     }
 }
 
@@ -251,12 +258,12 @@ fn a_token_is_read_trimmed_from_the_projects_home_and_an_empty_file_is_no_token(
     let at = home.join(forge::TOKEN_FILE);
 
     assert_eq!(absent(forge::credential(&home)).at, at);
-    std::fs::write(&at, "  \n").unwrap();
+    common::write_token(&at, "  \n");
     let empty = absent(forge::credential(&home));
     assert_eq!(empty.at, at);
     assert_eq!(empty.retired, None);
 
-    std::fs::write(&at, "tok-made-up\n").unwrap();
+    common::write_token(&at, "tok-made-up\n");
     assert_eq!(secret_of(&forge::credential(&home)), Some("tok-made-up"));
 }
 
@@ -291,7 +298,7 @@ fn the_machine_wide_file_alone_is_not_read_and_is_named() {
 fn the_projects_token_wins_over_a_machine_wide_file_still_there() {
     let (dir, home) = homes();
     std::fs::write(dir.path().join(forge::TOKEN_FILE), "tok-retired\n").unwrap();
-    std::fs::write(home.join(forge::TOKEN_FILE), "tok-project\n").unwrap();
+    common::write_token(&home.join(forge::TOKEN_FILE), "tok-project\n");
 
     assert_eq!(secret_of(&forge::credential(&home)), Some("tok-project"));
 }
@@ -358,7 +365,7 @@ fn without_a_machine_wide_file_no_move_is_announced() {
 #[test]
 fn a_token_does_not_print_itself() {
     let (_dir, home) = homes();
-    std::fs::write(home.join(forge::TOKEN_FILE), "tok-made-up\n").unwrap();
+    common::write_token(&home.join(forge::TOKEN_FILE), "tok-made-up\n");
 
     let shown = format!("{:?}", forge::credential(&home));
     assert!(!shown.contains("tok-made-up"), "{shown}");
@@ -467,4 +474,165 @@ fn live_the_real_forge_says_whether_a_branch_is_protected() {
             .unwrap(),
         forge::Protection::NoSuchBranch
     );
+}
+
+// --- a token file others can read is refused (SPEC 4.2, `nunki push`) -------
+
+#[cfg(unix)]
+fn token_with_mode(home: &std::path::Path, mode: u32) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let at = home.join(forge::TOKEN_FILE);
+    std::fs::write(&at, "tok-made-up\n").unwrap();
+    std::fs::set_permissions(&at, std::fs::Permissions::from_mode(mode)).unwrap();
+    at
+}
+
+/// Readable by its owner only — 0600, or 0400 — the token is used.
+#[cfg(unix)]
+#[test]
+fn a_token_its_owner_alone_can_read_is_used() {
+    for mode in [0o600, 0o400] {
+        let (_dir, home) = homes();
+        token_with_mode(&home, mode);
+        assert_eq!(
+            secret_of(&forge::credential(&home)),
+            Some("tok-made-up"),
+            "{mode:o}"
+        );
+    }
+}
+
+/// Any permission to the group or to others is refused, as ssh refuses such
+/// a key: the reason names the file, its mode, that others can reach it and
+/// the command that fixes it — never what it holds.
+#[cfg(unix)]
+#[test]
+fn a_token_open_to_its_group_or_to_others_is_refused_with_the_fix() {
+    for mode in [0o640, 0o604, 0o644, 0o620, 0o602, 0o610, 0o601, 0o666] {
+        let (_dir, home) = homes();
+        let at = token_with_mode(&home, mode);
+
+        let refused = refused(forge::credential(&home));
+        assert_eq!(refused.at, at, "{mode:o}");
+        assert_eq!(refused.why, forge::Why::OpenToOthers(mode), "{mode:o}");
+        let why = refused.refusal();
+        assert!(
+            why.contains(&format!("{} has mode {mode:04o}", at.display())),
+            "{why}"
+        );
+        assert!(why.contains("others can read"), "{why}");
+        assert!(
+            why.contains(&format!("`chmod 600 {}`", at.display())),
+            "{why}"
+        );
+        assert!(why.contains("nothing is pushed"), "{why}");
+        assert!(!why.contains("tok-made-up"), "{why}");
+    }
+}
+
+/// The mode judged is that of the file the read would open: a link's own
+/// bits say nothing, its target's decide.
+#[cfg(unix)]
+#[test]
+fn a_linked_token_is_judged_by_the_file_it_lands_on() {
+    use std::os::unix::fs::PermissionsExt;
+    for (mode, used) in [(0o600, true), (0o644, false)] {
+        let (_dir, home) = homes();
+        let store = tempfile::tempdir().unwrap();
+        let real = store.path().join("token");
+        std::fs::write(&real, "tok-made-up\n").unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(mode)).unwrap();
+        std::os::unix::fs::symlink(&real, home.join(forge::TOKEN_FILE)).unwrap();
+
+        match forge::credential(&home) {
+            forge::Credential::Token(t) if used => assert_eq!(t.secret(), "tok-made-up"),
+            forge::Credential::Refused(r) if !used => {
+                assert_eq!(r.why, forge::Why::OpenToOthers(mode))
+            }
+            other => panic!("{mode:o}: {other:?}"),
+        }
+    }
+}
+
+/// A file that is there and cannot be opened or read is refused with the
+/// reason — never taken for no file, which would send the human to create
+/// one that exists.
+#[cfg(unix)]
+#[test]
+fn a_token_file_that_cannot_be_read_is_refused_and_not_taken_for_none() {
+    use std::os::unix::fs::PermissionsExt;
+    // Its owner cannot open it.
+    let (_dir, home) = homes();
+    let at = token_with_mode(&home, 0o000);
+    if std::fs::File::open(&at).is_ok() {
+        // Running as root: the mode does not stop the open, nothing to prove.
+        return;
+    }
+    let refused = refused(forge::credential(&home));
+    assert!(
+        matches!(refused.why, forge::Why::Unopenable(_)),
+        "{:?}",
+        refused.why
+    );
+    let why = refused.refusal();
+    assert!(why.contains("could not be read"), "{why}");
+    assert!(
+        why.contains(&format!("chmod 600 {}", at.display())),
+        "{why}"
+    );
+
+    // A directory its owner alone may enter: opened, judged, unreadable.
+    let (_dir, home) = homes();
+    let at = home.join(forge::TOKEN_FILE);
+    std::fs::create_dir(&at).unwrap();
+    std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(
+        matches!(refused_why(&home), forge::Why::Unopenable(_)),
+        "{:?}",
+        refused_why(&home)
+    );
+}
+
+#[cfg(unix)]
+fn refused_why(home: &std::path::Path) -> forge::Why {
+    refused(forge::credential(home)).why
+}
+
+/// The rule itself, apart from any file: a mode that could not be read is
+/// refused with its own reason, never read as allowed; the file-type bits are
+/// not permissions; and a platform with no such bits has nothing to judge.
+#[test]
+fn a_mode_that_cannot_be_read_is_refused_and_only_group_and_other_bits_count() {
+    assert_eq!(
+        forge::judge(Err("stat failed".into())),
+        Err(forge::Why::ModeUnknown("stat failed".into()))
+    );
+    assert_eq!(forge::judge(Ok(Some(0o100600))), Ok(()));
+    assert_eq!(forge::judge(Ok(Some(0o100400))), Ok(()));
+    assert_eq!(forge::judge(Ok(Some(0o100700))), Ok(()));
+    assert_eq!(
+        forge::judge(Ok(Some(0o100640))),
+        Err(forge::Why::OpenToOthers(0o640))
+    );
+    assert_eq!(
+        forge::judge(Ok(Some(0o104601))),
+        Err(forge::Why::OpenToOthers(0o601)),
+        "only the permission bits are said"
+    );
+    assert_eq!(forge::judge(Ok(None)), Ok(()));
+
+    let unknown = forge::Refused {
+        at: "/h/.nunki/p/forge-token".into(),
+        why: forge::Why::ModeUnknown("stat failed".into()),
+    }
+    .refusal();
+    assert!(
+        unknown.contains("could not be read (stat failed)"),
+        "{unknown}"
+    );
+    assert!(
+        unknown.contains("chmod 600 /h/.nunki/p/forge-token"),
+        "{unknown}"
+    );
+    assert!(unknown.contains("nothing is pushed"), "{unknown}");
 }

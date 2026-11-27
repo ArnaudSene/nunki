@@ -23,6 +23,11 @@
 //! path, the permissions the token needs, and that its file is readable by
 //! its owner only.
 //!
+//! Its owner only, and nothing less: on unix, a token file whose mode grants
+//! anything to its group or to others is refused as ssh refuses such a
+//! private key ([`judge`]), and so is one whose mode cannot be read. The mode
+//! judged is that of the file opened, before a byte of it is read.
+//!
 //! The token never reaches a container. No bind mount nunki declares may
 //! expose the project's home or the token file — [`crate::compose`] refuses a
 //! plan whose mounts would ([`exposes`]) — and what a container does see under
@@ -197,6 +202,55 @@ pub enum Credential {
     Token(Token),
     /// No token: the file is missing or says nothing.
     Absent(Absent),
+    /// A file is there, and nunki will not use it: what it holds was not
+    /// read, or not kept.
+    Refused(Refused),
+}
+
+/// A token file nunki refuses, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refused {
+    /// The project's token file.
+    pub at: PathBuf,
+    pub why: Why,
+}
+
+/// Why a token file is refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Why {
+    /// Its mode grants something to its group or to others: the permission
+    /// bits, `0o777` at most.
+    OpenToOthers(u32),
+    /// Its mode could not be read, and an unknown mode is not an allowed one.
+    ModeUnknown(String),
+    /// It is there, and could not be opened or read.
+    Unopenable(String),
+}
+
+impl Refused {
+    /// Why nothing reaches the forge, said the same way by `nunki push` and
+    /// `nunki check`: the file's path, what is wrong with it, and what fixes
+    /// it. Never anything the file holds.
+    pub fn refusal(&self) -> String {
+        let at = self.at.display();
+        let wrong = match &self.why {
+            Why::OpenToOthers(mode) => format!(
+                "the forge token at {at} has mode {mode:04o}, which opens it to others than \
+                 its owner: nunki refuses a token others can read, as ssh refuses such a private \
+                 key. `chmod 600 {at}` fixes it"
+            ),
+            Why::ModeUnknown(e) => format!(
+                "the mode of the forge token at {at} could not be read ({e}), and a token \
+                 nunki cannot tell others are kept from is refused. Check that `ls -l {at}` \
+                 shows `-rw-------`, or run `chmod 600 {at}`"
+            ),
+            Why::Unopenable(e) => format!(
+                "the forge token at {at} is there and could not be read ({e}). It must be a \
+                 file its owner can read and nobody else can: `chmod 600 {at}`"
+            ),
+        };
+        format!("{wrong} — nothing is pushed and no pull request is opened until it is")
+    }
 }
 
 /// Why there is no token, and where it would go.
@@ -248,22 +302,76 @@ impl Absent {
 /// home, `~/.nunki/<id>/` ([`crate::project::Project::home`]) — and from
 /// nowhere else. An empty file is no token.
 ///
+/// The file is opened first, and its mode is read **from what was opened**
+/// — the file the read would read, through a link if it is one — then
+/// judged ([`judge`]) before a byte of it is read: a token others can read
+/// is refused, as ssh refuses such a private key, and so is one whose mode
+/// cannot be read. A file that exists and cannot be opened or read is
+/// refused too, with the reason, rather than taken for no file.
+///
 /// The machine-wide `~/.nunki/forge-token` (the file of that name in
 /// `home`'s parent) is **never read**: when the project has no token and that
 /// file exists, its path is returned in [`Absent::retired`], from its
 /// metadata alone, so that the caller can say the token moved.
 pub fn credential(home: &Path) -> Credential {
+    use std::io::Read;
+
     let at = home.join(TOKEN_FILE);
-    let token = std::fs::read_to_string(&at)
-        .ok()
-        .map(|t| t.trim().to_string())
-        .filter(|t| !t.is_empty());
-    match token {
-        Some(token) => Credential::Token(Token(token)),
-        None => Credential::Absent(Absent {
+    let absent = |at: PathBuf| {
+        Credential::Absent(Absent {
             retired: retired(home),
             at,
-        }),
+        })
+    };
+    let refused = |at: &Path, why: Why| {
+        Credential::Refused(Refused {
+            at: at.to_path_buf(),
+            why,
+        })
+    };
+    let mut file = match std::fs::File::open(&at) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return absent(at),
+        Err(e) => return refused(&at, Why::Unopenable(e.to_string())),
+    };
+    if let Err(why) = judge(mode_of(&file)) {
+        return refused(&at, why);
+    }
+    let mut text = String::new();
+    if let Err(e) = file.read_to_string(&mut text) {
+        return refused(&at, Why::Unopenable(e.to_string()));
+    }
+    let token = text.trim();
+    if token.is_empty() {
+        return absent(at);
+    }
+    Credential::Token(Token(token.to_string()))
+}
+
+/// The permission bits of an opened file, or why they could not be read.
+#[cfg(unix)]
+fn mode_of(file: &std::fs::File) -> Result<Option<u32>, String> {
+    use std::os::unix::fs::PermissionsExt;
+    file.metadata()
+        .map(|m| Some(m.permissions().mode()))
+        .map_err(|e| e.to_string())
+}
+
+/// Elsewhere there are no unix permission bits to judge.
+#[cfg(not(unix))]
+fn mode_of(_file: &std::fs::File) -> Result<Option<u32>, String> {
+    Ok(None)
+}
+
+/// Whether a token file's mode lets it be used: allowed only when it grants
+/// nothing to its group or to others (`mode & 0o077 == 0`), as ssh asks of a
+/// private key. A mode that could not be read is refused with its own
+/// reason, never taken as allowed. `None` is a platform with no such bits.
+pub fn judge(mode: Result<Option<u32>, String>) -> Result<(), Why> {
+    match mode {
+        Err(e) => Err(Why::ModeUnknown(e)),
+        Ok(Some(mode)) if mode & 0o077 != 0 => Err(Why::OpenToOthers(mode & 0o777)),
+        Ok(_) => Ok(()),
     }
 }
 

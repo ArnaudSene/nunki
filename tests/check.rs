@@ -826,7 +826,10 @@ fn on_github(dir: &Path, remote: &str) -> Project {
 /// The project's own token, in its home (`~/.nunki/<id>/forge-token`).
 fn with_token(project: &Project) {
     std::fs::create_dir_all(&project.home).unwrap();
-    std::fs::write(project.home.join(nunki::forge::TOKEN_FILE), "tok-project\n").unwrap();
+    common::write_token(
+        &project.home.join(nunki::forge::TOKEN_FILE),
+        "tok-project\n",
+    );
 }
 
 /// The machine-wide file every project used to share, `~/.nunki/forge-token`.
@@ -887,7 +890,7 @@ fn without_the_projects_token_the_check_is_red_and_names_the_projects_path() {
 
     for contents in [None, Some(" \n")] {
         if let Some(text) = contents {
-            std::fs::write(&ours, text).unwrap();
+            common::write_token(&ours, text);
         }
         let mut report = Report::default();
         nunki::check::forge_protection(&project, "http://127.0.0.1:9", &mut report);
@@ -941,6 +944,46 @@ fn with_the_machine_wide_token_alone_the_check_is_red_and_names_that_file() {
     );
     assert!(!why.contains("tok-"), "a token reached the report: {why}");
     branches_not_asked_for_want_of_a_token(&report, &ours);
+}
+
+/// A token file others can read makes the check red on its token line with
+/// the reason `nunki push` refuses with, and the forge is not asked with it.
+/// 0600 is green (`the_projects_token_is_green_and_never_shown`).
+#[cfg(unix)]
+#[test]
+fn a_token_others_can_read_makes_the_check_red_with_the_reason() {
+    use std::os::unix::fs::PermissionsExt;
+    for mode in [0o640, 0o604, 0o644] {
+        let dir = tempfile::tempdir().unwrap();
+        let project = on_github(dir.path(), "https://github.com/o/r.git");
+        with_token(&project);
+        let at = project.home.join(nunki::forge::TOKEN_FILE);
+        std::fs::set_permissions(&at, std::fs::Permissions::from_mode(mode)).unwrap();
+
+        let mut report = Report::default();
+        nunki::check::forge_protection(&project, "http://127.0.0.1:9", &mut report);
+
+        let why = red_reason(token_line(&report));
+        assert!(
+            why.contains(&format!("{} has mode {mode:04o}", at.display())),
+            "{why}"
+        );
+        assert!(why.contains("others can read"), "{why}");
+        assert!(
+            why.contains(&format!("`chmod 600 {}`", at.display())),
+            "{why}"
+        );
+        assert!(!why.contains("tok-"), "{why}");
+        for (what, verdict) in forge_verdicts(&report) {
+            match verdict {
+                Verdict::NotChecked(said) => assert!(
+                    said.contains(&format!("the forge token at {} is refused", at.display())),
+                    "{what}: {said}"
+                ),
+                other => panic!("{what}: {other:?}"),
+            }
+        }
+    }
 }
 
 /// `by_hand` is about who keeps the branches, not about the token: a push
