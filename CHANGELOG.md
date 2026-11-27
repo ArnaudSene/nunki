@@ -30,6 +30,19 @@ merged since the last one. `AGENTS.md`, under "Releases", says how.
 
 ### Changed
 
+- **The project's forge token is required, and it is the only one read.**
+  `nunki push` and `nunki check` read the token from the project's home,
+  `~/.nunki/<id>/forge-token`, and from nowhere else: `~/.nunki/forge-token`,
+  which every project shared, is no longer read, and both verbs name it when
+  it is still there. Without the project's token `nunki push` refuses before
+  it fetches or pushes anything — it used to push and hand over the address
+  of the pull request — and `nunki check` is red on its new line, *the
+  project's forge token*. Move your token, or better, create a fine-grained
+  one limited to the project's repository, with *Contents: read and write*,
+  *Pull requests: read and write* and *Metadata: read*, and `chmod 600` it.
+- **A launch refuses a mount that would expose the project's home or its
+  forge token** to a container — an advisory database declared there, or a
+  link to it — and says which mount.
 - **A toolchain the repository does not pin now stops the launch.** Each
   stack's `versions.txt` gains a `require:` line naming the build arguments
   the repository must pin: `RUST_VERSION` for Rust, `PYTHON` for Python,

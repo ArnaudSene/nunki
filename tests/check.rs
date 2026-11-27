@@ -507,7 +507,7 @@ fn the_verb_exits_non_zero_when_a_restriction_is_not_held() {
 /// on both CI runners, having asserted something about the machine rather
 /// than about the repository.
 #[test]
-fn the_verb_is_green_on_this_very_repository_but_for_a_toolchain_it_does_not_pin() {
+fn the_verb_is_green_on_this_very_repository_but_for_the_forge_token_of_a_home_of_its_own() {
     let root = std::fs::canonicalize(env!("CARGO_MANIFEST_DIR")).unwrap();
     let home = tempfile::tempdir().unwrap();
     // This repository's configuration is not in it, like any project's: the
@@ -547,17 +547,20 @@ fn the_verb_is_green_on_this_very_repository_but_for_a_toolchain_it_does_not_pin
         .output()
         .unwrap();
     let text = String::from_utf8_lossy(&out.stdout);
-    // This repository pins no toolchain yet: no `rust-toolchain.toml`, so
-    // `RUST_VERSION`, which the rust fragment requires, is not pinned and the
-    // versions line is red — rightly (SPEC 4.2). That line, and no other;
-    // once the repository pins its toolchain, the verb is green.
+    // A home of its own holds no forge token, and the project's token is a
+    // prerequisite (SPEC 4.2, `nunki push`): that line is red, rightly, and
+    // a made-up one would send this test to the real forge. That line, and
+    // the toolchain's while the repository pins none — no other.
     let red: Vec<&str> = text.lines().filter(|l| l.starts_with("RED ")).collect();
     if root.join("rust-toolchain.toml").is_file() {
-        assert_eq!(out.status.code(), Some(0), "{text}");
+        assert_eq!(red, ["RED the project's forge token"], "{text}");
     } else {
         assert_eq!(
             red,
-            ["RED the rust image follows the versions the repository pins"],
+            [
+                "RED the project's forge token",
+                "RED the rust image follows the versions the repository pins"
+            ],
             "{text}"
         );
         assert!(
@@ -571,15 +574,15 @@ fn the_verb_is_green_on_this_very_repository_but_for_a_toolchain_it_does_not_pin
     assert!(text.contains("could not be checked"), "{text}");
     // And the forge is part of the verb, not only of the library. This
     // repository lets the forge hold the rule, and a home of its own has no
-    // credential to ask it with: every protected branch is named as not
-    // checked, and why — never read off the forge from a test, never red.
+    // token to ask it with: every protected branch is named as not
+    // checked, and why — never read off the forge from a test, never red on its own lines.
     assert!(
         text.contains("--  main is protected on the forge"),
         "not checked, and said so: {text}"
     );
     // Why it was not checked depends on the clone this runs in, and the
     // test must not assume one. A clone of GitHub — a developer's, CI's —
-    // has a forge to ask and no credential to ask it with. A nunki slot's
+    // has a forge to ask and no token to ask it with. A nunki slot's
     // `origin` is the path it was cloned from, which no adapter speaks for.
     // Asserting the first everywhere was asserting something about the
     // machine again, and it was red in every slot nunki gates this
@@ -592,7 +595,7 @@ fn the_verb_is_green_on_this_very_repository_but_for_a_toolchain_it_does_not_pin
     {
         Ok(out) if out.status.success() => {
             if String::from_utf8_lossy(&out.stdout).contains("github.com") {
-                "no forge credential"
+                "there is no forge token at"
             } else {
                 "the remote is on a forge nunki has no adapter for"
             }
@@ -820,39 +823,162 @@ fn on_github(dir: &Path, remote: &str) -> Project {
     )
 }
 
+/// The project's own token, in its home (`~/.nunki/<id>/forge-token`).
 fn with_token(project: &Project) {
-    let at = project.nunki_home();
-    std::fs::create_dir_all(&at).unwrap();
-    std::fs::write(at.join(nunki::forge::TOKEN_FILE), "tok-human\n").unwrap();
+    std::fs::create_dir_all(&project.home).unwrap();
+    std::fs::write(project.home.join(nunki::forge::TOKEN_FILE), "tok-project\n").unwrap();
 }
 
-/// A forge credential belongs to the human, not to a project: it lives beside
-/// the accounts, under `~/.nunki/`, and two projects on the same forge share
-/// it. One left in a project's HQ is not read — that would be one copy of the
-/// one secret per project.
+/// The machine-wide file every project used to share, `~/.nunki/forge-token`.
+fn with_retired_token(project: &Project) -> std::path::PathBuf {
+    let at = project.nunki_home().join(nunki::forge::TOKEN_FILE);
+    std::fs::write(&at, "tok-retired\n").unwrap();
+    at
+}
+
+/// What the check says on its forge-token line.
+fn token_line(report: &Report) -> Verdict {
+    let lines: Vec<&Verdict> = report
+        .checks
+        .iter()
+        .filter(|c| c.what == nunki::check::FORGE_TOKEN)
+        .map(|c| &c.verdict)
+        .collect();
+    assert_eq!(lines.len(), 1, "one line for the token: {lines:?}");
+    lines[0].clone()
+}
+
+fn red_reason(verdict: Verdict) -> String {
+    match verdict {
+        Verdict::Red(why) => why,
+        other => panic!("the token line is not red: {other:?}"),
+    }
+}
+
+/// Every protected branch is named as not checked, for want of a token, and
+/// none is asked: the api here is unreachable, and an asked forge would
+/// have answered "the forge did not say".
+fn branches_not_asked_for_want_of_a_token(report: &Report, at: &Path) {
+    let verdicts = forge_verdicts(report);
+    assert_eq!(verdicts.len(), 2, "{verdicts:?}");
+    for (what, verdict) in verdicts {
+        match verdict {
+            Verdict::NotChecked(why) => {
+                assert!(
+                    why.contains(&format!("there is no forge token at {}", at.display())),
+                    "{what}: {why}"
+                );
+                assert!(!why.contains("did not say"), "the forge was asked: {why}");
+            }
+            other => panic!("{what}: {other:?}"),
+        }
+    }
+}
+
+/// The project's token is a prerequisite (SPEC 4.2, `nunki push`): with no
+/// file, or an empty one, the check is red on its token line with the
+/// refusal `nunki push` gives — the project's path, the permissions, a file
+/// readable by its owner only — and names no retired file it has not seen.
 #[test]
-fn the_credential_is_read_beside_the_accounts_and_not_in_a_projects_hq() {
+fn without_the_projects_token_the_check_is_red_and_names_the_projects_path() {
     let dir = tempfile::tempdir().unwrap();
     let project = on_github(dir.path(), "https://github.com/o/r.git");
+    let ours = project.home.join(nunki::forge::TOKEN_FILE);
+
+    for contents in [None, Some(" \n")] {
+        if let Some(text) = contents {
+            std::fs::write(&ours, text).unwrap();
+        }
+        let mut report = Report::default();
+        nunki::check::forge_protection(&project, "http://127.0.0.1:9", &mut report);
+
+        let why = red_reason(token_line(&report));
+        assert!(
+            why.contains(&format!("no forge token at {}", ours.display())),
+            "{contents:?}: {why}"
+        );
+        assert!(
+            why.contains(nunki::forge::PERMISSIONS),
+            "{contents:?}: {why}"
+        );
+        assert!(
+            why.contains("readable by its owner only"),
+            "{contents:?}: {why}"
+        );
+        assert!(!why.contains("no longer read"), "{contents:?}: {why}");
+        assert!(report.is_red());
+        branches_not_asked_for_want_of_a_token(&report, &ours);
+    }
+}
+
+/// With only the machine-wide `~/.nunki/forge-token` — holding a token — the
+/// check is red all the same: that token is not read, the forge is not asked,
+/// and the line names the file as no longer read, never what it holds. One
+/// left in the project's HQ is not read either.
+#[test]
+fn with_the_machine_wide_token_alone_the_check_is_red_and_names_that_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = on_github(dir.path(), "https://github.com/o/r.git");
+    let retired = with_retired_token(&project);
     std::fs::write(
         project.hq_root.join(nunki::forge::TOKEN_FILE),
         "tok-in-the-hq\n",
     )
     .unwrap();
+    let ours = project.home.join(nunki::forge::TOKEN_FILE);
 
     let mut report = Report::default();
     nunki::check::forge_protection(&project, "http://127.0.0.1:9", &mut report);
-    let beside = project
-        .nunki_home()
-        .join(nunki::forge::TOKEN_FILE)
-        .display()
-        .to_string();
-    for (_, verdict) in forge_verdicts(&report) {
-        match verdict {
-            Verdict::NotChecked(why) => assert!(why.contains(&beside), "{why}"),
-            other => panic!("a token in a project's HQ is not the human's: {other:?}"),
+
+    let why = red_reason(token_line(&report));
+    assert!(
+        why.contains(&format!("no forge token at {}", ours.display())),
+        "{why}"
+    );
+    assert!(
+        why.contains(&format!("{} is no longer read", retired.display())),
+        "{why}"
+    );
+    assert!(!why.contains("tok-"), "a token reached the report: {why}");
+    branches_not_asked_for_want_of_a_token(&report, &ours);
+}
+
+/// `by_hand` is about who keeps the branches, not about the token: a push
+/// needs one all the same, so its absence is red there too.
+#[test]
+fn by_hand_does_not_excuse_a_missing_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut project = on_github(dir.path(), "https://github.com/o/r.git");
+    project.config.forge_protection = nunki::project::ForgeProtection::ByHand;
+
+    let mut report = Report::default();
+    nunki::check::forge_protection(&project, "http://127.0.0.1:9", &mut report);
+
+    let why = red_reason(token_line(&report));
+    assert!(why.contains("no forge token at"), "{why}");
+}
+
+/// With the project's token, the line is green and says where it is — never
+/// what it holds.
+#[test]
+fn the_projects_token_is_green_and_never_shown() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut project = on_github(dir.path(), "https://github.com/o/r.git");
+    project.config.forge_protection = nunki::project::ForgeProtection::ByHand;
+    with_token(&project);
+
+    let mut report = Report::default();
+    nunki::check::forge_protection(&project, "http://127.0.0.1:9", &mut report);
+
+    match token_line(&report) {
+        Verdict::Green(said) => {
+            let at = project.home.join(nunki::forge::TOKEN_FILE);
+            assert!(said.contains(&at.display().to_string()), "{said}");
+            assert!(!said.contains("tok-"), "{said}");
         }
+        other => panic!("{other:?}"),
     }
+    assert!(!report.is_red());
 }
 
 fn forge_verdicts(report: &Report) -> Vec<(String, Verdict)> {
@@ -866,7 +992,7 @@ fn forge_verdicts(report: &Report) -> Vec<(String, Verdict)> {
 
 /// A protected branch is green, an unprotected one is red — the forge would
 /// take the push, and gate 2 is left alone — and each question goes to the
-/// branch itself, with the human's token.
+/// branch itself, with the project's token.
 #[test]
 fn the_forge_is_asked_branch_by_branch_and_an_unprotected_one_is_red() {
     let dir = tempfile::tempdir().unwrap();
@@ -902,30 +1028,9 @@ fn the_forge_is_asked_branch_by_branch_and_an_unprotected_one_is_red() {
     assert!(
         seen.iter().all(|r| r
             .to_ascii_lowercase()
-            .contains("authorization: bearer tok-human")),
+            .contains("authorization: bearer tok-project")),
         "{seen:?}"
     );
-}
-
-/// Without the human's credential the forge is not asked — and the check
-/// says so for every branch rather than passing over them in silence.
-#[test]
-fn without_a_credential_every_branch_is_named_as_not_checked() {
-    let dir = tempfile::tempdir().unwrap();
-    let project = on_github(dir.path(), "https://github.com/o/r.git");
-
-    let mut report = Report::default();
-    nunki::check::forge_protection(&project, "http://127.0.0.1:9", &mut report);
-    let verdicts = forge_verdicts(&report);
-
-    assert_eq!(verdicts.len(), 2, "{verdicts:?}");
-    for (_, verdict) in &verdicts {
-        match verdict {
-            Verdict::NotChecked(why) => assert!(why.contains(nunki::forge::TOKEN_FILE), "{why}"),
-            other => panic!("{other:?}"),
-        }
-    }
-    assert!(!report.is_red());
 }
 
 /// Measured on GitHub: a missing branch answers 404 "Branch not found", and a

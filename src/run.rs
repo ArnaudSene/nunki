@@ -1134,6 +1134,12 @@ pub fn remount_advisories(
     ) {
         return Ok(Vec::new());
     }
+    // The rule every launch holds, held here too: this adds mounts without
+    // going through the generator that refuses them.
+    let kept_out = crate::forge::kept_out(&project.home);
+    for (host, _) in &missing {
+        crate::compose::refuse_exposing(host, &kept_out)?;
+    }
     for (host, at) in &missing {
         volumes.push(crate::yaml::Value::String(crate::compose::mount(
             host, at, "ro",
@@ -1574,6 +1580,7 @@ pub fn plan(
         stack_scripts: stack_scripts(project, stack),
         advisories: advisories(project, stack),
         secrets: secrets(project),
+        kept_out: crate::forge::kept_out(&project.home),
         credentials,
         volumes: volumes(project, slot, stack, role),
         environment,

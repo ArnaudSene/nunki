@@ -7,12 +7,27 @@
 //! because there is no second decision — the human read the pull request
 //! before saying yes.
 //!
-//! It talks to the forge with **the human's** credential, kept beside the
-//! accounts at `~/.nunki/forge-token` and never mounted in a container: a
-//! forge account belongs to the human, not to a project, and the only part of
-//! a project's home a container ever sees is its own mission folder. Without
-//! that file `nunki push` still pushes, and hands over the exact address to
-//! open the pull request at by hand.
+//! It talks to the forge with **the project's** token, kept in the project's
+//! own home at `~/.nunki/<id>/forge-token` ([`TOKEN_FILE`]) and read from
+//! there and nowhere else ([`credential`]). One file per project, because on
+//! GitHub what grants rights is the token, not the account: a fine-grained
+//! token can be limited to one repository and to the permissions nunki uses
+//! ([`PERMISSIONS`]), and a file per project lets each project hold only its
+//! own. The file `~/.nunki/forge-token` that every project used to share is
+//! no longer read, not even as a fallback; it is only named, so that the move
+//! is said rather than silent.
+//!
+//! The token is **required**: without it nothing reaches the forge. `nunki
+//! push` refuses before it fetches or pushes anything, and `nunki check` is
+//! red, both with the one message [`Absent::refusal`] writes — the project's
+//! path, the permissions the token needs, and that its file is readable by
+//! its owner only.
+//!
+//! The token never reaches a container. No bind mount nunki declares may
+//! expose the project's home or the token file — [`crate::compose`] refuses a
+//! plan whose mounts would ([`exposes`]) — and what a container does see under
+//! the home is its own mission folder, the stack's scripts one file at a
+//! time, and the secrets file the human ruled on.
 //!
 //! **One adapter per forge**, as there is one per harness (SPEC 4.3) and one
 //! per container engine (4.2). This module holds what every forge means — a
@@ -23,12 +38,24 @@
 
 pub mod github;
 
-/// The credential's file, under `~/.nunki/` and beside the accounts.
+use std::path::{Path, PathBuf};
+
+/// The token's file, in the project's home (`~/.nunki/<id>/forge-token`),
+/// the only place it is read.
 ///
-/// A forge credential belongs to the human and not to a project — two
-/// projects on the same forge are the same account — so it is kept once
-/// rather than copied into every project's HQ, like the accounts.
+/// Per project rather than once per machine: a fine-grained token is limited
+/// to the repositories it names, so one file per project lets each project
+/// hold a token for its own repository and nothing more. One file shared by
+/// every project would push towards one token that can do everything
+/// everywhere. The same name directly under `~/.nunki/` is the retired file,
+/// which [`credential`] names and never reads.
 pub const TOKEN_FILE: &str = "forge-token";
+
+/// What the project's token must be allowed to do on GitHub, and nothing
+/// more: push the branch, open its pull request, and read what the
+/// repository is — its branch protection included, for `nunki check`.
+pub const PERMISSIONS: &str =
+    "Contents: read and write, Pull requests: read and write, and Metadata: read";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ForgeError {
@@ -142,11 +169,130 @@ pub fn of_remote_at(remote: &str, api: &str) -> Option<(Box<dyn Forge>, Repo)> {
         .map(|repo| (Box::new(github::GitHub::at(api)) as Box<dyn Forge>, repo))
 }
 
-/// The human's token, if they put one beside the accounts. An empty file is
-/// no token.
-pub fn token(nunki_home: &std::path::Path) -> Option<String> {
-    std::fs::read_to_string(nunki_home.join(TOKEN_FILE))
+/// The project's forge token: a secret that does not print itself.
+///
+/// Its `Debug` says nothing of what it holds, so a token carried in a value
+/// that is logged, asserted on or put in an error never reaches the output.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Token(String);
+
+impl Token {
+    /// The secret itself, for the one use it has: the forge's
+    /// `Authorization` header.
+    pub fn secret(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Token {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Token(..)")
+    }
+}
+
+/// What the project's home holds for the forge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Credential {
+    /// A token, read from the project's own file.
+    Token(Token),
+    /// No token: the file is missing or says nothing.
+    Absent(Absent),
+}
+
+/// Why there is no token, and where it would go.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Absent {
+    /// The project's token file, where a token goes.
+    pub at: PathBuf,
+    /// The machine-wide file a token used to live in, when it is still there.
+    /// Named so the move is said; never read.
+    pub retired: Option<PathBuf>,
+}
+
+impl Absent {
+    /// Why nothing reaches the forge, said the same way by `nunki push` and
+    /// `nunki check`: where the project's token goes, what it must be allowed
+    /// to do, and that its file is readable by its owner only — then, when
+    /// the retired machine-wide file is still there, that it is no longer
+    /// read. Never anything a file holds.
+    pub fn refusal(&self) -> String {
+        let mut why = format!(
+            "no forge token at {at}: nunki reaches the forge with this project's own token and \
+             with nothing else, so without it nothing is pushed and no pull request is opened. \
+             Put there a fine-grained GitHub token limited to this project's repository, with \
+             {PERMISSIONS}, in a file readable by its owner only (`chmod 600 {at}`)",
+            at = self.at.display()
+        );
+        if let Some(note) = self.retired_note() {
+            why.push_str(". ");
+            why.push_str(&note);
+        }
+        why
+    }
+
+    /// The sentence that says the retired file is not read and where the
+    /// project's token goes, or nothing when there is no retired file.
+    pub fn retired_note(&self) -> Option<String> {
+        self.retired.as_ref().map(|old| {
+            format!(
+                "{} is no longer read, not even as a fallback: nunki reads one token per \
+                 project, from {}, and no other",
+                old.display(),
+                self.at.display()
+            )
+        })
+    }
+}
+
+/// The project's forge credential, read from `home` — the project's own
+/// home, `~/.nunki/<id>/` ([`crate::project::Project::home`]) — and from
+/// nowhere else. An empty file is no token.
+///
+/// The machine-wide `~/.nunki/forge-token` (the file of that name in
+/// `home`'s parent) is **never read**: when the project has no token and that
+/// file exists, its path is returned in [`Absent::retired`], from its
+/// metadata alone, so that the caller can say the token moved.
+pub fn credential(home: &Path) -> Credential {
+    let at = home.join(TOKEN_FILE);
+    let token = std::fs::read_to_string(&at)
         .ok()
         .map(|t| t.trim().to_string())
-        .filter(|t| !t.is_empty())
+        .filter(|t| !t.is_empty());
+    match token {
+        Some(token) => Credential::Token(Token(token)),
+        None => Credential::Absent(Absent {
+            retired: retired(home),
+            at,
+        }),
+    }
+}
+
+/// The retired machine-wide file, if it is still there. Its metadata only:
+/// what it holds is never opened.
+fn retired(home: &Path) -> Option<PathBuf> {
+    let old = home.parent()?.join(TOKEN_FILE);
+    std::fs::symlink_metadata(&old).is_ok().then_some(old)
+}
+
+/// The paths no bind mount may expose for a project whose home is `home`:
+/// the home itself, and the token file. Where a link makes either land is
+/// [`exposes`]'s to resolve, at the time of the mount, so a mount of a
+/// linked token's target is caught too. The home comes first, so a mount
+/// of it or above it is refused as exposing the home.
+pub fn kept_out(home: &Path) -> Vec<PathBuf> {
+    vec![home.to_path_buf(), home.join(TOKEN_FILE)]
+}
+
+/// Whether a bind mount of `source` would put `kept` inside a container: the
+/// source is `kept` itself or a directory above it. Compared as written and
+/// as the filesystem resolves both, so a link to the home — or to a
+/// directory above it — exposes it as plainly as its own path does.
+pub fn exposes(source: &Path, kept: &Path) -> bool {
+    if kept.starts_with(source) {
+        return true;
+    }
+    match (std::fs::canonicalize(source), std::fs::canonicalize(kept)) {
+        (Ok(source), Ok(kept)) => kept.starts_with(source),
+        _ => false,
+    }
 }

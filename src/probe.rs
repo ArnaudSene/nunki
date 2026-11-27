@@ -399,6 +399,7 @@ fn plan(
         // hold before an agent depends on them.
         advisories: crate::run::advisories(project, stack),
         secrets: crate::run::secrets(project),
+        kept_out: crate::forge::kept_out(&project.home),
         credentials: Vec::new(),
         volumes: Vec::<NamedVolume>::new(),
         environment: BTreeMap::new(),

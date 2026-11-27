@@ -47,6 +47,11 @@ pub enum PushError {
         judged: String,
         done: &'static str,
     },
+    /// The project has no forge token (SPEC 4.2, `nunki push`): refused
+    /// before the fetch, so nothing leaves the slot and nothing reaches the
+    /// forge. The message is [`crate::forge::Absent::refusal`]'s.
+    #[error("{0} — nothing was fetched and nothing was pushed")]
+    NoToken(String),
     #[error("mission {0} has not started — there is nothing to push")]
     NotStarted(String),
     #[error(
@@ -338,7 +343,7 @@ pub fn push(project: &Project, id: &str, authorised: bool) -> Result<Pushed, Pus
 
 /// [`push`], against a given forge API — how the tests point the real client
 /// at a server they control. The binary calls [`push`] only, so the address
-/// the human's token goes to is never read from anything a process inherits.
+/// the project's token goes to is never read from anything a process inherits.
 pub fn push_to(
     project: &Project,
     id: &str,
@@ -409,6 +414,17 @@ pub fn push_to(
         }
     });
 
+    // The project's own token, and no other, is a prerequisite (SPEC 4.2,
+    // `nunki push`): without it nothing reaches the forge, so the refusal
+    // comes before the fetch — nothing leaves the slot, nothing is pushed.
+    // The machine-wide file a token used to live in is named, never read.
+    let token = match crate::forge::credential(&project.home) {
+        crate::forge::Credential::Token(token) => token,
+        crate::forge::Credential::Absent(absent) => {
+            return Err(PushError::NoToken(absent.refusal()));
+        }
+    };
+
     // Exactly the judged commit, by id: refused before the fetch when the
     // slot's branch is not it, and checked again on the project's side before
     // anything is pushed.
@@ -427,7 +443,7 @@ pub fn push_to(
     // After the push, and under the same `--yes`: SPEC names one verb that
     // pushes the branch and opens the pull request, on one argument.
     let pull_request = open_pull_request(
-        project,
+        &token,
         &remote,
         &header,
         &fetched.branch,
@@ -450,12 +466,15 @@ pub fn push_to(
 /// piece is missing otherwise. Every branch but the last is a reason the
 /// forge was never asked; the last is the forge's own answer.
 ///
+/// `token` is the project's own, which [`push_to`] required before it
+/// fetched anything: it is read once, there, and only handed on here.
+///
 /// `request` is `PR.md` as [`push_to`] read it, sent as written and followed
 /// by the departures from the rigor and the Security section `nunki` writes,
 /// or `None` when it says nothing a title could come from. `PR.md` itself is
 /// never written.
 fn open_pull_request(
-    project: &Project,
+    token: &crate::forge::Token,
     remote: &str,
     header: &crate::mission::Header,
     branch: &str,
@@ -489,20 +508,7 @@ fn open_pull_request(
              it opens pull requests on"
         ));
     };
-    let Some(token) = crate::forge::token(&project.nunki_home()) else {
-        return by_hand(format!(
-            "no forge credential at {} — a {} token that can open pull requests on {}/{}, and \
-             nunki opens it itself",
-            project
-                .nunki_home()
-                .join(crate::forge::TOKEN_FILE)
-                .display(),
-            forge.name(),
-            repo.owner,
-            repo.name
-        ));
-    };
-    match forge.open(&token, &repo, &request) {
+    match forge.open(token.secret(), &repo, &request) {
         Ok(opened) => PullRequestState::Opened(opened),
         Err(e) => by_hand(e.to_string()),
     }

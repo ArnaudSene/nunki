@@ -222,6 +222,11 @@ impl World {
         )
         .unwrap();
 
+        // The project's own forge token, a prerequisite of every push (SPEC
+        // 4.2, `nunki push`): every world starts with one, made up, and the
+        // tests about its absence take it away.
+        std::fs::write(project.home.join(nunki::forge::TOKEN_FILE), "tok-project\n").unwrap();
+
         Self {
             home: dir.path().join("home"),
             _dir: dir,
@@ -636,10 +641,21 @@ impl World {
         );
     }
 
+    /// The project's own token, in its home (`~/.nunki/<id>/forge-token`).
     fn with_token(&self) {
-        let at = self.project.nunki_home();
-        std::fs::create_dir_all(&at).unwrap();
-        std::fs::write(at.join(nunki::forge::TOKEN_FILE), "tok-human\n").unwrap();
+        std::fs::create_dir_all(&self.project.home).unwrap();
+        std::fs::write(
+            self.project.home.join(nunki::forge::TOKEN_FILE),
+            "tok-project\n",
+        )
+        .unwrap();
+    }
+
+    /// The machine-wide file every project used to share.
+    fn with_retired_token(&self) -> PathBuf {
+        let at = self.project.nunki_home().join(nunki::forge::TOKEN_FILE);
+        std::fs::write(&at, "tok-retired\n").unwrap();
+        at
     }
 
     fn pr_says(&self, text: &str) {
@@ -689,7 +705,7 @@ fn a_verified_mission_is_pushed_and_its_pull_request_opened() {
     );
     let sent = &server.join().unwrap()[0];
     assert!(sent.starts_with("POST /repos/o/r/pulls "), "{sent}");
-    assert!(sent.contains("Bearer tok-human"), "{sent}");
+    assert!(sent.contains("Bearer tok-project"), "{sent}");
     // Read as JSON, not as a string: how the client lays the body out is
     // its business, what it says is the test's.
     let body: serde_json::Value = serde_json::from_str(sent.split("\r\n\r\n").nth(1).unwrap())
@@ -710,28 +726,138 @@ fn a_verified_mission_is_pushed_and_its_pull_request_opened() {
     assert_eq!(body["base"], "dev");
 }
 
-/// No credential at the HQ: the push still happens — it is what `--yes`
-/// authorised — and the human is handed the exact address, and told where
-/// the credential would go.
+impl World {
+    /// The project's token taken away, or left there empty.
+    fn without_token(&self, empty: bool) -> PathBuf {
+        let at = self.project.home.join(nunki::forge::TOKEN_FILE);
+        if empty {
+            std::fs::write(&at, " \n").unwrap();
+        } else {
+            std::fs::remove_file(&at).unwrap();
+        }
+        at
+    }
+
+    /// Nothing of the mission left the slot: not on the forge, and not even
+    /// fetched into the project.
+    fn nothing_left_the_slot(&self) {
+        assert_eq!(self.on_forge("mission/x"), None, "pushed");
+        let in_project = Command::new("git")
+            .arg("-C")
+            .arg(&self.project.root)
+            .args(["rev-parse", "--verify", "--quiet", "refs/heads/mission/x"])
+            .output()
+            .unwrap();
+        assert!(!in_project.status.success(), "fetched into the project");
+        assert_eq!(self.state().pushed, None, "recorded as pushed");
+    }
+}
+
+/// A forge API that records whether anyone knocked: a listener nobody is
+/// meant to reach, read without waiting once the verb is done.
+fn untouched_forge() -> (String, std::net::TcpListener) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    (
+        format!("http://{}", listener.local_addr().unwrap()),
+        listener,
+    )
+}
+
+fn nobody_knocked(listener: &std::net::TcpListener) {
+    match listener.accept() {
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+        other => panic!("the forge was asked: {other:?}"),
+    }
+}
+
+/// The project's token is a prerequisite (SPEC 4.2, `nunki push`): with no
+/// file, or an empty one, the push is refused before the fetch — nothing
+/// leaves the slot and no pull request is opened — and the refusal names the
+/// project's path, what the token must be allowed to do, and that its file is
+/// readable by its owner only.
 #[test]
-fn without_a_credential_the_push_happens_and_the_address_is_handed_over() {
+fn without_the_projects_token_nothing_is_pushed_and_its_path_is_named() {
+    for empty in [false, true] {
+        let world = World::new(with_wiring(), Security::Agent);
+        world.on_github();
+        world.ready();
+        let at = world.without_token(empty);
+        let (api, forge) = untouched_forge();
+
+        let err = push::push_to(&world.project, "m1", true, &api).unwrap_err();
+
+        assert!(matches!(err, PushError::NoToken(_)), "{empty}: {err:?}");
+        let err = err.to_string();
+        assert!(
+            err.contains(&format!("no forge token at {}", at.display())),
+            "{empty}: {err}"
+        );
+        assert!(err.contains(nunki::forge::PERMISSIONS), "{empty}: {err}");
+        assert!(err.contains("readable by its owner only"), "{empty}: {err}");
+        assert!(err.contains("nothing was pushed"), "{empty}: {err}");
+        assert!(!err.contains("no longer read"), "no file to name: {err}");
+        world.nothing_left_the_slot();
+        nobody_knocked(&forge);
+    }
+}
+
+/// The machine-wide `~/.nunki/forge-token`, holding a token, gives none to a
+/// project that has none: nothing is pushed, and the refusal names that file
+/// as no longer read — and never says what it holds.
+#[test]
+fn with_the_machine_wide_token_alone_nothing_is_pushed_and_that_file_is_named() {
     let world = World::new(with_wiring(), Security::Agent);
     world.on_github();
-    world.pr_says("# feat: one returns two\n");
-    let head = world.ready();
+    world.ready();
+    let ours = world.without_token(false);
+    let retired = world.with_retired_token();
+    let (api, forge) = untouched_forge();
 
-    let pushed = push::push_to(&world.project, "m1", true, "http://127.0.0.1:9").unwrap();
-    assert_eq!(world.on_forge("mission/x").as_deref(), Some(head.as_str()));
-    match pushed.pull_request {
-        push::PullRequestState::ByHand { compare, why } => {
-            assert_eq!(
-                compare.as_deref(),
-                Some("https://github.com/o/r/compare/dev...mission/x?expand=1")
-            );
-            assert!(why.contains(nunki::forge::TOKEN_FILE), "{why}");
-        }
-        other => panic!("{other:?}"),
-    }
+    let err = push::push_to(&world.project, "m1", true, &api).unwrap_err();
+
+    assert!(matches!(err, PushError::NoToken(_)), "{err:?}");
+    let err = err.to_string();
+    assert!(
+        err.contains(&format!("no forge token at {}", ours.display())),
+        "{err}"
+    );
+    assert!(
+        err.contains(&format!("{} is no longer read", retired.display())),
+        "{err}"
+    );
+    assert!(!err.contains("tok-"), "a token reached the message: {err}");
+    world.nothing_left_the_slot();
+    nobody_knocked(&forge);
+}
+
+/// The refusal reaches the human from the real binary, as a failure: no
+/// `pushed` line, the project's path on stderr, and a non-zero exit.
+#[test]
+fn the_binary_exits_red_without_the_projects_token() {
+    let world = World::opened(no_integration(), Security::Agent);
+    world.coded("pub fn one() -> u8 { 2 }\n", "the lot");
+    world.security(Verdict::Clear, T1);
+    world.campaign_on_head();
+    let at = world.without_token(false);
+
+    let out = Command::new(env!("CARGO_BIN_EXE_nunki"))
+        .arg("-C")
+        .arg(&world.project.root)
+        .args(["push", "m1", "--yes"])
+        .env("HOME", &world.home)
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{stdout}{stderr}");
+    assert!(!stdout.contains("pushed"), "{stdout}");
+    assert!(
+        stderr.contains(&format!("no forge token at {}", at.display())),
+        "{stderr}"
+    );
+    world.nothing_left_the_slot();
 }
 
 /// The forge refusing the pull request does not undo the push, and must not

@@ -446,10 +446,18 @@ nunki push m1 --yes         # push the branch, and open the pull request
 nunki mission archive m1    # close it: the folder and state move under archive/
 ```
 
-`nunki push` opens the pull request when a GitHub token that may do so sits at
-`~/.nunki/forge-token`, beside the accounts — it is yours, not a project's,
-and every project on the same forge reads it. Without one it pushes the branch
-and hands you the address to open the pull request at yourself.
+`nunki push` needs the project's own GitHub token, in the project's home:
+`~/.nunki/<id>/forge-token`, the home `nunki sessions` names. It is
+required: without it `nunki push` refuses before it fetches or pushes
+anything, and `nunki check` is red. Put there a fine-grained token limited to
+the project's repository, with *Contents: read and write*, *Pull requests:
+read and write* and *Metadata: read*, in a file only you can read
+(`chmod 600`). One file per project because a fine-grained token is limited to
+the repositories it names: each project holds a token for its own repository,
+and nothing more. The file `~/.nunki/forge-token` that every project used to
+share is no longer read, not even as a fallback; `nunki push` and `nunki
+check` name it when it is still there. No container `nunki` lifts mounts the
+project's home or its token.
 
 GitHub is the one forge `nunki` has an adapter for. A remote on another one is
 **said to be on another one**: the branch is still pushed, and no address is

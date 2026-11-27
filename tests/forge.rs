@@ -220,14 +220,200 @@ fn the_title_is_the_first_line_that_says_anything_and_the_rest_is_the_body() {
     );
 }
 
-#[test]
-fn a_token_is_read_trimmed_and_an_empty_file_is_no_token() {
+/// A temporary `~/.nunki/` and one project's home inside it, `<id>/`, the
+/// way [`nunki::project::Project::home`] lays them out. Never the real one.
+fn homes() -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().unwrap();
-    assert_eq!(forge::token(dir.path()), None);
-    std::fs::write(dir.path().join(forge::TOKEN_FILE), "  \n").unwrap();
-    assert_eq!(forge::token(dir.path()), None);
-    std::fs::write(dir.path().join(forge::TOKEN_FILE), "ghp_abc\n").unwrap();
-    assert_eq!(forge::token(dir.path()).as_deref(), Some("ghp_abc"));
+    let home = dir.path().join("0b5e7c1a-project");
+    std::fs::create_dir_all(&home).unwrap();
+    (dir, home)
+}
+
+fn secret_of(credential: &forge::Credential) -> Option<&str> {
+    match credential {
+        forge::Credential::Token(token) => Some(token.secret()),
+        forge::Credential::Absent(_) => None,
+    }
+}
+
+fn absent(credential: forge::Credential) -> forge::Absent {
+    match credential {
+        forge::Credential::Absent(absent) => absent,
+        forge::Credential::Token(_) => panic!("a token was read where none should be"),
+    }
+}
+
+/// The project's own file is the one read, trimmed; an empty one is no
+/// token, and says where a token goes, as a missing one does.
+#[test]
+fn a_token_is_read_trimmed_from_the_projects_home_and_an_empty_file_is_no_token() {
+    let (_dir, home) = homes();
+    let at = home.join(forge::TOKEN_FILE);
+
+    assert_eq!(absent(forge::credential(&home)).at, at);
+    std::fs::write(&at, "  \n").unwrap();
+    let empty = absent(forge::credential(&home));
+    assert_eq!(empty.at, at);
+    assert_eq!(empty.retired, None);
+
+    std::fs::write(&at, "tok-made-up\n").unwrap();
+    assert_eq!(secret_of(&forge::credential(&home)), Some("tok-made-up"));
+}
+
+/// The machine-wide `~/.nunki/forge-token` is not read, not even as a
+/// fallback: holding a token, it gives none to a project that has none — and
+/// it is named, so the move is said rather than silent.
+#[test]
+fn the_machine_wide_file_alone_is_not_read_and_is_named() {
+    let (dir, home) = homes();
+    let retired = dir.path().join(forge::TOKEN_FILE);
+    std::fs::write(&retired, "tok-retired\n").unwrap();
+
+    let absent = absent(forge::credential(&home));
+    assert_eq!(absent.at, home.join(forge::TOKEN_FILE));
+    assert_eq!(absent.retired.as_deref(), Some(retired.as_path()));
+    let note = absent.retired_note().expect("the retired file is named");
+    assert!(note.contains(&retired.display().to_string()), "{note}");
+    assert!(note.contains("no longer read"), "{note}");
+    assert!(
+        note.contains(&home.join(forge::TOKEN_FILE).display().to_string()),
+        "{note}"
+    );
+    assert!(
+        !note.contains("tok-retired"),
+        "the note never says what it holds"
+    );
+}
+
+/// With both files, the project's is the one used: the retired one is
+/// neither read nor mixed in.
+#[test]
+fn the_projects_token_wins_over_a_machine_wide_file_still_there() {
+    let (dir, home) = homes();
+    std::fs::write(dir.path().join(forge::TOKEN_FILE), "tok-retired\n").unwrap();
+    std::fs::write(home.join(forge::TOKEN_FILE), "tok-project\n").unwrap();
+
+    assert_eq!(secret_of(&forge::credential(&home)), Some("tok-project"));
+}
+
+/// The one refusal `nunki push` and `nunki check` both give: the project's
+/// path, the permissions the token needs, a file its owner alone reads and
+/// the command that makes it so — and, only when the retired file is there,
+/// that it is no longer read. Never what any file holds.
+#[test]
+fn the_refusal_names_the_path_the_permissions_and_the_owner_only_file() {
+    let (dir, home) = homes();
+    let at = home.join(forge::TOKEN_FILE);
+
+    let alone = absent(forge::credential(&home)).refusal();
+    assert!(
+        alone.starts_with(&format!("no forge token at {}:", at.display())),
+        "{alone}"
+    );
+    for permission in [
+        "Contents: read and write",
+        "Pull requests: read and write",
+        "Metadata: read",
+    ] {
+        assert!(alone.contains(permission), "{permission}: {alone}");
+    }
+    assert!(alone.contains("fine-grained"), "{alone}");
+    assert!(alone.contains("readable by its owner only"), "{alone}");
+    assert!(
+        alone.contains(&format!("chmod 600 {}", at.display())),
+        "{alone}"
+    );
+    assert!(!alone.contains("no longer read"), "{alone}");
+
+    let retired = dir.path().join(forge::TOKEN_FILE);
+    std::fs::write(&retired, "tok-retired\n").unwrap();
+    let moved = absent(forge::credential(&home)).refusal();
+    assert!(
+        moved.starts_with(&alone),
+        "the same refusal, then the note: {moved}"
+    );
+    assert!(
+        moved.ends_with(&format!(
+            ". {}",
+            absent(forge::credential(&home)).retired_note().unwrap()
+        )),
+        "{moved}"
+    );
+    assert!(!moved.contains("tok-retired"), "{moved}");
+}
+
+/// No retired file, nothing said about one: a note about a file that is not
+/// there would send the human looking for it.
+#[test]
+fn without_a_machine_wide_file_no_move_is_announced() {
+    let (_dir, home) = homes();
+
+    let absent = absent(forge::credential(&home));
+    assert_eq!(absent.retired, None);
+    assert_eq!(absent.retired_note(), None);
+}
+
+/// A token carried in a value that is debugged — an assertion, a log — does
+/// not reach the output.
+#[test]
+fn a_token_does_not_print_itself() {
+    let (_dir, home) = homes();
+    std::fs::write(home.join(forge::TOKEN_FILE), "tok-made-up\n").unwrap();
+
+    let shown = format!("{:?}", forge::credential(&home));
+    assert!(!shown.contains("tok-made-up"), "{shown}");
+    assert!(shown.contains("Token"), "{shown}");
+}
+
+/// What a bind mount may not be: the home, a directory above it, the token
+/// file, or a link to any of them. What a container does see under the home
+/// — its mission folder, a stack's script — exposes neither.
+#[test]
+fn a_mount_exposes_the_home_from_it_or_above_it_and_never_from_below() {
+    let (dir, home) = homes();
+    let token = home.join(forge::TOKEN_FILE);
+    std::fs::write(&token, "tok-made-up\n").unwrap();
+    let mission = home.join("hq/missions/m1");
+    std::fs::create_dir_all(&mission).unwrap();
+
+    let kept = forge::kept_out(&home);
+    let exposes = |source: &std::path::Path| kept.iter().any(|k| forge::exposes(source, k));
+
+    assert!(exposes(&home));
+    assert!(exposes(dir.path()), "a directory above the home holds it");
+    assert!(exposes(&token));
+    assert!(!exposes(&mission), "the mission folder is below the home");
+    assert!(!exposes(&home.join("stacks/rust/prepush.sh")));
+    assert!(!exposes(&dir.path().join("elsewhere")));
+
+    #[cfg(unix)]
+    {
+        let outside = tempfile::tempdir().unwrap();
+        let to_home = outside.path().join("to-home");
+        std::os::unix::fs::symlink(&home, &to_home).unwrap();
+        assert!(exposes(&to_home), "a link to the home is the home");
+        let to_token = outside.path().join("to-token");
+        std::os::unix::fs::symlink(&token, &to_token).unwrap();
+        assert!(exposes(&to_token), "a link to the token is the token");
+    }
+}
+
+/// A token file that is itself a link: the place it lands is kept out too,
+/// so mounting that directory is refused like mounting the home.
+#[cfg(unix)]
+#[test]
+fn where_a_linked_token_lands_is_kept_out_too() {
+    let (_dir, home) = homes();
+    let store = tempfile::tempdir().unwrap();
+    let real = store.path().join("project-token");
+    std::fs::write(&real, "tok-made-up\n").unwrap();
+    std::os::unix::fs::symlink(&real, home.join(forge::TOKEN_FILE)).unwrap();
+
+    let kept = forge::kept_out(&home);
+    assert!(
+        kept.iter().any(|k| forge::exposes(store.path(), k)),
+        "{kept:?}"
+    );
 }
 
 /// The one call that proves what the local server cannot: the address, the
