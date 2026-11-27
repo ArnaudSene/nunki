@@ -917,6 +917,10 @@ fn walk(root: &Path, visit: &mut impl FnMut(&Path)) {
     }
 }
 
+/// The line `nunki check` says the project's forge token on: red without
+/// one, since nothing reaches the forge without it (SPEC 4.2, `nunki push`).
+pub const FORGE_TOKEN: &str = "the project's forge token";
+
 /// Whether each protected branch is protected **on the forge** (SPEC 4.1
 /// bis, "branche protégée"): locally nothing stops an agent committing to
 /// `main` in its clone — gate 2 sees it, and the forge is what refuses the
@@ -926,18 +930,22 @@ fn walk(root: &Path, visit: &mut impl FnMut(&Path)) {
 /// rule. Then the forge is not asked, and every branch is named as held by
 /// hand: never green, since nunki cannot see a human keep a rule, and never red.
 ///
-/// It asks with the human's credential at the HQ, and without one it says it
-/// did not ask. Anything the forge declines to answer is "not checked",
-/// never green and never red: a check that cannot say "I do not know" lies.
+/// It asks with the project's own token (`~/.nunki/<id>/forge-token`,
+/// [`crate::forge::credential`]), which is a prerequisite: its own line,
+/// [`FORGE_TOKEN`], is red without it, with the message `nunki push` refuses
+/// with — whatever `forge_protection` says, since no push reaches the forge
+/// without it either. The branches are then not checked, and say so.
+/// Anything the forge declines to answer is "not checked", never green and
+/// never red: a check that cannot say "I do not know" lies.
 ///
-/// It runs on every `nunki check` where a credential is present — unlike the
+/// It runs on every `nunki check` where a token is present — unlike the
 /// container probes, which wait for `--slot`. The asymmetry is deliberate:
 /// SPEC 4.1 bis asks for it "quand un credential de forge est présent sur
 /// l'hôte", and it costs one read per protected branch, where a probe costs
-/// a profile lifted and taken down. Without a credential it makes no network
+/// a profile lifted and taken down. Without a token it makes no network
 /// call at all.
 pub fn forge_protection(project: &Project, api: &str, report: &mut Report) {
-    use crate::forge::{Protection, TOKEN_FILE, token};
+    use crate::forge::{Credential, Protection, credential};
     use crate::project::{CONFIG_FILE, ForgeProtection};
 
     let not_checked = |report: &mut Report, why: String| {
@@ -946,6 +954,31 @@ pub fn forge_protection(project: &Project, api: &str, report: &mut Report) {
                 format!("{branch} is protected on the forge"),
                 Verdict::NotChecked(why.clone()),
             );
+        }
+    };
+
+    // The project's own token, and no other: the machine-wide file a token
+    // used to live in is named, never read (SPEC 4.2, `nunki push`). Said
+    // first, and red without one, whatever else the forge lines say.
+    let at = project.home.join(crate::forge::TOKEN_FILE);
+    let token = match credential(&project.home) {
+        Credential::Token(token) => {
+            report.add(
+                FORGE_TOKEN,
+                Verdict::Green(format!(
+                    "{} holds a token only its owner can read",
+                    at.display()
+                )),
+            );
+            Ok(token)
+        }
+        Credential::Absent(absent) => {
+            report.add(FORGE_TOKEN, Verdict::Red(absent.refusal()));
+            Err(format!("there is no forge token at {}", at.display()))
+        }
+        Credential::Refused(refused) => {
+            report.add(FORGE_TOKEN, Verdict::Red(refused.refusal()));
+            Err(format!("the forge token at {} is refused", at.display()))
         }
     };
 
@@ -980,18 +1013,18 @@ pub fn forge_protection(project: &Project, api: &str, report: &mut Report) {
             ),
         );
     };
-    let Some(token) = token(&project.nunki_home()) else {
-        return not_checked(
-            report,
-            format!(
-                "no forge credential at {} — without one nunki cannot ask the forge, and says so",
-                project.nunki_home().join(TOKEN_FILE).display()
-            ),
-        );
+    let token = match token {
+        Ok(token) => token,
+        Err(why) => {
+            return not_checked(
+                report,
+                format!("the forge was not asked: {why} ({FORGE_TOKEN}, above)"),
+            );
+        }
     };
 
     for branch in &project.config.protected_branches {
-        let verdict = match forge.protection(&token, &repo, branch) {
+        let verdict = match forge.protection(token.secret(), &repo, branch) {
             Ok(Protection::Protected) => Verdict::Green(format!(
                 "{} reports {branch} protected on {}/{}",
                 forge.name(),

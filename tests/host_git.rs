@@ -997,6 +997,19 @@ fn no_plain_git_runs_on_a_slot() {
             "src/project/mod.rs",
             "match crate::git::run(dir, &[\"rev-parse\", \"--show-toplevel\"]) {",
         ),
+        // The authenticated push (`forge::git`): the human's repository's
+        // object format and objects directory, then git in a scratch bare
+        // repository of nunki's own that borrows those objects — never a
+        // slot, which only the mirror reaches.
+        (
+            "src/forge/git.rs",
+            "let format = crate::git::run(push.objects_of, &[\"rev-parse\", \"--show-object-format\"])",
+        ),
+        ("src/forge/git.rs", "let objects = crate::git::run("),
+        (
+            "src/forge/git.rs",
+            "let mut command = std::process::Command::new(\"git\");",
+        ),
         // `mission fetch` and `push`, in the human's repository; the fetch
         // reads the slot's mirror, never the slot.
         (
@@ -1008,10 +1021,6 @@ fn no_plain_git_runs_on_a_slot() {
         (
             "src/push.rs",
             "let after = crate::git::head_of(&project.root, &full)?;",
-        ),
-        (
-            "src/push.rs",
-            "crate::git::run(&project.root, &[\"push\", REMOTE, &fetched.branch])?;",
         ),
         (
             "src/push.rs",

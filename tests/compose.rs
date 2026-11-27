@@ -88,6 +88,7 @@ fn plan(role: Role) -> Plan {
         // what proves a real database reaches the container.
         advisories: vec![],
         secrets: None,
+        kept_out: nunki::forge::kept_out(std::path::Path::new("/Users/h/.nunki/demo")),
         volumes,
         environment,
         command: strings(&["sleep", "infinity"]),
@@ -1184,4 +1185,115 @@ mod live_quoting {
             assert!(read["volumes"].get(volume).is_some(), "{volume}: {read}");
         }
     }
+}
+
+// --- what no mount may expose: the project's home and its forge token -------
+
+/// The project's home in [`plan`], and the token file in it.
+const HOME: &str = "/Users/h/.nunki/demo";
+
+/// Where a case of the test below puts its mount in a plan.
+type Put = dyn Fn(&mut Plan, PathBuf);
+
+fn exposes_home(plan: &Plan) -> (PathBuf, PathBuf) {
+    match generate(plan, &dialect()) {
+        Err(ComposeError::ExposesHome { mount, kept }) => (mount, kept),
+        other => panic!("not refused as exposing the home: {other:?}"),
+    }
+}
+
+/// Every source of an agent's bind mount is held to it: the home itself, the
+/// token file, or a directory above them is refused, whichever field of the
+/// plan carries it, and the refusal names the mount and what it exposes.
+#[test]
+fn a_bind_mount_of_the_projects_home_or_its_token_is_refused_wherever_it_comes_from() {
+    let home = PathBuf::from(HOME);
+    let token = home.join(nunki::forge::TOKEN_FILE);
+    let at = PathBuf::from("/run/x");
+    let cases: Vec<(&str, PathBuf, Box<Put>)> = vec![
+        ("tree", home.clone(), Box::new(|p, h| p.tree = h)),
+        ("mission", home.clone(), Box::new(|p, h| p.mission_dir = h)),
+        (
+            "stack script",
+            token.clone(),
+            Box::new(|p, h| p.stack_scripts.push((h, PathBuf::from("/work/stack/x")))),
+        ),
+        (
+            "credential",
+            PathBuf::from("/Users/h/.nunki"),
+            Box::new({
+                let at = at.clone();
+                move |p, h| p.credentials.push((h, at.clone()))
+            }),
+        ),
+        (
+            "advisories",
+            PathBuf::from("/Users/h"),
+            Box::new({
+                let at = at.clone();
+                move |p, h| p.advisories.push((h, at.clone()))
+            }),
+        ),
+        (
+            "secrets",
+            token.clone(),
+            Box::new(move |p, h| p.secrets = Some((h, at.clone()))),
+        ),
+    ];
+    for (what, source, put) in cases {
+        let mut plan = plan(Role::Integrator);
+        put(&mut plan, source.clone());
+        let (mount, kept) = exposes_home(&plan);
+        assert_eq!(mount, source, "{what}");
+        // The home first: a mount of it or above it is named as exposing the
+        // home, and only the token file itself as exposing the token.
+        let named = if source == token { &token } else { &home };
+        assert_eq!(&kept, named, "{what}");
+        let said = ComposeError::ExposesHome { mount, kept }.to_string();
+        assert!(
+            said.contains(&source.display().to_string()),
+            "{what}: {said}"
+        );
+    }
+}
+
+/// The prober is held to it too: a service nunki writes itself is still a
+/// container on the host's files. A named volume is not a host path, and
+/// passes.
+#[test]
+fn a_prober_bind_of_the_projects_home_is_refused_and_a_named_volume_is_not() {
+    let prober = |volume: &str| nunki::compose::model::Service {
+        image: "nunki/rust:1".to_string(),
+        volumes: vec![volume.to_string()],
+        ..Default::default()
+    };
+    let mut plan = plan(Role::Coder);
+    plan.prober = Some(prober(&format!("{HOME}:/x:ro")));
+    assert_eq!(exposes_home(&plan).0, PathBuf::from(HOME));
+
+    plan.prober = Some(prober("cache:/x"));
+    generate(&plan, &dialect()).unwrap();
+}
+
+/// What a container does see under the home — its mission folder, the
+/// files of it its role writes, the stack's scripts one file at a time, a
+/// credential file — is below the home and exposes neither it nor the token:
+/// the profile is written, and every one of those mounts is in it.
+#[test]
+fn the_mounts_from_under_the_home_are_below_it_and_are_written() {
+    let plan = plan(Role::Integrator);
+    let mounts = agent_mounts(&plan);
+    for below in [
+        "/Users/h/.nunki/demo/hq/missions/m1:/work/mission:ro",
+        "/Users/h/.nunki/demo/stacks/rust/prepush.sh:/work/stack/prepush.sh:ro",
+        "/Users/h/.nunki/demo/credentials/db.env:/run/nunki/credentials/db.env:ro",
+    ] {
+        assert!(mounts.iter().any(|m| m == below), "{below}: {mounts:?}");
+    }
+    assert!(
+        mounts
+            .iter()
+            .all(|m| !m.starts_with(&format!("{HOME}:")) && !m.contains(nunki::forge::TOKEN_FILE)),
+        "{mounts:?}"
+    );
 }

@@ -30,6 +30,32 @@ merged since the last one. `AGENTS.md`, under "Releases", says how.
 
 ### Changed
 
+- **The project's forge token is required, and it is the only one read.**
+  `nunki push` and `nunki check` read the token from the project's home,
+  `~/.nunki/<id>/forge-token`, and from nowhere else: `~/.nunki/forge-token`,
+  which every project shared, is no longer read, and both verbs name it when
+  it is still there. Without the project's token `nunki push` refuses before
+  it fetches or pushes anything — it used to push and hand over the address
+  of the pull request — and `nunki check` is red on its new line, *the
+  project's forge token*. Move your token, or better, create a fine-grained
+  one limited to the project's repository, with *Contents: read and write*,
+  *Pull requests: read and write* and *Metadata: read*, and `chmod 600` it.
+- **A forge token file others can read is refused**, as ssh refuses such a
+  key: on unix, a mode that grants anything to its group or to others, or one
+  that cannot be read, makes `nunki push` refuse before anything reaches the
+  forge and `nunki check` red, and both say `chmod 600 <path>`.
+- **`git push` authenticates with the project's token, and with nothing
+  else.** `nunki push` pushes over HTTPS to the GitHub repository `origin`
+  names, an SSH remote included, and git reads none of your configuration
+  for it: no credential helper at any level, no keychain, no askpass, no
+  `~/.netrc`, no SSH key, no `insteadOf` rewrite. A remote that is not on
+  GitHub is refused before anything is fetched; it used to be pushed. A push
+  the forge refuses fails with its answer, and opens no pull request. The
+  push no longer updates `refs/remotes/origin/<branch>` in your checkout. It
+  needs git 2.32 or later, and does not use `https_proxy`.
+- **A launch refuses a mount that would expose the project's home or its
+  forge token** to a container — an advisory database declared there, or a
+  link to it — and says which mount.
 - **A toolchain the repository does not pin now stops the launch.** Each
   stack's `versions.txt` gains a `require:` line naming the build arguments
   the repository must pin: `RUST_VERSION` for Rust, `PYTHON` for Python,

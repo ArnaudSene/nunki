@@ -12,6 +12,8 @@ use std::thread::JoinHandle;
 /// session is opened for it in `<user_home>/.nunki/sessions.json`, and the
 /// home that session names receives a `nunki.yaml` made of `body` and the
 /// `root:` it belongs to, plus an empty HQ. Returns the home.
+pub mod git_http;
+
 #[allow(dead_code)]
 pub fn project_home(root: &Path, user_home: &Path, body: &str) -> PathBuf {
     std::fs::create_dir_all(root).unwrap();
@@ -125,4 +127,17 @@ pub fn assert_printable(out: &str, outlet: &str) {
         out.contains("\\u{1b}"),
         "{outlet} should show the escape it replaced:\n{out}"
     );
+}
+
+/// Write a made-up forge token where `nunki` reads the project's, readable
+/// by its owner only — the one mode a token file is used with (SPEC 4.2,
+/// `nunki push`), whatever umask the test runs under.
+#[allow(dead_code)]
+pub fn write_token(at: &std::path::Path, text: &str) {
+    std::fs::write(at, text).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(at, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
 }

@@ -1723,6 +1723,7 @@ mod live {
                 credentials: Vec::new(),
                 advisories: vec![],
                 secrets: None,
+                kept_out: Vec::new(),
                 volumes: Vec::<NamedVolume>::new(),
                 environment: BTreeMap::new(),
                 command: vec!["sleep".to_string(), "600".to_string()],

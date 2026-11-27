@@ -142,6 +142,10 @@ pub struct Plan {
     /// read-only, or `None` when nobody has ruled on any (SPEC 4.4, gate 8).
     /// Given as (host path, path in the container).
     pub secrets: Option<(PathBuf, PathBuf)>,
+    /// Host paths no bind mount may expose: the project's home and its forge
+    /// token ([`crate::forge::kept_out`]). A plan with a mount whose source is
+    /// one of them, or a directory above one, is refused rather than lifted.
+    pub kept_out: Vec<PathBuf>,
     pub volumes: Vec<NamedVolume>,
     pub environment: BTreeMap<String, String>,
     pub command: Vec<String>,
@@ -187,6 +191,12 @@ pub enum ComposeError {
     CredentialsOnMissionProfile(usize),
     #[error("no domain and no address is allowed: the agent would have no allowlist at all")]
     EmptyPerimeter,
+    #[error(
+        "{mount} would be bind-mounted into a container, and it exposes {kept}: \
+         a project's home and its forge token never reach a container (SPEC 4.2, `nunki \
+         push`) — move what that mount was for out of the project's home"
+    )]
+    ExposesHome { mount: PathBuf, kept: PathBuf },
 }
 
 /// Generate the Compose file for one profile. The dialect comes from the
@@ -270,6 +280,24 @@ fn build(plan: &Plan, dialect: &Dialect) -> Result<Document, ComposeError> {
     absolute("the mission folder", &plan.mission_dir)?;
     for (host, _) in &plan.credentials {
         absolute("a credential file", host)?;
+    }
+    // Every host path a container of this profile is given: the agent's
+    // binds, and any the prober carries. The firewall carries none, and the
+    // project's services only named volumes — their closed model refuses a
+    // bind ([`services`]).
+    let prober_binds = plan
+        .prober
+        .iter()
+        .flat_map(|p| &p.volumes)
+        .filter_map(|v| v.split(':').next())
+        .map(PathBuf::from);
+    let sources: Vec<PathBuf> = binds(plan)
+        .into_iter()
+        .map(|(host, _, _)| host)
+        .chain(prober_binds)
+        .collect();
+    for mount in &sources {
+        refuse_exposing(mount, &plan.kept_out)?;
     }
 
     let lifted = plan
@@ -444,10 +472,20 @@ fn firewall(plan: &Plan, fenced: bool) -> Service {
     }
 }
 
-/// The agent: no capability, the human's uid, and no way to declare a
-/// network of its own — it lives in the firewall's namespace.
-fn agent(plan: &Plan, dialect: &Dialect) -> Result<Service, ComposeError> {
-    let mut volumes = Vec::new();
+/// Every bind mount the agent is given, as (host path, path in the
+/// container, mode), in the order its profile spells them. The one list:
+/// [`agent`] writes its mounts from it, and [`build`] refuses a plan from it
+/// whose mounts would expose what [`Plan::kept_out`] keeps out, so a mount
+/// cannot be added to one without the other.
+///
+/// Where each comes from, on the host (SPEC 4.2): the slot's tree, a sibling
+/// of the repository; and from under the project's home, the mission folder
+/// (`hq/missions/<id>`) and the files of it the role writes, the stack's
+/// scripts one file at a time (`stacks/<stack>/`), and the secrets file the
+/// human ruled on (`hq/`). The test credentials and the advisory databases
+/// are where the human declared them.
+fn binds(plan: &Plan) -> Vec<(PathBuf, PathBuf, &'static str)> {
+    let mut binds = Vec::new();
 
     let tree_mode = match plan.role {
         // The security agent reads the tree and never writes it; what an
@@ -456,17 +494,17 @@ fn agent(plan: &Plan, dialect: &Dialect) -> Result<Service, ComposeError> {
         Role::Security => "ro",
         Role::Coder | Role::Integrator => "rw",
     };
-    volumes.push(mount(&plan.tree, &plan.tree_at, tree_mode));
+    binds.push((plan.tree.clone(), plan.tree_at.clone(), tree_mode));
 
     // The mission folder is the agent's only channel with the HQ, and it is
     // read-only but for the files its role writes (SPEC 4.1). A directory
     // mounted rw would
     // hand back `MISSION.md` — the header the whole run is framed by.
-    volumes.push(mount(&plan.mission_dir, &plan.mission_dir_at, "ro"));
+    binds.push((plan.mission_dir.clone(), plan.mission_dir_at.clone(), "ro"));
     for file in agent_writable(plan.role) {
-        volumes.push(mount(
-            &plan.mission_dir.join(file),
-            &plan.mission_dir_at.join(file),
+        binds.push((
+            plan.mission_dir.join(file),
+            plan.mission_dir_at.join(file),
             "rw",
         ));
     }
@@ -475,24 +513,51 @@ fn agent(plan: &Plan, dialect: &Dialect) -> Result<Service, ComposeError> {
     // in the project's home, not in the tree, and read-only is what keeps
     // them out of the agent's reach — by construction, not by a gate.
     for (host, at) in &plan.stack_scripts {
-        volumes.push(mount(host, at, "ro"));
+        binds.push((host.clone(), at.clone(), "ro"));
     }
 
     for (host, at) in &plan.credentials {
-        volumes.push(mount(host, at, "ro"));
+        binds.push((host.clone(), at.clone(), "ro"));
     }
     // Read-only, like everything that judges the agent: a database it could
     // write is one it could empty.
     for (host, at) in &plan.advisories {
-        volumes.push(mount(host, at, "ro"));
+        binds.push((host.clone(), at.clone(), "ro"));
     }
     // The one part of the HQ an agent's container sees, and it sees it the
     // way it sees the allowlist: declared out of its reach, readable all the
     // same, so the gate can say "a human ruled on this" in the agent's own
     // proof rather than only in the HQ.
     if let Some((host, at)) = &plan.secrets {
-        volumes.push(mount(host, at, "ro"));
+        binds.push((host.clone(), at.clone(), "ro"));
     }
+    binds
+}
+
+/// Refuse a bind mount whose source would put one of `kept_out` inside a
+/// container ([`crate::forge::exposes`]). Public for the one caller that
+/// adds mounts to a profile already written
+/// ([`crate::run::remount_advisories`]), so the rule it holds is this one.
+pub fn refuse_exposing(mount: &Path, kept_out: &[PathBuf]) -> Result<(), ComposeError> {
+    match kept_out
+        .iter()
+        .find(|kept| crate::forge::exposes(mount, kept))
+    {
+        Some(kept) => Err(ComposeError::ExposesHome {
+            mount: mount.to_path_buf(),
+            kept: kept.clone(),
+        }),
+        None => Ok(()),
+    }
+}
+
+/// The agent: no capability, the human's uid, and no way to declare a
+/// network of its own — it lives in the firewall's namespace.
+fn agent(plan: &Plan, dialect: &Dialect) -> Result<Service, ComposeError> {
+    let mut volumes: Vec<String> = binds(plan)
+        .iter()
+        .map(|(host, at, mode)| mount(host, at, mode))
+        .collect();
     for volume in &plan.volumes {
         volumes.push(format!("{}:{}", volume.name, display(&volume.at)));
     }

@@ -2752,6 +2752,84 @@ fn a_database_still_missing_leaves_the_profile_and_the_container_alone() {
     assert_eq!(engine.calls(), vec![]);
 }
 
+/// A database filled after the lift is mounted by a path that never went
+/// through the generator, so it holds the generator's rule itself: one that
+/// turns out to be a link to the project's home is refused, and the profile
+/// that is up — and the container — are left as they were. The home holds the
+/// project's forge token.
+#[cfg(unix)]
+#[test]
+fn a_database_that_lands_in_the_projects_home_is_not_mounted_into_the_profile_that_is_up() {
+    let dir = tempfile::tempdir().unwrap();
+    let (project, slot, db, written) = lifted_before_the_database(dir.path());
+    std::fs::write(project.home.join(nunki::forge::TOKEN_FILE), "tok-made-up\n").unwrap();
+    std::os::unix::fs::symlink(&project.home, &db).unwrap();
+    let engine = nunki::engine::fake::FakeEngine::default();
+
+    let err = run::remount_advisories(&engine, &project, &slot, "rust").unwrap_err();
+
+    match &err {
+        run::RunError::Compose(nunki::compose::ComposeError::ExposesHome { mount, .. }) => {
+            assert_eq!(mount, &db)
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        std::fs::read_to_string(run::profile_path(&project, &slot.name)).unwrap(),
+        written
+    );
+    assert_eq!(engine.calls(), vec![]);
+}
+
+/// The launch holds it the same way: a database the stack declares in the
+/// project's home is refused before any profile is written.
+#[test]
+fn a_launch_refuses_a_database_declared_in_the_projects_home() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = project(dir.path());
+    std::fs::create_dir_all(project.fragment("rust")).unwrap();
+    std::fs::write(
+        project
+            .fragment("rust")
+            .join(nunki::project::ADVISORIES_FILE),
+        format!("{}\ncargo deny check advisories\n", project.home.display()),
+    )
+    .unwrap();
+    let slot = slot_at(dir.path());
+    let images = nunki::image::Images {
+        agent: "img/agent".into(),
+        firewall: "img/fw".into(),
+        prober: "img/probe".into(),
+    };
+    let paths = nunki::mission::dir::Paths::of(&project.hq_root, "m1");
+    let header = header_with(with_services());
+    let plan = run::plan(
+        &project,
+        &slot,
+        "rust",
+        &images,
+        &paths,
+        &header,
+        Role::Coder,
+    )
+    .unwrap();
+    assert!(
+        plan.advisories
+            .iter()
+            .any(|(host, _)| host == &project.home),
+        "{:?}",
+        plan.advisories
+    );
+
+    let engine = nunki::engine::fake::FakeEngine::default();
+    match nunki::compose::generate(&plan, nunki::engine::Engine::dialect(&engine)) {
+        Err(nunki::compose::ComposeError::ExposesHome { mount, .. }) => {
+            assert_eq!(mount, project.home)
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
 /// A mutation campaign lives in the container a remount recreates, so none
 /// happens under one: the campaign is not killed for a gate that can wait for
 /// it to be read back.
